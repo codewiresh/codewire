@@ -1904,6 +1904,9 @@ if [ "$event_selected" = false ]; then
         ;;
       scripts/runtime/dev/provision-dev-smoke-user.sh|\
       scripts/runtime/dev/smoke-dev-commodity.sh|\
+      scripts/runtime/dev/smoke-dev-dind-storage.sh|\
+      scripts/runtime/dev/docker-store-guest.sh|\
+      scripts/runtime/tests/test-dind-storage-probe.sh|\
       scripts/runtime/dev/provider-ssh-smoke.sh|\
       scripts/runtime/dev/provider-codex-smoke.sh|\
       scripts/runtime/dev/provider-codex-workload.sh|\

@@ -6,6 +6,10 @@ rust-version.workspace = true
 # Server-side crate: AGPL like the other Phase 2+ services.
 license = "AGPL-3.0-only"
 
+[[example]]
+name = "dind-storage-fixture"
+test = true
+
 [features]
 # Host-only evidence hooks used by the local Kind fencing smoke. Production
 # service images never enable this feature.

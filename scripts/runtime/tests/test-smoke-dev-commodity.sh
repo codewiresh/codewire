@@ -1755,6 +1755,7 @@ run_packet_header_summary_case
 run_packet_capture_startup_failure_case
 run_packet_diagnostic_phase_order_case
 run_admin_oauth_contract_cases
+bash "$ROOT/scripts/runtime/tests/test-dind-storage-probe.sh"
 bash "$ROOT/scripts/runtime/tests/test-smoke-dev-application-secrets.sh"
 bash "$ROOT/scripts/runtime/tests/test-provider-ssh-smoke.sh"
 

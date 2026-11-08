@@ -359,17 +359,13 @@ Confidential QEMU-SNP is different: the confidential guest has ext4 support
 but no loop devices, so `mount -o loop` fails even when the target directory exists. For
 confidential, the renderer starts dockerd with `--data-root
 /workspace/.codewire/docker-root`, `--storage-driver vfs`, and
-`CODEWIRE_DOCKER_MOUNT_MODE=none`. The focused diagnostic is:
+`CODEWIRE_DOCKER_MOUNT_MODE=none`.
 
-```bash
-KUBECONFIG=/path/to/the-dev-cluster-kubeconfig.yaml \
-  scripts/runtime/dev/smoke-dev-dind-storage.sh \
-    --runtime-class confidential \
-    --node <confidential-node> \
-    --data-root /workspace/.codewire/docker-root \
-    --mount-mode none \
-    --run-docker
-```
+Commodity bootstrap candidates use the source-bound storage fixture in the
+[agent development workflow](AGENT-WORKFLOW.md#local-verification). Render
+without Kubernetes credentials on native Linux, transfer `fixture.json`, and
+apply the reviewed bundle through the trusted host's Dev access wrapper. The
+fixture owns its Pod, Block workspace and exact product network policy.
 
 ### Docker readiness
 

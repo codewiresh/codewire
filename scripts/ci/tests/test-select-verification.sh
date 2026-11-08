@@ -1736,6 +1736,11 @@ run_paths_case runtime_dev_tooling pull_request refs/pull/1516/head false \
   scripts/runtime/dev/measure-dev-commodity-overhead.sh \
   scripts/runtime/dev/smoke-dev-commodity.sh \
   scripts/runtime/kata/kata-genpolicy.sh
+run_paths_case runtime_dind_storage_probe pull_request refs/pull/3960/head false \
+  'policy dev_smoke_script_tests security security_js' \
+  scripts/runtime/dev/smoke-dev-dind-storage.sh \
+  scripts/runtime/dev/docker-store-guest.sh \
+  scripts/runtime/tests/test-dind-storage-probe.sh
 # The Dev acceptance wrapper and the transport matrix are tested in the Dev
 # smoke script family (codewire#3827).
 run_paths_case runtime_transport_smokes pull_request refs/pull/3827/head false \

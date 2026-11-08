@@ -1,631 +1,310 @@
 #!/usr/bin/env bash
+# Focused owned commodity fixture; see docs/dev/AGENT-WORKFLOW.md.
 set -euo pipefail
-
+umask 077
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+SOURCE_ROOT="$ROOT"
+SUPPORT_IMAGE=''
+STORAGE_CLASS=''
+EVIDENCE_DIR=''
+RENDERED_FIXTURE=''
+FIXTURE_SHA256=''
+EXPECTED_STORE=containerd
+BASELINE=0
+RENDER_ONLY=0
+KEEP_PROBE=0
+WAIT_SECONDS=420
+NAME="dind-storage-$(date -u +%Y%m%d%H%M%S)-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+POD_UID=''
+PVC_UID=''
+POLICY_UID=''
+POLICY_NAME=''
+readonly NAMESPACE=dev-sandboxes DEV_CLUSTER=cw-dev-hz-eu-1
 
-KUBE_CONTEXT="${KUBE_CONTEXT:-codewire-dev}"
-NAMESPACE="${DIND_STORAGE_NAMESPACE:-dev-sandboxes}"
-RUNTIME_CLASS="${DIND_STORAGE_RUNTIME_CLASS:-confidential}"
-NODE="${DIND_STORAGE_NODE:-}"
-DIND_IMAGE="${DIND_STORAGE_IMAGE:-docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977}"
-DATA_IMAGE="${DIND_STORAGE_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}"
-DATA_ROOT="${DIND_STORAGE_DATA_ROOT:-/var/lib/docker}"
-DATA_SIZE="${DIND_STORAGE_DATA_SIZE:-4G}"
-MOUNT_MODE="${DIND_STORAGE_MOUNT_MODE:-loop}"
-PVC_SIZE="${DIND_STORAGE_PVC_SIZE:-8Gi}"
-STORAGE_CLASS="${DIND_STORAGE_STORAGE_CLASS:-local-path}"
-WAIT_SECONDS="${DIND_STORAGE_WAIT_SECONDS:-420}"
-RUN_DOCKER="${DIND_STORAGE_RUN_DOCKER:-0}"
-EXPECT_FAILURE="${DIND_STORAGE_EXPECT_FAILURE:-0}"
-KEEP_PROBE="${DIND_STORAGE_KEEP_PROBE:-0}"
-COCO_ANNOTATIONS="${DIND_STORAGE_COCO_ANNOTATIONS:-auto}"
-COCO_KBS_URL="${DIND_STORAGE_COCO_KBS_URL:-http://codewire-trustee-kbs.codewire-trustee.svc.cluster.local:8080}"
-EVIDENCE_DIR="${EVIDENCE_DIR:-}"
-
+log() { printf '[dind-storage-smoke] %s\n' "$*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+select_host_timeout() {
+  TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
+  [[ -n "$TIMEOUT_BIN" ]] || die 'missing timeout or gtimeout; install coreutils for bounded fixture commands'
+  "$TIMEOUT_BIN" 1 sh -c ':' >/dev/null 2>&1 || die 'host timeout tool is unusable'
+}
 usage() {
-  cat <<'USAGE'
-Usage:
-  scripts/runtime/dev/smoke-dev-dind-storage.sh [options]
+  cat <<'HELP'
+Usage: smoke-dev-dind-storage.sh --support-image REF --storage-class NAME [options]
 
-Runs a focused Kubernetes probe for the Codewire guest-local dind storage
-bootstrap. This intentionally bypasses Codewire environment creation, gateway,
-auth, and transport checks so dind mount failures can be debugged quickly.
+Render the candidate's actual commodity Block-workspace preparation and DinD
+bootstrap. The bootstrap is container PID1; a separate unprivileged client
+uses its guest-only Unix socket. Creates its own Pod, workspace PVC and exact
+product-rendered NetworkPolicy. No credential values, host sockets, custom
+network rules or admission exceptions.
 
-Options:
-  --runtime-class NAME  RuntimeClass to use (default: confidential)
-  --namespace NAME      Namespace to create the probe in (default: dev-sandboxes)
-  --node NAME           Optional kubernetes.io/hostname node pin
-  --image REF           dind image (default: pinned public Codewire dind digest)
-  --data-image PATH     ext4 image path (default: /workspace/.codewire/docker-data.ext4)
-  --data-root PATH      dockerd data root and mount target (default: /var/lib/docker)
-  --data-size SIZE      truncate size for ext4 image (default: 4G)
-  --mount-mode MODE     loop or none (default: loop)
-  --pvc-size SIZE       probe workspace PVC request (default: 8Gi)
-  --storage-class NAME  PVC StorageClass (default: local-path)
-  --wait-seconds N      wait for probe pod completion (default: 420)
-  --run-docker          After dockerd is ready, run hello-world
-  --expect-failure      Treat a failed probe pod as expected and exit 0
-  --keep-probe          Leave pod, ConfigMap, and PVC in place
-  --coco-kbs-url URL    KBS URL for confidential CoCo annotations
-  --no-coco-annotations Do not add CoCo annotations for confidential probes
-  --evidence-dir DIR    Store evidence in DIR instead of repo .tmp
-  -h, --help            Show this help
+  --source-root DIR       Clean product checkout to render (default this checkout)
+  --support-image REF     Current admitted daemon support image, pinned by digest
+  --storage-class NAME    Current commodity workspace StorageClass
+  --baseline              Record VFS first-child cgroup matrix, not qualification
+  --render-only           Export a nonsecret fixture bundle without Kubernetes auth
+  --rendered-fixture FILE Apply a separately exported bundle on the trusted host
+  --fixture-sha256 HASH   Expected bundle hash recorded at the offline render
+  --evidence-dir DIR      New empty directory for selected evidence
+  --wait-seconds N        Readiness budget, 1–1800 seconds (default420)
+  --keep-probe            Keep the exact named fixture for follow-up
+  -h, --help              Show help without credentials or Kubernetes access
 
-Examples:
-  # Reproduce the current confidential target.
-  scripts/runtime/dev/smoke-dev-dind-storage.sh \
-    --runtime-class confidential \
-    --node <confidential-node> \
-    --data-root /var/lib/docker
-
-  # Test the proposed workspace-local dockerd data root.
-  scripts/runtime/dev/smoke-dev-dind-storage.sh \
-    --runtime-class confidential \
-    --node <confidential-node> \
-    --data-root /workspace/.codewire/docker-root \
-    --run-docker
-
-Safety:
-  - uses no Codewire API key and reads no secrets
-  - creates only one pod, one ConfigMap, and one PVC
-  - never mounts host Docker or containerd sockets
-  - for confidential probes, adds dev Trustee/KBS CoCo annotations by default
-USAGE
+Run live only through the existing infrastructure kube-access wrapper for
+cw-dev-hz-eu-1. A baseline can record expected resource failures; admission,
+bootstrap and readiness errors always fail. Qualification requires actual
+containerd/overlayfs, resource enforcement and build/save/reload custody.
+HELP
 }
-
-log() {
-  printf '[dind-storage-smoke] %s\n' "$*" >&2
-}
-
-die() {
-  printf '[dind-storage-smoke] ERROR: %s\n' "$*" >&2
-  exit 1
-}
-
-case "$-" in
-  *x*) die "shell tracing is enabled; rerun without set -x" ;;
-esac
-
-while [[ "$#" -gt 0 ]]; do
+case "$-" in *x*) die 'shell tracing is enabled' ;; esac
+while (($#)); do
   case "$1" in
-    --runtime-class)
-      [[ "$#" -ge 2 ]] || die "--runtime-class requires a value"
-      RUNTIME_CLASS="$2"
-      shift 2
-      ;;
-    --namespace)
-      [[ "$#" -ge 2 ]] || die "--namespace requires a value"
-      NAMESPACE="$2"
-      shift 2
-      ;;
-    --node)
-      [[ "$#" -ge 2 ]] || die "--node requires a value"
-      NODE="$2"
-      shift 2
-      ;;
-    --image)
-      [[ "$#" -ge 2 ]] || die "--image requires a value"
-      DIND_IMAGE="$2"
-      shift 2
-      ;;
-    --data-image)
-      [[ "$#" -ge 2 ]] || die "--data-image requires a value"
-      DATA_IMAGE="$2"
-      shift 2
-      ;;
-    --data-root)
-      [[ "$#" -ge 2 ]] || die "--data-root requires a value"
-      DATA_ROOT="$2"
-      shift 2
-      ;;
-    --data-size)
-      [[ "$#" -ge 2 ]] || die "--data-size requires a value"
-      DATA_SIZE="$2"
-      shift 2
-      ;;
-    --mount-mode)
-      [[ "$#" -ge 2 ]] || die "--mount-mode requires a value"
-      MOUNT_MODE="$2"
-      shift 2
-      ;;
-    --pvc-size)
-      [[ "$#" -ge 2 ]] || die "--pvc-size requires a value"
-      PVC_SIZE="$2"
-      shift 2
-      ;;
-    --storage-class)
-      [[ "$#" -ge 2 ]] || die "--storage-class requires a value"
-      STORAGE_CLASS="$2"
-      shift 2
-      ;;
-    --wait-seconds)
-      [[ "$#" -ge 2 ]] || die "--wait-seconds requires a value"
-      WAIT_SECONDS="$2"
-      shift 2
-      ;;
-    --run-docker)
-      RUN_DOCKER=1
-      shift
-      ;;
-    --expect-failure)
-      EXPECT_FAILURE=1
-      shift
-      ;;
-    --keep-probe)
-      KEEP_PROBE=1
-      shift
-      ;;
-    --coco-kbs-url)
-      [[ "$#" -ge 2 ]] || die "--coco-kbs-url requires a value"
-      COCO_KBS_URL="$2"
-      shift 2
-      ;;
-    --no-coco-annotations)
-      COCO_ANNOTATIONS=0
-      shift
-      ;;
-    --evidence-dir)
-      [[ "$#" -ge 2 ]] || die "--evidence-dir requires a value"
-      EVIDENCE_DIR="$2"
-      shift 2
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      die "unknown option: $1"
-      ;;
+    --source-root|--support-image|--storage-class|--evidence-dir|--wait-seconds|--rendered-fixture|--fixture-sha256)
+      (($# >= 2)) || die "$1 requires a value"
+      case "$1" in
+        --source-root) SOURCE_ROOT="$2" ;; --support-image) SUPPORT_IMAGE="$2" ;;
+        --storage-class) STORAGE_CLASS="$2" ;;
+        --evidence-dir) EVIDENCE_DIR="$2" ;; --wait-seconds) WAIT_SECONDS="$2" ;;
+        --rendered-fixture) RENDERED_FIXTURE="$2" ;; --fixture-sha256) FIXTURE_SHA256="$2" ;;
+      esac
+      shift 2 ;;
+    --baseline) BASELINE=1; EXPECTED_STORE=vfs; shift ;;
+    --render-only) RENDER_ONLY=1; shift ;;
+    --keep-probe) KEEP_PROBE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option: $1" ;;
   esac
 done
-
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
-}
-
-require_bool01() {
-  local name="$1"
-  local value="$2"
-  [[ "$value" == "0" || "$value" == "1" ]] || die "$name must be 0 or 1, got $value"
-}
-
-require_cmd kubectl
-require_cmd jq
-
-require_bool01 RUN_DOCKER "$RUN_DOCKER"
-require_bool01 EXPECT_FAILURE "$EXPECT_FAILURE"
-require_bool01 KEEP_PROBE "$KEEP_PROBE"
-[[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]] || die "--wait-seconds must be an integer"
-[[ "$MOUNT_MODE" == "loop" || "$MOUNT_MODE" == "none" ]] || die "--mount-mode must be loop or none"
-if [[ "$COCO_ANNOTATIONS" == "auto" ]]; then
-  if [[ "$RUNTIME_CLASS" == "confidential" ]]; then
-    COCO_ANNOTATIONS=1
-  else
-    COCO_ANNOTATIONS=0
-  fi
-fi
-require_bool01 COCO_ANNOTATIONS "$COCO_ANNOTATIONS"
-if [[ "$COCO_ANNOTATIONS" == "1" ]]; then
-  require_cmd base64
-  require_cmd gzip
-fi
-
-if [[ -z "${KUBECONFIG:-}" && -f "$HOME/src/infra/kubeconfig-oidc.yaml" ]]; then
-  export KUBECONFIG="$HOME/src/infra/kubeconfig-oidc.yaml"
-fi
-
+[[ "$SUPPORT_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] || die '--support-image must be digest-pinned'
+[[ "$STORAGE_CLASS" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die '--storage-class is required'
+if [[ ! "$WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] || ((WAIT_SECONDS > 1800)); then die '--wait-seconds must be1–1800'; fi
+for cmd in git jq shasum python3; do command -v "$cmd" >/dev/null || die "missing command: $cmd"; done
+SOURCE_ROOT="$(cd "$SOURCE_ROOT" && pwd)"
+[[ -f "$SOURCE_ROOT/crates/codewire-orchestration/examples/dind-storage-fixture.rs" ]] || die 'candidate lacks the checked-in fixture renderer'
+[[ -z "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=normal)" ]] || die 'candidate source must be clean, including untracked inputs'
+source_sha="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
+source_tree="$(git -C "$SOURCE_ROOT" rev-parse 'HEAD^{tree}')"
+[[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=normal)" ]] || die 'probe tooling checkout must also be clean'
+tool_sha="$(git -C "$ROOT" rev-parse HEAD)"
+guest_sha="$(shasum -a 256 "$ROOT/scripts/runtime/dev/docker-store-guest.sh" | cut -d ' ' -f 1)"
+[[ "$source_sha" =~ ^[0-9a-f]{40}$ && "$source_tree" =~ ^[0-9a-f]{40}$ ]] || die 'invalid source identity'
 if [[ -z "$EVIDENCE_DIR" ]]; then
   mkdir -p "$ROOT/.tmp"
-  EVIDENCE_DIR="$(mktemp -d "$ROOT/.tmp/codewire-dind-storage.XXXXXX")"
+  EVIDENCE_DIR="$(mktemp -d "$ROOT/.tmp/dind-storage.XXXXXX")"
 else
+  [[ ! -e "$EVIDENCE_DIR" ]] || die '--evidence-dir must not exist'
   mkdir -p "$EVIDENCE_DIR"
 fi
-
-kubectl_dev() {
-  if [[ -n "$KUBE_CONTEXT" ]]; then
-    kubectl --context "$KUBE_CONTEXT" "$@"
-  else
-    kubectl "$@"
-  fi
-}
-
-rand_suffix() {
-  od -An -N3 -tx1 /dev/urandom | tr -d ' \n'
-}
-
-NAME="dind-storage-${RUNTIME_CLASS}-$(date -u +%Y%m%d%H%M%S)-$(rand_suffix)"
-PROBE_SCRIPT="$EVIDENCE_DIR/probe.sh"
-MANIFEST="$EVIDENCE_DIR/probe.yaml"
-
-build_coco_init_data() {
-  cat <<EOF | gzip -n -c | base64 -w0
-version = "0.1.0"
-algorithm = "sha256"
-
-[data]
-"policy.rego" = '''
-package agent_policy
-
-default AddARPNeighborsRequest := true
-default AddSwapPathRequest := true
-default AddSwapRequest := true
-default CloseStdinRequest := true
-default CopyFileRequest := true
-default CreateContainerRequest := true
-default CreateSandboxRequest := true
-default DestroySandboxRequest := true
-default ExecProcessRequest := true
-default GetDiagnosticDataRequest := false
-default GetIPTablesRequest := true
-default GetMetricsRequest := true
-default GetOOMEventRequest := true
-default GuestDetailsRequest := true
-default ListInterfacesRequest := true
-default ListRoutesRequest := true
-default MemAgentCompactConfig := true
-default MemAgentMemcgConfig := true
-default MemHotplugByProbeRequest := true
-default OnlineCPUMemRequest := true
-default PauseContainerRequest := true
-default PullImageRequest := true
-default ReadStreamRequest := true
-default RemoveContainerRequest := true
-default RemoveStaleVirtiofsShareMountsRequest := true
-default ReseedRandomDevRequest := true
-default ResizeVolumeRequest := true
-default ResumeContainerRequest := true
-default SetGuestDateTimeRequest := true
-default SetIPTablesRequest := true
-default SetPolicyRequest := false
-default SignalProcessRequest := true
-default StartContainerRequest := true
-default StartTracingRequest := false
-default StatsContainerRequest := true
-default StopTracingRequest := false
-default TtyWinResizeRequest := true
-default UpdateContainerRequest := true
-default UpdateEphemeralMountsRequest := true
-default UpdateInterfaceRequest := true
-default UpdateRoutesRequest := true
-default VolumeStatsRequest := true
-default WaitProcessRequest := true
-default WriteStreamRequest := true
-'''
-
-"aa.toml" = '''
-[token_configs]
-[token_configs.kbs]
-url = "${COCO_KBS_URL}"
-'''
-
-"cdh.toml" = '''
-socket = "unix:///run/confidential-containers/cdh.sock"
-protected_resource_uri_prefixes = ["kbs:///default/codewire-workspace-luks/"]
-
-[kbc]
-name = "cc_kbc"
-url = "${COCO_KBS_URL}"
-'''
-EOF
-}
-
-cleanup() {
-  local rc="$1"
-  if [[ "$KEEP_PROBE" == "1" ]]; then
-    log "keeping probe resources by request: $NAME"
-    return 0
-  fi
-  kubectl_dev -n "$NAMESPACE" delete pod "$NAME" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  kubectl_dev -n "$NAMESPACE" delete cm "$NAME" --ignore-not-found >/dev/null 2>&1 || true
-  kubectl_dev -n "$NAMESPACE" delete netpol "$NAME" --ignore-not-found >/dev/null 2>&1 || true
-  kubectl_dev -n "$NAMESPACE" delete pvc "$NAME-workspace" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  return "$rc"
-}
-
-collect_evidence() {
-  kubectl_dev -n "$NAMESPACE" get pod "$NAME" -o json >"$EVIDENCE_DIR/pod.json" 2>"$EVIDENCE_DIR/pod-json.err" || true
-  kubectl_dev -n "$NAMESPACE" get pod "$NAME" -o yaml >"$EVIDENCE_DIR/pod.yaml.live" 2>"$EVIDENCE_DIR/pod-yaml.err" || true
-  kubectl_dev -n "$NAMESPACE" describe pod "$NAME" >"$EVIDENCE_DIR/pod.describe.txt" 2>"$EVIDENCE_DIR/pod-describe.err" || true
-  kubectl_dev -n "$NAMESPACE" logs "$NAME" -c dind >"$EVIDENCE_DIR/dind.log" 2>"$EVIDENCE_DIR/dind-log.err" || true
-  kubectl_dev -n "$NAMESPACE" get pvc "$NAME-workspace" -o yaml >"$EVIDENCE_DIR/pvc.yaml" 2>"$EVIDENCE_DIR/pvc-yaml.err" || true
-  kubectl_dev -n "$NAMESPACE" get events --sort-by=.lastTimestamp >"$EVIDENCE_DIR/events.txt" 2>"$EVIDENCE_DIR/events.err" || true
-}
-
-trap 'rc=$?; collect_evidence; cleanup "$rc"; exit "$rc"' EXIT
-
-cat >"$PROBE_SCRIPT" <<'PROBE'
-#!/bin/sh
-set -eu
-
-log() {
-  printf '[dind-probe] %s\n' "$*"
-}
-
-docker_sock="${CODEWIRE_DOCKER_SOCK:-/var/run/docker/docker.sock}"
-data_image="${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}"
-data_root="${CODEWIRE_DOCKER_DATA_ROOT:-/var/lib/docker}"
-data_size="${CODEWIRE_DOCKER_DATA_SIZE:-4G}"
-mount_mode="${CODEWIRE_DOCKER_MOUNT_MODE:-loop}"
-run_docker="${CODEWIRE_DOCKER_RUN_TEST:-0}"
-codewire_dir="$(dirname "$data_image")"
-
-log "runtime probe starting"
-uname -a || true
-id || true
-log "data_image=$data_image"
-log "data_root=$data_root"
-log "data_size=$data_size"
-log "mount_mode=$mount_mode"
-
-mkdir -pv "$codewire_dir" "$data_root"
-chown 1000:1000 "$codewire_dir"
-chmod 0775 "$codewire_dir"
-
-log "path state before mkfs/mount"
-ls -ld / /var /var/lib /workspace "$codewire_dir" "$data_root" 2>&1 || true
-if [ -L "$data_root" ]; then
-  readlink "$data_root" || true
-fi
-log "loop/ext4 state before mount"
-ls -l /dev/loop-control /dev/loop* 2>&1 || true
-if command -v losetup >/dev/null 2>&1; then
-  losetup -f 2>&1 || true
-fi
-grep -E '(^nodev[[:space:]]+)?ext4$|(^nodev[[:space:]]+)?loop$' /proc/filesystems 2>&1 || true
-
-if [ "$mount_mode" = "loop" ]; then
-  if [ ! -s "$data_image" ]; then
-    log "creating ext4 image"
-    truncate -s "$data_size" "$data_image"
-    # As the workspace renders it: a fresh sparse image needs no zeroing.
-    started="$(date +%s)"
-    mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$data_image"
-    log "formatted $data_size in $(( $(date +%s) - started ))s, $(du -m "$data_image" | cut -f1) MiB allocated"
-  fi
-
-  log "mounting ext4 image"
-  if ! awk -v target="$data_root" '$2 == target && $3 == "ext4" { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts; then
-    mount -o loop "$data_image" "$data_root"
-  fi
+if [[ -n "$RENDERED_FIXTURE" ]]; then
+  [[ "$RENDER_ONLY" == 0 && "$FIXTURE_SHA256" =~ ^[0-9a-f]{64}$ ]] || die 'apply requires --fixture-sha256 and cannot use --render-only'
+  [[ -f "$RENDERED_FIXTURE" && ! -L "$RENDERED_FIXTURE" ]] || die 'fixture must be a regular file'
+  (( $(wc -c <"$RENDERED_FIXTURE") <= 2097152 )) || die 'fixture exceeds two MiB'
+  [[ "$(shasum -a 256 "$RENDERED_FIXTURE" | cut -d ' ' -f 1)" == "$FIXTURE_SHA256" ]] || die 'fixture bundle hash mismatch'
+  jq -e '.schema_version == 1 and (.receipt | type == "object") and (.render | type == "object")' "$RENDERED_FIXTURE" >/dev/null || die 'invalid fixture bundle'
+  jq '.receipt' "$RENDERED_FIXTURE" >"$EVIDENCE_DIR/source-receipt.json"
+  jq -cS '.render' "$RENDERED_FIXTURE" >"$EVIDENCE_DIR/rendered.json"
+  NAME="$(jq -er '.name | select(type == "string")' "$EVIDENCE_DIR/source-receipt.json")"
 else
-  log "using plain directory data root"
+  [[ "$RENDER_ONLY" == 1 ]] || die 'live use requires --rendered-fixture and --fixture-sha256; render separately without Kubernetes credentials'
+  [[ -z "${KUBECONFIG:-}" && "${INFRA_TRANSIENT_KUBE_AUTH:-0}" != 1 ]] || die 'offline rendering refuses Kubernetes credentials'
+  command -v cargo >/dev/null || die 'offline rendering requires cargo'
+  (cd "$SOURCE_ROOT" && cargo run --quiet --locked --jobs 2 -p codewire-orchestration \
+    --example dind-storage-fixture -- "$NAME" "$SUPPORT_IMAGE" "$STORAGE_CLASS") >"$EVIDENCE_DIR/rendered.raw.json"
+  [[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" == "$source_sha" && -z "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=normal)" ]] || die 'candidate changed while rendering'
+  jq -cS '.' "$EVIDENCE_DIR/rendered.raw.json" >"$EVIDENCE_DIR/rendered.json"
+  render_sha="$(shasum -a 256 "$EVIDENCE_DIR/rendered.json" | cut -d ' ' -f 1)"
+  jq -n --arg source "$source_sha" --arg tree "$source_tree" --arg hash "$render_sha" \
+    --arg name "$NAME" --arg expected "$EXPECTED_STORE" --arg tool "$tool_sha" --arg guest "$guest_sha" --argjson baseline "$BASELINE" \
+    --slurpfile render "$EVIDENCE_DIR/rendered.json" \
+    '{schema_version:1,source_sha:$source,source_tree:$tree,tool_source_sha:$tool,guest_script_sha256:$guest,render_sha256:$hash,name:$name,
+      expected_store:$expected,baseline:($baseline == 1),bootstrap_argv_sha256:$render[0].bootstrap_argv_sha256,
+      support_image:$render[0].support_image,dind_image:$render[0].dind_image,network_policy_sha256:$render[0].network_policy_sha256,network_policy_name:$render[0].objects[2].metadata.name}' >"$EVIDENCE_DIR/source-receipt.json"
 fi
-findmnt "$data_root" || true
+[[ "$NAME" =~ ^dind-storage-[a-z0-9]([a-z0-9-]*[a-z0-9])?$ && ${#NAME} -le 48 ]] || die 'fixture name is outside owned prefix'
+render_sha="$(shasum -a 256 "$EVIDENCE_DIR/rendered.json" | cut -d ' ' -f 1)"
+jq -e --arg source "$source_sha" --arg tree "$source_tree" --arg tool "$tool_sha" --arg guest "$guest_sha" \
+  --arg hash "$render_sha" --arg name "$NAME" --arg image "$SUPPORT_IMAGE" --argjson baseline "$BASELINE" \
+  --slurpfile render "$EVIDENCE_DIR/rendered.json" '
+  .schema_version == 1 and .source_sha == $source and .source_tree == $tree and .tool_source_sha == $tool
+  and .guest_script_sha256 == $guest and .render_sha256 == $hash and .name == $name
+  and .support_image == $image and .dind_image == $render[0].dind_image
+  and .bootstrap_argv_sha256 == $render[0].bootstrap_argv_sha256
+  and .network_policy_sha256 == $render[0].network_policy_sha256
+  and .network_policy_name == $render[0].objects[2].metadata.name and .baseline == ($baseline == 1)
+' "$EVIDENCE_DIR/source-receipt.json" >/dev/null || die 'fixture source or receipt binding mismatch'
+# This is one maintained fixture shape, never an arbitrary Kubernetes apply
+# channel. The out-of-band bundle hash binds evidence; it does not attest
+# execution in the rendering sandbox. Admission remains authoritative.
+jq -e --arg name "$NAME" --arg image "$SUPPORT_IMAGE" --arg storage "$STORAGE_CLASS" '
+  .schema_version == 1 and .support_image == $image and (.objects | length == 3)
+  and (.dind_image | test("^docker.io/library/docker:[^@]+@sha256:[0-9a-f]{64}$"))
+  and (all(.objects[]; .metadata.namespace == "dev-sandboxes"))
+  and .objects[0].kind == "PersistentVolumeClaim" and .objects[0].apiVersion == "v1"
+  and .objects[0].metadata.name == ($name + "-workspace")
+  and .objects[0].spec.storageClassName == $storage and .objects[0].spec.volumeMode == "Block"
+  and .objects[0].spec.resources.requests.storage == "8Gi" and .objects[0].spec.accessModes == ["ReadWriteOnce"]
+  and (.objects[0].spec | (has("dataSource") or has("dataSourceRef") or has("volumeName") or has("selector")) | not)
+  and .objects[1].kind == "Pod" and .objects[1].apiVersion == "v1" and .objects[1].metadata.name == $name
+  and .objects[1].metadata.annotations["codewire.sh/workspace"] == "true"
+  and (.objects[1].spec as $p |
+    $p.runtimeClassName == "commodity" and $p.restartPolicy == "Never"
+    and $p.serviceAccountName == "codewire-sandbox" and $p.automountServiceAccountToken == false
+    and ([$p.hostPID,$p.hostIPC,$p.hostNetwork,$p.shareProcessNamespace] | all(. != true))
+    and ($p.containers | length == 2) and $p.containers[0].name == "dind" and $p.containers[0].image == .dind_image
+    and $p.containers[0].resources.limits == {"cpu":"2","memory":"2Gi"}
+    and $p.containers[1].name == "client" and $p.containers[1].image == .dind_image
+    and $p.containers[1].resources.limits == {"cpu":"1","memory":"512Mi"}
+    and $p.containers[1].securityContext.runAsUser == 1000
+    and $p.containers[1].securityContext.allowPrivilegeEscalation == false
+    and ($p.containers[1].securityContext.privileged // false) == false
+    and $p.containers[1].securityContext.capabilities.drop == ["ALL"]
+    and ($p.containers[1].securityContext.capabilities.add // [] | length) == 0
+    and (all($p.volumes[]; (has("hostPath") or has("secret") or has("projected")) | not))
+    and (all($p.volumes[]; (has("emptyDir") or has("image") or has("persistentVolumeClaim"))))
+    and (all($p.volumes[] | select(has("persistentVolumeClaim")); .name == "workspace" and .persistentVolumeClaim.claimName == ($name + "-workspace")))
+    and (any($p.volumes[]; .name == "workspace" and .persistentVolumeClaim.claimName == ($name + "-workspace")))
+    and (any($p.initContainers[].volumeDevices[]?; .name == "workspace" and .devicePath == "/dev/cwws"))
+    and (all(($p.containers[],$p.initContainers[]); (.envFrom // [] | length) == 0 and (all(.env[]?; (has("valueFrom") | not) and has("value") and (.value | type == "string")))))
+    and (all($p.containers[].ports[]?; (.hostPort // 0) == 0))
+    and (all($p.initContainers[]; .image == $image and (.name == "mount-workspace" or .name == "workspace-flush" or .name == "codewire-docker-data-init")))
+    and (all($p.initContainers[] | select(.securityContext.privileged == true); .name == "mount-workspace"))
+  )
+  and .objects[2].kind == "NetworkPolicy" and .objects[2].apiVersion == "networking.k8s.io/v1"
+  and .objects[2].metadata.name == ("cw-daemon-net-" + $name)
+  and .objects[2].spec.podSelector.matchLabels == {"codewire.sh/environment-id":$name,"codewire.sh/type":"workspace"}
+  and .objects[1].metadata.labels["codewire.sh/environment-id"] == $name
+  and .objects[1].metadata.labels["codewire.sh/type"] == "workspace"
+' "$EVIDENCE_DIR/rendered.json" >/dev/null || die 'unsafe or unexpected fixture shape'
+python3 - "$EVIDENCE_DIR/rendered.json" <<'HASHES'
+import hashlib, json, sys
+render = json.load(open(sys.argv[1], encoding="utf-8"))
+def digest(value):
+    encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+    return hashlib.sha256(encoded).hexdigest()
+if digest(render["objects"][1]["spec"]["containers"][0]["command"]) != render["bootstrap_argv_sha256"]:
+    sys.exit("fixture bootstrap hash mismatch")
+if digest(render["objects"][2]) != render["network_policy_sha256"]:
+    sys.exit("fixture network policy hash mismatch")
+HASHES
+jq -n --slurpfile receipt "$EVIDENCE_DIR/source-receipt.json" --slurpfile render "$EVIDENCE_DIR/rendered.json" \
+  '{schema_version:1,receipt:$receipt[0],render:$render[0]}' >"$EVIDENCE_DIR/fixture.json"
+if [[ "$RENDER_ONLY" == 1 ]]; then
+  bundle_sha="$(shasum -a 256 "$EVIDENCE_DIR/fixture.json" | cut -d ' ' -f 1)"
+  log "offline fixture=$EVIDENCE_DIR/fixture.json sha256=$bundle_sha"
+  exit 0
+fi
+select_host_timeout
+[[ "${KUBE_CONTEXT:-}" == "$DEV_CLUSTER" && "${INFRA_TRANSIENT_KUBE_AUTH:-}" == 1 && -n "${KUBECONFIG:-}" ]] || \
+  die 'run through infrastructure scripts/kube-access cw-dev-hz-eu-1; ambient kubeconfig is refused'
+command -v kubectl >/dev/null || die 'missing command: kubectl'
+k() { kubectl --context "$DEV_CLUSTER" -n "$NAMESPACE" "$@"; }
 
-log "starting dockerd"
-dockerd --host "unix://$docker_sock" --group 1000 --data-root "$data_root" --storage-driver vfs > /tmp/dockerd.log 2>&1 &
-dockerd_pid="$!"
-trap 'kill "$dockerd_pid" 2>/dev/null || true; wait "$dockerd_pid" 2>/dev/null || true' EXIT
-
-i=0
-while [ "$i" -lt 90 ]; do
-  if docker -H "unix://$docker_sock" info >/tmp/docker-info.txt 2>/tmp/docker-info.err; then
-    log "dockerd ready"
-    cat /tmp/docker-info.txt
-    break
+collect_status() {
+  k get pod "$NAME" -o json | jq '{name:.metadata.name,uid:.metadata.uid,node:.spec.nodeName,
+    phase:.status.phase,conditions:[.status.conditions[]? | {type,status,reason}],
+    containers:[(.status.initContainerStatuses[]?,.status.containerStatuses[]?) |
+      {name,imageID,restartCount,state:(if .state.running then "running" elif .state.waiting then .state.waiting.reason else .state.terminated.reason end),exit_code:.state.terminated.exitCode}]}' \
+    >"$EVIDENCE_DIR/status.json" || return 1
+}
+cleanup() {
+  local rc=$? current preserve=0
+  trap - EXIT INT TERM
+  if [[ -n "$POD_UID" ]]; then
+    collect_status || log 'selected final status unavailable'
+    if [[ "$KEEP_PROBE" == 0 ]]; then
+      current="$(k get pod "$NAME" -o jsonpath='{.metadata.uid}')" || current=''
+      if [[ "$current" == "$POD_UID" ]]; then
+        k delete pod "$NAME" --ignore-not-found --wait=true --timeout=180s >/dev/null || rc=1
+      else log 'Pod identity changed; cleanup preserved it and its workspace'; rc=1; preserve=1; fi
+    else log "kept exact fixture $NAME"; fi
   fi
-  i=$((i + 1))
+  if [[ -n "$POLICY_UID" && "$KEEP_PROBE" == 0 && "$preserve" == 0 ]]; then
+    current="$(k get networkpolicy "$POLICY_NAME" -o jsonpath='{.metadata.uid}')" || current=''
+    if [[ "$current" == "$POLICY_UID" ]]; then
+      k delete networkpolicy "$POLICY_NAME" --ignore-not-found --wait=true --timeout=60s >/dev/null || rc=1
+    else log 'NetworkPolicy identity changed; cleanup preserved it'; rc=1; fi
+  fi
+  if [[ -n "$PVC_UID" && "$KEEP_PROBE" == 0 && "$preserve" == 0 ]]; then
+    current="$(k get pvc "$NAME-workspace" -o jsonpath='{.metadata.uid}')" || current=''
+    if [[ "$current" == "$PVC_UID" ]]; then
+      k annotate pvc "$NAME-workspace" platform.noel.sh/allow-deletion=true >/dev/null || rc=1
+      k delete pvc "$NAME-workspace" --ignore-not-found --wait=true --timeout=180s >/dev/null || rc=1
+    else log 'PVC identity changed; cleanup preserved it'; rc=1; fi
+  fi
+  log "result=$rc evidence=$EVIDENCE_DIR"
+  exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# Single-object creates are atomic and refuse collisions. Record each
+# returned UID before attempting the next object; an admission denial cannot
+# authorize deletion of an object this invocation did not create.
+jq '.objects[0]' "$EVIDENCE_DIR/rendered.json" >"$EVIDENCE_DIR/pvc.json"
+jq '.objects[1]' "$EVIDENCE_DIR/rendered.json" >"$EVIDENCE_DIR/pod.json"
+k create -f "$EVIDENCE_DIR/pvc.json" -o json >"$EVIDENCE_DIR/pvc-created.json" 2>"$EVIDENCE_DIR/create-pvc.err"
+PVC_UID="$(jq -er '.metadata.uid' "$EVIDENCE_DIR/pvc-created.json")"
+jq '.objects[2]' "$EVIDENCE_DIR/rendered.json" >"$EVIDENCE_DIR/network-policy.json"
+POLICY_NAME="$(jq -er '.metadata.name' "$EVIDENCE_DIR/network-policy.json")"
+k create -f "$EVIDENCE_DIR/network-policy.json" -o jsonpath='{.metadata.uid}' >"$EVIDENCE_DIR/policy-uid.txt" 2>"$EVIDENCE_DIR/create-policy.err"
+POLICY_UID="$(cat "$EVIDENCE_DIR/policy-uid.txt")"
+k create -f "$EVIDENCE_DIR/pod.json" -o jsonpath='{.metadata.uid}' >"$EVIDENCE_DIR/pod-uid.txt" 2>"$EVIDENCE_DIR/create-pod.err"
+POD_UID="$(cat "$EVIDENCE_DIR/pod-uid.txt")"
+jq -n --arg pod "$POD_UID" --arg pvc "$PVC_UID" --arg policy "$POLICY_UID" \
+  '{pod_uid:$pod,pvc_uid:$pvc,network_policy_uid:$policy}' >"$EVIDENCE_DIR/created-identities.json"
+rm "$EVIDENCE_DIR/pvc-created.json"
+k wait "pod/$NAME" --for=condition=Ready --timeout="${WAIT_SECONDS}s" >"$EVIDENCE_DIR/ready.log" 2>"$EVIDENCE_DIR/ready.err"
+collect_status
+k exec "$NAME" -c dind -- sh -ec 'uname -r; uname -m; runc --version; command -v cmp rm mv awk read printf mkdir' >"$EVIDENCE_DIR/runtime-versions.txt"
+cgroup_state() {
+  # shellcheck disable=SC2016 # Executed by the guest shell.
+  k exec "$NAME" -c dind -- sh -ec '
+    printf "pid1="; cat /proc/1/comm
+    printf "membership="; cat /proc/1/cgroup
+    for path in /sys/fs/cgroup /sys/fs/cgroup/docker /sys/fs/cgroup/init; do
+      test -d "$path" || continue
+      printf "cgroup=%s\n" "$path"
+      for field in cgroup.type cgroup.controllers cgroup.subtree_control; do
+        test ! -r "$path/$field" || { printf "%s=" "$field"; cat "$path/$field"; }
+      done
+    done' >"$EVIDENCE_DIR/cgroup-$1.txt"
+}
+client_for() {
+  local budget="$1"
+  shift
+  "$TIMEOUT_BIN" "$((budget + 5))" kubectl --context "$DEV_CLUSTER" -n "$NAMESPACE" exec "$NAME" -c client -- timeout "$budget" "$@"
+}
+client() { client_for 90 "$@"; }
+deadline=$((SECONDS + WAIT_SECONDS))
+ready=0
+while ((SECONDS < deadline)); do
+  if client_for 5 docker info --format '{{.Driver}}' >"$EVIDENCE_DIR/driver.txt" 2>"$EVIDENCE_DIR/docker-ready.err"; then ready=1; break; fi
   sleep 1
 done
-
-if [ "$i" -ge 90 ]; then
-  log "dockerd did not become ready"
-  cat /tmp/docker-info.err 2>/dev/null || true
-  tail -200 /tmp/dockerd.log 2>/dev/null || true
-  exit 1
-fi
-
-if [ "$run_docker" = "1" ]; then
-  log "running hello-world"
-  docker -H "unix://$docker_sock" run --rm hello-world
-fi
-
-log "probe passed"
-PROBE
-chmod 0755 "$PROBE_SCRIPT"
-
-cat >"$MANIFEST" <<YAML
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: ${NAME}-workspace
-  namespace: ${NAMESPACE}
-  labels:
-    codewire.sh/probe: dind-storage
-    codewire.sh/probe-id: ${NAME}
-    codewire.sh/runtime-class: ${RUNTIME_CLASS}
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: ${STORAGE_CLASS}
-  resources:
-    requests:
-      storage: ${PVC_SIZE}
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: ${NAME}
-  namespace: ${NAMESPACE}
-  labels:
-    codewire.sh/probe: dind-storage
-    codewire.sh/probe-id: ${NAME}
-    codewire.sh/runtime-class: ${RUNTIME_CLASS}
-data:
-  probe.sh: |
-$(sed 's/^/    /' "$PROBE_SCRIPT")
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ${NAME}
-  namespace: ${NAMESPACE}
-YAML
-
-if [[ "$COCO_ANNOTATIONS" == "1" ]]; then
-  COCO_INIT_DATA="$(build_coco_init_data)"
-  COCO_KERNEL_PARAMS="agent.guest_components_procs=confidential-data-hub agent.aa_kbc_params=cc_kbc::${COCO_KBS_URL} agent.log_vport=1025"
-  cat >>"$MANIFEST" <<YAML
-  annotations:
-    io.katacontainers.config.hypervisor.cc_init_data: ${COCO_INIT_DATA}
-    io.katacontainers.config.hypervisor.kernel_params: "${COCO_KERNEL_PARAMS}"
-YAML
-fi
-
-cat >>"$MANIFEST" <<YAML
-  labels:
-    codewire.sh/probe: dind-storage
-    codewire.sh/probe-id: ${NAME}
-    codewire.sh/runtime-class: ${RUNTIME_CLASS}
-    codewire.sh/type: workspace
-    app.kubernetes.io/managed-by: codewire-dind-storage-smoke
-spec:
-  restartPolicy: Never
-  runtimeClassName: ${RUNTIME_CLASS}
-  tolerations:
-    - key: node.codewire.sh/runtime-candidate
-      operator: Equal
-      value: "true"
-      effect: NoSchedule
-YAML
-
-if [[ -n "$NODE" ]]; then
-  cat >>"$MANIFEST" <<YAML
-  nodeSelector:
-    kubernetes.io/hostname: ${NODE}
-YAML
-fi
-
-cat >>"$MANIFEST" <<YAML
-  containers:
-    - name: dind
-      image: ${DIND_IMAGE}
-      imagePullPolicy: IfNotPresent
-      command:
-        - /bin/sh
-        - /probe/probe.sh
-      securityContext:
-        privileged: true
-        runAsUser: 0
-        runAsGroup: 0
-      env:
-        - name: DOCKER_TLS_CERTDIR
-          value: ""
-        - name: CODEWIRE_DOCKER_DATA_IMAGE
-          value: ${DATA_IMAGE}
-        - name: CODEWIRE_DOCKER_DATA_ROOT
-          value: ${DATA_ROOT}
-        - name: CODEWIRE_DOCKER_DATA_SIZE
-          value: ${DATA_SIZE}
-        - name: CODEWIRE_DOCKER_MOUNT_MODE
-          value: ${MOUNT_MODE}
-        - name: CODEWIRE_DOCKER_RUN_TEST
-          value: "${RUN_DOCKER}"
-      volumeMounts:
-        - name: workspace
-          mountPath: /workspace
-        - name: docker-sock
-          mountPath: /var/run/docker
-        - name: probe
-          mountPath: /probe
-          readOnly: true
-      resources:
-        requests:
-          cpu: 500m
-          memory: 1Gi
-        limits:
-          cpu: "2"
-          memory: 4Gi
-  volumes:
-    - name: workspace
-      persistentVolumeClaim:
-        claimName: ${NAME}-workspace
-    - name: docker-sock
-      # Match Kata's cross-container UDS contract even though this focused
-      # probe currently drives dockerd from one container.
-      emptyDir:
-        medium: Memory
-    - name: probe
-      configMap:
-        name: ${NAME}
-        defaultMode: 0755
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: ${NAME}
-  namespace: ${NAMESPACE}
-  labels:
-    codewire.sh/probe: dind-storage
-    codewire.sh/probe-id: ${NAME}
-    codewire.sh/runtime-class: ${RUNTIME_CLASS}
-spec:
-  podSelector:
-    matchLabels:
-      codewire.sh/probe-id: ${NAME}
-  policyTypes:
-    - Egress
-  egress:
-    - ports:
-        - port: 443
-          protocol: TCP
-      to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-    - ports:
-        - port: 53
-          protocol: UDP
-        - port: 53
-          protocol: TCP
-      to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-    - ports:
-        - port: 8080
-          protocol: TCP
-      to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: codewire-trustee
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: codewire-trustee-kbs
-YAML
-
-log "evidence: $EVIDENCE_DIR"
-log "creating probe $NAME runtimeClass=$RUNTIME_CLASS data_root=$DATA_ROOT"
-kubectl_dev apply -f "$MANIFEST"
-
-deadline=$((SECONDS + WAIT_SECONDS))
-phase=""
-while (( SECONDS < deadline )); do
-  phase="$(kubectl_dev -n "$NAMESPACE" get pod "$NAME" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-  case "$phase" in
-    Succeeded|Failed)
-      break
-      ;;
-  esac
-  sleep 5
+((ready == 1)) || die 'rendered bootstrap did not start Docker'
+client docker info --format '{{json .DriverStatus}}' >"$EVIDENCE_DIR/driver-status.json"
+client docker version --format '{{json .Server}}' >"$EVIDENCE_DIR/engine-version.json"
+base='registry.k8s.io/e2e-test-images/busybox@sha256:caec39cad3b12c26600baf6e67ba811ac15d28a9288d0ccdfffb4b318992c3bb'
+client docker pull "$base" >"$EVIDENCE_DIR/pull.log" 2>"$EVIDENCE_DIR/pull.err"
+cgroup_state before-child
+: >"$EVIDENCE_DIR/resource-matrix.tsv"
+for label in cpu-first plain pids cpu-after memory; do
+  flags=(--network none)
+  case "$label" in cpu-*) flags+=(--cpus 1) ;; pids) flags+=(--pids-limit 64) ;; memory) flags+=(--memory 128m --memory-swap 128m) ;; esac
+  rc=0
+  client docker run --rm "${flags[@]}" "$base" true >"$EVIDENCE_DIR/$label.log" 2>"$EVIDENCE_DIR/$label.err" || rc=$?
+  printf '%s\t%s\n' "$label" "$rc" >>"$EVIDENCE_DIR/resource-matrix.tsv"
+  cgroup_state "$label"
+  if [[ "$BASELINE" == 0 && "$rc" != 0 ]]; then die "resource case $label failed exit$rc"; fi
 done
-
-collect_evidence
-
-if [[ "$phase" == "Succeeded" ]]; then
-  if [[ "$EXPECT_FAILURE" == "1" ]]; then
-    die "probe succeeded but --expect-failure was set; evidence: $EVIDENCE_DIR"
-  fi
-  log "probe passed; evidence: $EVIDENCE_DIR"
-  exit 0
+if [[ "$BASELINE" == 1 ]]; then
+  [[ "$(cat "$EVIDENCE_DIR/driver.txt")" == vfs ]] || die 'baseline expected VFS'
+  awk '$1 == "plain" || $1 == "pids" { if ($2 != 0) exit 1; seen++ } END { if (seen != 2) exit 1 }' "$EVIDENCE_DIR/resource-matrix.tsv" || die 'plain/PID baseline failed'
+  log 'VFS baseline recorded; CPU/memory results are observations, not qualification'
+else
+  guest="$(cat "$ROOT/scripts/runtime/dev/docker-store-guest.sh")
+set -eu
+docker_store_guest core ${NAME//-/} $EXPECTED_STORE"
+  client_for 300 sh -ec "$guest" >"$EVIDENCE_DIR/qualification.log" 2>"$EVIDENCE_DIR/qualification.err"
+  log 'actual Docker backend/resource/image-custody qualification passed'
 fi
-
-if [[ "$phase" != "Failed" ]]; then
-  die "probe timed out in phase=${phase:-unknown}; evidence: $EVIDENCE_DIR"
-fi
-
-if [[ "$EXPECT_FAILURE" == "1" ]]; then
-  log "probe failed as expected; evidence: $EVIDENCE_DIR"
-  exit 0
-fi
-
-die "probe failed; evidence: $EVIDENCE_DIR"

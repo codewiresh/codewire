@@ -97,6 +97,38 @@ virtualenv installed from `scripts/dev/requirements-cli-guided-launch.txt`.
 `--evidence-dir` retains the observations in a new
 chosen directory; otherwise it prints its temporary evidence directory.
 
+For a DinD bootstrap candidate, use the maintained storage fixture before
+changing the normal runtime. `scripts/runtime/dev/smoke-dev-dind-storage.sh`
+renders the clean candidate through the product's public template renderer,
+keeps its DinD bootstrap as PID 1 and uses an unprivileged socket client.
+`--render-only` refuses Kubernetes credentials and exports `fixture.json`
+with its SHA256. Render on native Linux from clean source, then copy only that
+nonsecret bundle to the trusted host. Live use requires
+`--rendered-fixture FILE --fixture-sha256 HASH`; it verifies the recorded hash,
+local source/tree/tool/guest bindings, object shape and bootstrap/policy hashes
+without running Cargo. Keep the original generated fixture name. The hash
+binds the recorded evidence; it does not attest code execution in the rendering
+sandbox. Never copy an admin kubeconfig into that sandbox.
+
+Live runs use the infrastructure repository's existing
+`scripts/kube-access cw-dev-hz-eu-1 --` wrapper and the current admitted,
+digest-pinned daemon support image and workspace StorageClass, supplied with
+`--support-image` and `--storage-class`. Review the exact bundle before applying
+it. The same `--baseline` choice must be supplied at both steps.
+
+Run `--baseline` on the unchanged VFS source to record CPU-first, plain, PID,
+CPU-after and memory results and their cgroup transitions. This mode records
+resource failures; it does not qualify them. Without `--baseline`, the helper
+requires containerd with overlayfs, CPU throttling, an OOM kill, PID denial and
+image build/run/save/load identity. Admission and readiness failures always
+fail. It creates only its
+named Pod, Block PVC and exact product-rendered network policy, removes
+only the returned object identities, and retains selected source/tree/bootstrap/
+image and runtime evidence. It adds no custom network rule or admission
+exception. A passing fixture proves this focused runtime surface; it is
+separate from Dev application acceptance and the
+sealed runner-image qualification.
+
 Ignored Rust tests either run in a named CI step or are manual. CI runs the
 database tests (the database lanes), the egress broker's host-interface refusal
 (in a private network namespace, `scripts/ci/verify/run-in-public-netns.sh`;
