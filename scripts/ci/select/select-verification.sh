@@ -630,8 +630,18 @@ if [ "$event_selected" = false ] && [ "$explicit_paths" = false ]; then
       ;;
     push)
       if ! discover_push_changed_files "$tmp"; then
-        echo "selector: push baseline is unavailable" >&2
-        exit 2
+        if [ "${GITHUB_REF:-}" = refs/heads/main ] \
+          && [ "${PUSH_BASE_UNVERIFIED:-false}" != false ]; then
+          # The trusted caller could not verify a main baseline. A rewrite
+          # can make its previous tip a non-ancestor; verify everything even
+          # when both tips have the same tree, as the fallback below requires.
+          select_all_product
+          classification=unclassified
+          event_selected=true
+        else
+          echo "selector: push baseline is unavailable" >&2
+          exit 2
+        fi
       fi
       ;;
     workflow_dispatch)

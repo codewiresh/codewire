@@ -2900,6 +2900,47 @@ fi
 }
 grep -qF 'push baseline is unavailable' "$missing_stderr"
 
+# The previous tip of a rewritten main is not an ancestor, even if its tree
+# is identical. Exercise real discovery, not an explicit changed-path fixture.
+rewritten="$(printf 'metadata-only replacement\n' | git -C "$repo" -c commit.gpgsign=false \
+  commit-tree "$(git -C "$repo" rev-parse "$chain_tip^{tree}")" -p "$head")"
+git -C "$repo" diff --quiet "$chain_tip" "$rewritten"
+if git -C "$repo" merge-base --is-ancestor "$chain_tip" "$rewritten"; then
+  echo 'rewrite fixture did not produce a divergent graph' >&2
+  exit 1
+fi
+output="$(cd "$repo" && env -u GITHUB_OUTPUT \
+  GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main \
+  PUSH_BEFORE_SHA="$chain_tip" PUSH_AFTER_SHA="$rewritten" PUSH_BASE_UNVERIFIED=true "$SELECTOR")"
+assert_contract_field rewritten_main "$output" classification unclassified
+assert_contract_field rewritten_main "$output" required_local_mode full
+for token in policy policy_shell ci_script_tests rust rust_workspace transport database \
+    service_integration web docs release deploy security edge_kind; do
+  [[ "$(selection_value "$output")" == *"|${token}|"* ]] || {
+    echo "rewritten_main: failed to select ${token}" >&2
+    exit 1
+  }
+done
+for ref in refs/heads/main refs/heads/other; do
+  unverified=false
+  [[ "$ref" != refs/heads/other ]] || unverified=true
+  if (cd "$repo" && env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=push GITHUB_REF="$ref" \
+      PUSH_BEFORE_SHA="$chain_tip" PUSH_AFTER_SHA="$rewritten" PUSH_BASE_UNVERIFIED="$unverified" \
+      "$SELECTOR" >"$missing_stdout" 2>"$missing_stderr"); then
+    echo 'selector accepted an unsupported divergent baseline' >&2
+    exit 1
+  fi
+  [[ ! -s "$missing_stdout" ]] || { echo 'failed discovery emitted a contract' >&2; exit 1; }
+done
+if (cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH GITHUB_EVENT_NAME=pull_request \
+    GITHUB_BASE_REF= VERIFICATION_REMOTE=origin PUSH_BASE_UNVERIFIED=true \
+    "$SELECTOR" >"$missing_stdout" 2>"$missing_stderr"); then
+  echo 'main fallback accepted an unverified pull request baseline' >&2
+  exit 1
+fi
+[[ ! -s "$missing_stdout" ]] || { echo 'failed PR discovery emitted a contract' >&2; exit 1; }
+grep -qF 'pull-request baseline is unavailable' "$missing_stderr"
+
 # A scheduled run (owner decision 2026-10-20) checks Kind alone against the
 # commit the last successful scheduled run checked (SCHEDULE_BASELINE_SHA),
 # while the switch defers Kind on a push to main; these cases use that copy.
