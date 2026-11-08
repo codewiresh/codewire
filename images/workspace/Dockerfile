@@ -28,6 +28,23 @@ ADD --checksum=sha256:02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82
 FROM scratch AS zig-arm64
 ADD --checksum=sha256:958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f \
   https://ziglang.org/download/0.15.2/zig-aarch64-linux-0.15.2.tar.xz /zig.tar.xz
+
+# Infrastructure clients are image-owned binaries, outside the persistent home.
+FROM scratch AS kubectl-amd64
+ADD --checksum=sha256:cfda68cba5848bc3b6c6135ae2f20ba2c78de20059f68789c090166d6abc3e2c \
+  https://dl.k8s.io/release/v1.34.0/bin/linux/amd64/kubectl /kubectl
+FROM scratch AS kubectl-arm64
+ADD --checksum=sha256:00b182d103a8a73da7a4d11e7526d0543dcf352f06cc63a1fde25ce9243f49a0 \
+  https://dl.k8s.io/release/v1.34.0/bin/linux/arm64/kubectl /kubectl
+FROM scratch AS atmos-amd64
+ADD --checksum=sha256:46be9914a4a6af1c3a680b11231a4b1a5bc512f4bf6f9acaf050c3f4e44ee5c9 \
+  https://github.com/cloudposse/atmos/releases/download/v1.233.2/atmos_1.233.2_linux_amd64 /atmos
+FROM scratch AS atmos-arm64
+ADD --checksum=sha256:765226c8f8be4b586a80842b2f4c3f4cddd3b7932c9172a857a85f1b4fd01db8 \
+  https://github.com/cloudposse/atmos/releases/download/v1.233.2/atmos_1.233.2_linux_arm64 /atmos
+FROM kubectl-${TARGETARCH} AS workspace-kubectl
+FROM atmos-${TARGETARCH} AS workspace-atmos
+
 FROM sccache-${BUILDARCH} AS build-sccache
 FROM protoc-${BUILDARCH} AS build-protoc
 FROM zig-${BUILDARCH} AS build-zig
@@ -176,6 +193,9 @@ FROM ${BASE_IMAGE_REF} AS workspace-foundation
 SHELL ["/bin/bash", "-c"]
 USER root
 ARG TARGETARCH
+COPY --from=workspace-kubectl --chmod=0755 /kubectl /usr/local/bin/kubectl
+COPY --from=workspace-atmos --chmod=0755 /atmos /usr/local/bin/atmos
+RUN kubectl version --client && atmos version
 ARG NODE_VERSION=22.23.4
 ARG GO_VERSION=1.27.3
 

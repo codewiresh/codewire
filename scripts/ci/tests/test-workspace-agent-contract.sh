@@ -134,7 +134,7 @@ chmod -R go-w "$work/agents"
 for agent in codex claude gemini kimi pi aider; do
   ln -s agent "$work/bin/$agent"
 done
-for tool in cw docker dockerd docker-compose gh git go gopls hcloud \
+for tool in cw docker dockerd docker-compose gh git go gopls hcloud kubectl atmos \
   node bun bun""x pnpm yarn python3 pipx poetry uv cargo rustc psql protoc; do
   ln -s agent "$work/bin/$tool"
 done
@@ -176,6 +176,12 @@ run_contract >"$work/success.out" 2>"$work/success.err"
 [[ ! -s "$work/success.err" ]] || fail 'successful contract emitted failure evidence'
 grep -Fxq 'codex-cli 0.160.0' "$work/success.out" || fail 'agent checks did not run'
 grep -Fxq 'npm dry-run OK' "$work/success.out" || fail 'Codex install-plan check did not run'
+for tool in kubectl atmos; do
+  grep -Fxq "$tool test-version" "$work/success.out" || fail "$tool was not checked"
+  status=0
+  FAIL_AGENT="$tool" run_contract >"$work/$tool-failure.out" 2>"$work/$tool-failure.err" || status=$?
+  [[ "$status" -eq 42 ]] || fail "$tool failure was not preserved: $status"
+done
 grep -Fxq 'workspace image verification: inert SSH fixture contract passed' "$work/success.out" ||
   fail 'prepared SSH fixture was not checked'
 

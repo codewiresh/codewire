@@ -227,6 +227,8 @@ check_version git git --version
 check_version go go version
 check_version gopls gopls version
 check_version hcloud hcloud version
+check_version kubectl kubectl version --client
+check_version atmos atmos version
 check_version node node --version
 check_version npm npm --version
 check_version bun bun --version

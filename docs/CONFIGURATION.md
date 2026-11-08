@@ -19,6 +19,11 @@ digest is the published pin in `crates/codewire-workspace-image`. The DinD image
 is Docker's official image, pinned by digest in the source. The deployment
 chooses where the workspace and daemon images are pulled from.
 
+The default developer workspace includes `kubectl` and Atmos on `PATH` for
+infrastructure work. Their versions and per-architecture checksums are pinned
+in [the workspace Dockerfile](../images/workspace/Dockerfile) for both amd64
+and arm64.
+
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
 | `CODEWIRE_WORKSPACE_IMAGE_REPOSITORY` | Required by orchestration | The repository the default workspace image is pulled from, with no tag or digest. Orchestration appends the pinned digest. `cw` and the dashboard send the same digest at its public mirror, `ghcr.io/codewiresh/workspace`, and orchestration resolves it to this repository. The public mirror is itself a valid value. | `registry.example.com/codewire/workspace` |

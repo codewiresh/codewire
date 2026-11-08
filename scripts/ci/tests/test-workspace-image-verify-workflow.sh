@@ -164,7 +164,7 @@ grep -qF '"$cgroup_root/pids.events"' "$AGENT_CONTRACT" ||
 for agent in codex claude gemini kimi pi aider; do
   grep -qF "$agent" "$AGENT_CONTRACT" || fail "verification omits $agent"
 done
-for tool in cw docker dockerd docker-compose gh git go gopls hcloud node npm bun pnpm yarn \
+for tool in cw docker dockerd docker-compose gh git go gopls hcloud kubectl atmos node npm bun pnpm yarn \
   python3 pipx poetry uv cargo rustc psql protoc bwrap; do
   grep -qF "$tool" "$AGENT_CONTRACT" || fail "verification omits $tool"
 done
