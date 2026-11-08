@@ -573,10 +573,8 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|')) }}
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/protoc.zip \
-            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
-          echo '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
-            | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
           rm -rf "$HOME/.proto-tools/protoc"
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
@@ -870,10 +868,8 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) && steps.test-archive.outputs.ready != 'true' }}
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/protoc.zip \
-            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
-          echo '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
-            | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
           rm -rf "$HOME/.proto-tools/protoc"
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
@@ -975,10 +971,8 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) && steps.feature-archives.outputs.ready != 'true' }}
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/protoc.zip \
-            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
-          echo '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
-            | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
           rm -rf "$HOME/.proto-tools/protoc"
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
@@ -1108,10 +1102,8 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|') || contains(needs.verification-selection.outputs.selection, '|transport_pkg_codewire_vmm_guest_probe|') || needs.verification-selection.outputs.desktop_package_selected == 'true') && steps.local-vmm-archives.outputs.ready != 'true' }}
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/protoc.zip \
-            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
-          echo '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
-            | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
           rm -rf "$HOME/.proto-tools/protoc"
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
@@ -1237,10 +1229,8 @@ jobs:
         run: |
           set -euo pipefail
           scripts/ci/setup/assert-ci-runner-image.sh
-          curl -fsSL -o /tmp/protoc.zip \
-            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
-          echo '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
-            | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
@@ -1423,10 +1413,8 @@ jobs:
         run: |
           set -euo pipefail
           scripts/ci/setup/assert-ci-runner-image.sh
-          curl -fsSL -o /tmp/protoc.zip \
-            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
-          echo '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
-            | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
@@ -1611,10 +1599,8 @@ jobs:
         run: |
           set -euo pipefail
           scripts/ci/setup/assert-ci-runner-image.sh
-          curl -fsSL -o /tmp/protoc.zip \
-            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
-          echo '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
-            | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
@@ -1908,10 +1894,8 @@ jobs:
       - name: Install pinned protoc for Rust compilation
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/protoc.zip \
-            https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
-          echo '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
-            | sha256sum -c -
+          scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+            6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
           mkdir -p "$HOME/.proto-tools/protoc"
           unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"

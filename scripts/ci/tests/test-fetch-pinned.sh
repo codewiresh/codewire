@@ -89,6 +89,13 @@ grep -qF "[external-download] class=transient-exhausted url=$URL reason=\"curl e
   "$work/exhausted.log" || fail 'exhausted retries lack their fixed marker'
 [ ! -e "$out" ] && [ ! -e "$out.partial" ] || fail 'an exhausted download left a file'
 
+# A persistent 503, as seen in CI's protoc setup, exhausts the same bound.
+run unavailable 22:503 22:503 22:503 22:503 22:503 0:200
+[ "$status" = 22 ] && [ "$(calls unavailable)" = 5 ] || fail 'persistent 503 retries were not bounded'
+grep -qF 'reason="HTTP 503" attempts=5' "$work/unavailable.log" ||
+  fail 'a persistent 503 lacks its exhaustion reason'
+[ ! -e "$out" ] && [ ! -e "$out.partial" ] || fail 'persistent 503 left an archive'
+
 # A 404 and an unknown curl failure fail at once.
 run missing 22:404 0:200
 [ "$status" = 22 ] && [ "$(calls missing)" = 1 ] || fail 'a 404 was retried'

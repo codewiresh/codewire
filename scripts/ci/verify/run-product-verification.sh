@@ -935,10 +935,8 @@ install_contract_toolchain() {
   # all); go install checks their module sums against the checksum database.
   go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.5
   go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.18.1
-  curl -fsSL -o /tmp/protoc.zip \
-    https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip
-  echo '6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7  /tmp/protoc.zip' \
-    | sha256sum -c -
+  scripts/ci/release/fetch-pinned.sh "https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip" \
+    6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 /tmp/protoc.zip
   rm -rf "$HOME/.proto-tools/protoc"
   mkdir -p "$HOME/.proto-tools/protoc"
   unzip -o -q /tmp/protoc.zip -d "$HOME/.proto-tools/protoc"

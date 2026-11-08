@@ -57,6 +57,35 @@ grep -Fq "ADD --checksum=$PROTOC_CHECKSUM" "$RUST_BASE_DOCKERFILE" ||
 grep -Fq "$PROTOC_URL" "$RUST_BASE_DOCKERFILE" ||
   fail 'shared Rust build base does not use the reviewed protoc origin'
 
+# All active host installers must use the bounded, checksum-verifying path.
+# Join shell continuations so the URL, pin and destination form one command.
+protoc_downloads_are_pinned() {
+  local commands command
+  commands="$(awk '
+    sub(/\\[[:space:]]*$/, "") { command = command $0; next }
+    { print command $0; command = "" }
+    END { if (command != "") print command }
+  ' "$1" | grep -F "$PROTOC_URL")" || return 1
+  while IFS= read -r command; do
+    grep -Eq 'scripts/ci/release/fetch-pinned[.]sh"?[[:space:]]' <<<"$command" || return 1
+    grep -Fq "${PROTOC_CHECKSUM#sha256:} /tmp/protoc.zip" <<<"$command" || return 1
+  done <<<"$commands"
+}
+
+for installer in "$WORKFLOW" "$VERIFIER"; do
+  protoc_downloads_are_pinned "$installer" ||
+    fail "$installer bypasses the bounded, checksum-pinned protoc downloader"
+done
+
+# Reject the old one-shot curl even when its URL and separate hash are right.
+work="$(mktemp -d)"
+trap 'rm -rf -- "$work"' EXIT
+printf 'curl -fsSL -o /tmp/protoc.zip %s\necho "%s /tmp/protoc.zip" | sha256sum -c -\n' \
+  "$PROTOC_URL" "${PROTOC_CHECKSUM#sha256:}" >"$work/one-shot.sh"
+if protoc_downloads_are_pinned "$work/one-shot.sh"; then
+  fail 'the old one-shot protoc download was accepted'
+fi
+
 # Every host job compiling the shared bridge needs debug_redact support, not
 # only the release and guest-probe jobs. Image builds already pin this compiler.
 for job in database services-control services-runtime kind-smokes; do
@@ -68,7 +97,7 @@ for job in database services-control services-runtime kind-smokes; do
   grep -Fq 'name: Install pinned protoc for Rust compilation' <<<"$block" ||
     fail "$job does not prepare the shared bridge compiler"
   grep -Fq "$PROTOC_URL" <<<"$block" || fail "$job uses a different protoc source"
-  grep -Fq "${PROTOC_CHECKSUM#sha256:}  /tmp/protoc.zip" <<<"$block" ||
+  grep -Fq "${PROTOC_CHECKSUM#sha256:} /tmp/protoc.zip" <<<"$block" ||
     fail "$job does not verify the protoc archive"
   grep -Fq '"$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"' <<<"$block" ||
     fail "$job does not select the pinned protoc for host Cargo builds"
