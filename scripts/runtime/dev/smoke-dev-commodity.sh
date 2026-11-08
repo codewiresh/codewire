@@ -59,6 +59,18 @@ CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-}"
 EXPECTED_RUNTIME_CLASS="${EXPECTED_RUNTIME_CLASS:-commodity}"
 EXPECTED_DOCKER_MODE="${EXPECTED_DOCKER_MODE:-guest-dind}"
+DOCKER_STORE_FORK_ID=""
+DOCKER_STORE_FORK_NAME=""
+DOCKER_STORE_FORK_ORG=""
+DOCKER_STORE_FORK_CREATOR=""
+DOCKER_STORE_FORK_ATTEMPTED=0
+DOCKER_STORE_SNAPSHOT_ID=""
+DOCKER_STORE_SNAPSHOT_NAME=""
+DOCKER_STORE_SNAPSHOT_STATE=""
+DOCKER_STORE_SNAPSHOT_ATTEMPTED=0
+DOCKER_STORE_SOURCE_ID=""
+DOCKER_STORE_SOURCE_NAME=""
+DOCKER_STORE_SOURCE_ATTEMPTED=0
 EXPECTED_DAEMON_IMAGE="${EXPECTED_DAEMON_IMAGE:-}"
 EXPECTED_DIND_IMAGE="${EXPECTED_DIND_IMAGE:-}"
 EXPECTED_NODE="${EXPECTED_NODE:-}"
@@ -142,6 +154,8 @@ SMOKE_FAILURE_CLASS=""
 
 # shellcheck source=scripts/runtime/dev/provider-ssh-smoke.sh
 source "$ROOT/scripts/runtime/dev/provider-ssh-smoke.sh"
+# shellcheck source=scripts/runtime/dev/docker-store-journey.sh
+source "$ROOT/scripts/runtime/dev/docker-store-journey.sh"
 
 usage() {
   cat <<'USAGE'
@@ -159,7 +173,7 @@ Options:
   --admin-oidc             Use the saved native OIDC login for an admin-only
                            acceptance run. API keys are rejected in this mode.
   --only PHASE             Run only one smoke phase; repeatable. Phases:
-                           kube, exec, coco, docker, doctor, ssh,
+                           kube, exec, coco, docker, docker-store, doctor, ssh,
                            tailnet-ssh, derp-ssh, websocket-ssh,
                            host-key, ssh-burst, app-preview, resize-guest,
                            host-key proves the daemon presents the host
@@ -182,6 +196,8 @@ Options:
                            provider-ssh is owner-operated --admin-oidc with an
                            explicit login directory and expected email; it creates
                            only a disposable generated SSH identity/profile/env.
+                           docker-store also stops/starts and snapshots/forks a
+                           fresh disposable workspace to prove Docker persistence.
   --keep                   Keep the environment after the smoke
   --skip-kube              Skip Kubernetes shape assertions
   --skip-docker            Skip Docker/compose/Postgres guest smoke
@@ -501,7 +517,7 @@ while (($# > 0)); do
     --only)
       [[ $# -ge 2 ]] || die "--only requires a phase"
       case "$2" in
-        kube|exec|coco|docker|doctor|ssh|tailnet-ssh|derp-ssh|websocket-ssh|host-key|ssh-burst|app-preview|resize-guest|application-secrets|application-secrets-all-scopes|provider-ssh)
+        kube|exec|coco|docker|docker-store|doctor|ssh|tailnet-ssh|derp-ssh|websocket-ssh|host-key|ssh-burst|app-preview|resize-guest|application-secrets|application-secrets-all-scopes|provider-ssh)
           SMOKE_ONLY_PHASES+=("$2")
           ;;
         *)
@@ -556,6 +572,9 @@ cleanup() {
   if [[ "$rc" != "0" ]]; then
     report_acceptance_failure "$rc"
   fi
+  if [[ "$DOCKER_STORE_FORK_ATTEMPTED" == 1 || "$DOCKER_STORE_SNAPSHOT_ATTEMPTED" == 1 ]]; then
+    cleanup_docker_store_journey || { [[ "$rc" != 0 ]] || rc=1; failed_cleanup="${failed_cleanup:-docker}"; }
+  fi
   stop_peer_relay_packet_diagnostics || true
   if [[ "$rc" != "0" ]]; then
     collect_failure_diagnostics "failure" || true
@@ -568,12 +587,13 @@ cleanup() {
     else
       cleanup_application_secrets || { rc=1; failed_cleanup="${failed_cleanup:-app-cleanup}"; }
     fi
-  elif [[ -n "$ENV_ID" && "$SMOKE_KEEP_ENV" != "1" && -x "${CW_BIN:-}" ]]; then
+  elif [[ -n "$ENV_ID" && "$SMOKE_KEEP_ENV" != "1" && -z "$DOCKER_STORE_SOURCE_ID" && -x "${CW_BIN:-}" ]]; then
     log "deleting smoke environment $ENV_ID"
     "$CW_BIN" --server "$CODEWIRE_SERVER_URL" rm --yes "$ENV_ID" >/dev/null 2>&1 || true
   elif [[ -n "$ENV_ID" && "$SMOKE_KEEP_ENV" == "1" ]]; then
     log "kept smoke environment $ENV_ID"
   fi
+  cleanup_docker_store_source || { [[ "$rc" != 0 ]] || rc=1; failed_cleanup="${failed_cleanup:-docker}"; }
   if [[ "$SMOKE_OAUTH_LOGIN_ATTEMPTED" == 1 ]]; then
     cleanup_fresh_oauth_login || { rc=1; failed_cleanup="${failed_cleanup:-oauth-cleanup}"; }
   fi
@@ -2656,8 +2676,14 @@ assert_pod_shape() {
   ' "$pod_json" >/dev/null || \
     die "workspace Pod is not an identity-free daemon binding to $expected_binding_url with the internal roots"
   if [[ "$EXPECTED_DOCKER_MODE" != "none" ]]; then
-    [[ "$dind_bootstrap" == *"--data-root \"\$data_root\""* && "$dind_bootstrap" == *"--storage-driver vfs"* ]] || \
-      die "dind bootstrap does not use explicit data root with vfs storage driver"
+    local expected_driver=overlayfs
+    [[ "$EXPECTED_RUNTIME_CLASS" != confidential ]] || expected_driver=vfs
+    [[ "$dind_bootstrap" == *"--data-root \"\$data_root\""* && "$dind_bootstrap" == *"--storage-driver $expected_driver"* ]] || \
+      die "dind bootstrap does not use explicit data root with $expected_driver storage driver"
+    if [[ "$EXPECTED_RUNTIME_CLASS" != confidential ]]; then
+      [[ "$dind_bootstrap" == *'--feature containerd-snapshotter=true'* ]] || \
+        die 'dind bootstrap does not enable the containerd image store'
+    fi
     [[ "$dind_data_image" == "/workspace/.codewire/docker-data.ext4" ]] || \
       die "dind CODEWIRE_DOCKER_DATA_IMAGE=$dind_data_image, want /workspace/.codewire/docker-data.ext4"
     [[ "$dind_data_size" =~ ^[0-9]+G$ ]] || \
@@ -3447,6 +3473,10 @@ run_docker_smoke() {
   require_uint SMOKE_DOCKER_LARGE_IMAGE_MAX_SECONDS "$SMOKE_DOCKER_LARGE_IMAGE_MAX_SECONDS"
   require_bool01 SMOKE_DOCKER_OOM_STRESS "$SMOKE_DOCKER_OOM_STRESS"
 
+  if [[ "$EXPECTED_RUNTIME_CLASS" != confidential ]]; then run_docker_store_core; fi
+
+  local expected_driver=overlayfs
+  [[ "$EXPECTED_RUNTIME_CLASS" != confidential ]] || expected_driver=vfs
   local docker_smoke_id common
   docker_smoke_id="${ENV_ID//-/}"
   docker_smoke_id="${docker_smoke_id:0:12}"
@@ -3460,6 +3490,7 @@ SMOKE_DOCKER_LARGE_IMAGE_MAX_SECONDS=$SMOKE_DOCKER_LARGE_IMAGE_MAX_SECONDS
 SMOKE_DOCKER_EGRESS_SMALL_URL=$(shell_quote "$SMOKE_DOCKER_EGRESS_SMALL_URL")
 SMOKE_DOCKER_EGRESS_LARGE_URL=$(shell_quote "$SMOKE_DOCKER_EGRESS_LARGE_URL")
 SMOKE_DOCKER_OOM_STRESS=$SMOKE_DOCKER_OOM_STRESS
+expected_driver=$(shell_quote "$expected_driver")
 smoke_id=$(shell_quote "$docker_smoke_id")
 work="/tmp/codewire-runtime-smoke-\$smoke_id"
 pg="codewire-runtime-postgres-\$smoke_id"
@@ -3515,8 +3546,8 @@ mkdir -p "$work"
 test "$DOCKER_HOST" = "unix:///var/run/docker/docker.sock"
 docker version >/dev/null
 storage_driver="$(docker info --format "{{.Driver}}")"
-if [ "$storage_driver" != "vfs" ]; then
-  echo "expected guest dockerd storage driver vfs, got ${storage_driver}" >&2
+if [ "$storage_driver" != "$expected_driver" ]; then
+  echo "expected guest dockerd storage driver $expected_driver, got ${storage_driver}" >&2
   exit 1
 fi
 docker info --format "{{.ServerVersion}}" >/dev/null
@@ -5453,6 +5484,11 @@ run_selected_phase() {
     coco)
       assert_coco_guest_test_resource
       ;;
+    docker-store)
+      wait_for_cw_run
+      run_docker_store_core
+      run_docker_store_journey
+      ;;
     docker)
       wait_for_cw_run
       run_docker_smoke
@@ -5510,7 +5546,7 @@ run_selected_phases() {
   local phase
 
   for phase in "${SMOKE_ONLY_PHASES[@]}"; do
-    smoke_stage "$phase"
+    if [[ "$phase" == docker-store ]]; then smoke_stage docker; else smoke_stage "$phase"; fi
     log "running selected smoke phase: $phase"
     run_selected_phase "$phase"
   done
@@ -5531,6 +5567,15 @@ resize_guest_requested() {
 main() {
   smoke_stage setup
   require_bool01 SMOKE_RESIZE_GUEST "$SMOKE_RESIZE_GUEST"
+  local requested_phase
+  for requested_phase in "${SMOKE_ONLY_PHASES[@]}"; do
+    if [[ "$requested_phase" == docker-store && "$EXPECTED_RUNTIME_CLASS" != commodity ]]; then
+      die "docker-store lifecycle journey requires the commodity runtime"
+    fi
+    if [[ "$requested_phase" == docker-store && ( -n "$SMOKE_EXISTING_ENV_ID" || "$SMOKE_KEEP_ENV" != 0 ) ]]; then
+      die "docker-store lifecycle journey requires a fresh disposable environment; --existing-env and --keep are unsupported"
+    fi
+  done
   if resize_guest_requested && [[ -n "$SMOKE_EXISTING_ENV_ID" ]]; then
     die "resize-guest changes resources and may replace the workspace Pod; run it on a fresh disposable environment"
   fi
@@ -5578,8 +5623,13 @@ main() {
     SMOKE_KEEP_ENV=1
     log "using existing environment $ENV_ID"
   else
+    if docker_store_requested; then
+      DOCKER_STORE_SOURCE_NAME="$SMOKE_NAME"
+      DOCKER_STORE_SOURCE_ATTEMPTED=1
+    fi
     create_environment
   fi
+  if docker_store_requested; then DOCKER_STORE_SOURCE_ID="$ENV_ID"; fi
   record_environment_artifact
   if [[ -z "$SMOKE_EXISTING_ENV_ID" ]]; then
     if ! application_secrets_selected; then smoke_stage wait-environment; fi

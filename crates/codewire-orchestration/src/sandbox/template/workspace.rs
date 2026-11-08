@@ -1245,7 +1245,7 @@ const LAZY_MKFS: &str = r#"    # A fresh sparse image reads as zeros, so mke2fs 
 /// data image [`DOCKER_DATA_INIT_CONTAINER`] prepared and starts Docker on
 /// it, with only busybox, which the DinD image keeps (#3208). A missing image
 /// stops Docker with a reason, never the workspace.
-pub(crate) fn dind_bootstrap_script() -> String {
+fn dind_mount_script() -> String {
     format!(
         r#"data_image="${{CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}}"
 data_root="${{CODEWIRE_DOCKER_DATA_ROOT:-/var/lib/docker}}"
@@ -1262,9 +1262,32 @@ if [ "$mount_mode" = "loop" ]; then
 elif [ "$mount_mode" != "none" ]; then
   echo "unsupported CODEWIRE_DOCKER_MOUNT_MODE=$mount_mode" >&2
   exit 1
-fi
-exec dockerd --host "unix://{DIND_SOCKET_PATH}" --group 1000 --data-root "$data_root" --storage-driver vfs"#
+fi"#
     )
+}
+
+/// Frozen VFS bootstrap retained for local profiles and recognized old Sandboxes.
+pub(crate) fn dind_bootstrap_script() -> String {
+    format!(
+        "{}\nexec dockerd --host \"unix://{DIND_SOCKET_PATH}\" --group 1000 --data-root \"$data_root\" --storage-driver vfs",
+        dind_mount_script()
+    )
+}
+
+/// Commodity Docker delegates its cgroup before starting daemon subprocesses.
+/// Its persistent ext4 store uses the containerd image store and OverlayFS.
+pub(crate) fn commodity_dind_bootstrap_script() -> String {
+    use super::dind::{BOOTSTRAP_FAILURE, CGROUP_INIT, PREPARE_STORE, VERIFY_STORE_MOUNT};
+    format!(
+        "{BOOTSTRAP_FAILURE}\n{CGROUP_INIT}\n{}\n\
+{VERIFY_STORE_MOUNT}\n\
+{PREPARE_STORE}\n\
+exec dockerd --host \"unix://{DIND_SOCKET_PATH}\" --group 1000 --data-root \"$data_root\" --feature containerd-snapshotter=true --storage-driver overlayfs",
+        dind_mount_script()
+    )
+    // Kubernetes consumes each `$$` in command/args before invoking the shell.
+    // Preserve the shell PID in the self-only cgroup move and marker nonce.
+    .replace("$$", "$$$$")
 }
 
 /// The Docker data variables a guest DinD renders: a loop-mounted image at
@@ -1315,6 +1338,8 @@ fn dind_container(
 ) -> Value {
     let command = if ext4_data_root && runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
         json!(["sh", "-ec", growth_in_dind_bootstrap_script()])
+    } else if ext4_data_root && runtime_spec.profile == RUNTIME_PROFILE_COMMODITY {
+        json!(["sh", "-ec", commodity_dind_bootstrap_script()])
     } else if ext4_data_root {
         json!(["sh", "-ec", dind_bootstrap_script()])
     } else {

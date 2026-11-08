@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use super::{EXTENSIONS_API_VERSION, LABEL_ENV_ID, LABEL_TYPE};
 
 mod credentials;
+mod dind;
 mod encoding;
 mod naming;
 mod network;
@@ -46,8 +47,8 @@ pub(crate) use workspace::docker_data_image_prepare_script;
 pub(crate) use workspace::{
     DAEMON_INIT_CONTAINER, DAEMON_VOLUME, DOCKER_DATA_INIT_CONTAINER, DOCKER_DATA_INIT_ENV,
     LEGACY_DIND_BOOTSTRAP_SCRIPT, MOUNT_WORKSPACE_CONTAINER, WORKSPACE_MOUNT_VOLUME,
-    WorkspaceVolume, dind_bootstrap_script, docker_data_init_container,
-    eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script,
+    WorkspaceVolume, commodity_dind_bootstrap_script, dind_bootstrap_script,
+    docker_data_init_container, eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script,
     pre_growth_dind_bootstrap_script,
 };
 #[cfg(test)]

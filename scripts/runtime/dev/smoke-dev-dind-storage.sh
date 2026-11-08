@@ -153,6 +153,11 @@ jq -e --arg name "$NAME" --arg image "$SUPPORT_IMAGE" --arg storage "$STORAGE_CL
     and ($p.containers | length == 2) and $p.containers[0].name == "dind" and $p.containers[0].image == .dind_image
     and $p.containers[0].resources.limits == {"cpu":"2","memory":"2Gi"}
     and $p.containers[1].name == "client" and $p.containers[1].image == .dind_image
+    and $p.containers[1].command == ["sh","-ec","umask 077; mkdir \"$DOCKER_CONFIG\"; exec sleep 86400"]
+    and $p.containers[1].env == [
+      {"name":"DOCKER_HOST","value":"unix:///var/run/docker/docker.sock"},
+      {"name":"DOCKER_CONFIG","value":"/tmp/codewire-dind-client"}
+    ]
     and $p.containers[1].resources.limits == {"cpu":"1","memory":"512Mi"}
     and $p.containers[1].securityContext.runAsUser == 1000
     and $p.containers[1].securityContext.allowPrivilegeEscalation == false

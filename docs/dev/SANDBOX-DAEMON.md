@@ -326,9 +326,31 @@ runtime boundary, not the Kubernetes node's socket.
 The `dind` data root must stay inside the runtime boundary and must not use the
 Kubernetes node's Docker/containerd sockets. Commodity keeps an ext4 image at
 `/workspace/.codewire/docker-data.ext4`, mounts it at `/var/lib/docker`, and
-uses dockerd `vfs`, because the current Kata guest rejects `overlay2` for this
-path. The commodity smoke checks for the ext4 over-mount specifically, not
-just any mountpoint.
+uses Docker's containerd image store with the `overlayfs` snapshotter. Docker's
+managed containerd keeps its persistent state under
+`/var/lib/docker/containerd/daemon`, on that same ext4 image. No Kubernetes
+node socket or separate system containerd store is involved.
+
+Before starting Docker, the commodity bootstrap moves only its own process
+into an `init` cgroup and enables controllers on the empty domain root. This
+keeps Docker child cgroups in domain mode, with CPU, memory and process limits
+available. A contaminated root or missing delegation fails Docker startup
+with a reason; it never moves other processes. Local and confidential
+profiles keep their existing Docker bootstrap until separately qualified.
+The commodity command renderer escapes shell process IDs before Kubernetes
+command expansion, preserving the startup process ID and temporary marker nonce.
+
+The commodity cutover discards old Docker images, containers and volumes
+(owner decision, 2026-11-08, #3960). Before deleting any Docker state, startup
+requires the fixed `/var/lib/docker` ext4 loop mount and verifies that its
+loop backing file is exactly `/workspace/.codewire/docker-data.ext4`. It
+clears only that mounted filesystem's top-level entries, preserving
+`lost+found`, then atomically writes `.codewire-containerd-store-v1` with the
+exact format `containerd-overlayfs-v1` followed by a newline. This marker
+travels with the Docker filesystem through stop/start and snapshot/fork, so
+later starts retain modern images, containers and volumes. An unsupported
+marker or unexpected mount fails before cleanup. Workspace files and
+credentials outside this Docker filesystem are preserved.
 
 The DinD image ships no filesystem tools since Docker 29.9.2 (#3208), so the
 `codewire-docker-data-init` init container prepares the image from the support

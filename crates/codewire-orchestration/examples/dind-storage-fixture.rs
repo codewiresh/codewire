@@ -95,8 +95,11 @@ fn fixture(name: &str, support: &str, storage: &str) -> anyhow::Result<Value> {
     ensure!(mounts.len() == 2);
     let client = json!({
         "name":"client", "image":DEFAULT_DIND_IMAGE,
-        "command":["sh","-ec","exec sleep 86400"],
-        "env":[{"name":"DOCKER_HOST","value":"unix:///var/run/docker/docker.sock"}],
+        "command":["sh","-ec","umask 077; mkdir \"$DOCKER_CONFIG\"; exec sleep 86400"],
+        "env":[
+            {"name":"DOCKER_HOST","value":"unix:///var/run/docker/docker.sock"},
+            {"name":"DOCKER_CONFIG","value":"/tmp/codewire-dind-client"}
+        ],
         "securityContext":{"runAsUser":1000,"runAsGroup":1000,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},
         "resources":{"requests":{"cpu":"100m","memory":"128Mi"},"limits":{"cpu":"1","memory":"512Mi"}},
         "volumeMounts":mounts,
@@ -140,6 +143,8 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::{os::unix::fs::PermissionsExt, process::Command};
 
     fn rendered() -> Value {
         fixture(
@@ -195,6 +200,52 @@ mod tests {
             );
         }
         assert!(pod.get("hostPID").is_none() && pod.get("hostNetwork").is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn observer_setup_creates_empty_private_config_with_unwritable_home() {
+        let got = rendered();
+        let client = &got["objects"][1]["spec"]["containers"][1];
+        assert_eq!(
+            client["env"],
+            json!([
+                {"name":"DOCKER_HOST","value":"unix:///var/run/docker/docker.sock"},
+                {"name":"DOCKER_CONFIG","value":"/tmp/codewire-dind-client"}
+            ])
+        );
+        let work = tempfile::tempdir().unwrap();
+        // A non-directory HOME cannot hold Docker configuration, even when
+        // the test runs as root. The setup must use its own empty directory.
+        let home = work.path().join("unwritable-home");
+        std::fs::write(&home, b"synthetic home boundary").unwrap();
+        let config = work.path().join("docker-config");
+        let sleep = work.path().join("sleep");
+        std::fs::write(&sleep, b"#!/bin/sh\nset -eu\ntest \"$1\" = 86400\nif mkdir \"$HOME/.docker\" 2>/dev/null; then exit 90; fi\ntest -d \"$DOCKER_CONFIG\"\ntest -z \"$(ls -A \"$DOCKER_CONFIG\")\"\nprintf '{\"auths\":{}}\\n' > \"$DOCKER_CONFIG/config.json\"\n").unwrap();
+        std::fs::set_permissions(&sleep, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let argv = client["command"].as_array().unwrap();
+        let result = Command::new(argv[0].as_str().unwrap())
+            .args(argv.iter().skip(1).map(|v| v.as_str().unwrap()))
+            .env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", work.path().display()))
+            .env("HOME", &home)
+            .env("DOCKER_CONFIG", &config)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::read(config.join("config.json")).unwrap(),
+            b"{\"auths\":{}}\n"
+        );
+        assert_eq!(std::fs::read(home).unwrap(), b"synthetic home boundary");
     }
 
     #[test]

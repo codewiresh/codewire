@@ -9,6 +9,63 @@ mod tests {
     use sha2::{Digest, Sha256};
     const CONTENT_ADDRESSED_MANIFEST_URI: &str = "kbs:///default/codewire-storage-manifests/sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    #[cfg(unix)]
+    #[test]
+    fn commodity_shell_pid_survives_kubelet_command_expansion() {
+        let rendered = render_sandbox_template("dev-sandboxes", &commodity_opts());
+        let containers = rendered["spec"]["podTemplate"]["spec"]["containers"]
+            .as_array()
+            .unwrap();
+        let dind = containers.iter().find(|c| c["name"] == "dind").unwrap();
+        let command = dind["command"][2].as_str().unwrap();
+        // Container.command's documented expansion reduces each `$$` once,
+        // before the shell runs (kubelet expansion.go, Kubernetes v1.36.0).
+        let expanded = command.replace("$$", "$");
+        let self_move = expanded
+            .lines()
+            .find(|line| line.contains("> \"$cgroup_root/init/cgroup.procs\""))
+            .unwrap()
+            .split_once(" || ")
+            .unwrap()
+            .0
+            .replace("$cgroup_root/init/cgroup.procs", "$TEST_MOVED_PID");
+        let marker = expanded
+            .lines()
+            .find(|line| line.starts_with("  marker_temporary="))
+            .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        // Execute only the rendered self-PID write and marker assignment in
+        // ordinary files, never the actual cgroup or Docker data operations.
+        let script = format!(
+            "printf '%s\\n' \"$$\" > \"$TEST_EXPECTED_PID\"\n\
+             data_root=\"$TEST_ROOT\"\n{self_move}\n{marker}\n\
+             printf '%s\\n' \"$marker_temporary\" > \"$TEST_MARKER\""
+        );
+        let output = std::process::Command::new("sh")
+            .args(["-ec", &script])
+            .env("TEST_ROOT", scratch.path())
+            .env("TEST_EXPECTED_PID", scratch.path().join("expected"))
+            .env("TEST_MOVED_PID", scratch.path().join("moved"))
+            .env("TEST_MARKER", scratch.path().join("marker"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let expected = std::fs::read_to_string(scratch.path().join("expected")).unwrap();
+        assert!(expected.trim().parse::<u32>().unwrap() > 0);
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("moved")).unwrap(),
+            expected
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("marker")).unwrap(),
+            format!(
+                "{}/.codewire-containerd-store-v1.tmp.{}\n",
+                scratch.path().display(),
+                expected.trim()
+            )
+        );
+    }
+
     #[test]
     fn a_workspace_claim_restores_only_from_the_snapshot_it_names() {
         let claim = |source: Option<&str>| {
@@ -1269,7 +1326,7 @@ mod tests {
         assert_eq!(command[0].as_str(), Some("sh"));
         assert_eq!(command[1].as_str(), Some("-ec"));
         let bootstrap = command[2].as_str().unwrap();
-        assert_eq!(bootstrap, dind_bootstrap_script());
+        assert_eq!(bootstrap, commodity_dind_bootstrap_script());
         // DinD only mounts the image the data init prepared, with busybox:
         // the Docker 29.9.2 DinD image ships no e2fsprogs (#3208).
         for tool in [
@@ -1289,9 +1346,11 @@ mod tests {
             "if [ ! -s \"$data_image\" ]; then\n    echo \"the Docker data image $data_image is missing; the codewire-docker-data-init init container prepares it before Docker starts\" >&2\n    exit 1\n  fi"
         ));
         assert!(bootstrap.contains("echo \"unsupported CODEWIRE_DOCKER_MOUNT_MODE=$mount_mode\" >&2"));
-        assert!(bootstrap.ends_with(
-            "exec dockerd --host \"unix:///var/run/docker/docker.sock\" --group 1000 --data-root \"$data_root\" --storage-driver vfs"
-        ));
+        let self_move = bootstrap.find("printf '%s\\n' \"$$$$\" > \"$cgroup_root/init/cgroup.procs\"").unwrap();
+        let enable = bootstrap.find("printf '%s\\n' \"$enable_controllers\"").unwrap();
+        assert!(self_move < enable);
+        assert!(enable < bootstrap.find("exec dockerd").unwrap());
+        assert!(bootstrap.contains("--feature containerd-snapshotter=true --storage-driver overlayfs"));
 
         // The data init prepares the image offline: it owns `.codewire`,
         // formats a missing image lazily (Program #2238), and grows a grown
@@ -1372,6 +1431,7 @@ mod tests {
             pre_growth_dind_bootstrap_script(),
             growth_in_dind,
             dind_bootstrap_script(),
+            commodity_dind_bootstrap_script(),
         ];
         for (index, variant) in variants.iter().enumerate() {
             assert!(
@@ -1380,7 +1440,7 @@ mod tests {
             );
         }
         assert!(bootstrap.contains("--data-root \"$data_root\""));
-        assert!(bootstrap.contains("--storage-driver vfs"));
+        assert!(!bootstrap.contains("--storage-driver vfs"));
         assert!(dind["env"].as_array().unwrap().iter().any(|env| {
             env["name"].as_str() == Some("CODEWIRE_DOCKER_DATA_IMAGE")
                 && env["value"].as_str() == Some("/workspace/.codewire/docker-data.ext4")
@@ -3576,7 +3636,12 @@ mod tests {
                 .iter()
                 .find(|container| container["name"] == "dind")
                 .unwrap();
-            assert_eq!(dind["command"][2], dind_bootstrap_script());
+            let expected = if profile == RUNTIME_PROFILE_COMMODITY {
+                commodity_dind_bootstrap_script()
+            } else {
+                dind_bootstrap_script()
+            };
+            assert_eq!(dind["command"][2], expected);
             let dind_data_env: Vec<_> = dind["env"]
                 .as_array()
                 .unwrap()

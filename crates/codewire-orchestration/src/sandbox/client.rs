@@ -31,13 +31,13 @@ use super::template::{
     KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
     KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, LEGACY_DIND_BOOTSTRAP_SCRIPT,
     MOUNT_WORKSPACE_CONTAINER, RUNTIME_CLASS_RUNC, TemplateOpts, WORKSPACE_MOUNT_VOLUME,
-    WorkspaceVolume, dind_bootstrap_script, direct_udp_service_name, docker_data_init_container,
-    docker_data_size_gib, eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script,
-    is_commodity_runtime_class, pre_growth_dind_bootstrap_script, render_direct_udp_service,
-    render_sandbox_shadow_pool, render_sandbox_template, render_warm_member_bridge,
-    render_workspace_daemon_network_policy, render_workspace_daemon_service,
-    warm_member_daemon_bridge_name, workspace_daemon_network_policy_name,
-    workspace_daemon_service_name,
+    WorkspaceVolume, commodity_dind_bootstrap_script, dind_bootstrap_script,
+    direct_udp_service_name, docker_data_init_container, docker_data_size_gib,
+    eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script, is_commodity_runtime_class,
+    pre_growth_dind_bootstrap_script, render_direct_udp_service, render_sandbox_shadow_pool,
+    render_sandbox_template, render_warm_member_bridge, render_workspace_daemon_network_policy,
+    render_workspace_daemon_service, warm_member_daemon_bridge_name,
+    workspace_daemon_network_policy_name, workspace_daemon_service_name,
 };
 use super::{
     CRD_VERSION, ClaimOpts, EXTENSIONS_GROUP, LABEL_ENV_ID, LABEL_ORG_ID, LABEL_TYPE,
@@ -795,6 +795,10 @@ fn log_daemon_image_repin(
 /// so a grown workspace disk grows that image too (#3554), and the one that
 /// formats and grows it inside DinD ([`growth_in_dind_bootstrap_script`]),
 /// whose e2fsprogs the Docker 29.9.2 DinD image no longer ships (#3208).
+/// Commodity also replaces the former mount-only VFS bootstrap with cgroup
+/// delegation and the containerd OverlayFS store (#3960). Its exact Docker
+/// filesystem is reset once, before writing a persistent format marker; other
+/// runtime profiles retain their existing store.
 /// Every resume and Pod replacement that re-pins the daemon image carries
 /// them, as the controller builds each new Pod from the Sandbox's own spec.
 ///
@@ -845,13 +849,6 @@ fn dind_bootstrap_refresh(
             || *script == pre_growth_dind_bootstrap_script()
             || *script == growth_in_dind_bootstrap_script()
     });
-    let current = script.is_some_and(|script| script == dind_bootstrap_script());
-    if script.is_some() && prior.is_none() && !current {
-        tracing::warn!(
-            sandbox = name,
-            "Sandbox DinD bootstrap is neither current nor a known prior one; it is not re-rendered"
-        );
-    }
     let runtime_class = match pod_spec.get("runtimeClassName") {
         None | Some(Value::Null) => "",
         Some(class) => class
@@ -862,6 +859,25 @@ fn dind_bootstrap_refresh(
         || is_commodity_runtime_class(runtime_class))
     {
         return Ok(None);
+    }
+    let commodity = is_commodity_runtime_class(runtime_class);
+    let previous_current = script.is_some_and(|script| script == dind_bootstrap_script());
+    let desired = if commodity {
+        commodity_dind_bootstrap_script()
+    } else {
+        dind_bootstrap_script()
+    };
+    let current = script == Some(desired.as_str());
+    let prior = if commodity && previous_current {
+        script
+    } else {
+        prior
+    };
+    if script.is_some() && prior.is_none() && !current {
+        tracing::warn!(
+            sandbox = name,
+            "Sandbox DinD bootstrap is unknown; it is not re-rendered"
+        );
     }
     let inits = match pod_spec.get("initContainers") {
         None | Some(Value::Null) => None,
@@ -882,7 +898,7 @@ fn dind_bootstrap_refresh(
     let Some(prior) = prior else {
         return Ok(None);
     };
-    if data_init.is_some() {
+    if data_init.is_some() && !previous_current {
         tracing::warn!(
             sandbox = name,
             "Sandbox carries a prior DinD bootstrap beside a Docker data init; it is not re-rendered"
@@ -920,8 +936,16 @@ fn dind_bootstrap_refresh(
     let mut operations = vec![
         serde_json::json!({"op":"test","path":format!("{path}/name"),"value":"dind"}),
         serde_json::json!({"op":"test","path":format!("{path}/command/2"),"value":prior}),
-        serde_json::json!({"op":"replace","path":format!("{path}/command/2"),"value":dind_bootstrap_script()}),
+        serde_json::json!({"op":"replace","path":format!("{path}/command/2"),"value":desired}),
     ];
+    if let Some((_, (init_index, init))) = data_init {
+        if let Some(repin) =
+            docker_data_init_repin(&format!("{init_path}/{init_index}"), init, support_image)
+        {
+            operations.extend(repin);
+        }
+        return Ok(Some(operations));
+    }
     // On a Block workspace `mount-workspace` prepares the data image, as a
     // fresh render has it (#3718), so only the bootstrap is re-rendered.
     let block = pod_spec

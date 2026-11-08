@@ -1345,9 +1345,11 @@ declared_stages="$(awk '/^smoke_stage\(\) \{/,/^}/' "$SMOKE_SOURCE" | sed -n 's/
 [[ "$declared_stages" == "$expected_stages" ]] || fail 'acceptance stage set changed without its relay contract'
 # Every literal stage, every selectable phase and each source phase is declared.
 selectable_phases="$(sed -n '/^    --only)$/,/;;/p' "$SMOKE_SOURCE" | sed -n 's/^ *\([a-z][a-z|-]*\))$/\1/p' | tr '|' ' ')"
-[[ "$(wc -w <<<"$selectable_phases")" == 16 ]] || fail 'selectable smoke phases were not read'
+[[ "$(wc -w <<<"$selectable_phases")" == 17 ]] || fail 'selectable smoke phases were not read'
 for stage in $(grep -oE 'smoke_stage [a-z][a-z-]*' "$SMOKE_SOURCE" | cut -d ' ' -f 2 | sort -u) \
     $selectable_phases app-source-a app-source-b app-source-clear; do
+  # The disk lifecycle journey reports through the existing Docker stage.
+  [[ "$stage" != docker-store ]] || stage=docker
   [[ " $expected_stages " == *" $stage "* ]] || fail "stage or phase $stage is outside the closed stage set"
 done
 expect_failure unknown-stage smoke_stage not-a-stage

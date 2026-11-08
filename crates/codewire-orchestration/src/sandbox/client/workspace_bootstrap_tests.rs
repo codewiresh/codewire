@@ -2510,7 +2510,13 @@ fn a_re_rendered_sandbox_matches_a_fresh_render() {
             eager_mkfs_dind_bootstrap_script(),
             pre_growth_dind_bootstrap_script(),
             growth_in_dind_bootstrap_script(),
+            dind_bootstrap_script(),
         ] {
+            if profile != super::super::template::RUNTIME_PROFILE_COMMODITY
+                && prior == dind_bootstrap_script()
+            {
+                continue;
+            }
             let mut stored = fresh.clone();
             stored["containers"][dind]["command"][2] = json!(prior);
             let inits = stored["initContainers"].as_array_mut().unwrap();

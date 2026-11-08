@@ -130,6 +130,37 @@ exception. A passing fixture proves this focused runtime surface; it is
 separate from Dev application acceptance and the
 sealed runner-image qualification.
 
+Normal commodity Docker acceptance includes the modern containerd/overlayfs
+store, CPU throttling, memory OOM and PID refusal, plus image build/run/save/load
+custody. These checks land with the bootstrap; the confidential runtime retains
+its separate VFS checks. No additional CI workflow is needed.
+
+For the longer cloud disk lifecycle journey, use the same configured Dev inputs
+and dedicated smoke identity as commodity acceptance:
+
+```bash
+scripts/runtime/dev/with-dev-smoke-auth.sh \
+  scripts/runtime/dev/smoke-dev-commodity.sh --only docker-store --skip-kube
+```
+
+This creates a fresh disposable environment, proves Docker state across a
+supported cloud stop/start, then captures a stopped disk snapshot and creates a
+fork. It checks the same image identity, archived image checksum, container
+writable layer and named volume in the fork; fork writes must leave the source
+unchanged. Snapshot creation records an initially absent name before requesting
+capture; after an interrupted wait, cleanup recovers only a unique match for
+that exact name and source. Fork recovery similarly requires one exact generated
+name with the source's organization and creator, and proves cleanup ownership
+only. If the initial source request fails without a verified ID, cleanup reports
+the unresolved name and TTL and makes no guessed deletion. Cleanup observes snapshot absence and exact-ID
+environment reports in `destroyed` state, rather than counting delete
+acknowledgments as completion. Ambiguous or unfinished cleanup fails the journey and preserves
+its identifying metadata. The source environment is removed at the smoke's EXIT
+boundary, after any later selected phases. `--existing-env` and `--keep` are
+refused for this journey.
+Cloud `cw restart` is unsupported; this journey proves Docker startup through
+environment stop/start, without claiming a daemon-only restart.
+
 Ignored Rust tests either run in a named CI step or are manual. CI runs the
 database tests (the database lanes), the egress broker's host-interface refusal
 (in a private network namespace, `scripts/ci/verify/run-in-public-netns.sh`;

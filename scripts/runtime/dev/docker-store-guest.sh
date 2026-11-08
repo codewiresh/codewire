@@ -53,6 +53,25 @@ docker_store_limits() {
   printf 'docker-store resource-enforcement-passed\n'
 }
 
+docker_store_managed_root_script() {
+  cat <<'CHECK'
+root_type=$(stat -f -c %T / 2>/dev/null) || root_type=unavailable
+root_magic=$(stat -f -c %t / 2>/dev/null) || root_magic=unavailable
+managed_magic=$(stat -f -c %t /managed-store 2>/dev/null) || managed_magic=unavailable
+snapshotter_directory=false
+if test -d /managed-store/io.containerd.snapshotter.v1.overlayfs; then snapshotter_directory=true; fi
+marker_matches=false
+if printf 'containerd-overlayfs-v1\n' | cmp -s - /store-version; then marker_matches=true; fi
+printf 'docker-store managed-root root-type=%s root-magic=%s managed-magic=%s snapshotter-directory=%s marker-match=%s\n' "$root_type" "$root_magic" "$managed_magic" "$snapshotter_directory" "$marker_matches"
+# Linux UAPI linux/magic.h defines OVERLAYFS_SUPER_MAGIC as 0x794c7630.
+# Older BusyBox filesystem-name tables may report UNKNOWN for this magic.
+test "$root_magic" = 794c7630 || { printf 'docker-store: container root is not overlayfs\n' >&2; exit 1; }
+test "$managed_magic" = ef53 || { printf 'docker-store: managed containerd root is not ext4\n' >&2; exit 1; }
+test "$snapshotter_directory" = true || { printf 'docker-store: managed containerd overlayfs directory absent\n' >&2; exit 1; }
+test "$marker_matches" = true || { printf 'docker-store: Docker format marker mismatch\n' >&2; exit 1; }
+CHECK
+}
+
 docker_store_seed() {
   mkdir -p "$ds_work"
   docker pull "$ds_base" >/dev/null
@@ -69,7 +88,7 @@ docker_store_seed() {
     docker run --rm --network none --cpus .5 --memory 64m --memory-swap 64m --pids-limit 32 \
       --mount type=bind,src=/var/lib/docker/containerd/daemon,dst=/managed-store,readonly \
       --mount type=bind,src=/var/lib/docker/.codewire-containerd-store-v1,dst=/store-version,readonly \
-      "$ds_image" -ec 'test "$(stat -f -c %T /)" = overlayfs; test "$(stat -f -c %t /managed-store)" = ef53; test -d /managed-store/io.containerd.snapshotter.v1.overlayfs; printf "containerd-overlayfs-v1\n" | cmp - /store-version'
+      "$ds_image" -ec "$(docker_store_managed_root_script)"
     printf 'docker-store managed-containerd-root-on-ext4-passed\n'
   fi
   docker volume create "$ds_volume" >/dev/null

@@ -28,7 +28,7 @@ def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_a
 print(json.dumps({'schema_version':1,'support_image':image,'dind_image':dind,
  'bootstrap_argv_sha256':digest(command),'network_policy_sha256':digest(policy),'objects':[
  {'apiVersion':'v1','kind':'PersistentVolumeClaim','metadata':{'name':name+'-workspace','namespace':'dev-sandboxes'},'spec':{'storageClassName':storage,'volumeMode':'Block','accessModes':['ReadWriteOnce'],'resources':{'requests':{'storage':'8Gi'}}}},
- {'apiVersion':'v1','kind':'Pod','metadata':{'name':name,'namespace':'dev-sandboxes','annotations':{'codewire.sh/workspace':'true'},'labels':{'codewire.sh/environment-id':name,'codewire.sh/type':'workspace'}},'spec':{'runtimeClassName':'commodity','restartPolicy':'Never','serviceAccountName':'codewire-sandbox','automountServiceAccountToken':False,'initContainers':[{'name':'mount-workspace','image':image,'volumeDevices':[{'name':'workspace','devicePath':'/dev/cwws'}]}],'volumes':[{'name':'scratch','emptyDir':{}},{'name':'workspace','persistentVolumeClaim':{'claimName':name+'-workspace'}}],'containers':[{'name':'dind','image':dind,'resources':{'limits':{'cpu':'2','memory':'2Gi'}},'command':command},{'name':'client','image':dind,'resources':{'limits':{'cpu':'1','memory':'512Mi'}},'securityContext':{'runAsUser':1000,'allowPrivilegeEscalation':False,'capabilities':{'drop':['ALL']}}}]}},policy]}))
+ {'apiVersion':'v1','kind':'Pod','metadata':{'name':name,'namespace':'dev-sandboxes','annotations':{'codewire.sh/workspace':'true'},'labels':{'codewire.sh/environment-id':name,'codewire.sh/type':'workspace'}},'spec':{'runtimeClassName':'commodity','restartPolicy':'Never','serviceAccountName':'codewire-sandbox','automountServiceAccountToken':False,'initContainers':[{'name':'mount-workspace','image':image,'volumeDevices':[{'name':'workspace','devicePath':'/dev/cwws'}]}],'volumes':[{'name':'scratch','emptyDir':{}},{'name':'workspace','persistentVolumeClaim':{'claimName':name+'-workspace'}}],'containers':[{'name':'dind','image':dind,'resources':{'limits':{'cpu':'2','memory':'2Gi'}},'command':command},{'name':'client','image':dind,'resources':{'limits':{'cpu':'1','memory':'512Mi'}},'securityContext':{'runAsUser':1000,'allowPrivilegeEscalation':False,'capabilities':{'drop':['ALL']}},'command':['sh','-ec','umask 077; mkdir "$DOCKER_CONFIG"; exec sleep 86400'],'env':[{'name':'DOCKER_HOST','value':'unix:///var/run/docker/docker.sock'},{'name':'DOCKER_CONFIG','value':'/tmp/codewire-dind-client'}]}]}},policy]}))
 PY
 cat >"$TEST_TMP/bin/kubectl" <<'PY'
 #!/usr/bin/env python3
@@ -154,7 +154,7 @@ PYTEST
 printf 'dind-storage test: short readiness deadline refuses child execution\n'
 # Recompute the outer expected hash for malformed but intentionally supplied
 # bundles: shape/source/link checks must still reject them before any API call.
-for mutation in source name host-network privileged-observer host-path secret-volume extra-object foreign-pvc secret-env secret-env-from bootstrap policy; do
+for mutation in source name host-network privileged-observer host-path secret-volume extra-object foreign-pvc secret-env secret-env-from client-config client-setup bootstrap policy; do
   bundle="$TEST_TMP/reject-$mutation.json"
   python3 - "$TEST_TMP/offline/fixture.json" "$bundle" "$mutation" <<'MUTATE'
 import hashlib,json,sys
@@ -170,6 +170,8 @@ elif mode=='extra-object':render['objects'].append({'apiVersion':'v1','kind':'Se
 elif mode=='foreign-pvc':pod['volumes'].append({'name':'foreign','persistentVolumeClaim':{'claimName':'unrelated-user-workspace'}})
 elif mode=='secret-env':pod['containers'][1]['env']=[{'name':'TOKEN','valueFrom':{'secretKeyRef':{'name':'unrelated','key':'token'}}}]
 elif mode=='secret-env-from':pod['initContainers'][0]['envFrom']=[{'secretRef':{'name':'unrelated'}}]
+elif mode=='client-config':pod['containers'][1]['env'][1]['value']='/root/.docker'
+elif mode=='client-setup':pod['containers'][1]['command']=['sh','-ec','exec sleep 86400']
 elif mode=='bootstrap':pod['containers'][0]['command']=['sh','-c','unexpected']
 elif mode=='policy':render['objects'][2]['spec']['egress']=[{}]
 canonical=json.dumps(render,sort_keys=True,ensure_ascii=False,separators=(',',':'))+'\n'
@@ -184,7 +186,7 @@ MUTATE
     --evidence-dir "$TEST_TMP/reject-$mutation-evidence" >"$TEST_TMP/out" 2>"$TEST_TMP/err" || rc=$?
   [[ "$rc" != 0 && ! -s "$PROBE_TEST_LOG" ]] || fail "unsafe $mutation reached Kubernetes"
 done
-printf 'dind-storage test: source/name/unsafe shape/bootstrap/policy rejected before API (12 cases)\n'
+printf 'dind-storage test: source/name/unsafe shape/bootstrap/policy rejected before API (14 cases)\n'
 : >"$PROBE_TEST_LOG"
 rc=0
 KUBE_CONTEXT=cw-dev-hz-eu-1 INFRA_TRANSIENT_KUBE_AUTH=1 KUBECONFIG=/not-read-by-fixture \
@@ -216,4 +218,4 @@ run_case prefixed-timeout 0 --baseline
 [[ -s "${PROBE_TEST_LOG}.timeout" ]] || fail 'prefixed timeout was not selected'
 unset -f command
 printf 'dind-storage test: host timeout capability precedes API and supports gtimeout (2 cases)\n'
-printf 'dind-storage probe fixture tests: 26 passed\n'
+printf 'dind-storage probe fixture tests: 28 passed\n'
