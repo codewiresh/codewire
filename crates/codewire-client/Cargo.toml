@@ -48,6 +48,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
 tower = { workspace = true }
+tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 webpki-roots = "=1.0.10"

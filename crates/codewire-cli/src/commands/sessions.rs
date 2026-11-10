@@ -2108,9 +2108,6 @@ pub(crate) enum AttachExit {
     },
 }
 
-/// Far longer than the server takes: it answers on opening, and its heartbeat
-/// is 15 s.
-const API_ATTACH_ANSWER_WAIT: Duration = Duration::from_secs(30);
 const ATTACH_RECONNECT_LIMIT: u8 = 3;
 pub(crate) const ATTACH_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(250);
 
@@ -2187,11 +2184,6 @@ impl AttachNavigationDecoder {
     }
 }
 
-/// How long a first tailnet connection waits for direct UDP before it says
-/// which path it is on; every connection starts on DERP and usually moves to
-/// direct UDP within this time.
-pub(crate) const TAILNET_DIRECT_WAIT: Duration = Duration::from_secs(2);
-
 /// Attach to a hosted environment's session over its tailnet first: direct
 /// UDP, then peer relay, then DERP (#3827). The API carries it only when the
 /// tailnet cannot, and the line before the session says which path it took
@@ -2202,48 +2194,10 @@ pub(crate) async fn attach_platform_session(
     open: codewire_client::AttachSessionOpen,
     tailnet: &mut Option<codewire_client::tailnet_session::EnvironmentTailnet>,
 ) -> anyhow::Result<codewire_client::EnvironmentSessionAttachment> {
-    use codewire_client::SshTransportMode;
-    use codewire_client::tailnet_session::EnvironmentTailnet;
-
-    let mode = SshTransportMode::from_env()?;
-    let fallback = if mode == SshTransportMode::WebSocket {
-        "CW_SSH_TRANSPORT=websocket".to_owned()
-    } else {
-        if tailnet.as_ref().is_some_and(EnvironmentTailnet::is_closed) {
-            *tailnet = None;
-        }
-        let mut reason = None;
-        if tailnet.is_none() {
-            match EnvironmentTailnet::connect(client, &open.org_id, &open.environment_id).await {
-                Ok(connected) => {
-                    connected.wait_for_direct(TAILNET_DIRECT_WAIT).await.ok();
-                    *tailnet = Some(connected);
-                }
-                Err(error) if mode == SshTransportMode::Tailnet => {
-                    return Err(error.context("tailnet attach (CW_SSH_TRANSPORT=tailnet)"));
-                }
-                Err(error) => reason = Some(format!("{error:#}")),
-            }
-        }
-        if let Some(connected) = tailnet.as_ref() {
-            match connected.attach(open.clone()).await {
-                Ok(attachment) => {
-                    eprintln!("{}", tailnet_path_line(connected.path().ok()));
-                    return Ok(attachment);
-                }
-                Err(error) if mode == SshTransportMode::Tailnet => {
-                    return Err(display_client_error(error));
-                }
-                Err(error) => {
-                    *tailnet = None;
-                    reason = Some(error.message().to_owned());
-                }
-            }
-        }
-        reason.unwrap_or_else(|| "the tailnet is unavailable".into())
-    };
-    let attachment = attach_over_api(client, open).await?;
-    eprintln!("  via API · tailnet unavailable: {fallback}");
+    let (attachment, via) = codewire_client::hosted_shell::attach(client, open, tailnet)
+        .await
+        .map_err(super::tailnet_shell::display_hosted_shell_error)?;
+    eprintln!("{}", via_line(&via));
     Ok(attachment)
 }
 
@@ -2253,15 +2207,19 @@ async fn attach_over_api(
     client: &codewire_client::CodewireClient,
     open: codewire_client::AttachSessionOpen,
 ) -> anyhow::Result<codewire_client::EnvironmentSessionAttachment> {
-    let mut attachment = client
-        .attach_session(open)
+    codewire_client::hosted_shell::attach_over_api(client, open)
         .await
-        .map_err(display_client_error)?;
-    attachment
-        .wait_for_answer(API_ATTACH_ANSWER_WAIT)
-        .await
-        .map_err(display_client_error)?;
-    Ok(attachment)
+        .map_err(display_client_error)
+}
+
+/// The line before a hosted session that says which path it took.
+pub(crate) fn via_line(via: &codewire_client::hosted_shell::Via) -> String {
+    match via {
+        codewire_client::hosted_shell::Via::Tailnet(report) => tailnet_path_line(report.clone()),
+        codewire_client::hosted_shell::Via::Api {
+            tailnet_unavailable,
+        } => format!("  via API · tailnet unavailable: {tailnet_unavailable}"),
+    }
 }
 
 pub(crate) fn tailnet_path_line(
@@ -2293,7 +2251,7 @@ async fn attach_environment_session(
     // One tailnet connection to a hosted environment, kept for every
     // reattachment while it lives (#3827).
     let mut tailnet = None;
-    let mut retry_after = super::tailnet_shell::TAILNET_RETRY_FIRST;
+    let mut retry_after = codewire_client::hosted_shell::TAILNET_RETRY_FIRST;
     loop {
         let exit = match &target {
             #[cfg(unix)]
@@ -2345,15 +2303,15 @@ async fn attach_environment_session(
                     Ok(attachment) => {
                         pacing.attached();
                         if tailnet.is_some() {
-                            retry_after = super::tailnet_shell::TAILNET_RETRY_FIRST;
+                            retry_after = codewire_client::hosted_shell::TAILNET_RETRY_FIRST;
                         }
-                        let on_fallback = super::tailnet_shell::on_api_fallback(&tailnet)?;
+                        let on_fallback = codewire_client::hosted_shell::on_api_fallback(&tailnet)?;
                         let back = async {
                             if !on_fallback {
                                 return std::future::pending().await;
                             }
                             tailnet = Some(
-                                super::tailnet_shell::tailnet_again(
+                                codewire_client::hosted_shell::tailnet_again(
                                     client,
                                     org_id,
                                     environment_id,
@@ -2440,7 +2398,7 @@ async fn attach_environment_session(
             } => {
                 output_offset = next_offset;
                 // Longer next time, if this attachment lands on the API again.
-                retry_after = super::tailnet_shell::next_retry(retry_after);
+                retry_after = codewire_client::hosted_shell::next_retry(retry_after);
             }
             AttachExit::Restart => {
                 let current = target.get(&session.session_id).await?;
@@ -2820,15 +2778,7 @@ async fn attachment_environment_targets(
 }
 
 pub(crate) fn platform_session_is_terminal(session: &codewire_client::EnvironmentSession) -> bool {
-    matches!(
-        session.state.as_known(),
-        Some(
-            codewire_client::EnvironmentSessionState::Stopped
-                | codewire_client::EnvironmentSessionState::Exited
-                | codewire_client::EnvironmentSessionState::Failed
-                | codewire_client::EnvironmentSessionState::Interrupted
-        )
-    )
+    codewire_client::hosted_shell::session_has_ended(session)
 }
 
 fn strip_ansi_escapes(data: &[u8]) -> Vec<u8> {

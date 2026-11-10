@@ -12,6 +12,8 @@ mod credential_delegation;
 mod credentials;
 pub mod cw_runtime;
 mod error;
+#[cfg(feature = "tailnet-session")]
+pub mod hosted_shell;
 #[cfg(target_os = "linux")]
 pub mod member_tailnet;
 mod mesh;
