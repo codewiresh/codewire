@@ -254,25 +254,42 @@ pub(crate) fn current_org_id(
     platform: &config::ResolvedPlatformConfig,
     orgs: &[OrgWithRole],
 ) -> anyhow::Result<String> {
-    if platform.used_config_token
-        && let Some(configured_org) = platform.default_org.as_deref().and_then(trimmed_str)
-    {
+    if let Some(configured_org) = configured_org(platform) {
         return orgs
             .iter()
             .find(|org| org.id == configured_org || org.slug == configured_org)
             .map(|org| org.id.clone())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "configured organization {configured_org:?} is not available to the authenticated user (run 'cw org set <id-or-slug>')"
-                )
-            });
+            .ok_or_else(|| configured_org_unavailable(configured_org));
     }
 
     match orgs {
-        [] => anyhow::bail!("no organizations found"),
+        [] => Err(no_organizations_found()),
         [org] => Ok(org.id.clone()),
-        _ => anyhow::bail!("no org selected (run 'cw org set <id-or-slug>')"),
+        _ => Err(no_org_selected()),
     }
+}
+
+/// A login token's saved default. An API key ignores it: the key names its
+/// organization.
+pub(crate) fn configured_org(platform: &config::ResolvedPlatformConfig) -> Option<&str> {
+    platform
+        .used_config_token
+        .then(|| platform.default_org.as_deref().and_then(trimmed_str))
+        .flatten()
+}
+
+pub(crate) fn configured_org_unavailable(configured_org: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "configured organization {configured_org:?} is not available to the authenticated user (run 'cw org set <id-or-slug>')"
+    )
+}
+
+pub(crate) fn no_organizations_found() -> anyhow::Error {
+    anyhow::anyhow!("no organizations found")
+}
+
+pub(crate) fn no_org_selected() -> anyhow::Error {
+    anyhow::anyhow!("no org selected (run 'cw org set <id-or-slug>')")
 }
 
 pub(crate) fn select_org<'a>(
@@ -292,7 +309,7 @@ pub(crate) fn select_org<'a>(
 
     orgs.iter()
         .find(|org| org.id == id_or_slug || org.slug == id_or_slug)
-        .ok_or_else(|| anyhow::anyhow!("organization {id_or_slug:?} not found"))
+        .ok_or_else(|| organization_not_found(id_or_slug))
 }
 
 pub(crate) fn resolve_org_id(
@@ -311,7 +328,11 @@ pub(crate) fn resolve_org_id(
     orgs.iter()
         .find(|org| org.id == id_or_slug || org.slug == id_or_slug)
         .map(|org| org.id.clone())
-        .ok_or_else(|| anyhow::anyhow!("organization {id_or_slug:?} not found"))
+        .ok_or_else(|| organization_not_found(id_or_slug))
+}
+
+pub(crate) fn organization_not_found(id_or_slug: &str) -> anyhow::Error {
+    anyhow::anyhow!("organization {id_or_slug:?} not found")
 }
 
 pub(crate) fn looks_like_org_id(value: &str) -> bool {

@@ -159,6 +159,12 @@ class EnvironmentSourcesTestCase(unittest.TestCase):
                 self.cw.environments.create(project_spec={}, omit_application_previews=invalid)
         self.assertEqual(len(self.fixture.calls), count)
 
+    def test_create_names_its_organization_by_id_only(self):
+        self.cw.environments.create(project_spec={})
+        request = self.fixture.calls[-1][1]
+        self.assertTrue(request.org_id)
+        self.assertFalse(request.HasField("organization"))
+
     def test_create_joins_a_named_network_only_when_asked(self):
         self.cw.environments.create(project_spec={})
         self.assertEqual(self.fixture.calls[-1][1].network, "")

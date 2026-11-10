@@ -185,6 +185,26 @@ async fn db_listing_reads_every_membership_and_its_assignments_at_once() {
         [other_org]
     );
 
+    // #3747: a create's organization comes from these same memberships. The
+    // member has two, so choosing needs a selector; a key sees only its own.
+    assert_eq!(
+        resolve_create_organization(&fixture.pool, &user(Some(other_org)), "")
+            .await
+            .unwrap(),
+        other_org
+    );
+    assert_eq!(
+        resolve_create_organization(&fixture.pool, &user(None), org)
+            .await
+            .unwrap(),
+        org
+    );
+    for (caller, selector) in [(user(None), ""), (user(Some(other_org)), org)] {
+        resolve_create_organization(&fixture.pool, &caller, selector)
+            .await
+            .unwrap_err();
+    }
+
     for (sql, binds) in [
         (
             "DELETE FROM org_member_assignments WHERE org_member_id LIKE $1 || '%'",

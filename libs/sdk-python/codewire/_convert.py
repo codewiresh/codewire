@@ -32,6 +32,8 @@ _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
     24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision",
     27: "confirm_personal_credentials", 28: "confirm_personal_secrets",
     29: "omit_application_previews", 30: "network", 31: "source_snapshot_id",
+    # The SDK always names its organization by org_id, so this stays unset.
+    32: "organization",
 }
 
 _SOURCE_DESCRIPTOR_FIELDS = {

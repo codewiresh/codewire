@@ -233,6 +233,9 @@ message CreateEnvironmentRequest {
   // the new environment's workspace disk is a copy of it. Empty starts with an
   // empty disk. Not with a repository or the confidential tier.
   string source_snapshot_id = 31;
+  // Present, the server resolves the organization: this ID or slug, or when
+  // empty the caller's only one. Sending org_id too is refused.
+  optional string organization = 32;
 }
 
 // Complete selection. Empty means no sources and no provider profile.

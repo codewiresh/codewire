@@ -69,7 +69,31 @@ impl EnvironmentClient {
             .map(environment_from_proto)
             .transpose()?
             .ok_or_else(|| anyhow::anyhow!("CreateEnvironment returned no environment"))?;
-        validate_created_environment(&environment, org_id, request)?;
+        validate_created_environment(&environment, Some(org_id), request)?;
+        Ok(environment)
+    }
+
+    /// Creates in the organization the server resolves from `selector`: an ID
+    /// or slug, or when empty the caller's only one (#3747).
+    pub async fn create_environment_resolving_org(
+        &self,
+        selector: &str,
+        request: &CreateEnvironmentRequest,
+    ) -> Result<Environment, ResolvingCreateError> {
+        let mut message = proto_create_environment_request("", request);
+        message.organization = Some(selector.to_owned());
+        let response = self
+            .inner
+            .create_environment(message)
+            .await
+            .map_err(ResolvingCreateError::from_client)?;
+        let environment = response
+            .environment
+            .into_option()
+            .map(environment_from_proto)
+            .transpose()?
+            .ok_or_else(|| anyhow::anyhow!("CreateEnvironment returned no environment"))?;
+        validate_created_environment(&environment, None, request)?;
         Ok(environment)
     }
 
@@ -1039,9 +1063,41 @@ impl EnvironmentClient {
     }
 }
 
+/// Why a create that left the organization to the server didn't happen.
+#[derive(Debug)]
+pub enum ResolvingCreateError {
+    /// A server without the `organization` field refused the empty `org_id`
+    /// at its first check, so nothing was created: list, then create by ID.
+    OlderServer,
+    NoOrganizations,
+    NoOrganizationSelected,
+    OrganizationNotAvailable,
+    Other(anyhow::Error),
+}
+
+impl ResolvingCreateError {
+    fn from_client(error: ClientError) -> Self {
+        match error.reason() {
+            Some("ORG_NOT_FOUND") => Self::OlderServer,
+            Some("NO_ORGANIZATIONS") => Self::NoOrganizations,
+            Some("ORGANIZATION_NOT_SELECTED") => Self::NoOrganizationSelected,
+            Some("ORGANIZATION_NOT_AVAILABLE") => Self::OrganizationNotAvailable,
+            _ => Self::Other(display_client_error(error)),
+        }
+    }
+}
+
+impl From<anyhow::Error> for ResolvingCreateError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Other(error)
+    }
+}
+
+/// `org_id` is the organization the caller asked for; `None` when it left the
+/// choice to the server.
 fn validate_created_environment(
     environment: &Environment,
-    org_id: &str,
+    org_id: Option<&str>,
     request: &CreateEnvironmentRequest,
 ) -> anyhow::Result<()> {
     let expected = EnvironmentSourceSelection {
@@ -1052,7 +1108,9 @@ fn validate_created_environment(
     validate_source_selection(&expected, true)?;
     canonical_selection_id(&environment.id)?;
     anyhow::ensure!(
-        environment.org_id == org_id && environment.source_selection.as_ref() == Some(&expected),
+        org_id.is_none_or(|org_id| environment.org_id == org_id)
+            && !environment.org_id.is_empty()
+            && environment.source_selection.as_ref() == Some(&expected),
         "environment creation returned a different organization or source selection"
     );
     Ok(())
@@ -1967,15 +2025,19 @@ mod tests {
             ..Default::default()
         };
 
-        validate_created_environment(&acknowledged, "org_123", &request).unwrap();
+        validate_created_environment(&acknowledged, Some("org_123"), &request).unwrap();
 
         let mut wrong = acknowledged.clone();
         wrong.source_selection = None;
-        assert!(validate_created_environment(&wrong, "org_123", &request).is_err());
+        assert!(validate_created_environment(&wrong, Some("org_123"), &request).is_err());
 
         let mut wrong = acknowledged;
         wrong.org_id = "org_other".into();
-        assert!(validate_created_environment(&wrong, "org_123", &request).is_err());
+        assert!(validate_created_environment(&wrong, Some("org_123"), &request).is_err());
+        // #3747: left to the server, any organization will do, but it must name one.
+        assert!(validate_created_environment(&wrong, None, &request).is_ok());
+        wrong.org_id = String::new();
+        assert!(validate_created_environment(&wrong, None, &request).is_err());
     }
 
     #[tokio::test]

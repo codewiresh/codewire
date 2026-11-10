@@ -220,7 +220,13 @@ impl ConnectError {
 /// their legacy REST statuses; the remaining mapping follows the D2 table.
 fn connect_code_for(status: StatusCode, reason: Option<&str>) -> ConnectCode {
     match reason {
-        Some("invalid_state" | "environment_protected") => {
+        Some(
+            "invalid_state"
+            | "environment_protected"
+            | "no_organizations"
+            | "organization_not_available"
+            | "organization_not_selected",
+        ) => {
             return ConnectCode::FailedPrecondition;
         }
         Some("quota_exceeded" | "resource_limit_exceeded") => {

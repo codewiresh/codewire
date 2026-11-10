@@ -949,6 +949,48 @@ pub(crate) async fn list_organizations_core(
     list_memberships(&state.pool, &user).await
 }
 
+/// The organization of a create that doesn't name it by ID (#3747): `selector`
+/// as an ID or slug, or when empty the caller's only one. An API key sees only
+/// its own organization.
+pub(crate) async fn resolve_create_organization(
+    pool: &sqlx::PgPool,
+    user: &AuthUser,
+    selector: &str,
+) -> AppResult<String> {
+    select_create_organization(&list_memberships(pool, user).await?, selector)
+}
+
+fn select_create_organization(orgs: &[OrgWithRole], selector: &str) -> AppResult<String> {
+    let selector = selector.trim();
+    let refused = |code, detail| {
+        Err(crate::api::environments::coded(
+            axum::http::StatusCode::CONFLICT,
+            code,
+            detail,
+        ))
+    };
+    if !selector.is_empty() {
+        return match orgs
+            .iter()
+            .find(|org| org.id == selector || org.slug == selector)
+        {
+            Some(org) => Ok(org.id.clone()),
+            None => refused(
+                "organization_not_available",
+                "the organization is not available to the caller",
+            ),
+        };
+    }
+    match orgs {
+        [] => refused("no_organizations", "the caller has no organizations"),
+        [org] => Ok(org.id.clone()),
+        _ => refused(
+            "organization_not_selected",
+            "the caller has several organizations and selected none",
+        ),
+    }
+}
+
 /// The caller's organizations with their role and assignments in each, read
 /// in one statement: one database round trip whatever the number of
 /// organizations.
@@ -1122,6 +1164,57 @@ mod signup_credit_database_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn membership(id: &str, slug: &str) -> OrgWithRole {
+        OrgWithRole {
+            id: id.into(),
+            slug: slug.into(),
+            name: String::new(),
+            created_by: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            role: "member".into(),
+            assignments: Vec::new(),
+            billing_plan: String::new(),
+            billing_status: String::new(),
+            trial_ends_at: None,
+        }
+    }
+
+    /// #3747: the same choices and refusals the CLI made after listing.
+    #[test]
+    fn a_create_resolves_its_organization_by_the_clis_rules() {
+        let one = [membership("org-1", "first")];
+        let two = [membership("org-1", "first"), membership("org-2", "second")];
+        let chosen = |orgs: &[OrgWithRole], selector: &str| {
+            select_create_organization(orgs, selector).unwrap()
+        };
+        assert_eq!(chosen(&one, ""), "org-1");
+        assert_eq!(chosen(&two, "org-2"), "org-2");
+        assert_eq!(chosen(&two, " second "), "org-2");
+    }
+
+    /// #3747: the CLI tells these apart by reason, and none can be mistaken
+    /// for the `org_not_found` an older server answers.
+    #[test]
+    fn its_refusals_render_as_failed_preconditions() {
+        use codewire_server_core::connect_error::{ConnectCode, ConnectError, ConnectErrorDetail};
+        let two = [membership("org-1", "first"), membership("org-2", "second")];
+        for (orgs, selector, reason) in [
+            (&[][..], "", "NO_ORGANIZATIONS"),
+            (&[][..], "first", "ORGANIZATION_NOT_AVAILABLE"),
+            (&two[..], "absent", "ORGANIZATION_NOT_AVAILABLE"),
+            (&two[..], "", "ORGANIZATION_NOT_SELECTED"),
+        ] {
+            let error = select_create_organization(orgs, selector).unwrap_err();
+            let rendered = ConnectError::from_app_error(&error, None);
+            assert_eq!(rendered.code, ConnectCode::FailedPrecondition);
+            let ConnectErrorDetail::ErrorInfo(info) = &rendered.details[0] else {
+                panic!("expected ErrorInfo detail, got {:?}", rendered.details);
+            };
+            assert_eq!(info.reason, reason);
+        }
+    }
 
     #[test]
     fn created_invitation_debug_redacts_one_time_capability() {

@@ -233,7 +233,7 @@ fn read_confirmation(reader: impl BufRead) -> anyhow::Result<bool> {
 pub(super) async fn prepare_create_sources(
     platform: &config::ResolvedPlatformConfig,
     client: &EnvironmentClient,
-    org_id: &str,
+    org: &super::CreateOrganization<'_>,
     args: &EnvCreateArgs,
     request: &mut CreateEnvironmentRequest,
 ) -> anyhow::Result<super::lifecycle::SourceNames> {
@@ -247,6 +247,7 @@ pub(super) async fn prepare_create_sources(
     if selection.secrets.is_empty() && selection.credentials.is_none() {
         return Ok(Default::default());
     }
+    let org_id = org.id().await?;
     let names =
         resolve_platform_sources(platform, client, org_id, &mut selection, true, true).await?;
     if from_default && selection.secrets.is_empty() {

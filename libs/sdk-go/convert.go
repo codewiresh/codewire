@@ -1180,7 +1180,8 @@ func ensureEnvironmentConverterCoverage() error {
 			return
 		}
 		environmentCoverageErr = ensureDescriptorCoverage("create environment request", messages.ByName("CreateEnvironmentRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
-			1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds", 24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision", 27: "confirm_personal_credentials", 28: "confirm_personal_secrets", 29: "omit_application_previews", 30: "network", 31: "source_snapshot_id",
+			// The SDK always names its organization by org_id, so organization (32) stays unset.
+			1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds", 24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision", 27: "confirm_personal_credentials", 28: "confirm_personal_secrets", 29: "omit_application_previews", 30: "network", 31: "source_snapshot_id", 32: "organization",
 		})
 		if environmentCoverageErr != nil {
 			return

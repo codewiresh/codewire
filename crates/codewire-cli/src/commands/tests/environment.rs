@@ -2850,6 +2850,259 @@ fn this_repository_codewire_yaml_configures_a_cloud_create() {
     assert_eq!(provenance.unused_fields, ["workspace.vm_only"]);
 }
 
+const CREATE_ENVIRONMENT_PATH: &str = "/codewire.v1.EnvironmentService/CreateEnvironment";
+const LIST_ORGANIZATIONS_PATH: &str = "/codewire.v1.OrganizationService/ListOrganizations";
+const CREATED_ENVIRONMENT_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+fn create_org_platform(
+    server: &wiremock::MockServer,
+    used_config_token: bool,
+    default_org: Option<&str>,
+) -> config::ResolvedPlatformConfig {
+    config::ResolvedPlatformConfig::static_token(
+        server.uri(),
+        "synthetic-create-token",
+        used_config_token,
+        default_org.map(str::to_owned),
+    )
+}
+
+fn created_environment() -> wiremock::ResponseTemplate {
+    use buffa::Message as _;
+    wiremock::ResponseTemplate::new(200)
+        .insert_header("content-type", "application/proto")
+        .set_body_bytes(
+            codewire_client::CreateEnvironmentResponse {
+                environment: Some(codewire_client::Environment {
+                    id: CREATED_ENVIRONMENT_ID.into(),
+                    org_id: "org_test".into(),
+                    source_selection: Some(codewire_client::EnvironmentSourceSelection::default())
+                        .into(),
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        )
+}
+
+fn create_refused(status: u16, code: &str, reason: &str) -> wiremock::ResponseTemplate {
+    wiremock::ResponseTemplate::new(status)
+        .insert_header("content-type", "application/json")
+        .set_body_json(serde_json::json!({
+            "code": code,
+            "message": "synthetic refusal",
+            "details": [connectrpc::ErrorDetail::from_message(
+                "google.rpc.ErrorInfo",
+                &codewire_proto::google::rpc::ErrorInfo {
+                    reason: reason.into(),
+                    domain: "codewire.sh".into(),
+                    ..Default::default()
+                },
+            )],
+        }))
+}
+
+async fn mock_create(server: &wiremock::MockServer, response: wiremock::ResponseTemplate) {
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path(CREATE_ENVIRONMENT_PATH))
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+/// The create calls the server received, as `(org_id, organization)`, and how
+/// many organization listings came with them.
+async fn create_calls(server: &wiremock::MockServer) -> (Vec<(String, Option<String>)>, usize) {
+    use buffa::Message as _;
+    let received = server.received_requests().await.unwrap();
+    let creates = received
+        .iter()
+        .filter(|request| request.url.path() == CREATE_ENVIRONMENT_PATH)
+        .map(|request| {
+            let mut body = request.body.as_slice();
+            let sent = codewire_client::CreateEnvironmentRequest::decode(&mut body).unwrap();
+            (sent.org_id, sent.organization)
+        })
+        .collect();
+    let lists = received
+        .iter()
+        .filter(|request| request.url.path() == LIST_ORGANIZATIONS_PATH)
+        .count();
+    (creates, lists)
+}
+
+async fn run_create(platform: &config::ResolvedPlatformConfig) -> anyhow::Result<Environment> {
+    run_create_in(platform, None).await
+}
+
+async fn run_create_in(
+    platform: &config::ResolvedPlatformConfig,
+    requested: Option<&str>,
+) -> anyhow::Result<Environment> {
+    let environments = EnvironmentClient::new(platform).unwrap();
+    let organizations = organization_client(platform).unwrap();
+    let org = CreateOrganization::new(platform, &organizations, requested);
+    create_in_organization(&environments, &org, &CreateEnvironmentRequest::default()).await
+}
+
+/// #3747: a plain create makes no listing and asks the server to choose. A
+/// login token's saved default travels as the selector, an API key's doesn't.
+#[tokio::test]
+async fn a_cloud_create_leaves_its_organization_to_the_server() {
+    for (used_config_token, default_org, selector) in [
+        (false, None, ""),
+        (false, Some("ignored-for-an-api-key"), ""),
+        (true, None, ""),
+        (true, Some("saved-org"), "saved-org"),
+    ] {
+        let server = wiremock::MockServer::start().await;
+        mock_create(&server, created_environment()).await;
+        let platform = create_org_platform(&server, used_config_token, default_org);
+        let environment = run_create(&platform).await.unwrap();
+        assert_eq!(environment.org_id, "org_test");
+        assert_eq!(
+            create_calls(&server).await,
+            (vec![(String::new(), Some(selector.to_owned()))], 0)
+        );
+    }
+}
+
+/// #3747: `--org` wins over the saved default, as in every other command. An
+/// ID goes as given and a slug is the server's to resolve; neither lists.
+#[tokio::test]
+async fn a_cloud_create_sends_the_requested_organization() {
+    for (requested, sent) in [
+        (" org_test ", ("org_test", None)),
+        ("requested-slug", ("", Some("requested-slug"))),
+    ] {
+        let server = wiremock::MockServer::start().await;
+        mock_create(&server, created_environment()).await;
+        let platform = create_org_platform(&server, true, Some("saved-org"));
+        run_create_in(&platform, Some(requested)).await.unwrap();
+        assert_eq!(
+            create_calls(&server).await,
+            (vec![(sent.0.to_owned(), sent.1.map(str::to_owned))], 0)
+        );
+    }
+
+    let server = wiremock::MockServer::start().await;
+    mock_create(
+        &server,
+        create_refused(409, "failed_precondition", "ORGANIZATION_NOT_AVAILABLE"),
+    )
+    .await;
+    let platform = create_org_platform(&server, true, Some("saved-org"));
+    let error = run_create_in(&platform, Some("absent")).await.unwrap_err();
+    assert_eq!(format!("{error:#}"), "organization \"absent\" not found");
+}
+
+/// #3747: the three refusals the listing gave, word for word.
+#[tokio::test]
+async fn a_cloud_create_keeps_the_organization_refusals() {
+    for (default_org, reason, message) in [
+        (None, "NO_ORGANIZATIONS", "no organizations found".to_owned()),
+        (
+            None,
+            "ORGANIZATION_NOT_SELECTED",
+            "no org selected (run 'cw org set <id-or-slug>')".to_owned(),
+        ),
+        (
+            Some("saved-org"),
+            "ORGANIZATION_NOT_AVAILABLE",
+            "configured organization \"saved-org\" is not available to the authenticated user \
+             (run 'cw org set <id-or-slug>')"
+                .to_owned(),
+        ),
+    ] {
+        let server = wiremock::MockServer::start().await;
+        mock_create(&server, create_refused(409, "failed_precondition", reason)).await;
+        let platform = create_org_platform(&server, true, default_org);
+        let error = run_create(&platform).await.unwrap_err();
+        assert_eq!(format!("{error:#}"), message);
+    }
+}
+
+/// #3747: an older server refuses the empty `org_id` before anything exists,
+/// so the CLI lists and asks again by ID, once. Any other refusal is final.
+#[tokio::test]
+async fn a_cloud_create_lists_only_when_an_older_server_refuses_the_empty_organization() {
+    use buffa::Message as _;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path(CREATE_ENVIRONMENT_PATH))
+        .respond_with(create_refused(404, "not_found", "ORG_NOT_FOUND"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    mock_create(&server, created_environment()).await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path(LIST_ORGANIZATIONS_PATH))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "application/proto")
+                .set_body_bytes(
+                    codewire_client::ListOrganizationsResponse {
+                        organizations: vec![codewire_client::OrganizationMembership {
+                            organization: Some(codewire_client::Organization {
+                                id: "org_test".into(),
+                                slug: "test".into(),
+                                ..Default::default()
+                            })
+                            .into(),
+                            role: codewire_client::OrgRole::Owner.into(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                ),
+        )
+        .mount(&server)
+        .await;
+    let platform = create_org_platform(&server, false, None);
+    run_create(&platform).await.unwrap();
+    assert_eq!(
+        create_calls(&server).await,
+        (
+            vec![
+                (String::new(), Some(String::new())),
+                ("org_test".to_owned(), None)
+            ],
+            1
+        )
+    );
+
+    let server = wiremock::MockServer::start().await;
+    mock_create(&server, create_refused(429, "resource_exhausted", "RATE_LIMITED")).await;
+    let platform = create_org_platform(&server, false, None);
+    let error = run_create(&platform).await.unwrap_err();
+    assert!(format!("{error:#}").starts_with("create environment"), "{error:#}");
+    assert_eq!(create_calls(&server).await.1, 0);
+}
+
+/// #3747: only a network that's named needs the organization first.
+#[test]
+fn a_cloud_create_lists_first_only_for_a_network() {
+    let home = tempfile::tempdir().unwrap();
+    let env = config::MapEnv::default();
+    let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
+    let platform = config::ResolvedPlatformConfig::static_token(
+        "https://codewire.sh",
+        "platform-token",
+        true,
+        None,
+    );
+    let needs = |network, disabled| {
+        create_mesh_needs_organization(&paths, &env, &platform, network, disabled).unwrap()
+    };
+    assert!(!needs(None, false));
+    assert!(!needs(None, true));
+    assert!(!needs(Some("work"), true));
+    assert!(needs(Some("work"), false));
+}
+
 #[tokio::test]
 async fn cloud_create_sends_the_discovered_spec_to_the_platform() {
     use buffa::Message as _;

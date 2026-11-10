@@ -114,7 +114,9 @@ impl proto::EnvironmentService for EnvironmentConnectService {
     ) -> ServiceResult<proto::CreateEnvironmentResponse> {
         let user = auth_user(&ctx)?.clone();
         let request = request.to_owned_message();
-        let org_id = request.org_id.clone();
+        let org_id = create_organization(&self.state.pool, &user, &request)
+            .await
+            .map_err(|error| environment_rpc_error(&error, &ctx))?;
         let body = create_body(request).map_err(|error| environment_rpc_error(&error, &ctx))?;
         let environment = create_environment_core(&self.state, &user, &org_id, body)
             .await
@@ -698,6 +700,26 @@ impl proto::EnvironmentService for EnvironmentConnectService {
         });
         connectrpc::Response::stream_ok(stream)
     }
+}
+
+/// The organization a create goes to: `org_id`, or what the server resolves
+/// from `organization`. Both is refused: a mismatch must not pick one.
+async fn create_organization(
+    pool: &sqlx::PgPool,
+    user: &codewire_server_core::auth::AuthUser,
+    request: &proto::CreateEnvironmentRequest,
+) -> AppResult<String> {
+    let Some(selector) = request.organization.as_deref() else {
+        return Ok(request.org_id.clone());
+    };
+    if !request.org_id.is_empty() {
+        return Err(crate::api::environments::coded(
+            axum::http::StatusCode::BAD_REQUEST,
+            "organization_ambiguous",
+            "send org_id or organization, not both",
+        ));
+    }
+    crate::api::organizations::resolve_create_organization(pool, user, selector).await
 }
 
 fn create_body(request: proto::CreateEnvironmentRequest) -> AppResult<CreateEnvironmentBody> {
@@ -1489,6 +1511,36 @@ fn environment_connect_error(
 mod tests {
     use super::*;
     use codewire_server_core::connect_error::{ConnectCode, ConnectError, ConnectErrorDetail};
+
+    /// #3747: `org_id` passes through untouched, and asking for both is refused
+    /// before any read, so a mismatch can't pick one.
+    #[tokio::test]
+    async fn a_create_names_its_organization_one_way() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://synthetic@127.0.0.1:1/synthetic")
+            .unwrap();
+        let user = codewire_server_core::auth::AuthUser {
+            user_id: "synthetic-user".into(),
+            org_id: None,
+            is_admin: false,
+            via_api_key: false,
+        };
+        let by_id = proto::CreateEnvironmentRequest {
+            org_id: "org-1".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            create_organization(&pool, &user, &by_id).await.unwrap(),
+            "org-1"
+        );
+        let both = proto::CreateEnvironmentRequest {
+            organization: Some("org-2".into()),
+            ..by_id
+        };
+        let error = create_organization(&pool, &user, &both).await.unwrap_err();
+        let rendered = ConnectError::from_app_error(&error, None);
+        assert_eq!(rendered.code, ConnectCode::InvalidArgument);
+    }
 
     #[test]
     fn source_update_requires_both_complete_selections_and_preserves_fences() {
