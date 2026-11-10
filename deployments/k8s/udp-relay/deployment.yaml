@@ -25,6 +25,10 @@ spec:
       imagePullSecrets:
         - name: harbor-registry
       terminationGracePeriodSeconds: 15
+      # The TLS leaf is readable by the image's 65532 group only.
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: udp-relay
           image: git.example.com/codewire/services:latest
@@ -35,14 +39,37 @@ spec:
               name: udp
             - containerPort: 8095
               name: allocator
+            # The allocator again, over TLS, for orchestration's client
+            # certificate only (#4011). 8095 goes once orchestration uses it.
+            - containerPort: 8097
+              name: allocator-tls
             # Probes and metrics. The PodMonitor scrapes the port named http.
             - containerPort: 8096
               name: http
           # This Pod parses UDP from the internet and needs no secret to do it,
-          # so it takes none of codewire-secrets (#3926).
+          # so it takes none of codewire-secrets (#3926). Its only Secret is
+          # its own TLS identity for the allocator.
           envFrom:
             - configMapRef:
                 name: codewire-config
+          env:
+            - name: CODEWIRE_UDP_RELAY_ALLOCATOR_TLS_CERT
+              value: /run/codewire-udp-relay-allocator-tls/tls.crt
+            - name: CODEWIRE_UDP_RELAY_ALLOCATOR_TLS_KEY
+              value: /run/codewire-udp-relay-allocator-tls/tls.key
+            - name: CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_ROOTS
+              value: /run/codewire-udp-relay-allocator-roots/ca.crt
+            # The name on orchestration's client certificate. It names a
+            # caller, not a host, so it is the same in every namespace.
+            - name: CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_NAME
+              value: orchestration.udp-relay-allocator.codewire.internal
+          volumeMounts:
+            - name: allocator-tls
+              mountPath: /run/codewire-udp-relay-allocator-tls
+              readOnly: true
+            - name: allocator-roots
+              mountPath: /run/codewire-udp-relay-allocator-roots
+              readOnly: true
           resources:
             requests:
               cpu: 25m
@@ -71,3 +98,19 @@ spec:
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5
+      volumes:
+        - name: allocator-tls
+          secret:
+            secretName: codewire-udp-relay-allocator-tls
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        - name: allocator-roots
+          configMap:
+            name: codewire-udp-relay-allocator-roots
+            items:
+              - key: ca.crt
+                path: ca.crt

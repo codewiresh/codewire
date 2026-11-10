@@ -537,27 +537,120 @@ WORLD_EXCEPTIONS = {
 
 
 UDP_RELAY = "codewire-udp-relay"
+UDP_RELAY_TLS_SECRET = "codewire-udp-relay-allocator-tls"
+# The relay allocates over TLS only for the certificate with this name, which
+# orchestration's client leaf carries.
+UDP_RELAY_TLS_ENV = [
+    """
+    - name: CODEWIRE_UDP_RELAY_ALLOCATOR_TLS_CERT
+      value: /run/codewire-udp-relay-allocator-tls/tls.crt
+    """,
+    """
+    - name: CODEWIRE_UDP_RELAY_ALLOCATOR_TLS_KEY
+      value: /run/codewire-udp-relay-allocator-tls/tls.key
+    """,
+    """
+    - name: CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_ROOTS
+      value: /run/codewire-udp-relay-allocator-roots/ca.crt
+    """,
+    """
+    - name: CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_NAME
+      value: orchestration.udp-relay-allocator.codewire.internal
+    """,
+]
+UDP_RELAY_VOLUMES = """
+      volumes:
+      - name: allocator-tls
+        secret:
+          defaultMode: 288
+          items:
+          - key: tls.crt
+            path: tls.crt
+          - key: tls.key
+            path: tls.key
+          secretName: codewire-udp-relay-allocator-tls
+      - configMap:
+          items:
+          - key: ca.crt
+            path: ca.crt
+          name: codewire-udp-relay-allocator-roots
+        name: allocator-roots
+"""
+UDP_RELAY_CERTIFICATE_SPEC = """
+spec:
+  dnsNames:
+  - codewire-udp-relay
+  duration: 24h
+  isCA: false
+  issuerRef:
+    group: cert-manager.io
+    kind: Issuer
+    name: codewire-udp-relay-allocator
+  privateKey:
+    algorithm: ECDSA
+    encoding: PKCS8
+    rotationPolicy: Always
+    size: 256
+  renewBefore: 8h
+  revisionHistoryLimit: 1
+  secretName: codewire-udp-relay-allocator-tls
+  usages:
+  - digital signature
+  - server auth
+"""
 
 
 def assert_udp_relay(resources: list[str], label: str, output: list[str]) -> None:
     """The relay parses UDP from the internet, so it holds no shared secret and
-    its allocator answers only orchestration (#3926). Relay data stays open to
+    its allocator answers only orchestration (#3926). Its one Secret is its own
+    TLS leaf, from the authority that signs nothing but that leaf and
+    orchestration's client leaf, and its TLS listener allocates only for that
+    client's name (#4011). Relay data stays open to
     every source, because the LoadBalancer sends the internet there, and so do the
     read-only endpoints, because Prometheus runs on host networking and matches no
     Pod selector. Those endpoints stay on the port named http, which the PodMonitor
     scrapes."""
     deployment = exactly_one(resources, "Deployment", UDP_RELAY, label, output)
-    if deployment and re.search(r"secretRef:|secretKeyRef:|secret:", deployment):
-        output.append(f"{label}: the UDP relay must take no Secret")
+    if deployment and (
+        re.search(r"secretRef:|secretKeyRef:", deployment)
+        or len(re.findall(r"\bsecret:", deployment)) != 1
+        or compact(UDP_RELAY_VOLUMES) not in compact(deployment)
+    ):
+        output.append(
+            f"{label}: the UDP relay must take no Secret but its own allocator TLS leaf, "
+            "and its client roots from the published ConfigMap"
+        )
     if deployment and compact(
         """
         - containerPort: 8095
           name: allocator
+        - containerPort: 8097
+          name: allocator-tls
         - containerPort: 8096
           name: http
         """
     ) not in compact(deployment):
-        output.append(f"{label}: the UDP relay must serve its allocator on 8095 and the port named http on 8096")
+        output.append(
+            f"{label}: the UDP relay must serve its allocator on 8095, over TLS on 8097, and the port named http on 8096"
+        )
+    for line in UDP_RELAY_TLS_ENV:
+        name = line.split()[2]
+        # Kubernetes takes the last of two entries with one name.
+        if deployment and (compact(line) not in compact(deployment) or deployment.count(f"name: {name}\n") != 1):
+            output.append(f"{label}: the UDP relay must set {name} once, as checked in")
+    issued = [
+        resource
+        for resource in resources
+        if top_level_field(resource, "kind") == "Certificate" and "name: codewire-udp-relay-allocator\n" in resource
+    ]
+    if len(issued) != 1:
+        output.append(f"{label}: the relay allocator authority must sign exactly one leaf here, the relay's own")
+    certificate = exactly_one(resources, "Certificate", "codewire-udp-relay-allocator", label, output)
+    if certificate and compact(top_level_block(certificate, "spec")) != compact(UDP_RELAY_CERTIFICATE_SPEC):
+        output.append(
+            f"{label}: the relay allocator leaf must be a 24-hour server certificate for the relay's Service name "
+            "from the codewire-udp-relay-allocator Issuer"
+        )
     policy = exactly_one(resources, "NetworkPolicy", UDP_RELAY, label, output)
     if not policy:
         return
@@ -576,6 +669,8 @@ def assert_udp_relay(resources: list[str], label: str, output: list[str]) -> Non
             ports:
             - port: 8095
               protocol: TCP
+            - port: 8097
+              protocol: TCP
           - ports:
             - port: 8096
               protocol: TCP
@@ -589,7 +684,7 @@ def assert_udp_relay(resources: list[str], label: str, output: list[str]) -> Non
     )
     if compact(top_level_block(policy, "spec")) != expected:
         output.append(
-            f"{label}: UDP relay ingress must keep 41641/UDP and 8096 open and admit only orchestration on 8095"
+            f"{label}: UDP relay ingress must keep 41641/UDP and 8096 open and admit only orchestration on 8095 and 8097"
         )
 
 
@@ -604,8 +699,19 @@ def udp_relay_self_test(resources: list[str]) -> None:
         ("NetworkPolicy", "relay data closed", "port: 41641", "port: 41642"),
         ("NetworkPolicy", "allocator open to every source", "  - from:\n", "  - ports:\n    - port: 8095\n      protocol: TCP\n  - from:\n"),
         ("NetworkPolicy", "another component", "app.kubernetes.io/component: orchestration", "app.kubernetes.io/component: dashboard"),
-        ("NetworkPolicy", "read-only endpoints closed", "port: 8096", "port: 8097"),
-        ("Deployment", "metrics back on the allocator's port", "name: allocator", "name: http"),
+        ("NetworkPolicy", "read-only endpoints closed", "port: 8096", "port: 8098"),
+        ("NetworkPolicy", "TLS allocator open to every source", "  - from:\n", "  - ports:\n    - port: 8097\n      protocol: TCP\n  - from:\n"),
+        ("Deployment", "metrics back on the allocator's port", "name: allocator\n", "name: http\n"),
+        ("Deployment", "another Secret mounted", "secretName: codewire-udp-relay-allocator-tls", "secretName: codewire-secrets"),
+        ("Deployment", "a second Secret mounted", "      volumes:\n", "      volumes:\n      - name: extra\n        secret:\n          secretName: codewire-secrets\n"),
+        ("Deployment", "a projected shared secret", "      volumes:\n", "      volumes:\n      - name: extra\n        projected:\n          sources:\n          - secret:\n              name: codewire-secrets\n"),
+        ("Deployment", "client roots from another authority", "name: codewire-udp-relay-allocator-roots", "name: codewire-orchestration-internal-roots"),
+        ("Deployment", "a second client name that wins", "        envFrom:\n", "        - name: CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_NAME\n          value: mesh.udp-relay-allocator.codewire.internal\n        envFrom:\n"),
+        ("Deployment", "another client named", "orchestration.udp-relay-allocator.codewire.internal", "mesh.udp-relay-allocator.codewire.internal"),
+        ("Deployment", "client roots from the leaf Secret", "/run/codewire-udp-relay-allocator-roots/ca.crt", "/run/codewire-udp-relay-allocator-tls/ca.crt"),
+        ("Certificate", "the orchestration-internal authority", "name: codewire-udp-relay-allocator\n  privateKey", "name: codewire-orchestration-internal\n  privateKey"),
+        ("Certificate", "a client-capable leaf", "  - server auth", "  - server auth\n  - client auth"),
+        ("Certificate", "a wildcard name", "  - codewire-udp-relay\n", "  - '*.svc.cluster.local'\n"),
     ]:
         changed = [
             resource.replace(before, after, 1) if top_level_field(resource, "kind") == kind else resource
@@ -617,6 +723,15 @@ def udp_relay_self_test(resources: list[str]) -> None:
         assert_udp_relay(changed, label, output)
         if not output:
             raise RuntimeError(f"{label} {name} passed the check")
+    second_leaf = [
+        resource.replace("name: codewire-udp-relay-allocator\n", "name: codewire-udp-relay-allocator-client\n", 1)
+        for resource in resources
+        if top_level_field(resource, "kind") == "Certificate"
+    ]
+    forged: list[str] = []
+    assert_udp_relay(resources + second_leaf, label, forged)
+    if not forged:
+        raise RuntimeError(f"{label} a second leaf from the allocator authority passed the check")
     missing: list[str] = []
     assert_udp_relay(
         [resource for resource in resources if top_level_field(resource, "kind") != "NetworkPolicy"],

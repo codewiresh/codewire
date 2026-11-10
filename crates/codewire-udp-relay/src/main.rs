@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use codewire_tls::{PeerTlsListener, TlsPeer};
 use codewire_udp_relay::{Config, RelayRuntime};
 use tokio::sync::watch;
 
@@ -24,15 +25,26 @@ async fn main() -> anyhow::Result<()> {
             "udp relay generated a disco key for this process"
         );
     }
-    if cfg.allocator_token.is_none() {
-        tracing::warn!(
-            env = codewire_udp_relay::ALLOCATOR_TOKEN_ENV,
-            "udp relay allocator token unset; rely on local development or network policy only"
-        );
-    }
+    // Each handshake reads the identity and client roots again, so files
+    // that cannot serve one now only close the TLS allocator until they are
+    // repaired. They never stop relay data, which needs none of them.
+    let allocator_tls = match &cfg.allocator_tls {
+        Some(tls) => {
+            let files = tls.files()?;
+            if let Err(error) = files.validate().await {
+                tracing::error!(
+                    %error,
+                    "udp relay allocator TLS files cannot serve a handshake; the TLS allocator refuses every caller until they can"
+                );
+            }
+            Some((tls.bind_addr, files))
+        }
+        None => None,
+    };
 
     let runtime = RelayRuntime::bind(&cfg).await?;
     let allocator_app = runtime.allocator_app();
+    let allocator_tls_app = runtime.allocator_tls_app();
     let ops_app = runtime.ops_app();
     let server = runtime.into_server();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -68,7 +80,24 @@ async fn main() -> anyhow::Result<()> {
     let ops = axum::serve(ops_listener, ops_app)
         .with_graceful_shutdown(wait_shutdown())
         .into_future();
-    let result = tokio::try_join!(allocator, ops);
+    let allocator_tls = async {
+        let Some((addr, files)) = allocator_tls else {
+            return Ok(());
+        };
+        let listener = PeerTlsListener::new(tokio::net::TcpListener::bind(addr).await?, files)
+            .map_err(std::io::Error::other)?;
+        tracing::info!(
+            allocator_tls_addr = %addr,
+            "udp relay allocator TLS listener started"
+        );
+        axum::serve(
+            listener,
+            allocator_tls_app.into_make_service_with_connect_info::<TlsPeer>(),
+        )
+        .with_graceful_shutdown(wait_shutdown())
+        .await
+    };
+    let result = tokio::try_join!(allocator, ops, allocator_tls);
     let _ = shutdown_tx.send(true);
     match tokio::time::timeout(Duration::from_secs(5), udp_task).await {
         Ok(Ok(Ok(()))) => {}

@@ -19,6 +19,7 @@ path = "src/lib.rs"
 anyhow = { workspace = true }
 axum = { workspace = true }
 codewire-tailnet = { workspace = true }
+codewire-tls = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -28,5 +29,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+codewire-tls = { workspace = true, features = ["test-support"] }
+reqwest = { workspace = true }
 tower = { workspace = true }
 codewire-workspace-hack.workspace = true

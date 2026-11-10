@@ -19,3 +19,6 @@ spec:
     - port: 8095
       targetPort: 8095
       name: allocator
+    - port: 8097
+      targetPort: 8097
+      name: allocator-tls

@@ -1,7 +1,9 @@
 # Ingress to the UDP relay (#3926). Relay data on UDP 41641 is public: the
 # relay's LoadBalancer sends the internet here, and each side proves its disco
-# key before anything is forwarded. The allocator on TCP 8095 has no token yet and
-# only orchestration calls it. TCP 8096 is read-only: probes and metrics.
+# key before anything is forwarded. Only orchestration calls the allocator: on
+# TCP 8097 over TLS, where the relay allocates only for orchestration's client
+# certificate (#4011), and on plain TCP 8095 until orchestration has moved.
+# TCP 8096 is read-only: probes and metrics.
 #
 # 8096 lists no source because Prometheus runs on host networking on both
 # clusters. Cilium sees it as a node, which no Pod selector matches, and a
@@ -10,7 +12,8 @@
 #
 # A NetworkPolicy isolates its Pod on every port, so 41641 is listed. Traffic from
 # the Pod's own node is never blocked on Cilium, so a host-network process there
-# can reach the allocator; only a token closes that.
+# can reach the allocator; the client certificate on 8097 closes that, and
+# removing 8095 finishes it.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -35,6 +38,8 @@ spec:
       ports:
         - protocol: TCP
           port: 8095
+        - protocol: TCP
+          port: 8097
     - ports:
         - protocol: TCP
           port: 8096

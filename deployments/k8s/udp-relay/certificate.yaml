@@ -1,0 +1,33 @@
+# Server identity of the relay allocator's TLS listener (8097), which
+# orchestration verifies by the relay's Service name (#4011). The name is the
+# short one a caller in this namespace uses, so it is the same in every
+# namespace and no overlay has to rewrite it. The
+# namespace-local Issuer and its dedicated CA are provisioned by the
+# infrastructure owner, who also publishes the CA's public certificate here as
+# `codewire-udp-relay-allocator-roots`. That CA signs only this leaf and
+# orchestration's client leaf: never use it, or any other CA, for both.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: codewire-udp-relay-allocator
+  namespace: prod
+spec:
+  secretName: codewire-udp-relay-allocator-tls
+  issuerRef:
+    name: codewire-udp-relay-allocator
+    kind: Issuer
+    group: cert-manager.io
+  dnsNames:
+    - codewire-udp-relay
+  duration: 24h
+  renewBefore: 8h
+  isCA: false
+  revisionHistoryLimit: 1
+  usages:
+    - digital signature
+    - server auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+    rotationPolicy: Always

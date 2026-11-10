@@ -68,9 +68,26 @@ relay slots through `AllocatePeerRelay`; the allocator and its token stay in
 orchestration. The relay's NetworkPolicy keeps relay data on UDP 41641 and its
 read-only endpoints on TCP 8096 (`/healthz`, `/readyz`, `/metrics`) open to every
 source, because Prometheus runs on host networking and matches no Pod selector.
-It admits only orchestration to the allocator on TCP 8095. Traffic from the
-relay's own node isn't blocked, so a host-network process there can still
-allocate until the allocator has a token.
+It admits only orchestration to the allocator. Traffic from the relay's own
+node isn't blocked by that policy, so the allocator also authenticates its
+caller with mutual TLS (#4011):
+
+- On TCP 8097 the relay serves the allocator over TLS and allocates only for
+  a client certificate that carries orchestration's name. A caller with no
+  certificate, or another one, gets `401`.
+- The relay's server leaf and orchestration's client leaf come from one
+  namespace-local authority, `codewire-udp-relay-allocator`, that signs
+  nothing else. The site provisions it and publishes its public certificate
+  as the `codewire-udp-relay-allocator-roots` ConfigMap. Both sides read
+  their leaf and those roots again for every connection, so a rotation needs
+  no restart.
+- Orchestration verifies the relay by its short Service name, so a zone's
+  allocator URL for the TLS port is
+  `https://codewire-udp-relay:8097/internal/udp-relay/allocations`.
+- Plain TCP 8095 stays until orchestration has moved to 8097, and is then
+  removed. `codewire_udp_relay_allocator_calls_total{caller=...}` on
+  `/metrics` counts calls by `plain`, `orchestration`, `no_certificate` and
+  `another_certificate`, which shows when nothing uses the plain port.
 
 Terminology:
 
