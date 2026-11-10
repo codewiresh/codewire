@@ -359,6 +359,8 @@ test.describe.serial("server-rendered identity flows", () => {
       new URL(candidate.url()).pathname === "/settings/_actions/sign-out"
         && candidate.request().method() === "POST"
     ), { timeout: 15_000 });
+    // Sign Out is in the account menu at the foot of the sidebar.
+    await page.locator(".cw-sidebar-slot .cw-account-menu > summary").click();
     await page.locator(".cw-sidebar-slot form[data-sign-out]")
       .getByRole("button", { name: "Sign Out", exact: true })
       .click();

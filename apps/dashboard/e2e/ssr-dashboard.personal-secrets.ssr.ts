@@ -167,7 +167,7 @@ test("empty and unavailable states remain distinct and pagination never implies 
   const sidebar = page.locator(mobile ? ".cw-mobile-drawer" : ".cw-sidebar-slot");
   await expect(sidebar.getByText("Choose an organization above to view its Sandboxes.", { exact: true })).toBeVisible();
   await expect(sidebar.getByText("Create an organization to start a Sandbox.", { exact: true })).toHaveCount(0);
-  await sidebar.locator("summary").click();
+  await sidebar.locator(".cw-org-switcher > summary").click();
   await expect(sidebar.getByRole("link", { name: "Example organization" })).toHaveAttribute("href", "sandboxes.html");
   if (mobile) await action(sidebar, "Collapse navigation").click();
   await fits(page);

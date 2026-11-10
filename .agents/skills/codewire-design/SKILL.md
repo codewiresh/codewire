@@ -109,7 +109,39 @@ iteration checkpoint, which gates landing. Do not restate these elsewhere.
   0.75 px at 1440 and 390. "buttons with an icon centre their label's
   capitals" covers Create Sandbox, Add custom Git URL, Reconnect and Back.
 
-## 2. Status and visibility pills
+## 2. Anchor lines
+
+Owner, 2026-11-10: "there should be a grid, gutters, standard spacing that
+just works for this. that is methodical. left and right both have these
+anchoring vertical". On the Sandbox page: "just make sure that the plus sign
+and the arrow … and the banners are all left aligned on the same line …
+simple." Don't over-tune: no optical offsets for text.
+
+- **The sidebar** (`routes/dashboard.css`) is a grid: a leading mark column,
+  the text and a trailing mark column. The centre of each mark column is an
+  anchor line, `gutter + row padding + mark / 2` from the edge.
+  - Marks centre on it: the logo's c, the badges, the create plus, the sort
+    icon, the rail's dots, the footer icons, and on the right the chevrons,
+    the collapse and view-all icons and the region labels.
+  - A row with no mark, such as the Admin label and links, starts on the left
+    line.
+  - The phone's drawer is the same sidebar.
+- **A page column** has one left line, its gutter. Boxes such as notices and
+  banners start on it. A leading icon button (back, new) starts before it by
+  its inset around the icon plus `--icon-glyph-inset`, so the visible glyph
+  meets the line: `--cw-workspace-icon-start` in `routes/terminal.css`.
+- **Derive every line from tokens.** A row reaches its line through padding
+  or the primitive's hook, such as `--nav-link-padding-start`. To move
+  everything, change the gutter, never one element.
+- **Prove it** with `expectOnAnchorLines`
+  (`apps/dashboard/e2e/helpers/anchor-lines.ts`), within 1 px, at 1440 and 390:
+  - the sidebar and drawer in `ssr-dashboard.anchor-lines.ssr.ts`;
+  - the Sandbox page in `ssr-dashboard.durable-terminal.ssr.ts`.
+
+  A new mark, row or column of chrome adds its check there. Run the check
+  against the previous CSS once and see it fail.
+
+## 3. Status and visibility pills
 
 - Use `.cw-badge`: a rounded pill whose text names the state (Private, Public,
   Archived, Unavailable). Colour only reinforces it.
@@ -120,7 +152,7 @@ iteration checkpoint, which gates landing. Do not restate these elsewhere.
 - When a pill qualifies a control, keep it inside the control so it is part of
   the accessible name.
 
-## 3. Action labels follow real state
+## 4. Action labels follow real state
 
 - Derive a label from its source of truth on every change; never keep a second
   flag that can drift. `syncRepositoryActions` in `environments.js` reads the
@@ -134,7 +166,7 @@ iteration checkpoint, which gates landing. Do not restate these elsewhere.
   text. Take the limit from the server's constant through the template, as
   `data-repository-limit` does.
 
-## 4. Async regions
+## 5. Async regions
 
 - A hidden drawer or dialog must never drop a response silently. Defer the
   request until it is visible (`draftIsOpen`), keep a cancelled request pending,
@@ -153,7 +185,7 @@ iteration checkpoint, which gates landing. Do not restate these elsewhere.
 - Animations stop under `prefers-reduced-motion` in `components.css`; add any
   new animation to that block.
 
-## 5. Parity and primitives
+## 6. Parity and primitives
 
 - Change a production template and its fixture in the same commit, with the same
   classes, data hooks and route CSS.
@@ -166,7 +198,7 @@ iteration checkpoint, which gates landing. Do not restate these elsewhere.
   - primitives missing from the gallery.
   Policy: `scripts/checks/contracts/design-token-policy.json`.
 
-## 6. Semantics
+## 7. Semantics
 
 Follow `AGENTS.md`. In short:
 
@@ -177,7 +209,7 @@ Follow `AGENTS.md`. In short:
 - a `div` only for layout;
 - toggle with the `hidden` attribute (the global `[hidden]` rule wins).
 
-## 7. Verification loop
+## 8. Verification loop
 
 1. Iterate on fixtures with `make design-system`. List new fixture spec files in
    `apps/dashboard/e2e/helpers/design-fixtures.ts`.

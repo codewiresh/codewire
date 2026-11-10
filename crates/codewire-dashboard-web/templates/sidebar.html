@@ -31,7 +31,19 @@
   <section class="cw-console-sandboxes" aria-label="Sandboxes">
     <a class="cw-console-create cw-button cw-button--accent cw-button--pill" href="{{ view.selected_organization_url }}new/" data-drawer-trigger><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg><span>Create Sandbox</span></a>
     <header class="cw-console-rail-heading">
-      <h2><a href="{{ view.selected_organization_url }}">View all sandboxes <span aria-hidden="true">→</span></a></h2>
+      <button class="cw-icon-button" type="button" data-rail-sort aria-label="Sort: newest first"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-sort"/></svg></button>
+      <h2>Sandboxes</h2>
+      <details class="cw-menu cw-rail-filter" data-rail-filter>
+        <summary class="cw-icon-button" aria-label="Filter by status"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-filter"/></svg></summary>
+        <div class="cw-menu-panel cw-menu-panel--end" role="group" aria-label="Show Sandboxes">
+          <button class="cw-menu-item" type="button" data-rail-filter-value="all" aria-pressed="true"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-check"/></svg><span>All</span></button>
+          <button class="cw-menu-item" type="button" data-rail-filter-value="running" aria-pressed="false"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-check"/></svg><span>Running</span></button>
+          <button class="cw-menu-item" type="button" data-rail-filter-value="starting" aria-pressed="false"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-check"/></svg><span>Starting</span></button>
+          <button class="cw-menu-item" type="button" data-rail-filter-value="stopped" aria-pressed="false"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-check"/></svg><span>Stopped</span></button>
+          <button class="cw-menu-item" type="button" data-rail-filter-value="failed" aria-pressed="false"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-check"/></svg><span>Failed</span></button>
+        </div>
+      </details>
+      <a class="cw-icon-button" href="{{ view.selected_organization_url }}" aria-label="View all sandboxes"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-expand"/></svg></a>
     </header>
     <div class="cw-console-rail" hx-get="/{{ view.selected_organization_slug }}/_fragments/sandbox-rail" hx-trigger="sandbox-rail-refresh" hx-swap="innerHTML" data-sandbox-rail data-rail-loading="{{ view.sandbox_rail_loading }}">
       {% include "sandbox-rail.html" %}
@@ -59,14 +71,20 @@
   {% endif %}
 
   <ul class="cw-console-get-started">
-    <li><a class="cw-nav-link" href="/docs/quickstart">Get Started</a></li>
+    <li><a class="cw-nav-link" href="/docs/quickstart"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-play-circle"/></svg>Get Started</a></li>
+    <li><a class="cw-nav-link" href="/docs"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-book"/></svg>Documentation</a></li>
   </ul>
-  <ul class="cw-console-footer">
-    <li><a class="cw-nav-link" href="{{ view.settings_url }}"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-settings"/></svg>Settings</a></li>
-    <li><a class="cw-nav-link" href="/docs"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-book"/></svg>Docs</a></li>
-    <li><button class="cw-nav-link cw-theme-switch" type="button" data-theme-switch data-theme-current="system"><svg class="cw-icon cw-theme-icon cw-theme-icon--system" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-monitor"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--light" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-sun"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--dark" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-moon"/></svg><span data-theme-label>Theme: System</span></button></li>
-    <li><form method="post" action="/settings/_actions/sign-out" data-sign-out><input type="hidden" name="_csrf" value="{{ view.csrf_token }}"><button class="cw-nav-link" type="submit"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-right"/></svg>Sign Out</button></form></li>
-  </ul>
+  <div class="cw-console-footer">
+    <details class="cw-menu cw-account-menu">
+      <summary class="cw-button cw-button--ghost"><span class="cw-org-initial" aria-hidden="true">{{ view.user_initial() }}</span><span class="cw-account-name">{{ view.user_name }}</span><svg class="cw-icon cw-account-chevrons" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevrons-up-down"/></svg></summary>
+      <div class="cw-menu-panel cw-menu-panel--fill cw-menu-panel--up">
+        <div class="cw-user-menu-identity"><strong>{{ view.user_name }}</strong><span>Authenticated account</span></div>
+        <a href="{{ view.settings_url }}"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-settings"/></svg>Settings</a>
+        <button class="cw-menu-item cw-theme-switch" type="button" data-theme-switch data-theme-current="system"><svg class="cw-icon cw-theme-icon cw-theme-icon--system" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-auto"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--light" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-sun"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--dark" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-moon"/></svg><span data-theme-label>Theme: System</span></button>
+        <form method="post" action="/settings/_actions/sign-out" data-sign-out><input type="hidden" name="_csrf" value="{{ view.csrf_token }}"><button class="cw-menu-item" type="submit"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-log-out"/></svg>Sign Out</button></form>
+      </div>
+    </details>
+  </div>
 
   <dialog class="cw-command" data-quick-search aria-label="Search Codewire">
     <form method="dialog" class="cw-command-shell">

@@ -67,3 +67,44 @@ test("on a phone only the open drawer's rail refreshes", async ({ page }) => {
   await page.clock.runFor(20_000);
   expect(await refreshes(page)).toEqual(["drawer", "drawer"]);
 });
+
+// The rail's tools (owner, 2026-11-10): sort newest or oldest first and show
+// one status, on both rails, again after a refresh replaces the list, and
+// remembered by this browser.
+test("the rail's sort and status filter hold on both rails and through a refresh", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+  const sidebar = page.locator(".cw-sidebar-slot");
+  const shown = (scope: string) => page.locator(scope).evaluate((root) =>
+    Array.from(root.querySelectorAll<HTMLElement>(".cw-rail-list > li"))
+      .filter((item) => !item.hidden)
+      .map((item) => item.querySelector(".cw-rail-name")?.textContent ?? ""));
+  const served = await sidebar.locator(".cw-rail-list").innerHTML();
+  const newest = await shown(".cw-sidebar-slot");
+
+  await sidebar.getByRole("button", { name: "Sort: newest first" }).click();
+  await expect(sidebar.getByRole("button", { name: "Sort: oldest first" })).toBeVisible();
+  expect(await shown(".cw-sidebar-slot")).toEqual([...newest].reverse());
+  expect(await shown(".cw-mobile-drawer")).toEqual([...newest].reverse());
+
+  await sidebar.locator(".cw-rail-filter > summary").click();
+  await sidebar.getByRole("button", { name: "Running" }).click();
+  await expect(sidebar.locator(".cw-rail-filter > summary")).toHaveAttribute("aria-label", "Filter by status: running");
+  const running = await shown(".cw-sidebar-slot");
+  expect(running.length).toBeGreaterThan(0);
+  expect(running.length).toBeLessThan(newest.length);
+
+  // A refresh swaps in the server's list again; the choice applies to it.
+  await page.evaluate((html) => {
+    const rail = document.querySelector<HTMLElement>(".cw-sidebar-slot [data-sandbox-rail]")!;
+    rail.querySelector(".cw-rail-list")!.innerHTML = html;
+    rail.dispatchEvent(new CustomEvent("htmx:afterSwap", { bubbles: true }));
+  }, served);
+  expect(await shown(".cw-sidebar-slot")).toEqual(running);
+
+  await page.reload();
+  await expect(sidebar.getByRole("button", { name: "Sort: oldest first" })).toBeVisible();
+  expect(await shown(".cw-sidebar-slot")).toEqual(running);
+});

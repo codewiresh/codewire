@@ -466,6 +466,8 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
 .cw-menu-panel--end { right: 0; }
 .cw-menu-panel--start { left: 0; }
 .cw-menu-panel--fill { right: 0; left: 0; }
+/* A panel that opens upward, for a menu at the bottom of the page. */
+.cw-menu-panel--up { top: auto; bottom: calc(100% + var(--space-1)); }
 
 /* A panel that holds a small form instead of a list of actions. */
 .cw-menu-panel--form {
@@ -1017,15 +1019,15 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
 
 /* A banner across the whole top of every console page while the selected
    organization needs billing attention: one sentence and its action, on the
-   accent colour (the Create Sandbox button's), the brand yellow when credit
-   is low and red once it ran out. It is
-   fixed above the app, which moves down by its height. The words carry the
-   meaning; the colour only reinforces it. */
+   Create Sandbox button's colour (cream in dark, blue in light), the brand
+   yellow when credit is low and red once it ran out. It is fixed above the
+   app, which moves down by its height. The words carry the meaning; the
+   colour only reinforces it. */
 .cw-body:has(> .cw-banner) { --banner-offset: var(--banner-height); }
 
 .cw-banner {
-  --banner-bg: var(--accent);
-  --banner-fg: var(--fg-on-accent);
+  --banner-bg: var(--button-accent);
+  --banner-fg: var(--button-accent-text);
   position: fixed;
   inset: 0 0 auto;
   z-index: 41;

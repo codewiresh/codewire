@@ -37,7 +37,7 @@
   --light-fg-disabled: #787878;
   --dark-fg-inverse: #0d0d0d;
   --light-fg-inverse: #ffffff;
-  --dark-fg-on-accent: #121212;
+  --dark-fg-on-accent: #ffffff;
   --light-fg-on-accent: #ffffff;
   --dark-border: #262626;
   --light-border: #e0e0dc;
@@ -45,15 +45,18 @@
   --light-border-hover: #c8c8c3;
   --dark-border-subtle: #1e1e1e;
   --light-border-subtle: #ebebe8;
-  --dark-accent: #e6c784;
+  /* Dark: the homepage rope's purple (--dark-wire-steel) for accents, links
+     and focus (owner, 2026-11-10: "There's too much yellow"). Buttons don't
+     use it: filled buttons are the cream (--button-accent below). */
+  --dark-accent: #905f91;
   --light-accent: #0048bd;
-  --dark-accent-hover: #eed8a9;
+  --dark-accent-hover: #7d5080;
   --light-accent-hover: #003a99;
-  --dark-accent-muted: rgba(230, 199, 132, 0.14);
+  --dark-accent-muted: rgba(144, 95, 145, 0.18);
   --light-accent-muted: rgba(0, 72, 189, 0.1);
-  --dark-accent-text: #e6c784;
+  --dark-accent-text: #b98bba;
   --light-accent-text: #0048bd;
-  --dark-focus-ring: #eed8a9;
+  --dark-focus-ring: #b98bba;
   --light-focus-ring: #0048bd;
   --dark-success: #3fb950;
   --light-success: #116329;
@@ -99,9 +102,10 @@
   --light-qr-light: #ffffff;
   --dark-bg-auth: #000000;
   --light-bg-auth: #ffffff;
-  /* The wordmark artwork is white: light pages show it black. */
+  /* The wordmark artwork is the site's cream (#dbd1ad, the homepage's
+     wordmark); light pages show it black. */
   --dark-logo-filter: none;
-  --light-logo-filter: invert(1);
+  --light-logo-filter: brightness(0);
 
 
   /* Surfaces, darkest to lightest. */
@@ -234,6 +238,9 @@
   --choice-size: 1rem;
   --icon-size: 1rem;
   --icon-size-sm: 0.75rem;
+  /* The plus and arrow glyphs draw from 4 of their 24 units in, stroke
+     included: how far an icon's visible left edge sits inside its box. */
+  --icon-glyph-inset: calc(var(--icon-size) / 6);
 
   --console-header: 3.25rem;
   /* The Sandbox workspace: its terminal tab bar, the active tab's indicator
@@ -243,6 +250,24 @@
   --status-bar-height: 1.75rem;
   --sidebar-width: 16.25rem;
   --sidebar-rail-width: 3.25rem;
+  /* The sidebar grid's mark column: the organization badge's width. */
+  --sidebar-mark: 1.125rem;
+  /* The centre of the wordmark's c, from the logo's left edge at 6.5rem. */
+  --sidebar-logo-anchor: 0.39rem;
+  /* Where a nav link's and a section label's text start; a layout such as the
+     sidebar grid sets its own. */
+  --nav-link-padding-start: var(--space-3);
+  --nav-link-padding-end: var(--space-3);
+  --section-label-padding-start: var(--space-3);
+  /* An icon button's square; the sidebar's list tools use a smaller one. */
+  --icon-button-size: var(--control-height-sm);
+  --sidebar-tool: 1.5rem;
+  /* The accent button. Dark: the same cream as every filled button (owner,
+     2026-11-10: "for the dark, go back to that cream button"). Light: the
+     accent blue. */
+  --button-accent: var(--dark-bg-inverse);
+  --button-accent-hover: var(--dark-bg-inverse-hover);
+  --button-accent-text: var(--dark-fg-inverse);
   --mobile-drawer-width: 18rem;
   --context-nav-width: 14rem;
   --mobile-bar: 3.25rem;
@@ -276,8 +301,8 @@
 }
 
 /* Light: the system asks for it and the visitor has not chosen dark, or the visitor chose light. */
-@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg-base: var(--light-bg-base); --bg-primary: var(--light-bg-primary); --bg-sidebar: var(--light-bg-sidebar); --bg-secondary: var(--light-bg-secondary); --bg-surface: var(--light-bg-surface); --bg-field: var(--light-bg-field); --bg-overlay: var(--light-bg-overlay); --bg-surface-hover: var(--light-bg-surface-hover); --bg-selected: var(--light-bg-selected); --bg-inverse: var(--light-bg-inverse); --bg-inverse-hover: var(--light-bg-inverse-hover); --backdrop: var(--light-backdrop); --fg-primary: var(--light-fg-primary); --fg-secondary: var(--light-fg-secondary); --fg-tertiary: var(--light-fg-tertiary); --fg-disabled: var(--light-fg-disabled); --fg-inverse: var(--light-fg-inverse); --fg-on-accent: var(--light-fg-on-accent); --border: var(--light-border); --border-hover: var(--light-border-hover); --border-subtle: var(--light-border-subtle); --accent: var(--light-accent); --accent-hover: var(--light-accent-hover); --accent-muted: var(--light-accent-muted); --accent-text: var(--light-accent-text); --focus-ring: var(--light-focus-ring); --success: var(--light-success); --success-muted: var(--light-success-muted); --success-border: var(--light-success-border); --warning: var(--light-warning); --warning-muted: var(--light-warning-muted); --warning-border: var(--light-warning-border); --destructive: var(--light-destructive); --destructive-muted: var(--light-destructive-muted); --destructive-border: var(--light-destructive-border); --info: var(--light-info); --info-muted: var(--light-info-muted); --info-border: var(--light-info-border); --purple: var(--light-purple); --purple-border: var(--light-purple-border); --orange: var(--light-orange); --orange-border: var(--light-orange-border); --shadow-popover: var(--light-shadow-popover); --shadow-overlay: var(--light-shadow-overlay); --bg-field-translucent: var(--light-bg-field-translucent); --shadow-field-inset: var(--light-shadow-field-inset); --qr-light: var(--light-qr-light); --bg-auth: var(--light-bg-auth); --logo-filter: var(--light-logo-filter); color-scheme: light; } }
-:root[data-theme="light"] { --bg-base: var(--light-bg-base); --bg-primary: var(--light-bg-primary); --bg-sidebar: var(--light-bg-sidebar); --bg-secondary: var(--light-bg-secondary); --bg-surface: var(--light-bg-surface); --bg-field: var(--light-bg-field); --bg-overlay: var(--light-bg-overlay); --bg-surface-hover: var(--light-bg-surface-hover); --bg-selected: var(--light-bg-selected); --bg-inverse: var(--light-bg-inverse); --bg-inverse-hover: var(--light-bg-inverse-hover); --backdrop: var(--light-backdrop); --fg-primary: var(--light-fg-primary); --fg-secondary: var(--light-fg-secondary); --fg-tertiary: var(--light-fg-tertiary); --fg-disabled: var(--light-fg-disabled); --fg-inverse: var(--light-fg-inverse); --fg-on-accent: var(--light-fg-on-accent); --border: var(--light-border); --border-hover: var(--light-border-hover); --border-subtle: var(--light-border-subtle); --accent: var(--light-accent); --accent-hover: var(--light-accent-hover); --accent-muted: var(--light-accent-muted); --accent-text: var(--light-accent-text); --focus-ring: var(--light-focus-ring); --success: var(--light-success); --success-muted: var(--light-success-muted); --success-border: var(--light-success-border); --warning: var(--light-warning); --warning-muted: var(--light-warning-muted); --warning-border: var(--light-warning-border); --destructive: var(--light-destructive); --destructive-muted: var(--light-destructive-muted); --destructive-border: var(--light-destructive-border); --info: var(--light-info); --info-muted: var(--light-info-muted); --info-border: var(--light-info-border); --purple: var(--light-purple); --purple-border: var(--light-purple-border); --orange: var(--light-orange); --orange-border: var(--light-orange-border); --shadow-popover: var(--light-shadow-popover); --shadow-overlay: var(--light-shadow-overlay); --bg-field-translucent: var(--light-bg-field-translucent); --shadow-field-inset: var(--light-shadow-field-inset); --qr-light: var(--light-qr-light); --bg-auth: var(--light-bg-auth); --logo-filter: var(--light-logo-filter); color-scheme: light; }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg-base: var(--light-bg-base); --bg-primary: var(--light-bg-primary); --bg-sidebar: var(--light-bg-sidebar); --bg-secondary: var(--light-bg-secondary); --bg-surface: var(--light-bg-surface); --bg-field: var(--light-bg-field); --bg-overlay: var(--light-bg-overlay); --bg-surface-hover: var(--light-bg-surface-hover); --bg-selected: var(--light-bg-selected); --bg-inverse: var(--light-bg-inverse); --bg-inverse-hover: var(--light-bg-inverse-hover); --backdrop: var(--light-backdrop); --fg-primary: var(--light-fg-primary); --fg-secondary: var(--light-fg-secondary); --fg-tertiary: var(--light-fg-tertiary); --fg-disabled: var(--light-fg-disabled); --fg-inverse: var(--light-fg-inverse); --fg-on-accent: var(--light-fg-on-accent); --border: var(--light-border); --border-hover: var(--light-border-hover); --border-subtle: var(--light-border-subtle); --accent: var(--light-accent); --accent-hover: var(--light-accent-hover); --accent-muted: var(--light-accent-muted); --accent-text: var(--light-accent-text); --focus-ring: var(--light-focus-ring); --success: var(--light-success); --success-muted: var(--light-success-muted); --success-border: var(--light-success-border); --warning: var(--light-warning); --warning-muted: var(--light-warning-muted); --warning-border: var(--light-warning-border); --destructive: var(--light-destructive); --destructive-muted: var(--light-destructive-muted); --destructive-border: var(--light-destructive-border); --info: var(--light-info); --info-muted: var(--light-info-muted); --info-border: var(--light-info-border); --purple: var(--light-purple); --purple-border: var(--light-purple-border); --orange: var(--light-orange); --orange-border: var(--light-orange-border); --shadow-popover: var(--light-shadow-popover); --shadow-overlay: var(--light-shadow-overlay); --bg-field-translucent: var(--light-bg-field-translucent); --shadow-field-inset: var(--light-shadow-field-inset); --qr-light: var(--light-qr-light); --bg-auth: var(--light-bg-auth); --logo-filter: var(--light-logo-filter); --button-accent: var(--light-accent); --button-accent-hover: var(--light-accent-hover); --button-accent-text: var(--light-fg-on-accent); color-scheme: light; } }
+:root[data-theme="light"] { --bg-base: var(--light-bg-base); --bg-primary: var(--light-bg-primary); --bg-sidebar: var(--light-bg-sidebar); --bg-secondary: var(--light-bg-secondary); --bg-surface: var(--light-bg-surface); --bg-field: var(--light-bg-field); --bg-overlay: var(--light-bg-overlay); --bg-surface-hover: var(--light-bg-surface-hover); --bg-selected: var(--light-bg-selected); --bg-inverse: var(--light-bg-inverse); --bg-inverse-hover: var(--light-bg-inverse-hover); --backdrop: var(--light-backdrop); --fg-primary: var(--light-fg-primary); --fg-secondary: var(--light-fg-secondary); --fg-tertiary: var(--light-fg-tertiary); --fg-disabled: var(--light-fg-disabled); --fg-inverse: var(--light-fg-inverse); --fg-on-accent: var(--light-fg-on-accent); --border: var(--light-border); --border-hover: var(--light-border-hover); --border-subtle: var(--light-border-subtle); --accent: var(--light-accent); --accent-hover: var(--light-accent-hover); --accent-muted: var(--light-accent-muted); --accent-text: var(--light-accent-text); --focus-ring: var(--light-focus-ring); --success: var(--light-success); --success-muted: var(--light-success-muted); --success-border: var(--light-success-border); --warning: var(--light-warning); --warning-muted: var(--light-warning-muted); --warning-border: var(--light-warning-border); --destructive: var(--light-destructive); --destructive-muted: var(--light-destructive-muted); --destructive-border: var(--light-destructive-border); --info: var(--light-info); --info-muted: var(--light-info-muted); --info-border: var(--light-info-border); --purple: var(--light-purple); --purple-border: var(--light-purple-border); --orange: var(--light-orange); --orange-border: var(--light-orange-border); --shadow-popover: var(--light-shadow-popover); --shadow-overlay: var(--light-shadow-overlay); --bg-field-translucent: var(--light-bg-field-translucent); --shadow-field-inset: var(--light-shadow-field-inset); --qr-light: var(--light-qr-light); --bg-auth: var(--light-bg-auth); --logo-filter: var(--light-logo-filter); --button-accent: var(--light-accent); --button-accent-hover: var(--light-accent-hover); --button-accent-text: var(--light-fg-on-accent); color-scheme: light; }
 
 /* Geist Mono, shared with the public site: one variable file with the box-drawing
    and block characters the terminal needs. */
@@ -382,7 +407,7 @@
 .cw-section-label,
 .section-label {
   margin: 0 0 var(--space-2);
-  padding: 0 var(--space-3);
+  padding: 0 var(--space-3) 0 var(--section-label-padding-start);
   color: var(--fg-tertiary);
   font-size: var(--text-micro);
   font-weight: var(--weight-medium);
@@ -397,7 +422,7 @@
   align-items: center;
   gap: var(--space-2);
   min-height: var(--nav-row-height);
-  padding: var(--space-1-5) var(--space-3);
+  padding: var(--space-1-5) var(--nav-link-padding-end) var(--space-1-5) var(--nav-link-padding-start);
   border: 0;
   border-radius: var(--radius-md);
   background: transparent;
@@ -523,11 +548,11 @@
 .cw-button:hover { background: var(--bg-inverse-hover); }
 
 .cw-button--accent {
-  background: var(--accent);
-  color: var(--fg-on-accent);
+  background: var(--button-accent);
+  color: var(--button-accent-text);
 }
 
-.cw-button--accent:hover { background: var(--accent-hover); }
+.cw-button--accent:hover { background: var(--button-accent-hover); }
 
 .cw-button--outline {
   border-color: var(--border);
@@ -588,8 +613,8 @@
 .cw-icon-button {
   display: inline-grid;
   font: inherit;
-  width: var(--control-height-sm);
-  height: var(--control-height-sm);
+  width: var(--icon-button-size);
+  height: var(--icon-button-size);
   flex: none;
   place-items: center;
   padding: 0;

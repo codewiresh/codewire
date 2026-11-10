@@ -1,4 +1,5 @@
 import { expect, pauseClock, test, type Locator, type Page, type WebSocketRoute } from "./helpers/fixture-test";
+import { expectOnAnchorLines, type AnchorCheck } from "./helpers/anchor-lines";
 
 // Browser controller proof on the checked-in design server. These explicitly
 // synthetic BFF/WS responses do not qualify real daemon or authentication flows.
@@ -247,6 +248,31 @@ test("the workspace keeps the terminal between its tab bar and status bar, with 
       await expect(statusBar).toBeInViewport();
     }
   }
+});
+
+// The workspace has one left line, its gutter (routes/terminal.css): the
+// notice boxes start on it, and the back arrow and the new-terminal plus draw
+// from it, measured at the glyphs, not their buttons.
+test("the back arrow, the notices and the plus start on one left line", async ({ page }) => {
+  const state = await transport(page);
+  let release!: () => void;
+  state.launchGate = new Promise<void>((resolve) => { release = resolve; });
+  await gotoFixture(page);
+  await expect(page.locator("[data-terminal-message]")).toHaveText("Starting a terminal…");
+  await page.locator("#fixture-lifecycle-message").evaluate((node) => { (node as HTMLElement).hidden = false; });
+  const glyph = "var(--icon-glyph-inset)";
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width > 1024 ? 900 : 844 });
+    await expectOnAnchorLines(page, `${width}`, ".cw-workspace", "var(--cw-workspace-gutter)", [
+      { selector: ".cw-terminal-back > .cw-icon", at: "start", plus: glyph },
+      { selector: "#fixture-lifecycle-message", at: "start" },
+      { selector: ".cw-workspace-attention", at: "start" },
+      { selector: "[data-terminal-new] > .cw-icon", at: "start", plus: glyph },
+      // On a phone the actions wrap to their own row, which starts on the line.
+      ...(width < 1024 ? [{ selector: ".cw-workspace-actions :is(a, button, summary)", at: "start" as const }] : []),
+    ]);
+  }
+  release();
 });
 
 // Distance from the centre of a control's padding box to the centre of its
@@ -2364,7 +2390,7 @@ test("inventory Resize dismisses innermost menus with focus return and retains e
   await actions.locator(":scope > summary").click();
   await resize.locator(":scope > summary").click();
   await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("8000");
-  await page.getByRole("heading", { name: "Sandboxes", exact: true }).click();
+  await page.locator("main").getByRole("heading", { name: "Sandboxes", exact: true }).click();
   await expect(resize).toHaveJSProperty("open", false);
   await expect(actions).toHaveJSProperty("open", false);
   await actions.locator(":scope > summary").click();

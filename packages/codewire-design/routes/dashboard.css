@@ -6,9 +6,45 @@
 .cw-body[data-drawer-open="true"] { overflow: hidden; }
 [data-dashboard-app] .cw-page--wide { max-width: none; }
 
-/* Sidebar rows and controls share one gutter and one inner inset. */
-.cw-console-sidebar { --cw-sidebar-gutter: var(--space-2); --cw-sidebar-row-padding: var(--space-3); --button-padding-x: var(--cw-sidebar-row-padding); }
-.cw-console-brand-row { display: flex; height: var(--console-header); align-items: center; justify-content: space-between; padding: 0 var(--space-4); border-bottom: 1px solid var(--border-subtle); }
+/* The sidebar grid. A section owns the edge gutter; each row inside it has
+   its padding and three columns: a leading mark, the text, a trailing mark.
+   The centre of each mark column is an anchor line: on the left the logo's
+   c, the organization badge, the create plus, the rail's dots and the footer
+   icons; on the right the collapse icon, the chevron and the region labels.
+   A label beside a mark starts on the text line; a row with no mark, such as
+   the Admin label and links, starts on the left anchor itself. */
+.cw-console-sidebar {
+  --cw-sidebar-gutter: var(--space-2);
+  --cw-sidebar-row-padding: var(--space-3);
+  --cw-sidebar-mark: var(--sidebar-mark);
+  --cw-sidebar-gap: var(--space-2);
+  /* The anchor lines' distance from the sidebar's edges. */
+  --cw-sidebar-anchor: calc(var(--cw-sidebar-gutter) + var(--cw-sidebar-row-padding) + var(--cw-sidebar-mark) / 2);
+  /* Where text starts, from a row's edge. */
+  --cw-sidebar-text: calc(var(--cw-sidebar-row-padding) + var(--cw-sidebar-mark) + var(--cw-sidebar-gap));
+  /* Where a row with no mark starts, from a row's edge: the left anchor. */
+  --cw-sidebar-plain: calc(var(--cw-sidebar-row-padding) + var(--cw-sidebar-mark) / 2);
+  --section-label-padding-start: var(--cw-sidebar-plain);
+  --button-padding-x: var(--cw-sidebar-row-padding);
+  --nav-link-padding-start: var(--cw-sidebar-row-padding);
+  --nav-link-padding-end: var(--cw-sidebar-row-padding);
+}
+.cw-console-sidebar :is(.cw-org-switcher > summary, .cw-console-create, .cw-rail-row, .cw-nav-link, .cw-account-menu > summary) { display: grid; grid-template-columns: var(--cw-sidebar-mark) minmax(0, 1fr) var(--cw-sidebar-mark); align-items: center; column-gap: var(--cw-sidebar-gap); }
+.cw-rail-row { padding-inline: var(--cw-sidebar-row-padding); }
+.cw-console-sidebar :is(.cw-org-initial, .cw-console-create > .cw-icon, .cw-rail-dot, .cw-nav-link > .cw-icon) { grid-column: 1; justify-self: center; }
+.cw-console-sidebar :is(.cw-org-switcher-label, .cw-console-create > span, .cw-rail-name, .cw-account-name) { grid-column: 2; justify-self: start; }
+.cw-console-sidebar :is(.cw-org-chevron, .cw-rail-state, .cw-account-chevrons) { grid-column: 3; justify-self: center; }
+.cw-console-sidebar .cw-nav-link:not(:has(> .cw-icon)) { display: block; --nav-link-padding-start: var(--cw-sidebar-plain); }
+.cw-rail-status { padding-inline: var(--cw-sidebar-plain) var(--cw-sidebar-row-padding); }
+/* The list's tools share the row grid: sort on the left anchor, the heading on
+   the text line, then filter and expand, expand on the right anchor. */
+.cw-console-rail-heading { display: grid; grid-template-columns: var(--cw-sidebar-mark) minmax(0, 1fr) var(--cw-sidebar-mark) var(--cw-sidebar-mark); align-items: center; column-gap: var(--cw-sidebar-gap); padding-inline: var(--cw-sidebar-row-padding); --icon-button-size: var(--sidebar-tool); }
+.cw-console-rail-heading > * { justify-self: center; }
+.cw-console-rail-heading > h2 { justify-self: start; }
+.cw-rail-filter[data-active="true"] > summary { color: var(--accent-text); }
+.cw-rail-filter [data-rail-filter-value][aria-pressed="false"] > .cw-icon { visibility: hidden; }
+/* The logo's c and the collapse button's centre sit on the anchors. */
+.cw-console-brand-row { display: flex; height: var(--console-header); align-items: center; justify-content: space-between; padding: 0 calc(var(--cw-sidebar-anchor) - var(--control-height-sm) / 2) 0 calc(var(--cw-sidebar-anchor) - var(--sidebar-logo-anchor)); border-bottom: 1px solid var(--border-subtle); }
 /* A collapsed sidebar keeps a rail holding only the button that expands it;
    the page takes the rest. Phones use the drawer instead. */
 .cw-console-brand-row > .cw-sidebar-expand { display: none; }
@@ -29,17 +65,16 @@
    sideways for the ellipsis; hidden would cut off g, p and y below it. */
 .cw-org-switcher-label { min-width: 0; flex: 1; overflow-x: clip; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .cw-org-switcher .cw-org-chevron { width: var(--icon-size-sm); height: var(--icon-size-sm); color: var(--fg-tertiary); }
-.cw-org-initial { display: grid; width: 1.125rem; height: 1.125rem; flex: none; place-items: center; border-radius: var(--radius-sm); background: var(--bg-selected); color: var(--fg-secondary); font-size: var(--text-micro); font-weight: var(--weight-semibold); }
+.cw-org-initial { display: grid; width: var(--sidebar-mark); height: var(--sidebar-mark); flex: none; place-items: center; border-radius: var(--radius-sm); background: var(--bg-selected); color: var(--fg-secondary); font-size: var(--text-micro); font-weight: var(--weight-semibold); }
 .cw-org-menu li:last-child { margin-top: var(--space-1); padding-top: var(--space-1); border-top: 1px solid var(--border-subtle); }
 
 .cw-console-sandboxes { display: flex; min-height: 0; flex: 1; flex-direction: column; padding: 0 var(--cw-sidebar-gutter) var(--space-3); }
 .cw-console-create.cw-button { width: 100%; justify-content: flex-start; margin-bottom: var(--space-2); }
-.cw-console-rail-heading { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-0-5) var(--cw-sidebar-row-padding) var(--space-2); color: var(--fg-tertiary); font-size: var(--text-micro); line-height: var(--leading-ui); }
+.cw-console-rail-heading { padding-block: var(--space-0-5) var(--space-2); color: var(--fg-tertiary); font-size: var(--text-small); line-height: var(--leading-ui); }
 .cw-console-rail-heading h2 { margin: 0; font: inherit; }
-.cw-console-rail-heading a:hover { color: var(--fg-primary); }
 .cw-console-rail { min-height: var(--space-12); flex: 1; overflow-y: auto; }
 .cw-rail-list { display: grid; gap: var(--space-0-5); margin: 0; padding: 0; list-style: none; }
-.cw-rail-row { display: grid; min-height: var(--nav-row-height); grid-template-columns: var(--space-1-5) minmax(0, 1fr) auto; align-items: center; gap: var(--space-2); padding: var(--space-1-5) var(--cw-sidebar-row-padding); border-radius: var(--radius-md); color: var(--fg-secondary); }
+.cw-rail-row { min-height: var(--nav-row-height); padding-block: var(--space-1-5); border-radius: var(--radius-md); color: var(--fg-secondary); }
 .cw-rail-row:hover { background: var(--bg-surface-hover); color: var(--fg-primary); }
 .cw-rail-dot { width: var(--space-1-5); height: var(--space-1-5); border-radius: var(--radius-pill); background: var(--fg-disabled); }
 .cw-rail-dot[data-tone="success"] { background: var(--success); }
@@ -47,13 +82,19 @@
 .cw-rail-dot[data-tone="danger"] { background: var(--destructive); }
 .cw-rail-name { overflow: hidden; font-family: var(--font-sans); font-size: var(--text-secondary); line-height: var(--leading-ui); text-overflow: ellipsis; white-space: nowrap; }
 .cw-rail-state { color: var(--fg-tertiary); font-family: var(--font-sans); font-size: var(--text-micro); line-height: var(--leading-tight); }
-.cw-rail-status { margin: var(--space-3) 0; padding-inline: var(--cw-sidebar-row-padding); color: var(--fg-tertiary); font-size: var(--text-small); }
+.cw-rail-status { margin: var(--space-3) 0; color: var(--fg-tertiary); font-size: var(--text-small); }
 .cw-console-empty-org { margin: var(--space-1) var(--cw-sidebar-gutter) auto; padding: var(--space-4) var(--cw-sidebar-row-padding); border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-tertiary); font-size: var(--text-small); }
 .cw-console-empty-org p { margin: 0 0 var(--space-2); }
 .cw-console-empty-org a { color: var(--accent-text); }
 .cw-console-admin { padding: var(--space-2) var(--cw-sidebar-gutter); border-top: 1px solid var(--border-subtle); }
-.cw-console-admin ul, .cw-console-get-started, .cw-console-footer { display: grid; gap: var(--space-0-5); margin: 0; padding: 0; list-style: none; }
+.cw-console-admin ul, .cw-console-get-started { display: grid; gap: var(--space-0-5); margin: 0; padding: 0; list-style: none; }
 .cw-console-get-started, .cw-console-footer { padding: var(--space-2) var(--cw-sidebar-gutter); border-top: 1px solid var(--border-subtle); }
+/* The signed-in account: its initial on the left anchor, its name on the text
+   line and the menu's chevrons on the right anchor. Its menu opens upward. */
+.cw-account-menu { position: relative; }
+.cw-account-menu > summary { width: 100%; }
+.cw-account-name { min-width: 0; overflow-x: clip; text-overflow: ellipsis; white-space: nowrap; }
+.cw-account-chevrons { width: var(--icon-size-sm); height: var(--icon-size-sm); color: var(--fg-tertiary); }
 
 .cw-console-header { position: relative; display: flex; height: var(--console-header); align-items: center; justify-content: space-between; padding: 0 var(--space-5); border-bottom: 1px solid var(--border-subtle); color: var(--fg-tertiary); }
 .cw-console-breadcrumb { display: flex; align-items: center; gap: var(--space-3); font-family: var(--font-mono); font-size: var(--text-small); line-height: var(--leading-ui); }

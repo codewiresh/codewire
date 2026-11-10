@@ -186,13 +186,17 @@ async function focusGaps(page: Page) {
   return [...gaps];
 }
 
-test("the sidebar theme switch cycles system, light and dark and is kept on the next page", async ({ page }) => {
+test("the account menu's theme switch cycles system, light and dark and is kept on the next page", async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-check");
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
   const html = page.locator("html");
-  const theme = page.locator(".cw-sidebar-slot [data-theme-switch]");
+  // The theme is chosen in one place: the account menu at the foot of the sidebar.
+  const menu = page.locator(".cw-sidebar-slot .cw-account-menu");
+  const theme = menu.locator("[data-theme-switch]");
+  await expect(page.locator(".cw-console-header [data-theme-switch]")).toHaveCount(0);
+  await menu.locator(":scope > summary").click();
   await expect(theme).toHaveText("Theme: System");
   await expect(html).not.toHaveAttribute("data-theme", /./);
   const background = () => page.locator("body").evaluate((body) => getComputedStyle(body).backgroundColor);
@@ -206,6 +210,7 @@ test("the sidebar theme switch cycles system, light and dark and is kept on the 
   await page.goto(`${origin}/reference/fixtures/login.html`);
   await expect(html).toHaveAttribute("data-theme", "light");
   await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
+  await menu.locator(":scope > summary").click();
   await expect(theme).toHaveText("Theme: Light");
   await theme.click();
   await expect(html).toHaveAttribute("data-theme", "dark");
@@ -213,6 +218,7 @@ test("the sidebar theme switch cycles system, light and dark and is kept on the 
   await expect(html).not.toHaveAttribute("data-theme", /./);
   await expect(theme).toHaveText("Theme: System");
 });
+
 
 for (const fixture of fixtures) {
   test(`${fixture} renders within the design contract`, { tag: "@mobile" }, async ({ page }, testInfo) => {

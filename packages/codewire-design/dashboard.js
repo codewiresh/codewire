@@ -1320,3 +1320,98 @@ if (app) {
     }, 1600);
   });
 })();
+
+// The Sandbox rail's tools: sort newest or oldest first (the server lists
+// newest first), and show one status. The choice is the viewer's, kept in
+// this browser, and applies to every rail on the page (the desktop sidebar
+// and the phone drawer) and again after each refresh replaces the list.
+(() => {
+  "use strict";
+  const KEY = "codewire.sandbox-rail-view.v1";
+  const STATUSES = ["all", "running", "starting", "stopped", "failed"];
+  const STATUS_BY_TONE = { success: "running", warning: "starting", neutral: "stopped", danger: "failed" };
+  const read = () => {
+    try {
+      const value = JSON.parse(window.localStorage.getItem(KEY) || "{}");
+      return {
+        order: value.order === "oldest" ? "oldest" : "newest",
+        status: STATUSES.includes(value.status) ? value.status : "all",
+      };
+    } catch {
+      return { order: "newest", status: "all" };
+    }
+  };
+  const view = read();
+  const save = () => {
+    try { window.localStorage.setItem(KEY, JSON.stringify(view)); } catch { /* The page still works without storage. */ }
+  };
+  const apply = () => {
+    for (const rail of document.querySelectorAll("[data-sandbox-rail]")) {
+      const list = rail.querySelector(".cw-rail-list");
+      let empty = rail.querySelector("[data-rail-filter-empty]");
+      if (!list) {
+        empty?.remove();
+        continue;
+      }
+      const items = Array.from(list.children);
+      items.forEach((item, index) => {
+        if (!item.dataset.railIndex) item.dataset.railIndex = String(index);
+      });
+      const direction = view.order === "oldest" ? -1 : 1;
+      items.sort((a, b) => (Number(a.dataset.railIndex) - Number(b.dataset.railIndex)) * direction);
+      list.append(...items);
+      let shown = 0;
+      for (const item of items) {
+        const tone = item.querySelector(".cw-rail-dot")?.dataset.tone || "neutral";
+        const match = view.status === "all" || STATUS_BY_TONE[tone] === view.status;
+        item.hidden = !match;
+        if (match) shown += 1;
+      }
+      if (shown === 0 && items.length > 0) {
+        if (!empty) {
+          empty = document.createElement("p");
+          empty.className = "cw-rail-status";
+          empty.dataset.railFilterEmpty = "";
+          rail.append(empty);
+        }
+        empty.textContent = `No ${view.status} Sandboxes.`;
+        empty.hidden = false;
+      } else if (empty) {
+        empty.hidden = true;
+      }
+    }
+    for (const button of document.querySelectorAll("[data-rail-sort]")) {
+      button.setAttribute("aria-label", view.order === "oldest" ? "Sort: oldest first" : "Sort: newest first");
+      const use = button.querySelector("use");
+      if (use) use.setAttribute("href", use.getAttribute("href").replace(/#icon-[a-z-]+$/, view.order === "oldest" ? "#icon-sort-asc" : "#icon-sort"));
+    }
+    for (const menu of document.querySelectorAll("[data-rail-filter]")) {
+      menu.dataset.active = String(view.status !== "all");
+      for (const option of menu.querySelectorAll("[data-rail-filter-value]")) {
+        option.setAttribute("aria-pressed", String(option.dataset.railFilterValue === view.status));
+      }
+      menu.querySelector("summary")?.setAttribute("aria-label", view.status === "all" ? "Filter by status" : `Filter by status: ${view.status}`);
+    }
+  };
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
+    if (event.target.closest("[data-rail-sort]")) {
+      view.order = view.order === "oldest" ? "newest" : "oldest";
+      save();
+      apply();
+      return;
+    }
+    const option = event.target.closest("[data-rail-filter-value]");
+    if (option && STATUSES.includes(option.dataset.railFilterValue)) {
+      view.status = option.dataset.railFilterValue;
+      save();
+      apply();
+      option.closest("details")?.removeAttribute("open");
+    }
+  });
+  document.addEventListener("htmx:afterSwap", (event) => {
+    if (event.target instanceof Element && event.target.matches("[data-sandbox-rail]")) apply();
+  });
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", apply);
+  else apply();
+})();

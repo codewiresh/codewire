@@ -211,7 +211,7 @@ mod tests {
         }
         assert!(
             template
-                .contains("href=\"{{ page.list_url }}\" aria-label=\"Back to Sandboxes\">←</a>")
+                .contains("href=\"{{ page.list_url }}\" aria-label=\"Back to Sandboxes\"><svg class=\"cw-icon\" aria-hidden=\"true\"><use href=\"/assets/codewire/icons-v2.svg#icon-arrow-left\"/></svg></a>")
         );
         assert!(template.contains("href=\"{{ page.list_context.detail_url(organization.slug, page.environment.id) }}\" data-sandbox-observation-reload"));
         assert!(!template.contains("cw-action-menu--danger"));

@@ -422,18 +422,30 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
 // What each theme paints. The terminal keeps its own dark surface and text in
 // both, so the surface holding its text is what shows the output stays readable.
 const THEMES = {
-  light: { name: "Light", background: "rgb(255, 255, 255)", text: "rgb(0, 0, 0)" },
-  dark: { name: "Dark", background: "rgb(10, 10, 10)", text: "rgb(219, 209, 173)" },
+  light: { background: "rgb(255, 255, 255)", text: "rgb(0, 0, 0)" },
+  dark: { background: "rgb(10, 10, 10)", text: "rgb(219, 209, 173)" },
 } as const;
 
-// The sidebar switch on the live workspace: each choice repaints the page at
-// once, stays on the next page at both widths, and leaves the shell attached.
+// The account menu's switch on the live workspace: each choice repaints the
+// page at once, stays on the next page at both widths, and leaves the shell
+// attached. A Sandbox page has no console header, so its switch is in the
+// account menu at the foot of the sidebar.
 // Colours only; this helper takes no screenshots.
 async function themes(page: Page, terminal: Locator, rows: Locator, options: {
   slug: string; detailPath: string; sessionId: string; pid: string; send: (command: string) => Promise<void>;
 }): Promise<void> {
   const { slug, detailPath, sessionId, pid, send } = options;
-  const toggle = page.locator(".cw-sidebar-slot [data-theme-switch]");
+  const menu = page.locator(".cw-sidebar-slot .cw-account-menu");
+  const toggle = menu.locator("[data-theme-switch]");
+  // Opens the account menu, checks the choice shown, switches once and closes it.
+  const switchTheme = async (from: string, to: string) => {
+    await menu.locator(":scope > summary").click();
+    await expect(toggle).toHaveAttribute("data-theme-current", from);
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("data-theme-current", to);
+    await menu.locator(":scope > summary").click();
+    await expect(menu).toHaveJSProperty("open", false);
+  };
   const painted = async (theme: keyof typeof THEMES) => {
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     await expect(page.locator("body")).toHaveCSS("background-color", THEMES[theme].background);
@@ -446,13 +458,11 @@ async function themes(page: Page, terminal: Locator, rows: Locator, options: {
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", sessionId);
     await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
   };
-  let shown = "System";
+  let shown = "system";
   for (const theme of ["light", "dark"] as const) {
     await stage(`theme-${theme}`, async () => {
-      await expect(toggle).toHaveText(`Theme: ${shown}`);
-      await toggle.click();
-      shown = THEMES[theme].name;
-      await expect(toggle).toHaveText(`Theme: ${shown}`);
+      await switchTheme(shown, theme);
+      shown = theme;
       await terminalPainted(theme);
     });
     await stage(`theme-${theme}-pages`, async () => {
@@ -468,9 +478,7 @@ async function themes(page: Page, terminal: Locator, rows: Locator, options: {
     });
   }
   await stage("theme-system", async () => {
-    await expect(toggle).toHaveText(`Theme: ${shown}`);
-    await toggle.click();
-    await expect(toggle).toHaveText("Theme: System");
+    await switchTheme(shown, "system");
     await expect(page.locator("html")).not.toHaveAttribute("data-theme", /./);
     await send("printf '__UX_THEME__%s__%s__\\n' \"$CW_UX_SESSION\" \"$$\"");
     await expect(rows).toContainText(`__UX_THEME__preserved__${pid}__`);

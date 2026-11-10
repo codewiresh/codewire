@@ -751,6 +751,17 @@ impl DashboardView {
             )
     }
 
+    /// The account row's monogram: the signed-in user's first letter.
+    pub(crate) fn user_initial(&self) -> String {
+        self.user_name
+            .chars()
+            .find(|character| character.is_alphanumeric())
+            .map_or_else(
+                || "·".to_owned(),
+                |initial| initial.to_uppercase().collect(),
+            )
+    }
+
     pub(crate) fn select_organization(
         &mut self,
         organization: &OrganizationContext,

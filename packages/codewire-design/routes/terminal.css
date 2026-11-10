@@ -4,15 +4,23 @@
    status bar. The header, tab bar and status bar keep their own height; the
    terminal takes the rest and refits as it changes. */
 .cw-terminal-page { overflow: hidden; background: var(--bg-base); }
+/* One left line, the workspace's gutter: the notice boxes start on it, and
+   the back arrow and the new-terminal plus draw from it. An icon button
+   starts before the line by its inset around the icon and the glyph's own
+   inset, so the visible arrow and plus meet the line, not their boxes. */
+.cw-workspace {
+  --cw-workspace-gutter: var(--space-4);
+  --cw-workspace-icon-start: calc(var(--cw-workspace-gutter) - (var(--icon-button-size) - var(--icon-size)) / 2 - var(--icon-glyph-inset));
+}
 .cw-workspace { display: grid; height: 100dvh; min-width: 0; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; background: var(--bg-base); }
 
 /* Header: back, name, state and resources; the actions sit on the same line. */
-.cw-workspace-header { display: flex; min-width: 0; min-height: var(--console-header); align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-4); border-bottom: var(--border-width) solid var(--border-subtle); background: var(--bg-base); }
+.cw-workspace-header { display: flex; min-width: 0; min-height: var(--console-header); align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--cw-workspace-gutter) var(--space-2) var(--cw-workspace-icon-start); border-bottom: var(--border-width) solid var(--border-subtle); background: var(--bg-base); }
 .cw-workspace-title { display: flex; min-width: 0; align-items: center; gap: var(--space-3); }
 .cw-workspace-title h1 { min-width: 0; margin: 0; overflow: hidden; color: var(--fg-primary); font-family: var(--font-sans); font-size: var(--text-body); font-weight: var(--weight-semibold); line-height: var(--leading-tight); text-overflow: ellipsis; white-space: nowrap; }
 .cw-workspace-title .cw-status { flex: none; }
 .cw-workspace-resources { flex: none; color: var(--fg-tertiary); font-family: var(--font-mono); font-size: var(--text-small); line-height: var(--leading-tight); white-space: nowrap; }
-.cw-terminal-back { display: inline-grid; width: var(--control-height-sm); height: var(--control-height-sm); flex: none; place-items: center; border-radius: var(--radius-md); color: var(--fg-secondary); font-size: var(--text-title); line-height: var(--leading-tight); text-decoration: none; }
+.cw-terminal-back { display: inline-grid; width: var(--icon-button-size); height: var(--icon-button-size); flex: none; place-items: center; border-radius: var(--radius-md); color: var(--fg-secondary); text-decoration: none; }
 .cw-terminal-back:hover { background: var(--bg-surface-hover); color: var(--fg-primary); }
 .cw-workspace-actions { display: flex; flex: none; align-items: center; gap: var(--space-2); }
 .cw-workspace-actions form { display: contents; }
@@ -28,7 +36,7 @@
    up the terminal's minimum output area. */
 .cw-workspace-main { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow-x: hidden; overflow-y: auto; }
 .cw-workspace-main > * { flex: none; min-width: 0; }
-.cw-workspace-notices { display: grid; gap: var(--space-2); padding: var(--space-2) var(--space-4); border-bottom: var(--border-width) solid var(--border-subtle); }
+.cw-workspace-notices { display: grid; gap: var(--space-2); padding: var(--space-2) var(--cw-workspace-gutter); border-bottom: var(--border-width) solid var(--border-subtle); }
 .cw-workspace-notices:not(:has(> :not([hidden]))) { display: none; }
 .cw-workspace-notices > .cw-field-help { justify-self: start; }
 .cw-workspace-attention { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-3); }
@@ -65,6 +73,8 @@
 .cw-terminal-tab-close:disabled { color: var(--fg-disabled); cursor: not-allowed; }
 .cw-terminal-tab-close .cw-icon { width: var(--icon-size-sm); height: var(--icon-size-sm); }
 .cw-terminal-new { align-self: center; margin-inline: var(--space-2); }
+/* With no tab open the plus is the first thing on the bar. */
+.cw-terminal-tabs-bar:not(:has(.cw-terminal-tab-item)) > .cw-terminal-new { margin-inline-start: var(--cw-workspace-icon-start); }
 .cw-terminal-menu { align-self: center; margin: 0 var(--space-2) 0 auto; }
 .cw-terminal-menu-panel { width: min(20rem, calc(100vw - var(--space-8))); }
 /* Each tab's own actions; only the selected tab's group is shown. */
@@ -166,14 +176,18 @@ dialog[data-sandbox-resize] > .cw-dialog-body > p:first-child { margin-top: 0; }
 @media (max-width: 48rem) {
   /* Phones: the name and state on one line and the actions on the next; the
      resources and the Sandbox ID move to the More actions menu. */
-  .cw-workspace-header { flex-wrap: wrap; row-gap: var(--space-2); padding-inline: var(--space-3); }
+  .cw-workspace { --cw-workspace-gutter: var(--space-3); }
+  .cw-workspace-header { flex-wrap: wrap; row-gap: var(--space-2); }
   .cw-workspace-title { flex: 1 1 100%; gap: var(--space-2); }
   .cw-workspace-resources, .cw-workspace-facts > .cw-workspace-fact-id { display: none; }
   /* The actions row, not the More actions button, anchors its menu, so the
      panel's end meets the row's end and stays on screen. */
   .cw-workspace-actions { position: relative; flex: 1 1 100%; flex-wrap: wrap; }
+  /* The header starts at the arrow's glyph; its own row of buttons starts on
+     the gutter, as boxes do. */
+  .cw-workspace-actions { margin-inline-start: calc(var(--cw-workspace-gutter) - var(--cw-workspace-icon-start)); }
   .cw-workspace-actions > .cw-menu { position: static; }
-  .cw-workspace-notices, .cw-terminal-session-message, .cw-terminal-limit, .cw-terminal-notice, .cw-workspace-statusbar { padding-inline: var(--space-3); }
+  .cw-terminal-session-message, .cw-terminal-limit, .cw-terminal-notice, .cw-workspace-statusbar { padding-inline: var(--space-3); }
   .cw-setup-progress { padding-inline: var(--space-3); }
   .cw-durable-terminal .cw-terminal-panel .terminal { padding-inline: var(--space-3); }
   .cw-terminal-tab { padding-left: var(--space-3); }

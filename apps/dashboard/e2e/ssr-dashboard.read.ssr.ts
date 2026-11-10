@@ -38,7 +38,7 @@ test.describe("server-rendered dashboard", () => {
     const response = await page.goto("/dashboard/");
     expect(response?.status()).toBe(200);
     await expect(page).toHaveURL(/\/[a-z0-9-]+\/$/);
-    await expect(page.getByRole("heading", { name: "Sandboxes", exact: true })).toBeVisible();
+    await expect(page.locator("main").getByRole("heading", { name: "Sandboxes", exact: true })).toBeVisible();
     await expect(page.getByRole("navigation", { name: "Main navigation" }).first()).toBeVisible();
     const sandboxNavigation = page.locator(".cw-sidebar-slot").getByRole("region", {
       name: "Sandboxes",

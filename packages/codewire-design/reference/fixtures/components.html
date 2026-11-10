@@ -201,12 +201,12 @@
             <button class="cw-button cw-button--small" type="submit">Apply filter</button>
           </form>
         </details>
+        <button class="cw-icon-button cw-theme-switch" type="button" data-theme-switch data-theme-current="system" aria-label="Theme: System. Switch theme" title="Theme"><svg class="cw-icon cw-theme-icon cw-theme-icon--system" aria-hidden="true"><use href="../../assets/icons.svg#icon-auto"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--light" aria-hidden="true"><use href="../../assets/icons.svg#icon-sun"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--dark" aria-hidden="true"><use href="../../assets/icons.svg#icon-moon"/></svg></button>
         <details class="cw-menu cw-user-menu" open>
           <summary class="cw-button cw-button--outline cw-button--small cw-button--pill"><span>E2E Owner</span><svg class="cw-icon cw-user-chevrons" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevrons-up-down"/></svg></summary>
-          <div class="cw-menu-panel cw-menu-panel--end">
+          <div class="cw-menu-panel cw-menu-panel--end cw-menu-panel--up">
             <div class="cw-user-menu-identity"><strong>E2E Owner</strong><span>Authenticated account</span></div>
             <a href="#menus-title">Settings</a>
-            <a href="#menus-title">Docs</a>
             <form action="#"><button class="cw-menu-item" type="button">Sign Out</button></form>
           </div>
         </details>
@@ -250,7 +250,7 @@
   <section class="cw-card" aria-labelledby="theme-switch-title">
     <header class="cw-card-header"><h2 id="theme-switch-title" class="cw-card-title">Theme switch</h2><p class="cw-card-description">System, light or dark, one choice for every page (theme.js). It names its state in text and shows the matching icon; this one switches this page.</p></header>
     <div class="cw-card-content">
-      <ul class="cw-console-footer"><li><button class="cw-nav-link cw-theme-switch" type="button" data-theme-switch data-theme-current="system"><svg class="cw-icon cw-theme-icon cw-theme-icon--system" aria-hidden="true"><use href="../../assets/icons.svg#icon-monitor"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--light" aria-hidden="true"><use href="../../assets/icons.svg#icon-sun"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--dark" aria-hidden="true"><use href="../../assets/icons.svg#icon-moon"/></svg><span data-theme-label>Theme: System</span></button></li></ul>
+      <div class="cw-console-footer"><details class="cw-menu cw-account-menu"><summary class="cw-button cw-button--ghost"><span class="cw-org-initial" aria-hidden="true">E</span><span class="cw-account-name">Example user</span><svg class="cw-icon cw-account-chevrons" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevrons-up-down"/></svg></summary><div class="cw-menu-panel cw-menu-panel--fill cw-menu-panel--up"><div class="cw-user-menu-identity"><strong>Example user</strong><span>Authenticated account</span></div><a href="settings-account.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-settings"/></svg>Settings</a><button class="cw-menu-item cw-theme-switch" type="button" data-theme-switch data-theme-current="system"><svg class="cw-icon cw-theme-icon cw-theme-icon--system" aria-hidden="true"><use href="../../assets/icons.svg#icon-auto"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--light" aria-hidden="true"><use href="../../assets/icons.svg#icon-sun"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--dark" aria-hidden="true"><use href="../../assets/icons.svg#icon-moon"/></svg><span data-theme-label>Theme: System</span></button><form data-sign-out><button class="cw-menu-item" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-log-out"/></svg>Sign Out</button></form></div></details></div>
     </div>
   </section>
 
