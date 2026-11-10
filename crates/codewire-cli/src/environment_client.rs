@@ -677,9 +677,6 @@ impl EnvironmentClient {
             .await
             .map_err(display_client_error)?;
         Ok(StartResponse {
-            status: StatusResponse {
-                status: response.status,
-            },
             completes_with_log: response.completes_with_log,
         })
     }
@@ -1070,7 +1067,6 @@ impl EnvironmentClient {
 /// `complete` row once the environment is usable (#3938).
 #[derive(Debug)]
 pub struct StartResponse {
-    pub status: StatusResponse,
     pub completes_with_log: bool,
 }
 

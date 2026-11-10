@@ -923,7 +923,7 @@ async fn handle_platform_env_command_with_created(
                 return Ok(None);
             }
             let caps = super::lifecycle_output::capabilities(args.output);
-            let response = Box::pin(start_platform_environment_with_progress(
+            Box::pin(start_platform_environment_with_progress(
                 &environment_client,
                 &org_id,
                 &environment_id,
@@ -932,6 +932,10 @@ async fn handle_platform_env_command_with_created(
                 &InterruptNotice::new(VmLocation::Cloud, "start", &args.environment),
             ))
             .await?;
+            // The start has finished, so report its state, as stop does.
+            let response = StatusResponse {
+                status: "running".to_owned(),
+            };
             print_env_status(&args.environment, &response, args.output)?;
         }
         EnvCommand::Restart(_) => {
@@ -3232,7 +3236,7 @@ async fn start_platform_environment_with_progress(
     began: Instant,
     caps: &crate::output::Capabilities,
     interrupt: &InterruptNotice,
-) -> anyhow::Result<StatusResponse> {
+) -> anyhow::Result<()> {
     // Rows up to now belong to earlier operations, including the terminal
     // row that would otherwise end the stream at once.
     let cursor = client
@@ -3280,7 +3284,7 @@ async fn start_platform_environment_with_progress(
     })
     .await;
     match waited {
-        Some(result) => result.map(|()| started.status),
+        Some(result) => result,
         None => {
             view.finish()?;
             Err(interrupt.error(true))

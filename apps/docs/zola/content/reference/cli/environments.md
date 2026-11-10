@@ -138,7 +138,9 @@ cw rm ENV [-y]       # a host asks first and keeps its project directory; a VM o
 A cloud `start` returns once the environment is usable: its Git identity is
 set and its startup script has finished, as after `create`. A long startup
 script makes the start as long, so start servers in a session instead.
-Ctrl-C ends only the wait; the start carries on.
+Ctrl-C ends only the wait; the start carries on. With `--output json`, a
+cloud `start` prints `{"status": "running"}` when it returns, and `stop`
+prints `{"status": "stopped"}`.
 
 `stop` and `restart` without `--session` act on the whole environment and
 need `ENV` (or `--in ENV`). With `--session` they act on one session instead;
