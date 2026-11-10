@@ -90,9 +90,6 @@ Billing is disabled unless `STRIPE_SECRET_KEY` is set.
 | `CODEWIRE_STRIPE_REQUIRE_TEST_KEY` | No | `on` makes billing refuse to start with anything but a test key, so a test environment can never charge a real card. Unset, empty or `off` accepts any key. Any other value stops billing. | `on` |
 | `CODEWIRE_CREDIT_ENFORCEMENT` | No | Set on billing and orchestration. `on` enforces prepaid compute credit: a new card grants the free credit, an empty balance charges the card, creates and starts are refused without credit, and running sandboxes stop 24 hours after credit runs out. Unset, empty or `off` does none of these, and metering still draws usage from the balance. Any other value stops the service. | `on` |
 
-| `CODEWIRE_STRIPE_REQUIRE_TEST_KEY` | No | `on` makes billing refuse to start with anything but a test key, so a test environment can never charge a real card. Unset, empty or `off` accepts any key. Any other value stops billing. | `on` |
-| `CODEWIRE_CREDIT_ENFORCEMENT` | No | Set on billing and orchestration. `on` enforces prepaid compute credit: a new card grants the free credit, an empty balance charges the card, creates and starts are refused without credit, and running sandboxes stop 24 hours after credit runs out. Unset, empty or `off` does none of these, and metering still draws usage from the balance. Any other value stops the service. | `on` |
-
 With Stripe configured, every billing replica checks its webhook endpoint at
 startup and then hourly, using its own key. It lists the account's webhook
 endpoints and requires exactly one endpoint for the webhook URL. That
