@@ -6,7 +6,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use rcgen::{
-    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    BasicConstraints, Certificate, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+    KeyUsagePurpose,
 };
 use tempfile::TempDir;
 
@@ -14,7 +15,9 @@ use crate::{ServerTlsFiles, TlsListener};
 
 /// A synthetic CA and a server identity it issued for one DNS name.
 pub struct SyntheticPki {
-    _directory: TempDir,
+    directory: TempDir,
+    ca: Certificate,
+    ca_key: KeyPair,
     /// The CA's public certificate, as a mounted roots file.
     pub roots: PathBuf,
     /// The server identity for the name passed to [`SyntheticPki::new`].
@@ -43,10 +46,30 @@ impl SyntheticPki {
         std::fs::write(&certificate, leaf.pem()).expect("write synthetic leaf");
         std::fs::write(&key, leaf_key.serialize_pem()).expect("write synthetic key");
         Self {
-            _directory: directory,
+            directory,
+            ca,
+            ca_key,
             roots,
             files: ServerTlsFiles::new(certificate, key).expect("synthetic identity paths"),
         }
+    }
+
+    /// A client certificate chain and key this CA issued for `dns_name`, as
+    /// mounted files. A server that passes [`Self::roots`] to
+    /// [`ServerTlsFiles::with_client_roots`] verifies it.
+    pub fn client_identity(&self, dns_name: &str) -> (PathBuf, PathBuf) {
+        let key = KeyPair::generate().expect("synthetic client key");
+        let mut leaf = CertificateParams::new(vec![dns_name.to_owned()]).expect("synthetic client");
+        leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        leaf.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        let leaf = leaf
+            .signed_by(&key, &self.ca, &self.ca_key)
+            .expect("synthetic client certificate");
+        let certificate = self.directory.path().join(format!("{dns_name}.client.crt"));
+        let key_path = self.directory.path().join(format!("{dns_name}.client.key"));
+        std::fs::write(&certificate, leaf.pem()).expect("write synthetic client certificate");
+        std::fs::write(&key_path, key.serialize_pem()).expect("write synthetic client key");
+        (certificate, key_path)
     }
 
     /// Serve `app` over TLS with this identity on an ephemeral loopback port

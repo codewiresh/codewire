@@ -1,6 +1,7 @@
 //! TLS for administrator-owned mounted service identities and public trust.
 //!
-//! New server handshakes reload the mounted identity. Each client `connect`
+//! New server handshakes reload the mounted identity, and the client roots of
+//! an identity that asks for client certificates. Each client `connect`
 //! or Connect transport call loads current, explicit roots into a fresh
 //! channel. Existing connections
 //! retain their original TLS session; callers own their authority deadlines
@@ -11,6 +12,7 @@ mod client;
 mod connect;
 mod files;
 mod incoming;
+mod peer;
 
 pub use client::ClientTlsEndpoint;
 pub use connect::ConnectOriginTransport;
@@ -18,7 +20,8 @@ pub use connect::ConnectOriginTransport;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 pub use files::{ServerTlsFiles, read_optional_roots};
-pub use incoming::{TlsIncoming, TlsListener};
+pub use incoming::{PeerTlsListener, TlsIncoming, TlsListener};
+pub use peer::{TlsPeer, VerifiedClient};
 
 /// A server connection after [`ServerTlsFiles::accept_http1_only`].
 pub type ServerTlsStream = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;

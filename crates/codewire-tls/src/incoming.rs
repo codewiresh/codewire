@@ -10,7 +10,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Sleep;
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
-use crate::{MAX_HANDSHAKES, ServerTlsFiles, TLS_TIMEOUT, TlsError};
+use crate::{MAX_HANDSHAKES, ServerTlsFiles, TLS_TIMEOUT, TlsError, TlsPeer, VerifiedClient};
 
 type Handshake = Pin<Box<dyn Future<Output = Result<TlsStream<TcpStream>, TlsError>> + Send>>;
 
@@ -41,6 +41,22 @@ impl TlsIncoming {
 
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// The next completed handshake and its peer address. A failed handshake
+    /// or accept is skipped; it never ends the listener.
+    async fn accept(&mut self) -> (TlsStream<TcpStream>, SocketAddr) {
+        loop {
+            match self.next().await {
+                Some(Ok(stream)) => {
+                    if let Ok(address) = stream.get_ref().0.peer_addr() {
+                        return (stream, address);
+                    }
+                }
+                Some(Err(_)) => {}
+                None => std::future::pending::<()>().await,
+            }
+        }
     }
 
     #[cfg(test)]
@@ -118,20 +134,62 @@ impl axum::serve::Listener for TlsListener {
     type Addr = SocketAddr;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            match self.incoming.next().await {
-                Some(Ok(stream)) => {
-                    if let Ok(address) = stream.get_ref().0.peer_addr() {
-                        return (stream, address);
-                    }
-                }
-                Some(Err(_)) => {}
-                None => std::future::pending::<()>().await,
-            }
-        }
+        self.incoming.accept().await
     }
 
     fn local_addr(&self) -> io::Result<Self::Addr> {
         Ok(self.incoming.local_addr())
+    }
+}
+
+/// [`TlsListener`] for an identity that asks for client certificates
+/// ([`ServerTlsFiles::with_client_roots`]). Each connection's address is a
+/// [`TlsPeer`], which a handler reads as `ConnectInfo<TlsPeer>` to decide
+/// what that client may do.
+pub struct PeerTlsListener {
+    incoming: TlsIncoming,
+}
+
+impl PeerTlsListener {
+    /// Refuses an identity without client roots, whose peers could never be
+    /// verified.
+    pub fn new(listener: TcpListener, files: ServerTlsFiles) -> Result<Self, TlsError> {
+        if !files.asks_for_client_certificates() {
+            return Err(TlsError::Configuration);
+        }
+        let mut incoming = TlsIncoming::new(listener, files)?;
+        incoming.http1 = true;
+        Ok(Self { incoming })
+    }
+}
+
+impl axum::serve::Listener for PeerTlsListener {
+    type Io = TlsStream<TcpStream>;
+    type Addr = TlsPeer;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (stream, address) = self.incoming.accept().await;
+        let client = stream
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|chain| chain.first())
+            .map(|leaf| VerifiedClient::new(leaf.clone().into_owned()));
+        (stream, TlsPeer { address, client })
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        Ok(TlsPeer {
+            address: self.incoming.local_addr(),
+            client: None,
+        })
+    }
+}
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, PeerTlsListener>>
+    for TlsPeer
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, PeerTlsListener>) -> Self {
+        stream.remote_addr().clone()
     }
 }

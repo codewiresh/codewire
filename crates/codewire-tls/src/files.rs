@@ -32,6 +32,7 @@ type FileResult = Result<Zeroizing<Vec<u8>>, TlsError>;
 pub struct ServerTlsFiles {
     cert_chain: PathBuf,
     key: PathBuf,
+    client_roots: Option<PathBuf>,
 }
 
 impl fmt::Debug for ServerTlsFiles {
@@ -47,7 +48,32 @@ impl ServerTlsFiles {
         if cert_chain == key {
             return Err(TlsError::Configuration);
         }
-        Ok(Self { cert_chain, key })
+        Ok(Self {
+            cert_chain,
+            key,
+            client_roots: None,
+        })
+    }
+
+    /// Also ask each client for a certificate, and verify one that is offered
+    /// against the mounted `roots`, reread by every handshake. A client that
+    /// offers none still connects: the caller decides what an anonymous peer
+    /// may do, from [`crate::TlsPeer::client`]. An offered certificate these
+    /// roots do not trust for client authentication fails the handshake.
+    ///
+    /// Use roots whose authority signs only the intended clients: see
+    /// [`crate::VerifiedClient`] for what verification does not establish.
+    pub fn with_client_roots(mut self, roots: PathBuf) -> Result<Self, TlsError> {
+        validate_path(&roots)?;
+        if roots == self.cert_chain || roots == self.key {
+            return Err(TlsError::Configuration);
+        }
+        self.client_roots = Some(roots);
+        Ok(self)
+    }
+
+    pub(crate) fn asks_for_client_certificates(&self) -> bool {
+        self.client_roots.is_some()
     }
 
     /// Validate current files offline, without caching their contents. A later
@@ -74,10 +100,7 @@ impl ServerTlsFiles {
         .await
         .map_err(|_| TlsError::Timeout)??;
         let mut chain = certificates(&chain)?;
-        let mut roots = RootCertStore::empty();
-        for root in certificates(roots_pem)? {
-            roots.add(root).map_err(|_| TlsError::InvalidPem)?;
-        }
+        let roots = root_store(roots_pem)?;
         let name = rustls::pki_types::ServerName::try_from(dns_name.to_owned())
             .map_err(|_| TlsError::Configuration)?;
         let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
@@ -127,25 +150,61 @@ impl ServerTlsFiles {
     }
 
     async fn load_with_alpn(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<ServerConfig>, TlsError> {
-        let chain = read_regular(&self.cert_chain, MAX_CERTIFICATE_BYTES).await?;
-        let certificates = certificates(&chain)?;
-        let pem = read_regular(&self.key, MAX_KEY_BYTES).await?;
-        let key = private_key(&pem)?;
-        // Borrow the zeroizing DER rather than passing an unguarded owned DER
-        // allocation into with_single_cert. Ring owns the resulting signing key.
-        let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
-            .map_err(|_| TlsError::InvalidPem)?;
-        let identity = CertifiedKey::new(certificates, signing_key);
-        identity.keys_match().map_err(|_| TlsError::InvalidPem)?;
-        let mut config =
-            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .map_err(|_| TlsError::Configuration)?
-                .with_no_client_auth()
-                .with_cert_resolver(Arc::new(SingleCertAndKey::from(identity)));
+        let identity = identity(&self.cert_chain, &self.key).await?;
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let builder = ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .map_err(|_| TlsError::Configuration)?;
+        let builder = match &self.client_roots {
+            None => builder.with_no_client_auth(),
+            Some(roots) => {
+                let roots = root_store(&read_regular(roots, MAX_CERTIFICATE_BYTES).await?)?;
+                let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+                    Arc::new(roots),
+                    provider,
+                )
+                .allow_unauthenticated()
+                .build()
+                .map_err(|_| TlsError::Configuration)?;
+                builder.with_client_cert_verifier(verifier)
+            }
+        };
+        let mut config = builder.with_cert_resolver(Arc::new(identity));
         config.alpn_protocols = alpn;
+        if self.client_roots.is_some() {
+            // A resumed session restores its client certificate without
+            // verifying it again. This configuration serves one handshake, so
+            // nothing could be resumed anyway; say so rather than rely on it.
+            config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+            config.send_tls13_tickets = 0;
+        }
         Ok(Arc::new(config))
     }
+}
+
+/// The current mounted certificate chain and its matching private key.
+pub(crate) async fn identity(cert_chain: &Path, key: &Path) -> Result<SingleCertAndKey, TlsError> {
+    let chain = read_regular(cert_chain, MAX_CERTIFICATE_BYTES).await?;
+    let certificates = certificates(&chain)?;
+    let pem = read_regular(key, MAX_KEY_BYTES).await?;
+    let key = private_key(&pem)?;
+    // Borrow the zeroizing DER rather than passing an unguarded owned DER
+    // allocation into with_single_cert. Ring owns the resulting signing key.
+    let signing_key =
+        rustls::crypto::ring::sign::any_supported_type(&key).map_err(|_| TlsError::InvalidPem)?;
+    let identity = CertifiedKey::new(certificates, signing_key);
+    identity.keys_match().map_err(|_| TlsError::InvalidPem)?;
+    Ok(SingleCertAndKey::from(identity))
+}
+
+/// A trust store of exactly the certificates in `pem`; any malformed member
+/// refuses the whole bundle.
+pub(crate) fn root_store(pem: &[u8]) -> Result<RootCertStore, TlsError> {
+    let mut roots = RootCertStore::empty();
+    for root in certificates(pem)? {
+        roots.add(root).map_err(|_| TlsError::InvalidPem)?;
+    }
+    Ok(roots)
 }
 
 pub(crate) fn validate_path(path: &Path) -> Result<(), TlsError> {

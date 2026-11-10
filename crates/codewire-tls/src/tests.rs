@@ -1008,3 +1008,5 @@ async fn an_optional_trust_bundle_is_absent_valid_or_refused() {
         Err(TlsError::Configuration)
     );
 }
+
+mod client_identity;

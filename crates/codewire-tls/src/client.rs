@@ -7,7 +7,9 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 
 use zeroize::Zeroizing;
 
-use crate::files::{MAX_CERTIFICATE_BYTES, certificates, read_regular, validate_path};
+use crate::files::{
+    MAX_CERTIFICATE_BYTES, certificates, identity, read_regular, root_store, validate_path,
+};
 use crate::{TLS_TIMEOUT, TlsError};
 
 /// One exact HTTPS DNS origin and its purpose-specific public roots. No
@@ -16,6 +18,14 @@ use crate::{TLS_TIMEOUT, TlsError};
 pub struct ClientTlsEndpoint {
     origin: String,
     roots: Roots,
+    identity: Option<ClientIdentity>,
+}
+
+/// A mounted client certificate chain and key, reread on every use.
+#[derive(Clone)]
+struct ClientIdentity {
+    cert_chain: PathBuf,
+    key: PathBuf,
 }
 
 /// Where an endpoint's public roots come from.
@@ -41,6 +51,7 @@ impl ClientTlsEndpoint {
         Ok(Self {
             origin: https_origin,
             roots: Roots::Mounted(roots),
+            identity: None,
         })
     }
 
@@ -55,7 +66,26 @@ impl ClientTlsEndpoint {
         Ok(Self {
             origin: https_origin,
             roots: Roots::Fixed(Arc::from(pem)),
+            identity: None,
         })
+    }
+
+    /// Also present the mounted client certificate to the server, reread on
+    /// every use so a rotation applies to the next connection. Only
+    /// [`Self::rustls_config`] presents it; [`Self::connect`] refuses such
+    /// an endpoint rather than connect without it.
+    pub fn with_client_identity(
+        mut self,
+        cert_chain: PathBuf,
+        key: PathBuf,
+    ) -> Result<Self, TlsError> {
+        validate_path(&cert_chain)?;
+        validate_path(&key)?;
+        if cert_chain == key {
+            return Err(TlsError::Configuration);
+        }
+        self.identity = Some(ClientIdentity { cert_chain, key });
+        Ok(self)
     }
 
     async fn root_bytes(&self) -> Result<Zeroizing<Vec<u8>>, TlsError> {
@@ -96,12 +126,10 @@ fn validate_origin(https_origin: &str) -> Result<(), TlsError> {
 }
 
 impl ClientTlsEndpoint {
-    /// Validate current public roots without contacting the endpoint.
+    /// Validate current public roots, and the client identity if there is
+    /// one, without contacting the endpoint.
     pub async fn validate(&self) -> Result<(), TlsError> {
-        tokio::time::timeout(TLS_TIMEOUT, self.tls_config())
-            .await
-            .map_err(|_| TlsError::Timeout)??;
-        Ok(())
+        self.rustls_config().await.map(|_| ())
     }
 
     /// A fresh channel with current roots on every invocation. This never
@@ -109,6 +137,9 @@ impl ClientTlsEndpoint {
     /// Tonic uses its ring feature unless the trusted binary installed a
     /// process-wide Rustls provider; both use default-safe protocol versions.
     pub async fn connect(&self) -> Result<Channel, TlsError> {
+        if self.identity.is_some() {
+            return Err(TlsError::Configuration);
+        }
         tokio::time::timeout(TLS_TIMEOUT, async {
             let tls = self.tls_config().await?;
             Endpoint::from_shared(self.origin.clone())
@@ -124,24 +155,28 @@ impl ClientTlsEndpoint {
         .map_err(|_| TlsError::Timeout)?
     }
 
-    /// A Rustls client configuration that trusts exactly the current roots.
+    /// A Rustls client configuration that trusts exactly the current roots
+    /// and presents the current client identity, if the endpoint has one.
     /// It names its ring provider rather than a process default, so a binary
     /// that also compiles another provider cannot change or panic its choice.
-    pub(crate) async fn rustls_config(&self) -> Result<rustls::ClientConfig, TlsError> {
-        let bytes = tokio::time::timeout(TLS_TIMEOUT, self.root_bytes())
-            .await
-            .map_err(|_| TlsError::Timeout)??;
-        let mut roots = rustls::RootCertStore::empty();
-        for certificate in certificates(&bytes)? {
-            roots.add(certificate).map_err(|_| TlsError::InvalidPem)?;
-        }
-        Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .map_err(|_| TlsError::Configuration)?
-        .with_root_certificates(roots)
-        .with_no_client_auth())
+    pub async fn rustls_config(&self) -> Result<rustls::ClientConfig, TlsError> {
+        tokio::time::timeout(TLS_TIMEOUT, async {
+            let roots = root_store(&self.root_bytes().await?)?;
+            let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .map_err(|_| TlsError::Configuration)?
+            .with_root_certificates(roots);
+            Ok(match &self.identity {
+                None => builder.with_no_client_auth(),
+                Some(files) => builder.with_client_cert_resolver(Arc::new(
+                    identity(&files.cert_chain, &files.key).await?,
+                )),
+            })
+        })
+        .await
+        .map_err(|_| TlsError::Timeout)?
     }
 
     async fn tls_config(&self) -> Result<ClientTlsConfig, TlsError> {
