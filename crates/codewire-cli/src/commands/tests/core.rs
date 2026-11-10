@@ -2026,3 +2026,127 @@ fn every_list_subcommand_answers_to_ls_and_ls_is_the_one_inventory_route() {
         );
     }
 }
+
+/// A saved sign-in for `issuer` in a fresh config folder, with the saved
+/// configuration and account `cw logout` also removes (#4016).
+fn saved_sign_in(issuer: &str) -> tempfile::TempDir {
+    let config = private_mesh_data_fixture();
+    let credentials = codewire_client::OAuthCredentials::new(
+        issuer,
+        "codewire-cli",
+        "access-token-4016",
+        "refresh-token-4016",
+        1_800_000_000,
+        "openid codewire.api",
+    )
+    .unwrap();
+    codewire_client::CredentialStore::save(
+        &codewire_client::FileCredentialStore::at(crate::config::oauth_credentials_path(
+            config.path(),
+        )),
+        &credentials,
+    )
+    .unwrap();
+    std::fs::write(config.path().join("config.json"), b"{}").unwrap();
+    std::fs::write(config.path().join("account.json"), b"{}").unwrap();
+    config
+}
+
+fn assert_signed_out_locally(config: &std::path::Path) {
+    for leftover in [
+        crate::config::oauth_credentials_path(config),
+        config.join("config.json"),
+        config.join("account.json"),
+    ] {
+        assert!(!leftover.exists(), "cw logout left {}", leftover.display());
+    }
+}
+
+/// The revocation endpoint answering one token type with `status`.
+async fn revocation(server: &wiremock::MockServer, hint: &str, status: u16, calls: u64) {
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/api/oauth/revoke"))
+        .and(wiremock::matchers::body_string_contains(format!(
+            "token_type_hint={hint}"
+        )))
+        .respond_with(wiremock::ResponseTemplate::new(status).set_body_string("revocation refused"))
+        .expect(calls)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn logout_reports_logged_out_only_when_the_server_revoked_both_tokens() {
+    let server = wiremock::MockServer::start().await;
+    revocation(&server, "refresh_token", 200, 1).await;
+    revocation(&server, "access_token", 200, 1).await;
+    let config = saved_sign_in(&server.uri());
+    let outcome = log_out(config.path(), Some(&server.uri())).await.unwrap();
+    assert_eq!(outcome, LogoutOutcome::Revoked);
+    assert_signed_out_locally(config.path());
+    logout_result(outcome).unwrap();
+}
+
+#[tokio::test]
+async fn logout_that_the_server_did_not_confirm_removes_the_sign_in_and_fails() {
+    // An error response for the refresh token, then for the access token
+    // after the refresh token was revoked: either leaves the sign-in alive.
+    for (refresh, access, access_calls) in [(500, 200, 0), (200, 400, 1)] {
+        let server = wiremock::MockServer::start().await;
+        revocation(&server, "refresh_token", refresh, 1).await;
+        revocation(&server, "access_token", access, access_calls).await;
+        let config = saved_sign_in(&server.uri());
+        let outcome = log_out(config.path(), Some(&server.uri())).await.unwrap();
+        let LogoutOutcome::NotConfirmed { reason, access_token_expires_at_unix } = &outcome else {
+            panic!("an error response was reported as {outcome:?}");
+        };
+        assert!(reason.contains("revocation refused"), "{reason}");
+        assert_eq!(*access_token_expires_at_unix, Some(1_800_000_000));
+        assert_signed_out_locally(config.path());
+        let message = logout_result(outcome).unwrap_err().to_string();
+        assert!(message.contains("the server did not confirm it ended"), "{message}");
+        assert!(message.contains("until 2027-01-15 08:00 UTC"), "{message}");
+    }
+}
+
+#[tokio::test]
+async fn logout_with_an_unreachable_server_removes_the_sign_in_and_says_so() {
+    // Nothing listens on loopback port 1 and no process is ever given it,
+    // so the connection is refused.
+    let server_url = "http://127.0.0.1:1".to_owned();
+    let config = saved_sign_in(&server_url);
+    let outcome = log_out(config.path(), Some(&server_url)).await.unwrap();
+    assert_eq!(
+        outcome,
+        LogoutOutcome::NotConfirmed {
+            reason: "the server could not be reached".to_owned(),
+            access_token_expires_at_unix: Some(1_800_000_000),
+        }
+    );
+    assert_signed_out_locally(config.path());
+    assert!(logout_result(outcome).is_err());
+}
+
+#[tokio::test]
+async fn logout_never_sends_a_sign_in_to_another_server() {
+    let server = wiremock::MockServer::start().await;
+    revocation(&server, "refresh_token", 200, 0).await;
+    revocation(&server, "access_token", 200, 0).await;
+    let config = saved_sign_in("https://other.example.test");
+    let outcome = log_out(config.path(), Some(&server.uri())).await.unwrap();
+    let LogoutOutcome::NotConfirmed { reason, .. } = &outcome else {
+        panic!("an issuer mismatch was reported as {outcome:?}");
+    };
+    assert!(reason.contains("not for this Codewire server"), "{reason}");
+    assert_signed_out_locally(config.path());
+}
+
+#[tokio::test]
+async fn logout_without_a_saved_sign_in_only_removes_the_configuration() {
+    let config = private_mesh_data_fixture();
+    std::fs::write(config.path().join("config.json"), b"{}").unwrap();
+    let outcome = log_out(config.path(), None).await.unwrap();
+    assert_eq!(outcome, LogoutOutcome::NoSignIn);
+    assert_signed_out_locally(config.path());
+    logout_result(outcome).unwrap();
+}

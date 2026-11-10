@@ -7,24 +7,110 @@ use super::*;
 pub(crate) async fn handle_logout_command(globals: &Globals) -> anyhow::Result<()> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
-    if let Ok(platform) = resolve_platform(globals, &paths, &env) {
-        if let Some(path) = &platform.oauth_credentials_path {
-            let store = codewire_client::FileCredentialStore::at(path);
-            if let Ok(Some(credentials)) = codewire_client::CredentialStore::load(&store)
-                && let Ok(client) =
-                    codewire_client::OAuthClient::for_server_url(&platform.server_url)
+    let server_url = resolve_platform(globals, &paths, &env)
+        .ok()
+        .map(|platform| platform.server_url);
+    let outcome = log_out(&paths.platform_config_dir, server_url.as_deref()).await?;
+    if config::Env::var(&env, config::CODEWIRE_API_KEY_ENV)
+        .is_some_and(|key| !key.trim().is_empty())
+    {
+        eprintln!(
+            "CODEWIRE_API_KEY is set: cw logout does not end API keys. Delete the key with `cw api-keys delete KEY_ID`."
+        );
+    }
+    logout_result(outcome)
+}
+
+/// What `cw logout` could confirm about the sign-in saved on this machine.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LogoutOutcome {
+    NoSignIn,
+    /// The server revoked the sign-in's refresh and access tokens.
+    Revoked,
+    /// The sign-in was removed from this machine, but the server did not
+    /// confirm it ended (#4016).
+    NotConfirmed {
+        reason: String,
+        access_token_expires_at_unix: Option<u64>,
+    },
+}
+
+/// Revoke the saved sign-in, then remove it and the saved configuration
+/// whatever the server answered: a sign-out that cannot reach the server
+/// still leaves nothing usable on this machine.
+pub(crate) async fn log_out(
+    config_dir: &Path,
+    server_url: Option<&str>,
+) -> anyhow::Result<LogoutOutcome> {
+    let store =
+        codewire_client::FileCredentialStore::at(config::oauth_credentials_path(config_dir));
+    let outcome = match codewire_client::CredentialStore::load(&store) {
+        Ok(None) => LogoutOutcome::NoSignIn,
+        Ok(Some(credentials)) => match revoke_saved_sign_in(&credentials, server_url).await {
+            Ok(()) => LogoutOutcome::Revoked,
+            Err(reason) => LogoutOutcome::NotConfirmed {
+                reason,
+                access_token_expires_at_unix: Some(credentials.expires_at_unix()),
+            },
+        },
+        Err(_) => LogoutOutcome::NotConfirmed {
+            reason: "the saved sign-in could not be read".to_owned(),
+            access_token_expires_at_unix: None,
+        },
+    };
+    codewire_client::CredentialStore::delete(&store).context("remove the saved sign-in")?;
+    config::delete_platform_config(config_dir).context("remove the saved configuration")?;
+    config::delete_account(config_dir).context("remove the saved account")?;
+    Ok(outcome)
+}
+
+async fn revoke_saved_sign_in(
+    credentials: &codewire_client::OAuthCredentials,
+    server_url: Option<&str>,
+) -> Result<(), String> {
+    let server_url = server_url.ok_or("no Codewire server is configured")?;
+    let client = codewire_client::OAuthClient::for_server_url(server_url)
+        .map_err(|error| format!("the server address is invalid ({error})"))?;
+    client
+        .revoke_credentials(credentials)
+        .await
+        .map_err(|error| match error {
+            codewire_client::AuthClientError::Request(error)
+                if error.is_connect() || error.is_timeout() =>
             {
-                let _ = client.revoke_credentials(&credentials).await;
+                "the server could not be reached".to_owned()
             }
-            let _ = codewire_client::CredentialStore::delete(&store);
-        } else if let Ok(client) = codewire_client(&platform) {
-            let _ = client.auth().logout().await;
+            error => error.to_string(),
+        })
+}
+
+/// "Logged out" only when the server confirmed it; otherwise an error, so
+/// the command exits non-zero and scripts notice.
+pub(crate) fn logout_result(outcome: LogoutOutcome) -> anyhow::Result<()> {
+    match outcome {
+        LogoutOutcome::NoSignIn => {
+            eprintln!("No sign-in was saved on this machine; removed the saved configuration.");
+            Ok(())
+        }
+        LogoutOutcome::Revoked => {
+            eprintln!("Logged out; the server ended this sign-in.");
+            Ok(())
+        }
+        LogoutOutcome::NotConfirmed {
+            reason,
+            access_token_expires_at_unix,
+        } => {
+            let until = access_token_expires_at_unix
+                .and_then(|seconds| i64::try_from(seconds).ok())
+                .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+                .map(|expiry| format!(" until {}", expiry.format("%Y-%m-%d %H:%M UTC")))
+                .unwrap_or_default();
+            anyhow::bail!(
+                "Removed the sign-in from this machine, but the server did not confirm it ended: {reason}. \
+                 Its access token stays valid{until}, and its refresh token until it expires on the server."
+            )
         }
     }
-    let _ = config::delete_platform_config(&paths.platform_config_dir);
-    let _ = config::delete_account(&paths.platform_config_dir);
-    eprintln!("Logged out.");
-    Ok(())
 }
 
 pub(crate) async fn handle_whoami_command(

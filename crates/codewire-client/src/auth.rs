@@ -962,11 +962,15 @@ impl OAuthClient {
     }
 
     pub async fn revoke(&self, token: &str) -> Result<(), AuthClientError> {
+        self.revoke_token(token, "refresh_token").await
+    }
+
+    async fn revoke_token(&self, token: &str, hint: &str) -> Result<(), AuthClientError> {
         let response = self
             .json_request(self.http.post(self.revocation_endpoint.clone()).form(&[
                 ("client_id", CODEWIRE_CLI_OAUTH_CLIENT_ID),
                 ("token", token),
-                ("token_type_hint", "refresh_token"),
+                ("token_type_hint", hint),
             ]))
             .send()
             .await?;
@@ -974,7 +978,10 @@ impl OAuthClient {
         Ok(())
     }
 
-    /// Revoke a persisted refresh token without exposing it to the caller.
+    /// Revoke a persisted sign-in without exposing its tokens to the caller.
+    /// The server revokes exactly the token it is given, so the refresh token
+    /// and the access token are each revoked; the sign-in has ended only when
+    /// both succeed (#4016).
     pub async fn revoke_credentials(
         &self,
         credentials: &OAuthCredentials,
@@ -984,7 +991,10 @@ impl OAuthClient {
                 message: "OAuth credentials are not for this Codewire server".to_string(),
             });
         }
-        self.revoke(credentials.refresh_token()).await
+        self.revoke_token(credentials.refresh_token(), "refresh_token")
+            .await?;
+        self.revoke_token(&credentials.access_token, "access_token")
+            .await
     }
 
     async fn token_request(

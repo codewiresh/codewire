@@ -45,7 +45,13 @@ cw whoami [--output json]
 ```
 
 `login` needs a configured server (run `setup` once, or pass `--server`).
-`logout` revokes the sign-in and removes the saved configuration.
+`logout` asks the server to end the sign-in, then removes it and the saved
+configuration from this machine. It says "Logged out" only when the server
+confirmed the sign-in ended. When it could not confirm (the server was
+unreachable or refused), the sign-in is still removed from this machine, but
+`logout` exits non-zero, names the reason, and says until when the sign-in's
+access token stays valid. `logout` never ends an API key: with
+`CODEWIRE_API_KEY` set it says so; delete the key with `cw api-keys delete`.
 
 ## cw org
 
