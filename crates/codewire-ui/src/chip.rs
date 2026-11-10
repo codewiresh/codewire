@@ -26,7 +26,7 @@ pub fn option_chip(label: impl Into<SharedString>, selected: bool) -> gpui::Div 
         base.bg(theme.surface)
             .border_color(theme.border)
             .text_color(theme.foreground)
-            .hover(|s| s.bg(hover_bg))
+            .hover_style(|s| s.bg(hover_bg))
             .child(label.into())
     }
 }

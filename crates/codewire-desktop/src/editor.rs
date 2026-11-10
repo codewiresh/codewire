@@ -6,10 +6,10 @@
 use crate::file_browser::FileSource;
 use crate::theme::Theme;
 use gpui::{
-    App, Bounds, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId, Pixels,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UniformListScrollHandle, Window,
-    actions, div, fill, point, prelude::*, px, size, uniform_list,
+    App, Bounds, CaretPosition, Context, CursorStyle, Element, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId,
+    Pixels, ShapedLine, SharedString, Style, TextAlign, TextRun, UTF16Selection,
+    UniformListScrollHandle, Window, actions, div, point, prelude::*, px, size, uniform_list,
 };
 use std::ops::Range;
 use unicode_segmentation::*;
@@ -89,6 +89,15 @@ pub struct EditorView {
     /// Layout cache for the active cursor line (used by EditorLineElement)
     active_line_layout: Option<ShapedLine>,
     active_line_bounds: Option<Bounds<Pixels>>,
+    active_line_height: Option<Pixels>,
+}
+
+fn x_for_index(layout: &ShapedLine, index: usize, line_height: Pixels) -> Pixels {
+    layout
+        .platform_layout
+        .caret_bounds(CaretPosition::attached_to_next_cluster(index), line_height)
+        .map(|bounds| bounds.origin.x)
+        .unwrap_or_default()
 }
 
 impl EventEmitter<FileModified> for EditorView {}
@@ -118,6 +127,7 @@ impl EditorView {
             focus_handle: cx.focus_handle(),
             active_line_layout: None,
             active_line_bounds: None,
+            active_line_height: None,
         };
 
         Self::spawn_load(source, cx);
@@ -149,8 +159,7 @@ impl EditorView {
                             view.status = EditorStatus::Loaded;
                             cx.notify();
                         });
-                    })
-                    .ok();
+                    });
                 }
                 Ok(Err(e)) => {
                     cx.update(|cx| {
@@ -158,8 +167,7 @@ impl EditorView {
                             view.status = EditorStatus::Error(e);
                             cx.notify();
                         });
-                    })
-                    .ok();
+                    });
                 }
                 Err(_) => {
                     cx.update(|cx| {
@@ -167,8 +175,7 @@ impl EditorView {
                             view.status = EditorStatus::Error("Load cancelled".into());
                             cx.notify();
                         });
-                    })
-                    .ok();
+                    });
                 }
             }
         })
@@ -472,8 +479,7 @@ impl EditorView {
                             });
                             cx.notify();
                         });
-                    })
-                    .ok();
+                    });
                 }
                 Ok(Err(e)) => {
                     tracing::error!("Save failed: {}", e);
@@ -482,8 +488,7 @@ impl EditorView {
                             view.status = EditorStatus::Loaded;
                             cx.notify();
                         });
-                    })
-                    .ok();
+                    });
                 }
                 Err(_) => {
                     cx.update(|cx| {
@@ -491,8 +496,7 @@ impl EditorView {
                             view.status = EditorStatus::Loaded;
                             cx.notify();
                         });
-                    })
-                    .ok();
+                    });
                 }
             }
         })
@@ -724,6 +728,7 @@ impl EntityInputHandler for EditorView {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let last_layout = self.active_line_layout.as_ref()?;
+        let line_height = self.active_line_height?;
         let range = self.range_from_utf16(&range_utf16);
         let (cursor_line, _) = self.byte_offset_to_line_col(self.cursor_offset());
         let line_start = self.line_col_to_byte_offset(cursor_line, 0);
@@ -732,11 +737,11 @@ impl EntityInputHandler for EditorView {
 
         Some(Bounds::from_corners(
             point(
-                bounds.left() + last_layout.x_for_index(local_start),
+                bounds.left() + x_for_index(last_layout, local_start, line_height),
                 bounds.top(),
             ),
             point(
-                bounds.left() + last_layout.x_for_index(local_end),
+                bounds.left() + x_for_index(last_layout, local_end, line_height),
                 bounds.bottom(),
             ),
         ))
@@ -751,7 +756,13 @@ impl EntityInputHandler for EditorView {
         let line_bounds = self.active_line_bounds?;
         let last_layout = self.active_line_layout.as_ref()?;
         let local = line_bounds.localize(&point)?;
-        let utf8_index = last_layout.index_for_x(point.x - local.x)?;
+        let utf8_index = last_layout
+            .platform_layout
+            .byte_index_from_pixel_point(
+                gpui::point(point.x - local.x, px(0.)),
+                self.active_line_height?,
+            )
+            .ok()?;
 
         let (cursor_line, _) = self.byte_offset_to_line_col(self.cursor_offset());
         let line_start = self.line_col_to_byte_offset(cursor_line, 0);
@@ -972,14 +983,16 @@ impl Element for EditorLineElement {
             background_color: None,
             underline: None,
             strikethrough: None,
+            letter_spacing: None,
         };
 
         let font_size = style.font_size.to_pixels(window.rem_size());
+        let line_height = window.line_height();
         let shaped = window
             .text_system()
-            .shape_line(display_text, font_size, &[run], None);
+            .shape_line(display_text, font_size, &[run]);
 
-        let cursor_x = shaped.x_for_index(cursor_col);
+        let cursor_x = x_for_index(&shaped, cursor_col, line_height);
 
         // Determine selection within this line
         let line_end = line_start + line_text.len();
@@ -1001,31 +1014,31 @@ impl Element for EditorLineElement {
 
         let (selection, cursor_quad) = if has_selection_on_line {
             (
-                Some(fill(
-                    Bounds::from_corners(
+                Some(
+                    gpui::PaintQuad::new(Bounds::from_corners(
                         point(
-                            bounds.left() + shaped.x_for_index(sel_start_in_line),
+                            bounds.left() + x_for_index(&shaped, sel_start_in_line, line_height),
                             bounds.top(),
                         ),
                         point(
-                            bounds.left() + shaped.x_for_index(sel_end_in_line),
+                            bounds.left() + x_for_index(&shaped, sel_end_in_line, line_height),
                             bounds.bottom(),
                         ),
-                    ),
-                    gpui::rgba(0x89b4fa30),
-                )),
+                    ))
+                    .background(gpui::rgba(0x89b4fa30)),
+                ),
                 None,
             )
         } else {
             (
                 None,
-                Some(fill(
-                    Bounds::new(
+                Some(
+                    gpui::PaintQuad::new(Bounds::new(
                         point(bounds.left() + cursor_x, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
-                    ),
-                    theme.accent,
-                )),
+                    ))
+                    .background(theme.accent),
+                ),
             )
         };
 
@@ -1058,8 +1071,16 @@ impl Element for EditorLineElement {
         }
 
         let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .unwrap();
+        let line_height = window.line_height();
+        line.paint(
+            bounds.origin,
+            line_height,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        )
+        .unwrap();
 
         if focus_handle.is_focused(window) {
             if let Some(cursor) = prepaint.cursor.take() {
@@ -1070,6 +1091,7 @@ impl Element for EditorLineElement {
         self.editor.update(cx, |editor, _cx| {
             editor.active_line_layout = Some(line);
             editor.active_line_bounds = Some(bounds);
+            editor.active_line_height = Some(line_height);
         });
     }
 }

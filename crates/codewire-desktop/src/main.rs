@@ -43,8 +43,8 @@ use editor::{
 };
 use file_browser::{NextExplorerItem, PrevExplorerItem, RefreshExplorer, ToggleOrOpen};
 use gpui::{
-    AnyWindowHandle, App, Application, Bounds, Context, FocusHandle, Focusable, Global, KeyBinding,
-    Menu, MenuItem, OsAction, SharedString, Window, WindowBounds, WindowOptions, actions, div,
+    AnyWindowHandle, App, Bounds, Context, FocusHandle, Focusable, Global, KeyBinding, Menu,
+    MenuItem, OsAction, SharedString, Window, WindowBounds, WindowOptions, actions, div,
     prelude::*, px, size, svg,
 };
 use input::{Backspace, Copy, Cut, Delete, Left, Paste, Right, SelectAll};
@@ -279,6 +279,7 @@ fn update_window_menu(cx: &App) {
 
     cx.set_menus(vec![
         Menu {
+            disabled: false,
             name: "Codewire".into(),
             items: vec![
                 MenuItem::action("About Codewire", Quit),
@@ -287,6 +288,7 @@ fn update_window_menu(cx: &App) {
             ],
         },
         Menu {
+            disabled: false,
             name: "File".into(),
             items: vec![
                 MenuItem::action("New Window", NewWindow),
@@ -302,6 +304,7 @@ fn update_window_menu(cx: &App) {
             ],
         },
         Menu {
+            disabled: false,
             name: "Edit".into(),
             items: vec![
                 MenuItem::os_action("Cut", Cut, OsAction::Cut),
@@ -314,6 +317,7 @@ fn update_window_menu(cx: &App) {
             ],
         },
         Menu {
+            disabled: false,
             name: "Window".into(),
             items: window_items,
         },
@@ -518,22 +522,7 @@ fn main() {
 
     tracing::info!("Starting Codewire Desktop");
 
-    let app = Application::new().with_assets(assets::Assets);
-    app.on_become_active(|cx: &mut App| {
-        if cx.windows().is_empty() {
-            open_new_window(None, cx);
-            cx.activate(true);
-        } else {
-            for handle in cx.windows() {
-                handle
-                    .update(cx, |_, window, _cx| {
-                        window.activate_window();
-                    })
-                    .ok();
-            }
-            cx.activate(true);
-        }
-    });
+    let app = gpui_platform::application().with_assets(assets::Assets);
     app.on_reopen(|cx: &mut App| {
         if cx.windows().is_empty() {
             open_new_window(None, cx);
@@ -541,7 +530,7 @@ fn main() {
             for handle in cx.windows() {
                 handle
                     .update(cx, |_, window, _cx| {
-                        window.activate_window();
+                        window.activate();
                     })
                     .ok();
             }
@@ -690,7 +679,7 @@ fn main() {
             if let Some((_, handle)) = windows.get(action.index) {
                 handle
                     .update(cx, |_, window, _cx| {
-                        window.activate_window();
+                        window.activate();
                     })
                     .ok();
             }
@@ -749,7 +738,7 @@ fn main() {
                 for handle in cx.windows() {
                     handle
                         .update(cx, |_, window, _cx| {
-                            window.activate_window();
+                            window.activate();
                         })
                         .ok();
                 }
@@ -785,8 +774,7 @@ fn main() {
                 if let Ok(state) = rx.await {
                     cx.update(|cx| {
                         cx.global_mut::<AppState>().codewire_sidebar = state;
-                    })
-                    .ok();
+                    });
                 }
             }
         })
@@ -795,6 +783,7 @@ fn main() {
         // Initial menu (will be rebuilt dynamically by update_window_menu after windows open)
         cx.set_menus(vec![
             Menu {
+                disabled: false,
                 name: "Codewire".into(),
                 items: vec![
                     MenuItem::action("About Codewire", Quit),
@@ -803,6 +792,7 @@ fn main() {
                 ],
             },
             Menu {
+                disabled: false,
                 name: "File".into(),
                 items: vec![
                     MenuItem::action("New Window", NewWindow),
@@ -818,6 +808,7 @@ fn main() {
                 ],
             },
             Menu {
+                disabled: false,
                 name: "Edit".into(),
                 items: vec![
                     MenuItem::os_action("Cut", Cut, OsAction::Cut),
@@ -830,6 +821,7 @@ fn main() {
                 ],
             },
             Menu {
+                disabled: false,
                 name: "Window".into(),
                 items: vec![MenuItem::action("New Window", NewWindow)],
             },
@@ -1310,8 +1302,7 @@ impl AppView {
                     view.login_cancellation = None;
                     cx.notify();
                 });
-            })
-            .ok();
+            });
         })
         .detach();
     }
@@ -1404,8 +1395,7 @@ impl AppView {
                     loading: false,
                     error,
                 };
-            })
-            .ok();
+            });
         })
         .detach();
     }
@@ -1462,8 +1452,7 @@ impl AppView {
                     let _ = this.update(cx, |view, cx| {
                         view.open_local_folder(path, cx);
                     });
-                })
-                .ok();
+                });
             }
             Ok(None) => {}
             Err(_) => {
@@ -1548,8 +1537,7 @@ impl AppView {
                     sidebar.update(cx, |sidebar, cx| {
                         sidebar.update_local_git_status(&path, git_status, cx);
                     });
-                })
-                .ok();
+                });
             }
         })
         .detach();
@@ -1953,7 +1941,7 @@ impl Render for AppView {
                                     .justify_center()
                                     .rounded(px(8.0))
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(theme.hover))
+                                    .hover_style(|s| s.bg(theme.hover))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.sidebar_visible = !this.sidebar_visible;
                                         cx.notify();

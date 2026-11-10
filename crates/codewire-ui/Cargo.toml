@@ -11,8 +11,5 @@ description = "Reusable GPUI components for the Codewire desktop app"
 name = "codewire_ui"
 
 [dependencies]
-gpui = { package = "gpui-ce", git = "https://github.com/noeljackson/gpui-ce.git", rev = "9bc7447ed57c9d0f8a3e4e0ca25da7c15982304a" }
+gpui = { package = "gpui-ce", git = "https://github.com/noeljackson/gpui-ce.git", rev = "26813dad6cbc4a5e1a2f56ef46e27d0f16ea30ff" }
 unicode-segmentation = "1"
-
-[patch.crates-io]
-gpui_util = { git = "https://github.com/noeljackson/gpui-ce.git", rev = "9bc7447ed57c9d0f8a3e4e0ca25da7c15982304a" }

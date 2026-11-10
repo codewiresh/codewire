@@ -2,9 +2,10 @@
 
 use crate::theme::Theme;
 use gpui::{
-    App, Bounds, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, LayoutId, Pixels, ShapedLine,
-    SharedString, Style, TextRun, UTF16Selection, Window, div, fill, point, prelude::*, px, size,
+    App, Bounds, CaretPosition, Context, CursorStyle, Element, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, LayoutId, Pixels,
+    ShapedLine, SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, div, point,
+    prelude::*, px, size,
 };
 use std::ops::Range;
 use unicode_segmentation::*;
@@ -29,7 +30,16 @@ pub struct TextInput {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    last_line_height: Option<Pixels>,
     dragging: bool,
+}
+
+fn x_for_index(layout: &ShapedLine, index: usize, line_height: Pixels) -> Pixels {
+    layout
+        .platform_layout
+        .caret_bounds(CaretPosition::attached_to_next_cluster(index), line_height)
+        .map(|bounds| bounds.origin.x)
+        .unwrap_or_default()
 }
 
 impl TextInput {
@@ -43,6 +53,7 @@ impl TextInput {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            last_line_height: None,
             dragging: false,
         }
     }
@@ -203,9 +214,18 @@ impl TextInput {
     }
 
     fn index_for_mouse_x(&self, x: Pixels) -> usize {
-        if let (Some(layout), Some(bounds)) = (&self.last_layout, &self.last_bounds) {
+        if let (Some(layout), Some(bounds), Some(line_height)) = (
+            &self.last_layout,
+            &self.last_bounds,
+            self.last_line_height,
+        ) {
             let relative_x = x - bounds.left();
-            layout.index_for_x(relative_x).unwrap_or(self.content.len())
+            match layout.platform_layout.byte_index_from_pixel_point(
+                point(relative_x, px(0.)),
+                line_height,
+            ) {
+                Ok(index) | Err(index) => index,
+            }
         } else {
             0
         }
@@ -311,14 +331,15 @@ impl EntityInputHandler for TextInput {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let last_layout = self.last_layout.as_ref()?;
+        let line_height = self.last_line_height?;
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
             point(
-                bounds.left() + last_layout.x_for_index(range.start),
+                bounds.left() + x_for_index(last_layout, range.start, line_height),
                 bounds.top(),
             ),
             point(
-                bounds.left() + last_layout.x_for_index(range.end),
+                bounds.left() + x_for_index(last_layout, range.end, line_height),
                 bounds.bottom(),
             ),
         ))
@@ -333,7 +354,13 @@ impl EntityInputHandler for TextInput {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
 
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        let utf8_index = last_layout
+            .platform_layout
+            .byte_index_from_pixel_point(
+                gpui::point(point.x - line_point.x, px(0.)),
+                self.last_line_height?,
+            )
+            .ok()?;
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -480,40 +507,42 @@ impl Element for TextElement {
             background_color: None,
             underline: None,
             strikethrough: None,
+            letter_spacing: None,
         };
 
         let font_size = style.font_size.to_pixels(window.rem_size());
+        let line_height = window.line_height();
         let line = window
             .text_system()
-            .shape_line(display_text, font_size, &[run], None);
+            .shape_line(display_text, font_size, &[run]);
 
-        let cursor_pos = line.x_for_index(cursor);
+        let cursor_pos = x_for_index(&line, cursor, line_height);
         let (selection, cursor_quad) = if selected_range.is_empty() {
             (
                 None,
-                Some(fill(
-                    Bounds::new(
+                Some(
+                    gpui::PaintQuad::new(Bounds::new(
                         point(bounds.left() + cursor_pos, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
-                    ),
-                    theme.accent,
-                )),
+                    ))
+                    .background(theme.accent),
+                ),
             )
         } else {
             (
-                Some(fill(
-                    Bounds::from_corners(
+                Some(
+                    gpui::PaintQuad::new(Bounds::from_corners(
                         point(
-                            bounds.left() + line.x_for_index(selected_range.start),
+                            bounds.left() + x_for_index(&line, selected_range.start, line_height),
                             bounds.top(),
                         ),
                         point(
-                            bounds.left() + line.x_for_index(selected_range.end),
+                            bounds.left() + x_for_index(&line, selected_range.end, line_height),
                             bounds.bottom(),
                         ),
-                    ),
-                    gpui::rgba(0x89b4fa30),
-                )),
+                    ))
+                    .background(gpui::rgba(0x89b4fa30)),
+                ),
                 None,
             )
         };
@@ -547,8 +576,16 @@ impl Element for TextElement {
         }
 
         let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .unwrap();
+        let line_height = window.line_height();
+        line.paint(
+            bounds.origin,
+            line_height,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        )
+        .unwrap();
 
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()
@@ -559,6 +596,7 @@ impl Element for TextElement {
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
+            input.last_line_height = Some(line_height);
         });
     }
 }

@@ -122,7 +122,8 @@ impl TerminalView {
         let font_id = cx.text_system().resolve_font(&f);
         let cell_width: f32 = cx
             .text_system()
-            .ch_advance(font_id, font_size)
+            .advance(font_id, font_size, ' ')
+            .map(|advance| advance.width)
             .unwrap_or(px(7.8))
             .into();
         let cell_height: f32 = window.line_height().into();
@@ -187,6 +188,12 @@ impl TerminalView {
         #[cfg(test)]
         let (fixture_child_tx, fixture_child_rx) = mpsc::channel();
         self.pty_tx = Some(TerminalInputSender::Pty(tx));
+
+        // A test's local PTY is a real shell: its threads wake this view from
+        // outside GPUI's test scheduler, which the scheduler reports as
+        // non-determinism unless the test opts in to real I/O.
+        #[cfg(test)]
+        cx.background_executor().allow_parking();
 
         // Event channel: background threads -> GPUI foreground
         let (event_tx, event_rx) = futures::channel::mpsc::unbounded::<TermEvent>();

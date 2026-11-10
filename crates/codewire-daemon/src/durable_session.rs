@@ -115,7 +115,7 @@ impl HostBounds {
 
     /// Every host bound replaced by `bound`: the Linux host-control
     /// entrypoint's test seam and the tests' hang guard.
-    #[cfg(any(test, target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     pub(crate) const fn all(bound: Duration) -> Self {
         Self {
             cleanup_step: bound,

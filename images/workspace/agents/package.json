@@ -11,7 +11,9 @@
     "@openai/codex": "0.160.0"
   },
   "overrides": {
-    "undici": "8.12.2"
+    "undici": "8.12.2",
+    "esbuild": "0.28.2",
+    "minimatch": "11.0.1"
   },
   "allowScripts": {
     "@anthropic-ai/claude-code@2.1.308": true,

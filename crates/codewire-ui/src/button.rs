@@ -27,17 +27,17 @@ pub fn button(label: impl Into<SharedString>, variant: ButtonVariant) -> gpui::D
         ButtonVariant::Primary => base
             .bg(theme.accent)
             .text_color(theme.background)
-            .hover(|s| s.opacity(0.9))
+            .hover_style(|s| s.opacity(0.9))
             .child(label.into()),
         ButtonVariant::Secondary => base
             .bg(theme.surface)
             .text_color(theme.foreground)
-            .hover(|s| s.bg(gpui::hsla(0.0, 0.0, 0.22, 1.0)))
+            .hover_style(|s| s.bg(gpui::hsla(0.0, 0.0, 0.22, 1.0)))
             .child(label.into()),
         ButtonVariant::Ghost => base
             .bg(gpui::hsla(0.0, 0.0, 0.0, 0.0))
             .text_color(theme.foreground)
-            .hover(|s| s.bg(gpui::hsla(0.0, 0.0, 0.22, 1.0)))
+            .hover_style(|s| s.bg(gpui::hsla(0.0, 0.0, 0.22, 1.0)))
             .child(label.into()),
     }
 }

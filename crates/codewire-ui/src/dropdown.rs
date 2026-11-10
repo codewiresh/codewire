@@ -148,7 +148,7 @@ impl Dropdown {
                     .px_3()
                     .py_2()
                     .bg(selected_bg)
-                    .hover(|s| s.bg(dropdown_hover))
+                    .hover_style(|s| s.bg(dropdown_hover))
                     .cursor_pointer()
                     .when(idx > 0, |el| el.border_t_1().border_color(theme.border))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -211,7 +211,7 @@ impl Render for Dropdown {
                 .border_1()
                 .border_color(if is_open { theme.accent } else { theme.border })
                 .rounded(px(6.0))
-                .hover(|s| s.border_color(theme.accent))
+                .hover_style(|s| s.border_color(theme.accent))
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.toggle(cx);
@@ -245,7 +245,7 @@ impl Render for Dropdown {
                         .offset(point(px(0.0), px(2.0)))
                         .child(self.render_list(&theme, cx)),
                 )
-                .with_priority(1),
+                .priority(1),
             );
         }
 

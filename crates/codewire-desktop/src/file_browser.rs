@@ -203,8 +203,7 @@ impl FileExplorer {
                             }
                             cx.notify();
                         });
-                    })
-                    .ok();
+                    });
                 }
                 Ok(Err(e)) => {
                     cx.update(|cx| {
@@ -213,8 +212,7 @@ impl FileExplorer {
                             view.rebuild_flat_rows();
                             cx.notify();
                         });
-                    })
-                    .ok();
+                    });
                 }
                 Err(_) => {
                     cx.update(|cx| {
@@ -223,8 +221,7 @@ impl FileExplorer {
                             view.rebuild_flat_rows();
                             cx.notify();
                         });
-                    })
-                    .ok();
+                    });
                 }
             }
         })
@@ -476,8 +473,7 @@ impl FileExplorer {
                         view.rebuild_flat_rows();
                         cx.notify();
                     });
-                })
-                .ok();
+                });
             }
         })
         .detach();
@@ -610,7 +606,7 @@ impl FileExplorer {
             } else {
                 gpui::hsla(0.0, 0.0, 0.0, 0.0)
             })
-            .hover(|s| s.bg(theme.hover))
+            .hover_style(|s| s.bg(theme.hover))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected_row_idx = Some(row_idx);
                 this.toggle_directory(node_idx, cx);
@@ -703,7 +699,7 @@ impl FileExplorer {
             .gap_1()
             .cursor_pointer()
             .bg(bg)
-            .hover(|s| s.bg(theme.hover))
+            .hover_style(|s| s.bg(theme.hover))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected_row_idx = Some(row_idx);
                 this.select_file(node_idx, cx);

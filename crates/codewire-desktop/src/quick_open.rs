@@ -122,8 +122,7 @@ impl QuickOpen {
                     entity.update(cx, |this, cx| {
                         this.update_file_index(file_entries, cx);
                     });
-                })
-                .ok();
+                });
             }
         })
         .detach();
@@ -348,7 +347,7 @@ impl Render for QuickOpen {
                         theme.surface
                     })
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.hover))
+                    .hover_style(|s| s.bg(theme.hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.emit(QuickOpenFileSelected {
                             source: source.clone(),

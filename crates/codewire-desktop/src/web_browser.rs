@@ -215,7 +215,7 @@ impl Render for WebBrowserView {
                             .justify_center()
                             .rounded(px(4.0))
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme.hover))
+                            .hover_style(|s| s.bg(theme.hover))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if let Some(ref wv) = *this.native_webview.borrow() {
                                     wv.go_back();
@@ -240,7 +240,7 @@ impl Render for WebBrowserView {
                             .justify_center()
                             .rounded(px(4.0))
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme.hover))
+                            .hover_style(|s| s.bg(theme.hover))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if let Some(ref wv) = *this.native_webview.borrow() {
                                     wv.go_forward();
@@ -265,7 +265,7 @@ impl Render for WebBrowserView {
                             .justify_center()
                             .rounded(px(4.0))
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme.hover))
+                            .hover_style(|s| s.bg(theme.hover))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if let Some(ref wv) = *this.native_webview.borrow() {
                                     wv.reload();
@@ -307,7 +307,7 @@ impl Render for WebBrowserView {
                             .justify_center()
                             .rounded(px(4.0))
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme.hover))
+                            .hover_style(|s| s.bg(theme.hover))
                             .on_click({
                                 let url = self.url.clone();
                                 move |_, _, _| {
@@ -434,12 +434,15 @@ impl Element for WebBrowserElement {
             match result {
                 Ok(webview) => {
                     let native = Rc::downgrade(&self.native_webview);
-                    let teardown = window.on_native_child_teardown(move || {
-                        let webview = native
-                            .upgrade()
-                            .and_then(|native| native.borrow_mut().take());
-                        // GTK destruction can invoke callbacks; release the cell borrow first.
-                        drop(webview);
+                    let window_id = window.window_handle().window_id();
+                    let teardown = cx.on_window_closed(move |_, closed_id| {
+                        if closed_id == window_id {
+                            let webview = native
+                                .upgrade()
+                                .and_then(|native| native.borrow_mut().take());
+                            // GTK destruction can invoke callbacks; release the cell borrow first.
+                            drop(webview);
+                        }
                     });
                     *native_ref = Some(NativeWebView {
                         _window_teardown: teardown,

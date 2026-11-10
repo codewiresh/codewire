@@ -1,6 +1,6 @@
 use super::*;
 use crate::{assets, chat::ChatPanel, split_container::SplitContainer};
-use gpui::{Application, AsyncApp, Entity, QuitMode, WindowOptions, size};
+use gpui::{AsyncApp, Entity, QuitMode, WindowOptions, size};
 use std::{
     cell::Cell,
     ffi::CString,
@@ -19,6 +19,19 @@ use x11rb::{
     protocol::xproto::{self, ConnectionExt as _},
     xcb_ffi::XCBConnection,
 };
+
+fn on_native_child_teardown(
+    window: &Window,
+    cx: &App,
+    mut on_teardown: impl FnMut() + 'static,
+) -> gpui::Subscription {
+    let window_id = window.window_handle().window_id();
+    cx.on_window_closed(move |_, closed_id| {
+        if closed_id == window_id {
+            on_teardown();
+        }
+    })
+}
 
 struct FixtureServer {
     address: String,
@@ -275,18 +288,16 @@ impl Journey {
         })
         .await;
         let original = read_first(cx).expect("first native child");
-        browser
-            .update(cx, |browser, _cx| {
-                browser
-                    .native_webview
-                    .borrow()
-                    .as_ref()
-                    .expect("native browser")
-                    .webview
-                    .reload()
-                    .expect("reload Wry")
-            })
-            .expect("reload update");
+        browser.update(cx, |browser, _cx| {
+            browser
+                .native_webview
+                .borrow()
+                .as_ref()
+                .expect("native browser")
+                .webview
+                .reload()
+                .expect("reload Wry")
+        });
         until(cx, "real reload", |cx| {
             read_first(cx).is_some_and(|sample| sample.loads >= 2)
                 && requests.load(Ordering::Acquire) >= 3
@@ -319,9 +330,8 @@ impl Journey {
         .await;
 
         let closed_native = read_first(cx).expect("child before tab close");
-        let closed_cell = browser
-            .read_with(cx, |browser, _cx| Rc::downgrade(&browser.native_webview))
-            .expect("closing browser cell");
+        let closed_cell =
+            browser.read_with(cx, |browser, _cx| Rc::downgrade(&browser.native_webview));
         drop(browser);
         first
             .update(cx, |split, _window, cx| {
@@ -373,7 +383,7 @@ impl Journey {
         let teardown_seen = Rc::new(Cell::new(false));
         let teardown = first
             .update(cx, |_split, window, _cx| {
-                window.on_native_child_teardown({
+                on_native_child_teardown(window, _cx, {
                     let inspector = inspector.clone();
                     let seen = teardown_seen.clone();
                     move || {
@@ -405,11 +415,7 @@ impl Journey {
             teardown_seen.get(),
             "programmatic removal skipped native teardown"
         );
-        assert!(
-            browser
-                .read_with(cx, |browser, _cx| browser.native_webview.borrow().is_none())
-                .expect("retained entity read")
-        );
+        assert!(browser.read_with(cx, |browser, _cx| browser.native_webview.borrow().is_none()));
         assert!(
             inspector
                 .get_geometry(native.parent)
@@ -421,18 +427,16 @@ impl Journey {
         eprintln!(
             "native browser observed: child-before-parent programmatic removal with retained entity"
         );
-        other_browser
-            .update(cx, |browser, _cx| {
-                browser
-                    .native_webview
-                    .borrow()
-                    .as_ref()
-                    .expect("second native browser")
-                    .webview
-                    .reload()
-                    .expect("second reload")
-            })
-            .expect("second reload update");
+        other_browser.update(cx, |browser, _cx| {
+            browser
+                .native_webview
+                .borrow()
+                .as_ref()
+                .expect("second native browser")
+                .webview
+                .reload()
+                .expect("second reload")
+        });
         until(cx, "second window survives first close", |cx| {
             second
                 .update(cx, |_split, window, cx| {
@@ -448,12 +452,11 @@ impl Journey {
             })
             .expect("second native snapshot")
             .expect("second live child");
-        let quitting_cell = other_browser
-            .read_with(cx, |browser, _cx| browser.native_webview.clone())
-            .expect("retained quitting cell");
+        let quitting_cell =
+            other_browser.read_with(cx, |browser, _cx| browser.native_webview.clone());
         let quit_teardown = second
             .update(cx, |_split, window, _cx| {
-                window.on_native_child_teardown({
+                on_native_child_teardown(window, _cx, {
                     let inspector = inspector.clone();
                     let seen = quit_seen_for_app.clone();
                     move || {
@@ -482,7 +485,7 @@ impl Journey {
             .expect("register quit ordering assertion");
         quit_teardown.detach();
         finished_for_app.set(true);
-        cx.update(|cx| cx.quit()).expect("quit application");
+        cx.update(|cx| cx.quit());
     }
 }
 
@@ -502,7 +505,7 @@ fn linux_native_browser_journey() {
     let quit_seen_for_app = quit_seen.clone();
     let address = server.address.clone();
     let requests = server.requests.clone();
-    Application::new()
+    gpui_platform::application()
         .with_assets(assets::Assets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx| {

@@ -849,7 +849,7 @@ impl SplitContainer {
             .when(!is_horizontal, |d| {
                 d.h(px(4.0)).w_full().cursor_row_resize()
             })
-            .hover(|s| s.bg(theme.divider_hover))
+            .hover_style(|s| s.bg(theme.divider_hover))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
@@ -951,7 +951,7 @@ impl SplitContainer {
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .hover(|s| s.bg(Theme::dark().hover))
+                        .hover_style(|s| s.bg(Theme::dark().hover))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.toggle_explorer_sidebar(cx);
                         }))
@@ -1007,7 +1007,7 @@ impl SplitContainer {
                     })
                     .cursor_pointer()
                     .when(!is_active_tab, |d| {
-                        d.hover(|s| s.bg(theme.hover).rounded_t(px(8.0)))
+                        d.hover_style(|s| s.bg(theme.hover).rounded_t(px(8.0)))
                     })
                     // Make tab draggable
                     .on_drag(drag_data, |drag_data, _event, _window, cx| {
@@ -1063,7 +1063,7 @@ impl SplitContainer {
                             .justify_center()
                             .rounded(px(2.0))
                             .text_color(theme.muted)
-                            .hover(|s| s.bg(theme.border).text_color(theme.foreground))
+                            .hover_style(|s| s.bg(theme.border).text_color(theme.foreground))
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.close_tab(pane_id, tab_id, cx);
                             }))
@@ -1269,7 +1269,7 @@ impl SplitContainer {
             .bg(theme.background)
             .overflow_hidden()
             // Visual feedback when dragging over this pane
-            .drag_over::<TabDragData>(|style, _, _window, _cx| {
+            .on_drag_over::<TabDragData>(|style, _, _window, _cx| {
                 style.border_2().border_color(Theme::dark().accent)
             })
             // Handle tab drops
@@ -1640,7 +1640,7 @@ impl SplitContainer {
                 .text_size(px(13.0))
                 .text_color(theme.foreground)
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.hover))
+                .hover_style(|s| s.bg(theme.hover))
                 .rounded(px(3.0))
                 .mx(px(4.0))
                 .child(label.to_string())
@@ -1780,7 +1780,7 @@ impl SplitContainer {
                 .text_size(px(13.0))
                 .text_color(theme.foreground)
                 .cursor_pointer()
-                .hover(|s| {
+                .hover_style(|s| {
                     s.bg(if is_primary {
                         theme.divider_hover
                     } else {
@@ -1938,7 +1938,7 @@ impl Render for SplitContainer {
                             .flex_shrink_0()
                             .cursor_col_resize()
                             .bg(theme.border)
-                            .hover(|s| s.bg(Theme::dark().divider_hover))
+                            .hover_style(|s| s.bg(Theme::dark().divider_hover))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {

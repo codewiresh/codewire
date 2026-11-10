@@ -15,7 +15,8 @@ path = "src/main.rs"
 codewire-client = { path = "../codewire-client", features = ["desktop-keyring", "desktop-pkce-loopback"] }
 codewire-types = { path = "../codewire-types" }
 codewire-ui = { path = "../codewire-ui" }
-gpui = { package = "gpui-ce", git = "https://github.com/noeljackson/gpui-ce.git", rev = "9bc7447ed57c9d0f8a3e4e0ca25da7c15982304a" }
+gpui = { package = "gpui-ce", git = "https://github.com/noeljackson/gpui-ce.git", rev = "26813dad6cbc4a5e1a2f56ef46e27d0f16ea30ff" }
+gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/noeljackson/gpui-ce.git", rev = "26813dad6cbc4a5e1a2f56ef46e27d0f16ea30ff", features = ["font-kit", "wayland", "x11"] }
 alacritty_terminal = "0.25"
 dirs = "5"
 futures = "0.3"
@@ -23,7 +24,7 @@ open = "5"
 portable-pty = "0.9"
 schemars = "1"
 rfd = "0.15"
-rust-embed = "8"
+rust-embed = { version = "8", features = ["include-exclude"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -40,9 +41,8 @@ x11-dl = "=2.21.0"
 x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
 
 [dev-dependencies]
-gpui = { package = "gpui-ce", git = "https://github.com/noeljackson/gpui-ce.git", rev = "9bc7447ed57c9d0f8a3e4e0ca25da7c15982304a", features = ["test-support"] }
+gpui = { package = "gpui-ce", git = "https://github.com/noeljackson/gpui-ce.git", rev = "26813dad6cbc4a5e1a2f56ef46e27d0f16ea30ff", features = ["test-support"] }
 
 [patch.crates-io]
 webkit2gtk = { git = "https://github.com/tauri-apps/webkit2gtk-rs.git", rev = "61cfcd4dd79ae24f37a20c31b1848476fd80caba" }
 webkit2gtk-sys = { git = "https://github.com/tauri-apps/webkit2gtk-rs.git", rev = "61cfcd4dd79ae24f37a20c31b1848476fd80caba" }
-gpui_util = { git = "https://github.com/noeljackson/gpui-ce.git", rev = "9bc7447ed57c9d0f8a3e4e0ca25da7c15982304a" }

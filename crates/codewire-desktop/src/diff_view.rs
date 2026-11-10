@@ -127,8 +127,7 @@ impl DiffView {
                             view.rebuild_flat_rows();
                             cx.notify();
                         });
-                    })
-                    .ok();
+                    });
                 }
                 Ok(Err(e)) => {
                     cx.update(|cx| {
@@ -136,8 +135,7 @@ impl DiffView {
                             view.status = DiffStatus::Error(e);
                             cx.notify();
                         });
-                    })
-                    .ok();
+                    });
                 }
                 Err(_) => {
                     cx.update(|cx| {
@@ -145,8 +143,7 @@ impl DiffView {
                             view.status = DiffStatus::Error("Discovery cancelled".into());
                             cx.notify();
                         });
-                    })
-                    .ok();
+                    });
                 }
             }
         })
@@ -313,7 +310,7 @@ impl DiffView {
 
     fn focus_search(&mut self, _: &FocusDiffSearch, window: &mut Window, cx: &mut Context<Self>) {
         let handle = self.search_input.read(cx).focus_handle(cx);
-        window.focus(&handle);
+        window.focus(&handle, cx);
     }
 
     fn scroll_to_file_header(&self, file_idx: usize) {
@@ -392,7 +389,7 @@ impl DiffView {
             .when(is_selected, |el| {
                 el.border_l_2().border_color(theme.diff_selected_border)
             })
-            .hover(|s| s.bg(theme.hover))
+            .hover_style(|s| s.bg(theme.hover))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_file_expand(&path_toggle);
                 this.rebuild_flat_rows();
@@ -759,7 +756,7 @@ impl DiffView {
                     } else {
                         gpui::hsla(0.0, 0.0, 0.0, 0.0)
                     })
-                    .hover(|s| s.bg(theme.hover))
+                    .hover_style(|s| s.bg(theme.hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.select_file_from_tree(&path_click, cx);
                     }))
@@ -902,7 +899,7 @@ impl Render for DiffView {
                             .text_size(px(11.0))
                             .text_color(theme.accent)
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme.surface))
+                            .hover_style(|s| s.bg(theme.surface))
                             .on_click(cx.listener(|this, _, _, cx| this.refresh(cx)))
                             .child("Retry"),
                     )

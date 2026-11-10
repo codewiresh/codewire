@@ -27,7 +27,7 @@ pub fn icon_button(path: &'static str, size: f32, color: Hsla, theme: &Theme) ->
         .rounded(px(3.0))
         .cursor_pointer()
         .flex_shrink_0()
-        .hover(|s| s.bg(theme.hover).text_color(theme.foreground))
+        .hover_style(|s| s.bg(theme.hover).text_color(theme.foreground))
         .child(
             svg()
                 .path(path)

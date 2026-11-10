@@ -309,7 +309,7 @@ impl Render for CommandPalette {
                         theme.surface
                     })
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.hover))
+                    .hover_style(|s| s.bg(theme.hover))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.emit(PaletteActionSelected {
                             action_id: action_id.clone(),

@@ -297,7 +297,7 @@ impl Sidebar {
             .flex()
             .items_center()
             .gap_2()
-            .hover({
+            .hover_style({
                 let hover_bg = theme.hover;
                 move |s| s.bg(hover_bg)
             })
@@ -372,7 +372,7 @@ impl Sidebar {
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .hover({
+                .hover_style({
                     let hover_bg = theme.hover;
                     move |s| s.bg(hover_bg)
                 })
@@ -460,7 +460,7 @@ impl Sidebar {
             .flex()
             .items_center()
             .gap_2()
-            .hover(move |s| s.bg(hover_bg))
+            .hover_style(move |s| s.bg(hover_bg))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.expanded_local_projects.contains(&path_toggle) {
@@ -517,7 +517,7 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .hover(move |s| s.bg(hover_bg))
+                    .hover_style(move |s| s.bg(hover_bg))
                     .cursor_pointer()
                     .on_click(cx.listener(move |_this, _, _, cx| {
                         cx.emit(LocalBrowseRequested {
@@ -551,7 +551,7 @@ impl Sidebar {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .hover(move |s| s.bg(hover_bg))
+                        .hover_style(move |s| s.bg(hover_bg))
                         .cursor_pointer()
                         .on_click(cx.listener(move |_this, _, _, cx| {
                             cx.emit(LocalDiffRequested {
@@ -585,7 +585,7 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .hover(move |s| s.bg(hover_bg))
+                    .hover_style(move |s| s.bg(hover_bg))
                     .cursor_pointer()
                     .on_click(cx.listener(move |_this, _, _, cx| {
                         cx.emit(NewTerminalRequested {
@@ -617,7 +617,7 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .hover(move |s| s.bg(hover_bg))
+                    .hover_style(move |s| s.bg(hover_bg))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.remove_local_project(&path_remove, cx);
@@ -653,7 +653,7 @@ impl Sidebar {
                 .flex()
                 .items_center()
                 .gap(px(6.0))
-                .hover(move |style| style.bg(hover_bg))
+                .hover_style(move |style| style.bg(hover_bg))
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.local_group_expanded = !this.local_group_expanded;
@@ -722,7 +722,7 @@ impl Render for Sidebar {
                         div()
                             .id("add-local-project-btn")
                             .text_color(theme.muted)
-                            .hover(|style| style.text_color(theme.foreground))
+                            .hover_style(|style| style.text_color(theme.foreground))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.request_add_local_project(cx);
@@ -771,7 +771,7 @@ impl Render for Sidebar {
                                     .flex()
                                     .items_center()
                                     .gap(px(6.0))
-                                    .hover(|style| style.bg(theme.hover))
+                                    .hover_style(|style| style.bg(theme.hover))
                                     .cursor_pointer()
                                     .on_click(cx.listener(|_this, _, _, cx| {
                                         cx.emit(CodewireSignInRequested);
@@ -846,7 +846,7 @@ impl Render for Sidebar {
                                     .rounded(px(6.0))
                                     .text_size(px(11.0))
                                     .text_color(theme.muted)
-                                    .hover(|style| {
+                                    .hover_style(|style| {
                                         style.bg(theme.hover).text_color(theme.foreground)
                                     })
                                     .cursor_pointer()

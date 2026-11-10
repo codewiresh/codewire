@@ -14,9 +14,8 @@ use crate::theme::Theme;
 use crate::workspace::WorkspaceIdentity;
 use crate::{AppState, MoveWorkspaceToWindow};
 use gpui::{
-    App, Bounds, Context, ElementId, Entity, FocusHandle, Focusable, Global, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString, Window, anchored, div, prelude::*,
-    px, svg,
+    App, Bounds, Context, ElementId, Entity, FocusHandle, Focusable, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, Point, SharedString, Window, anchored, div, prelude::*, px, svg,
 };
 
 /// Data transferred when dragging a workspace tab between outer panes
@@ -706,7 +705,7 @@ impl AppLayout {
             .when(!is_horizontal, |d| {
                 d.h(px(4.0)).w_full().cursor_row_resize()
             })
-            .hover(|s| s.bg(theme.divider_hover))
+            .hover_style(|s| s.bg(theme.divider_hover))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
@@ -847,7 +846,7 @@ impl AppLayout {
                             gpui::hsla(0.0, 0.0, 0.0, 0.0)
                         })
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.hover).rounded(px(8.0)))
+                        .hover_style(|s| s.bg(theme.hover).rounded(px(8.0)))
                         .on_drag(drag_data, |drag_data, _event, _window, cx| {
                             cx.new(|_cx| WorkspaceTabDragPreview {
                                 title: drag_data.tab.title.clone(),
@@ -927,7 +926,7 @@ impl AppLayout {
                                 .justify_center()
                                 .rounded(px(2.0))
                                 .text_color(theme.muted)
-                                .hover(|s| s.bg(theme.border).text_color(theme.foreground))
+                                .hover_style(|s| s.bg(theme.border).text_color(theme.foreground))
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     // Find the workspace_id from the tab before closing
                                     let ws_id = this
@@ -972,7 +971,7 @@ impl AppLayout {
                         .rounded(px(4.0))
                         .text_color(theme.muted)
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.hover).text_color(theme.foreground))
+                        .hover_style(|s| s.bg(theme.hover).text_color(theme.foreground))
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.active_outer_pane = pane_id;
                             this.split_outer(SplitDirection::Horizontal, cx);
@@ -1000,7 +999,7 @@ impl AppLayout {
                         .rounded(px(4.0))
                         .text_color(theme.muted)
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.hover).text_color(theme.foreground))
+                        .hover_style(|s| s.bg(theme.hover).text_color(theme.foreground))
                         .on_click(cx.listener(move |this, _event, _window, cx| {
                             this.active_outer_pane = pane_id;
                             this.split_outer(SplitDirection::Vertical, cx);
@@ -1073,7 +1072,7 @@ impl AppLayout {
             .flex_col()
             .bg(theme.background)
             // Visual feedback when dragging a workspace tab over this pane
-            .drag_over::<WorkspaceTabDragData>(|style, _, _window, _cx| {
+            .on_drag_over::<WorkspaceTabDragData>(|style, _, _window, _cx| {
                 style.border_2().border_color(Theme::dark().accent)
             })
             // Handle workspace tab drops
@@ -1137,7 +1136,7 @@ impl AppLayout {
                 .text_size(px(13.0))
                 .text_color(theme.foreground)
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.hover))
+                .hover_style(|s| s.bg(theme.hover))
                 .rounded(px(3.0))
                 .mx(px(4.0))
                 .child(label.to_string())

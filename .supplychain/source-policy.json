@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "advisories": {
-    "minimum_severity": "high",
-    "only_fixed": true
+    "minimum_severity": "any",
+    "only_fixed": false
   },
   "exceptions": [
     {
@@ -28,6 +28,86 @@
       "reason": "libsqlite3-sys 0.39.0 fixes a C SQLite CVE, but rusqlite 0.41 (which needs it) does not resolve against sqlx 0.8, whose sqlx-sqlite pins ^0.30.1 and shares links = sqlite3; moving off it is a design change tracked on #3980. Short expiry on purpose: the bundled SQLite ships in the CLI's local credential store and local VMM. Owner approved 2026-11-10 (#3013)",
       "owner": "noel",
       "expires": "2026-11-30"
+    },
+    {
+      "kind": "osv",
+      "advisory_id": "RUSTSEC-2025-0012",
+      "package": "backoff",
+      "reason": "Informational unmaintained notice, not a vulnerability. Temporal owns this transitive dependency; migrate its retry path to backon when the SDK supports it.",
+      "owner": "noel",
+      "expires": "2027-02-08"
+    },
+    {
+      "kind": "osv",
+      "advisory_id": "RUSTSEC-2026-0374",
+      "package": "basic-toml",
+      "reason": "Informational unmaintained notice, not a vulnerability. Replace basic-toml with the maintained toml crate when Askama offers a compatible upgrade.",
+      "owner": "noel",
+      "expires": "2027-02-08"
+    },
+    {
+      "kind": "osv",
+      "advisory_id": "RUSTSEC-2024-0384",
+      "package": "instant",
+      "reason": "Informational unmaintained notice, not a vulnerability. This is removed with the backoff/backon migration.",
+      "owner": "noel",
+      "expires": "2027-02-08"
+    },
+    {
+      "kind": "osv",
+      "advisory_id": "RUSTSEC-2026-0441",
+      "package": "pin-utils",
+      "reason": "Informational unmaintained notice, not a vulnerability. Only aws-smithy-http and aws-smithy-types pull this transitive utility in; remove it through an AWS SDK upgrade.",
+      "owner": "noel",
+      "expires": "2027-02-08"
+    },
+    {
+      "kind": "osv",
+      "advisory_id": "RUSTSEC-2026-0173",
+      "package": "proc-macro-error2",
+      "reason": "Informational unmaintained notice, not a vulnerability. Only defmt-macros (defmt, through smoltcp in codewire-netstack) pulls this transitive macro in; remove it through a defmt upgrade.",
+      "owner": "noel",
+      "expires": "2027-02-08"
+    },
+    {
+      "kind": "osv",
+      "advisory_id": "RUSTSEC-2024-0449",
+      "package": "unsafe-libyaml",
+      "reason": "Informational unmaintained notice, not a vulnerability. Replace the deprecated serde_yaml integration with a maintained YAML implementation.",
+      "owner": "noel",
+      "expires": "2027-02-08"
+    },
+    {
+      "kind": "osv",
+      "advisory_id": "RUSTSEC-2026-0371",
+      "package": "zbus_names",
+      "reason": "Informational unmaintained notice, not a vulnerability. This functionality moved into zbus 6; migrate when compatible.",
+      "owner": "noel",
+      "expires": "2027-02-08"
+    },
+    {
+      "kind": "osv",
+      "advisory_id": "RUSTSEC-2026-0370",
+      "package": "zvariant",
+      "reason": "Informational unmaintained notice, not a vulnerability. This functionality moved into zbus 6; migrate when compatible.",
+      "owner": "noel",
+      "expires": "2027-02-08"
+    },
+    {
+      "kind": "osv",
+      "advisory_id": "RUSTSEC-2026-0372",
+      "package": "zvariant_derive",
+      "reason": "Informational unmaintained notice, not a vulnerability. This functionality moved into zbus 6; migrate when compatible.",
+      "owner": "noel",
+      "expires": "2027-02-08"
+    },
+    {
+      "kind": "osv",
+      "advisory_id": "RUSTSEC-2024-0436",
+      "package": "paste",
+      "reason": "Informational unmaintained notice, not a vulnerability. This compile-time macro has no runtime attack surface and no fixed release is required.",
+      "owner": "noel",
+      "expires": "2027-02-08"
     }
   ],
   "lockfiles": [
