@@ -160,7 +160,35 @@ rejected, and secret values never belong in the file: `secrets` and
 Repositories, from the file or from repeatable `--repo
 URL[@branch][::/workspace/path]`, are isolated clones that the host's Git
 fetches; `--repo` replaces the file's list rather than adding to it, and no
-host directory is mounted. `mounts` and `workspace.vm_only` apply to local
+host directory is mounted unless you ask for your own checkouts (below). `mounts` and `workspace.vm_only` apply to local
 VMs, where `--path` is mounted live by default; a cloud create ignores
 `workspace.vm_only` and refuses `mounts` and host ports. `cw create --local`
 shows the resolved settings and asks before creating.
+
+### Use your own checkouts instead of clones
+
+`cw create --local --path-mode mount` with a file that lists repositories
+uses the checkouts already in the folder instead of cloning them. The folder
+is mounted live at `/workspace/<folder name>`, as it is without repositories,
+so each repository's `destination` must lie inside it and already be a Git
+checkout there:
+
+```yaml
+# ~/src/platform/codewire.yaml: the folder holds web/ and api/ checkouts
+repositories:
+  - source: https://github.com/your-org/web.git
+    destination: /workspace/platform/web
+  - source: https://github.com/your-org/api.git
+    destination: /workspace/platform/api
+working_directory: /workspace/platform
+```
+
+A cloud create, or a local create without `--path-mode mount`, clones both to
+the same paths. With the mount, nothing is cloned and the file's `branch` and
+`revision` are not applied: each checkout stays as it is, and the review says
+so. A missing checkout, a link, or a destination outside the folder fails
+before anything is created and is named. `mounts` cannot be combined with it.
+
+The VM can change anything in the mounted folder, including Git hooks and
+settings that git on your machine later runs. For code you don't trust, leave
+out `--path-mode` so the repositories are cloned.

@@ -3926,9 +3926,12 @@ fn resolve_native_workspace(
 ) -> anyhow::Result<NativeWorkspace> {
     let vm_only = project.vm_only.clone();
     if !project.spec.repositories.is_empty() || !project.local_mounts.is_empty() {
+        if requested_mode == Some(PathModeArg::Mount) && !project.spec.repositories.is_empty() {
+            return mount_checked_out_repositories(source_path, project, mounts_supported);
+        }
         if requested_mode.is_some() {
             anyhow::bail!(
-                "--path-mode applies only when codewire.yaml has no repositories or mounts and no --repo is given"
+                "--path-mode applies only when codewire.yaml has no repositories or mounts and no --repo is given; with repositories, only --path-mode mount, which uses the checkouts already in the folder"
             );
         }
         let kept = project
@@ -4051,6 +4054,132 @@ fn resolve_native_workspace(
             })
         }
     }
+}
+
+/// `--path-mode mount` with repositories: the project folder is mounted
+/// live where the default mount puts it, `/workspace/<folder name>`, in
+/// place of fresh clones. Each repository's destination must lie inside that
+/// mount and already be a Git checkout in the folder, so the VM sees the
+/// paths the file declares. Nothing is cloned and no branch is switched.
+fn mount_checked_out_repositories(
+    source_path: &Path,
+    project: &mut NativeProjectPlan,
+    mounts_supported: bool,
+) -> anyhow::Result<NativeWorkspace> {
+    let shown = display_host_path(source_path);
+    if !project.local_mounts.is_empty() {
+        anyhow::bail!(
+            "--path-mode mount with repositories mounts {shown} itself, so codewire.yaml cannot also declare mounts"
+        );
+    }
+    if let Some(reason) = codewire_local_vmm::workspace_source_refusal(source_path) {
+        anyhow::bail!("refusing to mount {shown}: {reason}");
+    }
+    if !mounts_supported {
+        anyhow::bail!(
+            "this local runtime has no virtiofsd, so it cannot mount {shown}; reinstall the runtime, or leave out --path-mode to clone the repositories"
+        );
+    }
+    let destination = format!("/workspace/{}", workspace_directory_name(source_path));
+    let problems = project
+        .spec
+        .repositories
+        .iter()
+        .filter_map(|repository| {
+            checkout_problem(source_path, &destination, &repository.destination)
+        })
+        .collect::<Vec<_>>();
+    if !problems.is_empty() {
+        anyhow::bail!(
+            "--path-mode mount uses the repositories already checked out in {shown}, mounted at {destination}:\n  {}\nCheck them out there, or leave out --path-mode to clone them fresh",
+            problems.join("\n  ")
+        );
+    }
+    let unapplied = project
+        .spec
+        .repositories
+        .iter()
+        .any(|repository| !repository.branch.is_empty() || !repository.revision.is_empty());
+    let names = project
+        .spec
+        .repositories
+        .iter()
+        .map(|repository| repository.destination.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    // The mount replaces the clones: the runtime is given no repository.
+    project.spec.repositories.clear();
+    let vm_only = project.vm_only.clone();
+    let kept_in_vm = Some(codewire_project::vm_only_summary(&vm_only));
+    let vm_only_notes = project
+        .vm_only_notes
+        .iter()
+        .cloned()
+        .chain(vm_only_review(source_path, &vm_only, true))
+        .collect();
+    project.local_mounts.push(v1::LocalMountInput {
+        source_path: source_path.as_os_str().as_bytes().to_vec(),
+        destination: destination.clone(),
+        mode: v1::LocalMountMode::Direct as i32,
+        read_only: Some(false),
+        vm_only,
+    });
+    Ok(NativeWorkspace {
+        description: format!(
+            "mount {shown} at {destination} (live, read-write), with its checkouts of {names}"
+        ),
+        notice: unapplied.then(|| {
+            "codewire.yaml names branches or revisions; a mount uses each checkout as it is, so they are not applied.".to_owned()
+        }),
+        kept_in_vm,
+        vm_only_notes,
+        ..NativeWorkspace::default()
+    })
+}
+
+/// Why `repository_destination` is not a checkout inside the folder mounted
+/// at `mount_destination`, if it is not. A link anywhere on the way is
+/// refused: the VM sees it as a link, and a link out of the folder leads
+/// nowhere there.
+fn checkout_problem(
+    source_path: &Path,
+    mount_destination: &str,
+    repository_destination: &str,
+) -> Option<String> {
+    let Some(relative) = repository_destination
+        .strip_prefix(mount_destination)
+        .and_then(|rest| rest.strip_prefix('/'))
+    else {
+        return Some(format!(
+            "{repository_destination} is not inside {mount_destination}"
+        ));
+    };
+    let mut host = source_path.to_owned();
+    for component in Path::new(relative).components() {
+        host.push(component);
+        match host.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Some(format!(
+                    "{repository_destination}: {} is a link, which the VM cannot follow out of the folder",
+                    display_host_path(&host)
+                ));
+            }
+            Ok(metadata) if metadata.is_dir() => {}
+            _ => {
+                return Some(format!(
+                    "{repository_destination}: {} is not checked out",
+                    display_host_path(&source_path.join(relative))
+                ));
+            }
+        }
+    }
+    if host.join(".git").symlink_metadata().is_err() {
+        return Some(format!(
+            "{repository_destination}: {} is not a Git checkout",
+            display_host_path(&host)
+        ));
+    }
+    None
 }
 
 /// Direct mounts need virtio-fs: Virtualization.framework's own device on
@@ -5161,6 +5290,116 @@ mod tests {
             )),
             "{error:#}"
         );
+    }
+
+    /// A folder named `root` holding Git checkouts `a` and `b`, and a
+    /// codewire.yaml declaring them at `/workspace/root/a` and `/workspace/root/b`.
+    fn folder_with_checkouts(extra: &str) -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap().join("root");
+        for checkout in ["a", "b"] {
+            std::fs::create_dir_all(root.join(checkout).join(".git")).unwrap();
+        }
+        std::fs::write(
+            root.join("codewire.yaml"),
+            format!(
+                "version: 1\nrepositories:\n  - source: https://example.test/org/a.git\n    destination: /workspace/root/a\n    branch: main\n  - source: https://example.test/org/b.git\n    destination: /workspace/root/b\nworking_directory: /workspace/root\n{extra}"
+            ),
+        )
+        .unwrap();
+        (temp, root)
+    }
+
+    fn mount_plan(root: &Path) -> anyhow::Result<(NativeProjectPlan, NativeWorkspace)> {
+        let mut project = native_codewire_yaml(
+            root,
+            &project_file::ConfigSource::Discovered(root.join("codewire.yaml")),
+        )?;
+        let workspace =
+            resolve_native_workspace(root, &mut project, Some(PathModeArg::Mount), None, true)?;
+        Ok((project, workspace))
+    }
+
+    #[test]
+    fn mount_mode_with_repositories_mounts_the_folder_instead_of_cloning() {
+        let (_temp, root) = folder_with_checkouts("");
+        let (project, workspace) = mount_plan(&root).unwrap();
+        assert!(project.spec.repositories.is_empty(), "nothing is cloned");
+        assert_eq!(project.spec.working_directory, "/workspace/root");
+        assert_eq!(project.local_mounts.len(), 1);
+        let mount = &project.local_mounts[0];
+        assert_eq!(mount.source_path, root.as_os_str().as_bytes());
+        assert_eq!(mount.destination, "/workspace/root");
+        assert_eq!(mount.mode, v1::LocalMountMode::Direct as i32);
+        assert_eq!(mount.read_only, Some(false));
+        assert!(
+            workspace
+                .description
+                .ends_with("at /workspace/root (live, read-write), with its checkouts of /workspace/root/a, /workspace/root/b"),
+            "{}",
+            workspace.description
+        );
+        assert!(
+            workspace
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("not applied")),
+            "{:?}",
+            workspace.notice
+        );
+    }
+
+    #[test]
+    fn mount_mode_names_every_repository_that_is_not_checked_out() {
+        let (_temp, root) = folder_with_checkouts("");
+        std::fs::remove_dir_all(root.join("a")).unwrap();
+        std::fs::remove_dir_all(root.join("b/.git")).unwrap();
+        let error = mount_plan(&root).unwrap_err().to_string();
+        assert!(error.contains("/workspace/root/a: "), "{error}");
+        assert!(error.contains("a is not checked out"), "{error}");
+        assert!(error.contains("b is not a Git checkout"), "{error}");
+        assert!(
+            error.contains("leave out --path-mode to clone them fresh"),
+            "{error}"
+        );
+
+        let (temp, root) = folder_with_checkouts("");
+        std::fs::remove_dir_all(root.join("b")).unwrap();
+        let outside = temp.path().join("elsewhere");
+        std::fs::create_dir_all(outside.join(".git")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("b")).unwrap();
+        let error = mount_plan(&root).unwrap_err().to_string();
+        assert!(error.contains("b is a link"), "{error}");
+    }
+
+    #[test]
+    fn mount_mode_needs_destinations_inside_the_folder_and_no_declared_mounts() {
+        let (_temp, root) = folder_with_checkouts("");
+        let renamed = root.with_file_name("other");
+        std::fs::rename(&root, &renamed).unwrap();
+        let error = mount_plan(&renamed).unwrap_err().to_string();
+        assert!(
+            error.contains("/workspace/root/a is not inside /workspace/other"),
+            "{error}"
+        );
+
+        let (_temp, root) = folder_with_checkouts(
+            "mounts: [{source: a, destination: /workspace/extra, mode: copy}]\n",
+        );
+        let error = mount_plan(&root).unwrap_err().to_string();
+        assert!(error.contains("cannot also declare mounts"), "{error}");
+
+        let (_temp, root) = folder_with_checkouts("");
+        let mut project = native_codewire_yaml(
+            &root,
+            &project_file::ConfigSource::Discovered(root.join("codewire.yaml")),
+        )
+        .unwrap();
+        let error =
+            resolve_native_workspace(&root, &mut project, Some(PathModeArg::Copy), None, true)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("only --path-mode mount"), "{error}");
     }
 
     #[test]
