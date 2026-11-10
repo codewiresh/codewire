@@ -5219,8 +5219,11 @@ for selection in sorted(set(realistic) | synthetic):
             "needs.kind-daemon.result": "success",
             "needs.kind-smokes.result": "success",
             # The packages shard runs the compile job's test archive; the
-            # compile job is dispatched whenever the shards are.
+            # compile job is dispatched whenever the shards are, and reports
+            # its workspace archive (no store is reachable here, so each
+            # fetch is a miss that builds in place).
             "needs.rust-compile.result": "success",
+            "needs.rust-compile.outputs.archive_sha256": "0" * 64,
             "needs.verification-selection.outputs.selection": selection,
             "needs.verification-selection.outputs.tested_tree_receipt": "fallback",
             "needs.verification-selection.outputs.superseded": "false",
@@ -5281,8 +5284,11 @@ for selection in scheduled:
             "needs.kind-daemon.result": "success",
             "needs.kind-smokes.result": "success",
             # The packages shard runs the compile job's test archive; the
-            # compile job is dispatched whenever the shards are.
+            # compile job is dispatched whenever the shards are, and reports
+            # its workspace archive (no store is reachable here, so each
+            # fetch is a miss that builds in place).
             "needs.rust-compile.result": "success",
+            "needs.rust-compile.outputs.archive_sha256": "0" * 64,
             "needs.verification-selection.outputs.selection": selection,
             "needs.verification-selection.outputs.tested_tree_receipt": "fallback",
             "needs.verification-selection.outputs.superseded": "false",

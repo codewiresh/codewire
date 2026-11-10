@@ -16,11 +16,15 @@
 # part way is fetched once more to a file and extracted from there.
 #
 # With --or-build, a job that can still build its tests itself treats an
-# archive it cannot get (no digest reported, no store, or a store that no
-# longer holds it) as a miss: it warns, writes ready=false to GITHUB_OUTPUT
-# and succeeds, and the job builds in place as it did before compile once. A
-# miss costs time, never a red run. An archive whose bytes do not hash to the
-# digest always fails. A fetched and verified archive writes ready=true.
+# archive it cannot get (no digest reported for a leg the compile job did not
+# build, no store, or a store that no longer holds it) as a miss: it warns,
+# writes ready=false to GITHUB_OUTPUT and succeeds, and the job builds in place
+# as it did before compile once. A miss costs time, never a red run.
+# COMPILE_RESULT and COMPILE_ARCHIVE_SHA256 are the compile job's result and
+# its always-built workspace archive; when that job succeeded but the archive
+# digest is empty too, its outputs were lost and the job fails instead of
+# building the whole workspace. An archive whose bytes do not hash
+# to the digest always fails. A fetched and verified archive writes ready=true.
 set -euo pipefail
 
 die() {
@@ -53,8 +57,15 @@ miss() {
 [ "$#" -eq 2 ] || die 'usage: fetch-test-archive.sh [--or-build] [--extract] SHA256 PATH'
 digest="$1" file="$2"
 if [ -z "$digest" ] && [ "$or_build" = true ]; then
-  # Nothing was built for this run (a main push, or no Rust compile).
-  echo 'fetch-test-archive: no archive was built for this run; this job builds its tests itself'
+  # The compile job builds the workspace archive whenever it succeeds. When
+  # it succeeded but that digest is missing too, its outputs never reached
+  # this job: a rerun of only some jobs lost them, and building the whole
+  # workspace here ran a guest sized for tests out of memory (#4031).
+  if [ "${COMPILE_RESULT:-}" = success ] && [ -z "${COMPILE_ARCHIVE_SHA256:-}" ]; then
+    die 'no test archive for this head; rerun the whole run'
+  fi
+  # The compile job did not run, or built no such leg for this selection.
+  echo 'fetch-test-archive: no archive was built for this job; it builds its tests itself'
   ready false
   exit 0
 fi

@@ -89,4 +89,29 @@ if fetch --or-build --extract "$junk" "$work/x/junk"; then fail 'an archive that
 grep -q 'did not unpack' "$work/fetch.log" || fail 'an archive that does not unpack gave no reason'
 [ ! -e "$work/x/junk" ] && [ ! -e "$work/x/junk.partial" ] || fail 'an archive that does not unpack left a folder'
 
+# No digest for this job, which builds in place (#4031): the compile job was
+# skipped, or it succeeded and reported its workspace archive but built no
+# leg for this job's selection.
+for compile in 'skipped:' "success:$good"; do
+  COMPILE_RESULT="${compile%%:*}" COMPILE_ARCHIVE_SHA256="${compile#*:}" \
+    fetch --or-build '' "$work/x/unbuilt.tar" ||
+    fail "a job with no archive for it failed (compile ${compile%%:*}): $(cat "$work/fetch.log")"
+  grep -qx 'ready=false' "$work/out" || fail "a job with no archive for it was not a miss (compile ${compile%%:*})"
+  grep -q 'no archive was built for this job' "$work/fetch.log" ||
+    fail "a job with no archive for it gave no reason (compile ${compile%%:*})"
+done
+
+# The compile job succeeded but reported no digest at all, not even the
+# workspace archive's: its outputs were lost, as on a partial rerun. The job
+# fails instead of building the whole workspace on a guest sized for tests.
+for mode in '' --extract; do
+  # shellcheck disable=SC2086 # An empty mode adds no argument.
+  if COMPILE_RESULT=success COMPILE_ARCHIVE_SHA256='' fetch --or-build $mode '' "$work/x/lost$mode"; then
+    fail "lost compile outputs did not fail${mode:+ with $mode}"
+  fi
+  grep -q 'no test archive for this head; rerun the whole run' "$work/fetch.log" ||
+    fail "lost compile outputs gave no reason${mode:+ with $mode}"
+  ! grep -q 'ready=' "$work/out" || fail "lost compile outputs reported readiness${mode:+ with $mode}"
+done
+
 echo 'fetch-test-archive --extract tests: OK'
