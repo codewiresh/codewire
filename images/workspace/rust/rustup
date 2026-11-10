@@ -1,0 +1,13 @@
+#!/bin/bash
+# Keep the image toolchain available when persistent storage covers the home.
+# A user's explicit home or existing installation always keeps Rustup's normal
+# selection and errors. Only an untouched home uses the image fallback.
+set -euo pipefail
+
+rust_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ ! ${RUSTUP_HOME+x} && ! -e "$HOME/.rustup" && ! -L "$HOME/.rustup" ]]; then
+  export RUSTUP_HOME="$rust_root/rustup"
+fi
+
+# Rustup is a multicall binary: cargo, rustc, etc. select their proxy by argv[0].
+exec -a "${0##*/}" "$rust_root/cargo/bin/rustup" "$@"

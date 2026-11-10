@@ -67,6 +67,9 @@ cat >"$work/bin/agent" <<'EOF'
 if [ "${FAIL_AGENT:-}" = "$(basename "$0")" ]; then
   exit 42
 fi
+if [ "${FAIL_AGENT:-}" = cargo-clippy ] && [ "$(basename "$0"):$*" = 'cargo:clippy --version' ]; then
+  exit 42
+fi
 if [ "$(basename "$0")" = codex ]; then
   printf 'codex-cli %s\n' "${FAKE_CODEX_VERSION:-0.160.0}"
 else
@@ -135,7 +138,7 @@ for agent in codex claude gemini kimi pi aider; do
   ln -s agent "$work/bin/$agent"
 done
 for tool in cw docker dockerd docker-compose gh git go gopls hcloud kubectl atmos \
-  node bun bun""x pnpm yarn python3 pipx poetry uv cargo rustc psql protoc; do
+  node bun bun""x pnpm yarn python3 pipx poetry uv cargo rustc rustfmt psql protoc bwrap; do
   ln -s agent "$work/bin/$tool"
 done
 
@@ -184,6 +187,11 @@ for tool in kubectl atmos; do
 done
 grep -Fxq 'workspace image verification: inert SSH fixture contract passed' "$work/success.out" ||
   fail 'prepared SSH fixture was not checked'
+for tool in cargo rustc rustfmt cargo-clippy; do
+  if FAIL_AGENT="$tool" run_contract >"$work/rust-failure.out" 2>"$work/rust-failure.err"; then
+    fail "a broken Rust command was accepted: $tool"
+  fi
+done
 
 for bin_failure in wrong-uid wrong-gid group-write other-write symlink stat-error malformed; do
   rm -f "$work/prefix-state"
@@ -317,4 +325,45 @@ grep -Fxq 'workspace image verification: pids.max=2048' "$work/agent-failure.err
 grep -Fxq 'workspace image verification: pids.events=max 3' "$work/agent-failure.err" ||
   fail 'agent failure omitted pids.events'
 
-echo 'workspace agent PID contract: OK'
+# Exercise the real image dispatcher with bash as the multicall test binary.
+# Unlike a script stub, bash -c observes the argv[0] passed by exec -a.
+mkdir -p "$work/rust/bin" "$work/rust/cargo/bin" "$work/rust/rustup" "$work/home"
+cp "$ROOT/images/workspace/rust/rustup" "$work/rust/bin/rustup"
+ln -s "$(command -v bash)" "$work/rust/cargo/bin/rustup"
+for tool in cargo rustc rustdoc rustfmt cargo-clippy rustup; do
+  [[ "$tool" = rustup ]] || ln -s rustup "$work/rust/bin/$tool"
+  # shellcheck disable=SC2016 # The child shell observes exec -a and its environment.
+  observed="$(env -u RUSTUP_HOME HOME="$work/home" CARGO_HOME="$work/home/.cargo" \
+    "$work/rust/bin/$tool" -c 'printf "%s:%s:%s" "$0" "$RUSTUP_HOME" "$CARGO_HOME"')"
+  [[ "$observed" = "$tool:$work/rust/rustup:$work/home/.cargo" ]] ||
+    fail "Rust dispatcher lost command identity, fallback or Cargo home: $tool"
+done
+for home_kind in directory file dangling-symlink; do
+  case "$home_kind" in
+    directory) mkdir "$work/home/.rustup" ;;
+    file) touch "$work/home/.rustup" ;;
+    dangling-symlink) ln -s absent "$work/home/.rustup" ;;
+  esac
+  # shellcheck disable=SC2016 # Inspect the child process, not this test shell.
+  observed="$(env -u RUSTUP_HOME HOME="$work/home" "$work/rust/bin/cargo" \
+    -c 'printf "%s" "${RUSTUP_HOME-unset}"')"
+  [[ "$observed" = unset ]] || fail "Rust dispatcher hid existing home state: $home_kind"
+  if [[ "$home_kind" = directory ]]; then rmdir "$work/home/.rustup"; else rm "$work/home/.rustup"; fi
+done
+for explicit_home in "$work/explicit" ''; do
+  # shellcheck disable=SC2016 # Inspect the child process, not this test shell.
+  observed="$(HOME="$work/home" RUSTUP_HOME="$explicit_home" "$work/rust/bin/rustup" \
+    -c 'printf "%s" "$RUSTUP_HOME"')"
+  [[ "$observed" = "$explicit_home" ]] || fail 'Rust dispatcher replaced an explicit home'
+done
+# shellcheck disable=SC2016 # Arguments and selection must survive in the child.
+observed="$(env -u RUSTUP_HOME HOME="$work/home" RUSTUP_TOOLCHAIN=nightly \
+  "$work/rust/bin/cargo" -c 'printf "%s:%s:%s" "$RUSTUP_TOOLCHAIN" "$1" "$2"' -- 'two words' '+stable')"
+[[ "$observed" = 'nightly:two words:+stable' ]] || fail 'Rust dispatcher changed arguments or toolchain selection'
+set +e
+env -u RUSTUP_HOME HOME="$work/home" "$work/rust/bin/rustc" -c 'exit 42'
+status=$?
+set -e
+[[ "$status" -eq 42 ]] || fail 'Rust dispatcher lost the tool exit status'
+
+echo 'workspace agent PID and Rust dispatcher contracts: OK'

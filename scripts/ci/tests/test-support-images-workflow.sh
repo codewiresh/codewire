@@ -313,7 +313,7 @@ for moving_tool_pattern in \
   'COPY --from=workspace-floating-go --chown=codewire:codewire' \
   'pipx install aider-chat' \
   'npm install -g --ignore-scripts' \
-  'COPY --from=cw-toolchain --chown=codewire:codewire /usr/local/rustup/ /home/codewire/.rustup/'; do
+  'COPY --from=cw-toolchain --chown=codewire:codewire /usr/local/rustup/ /opt/codewire/rust/rustup/'; do
   moving_tool_line="$(grep -n -m1 -F "$moving_tool_pattern" \
     "$WORKSPACE_DOCKERFILE" | cut -d: -f1)"
   [[ -n "$moving_tool_line" && "$moving_tool_line" -lt "$cw_copy_line" ]] ||

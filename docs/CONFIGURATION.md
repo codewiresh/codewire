@@ -56,6 +56,28 @@ CODEWIRE_APPROVED_IMAGE_REGISTRIES=ghcr.io/codewiresh/,docker.io/library/
 
 `make kind-runtime-images` preloads that image into every node.
 
+### Workspace Rust toolchains
+
+The default workspace includes Rust 1.99.0 with rustfmt and Clippy outside the
+persistent home, under `/opt/codewire/rust`. Cargo keeps its configuration,
+registry cache and installed commands in `/home/codewire/.cargo`; its `bin`
+directory takes precedence over the image's Rust commands.
+
+The image sets no global `RUSTUP_HOME` or `RUSTUP_TOOLCHAIN`. Each image Rust
+command respects an explicit `RUSTUP_HOME`, then an existing `~/.rustup`.
+Otherwise it uses the image's writable toolchain store. Rustup still selects
+toolchains through its normal command-line, environment and project overrides.
+An incomplete user installation reports its normal error instead of silently
+switching stores.
+
+The baked Rustup executable is updated through the workspace image. Its
+explicit `rustup self update` fails before installing user-prefix proxies;
+automatic self-update is skipped. Normal toolchain, component and default
+commands can modify the fallback store, but those changes are lost when the
+workspace container is replaced. To retain Rustup changes, install Rustup in
+the persistent home or select a persistent `RUSTUP_HOME`. A user-installed
+Rustup keeps its normal update behavior.
+
 The process-level harnesses (`scripts/dev/dev-stack.sh` and the integration and
 rehearsal runners) use `registry.example.invalid`, a reserved name that never
 resolves.

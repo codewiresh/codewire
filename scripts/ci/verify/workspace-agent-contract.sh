@@ -171,6 +171,20 @@ case "$interactive_flags" in
   *) printf 'workspace image verification: interactive bash did not start\n' >&2; exit 1 ;;
 esac
 
+check_version() {
+  executable="$1"
+  shift
+  command -v "$executable" >/dev/null
+  "$@"
+}
+
+# Rust must also work with the actual empty home mount. Checking only the
+# populated image home previously hid the missing interactive toolchain.
+check_version cargo cargo --version
+check_version rustc rustc --version
+check_version rustfmt rustfmt --version
+check_version cargo cargo clippy --version
+
 if [ "$mode" = mounted-home-agents ]; then
   printf 'workspace image verification: fresh-home six-agent contract passed\n'
   exit 0
@@ -204,13 +218,6 @@ case "$ssh_version" in
 esac
 printf 'workspace image verification: inert SSH fixture contract passed\n'
 
-check_version() {
-  executable="$1"
-  shift
-  command -v "$executable" >/dev/null
-  "$@"
-}
-
 # This is the user-facing developer workspace contract. Check every advertised
 # tool whenever the image changes so one repaired installer cannot hide a
 # broken sibling or architecture-specific omission.
@@ -240,8 +247,6 @@ check_version python3 python3 --version
 check_version pipx pipx --version
 check_version poetry poetry --version
 check_version uv uv --version
-check_version cargo cargo --version
-check_version rustc rustc --version
 check_version psql psql --version
 check_version protoc protoc --version
 # Codex's Linux sandbox runs commands through the system bubblewrap on PATH.

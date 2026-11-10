@@ -249,9 +249,21 @@ RUN mkdir -p /home/codewire/go /home/codewire/.npm-global \
       /opt/codewire/agents/npm /opt/codewire/agents/pipx /opt/codewire/agents/bin && \
     chown -R codewire:codewire /home/codewire/go /home/codewire/.npm-global /opt/codewire/agents
 
+# Persistent storage covers the home, so keep the pinned Rust payload in the
+# image. The binary/dispatcher are image-managed; normal Rustup toolchain and
+# component commands can write the fallback store as codewire. User Rustup
+# homes and explicitly selected stores remain authoritative.
+COPY --from=cw-toolchain --chown=0:0 /usr/local/cargo/bin/ /opt/codewire/rust/cargo/bin/
+COPY --from=cw-toolchain --chown=codewire:codewire /usr/local/rustup/ /opt/codewire/rust/rustup/
+COPY --chown=0:0 --chmod=0755 images/workspace/rust/rustup /opt/codewire/rust/bin/rustup
+RUN for proxy in /opt/codewire/rust/cargo/bin/*; do \
+      name="${proxy##*/}"; \
+      [ "$name" = rustup ] || ln -s rustup "/opt/codewire/rust/bin/$name"; \
+    done && \
+    chmod -R go-w /opt/codewire/rust/cargo /opt/codewire/rust/bin
+
 USER codewire
 ENV CARGO_HOME="/home/codewire/.cargo"
-ENV RUSTUP_HOME="/home/codewire/.rustup"
 # User installations persist in the mounted home and take precedence over the
 # shipped agents. Image configuration, not a hidden ~/.npmrc, selects their
 # npm prefix. npm's install-script policy is left at its default, so project
@@ -259,14 +271,8 @@ ENV RUSTUP_HOME="/home/codewire/.rustup"
 # below runs under a strict allowlist. The upgrade commands of shipped agents
 # that would update in place come next.
 ENV NPM_CONFIG_PREFIX="/home/codewire/.npm-global"
-ENV PATH="/home/codewire/.npm-global/bin:/home/codewire/.local/bin:/opt/codewire/agents/upgrade:/opt/codewire/agents/npm/bin:/opt/codewire/agents/bin:${CARGO_HOME}/bin:${PATH}"
+ENV PATH="/home/codewire/.npm-global/bin:/home/codewire/.local/bin:/opt/codewire/agents/upgrade:/opt/codewire/agents/npm/bin:/opt/codewire/agents/bin:${CARGO_HOME}/bin:/opt/codewire/rust/bin:${PATH}"
 
-# Reuse the exact toolchain and explicitly selected components from the
-# digest-pinned Rust build stage. This removes a second mutable installer
-# transaction and keeps the interactive user's Cargo and Rustup homes writable
-# for normal development.
-COPY --from=cw-toolchain --chown=codewire:codewire /usr/local/cargo/ /home/codewire/.cargo/
-COPY --from=cw-toolchain --chown=codewire:codewire /usr/local/rustup/ /home/codewire/.rustup/
 RUN cargo --version && rustc --version && rustfmt --version && cargo clippy --version
 
 # Every actual workspace builder bypasses this named stage. Floating developer

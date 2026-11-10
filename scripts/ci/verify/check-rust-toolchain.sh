@@ -197,10 +197,27 @@ rust_workspace_image="rust:${channel}-slim-bookworm@sha256:2c3a22f0a5533ea2dd5a1
   die "workspace arm64 cw cross-compiler differs from the reviewed $rust_build_image"
 [[ "$(grep -Fxc "RUN rustup component add --toolchain ${channel} rustfmt clippy" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
   die "workspace build stage does not select exact $channel rustfmt and clippy components"
-[[ "$(grep -Fxc 'COPY --from=cw-toolchain --chown=codewire:codewire /usr/local/cargo/ /home/codewire/.cargo/' "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
-  die "workspace user Cargo home does not come from the exact $channel build stage"
-[[ "$(grep -Fxc 'COPY --from=cw-toolchain --chown=codewire:codewire /usr/local/rustup/ /home/codewire/.rustup/' "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
-  die "workspace user Rustup home does not come from the exact $channel build stage"
+[[ "$(grep -Fxc 'COPY --from=cw-toolchain --chown=0:0 /usr/local/cargo/bin/ /opt/codewire/rust/cargo/bin/' "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
+  die "workspace image Cargo proxies do not come from the exact $channel build stage with root ownership"
+[[ "$(grep -Fxc 'COPY --from=cw-toolchain --chown=codewire:codewire /usr/local/rustup/ /opt/codewire/rust/rustup/' "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
+  die "workspace image Rustup store does not come from the exact $channel build stage with user ownership"
+[[ "$(grep -Fxc 'ENV CARGO_HOME="/home/codewire/.cargo"' "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
+  die 'workspace Cargo home must remain in the persistent home'
+# Join continued instructions so a global override cannot hide on another
+# line. Per-command RUN environments do not select the interactive store.
+if awk '
+  /^[[:space:]]*#/ { next }
+  {
+    instruction = instruction $0
+    if (sub(/\\[[:space:]]*$/, " ", instruction)) next
+    if (instruction ~ /^[[:space:]]*ENV[[:space:]]/ &&
+        instruction ~ /(^|[[:space:]])RUSTUP_(HOME|TOOLCHAIN)([[:space:]]|=)/) found = 1
+    instruction = ""
+  }
+  END { exit !found }
+' "$ROOT/$WORKSPACE_DOCKERFILE"; then
+  die 'workspace image must not set a global Rustup home or toolchain override'
+fi
 if grep -Fq 'https://sh.rustup.rs' "$ROOT/$WORKSPACE_DOCKERFILE"; then
   die 'workspace user toolchain must not use the mutable Rustup network installer'
 fi
