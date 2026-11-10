@@ -485,6 +485,139 @@ async fn half_close_keeps_the_reverse_direction_open() {
 }
 
 #[tokio::test]
+async fn flush_handoff_retains_explicit_shutdown_and_abort_contracts() {
+    use std::pin::Pin;
+    use std::task::Poll;
+    use tokio::io::AsyncWrite;
+    use tokio::sync::{watch, Notify};
+
+    for graceful in [false, true] {
+        let (a_out, b_in) = mpsc::channel(PACKET_QUEUE);
+        let (b_out, mut from_b) = mpsc::channel(PACKET_QUEUE);
+        let (to_a, a_in) = mpsc::channel(PACKET_QUEUE);
+        let (gate, mut hold) = watch::channel(false);
+        let held = Arc::new(Notify::new());
+        let held_signal = held.clone();
+        let wire = tokio::spawn(async move {
+            let mut pending = std::collections::VecDeque::new();
+            loop {
+                tokio::select! {
+                    result = hold.changed() => { if result.is_err() { break; } }
+                    packet = from_b.recv(), if pending.len() < PACKET_QUEUE => {
+                        let Some(packet) = packet else { break };
+                        pending.push_back(packet);
+                        if *hold.borrow() { held_signal.notify_one(); }
+                    }
+                }
+                let forwarding = !*hold.borrow();
+                if forwarding {
+                    while let Some(packet) = pending.pop_front() {
+                        if to_a.send(packet).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        let a = Netstack::new(IpAddr::V6(A_IP), PREFIX, a_in, a_out);
+        let b = Netstack::new(IpAddr::V6(B_IP), PREFIX, b_in, b_out);
+        let mut listener = b.bind(7301).await.unwrap();
+        let mut client = a
+            .connect(SocketAddr::new(IpAddr::V6(B_IP), 7301))
+            .await
+            .unwrap();
+        let mut server = listener.accept().await.unwrap();
+        gate.send(true).unwrap();
+        let payload: Vec<_> = (0..8192).map(|n| (n % 251) as u8).collect();
+        client.write_all(&payload).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), held.notified())
+            .await
+            .expect("peer received data and its ACK is held");
+        tokio::time::timeout(Duration::from_secs(2), client.flush())
+            .await
+            .expect("socket handoff must not wait for held ACKs")
+            .unwrap();
+        if graceful {
+            std::future::poll_fn(|cx| {
+                assert!(
+                    Pin::new(&mut client).poll_shutdown(cx).is_pending(),
+                    "shutdown must retain its ACK barrier"
+                );
+                Poll::Ready(())
+            })
+            .await;
+            gate.send(false).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), client.shutdown())
+                .await
+                .expect("ACK release completes shutdown")
+                .unwrap();
+            drop(client);
+            let mut received = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), server.read_to_end(&mut received))
+                .await
+                .expect("successful shutdown/drop must deliver the whole tail and FIN")
+                .unwrap();
+            assert_eq!(received, payload);
+        } else {
+            // Flush alone is not a graceful close. Dropping this handle still
+            // resets the peer, just as a cancelled protocol must do.
+            drop(client);
+            let mut received = Vec::new();
+            let error =
+                tokio::time::timeout(Duration::from_secs(2), server.read_to_end(&mut received))
+                    .await
+                    .expect("flush followed by drop still aborts")
+                    .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+        }
+        wire.abort();
+    }
+}
+
+#[tokio::test]
+async fn packet_transport_loss_wakes_pending_shutdown() {
+    use std::pin::Pin;
+    use std::task::Poll;
+    use tokio::io::AsyncWrite;
+
+    let (a_out, b_in) = mpsc::channel(PACKET_QUEUE);
+    let (b_out, mut from_b) = mpsc::channel(PACKET_QUEUE);
+    let (to_a, a_in) = mpsc::channel(PACKET_QUEUE);
+    let (ready, hold) = tokio::sync::watch::channel(false);
+    let wire = tokio::spawn(async move {
+        while let Some(packet) = from_b.recv().await {
+            let forwarding = !*hold.borrow();
+            if forwarding && to_a.send(packet).await.is_err() {
+                break;
+            }
+        }
+    });
+    let a = Netstack::new(IpAddr::V6(A_IP), PREFIX, a_in, a_out);
+    let b = Netstack::new(IpAddr::V6(B_IP), PREFIX, b_in, b_out);
+    let mut listener = b.bind(7302).await.unwrap();
+    let mut client = a
+        .connect(SocketAddr::new(IpAddr::V6(B_IP), 7302))
+        .await
+        .unwrap();
+    let _server = listener.accept().await.unwrap();
+    ready.send(true).unwrap();
+    client.write_all(b"pending tail").await.unwrap();
+    client.flush().await.unwrap();
+    // Poll once before transport loss to install the real shutdown waker.
+    std::future::poll_fn(|cx| {
+        assert!(Pin::new(&mut client).poll_shutdown(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    wire.abort(); // Drops the only sender into A's packet transport.
+    let error = tokio::time::timeout(Duration::from_secs(2), client.shutdown())
+        .await
+        .expect("driver loss must wake pending shutdown")
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+}
+
+#[tokio::test]
 async fn dropped_peer_surfaces_a_prompt_connection_abort() {
     let (client_stack, server_stack) = wired_pair();
     let mut listener = server_stack.bind(7400).await.expect("listener");
@@ -693,7 +826,7 @@ async fn loopback_multi_segment_stream() {
                 Err(e) => panic!("echo read error: {e}"),
             }
         }
-        stream.flush().await.ok();
+        stream.shutdown().await.expect("echo half-close");
         total
     });
 

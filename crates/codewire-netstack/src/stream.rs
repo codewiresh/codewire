@@ -7,7 +7,7 @@
 
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
@@ -30,7 +30,10 @@ pub(crate) struct StreamControl {
     shutdown: AtomicBool,
     dropped: AtomicBool,
     peer_aborted: AtomicBool,
-    flush_complete: AtomicBool,
+    driver_closed: AtomicBool,
+    accepted: AtomicU64,
+    handed_off: AtomicU64,
+    acknowledged: AtomicU64,
     flush_waker: Mutex<Option<Waker>>,
     notify: Arc<Notify>,
 }
@@ -41,7 +44,10 @@ impl StreamControl {
             shutdown: AtomicBool::new(false),
             dropped: AtomicBool::new(false),
             peer_aborted: AtomicBool::new(false),
-            flush_complete: AtomicBool::new(true),
+            driver_closed: AtomicBool::new(false),
+            accepted: AtomicU64::new(0),
+            handed_off: AtomicU64::new(0),
+            acknowledged: AtomicU64::new(0),
             flush_waker: Mutex::new(None),
             notify,
         }
@@ -57,34 +63,75 @@ impl StreamControl {
 
     pub(crate) fn mark_peer_aborted(&self) {
         self.peer_aborted.store(true, Ordering::Release);
-        if let Some(waker) = self.flush_waker.lock().unwrap().take() {
-            waker.wake();
-        }
+        self.wake_writer();
     }
 
     fn peer_aborted(&self) -> bool {
         self.peer_aborted.load(Ordering::Acquire)
     }
 
-    fn mark_write(&self) {
-        self.flush_complete.store(false, Ordering::Release);
+    fn mark_write(&self, bytes: usize) {
+        self.accepted.fetch_add(bytes as u64, Ordering::Release);
     }
 
-    pub(crate) fn mark_flushed(&self) {
-        self.flush_complete.store(true, Ordering::Release);
-        if let Some(waker) = self.flush_waker.lock().unwrap().take() {
+    pub(crate) fn mark_handed_off(&self, bytes: usize) {
+        self.handed_off.fetch_add(bytes as u64, Ordering::Release);
+        self.wake_writer();
+    }
+
+    pub(crate) fn mark_acknowledged(&self) {
+        // Only the driver updates handed_off. Its empty socket send buffer
+        // proves those bytes were ACKed, even if another queue send has not
+        // yet published its accepted position.
+        self.acknowledged
+            .store(self.handed_off.load(Ordering::Acquire), Ordering::Release);
+        self.wake_writer();
+    }
+
+    fn wake_writer(&self) {
+        let waker = self.flush_waker.lock().unwrap().take();
+        if let Some(waker) = waker {
             waker.wake();
         }
     }
 
-    fn poll_flushed(&self, cx: &mut Context<'_>) -> Poll<()> {
-        if self.flush_complete.load(Ordering::Acquire) {
-            return Poll::Ready(());
+    pub(crate) fn mark_driver_closed(&self) {
+        self.driver_closed.store(true, Ordering::Release);
+        self.wake_writer();
+    }
+
+    fn write_error(&self) -> Option<io::Error> {
+        if self.peer_aborted() {
+            Some(connection_aborted())
+        } else if self.driver_closed.load(Ordering::Acquire) {
+            Some(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "netstack driver gone",
+            ))
+        } else {
+            None
         }
-        *self.flush_waker.lock().unwrap() = Some(cx.waker().clone());
-        if self.flush_complete.load(Ordering::Acquire) {
+    }
+
+    fn poll_progress(&self, cx: &mut Context<'_>, progress: &AtomicU64) -> Poll<io::Result<()>> {
+        // These are wrapping byte positions, not an ordering comparison.
+        // Bounded queues/socket buffers keep the distance below one wrap.
+        let ready = || self.accepted.load(Ordering::Acquire) == progress.load(Ordering::Acquire);
+        if let Some(error) = self.write_error() {
+            return Poll::Ready(Err(error));
+        }
+        if ready() {
+            return Poll::Ready(Ok(()));
+        }
+        let waker = cx.waker().clone();
+        *self.flush_waker.lock().unwrap() = Some(waker);
+        // Progress or abort may have happened before the waker was installed.
+        if let Some(error) = self.write_error() {
             self.flush_waker.lock().unwrap().take();
-            Poll::Ready(())
+            Poll::Ready(Err(error))
+        } else if ready() {
+            self.flush_waker.lock().unwrap().take();
+            Poll::Ready(Ok(()))
         } else {
             self.notify.notify_one();
             Poll::Pending
@@ -92,11 +139,20 @@ impl StreamControl {
     }
 }
 
+fn connection_aborted() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ConnectionAborted,
+        "userspace TCP connection aborted",
+    )
+}
+
 /// A userspace TCP stream over the consumer-supplied packet transport.
 ///
 /// Reads pull application bytes that the driver drained from the smoltcp
 /// socket; writes push bounded application chunks that the driver feeds into
-/// the socket on its next poll.
+/// the socket on its next poll. Flush waits for that socket handoff, without
+/// waiting for TCP acknowledgments. Shutdown waits for acknowledgments before
+/// requesting FIN, so dropping a successfully shut-down stream retains its tail.
 pub struct TcpStream {
     /// Driver -> stream: received application bytes.
     pub(crate) rx: mpsc::Receiver<ByteChunk>,
@@ -241,10 +297,10 @@ impl AsyncWrite for TcpStream {
             ))),
             Poll::Ready(Ok(())) => {
                 let len = buf.len().min(this.max_write_chunk);
-                this.control.mark_write();
                 this.tx.send_item(buf[..len].to_vec()).map_err(|_| {
                     io::Error::new(io::ErrorKind::BrokenPipe, "netstack driver gone")
                 })?;
+                this.control.mark_write(len);
                 this.control.notify.notify_one();
                 Poll::Ready(Ok(len))
             }
@@ -265,11 +321,17 @@ impl AsyncWrite for TcpStream {
                 "netstack driver gone",
             )));
         }
-        this.control.poll_flushed(cx).map(Ok)
+        this.control.poll_progress(cx, &this.control.handed_off)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.as_mut().poll_flush(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {}
+        }
+        let this = self.as_mut().get_mut();
+        match this.control.poll_progress(cx, &this.control.acknowledged) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {}
@@ -346,5 +408,160 @@ impl TcpListener {
             }
         };
         Some(std::net::SocketAddr::new(address, self.endpoint.port))
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::Wake;
+
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn queue_publication_can_follow_socket_and_ack_progress() {
+        let control = StreamControl::new(Arc::new(Notify::new()));
+        let waker = Waker::from(Arc::new(Wakes::default()));
+        let mut cx = Context::from_waker(&waker);
+        // A driver on another thread may process the successful queue send
+        // before poll_write publishes accepted. Neither barrier may mistake
+        // this transient ordering for completion.
+        control.mark_handed_off(8);
+        control.mark_acknowledged();
+        assert!(control
+            .poll_progress(&mut cx, &control.handed_off)
+            .is_pending());
+        assert!(control
+            .poll_progress(&mut cx, &control.acknowledged)
+            .is_pending());
+        control.mark_write(8);
+        assert!(matches!(
+            control.poll_progress(&mut cx, &control.handed_off),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(matches!(
+            control.poll_progress(&mut cx, &control.acknowledged),
+            Poll::Ready(Ok(()))
+        ));
+    }
+
+    #[test]
+    fn partial_handoff_and_acknowledgment_are_distinct_barriers() {
+        let control = StreamControl::new(Arc::new(Notify::new()));
+        let wakes = Arc::new(Wakes::default());
+        let waker = Waker::from(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        control.mark_write(8);
+        assert!(control
+            .poll_progress(&mut cx, &control.handed_off)
+            .is_pending());
+        control.mark_handed_off(3);
+        assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+        assert!(control
+            .poll_progress(&mut cx, &control.handed_off)
+            .is_pending());
+        control.mark_handed_off(5);
+        assert!(matches!(
+            control.poll_progress(&mut cx, &control.handed_off),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(control
+            .poll_progress(&mut cx, &control.acknowledged)
+            .is_pending());
+        control.mark_acknowledged();
+        assert!(matches!(
+            control.poll_progress(&mut cx, &control.acknowledged),
+            Poll::Ready(Ok(()))
+        ));
+    }
+
+    #[test]
+    fn abort_and_driver_close_wake_registered_waiters() {
+        for abort in [false, true] {
+            let control = StreamControl::new(Arc::new(Notify::new()));
+            let wakes = Arc::new(Wakes::default());
+            let waker = Waker::from(wakes.clone());
+            let mut cx = Context::from_waker(&waker);
+            control.mark_write(8);
+            assert!(control
+                .poll_progress(&mut cx, &control.handed_off)
+                .is_pending());
+            if abort {
+                control.mark_peer_aborted();
+            } else {
+                control.mark_driver_closed();
+            }
+            assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+            let Poll::Ready(Err(error)) = control.poll_progress(&mut cx, &control.handed_off)
+            else {
+                panic!("closed writer must fail")
+            };
+            assert_eq!(
+                error.kind(),
+                if abort {
+                    io::ErrorKind::ConnectionAborted
+                } else {
+                    io::ErrorKind::BrokenPipe
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn closure_before_accepted_publication_is_not_lost() {
+        let control = StreamControl::new(Arc::new(Notify::new()));
+        let waker = Waker::from(Arc::new(Wakes::default()));
+        let mut cx = Context::from_waker(&waker);
+        control.mark_handed_off(8);
+        control.mark_acknowledged();
+        control.mark_driver_closed();
+        control.mark_write(8);
+        let Poll::Ready(Err(error)) = control.poll_progress(&mut cx, &control.handed_off) else {
+            panic!("closure must remain observable")
+        };
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(
+            !control.peer_aborted(),
+            "normal driver closure is not a fabricated peer reset"
+        );
+    }
+
+    #[test]
+    fn byte_positions_work_across_wrap_without_ordering_or_subtraction() {
+        let control = StreamControl::new(Arc::new(Notify::new()));
+        let waker = Waker::from(Arc::new(Wakes::default()));
+        let mut cx = Context::from_waker(&waker);
+        for position in [
+            &control.accepted,
+            &control.handed_off,
+            &control.acknowledged,
+        ] {
+            position.store(u64::MAX - 3, Ordering::Release);
+        }
+        control.mark_write(8);
+        control.mark_handed_off(3);
+        assert!(control
+            .poll_progress(&mut cx, &control.handed_off)
+            .is_pending());
+        control.mark_handed_off(5);
+        assert!(matches!(
+            control.poll_progress(&mut cx, &control.handed_off),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(control
+            .poll_progress(&mut cx, &control.acknowledged)
+            .is_pending());
+        control.mark_acknowledged();
+        assert!(matches!(
+            control.poll_progress(&mut cx, &control.acknowledged),
+            Poll::Ready(Ok(()))
+        ));
     }
 }

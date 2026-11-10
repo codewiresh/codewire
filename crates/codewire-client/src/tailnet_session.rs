@@ -37,11 +37,11 @@ const SSH_USER: &str = "codewire";
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const KEEPALIVE_MAX: usize = 3;
 /// A connection that hears nothing for this long is dead, and the caller
-/// reconnects. Keepalives alone cannot say so: the tailnet's TCP completes a
-/// flush only once the peer acknowledges the data, so in a network cut
-/// russh's flush, and its keepalive timer with it, waited for the stack's
-/// 120 s idle timeout (#3861). A live connection hears the daemon's keepalive
-/// or a reply to its own at least every [`KEEPALIVE_INTERVAL`].
+/// reconnects. Keepalives alone cannot say so: a network cut can fill the
+/// tailnet's bounded TCP buffers and stall russh's writer and keepalive timer
+/// until the stack's 120 s idle timeout (#3861). A live connection hears the
+/// daemon's keepalive or a reply to its own at least every
+/// [`KEEPALIVE_INTERVAL`].
 const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// How long the end of a connection waits for its stream to shut down.
@@ -555,6 +555,10 @@ impl client::Handler for RecordedHostKey {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "tailnet_ssh_flush_tests.rs"]
+mod flush_tests;
 
 #[cfg(test)]
 mod tests {

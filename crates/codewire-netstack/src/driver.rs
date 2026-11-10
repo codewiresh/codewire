@@ -97,6 +97,14 @@ impl Conn {
     }
 }
 
+impl Drop for Conn {
+    fn drop(&mut self) {
+        // Wake flush/shutdown waiters even when the packet transport disappears.
+        // Keep normal receive EOF distinct from a peer reset.
+        self.control.mark_driver_closed();
+    }
+}
+
 /// A bound listener's accept side, owned by the driver.
 struct ListenSlot {
     /// Driver -> listener: newly accepted streams.
@@ -764,6 +772,7 @@ impl Driver {
                             "rust userspace netstack queued TCP transmit bytes"
                         );
                         conn.pending_tx.drain(..n);
+                        conn.control.mark_handed_off(n);
                     }
                     Err(_) => break,
                 }
@@ -814,7 +823,7 @@ impl Driver {
             // Apply a requested half-close once tx is fully flushed.
             let drained = conn.pending_tx.is_empty() && conn.from_stream.is_empty();
             if drained && socket.send_queue() == 0 {
-                conn.control.mark_flushed();
+                conn.control.mark_acknowledged();
             }
             if conn.control.shutdown_requested() && drained && socket.send_queue() == 0 {
                 socket.close();
