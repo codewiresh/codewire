@@ -495,11 +495,16 @@ export async function runDevUxWalkthrough(page: Page, options: {
   page.setDefaultTimeout(15_000);
   page.setDefaultNavigationTimeout(30_000);
   // Terminal sockets pass through unchanged. The reconnect journey drops the
-  // selected one from the server side, as an upstream restart does: the page
-  // offers no Disconnect.
-  const terminalSockets: Array<{ sessionId: string | null; server: WebSocketRoute }> = [];
+  // selected one, as a lost connection does: the page offers no Disconnect.
+  // Closing a routed socket's server side never reaches the page, so the drop
+  // closes the page's side (as an abnormal close) and then the server's.
+  const terminalSockets: Array<{ sessionId: string | null; page: WebSocketRoute; server: WebSocketRoute }> = [];
   await page.routeWebSocket("**/terminal?**", (socket) => {
-    terminalSockets.push({ sessionId: new URL(socket.url()).searchParams.get("session_id"), server: socket.connectToServer() });
+    terminalSockets.push({
+      sessionId: new URL(socket.url()).searchParams.get("session_id"),
+      page: socket,
+      server: socket.connectToServer(),
+    });
   });
   const socketsOf = (id: string | null) => terminalSockets.filter((socket) => socket.sessionId === id);
   for (const width of [1440, 390]) {
@@ -663,7 +668,9 @@ export async function runDevUxWalkthrough(page: Page, options: {
     const selected = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
     const before = socketsOf(selected);
     expect(before.length, "the selected terminal's socket").toBeGreaterThan(0);
-    await before.at(-1)!.server.close({ code: 1011, reason: "walkthrough connection drop" });
+    const dropped = before.at(-1)!;
+    await dropped.page.close({ code: 1011, reason: "walkthrough connection drop" });
+    await dropped.server.close({ code: 1000, reason: "walkthrough connection drop" });
     await expect.poll(() => socketsOf(selected).length, { timeout: TERMINAL_ATTACH_MS }).toBeGreaterThan(before.length);
   });
   await stage("terminal-tabs-reconnect-retained", async () => {
