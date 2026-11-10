@@ -922,17 +922,16 @@ async fn handle_platform_env_command_with_created(
                 super::lifecycle_output::print_summary(&summary, &caps);
                 return Ok(None);
             }
-            let response = environment_client
-                .start_environment(&org_id, &environment_id)
-                .await
-                .context("start environment")?;
-            wait_for_platform_environment_daemon_ready(
+            let caps = super::lifecycle_output::capabilities(args.output);
+            let response = Box::pin(start_platform_environment_with_progress(
                 &environment_client,
                 &org_id,
                 &environment_id,
-            )
-            .await
-            .context("wait for environment daemon readiness")?;
+                began,
+                &caps,
+                &InterruptNotice::new(VmLocation::Cloud, "start", &args.environment),
+            ))
+            .await?;
             print_env_status(&args.environment, &response, args.output)?;
         }
         EnvCommand::Restart(_) => {
@@ -3218,8 +3217,8 @@ async fn wait_for_platform_environment_setup(
     .await
 }
 
-/// `cw start` with text output: the start's stages, then daemon
-/// readiness. Exits non-zero when a stage fails.
+/// `cw start`: the start's stages, shown as `caps` allows, through its
+/// startup script and daemon readiness. Exits non-zero when a stage fails.
 async fn start_platform_environment_with_progress(
     client: &EnvironmentClient,
     org_id: &str,
@@ -3227,14 +3226,14 @@ async fn start_platform_environment_with_progress(
     began: Instant,
     caps: &crate::output::Capabilities,
     interrupt: &InterruptNotice,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<StatusResponse> {
     // Rows up to now belong to earlier operations, including the terminal
     // row that would otherwise end the stream at once.
     let cursor = client
         .get_environment_logs(org_id, environment_id)
         .await
         .map(|logs| progress::last_log_id(&logs));
-    client
+    let started = client
         .start_environment(org_id, environment_id)
         .await
         .context("start environment")?;
@@ -3259,6 +3258,9 @@ async fn start_platform_environment_with_progress(
                     &FollowPolicy::default(),
                     environment_id,
                     cursor,
+                    started
+                        .completes_with_log
+                        .then(|| progress::watch_start_failure(client, org_id, environment_id)),
                     daemon_ready,
                 )
                 .await
@@ -3272,7 +3274,7 @@ async fn start_platform_environment_with_progress(
     })
     .await;
     match waited {
-        Some(result) => result,
+        Some(result) => result.map(|()| started.status),
         None => {
             view.finish()?;
             Err(interrupt.error(true))

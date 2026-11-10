@@ -964,12 +964,40 @@ pub async fn handle_environment_start(
                 "environment sidecar ready"
             );
 
-            handle_post_start_configuration(
+            if let Err(error) = handle_post_start_configuration(
                 ctx,
                 payload,
                 authority,
                 setup_identity,
                 activity_ctx.clone(),
+            )
+            .await
+            {
+                if is_lifecycle_control_loss(&error) {
+                    return Err(error);
+                }
+                // A retry finds the environment running and skips, so this
+                // row is what ends `cw start`'s wait (#3938).
+                emit_authoritative_environment_log_for_states(
+                    authority,
+                    &["running"],
+                    "configure_environment",
+                    "failed",
+                    &format!("{error:#}"),
+                    None,
+                )
+                .await?;
+                return Err(error);
+            }
+            // Git identity is set and the startup script has finished, so the
+            // environment is usable: `cw start` waits for this row (#3938).
+            emit_authoritative_environment_log_for_states(
+                authority,
+                &["running"],
+                "complete",
+                "completed",
+                "Start complete",
+                None,
             )
             .await?;
         }

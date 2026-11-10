@@ -580,7 +580,10 @@ enum Command {
         long_about = "Create a new environment from the nearest codewire.yaml and direct CLI flags; flags win over the file.\n\nThe search starts in the current directory (--path for --local) and goes up to the root of its Git repository; outside a Git repository only that directory is checked. --file selects another file. The create shows which configuration it uses before it starts.\n\nMultiple repos can be specified as positional args or with --repo flags, on both placements; each is cloned into its own path, and they replace the file's repositories.\nUse URL[@branch][::/workspace/path] to set a branch and optional checkout path per repo.\n\nWith --local, create a local VM; with --cloud, a cloud environment. Starting an existing environment uses its saved configuration, never a changed file."
     )]
     Create(Box<EnvCreateArgs>),
-    #[command(about = "Start an environment")]
+    #[command(
+        about = "Start an environment",
+        long_about = "Start a stopped environment:\n  cw start ENV\n\nA cloud start returns once the environment is usable: its Git identity is set and its startup script has finished, as after `cw create`. A long startup script makes the start as long; start servers in a session instead. Ctrl-C ends only the wait."
+    )]
     Start(EnvTargetArgs),
     #[command(about = "Remove an environment")]
     Rm(EnvDeleteArgs),

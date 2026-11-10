@@ -449,6 +449,11 @@ message StartEnvironmentRequest {
 message StartEnvironmentResponse {
   string status = 1;
   StartOutcome outcome = 2;
+  // The start's log ends with a `complete` row once the environment is
+  // usable: after its post-start configuration and startup script, or after
+  // setup when the start retried a create. Unset from older servers, whose
+  // starts write no such row (#3938).
+  bool completes_with_log = 3;
 }
 
 message ProtectEnvironmentRequest {

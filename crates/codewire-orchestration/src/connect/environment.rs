@@ -375,6 +375,7 @@ impl proto::EnvironmentService for EnvironmentConnectService {
         connectrpc::Response::ok(proto::StartEnvironmentResponse {
             status: result.status.into(),
             outcome: proto_start_outcome(result.outcome).into(),
+            completes_with_log: true,
             ..Default::default()
         })
     }

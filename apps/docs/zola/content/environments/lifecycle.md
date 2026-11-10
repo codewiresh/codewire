@@ -40,6 +40,11 @@ says so and exits non-zero; the stop carries on, and `cw info web-app` shows how
 far it has come. `cw start` is refused until the state is `stopped`. See
 [Environment statuses](@/reference/environment-statuses.md) for every state.
 
+A hosted `cw start` returns once the sandbox is usable: its Git identity is set
+and its startup script has run, as after `cw create`, so the next command can
+open a session straight away. A long startup script makes the start as long;
+start servers in a session instead.
+
 ## Resize
 
 ```sh

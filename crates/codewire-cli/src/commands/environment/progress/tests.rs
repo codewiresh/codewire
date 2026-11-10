@@ -956,6 +956,139 @@ async fn create_reports_a_daemon_that_never_becomes_ready() {
     );
 }
 
+/// A server without `completes_with_log`: a ready daemon ends the start.
+const OLDER_SERVER: Option<std::future::Pending<anyhow::Error>> = None;
+
+/// #3938: with `completes_with_log`, a ready daemon doesn't end the start;
+/// its `complete` row does, after the startup script.
+#[tokio::test]
+async fn start_waits_for_its_complete_row_after_the_daemon_is_ready() {
+    let feed = ScriptedFeed::new(vec![
+        connection(
+            vec![log_event(row(
+                "log-7",
+                "startup_script",
+                "started",
+                "",
+                "2026-11-10T17:00:00Z",
+                None,
+            ))],
+            ConnectionEnd::Hang,
+        ),
+        connection(
+            vec![
+                log_event(row(
+                    "log-8",
+                    "startup_script",
+                    "completed",
+                    "",
+                    "2026-11-10T17:00:10Z",
+                    None,
+                )),
+                log_event(row(
+                    "log-9",
+                    "complete",
+                    "completed",
+                    "Start complete",
+                    "2026-11-10T17:00:10Z",
+                    None,
+                )),
+            ],
+            ConnectionEnd::Close,
+        ),
+    ]);
+    let mut view = plain_view(Instant::now());
+    await_environment_start(
+        &feed,
+        &mut view.progress,
+        &fast_policy(),
+        "env-1",
+        Some("log-6".to_owned()),
+        Some(std::future::pending()),
+        async { Ok(()) },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        feed.opened(),
+        [Some("log-6".to_owned()), Some("log-7".to_owned())]
+    );
+    let rendered = output(view);
+    assert!(rendered.contains("  ✓ Start complete\n"), "{rendered}");
+    assert!(
+        rendered
+            .lines()
+            .last()
+            .is_some_and(|line| line.starts_with("  ✓ Workspace daemon ready")),
+        "{rendered}"
+    );
+}
+
+/// #3938: the start's wait ends with the guard's error when the environment
+/// leaves the start before its `complete` row.
+#[tokio::test]
+async fn start_fails_when_the_environment_leaves_the_start() {
+    let feed = ScriptedFeed::new(vec![connection(vec![], ConnectionEnd::Hang)]);
+    let policy = FollowPolicy {
+        idle_timeout: Duration::from_secs(30),
+        ..fast_policy()
+    };
+    let mut view = plain_view(Instant::now());
+    let error = await_environment_start(
+        &feed,
+        &mut view.progress,
+        &policy,
+        "env-1",
+        None,
+        Some(async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            anyhow::anyhow!("environment env-1 became stopping before its start finished")
+        }),
+        async { Ok(()) },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        format!("{error:#}"),
+        "stopped at stage \"Waiting for the workspace daemon\": environment env-1 became stopping before its start finished"
+    );
+}
+
+/// #3938: without the log stream, the start can't see its `complete` row and
+/// falls back to a ready daemon, saying so.
+#[tokio::test]
+async fn start_falls_back_to_the_daemon_without_the_log_stream() {
+    let feed = ScriptedFeed::new(vec![connection(
+        vec![failure(
+            "session expired or invalid",
+            LogStreamRecovery::Fatal,
+        )],
+        ConnectionEnd::Close,
+    )]);
+    let mut view = plain_view(Instant::now());
+    await_environment_start(
+        &feed,
+        &mut view.progress,
+        &fast_policy(),
+        "env-1",
+        None,
+        Some(std::future::pending()),
+        async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    let rendered = output(view);
+    assert!(
+        rendered.contains("  ! Start progress is unavailable: "),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Workspace daemon ready"), "{rendered}");
+}
+
 #[tokio::test]
 async fn start_shows_rows_after_the_cursor_until_the_daemon_is_ready() {
     let feed = ScriptedFeed::new(vec![connection(
@@ -992,6 +1125,7 @@ async fn start_shows_rows_after_the_cursor_until_the_daemon_is_ready() {
         &policy,
         "env-1",
         Some("log-6".to_owned()),
+        OLDER_SERVER,
         async {
             tokio::time::sleep(Duration::from_millis(30)).await;
             Ok(())
@@ -1032,6 +1166,7 @@ async fn start_exits_non_zero_on_a_failed_row() {
         &fast_policy(),
         "env-1",
         None,
+        OLDER_SERVER,
         std::future::pending(),
     )
     .await
@@ -1058,6 +1193,7 @@ async fn start_still_waits_for_the_daemon_when_progress_is_unavailable() {
         &fast_policy(),
         "env-1",
         None,
+        OLDER_SERVER,
         async {
             tokio::time::sleep(Duration::from_millis(20)).await;
             Ok(())
@@ -1075,6 +1211,45 @@ async fn start_still_waits_for_the_daemon_when_progress_is_unavailable() {
     assert!(
         rendered.contains("  ✓ Workspace daemon ready"),
         "{rendered}"
+    );
+}
+
+/// #3938: a start is accepted while the environment is still `stopped`, so
+/// only a stop that's no longer wanted, or a state on the way out, ends it.
+#[test]
+fn start_failure_reports_states_that_cannot_finish_the_start() {
+    let environment = |state: &str, desired: &str| Environment {
+        id: "env-1".to_owned(),
+        state: state.to_owned(),
+        desired_state: desired.to_owned(),
+        ..Default::default()
+    };
+    for state in ["stopped", "pending", "creating", "starting", "running"] {
+        assert!(
+            start_failure(&environment(state, "started")).is_none(),
+            "{state}"
+        );
+    }
+    assert_eq!(
+        start_failure(&environment("stopped", "stopped"))
+            .unwrap()
+            .to_string(),
+        "environment env-1 became stopped before its start finished"
+    );
+    for state in ["error", "stopping", "destroying", "destroyed"] {
+        assert!(
+            start_failure(&environment(state, "started")).is_some(),
+            "{state}"
+        );
+    }
+    assert_eq!(
+        start_failure(&Environment {
+            error_code: Some("no_capacity".to_owned()),
+            ..environment("error", "started")
+        })
+        .unwrap()
+        .to_string(),
+        "No capacity right now. Try again shortly."
     );
 }
 

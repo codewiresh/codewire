@@ -750,50 +750,91 @@ fn daemon_ready_status(event: &EnvironmentLog) -> Option<EnvironmentDaemonStatus
 }
 
 /// `cw start`: shows the rows the start produces after `cursor` while
-/// waiting for daemon readiness. Fails on a `failed` row. Losing the log
-/// stream only loses the display; readiness still decides the outcome.
+/// waiting for daemon readiness. Fails on a `failed` row. With a
+/// `start_guard`, the start also waits for its `complete` row, written once
+/// the startup script has finished, and fails when the guard reports that the
+/// environment left the start (#3938). Losing the log stream only loses the
+/// display; readiness still decides the outcome.
 pub(crate) async fn await_environment_start<F, W>(
     feed: &F,
     view: &mut StartProgress<W>,
     policy: &FollowPolicy,
     environment_id: &str,
     cursor: Option<String>,
+    start_guard: Option<impl Future<Output = anyhow::Error>>,
     daemon_ready: impl Future<Output = anyhow::Result<()>>,
 ) -> anyhow::Result<()>
 where
     F: EnvironmentLogFeed,
     W: Write,
 {
+    enum Ended {
+        Followed(anyhow::Result<FollowEnd>),
+        Left(anyhow::Error),
+        Ready,
+    }
     view.begin_local_stage(DAEMON_STAGE_KEY, DAEMON_WAIT_LABEL, Instant::now())?;
+    let until_complete = start_guard.is_some();
+    let start_guard = async move {
+        match start_guard {
+            Some(guard) => guard.await,
+            None => std::future::pending().await,
+        }
+    };
     tokio::pin!(daemon_ready);
+    tokio::pin!(start_guard);
     let mut cursor = cursor;
-    let followed = {
+    let mut daemon = None;
+    let ended = {
         let follow = follow_start_progress(feed, view, &mut cursor, policy);
-        tokio::select! {
-            biased;
-            end = follow => Some(end),
-            ready = &mut daemon_ready => {
-                if let Err(error) = ready {
-                    let stage = view.fail_open_stage(Some(DAEMON_STAGE_KEY), Instant::now())?;
-                    view.finish()?;
-                    return Err(stage_error(error, stage));
+        tokio::pin!(follow);
+        loop {
+            tokio::select! {
+                biased;
+                end = &mut follow => break Ended::Followed(end),
+                error = &mut start_guard => break Ended::Left(error),
+                ready = &mut daemon_ready, if daemon.is_none() => {
+                    let failed = ready.is_err();
+                    daemon = Some(ready);
+                    // A ready daemon ends the wait only for a server whose
+                    // start writes no `complete` row.
+                    if failed || !until_complete {
+                        break Ended::Ready;
+                    }
                 }
-                None
             }
         }
     };
-    match followed {
-        None => {}
-        Some(Ok(FollowEnd::Failed(failure))) => {
+    let ready = match daemon {
+        Some(Err(error)) => {
+            let stage = view.fail_open_stage(Some(DAEMON_STAGE_KEY), Instant::now())?;
+            view.finish()?;
+            return Err(stage_error(error, stage));
+        }
+        Some(Ok(())) => true,
+        None => false,
+    };
+    match ended {
+        Ended::Ready => {}
+        Ended::Left(error) => {
+            let stage = view.fail_open_stage(None, Instant::now())?;
+            view.finish()?;
+            return Err(stage_error(error, stage));
+        }
+        Ended::Followed(Ok(FollowEnd::Failed(failure))) => {
             view.finish()?;
             return Err(failure.into_error(environment_id));
         }
-        Some(Ok(FollowEnd::Complete)) => {
-            finish_daemon_wait(view, policy, &mut daemon_ready).await?;
+        Ended::Followed(Ok(FollowEnd::Complete)) => {
+            if !ready {
+                finish_daemon_wait(view, policy, &mut daemon_ready).await?;
+            }
         }
-        Some(Err(error)) => {
+        Ended::Followed(Err(error)) => {
             view.note(&format!("Start progress is unavailable: {error:#}"))?;
-            finish_daemon_wait(view, policy, &mut daemon_ready).await?;
+            if !ready {
+                finish_daemon_wait(view, policy, &mut daemon_ready).await?;
+            }
         }
     }
     view.complete_local_stage(DAEMON_STAGE_KEY, DAEMON_READY_LABEL, Instant::now())?;
@@ -859,6 +900,59 @@ pub(crate) async fn watch_setup_failure(
         };
         tokio::time::sleep(interval.max(SETUP_GUARD_INTERVAL)).await;
     }
+}
+
+/// Resolves only when a start can no longer finish: the environment was
+/// stopped or removed, or failed, after the start was accepted (#3938).
+pub(crate) async fn watch_start_failure(
+    client: &EnvironmentClient,
+    org_id: &str,
+    environment_id: &str,
+) -> anyhow::Error {
+    loop {
+        let interval = match client
+            .get_environment_with_poll_interval(org_id, environment_id)
+            .await
+        {
+            Ok((environment, interval)) => {
+                if let Some(error) = start_failure(&environment) {
+                    return error;
+                }
+                interval.unwrap_or(SETUP_GUARD_INTERVAL)
+            }
+            // The log stream reports persistent connection failures itself.
+            Err(_) => SETUP_GUARD_INTERVAL,
+        };
+        tokio::time::sleep(interval.max(SETUP_GUARD_INTERVAL)).await;
+    }
+}
+
+/// A start is accepted while the environment is still `stopped`, with
+/// `started` desired, so only a change of intent ends it there.
+pub(crate) fn start_failure(environment: &Environment) -> Option<anyhow::Error> {
+    if let Some(failure) = no_capacity_failure(environment) {
+        return Some(failure);
+    }
+    let left = match environment.state.as_str() {
+        "build_failed" | "error" | "failed" | "stopping" | "destroying" | "destroyed" => true,
+        "stopped" => environment.desired_state != "started",
+        _ => false,
+    };
+    if !left {
+        return None;
+    }
+    let reason = environment
+        .error_reason
+        .as_deref()
+        .map(terminal_text)
+        .filter(|reason| !reason.is_empty())
+        .map(|reason| format!(": {reason}"))
+        .unwrap_or_default();
+    Some(anyhow::anyhow!(
+        "environment {} became {} before its start finished{reason}",
+        environment.id,
+        environment.state
+    ))
 }
 
 /// The message when the cluster had no room for this environment. It is written

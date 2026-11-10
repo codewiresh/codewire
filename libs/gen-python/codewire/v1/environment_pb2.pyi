@@ -598,12 +598,14 @@ class StartEnvironmentRequest(_message.Message):
     def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ...) -> None: ...
 
 class StartEnvironmentResponse(_message.Message):
-    __slots__ = ("status", "outcome")
+    __slots__ = ("status", "outcome", "completes_with_log")
     STATUS_FIELD_NUMBER: _ClassVar[int]
     OUTCOME_FIELD_NUMBER: _ClassVar[int]
+    COMPLETES_WITH_LOG_FIELD_NUMBER: _ClassVar[int]
     status: str
     outcome: StartOutcome
-    def __init__(self, status: _Optional[str] = ..., outcome: _Optional[_Union[StartOutcome, str]] = ...) -> None: ...
+    completes_with_log: bool
+    def __init__(self, status: _Optional[str] = ..., outcome: _Optional[_Union[StartOutcome, str]] = ..., completes_with_log: _Optional[bool] = ...) -> None: ...
 
 class ProtectEnvironmentRequest(_message.Message):
     __slots__ = ("org_id", "environment_id")

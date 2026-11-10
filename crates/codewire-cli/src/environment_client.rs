@@ -666,7 +666,7 @@ impl EnvironmentClient {
         &self,
         org_id: &str,
         environment_id: &str,
-    ) -> anyhow::Result<StatusResponse> {
+    ) -> anyhow::Result<StartResponse> {
         let response = self
             .inner
             .start_environment(rpc::StartEnvironmentRequest {
@@ -676,8 +676,11 @@ impl EnvironmentClient {
             })
             .await
             .map_err(display_client_error)?;
-        Ok(StatusResponse {
-            status: response.status,
+        Ok(StartResponse {
+            status: StatusResponse {
+                status: response.status,
+            },
+            completes_with_log: response.completes_with_log,
         })
     }
 
@@ -1061,6 +1064,14 @@ impl EnvironmentClient {
             .flatten()
             .collect())
     }
+}
+
+/// An accepted start. `completes_with_log` says its log ends with a
+/// `complete` row once the environment is usable (#3938).
+#[derive(Debug)]
+pub struct StartResponse {
+    pub status: StatusResponse,
+    pub completes_with_log: bool,
 }
 
 /// Why a create that left the organization to the server didn't happen.

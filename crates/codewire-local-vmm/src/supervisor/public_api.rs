@@ -419,7 +419,12 @@ const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[
     },
     MessageSemantics {
         full_name: "codewire.v1.StartEnvironmentResponse",
-        fields: &[field(1, "status", FIXED), field(2, "outcome", LOCAL)],
+        // A local start writes no `complete` log row (#3938).
+        fields: &[
+            field(1, "status", FIXED),
+            field(2, "outcome", LOCAL),
+            field(3, "completes_with_log", ZERO),
+        ],
     },
     MessageSemantics {
         full_name: "codewire.v1.EnvironmentDaemonDiagnostic",
