@@ -23,7 +23,7 @@ use super::workspace_binding::{
 };
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
-use crate::runtime::Placement;
+use crate::runtime::{Pick, Placement};
 use crate::sandbox::client::{
     NoCapacity, ProbeResult, RuntimeIdentityObservation, SandboxClient, WorkspacePodIdentity,
     WorkspaceSandboxIdentity,
@@ -1508,12 +1508,11 @@ async fn run_environment_create(
 
             CreateAction::EnsureNamespace => {
                 emit_create_log(authority, "ensure_namespace", "started", "", None).await?;
-                if let Some(kube) = &ctx.kube {
+                if let Some(runtime) = &ctx.runtime {
                     authority
                         .run_external_mutation(
                             CREATE_MUTATION_STATES,
-                            SandboxClient::new(kube.clone(), &cfg.sandbox_namespace)
-                                .ensure_namespace(),
+                            runtime.ensure_placement(&Placement::new(&cfg.sandbox_namespace)),
                         )
                         .await?;
                 }
@@ -1656,7 +1655,7 @@ async fn run_environment_create(
                     .await?;
                     return Err(e);
                 }
-                let mut claim_opts = environment_claim_opts(
+                let claim_opts = environment_claim_opts(
                     &image_ref,
                     &template_base,
                     &env,
@@ -1666,8 +1665,8 @@ async fn run_environment_create(
                 let backend = backend
                     .as_ref()
                     .expect("create_claim requires backend namespace");
-                let client = match require_client(ctx, &backend.namespace) {
-                    Ok(c) => c,
+                let runtime = match ctx.require_runtime() {
+                    Ok(runtime) => runtime,
                     Err(e) => {
                         emit_create_log(
                             authority,
@@ -1681,29 +1680,27 @@ async fn run_environment_create(
                         return Err(e);
                     }
                 };
+                let placement = Placement::new(&backend.namespace);
 
                 // Program #2238 C3: claim from a shared warm pool only when
-                // every routing condition holds; otherwise cold, unchanged. A
-                // pool Claim carries only `warmPoolRef` and the identity
-                // labels, and the shared template is never written for one
-                // environment.
+                // every routing condition holds; otherwise cold, unchanged.
+                // The shared rendering is never written for one environment.
                 let route = pool_route::route(
                     cfg,
                     &env,
                     &image_ref,
                     &template_opts,
-                    &client,
+                    runtime,
+                    &placement,
                     reclaimed_cold,
                 )
                 .await;
-                let claim_path = match &route {
+                let (pick, claim_path) = match &route {
                     pool_route::Route::Pool { name } => {
                         tracing::info!(env = env_id, pool = %name, "create: claiming from a warm pool");
-                        claim_opts.warm_pool_ref = name.clone();
-                        claim_opts.template_ref = name.clone();
-                        StartPath::Warm
+                        (Pick::Pool(name.clone()), StartPath::Warm)
                     }
-                    pool_route::Route::Cold(_) => StartPath::Cold,
+                    pool_route::Route::Cold(_) => (Pick::Cold, StartPath::Cold),
                 };
                 if claim_path == StartPath::Cold {
                     if claim_opts.template_ref != template_opts.name {
@@ -1721,17 +1718,12 @@ async fn run_environment_create(
                         record_error(&svc, authority, env_id, &error.to_string()).await?;
                         return Err(error);
                     }
-                    let ensured_template = template_opts.name.clone();
-                    let ensured_shadow_pool = if claim_opts.warm_pool_ref.is_empty() {
-                        shadow_warm_pool_name(&ensured_template)
-                    } else {
-                        claim_opts.warm_pool_ref.clone()
-                    };
+                    // Its error names the step: "template" or "shadow pool".
                     if let Err(e) = run_template_mutation(
                         authority,
                         &template_opts,
                         CREATE_MUTATION_STATES,
-                        client.ensure_sandbox_template(&template_opts),
+                        runtime.prepare_cold_claim(&placement, &template_opts, &claim_opts),
                     )
                     .await
                     {
@@ -1743,36 +1735,7 @@ async fn run_environment_create(
                             duration_meta(started),
                         )
                         .await?;
-                        record_error(&svc, authority, env_id, &format!("template: {e:#}")).await?;
-                        return Err(e);
-                    }
-                    if let Err(e) = authority
-                        .run_external_mutation(
-                            CREATE_MUTATION_STATES,
-                            client.ensure_shadow_pool(
-                                &ensured_shadow_pool,
-                                &ensured_template,
-                                env_id,
-                            ),
-                        )
-                        .await
-                    {
-                        let _ = authority
-                            .run_external_mutation(
-                                CREATE_MUTATION_STATES,
-                                client.delete_sandbox_template(&ensured_template),
-                            )
-                            .await;
-                        emit_create_log(
-                            authority,
-                            "create_claim",
-                            "failed",
-                            &format!("{e:#}"),
-                            duration_meta(started),
-                        )
-                        .await?;
-                        record_error(&svc, authority, env_id, &format!("shadow pool: {e:#}"))
-                            .await?;
+                        record_error(&svc, authority, env_id, &format!("{e:#}")).await?;
                         return Err(e);
                     }
                 }
@@ -1782,16 +1745,11 @@ async fn run_environment_create(
                         .await?;
                     let current = load_environment_in(guard.transaction(), env_id).await?;
                     validate_template_metadata(&current, &template_opts)?;
-                    let (created_claim_name, claim_uid) = await_external_mutation(
-                        client.create_sandbox_claim(&backend.namespace, &claim_opts),
-                    )
-                    .await?;
-                    await_external_mutation(client.reconcile_claim_runtime_identity(
-                        &claim_opts,
-                        &created_claim_name,
-                        &claim_uid,
-                    ))
-                    .await?;
+                    let claim =
+                        await_external_mutation(runtime.claim(&placement, &claim_opts, &pick))
+                            .await?;
+                    await_external_mutation(runtime.reconcile_identity(&claim)).await?;
+                    let (created_claim_name, claim_uid) = (claim.name, claim.uid);
                     #[cfg(feature = "kind-e2e")]
                     super::fencing_evidence::hold_claim_row_lock(
                         env_id,
@@ -1839,7 +1797,7 @@ async fn run_environment_create(
                     authority,
                     &template_opts,
                     CREATE_MUTATION_STATES,
-                    client.ensure_access_stack(&template_opts),
+                    runtime.ensure_access(&placement, &template_opts),
                 )
                 .await
                 {
@@ -1891,7 +1849,8 @@ async fn run_environment_create(
                     CREATE_MUTATION_STATES,
                     authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
-                        readiness_wait(client.prove_workspace_access(
+                        readiness_wait(runtime.prove_access(
+                            &placement,
                             env_id,
                             ready_timeout_for_isolation(&env.isolation_tier),
                             &RecordedHostKeys(&ctx.pool),
@@ -1969,9 +1928,8 @@ async fn run_environment_create(
                 // A pool Claim's Sandbox is warm only when the controller
                 // adopted a member; with none ready it was created cold.
                 let gateway_path = match claim_path {
-                    StartPath::Warm => ctx
-                        .require_runtime()?
-                        .probe(&Placement::new(&backend.namespace), env_id)
+                    StartPath::Warm => runtime
+                        .probe(&placement, env_id)
                         .await
                         .map(|probe| StartPath::from_launch_type(Some(probe.launch_type.as_str())))
                         .unwrap_or(StartPath::Cold),
@@ -2704,18 +2662,20 @@ async fn ensure_access_stack_for_environment(
     let runtime_spec = template_opts.runtime_profile_spec();
     validate_managed_runtime_profile(&runtime_spec, cfg.allow_diagnostic_runtime)
         .map_err(|e| anyhow::anyhow!("runtime profile: {e}"))?;
-    let client = require_client(ctx, namespace)?;
+    let runtime = ctx.require_runtime()?;
+    let placement = Placement::new(namespace);
     run_template_mutation(
         authority,
         &template_opts,
         states,
-        client.ensure_access_stack(&template_opts),
+        runtime.ensure_access(&placement, &template_opts),
     )
     .await?;
     authority
         .run_while_authoritative_for_states(
             states,
-            client.wait_for_workspace_access_ready(
+            runtime.wait_access_ready(
+                &placement,
                 env_id,
                 ready_timeout_for_isolation(&env.isolation_tier),
                 &RecordedHostKeys(&ctx.pool),
@@ -3233,15 +3193,18 @@ async fn try_reclaim_cold(
     env: &EnvironmentRow,
     authority: &ActivityAuthority,
 ) -> anyhow::Result<bool> {
-    let Some(kube) = ctx.kube.as_ref() else {
+    let Some(runtime) = ctx.runtime.as_deref() else {
         return Ok(false);
     };
     let backend = load_backend_row(&ctx.pool, &env.id).await?;
     if backend.namespace.is_empty() || backend.claim_uid.is_empty() {
         return Ok(false);
     }
-    let client = SandboxClient::new(kube.clone(), &backend.namespace);
-    let Some(observed) = client.pool_born_claim(&env.id, &backend.claim_uid).await? else {
+    let placement = Placement::new(&backend.namespace);
+    let Some(observed) = runtime
+        .pool_born_claim(&placement, &env.id, &backend.claim_uid)
+        .await?
+    else {
         return Ok(false);
     };
     if let Some((_, sandbox_uid)) = &observed.sandbox
@@ -3251,15 +3214,11 @@ async fn try_reclaim_cold(
         return Ok(false);
     }
     let started = std::time::Instant::now();
-    // A never-bound member never had a warm-member bridge (#2434); removing
-    // any name-addressed residue keeps the cold re-claim from inheriting one.
     authority
-        .run_external_mutation(CREATE_MUTATION_STATES, async {
-            client.delete_warm_member_bridge(&env.id).await?;
-            client
-                .delete_pool_born_claim(&env.id, &observed, RECLAIM_TIMEOUT)
-                .await
-        })
+        .run_external_mutation(
+            CREATE_MUTATION_STATES,
+            runtime.withdraw_pool_born_claim(&placement, &env.id, &observed, RECLAIM_TIMEOUT),
+        )
         .await?;
     emit_create_log(
         authority,

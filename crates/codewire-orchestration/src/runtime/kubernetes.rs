@@ -3,28 +3,33 @@
 //! comes back into the driver's own types.
 
 pub(crate) mod members;
+pub(crate) mod pools;
 mod suspension;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, LogParams};
 
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
-    KeptSnapshot, MemberRef, MemberReplacement, Placement, ProbeResult, ResizeState, RuntimeAccess,
-    RuntimeDriver, RuntimeExec, RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeResize,
-    RuntimeSnapshots, RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime,
-    VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef,
+    KeptSnapshot, MemberRef, MemberReplacement, Pick, Placement, PoolBornClaim, PoolState,
+    ProbeResult, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeDriver, RuntimeExec,
+    RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeResize, RuntimeSnapshots, RuntimeStorage,
+    RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeMode,
+    VolumeRef,
 };
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::HostKeyStore;
 use crate::sandbox::sidecar::WORKSPACE_SSH_PORT;
 use crate::sandbox::snapshots::{clearing_volume_name, kept_snapshot_name, raw_snapshot_name};
 use crate::sandbox::template::TemplateOpts;
+use crate::sandbox::warm_pool::WarmPoolObjects;
+use crate::sandbox::{ClaimOpts, shadow_warm_pool_name};
 
 const WORKSPACE_DAEMON_PORT: u16 = crate::sandbox::template::WORKSPACE_DAEMON_PORT as u16;
 
@@ -47,6 +52,114 @@ impl RuntimePools for KubernetesDriver {
     async fn retire_legacy_shared_pools(&self, placement: &Placement) -> anyhow::Result<usize> {
         self.sandbox_client(placement)
             .retire_legacy_shared_warm_pools()
+            .await
+    }
+
+    async fn pool_state(
+        &self,
+        placement: &Placement,
+        pool: &WarmPoolObjects,
+    ) -> anyhow::Result<PoolState> {
+        pools::pool_state(&self.sandbox_client(placement), pool).await
+    }
+}
+
+#[async_trait]
+impl RuntimeClaims for KubernetesDriver {
+    async fn ensure_placement(&self, placement: &Placement) -> anyhow::Result<()> {
+        self.sandbox_client(placement).ensure_namespace().await
+    }
+
+    async fn prepare_cold_claim(
+        &self,
+        placement: &Placement,
+        rendering: &TemplateOpts,
+        claim: &ClaimOpts,
+    ) -> anyhow::Result<()> {
+        let client = self.sandbox_client(placement);
+        let template = rendering.name.as_str();
+        let shadow_pool = if claim.warm_pool_ref.is_empty() {
+            shadow_warm_pool_name(template)
+        } else {
+            claim.warm_pool_ref.clone()
+        };
+        client
+            .ensure_sandbox_template(rendering)
+            .await
+            .context("template")?;
+        if let Err(error) = client
+            .ensure_shadow_pool(&shadow_pool, template, &rendering.environment_id)
+            .await
+        {
+            // The pool's error is the one that counts.
+            let _ = client.delete_sandbox_template(template).await;
+            return Err(error.context("shadow pool"));
+        }
+        Ok(())
+    }
+
+    async fn claim(
+        &self,
+        placement: &Placement,
+        claim: &ClaimOpts,
+        pick: &Pick,
+    ) -> anyhow::Result<ClaimRef> {
+        let mut opts = claim.clone();
+        if let Pick::Pool(pool) = pick {
+            // A pool Claim names only the pool, whose template is its own.
+            opts.warm_pool_ref = pool.clone();
+            opts.template_ref = pool.clone();
+        }
+        let (name, uid) = self
+            .sandbox_client(placement)
+            .create_sandbox_claim(&placement.namespace, &opts)
+            .await?;
+        Ok(ClaimRef {
+            placement: placement.clone(),
+            environment_id: opts.environment_id,
+            organization_id: opts.org_id,
+            operation_generation: opts.operation_generation,
+            name,
+            uid,
+        })
+    }
+
+    async fn bridge_adopted_member(
+        &self,
+        placement: &Placement,
+        rendering: &TemplateOpts,
+        runtime_uid: &str,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .ensure_warm_member_bridge(rendering, runtime_uid)
+            .await
+    }
+
+    async fn pool_born_claim(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        claim_uid: &str,
+    ) -> anyhow::Result<Option<PoolBornClaim>> {
+        self.sandbox_client(placement)
+            .pool_born_claim(environment_id, claim_uid)
+            .await
+    }
+
+    async fn withdraw_pool_born_claim(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        observed: &PoolBornClaim,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        let client = self.sandbox_client(placement);
+        // A never-bound member never had a warm-member bridge (#2434);
+        // removing any name-addressed residue keeps a cold re-claim from
+        // inheriting one.
+        client.delete_warm_member_bridge(environment_id).await?;
+        client
+            .delete_pool_born_claim(environment_id, observed, timeout)
             .await
     }
 }
@@ -514,6 +627,18 @@ impl RuntimeAccess for KubernetesDriver {
     ) -> anyhow::Result<()> {
         self.sandbox_client(placement)
             .wait_for_workspace_access_ready(environment_id, timeout, host_keys)
+            .await
+    }
+
+    async fn prove_access(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        timeout: Duration,
+        host_keys: &dyn HostKeyStore,
+    ) -> anyhow::Result<String> {
+        self.sandbox_client(placement)
+            .prove_workspace_access(environment_id, timeout, host_keys)
             .await
     }
 
@@ -1888,5 +2013,193 @@ mod tests {
                 && requests[0].ends_with("/namespaces/dev-sandboxes/sandboxwarmpools"),
             "{requests:?}"
         );
+    }
+
+    /// An API server holding nothing, where creating a SandboxWarmPool fails
+    /// if `pools_fail`, recording every write.
+    fn driver_over_claimable_cluster(pools_fail: bool) -> (Arc<dyn RuntimeDriver>, Writes) {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let seen = writes.clone();
+        let service = Router::new().fallback(move |request: Request<Body>| {
+            let seen = seen.clone();
+            async move {
+                let method = request.method().to_string();
+                let path = request.uri().path().to_owned();
+                let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let body = String::from_utf8(body.to_vec()).unwrap();
+                if method != "GET" {
+                    seen.lock()
+                        .unwrap()
+                        .push((method.clone(), path.clone(), body.clone()));
+                }
+                let (status, body) = match method.as_str() {
+                    "POST" if pools_fail && path.ends_with("/sandboxwarmpools") => (
+                        StatusCode::FORBIDDEN,
+                        json!({"apiVersion": "v1", "kind": "Status",
+                            "status": "Failure", "reason": "Forbidden", "code": 403}),
+                    ),
+                    "POST" => {
+                        let mut created: serde_json::Value = serde_json::from_str(&body).unwrap();
+                        created["metadata"]["uid"] = json!("claim-uid");
+                        (StatusCode::CREATED, created)
+                    }
+                    "DELETE" => (
+                        StatusCode::OK,
+                        json!({"apiVersion": "v1", "kind": "Status", "status": "Success"}),
+                    ),
+                    _ => (
+                        StatusCode::NOT_FOUND,
+                        json!({"apiVersion": "v1", "kind": "Status",
+                            "status": "Failure", "reason": "NotFound", "code": 404}),
+                    ),
+                };
+                Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap()
+            }
+        });
+        let client = kube::Client::new(service, "the-default-namespace");
+        (KubernetesDriver::shared(client), writes)
+    }
+
+    fn cold_claim_opts() -> ClaimOpts {
+        ClaimOpts {
+            environment_id: "env-1".into(),
+            org_id: "org-1".into(),
+            operation_generation: 7,
+            template_ref: "workspace-env-1".into(),
+            warm_pool_ref: shadow_warm_pool_name("workspace-env-1"),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pool_claim_names_only_its_pool_and_a_cold_one_the_environments_own() {
+        let placement = Placement::new("dev-sandboxes");
+        for (pick, pool) in [
+            (Pick::Pool("cw-pool-a".into()), "cw-pool-a".to_owned()),
+            (Pick::Cold, shadow_warm_pool_name("workspace-env-1")),
+        ] {
+            let (driver, writes) = driver_over_claimable_cluster(false);
+            let claim = driver
+                .claim(&placement, &cold_claim_opts(), &pick)
+                .await
+                .unwrap();
+            assert_eq!(
+                claim,
+                ClaimRef {
+                    placement: placement.clone(),
+                    environment_id: "env-1".into(),
+                    organization_id: "org-1".into(),
+                    operation_generation: 7,
+                    name: "sandbox-env-1".into(),
+                    uid: "claim-uid".into(),
+                }
+            );
+            let writes = writes.lock().unwrap();
+            assert_eq!(writes.len(), 1, "{writes:?}");
+            let (method, path, body) = &writes[0];
+            assert_eq!(method, "POST");
+            assert!(
+                path.ends_with("/namespaces/dev-sandboxes/sandboxclaims"),
+                "{path}"
+            );
+            let body: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(
+                body["spec"]["warmPoolRef"]["name"],
+                pool.as_str(),
+                "{pick:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cold_claim_is_prepared_with_its_template_then_its_shadow_pool() {
+        let placement = Placement::new("dev-sandboxes");
+        let rendering = TemplateOpts {
+            name: "workspace-env-1".into(),
+            environment_id: "env-1".into(),
+            ..Default::default()
+        };
+        let (driver, writes) = driver_over_claimable_cluster(false);
+        driver
+            .prepare_cold_claim(&placement, &rendering, &cold_claim_opts())
+            .await
+            .unwrap();
+        let writes_of = |writes: &Writes| -> Vec<String> {
+            writes
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(method, path, _)| {
+                    let resource = path.split("/namespaces/").nth(1).unwrap_or(path);
+                    format!("{method} {resource}")
+                })
+                .collect()
+        };
+        assert_eq!(
+            writes_of(&writes),
+            [
+                "POST dev-sandboxes/sandboxtemplates",
+                "POST dev-sandboxes/sandboxwarmpools",
+            ]
+        );
+
+        // A shadow pool that can't be made takes its template with it, and
+        // says which step failed.
+        let (driver, writes) = driver_over_claimable_cluster(true);
+        let error = driver
+            .prepare_cold_claim(&placement, &rendering, &cold_claim_opts())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").starts_with("shadow pool: "),
+            "{error:#}"
+        );
+        assert_eq!(
+            writes_of(&writes),
+            [
+                "POST dev-sandboxes/sandboxtemplates",
+                "POST dev-sandboxes/sandboxwarmpools",
+                "DELETE dev-sandboxes/sandboxtemplates/workspace-env-1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn withdrawing_a_pool_born_claim_removes_its_bridge_before_the_claim() {
+        let (driver, writes) = driver_over_claimable_cluster(false);
+        let observed = PoolBornClaim {
+            claim_uid: "claim-uid".into(),
+            pool: "cw-pool-a".into(),
+            sandbox: Some(("cw-pool-a-x".into(), "sandbox-uid".into())),
+        };
+        driver
+            .withdraw_pool_born_claim(
+                &Placement::new("dev-sandboxes"),
+                "env-1",
+                &observed,
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        let writes = writes.lock().unwrap();
+        assert!(!writes.is_empty(), "{writes:?}");
+        assert!(
+            writes[0].1.contains("/networkpolicies"),
+            "the bridge goes first: {writes:?}"
+        );
+        assert!(
+            writes.iter().all(|(method, _, _)| method == "DELETE"),
+            "{writes:?}"
+        );
+        // The claim is absent, so only the observed Sandbox is deleted, by UID.
+        let (_, path, body) = writes.last().unwrap();
+        assert!(path.ends_with("/sandboxes/cw-pool-a-x"), "{path}");
+        assert!(body.contains("sandbox-uid"), "{body}");
     }
 }

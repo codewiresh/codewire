@@ -17,9 +17,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use crate::sandbox::ClaimOpts;
 pub use crate::sandbox::client::{
-    ClearingProgress, FailedLiveResize, KeptSnapshot, PodResizeInfeasible, ProbeResult,
-    WorkspacePodIdentity as MemberRef, WorkspacePodReplacement as MemberReplacement,
+    ClearingProgress, FailedLiveResize, KeptSnapshot, PodResizeInfeasible, PoolBornClaim,
+    ProbeResult, WorkspacePodIdentity as MemberRef, WorkspacePodReplacement as MemberReplacement,
     WorkspacePodResizeState as ResizeState, WorkspacePvcAnchor as VolumeRef,
     WorkspaceSandboxIdentity as SuspendedRuntime, WorkspaceStorage as VolumeIdentity,
     WorkspaceStorageResizeOutcome as VolumeGrowth,
@@ -29,6 +30,7 @@ use crate::sandbox::host_keys::HostKeyStore;
 pub use crate::sandbox::sidecar::PortForwardedStream as RuntimeStream;
 pub use crate::sandbox::snapshots::{ClearingOpts, VolumeMode};
 use crate::sandbox::template::TemplateOpts;
+use crate::sandbox::warm_pool::WarmPoolObjects;
 
 /// Where a runtime object lives. A caller names this rather than holding a
 /// client per location; for Kubernetes it is the namespace.
@@ -137,12 +139,102 @@ pub enum ClaimReadiness {
     Ready,
 }
 
+/// Where a claim's runtime comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pick {
+    /// A member of the shared pool named here, or a cold start from that
+    /// pool's rendering when it has no ready member.
+    Pool(String),
+    /// The environment's own rendering, which
+    /// [`prepare_cold_claim`](RuntimeClaims::prepare_cold_claim) made ready.
+    Cold,
+}
+
+/// Whether a shared pool can take a claim now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoolState {
+    Claimable,
+    /// It is missing, being removed, empty, or not at this rendering's
+    /// revision and spec.
+    NotCurrent,
+    /// What runs the pool shows no claim safety on it, so a claim could adopt
+    /// a member it shouldn't.
+    ControllerIncapable,
+    /// An unclaimed member was started from another revision.
+    StaleMembers,
+}
+
 /// Warm capacity held ahead of any environment.
 #[async_trait]
 pub trait RuntimePools: Send + Sync {
     /// Ask for the shared pools of old releases to go. `Ok(0)` means none are
     /// left; any other count means they were asked to go and may still exist.
     async fn retire_legacy_shared_pools(&self, placement: &Placement) -> anyhow::Result<usize>;
+
+    /// Whether the shared pool rendered as `pool` can take a claim now. Its
+    /// members are read only once everything else holds.
+    async fn pool_state(
+        &self,
+        placement: &Placement,
+        pool: &WarmPoolObjects,
+    ) -> anyhow::Result<PoolState>;
+}
+
+/// An environment's claim on a runtime, from a shared pool or cold.
+#[async_trait]
+pub trait RuntimeClaims: Send + Sync {
+    /// Make the placement ready to hold claims.
+    async fn ensure_placement(&self, placement: &Placement) -> anyhow::Result<()>;
+
+    /// Make ready what a cold claim names: the environment's own rendering,
+    /// then the empty pool `claim` selects it through. If the pool can't be
+    /// made, the rendering is removed again. Each step's error says which.
+    async fn prepare_cold_claim(
+        &self,
+        placement: &Placement,
+        rendering: &TemplateOpts,
+        claim: &ClaimOpts,
+    ) -> anyhow::Result<()>;
+
+    /// Create the environment's claim, or find it if it exists. Its identity
+    /// is not converged yet: that is
+    /// [`reconcile_identity`](RuntimeLifecycle::reconcile_identity).
+    async fn claim(
+        &self,
+        placement: &Placement,
+        claim: &ClaimOpts,
+        pick: &Pick,
+    ) -> anyhow::Result<ClaimRef>;
+
+    /// Admit the environment's access to a member it adopted from a shared
+    /// pool, before the member's new identity has converged. `runtime_uid` is
+    /// the [`RuntimeMember::uid`] its binding recorded.
+    async fn bridge_adopted_member(
+        &self,
+        placement: &Placement,
+        rendering: &TemplateOpts,
+        runtime_uid: &str,
+    ) -> anyhow::Result<()>;
+
+    /// The environment's claim, when it is this exact claim and selects a
+    /// shared pool, with the runtime it holds.
+    async fn pool_born_claim(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        claim_uid: &str,
+    ) -> anyhow::Result<Option<PoolBornClaim>>;
+
+    /// Remove any bridge to the environment's runtime, then delete the
+    /// observed pool-born claim and its runtime, each only while it is the
+    /// one observed, and wait until the environment can claim again.
+    async fn withdraw_pool_born_claim(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        observed: &PoolBornClaim,
+        timeout: Duration,
+    ) -> anyhow::Result<()>;
 }
 
 /// An environment's runtime over its life.
@@ -475,6 +567,17 @@ pub trait RuntimeAccess: Send + Sync {
         host_keys: &dyn HostKeyStore,
     ) -> anyhow::Result<()>;
 
+    /// [`wait_access_ready`](Self::wait_access_ready), then in the same
+    /// connection a login and an SFTP exchange, retried until it all succeeds.
+    /// Returns the incarnation it proved, as [`MemberRef::uid`].
+    async fn prove_access(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        timeout: Duration,
+        host_keys: &dyn HostKeyStore,
+    ) -> anyhow::Result<String>;
+
     /// One attempt at what a client does first: connect, check the host key
     /// against the store, log in and exchange SFTP.
     async fn ssh_ready(
@@ -530,12 +633,19 @@ pub trait RuntimeAccess: Send + Sync {
 
 /// Everything orchestration needs from a runtime.
 pub trait RuntimeDriver:
-    RuntimePools + RuntimeLifecycle + RuntimeResize + RuntimeStorage + RuntimeSnapshots + RuntimeAccess
+    RuntimePools
+    + RuntimeClaims
+    + RuntimeLifecycle
+    + RuntimeResize
+    + RuntimeStorage
+    + RuntimeSnapshots
+    + RuntimeAccess
 {
 }
 
 impl<
     T: RuntimePools
+        + RuntimeClaims
         + RuntimeLifecycle
         + RuntimeResize
         + RuntimeStorage

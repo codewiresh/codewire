@@ -12,13 +12,15 @@ use tokio::sync::oneshot;
 
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
-    KeptSnapshot, MemberRef, MemberReplacement, Placement, ProbeResult, ResizeState, RuntimeAccess,
-    RuntimeExec, RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeResize, RuntimeSnapshots,
-    RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity,
-    VolumeMode, VolumeRef,
+    KeptSnapshot, MemberRef, MemberReplacement, Pick, Placement, PoolBornClaim, PoolState,
+    ProbeResult, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeExec, RuntimeLifecycle,
+    RuntimeMember, RuntimePools, RuntimeResize, RuntimeSnapshots, RuntimeStorage, RuntimeStream,
+    RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef,
 };
+use crate::sandbox::ClaimOpts;
 use crate::sandbox::host_keys::HostKeyStore;
 use crate::sandbox::template::TemplateOpts;
+use crate::sandbox::warm_pool::WarmPoolObjects;
 
 #[derive(Default)]
 pub(crate) struct FakeRuntimeDriver {
@@ -45,6 +47,8 @@ pub(crate) struct FakeRuntimeDriver {
     /// When set, keeping the cleared volume says it has begun on the sender,
     /// then waits for the receiver before it returns.
     pub keep_gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    /// What a pool's state answers.
+    pub pool_state: Mutex<Option<PoolState>>,
 }
 
 #[async_trait]
@@ -57,6 +61,85 @@ impl RuntimePools for FakeRuntimeDriver {
             .pop_front()
             .expect("the test scripts every retirement")
             .map_err(anyhow::Error::msg)
+    }
+
+    async fn pool_state(
+        &self,
+        placement: &Placement,
+        _pool: &WarmPoolObjects,
+    ) -> anyhow::Result<PoolState> {
+        self.placements.lock().unwrap().push(placement.clone());
+        Ok(self
+            .pool_state
+            .lock()
+            .unwrap()
+            .expect("the test scripts the pool's state"))
+    }
+}
+
+#[async_trait]
+impl RuntimeClaims for FakeRuntimeDriver {
+    async fn ensure_placement(&self, placement: &Placement) -> anyhow::Result<()> {
+        self.placements.lock().unwrap().push(placement.clone());
+        Ok(())
+    }
+
+    async fn prepare_cold_claim(
+        &self,
+        placement: &Placement,
+        _rendering: &TemplateOpts,
+        _claim: &ClaimOpts,
+    ) -> anyhow::Result<()> {
+        self.placements.lock().unwrap().push(placement.clone());
+        Ok(())
+    }
+
+    async fn claim(
+        &self,
+        placement: &Placement,
+        claim: &ClaimOpts,
+        _pick: &Pick,
+    ) -> anyhow::Result<ClaimRef> {
+        self.placements.lock().unwrap().push(placement.clone());
+        Ok(ClaimRef {
+            placement: placement.clone(),
+            environment_id: claim.environment_id.clone(),
+            organization_id: claim.org_id.clone(),
+            operation_generation: claim.operation_generation,
+            name: format!("claim-{}", claim.environment_id),
+            uid: format!("claim-uid-{}", claim.environment_id),
+        })
+    }
+
+    async fn bridge_adopted_member(
+        &self,
+        placement: &Placement,
+        _rendering: &TemplateOpts,
+        _runtime_uid: &str,
+    ) -> anyhow::Result<()> {
+        self.placements.lock().unwrap().push(placement.clone());
+        Ok(())
+    }
+
+    async fn pool_born_claim(
+        &self,
+        placement: &Placement,
+        _environment_id: &str,
+        _claim_uid: &str,
+    ) -> anyhow::Result<Option<PoolBornClaim>> {
+        self.placements.lock().unwrap().push(placement.clone());
+        Ok(None)
+    }
+
+    async fn withdraw_pool_born_claim(
+        &self,
+        placement: &Placement,
+        _environment_id: &str,
+        _observed: &PoolBornClaim,
+        _timeout: Duration,
+    ) -> anyhow::Result<()> {
+        self.placements.lock().unwrap().push(placement.clone());
+        Ok(())
     }
 }
 
@@ -439,6 +522,16 @@ impl RuntimeAccess for FakeRuntimeDriver {
         _timeout: Duration,
         _host_keys: &dyn HostKeyStore,
     ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn prove_access(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+        _timeout: Duration,
+        _host_keys: &dyn HostKeyStore,
+    ) -> anyhow::Result<String> {
         anyhow::bail!("not scripted")
     }
 

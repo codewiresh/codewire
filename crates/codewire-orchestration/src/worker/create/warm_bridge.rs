@@ -14,7 +14,7 @@
 //! re-claim remove it with the gateway stack.
 
 use super::{ActivityAuthority, EnvironmentRow, WorkerContext, await_external_mutation};
-use crate::sandbox::client::SandboxClient;
+use crate::runtime::Placement;
 use crate::start_metrics::StartPath;
 use crate::worker::activity_authority::{AuthorityLost, is_authority_lost};
 use crate::worker::workspace_binding::{RecordedBind, live_binding_sandbox};
@@ -51,7 +51,7 @@ pub(super) async fn bridge_warm_member(
     if recorded.path != StartPath::Warm {
         return Ok(());
     }
-    let Some(kube) = ctx.kube.as_ref() else {
+    let Some(runtime) = ctx.runtime.as_deref() else {
         return Ok(());
     };
     let result = async {
@@ -65,8 +65,8 @@ pub(super) async fn bridge_warm_member(
             let Some((namespace, sandbox_uid)) = warm_bridge_target(recorded, live) else {
                 return Ok(false);
             };
-            SandboxClient::new(kube.clone(), &namespace)
-                .ensure_warm_member_bridge(&opts, &sandbox_uid)
+            runtime
+                .bridge_adopted_member(&Placement::new(&namespace), &opts, &sandbox_uid)
                 .await?;
             Ok(true)
         })

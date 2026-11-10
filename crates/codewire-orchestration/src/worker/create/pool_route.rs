@@ -18,20 +18,16 @@
 
 use std::sync::OnceLock;
 
-use kube::api::DynamicObject;
 use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
-use serde_json::Value;
 
 use super::{SandboxWorkerCfg, render_configured_warm_pool};
+use crate::runtime::{Placement, PoolState, RuntimeDriver};
 use crate::sandbox::canonical_workspace_runtime_image;
-use crate::sandbox::client::SandboxClient;
 use crate::sandbox::template::{CpuSharingRatio, TemplateOpts, render_sandbox_template};
 use crate::sandbox::warm_pool::{
-    POOL_REVISION_ANNOTATION, WarmPoolObjects, WorkspaceShape, has_pool_labels,
-    parse_warm_pool_shapes, pod_spec_pool_revision, pool_revision,
+    WarmPoolObjects, WorkspaceShape, parse_warm_pool_shapes, pool_revision,
 };
 use crate::worker::env_data::EnvironmentRow;
-use crate::worker::warm_pool::{pool_observed_by_capable_controller, template_spec_current};
 
 /// Where one create claims from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,78 +136,19 @@ pub(crate) fn pool_candidate(
     Ok(objects)
 }
 
-/// The live half: the pool and its template are Codewire's, not
-/// terminating, at this replica's revision, the template's spec is this
-/// replica's rendering (review L5), and the pool holds members.
-pub(crate) fn live_pool_current(
-    pool: Option<&DynamicObject>,
-    template: Option<&DynamicObject>,
+/// The live half: what the driver says of the pool, as a route.
+async fn live_route(
+    runtime: &dyn RuntimeDriver,
+    placement: &Placement,
     objects: &WarmPoolObjects,
-) -> bool {
-    let at_revision = |object: &DynamicObject| {
-        object.metadata.deletion_timestamp.is_none()
-            && has_pool_labels(object.metadata.labels.as_ref())
-            && object
-                .metadata
-                .annotations
-                .as_ref()
-                .and_then(|annotations| annotations.get(POOL_REVISION_ANNOTATION))
-                == Some(&objects.revision)
-    };
-    let (Some(pool), Some(template)) = (pool, template) else {
-        return false;
-    };
-    at_revision(pool)
-        && at_revision(template)
-        && template_spec_current(template, &objects.template)
-        && pool
-            .data
-            .pointer("/spec/sandboxTemplateRef/name")
-            .and_then(Value::as_str)
-            == Some(objects.name.as_str())
-        && pool
-            .data
-            .pointer("/spec/replicas")
-            .and_then(Value::as_i64)
-            .is_some_and(|replicas| replicas > 0)
-}
-
-/// Every unclaimed, non-terminating member booted from `revision`: its Pod
-/// spec carries exactly that marker (review M1). The controller could adopt
-/// any of them.
-pub(crate) fn members_current(members: &[DynamicObject], revision: &str) -> bool {
-    members
-        .iter()
-        .filter(|member| member.metadata.deletion_timestamp.is_none())
-        .all(|member| {
-            member
-                .data
-                .pointer("/spec/podTemplate/spec")
-                .and_then(pod_spec_pool_revision)
-                == Some(revision)
-        })
-}
-
-/// The live pool's route: claim only on a capable controller, a current
-/// pool and template, and current members. Members are read only once the
-/// rest holds.
-async fn live_route(client: &SandboxClient, objects: &WarmPoolObjects) -> anyhow::Result<Route> {
-    let (pool, template) = client.warm_pool_objects(&objects.name).await?;
-    let Some(pool) = pool else {
-        return Ok(Route::Cold(ColdReason::Revision));
-    };
-    if !pool_observed_by_capable_controller(&pool) {
-        return Ok(Route::Cold(ColdReason::Controller));
-    }
-    if !live_pool_current(Some(&pool), template.as_ref(), objects) {
-        return Ok(Route::Cold(ColdReason::Revision));
-    }
-    let members = client.warm_pool_members(&objects.name).await?;
-    if !members_current(&members, &objects.revision) {
-        return Ok(Route::Cold(ColdReason::StaleMembers));
-    }
-    Ok(Route::Pool {
-        name: objects.name.clone(),
+) -> anyhow::Result<Route> {
+    Ok(match runtime.pool_state(placement, objects).await? {
+        PoolState::Claimable => Route::Pool {
+            name: objects.name.clone(),
+        },
+        PoolState::NotCurrent => Route::Cold(ColdReason::Revision),
+        PoolState::ControllerIncapable => Route::Cold(ColdReason::Controller),
+        PoolState::StaleMembers => Route::Cold(ColdReason::StaleMembers),
     })
 }
 
@@ -221,15 +158,16 @@ pub(crate) async fn route(
     env: &EnvironmentRow,
     image_ref: &str,
     opts: &TemplateOpts,
-    client: &SandboxClient,
+    runtime: &dyn RuntimeDriver,
+    placement: &Placement,
     reclaimed: bool,
 ) -> Route {
     let route = if reclaimed {
         Route::Cold(ColdReason::Reclaimed)
     } else {
-        match pool_candidate(cfg, env, image_ref, opts, &client.namespace) {
+        match pool_candidate(cfg, env, image_ref, opts, &placement.namespace) {
             Err(reason) => Route::Cold(reason),
-            Ok(objects) => match live_route(client, &objects).await {
+            Ok(objects) => match live_route(runtime, placement, &objects).await {
                 Ok(route) => route,
                 Err(error) => {
                     tracing::warn!(env = %env.id, error = %format!("{error:#}"), "warm pool unavailable; creating cold");

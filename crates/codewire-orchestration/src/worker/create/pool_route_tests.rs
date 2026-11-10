@@ -5,12 +5,16 @@ use std::sync::{Arc, Mutex};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode, header};
+use kube::api::DynamicObject;
 use serde_json::{Value, json};
 
 use super::*;
+use crate::runtime::kubernetes::KubernetesDriver;
+use crate::runtime::kubernetes::pools::{live_pool_current, members_current};
 use crate::sandbox::template::{
     CredentialRuntimeTemplateConfig, DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_PROFILE_COMMODITY,
 };
+use crate::sandbox::warm_pool::POOL_REVISION_ANNOTATION;
 use crate::worker::create::environment_template_opts;
 use codewire_project::ProjectSpec;
 
@@ -391,7 +395,10 @@ fn only_members_of_this_revision_keep_a_pool_routable() {
 
 /// A recorded API serving one pool, its template and its members, or failing
 /// every request.
-fn api(objects: Option<&WarmPoolObjects>, fail: bool) -> (SandboxClient, Arc<Mutex<Vec<String>>>) {
+fn api(
+    objects: Option<&WarmPoolObjects>,
+    fail: bool,
+) -> (Arc<dyn RuntimeDriver>, Arc<Mutex<Vec<String>>>) {
     api_with(objects.map(live), Vec::new(), fail)
 }
 
@@ -399,7 +406,7 @@ fn api_with(
     served: Option<(DynamicObject, DynamicObject)>,
     members: Vec<Value>,
     fail: bool,
-) -> (SandboxClient, Arc<Mutex<Vec<String>>>) {
+) -> (Arc<dyn RuntimeDriver>, Arc<Mutex<Vec<String>>>) {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&requests);
     let service = Router::new().fallback(move |request: Request<Body>| {
@@ -442,7 +449,7 @@ fn api_with(
         }
     });
     (
-        SandboxClient::new(kube::Client::new(service, "default"), NAMESPACE),
+        KubernetesDriver::shared(kube::Client::new(service, "default")),
         requests,
     )
 }
@@ -460,7 +467,8 @@ async fn routing_reads_nothing_without_configuration_and_claims_only_a_current_p
         &env,
         canonical,
         &opts(&cfg, &env, canonical),
-        &client,
+        client.as_ref(),
+        &Placement::new(NAMESPACE),
         false,
     )
     .await;
@@ -475,7 +483,8 @@ async fn routing_reads_nothing_without_configuration_and_claims_only_a_current_p
         &env,
         canonical,
         &opts(&cfg, &env, canonical),
-        &client,
+        client.as_ref(),
+        &Placement::new(NAMESPACE),
         false,
     )
     .await;
@@ -503,7 +512,8 @@ async fn routing_reads_nothing_without_configuration_and_claims_only_a_current_p
         &env,
         canonical,
         &opts(&cfg, &env, canonical),
-        &client,
+        client.as_ref(),
+        &Placement::new(NAMESPACE),
         true,
     )
     .await;
@@ -515,7 +525,8 @@ async fn routing_reads_nothing_without_configuration_and_claims_only_a_current_p
         &env,
         canonical,
         &opts(&cfg, &env, canonical),
-        &client,
+        client.as_ref(),
+        &Placement::new(NAMESPACE),
         false,
     )
     .await;
@@ -526,7 +537,8 @@ async fn routing_reads_nothing_without_configuration_and_claims_only_a_current_p
         &env,
         canonical,
         &opts(&cfg, &env, canonical),
-        &client,
+        client.as_ref(),
+        &Placement::new(NAMESPACE),
         false,
     )
     .await;
@@ -579,7 +591,7 @@ async fn routing_needs_a_capable_controller_and_current_members() {
     let canonical = canonical_workspace_runtime_image();
     let cfg = dev_cfg(SHAPES);
     let objects = candidate(&cfg, &env).unwrap();
-    let decide = |client: SandboxClient| {
+    let decide = |client: Arc<dyn RuntimeDriver>| {
         let cfg = cfg.clone();
         let env = env.clone();
         async move {
@@ -588,7 +600,8 @@ async fn routing_needs_a_capable_controller_and_current_members() {
                 &env,
                 canonical,
                 &opts(&cfg, &env, canonical),
-                &client,
+                client.as_ref(),
+                &Placement::new(NAMESPACE),
                 false,
             )
             .await
