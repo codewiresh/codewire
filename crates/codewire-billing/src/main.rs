@@ -117,7 +117,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let connect_auth = ConnectAuthLayer::authenticated(auth.clone());
+    // The signed-out pricing page reads the sign-up credit; nothing else on
+    // the billing mount is public.
+    let connect_auth = ConnectAuthLayer::authenticated(auth.clone())
+        .allow_public(["/codewire.console.v1.BillingService/GetSignupCredit"]);
     let connect_admin_auth = ConnectAuthLayer::admin(auth.clone());
     let app = AppBuilder::new("codewire-billing")
         .with_health_and_db(pool.clone())

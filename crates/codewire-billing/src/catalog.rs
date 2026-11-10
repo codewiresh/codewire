@@ -57,6 +57,17 @@ pub struct CatalogResponse {
 }
 
 /// Shared catalog read used by BillingCatalogService.
+/// The credit a new organization is granted now, in nano-euros: the
+/// `signup_credit_cents` setting a platform admin sets (#3381). 0 is none.
+pub async fn signup_credit_nano_eur(pool: &PgPool) -> AppResult<i64> {
+    let cents: Option<i32> = sqlx::query_scalar(
+        "SELECT int_value FROM billing_catalog_settings WHERE setting_key = 'signup_credit_cents'",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(i64::from(cents.unwrap_or(0).max(0)) * 10_000_000)
+}
+
 pub async fn get_catalog_core(pool: &PgPool) -> AppResult<CatalogResponse> {
     let plans = sqlx::query_as::<_, CatalogPlan>(
         r#"

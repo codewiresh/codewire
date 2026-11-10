@@ -21,7 +21,11 @@ pub(crate) struct HomeTemplate;
 
 #[derive(Template)]
 #[template(path = "pricing.html")]
-pub(crate) struct PricingTemplate;
+pub(crate) struct PricingTemplate {
+    /// The sign-up credit as the page says it ("€10"), or `None` when there
+    /// is none and the page promises nothing.
+    pub(crate) signup_credit: Option<String>,
+}
 
 #[derive(Template)]
 #[template(path = "settings-secrets.html")]

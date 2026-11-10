@@ -69,7 +69,6 @@ pub struct CreditOverview {
     pub auto_top_up_enabled: bool,
     pub auto_top_up_cents: i32,
     pub exhausted_at: Option<String>,
-    pub card_credit_granted: bool,
     pub month_usage_nano_eur: i64,
 }
 
@@ -299,7 +298,6 @@ async fn credit_overview(
         bool,
         i32,
         Option<DateTime<Utc>>,
-        bool,
         i64,
     );
     let row: Row = sqlx::query_as(
@@ -311,8 +309,6 @@ async fn credit_overview(
                o.auto_top_up_enabled,
                o.auto_top_up_cents,
                o.credit_exhausted_at,
-               EXISTS (SELECT 1 FROM billing_credit_ledger
-                       WHERE organization_id = o.id AND idempotency_key = 'card_grant'),
                COALESCE((SELECT -SUM(amount_nano_eur) FROM billing_credit_ledger
                          WHERE organization_id = o.id AND entry_kind = 'usage'
                            AND usage_ended_at >= $2), 0)::int8
@@ -325,7 +321,7 @@ async fn credit_overview(
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound("organization not found".into()))?;
-    let (rate_card, cpu, memory, disk, balance, enabled, cents, exhausted_at, granted, month) = row;
+    let (rate_card, cpu, memory, disk, balance, enabled, cents, exhausted_at, month) = row;
     Ok(CreditOverview {
         balance_nano_eur: balance,
         rates: CreditRates {
@@ -337,7 +333,6 @@ async fn credit_overview(
         auto_top_up_enabled: enabled,
         auto_top_up_cents: cents,
         exhausted_at: exhausted_at.map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-        card_credit_granted: granted,
         month_usage_nano_eur: month,
     })
 }

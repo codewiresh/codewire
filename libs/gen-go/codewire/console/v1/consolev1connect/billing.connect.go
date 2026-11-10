@@ -39,6 +39,9 @@ const (
 	// BillingServiceListResourcePlansProcedure is the fully-qualified name of the BillingService's
 	// ListResourcePlans RPC.
 	BillingServiceListResourcePlansProcedure = "/codewire.console.v1.BillingService/ListResourcePlans"
+	// BillingServiceGetSignupCreditProcedure is the fully-qualified name of the BillingService's
+	// GetSignupCredit RPC.
+	BillingServiceGetSignupCreditProcedure = "/codewire.console.v1.BillingService/GetSignupCredit"
 	// BillingServiceGetBillingOverviewProcedure is the fully-qualified name of the BillingService's
 	// GetBillingOverview RPC.
 	BillingServiceGetBillingOverviewProcedure = "/codewire.console.v1.BillingService/GetBillingOverview"
@@ -72,6 +75,9 @@ type BillingServiceClient interface {
 	// ListResourcePlans returns active plans for one resource type. Admin-only
 	// plans are visible only to platform administrators.
 	ListResourcePlans(context.Context, *connect.Request[v1.ListResourcePlansRequest]) (*connect.Response[v1.ListResourcePlansResponse], error)
+	// GetSignupCredit returns the credit a new organization is granted now. It
+	// is public: the signed-out pricing page reads it.
+	GetSignupCredit(context.Context, *connect.Request[v1.GetSignupCreditRequest]) (*connect.Response[v1.GetSignupCreditResponse], error)
 	// GetBillingOverview returns the caller's organization billing summary.
 	GetBillingOverview(context.Context, *connect.Request[v1.GetBillingOverviewRequest]) (*connect.Response[v1.GetBillingOverviewResponse], error)
 	// ListInvoices returns the most recent organization invoices.
@@ -85,8 +91,7 @@ type BillingServiceClient interface {
 	// CreatePortalSession creates a Stripe billing portal session.
 	CreatePortalSession(context.Context, *connect.Request[v1.CreatePortalSessionRequest]) (*connect.Response[v1.CreatePortalSessionResponse], error)
 	// CreateSetupSession creates a Stripe payment-method setup session. Where
-	// the deployment enforces credit, the first card an organization adds grants
-	// EUR 50 of credit, once per organization and once per card.
+	// the deployment enforces credit, a new card tops up a balance that ran out.
 	CreateSetupSession(context.Context, *connect.Request[v1.CreateSetupSessionRequest]) (*connect.Response[v1.CreateSetupSessionResponse], error)
 	// UpdateAutoTopUp turns automatic top-up on or off and sets its amount.
 	// Organization owners and admins only; audited.
@@ -115,6 +120,13 @@ func NewBillingServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			httpClient,
 			baseURL+BillingServiceListResourcePlansProcedure,
 			connect.WithSchema(billingServiceMethods.ByName("ListResourcePlans")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		getSignupCredit: connect.NewClient[v1.GetSignupCreditRequest, v1.GetSignupCreditResponse](
+			httpClient,
+			baseURL+BillingServiceGetSignupCreditProcedure,
+			connect.WithSchema(billingServiceMethods.ByName("GetSignupCredit")),
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
@@ -177,6 +189,7 @@ func NewBillingServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 type billingServiceClient struct {
 	listOrgPlans          *connect.Client[v1.ListOrgPlansRequest, v1.ListOrgPlansResponse]
 	listResourcePlans     *connect.Client[v1.ListResourcePlansRequest, v1.ListResourcePlansResponse]
+	getSignupCredit       *connect.Client[v1.GetSignupCreditRequest, v1.GetSignupCreditResponse]
 	getBillingOverview    *connect.Client[v1.GetBillingOverviewRequest, v1.GetBillingOverviewResponse]
 	listInvoices          *connect.Client[v1.ListInvoicesRequest, v1.ListInvoicesResponse]
 	listBillingEvents     *connect.Client[v1.ListBillingEventsRequest, v1.ListBillingEventsResponse]
@@ -195,6 +208,11 @@ func (c *billingServiceClient) ListOrgPlans(ctx context.Context, req *connect.Re
 // ListResourcePlans calls codewire.console.v1.BillingService.ListResourcePlans.
 func (c *billingServiceClient) ListResourcePlans(ctx context.Context, req *connect.Request[v1.ListResourcePlansRequest]) (*connect.Response[v1.ListResourcePlansResponse], error) {
 	return c.listResourcePlans.CallUnary(ctx, req)
+}
+
+// GetSignupCredit calls codewire.console.v1.BillingService.GetSignupCredit.
+func (c *billingServiceClient) GetSignupCredit(ctx context.Context, req *connect.Request[v1.GetSignupCreditRequest]) (*connect.Response[v1.GetSignupCreditResponse], error) {
+	return c.getSignupCredit.CallUnary(ctx, req)
 }
 
 // GetBillingOverview calls codewire.console.v1.BillingService.GetBillingOverview.
@@ -244,6 +262,9 @@ type BillingServiceHandler interface {
 	// ListResourcePlans returns active plans for one resource type. Admin-only
 	// plans are visible only to platform administrators.
 	ListResourcePlans(context.Context, *connect.Request[v1.ListResourcePlansRequest]) (*connect.Response[v1.ListResourcePlansResponse], error)
+	// GetSignupCredit returns the credit a new organization is granted now. It
+	// is public: the signed-out pricing page reads it.
+	GetSignupCredit(context.Context, *connect.Request[v1.GetSignupCreditRequest]) (*connect.Response[v1.GetSignupCreditResponse], error)
 	// GetBillingOverview returns the caller's organization billing summary.
 	GetBillingOverview(context.Context, *connect.Request[v1.GetBillingOverviewRequest]) (*connect.Response[v1.GetBillingOverviewResponse], error)
 	// ListInvoices returns the most recent organization invoices.
@@ -257,8 +278,7 @@ type BillingServiceHandler interface {
 	// CreatePortalSession creates a Stripe billing portal session.
 	CreatePortalSession(context.Context, *connect.Request[v1.CreatePortalSessionRequest]) (*connect.Response[v1.CreatePortalSessionResponse], error)
 	// CreateSetupSession creates a Stripe payment-method setup session. Where
-	// the deployment enforces credit, the first card an organization adds grants
-	// EUR 50 of credit, once per organization and once per card.
+	// the deployment enforces credit, a new card tops up a balance that ran out.
 	CreateSetupSession(context.Context, *connect.Request[v1.CreateSetupSessionRequest]) (*connect.Response[v1.CreateSetupSessionResponse], error)
 	// UpdateAutoTopUp turns automatic top-up on or off and sets its amount.
 	// Organization owners and admins only; audited.
@@ -283,6 +303,13 @@ func NewBillingServiceHandler(svc BillingServiceHandler, opts ...connect.Handler
 		BillingServiceListResourcePlansProcedure,
 		svc.ListResourcePlans,
 		connect.WithSchema(billingServiceMethods.ByName("ListResourcePlans")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	billingServiceGetSignupCreditHandler := connect.NewUnaryHandler(
+		BillingServiceGetSignupCreditProcedure,
+		svc.GetSignupCredit,
+		connect.WithSchema(billingServiceMethods.ByName("GetSignupCredit")),
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
@@ -344,6 +371,8 @@ func NewBillingServiceHandler(svc BillingServiceHandler, opts ...connect.Handler
 			billingServiceListOrgPlansHandler.ServeHTTP(w, r)
 		case BillingServiceListResourcePlansProcedure:
 			billingServiceListResourcePlansHandler.ServeHTTP(w, r)
+		case BillingServiceGetSignupCreditProcedure:
+			billingServiceGetSignupCreditHandler.ServeHTTP(w, r)
 		case BillingServiceGetBillingOverviewProcedure:
 			billingServiceGetBillingOverviewHandler.ServeHTTP(w, r)
 		case BillingServiceListInvoicesProcedure:
@@ -375,6 +404,10 @@ func (UnimplementedBillingServiceHandler) ListOrgPlans(context.Context, *connect
 
 func (UnimplementedBillingServiceHandler) ListResourcePlans(context.Context, *connect.Request[v1.ListResourcePlansRequest]) (*connect.Response[v1.ListResourcePlansResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.ListResourcePlans is not implemented"))
+}
+
+func (UnimplementedBillingServiceHandler) GetSignupCredit(context.Context, *connect.Request[v1.GetSignupCreditRequest]) (*connect.Response[v1.GetSignupCreditResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.GetSignupCredit is not implemented"))
 }
 
 func (UnimplementedBillingServiceHandler) GetBillingOverview(context.Context, *connect.Request[v1.GetBillingOverviewRequest]) (*connect.Response[v1.GetBillingOverviewResponse], error) {

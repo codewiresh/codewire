@@ -23,6 +23,8 @@ pub(crate) struct AppState {
     /// Long-lived reads such as the setup-progress relay. No total timeout:
     /// each use bounds its own lifetime.
     pub(crate) stream_http: reqwest::Client,
+    /// The sign-up credit the pricing page last read.
+    pub(crate) signup_credit: std::sync::Arc<crate::billing_connect::SignupCreditCache>,
 }
 
 impl AppState {
@@ -63,6 +65,7 @@ impl AppState {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("static dashboard stream HTTP client configuration"),
+            signup_credit: std::sync::Arc::default(),
         }
     }
 }

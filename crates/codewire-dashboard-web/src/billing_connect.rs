@@ -3,8 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::http::HeaderValue;
 use codewire_proto::codewire::console::v1::{
     BillingServiceClient, CreatePortalSessionRequest, CreateSetupSessionRequest,
-    GetBillingOverviewRequest, GetEnvironmentUsageRequest, ListBillingEventsRequest,
-    ListInvoicesRequest, UpdateAutoTopUpRequest,
+    GetBillingOverviewRequest, GetEnvironmentUsageRequest, GetSignupCreditRequest,
+    ListBillingEventsRequest, ListInvoicesRequest, UpdateAutoTopUpRequest,
 };
 use connectrpc::{ConnectError, client::ClientConfig};
 
@@ -17,6 +17,59 @@ use crate::{
 };
 
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the pricing page keeps the sign-up credit it read, and how long
+/// it waits for billing before saying nothing about one.
+const SIGNUP_CREDIT_TTL: Duration = Duration::from_secs(60);
+const SIGNUP_CREDIT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The sign-up credit the pricing page last read, and when.
+#[derive(Default)]
+pub(crate) struct SignupCreditCache(tokio::sync::Mutex<Option<(std::time::Instant, i64)>>);
+
+/// The credit a new organization is granted now, in nano-euros, for the
+/// signed-out pricing page. Read through billing's one public method and kept
+/// for a minute. When billing doesn't answer it is 0, so the page promises
+/// nothing.
+pub(crate) async fn signup_credit_nano_eur(state: &AppState) -> i64 {
+    let mut cached = state.signup_credit.0.lock().await;
+    if let Some((read_at, amount)) = *cached
+        && read_at.elapsed() < SIGNUP_CREDIT_TTL
+    {
+        return amount;
+    }
+    let client = BillingServiceClient::new(
+        BrowserTransport {
+            http: state.http.clone(),
+            cookie: None,
+            origin: None,
+        },
+        ClientConfig::new(state.billing_origin.clone()).with_default_timeout(SIGNUP_CREDIT_TIMEOUT),
+    );
+    let amount = match client
+        .get_signup_credit(GetSignupCreditRequest::default())
+        .await
+    {
+        Ok(response) => response.into_owned().amount_nano_eur.max(0),
+        Err(_) => 0,
+    };
+    *cached = Some((std::time::Instant::now(), amount));
+    amount
+}
+
+/// The sign-up credit as the pricing page says it: whole euros without
+/// cents ("€10"), otherwise to the cent ("€7.50"). `None` when there is none.
+pub(crate) fn signup_credit_text(nano_eur: i64) -> Option<String> {
+    const NANO_EUR_PER_CENT: i64 = 10_000_000;
+    let cents = nano_eur / NANO_EUR_PER_CENT;
+    (cents > 0).then(|| {
+        if cents % 100 == 0 {
+            format!("€{}", cents / 100)
+        } else {
+            format!("€{}.{:02}", cents / 100, cents % 100)
+        }
+    })
+}
 
 #[derive(Debug)]
 pub(crate) struct BillingUsageRow {
@@ -63,7 +116,6 @@ pub(crate) struct BillingPageView {
     pub(crate) cpu_rate: String,
     pub(crate) memory_rate: String,
     pub(crate) disk_rate: String,
-    pub(crate) card_credit_granted: bool,
     pub(crate) auto_top_up_enabled: bool,
     /// The automatic top-up in euros, as the form shows it ("20").
     pub(crate) auto_top_up_euros: String,
@@ -217,7 +269,6 @@ pub(crate) async fn billing_page(
         cpu_rate: euro_text(rates.cpu_nano_eur_per_vcpu_hour),
         memory_rate: euro_text(rates.memory_nano_eur_per_gib_hour),
         disk_rate: euro_text(rates.disk_nano_eur_per_gib_hour),
-        card_credit_granted: overview.card_credit_granted,
         auto_top_up_enabled: overview.auto_top_up_enabled,
         auto_top_up_euros: top_up_euros(overview.auto_top_up_cents),
         credit_exhausted: exhausted_at.is_some(),
@@ -549,9 +600,10 @@ mod tests {
         ));
         assert!(body.contains("<dt>vCPU</dt><dd>€0.0438 <small>per hour</small></dd>"));
         assert!(body.contains("ran out of compute credit on Oct 28, 2026"));
-        // No card yet: the setup action and the one-time grant note.
+        // No card yet: the setup action, and no credit is promised for one.
         assert!(body.contains(r#"action="/test/billing/_actions/setup""#));
-        assert!(body.contains("grants €50 of compute credit, once"));
+        assert!(body.contains("<p class=\"cw-muted\">No payment method yet.</p>"));
+        assert!(!body.contains("grants"));
         // The top-up form is labelled and starts at the stored values.
         assert!(body.contains(r#"action="/test/billing/_actions/auto-top-up""#));
         assert!(body.contains(
@@ -564,7 +616,7 @@ mod tests {
             assert!(!body.contains(retired), "{retired}");
         }
 
-        // An Unlimited organization sees no rates, top-up or grant.
+        // An Unlimited organization sees no rates or top-up.
         let body = render(&BillingPageView {
             billing_enabled: true,
             can_manage: true,
@@ -579,8 +631,46 @@ mod tests {
         assert!(body.contains("not charged for compute"));
         assert!(!body.contains("ran out of compute credit"));
         assert!(!body.contains("auto-top-up"));
-        assert!(!body.contains("grants €50"));
         assert!(!body.contains("<dt>vCPU</dt>"));
+    }
+
+    #[test]
+    fn the_signup_credit_reads_as_euros_and_none_is_silent() {
+        assert_eq!(signup_credit_text(0), None);
+        assert_eq!(signup_credit_text(-1), None);
+        assert_eq!(signup_credit_text(10_000_000_000).as_deref(), Some("€10"));
+        assert_eq!(signup_credit_text(7_500_000_000).as_deref(), Some("€7.50"));
+        assert_eq!(signup_credit_text(10_000_000).as_deref(), Some("€0.01"));
+    }
+
+    #[test]
+    fn the_pricing_page_promises_a_signup_credit_only_while_there_is_one() {
+        use askama::Template;
+
+        let render = |signup_credit: Option<&str>| {
+            crate::templates::PricingTemplate {
+                signup_credit: signup_credit.map(str::to_owned),
+            }
+            .render()
+            .unwrap()
+        };
+        let off = render(None);
+        for promise in ["of compute", "sign up", "€50"] {
+            assert!(!off.contains(promise), "{promise}");
+        }
+        assert!(off.contains("<p class=\"copy\">Pay only while your sandboxes run.</p>"));
+        assert!(off.contains("<h2 id=\"access-title\">Start building.</h2>"));
+        assert!(off.contains("Local sandboxes are always free."));
+
+        let on = render(Some("€10"));
+        assert!(
+            on.contains("€10 of compute when you sign up. Then pay only while your sandboxes run.")
+        );
+        assert!(on.contains("Start with €10 of compute <span"));
+        assert!(on.contains("<h2 id=\"access-title\">Start with €10 of compute.</h2>"));
+        assert!(
+            on.contains("€10 of compute when you sign up, and local sandboxes are always free.")
+        );
     }
 
     #[test]

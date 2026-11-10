@@ -1060,6 +1060,11 @@ pub(crate) async fn create_organization_core(
         tracing::error!(error = %e, "organizations: add owner failed");
         AppError::InternalMsg("failed to add owner membership".into())
     })?;
+    // It commits with the organization, so neither exists without the other.
+    let signup_credit_nano_eur = grant_signup_credit(&mut tx, &org_id).await.map_err(|e| {
+        tracing::error!(error = %e, "organizations: sign-up credit failed");
+        AppError::InternalMsg("failed to grant the sign-up credit".into())
+    })?;
     tx.commit().await.map_err(|e| {
         tracing::error!(error = %e, "organizations: create commit failed");
         AppError::InternalMsg("failed to commit transaction".into())
@@ -1069,7 +1074,12 @@ pub(crate) async fn create_organization_core(
         &state,
         "org.created",
         &user.user_id,
-        serde_json::json!({"org_id": org_id, "name": name, "slug": slug}),
+        serde_json::json!({
+            "org_id": org_id,
+            "name": name,
+            "slug": slug,
+            "signup_credit_nano_eur": signup_credit_nano_eur.unwrap_or(0),
+        }),
         "info",
     )
     .await;
@@ -1084,8 +1094,30 @@ pub(crate) async fn create_organization_core(
     })
 }
 
+/// Grants a new organization the sign-up credit current now, once (#3381,
+/// owner, 2026-11-10), and returns it in nano-euros. A platform admin sets it
+/// on the admin Billing page; 0 is off and grants nothing.
+async fn grant_signup_credit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: &str,
+) -> Result<Option<i64>, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"INSERT INTO billing_credit_ledger
+               (organization_id, entry_kind, amount_nano_eur, idempotency_key, reason)
+           SELECT $1, 'grant', int_value::int8 * 10000000, 'signup_credit', 'Sign-up credit'
+             FROM billing_catalog_settings
+            WHERE setting_key = 'signup_credit_cents' AND int_value > 0
+           RETURNING amount_nano_eur"#,
+    )
+    .bind(organization_id)
+    .fetch_optional(&mut **tx)
+    .await
+}
+
 #[cfg(test)]
 mod membership_database_tests;
+#[cfg(test)]
+mod signup_credit_database_tests;
 
 #[cfg(test)]
 mod tests {

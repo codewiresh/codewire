@@ -977,7 +977,7 @@ pub(crate) fn euro_amount_nano(text: &str) -> Option<i64> {
 
 fn credit_kind_text(kind: &str) -> &'static str {
     match kind {
-        "grant" => "Card grant",
+        "grant" => "Grant",
         "usage" => "Usage",
         "top_up" => "Top-up",
         "adjustment" => "Adjustment",

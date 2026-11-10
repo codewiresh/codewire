@@ -796,30 +796,6 @@ fn declined(error: &stripe::StripeError) -> Option<String> {
 }
 
 impl StripeHandle {
-    /// The fingerprint of the card a setup intent saved, when it saved one.
-    /// A fingerprint is the same for one card number across customers.
-    pub async fn setup_intent_card_fingerprint(
-        &self,
-        setup_intent_id: &str,
-    ) -> Result<Option<String>, AppError> {
-        let client = self.client()?;
-        let intent = RetrieveSetupIntent::new(
-            setup_intent_id
-                .parse::<stripe_shared::SetupIntentId>()
-                .map_err(stripe_err)?,
-        )
-        .expand(vec!["payment_method".to_owned()])
-        .send(client)
-        .await
-        .map_err(stripe_err)?;
-        Ok(intent.payment_method.and_then(|method| match method {
-            stripe_types::Expandable::Object(method) => {
-                method.card.and_then(|card| card.fingerprint)
-            }
-            stripe_types::Expandable::Id(_) => None,
-        }))
-    }
-
     /// Charges an automatic top-up to the customer's default payment method
     /// as its own EUR invoice, paid at once. Every call is idempotent on the
     /// top-up id, so a retry after a crash resumes the same charge.

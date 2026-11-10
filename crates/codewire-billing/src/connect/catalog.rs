@@ -215,11 +215,13 @@ impl BillingCatalogService for BillingCatalogConnectService {
         ctx: RequestContext,
         request: ServiceRequest<'_, UpdateSettingRequest>,
     ) -> ServiceResult<UpdateSettingResponse> {
+        let actor = auth_user(&ctx)?.clone();
         let request = request.view();
         validate_required(&[(request.setting_key, "/setting_key")])
             .map_err(|error| rpc_app_error(&error, &ctx))?;
         catalog_admin::update_setting_core(
             &self.state.pool,
+            &actor.user_id,
             request.setting_key,
             request.int_value,
         )

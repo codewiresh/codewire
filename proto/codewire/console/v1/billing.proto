@@ -19,6 +19,12 @@ service BillingService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
+  // GetSignupCredit returns the credit a new organization is granted now. It
+  // is public: the signed-out pricing page reads it.
+  rpc GetSignupCredit(GetSignupCreditRequest) returns (GetSignupCreditResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
   // GetBillingOverview returns the caller's organization billing summary.
   rpc GetBillingOverview(GetBillingOverviewRequest) returns (GetBillingOverviewResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -46,8 +52,7 @@ service BillingService {
   rpc CreatePortalSession(CreatePortalSessionRequest) returns (CreatePortalSessionResponse);
 
   // CreateSetupSession creates a Stripe payment-method setup session. Where
-  // the deployment enforces credit, the first card an organization adds grants
-  // EUR 50 of credit, once per organization and once per card.
+  // the deployment enforces credit, a new card tops up a balance that ran out.
   rpc CreateSetupSession(CreateSetupSessionRequest) returns (CreateSetupSessionResponse);
 
   // UpdateAutoTopUp turns automatic top-up on or off and sets its amount.
@@ -103,6 +108,14 @@ message ResourcePlan {
   int64 disk_overage_millicents = 15;
 }
 
+message GetSignupCreditRequest {}
+
+message GetSignupCreditResponse {
+  // The credit a new organization is granted once at creation, in
+  // nano-euros. 0 means none.
+  int64 amount_nano_eur = 1;
+}
+
 message GetBillingOverviewRequest {
   string org_id = 1;
 }
@@ -136,8 +149,9 @@ message GetBillingOverviewResponse {
   // Set while the organization has no credit and no way to get it: creates
   // and starts are refused, and running sandboxes stop 24 hours after it.
   optional google.protobuf.Timestamp credit_exhausted_at = 21;
-  // Whether a card has already granted this organization its free credit.
-  bool card_credit_granted = 22;
+  // Was card_credit_granted: a card no longer grants credit (#3381).
+  reserved 22;
+  reserved "card_credit_granted";
   // Usage drawn from credit since the start of this month, in nano-euros.
   int64 month_usage_nano_eur = 23;
 }

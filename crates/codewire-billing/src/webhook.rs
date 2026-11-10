@@ -229,7 +229,7 @@ async fn handle_checkout_completed(
                         tracing::error!(error = ?e, "billing: failed to set default payment method from setup")
                     }
                 }
-                credit_for_new_card(state, &org_id, si.id.as_str()).await?;
+                settle_after_new_card(state, &org_id).await?;
             }
         }
         return Ok(());
@@ -367,29 +367,15 @@ async fn handle_checkout_completed(
     Ok(())
 }
 
-/// A new card grants EUR 50 once per organization and once per card, then
-/// tops up a balance that ran out (#3381), where this deployment enforces
-/// credit. An error fails the delivery, so Stripe retries; both steps are
-/// idempotent.
-async fn credit_for_new_card(
-    state: &BillingState,
-    org_id: &str,
-    setup_intent_id: &str,
-) -> anyhow::Result<()> {
+/// A new card tops up a balance that ran out (#3381), where this deployment
+/// enforces credit. A card grants no credit (owner, 2026-11-10). An error
+/// fails the delivery, so Stripe retries; the top-up is idempotent.
+async fn settle_after_new_card(state: &BillingState, org_id: &str) -> anyhow::Result<()> {
     if !state.credit_enforcement.is_on() {
         return Ok(());
     }
-    let pool = &state.pool;
-    let fingerprint = state
-        .stripe
-        .setup_intent_card_fingerprint(setup_intent_id)
-        .await?;
-    let grant =
-        crate::credit::grant_card_credit(pool, org_id, fingerprint.as_deref(), setup_intent_id)
-            .await?;
-    tracing::info!(org_id, ?grant, "billing: card credit grant");
     let settlement = crate::credit::settle_organization(
-        pool,
+        &state.pool,
         &state.stripe,
         state.credit_enforcement,
         org_id,
@@ -1079,17 +1065,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_enforcement_off_a_new_card_grants_and_charges_nothing() {
+    async fn with_enforcement_off_a_new_card_charges_nothing() {
         // Neither the database nor Stripe is reachable, so doing anything
         // at all would fail.
         let mut billing = state(StripeHandle::for_test("http://127.0.0.1:1"));
-        credit_for_new_card(&billing, "org_off", "seti_off")
-            .await
-            .unwrap();
+        settle_after_new_card(&billing, "org_off").await.unwrap();
         billing.credit_enforcement = CreditEnforcement::On;
-        credit_for_new_card(&billing, "org_on", "seti_on")
-            .await
-            .unwrap_err();
+        settle_after_new_card(&billing, "org_on").await.unwrap_err();
     }
 
     #[test]

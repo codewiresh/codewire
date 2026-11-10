@@ -18,3 +18,4 @@ replace  337a21892c4886d5a88a053d7235e267b39d1ceb22bfff541404b6412a20e689  proto
 replace  54e7c1934fef59f554387b3aee476fa88741192ffef8466210971e68433cb440  proto/codewire/admin/v1/admin.proto
 delete   a35bfd90570aa951f2d7eb9a623f446f144fad95be468ca549d48984eacf6502  proto/codewire/internal/v1/gateway_binding.proto
 replace  7922308dff3710a83cb617686c74cd740e6e1d6d0cb13caf84ce0c7a9d1bd710  proto/codewire/v1/environment.proto
+replace  81c9f36dfeb0d6ef4f109e507a22cf767b84598d4f3cffbd2a8d6e7efc4e9641  proto/codewire/console/v1/billing.proto

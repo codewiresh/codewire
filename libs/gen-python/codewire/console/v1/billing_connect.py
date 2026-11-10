@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .billing_pb2 import CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse, CreateSetupSessionRequest, CreateSetupSessionResponse, GetBillingOverviewRequest, GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse, ListResourcePlansRequest, ListResourcePlansResponse, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse
+from .billing_pb2 import CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse, CreateSetupSessionRequest, CreateSetupSessionResponse, GetBillingOverviewRequest, GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, GetSignupCreditRequest, GetSignupCreditResponse, ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse, ListResourcePlansRequest, ListResourcePlansResponse, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -39,6 +39,9 @@ class BillingService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def list_resource_plans(self, request: ListResourcePlansRequest, ctx: RequestContext[ListResourcePlansRequest, ListResourcePlansResponse]) -> ListResourcePlansResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def get_signup_credit(self, request: GetSignupCreditRequest, ctx: RequestContext[GetSignupCreditRequest, GetSignupCreditResponse]) -> GetSignupCreditResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def get_billing_overview(self, request: GetBillingOverviewRequest, ctx: RequestContext[GetBillingOverviewRequest, GetBillingOverviewResponse]) -> GetBillingOverviewResponse:
@@ -98,6 +101,16 @@ class BillingServiceASGIApplication(ConnectASGIApplication[BillingService]):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.list_resource_plans,
+                ),
+                "/codewire.console.v1.BillingService/GetSignupCredit": Endpoint.unary(
+                    method=MethodInfo(
+                        name="GetSignupCredit",
+                        service_name="codewire.console.v1.BillingService",
+                        input=GetSignupCreditRequest,
+                        output=GetSignupCreditResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.get_signup_credit,
                 ),
                 "/codewire.console.v1.BillingService/GetBillingOverview": Endpoint.unary(
                     method=MethodInfo(
@@ -254,6 +267,28 @@ class BillingServiceClient(ConnectClient):
                 service_name="codewire.console.v1.BillingService",
                 input=ListResourcePlansRequest,
                 output=ListResourcePlansResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+    async def get_signup_credit(
+        self,
+        request: GetSignupCreditRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetSignupCreditResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetSignupCredit",
+                service_name="codewire.console.v1.BillingService",
+                input=GetSignupCreditRequest,
+                output=GetSignupCreditResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
@@ -436,6 +471,9 @@ class BillingServiceSync(Protocol):
     def list_resource_plans(self, request: ListResourcePlansRequest, ctx: RequestContext[ListResourcePlansRequest, ListResourcePlansResponse]) -> ListResourcePlansResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def get_signup_credit(self, request: GetSignupCreditRequest, ctx: RequestContext[GetSignupCreditRequest, GetSignupCreditResponse]) -> GetSignupCreditResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def get_billing_overview(self, request: GetBillingOverviewRequest, ctx: RequestContext[GetBillingOverviewRequest, GetBillingOverviewResponse]) -> GetBillingOverviewResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -491,6 +529,16 @@ class BillingServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.list_resource_plans,
+                ),
+                "/codewire.console.v1.BillingService/GetSignupCredit": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="GetSignupCredit",
+                        service_name="codewire.console.v1.BillingService",
+                        input=GetSignupCreditRequest,
+                        output=GetSignupCreditResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.get_signup_credit,
                 ),
                 "/codewire.console.v1.BillingService/GetBillingOverview": EndpointSync.unary(
                     method=MethodInfo(
@@ -646,6 +694,27 @@ class BillingServiceClientSync(ConnectClientSync):
                 service_name="codewire.console.v1.BillingService",
                 input=ListResourcePlansRequest,
                 output=ListResourcePlansResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def get_signup_credit(
+        self,
+        request: GetSignupCreditRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetSignupCreditResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetSignupCredit",
+                service_name="codewire.console.v1.BillingService",
+                input=GetSignupCreditRequest,
+                output=GetSignupCreditResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,

@@ -46,7 +46,7 @@
               {% endif %}
               {% if billing.billing_enabled %}
               <div class="cw-credit-row">
-                <p class="cw-muted">{% if billing.has_payment_method %}A payment method is on file.{% else %}No payment method yet.{% endif %}{% if !billing.card_credit_granted && !billing.unmetered %} The first card an organization adds grants €50 of compute credit, once.{% endif %}</p>
+                <p class="cw-muted">{% if billing.has_payment_method %}A payment method is on file.{% else %}No payment method yet.{% endif %}</p>
                 {% if billing.can_manage %}
                 <form method="post" action="{% if billing.has_payment_method %}/{{ organization.slug }}/billing/_actions/portal{% else %}/{{ organization.slug }}/billing/_actions/setup{% endif %}">
                   <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">

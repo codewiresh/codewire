@@ -793,6 +793,11 @@ database_lane_core() {
     cargo test -p codewire-billing --lib 'credit::tests::db_' \
       -- --nocapture
 
+  counted_suite "billing settings audit" billing-settings-audit \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-billing --lib 'catalog_admin::tests::db_' \
+      -- --nocapture
+
   counted_suite "Mesh migration ledger" mesh-migration-ledger \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-mesh --lib 'store::migration_tests::' \
@@ -1100,6 +1105,12 @@ database_lane_orchestration_workspaces() {
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::organizations::membership_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "organization sign-up credit" organization-signup-credit \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::organizations::signup_credit_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
   counted_suite "billing session bind matrix" billing-session-bind \

@@ -15,11 +15,11 @@ use codewire_proto::codewire::console::v1::{
     EnvironmentUsageHour as ProtoEnvironmentUsageHour,
     EnvironmentUsageMonth as ProtoEnvironmentUsageMonth, GetBillingOverviewRequest,
     GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetEnvironmentUsageResponse,
-    Invoice as ProtoInvoice, ListBillingEventsRequest, ListBillingEventsResponse,
-    ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse,
-    ListResourcePlansRequest, ListResourcePlansResponse, OrgPlan as ProtoOrgPlan,
-    ResourcePlan as ProtoResourcePlan, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse,
-    UsageSummary as ProtoUsageSummary,
+    GetSignupCreditRequest, GetSignupCreditResponse, Invoice as ProtoInvoice,
+    ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse,
+    ListOrgPlansRequest, ListOrgPlansResponse, ListResourcePlansRequest, ListResourcePlansResponse,
+    OrgPlan as ProtoOrgPlan, ResourcePlan as ProtoResourcePlan, UpdateAutoTopUpRequest,
+    UpdateAutoTopUpResponse, UsageSummary as ProtoUsageSummary,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult};
@@ -85,6 +85,20 @@ impl BillingService for BillingConnectService {
             .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(ListResourcePlansResponse {
             plans,
+            ..Default::default()
+        })
+    }
+
+    async fn get_signup_credit(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, GetSignupCreditRequest>,
+    ) -> ServiceResult<GetSignupCreditResponse> {
+        let amount_nano_eur = crate::catalog::signup_credit_nano_eur(&self.state.pool)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(GetSignupCreditResponse {
+            amount_nano_eur,
             ..Default::default()
         })
     }
@@ -361,7 +375,6 @@ fn proto_billing_overview(value: BillingOverviewResponse) -> AppResult<GetBillin
         auto_top_up_enabled: value.credit.auto_top_up_enabled,
         auto_top_up_cents: value.credit.auto_top_up_cents,
         credit_exhausted_at: optional_timestamp(value.credit.exhausted_at.as_deref())?.into(),
-        card_credit_granted: value.credit.card_credit_granted,
         month_usage_nano_eur: value.credit.month_usage_nano_eur,
         ..Default::default()
     })

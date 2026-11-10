@@ -369,7 +369,11 @@ mod tests {
             ),
             (
                 include_str!("../../../packages/codewire-design/reference/fixtures/pricing.html"),
-                crate::templates::PricingTemplate.render().unwrap(),
+                crate::templates::PricingTemplate {
+                    signup_credit: None,
+                }
+                .render()
+                .unwrap(),
             ),
         ] {
             let prefix = "../../";

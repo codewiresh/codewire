@@ -22,8 +22,11 @@ pub(super) async fn home() -> Response {
     render_page(HomeTemplate)
 }
 
-pub(super) async fn pricing() -> Response {
-    render_page(PricingTemplate)
+pub(super) async fn pricing(State(state): State<AppState>) -> Response {
+    let credit = crate::billing_connect::signup_credit_nano_eur(&state).await;
+    render_page(PricingTemplate {
+        signup_credit: crate::billing_connect::signup_credit_text(credit),
+    })
 }
 
 pub(super) async fn verify_email(

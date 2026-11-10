@@ -245,27 +245,69 @@ pub async fn set_price_archived_core(
     Ok(())
 }
 
+/// The sign-up credit setting: euro cents a new organization is granted once
+/// at creation. 0 is off.
+pub const SIGNUP_CREDIT_SETTING: &str = "signup_credit_cents";
+
+/// The largest sign-up credit: EUR 1,000, the largest automatic top-up.
+pub const MAX_SIGNUP_CREDIT_CENTS: i32 = 100_000;
+
 /// Shared catalog-setting update operation used by BillingCatalogService.
+/// The change and its audit entry, naming the actor and the old and new
+/// values, commit together.
 pub async fn update_setting_core(
     pool: &PgPool,
+    actor_user_id: &str,
     setting_key: &str,
     int_value: i32,
 ) -> AppResult<()> {
-    let result = sqlx::query(
+    if setting_key == SIGNUP_CREDIT_SETTING && !(0..=MAX_SIGNUP_CREDIT_CENTS).contains(&int_value) {
+        return Err(AppError::BadRequest(
+            format!("{SIGNUP_CREDIT_SETTING} must be between 0 and {MAX_SIGNUP_CREDIT_CENTS}")
+                .into(),
+        ));
+    }
+    let failed = |_| AppError::InternalMsg("failed to update billing catalog setting".into());
+    let mut transaction = pool.begin().await.map_err(failed)?;
+    let previous: Option<i32> = sqlx::query_scalar(
+        r#"SELECT int_value FROM billing_catalog_settings
+           WHERE setting_key = $1
+           FOR UPDATE"#,
+    )
+    .bind(setting_key)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(failed)?;
+    let Some(previous) = previous else {
+        return Err(AppError::NotFound(
+            "billing catalog setting not found".into(),
+        ));
+    };
+    sqlx::query(
         r#"UPDATE billing_catalog_settings
            SET int_value = $2, updated_at = NOW()
            WHERE setting_key = $1"#,
     )
     .bind(setting_key)
     .bind(int_value)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
-    .map_err(|_| AppError::InternalMsg("failed to update billing catalog setting".into()))?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound(
-            "billing catalog setting not found".into(),
-        ));
-    }
+    .map_err(failed)?;
+    sqlx::query(
+        r#"INSERT INTO audit_logs (id, timestamp, action, user_id, metadata, severity)
+           VALUES (gen_random_uuid()::text, NOW(), 'admin.billing.catalog.setting_updated', $1,
+                   jsonb_build_object('setting_key', $2::text, 'previous_value', $3::int4,
+                                      'value', $4::int4),
+                   'warn')"#,
+    )
+    .bind(actor_user_id)
+    .bind(setting_key)
+    .bind(previous)
+    .bind(int_value)
+    .execute(&mut *transaction)
+    .await
+    .map_err(failed)?;
+    transaction.commit().await.map_err(failed)?;
     Ok(())
 }
 
@@ -561,5 +603,105 @@ async fn log_audit_event(
     .await
     {
         tracing::error!(action, error = %e, "failed to log audit event");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_pool() -> Option<PgPool> {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => {
+                eprintln!("DATABASE_URL unset; skipping the billing settings database flow");
+                return None;
+            }
+        };
+        Some(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&url)
+                .await
+                .expect("connect billing settings test database"),
+        )
+    }
+
+    async fn signup_credit(pool: &PgPool) -> i32 {
+        sqlx::query_scalar("SELECT int_value FROM billing_catalog_settings WHERE setting_key = $1")
+            .bind(SIGNUP_CREDIT_SETTING)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn db_a_setting_change_is_audited_and_the_signup_credit_is_bounded() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let actor: String = sqlx::query_scalar("SELECT 'u_settings_' || gen_random_uuid()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users (id, email, name, is_admin) VALUES ($1, $1 || '@example.test', 'Admin', true)")
+            .bind(&actor)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = signup_credit(&pool).await;
+
+        update_setting_core(&pool, &actor, SIGNUP_CREDIT_SETTING, 1_000)
+            .await
+            .unwrap();
+        assert_eq!(signup_credit(&pool).await, 1_000);
+        let audit: (String, serde_json::Value) =
+            sqlx::query_as("SELECT action, metadata FROM audit_logs WHERE user_id = $1")
+                .bind(&actor)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(audit.0, "admin.billing.catalog.setting_updated");
+        assert_eq!(
+            audit.1,
+            serde_json::json!({
+                "setting_key": SIGNUP_CREDIT_SETTING,
+                "previous_value": before,
+                "value": 1_000,
+            })
+        );
+
+        // Out of range or unknown: nothing changes and nothing is audited.
+        for value in [-1, MAX_SIGNUP_CREDIT_CENTS + 1] {
+            assert!(matches!(
+                update_setting_core(&pool, &actor, SIGNUP_CREDIT_SETTING, value).await,
+                Err(AppError::BadRequest(_))
+            ));
+        }
+        assert!(matches!(
+            update_setting_core(&pool, &actor, "no_such_setting", 1).await,
+            Err(AppError::NotFound(_))
+        ));
+        assert_eq!(signup_credit(&pool).await, 1_000);
+        let audited: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE user_id = $1")
+            .bind(&actor)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(audited, 1);
+
+        update_setting_core(&pool, &actor, SIGNUP_CREDIT_SETTING, before)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM audit_logs WHERE user_id = $1")
+            .bind(&actor)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&actor)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

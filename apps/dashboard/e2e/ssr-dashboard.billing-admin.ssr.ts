@@ -18,6 +18,9 @@ import {
 import { ensureWorkerIdentity } from "./helpers/worker-identity";
 import { ACCOUNT_HOME, cleanupTestOrg, ensureTestOrg } from "./helpers/org";
 import { TEST_PASSWORD } from "./helpers/seed";
+import postgres from "postgres";
+
+const sql = postgres(process.env.DATABASE_URL!);
 
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const slug = `ssr-billing-${Date.now()}`;
@@ -58,8 +61,12 @@ test.describe.serial("server-rendered billing and administration", () => {
   });
 
   test.afterAll(async () => {
+    await sql`UPDATE billing_catalog_settings SET int_value = 0 WHERE setting_key = 'signup_credit_cents'`;
+    await cleanupTestOrg(`${slug}-credit-on`);
+    await cleanupTestOrg(`${slug}-credit-off`);
     await cleanupTestOrg(slug);
     await cleanupUser(adminEmail);
+    await sql.end();
   });
 
   test("renders organization billing without browser-side service calls", { tag: "@smoke" }, async ({ page, isMobile }) => {
@@ -115,4 +122,49 @@ test.describe.serial("server-rendered billing and administration", () => {
     expect(browserRequests.every((url) => url.startsWith(`${ssrUrl}/`))).toBe(true);
     expect(browserRequests.some((url) => new URL(url).pathname.startsWith("/codewire."))).toBe(false);
   });
+
+  // Owner, 2026-11-10 (#3381): an admin sets the sign-up credit; each new
+  // organization gets the amount current at its creation, once.
+  test("an admin's sign-up credit reaches organizations created after it, once", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "the setting and the grant do not depend on width");
+    await loginAsAdmin(page);
+    const setCredit = async (cents: string) => {
+      await page.goto("/admin/billing/");
+      const field = page.getByLabel(/Sign-up credit, in euro cents/);
+      await field.fill(cents);
+      await page.locator("form.cw-setting-row", { has: field }).getByRole("button", { name: "Save" }).click();
+      await expect(page.getByText("Billing setting saved.")).toBeVisible();
+      await expect(page.getByLabel(/Sign-up credit, in euro cents/)).toHaveValue(cents);
+    };
+    const createOrganization = async (name: string, orgSlug: string) => {
+      await page.goto("/organizations/new/");
+      await page.getByLabel("Organization Name").fill(name);
+      await page.getByLabel("Slug").fill(orgSlug);
+      await page.getByRole("button", { name: "Create Organization" }).click();
+      await expect(page).toHaveURL(`${ssrUrl}/${orgSlug}/`);
+    };
+    const grants = (orgSlug: string) => sql`
+      SELECT l.amount_nano_eur::text AS amount, l.idempotency_key AS key
+        FROM billing_credit_ledger l JOIN organizations o ON o.id = l.organization_id
+       WHERE o.slug = ${orgSlug} AND l.entry_kind = 'grant'`;
+
+    await setCredit("1000");
+    const [audit] = await sql`
+      SELECT a.metadata FROM audit_logs a JOIN users u ON u.id = a.user_id
+       WHERE u.email = ${adminEmail} AND a.action = 'admin.billing.catalog.setting_updated'
+       ORDER BY a.timestamp DESC LIMIT 1`;
+    expect(audit.metadata).toMatchObject({ setting_key: "signup_credit_cents", value: 1000 });
+
+    await createOrganization("Credit On", `${slug}-credit-on`);
+    expect(await grants(`${slug}-credit-on`)).toEqual([{ amount: "10000000000", key: "signup_credit" }]);
+    await page.goto(`/${slug}-credit-on/billing/`);
+    await expect(page.locator(".cw-stat", { hasText: "Balance" }).locator("dd")).toHaveText("€10.00");
+
+    await setCredit("0");
+    await createOrganization("Credit Off", `${slug}-credit-off`);
+    expect(await grants(`${slug}-credit-off`)).toEqual([]);
+    // The earlier organization keeps exactly its one grant.
+    expect(await grants(`${slug}-credit-on`)).toHaveLength(1);
+  });
 });
+

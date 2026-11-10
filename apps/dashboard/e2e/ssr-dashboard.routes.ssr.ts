@@ -146,7 +146,7 @@ test.describe("homepage", () => {
       await expect(page.locator('[data-pricing-cost="total"]')).toHaveText("€0.2091");
       await expect(page.locator("[data-pricing-period-label]")).toHaveText("per hour");
       await expect(page.getByRole("button", { name: "Month" })).toBeHidden();
-      await expect(page.getByRole("link", { name: "Start with €50 of compute" })).toHaveAttribute("href", "/signup");
+      await expect(page.getByRole("link", { name: "Start building" })).toHaveAttribute("href", "/signup");
     } finally {
       await context.close();
     }

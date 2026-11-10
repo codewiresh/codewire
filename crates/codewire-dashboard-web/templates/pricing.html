@@ -72,7 +72,7 @@
       <li class="plan panel">
         <article aria-labelledby="plan-cloud-title">
           <header class="plan-title"><h3 id="plan-cloud-title">Cloud</h3><p class="plan-price">Pay as you go</p></header>
-          <p class="copy">€50 of compute when you add a card. Then pay only while your sandboxes run.</p>
+          <p class="copy">{% if let Some(credit) = signup_credit %}{{ credit }} of compute when you sign up. Then pay{% else %}Pay{% endif %} only while your sandboxes run.</p>
           <a class="btn" href="/signup">Request access <span aria-hidden="true">→</span></a>
           <ul class="feats">
             <li>10 sandboxes included</li>
@@ -153,7 +153,7 @@
           </tbody>
         </table></div>
         <p class="mono grey fnote">Billed per second on the sandbox’s size while it runs. A month is 730 hours.</p>
-        <a class="btn" href="/signup">Start with €50 of compute <span aria-hidden="true">→</span></a>
+        <a class="btn" href="/signup">{% if let Some(credit) = signup_credit %}Start with {{ credit }} of compute{% else %}Start building{% endif %} <span aria-hidden="true">→</span></a>
       </div>
     </form>
   </section>
@@ -165,7 +165,7 @@
         <div><dt>Do local VMs cost anything?</dt><dd>No. A local VM runs on your own machine and is never billed. <a href="/docs/install">Download the Codewire CLI</a> to run sandboxes as local VMs.</dd></div>
         <div><dt>Where do the sandboxes run?</dt><dd>On a private network of bare-metal machines in Amsterdam, Netherlands, and Frankfurt, Germany. Locations in the US are coming soon.</dd></div>
         <div><dt>How does billing work?</dt><dd>Your organization keeps a balance. Running sandboxes draw it down per second at the rates above. There are no plans, seats or minimums.</dd></div>
-        <div><dt>What do I get for free?</dt><dd>€50 of compute when you add a card. Adding the card charges nothing. After that, automatic top-ups add €20 at a time; change the amount or switch them off on the Billing page.</dd></div>
+        <div><dt>What do I get for free?</dt><dd>{% if let Some(credit) = signup_credit %}{{ credit }} of compute when you sign up, and local sandboxes are always free. Adding a card charges nothing. After that, automatic{% else %}Local sandboxes are always free. In the cloud you pay only while your sandboxes run, and adding a card charges nothing. Automatic{% endif %} top-ups add €20 at a time; change the amount or switch them off on the Billing page.</dd></div>
         <div><dt>What happens if my balance runs out?</dt><dd>Without a card, or if a top-up fails, new sandboxes and starts are refused at once, and running sandboxes stop after 24 hours. Their storage is kept.</dd></div>
         <div><dt>Do credits expire?</dt><dd>No.</dd></div>
         <div><dt>Do agents or teammates cost extra?</dt><dd>No. Agents are processes in your sandboxes, and members are free. You pay only for running sandboxes.</dd></div>
@@ -177,7 +177,7 @@
 
   <section class="end" aria-labelledby="access-title">
     <div class="grid ask">
-      <h2 id="access-title">Start with €50 of compute.</h2>
+      <h2 id="access-title">{% if let Some(credit) = signup_credit %}Start with {{ credit }} of compute.{% else %}Start building.{% endif %}</h2>
       <div class="go">
         <p class="copy">Codewire is in private beta. Tell us what you want to build and verify your email to request access.</p>
         <a class="btn" href="/signup">Request access <span aria-hidden="true">→</span></a>

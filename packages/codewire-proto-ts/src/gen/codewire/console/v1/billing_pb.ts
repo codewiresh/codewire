@@ -12,7 +12,7 @@ import type { JsonObject, Message } from "@bufbuild/protobuf";
  * Describes the file codewire/console/v1/billing.proto.
  */
 export const file_codewire_console_v1_billing: GenFile = /*@__PURE__*/
-  fileDesc("CiFjb2Rld2lyZS9jb25zb2xlL3YxL2JpbGxpbmcucHJvdG8SE2NvZGV3aXJlLmNvbnNvbGUudjEiFQoTTGlzdE9yZ1BsYW5zUmVxdWVzdCKnAQoUTGlzdE9yZ1BsYW5zUmVzcG9uc2USQwoFcGxhbnMYASADKAsyNC5jb2Rld2lyZS5jb25zb2xlLnYxLkxpc3RPcmdQbGFuc1Jlc3BvbnNlLlBsYW5zRW50cnkaSgoKUGxhbnNFbnRyeRILCgNrZXkYASABKAkSKwoFdmFsdWUYAiABKAsyHC5jb2Rld2lyZS5jb25zb2xlLnYxLk9yZ1BsYW46AjgBIsMBCgdPcmdQbGFuEhQKDGRpc3BsYXlfbmFtZRgBIAEoCRITCgtwcmljZV9jZW50cxgCIAEoBRIVCg1pbmNsdWRlZF9kZXZzGAMgASgFEhkKEW1heF9jb25jdXJyZW50X3dzGAQgASgFEhgKEG1heF90ZWFtX21lbWJlcnMYBSABKAUSEgoKc3RvcmFnZV9nYhgGIAEoBRIVCg1pc19jb250YWN0X3VzGAcgASgIEhAKCGFyY2hpdmVkGAkgASgISgQICBAJIjEKGExpc3RSZXNvdXJjZVBsYW5zUmVxdWVzdBIVCg1yZXNvdXJjZV90eXBlGAEgASgJIrYBChlMaXN0UmVzb3VyY2VQbGFuc1Jlc3BvbnNlEkgKBXBsYW5zGAEgAygLMjkuY29kZXdpcmUuY29uc29sZS52MS5MaXN0UmVzb3VyY2VQbGFuc1Jlc3BvbnNlLlBsYW5zRW50cnkaTwoKUGxhbnNFbnRyeRILCgNrZXkYASABKAkSMAoFdmFsdWUYAiABKAsyIS5jb2Rld2lyZS5jb25zb2xlLnYxLlJlc291cmNlUGxhbjoCOAEilQMKDFJlc291cmNlUGxhbhIUCgxkaXNwbGF5X25hbWUYASABKAkSEwoLcHJpY2VfY2VudHMYAiABKAUSFQoNaW5jbHVkZWRfZGV2cxgDIAEoBRIZChFtYXhfY29uY3VycmVudF93cxgEIAEoBRIYChBtYXhfdGVhbV9tZW1iZXJzGAUgASgFEhIKCnN0b3JhZ2VfZ2IYBiABKAUSFQoNaXNfY29udGFjdF91cxgHIAEoCBIVCg1pc19hZG1pbl9vbmx5GAggASgIEhAKCGFyY2hpdmVkGAkgASgIEhoKEmluY2x1ZGVkX2NwdV9ob3VycxgKIAEoBRIdChVpbmNsdWRlZF9tZW1fZ2JfaG91cnMYCyABKAUSHgoWaW5jbHVkZWRfZGlza19nYl9ob3VycxgMIAEoBRIeChZjcHVfb3ZlcmFnZV9taWxsaWNlbnRzGA0gASgDEh4KFm1lbV9vdmVyYWdlX21pbGxpY2VudHMYDiABKAMSHwoXZGlza19vdmVyYWdlX21pbGxpY2VudHMYDyABKAMiKwoZR2V0QmlsbGluZ092ZXJ2aWV3UmVxdWVzdBIOCgZvcmdfaWQYASABKAki4QYKGkdldEJpbGxpbmdPdmVydmlld1Jlc3BvbnNlEhcKD2JpbGxpbmdfZW5hYmxlZBgBIAEoCBIaChJoYXNfcGF5bWVudF9tZXRob2QYAiABKAgSDAoEcGxhbhgDIAEoCRIZChFwbGFuX2Rpc3BsYXlfbmFtZRgEIAEoCRIOCgZzdGF0dXMYBSABKAkSMgoJdHJpYWxfZW5kGAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEgAiAEBEhIKCnRyaWFsX2RheXMYByABKAUSEgoKc2VhdF9jb3VudBgIIAEoBRIVCg1pbmNsdWRlZF9kZXZzGAkgASgFEh4KFmV4dHJhX3NlYXRfcHJpY2VfY2VudHMYCiABKAUSMgoGbGltaXRzGAsgASgLMiIuY29kZXdpcmUuY29uc29sZS52MS5CaWxsaW5nTGltaXRzEjsKEmN1cnJlbnRfcGVyaW9kX2VuZBgMIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXBIAYgBARIcChRhY3RpdmVfc3Vic2NyaXB0aW9ucxgNIAEoBRIgChh0b3RhbF9tb250aGx5X2Nvc3RfY2VudHMYDiABKAUSPgoTY3VycmVudF9tb250aF91c2FnZRgPIAEoCzIhLmNvZGV3aXJlLmNvbnNvbGUudjEuVXNhZ2VTdW1tYXJ5Eh8KF2NyZWRpdF9iYWxhbmNlX25hbm9fZXVyGBAgASgDEi8KBXJhdGVzGBEgASgLMiAuY29kZXdpcmUuY29uc29sZS52MS5DcmVkaXRSYXRlcxIRCgl1bm1ldGVyZWQYEiABKAgSGwoTYXV0b190b3BfdXBfZW5hYmxlZBgTIAEoCBIZChFhdXRvX3RvcF91cF9jZW50cxgUIAEoBRI8ChNjcmVkaXRfZXhoYXVzdGVkX2F0GBUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEgCiAEBEhsKE2NhcmRfY3JlZGl0X2dyYW50ZWQYFiABKAgSHAoUbW9udGhfdXNhZ2VfbmFub19ldXIYFyABKANCDAoKX3RyaWFsX2VuZEIVChNfY3VycmVudF9wZXJpb2RfZW5kQhYKFF9jcmVkaXRfZXhoYXVzdGVkX2F0InsKC0NyZWRpdFJhdGVzEiIKGmNwdV9uYW5vX2V1cl9wZXJfdmNwdV9ob3VyGAEgASgDEiQKHG1lbW9yeV9uYW5vX2V1cl9wZXJfZ2liX2hvdXIYAiABKAMSIgoaZGlza19uYW5vX2V1cl9wZXJfZ2liX2hvdXIYAyABKAMiTwoWVXBkYXRlQXV0b1RvcFVwUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDwoHZW5hYmxlZBgCIAEoCBIUCgxhbW91bnRfY2VudHMYAyABKAUiQAoXVXBkYXRlQXV0b1RvcFVwUmVzcG9uc2USDwoHZW5hYmxlZBgBIAEoCBIUCgxhbW91bnRfY2VudHMYAiABKAUiLgoRQmlsbGluZ0xpbWl0VXNhZ2USDAoEdXNlZBgBIAEoBRILCgNtYXgYAiABKAUigAEKDUJpbGxpbmdMaW1pdHMSPAoMdGVhbV9tZW1iZXJzGAEgASgLMiYuY29kZXdpcmUuY29uc29sZS52MS5CaWxsaW5nTGltaXRVc2FnZRIdChVjb25jdXJyZW50X3dvcmtzcGFjZXMYAiABKAUSEgoKc3RvcmFnZV9nYhgDIAEoBSJUCgxVc2FnZVN1bW1hcnkSEQoJY3B1X2hvdXJzGAEgASgBEhcKD21lbW9yeV9nYl9ob3VycxgCIAEoARIYChBzdG9yYWdlX2diX2hvdXJzGAMgASgBIiUKE0xpc3RJbnZvaWNlc1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJIkYKFExpc3RJbnZvaWNlc1Jlc3BvbnNlEi4KCGludm9pY2VzGAEgAygLMhwuY29kZXdpcmUuY29uc29sZS52MS5JbnZvaWNlIpkDCgdJbnZvaWNlEgoKAmlkGAEgASgJEhkKEXN0cmlwZV9pbnZvaWNlX2lkGAIgASgJEg4KBnN0YXR1cxgDIAEoCRISCgphbW91bnRfZHVlGAQgASgFEhMKC2Ftb3VudF9wYWlkGAUgASgFEhAKCGN1cnJlbmN5GAYgASgJEh8KEmhvc3RlZF9pbnZvaWNlX3VybBgHIAEoCUgAiAEBEhgKC2ludm9pY2VfcGRmGAggASgJSAGIAQESNQoMcGVyaW9kX3N0YXJ0GAkgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEgCiAEBEjMKCnBlcmlvZF9lbmQYCiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wSAOIAQESLgoKY3JlYXRlZF9hdBgLIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXBCFQoTX2hvc3RlZF9pbnZvaWNlX3VybEIOCgxfaW52b2ljZV9wZGZCDwoNX3BlcmlvZF9zdGFydEINCgtfcGVyaW9kX2VuZCIqChhMaXN0QmlsbGluZ0V2ZW50c1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJIk4KGUxpc3RCaWxsaW5nRXZlbnRzUmVzcG9uc2USMQoGZXZlbnRzGAEgAygLMiEuY29kZXdpcmUuY29uc29sZS52MS5CaWxsaW5nRXZlbnQilwIKDEJpbGxpbmdFdmVudBIKCgJpZBgBIAEoAxISCgpldmVudF90eXBlGAIgASgJEhMKBm9yZ19pZBgDIAEoCUgAiAEBEhkKDGFtb3VudF9jZW50cxgEIAEoBUgBiAEBEhAKCGN1cnJlbmN5GAUgASgJEhsKDnN0cmlwZV9pdGVtX2lkGAYgASgJSAKIAQESKQoIbWV0YWRhdGEYByABKAsyFy5nb29nbGUucHJvdG9idWYuU3RydWN0Ei4KCmNyZWF0ZWRfYXQYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wQgkKB19vcmdfaWRCDwoNX2Ftb3VudF9jZW50c0IRCg9fc3RyaXBlX2l0ZW1faWQiLAoaR2V0RW52aXJvbm1lbnRVc2FnZVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJIuoBChtHZXRFbnZpcm9ubWVudFVzYWdlUmVzcG9uc2USQQoNY3VycmVudF9tb250aBgBIAEoCzIqLmNvZGV3aXJlLmNvbnNvbGUudjEuRW52aXJvbm1lbnRVc2FnZU1vbnRoEkMKEGhvdXJseV9icmVha2Rvd24YAiADKAsyKS5jb2Rld2lyZS5jb25zb2xlLnYxLkVudmlyb25tZW50VXNhZ2VIb3VyEkMKD3Blcl9lbnZpcm9ubWVudBgDIAMoCzIqLmNvZGV3aXJlLmNvbnNvbGUudjEuRW52aXJvbm1lbnRVc2FnZUVudHJ5IqYBChVFbnZpcm9ubWVudFVzYWdlTW9udGgSEQoJY3B1X2hvdXJzGAEgASgBEhQKDG1lbV9nYl9ob3VycxgCIAEoARIVCg1kaXNrX2diX2hvdXJzGAMgASgBEhIKCmNvc3RfY2VudHMYBCABKAUSGgoSaW5jbHVkZWRfY3B1X2hvdXJzGAUgASgFEh0KFWluY2x1ZGVkX21lbV9nYl9ob3VycxgGIAEoBSJ9ChRFbnZpcm9ubWVudFVzYWdlSG91chIoCgRob3VyGAEgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIRCgljcHVfaG91cnMYAiABKAESFAoMbWVtX2diX2hvdXJzGAMgASgBEhIKCmNvc3RfY2VudHMYBCABKAUinwEKFUVudmlyb25tZW50VXNhZ2VFbnRyeRIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJEhcKD3J1bm5pbmdfc2Vjb25kcxgDIAEoBRISCgpjb3N0X2NlbnRzGAQgASgFEhYKDmNwdV9taWxsaWNvcmVzGAUgASgFEhEKCW1lbW9yeV9tYhgGIAEoBRIUCgxob3VybHlfY2VudHMYByABKAUiZQocQ3JlYXRlQ2hlY2tvdXRTZXNzaW9uUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDAoEcGxhbhgCIAEoCRITCgtzdWNjZXNzX3VybBgDIAEoCRISCgpjYW5jZWxfdXJsGAQgASgJIjUKHUNyZWF0ZUNoZWNrb3V0U2Vzc2lvblJlc3BvbnNlEhQKDGNoZWNrb3V0X3VybBgBIAEoCSJAChpDcmVhdGVQb3J0YWxTZXNzaW9uUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSEgoKcmV0dXJuX3VybBgCIAEoCSIxChtDcmVhdGVQb3J0YWxTZXNzaW9uUmVzcG9uc2USEgoKcG9ydGFsX3VybBgBIAEoCSJUChlDcmVhdGVTZXR1cFNlc3Npb25SZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRITCgtzdWNjZXNzX3VybBgCIAEoCRISCgpjYW5jZWxfdXJsGAMgASgJIjIKGkNyZWF0ZVNldHVwU2Vzc2lvblJlc3BvbnNlEhQKDGNoZWNrb3V0X3VybBgBIAEoCTKwCQoOQmlsbGluZ1NlcnZpY2USaAoMTGlzdE9yZ1BsYW5zEiguY29kZXdpcmUuY29uc29sZS52MS5MaXN0T3JnUGxhbnNSZXF1ZXN0GikuY29kZXdpcmUuY29uc29sZS52MS5MaXN0T3JnUGxhbnNSZXNwb25zZSIDkAIBEncKEUxpc3RSZXNvdXJjZVBsYW5zEi0uY29kZXdpcmUuY29uc29sZS52MS5MaXN0UmVzb3VyY2VQbGFuc1JlcXVlc3QaLi5jb2Rld2lyZS5jb25zb2xlLnYxLkxpc3RSZXNvdXJjZVBsYW5zUmVzcG9uc2UiA5ACARJ6ChJHZXRCaWxsaW5nT3ZlcnZpZXcSLi5jb2Rld2lyZS5jb25zb2xlLnYxLkdldEJpbGxpbmdPdmVydmlld1JlcXVlc3QaLy5jb2Rld2lyZS5jb25zb2xlLnYxLkdldEJpbGxpbmdPdmVydmlld1Jlc3BvbnNlIgOQAgESaAoMTGlzdEludm9pY2VzEiguY29kZXdpcmUuY29uc29sZS52MS5MaXN0SW52b2ljZXNSZXF1ZXN0GikuY29kZXdpcmUuY29uc29sZS52MS5MaXN0SW52b2ljZXNSZXNwb25zZSIDkAIBEncKEUxpc3RCaWxsaW5nRXZlbnRzEi0uY29kZXdpcmUuY29uc29sZS52MS5MaXN0QmlsbGluZ0V2ZW50c1JlcXVlc3QaLi5jb2Rld2lyZS5jb25zb2xlLnYxLkxpc3RCaWxsaW5nRXZlbnRzUmVzcG9uc2UiA5ACARJ9ChNHZXRFbnZpcm9ubWVudFVzYWdlEi8uY29kZXdpcmUuY29uc29sZS52MS5HZXRFbnZpcm9ubWVudFVzYWdlUmVxdWVzdBowLmNvZGV3aXJlLmNvbnNvbGUudjEuR2V0RW52aXJvbm1lbnRVc2FnZVJlc3BvbnNlIgOQAgESfgoVQ3JlYXRlQ2hlY2tvdXRTZXNzaW9uEjEuY29kZXdpcmUuY29uc29sZS52MS5DcmVhdGVDaGVja291dFNlc3Npb25SZXF1ZXN0GjIuY29kZXdpcmUuY29uc29sZS52MS5DcmVhdGVDaGVja291dFNlc3Npb25SZXNwb25zZRJ4ChNDcmVhdGVQb3J0YWxTZXNzaW9uEi8uY29kZXdpcmUuY29uc29sZS52MS5DcmVhdGVQb3J0YWxTZXNzaW9uUmVxdWVzdBowLmNvZGV3aXJlLmNvbnNvbGUudjEuQ3JlYXRlUG9ydGFsU2Vzc2lvblJlc3BvbnNlEnUKEkNyZWF0ZVNldHVwU2Vzc2lvbhIuLmNvZGV3aXJlLmNvbnNvbGUudjEuQ3JlYXRlU2V0dXBTZXNzaW9uUmVxdWVzdBovLmNvZGV3aXJlLmNvbnNvbGUudjEuQ3JlYXRlU2V0dXBTZXNzaW9uUmVzcG9uc2USbAoPVXBkYXRlQXV0b1RvcFVwEisuY29kZXdpcmUuY29uc29sZS52MS5VcGRhdGVBdXRvVG9wVXBSZXF1ZXN0GiwuY29kZXdpcmUuY29uc29sZS52MS5VcGRhdGVBdXRvVG9wVXBSZXNwb25zZULfAQoXY29tLmNvZGV3aXJlLmNvbnNvbGUudjFCDEJpbGxpbmdQcm90b1ABWkhnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvY29uc29sZS92MTtjb25zb2xldjGiAgNDQ1iqAhNDb2Rld2lyZS5Db25zb2xlLlYxygITQ29kZXdpcmVcQ29uc29sZVxWMeICH0NvZGV3aXJlXENvbnNvbGVcVjFcR1BCTWV0YWRhdGHqAhVDb2Rld2lyZTo6Q29uc29sZTo6VjFiBnByb3RvMw", [file_google_protobuf_struct, file_google_protobuf_timestamp]);
+  fileDesc("CiFjb2Rld2lyZS9jb25zb2xlL3YxL2JpbGxpbmcucHJvdG8SE2NvZGV3aXJlLmNvbnNvbGUudjEiFQoTTGlzdE9yZ1BsYW5zUmVxdWVzdCKnAQoUTGlzdE9yZ1BsYW5zUmVzcG9uc2USQwoFcGxhbnMYASADKAsyNC5jb2Rld2lyZS5jb25zb2xlLnYxLkxpc3RPcmdQbGFuc1Jlc3BvbnNlLlBsYW5zRW50cnkaSgoKUGxhbnNFbnRyeRILCgNrZXkYASABKAkSKwoFdmFsdWUYAiABKAsyHC5jb2Rld2lyZS5jb25zb2xlLnYxLk9yZ1BsYW46AjgBIsMBCgdPcmdQbGFuEhQKDGRpc3BsYXlfbmFtZRgBIAEoCRITCgtwcmljZV9jZW50cxgCIAEoBRIVCg1pbmNsdWRlZF9kZXZzGAMgASgFEhkKEW1heF9jb25jdXJyZW50X3dzGAQgASgFEhgKEG1heF90ZWFtX21lbWJlcnMYBSABKAUSEgoKc3RvcmFnZV9nYhgGIAEoBRIVCg1pc19jb250YWN0X3VzGAcgASgIEhAKCGFyY2hpdmVkGAkgASgISgQICBAJIjEKGExpc3RSZXNvdXJjZVBsYW5zUmVxdWVzdBIVCg1yZXNvdXJjZV90eXBlGAEgASgJIrYBChlMaXN0UmVzb3VyY2VQbGFuc1Jlc3BvbnNlEkgKBXBsYW5zGAEgAygLMjkuY29kZXdpcmUuY29uc29sZS52MS5MaXN0UmVzb3VyY2VQbGFuc1Jlc3BvbnNlLlBsYW5zRW50cnkaTwoKUGxhbnNFbnRyeRILCgNrZXkYASABKAkSMAoFdmFsdWUYAiABKAsyIS5jb2Rld2lyZS5jb25zb2xlLnYxLlJlc291cmNlUGxhbjoCOAEilQMKDFJlc291cmNlUGxhbhIUCgxkaXNwbGF5X25hbWUYASABKAkSEwoLcHJpY2VfY2VudHMYAiABKAUSFQoNaW5jbHVkZWRfZGV2cxgDIAEoBRIZChFtYXhfY29uY3VycmVudF93cxgEIAEoBRIYChBtYXhfdGVhbV9tZW1iZXJzGAUgASgFEhIKCnN0b3JhZ2VfZ2IYBiABKAUSFQoNaXNfY29udGFjdF91cxgHIAEoCBIVCg1pc19hZG1pbl9vbmx5GAggASgIEhAKCGFyY2hpdmVkGAkgASgIEhoKEmluY2x1ZGVkX2NwdV9ob3VycxgKIAEoBRIdChVpbmNsdWRlZF9tZW1fZ2JfaG91cnMYCyABKAUSHgoWaW5jbHVkZWRfZGlza19nYl9ob3VycxgMIAEoBRIeChZjcHVfb3ZlcmFnZV9taWxsaWNlbnRzGA0gASgDEh4KFm1lbV9vdmVyYWdlX21pbGxpY2VudHMYDiABKAMSHwoXZGlza19vdmVyYWdlX21pbGxpY2VudHMYDyABKAMiGAoWR2V0U2lnbnVwQ3JlZGl0UmVxdWVzdCIyChdHZXRTaWdudXBDcmVkaXRSZXNwb25zZRIXCg9hbW91bnRfbmFub19ldXIYASABKAMiKwoZR2V0QmlsbGluZ092ZXJ2aWV3UmVxdWVzdBIOCgZvcmdfaWQYASABKAki3wYKGkdldEJpbGxpbmdPdmVydmlld1Jlc3BvbnNlEhcKD2JpbGxpbmdfZW5hYmxlZBgBIAEoCBIaChJoYXNfcGF5bWVudF9tZXRob2QYAiABKAgSDAoEcGxhbhgDIAEoCRIZChFwbGFuX2Rpc3BsYXlfbmFtZRgEIAEoCRIOCgZzdGF0dXMYBSABKAkSMgoJdHJpYWxfZW5kGAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEgAiAEBEhIKCnRyaWFsX2RheXMYByABKAUSEgoKc2VhdF9jb3VudBgIIAEoBRIVCg1pbmNsdWRlZF9kZXZzGAkgASgFEh4KFmV4dHJhX3NlYXRfcHJpY2VfY2VudHMYCiABKAUSMgoGbGltaXRzGAsgASgLMiIuY29kZXdpcmUuY29uc29sZS52MS5CaWxsaW5nTGltaXRzEjsKEmN1cnJlbnRfcGVyaW9kX2VuZBgMIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXBIAYgBARIcChRhY3RpdmVfc3Vic2NyaXB0aW9ucxgNIAEoBRIgChh0b3RhbF9tb250aGx5X2Nvc3RfY2VudHMYDiABKAUSPgoTY3VycmVudF9tb250aF91c2FnZRgPIAEoCzIhLmNvZGV3aXJlLmNvbnNvbGUudjEuVXNhZ2VTdW1tYXJ5Eh8KF2NyZWRpdF9iYWxhbmNlX25hbm9fZXVyGBAgASgDEi8KBXJhdGVzGBEgASgLMiAuY29kZXdpcmUuY29uc29sZS52MS5DcmVkaXRSYXRlcxIRCgl1bm1ldGVyZWQYEiABKAgSGwoTYXV0b190b3BfdXBfZW5hYmxlZBgTIAEoCBIZChFhdXRvX3RvcF91cF9jZW50cxgUIAEoBRI8ChNjcmVkaXRfZXhoYXVzdGVkX2F0GBUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEgCiAEBEhwKFG1vbnRoX3VzYWdlX25hbm9fZXVyGBcgASgDQgwKCl90cmlhbF9lbmRCFQoTX2N1cnJlbnRfcGVyaW9kX2VuZEIWChRfY3JlZGl0X2V4aGF1c3RlZF9hdEoECBYQF1ITY2FyZF9jcmVkaXRfZ3JhbnRlZCJ7CgtDcmVkaXRSYXRlcxIiChpjcHVfbmFub19ldXJfcGVyX3ZjcHVfaG91chgBIAEoAxIkChxtZW1vcnlfbmFub19ldXJfcGVyX2dpYl9ob3VyGAIgASgDEiIKGmRpc2tfbmFub19ldXJfcGVyX2dpYl9ob3VyGAMgASgDIk8KFlVwZGF0ZUF1dG9Ub3BVcFJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEg8KB2VuYWJsZWQYAiABKAgSFAoMYW1vdW50X2NlbnRzGAMgASgFIkAKF1VwZGF0ZUF1dG9Ub3BVcFJlc3BvbnNlEg8KB2VuYWJsZWQYASABKAgSFAoMYW1vdW50X2NlbnRzGAIgASgFIi4KEUJpbGxpbmdMaW1pdFVzYWdlEgwKBHVzZWQYASABKAUSCwoDbWF4GAIgASgFIoABCg1CaWxsaW5nTGltaXRzEjwKDHRlYW1fbWVtYmVycxgBIAEoCzImLmNvZGV3aXJlLmNvbnNvbGUudjEuQmlsbGluZ0xpbWl0VXNhZ2USHQoVY29uY3VycmVudF93b3Jrc3BhY2VzGAIgASgFEhIKCnN0b3JhZ2VfZ2IYAyABKAUiVAoMVXNhZ2VTdW1tYXJ5EhEKCWNwdV9ob3VycxgBIAEoARIXCg9tZW1vcnlfZ2JfaG91cnMYAiABKAESGAoQc3RvcmFnZV9nYl9ob3VycxgDIAEoASIlChNMaXN0SW52b2ljZXNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCSJGChRMaXN0SW52b2ljZXNSZXNwb25zZRIuCghpbnZvaWNlcxgBIAMoCzIcLmNvZGV3aXJlLmNvbnNvbGUudjEuSW52b2ljZSKZAwoHSW52b2ljZRIKCgJpZBgBIAEoCRIZChFzdHJpcGVfaW52b2ljZV9pZBgCIAEoCRIOCgZzdGF0dXMYAyABKAkSEgoKYW1vdW50X2R1ZRgEIAEoBRITCgthbW91bnRfcGFpZBgFIAEoBRIQCghjdXJyZW5jeRgGIAEoCRIfChJob3N0ZWRfaW52b2ljZV91cmwYByABKAlIAIgBARIYCgtpbnZvaWNlX3BkZhgIIAEoCUgBiAEBEjUKDHBlcmlvZF9zdGFydBgJIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXBIAogBARIzCgpwZXJpb2RfZW5kGAogASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEgDiAEBEi4KCmNyZWF0ZWRfYXQYCyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wQhUKE19ob3N0ZWRfaW52b2ljZV91cmxCDgoMX2ludm9pY2VfcGRmQg8KDV9wZXJpb2Rfc3RhcnRCDQoLX3BlcmlvZF9lbmQiKgoYTGlzdEJpbGxpbmdFdmVudHNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCSJOChlMaXN0QmlsbGluZ0V2ZW50c1Jlc3BvbnNlEjEKBmV2ZW50cxgBIAMoCzIhLmNvZGV3aXJlLmNvbnNvbGUudjEuQmlsbGluZ0V2ZW50IpcCCgxCaWxsaW5nRXZlbnQSCgoCaWQYASABKAMSEgoKZXZlbnRfdHlwZRgCIAEoCRITCgZvcmdfaWQYAyABKAlIAIgBARIZCgxhbW91bnRfY2VudHMYBCABKAVIAYgBARIQCghjdXJyZW5jeRgFIAEoCRIbCg5zdHJpcGVfaXRlbV9pZBgGIAEoCUgCiAEBEikKCG1ldGFkYXRhGAcgASgLMhcuZ29vZ2xlLnByb3RvYnVmLlN0cnVjdBIuCgpjcmVhdGVkX2F0GAggASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEIJCgdfb3JnX2lkQg8KDV9hbW91bnRfY2VudHNCEQoPX3N0cmlwZV9pdGVtX2lkIiwKGkdldEVudmlyb25tZW50VXNhZ2VSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCSLqAQobR2V0RW52aXJvbm1lbnRVc2FnZVJlc3BvbnNlEkEKDWN1cnJlbnRfbW9udGgYASABKAsyKi5jb2Rld2lyZS5jb25zb2xlLnYxLkVudmlyb25tZW50VXNhZ2VNb250aBJDChBob3VybHlfYnJlYWtkb3duGAIgAygLMikuY29kZXdpcmUuY29uc29sZS52MS5FbnZpcm9ubWVudFVzYWdlSG91chJDCg9wZXJfZW52aXJvbm1lbnQYAyADKAsyKi5jb2Rld2lyZS5jb25zb2xlLnYxLkVudmlyb25tZW50VXNhZ2VFbnRyeSKmAQoVRW52aXJvbm1lbnRVc2FnZU1vbnRoEhEKCWNwdV9ob3VycxgBIAEoARIUCgxtZW1fZ2JfaG91cnMYAiABKAESFQoNZGlza19nYl9ob3VycxgDIAEoARISCgpjb3N0X2NlbnRzGAQgASgFEhoKEmluY2x1ZGVkX2NwdV9ob3VycxgFIAEoBRIdChVpbmNsdWRlZF9tZW1fZ2JfaG91cnMYBiABKAUifQoURW52aXJvbm1lbnRVc2FnZUhvdXISKAoEaG91chgBIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEQoJY3B1X2hvdXJzGAIgASgBEhQKDG1lbV9nYl9ob3VycxgDIAEoARISCgpjb3N0X2NlbnRzGAQgASgFIp8BChVFbnZpcm9ubWVudFVzYWdlRW50cnkSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRIXCg9ydW5uaW5nX3NlY29uZHMYAyABKAUSEgoKY29zdF9jZW50cxgEIAEoBRIWCg5jcHVfbWlsbGljb3JlcxgFIAEoBRIRCgltZW1vcnlfbWIYBiABKAUSFAoMaG91cmx5X2NlbnRzGAcgASgFImUKHENyZWF0ZUNoZWNrb3V0U2Vzc2lvblJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEgwKBHBsYW4YAiABKAkSEwoLc3VjY2Vzc191cmwYAyABKAkSEgoKY2FuY2VsX3VybBgEIAEoCSI1Ch1DcmVhdGVDaGVja291dFNlc3Npb25SZXNwb25zZRIUCgxjaGVja291dF91cmwYASABKAkiQAoaQ3JlYXRlUG9ydGFsU2Vzc2lvblJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhIKCnJldHVybl91cmwYAiABKAkiMQobQ3JlYXRlUG9ydGFsU2Vzc2lvblJlc3BvbnNlEhIKCnBvcnRhbF91cmwYASABKAkiVAoZQ3JlYXRlU2V0dXBTZXNzaW9uUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSEwoLc3VjY2Vzc191cmwYAiABKAkSEgoKY2FuY2VsX3VybBgDIAEoCSIyChpDcmVhdGVTZXR1cFNlc3Npb25SZXNwb25zZRIUCgxjaGVja291dF91cmwYASABKAkyowoKDkJpbGxpbmdTZXJ2aWNlEmgKDExpc3RPcmdQbGFucxIoLmNvZGV3aXJlLmNvbnNvbGUudjEuTGlzdE9yZ1BsYW5zUmVxdWVzdBopLmNvZGV3aXJlLmNvbnNvbGUudjEuTGlzdE9yZ1BsYW5zUmVzcG9uc2UiA5ACARJ3ChFMaXN0UmVzb3VyY2VQbGFucxItLmNvZGV3aXJlLmNvbnNvbGUudjEuTGlzdFJlc291cmNlUGxhbnNSZXF1ZXN0Gi4uY29kZXdpcmUuY29uc29sZS52MS5MaXN0UmVzb3VyY2VQbGFuc1Jlc3BvbnNlIgOQAgEScQoPR2V0U2lnbnVwQ3JlZGl0EisuY29kZXdpcmUuY29uc29sZS52MS5HZXRTaWdudXBDcmVkaXRSZXF1ZXN0GiwuY29kZXdpcmUuY29uc29sZS52MS5HZXRTaWdudXBDcmVkaXRSZXNwb25zZSIDkAIBEnoKEkdldEJpbGxpbmdPdmVydmlldxIuLmNvZGV3aXJlLmNvbnNvbGUudjEuR2V0QmlsbGluZ092ZXJ2aWV3UmVxdWVzdBovLmNvZGV3aXJlLmNvbnNvbGUudjEuR2V0QmlsbGluZ092ZXJ2aWV3UmVzcG9uc2UiA5ACARJoCgxMaXN0SW52b2ljZXMSKC5jb2Rld2lyZS5jb25zb2xlLnYxLkxpc3RJbnZvaWNlc1JlcXVlc3QaKS5jb2Rld2lyZS5jb25zb2xlLnYxLkxpc3RJbnZvaWNlc1Jlc3BvbnNlIgOQAgESdwoRTGlzdEJpbGxpbmdFdmVudHMSLS5jb2Rld2lyZS5jb25zb2xlLnYxLkxpc3RCaWxsaW5nRXZlbnRzUmVxdWVzdBouLmNvZGV3aXJlLmNvbnNvbGUudjEuTGlzdEJpbGxpbmdFdmVudHNSZXNwb25zZSIDkAIBEn0KE0dldEVudmlyb25tZW50VXNhZ2USLy5jb2Rld2lyZS5jb25zb2xlLnYxLkdldEVudmlyb25tZW50VXNhZ2VSZXF1ZXN0GjAuY29kZXdpcmUuY29uc29sZS52MS5HZXRFbnZpcm9ubWVudFVzYWdlUmVzcG9uc2UiA5ACARJ+ChVDcmVhdGVDaGVja291dFNlc3Npb24SMS5jb2Rld2lyZS5jb25zb2xlLnYxLkNyZWF0ZUNoZWNrb3V0U2Vzc2lvblJlcXVlc3QaMi5jb2Rld2lyZS5jb25zb2xlLnYxLkNyZWF0ZUNoZWNrb3V0U2Vzc2lvblJlc3BvbnNlEngKE0NyZWF0ZVBvcnRhbFNlc3Npb24SLy5jb2Rld2lyZS5jb25zb2xlLnYxLkNyZWF0ZVBvcnRhbFNlc3Npb25SZXF1ZXN0GjAuY29kZXdpcmUuY29uc29sZS52MS5DcmVhdGVQb3J0YWxTZXNzaW9uUmVzcG9uc2USdQoSQ3JlYXRlU2V0dXBTZXNzaW9uEi4uY29kZXdpcmUuY29uc29sZS52MS5DcmVhdGVTZXR1cFNlc3Npb25SZXF1ZXN0Gi8uY29kZXdpcmUuY29uc29sZS52MS5DcmVhdGVTZXR1cFNlc3Npb25SZXNwb25zZRJsCg9VcGRhdGVBdXRvVG9wVXASKy5jb2Rld2lyZS5jb25zb2xlLnYxLlVwZGF0ZUF1dG9Ub3BVcFJlcXVlc3QaLC5jb2Rld2lyZS5jb25zb2xlLnYxLlVwZGF0ZUF1dG9Ub3BVcFJlc3BvbnNlQt8BChdjb20uY29kZXdpcmUuY29uc29sZS52MUIMQmlsbGluZ1Byb3RvUAFaSGdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS9jb25zb2xlL3YxO2NvbnNvbGV2MaICA0NDWKoCE0NvZGV3aXJlLkNvbnNvbGUuVjHKAhNDb2Rld2lyZVxDb25zb2xlXFYx4gIfQ29kZXdpcmVcQ29uc29sZVxWMVxHUEJNZXRhZGF0YeoCFUNvZGV3aXJlOjpDb25zb2xlOjpWMWIGcHJvdG8z", [file_google_protobuf_struct, file_google_protobuf_timestamp]);
 
 /**
  * @generated from message codewire.console.v1.ListOrgPlansRequest
@@ -225,6 +225,39 @@ export const ResourcePlanSchema: GenMessage<ResourcePlan> = /*@__PURE__*/
   messageDesc(file_codewire_console_v1_billing, 5);
 
 /**
+ * @generated from message codewire.console.v1.GetSignupCreditRequest
+ */
+export type GetSignupCreditRequest = Message<"codewire.console.v1.GetSignupCreditRequest"> & {
+};
+
+/**
+ * Describes the message codewire.console.v1.GetSignupCreditRequest.
+ * Use `create(GetSignupCreditRequestSchema)` to create a new message.
+ */
+export const GetSignupCreditRequestSchema: GenMessage<GetSignupCreditRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_console_v1_billing, 6);
+
+/**
+ * @generated from message codewire.console.v1.GetSignupCreditResponse
+ */
+export type GetSignupCreditResponse = Message<"codewire.console.v1.GetSignupCreditResponse"> & {
+  /**
+   * The credit a new organization is granted once at creation, in
+   * nano-euros. 0 means none.
+   *
+   * @generated from field: int64 amount_nano_eur = 1;
+   */
+  amountNanoEur: bigint;
+};
+
+/**
+ * Describes the message codewire.console.v1.GetSignupCreditResponse.
+ * Use `create(GetSignupCreditResponseSchema)` to create a new message.
+ */
+export const GetSignupCreditResponseSchema: GenMessage<GetSignupCreditResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_console_v1_billing, 7);
+
+/**
  * @generated from message codewire.console.v1.GetBillingOverviewRequest
  */
 export type GetBillingOverviewRequest = Message<"codewire.console.v1.GetBillingOverviewRequest"> & {
@@ -239,7 +272,7 @@ export type GetBillingOverviewRequest = Message<"codewire.console.v1.GetBillingO
  * Use `create(GetBillingOverviewRequestSchema)` to create a new message.
  */
 export const GetBillingOverviewRequestSchema: GenMessage<GetBillingOverviewRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 6);
+  messageDesc(file_codewire_console_v1_billing, 8);
 
 /**
  * @generated from message codewire.console.v1.GetBillingOverviewResponse
@@ -362,13 +395,6 @@ export type GetBillingOverviewResponse = Message<"codewire.console.v1.GetBilling
   creditExhaustedAt?: Timestamp | undefined;
 
   /**
-   * Whether a card has already granted this organization its free credit.
-   *
-   * @generated from field: bool card_credit_granted = 22;
-   */
-  cardCreditGranted: boolean;
-
-  /**
    * Usage drawn from credit since the start of this month, in nano-euros.
    *
    * @generated from field: int64 month_usage_nano_eur = 23;
@@ -381,7 +407,7 @@ export type GetBillingOverviewResponse = Message<"codewire.console.v1.GetBilling
  * Use `create(GetBillingOverviewResponseSchema)` to create a new message.
  */
 export const GetBillingOverviewResponseSchema: GenMessage<GetBillingOverviewResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 7);
+  messageDesc(file_codewire_console_v1_billing, 9);
 
 /**
  * @generated from message codewire.console.v1.CreditRates
@@ -408,7 +434,7 @@ export type CreditRates = Message<"codewire.console.v1.CreditRates"> & {
  * Use `create(CreditRatesSchema)` to create a new message.
  */
 export const CreditRatesSchema: GenMessage<CreditRates> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 8);
+  messageDesc(file_codewire_console_v1_billing, 10);
 
 /**
  * @generated from message codewire.console.v1.UpdateAutoTopUpRequest
@@ -437,7 +463,7 @@ export type UpdateAutoTopUpRequest = Message<"codewire.console.v1.UpdateAutoTopU
  * Use `create(UpdateAutoTopUpRequestSchema)` to create a new message.
  */
 export const UpdateAutoTopUpRequestSchema: GenMessage<UpdateAutoTopUpRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 9);
+  messageDesc(file_codewire_console_v1_billing, 11);
 
 /**
  * @generated from message codewire.console.v1.UpdateAutoTopUpResponse
@@ -459,7 +485,7 @@ export type UpdateAutoTopUpResponse = Message<"codewire.console.v1.UpdateAutoTop
  * Use `create(UpdateAutoTopUpResponseSchema)` to create a new message.
  */
 export const UpdateAutoTopUpResponseSchema: GenMessage<UpdateAutoTopUpResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 10);
+  messageDesc(file_codewire_console_v1_billing, 12);
 
 /**
  * @generated from message codewire.console.v1.BillingLimitUsage
@@ -481,7 +507,7 @@ export type BillingLimitUsage = Message<"codewire.console.v1.BillingLimitUsage">
  * Use `create(BillingLimitUsageSchema)` to create a new message.
  */
 export const BillingLimitUsageSchema: GenMessage<BillingLimitUsage> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 11);
+  messageDesc(file_codewire_console_v1_billing, 13);
 
 /**
  * @generated from message codewire.console.v1.BillingLimits
@@ -508,7 +534,7 @@ export type BillingLimits = Message<"codewire.console.v1.BillingLimits"> & {
  * Use `create(BillingLimitsSchema)` to create a new message.
  */
 export const BillingLimitsSchema: GenMessage<BillingLimits> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 12);
+  messageDesc(file_codewire_console_v1_billing, 14);
 
 /**
  * @generated from message codewire.console.v1.UsageSummary
@@ -535,7 +561,7 @@ export type UsageSummary = Message<"codewire.console.v1.UsageSummary"> & {
  * Use `create(UsageSummarySchema)` to create a new message.
  */
 export const UsageSummarySchema: GenMessage<UsageSummary> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 13);
+  messageDesc(file_codewire_console_v1_billing, 15);
 
 /**
  * @generated from message codewire.console.v1.ListInvoicesRequest
@@ -552,7 +578,7 @@ export type ListInvoicesRequest = Message<"codewire.console.v1.ListInvoicesReque
  * Use `create(ListInvoicesRequestSchema)` to create a new message.
  */
 export const ListInvoicesRequestSchema: GenMessage<ListInvoicesRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 14);
+  messageDesc(file_codewire_console_v1_billing, 16);
 
 /**
  * @generated from message codewire.console.v1.ListInvoicesResponse
@@ -569,7 +595,7 @@ export type ListInvoicesResponse = Message<"codewire.console.v1.ListInvoicesResp
  * Use `create(ListInvoicesResponseSchema)` to create a new message.
  */
 export const ListInvoicesResponseSchema: GenMessage<ListInvoicesResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 15);
+  messageDesc(file_codewire_console_v1_billing, 17);
 
 /**
  * @generated from message codewire.console.v1.Invoice
@@ -636,7 +662,7 @@ export type Invoice = Message<"codewire.console.v1.Invoice"> & {
  * Use `create(InvoiceSchema)` to create a new message.
  */
 export const InvoiceSchema: GenMessage<Invoice> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 16);
+  messageDesc(file_codewire_console_v1_billing, 18);
 
 /**
  * @generated from message codewire.console.v1.ListBillingEventsRequest
@@ -653,7 +679,7 @@ export type ListBillingEventsRequest = Message<"codewire.console.v1.ListBillingE
  * Use `create(ListBillingEventsRequestSchema)` to create a new message.
  */
 export const ListBillingEventsRequestSchema: GenMessage<ListBillingEventsRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 17);
+  messageDesc(file_codewire_console_v1_billing, 19);
 
 /**
  * @generated from message codewire.console.v1.ListBillingEventsResponse
@@ -670,7 +696,7 @@ export type ListBillingEventsResponse = Message<"codewire.console.v1.ListBilling
  * Use `create(ListBillingEventsResponseSchema)` to create a new message.
  */
 export const ListBillingEventsResponseSchema: GenMessage<ListBillingEventsResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 18);
+  messageDesc(file_codewire_console_v1_billing, 20);
 
 /**
  * @generated from message codewire.console.v1.BillingEvent
@@ -722,7 +748,7 @@ export type BillingEvent = Message<"codewire.console.v1.BillingEvent"> & {
  * Use `create(BillingEventSchema)` to create a new message.
  */
 export const BillingEventSchema: GenMessage<BillingEvent> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 19);
+  messageDesc(file_codewire_console_v1_billing, 21);
 
 /**
  * @generated from message codewire.console.v1.GetEnvironmentUsageRequest
@@ -739,7 +765,7 @@ export type GetEnvironmentUsageRequest = Message<"codewire.console.v1.GetEnviron
  * Use `create(GetEnvironmentUsageRequestSchema)` to create a new message.
  */
 export const GetEnvironmentUsageRequestSchema: GenMessage<GetEnvironmentUsageRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 20);
+  messageDesc(file_codewire_console_v1_billing, 22);
 
 /**
  * @generated from message codewire.console.v1.GetEnvironmentUsageResponse
@@ -766,7 +792,7 @@ export type GetEnvironmentUsageResponse = Message<"codewire.console.v1.GetEnviro
  * Use `create(GetEnvironmentUsageResponseSchema)` to create a new message.
  */
 export const GetEnvironmentUsageResponseSchema: GenMessage<GetEnvironmentUsageResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 21);
+  messageDesc(file_codewire_console_v1_billing, 23);
 
 /**
  * @generated from message codewire.console.v1.EnvironmentUsageMonth
@@ -808,7 +834,7 @@ export type EnvironmentUsageMonth = Message<"codewire.console.v1.EnvironmentUsag
  * Use `create(EnvironmentUsageMonthSchema)` to create a new message.
  */
 export const EnvironmentUsageMonthSchema: GenMessage<EnvironmentUsageMonth> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 22);
+  messageDesc(file_codewire_console_v1_billing, 24);
 
 /**
  * @generated from message codewire.console.v1.EnvironmentUsageHour
@@ -840,7 +866,7 @@ export type EnvironmentUsageHour = Message<"codewire.console.v1.EnvironmentUsage
  * Use `create(EnvironmentUsageHourSchema)` to create a new message.
  */
 export const EnvironmentUsageHourSchema: GenMessage<EnvironmentUsageHour> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 23);
+  messageDesc(file_codewire_console_v1_billing, 25);
 
 /**
  * @generated from message codewire.console.v1.EnvironmentUsageEntry
@@ -887,7 +913,7 @@ export type EnvironmentUsageEntry = Message<"codewire.console.v1.EnvironmentUsag
  * Use `create(EnvironmentUsageEntrySchema)` to create a new message.
  */
 export const EnvironmentUsageEntrySchema: GenMessage<EnvironmentUsageEntry> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 24);
+  messageDesc(file_codewire_console_v1_billing, 26);
 
 /**
  * @generated from message codewire.console.v1.CreateCheckoutSessionRequest
@@ -919,7 +945,7 @@ export type CreateCheckoutSessionRequest = Message<"codewire.console.v1.CreateCh
  * Use `create(CreateCheckoutSessionRequestSchema)` to create a new message.
  */
 export const CreateCheckoutSessionRequestSchema: GenMessage<CreateCheckoutSessionRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 25);
+  messageDesc(file_codewire_console_v1_billing, 27);
 
 /**
  * @generated from message codewire.console.v1.CreateCheckoutSessionResponse
@@ -936,7 +962,7 @@ export type CreateCheckoutSessionResponse = Message<"codewire.console.v1.CreateC
  * Use `create(CreateCheckoutSessionResponseSchema)` to create a new message.
  */
 export const CreateCheckoutSessionResponseSchema: GenMessage<CreateCheckoutSessionResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 26);
+  messageDesc(file_codewire_console_v1_billing, 28);
 
 /**
  * @generated from message codewire.console.v1.CreatePortalSessionRequest
@@ -958,7 +984,7 @@ export type CreatePortalSessionRequest = Message<"codewire.console.v1.CreatePort
  * Use `create(CreatePortalSessionRequestSchema)` to create a new message.
  */
 export const CreatePortalSessionRequestSchema: GenMessage<CreatePortalSessionRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 27);
+  messageDesc(file_codewire_console_v1_billing, 29);
 
 /**
  * @generated from message codewire.console.v1.CreatePortalSessionResponse
@@ -975,7 +1001,7 @@ export type CreatePortalSessionResponse = Message<"codewire.console.v1.CreatePor
  * Use `create(CreatePortalSessionResponseSchema)` to create a new message.
  */
 export const CreatePortalSessionResponseSchema: GenMessage<CreatePortalSessionResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 28);
+  messageDesc(file_codewire_console_v1_billing, 30);
 
 /**
  * @generated from message codewire.console.v1.CreateSetupSessionRequest
@@ -1002,7 +1028,7 @@ export type CreateSetupSessionRequest = Message<"codewire.console.v1.CreateSetup
  * Use `create(CreateSetupSessionRequestSchema)` to create a new message.
  */
 export const CreateSetupSessionRequestSchema: GenMessage<CreateSetupSessionRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 29);
+  messageDesc(file_codewire_console_v1_billing, 31);
 
 /**
  * @generated from message codewire.console.v1.CreateSetupSessionResponse
@@ -1021,7 +1047,7 @@ export type CreateSetupSessionResponse = Message<"codewire.console.v1.CreateSetu
  * Use `create(CreateSetupSessionResponseSchema)` to create a new message.
  */
 export const CreateSetupSessionResponseSchema: GenMessage<CreateSetupSessionResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_billing, 30);
+  messageDesc(file_codewire_console_v1_billing, 32);
 
 /**
  * BillingService exposes first-party billing catalog, organization billing,
@@ -1050,6 +1076,17 @@ export const BillingService: GenService<{
     methodKind: "unary";
     input: typeof ListResourcePlansRequestSchema;
     output: typeof ListResourcePlansResponseSchema;
+  },
+  /**
+   * GetSignupCredit returns the credit a new organization is granted now. It
+   * is public: the signed-out pricing page reads it.
+   *
+   * @generated from rpc codewire.console.v1.BillingService.GetSignupCredit
+   */
+  getSignupCredit: {
+    methodKind: "unary";
+    input: typeof GetSignupCreditRequestSchema;
+    output: typeof GetSignupCreditResponseSchema;
   },
   /**
    * GetBillingOverview returns the caller's organization billing summary.
@@ -1113,8 +1150,7 @@ export const BillingService: GenService<{
   },
   /**
    * CreateSetupSession creates a Stripe payment-method setup session. Where
-   * the deployment enforces credit, the first card an organization adds grants
-   * EUR 50 of credit, once per organization and once per card.
+   * the deployment enforces credit, a new card tops up a balance that ran out.
    *
    * @generated from rpc codewire.console.v1.BillingService.CreateSetupSession
    */
