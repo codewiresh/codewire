@@ -23,7 +23,12 @@ class GitFixture(unittest.TestCase):
                        "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
                        "GIT_AUTHOR_NAME": "Synthetic", "GIT_COMMITTER_NAME": "Synthetic",
                        "GIT_AUTHOR_EMAIL": "synthetic@example.invalid",
-                       "GIT_COMMITTER_EMAIL": "synthetic@example.invalid"}
+                       "GIT_COMMITTER_EMAIL": "synthetic@example.invalid",
+                       # Each commit would otherwise start a detached `git maintenance run
+                       # --auto`, whose repack can delete a file in source/.git while the
+                       # local clone copies it (#4018).
+                       "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "maintenance.auto",
+                       "GIT_CONFIG_VALUE_0": "false"}
         if os.environ.get("BUF"):
             environment["BUF"] = os.environ["BUF"]
         patch = mock.patch.dict(os.environ, environment, clear=True)
@@ -78,6 +83,11 @@ class GitFixture(unittest.TestCase):
 
 
 class ResolverTests(GitFixture):
+    def test_fixture_commits_start_no_background_maintenance(self):
+        self.graph()
+        self.assertEqual(self.git(self.work / "source", "config", "--get", "maintenance.auto")
+                         .stdout.strip(), "false")
+
     def test_present_base_needs_no_fetch_or_timeout_tool(self):
         self.graph()
         self.git(self.target, "remote", "remove", "origin")
