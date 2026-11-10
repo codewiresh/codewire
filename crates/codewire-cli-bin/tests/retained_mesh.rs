@@ -136,6 +136,39 @@ fn isolated_case(name: &str) -> bool {
     false
 }
 
+/// The lowest port the kernel assigns on its own, to `bind(:0)` and to every
+/// outgoing connection.
+fn ephemeral_port_floor() -> u16 {
+    #[cfg(target_os = "linux")]
+    {
+        let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+        range.split_whitespace().next().unwrap().parse().unwrap()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        49152
+    }
+}
+
+/// A free loopback address the owner binds later by itself. A port from
+/// `bind(:0)` comes from the ephemeral range, so once released any outgoing
+/// connection in the parallel test run can take it before the owner binds it,
+/// and the owner then exits at startup (#3992). Ports below that range are only
+/// ever taken by an explicit bind.
+fn unassigned_loopback_address(other: Option<&str>) -> String {
+    use rand::RngCore as _;
+    const FIRST: u16 = 10_000;
+    let span = u32::from(ephemeral_port_floor() - FIRST);
+    for _ in 0..64 {
+        let port = FIRST + u16::try_from(rand::rngs::OsRng.next_u32() % span).unwrap();
+        let address = format!("127.0.0.1:{port}");
+        if Some(address.as_str()) != other && std::net::TcpListener::bind(&address).is_ok() {
+            return address;
+        }
+    }
+    panic!("no free loopback port below the ephemeral range");
+}
+
 struct Fixture {
     root: PathBuf,
     a: PathBuf,
@@ -160,12 +193,8 @@ impl Fixture {
         }
         fs::create_dir(root.join("empty-path")).unwrap();
         fs::write(root.join("unrelated-sentinel"), b"preserve").unwrap();
-        let listeners = [
-            std::net::TcpListener::bind("127.0.0.1:0").unwrap(),
-            std::net::TcpListener::bind("127.0.0.1:0").unwrap(),
-        ];
-        let mesh_addr = listeners[0].local_addr().unwrap().to_string();
-        let derp_addr = listeners[1].local_addr().unwrap().to_string();
+        let mesh_addr = unassigned_loopback_address(None);
+        let derp_addr = unassigned_loopback_address(Some(&mesh_addr));
         Self {
             root,
             a,
