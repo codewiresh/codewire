@@ -1915,6 +1915,7 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/runtime/dev/provision-dev-smoke-user.sh|\
+      scripts/runtime/dev/make-dev-acceptance-unlimited.sh|\
       scripts/runtime/dev/smoke-dev-commodity.sh|\
       scripts/runtime/dev/smoke-dev-dind-storage.sh|\
       scripts/runtime/dev/docker-store-guest.sh|\
@@ -1942,6 +1943,7 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/prod/provision-prod-smoke-user.sh|\
       scripts/runtime/prod/with-prod-smoke-auth.sh|\
       scripts/runtime/tests/test-provision-dev-smoke-user.sh|\
+      scripts/runtime/tests/test-make-dev-acceptance-unlimited.sh|\
       scripts/runtime/tests/test-provision-prod-smoke-user.sh|\
       scripts/runtime/tests/test-with-prod-smoke-auth.sh|\
       scripts/runtime/tests/test-provider-ssh-smoke.sh|\

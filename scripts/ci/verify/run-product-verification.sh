@@ -1235,6 +1235,7 @@ run_dev_smoke_script_tests() {
   bun test apps/dashboard/scripts/prepare-dev-smoke-browser-auth.test.ts
   bun test apps/dashboard/scripts/dev-ux-ownership.test.ts
   scripts/runtime/tests/test-provision-dev-smoke-user.sh
+  scripts/runtime/tests/test-make-dev-acceptance-unlimited.sh
   scripts/runtime/tests/test-provision-prod-smoke-user.sh
   scripts/runtime/tests/test-smoke-dev-commodity.sh
   scripts/runtime/tests/test-smoke-dev-transport-matrix.sh
