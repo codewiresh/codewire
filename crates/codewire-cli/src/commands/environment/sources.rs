@@ -41,16 +41,18 @@ pub(super) fn load_platform_document(paths: &[&Path]) -> anyhow::Result<Platform
             names.join(" + ")
         )
     })?;
-    let unused_fields = if document
+    let mut unused_fields = Vec::new();
+    if document
         .local
         .vm_only
         .as_ref()
         .is_some_and(|patterns| !patterns.is_empty())
     {
-        vec!["workspace.vm_only"]
-    } else {
-        Vec::new()
-    };
+        unused_fields.push("workspace.vm_only");
+    }
+    if document.local.path_mode.is_some() {
+        unused_fields.push("workspace.path_mode");
+    }
     Ok(PlatformDocument {
         spec: document.spec,
         unused_fields,

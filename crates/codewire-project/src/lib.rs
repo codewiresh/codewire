@@ -347,6 +347,30 @@ pub struct LocalProjectIntent {
     /// `workspace.vm_only` patterns as written (canonical): `None` when
     /// absent, so the default list applies; `Some([])` turns it off.
     pub vm_only: Option<Vec<String>>,
+    /// `workspace.path_mode`: how a local create turns the project folder
+    /// into the workspace when `--path-mode` does not say.
+    pub path_mode: Option<WorkspacePathMode>,
+}
+
+/// How a local create turns the project folder into the workspace, as
+/// `--path-mode` and `workspace.path_mode` name it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspacePathMode {
+    Mount,
+    Copy,
+    Clone,
+    Empty,
+}
+
+impl WorkspacePathMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mount => "mount",
+            Self::Copy => "copy",
+            Self::Clone => "clone",
+            Self::Empty => "empty",
+        }
+    }
 }
 
 impl LocalProjectIntent {
@@ -441,6 +465,8 @@ struct RawProject {
 struct RawWorkspaceBlock {
     #[serde(default, rename = "vm_only")]
     vm_only: Option<Vec<String>>,
+    #[serde(default)]
+    path_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

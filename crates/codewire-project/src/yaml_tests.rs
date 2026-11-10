@@ -42,6 +42,7 @@ mounts:
   - {{source: ./fixtures, destination: /workspace/fixtures, mode: copy}}
 workspace:
   vm_only: [node_modules, '**/target']
+  path_mode: mount
 "#,
         digest = "0".repeat(64)
     )

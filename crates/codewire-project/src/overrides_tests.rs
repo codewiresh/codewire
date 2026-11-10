@@ -165,3 +165,25 @@ mounts:
         .collect::<Vec<_>>();
     assert_eq!(sources, ["/srv/root/../infra", "/srv/data"]);
 }
+
+#[test]
+fn an_override_can_set_the_workspace_path_mode() {
+    let document = merged(&[
+        "version: 1\nworkspace:\n  vm_only: [target]\n",
+        "workspace:\n  path_mode: Mount\n",
+    ])
+    .unwrap();
+    assert_eq!(document.local.path_mode, Some(WorkspacePathMode::Mount));
+    assert_eq!(document.local.vm_only, Some(vec!["target".to_owned()]));
+    assert_eq!(
+        parse_project_yaml("version: 1\n").unwrap().local.path_mode,
+        None
+    );
+    let error = parse_project_yaml("workspace: {path_mode: live}\n")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("must be mount, copy, clone or empty"),
+        "{error}"
+    );
+}

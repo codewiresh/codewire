@@ -184,11 +184,13 @@ working_directory: /workspace/platform
 ```
 
 A cloud create, or a local create without `--path-mode mount`, clones both to
-the same paths. With the mount, nothing is cloned and the file's `branch` and
+the same paths. To mount by default in a folder, put `workspace.path_mode:
+mount` in its `codewire.local.yaml`; `--path-mode clone` then clones them for
+one create. With the mount, nothing is cloned and the file's `branch` and
 `revision` are not applied: each checkout stays as it is, and the review says
 so. A missing checkout, a link, or a destination outside the folder fails
 before anything is created and is named. `mounts` cannot be combined with it.
 
 The VM can change anything in the mounted folder, including Git hooks and
-settings that git on your machine later runs. For code you don't trust, leave
-out `--path-mode` so the repositories are cloned.
+settings that git on your machine later runs. For code you don't trust, use
+`--path-mode clone` so the repositories are cloned.

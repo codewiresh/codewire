@@ -40,7 +40,7 @@ as positionals or with `--repo`; they replace the file's repositories.
 | `--no-file` | Use only the flags; read no `codewire.yaml` |
 | `--no-local-file` | Local: do not merge the `codewire.local.yaml` beside the nearest `codewire.yaml` |
 | `--path PATH` | Local: the project directory, where the `codewire.yaml` search starts (default `.`) |
-| `--path-mode mount\|copy\|clone\|empty` | Local: mount the directory live and read-write (default; the VM can change anything in it, including Git hooks and settings that git on your machine later runs, so use `clone` for untrusted code), copy it once as it is now, clone the Git repository's committed state once, or start empty |
+| `--path-mode mount\|copy\|clone\|empty` | Local: mount the directory live and read-write (default; the VM can change anything in it, including Git hooks and settings that git on your machine later runs, so use `clone` for untrusted code), copy it once as it is now, clone the Git repository's committed state once, or start empty. Overrides `workspace.path_mode`; with repositories in `codewire.yaml`, `mount` uses the checkouts already in the folder and `clone` (the default) clones them |
 | `--cpu`, `--memory`, `--disk` | Resources, for example `--cpu 2 --memory 8GB --disk 40GB`; CPU is in cores (`0.5` or `500m` for half a core on a hosted sandbox). A hosted sandbox defaults to 2 vCPU, 8 GiB and an 80 GiB disk, and its disk is at most 200 GiB |
 | `--docker-disk SIZE`, `--no-docker` | Local: the guest Docker data disk (default 8 GiB), or no Docker daemon |
 | `--install CMD`, `--startup CMD` | Install command and startup script |

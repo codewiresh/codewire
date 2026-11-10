@@ -2725,6 +2725,24 @@ fn cloud_create_never_reads_the_local_file_and_merges_repeated_files() {
 }
 
 #[test]
+fn cloud_create_ignores_and_names_the_local_path_mode() {
+    let (_temp, root) = checkout_with_file(
+        "version: 1\nimage: workspace\nworkspace:\n  path_mode: mount\n",
+    );
+    let args = cloud_create_args(&["--name", "app-cloud"]);
+    let source = project_file::select_from(&root, &args.file, args.no_file).unwrap();
+    let (_, provenance) = prepare_platform_env_create(&args, &source).unwrap();
+    assert_eq!(provenance.unused_fields, ["workspace.path_mode"]);
+    assert!(
+        provenance
+            .text()
+            .ends_with("; workspace.path_mode applies to local VMs only"),
+        "{}",
+        provenance.text()
+    );
+}
+
+#[test]
 fn cloud_create_uses_the_file_found_from_a_subdirectory_without_file() {
     let (_temp, root) = checkout_with_file(
         "version: 1\nimage: ghcr.io/example/workspace:1\ninstall_command: npm ci\nrepositories:\n  - source: https://example.test/org/web.git\n    destination: /workspace/web\n  - source: https://example.test/org/api.git\n    destination: /workspace/api\nworking_directory: /workspace/web\n",

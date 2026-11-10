@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::{
     AgentsSpec, CredentialBinding, LocalMountMode, LocalProjectIntent, ProjectDocument,
-    ProjectError, ProjectSpec, RepositorySpec, SecretBindings, SkillSource,
+    ProjectError, ProjectSpec, RepositorySpec, SecretBindings, SkillSource, WorkspacePathMode,
 };
 
 impl ProjectDocument {
@@ -119,10 +119,12 @@ impl ProjectDocument {
                     read_only: mount.read_only,
                 })
                 .collect(),
-            workspace: local
-                .vm_only
-                .as_deref()
-                .map(|vm_only| YamlWorkspace { vm_only }),
+            workspace: (local.vm_only.is_some() || local.path_mode.is_some()).then(|| {
+                YamlWorkspace {
+                    vm_only: local.vm_only.as_deref(),
+                    path_mode: local.path_mode.map(WorkspacePathMode::as_str),
+                }
+            }),
         };
         serde_yaml::to_string(&document).map_err(ProjectError::Yaml)
     }
@@ -221,5 +223,8 @@ struct YamlMount<'a> {
 
 #[derive(Serialize)]
 struct YamlWorkspace<'a> {
-    vm_only: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vm_only: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_mode: Option<&'static str>,
 }

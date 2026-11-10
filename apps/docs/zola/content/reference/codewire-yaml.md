@@ -29,6 +29,7 @@ in every file merged with repeated `--file`; see
 | `skills` | list | `source: repository` with `path` (relative to `/workspace`), or `source: user` with `name` (from `~/.codewire/skills`); optional `agents`; needs `agents.tools`. See [Agent skills](@/agents/skills.md) |
 | `mounts` | list | local VMs only: `source`, `destination`, `mode: copy|direct`, `read_only` (required for `direct`) |
 | `workspace.vm_only` | list | local VMs only: folders kept on the VM disk under a live mount; default `node_modules`, `target`, `.venv` |
+| `workspace.path_mode` | string | local VMs only: `mount`, `copy`, `clone` or `empty`, the default for `--path-mode`, which overrides it; with repositories, `mount` or `clone` |
 
 Keep secret values, key file paths and store references out of this file:
 `secrets` and `credentials` select sources by name only.

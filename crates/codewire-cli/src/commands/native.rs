@@ -540,10 +540,11 @@ pub(crate) async fn create_native_environment(
     sources::apply_create_source_flags(&mut project.spec, &args)?;
     let declared_direct_mounts = native_direct_mount_warning(&project.local_mounts);
     let implicit = project.spec.repositories.is_empty() && project.local_mounts.is_empty();
+    let path_mode = args.path_mode.or(project.path_mode);
     let mut workspace = resolve_native_workspace(
         &source_path,
         &mut project,
-        args.path_mode,
+        path_mode,
         Some(&paths.mesh_data_dir.join("native-empty-workspace")),
         native_runtime_supports_mounts(),
     )?;
@@ -925,6 +926,7 @@ async fn create_from_snapshot_on_linux(
         memory_mib: None,
         disk_bytes: None,
         working_directory_explicit: false,
+        path_mode: None,
     };
     let mut requests = Vec::new();
     for name in &names {
@@ -1291,10 +1293,11 @@ fn native_create_summary(args: &EnvCreateArgs) -> anyhow::Result<String> {
     let (source, mut project, provenance) = native_plan(args)?;
     sources::apply_create_source_flags(&mut project.spec, args)?;
     let implicit = project.spec.repositories.is_empty() && project.local_mounts.is_empty();
+    let path_mode = args.path_mode.or(project.path_mode);
     let mut workspace = resolve_native_workspace(
         &source.project_directory,
         &mut project,
-        args.path_mode,
+        path_mode,
         None,
         native_runtime_supports_mounts(),
     )?;
@@ -3325,6 +3328,8 @@ struct NativeProjectPlan {
     memory_mib: Option<u32>,
     disk_bytes: Option<u64>,
     working_directory_explicit: bool,
+    /// `workspace.path_mode`, which `--path-mode` overrides.
+    path_mode: Option<PathModeArg>,
 }
 
 /// Where a local create's configuration comes from and its project
@@ -3494,6 +3499,12 @@ fn native_codewire_yaml(
         .transpose()?;
     let disk_bytes = resources.disk_gib.map(native_disk_from_gib).transpose()?;
     let working_directory_explicit = document.working_directory_is_explicit();
+    let path_mode = document.local.path_mode.map(|mode| match mode {
+        codewire_project::WorkspacePathMode::Mount => PathModeArg::Mount,
+        codewire_project::WorkspacePathMode::Copy => PathModeArg::Copy,
+        codewire_project::WorkspacePathMode::Clone => PathModeArg::Clone,
+        codewire_project::WorkspacePathMode::Empty => PathModeArg::Empty,
+    });
     Ok(NativeProjectPlan {
         spec: document.spec,
         host_ports: document.local.host_ports,
@@ -3504,6 +3515,7 @@ fn native_codewire_yaml(
         memory_mib,
         disk_bytes,
         working_directory_explicit,
+        path_mode,
     })
 }
 
@@ -3926,13 +3938,19 @@ fn resolve_native_workspace(
 ) -> anyhow::Result<NativeWorkspace> {
     let vm_only = project.vm_only.clone();
     if !project.spec.repositories.is_empty() || !project.local_mounts.is_empty() {
-        if requested_mode == Some(PathModeArg::Mount) && !project.spec.repositories.is_empty() {
-            return mount_checked_out_repositories(source_path, project, mounts_supported);
-        }
-        if requested_mode.is_some() {
-            anyhow::bail!(
-                "--path-mode applies only when codewire.yaml has no repositories or mounts and no --repo is given; with repositories, only --path-mode mount, which uses the checkouts already in the folder"
-            );
+        let repositories = !project.spec.repositories.is_empty();
+        match requested_mode {
+            Some(PathModeArg::Mount) if repositories => {
+                return mount_checked_out_repositories(source_path, project, mounts_supported);
+            }
+            // Cloning the declared repositories is what a create does
+            // without a mode, so `--path-mode clone` can override a
+            // `workspace.path_mode: mount` in codewire.local.yaml.
+            Some(PathModeArg::Clone) if repositories => {}
+            Some(_) => anyhow::bail!(
+                "--path-mode (or workspace.path_mode) applies only when codewire.yaml has no repositories or mounts and no --repo is given; with repositories, only mount (the checkouts already in the folder) or clone (fresh clones, the default)"
+            ),
+            None => {}
         }
         let kept = project
             .local_mounts
@@ -4077,7 +4095,7 @@ fn mount_checked_out_repositories(
     }
     if !mounts_supported {
         anyhow::bail!(
-            "this local runtime has no virtiofsd, so it cannot mount {shown}; reinstall the runtime, or leave out --path-mode to clone the repositories"
+            "this local runtime has no virtiofsd, so it cannot mount {shown}; reinstall the runtime, or pass --path-mode clone to clone the repositories"
         );
     }
     let destination = format!("/workspace/{}", workspace_directory_name(source_path));
@@ -4091,7 +4109,7 @@ fn mount_checked_out_repositories(
         .collect::<Vec<_>>();
     if !problems.is_empty() {
         anyhow::bail!(
-            "--path-mode mount uses the repositories already checked out in {shown}, mounted at {destination}:\n  {}\nCheck them out there, or leave out --path-mode to clone them fresh",
+            "--path-mode mount uses the repositories already checked out in {shown}, mounted at {destination}:\n  {}\nCheck them out there, or pass --path-mode clone to clone them fresh",
             problems.join("\n  ")
         );
     }
@@ -5359,7 +5377,7 @@ mod tests {
         assert!(error.contains("a is not checked out"), "{error}");
         assert!(error.contains("b is not a Git checkout"), "{error}");
         assert!(
-            error.contains("leave out --path-mode to clone them fresh"),
+            error.contains("pass --path-mode clone to clone them fresh"),
             "{error}"
         );
 
@@ -5399,7 +5417,43 @@ mod tests {
             resolve_native_workspace(&root, &mut project, Some(PathModeArg::Copy), None, true)
                 .unwrap_err()
                 .to_string();
-        assert!(error.contains("only --path-mode mount"), "{error}");
+        assert!(
+            error.contains("only mount (the checkouts already in the folder) or clone"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_local_file_can_make_mount_the_default_and_clone_overrides_it() {
+        let (_temp, root) = folder_with_checkouts("");
+        std::fs::write(
+            root.join("codewire.local.yaml"),
+            "workspace:\n  path_mode: mount\n",
+        )
+        .unwrap();
+        let config = project_file::ConfigSource::DiscoveredWithLocal(
+            root.join("codewire.yaml"),
+            root.join("codewire.local.yaml"),
+        );
+        let mut project = native_codewire_yaml(&root, &config).unwrap();
+        assert_eq!(project.path_mode, Some(PathModeArg::Mount));
+        let path_mode = None.or(project.path_mode);
+        resolve_native_workspace(&root, &mut project, path_mode, None, true).unwrap();
+        assert!(project.spec.repositories.is_empty(), "the key mounts");
+        assert_eq!(project.local_mounts[0].destination, "/workspace/root");
+
+        // --path-mode clone wins over the key and clones the repositories.
+        let mut project = native_codewire_yaml(&root, &config).unwrap();
+        let path_mode = Some(PathModeArg::Clone).or(project.path_mode);
+        let workspace =
+            resolve_native_workspace(&root, &mut project, path_mode, None, true).unwrap();
+        assert_eq!(project.spec.repositories.len(), 2);
+        assert!(project.local_mounts.is_empty());
+        assert!(
+            !workspace.description.contains("mount"),
+            "{}",
+            workspace.description
+        );
     }
 
     #[test]

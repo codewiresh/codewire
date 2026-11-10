@@ -16,11 +16,12 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
 
     let repositories = normalize_repositories(raw.repositories, RepositoryTrust::Required)?;
     let mounts = normalize_mounts(raw.mounts)?;
-    let vm_only = raw
+    let (vm_only, path_mode) = raw
         .workspace
-        .and_then(|workspace| workspace.vm_only)
-        .map(normalize_vm_only)
-        .transpose()?;
+        .map(|workspace| (workspace.vm_only, workspace.path_mode))
+        .unwrap_or_default();
+    let vm_only = vm_only.map(normalize_vm_only).transpose()?;
+    let path_mode = path_mode.as_deref().map(normalize_path_mode).transpose()?;
     let working_directory_explicit = !raw.working_directory.trim().is_empty();
     let working_directory =
         normalize_working_directory(&raw.working_directory, &repositories, &mounts)?;
@@ -58,6 +59,7 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
             mounts,
             host_ports,
             vm_only,
+            path_mode,
         },
         working_directory_explicit,
     };
@@ -532,6 +534,16 @@ fn normalize_mounts(mounts: Vec<RawMountBlock>) -> Result<Vec<LocalMountIntent>,
 
 /// Canonical `.dockerignore`-style patterns, each naming project folders kept
 /// on the VM's own disk. Order is kept; see [`VmOnlyPatterns`].
+fn normalize_path_mode(value: &str) -> Result<WorkspacePathMode, ProjectError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "mount" => Ok(WorkspacePathMode::Mount),
+        "copy" => Ok(WorkspacePathMode::Copy),
+        "clone" => Ok(WorkspacePathMode::Clone),
+        "empty" => Ok(WorkspacePathMode::Empty),
+        _ => invalid("workspace.path_mode", "must be mount, copy, clone or empty"),
+    }
+}
+
 fn normalize_vm_only(patterns: Vec<String>) -> Result<Vec<String>, ProjectError> {
     if patterns.len() > MAX_VM_ONLY_PATTERNS {
         return Err(ProjectError::TooManyEntries {
