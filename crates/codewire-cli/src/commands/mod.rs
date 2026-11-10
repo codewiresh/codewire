@@ -1178,7 +1178,7 @@ pub(crate) struct EnvCreateArgs {
         long = "path-mode",
         value_enum,
         value_name = "MODE",
-        help = "How --path becomes the workspace: mount (default, live), copy (a one-time copy of the folder as it is now), clone (a one-time clone of the Git repository's committed state), or empty; requires --local"
+        help = "How --path becomes the workspace: mount (default, live and read-write: the VM can change anything in the folder, including Git hooks and settings that git on this machine later runs; use clone for untrusted code), copy (a one-time copy of the folder as it is now), clone (a one-time clone of the Git repository's committed state), or empty; requires --local"
     )]
     path_mode: Option<PathModeArg>,
     #[arg(

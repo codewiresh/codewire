@@ -183,6 +183,12 @@ without a local profile, and scripts, `--yes` and JSON output never see it.
 
 ## Direct mounts
 
+The VM can change anything in a read-write mount, which `--path-mode mount`
+(the default) is, `.git` included. Git hooks and settings written there from
+inside the VM run on your machine, as you, the next time you use git in that
+folder. Mount only folders whose contents you trust the VM with, and use
+`--path-mode clone` for code you don't trust.
+
 A direct mount (`mounts:` with `mode: direct`) shares a host directory live
 through virtiofsd. Admission binds the directory's device, inode, mount,
 owner and filesystem. Every start reopens the path without following a

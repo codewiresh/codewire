@@ -140,8 +140,10 @@ These follow the Linux contract and messages:
   `--path-mode mount|copy|clone|empty`. `mount`, the default, mounts
   the directory live and read-write at `/workspace/<directory name>` and starts
   there, so host and guest edit the same files; guest root can change or delete
-  them. Linux needs `virtiofsd` in the runtime lock for this; without it the
-  default falls back to a one-time `copy` and says so. `copy` copies the
+  them, `.git` included, so Git hooks and settings written in the VM run on
+  the Mac the next time you use git in that folder. Use `clone` for code you
+  don't trust. Linux needs `virtiofsd` in the runtime lock for this; without
+  it the default falls back to a one-time `copy` and says so. `copy` copies the
   directory once as it is, including uncommitted and ignored files. `clone`
   uses `/usr/bin/git` and contains only the committed tree at `HEAD`; a dirty
   Git root is refused for `clone` (use `copy` instead). Copied or cloned

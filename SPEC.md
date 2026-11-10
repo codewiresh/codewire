@@ -349,7 +349,13 @@ running in them.
 `--path` (default: the current directory) with `--path-mode mount|copy|clone|empty`.
 `mount`, the default, shares the directory live and read-write through
 virtio-fs; `copy` copies it once as it is; `clone` contains only the committed
-tree at `HEAD`; `empty` starts empty. The share policy refuses the home
+tree at `HEAD`; `empty` starts empty. The VM can change anything in a mounted
+directory, `.git` included, so Git hooks and settings it writes there run on
+the host the next time the user runs git in that folder. This is accepted
+(owner, 2026-11-10, #4004); `clone` is the mode for untrusted workloads.
+Pulling a VM's commits brings no hooks or git config; copying a repository's
+`.git` directory out of a VM with `cw cp` does, so copy files or pull commits
+instead. The share policy refuses the home
 directory itself, anything containing it, top-level system directories and
 credential stores. Folders matching `workspace.vm_only` (default `node_modules`,
 `target`, `.venv`) are bound to the VM's disk over the live mount. A dedicated

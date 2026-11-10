@@ -41,7 +41,12 @@ Create with these settings?
 `--path-mode copy` copies the folder once, as it is now, uncommitted work
 included, into `/workspace` on the VM's own disk. Nothing the VM does reaches
 the original. Compare the default live mount, whose review warns that guest
-root can change and delete files in the mounted directory.
+root can change and delete files in the mounted directory. That includes
+`.git`: Git hooks and settings written there run on your machine the next time
+you use git in that folder. For code you don't trust, use `--path-mode clone`
+or `copy`. Pulling a VM's commits brings no hooks or git config; copying a
+repository's `.git` directory out of a VM with `cw cp` does, so copy files or
+pull commits instead.
 
 `Credentials  none` means no provider credentials, SSH keys or application
 secrets are available inside. Add them only when the code has earned them.
