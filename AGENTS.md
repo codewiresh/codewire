@@ -46,7 +46,9 @@ within five minutes the scheduled `deploy-prod` verifies and delivers it and
 `cli-release` publishes the CLI (owner, 2026-10-23, #2892). A tag not picked up
 within 24 hours, or a release that
 failed, is recovered only by dispatching `deploy-prod` then `cli-release` for
-it; a rerun of a scheduled run reads no release credential.
+it; a rerun of a scheduled run reads no release credential. That recovery needs
+no per-release approval either (owner, 2026-11-10: "Why do you need me to rerun
+releases? You don't need me."; cited on #3013).
 
 ## Method and risk
 
