@@ -14,9 +14,8 @@ use serde_json::Value;
 use crate::sandbox::client::{parse_quantity_ratio, sandbox_name_hash};
 use crate::sandbox::image_cache::{CacheState, cached_images, is_approved_image, rollout};
 use crate::sandbox::warm_pool::{
-    ConfiguredShape, MEMBER_POOL_LABEL, POOL_REVISION_ANNOTATION, TEMPLATE_REF_HASH_LABEL,
-    WarmPoolObjects, has_pool_labels, is_warm_pool_name, shape_label, spec_equivalent,
-    warm_pool_name_shape,
+    DesiredPool, MEMBER_POOL_LABEL, POOL_REVISION_ANNOTATION, TEMPLATE_REF_HASH_LABEL,
+    has_pool_labels, is_warm_pool_name, shape_label, spec_equivalent, warm_pool_name_shape,
 };
 use crate::sandbox::{EXTENSIONS_API_VERSION, image_cache::IMAGE_CACHE_STATE_ANNOTATION};
 
@@ -38,19 +37,6 @@ pub const ROTATION_SETTLE: Duration = Duration::from_secs(10 * 60);
 pub const SUPERSEDED_GRACE: Duration = Duration::from_secs(15 * 60);
 /// The fork removes this from an adopted Sandbox; it never marks staleness.
 const SAFE_TO_EVICT_ANNOTATION: &str = "cluster-autoscaler.kubernetes.io/safe-to-evict";
-
-/// One configured pool, rendered by this replica from its own configuration.
-#[derive(Clone, Debug, PartialEq)]
-pub struct DesiredPool {
-    pub configured: ConfiguredShape,
-    pub objects: WarmPoolObjects,
-}
-
-impl DesiredPool {
-    pub fn label(&self) -> String {
-        shape_label(self.configured.shape)
-    }
-}
 
 /// What one member reserves on its node: its effective Pod requests plus the
 /// RuntimeClass overhead, as the scheduler counts them.

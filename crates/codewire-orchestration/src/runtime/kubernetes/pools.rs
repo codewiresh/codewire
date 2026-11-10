@@ -4,11 +4,11 @@ use kube::api::DynamicObject;
 use serde_json::Value;
 
 use super::super::PoolState;
+use super::warm_pools::{pool_observed_by_capable_controller, template_spec_current};
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::warm_pool::{
     POOL_REVISION_ANNOTATION, WarmPoolObjects, has_pool_labels, pod_spec_pool_revision,
 };
-use crate::worker::warm_pool::{pool_observed_by_capable_controller, template_spec_current};
 
 /// Claim only on a capable controller, a current pool and template, and
 /// current members. Members are read only once the rest holds.

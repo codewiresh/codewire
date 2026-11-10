@@ -17,12 +17,12 @@ use kube::Api;
 use kube::api::ListParams;
 use serde_json::Value;
 
-use crate::sandbox::warm_pool::{MEMBER_POOL_LABEL, WorkspaceShape};
-use crate::worker::create::render_configured_warm_pool;
-use crate::worker::warm_pool::{
+use crate::runtime::kubernetes::warm_pools::{
     ClassOverheads, Reservation, member_reservation, node_unfit, pod_overhead, quantity_millis,
     quantity_units, read_runtime_classes, selector_of,
 };
+use crate::sandbox::warm_pool::{MEMBER_POOL_LABEL, WorkspaceShape};
+use crate::worker::create::render_configured_warm_pool;
 
 use super::ApiState;
 

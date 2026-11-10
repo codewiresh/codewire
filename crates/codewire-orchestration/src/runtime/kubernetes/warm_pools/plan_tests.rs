@@ -44,6 +44,7 @@ fn desired() -> Vec<DesiredPool> {
     WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2"), true)
         .unwrap()
         .unwrap()
+        .wanted
         .pools
 }
 
@@ -585,6 +586,7 @@ fn another_revision_of_a_configured_shape_drains_only_behind_a_ready_own_pool() 
     let previous = WarmPoolConfig::from_cfg(&previous_cfg, true)
         .unwrap()
         .unwrap()
+        .wanted
         .pools
         .remove(0);
     let mut fixture = Fixture::settled();
@@ -675,6 +677,7 @@ fn a_configured_zero_drains_another_revision_of_its_shape() {
     let previous = WarmPoolConfig::from_cfg(&previous_cfg, true)
         .unwrap()
         .unwrap()
+        .wanted
         .pools
         .remove(0);
     let mut fixture = Fixture::settled();
@@ -910,7 +913,7 @@ fn the_image_cache_gate_needs_every_cacheable_image_held_and_rolled_out() {
     let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), true)
         .unwrap()
         .unwrap();
-    let images = config.images();
+    let images = super::super::images(&config.wanted);
     assert_eq!(
         images.len(),
         3,
@@ -1111,6 +1114,7 @@ fn another_revisions_members_count_against_the_node_cap() {
     let previous = WarmPoolConfig::from_cfg(&previous_cfg, true)
         .unwrap()
         .unwrap()
+        .wanted
         .pools;
     let fixture = Fixture::settled();
     let reservations = [

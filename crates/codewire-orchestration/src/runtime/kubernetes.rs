@@ -5,9 +5,10 @@
 pub(crate) mod members;
 pub(crate) mod pools;
 mod suspension;
+pub(crate) mod warm_pools;
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -16,12 +17,12 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, LogParams};
 
 use super::{
-    CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
-    KeptSnapshot, MemberRef, MemberReplacement, Pick, Placement, PoolBornClaim, PoolState,
-    ProbeResult, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeDriver, RuntimeExec,
-    RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeResize, RuntimeSnapshots, RuntimeStorage,
-    RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeMode,
-    VolumeRef,
+    CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, DesiredPool,
+    FailedLiveResize, KeptSnapshot, MemberRef, MemberReplacement, Pick, Placement, PoolBornClaim,
+    PoolPass, PoolState, ProbeResult, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeDriver,
+    RuntimeExec, RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeResize, RuntimeSnapshots,
+    RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity,
+    VolumeMode, VolumeRef, WantedPools,
 };
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::HostKeyStore;
@@ -35,11 +36,16 @@ const WORKSPACE_DAEMON_PORT: u16 = crate::sandbox::template::WORKSPACE_DAEMON_PO
 
 pub struct KubernetesDriver {
     client: kube::Client,
+    /// What earlier pool passes remembered, by placement.
+    pool_memory: Mutex<BTreeMap<String, warm_pools::LoopState>>,
 }
 
 impl KubernetesDriver {
     pub fn shared(client: kube::Client) -> Arc<dyn RuntimeDriver> {
-        Arc::new(Self { client })
+        Arc::new(Self {
+            client,
+            pool_memory: Mutex::default(),
+        })
     }
 
     fn sandbox_client(&self, placement: &Placement) -> SandboxClient {
@@ -61,6 +67,47 @@ impl RuntimePools for KubernetesDriver {
         pool: &WarmPoolObjects,
     ) -> anyhow::Result<PoolState> {
         pools::pool_state(&self.sandbox_client(placement), pool).await
+    }
+
+    async fn keep_pools(
+        &self,
+        placement: &Placement,
+        wanted: &WantedPools,
+    ) -> anyhow::Result<PoolPass> {
+        let namespace = placement.namespace.as_str();
+        // Only the leader's loop keeps pools, so passes never overlap: the
+        // memory is taken out for the pass and put back after it.
+        let mut memory = self
+            .pool_memory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(namespace)
+            .unwrap_or_default();
+        let pass = warm_pools::reconcile_once(&self.client, namespace, wanted, &mut memory).await;
+        self.pool_memory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(namespace.to_owned(), memory);
+        pass
+    }
+
+    fn forget_pool_memory(&self) {
+        self.pool_memory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    async fn rotating_pools(
+        &self,
+        placement: &Placement,
+        wanted: &WantedPools,
+    ) -> anyhow::Result<Vec<DesiredPool>> {
+        warm_pools::rotating_pools(&self.client, &placement.namespace, wanted).await
+    }
+
+    async fn warm_pools(&self, placement: &Placement, pools: &[DesiredPool]) -> anyhow::Result<()> {
+        warm_pools::warm_pools(&self.client, &placement.namespace, pools).await
     }
 }
 

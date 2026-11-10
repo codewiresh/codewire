@@ -30,6 +30,7 @@ use crate::sandbox::host_keys::HostKeyStore;
 pub use crate::sandbox::sidecar::PortForwardedStream as RuntimeStream;
 pub use crate::sandbox::snapshots::{ClearingOpts, VolumeMode};
 use crate::sandbox::template::TemplateOpts;
+pub use crate::sandbox::warm_pool::DesiredPool;
 use crate::sandbox::warm_pool::WarmPoolObjects;
 
 /// Where a runtime object lives. A caller names this rather than holding a
@@ -164,9 +165,64 @@ pub enum PoolState {
     StaleMembers,
 }
 
+/// The warm capacity orchestration wants at a placement.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WantedPools {
+    /// In configuration order, which is the order the node cap clamps them in.
+    pub pools: Vec<DesiredPool>,
+    /// Validated percentage (1..=100) of the smallest runtime node that every
+    /// pool together may reserve.
+    pub max_node_percent: u8,
+    /// `false` when nothing is cached ahead of the pools, so nothing waits for
+    /// a cache.
+    pub image_cache_enabled: bool,
+    /// The configuration was invalid: no pool is wanted, so every existing
+    /// one drains (review L7).
+    pub draining: bool,
+}
+
+/// What one pass over the pools did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoolPass {
+    Unchanged,
+    /// What runs the pools shows no claim safety, so nothing was written
+    /// beyond a first empty pool.
+    Held,
+    Wrote,
+    /// Something changed after it was read; the next pass plans again.
+    Conflict,
+}
+
 /// Warm capacity held ahead of any environment.
 #[async_trait]
 pub trait RuntimePools: Send + Sync {
+    /// One pass toward `wanted`: keep each wanted pool at this replica's
+    /// rendering and within the node cap, replace stale unclaimed members,
+    /// and drain and remove pools nothing wants or claims any more. Run by one
+    /// replica at a time.
+    async fn keep_pools(
+        &self,
+        placement: &Placement,
+        wanted: &WantedPools,
+    ) -> anyhow::Result<PoolPass>;
+
+    /// Forget what earlier passes remembered at every placement, as a replica
+    /// that stops keeping the pools must.
+    fn forget_pool_memory(&self);
+
+    /// The wanted pools a release is rotating: this replica's rendering has no
+    /// pool yet while another revision's pool of the same shape is live.
+    /// Empty when none is, or when nothing may write pools yet.
+    async fn rotating_pools(
+        &self,
+        placement: &Placement,
+        wanted: &WantedPools,
+    ) -> anyhow::Result<Vec<DesiredPool>>;
+
+    /// Make each of `pools` with one member, unless it exists, then wait until
+    /// each has a ready member. It waits without bound: the caller bounds it.
+    async fn warm_pools(&self, placement: &Placement, pools: &[DesiredPool]) -> anyhow::Result<()>;
+
     /// Ask for the shared pools of old releases to go. `Ok(0)` means none are
     /// left; any other count means they were asked to go and may still exist.
     async fn retire_legacy_shared_pools(&self, placement: &Placement) -> anyhow::Result<usize>;

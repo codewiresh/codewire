@@ -11,11 +11,12 @@ use async_trait::async_trait;
 use tokio::sync::oneshot;
 
 use super::{
-    CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
-    KeptSnapshot, MemberRef, MemberReplacement, Pick, Placement, PoolBornClaim, PoolState,
-    ProbeResult, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeExec, RuntimeLifecycle,
-    RuntimeMember, RuntimePools, RuntimeResize, RuntimeSnapshots, RuntimeStorage, RuntimeStream,
-    RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef,
+    CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, DesiredPool,
+    FailedLiveResize, KeptSnapshot, MemberRef, MemberReplacement, Pick, Placement, PoolBornClaim,
+    PoolPass, PoolState, ProbeResult, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeExec,
+    RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeResize, RuntimeSnapshots, RuntimeStorage,
+    RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeMode,
+    VolumeRef, WantedPools,
 };
 use crate::sandbox::ClaimOpts;
 use crate::sandbox::host_keys::HostKeyStore;
@@ -49,6 +50,10 @@ pub(crate) struct FakeRuntimeDriver {
     pub keep_gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
     /// What a pool's state answers.
     pub pool_state: Mutex<Option<PoolState>>,
+    /// Each pool pass's answer, in order; an error is its message.
+    pub pool_passes: Mutex<VecDeque<Result<PoolPass, String>>>,
+    /// How many times pool memory was forgotten.
+    pub pool_memory_forgotten: Mutex<usize>,
 }
 
 #[async_trait]
@@ -74,6 +79,42 @@ impl RuntimePools for FakeRuntimeDriver {
             .lock()
             .unwrap()
             .expect("the test scripts the pool's state"))
+    }
+
+    async fn keep_pools(
+        &self,
+        placement: &Placement,
+        _wanted: &WantedPools,
+    ) -> anyhow::Result<PoolPass> {
+        self.placements.lock().unwrap().push(placement.clone());
+        self.pool_passes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("the test scripts every pool pass")
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn forget_pool_memory(&self) {
+        *self.pool_memory_forgotten.lock().unwrap() += 1;
+    }
+
+    async fn rotating_pools(
+        &self,
+        placement: &Placement,
+        _wanted: &WantedPools,
+    ) -> anyhow::Result<Vec<DesiredPool>> {
+        self.placements.lock().unwrap().push(placement.clone());
+        Ok(Vec::new())
+    }
+
+    async fn warm_pools(
+        &self,
+        placement: &Placement,
+        _pools: &[DesiredPool],
+    ) -> anyhow::Result<()> {
+        self.placements.lock().unwrap().push(placement.clone());
+        Ok(())
     }
 }
 

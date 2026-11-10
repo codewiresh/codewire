@@ -350,6 +350,19 @@ pub struct WarmPoolObjects {
     pub pool: Value,
 }
 
+/// One configured pool, rendered by this replica from its own configuration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DesiredPool {
+    pub configured: ConfiguredShape,
+    pub objects: WarmPoolObjects,
+}
+
+impl DesiredPool {
+    pub fn label(&self) -> String {
+        shape_label(self.configured.shape)
+    }
+}
+
 /// Render one pool from identity-free shape inputs.
 ///
 /// `opts` must carry no environment identity: no name, environment or
