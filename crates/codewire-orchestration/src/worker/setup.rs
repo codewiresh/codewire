@@ -80,6 +80,70 @@ mod clone_progress;
 mod github_checkout;
 mod ssh_checkout;
 
+/// Runs the clone chains depth by depth: every repository before the
+/// repositories inside it (#4024), each depth through
+/// [`observe_repository_chains`]. A depth with a failure stops the run; the
+/// deeper chains were never polled, so they did nothing.
+async fn observe_repository_levels<F, T>(chains: Vec<F>, depths: &[usize]) -> Vec<anyhow::Result<T>>
+where
+    F: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let deepest = depths.iter().copied().max().unwrap_or(0);
+    let mut chains = chains.into_iter().map(Some).collect::<Vec<_>>();
+    let mut results = Vec::with_capacity(chains.len());
+    for depth in 0..=deepest {
+        let level = chains
+            .iter_mut()
+            .zip(depths)
+            .filter(|(_, chain_depth)| **chain_depth == depth)
+            .filter_map(|(chain, _)| chain.take())
+            .collect::<Vec<_>>();
+        let level_results = observe_repository_chains(level).await;
+        let failed = level_results.iter().any(Result::is_err);
+        results.extend(level_results);
+        if failed {
+            break;
+        }
+    }
+    results
+}
+
+/// Exit status of [`NESTED_CHECKOUT_GUARD`] when the parent tracks the path.
+const NESTED_CHECKOUT_TRACKED_EXIT: i32 = 3;
+
+/// Before a nested repository's checkout is removed and cloned: the parent's
+/// commit must track neither the path nor a file on the way to it, so the
+/// removal can never delete the parent's files. The path then goes into the
+/// parent's `.git/info/exclude`, which a clone with an empty template lacks.
+const NESTED_CHECKOUT_GUARD: &str = r#"set -eu
+parent=$1 relative=$2
+git -C "$parent" rev-parse --verify --quiet HEAD >/dev/null
+if [ -n "$(git -C "$parent" ls-tree -r --name-only HEAD -- "$relative")" ]; then exit 3; fi
+prefix=
+saved_ifs=$IFS
+IFS=/
+for part in $relative; do
+  prefix=${prefix:+$prefix/}$part
+  kind=$(git -C "$parent" cat-file -t "HEAD:$prefix" 2>/dev/null || :)
+  if [ -n "$kind" ] && [ "$kind" != tree ]; then exit 3; fi
+done
+IFS=$saved_ifs
+mkdir -p "$parent/.git/info"
+printf '/%s/
+' "$relative" >> "$parent/.git/info/exclude"
+"#;
+
+fn nested_checkout_guard(parent: &str, relative: &str) -> Vec<String> {
+    vec![
+        "sh".into(),
+        "-c".into(),
+        NESTED_CHECKOUT_GUARD.into(),
+        "sh".into(),
+        parent.into(),
+        relative.into(),
+    ]
+}
+
 async fn observe_repository_chains<F: std::future::Future>(
     chains: impl IntoIterator<Item = F>,
 ) -> Vec<F::Output> {
@@ -1827,12 +1891,14 @@ impl SetupOps for WorkerSetupOps<'_> {
         self.phase_authority
             .ensure_active(self.active_phase)
             .await?;
-        validate_repository_mounts(
+        let destinations = validate_repository_mounts(
             input
                 .repos
                 .iter()
                 .map(|repo| (repo.url.as_str(), repo.mount_path.as_str())),
         )?;
+        let parents = codewire_project::destination_parents(&destinations);
+        let depths = codewire_project::destination_depths(&destinations);
         // Validate every trust/selection input before even the first checkout
         // removal. Missing metadata must never select an ambient SSH agent or
         // silently downgrade a potentially protected GitHub checkout.
@@ -1863,6 +1929,11 @@ impl SetupOps for WorkerSetupOps<'_> {
             .enumerate()
             .map(|(position, ((repo, ssh_command), github_command))| {
                 let repo = repo.clone();
+                let nested_in = parents[position].map(|parent| {
+                    let parent = destinations[parent].clone();
+                    let relative = destinations[position][parent.len() + 1..].to_owned();
+                    (parent, relative)
+                });
                 let namespace = input.namespace.clone();
                 let env_id = input.environment_id.clone();
                 let repo_index = position + 1;
@@ -1879,6 +1950,27 @@ impl SetupOps for WorkerSetupOps<'_> {
                         .await;
                     }
                     let dir = canonical_repository_mount(&repo.url, &repo.mount_path)?;
+                    if let Some((parent, relative)) = &nested_in {
+                        let guard = nested_checkout_guard(parent, relative);
+                        if let Err(error) = this
+                            .workspace_exec(&namespace, &env_id, &guard, "", &BTreeMap::new())
+                            .await
+                        {
+                            if is_setup_control_flow(&error) {
+                                return Err(error);
+                            }
+                            let context = if exited_with(&error, NESTED_CHECKOUT_TRACKED_EXIT) {
+                                format!(
+                                    "repository destination {dir} is a path the repository at {parent} tracks"
+                                )
+                            } else {
+                                format!("prepare repository destination {dir} inside {parent}")
+                            };
+                            return Err(this
+                                .fence_failed_launch_group(input, error.context(context))
+                                .await);
+                        }
+                    }
                     let rm: Vec<String> = vec!["rm".into(), "-rf".into(), dir.clone()];
                     if let Err(error) = this
                         .workspace_exec(&namespace, &env_id, &rm, "", &BTreeMap::new())
@@ -1997,7 +2089,7 @@ impl SetupOps for WorkerSetupOps<'_> {
                 }
             })
             .collect();
-        let results = observe_repository_chains(clones).await;
+        let results = observe_repository_levels(clones, &depths).await;
         setup_fencing_evidence!(SetupFencingEvidence::CloneGroupJoined {
             environment_id: input.environment_id.clone(),
             launched: results.len(),
@@ -2682,6 +2774,8 @@ async fn run_post_start_script(ops: &mut impl SetupOps, input: &Inputs) -> anyho
     .await
 }
 
+#[cfg(test)]
+mod nested_checkout_tests;
 #[cfg(test)]
 mod repository_schedule_tests;
 

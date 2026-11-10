@@ -38,9 +38,10 @@ pub(crate) fn canonical_repository_mount(
     validate_repository_mounts([(repo_url, mount_path)]).map(|mut paths| paths.remove(0))
 }
 
-/// Validate every canonical checkout path and reject duplicate or nested
-/// repositories. Nested targets make the setup worker's pre-clone removal
-/// order-dependent and can destroy a sibling checkout.
+/// Validate every canonical checkout path and reject duplicate repositories.
+/// A repository may sit inside another (#4024): the setup worker clones a
+/// parent before the repositories inside it, and refuses a nested path the
+/// parent tracks before its pre-clone removal could delete the parent's files.
 pub(crate) fn validate_repository_mounts<'a>(
     repos: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Result<Vec<String>, RepositoryMountError> {
@@ -115,7 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_and_nested_mounts() {
+    fn rejects_duplicate_mounts_and_allows_nested_ones() {
         assert!(
             validate_repository_mounts([
                 ("https://example.com/a", "/workspace/app"),
@@ -128,7 +129,7 @@ mod tests {
                 ("https://example.com/a", "/workspace/app"),
                 ("https://example.com/b", "/workspace/app/docs"),
             ])
-            .is_err()
+            .is_ok()
         );
         assert!(
             validate_repository_mounts([

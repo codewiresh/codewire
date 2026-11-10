@@ -239,21 +239,14 @@ fn normalize_repositories(
         .iter()
         .map(|repository| repository.destination.as_str())
         .collect::<Vec<_>>();
+    // A repository may sit inside another (#4024); only a duplicate is
+    // refused. Runtimes clone a parent before the repositories inside it.
     destinations.sort_unstable();
     for pair in destinations.windows(2) {
         if pair[0] == pair[1] {
             return invalid(
                 "repositories.destination",
                 format!("duplicate destination {}", pair[0]),
-            );
-        }
-        if pair[1]
-            .strip_prefix(pair[0])
-            .is_some_and(|suffix| suffix.starts_with('/'))
-        {
-            return invalid(
-                "repositories.destination",
-                format!("overlapping destinations {} and {}", pair[0], pair[1]),
             );
         }
     }
@@ -577,24 +570,68 @@ fn validate_workspace_input_destinations(
             (mount.destination.as_str(), kind)
         }))
         .collect::<Vec<_>>();
+    // Every pair, not only neighbours after sorting: `-` sorts before `/`,
+    // so `a`, `a-b`, `a/c` would hide `a/c` inside `a`.
     destinations.sort_unstable_by(|left, right| left.0.cmp(right.0));
-    for pair in destinations.windows(2) {
-        let (left_path, left_kind) = pair[0];
-        let (right_path, right_kind) = pair[1];
-        let duplicate = left_path == right_path;
-        let nested = right_path
-            .strip_prefix(left_path)
-            .is_some_and(|suffix| suffix.starts_with('/'));
-        if duplicate || nested {
-            return invalid(
-                "workspace destinations",
-                format!(
-                    "{left_kind} destination {left_path} overlaps {right_kind} destination {right_path}"
-                ),
-            );
+    for (index, &(left_path, left_kind)) in destinations.iter().enumerate() {
+        for &(right_path, right_kind) in &destinations[index + 1..] {
+            let duplicate = left_path == right_path;
+            let nested = destination_contains(left_path, right_path)
+                || destination_contains(right_path, left_path);
+            let both_repositories = left_kind == "repository" && right_kind == "repository";
+            if duplicate || (nested && !both_repositories) {
+                return invalid(
+                    "workspace destinations",
+                    format!(
+                        "{left_kind} destination {left_path} overlaps {right_kind} destination {right_path}"
+                    ),
+                );
+            }
         }
     }
     Ok(())
+}
+
+/// Whether `inner` lies inside `outer`, below it.
+fn destination_contains(outer: &str, inner: &str) -> bool {
+    inner
+        .strip_prefix(outer)
+        .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+/// For each destination, the index of the nearest other destination it lies
+/// inside: the repository a runtime must clone before it. A repository
+/// inside another is cloned after it, and the parent's checkout keeps the
+/// child out of `git status` (#4024).
+pub fn destination_parents<S: AsRef<str>>(destinations: &[S]) -> Vec<Option<usize>> {
+    destinations
+        .iter()
+        .map(|inner| {
+            destinations
+                .iter()
+                .enumerate()
+                .filter(|(_, outer)| destination_contains(outer.as_ref(), inner.as_ref()))
+                .max_by_key(|(_, outer)| outer.as_ref().len())
+                .map(|(index, _)| index)
+        })
+        .collect()
+}
+
+/// Each destination's nesting depth: 0 for one inside no other, its
+/// parent's depth plus one otherwise. Cloning depth by depth clones every
+/// parent before the repositories inside it.
+pub fn destination_depths<S: AsRef<str>>(destinations: &[S]) -> Vec<usize> {
+    let parents = destination_parents(destinations);
+    (0..destinations.len())
+        .map(|mut index| {
+            let mut depth = 0;
+            while let Some(parent) = parents[index] {
+                depth += 1;
+                index = parent;
+            }
+            depth
+        })
+        .collect()
 }
 
 pub fn canonical_agent_id(raw: &str) -> Result<Option<&'static str>, ProjectError> {

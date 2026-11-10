@@ -8185,20 +8185,29 @@ fn validate_request_destinations(
     project: &codewire_project::ProjectSpec,
     mounts: &[v1::LocalMountInput],
 ) -> Result<(), SupervisorError> {
-    let mut destinations = project
+    // Every pair: a repository may sit inside another repository (#4024);
+    // any other nesting, and any duplicate, is refused.
+    let destinations = project
         .repositories
         .iter()
-        .map(|repository| repository.destination.as_str())
-        .chain(mounts.iter().map(|mount| mount.destination.as_str()))
+        .map(|repository| (repository.destination.as_str(), true))
+        .chain(
+            mounts
+                .iter()
+                .map(|mount| (mount.destination.as_str(), false)),
+        )
         .collect::<Vec<_>>();
-    destinations.sort_unstable();
-    for pair in destinations.windows(2) {
-        if pair[0] == pair[1]
-            || pair[1]
-                .strip_prefix(pair[0])
-                .is_some_and(|suffix| suffix.starts_with('/'))
-        {
-            return Err(SupervisorError::InvalidRequest);
+    let contains = |outer: &str, inner: &str| {
+        inner
+            .strip_prefix(outer)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+    };
+    for (index, &(left, left_repository)) in destinations.iter().enumerate() {
+        for &(right, right_repository) in &destinations[index + 1..] {
+            let nested = contains(left, right) || contains(right, left);
+            if left == right || (nested && !(left_repository && right_repository)) {
+                return Err(SupervisorError::InvalidRequest);
+            }
         }
     }
     Ok(())
@@ -10168,6 +10177,9 @@ fn create_failure_code(error: &SupervisorError) -> &'static str {
         SupervisorError::Path(_) | SupervisorError::Io { .. } => "create_filesystem",
         SupervisorError::InvalidState => "create_state_invalid",
         SupervisorError::InvalidConfiguration => "create_configuration_invalid",
+        SupervisorError::Workspace(WorkspaceError::NestedRepositoryTracked { .. }) => {
+            "create_nested_repository_tracked"
+        }
         _ => "create_failed",
     }
 }
@@ -10394,6 +10406,41 @@ mod tests {
     use codewire_access::builtin_provider_catalog;
     use codewire_local_credentials::{LocalCredentialClient, serve_local_credential_authority};
     use codewire_protected_store::EphemeralProtectedStore;
+
+    #[test]
+    fn request_destinations_allow_only_repositories_inside_repositories() {
+        let project = |destinations: &[&str]| codewire_project::ProjectSpec {
+            repositories: destinations
+                .iter()
+                .map(|destination| codewire_project::RepositorySpec {
+                    source: "https://example.test/org/app.git".to_owned(),
+                    destination: (*destination).to_owned(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mount = |destination: &str| v1::LocalMountInput {
+            destination: destination.to_owned(),
+            ..Default::default()
+        };
+        validate_request_destinations(&project(&["/workspace/root", "/workspace/root/web"]), &[])
+            .unwrap();
+        for (repositories, mounts) in [
+            (vec!["/workspace/a", "/workspace/a"], vec![]),
+            (vec!["/workspace/a"], vec![mount("/workspace/a/c")]),
+            // `-` sorts before `/`; a neighbours-only check missed this.
+            (
+                vec!["/workspace/a-b", "/workspace/a/c"],
+                vec![mount("/workspace/a")],
+            ),
+        ] {
+            assert!(matches!(
+                validate_request_destinations(&project(&repositories), &mounts),
+                Err(SupervisorError::InvalidRequest)
+            ));
+        }
+    }
 
     /// Bounds a wait for a started supervisor's listener after its startup
     /// reconciliation. The socket appearing, or the supervisor exiting, ends
@@ -18817,6 +18864,13 @@ mod tests {
                 "create_filesystem",
             ),
             (SupervisorError::VmStart(CANARY.to_owned()), "create_failed"),
+            (
+                SupervisorError::Workspace(WorkspaceError::NestedRepositoryTracked {
+                    parent: CANARY.to_owned(),
+                    child: CANARY.to_owned(),
+                }),
+                "create_nested_repository_tracked",
+            ),
             (
                 SupervisorError::GuestDockerToolingMissing,
                 "create_guest_docker_tooling_missing",

@@ -822,3 +822,71 @@ fn vm_only_accepts_dockerignore_patterns_and_refuses_unsafe_ones() {
         assert!(parse_project_yaml(yaml).is_err(), "accepted {yaml:?}");
     }
 }
+
+fn repos_yaml(destinations: &[&str], extra: &str) -> String {
+    let mut yaml = String::from("version: 1\nrepositories:\n");
+    for (index, destination) in destinations.iter().enumerate() {
+        yaml.push_str(&format!(
+            "  - source: https://example.test/org/r{index}.git\n    destination: {destination}\n"
+        ));
+    }
+    yaml.push_str(extra);
+    yaml
+}
+
+#[test]
+fn a_repository_may_sit_inside_another() {
+    let document = parse_project_yaml(&repos_yaml(
+        &[
+            "/workspace/root",
+            "/workspace/root/a",
+            "/workspace/root/a/b",
+        ],
+        "",
+    ))
+    .unwrap();
+    assert_eq!(document.spec.repositories.len(), 3);
+    assert!(
+        parse_project_yaml(&repos_yaml(&["/workspace/a", "/workspace/a"], ""))
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate destination /workspace/a")
+    );
+}
+
+#[test]
+fn nesting_with_a_mount_is_refused_even_between_non_neighbours() {
+    for (repositories, mount) in [
+        (vec!["/workspace/a/c"], "/workspace/a"),
+        (vec!["/workspace/a"], "/workspace/a/c"),
+        // `-` sorts before `/`: a neighbours-only check never compares a and a/c.
+        (vec!["/workspace/a", "/workspace/a-b"], "/workspace/a/c"),
+    ] {
+        let error = parse_project_yaml(&repos_yaml(
+            &repositories,
+            &format!("mounts: [{{source: ., destination: {mount}, mode: copy}}]\n"),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("overlaps"),
+            "{repositories:?} {mount}: {error}"
+        );
+    }
+}
+
+#[test]
+fn destination_parents_and_depths_find_the_nearest_ancestor() {
+    let destinations = [
+        "/workspace/a/c",
+        "/workspace/a",
+        "/workspace/a-b",
+        "/workspace/a/c/d",
+        "/workspace/z",
+    ];
+    assert_eq!(
+        destination_parents(&destinations),
+        [Some(1), None, None, Some(0), None]
+    );
+    assert_eq!(destination_depths(&destinations), [1, 0, 0, 2, 0]);
+}

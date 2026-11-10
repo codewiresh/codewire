@@ -575,8 +575,37 @@ fn provision_workspace_plan(
         }
     })?;
 
-    for input in &plan.inputs {
+    // A repository inside another is materialized after it, into a path
+    // its parent does not track, and the parent's Git ignores it (#4024).
+    // The plan allows nesting only between repositories.
+    let destinations = plan
+        .inputs
+        .iter()
+        .map(WorkspaceInput::destination)
+        .collect::<Vec<_>>();
+    let parents = codewire_project::destination_parents(&destinations);
+    let depths = codewire_project::destination_depths(&destinations);
+    let mut order = (0..plan.inputs.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&index| depths[index]);
+    for index in order {
+        let input = &plan.inputs[index];
         let destination = staging_workspace_destination(&staging_dir, input.destination())?;
+        let nested_in = parents[index]
+            .map(|parent| {
+                let parent_destination = plan.inputs[parent].destination();
+                let relative = input.destination()[parent_destination.len() + 1..].to_owned();
+                staging_workspace_destination(&staging_dir, parent_destination)
+                    .map(|path| (path, parent_destination, relative))
+            })
+            .transpose()?;
+        if let Some((parent_path, parent_destination, relative)) = &nested_in {
+            reject_tracked_nested_path(
+                parent_path,
+                relative,
+                parent_destination,
+                input.destination(),
+            )?;
+        }
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|source| WorkspaceError::Io {
                 path: parent.to_owned(),
@@ -643,6 +672,9 @@ fn provision_workspace_plan(
                 let bundle = content.verified_blob_path(bundle_digest, *bundle_size)?;
                 prepare_git_bundle(&bundle, &destination, &staging_dir, source, commit, branch)?;
             }
+        }
+        if let Some((parent_path, _, relative)) = &nested_in {
+            exclude_nested_repository(parent_path, relative)?;
         }
     }
     if let Some(direct_shares) = plan.direct_share_plan()? {
@@ -811,6 +843,69 @@ fn cleanup_provisioning_staging(
             path: engine_root.path().to_owned(),
             source,
         })
+}
+
+/// Refuses a nested repository whose path, or a file on the way to it, the
+/// parent's checked-out commit tracks: materializing it would overwrite the
+/// parent's files.
+fn reject_tracked_nested_path(
+    parent: &Path,
+    relative: &str,
+    parent_destination: &str,
+    child_destination: &str,
+) -> Result<(), WorkspaceError> {
+    let tracked = || WorkspaceError::NestedRepositoryTracked {
+        parent: parent_destination.to_owned(),
+        child: child_destination.to_owned(),
+    };
+    if !git_text(
+        parent,
+        &["ls-tree", "-r", "--name-only", "HEAD", "--", relative],
+    )?
+    .is_empty()
+    {
+        return Err(tracked());
+    }
+    let mut prefix = String::new();
+    for component in relative.split('/') {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(component);
+        let entry = git_text(parent, &["ls-tree", "HEAD", "--", &prefix])?;
+        if entry
+            .split_whitespace()
+            .nth(1)
+            .is_some_and(|kind| kind != "tree")
+        {
+            return Err(tracked());
+        }
+    }
+    Ok(())
+}
+
+/// Keeps a nested repository out of its parent's `git status`. The parent
+/// was initialized from an empty template, so `.git/info` may not exist.
+fn exclude_nested_repository(parent: &Path, relative: &str) -> Result<(), WorkspaceError> {
+    use std::io::Write as _;
+    let info = parent.join(".git/info");
+    fs::create_dir_all(&info).map_err(|source| WorkspaceError::Io {
+        path: info.clone(),
+        source,
+    })?;
+    let exclude = info.join("exclude");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&exclude)
+        .map_err(|source| WorkspaceError::Io {
+            path: exclude.clone(),
+            source,
+        })?;
+    writeln!(file, "/{relative}/").map_err(|source| WorkspaceError::Io {
+        path: exclude,
+        source,
+    })
 }
 
 fn git_text(source: &Path, arguments: &[&str]) -> Result<String, WorkspaceError> {
@@ -2315,6 +2410,8 @@ pub enum WorkspaceError {
     GitAlternatesPresent,
     #[error("the prepared Git clone is not clean")]
     GitCloneNotClean,
+    #[error("repository destination {child} is a path the repository at {parent} tracks")]
+    NestedRepositoryTracked { parent: String, child: String },
     #[error("the prepared Git clone uses an unsupported object format")]
     InvalidGitObjectFormat,
     #[error("the prepared Git clone contains unsafe metadata: {0}")]
@@ -2986,6 +3083,92 @@ mod tests {
             inspect_workspace(source.path(), WorkspaceSelection::Clone, MAXIMUM_COPY_BYTES,),
             Err(WorkspaceError::DirtyWorktree)
         ));
+    }
+
+    #[test]
+    fn a_nested_repository_must_not_overwrite_its_parent_and_stays_out_of_its_status() {
+        let source = tempfile::tempdir().unwrap();
+        git(source.path(), &["init", "-q"]);
+        fs::create_dir(source.path().join("docs")).unwrap();
+        fs::write(source.path().join("docs/README.md"), b"tracked\n").unwrap();
+        fs::write(source.path().join("tools"), b"a file\n").unwrap();
+        git(source.path(), &["add", "docs", "tools"]);
+        git(
+            source.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "parent",
+            ],
+        );
+        let commit = git_text(source.path(), &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_owned();
+        git(
+            source.path(),
+            &["update-ref", "refs/codewire/source", &commit],
+        );
+        let staging = tempfile::tempdir().unwrap();
+        let bundle = staging.path().join("parent.bundle");
+        let status = Command::new(GIT)
+            .args(["bundle", "create"])
+            .arg(&bundle)
+            .arg("refs/codewire/source")
+            .current_dir(source.path())
+            .env_clear()
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("LC_ALL", "C")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let parent = staging.path().join("workspace/root");
+        prepare_git_bundle(
+            &bundle,
+            &parent,
+            staging.path(),
+            "https://example.invalid/acme/root.git",
+            &commit,
+            "main",
+        )
+        .unwrap();
+
+        for tracked in ["docs", "docs/README.md", "tools/inner"] {
+            assert!(
+                matches!(
+                    reject_tracked_nested_path(
+                        &parent,
+                        tracked,
+                        "/workspace/root",
+                        &format!("/workspace/root/{tracked}"),
+                    ),
+                    Err(WorkspaceError::NestedRepositoryTracked { .. })
+                ),
+                "{tracked}"
+            );
+        }
+        reject_tracked_nested_path(&parent, "child", "/workspace/root", "/workspace/root/child")
+            .unwrap();
+        fs::create_dir_all(parent.join("child/.git")).unwrap();
+        fs::write(parent.join("child/file"), b"child\n").unwrap();
+        exclude_nested_repository(&parent, "child").unwrap();
+        let status = git_output(
+            &parent,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+            MAX_GIT_CONTROL_OUTPUT,
+        )
+        .unwrap();
+        assert!(
+            status.stdout.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&status.stdout)
+        );
     }
 
     #[test]

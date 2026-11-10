@@ -81,7 +81,10 @@ impl WorkspacePlan {
         for input in &self.inputs {
             let destination = input.destination();
             validate_destination(destination)?;
-            destinations.push(destination);
+            destinations.push((
+                destination,
+                matches!(input, WorkspaceInput::Repository { .. }),
+            ));
             match input {
                 WorkspaceInput::Local {
                     source_path,
@@ -128,14 +131,21 @@ impl WorkspacePlan {
                 }
             }
         }
-        destinations.sort_unstable();
-        for pair in destinations.windows(2) {
-            if pair[0] == pair[1]
-                || pair[1]
-                    .strip_prefix(pair[0])
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-            {
-                return Err(WorkspacePlanError::OverlappingDestinations);
+        // Every pair: a repository may sit inside another repository, which
+        // provisioning materializes after it (#4024); any other nesting, and
+        // any duplicate, is refused. Copies, clones and live mounts need an
+        // empty destination of their own.
+        let contains = |outer: &str, inner: &str| {
+            inner
+                .strip_prefix(outer)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        };
+        for (index, &(left, left_repository)) in destinations.iter().enumerate() {
+            for &(right, right_repository) in &destinations[index + 1..] {
+                let nested = contains(left, right) || contains(right, left);
+                if left == right || (nested && !(left_repository && right_repository)) {
+                    return Err(WorkspacePlanError::OverlappingDestinations);
+                }
             }
         }
         self.direct_share_plan()?;

@@ -1040,7 +1040,7 @@ mod tests {
     }
 
     #[test]
-    fn plans_reject_non_https_and_overlapping_destinations() {
+    fn plans_reject_non_https_and_overlapping_destinations_but_allow_nested_repositories() {
         assert!(matches!(
             validate_anonymous_https_source("ssh://git@example.test/org/app.git"),
             Err(WorkspacePlanError::UnsupportedRepositorySource)
@@ -1069,8 +1069,28 @@ mod tests {
                 },
             ],
         };
+        // A repository may sit inside another (#4024).
+        plan.validate().unwrap();
+
+        // Not inside a copied folder, and never twice at one destination.
+        let mut nested_in_copy = plan.clone();
+        nested_in_copy.inputs[0] = WorkspaceInput::Local {
+            source_path: b"/srv/app".to_vec(),
+            identity: "d".repeat(40),
+            mode: WorkspaceSourceMode::Copy,
+            destination: "/workspace/app".to_owned(),
+            vm_only: Vec::new(),
+        };
         assert!(matches!(
-            plan.validate(),
+            nested_in_copy.validate(),
+            Err(WorkspacePlanError::OverlappingDestinations)
+        ));
+        let mut duplicate = plan.clone();
+        if let WorkspaceInput::Repository { destination, .. } = &mut duplicate.inputs[1] {
+            *destination = "/workspace/app".to_owned();
+        }
+        assert!(matches!(
+            duplicate.validate(),
             Err(WorkspacePlanError::OverlappingDestinations)
         ));
     }

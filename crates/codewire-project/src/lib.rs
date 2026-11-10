@@ -612,7 +612,8 @@ pub fn parse_project_yaml(content: &str) -> Result<ProjectDocument, ProjectError
 }
 
 pub use normalize::{
-    canonical_agent_id, display_agent_id, repository_name, validate_repository_destinations,
+    canonical_agent_id, destination_depths, destination_parents, display_agent_id, repository_name,
+    validate_repository_destinations,
 };
 
 #[cfg(test)]

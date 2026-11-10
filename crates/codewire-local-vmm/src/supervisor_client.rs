@@ -1032,6 +1032,9 @@ fn operation_error_hint(error_code: &str) -> &'static str {
             " (the VM could not install the workspace image; try another image or a current release of it)"
         }
         "create_guest_workspace_failed" => " (the workspace could not start inside the VM)",
+        "create_nested_repository_tracked" => {
+            " (a repository's destination is a path that the repository it sits inside tracks, or lies under one of that repository's files; choose a destination the outer repository does not track)"
+        }
         "delete_failed" | "delete_interrupted" => {
             " (nothing was removed and the environment was kept; see cw info, then run cw rm again)"
         }

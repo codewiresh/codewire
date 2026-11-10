@@ -1356,24 +1356,26 @@ mod tests {
     }
 
     #[test]
-    fn repository_mounts_are_safe_and_non_overlapping() {
+    fn repository_mounts_are_safe_and_distinct() {
+        let repository = |source: &str, destination: &str| codewire_project::RepositorySpec {
+            source: source.into(),
+            destination: destination.into(),
+            ..Default::default()
+        };
+        // A repository may sit inside another (#4024).
+        validate_environment_repository_mounts(&[
+            repository("https://github.com/x/y", "/workspace/app"),
+            repository("https://github.com/x/z", "/workspace/app/docs"),
+        ])
+        .unwrap();
         let invalid = [
-            vec![codewire_project::RepositorySpec {
-                source: "https://github.com/x/y".into(),
-                destination: "/workspace/../outside".into(),
-                ..Default::default()
-            }],
+            vec![repository(
+                "https://github.com/x/y",
+                "/workspace/../outside",
+            )],
             vec![
-                codewire_project::RepositorySpec {
-                    source: "https://github.com/x/y".into(),
-                    destination: "/workspace/app".into(),
-                    ..Default::default()
-                },
-                codewire_project::RepositorySpec {
-                    source: "https://github.com/x/z".into(),
-                    destination: "/workspace/app/docs".into(),
-                    ..Default::default()
-                },
+                repository("https://github.com/x/y", "/workspace/app"),
+                repository("https://github.com/x/z", "/workspace/app"),
             ],
         ];
         for repos in invalid {

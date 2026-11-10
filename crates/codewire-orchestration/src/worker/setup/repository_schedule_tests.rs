@@ -200,3 +200,52 @@ fn repository_scheduler_cancellation_fences_queue_without_dropping_started_sibli
     assert_eq!(state.active.get(), 0);
     assert_eq!(state.dropped_early.get(), 0);
 }
+
+/// A nested repository is cloned only after every repository at a lower
+/// depth has finished, and a failed depth starts nothing deeper (#4024).
+#[tokio::test(flavor = "current_thread")]
+async fn nested_repositories_clone_depth_by_depth_and_stop_after_a_failure() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let make = |name: &'static str, fail: bool| {
+        let events = Rc::clone(&events);
+        async move {
+            events.borrow_mut().push(format!("start {name}"));
+            tokio::task::yield_now().await;
+            events.borrow_mut().push(format!("end {name}"));
+            if fail {
+                anyhow::bail!("{name} failed");
+            }
+            Ok(name)
+        }
+    };
+    // root/a and root/a/b inside root; z beside it.
+    let depths = [1, 0, 2, 0];
+    let results = super::observe_repository_levels(
+        vec![
+            make("a", false),
+            make("root", false),
+            make("b", false),
+            make("z", false),
+        ],
+        &depths,
+    )
+    .await;
+    assert_eq!(
+        results.into_iter().map(Result::unwrap).collect::<Vec<_>>(),
+        ["root", "z", "a", "b"]
+    );
+    let order = events.borrow().clone();
+    let at = |event: &str| order.iter().position(|seen| seen == event).unwrap();
+    assert!(at("end root") < at("start a") && at("end z") < at("start a"));
+    assert!(at("end a") < at("start b"));
+
+    events.borrow_mut().clear();
+    let results = super::observe_repository_levels(
+        vec![make("a", false), make("root", true), make("b", false)],
+        &[1, 0, 2],
+    )
+    .await;
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_err());
+    assert_eq!(*events.borrow(), ["start root", "end root"]);
+}

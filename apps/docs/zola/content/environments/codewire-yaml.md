@@ -148,6 +148,25 @@ workspace:
     - .venv
 ```
 
+## Repositories inside a repository
+
+A repository's `destination` may lie inside another's, for a root repository
+that holds others:
+
+```yaml
+repositories:
+  - source: https://github.com/your-org/platform.git
+    destination: /workspace/platform
+  - source: https://github.com/your-org/web.git
+    destination: /workspace/platform/web
+```
+
+Codewire clones the outer repository first, then the ones inside it, and
+adds each inner path to the outer checkout's `.git/info/exclude`, so its
+`git status` shows only its own files. A path the outer repository's commit
+tracks, or a file on the way to it, fails the create and is named. `mounts`
+cannot nest with repositories or each other.
+
 ## Keys
 
 Every key, its type and its limits are in
