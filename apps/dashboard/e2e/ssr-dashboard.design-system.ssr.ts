@@ -126,9 +126,18 @@ async function inspect(page: Page, marketing: boolean) {
 // non-transparent outline or a shadow compared with the resting state, on the
 // control itself or where its primitive draws the ring (an input group, a
 // wrapping label, a toggle chip's label span). A terminal keeps Tab as input.
+//
+// Tab is pressed in batches while the page records each control as it takes
+// focus, and the controls are then checked in one call, each focused again
+// as the keyboard shows it (focusVisible). The order is walked once, in the
+// first colour scheme, and recorded as each control's structural path; the
+// other scheme's reload is checked from those paths. Every press waits for a
+// frame, and at a phone's pixel density home.html took over 50 s with a
+// round trip per press in both schemes, against a 60 s limit.
 const tabLimit = 400;
+const tabBatch = 20;
 
-async function focusGaps(page: Page) {
+async function focusGaps(page: Page, walked?: string[]): Promise<{ gaps: string[]; order: string[] }> {
   await page.evaluate(() => {
     // Measure every control unfocused: an autofocused field would otherwise
     // record its focus ring as its resting look.
@@ -142,48 +151,75 @@ async function focusGaps(page: Page) {
     };
     const resting = new Map<Element, ReturnType<typeof look>>();
     for (const element of document.querySelectorAll("*")) resting.set(element, look(element));
-    Object.assign(window, { __designFocus: { resting, look } });
+    const order: Element[] = [];
+    document.addEventListener("focusin", (event) => { if (event.target instanceof Element) order.push(event.target); }, true);
+    // A control's place in the document, stable across reloads of a fixture.
+    const path = (element: Element) => {
+      const steps: string[] = [];
+      for (let node: Element | null = element; node && node !== document.documentElement; node = node.parentElement) {
+        steps.unshift(`${node.tagName.toLowerCase()}:nth-child(${[...node.parentElement!.children].indexOf(node) + 1})`);
+      }
+      return `html > ${steps.join(" > ")}`;
+    };
+    Object.assign(window, { __designFocus: { resting, look, order, path } });
   });
-  const gaps = new Set<string>();
-  let first: string | null = null;
-  for (let step = 0; step <= tabLimit; step += 1) {
-    if (step === tabLimit) {
-      gaps.add(`focus order did not cycle within ${tabLimit} Tab presses`);
-      break;
+  type Focus = { order: Element[] };
+  // The walk ends when focus leaves the page after its last control, comes
+  // back to the first one, or enters a terminal, or when a whole batch finds
+  // nothing to focus. Presses after that only revisit what is recorded.
+  const ended = () => page.evaluate(() => {
+    const { order } = (window as unknown as { __designFocus: Focus }).__designFocus;
+    const left = !document.activeElement || document.activeElement === document.body;
+    return order.length === 0 || left || order.slice(1).includes(order[0])
+      || order.some((element) => element.closest(".xterm") !== null);
+  });
+  let cycled = walked !== undefined;
+  for (let pressed = 0; pressed < tabLimit && !cycled; ) {
+    for (let batch = 0; batch < tabBatch && pressed < tabLimit; batch += 1, pressed += 1) await page.keyboard.press("Tab");
+    cycled = await ended();
+  }
+  const result = await page.evaluate((walked) => {
+    type Look = { outline: string; shadow: string };
+    const { resting, look, order, path } = (window as unknown as {
+      __designFocus: { resting: Map<Element, Look>; look: (element: Element) => Look; order: Element[]; path: (element: Element) => string };
+    }).__designFocus;
+    const shows = (candidate: Element) => {
+      const before = resting.get(candidate);
+      const now = look(candidate);
+      const style = getComputedStyle(candidate);
+      const alpha = style.outlineColor.match(/rgba?\(([^)]+)\)/)?.[1].split(/[\s,/]+/).filter(Boolean).map(Number)[3] ?? 1;
+      const outline = style.outlineStyle !== "none" && Number.parseFloat(style.outlineWidth) > 0 && alpha > 0
+        && now.outline !== before?.outline;
+      return outline || (now.shadow !== "none" && now.shadow !== before?.shadow);
+    };
+    const stops: Element[] = [];
+    const hidden: string[] = [];
+    if (walked) {
+      for (const place of walked) {
+        const element = document.querySelector(place);
+        if (element) stops.push(element);
+        else hidden.push(`the walked control ${place} is missing after reload`);
+      }
+    } else {
+      for (const element of order) {
+        if (element.closest(".xterm") || stops.includes(element)) break;
+        stops.push(element);
+      }
     }
-    await page.keyboard.press("Tab");
-    const focused = await page.evaluate(() => {
-      const element = document.activeElement;
-      if (!element || element === document.body) return null;
-      if (element.closest(".xterm")) return { id: "terminal", key: "terminal", visible: true, terminal: true };
-      type Look = { outline: string; shadow: string };
-      const { resting, look } = (window as unknown as {
-        __designFocus: { resting: Map<Element, Look>; look: (element: Element) => Look };
-      }).__designFocus;
-      const shows = (candidate: Element) => {
-        const before = resting.get(candidate);
-        const now = look(candidate);
-        const style = getComputedStyle(candidate);
-        const alpha = style.outlineColor.match(/rgba?\(([^)]+)\)/)?.[1].split(/[\s,/]+/).filter(Boolean).map(Number)[3] ?? 1;
-        const outline = style.outlineStyle !== "none" && Number.parseFloat(style.outlineWidth) > 0 && alpha > 0
-          && now.outline !== before?.outline;
-        return outline || (now.shadow !== "none" && now.shadow !== before?.shadow);
-      };
+    for (const element of stops) {
+      if (element instanceof HTMLElement || element instanceof SVGElement) element.focus({ focusVisible: true });
       const parent = element.parentElement;
       const related = [element, element.nextElementSibling, parent, parent?.parentElement, parent?.parentElement?.parentElement];
-      const id = `${element.tagName.toLowerCase()}${element.classList.length ? `.${[...element.classList].join(".")}` : ""}`;
-      return {
-        id,
-        key: String([...document.querySelectorAll("*")].indexOf(element)),
-        visible: related.some((candidate) => candidate && shows(candidate)),
-        terminal: false,
-      };
-    });
-    if (!focused || focused.terminal || focused.key === first) break;
-    first ??= focused.key;
-    if (!focused.visible) gaps.add(focused.id);
-  }
-  return [...gaps];
+      if (!related.some((candidate) => candidate && shows(candidate))) {
+        hidden.push(`${element.tagName.toLowerCase()}${element.classList.length ? `.${[...element.classList].join(".")}` : ""}`);
+      }
+    }
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    return { hidden, order: stops.map(path) };
+  }, walked);
+  const gaps = [...result.hidden];
+  if (!cycled) gaps.push(`focus order did not cycle within ${tabLimit} Tab presses`);
+  return { gaps: [...new Set(gaps)], order: result.order };
 }
 
 test("the account menu's theme switch cycles system, light and dark and is kept on the next page", async ({ page }) => {
@@ -226,12 +262,16 @@ for (const fixture of fixtures) {
     test.skip(!origin, "Run make design-check");
     const viewport: Viewport = testInfo.project.name.endsWith("mobile") ? "mobile" : "desktop";
     // Every page follows the system theme (theme.js), so each is measured in both.
+    let walked: string[] | undefined;
     for (const colorScheme of ["dark", "light"] as const) {
       await page.emulateMedia({ colorScheme });
       await page.goto(`${origin}/reference/fixtures/${fixture}`);
       await page.evaluate(() => document.fonts.ready);
 
-      const findings = { ...(await inspect(page, ownScale.has(fixture))), focus: await focusGaps(page) };
+      const inspected = await inspect(page, ownScale.has(fixture));
+      const focus = await focusGaps(page, walked);
+      walked ??= focus.order;
+      const findings = { ...inspected, focus: focus.gaps };
       expect.soft(findings.overflow, `${colorScheme}: the page scrolls sideways`).toBe(0);
       expect.soft(findings.select, `${colorScheme}: selects must render the styled base-select picker`).toEqual([]);
       expect.soft(findings.labels, `${colorScheme}: buttons with an icon must wrap their label in a span`).toEqual([]);
