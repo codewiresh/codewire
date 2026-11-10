@@ -630,7 +630,7 @@ async fn handle_platform_env_create(
     // from, before it reads the platform settings or sends any request.
     let source = project_file::select_from(
         &project_file::invoking_directory()?,
-        args.file.as_deref(),
+        &args.file,
         args.no_file,
     )?;
     let mut prepared = prepare_platform_env_create(&args, &source)?;
@@ -652,7 +652,7 @@ async fn handle_platform_env_create(
         // the original validated request, before any create request.
         let source = project_file::select_from(
             &project_file::invoking_directory()?,
-            args.file.as_deref(),
+            &args.file,
             args.no_file,
         )?;
         prepared = prepare_platform_env_create(&args, &source)?;
@@ -2584,15 +2584,16 @@ pub(crate) fn format_environment_daemon_status(status: &EnvironmentDaemonStatus)
     output
 }
 
-/// The request from the flags and the file `--file` names, if any. Nothing
+/// The request from the flags and the files `--file` names, if any. Nothing
 /// is searched for: `cw init` and direct request construction use this; a
 /// create selects its file first ([`project_file::select_from`]).
 pub(crate) fn env_create_request_from_args(
     args: &EnvCreateArgs,
 ) -> anyhow::Result<CreateEnvironmentRequest> {
-    let source = match args.file.as_deref() {
-        Some(path) => project_file::ConfigSource::File(path.to_owned()),
-        None => project_file::ConfigSource::Flags,
+    let source = if args.file.is_empty() {
+        project_file::ConfigSource::Flags
+    } else {
+        project_file::ConfigSource::Files(args.file.clone())
     };
     env_create_request_from_source(args, &source).map(|(request, _)| request)
 }
@@ -2613,8 +2614,8 @@ pub(crate) fn env_create_request_from_source(
     let preset_id = trimmed_optional(args.preset_id.clone());
     let mut provenance = project_file::Provenance::new(source.clone());
     let mut project_spec = match source.path() {
-        Some(path) => {
-            let document = sources::load_platform_document(path)?;
+        Some(_) => {
+            let document = sources::load_platform_document(&source.paths())?;
             provenance.unused_fields = document.unused_fields;
             document.spec
         }
@@ -2735,6 +2736,11 @@ pub(crate) fn prepare_platform_env_create(
 ) -> anyhow::Result<(CreateEnvironmentRequest, project_file::Provenance)> {
     let (mut request, mut provenance) = env_create_request_from_source(args, source)?;
     request.project_spec.ensure_platform_compatible()?;
+    if let project_file::ConfigSource::Discovered(found) = source
+        && !args.no_local_file
+    {
+        provenance.skipped_local_file = project_file::local_file_beside(found)?;
+    }
     if request.preset_id.is_none()
         && request.project_spec.preset.is_empty()
         && request.project_spec.image.is_empty()

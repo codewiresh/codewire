@@ -1121,8 +1121,9 @@ fn reject_snapshot_create_options(args: &EnvCreateArgs) -> anyhow::Result<()> {
         (args.branch.is_some(), "--branch"),
         (args.path.is_some(), "--path"),
         (args.path_mode.is_some(), "--path-mode"),
-        (args.file.is_some(), "--file"),
+        (!args.file.is_empty(), "--file"),
         (args.no_file, "--no-file"),
+        (args.no_local_file, "--no-local-file"),
         (args.image.is_some(), "--image"),
         (args.install.is_some(), "--install"),
         (args.startup.is_some(), "--startup"),
@@ -3338,11 +3339,13 @@ struct NativeSource {
     invoked_from: Option<PathBuf>,
 }
 
-/// The search starts at `--path` or the invoking directory. `--file` is a
-/// relative path beneath that directory. Without `--path`, a file found
-/// above the invoking directory makes its own folder the project directory,
-/// so creating from a subdirectory matches creating beside the file; an
-/// explicit `--path` stays the project directory.
+/// The search starts at `--path` or the invoking directory, and the
+/// `codewire.local.yaml` beside the file it finds is merged over it unless
+/// `--no-local-file`. Each `--file` is a relative path beneath that
+/// directory. Without `--path`, a file found above the invoking directory
+/// makes its own folder the project directory, so creating from a
+/// subdirectory matches creating beside the file; an explicit `--path` stays
+/// the project directory.
 fn native_source(args: &EnvCreateArgs) -> anyhow::Result<NativeSource> {
     let requested = args.path.as_deref().unwrap_or_else(|| Path::new("."));
     let start = std::fs::canonicalize(requested)
@@ -3354,26 +3357,31 @@ fn native_source(args: &EnvCreateArgs) -> anyhow::Result<NativeSource> {
             invoked_from: None,
         });
     }
-    native_source_at(start, args.path.is_some(), args.file.as_deref())
+    native_source_at(start, args.path.is_some(), &args.file, !args.no_local_file)
 }
 
 /// [`native_source`] from the canonical start directory.
 fn native_source_at(
     start: PathBuf,
     explicit_path: bool,
-    file: Option<&Path>,
+    files: &[PathBuf],
+    read_local_file: bool,
 ) -> anyhow::Result<NativeSource> {
-    if let Some(file) = file {
-        if file.is_absolute()
-            || file.as_os_str().is_empty()
-            || file
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            anyhow::bail!("native --file must be a relative path beneath --path");
+    if !files.is_empty() {
+        for file in files {
+            if file.is_absolute()
+                || file.as_os_str().is_empty()
+                || file
+                    .components()
+                    .any(|component| !matches!(component, Component::Normal(_)))
+            {
+                anyhow::bail!("native --file must be a relative path beneath --path");
+            }
         }
         return Ok(NativeSource {
-            config: project_file::ConfigSource::File(start.join(file)),
+            config: project_file::ConfigSource::Files(
+                files.iter().map(|file| start.join(file)).collect(),
+            ),
             project_directory: start,
             invoked_from: None,
         });
@@ -3394,9 +3402,17 @@ fn native_source_at(
     } else {
         (folder, Some(start))
     };
+    let local = if read_local_file {
+        project_file::local_file_beside(&found)?
+    } else {
+        None
+    };
     Ok(NativeSource {
         project_directory,
-        config: project_file::ConfigSource::Discovered(found),
+        config: match local {
+            Some(local) => project_file::ConfigSource::DiscoveredWithLocal(found, local),
+            None => project_file::ConfigSource::Discovered(found),
+        },
         invoked_from,
     })
 }
@@ -3448,14 +3464,7 @@ fn native_codewire_yaml(
             ..NativeProjectPlan::default()
         });
     };
-    let file = std::fs::File::open(path).with_context(|| format!("read {}", path.display()))?;
-    use std::io::Read as _;
-    let mut data = String::new();
-    file.take((codewire_project::MAX_PROJECT_DOCUMENT_BYTES + 1) as u64)
-        .read_to_string(&mut data)
-        .with_context(|| format!("read {}", path.display()))?;
-    let document = codewire_project::parse_project_yaml(&data)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let document = project_file::read_document(&config.paths())?;
     let unsupported = native_unsupported_project_fields(&document);
     if !unsupported.is_empty() {
         anyhow::bail!(
@@ -5053,7 +5062,7 @@ mod tests {
         .unwrap();
         let mut project = native_codewire_yaml(
             temp.path(),
-            &project_file::ConfigSource::File(temp.path().join("config/dev.yaml")),
+            &project_file::ConfigSource::Files(vec![temp.path().join("config/dev.yaml")]),
         )
         .unwrap();
         assert_eq!(project.spec.working_directory, "/workspace/fixtures");
@@ -5075,6 +5084,82 @@ mod tests {
                 description: "as declared in codewire.yaml".to_owned(),
                 ..NativeWorkspace::default()
             }
+        );
+    }
+
+    #[test]
+    fn native_merges_the_local_file_beside_the_found_one() {
+        let (_temp, root) =
+            checkout("version: 1\ncpu: \"2\"\nenvironment: {SHARED: base, LOG_LEVEL: info}\n");
+        std::fs::write(
+            root.join("codewire.local.yaml"),
+            "cpu: \"4\"\nenvironment: {LOG_LEVEL: debug}\n",
+        )
+        .unwrap();
+        let source = native_source_at(root.join("crates"), false, &[], true).unwrap();
+        assert_eq!(
+            source.config,
+            project_file::ConfigSource::DiscoveredWithLocal(
+                root.join("codewire.yaml"),
+                root.join("codewire.local.yaml"),
+            )
+        );
+        let project = native_codewire_yaml(&root, &source.config).unwrap();
+        assert_eq!(project.vcpus, Some(4));
+        assert_eq!(project.spec.environment["SHARED"], "base");
+        assert_eq!(project.spec.environment["LOG_LEVEL"], "debug");
+
+        // --no-local-file reads the shared file alone.
+        let source = native_source_at(root.join("crates"), false, &[], false).unwrap();
+        assert_eq!(
+            source.config,
+            project_file::ConfigSource::Discovered(root.join("codewire.yaml"))
+        );
+        assert_eq!(
+            native_codewire_yaml(&root, &source.config).unwrap().vcpus,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn native_files_merge_in_order_and_mounts_resolve_from_their_own_file() {
+        let (_temp, root) = checkout("version: 1\ncpu: \"2\"\nmemory: \"4Gi\"\n");
+        std::fs::create_dir_all(root.join("fixtures")).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/gpu.yaml"),
+            "cpu: \"8\"\nmounts: [{source: ../fixtures, destination: /workspace/fixtures, mode: copy}]\n",
+        )
+        .unwrap();
+        // A local file beside the found one is not read with explicit files.
+        std::fs::write(root.join("codewire.local.yaml"), "cpu: \"16\"\n").unwrap();
+        let source = native_source_at(
+            root.clone(),
+            false,
+            &[
+                PathBuf::from("codewire.yaml"),
+                PathBuf::from("config/gpu.yaml"),
+            ],
+            true,
+        )
+        .unwrap();
+        let project = native_codewire_yaml(&root, &source.config).unwrap();
+        assert_eq!(project.vcpus, Some(8));
+        assert_eq!(project.memory_mib, Some(4 * 1024));
+        assert_eq!(
+            project.local_mounts[0].source_path,
+            root.join("fixtures").as_os_str().as_bytes()
+        );
+
+        // An override file is checked on its own, and the error names it.
+        std::fs::write(root.join("config/gpu.yaml"), "cpus: \"8\"\n").unwrap();
+        let error = native_codewire_yaml(&root, &source.config).unwrap_err();
+        assert!(
+            format!("{error:#}").starts_with(&format!(
+                "parse {}: unknown field `cpus`",
+                root.join("config/gpu.yaml").display()
+            )),
+            "{error:#}"
         );
     }
 
@@ -5177,7 +5262,7 @@ working_directory: /workspace/github
         let found = project_file::ConfigSource::Discovered(root.join("codewire.yaml"));
         // Without --path: the file's folder is the project directory.
         assert_eq!(
-            native_source_at(root.join("crates"), false, None).unwrap(),
+            native_source_at(root.join("crates"), false, &[], true).unwrap(),
             NativeSource {
                 project_directory: root.clone(),
                 config: found.clone(),
@@ -5186,7 +5271,7 @@ working_directory: /workspace/github
         );
         // Beside the file nothing changes.
         assert_eq!(
-            native_source_at(root.clone(), false, None).unwrap(),
+            native_source_at(root.clone(), false, &[], true).unwrap(),
             NativeSource {
                 project_directory: root.clone(),
                 config: found.clone(),
@@ -5195,7 +5280,7 @@ working_directory: /workspace/github
         );
         // An explicit --path stays the project directory; the file applies.
         assert_eq!(
-            native_source_at(root.join("crates"), true, None).unwrap(),
+            native_source_at(root.join("crates"), true, &[], true).unwrap(),
             NativeSource {
                 project_directory: root.join("crates"),
                 config: found.clone(),
@@ -5205,19 +5290,30 @@ working_directory: /workspace/github
         // --file overrides the search and is read beneath the start.
         std::fs::write(root.join("crates/ci.yaml"), "version: 1\n").unwrap();
         assert_eq!(
-            native_source_at(root.join("crates"), false, Some(Path::new("ci.yaml")))
-                .unwrap()
-                .config,
-            project_file::ConfigSource::File(root.join("crates/ci.yaml"))
+            native_source_at(
+                root.join("crates"),
+                false,
+                &[PathBuf::from("ci.yaml")],
+                true
+            )
+            .unwrap()
+            .config,
+            project_file::ConfigSource::Files(vec![root.join("crates/ci.yaml")])
         );
         assert!(
-            native_source_at(root.clone(), false, Some(Path::new("/etc/codewire.yaml"))).is_err()
+            native_source_at(
+                root.clone(),
+                false,
+                &[PathBuf::from("/etc/codewire.yaml")],
+                true
+            )
+            .is_err()
         );
         let missing =
-            native_source_at(root.clone(), false, Some(Path::new("missing.yaml"))).unwrap();
+            native_source_at(root.clone(), false, &[PathBuf::from("missing.yaml")], true).unwrap();
         assert!(native_codewire_yaml(&root, &missing.config).is_err());
 
-        let source = native_source_at(root.join("crates"), false, None).unwrap();
+        let source = native_source_at(root.join("crates"), false, &[], true).unwrap();
         let mut workspace = NativeWorkspace {
             description: format!(
                 "mount {} at /workspace/app (live, read-write)",
@@ -5270,11 +5366,11 @@ working_directory: /workspace/github
             "version: 1\ninstall_command: make nested\nstartup_script: nested-only\n",
         )
         .unwrap();
-        let source = native_source_at(root.clone(), false, None).unwrap();
+        let source = native_source_at(root.clone(), false, &[], true).unwrap();
         let plan = native_codewire_yaml(&source.project_directory, &source.config).unwrap();
         assert_eq!(plan.spec.install_command, "make root");
         assert!(plan.spec.startup_script.is_empty());
-        let source = native_source_at(nested.clone(), false, None).unwrap();
+        let source = native_source_at(nested.clone(), false, &[], true).unwrap();
         let plan = native_codewire_yaml(&source.project_directory, &source.config).unwrap();
         assert_eq!(plan.spec.install_command, "make nested");
     }

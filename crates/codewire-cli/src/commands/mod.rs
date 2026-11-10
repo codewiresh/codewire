@@ -1184,15 +1184,21 @@ pub(crate) struct EnvCreateArgs {
     #[arg(
         long,
         value_name = "FILE",
-        help = "Project YAML file to use instead of the nearest codewire.yaml (relative to --path for a local create)"
+        help = "Project YAML file to use instead of the nearest codewire.yaml; repeat to merge files in order (relative to --path for a local create)"
     )]
-    file: Option<PathBuf>,
+    file: Vec<PathBuf>,
     #[arg(
         long,
         conflicts_with = "file",
         help = "Use only the flags: do not read the nearest codewire.yaml"
     )]
     no_file: bool,
+    #[arg(
+        long,
+        conflicts_with_all = ["file", "no_file"],
+        help = "Do not merge the codewire.local.yaml beside the nearest codewire.yaml (a local create reads it by default)"
+    )]
+    no_local_file: bool,
     #[arg(
         long,
         value_name = "SPEC",

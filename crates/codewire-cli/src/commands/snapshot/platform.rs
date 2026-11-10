@@ -208,7 +208,7 @@ pub(crate) async fn create_environments_from_platform_snapshot(
         args.repo_urls.is_empty()
             && args.repo_flags.is_empty()
             && args.branch.is_none()
-            && args.file.is_none()
+            && args.file.is_empty()
             && !args.share_mounts,
         "--snapshot takes its files from the snapshot: it can't be used with a repository, \
          --branch, --file or --share-mounts"

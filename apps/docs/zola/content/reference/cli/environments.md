@@ -1,7 +1,7 @@
 ---
 title: Environments
 description: ls, info, create, start, stop, restart, rm, update, ports, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh and preset.
-updated: 2026-11-07
+updated: 2026-11-10
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -36,8 +36,9 @@ as positionals or with `--repo`; they replace the file's repositories.
 | `--image IMAGE` | Container image; `workspace` is shorthand for the Codewire workspace image |
 | `--preset SLUG`, `--preset-id ID` | Cloud: create from a preset |
 | `--repo URL`, `--branch` | Repositories to clone, each to its own path |
-| `--file FILE` | Project YAML file instead of the nearest `codewire.yaml` (relative to `--path` for local creation) |
+| `--file FILE` | Project YAML file instead of the nearest `codewire.yaml` (relative to `--path` for local creation); repeat to merge files in order |
 | `--no-file` | Use only the flags; read no `codewire.yaml` |
+| `--no-local-file` | Local: do not merge the `codewire.local.yaml` beside the nearest `codewire.yaml` |
 | `--path PATH` | Local: the project directory, where the `codewire.yaml` search starts (default `.`) |
 | `--path-mode mount\|copy\|clone\|empty` | Local: mount the directory live and read-write (default; the VM can change anything in it, including Git hooks and settings that git on your machine later runs, so use `clone` for untrusted code), copy it once as it is now, clone the Git repository's committed state once, or start empty |
 | `--cpu`, `--memory`, `--disk` | Resources, for example `--cpu 2 --memory 8GB --disk 40GB`; CPU is in cores (`0.5` or `500m` for half a core on a hosted sandbox). A hosted sandbox defaults to 2 vCPU, 8 GiB and an 80 GiB disk, and its disk is at most 200 GiB |

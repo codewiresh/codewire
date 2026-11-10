@@ -67,7 +67,11 @@ calls a hosted environment a **Sandbox**; it is the same object.
 
 A `codewire.yaml` in the project describes an environment once (image,
 repositories, setup, ports, kept folders, secrets and credential profile) and
-either placement reads it (`crates/codewire-project` parses it).
+either placement reads it (`crates/codewire-project` parses it). A local create
+also merges the `codewire.local.yaml` beside it, for personal and local VM
+settings; a cloud create never reads that file. Repeated `--file` merges the
+named files in order: mappings merge by key, a later value or list replaces the
+earlier one, and `null` removes a key.
 
 ### Placements
 

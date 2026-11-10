@@ -1,14 +1,16 @@
 ---
 title: codewire.yaml keys
 description: Every key codewire.yaml accepts, with its type and limits.
-updated: 2026-10-26
+updated: 2026-11-10
 weight: 2
 ---
 
 How Codewire finds and uses the file is in
 [`codewire.yaml`](@/environments/codewire-yaml.md).
 
-Unknown keys are rejected.
+Unknown keys are rejected. The same keys apply in `codewire.local.yaml` and
+in every file merged with repeated `--file`; see
+[Override files](@/environments/codewire-yaml.md#override-files).
 
 | Key | Type | Notes |
 | --- | --- | --- |

@@ -1,6 +1,6 @@
 //! Hosted source selection is metadata-only. Material remains behind the
 //! environment operation, and every mutation uses the exact previewed inputs.
-use std::io::{BufRead, Read as _};
+use std::io::BufRead;
 
 use super::*;
 use crate::environment_client::validate_source_selection;
@@ -27,18 +27,18 @@ pub(super) struct PlatformDocument {
 /// (mounts, host ports, local credential or secret stores) refuse the create
 /// before any request; `workspace.vm_only`, which only shapes a local VM's
 /// disk, is accepted and reported as unused.
-pub(super) fn load_platform_document(path: &Path) -> anyhow::Result<PlatformDocument> {
-    let file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut content = String::new();
-    file.take((codewire_project::MAX_PROJECT_DOCUMENT_BYTES + 1) as u64)
-        .read_to_string(&mut content)
-        .with_context(|| format!("read {}", path.display()))?;
-    let document = codewire_project::parse_project_yaml(&content)
-        .with_context(|| format!("parse {}", path.display()))?;
+/// The project document from `paths`, the files a cloud create reads, merged
+/// in order.
+pub(super) fn load_platform_document(paths: &[&Path]) -> anyhow::Result<PlatformDocument> {
+    let document = project_file::read_document(paths)?;
     document.ensure_platform_compatible().with_context(|| {
+        let names = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
         format!(
             "{} cannot configure a cloud environment; create a local VM from it, or choose another file with --file",
-            path.display()
+            names.join(" + ")
         )
     })?;
     let unused_fields = if document
@@ -590,7 +590,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("codewire.yaml");
         std::fs::write(&path, "# Resources.\nversion: 1\ncpu: 8\n").unwrap();
-        let error = load_platform_document(&path).unwrap_err();
+        let error = load_platform_document(&[&path]).unwrap_err();
         assert_eq!(
             format!("{error:#}"),
             format!(

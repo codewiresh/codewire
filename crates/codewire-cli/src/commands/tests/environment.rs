@@ -2650,9 +2650,10 @@ fn format_env_info_text_uses_go_style_labels() {
 fn prepare_platform_env_create_request(
     args: &EnvCreateArgs,
 ) -> anyhow::Result<CreateEnvironmentRequest> {
-    let source = match args.file.as_deref() {
-        Some(path) => project_file::ConfigSource::File(path.to_owned()),
-        None => project_file::ConfigSource::Flags,
+    let source = if args.file.is_empty() {
+        project_file::ConfigSource::Flags
+    } else {
+        project_file::ConfigSource::Files(args.file.clone())
     };
     prepare_platform_env_create(args, &source).map(|(request, _)| request)
 }
@@ -2678,12 +2679,58 @@ fn checkout_with_file(yaml: &str) -> (tempfile::TempDir, PathBuf) {
 }
 
 #[test]
+fn cloud_create_never_reads_the_local_file_and_merges_repeated_files() {
+    let (_temp, root) = checkout_with_file(
+        "version: 1\nimage: workspace\ninstall_command: npm ci\ncpu: \"2\"\n",
+    );
+    fs::write(
+        root.join("codewire.local.yaml"),
+        "install_command: make local\ncredentials: {profile: \"local:work\"}\n",
+    )
+    .unwrap();
+    let args = cloud_create_args(&["--name", "app-cloud"]);
+    let source = project_file::select_from(&root.join("web"), &args.file, args.no_file).unwrap();
+    let (request, provenance) = prepare_platform_env_create(&args, &source).unwrap();
+    assert_eq!(request.project_spec.install_command, "npm ci");
+    assert_eq!(
+        provenance.skipped_local_file,
+        Some(root.join("codewire.local.yaml"))
+    );
+    assert!(
+        provenance
+            .text()
+            .ends_with("; codewire.local.yaml applies to local VMs only"),
+        "{}",
+        provenance.text()
+    );
+    let args = cloud_create_args(&["--no-local-file"]);
+    let (_, provenance) = prepare_platform_env_create(&args, &source).unwrap();
+    assert_eq!(provenance.skipped_local_file, None);
+
+    fs::write(root.join("codewire.ci.yaml"), "install_command: make ci\ncpu: null\n").unwrap();
+    let args = cloud_create_args(&["--file", "codewire.yaml", "--file", "codewire.ci.yaml"]);
+    let source = project_file::select_from(&root, &args.file, args.no_file).unwrap();
+    let (request, provenance) = prepare_platform_env_create(&args, &source).unwrap();
+    assert_eq!(request.project_spec.install_command, "make ci");
+    assert_eq!(request.project_spec.resources.cpu_millicores, None);
+    assert_eq!(request.project_spec.image, "workspace");
+    assert_eq!(
+        provenance.json()["files"],
+        serde_json::json!([
+            root.join("codewire.yaml").to_string_lossy(),
+            root.join("codewire.ci.yaml").to_string_lossy(),
+        ])
+    );
+    assert!(Cli::try_parse_from(["cw", "--cloud", "create", "--file", "a.yaml", "--no-local-file"]).is_err());
+}
+
+#[test]
 fn cloud_create_uses_the_file_found_from_a_subdirectory_without_file() {
     let (_temp, root) = checkout_with_file(
         "version: 1\nimage: ghcr.io/example/workspace:1\ninstall_command: npm ci\nrepositories:\n  - source: https://example.test/org/web.git\n    destination: /workspace/web\n  - source: https://example.test/org/api.git\n    destination: /workspace/api\nworking_directory: /workspace/web\n",
     );
     let args = cloud_create_args(&["--name", "app-cloud"]);
-    let source = project_file::select_from(&root.join("web/src"), args.file.as_deref(), args.no_file).unwrap();
+    let source = project_file::select_from(&root.join("web/src"), &args.file, args.no_file).unwrap();
     assert_eq!(
         source,
         project_file::ConfigSource::Discovered(root.join("codewire.yaml"))
@@ -2708,12 +2755,12 @@ fn cloud_create_uses_the_file_found_from_a_subdirectory_without_file() {
     // --file overrides the search; a missing explicit file is an error.
     fs::write(root.join("ci.yaml"), "version: 1\ninstall_command: make ci\n").unwrap();
     let args = cloud_create_args(&["--file", "ci.yaml"]);
-    let source = project_file::select_from(&root, args.file.as_deref(), args.no_file).unwrap();
+    let source = project_file::select_from(&root, &args.file, args.no_file).unwrap();
     let (request, provenance) = prepare_platform_env_create(&args, &source).unwrap();
     assert_eq!(request.project_spec.install_command, "make ci");
     assert_eq!(provenance.json()["source"], "file");
     let args = cloud_create_args(&["--file", "missing.yaml"]);
-    let source = project_file::select_from(&root, args.file.as_deref(), args.no_file).unwrap();
+    let source = project_file::select_from(&root, &args.file, args.no_file).unwrap();
     assert!(prepare_platform_env_create(&args, &source).is_err());
 }
 
@@ -2722,7 +2769,7 @@ fn cloud_create_no_file_uses_only_the_flags() {
     let (_temp, root) = checkout_with_file("version: 1\ncpu: \"8\"\nagents: {tools: [codex]}\n");
     let args = cloud_create_args(&["--no-file", "--preset", "rust"]);
     let source =
-        project_file::select_from(&root.join("web"), args.file.as_deref(), args.no_file).unwrap();
+        project_file::select_from(&root.join("web"), &args.file, args.no_file).unwrap();
     assert_eq!(source, project_file::ConfigSource::NoFile);
     let (request, provenance) = prepare_platform_env_create(&args, &source).unwrap();
     // No size flag sends no size, so the platform default applies: 2 vCPU,
@@ -2749,7 +2796,7 @@ fn cloud_create_repo_flags_replace_the_file_repositories() {
         "--repo",
         "https://example.test/org/api.git::/workspace/api",
     ]);
-    let source = project_file::select_from(&root, None, false).unwrap();
+    let source = project_file::select_from(&root, &[], false).unwrap();
     let (request, provenance) = prepare_platform_env_create(&args, &source).unwrap();
     assert_eq!(
         request
@@ -2775,7 +2822,7 @@ fn cloud_create_first_repository_defaults_never_fill_a_selected_file() {
         "version: 1\nrepositories:\n  - source: https://example.test/org/app.git\n",
     );
     let args = cloud_create_args(&[]);
-    let source = project_file::select_from(&root, None, false).unwrap();
+    let source = project_file::select_from(&root, &[], false).unwrap();
     let (request, provenance) = prepare_platform_env_create(&args, &source).unwrap();
     assert_eq!(request.project_spec.image, CANONICAL_WORKSPACE_IMAGE);
     assert!(provenance.default_image);
@@ -2817,7 +2864,7 @@ fn cloud_create_accepts_vm_only_and_refuses_other_local_settings_naming_the_file
         "version: 1\nimage: workspace\nworkspace:\n  vm_only:\n    - target\n",
     );
     let args = cloud_create_args(&[]);
-    let source = project_file::select_from(&root.join("web"), None, false).unwrap();
+    let source = project_file::select_from(&root.join("web"), &[], false).unwrap();
     let (_, provenance) = prepare_platform_env_create(&args, &source).unwrap();
     assert_eq!(provenance.unused_fields, ["workspace.vm_only"]);
     assert!(
@@ -2841,7 +2888,7 @@ fn cloud_create_accepts_vm_only_and_refuses_other_local_settings_naming_the_file
 fn this_repository_codewire_yaml_configures_a_cloud_create() {
     let crate_directory = fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
     let repository = crate_directory.parent().unwrap().parent().unwrap();
-    let source = project_file::ConfigSource::File(repository.join("codewire.yaml"));
+    let source = project_file::ConfigSource::Files(vec![repository.join("codewire.yaml")]);
     let (request, provenance) = prepare_platform_env_create(&cloud_create_args(&[]), &source)
         .expect("the repository codewire.yaml configures a cloud environment");
     // The file names its image.
@@ -3111,7 +3158,7 @@ async fn cloud_create_sends_the_discovered_spec_to_the_platform() {
         "version: 1\nimage: ghcr.io/example/workspace:1\ninstall_command: npm ci\nstartup_script: npm run dev\nrepositories:\n  - source: https://example.test/org/web.git\n    destination: /workspace/web\n  - source: https://example.test/org/api.git\n    destination: /workspace/api\nworking_directory: /workspace/web\n",
     );
     let args = cloud_create_args(&["--name", "app-cloud", "--yes"]);
-    let source = project_file::select_from(&root.join("web/src"), None, false).unwrap();
+    let source = project_file::select_from(&root.join("web/src"), &[], false).unwrap();
     let (request, _) = prepare_platform_env_create(&args, &source).unwrap();
 
     let server = wiremock::MockServer::start().await;

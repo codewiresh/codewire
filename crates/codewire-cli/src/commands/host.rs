@@ -347,7 +347,8 @@ pub(crate) fn validate_host_create(
         || !args.repo_flags.is_empty()
         || args.backend.is_some()
         || args.path_mode.is_some()
-        || args.file.is_some()
+        || !args.file.is_empty()
+        || args.no_local_file
         || args.spec.is_some()
         || args.preset_slug.is_some()
         || args.preset_id.is_some()

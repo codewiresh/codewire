@@ -1,14 +1,15 @@
 ---
 title: codewire.yaml
 description: Describe an environment once in codewire.yaml so that cw create builds it the same way every time, locally or on the platform.
-updated: 2026-10-26
+updated: 2026-11-10
 weight: 1
 aliases: ["/guides/project-file"]
 ---
 
 `codewire.yaml` in a project's root describes the environment that project
 wants. One file describes the whole environment, including every repository
-it clones. Explicit flags override the file.
+it clones. An optional `codewire.local.yaml` beside it holds your own settings
+for local VMs, and explicit flags override both.
 
 ```sh
 cw init                                                   # writes codewire.yaml from the current directory
@@ -25,9 +26,9 @@ cw create --name app --image workspace --write-preset  # write the resolved pres
 `cw create` looks for `codewire.yaml` in the current directory (`--path`
 for `--local`) and then in each parent, up to the root of its Git
 repository; outside a Git repository it checks only that directory. The
-nearest file wins, and only that file is read: a nested repository's own
-`codewire.yaml`, and any file inside a cloned repository, is never merged
-in. `--file` selects another file and `--no-file` uses the flags alone.
+nearest file wins: a nested repository's own `codewire.yaml`, and any file
+inside a cloned repository, is never merged in. `--file` selects another
+file and `--no-file` uses the flags alone.
 
 Before it creates anything, `cw create` names the configuration it uses
 (`Configuration: ~/src/app/codewire.yaml`), and `--output json` returns it
@@ -47,10 +48,53 @@ changes. A new `cw create` reads the file again.
 direct inputs (image, commands, resources, variables) it works offline;
 resolving a preset, a repository or a branch needs a signed-in platform.
 
+## Override files
+
+A local create also reads `codewire.local.yaml` from the folder of the
+`codewire.yaml` it found, and merges it over that file. Use it for settings
+that are yours or only make sense on your machine: a `local:` credential
+profile, more CPU or memory, extra environment variables, `mounts`, host
+ports. A cloud create never reads it, and its review says so. Most projects
+keep it out of Git; `--no-local-file` skips it for one create.
+
+```yaml
+# codewire.local.yaml
+credentials:
+  profile: local:work
+memory: "16Gi"
+environment:
+  LOG_LEVEL: debug
+```
+
+Repeat `--file` to merge files you name, in order, for variants such as CI
+or a GPU machine. Named files replace the search, so `codewire.local.yaml`
+is read only if you name it:
+
+```sh
+cw create --cloud --name ci --file codewire.yaml --file codewire.ci.yaml
+```
+
+Files merge the same way however they are chosen:
+
+- mappings merge by key, at any depth (`environment`, `secrets`, `agents`,
+  `workspace`);
+- a later value or list replaces the earlier one whole, so a variant that
+  changes `repositories`, `ports` or `mounts` restates the list;
+- `key: null` in a later file removes the key, such as `cpu: null` or
+  `LOG_LEVEL: null` under `environment`.
+
+Each file must be valid YAML with known keys and value types on its own,
+but only the merged result must be a complete, valid environment. A
+relative `mounts` source resolves from the folder of the file that declares
+it. The review before creating lists every file it merged
+(`Configuration: ~/src/app/codewire.yaml + codewire.local.yaml`), and
+`--output json` lists them under `configuration.files`.
+
 ## Save an existing environment
 
 `cw export ENV` writes an environment's saved configuration as `./codewire.yaml`,
-the file the next `cw create` in that folder reads. `--file PATH` writes
+the file the next `cw create` in that folder reads. It writes one file with
+the merged result; it does not split it back into override files. `--file PATH` writes
 elsewhere, `--stdout` prints it, and an existing file is kept unless you pass
 `--force`. Export only reads: it never starts or changes the environment.
 

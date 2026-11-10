@@ -12,6 +12,7 @@ use thiserror::Error;
 pub use codewire_access::AccessProfileReference;
 
 mod normalize;
+mod overrides;
 mod platform_projection;
 mod repository;
 mod selection;
@@ -19,10 +20,13 @@ mod vm_only;
 mod yaml;
 
 #[cfg(test)]
+mod overrides_tests;
+#[cfg(test)]
 mod selection_tests;
 #[cfg(test)]
 mod yaml_tests;
 
+pub use overrides::{ProjectYamlFile, merge_project_files};
 pub use platform_projection::{
     PlatformProjectionSelection, PlatformProjectionSelectionError,
     platform_projection_reserved_keys,

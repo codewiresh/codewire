@@ -4,11 +4,14 @@
 //! Both placements search the same way: the nearest `codewire.yaml` from the
 //! start directory (`--path` for a local create, otherwise the invoking
 //! directory) up to the root of the Git worktree that holds it. Outside a Git
-//! worktree only the start directory is checked. `--file` replaces the search.
-//! Exactly one file is read: a nested repository's own file, and the files
+//! worktree only the start directory is checked. A local create also reads
+//! the `codewire.local.yaml` beside the file it found, merged over it; a cloud
+//! create never does. `--file`, repeatable, replaces the search and merges the
+//! files it names in order. A nested repository's own file, and the files
 //! inside declared repositories, are never read or merged. Start and attach
 //! read no file: an existing environment keeps its saved configuration.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -17,14 +20,20 @@ use serde::Serialize;
 use crate::commands::progress::terminal_text;
 
 pub(crate) const PROJECT_FILE_NAME: &str = "codewire.yaml";
+/// Personal and local VM settings, merged over the `codewire.yaml` beside it
+/// on a local create.
+pub(crate) const LOCAL_FILE_NAME: &str = "codewire.local.yaml";
 
-/// The file a create reads, if any.
+/// The files a create reads, if any.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ConfigSource {
     /// The nearest `codewire.yaml`, found by the search.
     Discovered(PathBuf),
-    /// The file `--file` named.
-    File(PathBuf),
+    /// The nearest `codewire.yaml` and the `codewire.local.yaml` beside it,
+    /// merged over it: a local create.
+    DiscoveredWithLocal(PathBuf, PathBuf),
+    /// The files `--file` named, merged in order; never empty.
+    Files(Vec<PathBuf>),
     /// No file was found: flags and defaults only.
     Flags,
     /// `--no-file`: flags and defaults only, without a search.
@@ -32,12 +41,73 @@ pub(crate) enum ConfigSource {
 }
 
 impl ConfigSource {
+    /// The base file: the one found, or the first `--file`.
     pub(crate) fn path(&self) -> Option<&Path> {
+        self.paths().first().copied()
+    }
+
+    /// Every file read, in merge order.
+    pub(crate) fn paths(&self) -> Vec<&Path> {
         match self {
-            ConfigSource::Discovered(path) | ConfigSource::File(path) => Some(path),
-            ConfigSource::Flags | ConfigSource::NoFile => None,
+            ConfigSource::Discovered(path) => vec![path],
+            ConfigSource::DiscoveredWithLocal(path, local) => vec![path, local],
+            ConfigSource::Files(paths) => paths.iter().map(PathBuf::as_path).collect(),
+            ConfigSource::Flags | ConfigSource::NoFile => Vec::new(),
         }
     }
+}
+
+/// The `codewire.local.yaml` beside `file`, if there is one.
+pub(crate) fn local_file_beside(file: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let Some(folder) = file.parent() else {
+        return Ok(None);
+    };
+    let local = folder.join(LOCAL_FILE_NAME);
+    match local.symlink_metadata() {
+        Ok(_) => Ok(Some(local)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("look for {}", local.display())),
+    }
+}
+
+/// The project document from `paths`, the files a create reads, merged in
+/// order. Each file is checked on its own, and a relative mount source
+/// resolves from the folder of the file that declares it.
+pub(crate) fn read_document(paths: &[&Path]) -> anyhow::Result<codewire_project::ProjectDocument> {
+    if let [path] = paths {
+        let data = read_text(path)?;
+        return codewire_project::parse_project_yaml(&data)
+            .with_context(|| format!("parse {}", path.display()));
+    }
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        let data = read_text(path)?;
+        let mut file = codewire_project::ProjectYamlFile::parse(&data)
+            .with_context(|| format!("parse {}", path.display()))?;
+        if let Some(folder) = path.parent() {
+            file.resolve_mount_sources(folder)
+                .with_context(|| format!("parse {}", path.display()))?;
+        }
+        files.push(file);
+    }
+    codewire_project::merge_project_files(files).with_context(|| {
+        let names = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        format!("merge {}", names.join(" + "))
+    })
+}
+
+/// A file's text, read no further than one byte past the document limit so
+/// the parser reports an oversized file.
+fn read_text(path: &Path) -> anyhow::Result<String> {
+    let file = std::fs::File::open(path).with_context(|| format!("read {}", path.display()))?;
+    let mut data = String::new();
+    file.take((codewire_project::MAX_PROJECT_DOCUMENT_BYTES + 1) as u64)
+        .read_to_string(&mut data)
+        .with_context(|| format!("read {}", path.display()))?;
+    Ok(data)
 }
 
 /// The nearest `codewire.yaml` from `start` (a canonical directory) up to the
@@ -72,19 +142,23 @@ pub(crate) fn invoking_directory() -> anyhow::Result<PathBuf> {
     std::fs::canonicalize(&current).with_context(|| format!("resolve {}", current.display()))
 }
 
-/// The configuration source for a create that has no `--path`: `--file`
-/// relative to the invoking directory, none with `--no-file`, or the search
-/// from it.
+/// The configuration source for a create that has no `--path`, a cloud
+/// create: each `--file` relative to the invoking directory, none with
+/// `--no-file`, or the search from it. It never reads `codewire.local.yaml`.
 pub(crate) fn select_from(
     start: &Path,
-    file: Option<&Path>,
+    files: &[PathBuf],
     no_file: bool,
 ) -> anyhow::Result<ConfigSource> {
-    match file {
-        Some(file) => Ok(ConfigSource::File(start.join(file))),
-        None if no_file => Ok(ConfigSource::NoFile),
-        None => Ok(discover(start)?.map_or(ConfigSource::Flags, ConfigSource::Discovered)),
+    if !files.is_empty() {
+        return Ok(ConfigSource::Files(
+            files.iter().map(|file| start.join(file)).collect(),
+        ));
     }
+    if no_file {
+        return Ok(ConfigSource::NoFile);
+    }
+    Ok(discover(start)?.map_or(ConfigSource::Flags, ConfigSource::Discovered))
 }
 
 /// Explicit repository inputs (positional URLs and `--repo`) replace the
@@ -141,6 +215,9 @@ pub(crate) struct Provenance {
     /// File settings this placement does not use, such as
     /// `workspace.vm_only` on a cloud create.
     pub(crate) unused_fields: Vec<&'static str>,
+    /// The `codewire.local.yaml` beside the file a cloud create found, which
+    /// only a local create reads.
+    pub(crate) skipped_local_file: Option<PathBuf>,
 }
 
 impl Provenance {
@@ -151,15 +228,33 @@ impl Provenance {
             default_image: false,
             repository_defaults: None,
             unused_fields: Vec::new(),
+            skipped_local_file: None,
         }
     }
 
-    /// One line: the file (`~/src/app/codewire.yaml`, `… (--file)`) or
-    /// `flags only`, then what else applies.
+    /// One line: the files (`~/src/app/codewire.yaml + codewire.local.yaml`,
+    /// `… (--file)`) or `flags only`, then what else applies.
     pub(crate) fn text(&self) -> String {
         let mut parts = vec![match &self.source {
             ConfigSource::Discovered(path) => shown_path(path),
-            ConfigSource::File(path) => format!("{} (--file)", shown_path(path)),
+            ConfigSource::DiscoveredWithLocal(path, _) => {
+                format!("{} + {LOCAL_FILE_NAME}", shown_path(path))
+            }
+            // A later file in the base file's folder is shown by its name.
+            ConfigSource::Files(paths) => format!(
+                "{} (--file)",
+                paths
+                    .iter()
+                    .enumerate()
+                    .map(|(index, path)| match path.file_name() {
+                        Some(name) if index > 0 && path.parent() == paths[0].parent() => {
+                            terminal_text(&name.to_string_lossy())
+                        }
+                        _ => shown_path(path),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            ),
             ConfigSource::Flags => "flags only, no codewire.yaml found".to_owned(),
             ConfigSource::NoFile => "flags only (--no-file)".to_owned(),
         }];
@@ -178,6 +273,9 @@ impl Provenance {
         for field in &self.unused_fields {
             parts.push(format!("{field} applies to local VMs only"));
         }
+        if self.skipped_local_file.is_some() {
+            parts.push(format!("{LOCAL_FILE_NAME} applies to local VMs only"));
+        }
         parts.join("; ")
     }
 
@@ -193,17 +291,22 @@ impl Provenance {
             source: &'static str,
             #[serde(skip_serializing_if = "Option::is_none")]
             path: Option<String>,
+            /// Every file read, in merge order; `path` is the first.
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            files: Vec<String>,
             repositories_from_flags: bool,
             default_image: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             platform_defaults: Option<PlatformDefaults<'a>>,
             #[serde(skip_serializing_if = "<[_]>::is_empty")]
             unused_fields: &'a [&'static str],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            skipped_local_file: Option<String>,
         }
         serde_json::to_value(Json {
             source: match self.source {
-                ConfigSource::Discovered(_) => "discovered",
-                ConfigSource::File(_) => "file",
+                ConfigSource::Discovered(_) | ConfigSource::DiscoveredWithLocal(..) => "discovered",
+                ConfigSource::Files(_) => "file",
                 ConfigSource::Flags => "flags",
                 ConfigSource::NoFile => "no_file",
             },
@@ -211,6 +314,12 @@ impl Provenance {
                 .source
                 .path()
                 .map(|path| path.to_string_lossy().into_owned()),
+            files: self
+                .source
+                .paths()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
             repositories_from_flags: self.repositories_from_flags,
             default_image: self.default_image,
             platform_defaults: self.repository_defaults.as_deref().map(|repository| {
@@ -220,6 +329,10 @@ impl Provenance {
                 }
             }),
             unused_fields: &self.unused_fields,
+            skipped_local_file: self
+                .skipped_local_file
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned()),
         })
         .expect("provenance is plain JSON")
     }
@@ -340,21 +453,37 @@ mod tests {
         std::fs::create_dir_all(root.join(".git")).unwrap();
         write(&root.join("codewire.yaml"), "version: 1\n");
         assert_eq!(
-            select_from(&root, Some(Path::new("ci.yaml")), false).unwrap(),
-            ConfigSource::File(root.join("ci.yaml"))
+            select_from(&root, &[PathBuf::from("ci.yaml")], false).unwrap(),
+            ConfigSource::Files(vec![root.join("ci.yaml")])
         );
         assert_eq!(
-            select_from(&root, None, false).unwrap(),
+            select_from(&root, &[], false).unwrap(),
             ConfigSource::Discovered(root.join("codewire.yaml"))
         );
-        assert_eq!(
-            select_from(&root, None, true).unwrap(),
-            ConfigSource::NoFile
-        );
+        assert_eq!(select_from(&root, &[], true).unwrap(), ConfigSource::NoFile);
         std::fs::remove_file(root.join("codewire.yaml")).unwrap();
+        assert_eq!(select_from(&root, &[], false).unwrap(), ConfigSource::Flags);
+    }
+
+    #[test]
+    fn the_local_file_is_found_only_beside_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = canonical(temp.path());
+        write(&root.join("codewire.yaml"), "version: 1\n");
         assert_eq!(
-            select_from(&root, None, false).unwrap(),
-            ConfigSource::Flags
+            local_file_beside(&root.join("codewire.yaml")).unwrap(),
+            None
+        );
+        write(&root.join("codewire.local.yaml"), "cpu: \"4\"\n");
+        assert_eq!(
+            local_file_beside(&root.join("codewire.yaml")).unwrap(),
+            Some(root.join("codewire.local.yaml"))
+        );
+        // A cloud create's search never selects it.
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        assert_eq!(
+            select_from(&root, &[], false).unwrap(),
+            ConfigSource::Discovered(root.join("codewire.yaml"))
         );
     }
 
@@ -441,6 +570,7 @@ mod tests {
             serde_json::json!({
                 "source": "discovered",
                 "path": "/srv/app/codewire.yaml",
+                "files": ["/srv/app/codewire.yaml"],
                 "repositories_from_flags": false,
                 "default_image": false,
             })
@@ -457,9 +587,46 @@ mod tests {
             serde_json::json!(["workspace.vm_only"])
         );
 
-        let explicit = Provenance::new(ConfigSource::File(PathBuf::from("/srv/app/ci.yaml")));
+        let explicit =
+            Provenance::new(ConfigSource::Files(vec![PathBuf::from("/srv/app/ci.yaml")]));
         assert_eq!(explicit.text(), "/srv/app/ci.yaml (--file)");
         assert_eq!(explicit.json()["source"], "file");
+
+        let merged = Provenance::new(ConfigSource::Files(vec![
+            PathBuf::from("/srv/app/codewire.yaml"),
+            PathBuf::from("/srv/app/codewire.ci.yaml"),
+        ]));
+        assert_eq!(
+            merged.text(),
+            "/srv/app/codewire.yaml + codewire.ci.yaml (--file)"
+        );
+        assert_eq!(merged.json()["path"], "/srv/app/codewire.yaml");
+        assert_eq!(
+            merged.json()["files"],
+            serde_json::json!(["/srv/app/codewire.yaml", "/srv/app/codewire.ci.yaml"])
+        );
+
+        let local = Provenance::new(ConfigSource::DiscoveredWithLocal(
+            path.clone(),
+            PathBuf::from("/srv/app/codewire.local.yaml"),
+        ));
+        assert_eq!(local.text(), "/srv/app/codewire.yaml + codewire.local.yaml");
+        assert_eq!(local.json()["source"], "discovered");
+        assert_eq!(
+            local.json()["files"],
+            serde_json::json!(["/srv/app/codewire.yaml", "/srv/app/codewire.local.yaml"])
+        );
+
+        let mut cloud = Provenance::new(ConfigSource::Discovered(path.clone()));
+        cloud.skipped_local_file = Some(PathBuf::from("/srv/app/codewire.local.yaml"));
+        assert_eq!(
+            cloud.text(),
+            "/srv/app/codewire.yaml; codewire.local.yaml applies to local VMs only"
+        );
+        assert_eq!(
+            cloud.json()["skipped_local_file"],
+            "/srv/app/codewire.local.yaml"
+        );
 
         let mut flags = Provenance::new(ConfigSource::Flags);
         flags.repository_defaults = Some("https://example.test/org/app.git".to_owned());
