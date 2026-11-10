@@ -207,8 +207,7 @@
       for (const tab of tabs.values()) {
         // An ended session has nothing to reconnect to; Replay still shows its output.
         const open = tab.socket?.readyState === WebSocket.OPEN;
-        tab.toggle.disabled = (open ? openBlocked : blocked) || !tab.available || tab.renderFailed
-          || (ended(tab.state) && tab.socket?.readyState !== WebSocket.OPEN);
+        tab.toggle.disabled = blocked || !tab.available || tab.renderFailed || ended(tab.state);
         tab.reset.disabled = blocked || !tab.available;
         const removable = !tab.available || ended(tab.state);
         tab.close.hidden = removable;
@@ -302,15 +301,15 @@
       tab.queuedBytes = 0;
       discardInput(tab);
       if (socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(socket.readyState)) socket.close(1000, "browser detached");
-      tab.toggle.textContent = "Reconnect";
+      tab.toggle.hidden = false;
       tab.root.dataset.terminalSettled = String(tab.pendingFrames === 0);
       tab.presentation.terminal.options.disableStdin = true;
       connectionText(tab, text, tone);
     }
     // Transport loss is not a decision to stop. Re-attach the same wanted
-    // session automatically; explicit Disconnect, final status, unverifiable
-    // output, render failure and unavailable sessions stay manual. Nothing
-    // here launches a shell, and input is never resent.
+    // session automatically; a final status, unverifiable output, render
+    // failure and unavailable sessions stay manual. Nothing here launches a
+    // shell, and input is never resent.
     function automatic(tab) {
       return tab.wanted && tab.available && !tab.disposed && !tab.renderFailed && !ended(tab.state);
     }
@@ -520,7 +519,8 @@
       socket.addEventListener("open", () => {
         if (tab.socket !== socket || suspended || !authorized) { socket.close(); return; }
         if (socket.protocol !== P.protocol) { detach(tab, "The terminal protocol is unavailable.", false, "danger"); return; }
-        tab.toggle.textContent = "Disconnect";
+        // An attached terminal needs no control: closing the tab detaches it.
+        tab.toggle.hidden = true;
         connectionText(tab, live(tab.state) ? "Connected" : stateLabel(tab.state), stateTone(tab.state));
         // A server that accepts and then closes must not reset the backoff.
         tab.stableTimer = setTimeout(() => {
@@ -695,9 +695,8 @@
       button.addEventListener("click", () => choose(tab.id));
       button.addEventListener("dblclick", () => { if (tab.id === active) startRename(button); });
       tab.toggle.addEventListener("click", () => {
-        // Disconnect is sticky until Reconnect. Reconnect acts immediately,
-        // including while an automatic attempt is waiting or connecting.
-        if ([WebSocket.OPEN, WebSocket.CLOSING].includes(tab.socket?.readyState)) { detach(tab); updateControls(); return; }
+        // Reconnect shows only while detached and acts immediately, including
+        // while an automatic attempt is waiting or connecting.
         tab.failures = 0;
         void refresh(tab.id);
       });

@@ -173,6 +173,9 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     await page.addInitScript(() => {
       const frames: TerminalClientFrame[] = [];
       (window as Window & { __terminalFrames?: TerminalClientFrame[] }).__terminalFrames = frames;
+      // Terminal sockets, so the journey can drop one as a lost network does.
+      const sockets = new Set<WebSocket>();
+      (window as Window & { __terminalSockets?: Set<WebSocket> }).__terminalSockets = sockets;
       const styleViolations: string[] = [];
       (window as Window & { __terminalStyleViolations?: string[] }).__terminalStyleViolations = styleViolations;
       document.addEventListener("securitypolicyviolation", (event) => {
@@ -180,7 +183,10 @@ test.describe.serial("server-rendered environment lifecycle", () => {
       });
       const nativeSend = WebSocket.prototype.send;
       WebSocket.prototype.send = function(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
-        if (typeof data === "string" && this.protocol === "codewire.durable-terminal.v1") frames.push(JSON.parse(data));
+        if (typeof data === "string" && this.protocol === "codewire.durable-terminal.v1") {
+          sockets.add(this);
+          frames.push(JSON.parse(data));
+        }
         return (nativeSend as (
           this: WebSocket,
           payload: typeof data,
@@ -307,10 +313,12 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     expect(stopRequests).toBe(0);
     test.info().annotations.push({ type: "terminal-launch", description: recoveredLaunch ? "Recovered by one Retry re-list after unknown outcome" : "Directly acknowledged" });
     const terminalRoot = page.locator(".cw-terminal-page [data-terminal-tab-panel]:not([hidden]) [data-terminal-root]");
+    // An attached terminal reads Connected and offers no control.
+    const terminalConnection = page.locator("[data-terminal-session-status]:not([hidden]) [data-terminal-connection]");
     await expect(terminalRoot.locator(".xterm")).toBeVisible({ timeout: 15_000 });
     const firstSessionId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
     expect(firstSessionId).toMatch(/^session-[0-9a-f-]{36}$/);
-    await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled({ timeout: 15_000 });
+    await expect(terminalConnection).toHaveText("Connected", { timeout: 15_000 });
     expect((await terminalRoot.boundingBox())!.height).toBeGreaterThan(180);
     expect((await page.locator(".cw-workspace-statusbar").boundingBox())!.height).toBeLessThan(60);
     await expect.poll(() => page.evaluate(() => (
@@ -331,7 +339,7 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     // The idle interval is the behavior under test, not a fixture delay: the
     // same attached browser socket must still carry the later command.
     await page.evaluate(() => new Promise((resolve) => window.setTimeout(resolve, 35_000)));
-    await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
+    await expect(terminalConnection).toHaveText("Connected");
     await terminalRoot.locator(".xterm").click();
     await page.keyboard.type("printf '__SSR_TERM_IDLE__%d__\\n' $RANDOM");
     await page.keyboard.press("Enter");
@@ -420,7 +428,7 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     await expect(page.getByRole("tab")).toHaveCount(2);
     const secondSessionId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
     expect(secondSessionId).not.toBe(firstSessionId);
-    await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
+    await expect(terminalConnection).toHaveText("Connected");
     await terminalRoot.locator(".xterm").click();
     await page.keyboard.type("printf '__SECOND_TERMINAL__%s__%s__\\n' \"${CW_DURABLE_BROWSER-unset}\" \"$$\"");
     await page.keyboard.press("Enter");
@@ -461,7 +469,7 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     // narrow-width redraw reaches xterm only after it has reflowed back (time
     // at 390 px shorter than a PTY round trip), that row is the line above
     // the prompt. Output printed before this round trip therefore cannot
-    // witness Disconnect. Resize and input frames reach the PTY in order, so
+    // witness the connection drop. Resize and input frames reach the PTY in order, so
     // output printed now follows every redraw.
     await terminalRoot.locator(".xterm").click();
     await page.keyboard.type("printf '__DURABLE_DISCONNECT__%s__%s__%s__\\n' \"$CW_DURABLE_BROWSER\" \"$PWD\" \"$$\"");
@@ -508,16 +516,24 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     expect(await terminalBeforePorts!.evaluate((element) => element === document.querySelector("[data-terminal-tab-panel]:not([hidden]) [data-terminal-root]"))).toBe(true);
     const csrfAfterPorts = (await page.context().cookies()).find((cookie) => cookie.name === "codewire_ssr_csrf")?.value;
     expect(Boolean(csrfBeforePorts) && csrfBeforePorts === csrfAfterPorts).toBe(true);
-    // Disconnect detaches the transport only: the settled terminal keeps this
-    // shell's rendered output exactly as it was.
+    // A dropped connection detaches the transport only: the terminal keeps
+    // this shell's rendered output exactly as it was and re-attaches to the
+    // same session by itself.
     const renderedBeforeDisconnect = await terminalRows.textContent();
     expect(renderedBeforeDisconnect).toContain(beforeDisconnect);
-    await page.getByRole("button", { name: "Disconnect" }).click();
+    const sessionSockets = () => page.evaluate((id) => [...(window as Window & { __terminalSockets?: Set<WebSocket> }).__terminalSockets!]
+      .filter((socket) => new URL(socket.url).searchParams.get("session_id") === id).length, firstSessionId);
+    const socketsBeforeDrop = await sessionSockets();
+    await page.evaluate((id) => {
+      for (const socket of (window as Window & { __terminalSockets?: Set<WebSocket> }).__terminalSockets!) {
+        if (socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.get("session_id") === id) socket.close(4000, "test connection drop");
+      }
+    }, firstSessionId);
+    await expect.poll(sessionSockets, { timeout: 30_000 }).toBeGreaterThan(socketsBeforeDrop);
+    await expect(terminalConnection).toHaveText("Connected");
     await expect(terminalRoot).toHaveAttribute("data-terminal-settled", "true");
     await expect(terminalRows).toContainText(beforeDisconnect);
     await expect(terminalRows).toHaveText(renderedBeforeDisconnect!);
-    await page.getByRole("button", { name: "Reconnect", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toBeEnabled();
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstSessionId!);
     await terminalRoot.locator(".xterm").click();
     await page.keyboard.type("printf '__DURABLE_RECONNECT__%s__%s__\\n' \"$CW_DURABLE_BROWSER\" \"$$\"");

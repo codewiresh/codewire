@@ -23,7 +23,8 @@ trees. Managed-Runc commit/handoff verification remains separate from the
 synthetic native projection fixture.
 
 After handoff, caller loss deliberately does not terminate the running shell.
-Disconnect releases an attachment; Stop explicitly terminates a session.
+Closing the page or losing the connection releases an attachment; Stop
+explicitly terminates a session.
 Reconnect attaches to the existing durable identity and output cursor rather
 than creating a replacement process.
 

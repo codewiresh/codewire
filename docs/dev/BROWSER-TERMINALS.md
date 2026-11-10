@@ -67,7 +67,7 @@ cannot be hidden by stale completion. Only a clean WebSocket close (1000)
 finishes the clean final-state path; abnormal closure remains visible.
 
 Browser input is bounded and batched on a fixed leading-edge interval, with a
-fixed send deadline. Disconnect or uncertain delivery discards staged input;
+fixed send deadline. A lost connection or uncertain delivery discards staged input;
 input is never replayed on reconnect. Plain Ctrl+C remains a shell interrupt;
 Copy selection and Ctrl+Shift+C copy without sending input.
 
@@ -85,11 +85,12 @@ pauses every transport but keeps the tabs wanted. When readiness returns, the
 dashboard refreshes the inventory and re-attaches the surviving sessions.
 
 Automatic recovery never launches, restarts or stops a shell and never resends
-input. Explicit Disconnect, a final session status, unverifiable output, a
-rendering failure and a rendering queue that does not drain stay manual until
-Reconnect or Replay recent output. Reconnect always acts immediately. Hidden or
-suspended pages make no attempts; returning to the page revalidates the account
-before re-attaching.
+input. A final session status, unverifiable output, a rendering failure and a
+rendering queue that does not drain stay manual until Reconnect or Replay recent
+output. An attached tab offers no Disconnect; its status reads Connected, in
+green. Reconnect shows only while a tab is detached and always acts immediately.
+Hidden or suspended pages make no attempts; returning to the page revalidates
+the account before re-attaching.
 
 Focused synthetic controller/adapter tests establish these protocol and browser
 rules, not managed sandbox acceptance. The checked-in authenticated browser and

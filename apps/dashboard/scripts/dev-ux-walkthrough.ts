@@ -1,6 +1,6 @@
 // Runs ONLY inside the existing protected Dev auth helper. No traces, page
 // dumps, screenshots, stored browser sessions, or provider authorizations.
-import { expect, request, type Locator, type Page } from "@playwright/test";
+import { expect, request, type Locator, type Page, type WebSocketRoute } from "@playwright/test";
 import { DevUxError, failureClassOf, type OwnedUxSandbox } from "./dev-ux-ownership";
 
 const ORIGIN = "https://codewire-dev.sh";
@@ -10,6 +10,10 @@ const ORIGIN = "https://codewire-dev.sh";
 const TERMINAL_ATTACH_MS = 30_000;
 const button = (owner: Page | Locator, name: string) => owner.getByRole("button", { name, exact: true });
 const dialog = (page: Page, name: string) => page.getByRole("dialog", { name, exact: true });
+// The selected terminal's connection status. An attached terminal reads
+// Connected and offers no control; Reconnect shows only while it is detached.
+const terminalConnection = (page: Page) => page.locator("[data-terminal-session-status]:not([hidden]) [data-terminal-connection]");
+const attachedTerminal = (page: Page, timeout: number) => expect(terminalConnection(page)).toHaveText("Connected", { timeout });
 // The Sandbox workspace keeps terminal actions and Sandbox actions in two
 // menus; open one, as a person does, before using what it holds.
 async function workspaceMenu(page: Page, menu: "Terminal actions" | "More actions"): Promise<Locator> {
@@ -45,10 +49,9 @@ async function shellFailure(page: Page, rows: Locator, echo: string, marker: Reg
   const status = page.locator("[data-terminal-session-status]:not([hidden])");
   const read = async (locator: Locator) => (await locator.textContent({ timeout: 1_000 }).catch(() => "")) ?? "";
   const connection = (await read(status.locator("[data-terminal-connection]"))).trim();
-  const toggle = (await read(status.locator("[data-terminal-toggle]"))).trim();
   const text = await rows.innerText({ timeout: 1_000 }).catch(() => "");
   if (/^(Sandbox status is unavailable|Checking )/.test(connection)) return "paused";
-  if (toggle !== "Disconnect") return "detached";
+  if (connection !== "Connected") return "detached";
   if (marker.test(text)) return "mismatch";
   return text.includes(echo) ? "no-output" : "no-echo";
 }
@@ -456,7 +459,7 @@ async function themes(page: Page, terminal: Locator, rows: Locator, options: {
     await expect(terminal.locator(".xterm-scrollable-element")).toHaveCSS("background-color", "rgb(10, 10, 10)");
     await expect(rows).toHaveCSS("color", "rgb(228, 228, 231)");
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", sessionId);
-    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
+    await attachedTerminal(page, TERMINAL_ATTACH_MS);
   };
   let shown = "system";
   for (const theme of ["light", "dark"] as const) {
@@ -491,6 +494,14 @@ export async function runDevUxWalkthrough(page: Page, options: {
   const { slug, userId, orgId, owned, deadline } = options;
   page.setDefaultTimeout(15_000);
   page.setDefaultNavigationTimeout(30_000);
+  // Terminal sockets pass through unchanged. The reconnect journey drops the
+  // selected one from the server side, as an upstream restart does: the page
+  // offers no Disconnect.
+  const terminalSockets: Array<{ sessionId: string | null; server: WebSocketRoute }> = [];
+  await page.routeWebSocket("**/terminal?**", (socket) => {
+    terminalSockets.push({ sessionId: new URL(socket.url()).searchParams.get("session_id"), server: socket.connectToServer() });
+  });
+  const socketsOf = (id: string | null) => terminalSockets.filter((socket) => socket.sessionId === id);
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
     await credentials(page, slug, width);
@@ -572,7 +583,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(button(page, "New terminal")).toBeEnabled({ timeout: 60_000 });
   }, accepted);
   await stage("terminal-attach", async () => {
-    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: 60_000 });
+    await attachedTerminal(page, 60_000);
     firstId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
     expect(firstId).toBeTruthy();
   });
@@ -613,7 +624,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await visit(page, detailPath);
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstId!);
     await expect(rows).toContainText(`__UX_PID__${pid}__`);
-    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
+    await attachedTerminal(page, TERMINAL_ATTACH_MS);
   });
   await stage("terminal-tabs-second", async () => {
     await button(page, "New terminal").click();
@@ -621,7 +632,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     secondId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
     expect(secondId).toBeTruthy();
     expect(secondId).not.toBe(firstId);
-    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
+    await attachedTerminal(page, TERMINAL_ATTACH_MS);
     await send("printf '__UX_SECOND__%s__%s__\\n' \"${CW_UX_SESSION-unset}\" \"$$\"");
     await expect(rows).toContainText(/__UX_SECOND__unset__\d+__/);
     expect(/__UX_SECOND__unset__(\d+)__/.exec(await rows.innerText())![1]).not.toBe(pid);
@@ -640,23 +651,26 @@ export async function runDevUxWalkthrough(page: Page, options: {
   await stage("terminal-tabs-reconnect-select", async () => {
     await page.getByRole("tab", { name: "UX shell", exact: true }).click();
   });
-  // A restored tab may still be attaching after the reload. Disconnect is
-  // offered when the socket opens and the replay follows it; a click before
-  // the replay leaves nothing on screen for the next step to find retained.
+  // A restored tab may still be attaching after the reload. The replay
+  // follows the socket's opening; a drop before it leaves nothing on screen
+  // for the next step to find retained.
   await stage("terminal-tabs-reconnect-attached", async () => {
-    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
+    await attachedTerminal(page, TERMINAL_ATTACH_MS);
     await expect(rows).toContainText(`__UX_PID__${pid}__`);
   });
-  await stage("terminal-tabs-reconnect-disconnect", async () => {
-    await button(page, "Disconnect").click();
-    await expect(button(page, "Reconnect")).toBeEnabled();
+  // The connection drops and the tab re-attaches by itself to the same shell.
+  await stage("terminal-tabs-reconnect-drop", async () => {
+    const selected = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
+    const before = socketsOf(selected);
+    expect(before.length, "the selected terminal's socket").toBeGreaterThan(0);
+    await before.at(-1)!.server.close({ code: 1011, reason: "walkthrough connection drop" });
+    await expect.poll(() => socketsOf(selected).length, { timeout: TERMINAL_ATTACH_MS }).toBeGreaterThan(before.length);
   });
   await stage("terminal-tabs-reconnect-retained", async () => {
     await expect(rows).toContainText(`__UX_PID__${pid}__`);
   });
   await stage("terminal-tabs-reconnect-attach", async () => {
-    await button(page, "Reconnect").click();
-    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
+    await attachedTerminal(page, TERMINAL_ATTACH_MS);
   });
   await stage("terminal-tabs-reconnect-shell", async () => {
     // Always print, so a changed shell reports a mismatch instead of silence.
@@ -685,7 +699,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(page.getByRole("tabpanel")).toHaveAttribute("data-terminal-session-id", firstId!);
   });
   await stage("terminal-tabs-survivor-connected", async () => {
-    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
+    await attachedTerminal(page, TERMINAL_ATTACH_MS);
   });
   // Closing the confirmation dialog must leave keyboard input with the
   // surviving terminal before anything is typed into it.
@@ -794,7 +808,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     // The dialog must leave the live terminal intact. Check its latest
     // output: earlier lines may have scrolled out of the visible rows.
     await expect(rows).toContainText("__UX_PREVIEW_ready__");
-    await expect(button(page, "Disconnect")).toBeEnabled({ timeout: TERMINAL_ATTACH_MS });
+    await attachedTerminal(page, TERMINAL_ATTACH_MS);
   });
   await stage("resize-dismissal", async () => {
     // The detail page shows the exact resources and the scheduled deletion
