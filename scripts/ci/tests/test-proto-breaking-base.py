@@ -36,9 +36,13 @@ class GitFixture(unittest.TestCase):
         self.addCleanup(patch.stop)
 
     def git(self, directory, *arguments, check=True):
+        # Only a hang guard: prompts are off and nothing here waits on the
+        # network. A starved Policy runner ran these local clones past 10 s
+        # (#4018: the whole job about 4x slower than usual), so the bound is
+        # the policy's own fetch bound, not a speed expectation.
         try:
             return subprocess.run(["git", *arguments], cwd=directory, capture_output=True,
-                                  text=True, check=check, timeout=10)
+                                  text=True, check=check, timeout=60)
         except subprocess.CalledProcessError as error:
             self.fail(f"synthetic Git command {error.cmd!r} exited {error.returncode}\n"
                       f"stdout:\n{error.stdout}\nstderr:\n{error.stderr}")
