@@ -201,3 +201,118 @@ async fn fragments_send_the_session_check_and_organization_read_together() {
         assert_eq!(count(&calls, "/ListOrganizations"), 1, "{path} {calls:?}");
     }
 }
+
+/// The settings pages answer like organization pages: the session check and
+/// the organization read leave together, or the paired upstream fails the
+/// session check and no later read is sent.
+#[tokio::test]
+async fn settings_pages_send_the_session_check_and_organization_read_together() {
+    for (path, next) in [
+        ("/settings/", "/api/auth/sessions"),
+        ("/settings/credentials/", "/GetGitIdentity"),
+    ] {
+        let (_, _, calls) = get(path).await;
+        assert_eq!(
+            count(&calls, "/api/auth/get-session"),
+            1,
+            "{path} {calls:?}"
+        );
+        assert_eq!(count(&calls, "/ListOrganizations"), 1, "{path} {calls:?}");
+        assert!(
+            count(&calls, next) >= 1,
+            "{path} reads past the shell: {calls:?}"
+        );
+    }
+}
+
+/// An upstream for the credentials page: the session, organizations, Git
+/// identity, credentials and profiles answer at once, with a GitHub
+/// credential when `github` is set. The live GitHub permission check never
+/// answers, so a page that waits for it would take its full deadline.
+async fn credentials_upstream(github: bool) -> TestServer {
+    use codewire_proto::codewire::{
+        console::v1::GetGitIdentityResponse,
+        v1::{
+            Credential, CredentialAuthenticationKind, CredentialStatus, ListAccessProfilesResponse,
+            ListCredentialsResponse,
+        },
+    };
+    let router = Router::new().fallback(any(move |request: axum::extract::Request| async move {
+        let path = request.uri().path().to_owned();
+        if path == "/api/auth/get-session" {
+            return Json(serde_json::json!({"user": {"id": "synthetic-account", "email": "synthetic@example.test", "two_factor_enabled": true}})).into_response();
+        }
+        if path.ends_with("/ListGithubPendingPermissions") {
+            std::future::pending::<()>().await;
+        }
+        let bytes = if path.ends_with("/ListOrganizations") {
+            ListOrganizationsResponse::default().encode_to_vec()
+        } else if path.ends_with("/GetGitIdentity") {
+            GetGitIdentityResponse::default().encode_to_vec()
+        } else if path.ends_with("/ListAccessProfiles") {
+            ListAccessProfilesResponse::default().encode_to_vec()
+        } else if path.ends_with("/ListCredentials") {
+            ListCredentialsResponse {
+                credentials: if github {
+                    vec![Credential {
+                        id: "00000000-0000-4000-8000-000000000021".into(),
+                        name: "Synthetic GitHub".into(),
+                        provider: "github".into(),
+                        authentication_kind: CredentialAuthenticationKind::Oauth.into(),
+                        status: CredentialStatus::Active.into(),
+                        revocation_generation: 1,
+                        ..Default::default()
+                    }]
+                } else {
+                    Vec::new()
+                },
+                ..Default::default()
+            }
+            .encode_to_vec()
+        } else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        ([(header::CONTENT_TYPE, "application/proto")], bytes).into_response()
+    }));
+    serve(router).await
+}
+
+/// Without a GitHub connection the page does not wait for the live GitHub
+/// permission check; with one it does, and its timing says so.
+#[tokio::test]
+async fn the_credentials_page_waits_for_github_only_while_github_is_connected() {
+    for github in [false, true] {
+        let upstream = credentials_upstream(github).await;
+        let dashboard = serve(crate::app(config(&upstream.origin))).await;
+        let started = std::time::Instant::now();
+        let response = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap()
+            .get(format!("{}/settings/credentials/", dashboard.origin))
+            .headers(session())
+            .send()
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(response.status(), StatusCode::OK, "github {github}");
+        let timing = response
+            .headers()
+            .get("server-timing")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let phases: Vec<&str> = timing
+            .split(", ")
+            .map(|phase| phase.split(';').next().unwrap_or_default())
+            .collect();
+        if github {
+            assert_eq!(phases, ["shell", "reads", "github"], "{timing}");
+        } else {
+            assert_eq!(phases, ["shell", "reads"], "{timing}");
+            // The check's own deadline is 2 s; the page never reaches it.
+            assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+        }
+    }
+}

@@ -120,7 +120,7 @@ pub(super) async fn dashboard_shell_view(
 /// at orchestration, and it changes nothing; its result is used only after
 /// the session check has succeeded and two-factor is enforced. Sending both
 /// at once saves one service round trip on every organization page.
-async fn identity_and_organizations(
+pub(super) async fn identity_and_organizations(
     state: &AppState,
     headers: &HeaderMap,
     cookie: axum::http::HeaderValue,
@@ -206,11 +206,22 @@ pub(super) async fn personal_settings_shell_view(
     if !crate::account_sessions::cookie_authority_is_unique(headers) {
         return Err(WebError::Unauthorized);
     }
-    let identity = authenticated_identity(state, headers).await?;
-    enforce_two_factor(&identity)?;
     let cookie = canonical_cookie(headers).map_err(|()| WebError::Unauthorized)?;
-    personal_settings_shell_view_from_identity(state, headers, &identity, cookie, selected_slug)
-        .await
+    // The organization read leaves with the session check, as on organization
+    // pages; its result is used only once the session and two-factor pass.
+    let (identity, organizations) =
+        identity_and_organizations(state, headers, cookie.clone()).await;
+    let identity = identity?;
+    enforce_two_factor(&identity)?;
+    personal_settings_shell_view_from_rows(
+        state,
+        headers,
+        &identity,
+        cookie,
+        selected_slug,
+        organizations,
+    )
+    .await
 }
 
 pub(super) async fn personal_settings_shell_view_from_identity(
@@ -220,10 +231,27 @@ pub(super) async fn personal_settings_shell_view_from_identity(
     cookie: axum::http::HeaderValue,
     selected_slug: &str,
 ) -> Result<DashboardView, WebError> {
-    let dependency = resolve_web(
-        PageDependency::PersonalSettingsOrganizations,
-        organizations(state, cookie.clone()).await,
-    )?;
+    let organizations = organizations(state, cookie.clone()).await;
+    personal_settings_shell_view_from_rows(
+        state,
+        headers,
+        identity,
+        cookie,
+        selected_slug,
+        organizations,
+    )
+    .await
+}
+
+pub(super) async fn personal_settings_shell_view_from_rows(
+    state: &AppState,
+    headers: &HeaderMap,
+    identity: &IdentityUser,
+    cookie: axum::http::HeaderValue,
+    selected_slug: &str,
+    organizations: Result<Vec<OrganizationRow>, WebError>,
+) -> Result<DashboardView, WebError> {
+    let dependency = resolve_web(PageDependency::PersonalSettingsOrganizations, organizations)?;
     let (organizations, unavailable) = match dependency {
         DependencyResult::Available(rows) => (rows, false),
         DependencyResult::Unavailable => (Vec::new(), true),

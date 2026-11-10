@@ -27,6 +27,7 @@ mod response;
 mod routes;
 mod secrets_presets_connect;
 mod security;
+mod server_timing;
 mod state;
 mod templates;
 mod time_display;

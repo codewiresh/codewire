@@ -21,7 +21,7 @@ use crate::{
     templates::{AccountDeletionTemplate, AuthStatusTemplate, SettingsTemplate},
     view::{
         AccountDeletionOrganizationView, AccountDeletionPageView, AccountSessionRowView,
-        DashboardView, SettingsPageView, TwoFactorDialogView,
+        DashboardView, OrganizationRow, SettingsPageView, TwoFactorDialogView,
     },
 };
 
@@ -65,7 +65,15 @@ pub(super) async fn settings(
     if !account_sessions::cookie_authority_is_unique(&headers) {
         return login_redirect(&continuation, &headers);
     }
-    let identity = match authenticated_identity(&state, &headers).await {
+    let cookie = match canonical_cookie(&headers) {
+        Ok(cookie) => cookie,
+        Err(()) => return login_redirect(&continuation, &headers),
+    };
+    // The organization read leaves with the session check, as on organization
+    // pages; its result is used only once the session and two-factor pass.
+    let (identity, organizations) =
+        super::dashboard::identity_and_organizations(&state, &headers, cookie.clone()).await;
+    let identity = match identity {
         Ok(identity) => identity,
         Err(WebError::Unauthorized) => return login_redirect(&continuation, &headers),
         Err(error) => return error_page(error),
@@ -73,15 +81,12 @@ pub(super) async fn settings(
     if enforce_two_factor(&identity).is_err() {
         return two_factor_redirect(&continuation, &headers);
     }
-    let cookie = match canonical_cookie(&headers) {
-        Ok(cookie) => cookie,
-        Err(()) => return login_redirect(&continuation, &headers),
-    };
     let mut page = match account_page(
         &state,
         &headers,
         &identity,
         cookie,
+        organizations,
         &query.org,
         query.cursor.as_deref(),
     )
@@ -107,15 +112,17 @@ async fn account_page(
     headers: &HeaderMap,
     identity: &IdentityUser,
     cookie: HeaderValue,
+    organizations: Result<Vec<OrganizationRow>, WebError>,
     selected_org: &str,
     cursor: Option<&str>,
 ) -> Result<AccountPage, Response> {
-    let dashboard = match super::dashboard::personal_settings_shell_view_from_identity(
+    let dashboard = match super::dashboard::personal_settings_shell_view_from_rows(
         state,
         headers,
         identity,
         cookie.clone(),
         selected_org,
+        organizations,
     )
     .await
     {
@@ -273,9 +280,18 @@ async fn factor_change_page(
     }
     let cookie =
         canonical_cookie(headers).map_err(|()| private(login_redirect(SETTINGS_PATH, headers)))?;
-    let page = account_page(state, headers, &identity, cookie.clone(), "", None)
-        .await
-        .map_err(private)?;
+    let organizations = crate::connect::organizations(state, cookie.clone()).await;
+    let page = account_page(
+        state,
+        headers,
+        &identity,
+        cookie.clone(),
+        organizations,
+        "",
+        None,
+    )
+    .await
+    .map_err(private)?;
     Ok((page, cookie))
 }
 

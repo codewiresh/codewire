@@ -29,6 +29,7 @@ use crate::{
         github_app_authorization_continuation, github_app_authorization_cookie, new_csrf_token,
         page_csrf_token, with_csrf_cookie, with_response_cookie,
     },
+    server_timing::ServerTiming,
     state::AppState,
     templates::CredentialSettingsTemplate,
     view::{
@@ -122,6 +123,7 @@ async fn render_page(
     rejected: Option<RejectedAddition<'_>>,
 ) -> Response {
     let continuation = page_path(query);
+    let mut timing = ServerTiming::start();
     let dashboard =
         match super::dashboard::personal_settings_shell_view(state, headers, &query.org).await {
             Ok(view) => view,
@@ -131,32 +133,49 @@ async fn render_page(
             }
             Err(error) => return error_page(error),
         };
+    timing.mark("shell");
     let cookie = match canonical_cookie(headers) {
         Ok(cookie) => cookie,
         Err(()) => return login_redirect(&continuation, headers),
     };
-    let git_identity = match git_identity_data(state, cookie.clone()).await {
+    // The live GitHub permission status runs beside the metadata reads and
+    // never holds the page up for long. A page load another site started
+    // renders without it, so a link elsewhere cannot make the dashboard call
+    // GitHub or renew a token (#2712). It matters only while the person's own
+    // GitHub connection is active, so once the credentials show none the page
+    // stops waiting for it.
+    let live = credentials_connect::live_check_allowed(headers, &state.public_origin);
+    let github_cookie = cookie.clone();
+    let github = async move {
+        if live {
+            credentials_connect::github_pending_permissions(state, github_cookie).await
+        } else {
+            Vec::new()
+        }
+    };
+    tokio::pin!(github);
+    let reads = async {
+        tokio::join!(
+            git_identity_data(state, cookie.clone()),
+            credentials_connect::settings_data(state, cookie.clone()),
+        )
+    };
+    tokio::pin!(reads);
+    let mut github_pending = None;
+    let (git_identity, data) = loop {
+        tokio::select! {
+            reads = &mut reads => break reads,
+            pending = &mut github, if github_pending.is_none() => github_pending = Some(pending),
+        }
+    };
+    timing.mark("reads");
+    let git_identity = match git_identity {
         Ok(identity) => identity,
         Err(WebError::Connect(error)) if error.code == ErrorCode::Unauthenticated => {
             return login_redirect(&continuation, headers);
         }
         Err(error) => return error_page(error),
     };
-    // The live GitHub permission status runs beside the metadata reads and
-    // never holds the page up for long. A page load another site started
-    // renders without it, so a link elsewhere cannot make the dashboard call
-    // GitHub or renew a token (#2712).
-    let live = credentials_connect::live_check_allowed(headers, &state.public_origin);
-    let (data, github_pending) = tokio::join!(
-        credentials_connect::settings_data(state, cookie.clone()),
-        async {
-            if live {
-                credentials_connect::github_pending_permissions(state, cookie).await
-            } else {
-                Vec::new()
-            }
-        },
-    );
     let data = match data {
         Ok(data) => data,
         Err(error) if error.code == ErrorCode::Unauthenticated => {
@@ -193,6 +212,16 @@ async fn render_page(
         .credentials
         .iter()
         .any(|credential| credential.oauth_provider == "github" && !credential.revoked);
+    let github_pending = if github_connected {
+        let pending = match github_pending {
+            Some(pending) => pending,
+            None => github.await,
+        };
+        timing.mark("github");
+        pending
+    } else {
+        Vec::new()
+    };
     let page = CredentialSettingsView {
         navigation_query: page_query(query),
         creation_return_url: if dashboard.has_selected_organization {
@@ -219,17 +248,13 @@ async fn render_page(
         message: approved_message(message).into(),
         error: approved_error(error).into(),
         retained_name: retained_name.into(),
-        github_accept: if github_connected {
-            github_pending
-                .into_iter()
-                .map(|pending| GithubAcceptView {
-                    url: pending.settings_url().unwrap_or_default(),
-                    account: pending.account,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        },
+        github_accept: github_pending
+            .into_iter()
+            .map(|pending| GithubAcceptView {
+                url: pending.settings_url().unwrap_or_default(),
+                account: pending.account,
+            })
+            .collect(),
     };
     let mut response = with_csrf_cookie(
         render_credential_settings_page(CredentialSettingsTemplate {
@@ -241,6 +266,7 @@ async fn render_page(
     if rejected.is_some() && response.status() == StatusCode::OK {
         *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
     }
+    timing.apply(&mut response);
     response
 }
 
