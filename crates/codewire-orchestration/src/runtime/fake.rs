@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::sync::oneshot;
 
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
@@ -37,6 +38,13 @@ pub(crate) struct FakeRuntimeDriver {
     pub claim_readiness: Mutex<Option<Result<ClaimReadiness, String>>>,
     /// Every placement a method was asked about, in order.
     pub placements: Mutex<Vec<Placement>>,
+    /// Each step of a capture's keep asked for, in order.
+    pub snapshot_calls: Mutex<Vec<String>>,
+    /// What waiting for the kept snapshot answers, its restore size.
+    pub kept_size: Mutex<Option<String>>,
+    /// When set, keeping the cleared volume says it has begun on the sender,
+    /// then waits for the receiver before it returns.
+    pub keep_gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
 
 #[async_trait]
@@ -314,20 +322,36 @@ impl RuntimeSnapshots for FakeRuntimeDriver {
     async fn keep_cleared_volume(
         &self,
         _placement: &Placement,
-        _snapshot_id: &str,
-        _snapshot_class: &str,
+        snapshot_id: &str,
+        snapshot_class: &str,
     ) -> anyhow::Result<()> {
-        anyhow::bail!("not scripted")
+        self.snapshot_calls
+            .lock()
+            .unwrap()
+            .push(format!("keep {snapshot_id} {snapshot_class}"));
+        let gate = self.keep_gate.lock().unwrap().take();
+        if let Some((begun, release)) = gate {
+            begun.send(()).expect("the test waits for the keep");
+            release.await.expect("the test releases the keep");
+        }
+        Ok(())
     }
 
     async fn wait_snapshot(
         &self,
         _placement: &Placement,
-        _snapshot_id: &str,
-        _stage: CaptureStage,
+        snapshot_id: &str,
+        stage: CaptureStage,
         _timeout: Duration,
     ) -> anyhow::Result<String> {
-        anyhow::bail!("not scripted")
+        self.snapshot_calls
+            .lock()
+            .unwrap()
+            .push(format!("wait {snapshot_id} {stage:?}"));
+        match (stage, self.kept_size.lock().unwrap().clone()) {
+            (CaptureStage::Kept, Some(size)) => Ok(size),
+            _ => anyhow::bail!("not scripted"),
+        }
     }
 
     async fn raw_snapshot_mode(
@@ -357,20 +381,28 @@ impl RuntimeSnapshots for FakeRuntimeDriver {
     async fn stop_clearing(
         &self,
         _placement: &Placement,
-        _snapshot_id: &str,
+        snapshot_id: &str,
         _timeout: Duration,
     ) -> anyhow::Result<()> {
-        anyhow::bail!("not scripted")
+        self.snapshot_calls
+            .lock()
+            .unwrap()
+            .push(format!("stop {snapshot_id}"));
+        Ok(())
     }
 
     async fn delete_capture(
         &self,
         _placement: &Placement,
-        _snapshot_id: &str,
-        _kept: KeptSnapshot,
+        snapshot_id: &str,
+        kept: KeptSnapshot,
         _timeout: Duration,
     ) -> anyhow::Result<()> {
-        anyhow::bail!("not scripted")
+        self.snapshot_calls
+            .lock()
+            .unwrap()
+            .push(format!("delete {snapshot_id} {kept:?}"));
+        Ok(())
     }
 }
 

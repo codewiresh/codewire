@@ -324,17 +324,28 @@ fn log_clearing_report(snapshot_id: &str, volume_mode: VolumeMode, report: Optio
 /// activity, so `ready` means the raw snapshot is gone.
 pub async fn keep_and_finish(ctx: &WorkerContext, snapshot_id: &str) -> anyhow::Result<()> {
     let (runtime, placement) = require_runtime(ctx)?;
-    let class = snapshot_class(ctx)?.to_owned();
-    if capturing_source(&ctx.pool, snapshot_id).await?.is_none() {
+    let class = snapshot_class(ctx)?;
+    keep_cleared(&ctx.pool, runtime, &placement, class, snapshot_id).await
+}
+
+/// [`keep_and_finish`] over its parts, so a test can drive it with a fake.
+async fn keep_cleared(
+    pool: &PgPool,
+    runtime: &dyn RuntimeDriver,
+    placement: &Placement,
+    class: &str,
+    snapshot_id: &str,
+) -> anyhow::Result<()> {
+    if capturing_source(pool, snapshot_id).await?.is_none() {
         return Ok(());
     }
     runtime
-        .stop_clearing(&placement, snapshot_id, OBJECT_TIMEOUT)
+        .stop_clearing(placement, snapshot_id, OBJECT_TIMEOUT)
         .await?;
     if create_while_capturing(
-        &ctx.pool,
+        pool,
         snapshot_id,
-        runtime.keep_cleared_volume(&placement, snapshot_id, &class),
+        runtime.keep_cleared_volume(placement, snapshot_id, class),
     )
     .await?
     .is_none()
@@ -342,15 +353,10 @@ pub async fn keep_and_finish(ctx: &WorkerContext, snapshot_id: &str) -> anyhow::
         return Ok(());
     }
     let restore_size = runtime
-        .wait_snapshot(&placement, snapshot_id, CaptureStage::Kept, OBJECT_TIMEOUT)
+        .wait_snapshot(placement, snapshot_id, CaptureStage::Kept, OBJECT_TIMEOUT)
         .await?;
     runtime
-        .delete_capture(
-            &placement,
-            snapshot_id,
-            KeptSnapshot::Retain,
-            OBJECT_TIMEOUT,
-        )
+        .delete_capture(placement, snapshot_id, KeptSnapshot::Retain, OBJECT_TIMEOUT)
         .await?;
     sqlx::query(
         "UPDATE hosted_snapshots
@@ -359,7 +365,7 @@ pub async fn keep_and_finish(ctx: &WorkerContext, snapshot_id: &str) -> anyhow::
     )
     .bind(snapshot_id)
     .bind(quantity_bytes(&restore_size))
-    .execute(&ctx.pool)
+    .execute(pool)
     .await?;
     Ok(())
 }
@@ -664,6 +670,139 @@ mod tests {
                 .unwrap(),
             "a capture that finished keeps its snapshot"
         );
+
+        sqlx::query("DELETE FROM hosted_snapshots WHERE org_id = $1")
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// The kept snapshot is taken only after the clearing Pod has stopped, and
+    /// while the capture's row is held, so an abandonment can't finish its
+    /// deletes before it. `ready` comes last.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_the_kept_snapshot_is_taken_after_the_clearing_stops_under_the_capture_lock() {
+        use crate::runtime::fake::FakeRuntimeDriver;
+        use tokio::sync::oneshot;
+
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("ignored DB test requires TEST_DATABASE_URL");
+        let pool = PgPoolOptions::new()
+            .max_connections(3)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let user = format!("user_snapshot_keep_{suffix}");
+        let org = format!("org-keep-{suffix}");
+        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+            .bind(&user)
+            .bind(format!("{user}@example.test"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $1, $1, $2)",
+        )
+        .bind(&org)
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let capturing = format!("capturing-{suffix}");
+        let settled = format!("settled-{suffix}");
+        for (id, state, failure) in [
+            (&capturing, "capturing", None),
+            (&settled, "failed", Some(FAILURE_CAPTURE)),
+        ] {
+            sqlx::query(
+                "INSERT INTO hosted_snapshots
+                   (id, org_id, created_by, source_environment_id, name, state, failure_code)
+                 VALUES ($1, $2, $3, 'env', $1, $4, $5)",
+            )
+            .bind(id)
+            .bind(&org)
+            .bind(&user)
+            .bind(state)
+            .bind(failure)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let (begun_tx, begun) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let runtime = FakeRuntimeDriver {
+            kept_size: Some("2Gi".to_owned()).into(),
+            keep_gate: Some((begun_tx, release_rx)).into(),
+            ..Default::default()
+        };
+        let placement = Placement::new("sandboxes");
+        let keep = keep_cleared(&pool, &runtime, &placement, "class", &capturing);
+        tokio::pin!(keep);
+        // A keep_cleared that returns before its keep fails here, never waits.
+        tokio::select! {
+            kept = &mut keep => panic!("the capture ended before its keep: {kept:?}"),
+            begun = begun => begun.unwrap(),
+        }
+        assert_eq!(
+            *runtime.snapshot_calls.lock().unwrap(),
+            [
+                format!("stop {capturing}"),
+                format!("keep {capturing} class")
+            ],
+            "the clearing Pod stops before the kept snapshot is taken"
+        );
+        let error = sqlx::query("SELECT 1 FROM hosted_snapshots WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(&capturing)
+            .execute(&pool)
+            .await
+            .expect_err("the kept snapshot is taken while the capture is held");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("55P03"),
+            "{error}"
+        );
+        release.send(()).unwrap();
+        keep.await.unwrap();
+        assert_eq!(
+            *runtime.snapshot_calls.lock().unwrap(),
+            [
+                format!("stop {capturing}"),
+                format!("keep {capturing} class"),
+                format!("wait {capturing} Kept"),
+                format!("delete {capturing} Retain"),
+            ]
+        );
+        let (state, size): (String, Option<i64>) =
+            sqlx::query_as("SELECT state, size_bytes FROM hosted_snapshots WHERE id = $1")
+                .bind(&capturing)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((state.as_str(), size), ("ready", Some(2 << 30)));
+
+        // A retry of a capture that has settled touches nothing.
+        runtime.snapshot_calls.lock().unwrap().clear();
+        keep_cleared(&pool, &runtime, &placement, "class", &settled)
+            .await
+            .unwrap();
+        assert!(runtime.snapshot_calls.lock().unwrap().is_empty());
 
         sqlx::query("DELETE FROM hosted_snapshots WHERE org_id = $1")
             .bind(&org)
