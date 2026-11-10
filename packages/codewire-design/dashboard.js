@@ -1278,3 +1278,45 @@ if (app) {
     if (event.target instanceof Element) enhanceAll(event.target);
   });
 })();
+
+// Copy a command (data-copy-command, the text of its box's <code>) or an
+// agent prompt (data-copy-prompt, its data-copy-text). The button says it
+// worked with a check for a moment; where the Clipboard API is unavailable
+// the text is selected so the keyboard can copy it.
+(() => {
+  "use strict";
+  const icon = (button, name) => {
+    const use = button.querySelector("use");
+    if (use) use.setAttribute("href", use.getAttribute("href").replace(/#icon-[a-z-]+$/, `#icon-${name}`));
+  };
+  document.addEventListener("click", async (event) => {
+    if (!(event.target instanceof Element)) return;
+    const button = event.target.closest("[data-copy-command], [data-copy-prompt]");
+    if (!(button instanceof HTMLButtonElement)) return;
+    const code = button.hasAttribute("data-copy-command") ? button.parentElement?.querySelector("code") : null;
+    const text = code ? code.textContent : button.dataset.copyText;
+    if (!text) return;
+    const label = button.getAttribute("aria-label");
+    try {
+      if (!navigator.clipboard || !window.isSecureContext) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+    } catch {
+      if (code) {
+        const range = document.createRange();
+        range.selectNodeContents(code);
+        window.getSelection()?.removeAllRanges();
+        window.getSelection()?.addRange(range);
+      }
+      return;
+    }
+    const words = button.querySelector("svg") ? null : button.textContent;
+    icon(button, "check");
+    if (label) button.setAttribute("aria-label", "Copied");
+    if (words) button.textContent = "Copied";
+    window.setTimeout(() => {
+      icon(button, "copy");
+      if (label) button.setAttribute("aria-label", label);
+      if (words) button.textContent = words;
+    }, 1600);
+  });
+})();

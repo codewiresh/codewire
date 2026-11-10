@@ -25,7 +25,9 @@
 .cw-console-org-switcher { display: grid; gap: var(--space-2); padding: var(--space-3) var(--cw-sidebar-gutter) var(--space-2); }
 .cw-org-switcher { position: relative; min-width: 0; width: 100%; }
 .cw-org-switcher > summary { width: 100%; justify-content: flex-start; }
-.cw-org-switcher-label { min-width: 0; flex: 1; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+/* The button trims its label to the capitals and baseline, so clip only
+   sideways for the ellipsis; hidden would cut off g, p and y below it. */
+.cw-org-switcher-label { min-width: 0; flex: 1; overflow-x: clip; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .cw-org-switcher .cw-org-chevron { width: var(--icon-size-sm); height: var(--icon-size-sm); color: var(--fg-tertiary); }
 .cw-org-initial { display: grid; width: 1.125rem; height: 1.125rem; flex: none; place-items: center; border-radius: var(--radius-sm); background: var(--bg-selected); color: var(--fg-secondary); font-size: var(--text-micro); font-weight: var(--weight-semibold); }
 .cw-org-menu li:last-child { margin-top: var(--space-1); padding-top: var(--space-1); border-top: 1px solid var(--border-subtle); }

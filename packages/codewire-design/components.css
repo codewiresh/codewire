@@ -1014,3 +1014,75 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
   .cw-spinner,
   .cw-skeleton { animation: none; }
 }
+
+/* A banner across the whole top of every console page while the selected
+   organization needs billing attention: one sentence and its action, on the
+   accent colour (the Create Sandbox button's), the brand yellow when credit
+   is low and red once it ran out. It is
+   fixed above the app, which moves down by its height. The words carry the
+   meaning; the colour only reinforces it. */
+.cw-body:has(> .cw-banner) { --banner-offset: var(--banner-height); }
+
+.cw-banner {
+  --banner-bg: var(--accent);
+  --banner-fg: var(--fg-on-accent);
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 41;
+  display: flex;
+  height: var(--banner-height);
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  padding: 0 var(--space-5);
+  background: var(--banner-bg);
+  color: var(--banner-fg);
+  font-size: var(--text-secondary);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+}
+
+.cw-banner > p { margin: 0; }
+.cw-banner[data-tone="warning"] { --banner-bg: var(--banner-warning); --banner-fg: var(--banner-warning-text); }
+.cw-banner[data-tone="danger"] { --banner-bg: var(--destructive); }
+
+/* The banner's one action: a pill in the banner's colours, reversed. */
+.cw-banner-action {
+  display: inline-flex;
+  min-height: var(--control-height-sm);
+  flex: none;
+  align-items: center;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-pill);
+  background: var(--banner-fg);
+  color: var(--banner-bg);
+  font-size: var(--text-small);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-none);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.cw-banner-action:hover { text-decoration: underline; }
+
+@media (max-width: 48rem) {
+  .cw-body { --banner-height: var(--banner-height-compact); }
+  .cw-banner { justify-content: space-between; padding: 0 var(--space-4); }
+}
+
+/* A command to copy, as on the homepage: a label, the command in mono and
+   the copy action inside the box. */
+.cw-copy-command { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); gap: var(--space-1-5); margin: 0; }
+.cw-copy-command > p { margin: 0; color: var(--fg-secondary); font-size: var(--text-small); font-weight: var(--weight-medium); }
+
+.cw-copy-command > div {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-base);
+}
+
+.cw-copy-command code { min-width: 0; flex: 1; overflow-x: auto; color: var(--fg-primary); font-family: var(--font-mono); font-size: var(--text-small); white-space: nowrap; }
