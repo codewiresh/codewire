@@ -26,11 +26,11 @@ There is no default command; for example:
   scripts/runtime/prod/with-prod-smoke-auth.sh -- \
     scripts/ci/verify/smoke-prod.sh --allow-prod-mutation
 
-The wrapper is intentionally non-interactive. Establish the normal human OIDC
-session first with:
-
-  BAO_ADDR=https://openbao.example.invalid \
-    bao login -method=oidc -path=oidc -no-print role=human
+The wrapper is intentionally non-interactive. It takes a short-lived OpenBao
+token from the workstation access client named by CODEWIRE_ACCESS_CLIENT (an
+absolute path), uses it for the one read, and revokes it before the command
+runs. It never uses an inherited token or a saved bao session, and it never
+opens a browser.
 USAGE
 }
 
@@ -48,9 +48,10 @@ secure_remove() {
 cleanup() {
   local status=0
   if [[ -n "$AUTH_TMPDIR" && -d "$AUTH_TMPDIR" ]]; then
+    openbao_access_cleanup "$AUTH_TMPDIR" "$OPENBAO_ADDR" || status=1
     while IFS= read -r -d '' file; do secure_remove "$file" || status=1; done \
       < <(find "$AUTH_TMPDIR" -type f -print0)
-    rmdir "$AUTH_TMPDIR" 2>/dev/null || status=1
+    find "$AUTH_TMPDIR" -depth -type d -empty -delete 2>/dev/null || status=1
     [[ ! -e "$AUTH_TMPDIR" ]] || status=1
   fi
   AUTH_TMPDIR=""
@@ -72,9 +73,12 @@ case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
 if [[ "${1:-}" == '-h' || "${1:-}" == '--help' ]]; then usage; exit 0; fi
 if [[ "${1:-}" == '--' ]]; then shift; fi
 [[ "$#" -gt 0 ]] || die 'a command is required; Production smoke has no default'
-for command in bao find grep jq mktemp rm rmdir; do
+for command in bao cmp find grep jq mktemp rm sed stat wc; do
   command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"
 done
+# shellcheck source=scripts/runtime/dev/openbao-access-token.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/dev/openbao-access-token.sh"
+openbao_access_admit || die 'the workstation access client is not available'
 [[ "${BAO_ADDR:-$OPENBAO_ADDR}" == "$OPENBAO_ADDR" ]] ||
   die 'BAO_ADDR must be the canonical OpenBao Tailnet endpoint'
 
@@ -95,16 +99,19 @@ for file in "$DOCUMENT" "$ERROR_FILE" "$API_KEY_FILE" "$EMAIL_FILE"; do
   chmod 0600 "$file"
 done
 
-if ! BAO_ADDR="$OPENBAO_ADDR" bao kv get -format=json "$OPENBAO_PATH" \
-  >"$DOCUMENT" 2>"$ERROR_FILE"; then
+openbao_access_acquire "$AUTH_TMPDIR" || die 'no OpenBao token from the access client'
+if ! openbao_access_kv_get "$AUTH_TMPDIR" "$OPENBAO_ADDR" "$OPENBAO_PATH" "$DOCUMENT" "$ERROR_FILE"; then
   if grep -Eqi 'permission denied|status code: 403|code 403' "$ERROR_FILE"; then
-    die 'OpenBao OIDC session is stale or lacks the exact Prod smoke path'
+    die 'the access client token lacks the exact Prod smoke path'
   fi
   if grep -Eqi 'no value found' "$ERROR_FILE"; then
     die 'the Prod smoke identity is not provisioned yet (scripts/runtime/prod/provision-prod-smoke-user.sh)'
   fi
   die 'failed to fetch the canonical Prod smoke document; output suppressed'
 fi
+
+openbao_access_revoke "$AUTH_TMPDIR" "$OPENBAO_ADDR" ||
+  die 'the OpenBao token was not confirmed revoked; the command does not run'
 
 jq -e '
   (.data.metadata.version | type == "number" and . > 0) and

@@ -78,8 +78,8 @@ Options:
   -h, --help               Show this help
 
 The product phase runs as the dedicated Dev smoke identity through
-scripts/runtime/dev/with-dev-smoke-auth.sh, which needs the normal human
-OpenBao OIDC session; its organization must be opted in to confidential
+scripts/runtime/dev/with-dev-smoke-auth.sh, which needs the workstation access
+client in CODEWIRE_ACCESS_CLIENT; its organization must be opted in to confidential
 environments (on its admin Organizations page) and its plan needs a confidential
 catalog entry.
 
