@@ -1,0 +1,32 @@
+# Orchestration's client identity for the UDP relay allocator's TLS listener
+# (#4011). The relay allocates only for a certificate that carries this
+# name, which names a caller, not a host, so it is the same in every
+# namespace. It comes from the dedicated `codewire-udp-relay-allocator`
+# authority, which signs only this leaf and the relay's server leaf; the
+# infrastructure owner provisions it and publishes its public certificate
+# here as `codewire-udp-relay-allocator-roots`.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: codewire-orchestration-udp-relay-allocator-client
+  namespace: prod
+spec:
+  secretName: codewire-orchestration-udp-relay-allocator-client-tls
+  issuerRef:
+    name: codewire-udp-relay-allocator
+    kind: Issuer
+    group: cert-manager.io
+  dnsNames:
+    - orchestration.udp-relay-allocator.codewire.internal
+  duration: 24h
+  renewBefore: 8h
+  isCA: false
+  revisionHistoryLimit: 1
+  usages:
+    - digital signature
+    - client auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+    rotationPolicy: Always

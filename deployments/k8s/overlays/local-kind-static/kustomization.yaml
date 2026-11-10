@@ -91,6 +91,18 @@ patches:
       group: cert-manager.io
       kind: Certificate
       name: codewire-orchestration-internal
+  # Nor is there a UDP relay here, so orchestration needs no client
+  # certificate for its allocator; the Deployment's mounts are optional.
+  - patch: |-
+      $patch: delete
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: unused
+    target:
+      group: cert-manager.io
+      kind: Certificate
+      name: codewire-orchestration-udp-relay-allocator-client
   - patch: |-
       $patch: delete
       apiVersion: networking.k8s.io/v1

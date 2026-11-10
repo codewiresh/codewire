@@ -53,6 +53,56 @@ const ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV: &str =
 /// through. Defaults to the public API origin, whose ingress routes
 /// `CoordinatorService` to the coordinator.
 const SANDBOX_PUBLIC_COORDINATOR_URL_ENV: &str = "CODEWIRE_SANDBOX_PUBLIC_COORDINATOR_URL";
+// Orchestration's client certificate for the UDP relay allocator and the
+// public roots that verify the relay (#4011): all three, or none.
+const UDP_RELAY_ALLOCATOR_ROOTS_FILE_ENV: &str = "CODEWIRE_UDP_RELAY_ALLOCATOR_ROOTS_FILE";
+const UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE_ENV: &str =
+    "CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE";
+const UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE_ENV: &str =
+    "CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE";
+
+/// The relay allocator client. With none of the TLS files named it can call
+/// only a plain allocator URL; with some but not all it refuses to start,
+/// so a half-configured Pod never looks configured.
+fn relay_allocator(
+    token: String,
+    getenv: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<codewire_orchestration::workspace_binding::HttpRelayAllocator> {
+    use codewire_orchestration::workspace_binding::{HttpRelayAllocator, RelayAllocatorTls};
+    let file = |name: &str| {
+        getenv(name)
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    let allocator = HttpRelayAllocator::new(Some(token));
+    match (
+        file(UDP_RELAY_ALLOCATOR_ROOTS_FILE_ENV),
+        file(UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE_ENV),
+        file(UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE_ENV),
+    ) {
+        (None, None, None) => Ok(allocator),
+        (Some(roots), Some(cert_chain), Some(key)) => {
+            // Paths the TLS client would refuse on every allocation.
+            anyhow::ensure!(
+                roots.is_absolute()
+                    && cert_chain.is_absolute()
+                    && key.is_absolute()
+                    && cert_chain != key,
+                "the UDP relay allocator TLS files must be distinct absolute paths"
+            );
+            Ok(allocator.with_tls(RelayAllocatorTls {
+                roots,
+                cert_chain,
+                key,
+            }))
+        }
+        _ => anyhow::bail!(
+            "{UDP_RELAY_ALLOCATOR_ROOTS_FILE_ENV}, {UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE_ENV} and \
+             {UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE_ENV} must be set together"
+        ),
+    }
+}
 
 fn sandbox_public_coordinator_url(configured: Option<&str>, api_base_url: &str) -> String {
     configured
@@ -653,11 +703,10 @@ async fn main() -> anyhow::Result<()> {
                 ),
                 mesh_url: api_state.sandbox_cfg.mesh_public_url.clone(),
             },
-            Arc::new(
-                codewire_orchestration::workspace_binding::HttpRelayAllocator::new(Some(
-                    api_state.sandbox_cfg.udp_relay_allocator_token.clone(),
-                )),
-            ),
+            Arc::new(relay_allocator(
+                api_state.sandbox_cfg.udp_relay_allocator_token.clone(),
+                |name| std::env::var(name).ok(),
+            )?),
         ),
     );
     // There is no plaintext form: inside a cluster it serves TLS with the
@@ -835,6 +884,38 @@ mod tests {
             SocketAddr::from(([127, 0, 0, 1], 18087))
         );
         assert!(workspace_binding_bind_addr(public, Some("binding")).is_err());
+    }
+
+    #[test]
+    fn the_relay_allocator_takes_all_of_its_tls_files_or_none() {
+        let env = |set: &'static [&'static str]| {
+            move |name: &str| set.contains(&name).then(|| format!("/run/{name}"))
+        };
+        // A relative path would fail every allocation, so it fails startup.
+        assert!(relay_allocator(String::new(), |name| Some(format!("run/{name}"))).is_err());
+        assert!(relay_allocator(String::new(), |_| Some("/run/one-file".into())).is_err());
+        assert!(relay_allocator(String::new(), env(&[])).is_ok());
+        assert!(
+            relay_allocator(
+                String::new(),
+                env(&[
+                    UDP_RELAY_ALLOCATOR_ROOTS_FILE_ENV,
+                    UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE_ENV,
+                    UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE_ENV,
+                ])
+            )
+            .is_ok()
+        );
+        for partial in [
+            &[UDP_RELAY_ALLOCATOR_ROOTS_FILE_ENV][..],
+            &[
+                UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE_ENV,
+                UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE_ENV,
+            ],
+        ] {
+            let partial: &'static [&'static str] = partial;
+            assert!(relay_allocator(String::new(), env(partial)).is_err());
+        }
     }
 
     /// Distinct free addresses: every probe is held until all are chosen, so

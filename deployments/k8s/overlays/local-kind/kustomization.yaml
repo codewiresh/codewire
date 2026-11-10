@@ -93,6 +93,18 @@ patches:
       group: cert-manager.io
       kind: Certificate
       name: codewire-orchestration-internal
+  # Nor is there a UDP relay here, so orchestration needs no client
+  # certificate for its allocator; the Deployment's mounts are optional.
+  - patch: |-
+      $patch: delete
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: unused
+    target:
+      group: cert-manager.io
+      kind: Certificate
+      name: codewire-orchestration-udp-relay-allocator-client
   # Remove base ingress resources; local kind uses a hostless ingress shape
   # that matches current 127.0.0.1:8080 / 127.0.0.1:8443 workflows.
   - patch: |-

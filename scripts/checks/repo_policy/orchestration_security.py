@@ -742,6 +742,173 @@ def udp_relay_self_test(resources: list[str]) -> None:
         raise RuntimeError(f"{label} without its policy passed the check")
 
 
+RELAY_ALLOCATOR_CLIENT = "codewire-orchestration-udp-relay-allocator-client"
+RELAY_ALLOCATOR_CLIENT_SPEC = """
+spec:
+  dnsNames:
+  - orchestration.udp-relay-allocator.codewire.internal
+  duration: 24h
+  isCA: false
+  issuerRef:
+    group: cert-manager.io
+    kind: Issuer
+    name: codewire-udp-relay-allocator
+  privateKey:
+    algorithm: ECDSA
+    encoding: PKCS8
+    rotationPolicy: Always
+    size: 256
+  renewBefore: 8h
+  revisionHistoryLimit: 1
+  secretName: codewire-orchestration-udp-relay-allocator-client-tls
+  usages:
+  - digital signature
+  - client auth
+"""
+RELAY_ALLOCATOR_CLIENT_VOLUMES = """
+      - name: udp-relay-allocator-client-tls
+        secret:
+          defaultMode: 288
+          items:
+          - key: tls.crt
+            path: tls.crt
+          - key: tls.key
+            path: tls.key
+          optional: true
+          secretName: codewire-orchestration-udp-relay-allocator-client-tls
+      - configMap:
+          items:
+          - key: ca.crt
+            path: ca.crt
+          name: codewire-udp-relay-allocator-roots
+          optional: true
+        name: udp-relay-allocator-roots
+"""
+RELAY_ALLOCATOR_CLIENT_MOUNTS = """
+        - mountPath: /run/codewire-udp-relay-allocator-client-tls
+          name: udp-relay-allocator-client-tls
+          readOnly: true
+        - mountPath: /run/codewire-udp-relay-allocator-roots
+          name: udp-relay-allocator-roots
+          readOnly: true
+"""
+# How often each path appears in the Deployment: its mount, and the settings
+# that name a file under it.
+RELAY_ALLOCATOR_CLIENT_PATHS = {
+    "/run/codewire-udp-relay-allocator-client-tls": 3,
+    "/run/codewire-udp-relay-allocator-roots": 2,
+}
+# Every leaf the allocator authority may sign, in any package.
+RELAY_ALLOCATOR_LEAVES = {"codewire-udp-relay-allocator", "codewire-orchestration-udp-relay-allocator-client"}
+
+
+def relay_allocator_leaves(resources: list[str]) -> list[str]:
+    """The names of everything in `resources` that asks the allocator
+    authority for a certificate."""
+    return sorted(
+        metadata_field(resource, "name")
+        for resource in resources
+        if top_level_field(resource, "kind") in ("Certificate", "CertificateRequest")
+        and re.search(r"^    name: codewire-udp-relay-allocator$", resource, flags=re.MULTILINE)
+    )
+
+
+RELAY_ALLOCATOR_CLIENT_ENV = [
+    """
+    - name: CODEWIRE_UDP_RELAY_ALLOCATOR_ROOTS_FILE
+      value: /run/codewire-udp-relay-allocator-roots/ca.crt
+    """,
+    """
+    - name: CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE
+      value: /run/codewire-udp-relay-allocator-client-tls/tls.crt
+    """,
+    """
+    - name: CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE
+      value: /run/codewire-udp-relay-allocator-client-tls/tls.key
+    """,
+]
+
+
+def assert_relay_allocator_client(resources: list[str], label: str, output: list[str]) -> None:
+    """The UDP relay allocates over TLS only for the certificate that carries
+    orchestration's name (#4011). Orchestration holds the one client leaf with
+    that name, from the authority that signs nothing else here, and verifies
+    the relay with that authority's published roots, never with whatever CA a
+    leaf Secret carries."""
+    certificate = exactly_one(resources, "Certificate", RELAY_ALLOCATOR_CLIENT, label, output)
+    if certificate and compact(top_level_block(certificate, "spec")) != compact(RELAY_ALLOCATOR_CLIENT_SPEC):
+        output.append(
+            f"{label}: the relay allocator client leaf must be a 24-hour client-only certificate for "
+            "orchestration's allocator name from the codewire-udp-relay-allocator Issuer"
+        )
+    if relay_allocator_leaves(resources) != [RELAY_ALLOCATOR_CLIENT]:
+        output.append(f"{label}: the relay allocator authority must sign exactly one leaf here, orchestration's client")
+    deployment = exactly_one(resources, "Deployment", "codewire-orchestration", label, output)
+    if deployment and (
+        compact(RELAY_ALLOCATOR_CLIENT_VOLUMES) not in compact(deployment)
+        or compact(RELAY_ALLOCATOR_CLIENT_MOUNTS) not in compact(deployment)
+        # Each path is mounted once, so no other volume or subPath covers it.
+        or any(deployment.count(path) != count for path, count in RELAY_ALLOCATOR_CLIENT_PATHS.items())
+    ):
+        output.append(
+            f"{label}: orchestration must mount its relay allocator client leaf and the published relay roots, "
+            "both optional, each at its own path and nothing else there"
+        )
+    for line in RELAY_ALLOCATOR_CLIENT_ENV:
+        name = line.split()[2]
+        # Kubernetes takes the last of two entries with one name.
+        if deployment and (compact(line) not in compact(deployment) or deployment.count(f"name: {name}\n") != 1):
+            output.append(f"{label}: orchestration must set {name} once, as checked in")
+
+
+def relay_allocator_client_self_test(resources: list[str]) -> None:
+    label = "relay allocator client negative fixture"
+    clean: list[str] = []
+    assert_relay_allocator_client(resources, label, clean)
+    if clean:
+        raise RuntimeError(f"{label} failed before any change: {clean}")
+    client = "name: codewire-orchestration-udp-relay-allocator-client\n"
+    for kind, name, before, after in [
+        ("Certificate", "a server-capable leaf", "  - client auth", "  - client auth\n  - server auth"),
+        ("Certificate", "another caller named", "orchestration.udp-relay-allocator", "mesh.udp-relay-allocator"),
+        ("Certificate", "a wildcard name", "orchestration.udp-relay-allocator.codewire.internal", "'*.codewire.internal'"),
+        ("Certificate", "the orchestration-internal authority", "name: codewire-udp-relay-allocator\n  privateKey", "name: codewire-orchestration-internal\n  privateKey"),
+        ("Deployment", "relay roots from another authority", "name: codewire-udp-relay-allocator-roots", "name: codewire-orchestration-internal-roots"),
+        ("Deployment", "relay roots from the leaf Secret", "/run/codewire-udp-relay-allocator-roots/ca.crt", "/run/codewire-udp-relay-allocator-client-tls/ca.crt"),
+        ("Deployment", "another volume at the roots path", "          name: udp-relay-allocator-roots\n", "          name: internal-tls\n"),
+        ("Deployment", "a file mounted over the roots", "        volumeMounts:\n", "        volumeMounts:\n        - mountPath: /run/codewire-udp-relay-allocator-roots/ca.crt\n          name: internal-tls\n          subPath: ca.crt\n"),
+        ("Deployment", "a second roots path that wins", "        envFrom:\n", "        - name: CODEWIRE_UDP_RELAY_ALLOCATOR_ROOTS_FILE\n          value: /tmp/ca.crt\n        envFrom:\n"),
+    ]:
+        changed = [
+            resource.replace(before, after, 1)
+            if top_level_field(resource, "kind") == kind and (kind != "Certificate" or client in resource)
+            else resource
+            for resource in resources
+        ]
+        if changed == resources:
+            raise RuntimeError(f"{label} {name} did not change the render")
+        output: list[str] = []
+        assert_relay_allocator_client(changed, label, output)
+        if not output:
+            raise RuntimeError(f"{label} {name} passed the check")
+    second_leaf = [
+        resource.replace(client, "name: codewire-orchestration-udp-relay-allocator-other\n", 1)
+        for resource in resources
+        if top_level_field(resource, "kind") == "Certificate" and client in resource
+    ]
+    for name, leaf in [
+        ("a second leaf", second_leaf),
+        ("a second leaf with a default key", [re.sub(r"  privateKey:\n(?:    .*\n)+", "", second_leaf[0])]),
+    ]:
+        forged: list[str] = []
+        assert_relay_allocator_client(resources + leaf, label, forged)
+        if not forged:
+            raise RuntimeError(f"{label} {name} from the allocator authority passed the check")
+    elsewhere = relay_allocator_leaves(resources + second_leaf)
+    if set(elsewhere) <= RELAY_ALLOCATOR_LEAVES:
+        raise RuntimeError(f"{label} a leaf in another package passed the check")
+
+
 def world_peer(peer: Any) -> bool:
     """An ipBlock peer for the whole world less every cluster and Pod range."""
     if not isinstance(peer, dict) or set(peer) != {"ipBlock"} or not isinstance(peer["ipBlock"], dict):
@@ -1366,17 +1533,26 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
         assert_credential_service(credential_resources, credential_target, "credential-service (rendered)", failures)
         udp_relay_resources = documents(run(["kustomize", "build", "deployments/k8s/udp-relay"]).stdout)
         assert_udp_relay(udp_relay_resources, "udp-relay (rendered)", failures)
+        orchestration_resources = documents(run(["kustomize", "build", "deployments/k8s/orchestration"]).stdout)
+        assert_relay_allocator_client(orchestration_resources, "orchestration (rendered)", failures)
         manifests: list[str] = []
         renders: dict[str, list[str]] = {}
         for target in targets:
             renders[target["path"]] = documents(run(["kustomize", "build", target["path"]]).stdout)
             manifests.extend(renders[target["path"]])
             failures.extend(verify_resources(renders[target["path"]], target, f"{target['path']} (rendered)"))
+        unexpected = set(relay_allocator_leaves(manifests + udp_relay_resources + orchestration_resources))
+        if not unexpected <= RELAY_ALLOCATOR_LEAVES:
+            failures.append(
+                "the relay allocator authority signs a leaf it must not: "
+                + ", ".join(sorted(unexpected - RELAY_ALLOCATOR_LEAVES))
+            )
         failures.extend(check_warm_member_bridge(args.self_test, manifests))
         if args.self_test:
             self_test()
             credential_service_self_test(credential_resources, credential_target)
             udp_relay_self_test(udp_relay_resources)
+            relay_allocator_client_self_test(orchestration_resources)
             # The rendered credential edge is proved on the retained local
             # Kind overlay; codewire/deploy guards the hosted renders.
             for path in CREDENTIAL_SELF_TEST_TARGETS:

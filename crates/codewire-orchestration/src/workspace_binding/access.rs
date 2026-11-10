@@ -6,11 +6,13 @@
 //! its credential stay here: orchestration allocates on the daemon's behalf.
 
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
+use codewire_tls::ClientTlsEndpoint;
 use k8s_openapi::api::core::v1::{Pod, Service};
 use kube::Api;
 use serde::{Deserialize, Serialize};
@@ -99,25 +101,80 @@ pub trait RelayAllocator: Send + Sync {
     ) -> Result<RelayAllocation, RelayError>;
 }
 
-/// HTTP allocator client. The bearer is orchestration's allocator token and
-/// never leaves this process.
+const ALLOCATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Orchestration's mounted client certificate for the relay allocator and
+/// the public roots that verify the relay (#4011). The files are read again
+/// for every allocation, so a rotated leaf needs no restart.
+#[derive(Clone, Debug)]
+pub struct RelayAllocatorTls {
+    pub roots: PathBuf,
+    pub cert_chain: PathBuf,
+    pub key: PathBuf,
+}
+
+/// HTTP allocator client. An `https` allocator URL is called over mutual TLS
+/// with orchestration's client certificate, and never without it. A plain
+/// URL is called as before, with the allocator token if there is one; the
+/// token never leaves this process on any other path.
 pub struct HttpRelayAllocator {
     http: reqwest::Client,
     token: Option<Arc<str>>,
+    tls: Option<RelayAllocatorTls>,
 }
 
 impl HttpRelayAllocator {
     pub fn new(token: Option<String>) -> Self {
         Self {
             http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
+                .timeout(ALLOCATION_TIMEOUT)
                 .build()
                 .expect("relay allocator client"),
             token: token
                 .map(|token| token.trim().to_owned())
                 .filter(|token| !token.is_empty())
                 .map(Arc::from),
+            tls: None,
         }
+    }
+
+    pub fn with_tls(mut self, tls: RelayAllocatorTls) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// A client for one allocation at `allocator_url`'s origin, verifying
+    /// the relay with the current roots and presenting the current leaf.
+    async fn tls_client(&self, allocator_url: &url::Url) -> Result<reqwest::Client, RelayError> {
+        let unavailable = |reason: &'static str| {
+            tracing::warn!(reason, "UDP relay allocation over TLS is unavailable");
+            RelayError::Unavailable
+        };
+        let tls = self
+            .tls
+            .as_ref()
+            .ok_or_else(|| unavailable("no client certificate is configured"))?;
+        // Credentials in the URL would be sent to the relay as Basic auth.
+        if !allocator_url.username().is_empty() || allocator_url.password().is_some() {
+            return Err(unavailable("the allocator URL carries credentials"));
+        }
+        let origin = allocator_url.origin().ascii_serialization();
+        let config = ClientTlsEndpoint::new(origin, tls.roots.clone())
+            .and_then(|endpoint| {
+                endpoint.with_client_identity(tls.cert_chain.clone(), tls.key.clone())
+            })
+            .map_err(|_| unavailable("the allocator URL or TLS paths are invalid"))?
+            .rustls_config()
+            .await
+            .map_err(|_| unavailable("the client certificate or relay roots cannot be read"))?;
+        reqwest::Client::builder()
+            .timeout(ALLOCATION_TIMEOUT)
+            .https_only(true)
+            // The certificate is for the configured relay only.
+            .redirect(reqwest::redirect::Policy::none())
+            .use_preconfigured_tls(config)
+            .build()
+            .map_err(|_| unavailable("the TLS client could not be built"))
     }
 }
 
@@ -128,10 +185,16 @@ impl RelayAllocator for HttpRelayAllocator {
         allocator_url: &str,
         request: &RelayAllocationRequest,
     ) -> Result<RelayAllocation, RelayError> {
-        let mut call = self.http.post(allocator_url).json(request);
-        if let Some(token) = &self.token {
-            call = call.bearer_auth(token);
-        }
+        let url = url::Url::parse(allocator_url).map_err(|_| RelayError::Unavailable)?;
+        let call = if url.scheme() == "https" {
+            self.tls_client(&url).await?.post(url).json(request)
+        } else {
+            let call = self.http.post(url).json(request);
+            match &self.token {
+                Some(token) => call.bearer_auth(token),
+                None => call,
+            }
+        };
         let response = call.send().await.map_err(|error| {
             tracing::warn!(error = %error, "UDP relay allocation failed");
             RelayError::Unavailable
@@ -269,3 +332,6 @@ mod tests {
         assert!(!peer_is_pod(&Pod::default(), "10.244.0.9".parse().unwrap()));
     }
 }
+
+#[cfg(test)]
+mod relay_allocator_tests;

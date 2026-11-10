@@ -78,6 +78,14 @@ spec:
               value: /run/codewire-orchestration-internal-tls/tls.key
             - name: ORCHESTRATION_WORKSPACE_BINDING_PORT
               value: "8087"
+            # Client certificate and relay roots for an https UDP relay
+            # allocator URL (#4011). Read again for every allocation.
+            - name: CODEWIRE_UDP_RELAY_ALLOCATOR_ROOTS_FILE
+              value: /run/codewire-udp-relay-allocator-roots/ca.crt
+            - name: CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE
+              value: /run/codewire-udp-relay-allocator-client-tls/tls.crt
+            - name: CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE
+              value: /run/codewire-udp-relay-allocator-client-tls/tls.key
             # Public trust only. The separate infrastructure owner provisions
             # the broker bundle before rollout.
             - name: SANDBOX_CREDENTIAL_BROKER_NAMESPACE
@@ -144,6 +152,12 @@ spec:
             - name: internal-tls
               mountPath: /run/codewire-orchestration-internal-tls
               readOnly: true
+            - name: udp-relay-allocator-client-tls
+              mountPath: /run/codewire-udp-relay-allocator-client-tls
+              readOnly: true
+            - name: udp-relay-allocator-roots
+              mountPath: /run/codewire-udp-relay-allocator-roots
+              readOnly: true
             # Platform-only Trustee administration credential. This volume is
             # never projected into tenant Secrets or sandbox Pods.
             - name: confidential-storage-kbs-admin
@@ -168,6 +182,27 @@ spec:
           secret:
             secretName: codewire-orchestration-internal-tls
             defaultMode: 0440
+        # cert-manager-owned client leaf for the UDP relay allocator, and the
+        # public roots that verify the relay. Both are optional so that
+        # orchestration starts without them: until they exist an https
+        # allocator URL fails closed and the kubelet adds them when they do.
+        - name: udp-relay-allocator-client-tls
+          secret:
+            secretName: codewire-orchestration-udp-relay-allocator-client-tls
+            defaultMode: 0440
+            optional: true
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        - name: udp-relay-allocator-roots
+          configMap:
+            name: codewire-udp-relay-allocator-roots
+            optional: true
+            items:
+              - key: ca.crt
+                path: ca.crt
         - name: confidential-storage-kbs-admin
           secret:
             secretName: codewire-confidential-storage-kbs-admin

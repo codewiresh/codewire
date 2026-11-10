@@ -8,6 +8,7 @@ resources:
   - service.yaml
   - rbac.yaml
   - certificate.yaml
+  - udp-relay-allocator-client-certificate.yaml
   - internal-roots-authz.yaml
   - image-cache-authz.yaml
   - image-registries.yaml

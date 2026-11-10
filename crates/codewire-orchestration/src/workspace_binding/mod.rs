@@ -32,7 +32,7 @@ use std::time::Duration;
 use codewire_server_core::bounded_http1::{BoundedHttp1Limits, ConnectionUpgrade};
 use codewire_tls::{ServerTlsFiles, ServerTlsStream};
 
-pub use access::{AccessSettings, HttpRelayAllocator, RelayAllocator};
+pub use access::{AccessSettings, HttpRelayAllocator, RelayAllocator, RelayAllocatorTls};
 pub(crate) use authorize::canonical_uid;
 pub use service::{WorkspaceBindingState, workspace_binding_router};
 pub use store::{
