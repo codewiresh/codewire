@@ -14,7 +14,8 @@
 //!   4. Service every managed socket: drain RX -> stream, push queued TX into
 //!      the socket, detect established/closed transitions.
 //!   5. Sleep until the earliest of: a new inbound packet, a new command, or
-//!      smoltcp's own `poll_at` deadline (retransmit/delayed-ACK timers).
+//!      smoltcp's own `poll_at` deadline (retransmit/delayed-ACK timers). While
+//!      the outbound queue is full, sleep instead until it has drained by half.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
@@ -588,7 +589,8 @@ impl Driver {
             }
             self.service_sockets();
             poll_at = self.iface.poll_at(now, &self.sockets);
-            if !self.has_immediate_work() {
+            // Another poll cannot send while the outbound queue is full.
+            if self.device.outbound_full() || !self.has_immediate_work() {
                 break;
             }
         }
@@ -932,8 +934,11 @@ pub(crate) fn spawn(
             };
 
             tokio::select! {
-                // Inbound IP packet from the consumer transport.
-                pkt = inbound.recv() => {
+                // Inbound IP packet from the consumer transport. Packets still
+                // staged for want of an outbound slot go first, so a full
+                // outbound queue pushes back on the transport through this
+                // bounded channel instead of growing the staging queue.
+                pkt = inbound.recv(), if !driver.device.has_inbound() => {
                     match pkt {
                         Some(pkt) => {
                             driver.device.push_inbound(pkt);
@@ -966,15 +971,22 @@ pub(crate) fn spawn(
                 _ = stream_notify.notified() => {
                     poll_at = driver.pump();
                 }
-                // smoltcp timer fired (retransmit / delayed ACK / etc).
-                _ = tokio::time::sleep(timer) => {
+                // The outbound queue drained after refusing the stack a slot.
+                () = driver.device.outbound_room(), if driver.device.outbound_full() => {
+                    poll_at = driver.pump();
+                }
+                // smoltcp timer fired (retransmit / delayed ACK / etc). While
+                // the outbound queue is full, a socket with data to send asks
+                // to be polled now, and any timer's work needs a slot, so the
+                // drain above wakes the driver instead.
+                _ = tokio::time::sleep(timer), if !driver.device.outbound_full() => {
                     poll_at = driver.pump();
                 }
             }
 
-            // If the device still has staged inbound work or any socket has
-            // queued tx, keep pumping promptly rather than sleeping.
-            if driver.device.has_inbound() {
+            // If the device still has staged inbound work it can process,
+            // keep pumping promptly rather than sleeping.
+            if driver.device.has_inbound() && !driver.device.outbound_full() {
                 poll_at = Some(now());
             }
         }

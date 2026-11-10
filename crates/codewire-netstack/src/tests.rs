@@ -1524,3 +1524,152 @@ async fn a_refused_syn_fails_the_connect_as_refused() {
         "the refused connect delivered data: {read:?}"
     );
 }
+
+/// Relay packets from `rx` to `tx` without loss, counting TCP data segments
+/// that repeat sequence space the flow already sent. On a lossless wire a
+/// retransmission means the sending stack lost a packet before the wire.
+fn retransmission_counting_wire(
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    tx: mpsc::Sender<Vec<u8>>,
+    retransmissions: Arc<AtomicUsize>,
+) {
+    tokio::spawn(async move {
+        let mut sent_up_to = std::collections::HashMap::new();
+        while let Some(packet) = rx.recv().await {
+            if let Ok(ip) = Ipv6Packet::new_checked(&packet[..]) {
+                if let Ok(tcp) = TcpPacket::new_checked(ip.payload()) {
+                    let len = tcp.payload().len();
+                    if len > 0 {
+                        let flow = (ip.src_addr(), tcp.src_port(), ip.dst_addr(), tcp.dst_port());
+                        let seq = tcp.seq_number();
+                        let end = seq + len;
+                        match sent_up_to.get_mut(&flow) {
+                            Some(high) => {
+                                if seq < *high {
+                                    retransmissions.fetch_add(1, Ordering::Relaxed);
+                                }
+                                if end > *high {
+                                    *high = end;
+                                }
+                            }
+                            None => {
+                                sent_up_to.insert(flow, end);
+                            }
+                        }
+                    }
+                }
+            }
+            if tx.send(packet).await.is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// Parallel bulk streams share one small outbound packet queue (#4046). When
+/// the queue is full the device must hold the stack back rather than drop the
+/// packet it built: every byte arrives intact and no segment is ever sent
+/// twice. Dropping at the queue lost thousands of packets and stalled
+/// connections behind retransmission timeouts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_streams_through_a_small_packet_queue_lose_no_packet() {
+    const STREAMS: usize = 8;
+    const BYTES: usize = 512 * 1024;
+    const QUEUE: usize = 8;
+    let limits = NetstackLimits {
+        max_queued_packets: QUEUE,
+        max_packets_per_wake: QUEUE,
+        ..NetstackLimits::default()
+    };
+    let config = |local_ip| NetstackConfig {
+        local_ip,
+        prefix_len: PREFIX,
+        mtu: 1_500,
+        verify_rx_checksums: true,
+        accept_any_ip: false,
+        default_gateway: None,
+    };
+    let retransmissions = Arc::new(AtomicUsize::new(0));
+    let (client_out, client_packets) = mpsc::channel(QUEUE);
+    let (to_server, server_in) = mpsc::channel(QUEUE);
+    let (server_out, server_packets) = mpsc::channel(QUEUE);
+    let (to_client, client_in) = mpsc::channel(QUEUE);
+    retransmission_counting_wire(client_packets, to_server, retransmissions.clone());
+    retransmission_counting_wire(server_packets, to_client, retransmissions.clone());
+    let client_stack =
+        Netstack::with_config_and_limits(config(IpAddr::V6(A_IP)), limits, client_in, client_out)
+            .expect("client netstack");
+    let server_stack =
+        Netstack::with_config_and_limits(config(IpAddr::V6(B_IP)), limits, server_in, server_out)
+            .expect("server netstack");
+
+    let mut listener = server_stack.bind(7420).await.expect("listener");
+    let mut clients = Vec::new();
+    for _ in 0..STREAMS {
+        let client = client_stack
+            .connect(SocketAddr::new(IpAddr::V6(B_IP), 7420))
+            .await
+            .expect("client");
+        clients.push(client);
+    }
+    // Every server stream sends its own pattern, so bytes crossing streams
+    // would show as well as bytes lost.
+    let payload = |index: usize| -> Vec<u8> {
+        (0..BYTES)
+            .map(|offset| (offset % 251) as u8 ^ index as u8)
+            .collect()
+    };
+    let mut senders = Vec::new();
+    for _ in 0..STREAMS {
+        let mut server = accept_one(&mut listener).await;
+        senders.push(tokio::spawn(async move {
+            let mut index = [0_u8; 1];
+            server.read_exact(&mut index).await.expect("stream index");
+            server
+                .write_all(&payload(usize::from(index[0])))
+                .await
+                .expect("server write");
+            server.shutdown().await.expect("server half-close");
+            server
+        }));
+    }
+    let mut readers = Vec::new();
+    for (index, mut client) in clients.into_iter().enumerate() {
+        readers.push(tokio::spawn(async move {
+            client
+                .write_all(&[index as u8])
+                .await
+                .expect("client write");
+            let mut received = Vec::new();
+            client
+                .read_to_end(&mut received)
+                .await
+                .expect("client read");
+            (index, received, client)
+        }));
+    }
+    let downloads = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut downloads = Vec::new();
+        for reader in readers {
+            downloads.push(reader.await.expect("reader"));
+        }
+        downloads
+    })
+    .await
+    .expect("a stream stalled");
+    for (index, received, _client) in &downloads {
+        assert!(
+            received == &payload(*index),
+            "stream {index} received {} of {BYTES} bytes, or the wrong bytes",
+            received.len()
+        );
+    }
+    for sender in senders {
+        sender.await.expect("sender");
+    }
+    assert_eq!(
+        retransmissions.load(Ordering::Relaxed),
+        0,
+        "a segment was sent twice, so the device dropped a packet"
+    );
+}
