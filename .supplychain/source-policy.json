@@ -12,6 +12,22 @@
       "reason": "Admits only the webpki-roots 0.26.11 semver-trick shim, which bundles no roots and re-exports webpki-roots 1 (sqlx 0.8, tokio-tungstenite and async-nats have no release off 0.26). Supplychain cannot scope an exception by version, so the policy-core guard scripts/checks/repo_policy/webpki_roots_floor.py (repo_checks.py webpki-roots-floor) narrows it: every webpki-roots in Cargo.lock, crates/codewire-desktop/Cargo.lock and deployments/docker/*.Cargo.lock must be exactly 0.26.11 or at least 1.0.10",
       "owner": "noel",
       "expires": "2026-12-31"
+    },
+    {
+      "kind": "osv",
+      "advisory_id": "RUSTSEC-2023-0071",
+      "package": "rsa",
+      "reason": "rsa 0.10.0 (2026-11-08) fixes the Marvin timing attack, but russh 0.65.0 and 0.65.1 pin rsa =0.10.0-rc.18, so Cargo cannot select it; rsa 0.9.10 is lock-only through sqlx-mysql 0.8.6 and never built. Our own use (codewire-protected-store ssh-material) validates keys and does not decrypt. Removed when russh allows rsa 0.10 (#3981). Owner approved 2026-11-10 (#3013)",
+      "owner": "noel",
+      "expires": "2026-12-31"
+    },
+    {
+      "kind": "osv",
+      "advisory_id": "RUSTSEC-2026-0459",
+      "package": "libsqlite3-sys",
+      "reason": "libsqlite3-sys 0.39.0 fixes a C SQLite CVE, but rusqlite 0.41 (which needs it) does not resolve against sqlx 0.8, whose sqlx-sqlite pins ^0.30.1 and shares links = sqlite3; moving off it is a design change tracked on #3980. Short expiry on purpose: the bundled SQLite ships in the CLI's local credential store and local VMM. Owner approved 2026-11-10 (#3013)",
+      "owner": "noel",
+      "expires": "2026-11-30"
     }
   ],
   "lockfiles": [
