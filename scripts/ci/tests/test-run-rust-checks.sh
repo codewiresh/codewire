@@ -47,6 +47,7 @@ CHECK
 chmod +x "$work/check"
 cat > "$src/scripts/ci/verify/compile-all-targets.sh" <<STUB
 #!/bin/sh
+sleep "\${STUB_DELAY:-0}"
 echo "compile start \$(date +%s%N)" >> "\$CHECK_STATE/times"
 exec "$work/check" compile
 STUB
@@ -58,12 +59,14 @@ case "\$1 \$RUST_TRANSPORT_SHARD \$RUST_SHARD_STAGE" in
   'rust local-vmm checks') name=desktop ;;
   *) echo "unexpected run-product-verification.sh \$*" >&2; exit 2 ;;
 esac
+sleep "\${STUB_DELAY:-0}"
 echo "\$name start \$(date +%s%N)" >> "\$CHECK_STATE/times"
 exec "$work/check" "\$name"
 STUB
 cat > "$src/scripts/ci/verify/check-darwin-cross.sh" <<STUB
 #!/bin/sh
 [ "\$*" = --cli ] || { echo "unexpected check-darwin-cross.sh \$*" >&2; exit 2; }
+sleep "\${STUB_DELAY:-0}"
 echo "cw-darwin start \$(date +%s%N)" >> "\$CHECK_STATE/times"
 exec "$work/check" cw-darwin
 STUB
@@ -128,25 +131,40 @@ expected_out="$(
 )"
 [ "$(sed -n '/: start$/,$p' "$work/out" | sed -E 's/elapsed_seconds=[0-9]+\)$/elapsed_seconds=N)/')" = "$expected_out" ] ||
   fail "a log was not printed between its start and finish lines: $(cat "$work/out")"
-# Each finish line carries its own check's time, as the check measured it,
-# not the nominal sleep: on a loaded machine every check can be held until
-# the longest one ends (#3876, Policy run 33491), and then they all take that
-# long. The script counts whole seconds from just before the stub starts to
-# just after the check ends, so it reports at least the measured time rounded
-# down and, for a gap under half a second around the check, at most rounded to
-# the nearest second plus one. A time shared by the checks (from the first
-# start, or after the last end) reports about 3 s for a 1 s check, and fails.
+# Each finish line carries its own check's time. The script counts whole
+# seconds from just before a check's stub starts until just after the check
+# ends; the stub records its own start and end inside that. A busy runner only
+# adds to the script's count: starting and ending those processes took seconds
+# (#4048: 7 s reported for a 3 s check). So each report is at least the check's
+# own measured time, rounded down, however slow the runner. A time shared by
+# the checks (#3876: every check reporting the longest one's end) is caught by
+# comparison instead: each 1 s check reports less than the 3 s compile check.
 elapsed() { sed -nE "s/^\[rust-checks\] $1: finish \(status=[0-9]+ elapsed_seconds=([0-9]+)\)$/\1/p" "$work/out"; }
-for pair in 'compile-all-targets:compile' 'feature-graph checks:features' 'local-vmm checks:local-vmm' \
-    'desktop checks:desktop' 'cw Darwin cross-check:cw-darwin'; do
-  reported="$(elapsed "${pair%%:*}")"
-  took=$(( $(at "${pair#*:}" end) - $(at "${pair#*:}" start) ))
-  if ! { [ -n "$reported" ] && (( reported >= took / 1000000000 &&
-      reported <= (took + 500000000) / 1000000000 + 1 )); }; then
-    fail "the ${pair%%:*} finish line did not carry its own time (${took} ns): $(grep finish "$work/out")"
-  fi
-done
+assert_own_times() {
+  local pair reported took compile
+  compile="$(elapsed compile-all-targets)"
+  for pair in 'compile-all-targets:compile' 'feature-graph checks:features' 'local-vmm checks:local-vmm' \
+      'desktop checks:desktop' 'cw Darwin cross-check:cw-darwin'; do
+    reported="$(elapsed "${pair%%:*}")"
+    took=$(( $(at "${pair#*:}" end) - $(at "${pair#*:}" start) ))
+    if ! { [ -n "$reported" ] && (( reported >= took / 1000000000 )); }; then
+      fail "the ${pair%%:*} finish line reported less than its own time (${took} ns): $(grep finish "$work/out")"
+    fi
+    if [ "${pair#*:}" != compile ] && (( reported >= compile )); then
+      fail "the ${pair%%:*} finish line reported the compile check's time, not its own: $(grep finish "$work/out")"
+    fi
+  done
+}
+assert_own_times
 ! grep -q '::error::' "$work/out" || fail 'a passing run reported an error'
+
+# A slow runner, reproduced: every stub starts 3 s after the script starts
+# timing it, more than the old 1.5 s upper bound allowed. Each report still
+# carries its check's own time.
+checks '|rust|transport|' BUILD_ONCE_LOCAL_VMM=true DESKTOP_PACKAGE_SELECTED=true CW_PACKAGE_SELECTED=true \
+  STUB_DELAY=3
+[ "$rc" -eq 0 ] || fail "a slow runner failed the script: $(cat "$work/out")"
+assert_own_times
 
 # A failed check fails the script; every other check still runs to its end
 # and prints, and only the failed one reports an error.
