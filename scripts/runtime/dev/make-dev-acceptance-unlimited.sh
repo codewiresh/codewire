@@ -120,10 +120,10 @@ IFS='|' read -r org_id previous audited <<<"$result"
 [[ "$org_id" =~ ^[0-9a-f]{32}$ ]] || die 'the database returned an unexpected organization ID'
 
 state="$(run_psql --set "org_id=$org_id" <<'SQL'
-SELECT rate_card || '|' || billing_exempt FROM organizations WHERE id = :'org_id';
+SELECT rate_card || '|' || billing_exempt::text FROM organizations WHERE id = :'org_id';
 SQL
 )"
-[[ "$state" == 'unlimited|t' ]] || die "organization ${org_id} reads back as ${state}, not unlimited"
+[[ "$state" == 'unlimited|true' ]] || die "organization ${org_id} reads back as ${state}, not unlimited"
 if [[ "$audited" == 1 ]]; then
   log "organization ${org_id}: ${previous} -> unlimited, billing-exempt (audited)"
 else

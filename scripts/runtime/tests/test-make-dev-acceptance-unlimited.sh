@@ -38,7 +38,8 @@ if grep -F 'dev.acceptance.rate_card' <<<"$sql" >/dev/null; then
     *) printf '%s|regular|1\n' "$MOCK_ORG_ID" ;;
   esac
 elif grep -F 'SELECT rate_card' <<<"$sql" >/dev/null; then
-  if [[ "$MOCK_MODE" == readback_regular ]]; then printf 'regular|f\n'; else printf 'unlimited|t\n'; fi
+  # PostgreSQL renders a boolean cast to text as true or false.
+  if [[ "$MOCK_MODE" == readback_regular ]]; then printf 'regular|false\n'; else printf 'unlimited|true\n'; fi
 else
   exit 92
 fi
@@ -70,6 +71,8 @@ for needle in "BEGIN;" "COMMIT;" "FOR UPDATE OF o" "lower(u.email) = lower(:'own
   "'dev.acceptance.rate_card'" "o.rate_card <> 'unlimited' OR NOT o.billing_exempt"; do
   grep -F -- "$needle" <<<"$sql" >/dev/null || fail "changed: SQL lacks: $needle"
 done
+grep -F -- "billing_exempt::text" <<<"$sql" >/dev/null ||
+  fail 'changed: the read-back must cast the boolean to text explicitly'
 grep -F -- "org_slug=codewire-dev-acceptance" "$TEST_TMP/changed/calls" >/dev/null ||
   fail 'changed: the default slug was not passed'
 grep -F -- "owner_email=hello@codewire.sh" "$TEST_TMP/changed/calls" >/dev/null ||
@@ -90,7 +93,7 @@ stderr_has missing 'no organization other-org is owned by someone@example.test; 
 # A read-back that is not unlimited fails.
 run_case readback_regular
 [[ "$(status_of readback_regular)" != 0 ]] || fail 'readback_regular: should fail'
-stderr_has readback_regular 'reads back as regular|f, not unlimited'
+stderr_has readback_regular 'reads back as regular|false, not unlimited'
 
 # Exactly one primary, or nothing runs.
 for mode in no_primary two_primaries; do
