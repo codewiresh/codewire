@@ -65,6 +65,10 @@ const PROJECT_FEATURE_UNAVAILABLE: &str =
 pub(super) struct EnvironmentsQuery {
     #[serde(default)]
     search: String,
+    /// `start` when the list on screen is the empty organization's start
+    /// panel, sent back by its refresh.
+    #[serde(default)]
+    showing: String,
     #[serde(default)]
     state: String,
     #[serde(default)]
@@ -768,6 +772,7 @@ async fn render_page(
             state: allowlisted_state(&query.state).to_owned(),
             message: page_message(&query.message).to_owned(),
             error: page_error(&query.error).to_owned(),
+            start: None,
         }
     } else {
         match build_page(&state, cookie, &organization, &query, form, &dashboard).await {
@@ -815,6 +820,21 @@ pub(super) async fn list_fragment(
     for environment in &mut environments {
         apply_confidential_visibility(&state, environment);
     }
+    // An organization with no Sandboxes at all, not merely none matching a
+    // search, gets the start panel. Its refresh says it is showing, and while
+    // the organization stays empty the answer changes nothing on screen: the
+    // panel keeps its focus and copy feedback and billing is read once.
+    let unfiltered = query.search.trim().is_empty()
+        && allowlisted_state(&query.state) == "all"
+        && !query.destroyed;
+    let start = if environments.is_empty() && unfiltered {
+        if query.showing == "start" {
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        Some(crate::billing_connect::sandbox_start(&state, cookie.clone(), &organization.id).await)
+    } else {
+        None
+    };
     environment_connect::mark_credential_attention(&state, cookie, &mut environments).await;
     let token = csrf_cookie_value(&headers).unwrap_or_default().to_owned();
     let page = EnvironmentsPageView {
@@ -830,6 +850,7 @@ pub(super) async fn list_fragment(
         state: allowlisted_state(&query.state).to_owned(),
         message: String::new(),
         error: String::new(),
+        start,
     };
     render_template(
         StatusCode::OK,
@@ -1947,6 +1968,7 @@ async fn build_page(
         state: allowlisted_state(&query.state).to_owned(),
         message,
         error: page_error(&query.error).to_owned(),
+        start: None,
     })
 }
 
@@ -2037,6 +2059,7 @@ fn render_create_action_page(
         state: String::new(),
         message: String::new(),
         error: String::new(),
+        start: None,
     };
     let websocket_origin = match crate::routes::terminal::browser_websocket_origin(
         &state.public_origin,
@@ -2648,6 +2671,7 @@ mod tests {
             state: "all".into(),
             message: String::new(),
             error: String::new(),
+            start: None,
         };
         let html = OrganizationEnvironmentsContentTemplate {
             organization: &organization,
@@ -2694,6 +2718,7 @@ mod tests {
                 state: "all".into(),
                 message: String::new(),
                 error: String::new(),
+                start: None,
             };
             let html = OrganizationEnvironmentsContentTemplate {
                 organization: &organization,
@@ -3237,6 +3262,7 @@ mod tests {
             state: "all".into(),
             message: String::new(),
             error: String::new(),
+            start: None,
         };
         let rendered = EnvironmentListTemplate {
             organization: &organization,
@@ -3390,6 +3416,7 @@ mod tests {
             state: "all".into(),
             message: String::new(),
             error: String::new(),
+            start: None,
         };
         let list = EnvironmentListTemplate {
             organization: &organization,
@@ -3545,6 +3572,7 @@ mod tests {
             state: "all".into(),
             message: String::new(),
             error: String::new(),
+            start: None,
         };
         let list = EnvironmentListTemplate {
             organization: &organization,
@@ -3625,7 +3653,68 @@ mod tests {
             state: "all".into(),
             message: String::new(),
             error: String::new(),
+            start: None,
         }
+    }
+
+    fn render_start(start: Option<crate::view::SandboxStartView>, can_admin: bool) -> String {
+        let mut organization = test_organization();
+        organization.can_admin = can_admin;
+        let mut page = lifecycle_test_page(Vec::new());
+        page.start = start;
+        EnvironmentListTemplate {
+            organization: &organization,
+            page: &page,
+        }
+        .render()
+        .unwrap()
+    }
+
+    /// An organization with no Sandboxes gets the start panel (owner,
+    /// 2026-11-10): a free local Sandbox with copyable commands, and a cloud one
+    /// whose price and next step follow billing.
+    #[test]
+    fn the_start_panel_follows_billing_and_the_viewer() {
+        use crate::view::SandboxStartView;
+        let metered = |has_card| SandboxStartView {
+            hourly: Some("€0.2091".into()),
+            has_card,
+            metered: true,
+        };
+        // No card yet: the price, and Add a card for an owner or admin.
+        let html = render_start(Some(metered(false)), true);
+        assert!(html.contains("Start your first sandbox"));
+        assert!(html.contains(
+            r#"<input type="hidden" name="showing" value="start" data-sandbox-start-state>"#
+        ));
+        assert!(html.contains("<code>curl -fsSL https://get.codewire.sh | sh</code>"));
+        assert!(html.contains("<code>cw setup --local</code>"));
+        assert!(html.contains("<code>cw create --local --name app --path .</code>"));
+        assert!(html.contains("data-copy-prompt"));
+        assert!(html.contains(r#"<span class="cw-badge">€0.2091 / hour</span>"#));
+        assert!(html.contains("Adding a card charges nothing."));
+        assert!(html.contains(
+            r#"<a class="cw-button cw-button--accent" href="/test/billing/">Add a card</a>"#
+        ));
+        assert!(!html.contains("<table"));
+        // A member who cannot manage billing is told who can.
+        let html = render_start(Some(metered(false)), false);
+        assert!(html.contains("An organization owner or admin adds a card on the Billing page."));
+        assert!(!html.contains("Add a card</a>"));
+        // A card on file: the price and Create Sandbox.
+        let html = render_start(Some(metered(true)), true);
+        assert!(html.contains("€0.2091 / hour"));
+        assert!(!html.contains("Adding a card charges nothing."));
+        assert!(html.contains(r#"href="/test/new/" data-drawer-trigger>"#));
+        // Unmetered, or billing unavailable: no price, Create Sandbox.
+        let html = render_start(Some(SandboxStartView::default()), true);
+        assert!(!html.contains(" / hour"));
+        assert!(!html.contains("at that price"));
+        assert!(html.contains(r#"href="/test/new/" data-drawer-trigger>"#));
+        // No start panel (a search that matches nothing): the table says so.
+        let html = render_start(None, true);
+        assert!(html.contains("No Sandboxes found"));
+        assert!(!html.contains("Start your first sandbox"));
     }
 
     /// Owner report (2026-10-01): a deleted Sandbox vanished at once behind a
@@ -4178,6 +4267,7 @@ mod tests {
             state: "all".into(),
             message: String::new(),
             error: String::new(),
+            start: None,
         };
         let organization = test_organization();
         let render = |page: &EnvironmentsPageView| {
@@ -4627,6 +4717,7 @@ mod tests {
             state: "all".to_owned(),
             message: String::new(),
             error: String::new(),
+            start: None,
         };
 
         let html = OrganizationEnvironmentsContentTemplate {

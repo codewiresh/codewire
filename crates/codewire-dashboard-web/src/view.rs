@@ -1740,6 +1740,23 @@ pub(crate) struct EnvironmentsPageView {
     /// refreshes observe transitions.
     pub(crate) message: String,
     pub(crate) error: String,
+    /// Shown instead of an empty table while the organization has no
+    /// Sandboxes at all (not merely none matching a search).
+    pub(crate) start: Option<SandboxStartView>,
+}
+
+/// The first-run panel of an organization with no Sandboxes: a free local
+/// Sandbox on one side, a cloud one on the other. The cloud side says what the
+/// standard size costs on this organization's rate card and whether a card is
+/// still needed; without billing it offers no price.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SandboxStartView {
+    /// What the standard cloud size costs an hour ("€0.2091"), when metered.
+    pub(crate) hourly: Option<String>,
+    /// A card is on file, so a cloud Sandbox can be created now.
+    pub(crate) has_card: bool,
+    /// The organization pays for cloud use (billing on and not unmetered).
+    pub(crate) metered: bool,
 }
 
 impl EnvironmentsPageView {

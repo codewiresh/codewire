@@ -1,0 +1,26 @@
+<section class="cw-start" aria-labelledby="start-title">
+  <input type="hidden" name="showing" value="start" data-sandbox-start-state>
+  <header class="cw-start-header"><h1 id="start-title">Start your first sandbox</h1><p>Run one free on your own machine, or in the cloud so it keeps working when your laptop sleeps.</p></header>
+  <ul class="cw-start-options">
+    <li><article class="cw-start-option" aria-labelledby="start-local-title">
+      <header><span class="cw-start-icon"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-device"/></svg></span><div><h2 id="start-local-title">On your machine</h2><p>Runs on your Mac or Linux machine</p></div><span class="cw-badge" data-tone="success">Free</span></header>
+      <ol class="cw-start-steps">
+        <li><section class="cw-copy-command" aria-label="Install command"><p>1. Install the CLI on Linux or macOS</p><div><code>curl -fsSL https://get.codewire.sh | sh</code><button class="cw-icon-button" type="button" data-copy-command aria-label="Copy install command"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-copy"/></svg></button></div></section></li>
+        <li><section class="cw-copy-command" aria-label="Setup command"><p>2. Set up the local runtime</p><div><code>cw setup --local</code><button class="cw-icon-button" type="button" data-copy-command aria-label="Copy setup command"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-copy"/></svg></button></div></section></li>
+        <li><section class="cw-copy-command" aria-label="Create command"><p>3. Create a sandbox for this project</p><div><code>cw create --local --name app --path .</code><button class="cw-icon-button" type="button" data-copy-command aria-label="Copy create command"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-copy"/></svg></button></div></section></li>
+      </ol>
+      <footer><p class="cw-start-agent">Or hand it to your agent: <button class="cw-link-button" type="button" data-copy-prompt data-copy-text="Install the Codewire CLI with `curl -fsSL https://get.codewire.sh | sh`, then run `cw setup --local` to install the local VM runtime. Create a local VM for this project with `cw create --local --name app --path .`. If a host requirement is missing, cw names it and its fix. Docs for agents: https://codewire.sh/docs/llms.txt">copy the prompt</button></p><a class="cw-button cw-button--outline cw-button--small" href="/docs/install">Install guide</a></footer>
+    </article></li>
+    <li><article class="cw-start-option" aria-labelledby="start-cloud-title">
+      <header><span class="cw-start-icon"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-box"/></svg></span><div><h2 id="start-cloud-title">In the cloud</h2><p>Always on, sized for the work</p></div>{% if let Some(hourly) = start.hourly %}<span class="cw-badge">{{ hourly }} / hour</span>{% endif %}</header>
+      <ul class="cw-start-features">
+        <li><span class="cw-start-check"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-check"/></svg></span><span>Keeps running when your laptop sleeps</span></li>
+        <li><span class="cw-start-check"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-check"/></svg></span><span>Amsterdam and Frankfurt, on bare metal</span></li>
+        <li><span class="cw-start-check"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-check"/></svg></span><span>A stopped sandbox costs nothing</span></li>
+        <li><span class="cw-start-check"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-check"/></svg></span><span>Preview URLs, SSH from any device and the credential proxy</span></li>
+      </ul>
+      {% if start.hourly.is_some() %}<p class="cw-start-note">2 vCPU · 8 GB memory · 100 GB disk at that price.{% if !start.has_card %} Adding a card charges nothing.{% endif %}</p>{% endif %}
+      <footer>{% if start.metered && !start.has_card %}{% if organization.can_admin %}<a class="cw-button cw-button--accent" href="{{ organization.billing_url }}">Add a card</a><span class="cw-start-or">then create it here or with <code>cw create --cloud</code></span>{% else %}<p class="cw-start-or">An organization owner or admin adds a card on the Billing page.</p>{% endif %}{% else %}<a class="cw-button cw-button--accent" href="{{ organization.environments_url }}new/" data-drawer-trigger><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg><span>Create Sandbox</span></a><span class="cw-start-or">or with <code>cw create --cloud</code></span>{% endif %}</footer>
+    </article></li>
+  </ul>
+</section>

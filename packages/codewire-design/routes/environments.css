@@ -183,3 +183,31 @@
   .cw-environment-create .cw-app-port-row { grid-template-columns: minmax(0, 1fr) auto; }
   :is(.cw-repository-row, .cw-app-port-row) > .cw-field:not(:first-child) { grid-column: 1 / -1; }
 }
+
+/* An organization with no Sandboxes sees only the start panel: a free local
+   Sandbox beside a cloud one. The page title, search and Create Sandbox come
+   back with its first Sandbox. */
+.cw-main:has(.cw-start) :is(.cw-page-header, .cw-environment-toolbar) { display: none; }
+.cw-start { display: grid; gap: var(--space-6); padding-top: var(--space-6); }
+.cw-start-header { display: grid; justify-items: center; gap: var(--space-2); text-align: center; }
+.cw-start-header h1 { margin: 0; font-size: var(--text-page); font-weight: var(--weight-semibold); }
+.cw-start-header p { max-width: var(--measure); margin: 0; color: var(--fg-secondary); }
+.cw-start-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); margin: 0; padding: 0; list-style: none; }
+.cw-start-options > li { min-width: 0; }
+.cw-start-option { display: grid; height: 100%; grid-template-rows: auto 1fr auto; gap: var(--space-5); padding: var(--space-6); border: var(--border-width) solid var(--border); border-radius: var(--radius-lg); background: var(--bg-secondary); }
+.cw-start-option > header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); }
+.cw-start-option h2 { margin: 0; font-size: var(--text-title); font-weight: var(--weight-semibold); }
+.cw-start-option > header p { margin: 0; color: var(--fg-tertiary); font-size: var(--text-small); }
+.cw-start-icon { display: grid; width: var(--control-height-lg); height: var(--control-height-lg); place-items: center; border-radius: var(--radius-pill); background: var(--accent-muted); color: var(--accent-text); }
+.cw-start-steps { display: grid; align-content: start; gap: var(--space-4); margin: 0; padding: 0; list-style: none; }
+.cw-start-features { display: grid; align-content: start; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
+.cw-start-features > li { display: flex; align-items: center; gap: var(--space-2); }
+.cw-start-check { display: inline-flex; color: var(--success); }
+.cw-start-note { margin: 0; color: var(--fg-tertiary); font-size: var(--text-small); }
+.cw-start-option > footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); padding-top: var(--space-4); border-top: var(--border-width) solid var(--border-subtle); }
+.cw-start-agent, .cw-start-or { margin: 0; color: var(--fg-tertiary); font-size: var(--text-small); }
+
+@media (max-width: 48rem) {
+  .cw-start-options { grid-template-columns: minmax(0, 1fr); }
+  .cw-start-option { padding: var(--space-4); }
+}

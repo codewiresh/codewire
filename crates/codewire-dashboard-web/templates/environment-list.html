@@ -1,4 +1,6 @@
-{% if page.environments.is_empty() %}
+{% if let Some(start) = page.start %}
+{% include "sandbox-start.html" %}
+{% else if page.environments.is_empty() %}
 <div class="cw-table-shell cw-sandbox-table-shell" data-list-search="{{ page.search }}" data-list-state="{{ page.state }}">
   <table class="cw-table cw-sandbox-table"><thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Resources</th><th scope="col">Last event</th><th scope="col">Created</th><th scope="col"><span class="cw-sr-only">Actions</span></th></tr></thead><tbody><tr><td colspan="6"><div class="cw-state"><strong>No Sandboxes found</strong><p>Start an isolated workspace from a repository or image.</p><a class="cw-button cw-button--pill" href="{{ organization.environments_url }}new/" data-drawer-trigger>Create Sandbox</a></div></td></tr></tbody></table>
 </div>

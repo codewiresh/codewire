@@ -14,6 +14,7 @@ use crate::{
     state::AppState,
     time_display::calendar_date,
     transport::BrowserTransport,
+    view::SandboxStartView,
 };
 
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -136,6 +137,45 @@ pub(crate) struct BillingPageView {
     pub(crate) csrf_token: String,
     pub(crate) message: String,
     pub(crate) error: String,
+}
+
+/// The standard cloud size the empty Sandboxes page prices, as the pricing
+/// page shows it: 2 vCPU, 8 GB of memory and 100 GB of disk.
+const START_VCPU: i64 = 2;
+const START_MEMORY_GIB: i64 = 8;
+const START_DISK_GIB: i64 = 100;
+/// The empty Sandboxes page waits this long for billing, then shows its
+/// panel without a price.
+const START_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// What the empty Sandboxes page says about the cloud: the standard size's
+/// hourly price on this organization's rate card and whether a card is on
+/// file. Billing that is off, unmetered or unavailable gives no price.
+pub(crate) async fn sandbox_start(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: &str,
+) -> SandboxStartView {
+    let billing = client(state, cookie);
+    let request = billing.get_billing_overview(GetBillingOverviewRequest {
+        org_id: org_id.to_owned(),
+        ..Default::default()
+    });
+    let Ok(Ok(overview)) = tokio::time::timeout(START_TIMEOUT, request).await else {
+        return SandboxStartView::default();
+    };
+    let overview = overview.into_owned();
+    let metered = overview.billing_enabled && !overview.unmetered;
+    let rates = overview.rates.into_option().unwrap_or_default();
+    let hourly = START_VCPU
+        .saturating_mul(rates.cpu_nano_eur_per_vcpu_hour)
+        .saturating_add(START_MEMORY_GIB.saturating_mul(rates.memory_nano_eur_per_gib_hour))
+        .saturating_add(START_DISK_GIB.saturating_mul(rates.disk_nano_eur_per_gib_hour));
+    SandboxStartView {
+        hourly: (metered && hourly > 0).then(|| euro_text(hourly)),
+        has_card: overview.has_payment_method,
+        metered,
+    }
 }
 
 fn client(state: &AppState, cookie: HeaderValue) -> BillingServiceClient<BrowserTransport> {

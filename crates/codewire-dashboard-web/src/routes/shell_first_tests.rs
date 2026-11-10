@@ -161,6 +161,11 @@ async fn the_organization_page_renders_its_shell_before_any_inventory() {
             ),
             "{path} loads the Sandbox list"
         );
+        // The start panel's marker rides along, so its refresh can stand still.
+        assert!(
+            html.contains(r##"hx-include="#environment-filters, [data-sandbox-start-state]""##),
+            "{path} refreshes with the start panel's marker"
+        );
         assert!(
             html.contains(
                 r#"hx-get="/synthetic/_fragments/sandbox-rail" hx-trigger="sandbox-rail-refresh""#
@@ -315,4 +320,26 @@ async fn the_credentials_page_waits_for_github_only_while_github_is_connected() 
             assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
         }
     }
+}
+
+/// An organization with no Sandboxes gets the start panel, which reads
+/// billing once. Its refresh, while the organization stays empty, answers 204
+/// so htmx leaves the panel (focus and copy feedback) as it is and billing is
+/// not read again. A search that matches nothing still shows the table.
+#[tokio::test]
+async fn an_empty_organization_gets_the_start_panel_and_its_refresh_changes_nothing() {
+    let (status, html, calls) = get("/synthetic/_fragments/sandboxes").await;
+    assert_eq!(status, StatusCode::OK, "{calls:?}");
+    assert!(html.contains("Start your first sandbox"), "{html}");
+    assert_eq!(count(&calls, "/GetBillingOverview"), 1, "{calls:?}");
+
+    let (status, html, calls) = get("/synthetic/_fragments/sandboxes?showing=start").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{calls:?}");
+    assert!(html.is_empty());
+    assert_eq!(count(&calls, "/GetBillingOverview"), 0, "{calls:?}");
+
+    let (status, html, calls) = get("/synthetic/_fragments/sandboxes?search=nothing").await;
+    assert_eq!(status, StatusCode::OK, "{calls:?}");
+    assert!(html.contains("No Sandboxes found"), "{html}");
+    assert_eq!(count(&calls, "/GetBillingOverview"), 0, "{calls:?}");
 }
