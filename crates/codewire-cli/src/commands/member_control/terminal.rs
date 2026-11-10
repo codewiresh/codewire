@@ -6,10 +6,13 @@ use super::super::sessions::{
 };
 use super::*;
 
-async fn open(
+/// Runs `body` on a connection to the selected member, which is closed when
+/// `body` returns.
+async fn with_remote<T>(
     globals: &Globals,
     environment: Option<&str>,
-) -> anyhow::Result<(store::Directory, transport::Remote)> {
+    body: impl AsyncFnOnce(&store::Directory, &mut transport::Remote) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
     let selected = globals
         .member
         .as_deref()
@@ -22,8 +25,10 @@ async fn open(
             "member environment must be the exact saved UUID"
         );
     }
-    let remote = transport::Remote::connect(&dir, alias, globals).await?;
-    Ok((dir, remote))
+    transport::Remote::with(&dir, alias, globals, async |remote| {
+        body(&dir, remote).await
+    })
+    .await
 }
 fn target<'a>(values: &'a [String], env: &str) -> anyhow::Result<&'a str> {
     let id = match values {
@@ -78,60 +83,64 @@ pub(crate) async fn run(globals: &Globals, args: EnvironmentRunArgs) -> anyhow::
     );
     ensure!(!args.command.is_empty(), "member command required");
     let id = request_id(args.request_id)?;
-    let (dir, mut remote) = open(globals, args.environment.as_deref()).await?;
-    let receipt = remote
-        .mutate(
-            &dir,
-            v1::HostControlMutationRequest {
-                request_id: id,
-                scope: Some(remote.alias.binding.scope()),
-                operation: Some(v1::host_control_mutation_request::Operation::Launch(
-                    v1::HostControlLaunch {
-                        command: args.command,
-                        working_dir: args.workdir.unwrap_or_default(),
-                        name: args.name.unwrap_or_default(),
-                        ..Default::default()
-                    },
-                )),
-            },
-        )
-        .await?;
-    complete(&receipt)?;
-    let session = remote.get(&receipt.session_id).await?;
-    guard(&session, &receipt.session_id, receipt.launch_generation)?;
-    print_environment_sessions(
-        &[host_environment_session_view(session.clone())],
-        args.output,
-    )?;
-    if args.detach || matches!(args.output, OutputFormat::Json) {
-        return Ok(());
-    }
-    follow(&mut remote, &session, Duration::from_secs(1800)).await
+    with_remote(globals, args.environment.as_deref(), async |dir, remote| {
+        let receipt = remote
+            .mutate(
+                dir,
+                v1::HostControlMutationRequest {
+                    request_id: id,
+                    scope: Some(remote.alias.binding.scope()),
+                    operation: Some(v1::host_control_mutation_request::Operation::Launch(
+                        v1::HostControlLaunch {
+                            command: args.command,
+                            working_dir: args.workdir.unwrap_or_default(),
+                            name: args.name.unwrap_or_default(),
+                            ..Default::default()
+                        },
+                    )),
+                },
+            )
+            .await?;
+        complete(&receipt)?;
+        let session = remote.get(&receipt.session_id).await?;
+        guard(&session, &receipt.session_id, receipt.launch_generation)?;
+        print_environment_sessions(
+            &[host_environment_session_view(session.clone())],
+            args.output,
+        )?;
+        if args.detach || matches!(args.output, OutputFormat::Json) {
+            return Ok(());
+        }
+        follow(remote, &session, Duration::from_secs(1800)).await
+    })
+    .await
 }
 pub(crate) async fn list(globals: &Globals, args: ListArgs) -> anyhow::Result<()> {
     ensure!(
         !args.all && args.environment_type.is_none() && args.state.is_none(),
         "member ls lists the pinned environment's sessions; --all, --type and --state are not admitted"
     );
-    let (_, mut remote) = open(globals, args.environment.as_deref()).await?;
-    let mut sessions = Vec::new();
-    let mut cursor = String::new();
-    let mut done = false;
-    for _ in 0..128 {
-        let page = remote.list(cursor.clone()).await?;
-        sessions.extend(page.sessions.into_iter().map(host_environment_session_view));
-        if page.next_session_id.is_empty() {
-            done = true;
-            break;
+    with_remote(globals, args.environment.as_deref(), async |_, remote| {
+        let mut sessions = Vec::new();
+        let mut cursor = String::new();
+        let mut done = false;
+        for _ in 0..128 {
+            let page = remote.list(cursor.clone()).await?;
+            sessions.extend(page.sessions.into_iter().map(host_environment_session_view));
+            if page.next_session_id.is_empty() {
+                done = true;
+                break;
+            }
+            ensure!(
+                page.next_session_id > cursor,
+                "member list cursor did not advance"
+            );
+            cursor = page.next_session_id;
         }
-        ensure!(
-            page.next_session_id > cursor,
-            "member list cursor did not advance"
-        );
-        cursor = page.next_session_id;
-    }
-    ensure!(done, "member list exceeds bounded session inventory");
-    print_environment_sessions(&sessions, args.output)
+        ensure!(done, "member list exceeds bounded session inventory");
+        print_environment_sessions(&sessions, args.output)
+    })
+    .await
 }
 pub(crate) async fn send(globals: &Globals, args: SendArgs) -> anyhow::Result<()> {
     ensure!(
@@ -141,71 +150,75 @@ pub(crate) async fn send(globals: &Globals, args: SendArgs) -> anyhow::Result<()
     let SendRequest { selection, data } = send_request(&args)?;
     let values = selection.values();
     let id = request_id(args.request_id)?;
-    let (dir, mut remote) = open(globals, None).await?;
-    let sid = target(&values, &remote.alias.binding.environment_id)?;
-    let session = remote.get(sid).await?;
-    ensure!(
-        !session.command.iter().any(|arg| arg == "_agent-driver"),
-        "member managed controls are not admitted"
-    );
-    let generation = generation(session.launch_generation, args.expected_launch_generation)?;
-    let receipt = remote
-        .mutate(
-            &dir,
-            v1::HostControlMutationRequest {
-                request_id: id,
-                scope: Some(remote.alias.binding.scope()),
-                operation: Some(v1::host_control_mutation_request::Operation::Input(
-                    v1::HostControlInput {
-                        session_id: sid.into(),
-                        expected_launch_generation: generation,
-                        data,
-                    },
-                )),
-            },
-        )
-        .await?;
-    complete(&receipt)?;
-    ensure!(
-        receipt.input_acknowledged,
-        "member input acknowledgement unavailable; observe only"
-    );
-    println!("Input written to {sid}");
-    Ok(())
+    with_remote(globals, None, async |dir, remote| {
+        let sid = target(&values, &remote.alias.binding.environment_id)?;
+        let session = remote.get(sid).await?;
+        ensure!(
+            !session.command.iter().any(|arg| arg == "_agent-driver"),
+            "member managed controls are not admitted"
+        );
+        let generation = generation(session.launch_generation, args.expected_launch_generation)?;
+        let receipt = remote
+            .mutate(
+                dir,
+                v1::HostControlMutationRequest {
+                    request_id: id,
+                    scope: Some(remote.alias.binding.scope()),
+                    operation: Some(v1::host_control_mutation_request::Operation::Input(
+                        v1::HostControlInput {
+                            session_id: sid.into(),
+                            expected_launch_generation: generation,
+                            data,
+                        },
+                    )),
+                },
+            )
+            .await?;
+        complete(&receipt)?;
+        ensure!(
+            receipt.input_acknowledged,
+            "member input acknowledgement unavailable; observe only"
+        );
+        println!("Input written to {sid}");
+        Ok(())
+    })
+    .await
 }
 pub(crate) async fn stop(globals: &Globals, args: SessionTargetArgs) -> anyhow::Result<()> {
     let id = request_id(args.request_id)?;
-    let (dir, mut remote) = open(globals, None).await?;
-    let sid = target(&args.target, &remote.alias.binding.environment_id)?;
-    let session = remote.get(sid).await?;
-    ensure!(
-        !session.command.iter().any(|arg| arg == "_agent-driver"),
-        "member managed cleanup is not admitted"
-    );
-    let generation = generation(session.launch_generation, args.expected_launch_generation)?;
-    let receipt = remote
-        .mutate(
-            &dir,
-            v1::HostControlMutationRequest {
-                request_id: id,
-                scope: Some(remote.alias.binding.scope()),
-                operation: Some(v1::host_control_mutation_request::Operation::Stop(
-                    v1::HostControlStop {
-                        session_id: sid.into(),
-                        expected_launch_generation: generation,
-                    },
-                )),
-            },
-        )
-        .await?;
-    complete(&receipt)?;
-    let stopped = remote.get(sid).await?;
-    guard(&stopped, sid, generation)?;
-    ensure!(
-        terminal(&stopped) && !stopped.cleanup_unknown,
-        "member stop cleanup unknown; observe original request"
-    );
-    print_environment_sessions(&[host_environment_session_view(stopped)], args.output)
+    with_remote(globals, None, async |dir, remote| {
+        let sid = target(&args.target, &remote.alias.binding.environment_id)?;
+        let session = remote.get(sid).await?;
+        ensure!(
+            !session.command.iter().any(|arg| arg == "_agent-driver"),
+            "member managed cleanup is not admitted"
+        );
+        let generation = generation(session.launch_generation, args.expected_launch_generation)?;
+        let receipt = remote
+            .mutate(
+                dir,
+                v1::HostControlMutationRequest {
+                    request_id: id,
+                    scope: Some(remote.alias.binding.scope()),
+                    operation: Some(v1::host_control_mutation_request::Operation::Stop(
+                        v1::HostControlStop {
+                            session_id: sid.into(),
+                            expected_launch_generation: generation,
+                        },
+                    )),
+                },
+            )
+            .await?;
+        complete(&receipt)?;
+        let stopped = remote.get(sid).await?;
+        guard(&stopped, sid, generation)?;
+        ensure!(
+            terminal(&stopped) && !stopped.cleanup_unknown,
+            "member stop cleanup unknown; observe original request"
+        );
+        print_environment_sessions(&[host_environment_session_view(stopped)], args.output)
+    })
+    .await
 }
 /// `wait` asks the member only for the session's state, never its output, so
 /// its cost does not grow with what the session printed. Read the output with
@@ -220,27 +233,31 @@ pub(crate) async fn wait(globals: &Globals, args: WaitArgs) -> anyhow::Result<()
     ensure!(!timeout.is_zero(), "wait timeout must be positive");
     let selection = wait_selection(&args)?.context("member wait needs --session")?;
     let values = selection.values();
-    let (_, mut remote) = open(globals, None).await?;
-    let sid = target(&values, &remote.alias.binding.environment_id)?;
-    let initial = remote.get(sid).await?;
-    let current = until_terminal(&initial, timeout, async || remote.get(sid).await).await?;
-    ensure!(!current.cleanup_unknown, "member terminal cleanup unknown");
-    let view = host_environment_session_view(current.clone());
-    match args.output {
-        OutputFormat::Json => value(serde_json::json!({ "session": view }), args.output)?,
-        OutputFormat::Text => {
-            print_environment_sessions(&[view], args.output)?;
-            if let Some(member) = globals.member.as_deref() {
-                eprintln!("[cw] read its output with cw --member {member} logs --session {sid}");
+    with_remote(globals, None, async |_, remote| {
+        let sid = target(&values, &remote.alias.binding.environment_id)?;
+        let initial = remote.get(sid).await?;
+        let current = until_terminal(&initial, timeout, async || remote.get(sid).await).await?;
+        ensure!(!current.cleanup_unknown, "member terminal cleanup unknown");
+        let view = host_environment_session_view(current.clone());
+        match args.output {
+            OutputFormat::Json => value(serde_json::json!({ "session": view }), args.output)?,
+            OutputFormat::Text => {
+                print_environment_sessions(&[view], args.output)?;
+                if let Some(member) = globals.member.as_deref() {
+                    eprintln!(
+                        "[cw] read its output with cw --member {member} logs --session {sid}"
+                    );
+                }
             }
         }
-    }
-    ensure!(
-        current.exit_code == Some(0),
-        "session exited with code {:?}",
-        current.exit_code
-    );
-    Ok(())
+        ensure!(
+            current.exit_code == Some(0),
+            "session exited with code {:?}",
+            current.exit_code
+        );
+        Ok(())
+    })
+    .await
 }
 
 const WAIT_POLL: Duration = Duration::from_millis(200);
@@ -308,85 +325,87 @@ pub(crate) async fn logs(globals: &Globals, args: SessionLogs) -> anyhow::Result
         anyhow::bail!("member logs requires --session with the exact session ID");
     };
     let values: Vec<String> = args.environment.iter().cloned().chain([session]).collect();
-    let (_, mut remote) = open(globals, None).await?;
-    let sid = target(&values, &remote.alias.binding.environment_id)?;
-    let initial = remote.get(sid).await?;
-    let end = initial.output_end_offset;
-    let mut offset = 0;
-    let mut bytes = 0;
-    let mut tail = args.tail.map(|_| Vec::new());
-    let mut ansi = LogsAnsiFilter::default();
-    loop {
-        let page = remote.output(sid, offset).await?;
-        if page.history_gap {
-            eprintln!("[cw] older member output unavailable");
-            ansi = LogsAnsiFilter::default();
-            if let Some(tail) = &mut tail {
-                tail.clear();
-            }
-        }
-        for chunk in page.chunks {
-            bytes += chunk.data.len();
-            ensure!(
-                bytes <= 16 * 1024 * 1024,
-                "member retained replay exceeds bound"
-            );
-            if let Some(tail) = &mut tail {
-                if args.tail != Some(0) {
-                    tail.extend(chunk.data);
-                    let start = session_output_tail_start(tail, args.tail);
-                    tail.drain(..start);
-                }
-            } else {
-                let data = if args.raw {
-                    chunk.data
-                } else {
-                    ansi.strip(&chunk.data)
-                };
-                write_session_output(&mut std::io::stdout(), &data, true)?;
-            }
-        }
-        ensure!(
-            page.next_offset > offset || offset >= end,
-            "member replay did not advance"
-        );
-        offset = page.next_offset;
-        if offset >= end {
-            break;
-        }
-    }
-    if let Some(tail) = tail {
-        let data = if args.raw { tail } else { ansi.strip(&tail) };
-        write_session_output(&mut std::io::stdout(), &data, true)?;
-    }
-    if args.follow {
+    with_remote(globals, None, async |_, remote| {
+        let sid = target(&values, &remote.alias.binding.environment_id)?;
+        let initial = remote.get(sid).await?;
+        let end = initial.output_end_offset;
+        let mut offset = 0;
+        let mut bytes = 0;
+        let mut tail = args.tail.map(|_| Vec::new());
+        let mut ansi = LogsAnsiFilter::default();
         loop {
             let page = remote.output(sid, offset).await?;
             if page.history_gap {
                 eprintln!("[cw] older member output unavailable");
                 ansi = LogsAnsiFilter::default();
+                if let Some(tail) = &mut tail {
+                    tail.clear();
+                }
             }
             for chunk in page.chunks {
-                let data = if args.raw {
-                    chunk.data
+                bytes += chunk.data.len();
+                ensure!(
+                    bytes <= 16 * 1024 * 1024,
+                    "member retained replay exceeds bound"
+                );
+                if let Some(tail) = &mut tail {
+                    if args.tail != Some(0) {
+                        tail.extend(chunk.data);
+                        let start = session_output_tail_start(tail, args.tail);
+                        tail.drain(..start);
+                    }
                 } else {
-                    ansi.strip(&chunk.data)
-                };
-                write_session_output(&mut std::io::stdout(), &data, true)?;
+                    let data = if args.raw {
+                        chunk.data
+                    } else {
+                        ansi.strip(&chunk.data)
+                    };
+                    write_session_output(&mut std::io::stdout(), &data, true)?;
+                }
             }
-            let advanced = page.next_offset > offset;
+            ensure!(
+                page.next_offset > offset || offset >= end,
+                "member replay did not advance"
+            );
             offset = page.next_offset;
-            let current = remote.get(sid).await?;
-            guard(&current, sid, initial.launch_generation)?;
-            if terminal(&current) && offset >= current.output_end_offset {
+            if offset >= end {
                 break;
             }
-            if !advanced {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if let Some(tail) = tail {
+            let data = if args.raw { tail } else { ansi.strip(&tail) };
+            write_session_output(&mut std::io::stdout(), &data, true)?;
+        }
+        if args.follow {
+            loop {
+                let page = remote.output(sid, offset).await?;
+                if page.history_gap {
+                    eprintln!("[cw] older member output unavailable");
+                    ansi = LogsAnsiFilter::default();
+                }
+                for chunk in page.chunks {
+                    let data = if args.raw {
+                        chunk.data
+                    } else {
+                        ansi.strip(&chunk.data)
+                    };
+                    write_session_output(&mut std::io::stdout(), &data, true)?;
+                }
+                let advanced = page.next_offset > offset;
+                offset = page.next_offset;
+                let current = remote.get(sid).await?;
+                guard(&current, sid, initial.launch_generation)?;
+                if terminal(&current) && offset >= current.output_end_offset {
+                    break;
+                }
+                if !advanced {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
             }
         }
-    }
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 #[cfg(test)]

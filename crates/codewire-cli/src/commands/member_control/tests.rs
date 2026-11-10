@@ -56,6 +56,35 @@ async fn member_wire_mutual_proof_binds_scope_and_typed_terminal_payload() {
 }
 
 #[tokio::test]
+async fn member_caller_close_ends_the_target_connection_without_a_timeout() {
+    let binding = binding();
+    let (a, b) = tokio::io::duplex(8192);
+    let (caller, target) = tokio::join!(
+        wire::Channel::caller(a, NodePrivate::from_raw([11; 32]), binding.clone()),
+        wire::Channel::target(b, NodePrivate::from_raw([22; 32]), &binding)
+    );
+    let mut caller = caller.unwrap();
+    let mut target = target.unwrap();
+    // The target ends its connection when the caller's close reaches it, as
+    // its serve loop does on any receive error; the caller's close then
+    // completes because the target's side has closed too.
+    let target = async move {
+        assert!(target.receive().await.is_err());
+        drop(target);
+    };
+    let (closed, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(caller.close(), target)
+    })
+    .await
+    .expect("close and the target's end must not wait for a timeout");
+    closed.unwrap();
+    assert!(
+        caller.send(1, &[1]).await.is_err(),
+        "a closed channel sends nothing more"
+    );
+}
+
+#[tokio::test]
 async fn member_wire_refuses_wrong_org_network_target_and_noncontributory_key() {
     for field in 0..3 {
         let expected = binding();

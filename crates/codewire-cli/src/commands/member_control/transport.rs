@@ -19,6 +19,8 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const SETTLE_BOUND: Duration = Duration::from_secs(60);
 const SETTLE_POLL: Duration = Duration::from_millis(200);
 const READ_PAGE: u64 = 8 * 1024;
+/// How long a finished command waits for the target to close its side.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn admit_info(
     value: &v1::HostControlInfoResponse,
@@ -190,7 +192,23 @@ pub(super) struct Remote {
     pub alias: Alias,
 }
 impl Remote {
-    pub async fn connect(
+    /// Connects, runs `body`, then closes the connection whatever `body`
+    /// returned. A process that exits with its connection open never tells the
+    /// target, which holds one of its few connection slots until a timeout.
+    pub async fn with<T>(
+        directory: &Directory,
+        alias: Alias,
+        globals: &super::super::Globals,
+        body: impl AsyncFnOnce(&mut Self) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let mut remote = Self::connect(directory, alias, globals).await?;
+        let result = body(&mut remote).await;
+        // The command's own result stands; a close that fails or times out
+        // leaves only the target's idle timeout to end the connection.
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT, remote.channel.close()).await;
+        result
+    }
+    async fn connect(
         directory: &Directory,
         alias: Alias,
         globals: &super::super::Globals,

@@ -1098,6 +1098,16 @@ async fn journey(
                 > info["path_before"]["direct_wg_received"].as_u64().unwrap()
         );
     }
+    // The target serves at most 16 member connections at once. A command that
+    // exits without closing its connection holds one of them until the target
+    // times it out, so one more command than that, back to back, passes only
+    // if every command closes its connection when it ends.
+    for _ in 0..17 {
+        let listed = caller
+            .json(&["--member", "target", "ls", "--output", "json"], None)
+            .await;
+        assert!(listed.is_array(), "{listed}");
+    }
     if !direct {
         // The full journey runs once, over direct UDP. Over TLS DERP, one
         // typed command proves the relay route end to end: its launch, wait

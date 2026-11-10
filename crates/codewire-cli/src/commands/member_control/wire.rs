@@ -237,6 +237,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Channel<S> {
         })
     }
 
+    /// Ends the connection from the caller's side: a FIN once the target has
+    /// acknowledged everything sent, then whatever the target still sends is
+    /// discarded until it closes too. The target ends its connection task on
+    /// that FIN, so its slot is free before this process exits.
+    pub async fn close(&mut self) -> anyhow::Result<()> {
+        self.closed = true;
+        self.io.shutdown().await?;
+        let mut discard = [0; 256];
+        while self.io.read(&mut discard).await? > 0 {}
+        Ok(())
+    }
+
     pub async fn send(&mut self, action: u8, payload: &[u8]) -> anyhow::Result<()> {
         ensure!(
             !self.closed && payload.len() <= MAX_PAYLOAD + 1 && (1..=7).contains(&action),

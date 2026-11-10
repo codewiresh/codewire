@@ -383,19 +383,20 @@ pub(crate) async fn handle_member_command(
         MemberCommand::Info(args) => {
             let dir = directory(false)?;
             let alias = store::Alias::load(&dir, &args.name)?;
-            let mut remote = transport::Remote::connect(&dir, alias, globals).await?;
             let timeout = tailnet_ssh::parse_duration(&args.path_timeout)
                 .map_err(|_| anyhow::anyhow!("invalid member path timeout"))?;
             ensure!(
                 !timeout.is_zero() && timeout <= Duration::from_secs(60),
                 "member path timeout must be 1ms..60s"
             );
-            let before = remote
-                .observe_path(args.expect_transport.as_deref(), timeout)
-                .await?;
-            let info = remote.info().await?;
-            let after = remote
-                .observe_path(args.expect_transport.as_deref(), timeout)
+            let expected = args.expect_transport.as_deref();
+            let (before, info, after) =
+                transport::Remote::with(&dir, alias, globals, async |remote| {
+                    let before = remote.observe_path(expected, timeout).await?;
+                    let info = remote.info().await?;
+                    let after = remote.observe_path(expected, timeout).await?;
+                    Ok((before, info, after))
+                })
                 .await?;
             value(
                 serde_json::json!({"environment_id":info.environment_id,"protocol_version":info.protocol_version,"verbs":info.verbs,"path_before":before,"path_after":after}),
@@ -411,8 +412,10 @@ pub(crate) async fn handle_member_command(
                 record.binding == alias.binding,
                 "member request belongs to a different pinned principal"
             );
-            let mut remote = transport::Remote::connect(&dir, alias, globals).await?;
-            let receipt = remote.observe_record(&dir, &mut record).await?;
+            let receipt = transport::Remote::with(&dir, alias, globals, async |remote| {
+                remote.observe_record(&dir, &mut record).await
+            })
+            .await?;
             value(receipt_value(&receipt), args.presentation.output)
         }
     }
