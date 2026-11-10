@@ -657,6 +657,27 @@ fn plan_daemon_image<'a>(
 /// Reads and fenced writes one Pod-replacement re-pin may make.
 const DAEMON_REPIN_ATTEMPTS: usize = 3;
 
+/// Created only for a PATCH response that guarantees no publication. A read
+/// failure after a successful write must never authorize another publication.
+#[derive(Debug)]
+struct WorkspaceModePatchConflict(kube::Error);
+
+impl std::fmt::Display for WorkspaceModePatchConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "workspace operating mode update was not admitted: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for WorkspaceModePatchConflict {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
 /// How [`SandboxClient::replace_workspace_pod_if_uid`] ended. Callers treat
 /// both as a replacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3671,14 +3692,14 @@ impl SandboxClient {
         expected_claim_name: &str,
         expected_claim_uid: &str,
     ) -> anyhow::Result<()> {
-        let (_, sandbox) = self
+        let (claim, sandbox) = self
             .read_owned_claim_sandbox(claim_opts, expected_claim_name, expected_claim_uid)
             .await?;
         self.set_workspace_operating_mode(
             claim_opts,
             expected_claim_name,
             expected_claim_uid,
-            &sandbox,
+            (&claim, &sandbox),
             0,
             None,
         )
@@ -3701,7 +3722,7 @@ impl SandboxClient {
         replicas: i64,
         support_image: &str,
     ) -> anyhow::Result<()> {
-        let (_, sandbox) = self
+        let (claim, sandbox) = self
             .read_owned_claim_sandbox(claim_opts, expected_claim_name, expected_claim_uid)
             .await?;
         expected_sandbox.require_match(&sandbox)?;
@@ -3709,16 +3730,90 @@ impl SandboxClient {
             claim_opts,
             expected_claim_name,
             expected_claim_uid,
-            &sandbox,
+            (&claim, &sandbox),
             replicas,
             Some(support_image),
         )
         .await
     }
 
-    /// The object is supplied only by the exact owned-chain readers above.
-    /// Keep one UID/version-fenced writer for initial suspend and pinned resume.
+    /// A status/annotation update may advance resourceVersion between the owned
+    /// read and conditional write. Re-read at most twice, keeping the original
+    /// Claim/Sandbox and complete specs: a new mode, slot or identity is never
+    /// adopted as a retry. Every attempt still tests UID, version and slots.
     async fn set_workspace_operating_mode(
+        &self,
+        claim_opts: &ClaimOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+        owned: (&DynamicObject, &DynamicObject),
+        replicas: i64,
+        support_image: Option<&str>,
+    ) -> anyhow::Result<()> {
+        const ATTEMPTS: usize = 3;
+        let (claim, sandbox) = owned;
+        let name = sandbox
+            .metadata
+            .name
+            .as_deref()
+            .expect("validated Sandbox name");
+        let uid = runtime_object_uid(&sandbox.metadata, &self.namespace, name)?;
+        let claim_spec = claim.data.get("spec");
+        let sandbox_spec = sandbox.data.get("spec");
+        let observed_mode = sandbox.data.pointer("/spec/operatingMode");
+        let mut observed = sandbox.clone();
+        for attempt in 0..ATTEMPTS {
+            let error = match self
+                .publish_workspace_operating_mode(
+                    claim_opts,
+                    expected_claim_name,
+                    expected_claim_uid,
+                    &observed,
+                    replicas,
+                    support_image,
+                )
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            if attempt + 1 == ATTEMPTS
+                || error.downcast_ref::<WorkspaceModePatchConflict>().is_none()
+            {
+                return Err(error);
+            }
+            let (fresh_claim, fresh) = self
+                .read_owned_claim_sandbox(claim_opts, expected_claim_name, expected_claim_uid)
+                .await?;
+            anyhow::ensure!(
+                fresh.metadata.name.as_deref() == Some(name)
+                    && runtime_object_uid(&fresh.metadata, &self.namespace, name)? == uid,
+                "workspace Sandbox changed during operating mode conflict"
+            );
+            anyhow::ensure!(
+                fresh_claim.data.get("spec") == claim_spec
+                    && fresh.data.get("spec") == sandbox_spec
+                    && fresh.data.pointer("/spec/operatingMode") == observed_mode,
+                "workspace Claim or Sandbox spec changed during operating mode conflict"
+            );
+            let version = fresh
+                .metadata
+                .resource_version
+                .as_deref()
+                .filter(|v| !v.is_empty());
+            if version.is_none() || version == observed.metadata.resource_version.as_deref() {
+                // A deterministic invalid patch, or another unchanged refusal,
+                // has no evidence of a status conflict and must not be replayed.
+                return Err(error);
+            }
+            observed = fresh;
+        }
+        unreachable!("the final attempt returns its original failure")
+    }
+
+    /// One UID/version-fenced write, including unchanged ownership/convergence
+    /// checks after publication. Only an unapplied API conflict is retryable.
+    async fn publish_workspace_operating_mode(
         &self,
         claim_opts: &ClaimOpts,
         expected_claim_name: &str,
@@ -3798,7 +3893,11 @@ impl SandboxClient {
             .patch(name, &PatchParams::default(), &patch)
             .await
             .map_err(|error| {
-                anyhow::anyhow!("workspace operating mode update was not admitted: {error}")
+                if matches!(&error, kube::Error::Api(status) if matches!(status.code, 409 | 422)) {
+                    anyhow::Error::new(WorkspaceModePatchConflict(error))
+                } else {
+                    anyhow::anyhow!("workspace operating mode update was not admitted: {error}")
+                }
             })?;
         anyhow::ensure!(
             runtime_object_uid(&updated.metadata, &self.namespace, name)? == uid,

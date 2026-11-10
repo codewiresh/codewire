@@ -75,6 +75,17 @@ fn blueprint() -> Value {
 enum Race {
     SandboxUid,
     SandboxVersion,
+    /// Upstream JSON Patch test failure, with only resourceVersion changed.
+    SandboxVersionApi422,
+    SandboxVersionEveryPatchApi422,
+    StableApi422,
+    SandboxSpecApi422,
+    ClaimSpecApi422,
+    SandboxModeApi422,
+    SandboxUidApi422,
+    MalformedPatchResponse,
+    PostPublicationRead409,
+    PostPublicationRead422,
     SandboxMode,
     TemplateVersion,
     ClaimAfterPatch,
@@ -219,12 +230,29 @@ fn client(fixture: Fixture) -> (SandboxClient, Arc<Mutex<Fixture>>) {
             }
             let is_template = path.contains("/sandboxtemplates/");
             let is_sandbox = path.contains("/sandboxes/");
+            if is_sandbox && method == Method::GET
+                && matches!(state.race, Some(Race::PostPublicationRead409 | Race::PostPublicationRead422))
+                && state.requests.iter().any(|(method, _, _)| *method == Method::PATCH) {
+                let (code, reason) = if matches!(state.race, Some(Race::PostPublicationRead409)) { (409, "Conflict") } else { (422, "Invalid") };
+                return Response::builder().status(code).header("content-type", "application/json")
+                    .body(Body::from(json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":reason,"code":code}).to_string())).unwrap();
+            }
             if method == Method::PATCH {
                 if is_sandbox && matches!(state.race, Some(Race::SandboxUid)) { state.sandbox["metadata"]["uid"] = json!("replacement"); }
-                if is_sandbox && matches!(state.race, Some(Race::SandboxVersion)) { state.sandbox["metadata"]["resourceVersion"] = json!("31"); }
+                if is_sandbox && matches!(state.race, Some(Race::SandboxVersion | Race::SandboxVersionApi422)) { state.sandbox["metadata"]["resourceVersion"] = json!("31"); }
+                if is_sandbox && matches!(state.race, Some(Race::SandboxSpecApi422 | Race::ClaimSpecApi422 | Race::SandboxModeApi422 | Race::SandboxUidApi422)) {
+                    state.sandbox["metadata"]["resourceVersion"] = json!("31");
+                    match state.race {
+                        Some(Race::SandboxSpecApi422) => { *daemon_reference_mut(&mut state.sandbox) = json!(CONCURRENT_DAEMON_IMAGE); }
+                        Some(Race::ClaimSpecApi422) => { state.claim["spec"]["warmPoolRef"]["name"] = json!("another-pool"); }
+                        Some(Race::SandboxModeApi422) => { state.sandbox["spec"]["operatingMode"] = json!("Running"); }
+                        Some(Race::SandboxUidApi422) => { state.sandbox["metadata"]["uid"] = json!("replacement-sandbox"); }
+                        _ => unreachable!(),
+                    }
+                }
                 if is_sandbox && matches!(state.race, Some(Race::SandboxMode)) { state.sandbox["spec"]["operatingMode"] = json!("Running"); }
                 if is_template && matches!(state.race, Some(Race::TemplateVersion)) { state.template["metadata"]["resourceVersion"] = json!("21"); }
-                if is_sandbox && matches!(state.race, Some(Race::SandboxVersionEveryPatch)) {
+                if is_sandbox && matches!(state.race, Some(Race::SandboxVersionEveryPatch | Race::SandboxVersionEveryPatchApi422)) {
                     let version: u64 = state.sandbox["metadata"]["resourceVersion"].as_str().unwrap().parse().unwrap();
                     state.sandbox["metadata"]["resourceVersion"] = json!((version + 1).to_string());
                 }
@@ -250,6 +278,9 @@ fn client(fixture: Fixture) -> (SandboxClient, Arc<Mutex<Fixture>>) {
                 return Response::builder().status(StatusCode::NOT_FOUND).header("content-type","application/json")
                     .body(Body::from(json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404}).to_string())).unwrap();
             }
+            let upstream_422 = matches!(state.race, Some(Race::SandboxVersionApi422 | Race::SandboxVersionEveryPatchApi422 | Race::StableApi422 | Race::SandboxSpecApi422 | Race::ClaimSpecApi422 | Race::SandboxModeApi422 | Race::SandboxUidApi422));
+            let stable_422 = is_sandbox && matches!(state.race, Some(Race::StableApi422));
+            let malformed_reply = is_sandbox && method == Method::PATCH && matches!(state.race, Some(Race::MalformedPatchResponse));
             let object = if path.contains("/sandboxclaims/") { &mut state.claim }
                 else if path.contains("/sandboxwarmpools/") { &mut state.pool }
                 else if is_template { &mut state.template }
@@ -260,14 +291,19 @@ fn client(fixture: Fixture) -> (SandboxClient, Arc<Mutex<Fixture>>) {
                 else {
                     assert_eq!(method, Method::PATCH);
                     assert!(is_template || is_sandbox, "must never patch a Pod");
-                    if apply_patch_fixture(object, &patch) { (StatusCode::OK, object.clone()) }
+                    if stable_422 { (StatusCode::UNPROCESSABLE_ENTITY, json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Invalid","code":422,"message":"the server rejected our request due to an error in our request","details":{"causes":[]}})) }
+                    else if apply_patch_fixture(object, &patch) { (StatusCode::OK, object.clone()) }
+                    else if upstream_422 { (StatusCode::UNPROCESSABLE_ENTITY, json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Invalid","code":422,"message":"the server rejected our request due to an error in our request","details":{"causes":[]}})) }
                     else { (StatusCode::CONFLICT, json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Conflict","code":409})) }
                 };
+            if is_sandbox && method == Method::PATCH && matches!(state.race, Some(Race::PostPublicationRead409 | Race::PostPublicationRead422)) {
+                state.sandbox["metadata"]["resourceVersion"] = json!("31");
+            }
             if is_sandbox && method == Method::PATCH && matches!(state.race, Some(Race::ClaimAfterPatch)) {
                 state.claim["metadata"]["uid"] = json!("replacement-claim");
             }
             Response::builder().status(status).header("content-type","application/json")
-                .body(Body::from(body.to_string())).unwrap()
+                .body(Body::from(if malformed_reply { "{".to_owned() } else { body.to_string() })).unwrap()
         }
     });
     (
@@ -747,12 +783,7 @@ async fn pinned_resume_refuses_replaced_claim_sandbox_or_running_target_without_
 
 #[tokio::test]
 async fn pinned_resume_conditional_races_fail_without_retry_or_replacement_success() {
-    for race in [
-        Race::SandboxUid,
-        Race::SandboxVersion,
-        Race::SandboxMode,
-        Race::ClaimAfterPatch,
-    ] {
+    for race in [Race::SandboxUid, Race::SandboxMode, Race::ClaimAfterPatch] {
         let mut fixture = fixture();
         fixture.race = Some(race);
         let (client, state) = client(fixture);
@@ -870,11 +901,7 @@ async fn exact_claim_suspend_refuses_wrong_claim_or_owner_before_every_write() {
 
 #[tokio::test]
 async fn exact_claim_suspend_fences_replacement_during_conditional_write() {
-    for race in [
-        Race::SandboxUid,
-        Race::SandboxVersion,
-        Race::ClaimAfterPatch,
-    ] {
+    for race in [Race::SandboxUid, Race::ClaimAfterPatch] {
         let mut fixture = fixture();
         fixture.sandbox["spec"]["operatingMode"] = json!("Running");
         fixture.race = Some(race);
@@ -1880,7 +1907,7 @@ async fn a_concurrent_daemon_volume_change_fails_the_whole_resume() {
 #[tokio::test]
 async fn a_rejected_resume_names_its_cause() {
     let mut before = stale_daemon_fixture();
-    before.race = Some(Race::SandboxVersion);
+    before.race = Some(Race::SandboxVersionEveryPatch);
     let (client, state) = client(before);
     let error = pinned_resume(&client, &state, DAEMON_IMAGE)
         .await
@@ -2844,4 +2871,260 @@ fn a_mounted_block_workspace_becomes_existing_and_a_failed_one_stays_new() {
             .is_none()
     );
     assert!(block_workspace(&sandbox(runc)).unwrap().is_none());
+}
+
+fn old_vfs_block_fixture() -> Fixture {
+    let mut before = fixture();
+    let options = TemplateOpts {
+        runtime_profile: super::super::template::RUNTIME_PROFILE_COMMODITY.into(),
+        docker_mode: super::super::template::DOCKER_MODE_GUEST_DIND.into(),
+        support_image: OLD_DAEMON_IMAGE.into(),
+        disk_gib: 40,
+        ..binding_opts()
+    };
+    let rendered = render_sandbox_template(NS, &options);
+    before.sandbox["spec"]["podTemplate"] = rendered["spec"]["podTemplate"].clone();
+    before.sandbox["spec"]["volumeClaimTemplates"] =
+        rendered["spec"]["volumeClaimTemplates"].clone();
+    let spec = &mut before.sandbox["spec"]["podTemplate"]["spec"];
+    for container in spec["containers"].as_array_mut().unwrap() {
+        if container["name"] == "dind" {
+            container["command"][2] = json!(dind_bootstrap_script());
+        }
+    }
+    for init in spec["initContainers"].as_array_mut().unwrap() {
+        if init["name"] == MOUNT_WORKSPACE_CONTAINER {
+            init["command"][4] = json!(WorkspaceVolume::Existing.as_str());
+        }
+    }
+    before.pod = Value::Null;
+    before
+}
+
+/// This fixture runs the shipped conditional resume emitter with the former
+/// commodity VFS bootstrap, current Block mounts and one status-only write.
+/// Kubernetes v1.36 patch.go returns 422/Invalid without causes when Apply
+/// rejects a JSON Patch test; that differs from the older fixture's 409.
+#[tokio::test]
+async fn pinned_resume_retries_status_only_json_patch_422() {
+    let mut before = old_vfs_block_fixture();
+    let unchanged = before.sandbox.clone();
+    before.race = Some(Race::SandboxVersionApi422);
+    let (client, state) = client(before);
+    let suspended = client
+        .workspace_suspension_observed(&claim_opts(), &claim_name(ENV), CLAIM_UID)
+        .await
+        .unwrap()
+        .unwrap();
+    let result = client
+        .set_replicas_for_identity(
+            &claim_opts(),
+            &claim_name(ENV),
+            CLAIM_UID,
+            &suspended,
+            1,
+            DAEMON_IMAGE,
+        )
+        .await;
+    {
+        let state = state.lock().unwrap();
+        let patch = state
+            .requests
+            .iter()
+            .find(|(method, _, _)| *method == Method::PATCH)
+            .unwrap()
+            .2
+            .clone();
+        // Every emitted path and slot is valid on the same observed object.
+        let mut uncontended = unchanged.clone();
+        assert!(apply_patch_fixture(&mut uncontended, &patch));
+        assert_eq!(uncontended["spec"]["operatingMode"], "Running");
+        let spec = &uncontended["spec"]["podTemplate"]["spec"];
+        let dind = spec["containers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "dind")
+            .unwrap();
+        assert_eq!(dind["command"][2], commodity_dind_bootstrap_script());
+        assert_eq!(
+            spec["volumes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["name"] == "codewire-bin")
+                .unwrap()["image"]["reference"],
+            DAEMON_IMAGE
+        );
+        // The synthetic controller changes ONLY RV, retaining UID/spec/slots.
+        let mut changed = unchanged;
+        changed["metadata"]["resourceVersion"] = json!("31");
+        let failed: Vec<_> = patch
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|op| op["op"] == "test")
+            .filter_map(|op| {
+                let path = op["path"].as_str().unwrap();
+                (changed.pointer(path) != Some(&op["value"])).then_some(path)
+            })
+            .collect();
+        assert_eq!(failed, ["/metadata/resourceVersion"]);
+        assert!(!apply_patch_fixture(&mut changed, &patch));
+        println!(
+            "upstream=422/Invalid failed-test=/metadata/resourceVersion all-other-slots-valid=true"
+        );
+    }
+    result.expect("a status-only version conflict should be re-read within the existing bound");
+}
+
+#[tokio::test]
+async fn operating_mode_status_conflicts_keep_the_original_stop_mode() {
+    for mode in ["Running", "Suspended"] {
+        for race in [Race::SandboxVersion, Race::SandboxVersionApi422] {
+            let mut before = fixture();
+            before.sandbox["spec"]["operatingMode"] = json!(mode);
+            before.pod = Value::Null;
+            before.race = Some(race);
+            let (client, state) = client(before);
+            client
+                .suspend_workspace(&claim_opts(), &claim_name(ENV), CLAIM_UID)
+                .await
+                .unwrap();
+            let state = state.lock().unwrap();
+            assert_eq!(patches(&state).len(), 2);
+            assert_eq!(state.sandbox["spec"]["operatingMode"], "Suspended");
+            assert_eq!(patches(&state)[0][1]["value"], "30");
+            assert_eq!(patches(&state)[1][1]["value"], "31");
+        }
+    }
+}
+
+#[tokio::test]
+async fn operating_mode_conflicts_refuse_stable_invalid_and_identity_or_spec_drift() {
+    for race in [
+        Race::StableApi422,
+        Race::SandboxSpecApi422,
+        Race::ClaimSpecApi422,
+        Race::SandboxModeApi422,
+        Race::SandboxUidApi422,
+    ] {
+        let mut before = old_vfs_block_fixture();
+        before.race = Some(race);
+        let (client, state) = client(before);
+        let suspended = client
+            .workspace_suspension_observed(&claim_opts(), &claim_name(ENV), CLAIM_UID)
+            .await
+            .unwrap()
+            .unwrap();
+        let error = client
+            .set_replicas_for_identity(
+                &claim_opts(),
+                &claim_name(ENV),
+                CLAIM_UID,
+                &suspended,
+                1,
+                DAEMON_IMAGE,
+            )
+            .await
+            .unwrap_err();
+        let state = state.lock().unwrap();
+        assert_eq!(patches(&state).len(), 1, "{error:#}");
+        if matches!(race, Race::StableApi422) {
+            assert_eq!(state.sandbox["metadata"]["resourceVersion"], "30");
+            assert_eq!(state.sandbox["spec"]["operatingMode"], "Suspended");
+            assert!(format!("{error:#}").contains("422"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn operating_mode_status_conflicts_exhaust_exactly_three_writes() {
+    for race in [
+        Race::SandboxVersionEveryPatch,
+        Race::SandboxVersionEveryPatchApi422,
+    ] {
+        let mut before = old_vfs_block_fixture();
+        let original = before.sandbox["spec"].clone();
+        before.race = Some(race);
+        let (client, state) = client(before);
+        let suspended = client
+            .workspace_suspension_observed(&claim_opts(), &claim_name(ENV), CLAIM_UID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            client
+                .set_replicas_for_identity(
+                    &claim_opts(),
+                    &claim_name(ENV),
+                    CLAIM_UID,
+                    &suspended,
+                    1,
+                    DAEMON_IMAGE
+                )
+                .await
+                .is_err()
+        );
+        let state = state.lock().unwrap();
+        assert_eq!(patches(&state).len(), 3);
+        let versions: Vec<_> = patches(&state)
+            .iter()
+            .map(|patch| patch[1]["value"].clone())
+            .collect();
+        assert_eq!(versions, [json!("30"), json!("31"), json!("32")]);
+        assert_eq!(state.sandbox["metadata"]["resourceVersion"], "33");
+        assert_eq!(state.sandbox["spec"], original);
+    }
+}
+
+#[tokio::test]
+async fn operating_mode_unknown_reply_never_replays_a_possibly_published_write() {
+    let mut before = old_vfs_block_fixture();
+    before.race = Some(Race::MalformedPatchResponse);
+    let (client, state) = client(before);
+    let suspended = client
+        .workspace_suspension_observed(&claim_opts(), &claim_name(ENV), CLAIM_UID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        client
+            .set_replicas_for_identity(
+                &claim_opts(),
+                &claim_name(ENV),
+                CLAIM_UID,
+                &suspended,
+                1,
+                DAEMON_IMAGE
+            )
+            .await
+            .is_err()
+    );
+    let state = state.lock().unwrap();
+    assert_eq!(patches(&state).len(), 1);
+    assert_eq!(state.sandbox["spec"]["operatingMode"], "Running");
+}
+
+#[tokio::test]
+async fn operating_mode_post_publication_read_conflicts_never_replay_the_write() {
+    for race in [Race::PostPublicationRead409, Race::PostPublicationRead422] {
+        // An idempotent suspend leaves the spec/mode unchanged, and the
+        // controller advances RV. Those facts must not turn a later read
+        // failure into evidence that the successful PATCH was unapplied.
+        let mut before = fixture();
+        before.pod = Value::Null;
+        before.race = Some(race);
+        let (client, state) = client(before);
+        assert!(
+            client
+                .suspend_workspace(&claim_opts(), &claim_name(ENV), CLAIM_UID)
+                .await
+                .is_err()
+        );
+        let state = state.lock().unwrap();
+        assert_eq!(patches(&state).len(), 1);
+        assert_eq!(state.sandbox["spec"]["operatingMode"], "Suspended");
+        assert_eq!(state.sandbox["metadata"]["resourceVersion"], "31");
+    }
 }
