@@ -7,6 +7,7 @@ Scripts are grouped by execution boundary:
 - `ci/` — Gitea workflow entrypoints, selectors, verification runners, release,
   deploy, image, setup, and script self-tests.
 - `dev/` — local developer entrypoints and local-kind helpers.
+  `dev/orchestrator/` holds the maintainers' merge, release and Dev helpers.
 - `runtime/` — dev/prod runtime smoke, API key, confidential-computing, and
   Kata diagnostics.
 

@@ -1862,6 +1862,11 @@ if [ "$event_selected" = false ]; then
         select_token policy
         recognized=true
         ;;
+      scripts/dev/orchestrator/*|scripts/ci/tests/test-orchestrator-scripts.sh)
+        # The orchestrator's merge, release and Dev helpers; a fake fj tests them.
+        select_token policy
+        recognized=true
+        ;;
       scripts/dev/kind/sync-local-secrets.sh)
         # The local credential bridge has a hermetic policy fixture and does
         # not provision or exercise a Kind cluster.
