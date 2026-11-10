@@ -1,7 +1,7 @@
 ---
 title: Access
 description: run, ls, attach, logs, send, wait, stop and restart, and the attach key bindings.
-updated: 2026-11-08
+updated: 2026-11-10
 weight: 3
 aliases: ["/cli/sessions"]
 ---
@@ -59,6 +59,7 @@ environment, may be.
 | `-e, --env KEY=VALUE` | Set a variable for this session; repeatable. Not kept across a daemon restart |
 | `-t, --tty`, `--no-tty` | Allocate a terminal, or not; the default is a terminal when stdin and stdout are terminals, and always for `claude` and `codex` |
 | `-d, --detach` | Launch without attaching |
+| `-y, --yes` | Never ask: without an agent, a command or an environment, fail and name what to pass instead of opening a picker or setup |
 | `--agent codex\|claude\|noel` | Launch a managed agent conversation instead of a command; `noel` on a trusted Linux host only |
 | `--prompt TEXT` | Initial task for the conversation |
 | `--model M` | Agent model; Codex and Claude Code default to their own, noel requires `PROVIDER/ID` |

@@ -938,6 +938,12 @@ pub(crate) struct EnvironmentRunArgs {
     pub(crate) no_tty: bool,
     #[arg(short = 'd', long, help = "Launch the session without attaching")]
     pub(crate) detach: bool,
+    #[arg(
+        short,
+        long,
+        help = "Skip prompts: never ask, and fail naming the agent, command or --in a choice would have supplied"
+    )]
+    pub(crate) yes: bool,
     #[arg(short = 'o', long = "output", value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     pub(crate) output: OutputFormat,
     #[arg(

@@ -641,6 +641,31 @@ mod tests {
             panic!("run");
         };
         assert!(sessions::run_can_ask(&args, &caps));
+        // --yes never asks, even on a terminal: a bare run names what to pass.
+        for argv in [vec!["cw", "run", "-y"], vec!["cw", "run", "--yes"]] {
+            let Command::Run(args) = Cli::try_parse_from(argv).unwrap().command else {
+                panic!("run");
+            };
+            assert!(!sessions::run_can_ask(&args, &caps));
+            let error = sessions::check_run_request(&args, sessions::run_can_ask(&args, &caps))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("needs an agent or a command"), "{error}");
+        }
+        for argv in [
+            vec!["cw", "run", "--in", "pr-42", "-y", "--", "npm", "test"],
+            vec!["cw", "run", "-y", "--in", "pr-42", "--", "npm", "test"],
+            vec!["cw", "run", "claude", "--in", "pr-42", "--yes"],
+        ] {
+            let Command::Run(args) = Cli::try_parse_from(argv.clone()).unwrap().command else {
+                panic!("run");
+            };
+            assert!(args.yes, "{argv:?}");
+            assert!(
+                sessions::check_run_request(&args, false).is_ok(),
+                "{argv:?}"
+            );
+        }
     }
 
     #[tokio::test]

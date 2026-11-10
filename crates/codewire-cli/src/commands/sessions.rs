@@ -1808,9 +1808,10 @@ async fn launch_run(
     Ok(())
 }
 
-/// Prompt only when the requested output mode and process terminals allow it.
+/// Prompt only when the requested output mode and process terminals allow
+/// it, and never with `--yes`, as `cw create --yes` never prompts.
 pub(crate) fn run_can_ask(args: &EnvironmentRunArgs, caps: &crate::output::Capabilities) -> bool {
-    matches!(args.output, OutputFormat::Text) && caps.interactive && caps.live
+    !args.yes && matches!(args.output, OutputFormat::Text) && caps.interactive && caps.live
 }
 
 /// Creating a sandbox can satisfy a new session request. A parent session
@@ -2064,6 +2065,7 @@ pub(crate) async fn handle_environment_shell_command(
             tty: true,
             no_tty: false,
             detach: false,
+            yes: false,
             output: OutputFormat::Text,
             command: login_shell_command(),
         },
