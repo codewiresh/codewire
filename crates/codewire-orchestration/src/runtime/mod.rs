@@ -83,6 +83,10 @@ pub struct RuntimeMember {
     pub phase: MemberPhase,
     /// Why it is in that phase; may be empty.
     pub phase_reason: String,
+    /// When a `Terminated` runtime records that it stopped running: it stopped
+    /// reporting ready, or its deletion was requested, whichever came first.
+    /// `None` in any other phase, or when it records neither.
+    pub stopped_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Everything it declares, sidecars included.
     pub declared: Resources,
     /// The workspace's share of `declared`.

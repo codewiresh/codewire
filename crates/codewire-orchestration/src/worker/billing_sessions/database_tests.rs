@@ -306,6 +306,7 @@ fn member(phase: Phase, phase_reason: &str) -> RuntimeMember {
         snapshot_clearing: false,
         phase,
         phase_reason: phase_reason.into(),
+        stopped_at: None,
         declared: resources(),
         workspace: Resources {
             cpu_millicores: 1000,
@@ -461,13 +462,99 @@ async fn db_a_terminated_member_closes_with_its_reason() -> Result<()> {
         let runtime = runtime_listing(vec![member(Phase::Running, "")]);
         run_cycle(&db.pool, &runtime, NAMESPACE).await;
 
-        // Unlike a vanished member, a terminated one was seen: it closes now.
+        // A terminated member that records no stop closes when it is seen.
         *runtime.members.lock().unwrap() = vec![member(Phase::Terminated, "PodFailed")];
         let before_close = Utc::now().trunc_subsecs(6);
         run_cycle(&db.pool, &runtime, NAMESPACE).await;
 
         ensure!(sessions(&db.pool).await?[0].2 >= Some(before_close));
         ensure!(end_reason(&db.pool).await?.as_deref() == Some("PodFailed"));
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// Opens a session for a running member, sets its last observation, then
+/// lists the member stopped at `stopped_at` and returns the session's end.
+async fn end_after_stop(
+    db: &TestDatabase,
+    last_observed_at: DateTime<Utc>,
+    stopped_at: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>> {
+    let runtime = runtime_listing(vec![member(Phase::Running, "")]);
+    run_cycle(&db.pool, &runtime, NAMESPACE).await;
+    sqlx::query(
+        "UPDATE sandbox_running_sessions SET started_at = $1, last_observed_at = $1 \
+          WHERE environment_id = $2",
+    )
+    .bind(last_observed_at)
+    .bind(ENV)
+    .execute(&db.pool)
+    .await?;
+    *runtime.members.lock().unwrap() = vec![RuntimeMember {
+        stopped_at: Some(stopped_at),
+        ..member(Phase::Terminated, "suspended")
+    }];
+    run_cycle(&db.pool, &runtime, NAMESPACE).await;
+    ensure!(end_reason(&db.pool).await?.as_deref() == Some("suspended"));
+    Ok(sessions(&db.pool).await?[0].2)
+}
+
+// Owner decision, 2026-11-10 (#3950): charging ends at the observed stop.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_stopped_member_is_billed_until_it_stopped() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        bind(&db.pool).await?;
+        let observed = Utc::now().trunc_subsecs(6) - Duration::seconds(60);
+        let stopped = observed + Duration::seconds(1);
+        let ended = end_after_stop(&db, observed, stopped).await?;
+        ensure!(ended == Some(stopped), "ended at {ended:?}, not {stopped}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_stop_never_ends_a_session_before_its_last_observation() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        bind(&db.pool).await?;
+        // The runtime's clock, or its one-second timestamps, can put the stop
+        // before the last observation that saw it running.
+        let observed = Utc::now().trunc_subsecs(6) - Duration::seconds(60);
+        let ended = end_after_stop(&db, observed, observed - Duration::seconds(5)).await?;
+        ensure!(
+            ended == Some(observed),
+            "ended at {ended:?}, not {observed}"
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_stop_in_the_future_ends_a_session_now() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        bind(&db.pool).await?;
+        let observed = Utc::now().trunc_subsecs(6) - Duration::seconds(60);
+        let before_close = Utc::now().trunc_subsecs(6);
+        let ended = end_after_stop(&db, observed, before_close + Duration::hours(1)).await?;
+        let after_close = Utc::now();
+        ensure!(
+            ended.is_some_and(|ended| ended >= before_close && ended <= after_close),
+            "ended at {ended:?}"
+        );
         Ok(())
     }
     .await;

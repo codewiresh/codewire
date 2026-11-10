@@ -33,12 +33,16 @@ pub(super) fn runtime_member(sandbox: &DynamicObject) -> RuntimeMember {
             .to_string()
     };
     let (phase, phase_reason) = classify(&value);
+    let stopped_at = (phase == Phase::Terminated)
+        .then(|| stopped_at(&value))
+        .flatten();
     RuntimeMember {
         environment_id: label(LABEL_ENV_ID),
         organization_id: label(LABEL_ORG_ID),
         claim_uid: label(LABEL_CLAIM_UID),
         phase,
         phase_reason,
+        stopped_at,
         declared: declared_resources(&value),
         workspace: workspace_declared_resources(&value),
         ..unread_member(sandbox)
@@ -58,6 +62,7 @@ pub(crate) fn unread_member(sandbox: &DynamicObject) -> RuntimeMember {
         claim_uid: String::new(),
         phase: Phase::Pending,
         phase_reason: String::new(),
+        stopped_at: None,
         declared: Resources::default(),
         workspace: Resources::default(),
     }
@@ -196,6 +201,31 @@ fn classify(sb: &Value) -> (Phase, String) {
         return (Phase::Terminated, reason);
     }
     (Phase::Pending, reason)
+}
+
+/// When a stopped Sandbox records that it stopped running: its Ready
+/// condition's last transition while Ready isn't True, or its deletion
+/// timestamp, whichever is earlier. A suspended Sandbox whose controller
+/// hasn't yet turned Ready off records neither.
+fn stopped_at(sb: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    let time = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+            .map(|time| time.with_timezone(&chrono::Utc))
+    };
+    let not_ready_since = sb
+        .pointer("/status/conditions")
+        .and_then(Value::as_array)
+        .and_then(|conditions| {
+            conditions
+                .iter()
+                .find(|cond| cond.get("type").and_then(Value::as_str) == Some("Ready"))
+        })
+        .filter(|cond| cond.get("status").and_then(Value::as_str) != Some("True"))
+        .and_then(|cond| time(cond.get("lastTransitionTime")));
+    let deleted_at = time(sb.pointer("/metadata/deletionTimestamp"));
+    not_ready_since.into_iter().chain(deleted_at).min()
 }
 
 /// Mirrors `sessions.readyCondition`.
@@ -522,6 +552,73 @@ mod tests {
             classify(&ready_sb(None, "False", "Failed")).0,
             Phase::Terminated
         );
+    }
+
+    fn at(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        Some(text.parse().unwrap())
+    }
+
+    #[test]
+    fn a_stopped_sandbox_records_when_ready_turned_off_or_deletion_began() {
+        let ready = |status: &str, time: &str| {
+            json!({ "type": "Ready", "status": status, "reason": "SandboxSuspended",
+                    "lastTransitionTime": time })
+        };
+        let suspended = json!({
+            "spec": { "operatingMode": "Suspended" },
+            "status": { "conditions": [ ready("False", "2026-11-03T21:02:30Z") ] },
+        });
+        assert_eq!(stopped_at(&suspended), at("2026-11-03T21:02:30Z"));
+
+        // Ready still True: the controller hasn't acted on the suspension yet.
+        let not_yet = json!({
+            "spec": { "operatingMode": "Suspended" },
+            "status": { "conditions": [ ready("True", "2026-11-03T20:00:00Z") ] },
+        });
+        assert_eq!(stopped_at(&not_yet), None);
+
+        // A deletion requested while ready ends at the request.
+        let deleting = json!({
+            "metadata": { "deletionTimestamp": "2026-11-03T21:05:00Z" },
+            "status": { "conditions": [ ready("True", "2026-11-03T20:00:00Z") ] },
+        });
+        assert_eq!(stopped_at(&deleting), at("2026-11-03T21:05:00Z"));
+
+        // Both recorded: the earlier one.
+        let both = json!({
+            "metadata": { "deletionTimestamp": "2026-11-03T21:05:00Z" },
+            "status": { "conditions": [ ready("False", "2026-11-03T21:02:30Z") ] },
+        });
+        assert_eq!(stopped_at(&both), at("2026-11-03T21:02:30Z"));
+
+        let unreadable = json!({
+            "status": { "conditions": [ ready("False", "not a time") ] },
+        });
+        assert_eq!(stopped_at(&unreadable), None);
+    }
+
+    #[test]
+    fn only_a_terminated_member_carries_a_stop_time() {
+        let sandbox = |mode: &str, status: &str| -> DynamicObject {
+            serde_json::from_value(json!({
+                "apiVersion": "agents.x-k8s.io/v1alpha1",
+                "kind": "Sandbox",
+                "metadata": { "name": "sandbox-a", "uid": "uid-a" },
+                "spec": { "operatingMode": mode },
+                "status": { "conditions": [
+                    { "type": "Ready", "status": status, "reason": "DependenciesNotReady",
+                      "lastTransitionTime": "2026-11-03T21:02:30Z" } ] }
+            }))
+            .unwrap()
+        };
+
+        let stopped = runtime_member(&sandbox("Suspended", "False"));
+        assert_eq!(stopped.phase, Phase::Terminated);
+        assert_eq!(stopped.stopped_at, at("2026-11-03T21:02:30Z"));
+
+        let pending = runtime_member(&sandbox("Running", "False"));
+        assert_eq!(pending.phase, Phase::Pending);
+        assert_eq!(pending.stopped_at, None);
     }
 
     #[test]

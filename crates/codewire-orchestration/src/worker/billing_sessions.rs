@@ -425,6 +425,8 @@ pub(crate) async fn open_or_heartbeat(
 
 /// Mirrors `Store.CloseByUID`: set `ended_at`/`end_reason` on the open row
 /// for this runtime UID. No-op when the UID is empty or already closed.
+/// A row never ends before it was last observed running, so a draw already
+/// made up to that observation stays within the session.
 async fn close_by_uid(
     pool: &PgPool,
     runtime_uid: &str,
@@ -436,7 +438,8 @@ async fn close_by_uid(
     }
     sqlx::query(
         r#"UPDATE sandbox_running_sessions
-              SET ended_at = $1, end_reason = $2, updated_at = $1
+              SET ended_at = GREATEST(last_observed_at, $1), end_reason = $2,
+                  updated_at = NOW()
             WHERE runtime_type = 'sandbox'
               AND runtime_uid = $3
               AND ended_at IS NULL"#,
@@ -567,7 +570,11 @@ async fn reconcile(pool: &PgPool, member: &RuntimeMember) -> Reconciled {
             } else {
                 member.phase_reason.as_str()
             };
-            if let Err(e) = close_by_uid(pool, uid, reason, now).await {
+            // Charging ends when the Sandbox stopped running, as it records
+            // it, not when this poll noticed (owner, 2026-11-10, #3950).
+            // Without a record it ends now.
+            let ended_at = member.stopped_at.map_or(now, |stopped| stopped.min(now));
+            if let Err(e) = close_by_uid(pool, uid, reason, ended_at).await {
                 tracing::error!(environment_id = id.environment_id, sandbox = name, reason, error = %e, "billing-session: close session");
             }
         }
