@@ -112,10 +112,12 @@ round_with_kill() (
         case "$n" in
           1) printf 'anon %d\nkernel %d\nshmem %d\nfile 0\nfile_dirty 0\nfile_writeback 0\n' $((200 * M)) $((100 * M)) $((18000 * M)) ;;
           2) printf 'anon %d\nkernel %d\nshmem %d\nfile 0\nfile_dirty 0\nfile_writeback 0\n' $((300 * M)) $((120 * M)) $((19000 * M)) ;;
-          *) return 1 ;;
+          # The loop came round again, so the second sample's line is written:
+          # only now may the Pod fail and the round stop the sampler (#4040).
+          *) : >"$work/sampled"; return 1 ;;
         esac ;;
       */memory.events)
-        if [[ "$(cat "$work/samples")" -ge 2 ]]; then printf 'oom 1\noom_kill 1\n'; : >"$work/sampled"; else printf 'oom 0\noom_kill 0\n'; fi ;;
+        if [[ "$(cat "$work/samples")" -ge 2 ]]; then printf 'oom 1\noom_kill 1\n'; else printf 'oom 0\noom_kill 0\n'; fi ;;
       *) return 1 ;;
     esac
   }
@@ -124,9 +126,11 @@ round_with_kill() (
       "get runtimeclass commodity -o json") echo '{"handler":"kata-clh","overhead":{"podFixed":{"cpu":"250m","memory":"1Gi"}},"scheduling":{}}' ;;
       *"apply -f -") cat >/dev/null ;;
       *"get pod cw-kill-test -o jsonpath={.metadata.uid} {.status.phase}") echo "uid-1 Running" ;;
+      # Running until the sampler has written both samples, however slow the
+      # runner: a fixed wait failed the Pod after one sample on a starved
+      # runner (#4040). The round's own deadline bounds a sampler that never does.
       *"get pod cw-kill-test -o jsonpath={.status.phase}")
-        for _ in $(seq 1 100); do [[ -e "$work/sampled" ]] && break; command sleep 0.05; done
-        echo Failed ;;
+        if [[ -e "$work/sampled" ]]; then echo Failed; else command sleep 0.05; echo Running; fi ;;
       *" logs cw-kill-test "*) echo "main holding 15GiB" ;;
       *"delete "* | *"annotate "*) echo "$*" >>"$work/cleaned" ;;
     esac
