@@ -14,10 +14,14 @@
 //! ([`punch_unreadable_blocks`]); a block device has them discarded, then
 //! overwritten wherever they still read as data, then read back from the
 //! device ([`wipe_unreadable_blocks`]).
+//!
+//! Before either, a caller removes files through [`files`], with debugfs on
+//! the unmounted disk.
 
 #![cfg(target_os = "linux")]
 
 mod block;
+pub mod files;
 mod ranges;
 
 use std::fs::{File, OpenOptions};
@@ -54,6 +58,12 @@ pub enum Error {
     Unreadable(&'static str),
     #[error("a block the guest cannot read still held data after it was cleared")]
     NotCleared,
+    #[error("a removed file or tree was still present after its removal")]
+    NotRemoved,
+    #[error("a cleared path is a symbolic link")]
+    SymbolicLink,
+    #[error("a file's data is not in blocks clearing can overwrite")]
+    DataNotInBlocks,
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -266,7 +276,18 @@ async fn run_tool(
     arguments: &[&str],
     disk: &Path,
 ) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), Error> {
-    use tokio::io::AsyncReadExt as _;
+    run_tool_with_input(tools, name, arguments, disk, None).await
+}
+
+/// [`run_tool`], writing `input` to the tool's stdin when there is one.
+async fn run_tool_with_input(
+    tools: &impl Tools,
+    name: &'static str,
+    arguments: &[&str],
+    disk: &Path,
+    input: Option<&[u8]>,
+) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), Error> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let program = program(tools, name)?;
     let mut command = tools
@@ -278,23 +299,38 @@ async fn run_tool(
         .env("PAGER", "__none__")
         .env("DEBUGFS_PAGER", "__none__")
         .env("E2FSCK_CONFIG", "/dev/null")
-        .stdin(Stdio::null())
+        .env("SS_READLINE_PATH", "")
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| Error::Confinement(name, error))?;
     let mut stdout = child.stdout.take().ok_or(Error::Unreadable(name))?;
     let mut stderr = child.stderr.take().ok_or(Error::Unreadable(name))?;
+    let stdin = child.stdin.take();
     let run = async {
+        let write = async {
+            if let (Some(mut stdin), Some(input)) = (stdin, input) {
+                stdin.write_all(input).await?;
+                stdin.shutdown().await?;
+            }
+            Ok::<_, io::Error>(())
+        };
         let mut output = Vec::new();
         let mut errors = Vec::new();
         let limit = MAXIMUM_TOOL_OUTPUT_BYTES as u64 + 1;
         let mut stdout = (&mut stdout).take(limit);
         let mut stderr = (&mut stderr).take(limit);
-        let (out, err) = tokio::join!(
+        let (written, out, err) = tokio::join!(
+            write,
             stdout.read_to_end(&mut output),
             stderr.read_to_end(&mut errors),
         );
+        written?;
         out?;
         err?;
         let status = child.wait().await?;

@@ -6,10 +6,11 @@ set -euo pipefail
 # workspace.rs). The DinD bootstrap mounts the Docker data image and starts
 # Docker with busybox (dind_bootstrap_script). The support image's Debian base
 # runs the Docker data init (docker_data_image_prepare_script) and the daemon
-# copy (#3208).
+# copy (#3208), and a snapshot's Block clearing, which reads and edits the
+# unmounted volume with debugfs and dumpe2fs (#4013).
 readonly -a dind_tools=(sh mkdir awk mount dockerd)
 readonly -a support_tools=(sh dirname mkdir chown chmod rm cp mv truncate stat awk
-  mkfs.ext4 e2fsck resize2fs dumpe2fs)
+  mkfs.ext4 e2fsck resize2fs dumpe2fs debugfs)
 
 # Print `tool path` for each TOOL found on IMAGE's PATH, as the container's
 # shell resolves it. With CODEWIRE_RUNTIME_TOOL_LISTINGS set, print the
@@ -63,8 +64,9 @@ write_tool_fixtures() {
     'chown /usr/bin/chown' 'chmod /usr/bin/chmod' 'rm /usr/bin/rm' 'cp /usr/bin/cp' \
     'mv /usr/bin/mv' 'truncate /usr/bin/truncate' 'stat /usr/bin/stat' 'awk /usr/bin/awk' \
     'mkfs.ext4 /usr/sbin/mkfs.ext4' 'e2fsck /usr/sbin/e2fsck' \
-    'resize2fs /usr/sbin/resize2fs' 'dumpe2fs /usr/sbin/dumpe2fs' >"$root/support-base"
-  grep -Ev '^(mkfs[.]ext4|e2fsck|resize2fs|dumpe2fs) ' "$root/support-base" \
+    'resize2fs /usr/sbin/resize2fs' 'dumpe2fs /usr/sbin/dumpe2fs' \
+    'debugfs /usr/sbin/debugfs' >"$root/support-base"
+  grep -Ev '^(mkfs[.]ext4|e2fsck|resize2fs|dumpe2fs|debugfs) ' "$root/support-base" \
     >"$root/support-without-e2fsprogs"
   # A tool name with no path is a shell builtin or alias, not an executable.
   sed 's|^dockerd .*|dockerd dockerd|' "$root/dind-29.9.2" >"$root/dind-relative-dockerd"
@@ -92,7 +94,7 @@ tool_fixture_self_test() {
   done
   grep -Fxq 'runtime image audit: fixture-dind (dind-without-mount) lacks mount' \
     "$root/dind-without-mount.err"
-  grep -Fxq 'runtime image audit: fixture-support (support-without-e2fsprogs) lacks mkfs.ext4 e2fsck resize2fs dumpe2fs' \
+  grep -Fxq 'runtime image audit: fixture-support (support-without-e2fsprogs) lacks mkfs.ext4 e2fsck resize2fs dumpe2fs debugfs' \
     "$root/support-without-e2fsprogs.err"
   unset CODEWIRE_RUNTIME_TOOL_LISTINGS
 }

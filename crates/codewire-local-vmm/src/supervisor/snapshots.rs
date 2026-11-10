@@ -1873,8 +1873,6 @@ mod linux {
     /// which it refuses under any other id. Without it a new environment's
     /// guest starts from the cw runtime its own create bound.
     const ENVIRONMENT_BOUND_TREES: [&[&str]; 1] = [&["codewire", "cw-runtime"]];
-    /// The most entries one removed tree may hold.
-    const MAXIMUM_TREE_ENTRIES: usize = 4096;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum LoginKind {
@@ -1961,6 +1959,10 @@ mod linux {
         NotRemoved,
         #[error("a free block of the copy still held data after it was punched")]
         NotPunched,
+        #[error("a delivered sign-in or environment-bound state is behind a symbolic link")]
+        SymbolicLink,
+        #[error("a delivered sign-in's data is not in blocks the scrub can overwrite")]
+        DataNotInBlocks,
 
         #[error("writing the copy failed: {0}")]
         Io(#[from] io::Error),
@@ -1979,6 +1981,9 @@ mod linux {
                 Error::Reported(label) => Self::Reported(label),
                 Error::Unreadable(label) => Self::Unreadable(label),
                 Error::NotCleared => Self::NotPunched,
+                Error::NotRemoved => Self::NotRemoved,
+                Error::SymbolicLink => Self::SymbolicLink,
+                Error::DataNotInBlocks => Self::DataNotInBlocks,
                 Error::Io(error) => Self::Io(error),
             }
         }
@@ -1991,14 +1996,18 @@ mod linux {
     ///    later replay cannot undo a removal);
     /// 2. each delivered login, recognised by the daemon's own rules, has
     ///    its blocks zeroed and is removed, and the guest's live cw runtime
-    ///    selection is removed; every debugfs call fails on any error it
-    ///    reports, and an absent path is proven absent from its parent;
+    ///    selection is removed, through debugfs on the unmounted copy
+    ///    ([`codewire_ext4_scrub::files`]); every debugfs call fails on any
+    ///    error it reports, and an absent path is proven absent from its
+    ///    parent;
     /// 3. a second settling `e2fsck -f -p`, so the block bitmaps are exact;
     /// 4. every free range in those bitmaps is punched out of the copy, and
     ///    samples of each are read back as zeros.
     ///
     /// Returns how many logins it removed.
     pub(crate) async fn scrub_state_disk(disk: &Path) -> Result<u32, ScrubError> {
+        use codewire_ext4_scrub::files::{self, EntryKind, Lookup};
+
         e2fsck(disk).await?;
         let block_size = {
             let file = File::open(disk)?;
@@ -2006,219 +2015,41 @@ mod linux {
         };
         let mut removed = 0;
         for (components, kind) in LOGIN_DIRECTORIES {
-            let Some(entries) = directory_entries(disk, components).await? else {
+            let Lookup::Directory(entries) =
+                files::lookup_directory(&HostTools, disk, components).await?
+            else {
                 continue;
             };
-            let directory = absolute(components);
             for entry in entries {
                 let Some(name) = entry.name.as_deref() else {
                     continue;
                 };
-                if !entry.regular || kind.entry(name) == LoginEntry::Other {
+                if entry.kind != EntryKind::File || kind.entry(name) == LoginEntry::Other {
                     continue;
                 }
-                let path = format!("{directory}/{name}");
                 let codewire = if kind.entry(name) == LoginEntry::WriteInProgress {
                     true
                 } else if entry.size > MAXIMUM_LOGIN_FILE_BYTES {
                     false
                 } else {
                     let contents =
-                        Zeroizing::new(debugfs(disk, false, &format!("cat {path}")).await?);
+                        Zeroizing::new(files::read_file(&HostTools, disk, components, name).await?);
                     kind.codewire(name, &contents)
                 };
                 if !codewire {
                     continue;
                 }
-                zero_blocks(disk, &path, block_size).await?;
-                debugfs(disk, true, &format!("rm {path}")).await?;
-                if directory_entries(disk, components)
-                    .await?
-                    .is_some_and(|remaining| {
-                        remaining
-                            .iter()
-                            .any(|other| other.name.as_deref() == Some(name))
-                    })
-                {
-                    return Err(ScrubError::NotRemoved);
-                }
+                files::zero_and_remove(&HostTools, disk, components, name, entry.size, block_size)
+                    .await?;
                 removed += 1;
             }
         }
         for components in ENVIRONMENT_BOUND_TREES {
-            remove_tree(disk, components).await?;
+            files::remove_tree(&HostTools, disk, components).await?;
         }
         e2fsck(disk).await?;
         punch_unreadable_blocks(disk, block_size).await?;
         Ok(removed)
-    }
-
-    fn absolute(components: &[&str]) -> String {
-        format!("/{}", components.join("/"))
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct DirectoryEntry {
-        /// `None` for a name that is not plain UTF-8 debugfs can name back,
-        /// which no Codewire file has.
-        name: Option<String>,
-        regular: bool,
-        directory: bool,
-        size: u64,
-    }
-
-    /// The entries of the directory at `components` from the root, or
-    /// `None` when it is absent: each component is looked up in its parent's
-    /// own listing first, so an absent path is never inferred from an error.
-    async fn directory_entries(
-        disk: &Path,
-        components: &[&str],
-    ) -> Result<Option<Vec<DirectoryEntry>>, ScrubError> {
-        let mut entries = list_directory(disk, "/").await?;
-        for (index, component) in components.iter().enumerate() {
-            let present = entries
-                .iter()
-                .any(|entry| entry.directory && entry.name.as_deref() == Some(*component));
-            if !present {
-                return Ok(None);
-            }
-            entries = list_directory(disk, &absolute(&components[..=index])).await?;
-        }
-        Ok(Some(entries))
-    }
-
-    /// Remove the tree at `components`, if present: every file first, then
-    /// each directory, deepest first. It is the guest's own, so every name
-    /// in it is one debugfs can name.
-    async fn remove_tree(disk: &Path, components: &[&str]) -> Result<(), ScrubError> {
-        let (parent, name) = components.split_at(components.len() - 1);
-        let present = |entries: &Option<Vec<DirectoryEntry>>| {
-            entries.as_ref().is_some_and(|entries| {
-                entries
-                    .iter()
-                    .any(|entry| entry.directory && entry.name.as_deref() == Some(name[0]))
-            })
-        };
-        if !present(&directory_entries(disk, parent).await?) {
-            return Ok(());
-        }
-        let mut directories = vec![absolute(components)];
-        let mut files = Vec::new();
-        let mut index = 0;
-        while index < directories.len() {
-            let directory = directories[index].clone();
-            index += 1;
-            for entry in list_directory(disk, &directory).await? {
-                let name = entry.name.ok_or(ScrubError::Unreadable("debugfs"))?;
-                let path = format!("{directory}/{name}");
-                if entry.directory {
-                    directories.push(path);
-                } else {
-                    files.push(path);
-                }
-                if directories.len() + files.len() > MAXIMUM_TREE_ENTRIES {
-                    return Err(ScrubError::Unreadable("debugfs"));
-                }
-            }
-        }
-        for file in &files {
-            debugfs(disk, true, &format!("rm {file}")).await?;
-        }
-        for directory in directories.iter().rev() {
-            debugfs(disk, true, &format!("rmdir {directory}")).await?;
-        }
-        if present(&directory_entries(disk, parent).await?) {
-            return Err(ScrubError::NotRemoved);
-        }
-        Ok(())
-    }
-
-    /// A name debugfs takes back as one argument, as every name Codewire
-    /// writes is.
-    fn nameable(name: &str) -> bool {
-        !name.is_empty()
-            && name.len() <= 255
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    }
-
-    /// `debugfs ls -p <directory>`, which must exist.
-    async fn list_directory(
-        disk: &Path,
-        directory: &str,
-    ) -> Result<Vec<DirectoryEntry>, ScrubError> {
-        let output = debugfs(disk, false, &format!("ls -p {directory}")).await?;
-        Ok(parse_listing(&output))
-    }
-
-    /// `ls -p` lines: `/inode/mode/uid/gid/name/size/`. A name with a
-    /// newline, a slash or non-UTF-8 bytes breaks or bends its line; such a
-    /// name is never one of Codewire's, so its pieces are skipped, and an
-    /// entry whose name debugfs could not take back is kept nameless.
-    fn parse_listing(output: &[u8]) -> Vec<DirectoryEntry> {
-        let mut entries = Vec::new();
-        for line in output.split(|byte| *byte == b'\n') {
-            let fields = line.split(|byte| *byte == b'/').collect::<Vec<_>>();
-            let [empty, inode, mode, _uid, _gid, name, size, trailing] = fields.as_slice() else {
-                continue;
-            };
-            let text = |bytes: &[u8]| std::str::from_utf8(bytes).ok().map(str::to_owned);
-            let (Some(inode), Some(mode)) = (text(inode), text(mode)) else {
-                continue;
-            };
-            let Ok(mode) = u32::from_str_radix(&mode, 8) else {
-                continue;
-            };
-            if !empty.is_empty() || !trailing.is_empty() || inode.parse::<u64>().is_err() {
-                continue;
-            }
-            let name = text(name);
-            if matches!(name.as_deref(), Some("." | "..")) {
-                continue;
-            }
-            let regular = mode & 0o170_000 == 0o100_000;
-            entries.push(DirectoryEntry {
-                name: name.filter(|name| nameable(name)),
-                regular,
-                directory: mode & 0o170_000 == 0o040_000,
-                size: if regular {
-                    match text(size).and_then(|size| size.parse().ok()) {
-                        Some(size) => size,
-                        None => continue,
-                    }
-                } else {
-                    0
-                },
-            });
-        }
-        entries
-    }
-
-    async fn zero_blocks(disk: &Path, path: &str, block_size: u64) -> Result<(), ScrubError> {
-        let output = debugfs(disk, false, &format!("blocks {path}")).await?;
-        let text = String::from_utf8(output).map_err(|_| ScrubError::Unreadable("debugfs"))?;
-        let blocks = text
-            .split_whitespace()
-            .map(str::parse::<u64>)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| ScrubError::Unreadable("debugfs"))?;
-        let image = OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(disk)?;
-        let length = image.metadata()?.len();
-        let zeros =
-            vec![0_u8; usize::try_from(block_size).map_err(|_| ScrubError::Unreadable("debugfs"))?];
-        for block in blocks {
-            let offset = block
-                .checked_mul(block_size)
-                .filter(|offset| offset.saturating_add(block_size) <= length)
-                .ok_or(ScrubError::Unreadable("debugfs"))?;
-            image.write_all_at(&zeros, offset)?;
-        }
-        image.sync_all()?;
-        Ok(())
     }
 
     /// Punch out of the file in `disk` every block the guest cannot read,
@@ -2226,10 +2057,6 @@ mod linux {
     /// ([`codewire_ext4_scrub::punch_unreadable_blocks`]).
     async fn punch_unreadable_blocks(disk: &Path, block_size: u64) -> Result<(), ScrubError> {
         Ok(codewire_ext4_scrub::punch_unreadable_blocks(&HostTools, disk, block_size).await?)
-    }
-
-    async fn debugfs(disk: &Path, write: bool, request: &str) -> Result<Vec<u8>, ScrubError> {
-        Ok(codewire_ext4_scrub::debugfs(&HostTools, disk, write, request).await?)
     }
 
     async fn e2fsck(disk: &Path) -> Result<(), ScrubError> {

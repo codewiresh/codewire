@@ -25,9 +25,6 @@ pub const CLEARING_MOUNT_PATH: &str = "/workspace";
 pub const CLEARING_COMMAND: &str = "__snapshot-clear";
 /// Where a Block restore appears in the clearing container.
 pub const CLEARING_DEVICE_PATH: &str = "/dev/codewire-clearing";
-/// The empty directory a Block restore is mounted on while its files are
-/// cleared.
-pub const CLEARING_BLOCK_MOUNT_PATH: &str = "/mnt/codewire-clearing";
 /// Where a Block clearing writes its report line, which Kubernetes keeps as the
 /// container's termination message for the worker to log.
 pub const CLEARING_REPORT_PATH: &str = "/dev/termination-log";
@@ -140,17 +137,16 @@ pub struct ClearingOpts<'a> {
 /// The template of a clearing Sandbox: one container that clears a restore of
 /// the raw snapshot and exits.
 ///
-/// A Block restore reaches the container as a device. The container mounts it
-/// on an empty directory to clear its files, unmounts it, and wipes every
-/// block its guest cannot read (`cw __snapshot-clear --block`), all inside the
-/// clearing VM, so the host never parses the guest's filesystem. Mounting
-/// needs `SYS_ADMIN`, which only this container holds, in a VM with no network.
+/// A Block restore reaches the container as a device. The container clears its
+/// files through debugfs without mounting it, and wipes every block its guest
+/// cannot read (`cw __snapshot-clear --block`), all inside the clearing VM, so
+/// the host never parses the guest's filesystem. Nothing mounts it, so the
+/// container holds no `SYS_ADMIN` (#4013).
 pub fn render_clearing_template(namespace: &str, opts: &ClearingOpts<'_>) -> Value {
     let name = clearing_name(opts.snapshot_id);
-    let (command, capabilities, storage) = match opts.volume_mode {
+    let (command, storage) = match opts.volume_mode {
         VolumeMode::Filesystem => (
             json!([SUPPORT_IMAGE_CW, CLEARING_COMMAND, CLEARING_MOUNT_PATH]),
-            json!(["DAC_OVERRIDE", "FOWNER"]),
             json!({
                 "volumeMounts": [{ "name": "workspace", "mountPath": CLEARING_MOUNT_PATH }],
             }),
@@ -161,14 +157,11 @@ pub fn render_clearing_template(namespace: &str, opts: &ClearingOpts<'_>) -> Val
                 CLEARING_COMMAND,
                 "--block",
                 CLEARING_DEVICE_PATH,
-                CLEARING_BLOCK_MOUNT_PATH,
                 "--report",
                 CLEARING_REPORT_PATH
             ]),
-            json!(["DAC_OVERRIDE", "FOWNER", "SYS_ADMIN"]),
             json!({
                 "volumeDevices": [{ "name": "workspace", "devicePath": CLEARING_DEVICE_PATH }],
-                "volumeMounts": [{ "name": "mount-point", "mountPath": CLEARING_BLOCK_MOUNT_PATH }],
                 "terminationMessagePath": CLEARING_REPORT_PATH,
             }),
         ),
@@ -184,7 +177,7 @@ pub fn render_clearing_template(namespace: &str, opts: &ClearingOpts<'_>) -> Val
         "securityContext": {
             "allowPrivilegeEscalation": false,
             "readOnlyRootFilesystem": true,
-            "capabilities": { "drop": ["ALL"], "add": capabilities },
+            "capabilities": { "drop": ["ALL"], "add": ["DAC_OVERRIDE", "FOWNER"] },
             "seccompProfile": { "type": "RuntimeDefault" },
         },
     });
@@ -204,12 +197,6 @@ pub fn render_clearing_template(namespace: &str, opts: &ClearingOpts<'_>) -> Val
     });
     if !opts.runtime_class.is_empty() {
         pod_spec["runtimeClassName"] = opts.runtime_class.into();
-    }
-    if opts.volume_mode == VolumeMode::Block {
-        pod_spec["volumes"] = json!([{
-            "name": "mount-point",
-            "emptyDir": { "medium": "Memory", "sizeLimit": "1Mi" },
-        }]);
     }
     let mut claim_spec = json!({
         "accessModes": ["ReadWriteOnce"],
@@ -463,7 +450,6 @@ mod tests {
                 "__snapshot-clear",
                 "--block",
                 "/dev/codewire-clearing",
-                "/mnt/codewire-clearing",
                 "--report",
                 "/dev/termination-log"
             ])
@@ -473,20 +459,14 @@ mod tests {
             container["volumeDevices"],
             json!([{ "name": "workspace", "devicePath": "/dev/codewire-clearing" }])
         );
-        // The volume itself is never mounted by the node, only the empty
-        // directory the container mounts it on.
-        assert_eq!(
-            container["volumeMounts"],
-            json!([{ "name": "mount-point", "mountPath": "/mnt/codewire-clearing" }])
-        );
-        assert_eq!(
-            pod["volumes"],
-            json!([{ "name": "mount-point", "emptyDir": { "medium": "Memory", "sizeLimit": "1Mi" } }])
-        );
+        // Nothing mounts the volume, the node or the container, so the
+        // container holds no SYS_ADMIN (#4013).
+        assert!(container.get("volumeMounts").is_none());
+        assert!(pod.get("volumes").is_none());
         let security = &container["securityContext"];
         assert_eq!(
             security["capabilities"],
-            json!({ "drop": ["ALL"], "add": ["DAC_OVERRIDE", "FOWNER", "SYS_ADMIN"] })
+            json!({ "drop": ["ALL"], "add": ["DAC_OVERRIDE", "FOWNER"] })
         );
         assert_eq!(security["allowPrivilegeEscalation"], false);
         assert_eq!(security["readOnlyRootFilesystem"], true);

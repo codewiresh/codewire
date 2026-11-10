@@ -832,36 +832,7 @@ fn a_restore_selection_round_trips_through_the_journaled_payload() {
 }
 
 #[test]
-fn listings_and_entries_parse_by_the_daemons_rules() {
-    let entries = parse_listing(
-        b"/2/040755/0/0/.//\n/2/040755/0/0/..//\n/14/100600/1000/1000/auth.json/7/\n/15/040700/0/0/sub//\n",
-    );
-    assert_eq!(
-        entries,
-        [
-            DirectoryEntry {
-                name: Some("auth.json".to_owned()),
-                regular: true,
-                directory: false,
-                size: 7,
-            },
-            DirectoryEntry {
-                name: Some("sub".to_owned()),
-                regular: false,
-                directory: true,
-                size: 0,
-            },
-        ]
-    );
-    // A name with a newline, or that is not UTF-8, cannot be Codewire's: its
-    // pieces are skipped or it stays nameless, and nothing fails.
-    let odd = parse_listing(
-        b"/16/100600/1000/1000/notes\nmore/3/\n/17/100600/1000/1000/\xff\xfe/4/\n/18/100600/1000/1000/with space/5/\ngarbage\n",
-    );
-    assert_eq!(odd.len(), 2);
-    assert!(odd.iter().all(|entry| entry.name.is_none()));
-    assert!(parse_listing(b"").is_empty());
-
+fn login_entries_follow_the_daemons_rules() {
     assert_eq!(LoginKind::Codex.entry("auth.json"), LoginEntry::File);
     assert_eq!(
         LoginKind::Codex.entry(".auth.json.codewire.0123abcd.new"),

@@ -1220,17 +1220,22 @@ A Block workspace volume (#3718), which the guest formats and reads block by
 block, breaks the first of those properties, so the exception does not apply to
 it. Its raw snapshot records the source's volume mode, and its restore reaches
 the clearing VM as a device. Inside that VM, never on the host, the clearing
-command settles the filesystem with `e2fsck -f -p`, mounts it (`nosuid`, `nodev`,
-`noexec`) on an empty directory, clears its files as above, unmounts it, settles
-it again, and then wipes every block a guest cannot read through the filesystem:
+command settles the filesystem with `e2fsck -f -p`, clears its files by the
+rules above through `debugfs` on the unmounted device (zeroing each removed
+login's blocks and proving each removal from its directory's listing; a symbolic
+link at an agent's home, at a login or on the way to a cleared tree fails the
+capture, as does a name in a cleared tree holding `"`, `\`, a control character
+or bytes that are not UTF-8, which `debugfs` can't be handed back, and a cleared
+tree of more than 100,000 entries), settles it again, and then wipes every block a guest cannot read through the filesystem:
 each free range, and each file's unwritten extents and blocks past its end. A range
 is discarded, and its discard proven by canaries written over its first and last
 aligned granule beforehand. A range whose canary survives, a range too small to
 hold a whole granule, a range's unaligned edges and a device that takes no
 discard are overwritten with zeros instead, and every byte written is read back
-from the device as zeros. Only that container holds `SYS_ADMIN`, for the mount.
-An `e2fsck` that cannot fix the filesystem without asking, a failed mount or
-unmount, and any wipe or read-back failure fail the capture; nothing is retried
+from the device as zeros. Nothing mounts the device, so the container holds no
+`SYS_ADMIN` (#4013). An `e2fsck` that cannot fix the filesystem without asking,
+a removal that can't be proven, and any wipe or read-back failure fail the
+capture; nothing is retried
 with `e2fsck -y`. The Filesystem path, and with it the exception, goes when the
 virtio-fs workspace path is removed at the Block cutover.
 

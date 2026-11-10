@@ -1118,8 +1118,8 @@ fn validate_placement_scope(
 
 /// A snapshot's clearing Sandbox runs this as its only process: `__snapshot-clear
 /// ROOT` for a restore the node mounted at ROOT, or `__snapshot-clear --block
-/// DEVICE MOUNT_POINT [--report PATH]` for a Block restore, which it mounts,
-/// clears and wipes itself, writing its report line to PATH too. It runs before any CLI setup, and prints only counts and an error,
+/// DEVICE [--report PATH]` for a Block restore, which it clears and wipes
+/// without mounting it, writing its report line to PATH too. It runs before any CLI setup, and prints only counts and an error,
 /// never a path or a file's contents. Any failure exits non-zero, so the capture
 /// keeps nothing.
 #[cfg(target_os = "linux")]
@@ -1142,7 +1142,7 @@ pub fn run_snapshot_clear_from(arguments: impl Iterator<Item = std::ffi::OsStrin
                 1
             }
         },
-        [flag, device, mount_point, rest @ ..]
+        [flag, device, rest @ ..]
             if flag == "--block"
                 && matches!(rest, [] | [_, _])
                 && rest.first().is_none_or(|flag| flag == "--report") =>
@@ -1159,10 +1159,7 @@ pub fn run_snapshot_clear_from(arguments: impl Iterator<Item = std::ffi::OsStrin
                 }
             };
             let started = std::time::Instant::now();
-            match runtime.block_on(block::clear_block_volume(
-                Path::new(device),
-                Path::new(mount_point),
-            )) {
+            match runtime.block_on(block::clear_block_volume(Path::new(device))) {
                 Ok(report) => {
                     let ms = started.elapsed().as_millis();
                     let wipe = report.wipe;
@@ -1207,9 +1204,7 @@ pub fn run_snapshot_clear_from(arguments: impl Iterator<Item = std::ffi::OsStrin
             }
         }
         _ => {
-            eprintln!(
-                "usage: cw __snapshot-clear ROOT | --block DEVICE MOUNT_POINT [--report PATH]"
-            );
+            eprintln!("usage: cw __snapshot-clear ROOT | --block DEVICE [--report PATH]");
             2
         }
     }
