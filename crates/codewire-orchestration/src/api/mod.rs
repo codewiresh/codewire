@@ -18,6 +18,7 @@ pub mod environment_sources;
 pub mod environments;
 pub mod feedback;
 pub mod host_key;
+pub mod hosts;
 pub mod log_notifications;
 pub mod logs;
 pub mod organizations;

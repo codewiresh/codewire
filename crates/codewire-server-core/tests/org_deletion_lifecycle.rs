@@ -1900,6 +1900,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "environments:no_action",
             "feedback:set_null",
             "hosted_snapshots:no_action",
+            "hosts:cascade",
             "org_invitations:cascade",
             "org_members:cascade",
             "org_subscriptions:cascade",

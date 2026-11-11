@@ -30,6 +30,7 @@ fn main() {
         "codewire/v1/exec.proto",
         "codewire/v1/feedback.proto",
         "codewire/v1/file.proto",
+        "codewire/v1/host.proto",
         "codewire/v1/mesh_group.proto",
         "codewire/v1/mesh_invite.proto",
         "codewire/v1/mesh_kv.proto",

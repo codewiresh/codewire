@@ -1758,6 +1758,7 @@ if [ "$event_selected" = false ]; then
       crates/codewire-orchestration/src/worker/credit_stop.rs|\
       crates/codewire-orchestration/src/api/create.rs|\
       crates/codewire-orchestration/src/api/feedback.rs|\
+      crates/codewire-orchestration/src/api/hosts.rs|\
       crates/codewire-orchestration/src/api/presets.rs|\
       crates/codewire-orchestration/src/api/snapshots.rs|\
       crates/codewire-orchestration/src/confidential_storage.rs|\

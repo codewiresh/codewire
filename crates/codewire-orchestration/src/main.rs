@@ -787,6 +787,11 @@ async fn main() -> anyhow::Result<()> {
             codewire_orchestration::connect::snapshots::router(api_state.clone()),
             connect_auth.clone(),
         )
+        // Hosts that provide VMs (#3609).
+        .with_unary_connect_routes_auth(
+            codewire_orchestration::connect::hosts::router(api_state.pool.clone()),
+            connect_auth.clone(),
+        )
         .with_unary_connect_routes_auth(
             codewire_orchestration::connect::access_profiles::router(api_state.pool.clone()),
             connect_auth.clone(),

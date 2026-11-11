@@ -1,0 +1,215 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// HostService manages hosts: computers that an organization's members enroll
+// to provide VMs for their environments (`cw host`, `cw hosts`).
+//
+// A host belongs to one organization and to the member who enrolled it, its
+// owner. Enrolling grants nothing: the owner separately opts in to providing
+// VMs, with limits, and only the owner may place environments there unless
+// they grant the host to named members or to the whole organization. A host
+// is a VM provider only; it is not a trusted host (`cw member`).
+//
+// Every method needs a signed-in caller who is a member of `org_id`; a
+// non-member is told the organization does not exist. A host of another
+// organization does not exist either.
+service HostService {
+  // EnrollHost registers the caller's computer as a host they own. The
+  // computer proves it holds the private key with `enrollment_signature`. A
+  // name used by another host of the organization that is not revoked is
+  // refused with ALREADY_EXISTS, as is a public key that any host record has.
+  // An organization holds at most 100 hosts that are not revoked, and one
+  // member at most 100 host records there, revoked ones included.
+  rpc EnrollHost(EnrollHostRequest) returns (EnrollHostResponse);
+
+  // ListHosts returns the organization's hosts, revoked ones included,
+  // oldest first. It returns every host in one page.
+  rpc ListHosts(ListHostsRequest) returns (ListHostsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc GetHost(GetHostRequest) returns (GetHostResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // UpdateHostProvide turns providing on, with limits, or off. The host's
+  // owner only; a revoked host is refused with FAILED_PRECONDITION.
+  rpc UpdateHostProvide(UpdateHostProvideRequest) returns (UpdateHostProvideResponse);
+
+  // GrantHost lets one more member, or the whole organization, place
+  // environments on the host. The host's owner only. The member must belong
+  // to the organization; granting the owner is refused.
+  rpc GrantHost(GrantHostRequest) returns (GrantHostResponse);
+
+  // RevokeHostGrant takes a grant back. The host's owner only.
+  rpc RevokeHostGrant(RevokeHostGrantRequest) returns (RevokeHostGrantResponse);
+
+  // RevokeHost marks the host revoked, which is final: its session ends and
+  // cannot attach again. The host's owner, or an organization owner or
+  // admin.
+  rpc RevokeHost(RevokeHostRequest) returns (RevokeHostResponse);
+
+  // LeaveHost removes the host's record. The host's owner only. It is
+  // refused while any environment is placed there, and for a revoked host
+  // with FAILED_PRECONDITION: a revoked record stays, so its key can never
+  // enroll again.
+  rpc LeaveHost(LeaveHostRequest) returns (LeaveHostResponse);
+}
+
+enum HostPlatform {
+  HOST_PLATFORM_UNSPECIFIED = 0;
+  // Linux on x86_64, with KVM.
+  HOST_PLATFORM_LINUX_X86_64_KVM = 1;
+  // macOS on Apple silicon, with Virtualization.framework.
+  HOST_PLATFORM_DARWIN_ARM64_VZ = 2;
+}
+
+enum HostState {
+  HOST_STATE_UNSPECIFIED = 0;
+  // The host's session was heard from in the last 45 seconds.
+  HOST_STATE_ONLINE = 1;
+  // Not heard from in 45 seconds, or never. last_seen_at says when it was.
+  HOST_STATE_OFFLINE = 2;
+  // Revoked: it can never attach again.
+  HOST_STATE_REVOKED = 3;
+}
+
+// The owner's limits on what the host provides. Unset caps leave that
+// resource to the host's own view of its capacity.
+message HostLimits {
+  // 1 to 1024. Required to provide.
+  uint32 max_vms = 1;
+  // 1 to 4096.
+  optional uint32 max_vcpus = 2;
+  // 256 MiB to 64 TiB.
+  optional uint64 max_memory_mib = 3;
+  // 1 GiB to 1 PiB.
+  optional uint64 max_disk_gib = 4;
+}
+
+message Host {
+  string id = 1;
+  string org_id = 2;
+  string owner_user_id = 3;
+  // A DNS label: 1 to 63 lowercase letters, digits and '-', starting and
+  // ending with a letter or digit.
+  string name = 4;
+  HostPlatform platform = 5;
+  uint32 capability_version = 6;
+  // The 32-byte Ed25519 public key the host authenticates with.
+  bytes public_key = 7;
+  HostState state = 8;
+  // Whether the owner has opted in to providing VMs.
+  bool provide = 9;
+  // The owner's limits, set the first time the host provides, and kept
+  // while it does not.
+  HostLimits limits = 10;
+  // Whether every member of the organization may place environments here.
+  bool organization_grant = 11;
+  // Members granted the host by name. GetHost only; ListHosts leaves it
+  // empty.
+  repeated string granted_user_ids = 12;
+  google.protobuf.Timestamp created_at = 13;
+  google.protobuf.Timestamp last_seen_at = 14;
+  google.protobuf.Timestamp revoked_at = 15;
+}
+
+message EnrollHostRequest {
+  string org_id = 1;
+  string name = 2;
+  HostPlatform platform = 3;
+  uint32 capability_version = 4;
+  bytes public_key = 5;
+  // The 64-byte Ed25519 signature, by public_key, of the enrollment
+  // statement: the line "codewire-host-enroll-v1", then org_id, the caller's
+  // user ID and the lowercase hex of public_key, each on its own line ending
+  // in "\n". It binds the key to this organization and this user, so the
+  // signature cannot enroll the key anywhere else.
+  bytes enrollment_signature = 6;
+}
+
+message EnrollHostResponse {
+  Host host = 1;
+}
+
+message ListHostsRequest {
+  string org_id = 1;
+  int32 page_size = 2;
+  // Must be empty: every host comes in one page.
+  string page_token = 3;
+}
+
+message ListHostsResponse {
+  repeated Host hosts = 1;
+  // Always empty.
+  string next_page_token = 2;
+}
+
+message GetHostRequest {
+  string org_id = 1;
+  string host_id = 2;
+}
+
+message GetHostResponse {
+  Host host = 1;
+}
+
+message UpdateHostProvideRequest {
+  string org_id = 1;
+  string host_id = 2;
+  bool provide = 3;
+  // Required to turn providing on, and replaces the stored limits. Turning
+  // it off keeps them unless limits are given.
+  HostLimits limits = 4;
+}
+
+message UpdateHostProvideResponse {
+  Host host = 1;
+}
+
+message GrantHostRequest {
+  string org_id = 1;
+  string host_id = 2;
+  oneof grantee {
+    string user_id = 3;
+    // Must be true.
+    bool organization = 4;
+  }
+}
+
+message GrantHostResponse {
+  Host host = 1;
+}
+
+message RevokeHostGrantRequest {
+  string org_id = 1;
+  string host_id = 2;
+  oneof grantee {
+    string user_id = 3;
+    // Must be true.
+    bool organization = 4;
+  }
+}
+
+message RevokeHostGrantResponse {
+  Host host = 1;
+}
+
+message RevokeHostRequest {
+  string org_id = 1;
+  string host_id = 2;
+}
+
+message RevokeHostResponse {
+  Host host = 1;
+}
+
+message LeaveHostRequest {
+  string org_id = 1;
+  string host_id = 2;
+}
+
+message LeaveHostResponse {}

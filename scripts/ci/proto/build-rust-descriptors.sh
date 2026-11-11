@@ -38,6 +38,7 @@ cd "$ROOT/proto"
   --path codewire/v1/exec.proto \
   --path codewire/v1/feedback.proto \
   --path codewire/v1/file.proto \
+  --path codewire/v1/host.proto \
   --path codewire/v1/mesh_group.proto \
   --path codewire/v1/mesh_invite.proto \
   --path codewire/v1/mesh_kv.proto \

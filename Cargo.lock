@@ -2164,6 +2164,7 @@ dependencies = [
  "codewire-workspace-hack",
  "connectrpc",
  "crc32fast",
+ "ed25519-dalek 2.2.0",
  "flate2",
  "futures",
  "futures-util",
