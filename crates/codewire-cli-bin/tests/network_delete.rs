@@ -15,6 +15,11 @@ const ORG: &str = "org-network-delete";
 const KEY: &str = "cw_synthetic-network-delete-owner";
 const OTHER_ORG: &str = "org-network-other";
 const OTHER_KEY: &str = "cw_synthetic-network-other-owner";
+/// A hang guard for one `cw` run, not a speed expectation
+/// (docs/dev/AGENT-WORKFLOW.md "Failure convergence"). Each run takes well
+/// under a second here, but on a CI guest whose memory was thrashing a fixed
+/// 10 s failed all three tests at once (#4186, #4169).
+const CLI_HANG_GUARD: Duration = Duration::from_secs(60);
 
 /// A Mesh service that admits one organization's synthetic key.
 async fn mesh(organization: &str, key: &str) -> (String, tokio::task::JoinHandle<()>) {
@@ -66,7 +71,7 @@ async fn cw(root: &Path, server: &str, environment: &[(&str, &str)], args: &[&st
         .args(args)
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
-    tokio::time::timeout(Duration::from_secs(10), command.output())
+    tokio::time::timeout(CLI_HANG_GUARD, command.output())
         .await
         .expect("CLI command timed out")
         .expect("run normal cw")
