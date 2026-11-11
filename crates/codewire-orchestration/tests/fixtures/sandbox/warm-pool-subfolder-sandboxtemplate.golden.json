@@ -1,0 +1,619 @@
+{
+  "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+  "kind": "SandboxTemplate",
+  "metadata": {
+    "annotations": {
+      "codewire.sh/pool-revision": "fcc1b0b898be57ef666d83c48312cdccfe190494fc58f0072385ad1deab40237"
+    },
+    "labels": {
+      "app.kubernetes.io/managed-by": "codewire",
+      "codewire.sh/type": "workspace-pool"
+    },
+    "name": "cw-pool-1000m-4096mi-10gi-d0d81360",
+    "namespace": "dev-sandboxes"
+  },
+  "spec": {
+    "networkPolicy": {
+      "egress": [
+        {
+          "to": [
+            {
+              "ipBlock": {
+                "cidr": "0.0.0.0/0",
+                "except": [
+                  "10.0.0.0/8",
+                  "100.64.0.0/10",
+                  "127.0.0.0/8",
+                  "172.16.0.0/12",
+                  "192.168.0.0/16",
+                  "169.254.0.0/16"
+                ]
+              }
+            },
+            {
+              "ipBlock": {
+                "cidr": "::/0",
+                "except": [
+                  "fc00::/7"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 53,
+              "protocol": "UDP"
+            },
+            {
+              "port": 53,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "kube-system"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 443,
+              "protocol": "TCP"
+            },
+            {
+              "port": 80,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "kube-system"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/name": "rke2-ingress-nginx"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 8087,
+              "protocol": "TCP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "orchestration"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ports": [
+            {
+              "port": 3478,
+              "protocol": "UDP"
+            }
+          ],
+          "to": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "derp"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "ingress": [
+        {
+          "from": [
+            {
+              "namespaceSelector": {
+                "matchLabels": {
+                  "kubernetes.io/metadata.name": "dev"
+                }
+              },
+              "podSelector": {
+                "matchLabels": {
+                  "app.kubernetes.io/component": "orchestration",
+                  "app.kubernetes.io/name": "codewire"
+                }
+              }
+            }
+          ],
+          "ports": [
+            {
+              "port": 7777,
+              "protocol": "TCP"
+            },
+            {
+              "port": 2222,
+              "protocol": "TCP"
+            }
+          ]
+        }
+      ]
+    },
+    "podTemplate": {
+      "metadata": {
+        "annotations": {
+          "codewire.sh/disk-gib": "10",
+          "codewire.sh/workspace": "true",
+          "io.katacontainers.config.hypervisor.cc_init_data": "H4sIAAAAAAAA/wGbB2T4dmVyc2lvbiA9ICIwLjEuMCIKYWxnb3JpdGhtID0gInNoYTI1NiIKCltkYXRhXQoicG9saWN5LnJlZ28iID0gJycnCnBhY2thZ2UgYWdlbnRfcG9saWN5CgojIENvZGV3aXJlLW93bmVkIGJhc2UgcG9saWN5IGZvciBjb21tb2RpdHkgS2F0YSBBZ2VudCBQb2xpY3kgYW5kIGNvbmZpZGVudGlhbAojIENvQ28gYm9vdHN0cmFwLiBDb21tb2RpdHkgdXNlcyB0aGlzIG9ubHkgYXMgZGVmZW5zZSBpbiBkZXB0aDogd2l0aG91dCBTTlAvVERYCiMgdGhlIGhvc3QgY2FuIHN0aWxsIHJlcGxhY2UgdGhlIGd1ZXN0IGltYWdlLCBhZ2VudCwgb3IgcG9saWN5LgpkZWZhdWx0IEFkZEFSUE5laWdoYm9yc1JlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IEFkZFN3YXBQYXRoUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgQWRkU3dhcFJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IENsb3NlU3RkaW5SZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBDb3B5RmlsZVJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IENyZWF0ZVNhbmRib3hSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBEZXN0cm95U2FuZGJveFJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IEV4ZWNQcm9jZXNzUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgR2V0RGlhZ25vc3RpY0RhdGFSZXF1ZXN0IDo9IGZhbHNlCmRlZmF1bHQgR2V0SVBUYWJsZXNSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBHZXRNZXRyaWNzUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgR2V0T09NRXZlbnRSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBHdWVzdERldGFpbHNSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBMaXN0SW50ZXJmYWNlc1JlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IExpc3RSb3V0ZXNSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBNZW1BZ2VudENvbXBhY3RDb25maWcgOj0gdHJ1ZQpkZWZhdWx0IE1lbUFnZW50TWVtY2dDb25maWcgOj0gdHJ1ZQpkZWZhdWx0IE1lbUhvdHBsdWdCeVByb2JlUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgT25saW5lQ1BVTWVtUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgUGF1c2VDb250YWluZXJSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBQdWxsSW1hZ2VSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBSZWFkU3RyZWFtUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgUmVtb3ZlQ29udGFpbmVyUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgUmVtb3ZlU3RhbGVWaXJ0aW9mc1NoYXJlTW91bnRzUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgUmVzZWVkUmFuZG9tRGV2UmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgUmVzaXplVm9sdW1lUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgUmVzdW1lQ29udGFpbmVyUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgU2V0R3Vlc3REYXRlVGltZVJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFNldElQVGFibGVzUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgU2V0UG9saWN5UmVxdWVzdCA6PSBmYWxzZQpkZWZhdWx0IFNpZ25hbFByb2Nlc3NSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBTdGFydENvbnRhaW5lclJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFN0YXJ0VHJhY2luZ1JlcXVlc3QgOj0gZmFsc2UKZGVmYXVsdCBTdGF0c0NvbnRhaW5lclJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFN0b3BUcmFjaW5nUmVxdWVzdCA6PSBmYWxzZQpkZWZhdWx0IFR0eVdpblJlc2l6ZVJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFVwZGF0ZUNvbnRhaW5lclJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFVwZGF0ZUVwaGVtZXJhbE1vdW50c1JlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFVwZGF0ZUludGVyZmFjZVJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFVwZGF0ZVJvdXRlc1JlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IFZvbHVtZVN0YXRzUmVxdWVzdCA6PSB0cnVlCmRlZmF1bHQgV2FpdFByb2Nlc3NSZXF1ZXN0IDo9IHRydWUKZGVmYXVsdCBXcml0ZVN0cmVhbVJlcXVlc3QgOj0gdHJ1ZQpkZWZhdWx0IENyZWF0ZUNvbnRhaW5lclJlcXVlc3QgOj0gdHJ1ZQonJycK5H4mdpsHAAA="
+        },
+        "labels": {
+          "codewire.sh/type": "workspace"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "command": [
+              "sh",
+              "-c",
+              "daemon_pid=; workload_pid=; shutdown() { daemon_pid=\"${daemon_pid:-$!}\"; workload_pid=\"${workload_pid:-$!}\"; kill \"$workload_pid\" \"$daemon_pid\" 2>/dev/null || true; wait \"$workload_pid\" 2>/dev/null || true; wait \"$daemon_pid\" 2>/dev/null || true; }; trap 'shutdown; exit 0' TERM INT; user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo \"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}\" >> /etc/passwd; grep -q '^[^:]*:[^:]*:1000:' /etc/group || echo 'codewire:x:1000:' >> /etc/group; while [ ! -x /codewire/bin/cw ]; do sleep 0.1; done; /codewire/bin/cw __hosted-daemon & daemon_pid=$!; (exec 'sleep' 'infinity') & workload_pid=$!; while kill -0 \"$workload_pid\" 2>/dev/null; do if ! kill -0 \"$daemon_pid\" 2>/dev/null; then wait \"$daemon_pid\" 2>/dev/null || true; sleep 1; daemon_pid=; /codewire/bin/cw __hosted-daemon & daemon_pid=$!; fi; sleep 1; done; wait \"$workload_pid\"; status=$?; kill \"$daemon_pid\" 2>/dev/null || true; wait \"$daemon_pid\" 2>/dev/null || true; exit \"$status\""
+            ],
+            "env": [
+              {
+                "name": "CODEWIRE_WORKSPACE_SHIM_ADDR",
+                "value": "0.0.0.0:7777"
+              },
+              {
+                "name": "HOME",
+                "value": "/home/codewire"
+              },
+              {
+                "name": "USER",
+                "value": "codewire"
+              },
+              {
+                "name": "CODEWIRE_WORKSPACE_BINDING_URL",
+                "value": "https://codewire-orchestration-workspace-binding.dev.svc.cluster.local:8087"
+              },
+              {
+                "name": "CODEWIRE_POD_UID",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.uid"
+                  }
+                }
+              },
+              {
+                "name": "DOCKER_HOST",
+                "value": "unix:///var/run/docker/docker.sock"
+              },
+              {
+                "name": "CODEWIRE_WORKSPACE_POOL_REVISION",
+                "value": "fcc1b0b898be57ef666d83c48312cdccfe190494fc58f0072385ad1deab40237"
+              }
+            ],
+            "image": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "name": "workspace",
+            "ports": [
+              {
+                "containerPort": 7777,
+                "name": "daemon",
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "exec": {
+                "command": [
+                  "sh",
+                  "-ec",
+                  "test -f /codewire/run/daemon/ready"
+                ]
+              },
+              "failureThreshold": 3,
+              "periodSeconds": 2,
+              "successThreshold": 1,
+              "timeoutSeconds": 2
+            },
+            "resizePolicy": [
+              {
+                "resourceName": "cpu",
+                "restartPolicy": "NotRequired"
+              },
+              {
+                "resourceName": "memory",
+                "restartPolicy": "NotRequired"
+              }
+            ],
+            "resources": {
+              "limits": {
+                "cpu": "1000m",
+                "ephemeral-storage": "8Gi",
+                "memory": "4096Mi"
+              },
+              "requests": {
+                "cpu": "1000m",
+                "ephemeral-storage": "8Gi",
+                "memory": "4096Mi"
+              }
+            },
+            "startupProbe": {
+              "exec": {
+                "command": [
+                  "sh",
+                  "-ec",
+                  "test -f /codewire/run/daemon/ready"
+                ]
+              },
+              "failureThreshold": 600,
+              "periodSeconds": 1,
+              "successThreshold": 1,
+              "timeoutSeconds": 2
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/home/codewire",
+                "mountPropagation": "HostToContainer",
+                "name": "mnthome"
+              },
+              {
+                "mountPath": "/workspace",
+                "mountPropagation": "HostToContainer",
+                "name": "mntws"
+              },
+              {
+                "mountPath": "/codewire/bin",
+                "name": "codewire-bin",
+                "readOnly": true,
+                "subPath": "usr/local/bin"
+              },
+              {
+                "mountPath": "/codewire/run",
+                "name": "codewire-run"
+              },
+              {
+                "mountPath": "/tmp",
+                "mountPropagation": "HostToContainer",
+                "name": "wstmp"
+              },
+              {
+                "mountPath": "/var/tmp",
+                "mountPropagation": "HostToContainer",
+                "name": "wstmp"
+              },
+              {
+                "mountPath": "/run/codewire-credentials/workspace",
+                "name": "credential-workspace-identity",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/var/run/secrets/codewire/workspace-binding",
+                "name": "workspace-binding-identity",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/run/codewire-orchestration-internal-roots",
+                "name": "orchestration-internal-roots",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/var/run/docker",
+                "name": "docker-sock"
+              }
+            ]
+          },
+          {
+            "command": [
+              "sh",
+              "-ec",
+              "docker_bootstrap_fail() {\n  printf 'Codewire Docker startup failed: %s\\n' \"$1\" >&2\n  exit 1\n}\ncgroup_root=/sys/fs/cgroup\nif [ -f \"$cgroup_root/cgroup.controllers\" ]; then\n  IFS= read -r cgroup_type < \"$cgroup_root/cgroup.type\" || docker_bootstrap_fail 'cannot read the Docker cgroup type'\n  [ \"$cgroup_type\" = domain ] || docker_bootstrap_fail 'Docker needs a fresh domain cgroup; existing cgroups were left unchanged'\n  mkdir -p \"$cgroup_root/init\" || docker_bootstrap_fail 'cannot create the Docker process cgroup'\n  printf '%s\\n' \"$$$$\" > \"$cgroup_root/init/cgroup.procs\" || docker_bootstrap_fail 'cannot delegate the Docker startup process'\n  if IFS= read -r _unexpected_pid < \"$cgroup_root/cgroup.procs\"; then\n    docker_bootstrap_fail 'the Docker cgroup root contains another process; it was not moved'\n  fi\n  IFS= read -r controllers < \"$cgroup_root/cgroup.controllers\" || docker_bootstrap_fail 'cannot read available Docker cgroup controllers'\n  for required in cpu memory pids; do\n    case \" $controllers \" in\n      *\" $required \"*) ;;\n      *) docker_bootstrap_fail \"the Docker cgroup lacks the $required controller\" ;;\n    esac\n  done\n  enable_controllers=\n  for controller in $controllers; do\n    enable_controllers=\"$enable_controllers+$controller \"\n  done\n  printf '%s\\n' \"$enable_controllers\" > \"$cgroup_root/cgroup.subtree_control\" || docker_bootstrap_fail 'cannot enable Docker cgroup delegation'\n  IFS= read -r delegated < \"$cgroup_root/cgroup.subtree_control\" || docker_bootstrap_fail 'cannot verify Docker cgroup delegation'\n  for required in cpu memory pids; do\n    case \" $delegated \" in\n      *\" $required \"*) ;;\n      *) docker_bootstrap_fail \"Docker did not receive the $required controller\" ;;\n    esac\n  done\nfi\ndata_image=\"${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}\"\ndata_root=\"${CODEWIRE_DOCKER_DATA_ROOT:-/var/lib/docker}\"\nmount_mode=\"${CODEWIRE_DOCKER_MOUNT_MODE:-loop}\"\nmkdir -p \"$data_root\"\nif [ \"$mount_mode\" = \"loop\" ]; then\n  if [ ! -s \"$data_image\" ]; then\n    echo \"the Docker data image $data_image is missing; the codewire-docker-data-init init container prepares it before Docker starts\" >&2\n    exit 1\n  fi\n  if ! awk -v target=\"$data_root\" '$2 == target && $3 == \"ext4\" { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts; then\n    mount -o loop \"$data_image\" \"$data_root\"\n  fi\nelif [ \"$mount_mode\" != \"none\" ]; then\n  echo \"unsupported CODEWIRE_DOCKER_MOUNT_MODE=$mount_mode\" >&2\n  exit 1\nfi\ncase \"$data_image\" in\n/workspace/.codewire/docker-data.ext4 | /mnt/home/.codewire/docker-data.ext4) ;;\n*) docker_bootstrap_fail 'the commodity Docker data paths are invalid' ;;\nesac\n[ \"$data_root\" = /var/lib/docker ] && [ \"$mount_mode\" = loop ] || docker_bootstrap_fail 'the commodity Docker data paths are invalid'\n[ ! -L \"$data_root\" ] && [ ! -L \"$data_image\" ] && [ ! -L \"${data_image%/*}\" ] || docker_bootstrap_fail 'the commodity Docker data path is a symlink'\ndata_device=\"$(awk '$2 == \"/var/lib/docker\" && $3 == \"ext4\" { print $1; exit }' /proc/mounts)\"\ncase \"$data_device\" in\n  /dev/loop*) loop_number=\"${data_device#/dev/loop}\" ;;\n  *) docker_bootstrap_fail 'the commodity Docker data filesystem is not a loop-mounted ext4 image' ;;\nesac\ncase \"$loop_number\" in ''|*[!0-9]*) docker_bootstrap_fail 'the Docker loop device is invalid' ;; esac\nIFS= read -r loop_backing < \"/sys/block/loop$loop_number/loop/backing_file\" || docker_bootstrap_fail 'cannot verify the Docker loop backing file'\n[ \"$loop_backing\" = \"$data_image\" ] || docker_bootstrap_fail 'the Docker loop device belongs to another image'\ndocker_store_marker=\"$data_root/.codewire-containerd-store-v1\"\nif [ -L \"$docker_store_marker\" ] || { [ -e \"$docker_store_marker\" ] && [ ! -f \"$docker_store_marker\" ]; }; then\n  docker_bootstrap_fail 'the Docker format marker is not a regular file'\nfi\nif [ -f \"$docker_store_marker\" ]; then\n  printf 'containerd-overlayfs-v1\\n' | cmp -s - \"$docker_store_marker\" || docker_bootstrap_fail 'the Docker data format is unsupported'\nelse\n  # Owner-authorized clean cutover: old Docker images, containers and volumes\n  # are disposable. rm does not follow symlinks outside the Docker filesystem.\n  for entry in \"$data_root\"/* \"$data_root\"/.[!.]* \"$data_root\"/..?*; do\n    if [ ! -e \"$entry\" ] && [ ! -L \"$entry\" ]; then continue; fi\n    if [ \"$entry\" = \"$data_root/lost+found\" ] && [ -d \"$entry\" ] && [ ! -L \"$entry\" ]; then continue; fi\n    rm -rf -- \"$entry\" || docker_bootstrap_fail 'cannot reset the old Docker data'\n  done\n  marker_temporary=\"$data_root/.codewire-containerd-store-v1.tmp.$$$$\"\n  (umask 077; set -C; printf 'containerd-overlayfs-v1\\n' > \"$marker_temporary\") || docker_bootstrap_fail 'cannot prepare the Docker format marker'\n  mv -f \"$marker_temporary\" \"$docker_store_marker\" || docker_bootstrap_fail 'cannot commit the Docker format marker'\nfi\nexec dockerd --host \"unix:///var/run/docker/docker.sock\" --group 1000 --data-root \"$data_root\" --feature containerd-snapshotter=true --storage-driver overlayfs"
+            ],
+            "env": [
+              {
+                "name": "DOCKER_TLS_CERTDIR",
+                "value": ""
+              },
+              {
+                "name": "CODEWIRE_DOCKER_DATA_IMAGE",
+                "value": "/mnt/home/.codewire/docker-data.ext4"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_DATA_ROOT",
+                "value": "/var/lib/docker"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_DATA_SIZE",
+                "value": "8G"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_MOUNT_MODE",
+                "value": "loop"
+              }
+            ],
+            "image": "docker.io/library/docker:29.7.1-dind@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "name": "dind",
+            "resources": {
+              "limits": {
+                "cpu": "2",
+                "memory": "2Gi"
+              },
+              "requests": {
+                "cpu": "500m",
+                "memory": "1Gi"
+              }
+            },
+            "securityContext": {
+              "privileged": true,
+              "runAsGroup": 0,
+              "runAsUser": 0
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/var/run/docker",
+                "name": "docker-sock"
+              },
+              {
+                "mountPath": "/workspace",
+                "mountPropagation": "HostToContainer",
+                "name": "mntws"
+              },
+              {
+                "mountPath": "/tmp",
+                "mountPropagation": "HostToContainer",
+                "name": "wstmp"
+              },
+              {
+                "mountPath": "/var/tmp",
+                "mountPropagation": "HostToContainer",
+                "name": "wstmp"
+              },
+              {
+                "mountPath": "/mnt/home",
+                "mountPropagation": "HostToContainer",
+                "name": "mnthome"
+              }
+            ]
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "enableServiceLinks": false,
+        "initContainers": [
+          {
+            "command": [
+              "sh",
+              "-c",
+              "set -u\n# The three paths are overridable only for the script's own test; nothing\n# renders them, and the pool policy admits no other variable.\ndev=\"${CODEWIRE_MOUNT_WORKSPACE_DEVICE:-/dev/cwws}\"\nws=\"${CODEWIRE_MOUNT_WORKSPACE_ROOT:-/mnt/ws}\"\ntmp=\"${CODEWIRE_MOUNT_WORKSPACE_TMP:-/mnt/tmp}\"\nvolume=\"${1:-}\"\nbegan=\"$(date +%s%N)\"\nrefuse() {\n  echo \"codewire mount-workspace: $*\" >&2\n  exit 1\n}\nsubfolder=0\ncase \"$volume\" in\n  new|existing) ;;\n  new-subfolder|existing-subfolder) subfolder=1; volume=\"${volume%-subfolder}\" ;;\n  *) refuse \"the volume state must be new or existing, optionally with -subfolder, not '$volume'\" ;;\nesac\ndd if=\"$dev\" of=/dev/null bs=4096 count=1 2>/dev/null || refuse \"the workspace device $dev cannot be read\"\nprobe=0\nblkid -p \"$dev\" >/dev/null 2>&1 || probe=$?\nfstype=\n[ \"$probe\" != 0 ] || fstype=\"$(blkid -p -s TYPE -o value \"$dev\" 2>/dev/null || true)\"\next4=0\nif [ \"$fstype\" = ext4 ] || dumpe2fs -h \"$dev\" >/dev/null 2>&1; then ext4=1; fi\nfresh=0\nif [ \"$ext4\" = 0 ] && [ \"$volume\" = new ]; then\n  case \"$probe\" in\n    0|2|8) ;;\n    *) refuse \"probing the workspace device failed (blkid exit $probe)\" ;;\n  esac\n  [ \"$probe\" = 2 ] || wipefs -a -q \"$dev\" || refuse \"clearing the new workspace volume's chance signature failed\"\n  mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 \"$dev\" || refuse \"formatting the new workspace volume failed\"\n  fresh=1\nelif [ \"$ext4\" = 0 ]; then\n  case \"$probe\" in\n    0) refuse \"the workspace volume holds '${fstype:-an unknown signature}', not ext4\" ;;\n    2) refuse \"the existing workspace volume has no filesystem; it is not formatted\" ;;\n    *) refuse \"probing the workspace device failed (blkid exit $probe)\" ;;\n  esac\nfi\nchecked=\"$(date +%s%N)\"\ncheck=0\ne2fsck -f -p \"$dev\" >/dev/null 2>&1 || check=$?\n[ \"$check\" -le 1 ] || refuse \"checking the workspace filesystem failed (e2fsck exit $check)\"\ncheck_ms=$((($(date +%s%N) - checked) / 1000000))\nmount -t ext4 -o noatime \"$dev\" \"$ws\" || refuse \"mounting the workspace filesystem failed\"\nresize2fs \"$dev\" >/dev/null 2>&1 || echo \"codewire mount-workspace: the workspace filesystem did not grow; it keeps its previous size\" >&2\n[ \"$fresh\" = 0 ] || chown 1000:1000 \"$ws\" || refuse \"the fresh workspace root could not be given to the workspace user\"\n[ ! -L \"$ws/.codewire\" ] || refuse \"the workspace's .codewire is a symbolic link\"\nif [ ! -d \"$ws/.codewire\" ]; then\n  mkdir \"$ws/.codewire\" && chown 1000:1000 \"$ws/.codewire\" && chmod 0755 \"$ws/.codewire\" ||\n    refuse \"the workspace's .codewire could not be created\"\nfi\nrm -rf \"$ws/.codewire/tmp\" && mkdir \"$ws/.codewire/tmp\" && chmod 1777 \"$ws/.codewire/tmp\" ||\n  refuse \"the workspace temporary directory could not be emptied\"\nmount --bind \"$ws/.codewire/tmp\" \"$tmp\" || refuse \"binding the workspace temporary directory failed\"\nif [ \"$subfolder\" = 1 ]; then\n  # /workspace is the filesystem's workspace/ folder (#4026). No workspace\n  # process runs yet, so a folder checked here is the one bound.\n  dir=\"${CODEWIRE_MOUNT_WORKSPACE_DIR:-/mnt/wsdir}\"\n  [ ! -L \"$ws/workspace\" ] || refuse \"the workspace's workspace folder is a symbolic link\"\n  if [ ! -d \"$ws/workspace\" ]; then\n    [ ! -e \"$ws/workspace\" ] || refuse \"the workspace's workspace folder is not a directory\"\n    mkdir \"$ws/workspace\" && chown 1000:1000 \"$ws/workspace\" && chmod 0755 \"$ws/workspace\" ||\n      refuse \"the workspace's workspace folder could not be created\"\n  fi\n  mount --bind \"$ws/workspace\" \"$dir\" || refuse \"binding the workspace folder failed\"\nfi\nif [ -n \"${CODEWIRE_DOCKER_DATA_SIZE:-}\" ]; then\n  (\n    CODEWIRE_DOCKER_DATA_IMAGE=\"$ws/.codewire/docker-data.ext4\"\ndata_image=\"${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}\"\ndata_size=\"${CODEWIRE_DOCKER_DATA_SIZE:-8G}\"\nmount_mode=\"${CODEWIRE_DOCKER_MOUNT_MODE:-loop}\"\nif [ \"$mount_mode\" = \"loop\" ]; then\n  codewire_dir=\"$(dirname \"$data_image\")\"\n  mkdir -p \"$codewire_dir\"\n  chown 1000:1000 \"$codewire_dir\"\n  # Owner-writable only: the workspace daemon refuses a group- or\n  # world-writable ancestor of its platform session store.\n  chmod 0755 \"$codewire_dir\"\n  if [ ! -s \"$data_image\" ]; then\n    # A fresh sparse image reads as zeros, so mke2fs skips zeroing its\n    # inode tables and journal: a few MiB of writes at any size.\n    if ! { truncate -s \"$data_size\" \"$data_image\" &&\n      mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 \"$data_image\"; }; then\n      rm -f \"$data_image\"\n      echo \"the Docker data image $data_image was not created; Docker does not start\" >&2\n    fi\n  fi\n  if [ -s \"$data_image\" ]; then\n    # A grown workspace disk renders a larger data size: extend the image to\n    # it, never shrinking it, and grow its filesystem offline to fill the\n    # image. Growth keeps every byte, and a failed grow still starts Docker\n    # at its previous size (#3554).\n    data_gib=\"${data_size%G}\"\n    case \"$data_gib\" in ''|*[!0-9]*) data_gib=0 ;; esac\n    if [ \"$(stat -c %s \"$data_image\")\" -lt \"$((data_gib * 1073741824))\" ]; then\n      truncate -s \"$data_size\" \"$data_image\" || true\n    fi\n    data_fs_bytes=\"$(dumpe2fs -h \"$data_image\" 2>/dev/null | awk -F: '$1 == \"Block count\" { count = $2 } $1 == \"Block size\" { size = $2 } END { printf \"%.0f\", count * size }')\"\n    if [ \"$(stat -c %s \"$data_image\")\" -gt \"${data_fs_bytes:-0}\" ]; then\n      # resize2fs grows an unmounted filesystem only after a forced check;\n      # e2fsck exits 1 when it corrected something.\n      fsck_status=0\n      e2fsck -fy \"$data_image\" >/dev/null || fsck_status=$?\n      if [ \"$fsck_status\" -gt 1 ] || ! resize2fs \"$data_image\"; then\n        echo \"the Docker data filesystem did not grow to $data_size; Docker keeps its previous size\" >&2\n      fi\n    fi\n  fi\nfi\n  ) || echo \"codewire mount-workspace: preparing the Docker data image failed; Docker reports it\" >&2\nfi\necho \"codewire mount-workspace: mounted the $volume workspace volume (formatted=$fresh e2fsck_ms=$check_ms total_ms=$((($(date +%s%N) - began) / 1000000)))\"\n",
+              "mount-workspace",
+              "new-subfolder"
+            ],
+            "env": [
+              {
+                "name": "CODEWIRE_DOCKER_DATA_IMAGE",
+                "value": "/mnt/home/.codewire/docker-data.ext4"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_DATA_SIZE",
+                "value": "8G"
+              },
+              {
+                "name": "CODEWIRE_DOCKER_MOUNT_MODE",
+                "value": "loop"
+              }
+            ],
+            "image": "registry.example.invalid/codewire/daemon@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "name": "mount-workspace",
+            "resources": {
+              "limits": {
+                "cpu": "1",
+                "memory": "512Mi"
+              },
+              "requests": {
+                "cpu": "25m",
+                "memory": "32Mi"
+              }
+            },
+            "securityContext": {
+              "privileged": true,
+              "runAsGroup": 0,
+              "runAsUser": 0
+            },
+            "volumeDevices": [
+              {
+                "devicePath": "/dev/cwws",
+                "name": "workspace"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "mountPath": "/mnt/ws",
+                "mountPropagation": "Bidirectional",
+                "name": "mnthome"
+              },
+              {
+                "mountPath": "/mnt/tmp",
+                "mountPropagation": "Bidirectional",
+                "name": "wstmp"
+              },
+              {
+                "mountPath": "/mnt/wsdir",
+                "mountPropagation": "Bidirectional",
+                "name": "mntws"
+              }
+            ]
+          },
+          {
+            "command": [
+              "sh",
+              "-c",
+              "# The path is overridable only for the script's own test.\nws=\"${CODEWIRE_WORKSPACE_FLUSH_ROOT:-/mnt/ws}\"\nflush() {\n  began=\"$(date +%s%N)\"\n  status=0\n  timeout 35 sync -f \"$ws\" || status=$?\n  took=$((($(date +%s%N) - began) / 1000000))\n  if [ \"$status\" = 0 ]; then\n    echo \"codewire workspace-flush: flushed the workspace (flush_ms=$took)\"\n  else\n    echo \"codewire workspace-flush: flushing the workspace failed (status=$status flush_ms=$took)\" >&2\n  fi\n  kill \"$sleeper\" 2>/dev/null\n  exit 0\n}\ntrap flush TERM\nwhile :; do\n  sleep 3600 &\n  sleeper=$!\n  wait \"$sleeper\"\ndone\n"
+            ],
+            "image": "registry.example.invalid/codewire/daemon@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "name": "workspace-flush",
+            "resources": {
+              "limits": {
+                "cpu": "100m",
+                "memory": "32Mi"
+              },
+              "requests": {
+                "cpu": "5m",
+                "memory": "8Mi"
+              }
+            },
+            "restartPolicy": "Always",
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "readOnlyRootFilesystem": true,
+              "runAsGroup": 1000,
+              "runAsNonRoot": true,
+              "runAsUser": 1000
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/mnt/ws",
+                "mountPropagation": "HostToContainer",
+                "name": "mnthome"
+              }
+            ]
+          }
+        ],
+        "restartPolicy": "Never",
+        "runtimeClassName": "commodity",
+        "securityContext": {
+          "fsGroup": 1000,
+          "fsGroupChangePolicy": "OnRootMismatch",
+          "runAsGroup": 1000,
+          "runAsUser": 1000
+        },
+        "serviceAccountName": "codewire-sandbox",
+        "terminationGracePeriodSeconds": 60,
+        "volumes": [
+          {
+            "image": {
+              "pullPolicy": "IfNotPresent",
+              "reference": "registry.example.invalid/codewire/daemon@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+            },
+            "name": "codewire-bin"
+          },
+          {
+            "emptyDir": {},
+            "name": "codewire-run"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "mnthome"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "wstmp"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "mntws"
+          },
+          {
+            "name": "credential-workspace-identity",
+            "projected": {
+              "defaultMode": 288,
+              "sources": [
+                {
+                  "serviceAccountToken": {
+                    "audience": "codewire.internal.credential-workspace.v1",
+                    "expirationSeconds": 600,
+                    "path": "token"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "workspace-binding-identity",
+            "projected": {
+              "defaultMode": 288,
+              "sources": [
+                {
+                  "serviceAccountToken": {
+                    "audience": "codewire.internal.workspace-binding.v1",
+                    "expirationSeconds": 600,
+                    "path": "token"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "configMap": {
+              "defaultMode": 292,
+              "items": [
+                {
+                  "key": "ca.crt",
+                  "path": "ca.crt"
+                }
+              ],
+              "name": "codewire-orchestration-internal-roots"
+            },
+            "name": "orchestration-internal-roots"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "docker-sock"
+          }
+        ]
+      }
+    },
+    "volumeClaimTemplates": [
+      {
+        "metadata": {
+          "name": "workspace"
+        },
+        "spec": {
+          "accessModes": [
+            "ReadWriteOnce"
+          ],
+          "resources": {
+            "requests": {
+              "storage": "10Gi"
+            }
+          },
+          "storageClassName": "linstor-local",
+          "volumeMode": "Block"
+        }
+      }
+    ]
+  }
+}

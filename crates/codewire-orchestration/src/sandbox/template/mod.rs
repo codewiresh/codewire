@@ -46,19 +46,19 @@ use workspace::custom_workspace_supervisor_command;
 pub(crate) use workspace::docker_data_image_prepare_script;
 pub(crate) use workspace::{
     DAEMON_INIT_CONTAINER, DAEMON_VOLUME, DOCKER_DATA_INIT_CONTAINER, DOCKER_DATA_INIT_ENV,
-    LEGACY_DIND_BOOTSTRAP_SCRIPT, MOUNT_WORKSPACE_CONTAINER, WORKSPACE_MOUNT_VOLUME,
-    WorkspaceVolume, commodity_dind_bootstrap_script, dind_bootstrap_script,
-    docker_data_init_container, eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script,
-    pre_growth_dind_bootstrap_script,
+    LEGACY_DIND_BOOTSTRAP_SCRIPT, LEGACY_WORKSPACE_MOUNT_VOLUME, MOUNT_WORKSPACE_CONTAINER,
+    WORKSPACE_MOUNT_VOLUME, WorkspaceVolume, commodity_dind_bootstrap_script,
+    dind_bootstrap_script, docker_data_init_container, eager_mkfs_dind_bootstrap_script,
+    growth_in_dind_bootstrap_script, pre_growth_dind_bootstrap_script,
 };
 #[cfg(test)]
 pub(crate) use workspace::{
-    MOUNT_WORKSPACE_DEVICE_PATH, MOUNT_WORKSPACE_SCRIPT, WORKSPACE_FLUSH_CONTAINER,
-    WORKSPACE_FLUSH_SCRIPT,
+    DIND_WORKSPACE_ROOT, MOUNT_WORKSPACE_DEVICE_PATH, MOUNT_WORKSPACE_SCRIPT, WORKSPACE_DIR_VOLUME,
+    WORKSPACE_FLUSH_CONTAINER, WORKSPACE_FLUSH_SCRIPT,
 };
 pub use workspace::{
-    ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, orchestration_internal_tls_host,
-    render_sandbox_template, render_workspace_daemon_service,
+    ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, WORKSPACE_LAYOUT_ENV, orchestration_internal_tls_host,
+    render_sandbox_template, render_workspace_daemon_service, workspace_subfolder_layout,
 };
 
 /// Return the exact raw TOML bytes that the hypervisor annotation compresses
@@ -286,6 +286,10 @@ pub struct TemplateOpts {
     pub memory_mib: i64,
     pub disk_gib: i64,
     pub workspace_storage_class: String,
+    /// A Block (commodity) workspace's `/workspace` is its filesystem's
+    /// `workspace/` folder, not its root, which stays the home
+    /// (`SANDBOX_WORKSPACE_LAYOUT=subfolder`, #4026).
+    pub workspace_subfolder: bool,
     /// The `VolumeSnapshot` a new workspace PVC restores from. Only a create
     /// from a hosted snapshot has one; such a claim never comes from a pool.
     pub workspace_source_snapshot: Option<String>,
@@ -360,6 +364,7 @@ impl fmt::Debug for TemplateOpts {
             .field("memory_mib", &self.memory_mib)
             .field("disk_gib", &self.disk_gib)
             .field("workspace_storage_class", &self.workspace_storage_class)
+            .field("workspace_subfolder", &self.workspace_subfolder)
             .field("network_policy_management", &self.network_policy_management)
             .field("dind_enabled", &self.dind_enabled)
             .field("kata_agent_policy_enabled", &self.kata_agent_policy_enabled)

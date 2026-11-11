@@ -30,14 +30,15 @@ use super::template::{
     CpuSharingRatio, DOCKER_DATA_INIT_CONTAINER, DOCKER_DATA_INIT_ENV,
     KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
     KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, LEGACY_DIND_BOOTSTRAP_SCRIPT,
-    MOUNT_WORKSPACE_CONTAINER, RUNTIME_CLASS_RUNC, TemplateOpts, WORKSPACE_MOUNT_VOLUME,
-    WorkspaceVolume, commodity_dind_bootstrap_script, dind_bootstrap_script,
-    direct_udp_service_name, docker_data_init_container, docker_data_size_gib,
-    eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script, is_commodity_runtime_class,
-    pre_growth_dind_bootstrap_script, render_direct_udp_service, render_sandbox_shadow_pool,
-    render_sandbox_template, render_warm_member_bridge, render_workspace_daemon_network_policy,
-    render_workspace_daemon_service, warm_member_daemon_bridge_name,
-    workspace_daemon_network_policy_name, workspace_daemon_service_name,
+    LEGACY_WORKSPACE_MOUNT_VOLUME, MOUNT_WORKSPACE_CONTAINER, RUNTIME_CLASS_RUNC, TemplateOpts,
+    WORKSPACE_MOUNT_VOLUME, WorkspaceVolume, commodity_dind_bootstrap_script,
+    dind_bootstrap_script, direct_udp_service_name, docker_data_init_container,
+    docker_data_size_gib, eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script,
+    is_commodity_runtime_class, pre_growth_dind_bootstrap_script, render_direct_udp_service,
+    render_sandbox_shadow_pool, render_sandbox_template, render_warm_member_bridge,
+    render_workspace_daemon_network_policy, render_workspace_daemon_service,
+    warm_member_daemon_bridge_name, workspace_daemon_network_policy_name,
+    workspace_daemon_service_name,
 };
 use super::{
     CRD_VERSION, ClaimOpts, EXTENSIONS_GROUP, LABEL_ENV_ID, LABEL_ORG_ID, LABEL_TYPE,
@@ -969,14 +970,7 @@ fn dind_bootstrap_refresh(
     }
     // On a Block workspace `mount-workspace` prepares the data image, as a
     // fresh render has it (#3718), so only the bootstrap is re-rendered.
-    let block = pod_spec
-        .get("volumes")
-        .and_then(Value::as_array)
-        .is_some_and(|volumes| {
-            volumes.iter().any(|volume| {
-                volume.get("name").and_then(Value::as_str) == Some(WORKSPACE_MOUNT_VOLUME)
-            })
-        });
+    let block = mounts_block_workspace(pod_spec);
     if block {
         return Ok(Some(operations));
     }
@@ -1022,6 +1016,23 @@ fn docker_data_init_repin(path: &str, init: &Value, support_image: &str) -> Opti
 }
 
 /// Log a DinD bootstrap refresh an admitted patch carried.
+/// Whether a Pod mounts a Block workspace's filesystem: the guest-memory
+/// volume `mount-workspace` mounts it into, by its name since #4026 or the
+/// one Pods rendered before it still carry.
+fn mounts_block_workspace(pod_spec: &Value) -> bool {
+    pod_spec
+        .get("volumes")
+        .and_then(Value::as_array)
+        .is_some_and(|volumes| {
+            volumes.iter().any(|volume| {
+                matches!(
+                    volume.get("name").and_then(Value::as_str),
+                    Some(WORKSPACE_MOUNT_VOLUME | LEGACY_WORKSPACE_MOUNT_VOLUME)
+                )
+            })
+        })
+}
+
 /// A commodity Sandbox's Block workspace (#3718): the index of its
 /// `mount-workspace` init container, or `None` with no Block workspace.
 ///

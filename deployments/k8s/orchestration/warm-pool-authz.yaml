@@ -195,9 +195,11 @@ spec:
           echo "codewire mount-workspace: $*" >&2
           exit 1
         }
+        subfolder=0
         case "$volume" in
           new|existing) ;;
-          *) refuse "the volume state must be new or existing, not '$volume'" ;;
+          new-subfolder|existing-subfolder) subfolder=1; volume="${volume%-subfolder}" ;;
+          *) refuse "the volume state must be new or existing, optionally with -subfolder, not '$volume'" ;;
         esac
         dd if="$dev" of=/dev/null bs=4096 count=1 2>/dev/null || refuse "the workspace device $dev cannot be read"
         probe=0
@@ -238,6 +240,18 @@ spec:
         rm -rf "$ws/.codewire/tmp" && mkdir "$ws/.codewire/tmp" && chmod 1777 "$ws/.codewire/tmp" ||
           refuse "the workspace temporary directory could not be emptied"
         mount --bind "$ws/.codewire/tmp" "$tmp" || refuse "binding the workspace temporary directory failed"
+        if [ "$subfolder" = 1 ]; then
+          # /workspace is the filesystem's workspace/ folder (#4026). No workspace
+          # process runs yet, so a folder checked here is the one bound.
+          dir="${CODEWIRE_MOUNT_WORKSPACE_DIR:-/mnt/wsdir}"
+          [ ! -L "$ws/workspace" ] || refuse "the workspace's workspace folder is a symbolic link"
+          if [ ! -d "$ws/workspace" ]; then
+            [ ! -e "$ws/workspace" ] || refuse "the workspace's workspace folder is not a directory"
+            mkdir "$ws/workspace" && chown 1000:1000 "$ws/workspace" && chmod 0755 "$ws/workspace" ||
+              refuse "the workspace's workspace folder could not be created"
+          fi
+          mount --bind "$ws/workspace" "$dir" || refuse "binding the workspace folder failed"
+        fi
         if [ -n "${CODEWIRE_DOCKER_DATA_SIZE:-}" ]; then
           (
             CODEWIRE_DOCKER_DATA_IMAGE="$ws/.codewire/docker-data.ext4"
@@ -383,7 +397,7 @@ spec:
         variables.pod.initContainers.all(c, c.name != 'mount-workspace' ||
         (has(c.command) && size(c.command) == 5 && c.command[0] == 'sh' && c.command[1] == '-c' &&
         c.command[2] == variables.mountWorkspaceScript && c.command[3] == 'mount-workspace' &&
-        c.command[4] in ['new', 'existing'] && !has(c.args) &&
+        c.command[4] in ['new', 'existing', 'new-subfolder', 'existing-subfolder'] && !has(c.args) &&
         variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) &&
         has(v.image.reference) && v.image.reference == c.image)))
       message: mount-workspace runs exactly its rendered script, from the workspace daemon's support image

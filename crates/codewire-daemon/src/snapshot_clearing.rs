@@ -87,7 +87,9 @@ impl LoginKind {
     }
 }
 
-/// Clear the volume mounted at `root`: its home and `/workspace` are one tree.
+/// Clear the volume mounted at `root`, which is the environment's home; its
+/// `/workspace` is that same tree or, in the subfolder layout, the volume's
+/// `workspace/` folder, so clearing from the root covers both.
 pub fn clear_workspace_volume(root: &Path) -> io::Result<ClearingReport> {
     let mut report = ClearingReport::default();
     for kind in [LoginKind::Codex, LoginKind::Claude] {

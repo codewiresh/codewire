@@ -177,7 +177,7 @@ pod="$(jq '.[2]' <<<"$real")"
   fail "real: the mounter: $(jq -c .spec.initContainers <<<"$pod")"
 [[ "$(jq '[.spec.containers[] | select(.volumeDevices)] | length' <<<"$pod")" == 0 ]] || fail "real: a workload container holds the device"
 [[ "$(jq -c '[.spec.initContainers[0].volumeMounts[].mountPropagation] | unique' <<<"$pod")" == '["Bidirectional"]' ]] || fail "real: mounter propagation"
-[[ "$(jq -r '[.spec.containers[0].volumeMounts[] | select(.name == "wsmnt" or .name == "wstmp") | "\(.mountPath):\(.mountPropagation)"] | join(" ")' <<<"$pod")" == \
+[[ "$(jq -r '[.spec.containers[0].volumeMounts[] | select(.name == "mnthome" or .name == "wstmp") | "\(.mountPath):\(.mountPropagation)"] | join(" ")' <<<"$pod")" == \
   "/workspace:HostToContainer /home/codewire:HostToContainer /tmp:HostToContainer /var/tmp:HostToContainer" ]] || fail "real: workspace mounts"
 [[ "$(jq -r '.spec.volumes[] | select(.name == "docker-sock") | .emptyDir.medium' <<<"$pod")" == Memory ]] ||
   fail "real: the Docker socket is not in guest memory"

@@ -360,6 +360,27 @@ fn warm_pool_matches_golden_files() {
     crate::test_golden::assert_golden("warm-pool-sandboxwarmpool.golden.json", &objects.pool);
 }
 
+/// The subfolder layout's template, which infra's admission policy must also
+/// admit (#4026).
+#[test]
+fn a_subfolder_warm_pool_matches_its_golden_file() {
+    let cfg = SandboxWorkerCfg {
+        workspace_subfolder: true,
+        ..dev_cfg()
+    };
+    let opts = shape_template_opts(
+        &cfg,
+        SYNTHETIC_WORKSPACE_IMAGE,
+        &standard_runtime_profile_spec(&cfg),
+        shapes()[0],
+    );
+    let objects = render_warm_pool(&cfg.sandbox_namespace, &opts, 2, false).unwrap();
+    crate::test_golden::assert_golden(
+        "warm-pool-subfolder-sandboxtemplate.golden.json",
+        &objects.template,
+    );
+}
+
 /// The CEL list literal a policy variable or overlay value carries.
 fn cel_names(literal: &str) -> Vec<String> {
     literal

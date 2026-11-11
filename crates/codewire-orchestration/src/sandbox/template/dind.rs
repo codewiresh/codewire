@@ -39,8 +39,12 @@ fi"#;
 
 /// Fail closed before resetting data: both the mount and its loop backing file
 /// must name the product's Docker image, never another workspace filesystem.
-pub(super) const VERIFY_STORE_MOUNT: &str = r#"[ "$data_root" = /var/lib/docker ] && [ "$data_image" = /workspace/.codewire/docker-data.ext4 ] && [ "$mount_mode" = loop ] || docker_bootstrap_fail 'the commodity Docker data paths are invalid'
-[ ! -L "$data_root" ] && [ ! -L "$data_image" ] && [ ! -L /workspace/.codewire ] || docker_bootstrap_fail 'the commodity Docker data path is a symlink'
+pub(super) const VERIFY_STORE_MOUNT: &str = r#"case "$data_image" in
+/workspace/.codewire/docker-data.ext4 | /mnt/home/.codewire/docker-data.ext4) ;;
+*) docker_bootstrap_fail 'the commodity Docker data paths are invalid' ;;
+esac
+[ "$data_root" = /var/lib/docker ] && [ "$mount_mode" = loop ] || docker_bootstrap_fail 'the commodity Docker data paths are invalid'
+[ ! -L "$data_root" ] && [ ! -L "$data_image" ] && [ ! -L "${data_image%/*}" ] || docker_bootstrap_fail 'the commodity Docker data path is a symlink'
 data_device="$(awk '$2 == "/var/lib/docker" && $3 == "ext4" { print $1; exit }' /proc/mounts)"
 case "$data_device" in
   /dev/loop*) loop_number="${data_device#/dev/loop}" ;;

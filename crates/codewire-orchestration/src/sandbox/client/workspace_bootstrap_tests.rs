@@ -3128,3 +3128,20 @@ async fn operating_mode_post_publication_read_conflicts_never_replay_the_write()
         assert_eq!(state.sandbox["metadata"]["resourceVersion"], "31");
     }
 }
+
+/// A start recognizes a Block workspace by its mounted filesystem's volume,
+/// under its name since #4026 and the one older Pods carry, so neither gets a
+/// Docker data init added that `mount-workspace` already does.
+#[test]
+fn a_block_workspace_is_recognized_by_its_current_and_legacy_volume_name() {
+    for name in [WORKSPACE_MOUNT_VOLUME, LEGACY_WORKSPACE_MOUNT_VOLUME] {
+        let pod = serde_json::json!({ "volumes": [
+            { "name": "codewire-run", "emptyDir": {} },
+            { "name": name, "emptyDir": { "medium": "Memory" } },
+        ]});
+        assert!(mounts_block_workspace(&pod), "{name}");
+    }
+    let filesystem = serde_json::json!({ "volumes": [{ "name": "workspace", "emptyDir": {} }] });
+    assert!(!mounts_block_workspace(&filesystem));
+    assert!(!mounts_block_workspace(&serde_json::json!({})));
+}

@@ -311,7 +311,7 @@ real_pod_json() { # MAIN_GIB SECOND_GIB NODE
     --arg image "$IMAGE" --arg dind "$DIND_IMAGE" --argjson main "$1" --argjson second "$2" \
     --arg mounter "$(real_mounter_script)" --arg workspace "$(real_main_script)" --arg docker "$(real_dind_script)" '
     def limits($cpu; $memory): {requests: {cpu: $cpu, memory: $memory}, limits: {cpu: $cpu, memory: $memory}};
-    def seen($at): {name: "wsmnt", mountPath: $at, mountPropagation: "HostToContainer"};
+    def seen($at): {name: "mnthome", mountPath: $at, mountPropagation: "HostToContainer"};
     def tmp($at): {name: "wstmp", mountPath: $at, mountPropagation: "HostToContainer"};
     {
       apiVersion: "v1", kind: "Pod",
@@ -326,7 +326,7 @@ real_pod_json() { # MAIN_GIB SECOND_GIB NODE
           securityContext: {privileged: true, runAsUser: 0},
           resources: limits("1"; "512Mi"),
           volumeDevices: [{name: "ws", devicePath: "/dev/cwws"}],
-          volumeMounts: [{name: "wsmnt", mountPath: "/mnt/ws", mountPropagation: "Bidirectional"},
+          volumeMounts: [{name: "mnthome", mountPath: "/mnt/ws", mountPropagation: "Bidirectional"},
                          {name: "wstmp", mountPath: "/mnt/tmp", mountPropagation: "Bidirectional"}]
         }],
         containers: [
@@ -348,7 +348,7 @@ real_pod_json() { # MAIN_GIB SECOND_GIB NODE
                           {name: "hold-dind", mountPath: "/hold"}]}
         ],
         volumes: [{name: "ws", persistentVolumeClaim: {claimName: $name}},
-                  {name: "wsmnt", emptyDir: {medium: "Memory"}},
+                  {name: "mnthome", emptyDir: {medium: "Memory"}},
                   {name: "wstmp", emptyDir: {medium: "Memory"}},
                   # In guest memory, as the product has it: a socket does not cross virtio-fs.
                   {name: "docker-sock", emptyDir: {medium: "Memory"}},

@@ -219,9 +219,14 @@ workspace keeps a Filesystem claim.
   inside the guest only, and runs from the support image. A Kata container
   with a `volumeDevice` cannot restart, so it fails closed and is never
   retried in place; recovery is a new Pod. It mounts the filesystem into a
-  guest-memory emptyDir (`wsmnt`, `Bidirectional`), which the workspace and
+  guest-memory emptyDir (`mnthome`, `Bidirectional`), which the workspace and
   DinD containers mount at `/workspace` and `/home/codewire`
-  (`HostToContainer`). The guest keeps the kernel's writeback defaults.
+  (`HostToContainer`). With `SANDBOX_WORKSPACE_LAYOUT=subfolder`
+  (docs/CONFIGURATION.md) it also creates the filesystem's `workspace/`
+  folder and binds it into a second emptyDir (`mntws`), which is what the
+  workspace and DinD mount at `/workspace`; the home stays the filesystem's
+  root, and DinD sees that root at `/mnt/home` for its data image. The
+  guest keeps the kernel's writeback defaults.
   Beside a guest DinD
   it then prepares the Docker data image, as the data init does elsewhere; a
   failure there never stops the workspace. A Block Pod so has one init

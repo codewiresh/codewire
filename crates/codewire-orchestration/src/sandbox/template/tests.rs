@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(flush["command"], json!(["sh", "-c", WORKSPACE_FLUSH_SCRIPT]));
         assert_eq!(
             flush["volumeMounts"],
-            json!([{ "name": "wsmnt", "mountPath": "/mnt/ws", "mountPropagation": "HostToContainer" }])
+            json!([{ "name": "mnthome", "mountPath": "/mnt/ws", "mountPropagation": "HostToContainer" }])
         );
         assert_eq!(flush["securityContext"]["runAsUser"], 1000);
         assert_eq!(flush["securityContext"]["capabilities"], json!({ "drop": ["ALL"] }));
@@ -573,7 +573,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|mount| mount
-                    == &json!({"name":"wsmnt","mountPath":"/home/codewire","mountPropagation":"HostToContainer"}))
+                    == &json!({"name":"mnthome","mountPath":"/home/codewire","mountPropagation":"HostToContainer"}))
         );
         assert!(CODEX_PLATFORM_HOME.starts_with("/home/codewire/"));
         // The bound daemon sets `CODEX_HOME` for the sessions it launches; the
@@ -2836,6 +2836,17 @@ mod tests {
     }
 
     #[test]
+    fn the_workspace_layout_is_the_whole_volume_or_its_subfolder_and_nothing_else() {
+        assert!(!workspace_subfolder_layout("").unwrap());
+        assert!(!workspace_subfolder_layout(" ").unwrap());
+        assert!(workspace_subfolder_layout("subfolder").unwrap());
+        for value in ["Subfolder", "subdir", "true", "sub folder"] {
+            let error = workspace_subfolder_layout(value).unwrap_err();
+            assert!(error.contains(WORKSPACE_LAYOUT_ENV), "{error}");
+        }
+    }
+
+    #[test]
     fn confidential_workspace_storage_class_is_one_name_or_unset() {
         assert_eq!(confidential_workspace_storage_class("").unwrap(), "");
         assert_eq!(confidential_workspace_storage_class("  ").unwrap(), "");
@@ -3865,5 +3876,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bridge["spec"]["ingress"], daemon["spec"]["ingress"]);
+    }
+
+    /// `SANDBOX_WORKSPACE_LAYOUT=subfolder` (#4026): a commodity Block
+    /// workspace's `/workspace` is the filesystem's `workspace/` folder,
+    /// bound by `mount-workspace`; the home stays its root.
+    #[test]
+    fn a_subfolder_workspace_mounts_only_the_workspace_folder_at_workspace() {
+        let mount = |container: &Value, path: &str| {
+            container["volumeMounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|mount| mount["mountPath"] == path)
+                .map(|mount| mount["name"].as_str().unwrap().to_owned())
+        };
+        for subfolder in [false, true] {
+            let opts = TemplateOpts {
+                workspace_subfolder: subfolder,
+                ..identity_free_opts()
+            };
+            let template = render_sandbox_template("dev-sandboxes", &opts);
+            let pod = &template["spec"]["podTemplate"]["spec"];
+            let volumes = pod["volumes"].as_array().unwrap();
+            assert_eq!(
+                volumes.iter().any(|volume| volume["name"] == WORKSPACE_DIR_VOLUME),
+                subfolder
+            );
+            let workspace = pod["containers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|container| container["name"] == "workspace")
+                .unwrap();
+            assert_eq!(mount(workspace, "/home/codewire").as_deref(), Some(WORKSPACE_MOUNT_VOLUME));
+            assert_eq!(
+                mount(workspace, "/workspace").as_deref(),
+                Some(if subfolder { WORKSPACE_DIR_VOLUME } else { WORKSPACE_MOUNT_VOLUME })
+            );
+            let init = pod["initContainers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|container| container["name"] == MOUNT_WORKSPACE_CONTAINER)
+                .unwrap();
+            assert_eq!(init["command"].as_array().unwrap().len(), 5);
+            assert_eq!(
+                init["command"][4],
+                if subfolder { "new-subfolder" } else { "new" }
+            );
+            assert_eq!(mount(init, "/mnt/wsdir").is_some(), subfolder);
+            if let Some(dind) = pod["containers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|container| container["name"] == "dind")
+            {
+                assert_eq!(
+                    mount(dind, "/workspace").as_deref(),
+                    Some(if subfolder { WORKSPACE_DIR_VOLUME } else { WORKSPACE_MOUNT_VOLUME })
+                );
+                assert_eq!(mount(dind, DIND_WORKSPACE_ROOT).is_some(), subfolder);
+            }
+        }
     }
 }

@@ -366,8 +366,9 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         configure_confidential_workspace_device(ws);
     }
     let block = block_workspace(opts, &runtime_spec);
+    let subfolder = block && opts.workspace_subfolder;
     if block {
-        configure_block_workspace_mounts(ws, true);
+        configure_block_workspace_mounts(ws, true, subfolder);
     }
     let daemon_image_volume = daemon_from_image_volume(&runtime_spec);
     let daemon_volume = if daemon_image_volume {
@@ -390,7 +391,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         volumes.insert(0, json!({ "name": "workspace", "emptyDir": {} }));
     }
     if block {
-        volumes.extend(block_workspace_volumes());
+        volumes.extend(block_workspace_volumes(subfolder));
     }
     if opts.credential_runtime.is_some() {
         volumes.extend(credentials::workspace_volumes(opts));
@@ -506,7 +507,10 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             configure_confidential_workspace_device(&mut dind);
         }
         if block {
-            configure_block_workspace_mounts(&mut dind, true);
+            configure_block_workspace_mounts(&mut dind, true, subfolder);
+            if subfolder {
+                dind_mount_workspace_root(&mut dind);
+            }
         }
         containers.push(dind);
     } else if runtime_spec.docker_mode == DOCKER_MODE_GUEST_DIND {
@@ -525,7 +529,10 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             configure_confidential_workspace_device(&mut dind);
         }
         if block {
-            configure_block_workspace_mounts(&mut dind, true);
+            configure_block_workspace_mounts(&mut dind, true, subfolder);
+            if subfolder {
+                dind_mount_workspace_root(&mut dind);
+            }
         }
         containers.push(dind);
     } else {
@@ -549,6 +556,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             support_image,
             WorkspaceVolume::rendered(opts),
             data_env.clone().unwrap_or_default(),
+            subfolder,
         ));
     }
     if !daemon_image_volume {
@@ -587,9 +595,32 @@ pub(crate) const MOUNT_WORKSPACE_CONTAINER: &str = "mount-workspace";
 /// Where `mount-workspace` sees the workspace device.
 pub(crate) const MOUNT_WORKSPACE_DEVICE_PATH: &str = "/dev/cwws";
 
-/// The guest-memory volume the workspace filesystem is mounted into, and the
-/// one its `.codewire/tmp` is bound into for `/tmp` and `/var/tmp` (R1).
-pub(crate) const WORKSPACE_MOUNT_VOLUME: &str = "wsmnt";
+/// The guest-memory volume the workspace filesystem is mounted into: the
+/// home, and with no workspace subfolder also `/workspace`.
+pub(crate) const WORKSPACE_MOUNT_VOLUME: &str = "mnthome";
+/// Its name in Pods rendered before #4026, which a start still recognizes.
+pub(crate) const LEGACY_WORKSPACE_MOUNT_VOLUME: &str = "wsmnt";
+/// The guest-memory volume the filesystem's `workspace/` folder is bound
+/// into for `/workspace` when the workspace is a subfolder (#4026).
+pub(crate) const WORKSPACE_DIR_VOLUME: &str = "mntws";
+/// Chooses the commodity Block workspace layout (#4026).
+pub const WORKSPACE_LAYOUT_ENV: &str = "SANDBOX_WORKSPACE_LAYOUT";
+
+/// Validates [`WORKSPACE_LAYOUT_ENV`] at startup: empty mounts the whole volume
+/// at `/workspace`, `subfolder` only its `workspace/` folder. Anything else is
+/// refused, so a misspelling never silently keeps the old layout.
+pub fn workspace_subfolder_layout(value: &str) -> Result<bool, String> {
+    match value.trim() {
+        "" => Ok(false),
+        "subfolder" => Ok(true),
+        other => Err(format!(
+            "{WORKSPACE_LAYOUT_ENV} must be empty or subfolder, not '{other}'"
+        )),
+    }
+}
+/// Where DinD sees the filesystem's root, and so its data image, when its
+/// `/workspace` is the subfolder (#4026).
+pub(crate) const DIND_WORKSPACE_ROOT: &str = "/mnt/home";
 const WORKSPACE_TMP_VOLUME: &str = "wstmp";
 
 /// What the create operation knows of a Block workspace volume: `New` only
@@ -625,27 +656,38 @@ impl WorkspaceVolume {
     }
 }
 
-/// The two guest-memory emptyDirs a Block workspace is mounted into. They
-/// hold only mount points, so they use no memory of their own.
-fn block_workspace_volumes() -> [Value; 2] {
-    [
+/// The guest-memory emptyDirs a Block workspace is mounted into, with the
+/// subfolder's when `/workspace` is one (#4026). They hold only mount
+/// points, so they use no memory of their own.
+fn block_workspace_volumes(subfolder: bool) -> Vec<Value> {
+    let mut volumes = vec![
         json!({ "name": WORKSPACE_MOUNT_VOLUME, "emptyDir": { "medium": "Memory" } }),
         json!({ "name": WORKSPACE_TMP_VOLUME, "emptyDir": { "medium": "Memory" } }),
-    ]
+    ];
+    if subfolder {
+        volumes.push(json!({ "name": WORKSPACE_DIR_VOLUME, "emptyDir": { "medium": "Memory" } }));
+    }
+    volumes
 }
 
 /// Replaces a container's `workspace` mounts with the mounted filesystem,
 /// seen through `HostToContainer` propagation, and, with `tmp`, mounts the
-/// workspace's temporary directory at `/tmp` and `/var/tmp` (R1). No
-/// long-lived container ever holds the device: a Kata container with a
-/// `volumeDevice` cannot restart (design §2).
-pub(crate) fn configure_block_workspace_mounts(container: &mut Value, tmp: bool) {
+/// workspace's temporary directory at `/tmp` and `/var/tmp` (R1). With
+/// `subfolder`, its `/workspace` is the filesystem's `workspace/` folder
+/// instead of its root (#4026). No long-lived container ever holds the
+/// device: a Kata container with a `volumeDevice` cannot restart (design §2).
+pub(crate) fn configure_block_workspace_mounts(container: &mut Value, tmp: bool, subfolder: bool) {
     let mounts = container["volumeMounts"]
         .as_array_mut()
         .expect("container volumeMounts array");
     for mount in mounts.iter_mut() {
         if mount["name"].as_str() == Some("workspace") {
-            mount["name"] = WORKSPACE_MOUNT_VOLUME.into();
+            mount["name"] = if subfolder && mount["mountPath"].as_str() == Some("/workspace") {
+                WORKSPACE_DIR_VOLUME
+            } else {
+                WORKSPACE_MOUNT_VOLUME
+            }
+            .into();
             mount["mountPropagation"] = "HostToContainer".into();
         }
     }
@@ -670,17 +712,36 @@ pub(crate) fn mount_workspace_init_container(
     support_image: &str,
     volume: WorkspaceVolume,
     data_env: Vec<Value>,
+    subfolder: bool,
 ) -> Value {
+    // The layout rides in the one argument, so the admitted argv keeps its
+    // shape (infra's Kyverno policy pins five elements).
+    let state = if subfolder {
+        format!("{}-subfolder", volume.as_str())
+    } else {
+        volume.as_str().to_owned()
+    };
+    let command = json!([
+        "sh",
+        "-c",
+        MOUNT_WORKSPACE_SCRIPT,
+        MOUNT_WORKSPACE_CONTAINER,
+        state
+    ]);
+    let mut mounts = vec![
+        json!({ "name": WORKSPACE_MOUNT_VOLUME, "mountPath": "/mnt/ws", "mountPropagation": "Bidirectional" }),
+        json!({ "name": WORKSPACE_TMP_VOLUME, "mountPath": "/mnt/tmp", "mountPropagation": "Bidirectional" }),
+    ];
+    if subfolder {
+        mounts.push(json!({ "name": WORKSPACE_DIR_VOLUME, "mountPath": "/mnt/wsdir", "mountPropagation": "Bidirectional" }));
+    }
     let mut container = json!({
         "name": MOUNT_WORKSPACE_CONTAINER,
         "image": support_image,
         "securityContext": { "privileged": true, "runAsUser": 0, "runAsGroup": 0 },
-        "command": ["sh", "-c", MOUNT_WORKSPACE_SCRIPT, MOUNT_WORKSPACE_CONTAINER, volume.as_str()],
+        "command": command,
         "volumeDevices": [{ "name": "workspace", "devicePath": MOUNT_WORKSPACE_DEVICE_PATH }],
-        "volumeMounts": [
-            { "name": WORKSPACE_MOUNT_VOLUME, "mountPath": "/mnt/ws", "mountPropagation": "Bidirectional" },
-            { "name": WORKSPACE_TMP_VOLUME, "mountPath": "/mnt/tmp", "mountPropagation": "Bidirectional" },
-        ],
+        "volumeMounts": mounts,
         "resources": docker_data_init_resources(),
     });
     if !data_env.is_empty() {
@@ -809,7 +870,8 @@ fi"#
     };
 }
 
-/// `mount-workspace`'s shell; its one argument is `new` or `existing`.
+/// `mount-workspace`'s shell; its one argument is `new` or `existing`, with
+/// `-subfolder` when `/workspace` is the filesystem's `workspace/` folder.
 ///
 /// It fails closed and is never retried in place: a retried container
 /// cannot re-add the locked disk, so recovery is a new Pod (#3786). Every
@@ -839,6 +901,9 @@ fi"#
 /// - `.codewire/tmp` is emptied at every boot and bound for `/tmp` and
 ///   `/var/tmp` (R1). A `.codewire` that is a symbolic link is refused, so
 ///   no path the workspace controls is followed as root.
+/// - With `-subfolder`, `workspace/` is created if absent and bound for
+///   `/workspace` (#4026); one that is a symbolic link or not a directory is
+///   refused, for the same reason.
 pub(crate) const MOUNT_WORKSPACE_SCRIPT: &str = concat!(
     r#"set -u
 # The three paths are overridable only for the script's own test; nothing
@@ -852,9 +917,11 @@ refuse() {
   echo "codewire mount-workspace: $*" >&2
   exit 1
 }
+subfolder=0
 case "$volume" in
   new|existing) ;;
-  *) refuse "the volume state must be new or existing, not '$volume'" ;;
+  new-subfolder|existing-subfolder) subfolder=1; volume="${volume%-subfolder}" ;;
+  *) refuse "the volume state must be new or existing, optionally with -subfolder, not '$volume'" ;;
 esac
 dd if="$dev" of=/dev/null bs=4096 count=1 2>/dev/null || refuse "the workspace device $dev cannot be read"
 probe=0
@@ -895,6 +962,18 @@ fi
 rm -rf "$ws/.codewire/tmp" && mkdir "$ws/.codewire/tmp" && chmod 1777 "$ws/.codewire/tmp" ||
   refuse "the workspace temporary directory could not be emptied"
 mount --bind "$ws/.codewire/tmp" "$tmp" || refuse "binding the workspace temporary directory failed"
+if [ "$subfolder" = 1 ]; then
+  # /workspace is the filesystem's workspace/ folder (#4026). No workspace
+  # process runs yet, so a folder checked here is the one bound.
+  dir="${CODEWIRE_MOUNT_WORKSPACE_DIR:-/mnt/wsdir}"
+  [ ! -L "$ws/workspace" ] || refuse "the workspace's workspace folder is a symbolic link"
+  if [ ! -d "$ws/workspace" ]; then
+    [ ! -e "$ws/workspace" ] || refuse "the workspace's workspace folder is not a directory"
+    mkdir "$ws/workspace" && chown 1000:1000 "$ws/workspace" && chmod 0755 "$ws/workspace" ||
+      refuse "the workspace's workspace folder could not be created"
+  fi
+  mount --bind "$ws/workspace" "$dir" || refuse "binding the workspace folder failed"
+fi
 if [ -n "${CODEWIRE_DOCKER_DATA_SIZE:-}" ]; then
   (
     CODEWIRE_DOCKER_DATA_IMAGE="$ws/.codewire/docker-data.ext4"
@@ -906,6 +985,31 @@ fi
 echo "codewire mount-workspace: mounted the $volume workspace volume (formatted=$fresh e2fsck_ms=$check_ms total_ms=$((($(date +%s%N) - began) / 1000000)))"
 "#
 );
+
+/// Where a guest DinD finds its data image: under `/workspace` when that is
+/// the filesystem's root, or under [`DIND_WORKSPACE_ROOT`] when `/workspace`
+/// is the subfolder (#4026). The image stays at the filesystem root's
+/// `.codewire/` either way.
+fn docker_data_image_path(opts: &TemplateOpts, runtime_spec: &RuntimeProfileSpec) -> String {
+    if opts.workspace_subfolder && block_workspace(opts, runtime_spec) {
+        format!("{DIND_WORKSPACE_ROOT}/.codewire/docker-data.ext4")
+    } else {
+        "/workspace/.codewire/docker-data.ext4".to_owned()
+    }
+}
+
+/// With `/workspace` the subfolder, DinD also sees the filesystem's root at
+/// [`DIND_WORKSPACE_ROOT`] for its data image (#4026).
+fn dind_mount_workspace_root(dind: &mut Value) {
+    dind["volumeMounts"]
+        .as_array_mut()
+        .expect("dind volumeMounts array")
+        .push(json!({
+            "name": WORKSPACE_MOUNT_VOLUME,
+            "mountPath": DIND_WORKSPACE_ROOT,
+            "mountPropagation": "HostToContainer",
+        }));
+}
 
 fn configure_confidential_workspace_device(container: &mut Value) {
     container["volumeMounts"]
@@ -1300,7 +1404,7 @@ fn guest_dind_data_env(opts: &TemplateOpts, runtime_spec: &RuntimeProfileSpec) -
         ("/var/lib/docker", "loop")
     };
     vec![
-        json!({ "name": "CODEWIRE_DOCKER_DATA_IMAGE", "value": "/workspace/.codewire/docker-data.ext4" }),
+        json!({ "name": "CODEWIRE_DOCKER_DATA_IMAGE", "value": docker_data_image_path(opts, runtime_spec) }),
         json!({ "name": "CODEWIRE_DOCKER_DATA_ROOT", "value": data_root }),
         json!({ "name": "CODEWIRE_DOCKER_DATA_SIZE", "value": format!("{}G", docker_data_size_gib(opts.disk_gib)) }),
         json!({ "name": "CODEWIRE_DOCKER_MOUNT_MODE", "value": mount_mode }),

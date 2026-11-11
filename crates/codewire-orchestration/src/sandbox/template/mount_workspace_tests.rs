@@ -380,7 +380,7 @@ fn a_failed_grow_keeps_the_previous_size() {
 fn an_unknown_volume_state_and_a_linked_codewire_directory_are_refused() {
     Scene::new("ext4")
         .run("")
-        .refused("the volume state must be new or existing, not ''");
+        .refused("the volume state must be new or existing, optionally with -subfolder, not ''");
     let scene = Scene::new("ext4");
     std::os::unix::fs::symlink("/etc", scene.root.join(".codewire")).unwrap();
     let outcome = scene.run("existing");
@@ -395,11 +395,12 @@ fn an_unknown_volume_state_and_a_linked_codewire_directory_are_refused() {
 
 /// infra's Kyverno policy `codewire-shared-sandbox-runtime-security` admits
 /// the privileged `mount-workspace` only when `sha256(command[2])` is this
-/// value (infra#2229, moved by infra#2234 and the writeback-defaults pin; `MOUNT_WORKSPACE_SCRIPT_SHA256` in
+/// value (infra#2229, moved by infra#2234, the writeback-defaults pin and
+/// infra#2426 for #4026; `MOUNT_WORKSPACE_SCRIPT_SHA256` in
 /// `scripts/test-codewire-sandbox-runtime-admission`). A changed script lands
 /// after infra's pin moves with it, or Kyverno refuses every commodity Pod.
 const INFRA_MOUNT_WORKSPACE_SCRIPT_SHA256: &str =
-    "8e81452565e4077767089beaa91b7730ed26f49ab852a67fdc009af2ade24681";
+    "cf7284e96e07f69f3728e6331bda0ed39c654e6498626a5e3a025e31e7ad8775";
 
 #[test]
 fn the_script_is_the_one_infra_admits() {
@@ -559,4 +560,100 @@ fn the_flush_bound_and_the_grace_period_fit_together() {
     assert_eq!(bound, 35);
     // The flush comes after the workspace and DinD shutdowns, up to 15 s.
     assert!(bound + 15 <= super::workspace::BLOCK_WORKSPACE_GRACE_SECONDS);
+}
+
+/// `-subfolder` binds the filesystem's `workspace/` folder for `/workspace`
+/// (#4026): created for the workspace user when absent, refused when it is a
+/// link or not a directory, so no path the workspace controls is followed.
+#[test]
+fn a_subfolder_workspace_is_created_or_kept_and_bound() {
+    let scene = Scene::new("ext4");
+    let target = scene.fake.join("dir-target");
+    let dir = target.to_str().unwrap();
+    let outcome = scene.run_with(
+        &scene.device,
+        "existing-subfolder",
+        &[("CODEWIRE_MOUNT_WORKSPACE_DIR", dir)],
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    let workspace = scene.root.join("workspace");
+    assert!(workspace.is_dir());
+    assert!(
+        outcome
+            .calls
+            .contains(&format!("chown 1000:1000 {}\n", workspace.display())),
+        "{}",
+        outcome.calls
+    );
+    assert!(
+        outcome
+            .calls
+            .contains(&format!("mount --bind {} {dir}\n", workspace.display())),
+        "{}",
+        outcome.calls
+    );
+
+    // An existing folder is bound as it is, not created or handed over again.
+    std::fs::remove_file(scene.fake.join("calls")).unwrap();
+    let outcome = scene.run_with(
+        &scene.device,
+        "existing-subfolder",
+        &[("CODEWIRE_MOUNT_WORKSPACE_DIR", dir)],
+    );
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert!(
+        !outcome
+            .calls
+            .contains(&format!("chown 1000:1000 {}\n", workspace.display()))
+    );
+    assert!(
+        outcome
+            .calls
+            .contains(&format!("mount --bind {} {dir}\n", workspace.display()))
+    );
+
+    // Without -subfolder nothing more is bound.
+    let scene = Scene::new("ext4");
+    let outcome = scene.run("existing");
+    assert_eq!(outcome.status, 0, "{}", outcome.stderr);
+    assert!(!scene.root.join("workspace").exists());
+    assert!(!outcome.calls.contains("/workspace "));
+}
+
+#[test]
+fn a_linked_or_non_directory_workspace_folder_is_refused() {
+    for (setup, message) in [
+        (
+            "link",
+            "codewire mount-workspace: the workspace's workspace folder is a symbolic link",
+        ),
+        (
+            "file",
+            "codewire mount-workspace: the workspace's workspace folder is not a directory",
+        ),
+    ] {
+        let scene = Scene::new("ext4");
+        let workspace = scene.root.join("workspace");
+        if setup == "link" {
+            std::os::unix::fs::symlink("/etc", &workspace).unwrap();
+        } else {
+            std::fs::write(&workspace, "a file").unwrap();
+        }
+        let target = scene.fake.join("dir-target");
+        let outcome = scene.run_with(
+            &scene.device,
+            "new-subfolder",
+            &[("CODEWIRE_MOUNT_WORKSPACE_DIR", target.to_str().unwrap())],
+        );
+        assert_eq!(outcome.status, 1, "{setup}");
+        assert_eq!(
+            outcome.stderr.lines().collect::<Vec<_>>(),
+            [message],
+            "{setup}"
+        );
+        assert!(
+            !outcome.calls.contains(&target.display().to_string()),
+            "{setup}"
+        );
+    }
 }
