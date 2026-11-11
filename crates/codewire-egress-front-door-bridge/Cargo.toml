@@ -1,0 +1,36 @@
+[package]
+name = "codewire-egress-front-door-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "AGPL-3.0-only"
+authors.workspace = true
+description = "Front door back end that hands bound-host requests to the existing credential routes"
+
+[dependencies]
+axum = { workspace = true }
+bytes = { workspace = true }
+codewire-access = { workspace = true }
+codewire-credential-bridge = { workspace = true }
+codewire-egress-front-door = { workspace = true }
+codewire-egress-policy = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+codewire-daemon-proto = { workspace = true }
+futures = { workspace = true }
+hyper = { workspace = true, features = ["client", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+# The front door's own ring-only Rustls, for a client that trusts only the
+# environment CA.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { workspace = true, features = ["test-util"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+uuid = { workspace = true }
+codewire-workspace-hack.workspace = true

@@ -124,6 +124,9 @@ map_token() {
     # Nothing links the TLS front door yet (#3999), so nothing runs it in Kind.
     rust_pkg_codewire_egress_front_door)
       unobserved "$token" 'no binary uses it yet' ;;
+    # Nor its credential route back end (#3999).
+    rust_pkg_codewire_egress_front_door_bridge)
+      unobserved "$token" 'no binary uses it yet' ;;
     # Kind runs the relay (tests/e2e/kind/tailnet.yaml), but no retained suite
     # drives a tailnet through it yet: walk the host tailnet journey.
     transport_pkg_codewire_derp)

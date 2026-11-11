@@ -1872,6 +1872,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-egress-front-door-bridge"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "codewire-access",
+ "codewire-credential-bridge",
+ "codewire-daemon-proto",
+ "codewire-egress-front-door",
+ "codewire-egress-policy",
+ "codewire-workspace-hack",
+ "futures",
+ "http 1.4.1",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rustls",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "codewire-egress-policy"
 version = "0.1.0"
 dependencies = [
