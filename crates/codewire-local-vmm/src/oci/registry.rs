@@ -1289,7 +1289,11 @@ mod tests {
     #[tokio::test]
     async fn a_slow_blob_outlasts_the_document_deadline_while_it_keeps_arriving() {
         // A large layer on a slow link takes longer than a document may, but
-        // each read arrives within the idle timeout (#2952).
+        // each read arrives within the idle timeout (#2952). Only the document
+        // deadline is timed here: the transfer (six 150 ms gaps) outlasts its
+        // 300 ms, and a busy host only lengthens it. The read timeout is a hang
+        // guard, not a speed expectation: a 600 ms one failed when the whole
+        // suite delayed a gap past it (#4209).
         let fixture = Fixture::new();
         let (base, _) = drip_server(fixture.layer.clone(), 6, Duration::from_millis(150), 0).await;
         let resolver = RegistryResolver::for_test_with_timeouts(
@@ -1297,7 +1301,7 @@ mod tests {
             base.clone(),
             OciArchitecture::Amd64,
             Duration::from_millis(300),
-            Duration::from_millis(600),
+            Duration::from_secs(30),
         )
         .unwrap();
 
