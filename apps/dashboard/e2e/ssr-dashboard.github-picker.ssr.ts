@@ -99,7 +99,7 @@ test("GitHub picker on a fresh account offers setup, preserves the draft and enf
     const github = page.getByRole("dialog", { name: "Connect GitHub", exact: true });
     await expect(github.locator('[name="name"]')).toHaveCount(0);
     await expect(github.getByRole("button", { name: "Continue to GitHub", exact: true }).locator("svg use"))
-      .toHaveAttribute("href", "/assets/codewire/icons-v2.svg#icon-github");
+      .toHaveAttribute("href", /^\/assets\/codewire\/icons-v2\.svg\?h=[0-9a-f]{16}#icon-github$/);
 
     // Exercise the actual bundled dialog guard without enrolling a credential
     // or contacting a provider. All entered material belongs to this owner.

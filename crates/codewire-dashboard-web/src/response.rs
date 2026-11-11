@@ -254,6 +254,7 @@ fn html_response_with_terminal_styles(
     connect_origin: Option<&str>,
     nonce: Option<&TerminalStyleNonce>,
 ) -> Response {
+    let body = crate::assets::versioned(&body).unwrap_or(body);
     let mut response = (
         status,
         [

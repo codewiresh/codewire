@@ -209,7 +209,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await expect(slots).toHaveCount(8);
     // Count and overflow checks also pass a vertical stack. Protect the actual
     // four-separator-four row on every configured desktop/mobile viewport.
-    await expect(page.locator('link[href="/assets/codewire/routes/auth-v2.css"]')).toHaveCount(1);
+    await expect(page.locator('link[href^="/assets/codewire/routes/auth-v2.css?h="]')).toHaveCount(1);
     const boxes = await slots.evaluateAll((inputs) => inputs.map((input) => {
       const { x, y, width, height } = input.getBoundingClientRect();
       return { x, y, width, height };

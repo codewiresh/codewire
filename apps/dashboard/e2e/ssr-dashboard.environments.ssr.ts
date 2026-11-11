@@ -293,9 +293,9 @@ test.describe.serial("server-rendered environments", () => {
 
     await page.goto(`/${slug}/new/`);
     await expect(page.locator("main").getByRole("heading", { name: "Sandboxes", exact: true })).toBeVisible();
-    await expect(page.locator('script[src="/assets/codewire/environments-v2.js"]')).toHaveCount(1);
-    await expect(page.locator('link[href="/assets/codewire/routes/environments-v2.css"]')).toHaveCount(1);
-    await expect(page.locator('use[href^="/assets/codewire/icons-v2.svg#"]').first()).toHaveCount(1);
+    await expect(page.locator('script[src^="/assets/codewire/environments-v2.js?h="]')).toHaveCount(1);
+    await expect(page.locator('link[href^="/assets/codewire/routes/environments-v2.css?h="]')).toHaveCount(1);
+    await expect(page.locator('use[href^="/assets/codewire/icons-v2.svg?h="]').first()).toHaveCount(1);
     await expect(
       page.locator(".cw-sidebar-slot").getByRole("link", { name: /View all sandboxes/ }),
     ).toHaveAttribute(

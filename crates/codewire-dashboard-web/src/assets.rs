@@ -1,15 +1,17 @@
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{HashMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
+    sync::LazyLock,
 };
 
 use axum::{
     Router,
-    body::Body,
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    body::{Body, Bytes},
+    http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
     response::{IntoResponse, Response},
-    routing::{MethodRouter, get},
+    routing::get,
 };
+use sha2::{Digest as _, Sha256};
 
 use crate::state::AppState;
 
@@ -122,189 +124,238 @@ const SCHIBSTED_GROTESK_LATIN_EXT: &[u8] =
     include_bytes!("../assets/fonts/SchibstedGrotesk-latin-ext-5.3.0.woff2");
 const GEIST_MONO: &[u8] = include_bytes!("../assets/fonts/GeistMono-Variable-1.9.0.woff2");
 
+const JS: &str = "application/javascript; charset=utf-8";
+const CSS: &str = "text/css; charset=utf-8";
+const SVG: &str = "image/svg+xml";
+const WOFF2: &str = "font/woff2";
+
+/// Every embedded asset at its stable path. Pages link each one with its
+/// content hash (`?h=`), so browsers and the CDN keep those bytes for a year
+/// and a deploy refreshes exactly the files that changed.
+const ASSETS: &[(&str, &str, &[u8])] = &[
+    (SCHIBSTED_GROTESK_LATIN_PATH, WOFF2, SCHIBSTED_GROTESK_LATIN),
+    (
+        SCHIBSTED_GROTESK_LATIN_EXT_PATH,
+        WOFF2,
+        SCHIBSTED_GROTESK_LATIN_EXT,
+    ),
+    (GEIST_MONO_PATH, WOFF2, GEIST_MONO),
+    (HTMX_PATH, JS, HTMX.as_bytes()),
+    (STYLE_PATH, CSS, STYLES.as_bytes()),
+    (DEVICE_SCRIPT_PATH, JS, DEVICE_SCRIPT.as_bytes()),
+    (DASHBOARD_STYLE_PATH, CSS, DASHBOARD_STYLES.as_bytes()),
+    (AUTH_STYLE_PATH, CSS, AUTH_STYLES.as_bytes()),
+    (PUBLIC_STYLE_PATH, CSS, PUBLIC_STYLES.as_bytes()),
+    (SETTINGS_STYLE_PATH, CSS, SETTINGS_STYLES.as_bytes()),
+    (
+        ORGANIZATIONS_STYLE_PATH,
+        CSS,
+        ORGANIZATIONS_STYLES.as_bytes(),
+    ),
+    (
+        SECRET_MANAGEMENT_STYLE_PATH,
+        CSS,
+        SECRET_MANAGEMENT_STYLES.as_bytes(),
+    ),
+    (ENVIRONMENTS_STYLE_PATH, CSS, ENVIRONMENTS_STYLES.as_bytes()),
+    (TERMINAL_STYLE_PATH, CSS, TERMINAL_STYLES.as_bytes()),
+    (
+        BILLING_ADMIN_STYLE_PATH,
+        CSS,
+        BILLING_ADMIN_STYLES.as_bytes(),
+    ),
+    (OVERVIEW_STYLE_PATH, CSS, OVERVIEW_STYLES.as_bytes()),
+    (XTERM_STYLE_PATH, CSS, XTERM_STYLES.as_bytes()),
+    (SCRIPT_PATH, JS, DASHBOARD_SCRIPT.as_bytes()),
+    (PUBLIC_SCRIPT_PATH, JS, PUBLIC_SCRIPT.as_bytes()),
+    (PRICING_SCRIPT_PATH, JS, PRICING_SCRIPT.as_bytes()),
+    (THEME_SCRIPT_PATH, JS, THEME_SCRIPT.as_bytes()),
+    (
+        ORGANIZATIONS_SCRIPT_PATH,
+        JS,
+        ORGANIZATIONS_SCRIPT.as_bytes(),
+    ),
+    (ENVIRONMENTS_SCRIPT_PATH, JS, ENVIRONMENTS_SCRIPT.as_bytes()),
+    (TERMINAL_SCRIPT_PATH, JS, TERMINAL_SCRIPT.as_bytes()),
+    (
+        DURABLE_TERMINAL_SCRIPT_PATH,
+        JS,
+        DURABLE_TERMINAL_SCRIPT.as_bytes(),
+    ),
+    (
+        TERMINAL_PROTOCOL_SCRIPT_PATH,
+        JS,
+        TERMINAL_PROTOCOL_SCRIPT.as_bytes(),
+    ),
+    (
+        SANDBOX_RESIZE_SCRIPT_PATH,
+        JS,
+        SANDBOX_RESIZE_SCRIPT.as_bytes(),
+    ),
+    (
+        TERMINAL_READINESS_SCRIPT_PATH,
+        JS,
+        TERMINAL_READINESS_SCRIPT.as_bytes(),
+    ),
+    (
+        SETUP_PROGRESS_SCRIPT_PATH,
+        JS,
+        SETUP_PROGRESS_SCRIPT.as_bytes(),
+    ),
+    (
+        TERMINAL_RENDERER_SCRIPT_PATH,
+        JS,
+        TERMINAL_RENDERER_SCRIPT.as_bytes(),
+    ),
+    (
+        TERMINAL_PRESENTATION_SCRIPT_PATH,
+        JS,
+        TERMINAL_PRESENTATION_SCRIPT.as_bytes(),
+    ),
+    (XTERM_SCRIPT_PATH, JS, XTERM_SCRIPT.as_bytes()),
+    (XTERM_FIT_SCRIPT_PATH, JS, XTERM_FIT_SCRIPT.as_bytes()),
+    (
+        XTERM_WEB_LINKS_SCRIPT_PATH,
+        JS,
+        XTERM_WEB_LINKS_SCRIPT.as_bytes(),
+    ),
+    (LOGO_PATH, SVG, LOGO.as_bytes()),
+    (BRAND_WORDMARK_PATH, SVG, BRAND_WORDMARK.as_bytes()),
+    (BRAND_ICON_PATH, SVG, BRAND_ICON.as_bytes()),
+    (CONSOLE_LOGO_PATH, SVG, CONSOLE_LOGO.as_bytes()),
+    (ICONS_PATH, SVG, ICONS.as_bytes()),
+];
+
+const ASSET_PREFIX: &str = "/assets/codewire/";
+const IMMUTABLE: &str = "public, max-age=31536000, immutable";
+
+struct ServedAsset {
+    content_type: &'static str,
+    body: Bytes,
+    etag: String,
+    version: String,
+}
+
+/// The bytes served at each stable path. A stylesheet or script that names
+/// another asset names it by its versioned URL. The fonts and icons it can
+/// name name nothing themselves, so their raw hashes are already final.
+static SERVED: LazyLock<HashMap<&'static str, ServedAsset>> = LazyLock::new(|| {
+    let raw: HashMap<&str, String> = ASSETS
+        .iter()
+        .map(|&(path, _, body)| (path, content_version(body)))
+        .collect();
+    ASSETS
+        .iter()
+        .map(|&(path, content_type, body)| {
+            let linked = std::str::from_utf8(body)
+                .ok()
+                .and_then(|text| link(text, |name| raw.get(name).map(String::as_str)));
+            let body = linked.map_or(Bytes::from_static(body), Bytes::from);
+            let served = ServedAsset {
+                content_type,
+                etag: content_etag(&body),
+                version: content_version(&body),
+                body,
+            };
+            (path, served)
+        })
+        .collect()
+});
+
 pub(crate) fn router() -> Router<AppState> {
-    Router::new()
-        .route(
-            SCHIBSTED_GROTESK_LATIN_PATH,
-            static_binary_asset("font/woff2", SCHIBSTED_GROTESK_LATIN),
+    ASSETS.iter().fold(Router::new(), |router, &(path, _, _)| {
+        router.route(
+            path,
+            get(move |headers: HeaderMap, uri: Uri| async move {
+                asset_response(&headers, path, uri.query())
+            }),
         )
-        .route(
-            SCHIBSTED_GROTESK_LATIN_EXT_PATH,
-            static_binary_asset("font/woff2", SCHIBSTED_GROTESK_LATIN_EXT),
-        )
-        .route(
-            GEIST_MONO_PATH,
-            static_binary_asset("font/woff2", GEIST_MONO),
-        )
-        .route(
-            HTMX_PATH,
-            static_asset("application/javascript; charset=utf-8", HTMX),
-        )
-        .route(STYLE_PATH, static_asset("text/css; charset=utf-8", STYLES))
-        .route(
-            DEVICE_SCRIPT_PATH,
-            static_asset("application/javascript; charset=utf-8", DEVICE_SCRIPT),
-        )
-        .route(
-            DASHBOARD_STYLE_PATH,
-            static_asset("text/css; charset=utf-8", DASHBOARD_STYLES),
-        )
-        .route(
-            AUTH_STYLE_PATH,
-            static_asset("text/css; charset=utf-8", AUTH_STYLES),
-        )
-        .route(
-            PUBLIC_STYLE_PATH,
-            static_asset("text/css; charset=utf-8", PUBLIC_STYLES),
-        )
-        .route(
-            SETTINGS_STYLE_PATH,
-            static_asset("text/css; charset=utf-8", SETTINGS_STYLES),
-        )
-        .route(
-            ORGANIZATIONS_STYLE_PATH,
-            static_asset("text/css; charset=utf-8", ORGANIZATIONS_STYLES),
-        )
-        .route(
-            SECRET_MANAGEMENT_STYLE_PATH,
-            static_asset("text/css; charset=utf-8", SECRET_MANAGEMENT_STYLES),
-        )
-        .route(
-            ENVIRONMENTS_STYLE_PATH,
-            static_asset("text/css; charset=utf-8", ENVIRONMENTS_STYLES),
-        )
-        .route(
-            TERMINAL_STYLE_PATH,
-            static_asset("text/css; charset=utf-8", TERMINAL_STYLES),
-        )
-        .route(
-            BILLING_ADMIN_STYLE_PATH,
-            static_asset("text/css; charset=utf-8", BILLING_ADMIN_STYLES),
-        )
-        .route(
-            OVERVIEW_STYLE_PATH,
-            static_asset("text/css; charset=utf-8", OVERVIEW_STYLES),
-        )
-        .route(
-            XTERM_STYLE_PATH,
-            static_asset("text/css; charset=utf-8", XTERM_STYLES),
-        )
-        .route(
-            SCRIPT_PATH,
-            static_asset("application/javascript; charset=utf-8", DASHBOARD_SCRIPT),
-        )
-        .route(
-            PUBLIC_SCRIPT_PATH,
-            static_asset("application/javascript; charset=utf-8", PUBLIC_SCRIPT),
-        )
-        .route(
-            PRICING_SCRIPT_PATH,
-            static_asset("application/javascript; charset=utf-8", PRICING_SCRIPT),
-        )
-        .route(
-            THEME_SCRIPT_PATH,
-            static_asset("application/javascript; charset=utf-8", THEME_SCRIPT),
-        )
-        .route(
-            ORGANIZATIONS_SCRIPT_PATH,
-            static_asset(
-                "application/javascript; charset=utf-8",
-                ORGANIZATIONS_SCRIPT,
-            ),
-        )
-        .route(
-            ENVIRONMENTS_SCRIPT_PATH,
-            static_asset("application/javascript; charset=utf-8", ENVIRONMENTS_SCRIPT),
-        )
-        .route(
-            TERMINAL_SCRIPT_PATH,
-            static_asset("application/javascript; charset=utf-8", TERMINAL_SCRIPT),
-        )
-        .route(
-            DURABLE_TERMINAL_SCRIPT_PATH,
-            static_asset(
-                "application/javascript; charset=utf-8",
-                DURABLE_TERMINAL_SCRIPT,
-            ),
-        )
-        .route(
-            TERMINAL_PROTOCOL_SCRIPT_PATH,
-            static_asset(
-                "application/javascript; charset=utf-8",
-                TERMINAL_PROTOCOL_SCRIPT,
-            ),
-        )
-        .route(
-            SANDBOX_RESIZE_SCRIPT_PATH,
-            static_asset(
-                "application/javascript; charset=utf-8",
-                SANDBOX_RESIZE_SCRIPT,
-            ),
-        )
-        .route(
-            TERMINAL_READINESS_SCRIPT_PATH,
-            static_asset(
-                "application/javascript; charset=utf-8",
-                TERMINAL_READINESS_SCRIPT,
-            ),
-        )
-        .route(
-            SETUP_PROGRESS_SCRIPT_PATH,
-            static_asset(
-                "application/javascript; charset=utf-8",
-                SETUP_PROGRESS_SCRIPT,
-            ),
-        )
-        .route(
-            TERMINAL_RENDERER_SCRIPT_PATH,
-            static_asset(
-                "application/javascript; charset=utf-8",
-                TERMINAL_RENDERER_SCRIPT,
-            ),
-        )
-        .route(
-            TERMINAL_PRESENTATION_SCRIPT_PATH,
-            static_asset(
-                "application/javascript; charset=utf-8",
-                TERMINAL_PRESENTATION_SCRIPT,
-            ),
-        )
-        .route(
-            XTERM_SCRIPT_PATH,
-            static_asset("application/javascript; charset=utf-8", XTERM_SCRIPT),
-        )
-        .route(
-            XTERM_FIT_SCRIPT_PATH,
-            static_asset("application/javascript; charset=utf-8", XTERM_FIT_SCRIPT),
-        )
-        .route(
-            XTERM_WEB_LINKS_SCRIPT_PATH,
-            static_asset(
-                "application/javascript; charset=utf-8",
-                XTERM_WEB_LINKS_SCRIPT,
-            ),
-        )
-        .route(LOGO_PATH, static_asset("image/svg+xml", LOGO))
-        .route(
-            BRAND_WORDMARK_PATH,
-            static_asset("image/svg+xml", BRAND_WORDMARK),
-        )
-        .route(BRAND_ICON_PATH, static_asset("image/svg+xml", BRAND_ICON))
-        .route(
-            CONSOLE_LOGO_PATH,
-            static_asset("image/svg+xml", CONSOLE_LOGO),
-        )
-        .route(ICONS_PATH, static_asset("image/svg+xml", ICONS))
+    })
 }
 
-fn static_asset(content_type: &'static str, body: &'static str) -> MethodRouter<AppState> {
-    get(move |headers: HeaderMap| async move { static_response(&headers, content_type, body) })
+/// `html` with each known asset path linked by its content hash, or `None`
+/// when it links no asset.
+pub(crate) fn versioned(html: &str) -> Option<String> {
+    link(html, |name| {
+        SERVED.get(name).map(|asset| asset.version.as_str())
+    })
 }
 
-fn static_binary_asset(content_type: &'static str, body: &'static [u8]) -> MethodRouter<AppState> {
-    get(
-        move |headers: HeaderMap| async move { static_binary_response(&headers, content_type, body) },
-    )
+fn link<'a>(text: &str, version_of: impl Fn(&str) -> Option<&'a str>) -> Option<String> {
+    let mut linked = String::new();
+    let mut rest = text;
+    let mut changed = false;
+    while let Some(start) = rest.find(ASSET_PREFIX) {
+        let end = rest[start..]
+            .find(|c: char| {
+                matches!(c, '"' | '\'' | '`' | ')' | '#' | '?' | '<') || c.is_whitespace()
+            })
+            .map_or(rest.len(), |length| start + length);
+        linked.push_str(&rest[..end]);
+        if !rest[end..].starts_with('?')
+            && let Some(version) = version_of(&rest[start..end])
+        {
+            linked.push_str("?h=");
+            linked.push_str(version);
+            changed = true;
+        }
+        rest = &rest[end..];
+    }
+    changed.then(|| linked + rest)
+}
+
+fn asset_response(headers: &HeaderMap, path: &str, query: Option<&str>) -> Response {
+    let asset = &SERVED[path];
+    // Only the bytes a URL's hash names may be kept for good. A stale or
+    // missing hash, such as a page rendered before a deploy, gets the current
+    // bytes revalidated by ETag, so no cache pins the wrong ones.
+    let current = query.is_some_and(|query| {
+        query
+            .split('&')
+            .any(|pair| pair.strip_prefix("h=") == Some(asset.version.as_str()))
+    });
+    let not_modified = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|candidate| matches!(candidate.trim(), "*") || candidate.trim() == asset.etag)
+        });
+    let mut response = if not_modified {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        Response::new(Body::from(asset.body.clone()))
+    };
+    let response_headers = response.headers_mut();
+    response_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(asset.content_type),
+    );
+    response_headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(if current {
+            IMMUTABLE
+        } else {
+            "public, no-cache"
+        }),
+    );
+    response_headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(&asset.etag).expect("asset ETag is valid"),
+    );
+    response_headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+fn content_version(body: &[u8]) -> String {
+    Sha256::digest(body)[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn content_etag(body: &[u8]) -> String {
@@ -314,50 +365,6 @@ fn content_etag(body: &[u8]) -> String {
     let mut hasher = DefaultHasher::new();
     body.hash(&mut hasher);
     format!("\"{:x}-{:016x}\"", body.len(), hasher.finish())
-}
-
-fn static_response(
-    headers: &HeaderMap,
-    content_type: &'static str,
-    body: &'static str,
-) -> Response {
-    static_binary_response(headers, content_type, body.as_bytes())
-}
-
-fn static_binary_response(
-    headers: &HeaderMap,
-    content_type: &'static str,
-    body: &'static [u8],
-) -> Response {
-    let etag = content_etag(body);
-    let not_modified = headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .any(|candidate| matches!(candidate.trim(), "*") || candidate.trim() == etag)
-        });
-    let mut response = if not_modified {
-        StatusCode::NOT_MODIFIED.into_response()
-    } else {
-        Response::new(Body::from(body))
-    };
-    let response_headers = response.headers_mut();
-    response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    response_headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("public, no-cache"),
-    );
-    response_headers.insert(
-        header::ETAG,
-        HeaderValue::from_str(&etag).expect("asset ETag is valid"),
-    );
-    response_headers.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    response
 }
 
 #[cfg(test)]
@@ -453,7 +460,12 @@ mod tests {
         );
         assert_eq!(DEVICE_SCRIPT_PATH, "/assets/codewire/device-v1.js");
         assert_eq!(ICONS_PATH, "/assets/codewire/icons-v2.svg");
-        let response = static_response(&HeaderMap::new(), "text/css; charset=utf-8", "body{}");
+        let response = asset_response(&HeaderMap::new(), STYLE_PATH, None);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/css; charset=utf-8"
+        );
         assert_eq!(
             response.headers()[header::CACHE_CONTROL],
             "public, no-cache"
@@ -466,13 +478,101 @@ mod tests {
 
         let mut conditional = HeaderMap::new();
         conditional.insert(header::IF_NONE_MATCH, etag.clone());
-        let unchanged = static_response(&conditional, "text/css; charset=utf-8", "body{}");
+        let unchanged = asset_response(&conditional, STYLE_PATH, None);
         assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
         assert_eq!(unchanged.headers()[header::ETAG], etag);
 
-        let changed = static_response(&conditional, "text/css; charset=utf-8", "body{color:red}");
-        assert_eq!(changed.status(), StatusCode::OK);
-        assert_ne!(changed.headers()[header::ETAG], etag);
+        assert_ne!(content_etag(b"body{}"), content_etag(b"body{color:red}"));
+    }
+
+    #[test]
+    fn only_the_current_content_hash_is_cached_for_good() {
+        let version = &SERVED[PUBLIC_SCRIPT_PATH].version;
+        assert_eq!(version.len(), 16);
+        assert_ne!(version, &SERVED[PRICING_SCRIPT_PATH].version);
+        for (query, cache_control) in [
+            (Some(format!("h={version}")), IMMUTABLE),
+            (Some(format!("x=1&h={version}")), IMMUTABLE),
+            // A page from before a deploy names the old bytes: serve today's
+            // without letting any cache keep them under that URL.
+            (Some("h=0123456789abcdef".to_owned()), "public, no-cache"),
+            (Some(format!("h={version}0")), "public, no-cache"),
+            (None, "public, no-cache"),
+        ] {
+            let response = asset_response(&HeaderMap::new(), PUBLIC_SCRIPT_PATH, query.as_deref());
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                cache_control,
+                "{query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pages_link_each_asset_by_its_content_hash() {
+        use askama::Template;
+
+        let style = &SERVED[STYLE_PATH].version;
+        let icons = &SERVED[ICONS_PATH].version;
+        assert_eq!(
+            versioned(&format!(
+                "<link rel=\"stylesheet\" href=\"{STYLE_PATH}\"><svg><use href=\"{ICONS_PATH}#icon-github\"></use></svg>"
+            ))
+            .unwrap(),
+            format!(
+                "<link rel=\"stylesheet\" href=\"{STYLE_PATH}?h={style}\"><svg><use href=\"{ICONS_PATH}?h={icons}#icon-github\"></use></svg>"
+            )
+        );
+        // Unknown assets, URLs that already carry a query, and pages without
+        // assets are left alone.
+        assert_eq!(
+            versioned("<a href=\"/assets/codewire/unknown.css\">x</a>"),
+            None
+        );
+        assert_eq!(
+            versioned(&format!("<link href=\"{STYLE_PATH}?h=1\">")),
+            None
+        );
+        assert_eq!(versioned("<p>No assets here.</p>"), None);
+        let home = versioned(&crate::templates::HomeTemplate.render().unwrap()).unwrap();
+        for path in [PUBLIC_STYLE_PATH, PUBLIC_SCRIPT_PATH, THEME_SCRIPT_PATH] {
+            assert!(home.contains(&format!("{path}?h={}", SERVED[path].version)));
+        }
+    }
+
+    #[test]
+    fn assets_name_the_assets_they_use_by_final_content_hash() {
+        let mut references = 0;
+        for &(path, _, _) in ASSETS {
+            let Ok(text) = std::str::from_utf8(&SERVED[path].body) else {
+                continue;
+            };
+            for (at, _) in text.match_indices(ASSET_PREFIX) {
+                let rest = &text[at..];
+                let Some((name, after)) = rest.split_once("?h=") else {
+                    continue;
+                };
+                let Some(asset) = SERVED.get(name) else {
+                    continue;
+                };
+                assert!(
+                    after.starts_with(&asset.version),
+                    "{path} names {name} by a stale hash"
+                );
+                references += 1;
+            }
+        }
+        // The fonts in both stylesheets and the icon sprite in the dashboard.
+        assert!(references >= 4, "{references}");
+        assert!(
+            std::str::from_utf8(&SERVED[PUBLIC_STYLE_PATH].body)
+                .unwrap()
+                .contains(&format!(
+                    "{GEIST_MONO_PATH}?h={}",
+                    SERVED[GEIST_MONO_PATH].version
+                ))
+        );
     }
 
     #[test]

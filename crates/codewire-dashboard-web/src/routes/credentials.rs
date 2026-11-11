@@ -1213,6 +1213,7 @@ fn enrollment_response(
 <h1 id=\"credential-enrollment-title\" class=\"cw-card-title\">Connect credential</h1></header>\
 <div class=\"cw-card-content\"><p class=\"cw-device-status\" data-connect-pending>Requesting a sign-in code…</p>"
     );
+    let prefix = crate::assets::versioned(&prefix).unwrap_or(prefix);
     let stream = tokio_stream::iter([Ok::<Bytes, Infallible>(Bytes::from(prefix))]).chain(
         ReceiverStream::new(receiver)
             .map(move |event| Ok(Bytes::from(render_enrollment_event(event, &return_path)))),

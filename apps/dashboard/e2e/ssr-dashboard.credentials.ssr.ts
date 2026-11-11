@@ -240,7 +240,7 @@ test.describe("managed provider credential browser journey", () => {
       const form = connection.locator("form:not(.cw-dialog-launcher)");
       await expect(form.locator('[name="name"]')).toHaveCount(0);
       await expect(connection.getByRole("button", { name: "Continue to GitHub", exact: true }).locator("svg use"))
-        .toHaveAttribute("href", "/assets/codewire/icons-v2.svg#icon-github");
+        .toHaveAttribute("href", /^\/assets\/codewire\/icons-v2\.svg\?h=[0-9a-f]{16}#icon-github$/);
       await expect(connection).toContainText("Your verified GitHub username names this connection");
       await expect(connection).not.toContainText("one-time code");
       await expect(connection.getByRole("link", { name: "Install/manage repository access" }))
