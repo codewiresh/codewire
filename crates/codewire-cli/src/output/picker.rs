@@ -105,7 +105,7 @@ impl Picker {
                     return PickerStep::Chosen(index);
                 }
             }
-            Key::Escape | Key::CtrlC => return PickerStep::Canceled,
+            Key::Escape | Key::CtrlC | Key::CtrlD => return PickerStep::Canceled,
             Key::Backspace => {
                 if self.query.pop().is_some() {
                     self.refilter();
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn escape_and_ctrl_c_cancel() {
-        for key in [Key::Escape, Key::CtrlC] {
+        for key in [Key::Escape, Key::CtrlC, Key::CtrlD] {
             let mut picker = environments();
             type_text(&mut picker, "app");
             assert_eq!(picker.handle(key), PickerStep::Canceled);

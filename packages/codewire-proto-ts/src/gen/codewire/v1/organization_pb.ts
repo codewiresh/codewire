@@ -928,8 +928,8 @@ export const OrganizationDeletionStateSchema: GenEnum<OrganizationDeletionState>
 
 /**
  * OrganizationService manages organizations, membership, assignments, and
- * invitations. GetInvitationByToken is the sole unauthenticated codewire.v1
- * RPC; every other method requires an authenticated product credential.
+ * invitations. GetInvitationByToken needs no credential; every other method
+ * requires an authenticated product credential.
  *
  * @generated from service codewire.v1.OrganizationService
  */

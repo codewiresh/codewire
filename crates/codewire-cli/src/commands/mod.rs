@@ -2765,6 +2765,7 @@ mod core;
 mod current_environment;
 mod environment;
 mod export;
+mod feedback;
 pub(crate) mod flat;
 pub(crate) mod inventory;
 mod launch_setup;
@@ -2788,6 +2789,7 @@ pub(crate) use core::*;
 pub(crate) use current_environment::{handle_current_command, handle_use_command};
 pub(crate) use environment::*;
 pub(crate) use export::handle_export;
+pub(crate) use feedback::{FEEDBACK_LONG_ABOUT, FeedbackArgs, handle_feedback_command};
 #[cfg(test)]
 pub(crate) use flat::env_operation;
 pub(crate) use flat::{HelpArgs, RetiredEnvArgs};

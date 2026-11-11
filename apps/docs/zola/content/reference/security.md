@@ -1,7 +1,7 @@
 ---
 title: Security model
 description: What isolates an environment, where secrets and credentials live, and what each placement does not protect.
-updated: 2026-11-08
+updated: 2026-11-10
 weight: 4
 aliases: ["/security"]
 ---
@@ -111,6 +111,18 @@ environment.
 - Browser sessions last 8 hours and are listed in Settings → Account, where
   you can sign out any of them.
 - API keys carry the `cw_` prefix and are stored hashed.
+
+## Feedback
+
+`cw feedback` stores the message with the `cw` version, operating system,
+architecture, local or cloud placement and, when you name one, an environment
+ID. Signed in, it also records your account and current organization;
+anonymous feedback records neither. Your network address is never stored:
+only a keyed hash of it, used to limit how much one address can send. Deleting
+your account deletes your feedback; deleting an organization keeps the
+feedback without the organization. Only Codewire's platform admins can read
+feedback; it is never shown to other users. See
+[cw feedback](@/reference/cli/cw.md#cw-feedback).
 
 ## What you still own
 

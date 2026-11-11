@@ -1019,6 +1019,79 @@ async fn stalled_auth_lookup_is_bounded_before_unknown_method_dispatch() {
     assert_eq!(body["code"], "unimplemented");
 }
 
+/// `allow_anonymous`: a method that needs no credential still uses one that
+/// is presented, and refuses one that does not validate instead of treating
+/// the caller as anonymous (`cw feedback`, #4061).
+#[tokio::test]
+async fn anonymous_methods_use_a_presented_credential_and_refuse_an_invalid_one() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping Connect anonymous-method test");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+    let seeded = seed(&pool, "anonymous").await;
+    let layer = ConnectAuthLayer::authenticated(AuthState { pool: pool.clone() })
+        .allow_anonymous([format!("/{SERVICE}/PublicPing"), format!("/{SERVICE}/Ping")]);
+    let addr = start_app(layer).await;
+    let client = reqwest::Client::new();
+
+    // No credential: the request reaches the handler.
+    let resp = post_ping(&client, &ping_url(addr, "PublicPing"), "{}", None, None).await;
+    assert_eq!(resp.status(), 200, "no credential continues anonymously");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["message"], "public pong");
+
+    // ...without an AuthUser: Ping's own extractor refuses it.
+    let resp = post_ping(
+        &client,
+        &ping_url(addr, "Ping"),
+        r#"{"message":"whoami"}"#,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), 401, "an anonymous handler sees no AuthUser");
+
+    // A presented credential that does not validate is refused by the layer.
+    for (cookie, bearer) in [
+        (Some("not-a-session"), None),
+        (None, Some("cw_not_a_key")),
+        (None, Some("")),
+    ] {
+        let resp = post_ping(&client, &ping_url(addr, "PublicPing"), "{}", cookie, bearer).await;
+        assert_eq!(
+            resp.status(),
+            401,
+            "an invalid credential is refused, never anonymous: {cookie:?} {bearer:?}"
+        );
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["code"], "unauthenticated");
+    }
+
+    // A valid credential authenticates and reaches the handler as its user.
+    for (cookie, bearer) in [
+        (Some(seeded.session_token.as_str()), None),
+        (None, Some(seeded.api_key.as_str())),
+        (None, Some(seeded.oidc_token.as_str())),
+    ] {
+        let resp = post_ping(
+            &client,
+            &ping_url(addr, "Ping"),
+            r#"{"message":"whoami"}"#,
+            cookie,
+            bearer,
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["message"], seeded.user_id.as_str());
+    }
+
+    // The allowance is per method: the rest of the mount still requires one.
+    let resp = post_ping(&client, &ping_url(addr, "AdminPing"), "{}", None, None).await;
+    assert_eq!(resp.status(), 401);
+}
+
 /// D3's whole-service `admin` mount: every method requires `is_admin`.
 #[tokio::test]
 async fn admin_mount_gates_whole_service() {

@@ -32,6 +32,7 @@
 pub mod account_deletion;
 pub mod auth;
 pub mod bounded_http1;
+pub mod client_address;
 pub mod config;
 pub mod connect;
 pub mod connect_error;

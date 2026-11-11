@@ -36,6 +36,7 @@ cd "$ROOT/proto"
   --path codewire/v1/environment_cw_runtime.proto \
   --path codewire/v1/environment_session.proto \
   --path codewire/v1/exec.proto \
+  --path codewire/v1/feedback.proto \
   --path codewire/v1/file.proto \
   --path codewire/v1/mesh_group.proto \
   --path codewire/v1/mesh_invite.proto \

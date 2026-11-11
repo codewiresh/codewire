@@ -4,12 +4,22 @@ from google.protobuf import duration_pb2 as _duration_pb2
 from google.protobuf import struct_pb2 as _struct_pb2
 from google.protobuf import timestamp_pb2 as _timestamp_pb2
 from google.protobuf.internal import containers as _containers
+from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
 from collections.abc import Iterable as _Iterable, Mapping as _Mapping
 from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
+
+class FeedbackSender(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    FEEDBACK_SENDER_UNSPECIFIED: _ClassVar[FeedbackSender]
+    FEEDBACK_SENDER_SIGNED_IN: _ClassVar[FeedbackSender]
+    FEEDBACK_SENDER_ANONYMOUS: _ClassVar[FeedbackSender]
+FEEDBACK_SENDER_UNSPECIFIED: FeedbackSender
+FEEDBACK_SENDER_SIGNED_IN: FeedbackSender
+FEEDBACK_SENDER_ANONYMOUS: FeedbackSender
 
 class GetStatsRequest(_message.Message):
     __slots__ = ()
@@ -96,6 +106,52 @@ class ListAuditLogsResponse(_message.Message):
     AUDIT_LOGS_FIELD_NUMBER: _ClassVar[int]
     audit_logs: _containers.RepeatedCompositeFieldContainer[AuditLogEntry]
     def __init__(self, audit_logs: _Optional[_Iterable[_Union[AuditLogEntry, _Mapping]]] = ...) -> None: ...
+
+class ListFeedbackRequest(_message.Message):
+    __slots__ = ("limit", "page_token", "sender")
+    LIMIT_FIELD_NUMBER: _ClassVar[int]
+    PAGE_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    SENDER_FIELD_NUMBER: _ClassVar[int]
+    limit: int
+    page_token: str
+    sender: FeedbackSender
+    def __init__(self, limit: _Optional[int] = ..., page_token: _Optional[str] = ..., sender: _Optional[_Union[FeedbackSender, str]] = ...) -> None: ...
+
+class FeedbackEntry(_message.Message):
+    __slots__ = ("id", "created_at", "user_id", "user_email", "organization_id", "organization_name", "message", "cli_version", "os", "arch", "placement", "environment_id")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    CREATED_AT_FIELD_NUMBER: _ClassVar[int]
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
+    USER_EMAIL_FIELD_NUMBER: _ClassVar[int]
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    ORGANIZATION_NAME_FIELD_NUMBER: _ClassVar[int]
+    MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    CLI_VERSION_FIELD_NUMBER: _ClassVar[int]
+    OS_FIELD_NUMBER: _ClassVar[int]
+    ARCH_FIELD_NUMBER: _ClassVar[int]
+    PLACEMENT_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    created_at: _timestamp_pb2.Timestamp
+    user_id: str
+    user_email: str
+    organization_id: str
+    organization_name: str
+    message: str
+    cli_version: str
+    os: str
+    arch: str
+    placement: str
+    environment_id: str
+    def __init__(self, id: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., user_id: _Optional[str] = ..., user_email: _Optional[str] = ..., organization_id: _Optional[str] = ..., organization_name: _Optional[str] = ..., message: _Optional[str] = ..., cli_version: _Optional[str] = ..., os: _Optional[str] = ..., arch: _Optional[str] = ..., placement: _Optional[str] = ..., environment_id: _Optional[str] = ...) -> None: ...
+
+class ListFeedbackResponse(_message.Message):
+    __slots__ = ("feedback", "next_page_token")
+    FEEDBACK_FIELD_NUMBER: _ClassVar[int]
+    NEXT_PAGE_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    feedback: _containers.RepeatedCompositeFieldContainer[FeedbackEntry]
+    next_page_token: str
+    def __init__(self, feedback: _Optional[_Iterable[_Union[FeedbackEntry, _Mapping]]] = ..., next_page_token: _Optional[str] = ...) -> None: ...
 
 class ListEnvironmentLifecycleJournalRequest(_message.Message):
     __slots__ = ("environment_id", "limit")

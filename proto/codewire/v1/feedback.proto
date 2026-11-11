@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// FeedbackService takes feedback for the Codewire team from `cw feedback`.
+//
+// SubmitFeedback needs no credential. With one (a session, OAuth bearer or
+// API key) the feedback records its user and, when given, their current
+// organization; a credential that does not validate is refused rather than
+// sent anonymously. Without one it records neither. Only platform
+// administrators read feedback, through the administrator service.
+service FeedbackService {
+  // SubmitFeedback stores one message and returns its ID. It is refused with
+  // RESOURCE_EXHAUSTED and a RetryInfo delay past 10 per hour for a signed-in
+  // user, 5 per hour from one address for anonymous senders, or 500 per hour
+  // in total.
+  rpc SubmitFeedback(SubmitFeedbackRequest) returns (SubmitFeedbackResponse);
+}
+
+// Where the sender works: on local VMs or in the cloud.
+enum FeedbackPlacement {
+  // Not known, for example before any environment is selected.
+  FEEDBACK_PLACEMENT_UNSPECIFIED = 0;
+  FEEDBACK_PLACEMENT_LOCAL = 1;
+  FEEDBACK_PLACEMENT_CLOUD = 2;
+}
+
+message SubmitFeedbackRequest {
+  // The feedback: 1 to 10240 bytes of UTF-8, not only whitespace.
+  string message = 1;
+  // The sending CLI's version, 1 to 64 characters.
+  string cli_version = 2;
+  // The sender's operating system and architecture, as the CLI names them
+  // (for example "linux" and "x86_64"), 1 to 32 characters each.
+  string os = 3;
+  string arch = 4;
+  FeedbackPlacement placement = 5;
+  // An environment the feedback is about, when the sender names one: 1 to
+  // 128 characters of letters, digits, '.', '_' and '-'. It is stored as
+  // given and grants nothing.
+  optional string environment_id = 6;
+  // The sender's current organization. Signed-in senders only: the caller
+  // must be a member, and an API key may name only its own organization (an
+  // API key with none set records its own). Refused for anonymous senders.
+  optional string org_id = 7;
+}
+
+message SubmitFeedbackResponse {
+  // The stored feedback's ID.
+  string id = 1;
+  google.protobuf.Timestamp created_at = 2;
+  // Whether the feedback recorded a user (false when sent anonymously).
+  bool signed_in = 3;
+}

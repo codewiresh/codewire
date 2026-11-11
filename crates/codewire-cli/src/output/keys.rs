@@ -10,6 +10,9 @@ pub(crate) enum Key {
     Escape,
     Backspace,
     CtrlC,
+    /// In raw mode Ctrl-D is a byte rather than an EOF. Menus cancel on it,
+    /// as on a closed input stream; the feedback editor sends.
+    CtrlD,
     CtrlU,
     Char(char),
     /// Anything else, such as another escape sequence; ignored.
@@ -67,9 +70,7 @@ fn decode_one(bytes: &[u8]) -> Decoded {
         b'\r' | b'\n' => Decoded::Key(Key::Enter, 1),
         0x7f | 0x08 => Decoded::Key(Key::Backspace, 1),
         0x03 => Decoded::Key(Key::CtrlC, 1),
-        // In raw mode Ctrl-D is a byte rather than an EOF; cancel just as
-        // a closed input stream does.
-        0x04 => Decoded::Key(Key::Escape, 1),
+        0x04 => Decoded::Key(Key::CtrlD, 1),
         0x15 => Decoded::Key(Key::CtrlU, 1),
         byte if byte < 0x20 => Decoded::Key(Key::Other, 1),
         byte if byte < 0x80 => Decoded::Key(Key::Char(char::from(byte)), 1),
@@ -164,6 +165,7 @@ mod tests {
         assert_eq!(decode_keys(b"\r\n"), [Key::Enter]);
         assert_eq!(decode_keys(b"\x7f\x08"), [Key::Backspace, Key::Backspace]);
         assert_eq!(decode_keys(b"\x03"), [Key::CtrlC]);
+        assert_eq!(decode_keys(b"\x04"), [Key::CtrlD]);
         assert_eq!(decode_keys(b"\x15"), [Key::CtrlU]);
         assert_eq!(decode_keys(b"\x01\t"), [Key::Other, Key::Other]);
     }

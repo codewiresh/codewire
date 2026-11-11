@@ -1898,6 +1898,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "environment_usage_billing:no_action",
             "environment_usage_billing_tiers:no_action",
             "environments:no_action",
+            "feedback:set_null",
             "hosted_snapshots:no_action",
             "org_invitations:cascade",
             "org_members:cascade",

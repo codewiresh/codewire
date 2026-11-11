@@ -694,6 +694,7 @@ fn placement_is_refused_by_commands_that_do_not_read_it() {
         vec!["cw", "secrets", "--local", "--user", "list"],
         vec!["cw", "--local", "use", "app"],
         vec!["cw", "--cloud", "prune"],
+        vec!["cw", "--local", "feedback", "works", "--yes"],
     ] {
         let matches = crate::cli_command().try_get_matches_from(argv.clone()).unwrap();
         let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap();

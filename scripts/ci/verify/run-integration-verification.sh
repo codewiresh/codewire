@@ -1101,6 +1101,12 @@ database_lane_orchestration_workspaces() {
       'api::environments::rate_limit_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "CLI feedback limits and admin list" cli-feedback \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::feedback::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "organization membership credential matrix" organization-membership-credentials \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
@@ -2137,7 +2143,7 @@ run_connect_auth_matrix() {
     echo "::error::Connect auth matrix skipped"
     return 1
   fi
-  assert_passed_count "Connect auth matrix" "$logfile" 5
+  assert_passed_count "Connect auth matrix" "$logfile" 6
 }
 
 run_billing_temporal() {

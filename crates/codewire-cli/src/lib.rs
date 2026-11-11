@@ -183,7 +183,7 @@ const HELP_SECTIONS: &[HelpSection] = &[
             "policy",
         ],
     ),
-    HelpSection::everyday("Codewire", &["upgrade", "doctor", "help"]),
+    HelpSection::everyday("Codewire", &["upgrade", "doctor", "feedback", "help"]),
     HelpSection::full(
         "Account and organization",
         &["logout", "whoami", "org", "api-keys", "cost"],
@@ -356,6 +356,8 @@ enum Command {
     Logout,
     #[command(about = "Show current user and server")]
     Whoami(WhoamiArgs),
+    #[command(about = "Send feedback to the Codewire team", long_about = FEEDBACK_LONG_ABOUT)]
+    Feedback(FeedbackArgs),
     #[command(
         about = "Select the current environment; without ENV, choose from a list",
         long_about = "Select the current environment, which commands use when no environment is named.\n\nWith ENV, select it by name or ID; --local or --cloud says where to look when a name exists in both. Without ENV, choose from a searchable list of local and cloud environments (--local or --cloud filters it): arrow keys move, typing filters, Enter selects, Escape cancels without changing the selection. Selecting a stopped environment does not start it. Outside an interactive terminal, ENV is required."
@@ -903,6 +905,7 @@ where
         Command::Setup(args) => handle_setup_command(&globals, args).await,
         Command::Logout => handle_logout_command(&globals).await,
         Command::Whoami(args) => handle_whoami_command(&globals, args).await,
+        Command::Feedback(args) => handle_feedback_command(&globals, args).await,
         Command::Use(args) => handle_use_command(&globals, args).await,
         Command::Current(args) => handle_current_command(&globals, args).await,
         Command::Init(args) => handle_init_command(&globals, args).await,
@@ -1060,6 +1063,8 @@ fn validate_placement_scope(
     let reads = matches!(
         command,
         Command::Setup(_)
+            // Which one the feedback says the sender works in.
+            | Command::Feedback(_)
             | Command::Use(_)
             | Command::Credentials(_)
             | Command::Policy(_)

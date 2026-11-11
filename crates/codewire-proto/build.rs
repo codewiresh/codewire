@@ -28,6 +28,7 @@ fn main() {
         "codewire/v1/environment_cw_runtime.proto",
         "codewire/v1/environment_session.proto",
         "codewire/v1/exec.proto",
+        "codewire/v1/feedback.proto",
         "codewire/v1/file.proto",
         "codewire/v1/mesh_group.proto",
         "codewire/v1/mesh_invite.proto",

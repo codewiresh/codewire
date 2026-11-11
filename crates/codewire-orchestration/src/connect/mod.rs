@@ -19,6 +19,7 @@ pub mod environment_cw_runtime;
 pub mod environment_session;
 pub mod environment_setup;
 pub mod exec;
+pub mod feedback;
 pub mod file;
 pub mod mesh_authorization;
 pub mod organizations;

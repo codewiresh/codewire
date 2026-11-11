@@ -41,6 +41,9 @@ const (
 	// AdminServiceListAuditLogsProcedure is the fully-qualified name of the AdminService's
 	// ListAuditLogs RPC.
 	AdminServiceListAuditLogsProcedure = "/codewire.admin.v1.AdminService/ListAuditLogs"
+	// AdminServiceListFeedbackProcedure is the fully-qualified name of the AdminService's ListFeedback
+	// RPC.
+	AdminServiceListFeedbackProcedure = "/codewire.admin.v1.AdminService/ListFeedback"
 	// AdminServiceListEnvironmentLifecycleJournalProcedure is the fully-qualified name of the
 	// AdminService's ListEnvironmentLifecycleJournal RPC.
 	AdminServiceListEnvironmentLifecycleJournalProcedure = "/codewire.admin.v1.AdminService/ListEnvironmentLifecycleJournal"
@@ -90,6 +93,9 @@ type AdminServiceClient interface {
 	ListOrganizations(context.Context, *connect.Request[v1.ListOrganizationsRequest]) (*connect.Response[v1.ListOrganizationsResponse], error)
 	// ListAuditLogs returns newest-first global audit entries.
 	ListAuditLogs(context.Context, *connect.Request[v1.ListAuditLogsRequest]) (*connect.Response[v1.ListAuditLogsResponse], error)
+	// ListFeedback returns newest-first feedback sent with `cw feedback`,
+	// optionally only signed-in or only anonymous feedback, one page at a time.
+	ListFeedback(context.Context, *connect.Request[v1.ListFeedbackRequest]) (*connect.Response[v1.ListFeedbackResponse], error)
 	// ListEnvironmentLifecycleJournal returns newest-first lifecycle entries for
 	// one environment.
 	ListEnvironmentLifecycleJournal(context.Context, *connect.Request[v1.ListEnvironmentLifecycleJournalRequest]) (*connect.Response[v1.ListEnvironmentLifecycleJournalResponse], error)
@@ -171,6 +177,13 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			httpClient,
 			baseURL+AdminServiceListAuditLogsProcedure,
 			connect.WithSchema(adminServiceMethods.ByName("ListAuditLogs")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		listFeedback: connect.NewClient[v1.ListFeedbackRequest, v1.ListFeedbackResponse](
+			httpClient,
+			baseURL+AdminServiceListFeedbackProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("ListFeedback")),
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
@@ -267,6 +280,7 @@ type adminServiceClient struct {
 	getStats                          *connect.Client[v1.GetStatsRequest, v1.GetStatsResponse]
 	listOrganizations                 *connect.Client[v1.ListOrganizationsRequest, v1.ListOrganizationsResponse]
 	listAuditLogs                     *connect.Client[v1.ListAuditLogsRequest, v1.ListAuditLogsResponse]
+	listFeedback                      *connect.Client[v1.ListFeedbackRequest, v1.ListFeedbackResponse]
 	listEnvironmentLifecycleJournal   *connect.Client[v1.ListEnvironmentLifecycleJournalRequest, v1.ListEnvironmentLifecycleJournalResponse]
 	getEnvironmentStartupSummary      *connect.Client[v1.GetEnvironmentStartupSummaryRequest, v1.GetEnvironmentStartupSummaryResponse]
 	getEnvironmentStartupTimings      *connect.Client[v1.GetEnvironmentStartupTimingsRequest, v1.GetEnvironmentStartupTimingsResponse]
@@ -295,6 +309,11 @@ func (c *adminServiceClient) ListOrganizations(ctx context.Context, req *connect
 // ListAuditLogs calls codewire.admin.v1.AdminService.ListAuditLogs.
 func (c *adminServiceClient) ListAuditLogs(ctx context.Context, req *connect.Request[v1.ListAuditLogsRequest]) (*connect.Response[v1.ListAuditLogsResponse], error) {
 	return c.listAuditLogs.CallUnary(ctx, req)
+}
+
+// ListFeedback calls codewire.admin.v1.AdminService.ListFeedback.
+func (c *adminServiceClient) ListFeedback(ctx context.Context, req *connect.Request[v1.ListFeedbackRequest]) (*connect.Response[v1.ListFeedbackResponse], error) {
+	return c.listFeedback.CallUnary(ctx, req)
 }
 
 // ListEnvironmentLifecycleJournal calls
@@ -374,6 +393,9 @@ type AdminServiceHandler interface {
 	ListOrganizations(context.Context, *connect.Request[v1.ListOrganizationsRequest]) (*connect.Response[v1.ListOrganizationsResponse], error)
 	// ListAuditLogs returns newest-first global audit entries.
 	ListAuditLogs(context.Context, *connect.Request[v1.ListAuditLogsRequest]) (*connect.Response[v1.ListAuditLogsResponse], error)
+	// ListFeedback returns newest-first feedback sent with `cw feedback`,
+	// optionally only signed-in or only anonymous feedback, one page at a time.
+	ListFeedback(context.Context, *connect.Request[v1.ListFeedbackRequest]) (*connect.Response[v1.ListFeedbackResponse], error)
 	// ListEnvironmentLifecycleJournal returns newest-first lifecycle entries for
 	// one environment.
 	ListEnvironmentLifecycleJournal(context.Context, *connect.Request[v1.ListEnvironmentLifecycleJournalRequest]) (*connect.Response[v1.ListEnvironmentLifecycleJournalResponse], error)
@@ -451,6 +473,13 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 		AdminServiceListAuditLogsProcedure,
 		svc.ListAuditLogs,
 		connect.WithSchema(adminServiceMethods.ByName("ListAuditLogs")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	adminServiceListFeedbackHandler := connect.NewUnaryHandler(
+		AdminServiceListFeedbackProcedure,
+		svc.ListFeedback,
+		connect.WithSchema(adminServiceMethods.ByName("ListFeedback")),
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
@@ -547,6 +576,8 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 			adminServiceListOrganizationsHandler.ServeHTTP(w, r)
 		case AdminServiceListAuditLogsProcedure:
 			adminServiceListAuditLogsHandler.ServeHTTP(w, r)
+		case AdminServiceListFeedbackProcedure:
+			adminServiceListFeedbackHandler.ServeHTTP(w, r)
 		case AdminServiceListEnvironmentLifecycleJournalProcedure:
 			adminServiceListEnvironmentLifecycleJournalHandler.ServeHTTP(w, r)
 		case AdminServiceGetEnvironmentStartupSummaryProcedure:
@@ -592,6 +623,10 @@ func (UnimplementedAdminServiceHandler) ListOrganizations(context.Context, *conn
 
 func (UnimplementedAdminServiceHandler) ListAuditLogs(context.Context, *connect.Request[v1.ListAuditLogsRequest]) (*connect.Response[v1.ListAuditLogsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.ListAuditLogs is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) ListFeedback(context.Context, *connect.Request[v1.ListFeedbackRequest]) (*connect.Response[v1.ListFeedbackResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.ListFeedback is not implemented"))
 }
 
 func (UnimplementedAdminServiceHandler) ListEnvironmentLifecycleJournal(context.Context, *connect.Request[v1.ListEnvironmentLifecycleJournalRequest]) (*connect.Response[v1.ListEnvironmentLifecycleJournalResponse], error) {

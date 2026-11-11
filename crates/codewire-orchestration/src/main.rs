@@ -662,6 +662,8 @@ async fn main() -> anyhow::Result<()> {
         .allow_public(PUBLIC_CONNECT_METHODS)
         .synthetic_user_ids(synthetic_user_ids);
     let connect_admin = codewire_server_core::connect::ConnectAuthLayer::admin(auth.clone());
+    let feedback_address_key =
+        codewire_orchestration::api::feedback::ClientAddressKey::derive(&cfg.session_secret)?;
     let mesh_authorization = codewire_server_core::connect::MeshAuthorizationLayer::new(
         auth.clone(),
         cfg.session_secret.clone(),
@@ -762,6 +764,12 @@ async fn main() -> anyhow::Result<()> {
         .with_unary_connect_routes_auth(
             codewire_orchestration::connect::admin::router(api_state.clone()),
             connect_admin,
+        )
+        // `cw feedback` (#4061): anyone may send it; a presented credential
+        // still authenticates and is recorded.
+        .with_unary_connect_routes_auth(
+            codewire_orchestration::connect::feedback::router(pool.clone(), feedback_address_key),
+            codewire_orchestration::connect::feedback::connect_auth_layer(auth.clone()),
         )
         .with_unary_connect_routes_auth(
             codewire_orchestration::connect::environment_setup::router(api_state.clone()),

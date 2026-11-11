@@ -21,7 +21,7 @@ impl<F: Fn(&str) -> Result<(), String>> Widget for TextInput<F> {
 
     fn on_key(&mut self, key: Key) -> Step<String> {
         match key {
-            Key::Escape | Key::CtrlC => Step::Canceled,
+            Key::Escape | Key::CtrlC | Key::CtrlD => Step::Canceled,
             Key::Enter => {
                 let value = if self.value.trim().is_empty() {
                     self.default.as_deref().unwrap_or_default()

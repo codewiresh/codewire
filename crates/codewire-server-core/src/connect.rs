@@ -492,6 +492,12 @@ async fn unbuffer_streaming_responses(
 ///   `/{package}.{Service}/{Method}` paths that bypass authentication
 ///   entirely (D3's public-method allowlist; e.g. the invitation token
 ///   lookup). No `AuthUser` is inserted for them.
+/// - [`allow_anonymous`](ConnectAuthLayer::allow_anonymous) — full paths
+///   that need no credential but use one when it is presented: a request
+///   with neither a session cookie nor an `Authorization` header continues
+///   without an `AuthUser`, and any presented credential is validated
+///   exactly as on the mount, so an invalid one is refused, never silently
+///   treated as anonymous (e.g. `cw feedback`).
 /// - [`admin_only`](ConnectAuthLayer::admin_only) — full paths elevated to
 ///   the admin check inside an `authenticated` mount. Product admin gating
 ///   stays per-Service per D3; this elevation exists for the D8 probe
@@ -510,6 +516,7 @@ pub struct ConnectAuthLayer {
     session_origin: Option<HeaderValue>,
     admin_mount: bool,
     public_methods: BTreeSet<String>,
+    anonymous_methods: BTreeSet<String>,
     admin_methods: BTreeSet<String>,
     synthetic_user_ids: BTreeSet<String>,
 }
@@ -530,6 +537,7 @@ impl ConnectAuthLayer {
             session_origin: None,
             admin_mount: false,
             public_methods: BTreeSet::new(),
+            anonymous_methods: BTreeSet::new(),
             admin_methods: BTreeSet::new(),
             synthetic_user_ids: BTreeSet::new(),
         }
@@ -590,6 +598,23 @@ impl ConnectAuthLayer {
         S: Into<String>,
     {
         self.public_methods
+            .extend(methods.into_iter().map(|m| normalize_method_path(m.into())));
+        self
+    }
+
+    /// Allowlist full `/{package}.{Service}/{Method}` paths that accept a
+    /// request without a credential. A request that presents a session
+    /// cookie or an `Authorization` header is authenticated and authorized
+    /// exactly like the rest of the mount, and its handler sees the
+    /// [`AuthUser`]; one that presents neither reaches the handler with no
+    /// `AuthUser`, and the D7 event logs `credential=none`.
+    #[must_use]
+    pub fn allow_anonymous<I, S>(mut self, methods: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.anonymous_methods
             .extend(methods.into_iter().map(|m| normalize_method_path(m.into())));
         self
     }
@@ -1082,6 +1107,10 @@ async fn enforce_connect_auth(
         // D3 allowlist bypass: no authentication attempted, no AuthUser.
         return next.run(req).await;
     }
+    if layer.anonymous_methods.contains(req.uri().path()) && !presents_credential(req.headers()) {
+        // No credential presented: continue anonymously, no AuthUser.
+        return next.run(req).await;
+    }
 
     // Pull everything out of the request before the first await (the body is
     // !Sync; holding &Request across an await would make this future !Send).
@@ -1184,6 +1213,13 @@ async fn enforce_connect_auth(
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("private"));
     }
     resp
+}
+
+/// Whether a request presents any credential the layer would resolve: a
+/// session cookie or an `Authorization` header of any form. A malformed
+/// header counts, so it is refused rather than treated as anonymous.
+fn presents_credential(headers: &http::HeaderMap) -> bool {
+    headers.contains_key(header::AUTHORIZATION) || session_cookie(headers).is_some()
 }
 
 /// Returns the authentication budget without extending a caller's asserted

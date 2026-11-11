@@ -91,7 +91,7 @@ impl Checklist {
                 }
             }
             Key::Enter => return ChecklistStep::Applied(self.checked()),
-            Key::Escape | Key::CtrlC => return ChecklistStep::Canceled,
+            Key::Escape | Key::CtrlC | Key::CtrlD => return ChecklistStep::Canceled,
             Key::Backspace | Key::CtrlU | Key::Char(_) | Key::Other => {}
         }
         ChecklistStep::Continue
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn escape_and_ctrl_c_cancel() {
-        for key in [Key::Escape, Key::CtrlC] {
+        for key in [Key::Escape, Key::CtrlC, Key::CtrlD] {
             let mut checklist = upgrade();
             checklist.handle(Key::Char(' '));
             assert_eq!(checklist.handle(key), ChecklistStep::Canceled);

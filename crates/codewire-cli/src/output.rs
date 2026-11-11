@@ -24,6 +24,7 @@ mod caps;
 mod checklist;
 mod interactive;
 mod keys;
+mod message_input;
 mod picker;
 mod spinner;
 mod status_line;
@@ -40,6 +41,7 @@ pub(crate) use self::{
     caps::{Capabilities, Charset, Motion, OutputMode, TerminalFacts},
     checklist::{Checklist, ChecklistItem, ChecklistOutcome, ChecklistStep, run_checklist},
     keys::{Key, decode_keys, needs_more_input},
+    message_input::run_message_input,
     picker::{Picker, PickerOutcome, PickerRow, PickerStep, run_picker},
     spinner::{FRAME_INTERVAL, Spinner},
     status_line::StatusLine,

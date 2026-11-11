@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .admin_pb2 import AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse, ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse, GetClusterCapacityRequest, GetClusterCapacityResponse, GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse, ListOrganizationsRequest, ListOrganizationsResponse, SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse, SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse, SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest, SetOrganizationRateCardResponse
+from .admin_pb2 import AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse, ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse, GetClusterCapacityRequest, GetClusterCapacityResponse, GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse, ListFeedbackRequest, ListFeedbackResponse, ListOrganizationsRequest, ListOrganizationsResponse, SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse, SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse, SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest, SetOrganizationRateCardResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -42,6 +42,9 @@ class AdminService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def list_audit_logs(self, request: ListAuditLogsRequest, ctx: RequestContext[ListAuditLogsRequest, ListAuditLogsResponse]) -> ListAuditLogsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def list_feedback(self, request: ListFeedbackRequest, ctx: RequestContext[ListFeedbackRequest, ListFeedbackResponse]) -> ListFeedbackResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def list_environment_lifecycle_journal(self, request: ListEnvironmentLifecycleJournalRequest, ctx: RequestContext[ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse]) -> ListEnvironmentLifecycleJournalResponse:
@@ -126,6 +129,16 @@ class AdminServiceASGIApplication(ConnectASGIApplication[AdminService]):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.list_audit_logs,
+                ),
+                "/codewire.admin.v1.AdminService/ListFeedback": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ListFeedback",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=ListFeedbackRequest,
+                        output=ListFeedbackResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.list_feedback,
                 ),
                 "/codewire.admin.v1.AdminService/ListEnvironmentLifecycleJournal": Endpoint.unary(
                     method=MethodInfo(
@@ -354,6 +367,28 @@ class AdminServiceClient(ConnectClient):
                 service_name="codewire.admin.v1.AdminService",
                 input=ListAuditLogsRequest,
                 output=ListAuditLogsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+    async def list_feedback(
+        self,
+        request: ListFeedbackRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListFeedbackResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListFeedback",
+                service_name="codewire.admin.v1.AdminService",
+                input=ListFeedbackRequest,
+                output=ListFeedbackResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
@@ -645,6 +680,9 @@ class AdminServiceSync(Protocol):
     def list_audit_logs(self, request: ListAuditLogsRequest, ctx: RequestContext[ListAuditLogsRequest, ListAuditLogsResponse]) -> ListAuditLogsResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def list_feedback(self, request: ListFeedbackRequest, ctx: RequestContext[ListFeedbackRequest, ListFeedbackResponse]) -> ListFeedbackResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def list_environment_lifecycle_journal(self, request: ListEnvironmentLifecycleJournalRequest, ctx: RequestContext[ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse]) -> ListEnvironmentLifecycleJournalResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -725,6 +763,16 @@ class AdminServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.list_audit_logs,
+                ),
+                "/codewire.admin.v1.AdminService/ListFeedback": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ListFeedback",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=ListFeedbackRequest,
+                        output=ListFeedbackResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.list_feedback,
                 ),
                 "/codewire.admin.v1.AdminService/ListEnvironmentLifecycleJournal": EndpointSync.unary(
                     method=MethodInfo(
@@ -951,6 +999,27 @@ class AdminServiceClientSync(ConnectClientSync):
                 service_name="codewire.admin.v1.AdminService",
                 input=ListAuditLogsRequest,
                 output=ListAuditLogsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def list_feedback(
+        self,
+        request: ListFeedbackRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListFeedbackResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListFeedback",
+                service_name="codewire.admin.v1.AdminService",
+                input=ListFeedbackRequest,
+                output=ListFeedbackResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,

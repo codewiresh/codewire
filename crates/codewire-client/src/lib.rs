@@ -12,6 +12,7 @@ mod credential_delegation;
 mod credentials;
 pub mod cw_runtime;
 mod error;
+mod feedback;
 #[cfg(feature = "tailnet-session")]
 pub mod hosted_shell;
 #[cfg(target_os = "linux")]
@@ -183,6 +184,9 @@ pub use coordinator::{
 pub use credential_delegation::{AdmittedCredentialDelegation, CredentialDelegationStream};
 pub use credentials::GithubEnrollment;
 pub use error::{ClientError, ErrorInfo, ValidationError};
+pub use feedback::{
+    FeedbackClient, FeedbackPlacement, SubmitFeedbackRequest, SubmitFeedbackResponse,
+};
 pub use tailnet::{
     EnvironmentTailnetDiagnostic, ExpectedTransport, NativeClientFacade, SshTransportMode,
     StunServer, TailnetConnection, TailnetDerpMapDiagnostic, TailnetDiagnosticOptions,

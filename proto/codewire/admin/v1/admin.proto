@@ -26,6 +26,12 @@ service AdminService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
+  // ListFeedback returns newest-first feedback sent with `cw feedback`,
+  // optionally only signed-in or only anonymous feedback, one page at a time.
+  rpc ListFeedback(ListFeedbackRequest) returns (ListFeedbackResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
   // ListEnvironmentLifecycleJournal returns newest-first lifecycle entries for
   // one environment.
   rpc ListEnvironmentLifecycleJournal(ListEnvironmentLifecycleJournalRequest)
@@ -170,6 +176,51 @@ message AuditLogEntry {
 
 message ListAuditLogsResponse {
   repeated AuditLogEntry audit_logs = 1;
+}
+
+// Which senders' feedback ListFeedback returns.
+enum FeedbackSender {
+  // Every sender.
+  FEEDBACK_SENDER_UNSPECIFIED = 0;
+  // Only feedback that recorded a user.
+  FEEDBACK_SENDER_SIGNED_IN = 1;
+  // Only feedback sent anonymously.
+  FEEDBACK_SENDER_ANONYMOUS = 2;
+}
+
+message ListFeedbackRequest {
+  // Zero selects the server default of 50; the maximum is 200.
+  int32 limit = 1;
+  // Empty starts at the newest feedback; otherwise a next_page_token from an
+  // earlier response with the same sender filter.
+  string page_token = 2;
+  FeedbackSender sender = 3;
+}
+
+message FeedbackEntry {
+  string id = 1;
+  google.protobuf.Timestamp created_at = 2;
+  // Unset for anonymous feedback.
+  optional string user_id = 3;
+  optional string user_email = 4;
+  // Unset for anonymous feedback, when the sender named no organization, or
+  // once the organization is deleted.
+  optional string organization_id = 5;
+  optional string organization_name = 6;
+  string message = 7;
+  string cli_version = 8;
+  string os = 9;
+  string arch = 10;
+  // "local", "cloud", or empty when the CLI did not know.
+  string placement = 11;
+  // Unset when the sender named no environment.
+  optional string environment_id = 12;
+}
+
+message ListFeedbackResponse {
+  repeated FeedbackEntry feedback = 1;
+  // Empty on the last page.
+  string next_page_token = 2;
 }
 
 message ListEnvironmentLifecycleJournalRequest {

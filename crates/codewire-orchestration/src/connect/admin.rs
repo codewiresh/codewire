@@ -12,14 +12,15 @@ use codewire_admin_proto::codewire::admin::v1::{
     AuditLogEntry as ProtoAuditLogEntry, ClearOrganizationEnvironmentQuotaRequest,
     ClearOrganizationEnvironmentQuotaResponse, CreditLedgerEntry as ProtoCreditLedgerEntry,
     EnvironmentLifecycleJournalEntry, EnvironmentQuota as ProtoEnvironmentQuota,
-    EnvironmentStartupTiming, GetClusterCapacityRequest, GetClusterCapacityResponse,
-    GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse,
-    GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse,
-    GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse,
-    GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse,
-    GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest,
-    GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse,
-    ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse,
+    EnvironmentStartupTiming, FeedbackEntry as ProtoFeedbackEntry, FeedbackSender,
+    GetClusterCapacityRequest, GetClusterCapacityResponse, GetDefaultEnvironmentQuotaRequest,
+    GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest,
+    GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest,
+    GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest,
+    GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest,
+    GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest,
+    ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest,
+    ListEnvironmentLifecycleJournalResponse, ListFeedbackRequest, ListFeedbackResponse,
     ListOrganizationsRequest, ListOrganizationsResponse, NodeCapacity, NodeReservedCapacity,
     NodeUsedCapacity, Organization as ProtoOrganization,
     OrganizationApiKey as ProtoOrganizationApiKey, OrganizationBilling as ProtoOrganizationBilling,
@@ -42,8 +43,9 @@ use crate::api::admin::{
     AdminEnvironmentStartupTimings, AdminOrg, AdminOrganizationEnvironmentQuota,
     AdminOrganizationOverview, AuditLogEntry, ListAuditLogsParams,
 };
+use crate::api::feedback;
 
-/// Registers the nine AdminService reads, the three audited quota writes and
+/// Registers the ten AdminService reads, the three audited quota writes and
 /// the audited rate card, dedicated CPU and credit writes on their generated
 /// Connect routes.
 pub fn router(state: ApiState) -> connectrpc::Router {
@@ -123,6 +125,32 @@ impl AdminService for AdminConnectService {
         .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(ListAuditLogsResponse {
             audit_logs: entries,
+            ..Default::default()
+        })
+    }
+
+    async fn list_feedback(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, ListFeedbackRequest>,
+    ) -> ServiceResult<ListFeedbackResponse> {
+        let request = request.view();
+        let limit = if request.limit == 0 {
+            feedback::DEFAULT_LIST_LIMIT
+        } else {
+            i64::from(request.limit)
+        };
+        let sender = match request.sender.as_known() {
+            Some(FeedbackSender::FEEDBACK_SENDER_SIGNED_IN) => feedback::SenderFilter::SignedIn,
+            Some(FeedbackSender::FEEDBACK_SENDER_ANONYMOUS) => feedback::SenderFilter::Anonymous,
+            _ => feedback::SenderFilter::All,
+        };
+        let page = feedback::list_feedback(&self.state.pool, limit, request.page_token, sender)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(ListFeedbackResponse {
+            feedback: page.feedback.into_iter().map(proto_feedback).collect(),
+            next_page_token: page.next_page_token,
             ..Default::default()
         })
     }
@@ -610,6 +638,28 @@ fn proto_organization_overview(
                 ..Default::default()
             })
             .collect(),
+        ..Default::default()
+    }
+}
+
+fn proto_feedback(value: feedback::FeedbackRow) -> ProtoFeedbackEntry {
+    ProtoFeedbackEntry {
+        id: value.id,
+        created_at: Some(Timestamp::from_unix(
+            value.created_at.timestamp(),
+            value.created_at.timestamp_subsec_nanos() as i32,
+        ))
+        .into(),
+        user_id: value.user_id,
+        user_email: value.user_email,
+        organization_id: value.organization_id,
+        organization_name: value.organization_name,
+        message: value.message,
+        cli_version: value.cli_version,
+        os: value.os,
+        arch: value.arch,
+        placement: value.placement.unwrap_or_default(),
+        environment_id: value.environment_id,
         ..Default::default()
     }
 }

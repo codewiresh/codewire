@@ -1,7 +1,7 @@
 ---
 title: cw itself
-description: install, upgrade, doctor, config and completion.
-updated: 2026-10-27
+description: install, upgrade, doctor, feedback, config and completion.
+updated: 2026-11-10
 weight: 8
 aliases: ["/cli/cw"]
 ---
@@ -103,6 +103,64 @@ cw doctor local
 
 ```text
 Native local VM orphans: none
+```
+
+## cw feedback
+
+```sh
+cw feedback "MESSAGE" [--anonymous] [--environment ID] [--yes] [-o json]
+cw feedback                      # at a terminal: type the message
+some-command | cw feedback --yes # from a script: the message on stdin
+```
+
+Sends a message to the Codewire team. Without `MESSAGE` at a terminal, type
+it: Enter starts a new line, Ctrl-D sends, and Escape or Ctrl-C cancels. When
+stdin is not a terminal, the message is read from it.
+
+Before sending, `cw` shows who the feedback is from and everything attached,
+then asks; `--yes` sends without asking, and is required when there is no
+terminal to ask in or with `-o json`.
+
+What is sent, and nothing else:
+
+- the message, at most 10 KB;
+- the `cw` version, the operating system and the architecture;
+- whether you work locally or in the cloud: `--local` or `--cloud`, else
+  where the selected environment runs;
+- with `--environment ID`, that environment's ID.
+
+No logs, files, environment contents or settings are sent. Do not paste
+secrets into the message.
+
+Signed in, the feedback records your account and your current organization;
+signed out, or with `--anonymous`, it records neither. A sign-in that no
+longer works is refused rather than sent anonymously: run `cw login`, or send
+with `--anonymous`.
+
+Sending is limited to 10 messages an hour for an account, 5 an hour
+anonymously from one address, and a ceiling for everyone together. A refusal
+says how many seconds to wait. See [Feedback](@/reference/security.md#feedback)
+for what is stored and who reads it.
+
+| Flag | Meaning |
+| --- | --- |
+| `--anonymous` | Send without your account or organization |
+| `--environment ID` | An environment the feedback is about; only its ID is sent |
+| `-y`, `--yes` | Send without asking |
+| `-o json` | Print the stored feedback's ID as JSON |
+
+Example:
+
+```sh
+cw feedback "cw ls is slow with 40 environments"   # then choose Continue
+```
+
+```text
+Feedback for the Codewire team at https://codewire.sh
+  From      alice@example.com, organization Acme
+  Attached  cw 0.4.3, linux x86_64, cloud
+  Message   34 bytes
+Feedback sent (5f0c9a2e-0d7b-4c1e-9a43-2b8f6f3d1c11). Thank you.
 ```
 
 ## cw config
