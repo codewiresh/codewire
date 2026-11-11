@@ -905,7 +905,9 @@ async fn nonregular_fifo_is_rejected_without_a_blocking_open() {
     let fifo = directory.path().join("synthetic-fifo");
     let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
     // Exact disposable synthetic path; libc is used only to create this FIFO.
-    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    // SAFETY: `name` is a NUL-terminated string that lives past the call.
+    let created = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+    assert_eq!(created, 0);
     let endpoint = ClientTlsEndpoint::new("https://localhost".into(), fifo).unwrap();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), endpoint.validate())

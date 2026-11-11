@@ -26,7 +26,6 @@ ALLOWED_IN_TESTS = ("clippy::unwrap_used",)
 
 DEBT: dict[str, tuple[str, ...]] = {
     "clippy::undocumented_unsafe_blocks": (
-        "crates/codewire-cli-bin/tests/feedback.rs",
         "crates/codewire-cli-bin/tests/guided_credentials.rs",
         "crates/codewire-cli-bin/tests/host_member_control.rs",
         "crates/codewire-cli-bin/tests/native_egress_broker.rs",
@@ -38,7 +37,6 @@ DEBT: dict[str, tuple[str, ...]] = {
         "crates/codewire-cli-bin/tests/retained_mesh.rs",
         "crates/codewire-cli/src/lib.rs",
         "crates/codewire-client/src/lib.rs",
-        "crates/codewire-cw-release/src/lib.rs",
         "crates/codewire-daemon/src/lib.rs",
         "crates/codewire-daemon/tests/projection.rs",
         "crates/codewire-local-vmm/src/bin/codewire-local-codex-bridge-smoke.rs",
@@ -47,11 +45,8 @@ DEBT: dict[str, tuple[str, ...]] = {
         "crates/codewire-local-vmm/src/lib.rs",
         "crates/codewire-local-vmm/tests/network_worker_process.rs",
         "crates/codewire-server-core/src/lib.rs",
-        "crates/codewire-tls/src/lib.rs",
         "crates/codewire-vmm-guest-probe/src/lib.rs",
-        "crates/codewire-vmm-guest-probe/src/main.rs",
         "crates/codewire-vmm-guest-probe/tests/cw-runtime-live.rs",
-        "crates/codewire-workspace-access/examples/initial_private_checkout_fixture.rs",
     ),
     "clippy::unwrap_used": (
         "crates/codewire-cli/src/lib.rs",

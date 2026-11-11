@@ -4,8 +4,6 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 // A test reports failure by panicking, so it may unwrap.
 #![allow(clippy::unwrap_used)]
-// Predates this workspace lint; #4125 tracks removing the allow.
-#![allow(clippy::undocumented_unsafe_blocks)]
 
 use std::fs::File;
 use std::io::{Read as _, Write as _};
@@ -307,27 +305,25 @@ impl Pty {
         let (mut master, mut slave) = (-1, -1);
         // SAFETY: both descriptor pointers are valid for this call; null
         // termios/window pointers ask the OS for its default terminal state.
-        assert_eq!(
-            unsafe {
-                libc::openpty(
-                    &mut master,
-                    &mut slave,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            },
-            0
-        );
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0);
         // SAFETY: successful openpty returned two distinct owned descriptors.
         let (master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
-        // SAFETY: the descriptor is live; F_SETFL changes only this test's PTY.
+        // SAFETY: the descriptor is live and F_GETFL takes no argument.
         let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
         assert_ne!(flags, -1);
-        assert_ne!(
-            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
-            -1
-        );
+        // SAFETY: the descriptor is live; F_SETFL changes only this test's PTY.
+        let set =
+            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        assert_ne!(set, -1);
         let child = std::process::Command::new(env!("CARGO_BIN_EXE_cw"))
             .env_clear()
             .env("HOME", root)

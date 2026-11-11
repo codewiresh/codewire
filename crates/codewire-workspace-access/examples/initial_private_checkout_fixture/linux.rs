@@ -147,9 +147,8 @@ fn create_output(path: &Path) -> Result<()> {
         return Err("fixture output must have an absolute canonical parent");
     }
     let metadata = fs::metadata(parent).map_err(|_| "cannot inspect fixture output parent")?;
-    // SAFETY: geteuid has no arguments and does not change process state.
     if !metadata.is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.uid() != rustix::process::geteuid().as_raw()
         || metadata.mode() & 0o077 != 0
     {
         return Err("fixture output parent must be owner-only and owned");

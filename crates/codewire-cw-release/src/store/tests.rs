@@ -678,7 +678,9 @@ fn self_install_records_this_build_and_reinstall_adds_a_version() {
 fn mkfifo(path: &Path) {
     use std::os::unix::ffi::OsStrExt as _;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    // SAFETY: `path` is a NUL-terminated string that lives past the call.
+    let created = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+    assert_eq!(created, 0);
 }
 
 #[test]

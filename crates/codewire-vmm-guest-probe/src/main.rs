@@ -1,6 +1,3 @@
-// Predates this workspace lint; #4125 tracks removing the allow.
-#![allow(clippy::undocumented_unsafe_blocks)]
-
 #[cfg(target_os = "linux")]
 use std::ffi::{OsStr, OsString};
 #[cfg(target_os = "linux")]
@@ -9,9 +6,7 @@ use std::path::Path;
 fn main() {
     #[cfg(target_os = "linux")]
     let fatal_vm_init_failure =
-        is_fatal_vm_init_failure(std::env::args_os().nth(1).as_deref(), unsafe {
-            libc::getpid()
-        });
+        is_fatal_vm_init_failure(std::env::args_os().nth(1).as_deref(), std::process::id());
     if let Err(error) = entrypoint() {
         eprintln!("codewire guest probe failed: {error:#}");
         #[cfg(target_os = "linux")]
@@ -23,7 +18,7 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
-fn is_fatal_vm_init_failure(command: Option<&OsStr>, pid: libc::pid_t) -> bool {
+fn is_fatal_vm_init_failure(command: Option<&OsStr>, pid: u32) -> bool {
     pid == 1 && command.is_none()
 }
 
