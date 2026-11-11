@@ -41,6 +41,21 @@ name="$1"
 echo "$name target=${CARGO_TARGET_DIR:-} desktop=${CODEWIRE_DESKTOP_CARGO_TARGET_DIR:-} zigbuild=${CARGO_ZIGBUILD_CACHE_DIR:-} selection=${VERIFICATION_SELECTION:-}" >> "$CHECK_STATE/env"
 echo "output of $name"
 if [ "$name" = compile ]; then sleep "${COMPILE_SLEEP:-3}"; else sleep "${CHECK_SLEEP:-1}"; fi
+# With BARRIER (#4184), compile ends only once every other check's status is
+# on disk in the script's log folder, and keeps a copy of each as it stood
+# then. A time the checks share (#3876) could only be written after compile
+# ends, so the copies tell each check's own record from a shared one without
+# comparing times. The wait is a hang guard, not a speed expectation.
+if [ "$name" = compile ] && [ -n "${BARRIER:-}" ]; then
+  for _ in $(seq 600); do
+    statuses=("$CHECK_STATE"/rust-checks.*/[1-4].status)
+    if [ "${#statuses[@]}" -eq 4 ] && [ -f "${statuses[0]}" ]; then
+      for status in "${statuses[@]}"; do cp "$status" "$CHECK_STATE/seen-${status##*/}"; done
+      break
+    fi
+    sleep 0.1
+  done
+fi
 echo "$name end $(date +%s%N)" >> "$CHECK_STATE/times"
 if [ "${FAIL_CHECK:-}" = "$name" ]; then echo "error in $name"; exit 101; fi
 CHECK
@@ -80,7 +95,7 @@ rc=0
 checks() {
   local selection="$1"
   shift
-  rm -f "$work/state/times" "$work/state/env"
+  rm -f "$work/state/times" "$work/state/env" "$work/state"/seen-*.status
   rc=0
   env CHECK_STATE="$work/state" RUNNER_TEMP="$work/state" CARGO_TARGET_DIR="$target/clippy" \
     RUST_CHECKS_FEATURES_TARGET_DIR="$target/clippy_features" \
@@ -95,7 +110,8 @@ ran() { cut -d' ' -f1 "$work/state/times" | sort -u | tr '\n' ' '; }
 printed() { sed -nE "s/^\[rust-checks\] (.*): start$/\1/p" "$work/out" | tr '\n' '|'; }
 
 # Every check selected: all five run, and every one starts before any ends.
-checks '|rust|transport|' BUILD_ONCE_LOCAL_VMM=true DESKTOP_PACKAGE_SELECTED=true CW_PACKAGE_SELECTED=true
+checks '|rust|transport|' BUILD_ONCE_LOCAL_VMM=true DESKTOP_PACKAGE_SELECTED=true CW_PACKAGE_SELECTED=true \
+  BARRIER=1
 [ "$rc" -eq 0 ] || fail "every check passed but the script failed: $(cat "$work/out")"
 [ "$(ran)" = 'compile cw-darwin desktop features local-vmm ' ] || fail "not every check ran: $(ran)"
 last_start=0 first_end=''
@@ -137,12 +153,12 @@ expected_out="$(
 # adds to the script's count: starting and ending those processes took seconds
 # (#4048: 7 s reported for a 3 s check). So each report is at least the check's
 # own measured time, rounded down, however slow the runner. A time shared by
-# the checks (#3876: every check reporting the longest one's end) is caught by
-# comparison instead: each 1 s check reports less than the 3 s compile check.
+# the checks (#3876: every check reporting the longest one's end) is caught
+# without comparing times (#4184): each other check's finish line must report
+# exactly the status it had on disk while compile was still running (BARRIER).
 elapsed() { sed -nE "s/^\[rust-checks\] $1: finish \(status=[0-9]+ elapsed_seconds=([0-9]+)\)$/\1/p" "$work/out"; }
 assert_own_times() {
-  local pair reported took compile
-  compile="$(elapsed compile-all-targets)"
+  local pair reported took index=0 seen
   for pair in 'compile-all-targets:compile' 'feature-graph checks:features' 'local-vmm checks:local-vmm' \
       'desktop checks:desktop' 'cw Darwin cross-check:cw-darwin'; do
     reported="$(elapsed "${pair%%:*}")"
@@ -150,9 +166,13 @@ assert_own_times() {
     if ! { [ -n "$reported" ] && (( reported >= took / 1000000000 )); }; then
       fail "the ${pair%%:*} finish line reported less than its own time (${took} ns): $(grep finish "$work/out")"
     fi
-    if [ "${pair#*:}" != compile ] && (( reported >= compile )); then
-      fail "the ${pair%%:*} finish line reported the compile check's time, not its own: $(grep finish "$work/out")"
+    if [ "$index" -gt 0 ]; then
+      seen="$work/state/seen-$index.status"
+      [ -f "$seen" ] || fail "the ${pair%%:*} check's status was not on disk before compile ended"
+      [ "$(cat "$seen")" = "0 $reported" ] ||
+        fail "the ${pair%%:*} finish line reported $reported, not the time it recorded when it ended ($(cat "$seen")): $(grep finish "$work/out")"
     fi
+    index=$((index + 1))
   done
 }
 assert_own_times
@@ -162,7 +182,7 @@ assert_own_times
 # timing it, more than the old 1.5 s upper bound allowed. Each report still
 # carries its check's own time.
 checks '|rust|transport|' BUILD_ONCE_LOCAL_VMM=true DESKTOP_PACKAGE_SELECTED=true CW_PACKAGE_SELECTED=true \
-  STUB_DELAY=3
+  STUB_DELAY=3 BARRIER=1
 [ "$rc" -eq 0 ] || fail "a slow runner failed the script: $(cat "$work/out")"
 assert_own_times
 

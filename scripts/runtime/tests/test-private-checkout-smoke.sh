@@ -71,10 +71,13 @@ expect_failure() {
   if ( "$@" ) >"$TEST_ROOT/failure.out" 2>"$TEST_ROOT/failure.err"; then fail "$label accepted"; fi
   pass
 }
+# The smoke's own wait, standing in: it ignores the smoke's timeout and
+# interval and polls every 20 ms. Its bound is a hang guard of about 60 s, not
+# a speed expectation: 2 s failed a starved CI guest (#4137).
 wait_until() {
   shift 2
   local attempt
-  for ((attempt=0; attempt<100; attempt++)); do "$@" && return 0; sleep 0.02; done
+  for ((attempt=0; attempt<3000; attempt++)); do "$@" && return 0; sleep 0.02; done
   die 'synthetic fixture readiness failed'
 }
 run_guest() {

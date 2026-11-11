@@ -226,6 +226,18 @@ process_running() {
   state="$(sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1)" || return 1
   [[ -n "$state" && "$state" != Z ]]
 }
+# Whether PID stops running. The matrix ends its smoke's process group with
+# SIGKILL, which the kernel delivers and finishes asynchronously: on a starved
+# guest the stray can still read as running just after the matrix exits
+# (#4137). The bound is a hang guard; a stray nothing killed still fails.
+stops_running() {
+  local _
+  for _ in $(seq 1 600); do
+    process_running "$1" || return 0
+    sleep 0.1
+  done
+  return 1
+}
 node_state() { printf '%s:%s' "$(cat "$CASE/state/nodes/$1/unschedulable")" "$(cat "$CASE/state/nodes/$1/annotation" 2>/dev/null || true)"; }
 last_error() { grep -F '[transport-matrix] ERROR:' "$CASE/err" | tail -n 1; }
 exit_line() { grep -F '[transport-matrix] exit-failure' "$CASE/err" | tail -n 1; }
@@ -259,9 +271,8 @@ new_case stray-after-pass
 run_matrix pass MATRIX_CORDON_OTHER_RUNTIME_NODES=0 FAKE_STRAY=1 -- --current-dev
 [[ "$(case_rc)" == 0 ]] || { show_err; fail "stray pass exited $(case_rc)"; }
 [[ -s "$CASE/state/stray.pid" ]] || fail "the stray fixture did not start"
-if process_running "$(cat "$CASE/state/stray.pid")"; then
+stops_running "$(cat "$CASE/state/stray.pid")" ||
   fail "a process in the smoke's group outlived a passing run"
-fi
 
 # A supplied cw is used instead of a cargo build, and removes the environment.
 new_case supplied-cw
@@ -354,7 +365,8 @@ new_case sigterm node-a=false node-b=false
     "$FAKE_ROOT/scripts/runtime/dev/smoke-dev-transport-matrix.sh" --current-dev --cleanup-on-failure \
     >/dev/null 2>"$CASE/err" &
   matrix_pid=$!
-  for _ in $(seq 1 100); do
+  # A hang guard for the fake smoke to start, not a speed expectation (#4137).
+  for _ in $(seq 1 600); do
     [[ -e "$CASE/state/candidate.started" ]] && break
     sleep 0.1
   done
@@ -369,9 +381,8 @@ grep -Fq 'interrupted; cleaning up' "$CASE/err" || fail "the signal was not hand
 [[ -s "$CASE/state/candidate.term" ]] || fail "the signal was not forwarded to the smoke"
 [[ "$(node_state node-b)" == 'false:' ]] || fail "node-b stayed cordoned after a signal"
 [[ "$(cat "$CASE/state/cw-rm")" == env-0123 ]] || fail "the signalled run kept its environment"
-if process_running "$(cat "$CASE/state/stray.pid")"; then
+stops_running "$(cat "$CASE/state/stray.pid")" ||
   fail "a process in the smoke's group outlived a signalled run"
-fi
 
 # A node a killed run left cordoned is recovered by the next run.
 new_case stale-cordon node-a=false node-b=true:1000:killed-run
