@@ -9,6 +9,9 @@ readonly TEST_REQUEST_TOKEN='test-only-oidc-request-token'
 readonly TEST_JWT='synthetic.header.signature'
 readonly EXPECTED_AUDIENCE='u:36:743b0975-b91c-4323-be37-a55707687c78'
 readonly SCHEDULE_AUDIENCE='u:36:ae5a19f7-8bfe-4f85-a25f-3b743b38f437'
+# The exact line codewire/deploy's promote-prod.sh prints when deploy main moved
+# under its run; deploy's test_promote_prod.sh pins the same value (#4115).
+readonly MAIN_MOVED_MARKER='codewire-promote-prod-outcome: deploy-main-moved'
 
 fail() {
   printf '[test-dispatch-deploy-prod] ERROR: %s\n' "$*" >&2
@@ -39,6 +42,52 @@ for argument in "$@"; do
   previous="$argument"
   [[ "$argument" == https://* ]] && url="$argument"
 done
+# MOCK_RUNS (moved, fail or success per dispatch) gives each dispatch its own
+# run, 800 + n, whose failed job 900 + n logs the moved-main marker or not.
+if [[ -n "${MOCK_RUNS:-}" ]]; then
+  IFS=, read -r -a runs <<<"$MOCK_RUNS"
+  case "$url" in
+    https://git.example.invalid/api/v1/repos/codewire/deploy/actions/workflows/promote-prod.yaml/dispatches)
+      printf 'dispatch\n' >>"$MOCK_CAPTURE_DIR/dispatches"
+      n="$(wc -l <"$MOCK_CAPTURE_DIR/dispatches")"
+      jq -n --argjson id "$((800 + n))" --argjson number "$((30 + n))" \
+        '{id:$id,run_number:$number,jobs:["prepare"]}' >"$output"
+      printf 201
+      exit 0
+      ;;
+    https://git.example.invalid/api/v1/repos/codewire/deploy/actions/runs/80[1-9])
+      n="$((${url##*/} - 800))"
+      verdict="${runs[$((n - 1))]}"
+      [[ "$verdict" == success ]] || verdict=failure
+      jq -n --argjson id "$((800 + n))" --arg state "$verdict" '{id:$id,status:$state}' >"$output"
+      printf 200
+      exit 0
+      ;;
+    https://git.example.invalid/api/v1/repos/codewire/deploy/actions/runs/80[1-9]/jobs)
+      n="${url%/jobs}"; n="$((${n##*/} - 800))"
+      jq -n --argjson job "$((900 + n))" \
+        '{jobs:[{id:99,status:"success"},{id:$job,status:"failure"}]}' >"$output"
+      printf 200
+      exit 0
+      ;;
+    https://git.example.invalid/api/v1/repos/codewire/deploy/actions/jobs/90[1-9]/logs)
+      n="${url%/logs}"; n="$((${n##*/} - 900))"
+      {
+        printf '2026-11-11T11:32:40.0000000Z [promote-prod] checking deploy main\n'
+        if [[ "${runs[$((n - 1))]}" == moved ]]; then
+          printf '2026-11-11T11:32:48.0000000Z %s\n' "${MOCK_MARKER:?}"
+          printf '2026-11-11T11:32:48.0000001Z [promote-prod] ERROR: deploy main moved before promotion began\n'
+        else
+          # The marker inside a longer line is not the marker.
+          printf '2026-11-11T11:32:48.0000000Z note: %s was not printed\n' "${MOCK_MARKER:?}"
+          printf '2026-11-11T11:32:48.0000001Z [promote-prod] ERROR: hosted policy refused the release\n'
+        fi
+      } >"$output"
+      printf 200
+      exit 0
+      ;;
+  esac
+fi
 case "$url" in
   https://git.example.invalid/api/actions/oidc*audience=*)
     [[ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN+x}" ]] || exit 91
@@ -131,6 +180,41 @@ MOCK_RUN_STATES=http-500,running,success "$DISPATCH" "$SOURCE_TAG" >"$work/retry
   fail "a transient lookup failure ended the wait: $(cat "$work/retry.out")"
 grep -Fq 'deploy run 704 lookup failed (HTTP 500); retrying' "$work/retry.out" ||
   fail 'a failed lookup was not reported'
+
+# The dispatcher matches exactly the line deploy prints.
+grep -qxF "readonly MAIN_MOVED_MARKER='$MAIN_MOVED_MARKER'" "$DISPATCH" ||
+  fail 'dispatch-deploy-prod.sh does not define the pinned moved-main marker'
+export MOCK_MARKER="$MAIN_MOVED_MARKER"
+
+# A run that failed because deploy main moved under it is dispatched afresh
+# (its verify-dev then checks the new main), until one succeeds (#4115).
+reset_wait; rm -f "$work/capture/dispatches"
+MOCK_RUNS=moved,moved,success "$DISPATCH" "$SOURCE_TAG" >"$work/moved-retried.out" 2>&1 ||
+  fail "a moved main was not retried to success: $(cat "$work/moved-retried.out")"
+[[ "$(wc -l <"$work/capture/dispatches")" -eq 3 ]] || fail 'a moved main was not dispatched exactly three times'
+grep -Fq 'deploy run 801 found deploy main moved under it; dispatching a fresh run (retry 1 of 3)' \
+  "$work/moved-retried.out" || fail 'the first moved-main retry was not named'
+grep -Fq "deploy run 803 succeeded: Production accepted $SOURCE_TAG" "$work/moved-retried.out" ||
+  fail 'the retried run did not end the wait on its own success'
+
+# Retries stop after three; the last run's failure is reported.
+reset_wait; rm -f "$work/capture/dispatches"
+if MOCK_RUNS=moved,moved,moved,moved,success "$DISPATCH" "$SOURCE_TAG" >"$work/moved-exhausted.out" 2>&1; then
+  fail 'moved-main retries did not stop after three'
+fi
+[[ "$(wc -l <"$work/capture/dispatches")" -eq 4 ]] || fail 'moved-main retries were not bounded at three'
+grep -Fq "deploy run 804 ended failure: Production did not accept $SOURCE_TAG" "$work/moved-exhausted.out" ||
+  fail "exhausted retries did not name the last run: $(cat "$work/moved-exhausted.out")"
+
+# Any other failure is final, even when its log mentions the marker in a
+# longer line.
+reset_wait; rm -f "$work/capture/dispatches"
+if MOCK_RUNS=fail,success "$DISPATCH" "$SOURCE_TAG" >"$work/other-failure.out" 2>&1; then
+  fail 'a failure other than a moved main was retried'
+fi
+[[ "$(wc -l <"$work/capture/dispatches")" -eq 1 ]] || fail 'a failure other than a moved main was dispatched again'
+! grep -Fq 'dispatching a fresh run' "$work/other-failure.out" ||
+  fail 'a failure other than a moved main announced a retry'
 
 # Every other verdict fails the release run, naming it.
 for state in failure cancelled skipped; do
