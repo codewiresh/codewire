@@ -439,7 +439,22 @@ pub async fn settle_due(
     if !enforcement.is_on() {
         return Ok(0);
     }
-    let organizations: Vec<String> = sqlx::query_scalar(
+    let organizations = organizations_due(pool).await?;
+    let count = organizations.len();
+    for organization_id in organizations {
+        if let Err(error) =
+            settle_organization(pool, stripe, enforcement, &organization_id, false).await
+        {
+            tracing::error!(organization_id, %error, "credit settlement failed");
+        }
+    }
+    Ok(count)
+}
+
+/// The organizations [`settle_due`] settles. Reading them changes nothing, so
+/// a test can check one organization is due without settling everyone else's.
+async fn organizations_due(pool: &PgPool) -> anyhow::Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
         r#"SELECT b.organization_id FROM billing_credit_balances b
            JOIN organizations o ON o.id = b.organization_id
            WHERE o.rate_card <> 'unlimited' AND b.balance_nano_eur <= 0
@@ -464,16 +479,7 @@ pub async fn settle_due(
                             AND t.completed_at > now() - interval '24 hours')))"#,
     )
     .fetch_all(pool)
-    .await?;
-    let count = organizations.len();
-    for organization_id in organizations {
-        if let Err(error) =
-            settle_organization(pool, stripe, enforcement, &organization_id, false).await
-        {
-            tracing::error!(organization_id, %error, "credit settlement failed");
-        }
-    }
-    Ok(count)
+    .await?)
 }
 
 /// Below this, an organization that nothing will top up hears about it.
@@ -1138,11 +1144,13 @@ mod tests {
         adjust("plenty", 6 * NANO_EUR_PER_EURO).await;
         assert!(due().await.is_empty());
         adjust("spend", -2 * NANO_EUR_PER_EURO).await;
-        sqlx::query("UPDATE organizations SET stripe_customer_id = 'cus_notice' WHERE id = $1")
-            .bind(&organization_id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE organizations SET stripe_customer_id = 'cus_notice_' || id WHERE id = $1",
+        )
+        .bind(&organization_id)
+        .execute(&pool)
+        .await
+        .unwrap();
         assert!(due().await.is_empty());
 
         // Top-up off: due once, whatever the balance does next.
@@ -1257,7 +1265,7 @@ mod tests {
             .await
             .unwrap();
         assert!(balance(&pool, &fixture).await < 0);
-        sqlx::query("UPDATE organizations SET stripe_customer_id = 'cus_off' WHERE id = $1")
+        sqlx::query("UPDATE organizations SET stripe_customer_id = 'cus_off_' || id WHERE id = $1")
             .bind(&fixture.organization_id)
             .execute(&pool)
             .await
@@ -1300,19 +1308,40 @@ mod tests {
         };
         let stripe = crate::stripe_client::StripeHandle::default();
         let fixture = seed(&pool, "regular").await;
-        // Usage overran: with no card, settling records the exhaustion.
-        session(&pool, &fixture, "ended", "2 hours", Some("1 hour")).await;
-        draw_organization(&pool, &fixture.organization_id)
-            .await
-            .unwrap();
-        assert!(balance(&pool, &fixture).await < 0);
+        // Another organization out of credit at the same time, as other tests'
+        // fixtures are while this one runs (#4098).
+        let bystander = seed(&pool, "regular").await;
+        for organization in [&fixture, &bystander] {
+            session(&pool, organization, "ended", "2 hours", Some("1 hour")).await;
+            draw_organization(&pool, &organization.organization_id)
+                .await
+                .unwrap();
+            assert!(balance(&pool, organization).await < 0);
+        }
+        // Usage overran: the sweep finds the organization, and with no card,
+        // settling it records the exhaustion. Only this organization is
+        // settled: settling every due one would change other tests' fixtures.
         assert!(
-            settle_due(&pool, &stripe, CreditEnforcement::On)
+            organizations_due(&pool)
                 .await
                 .unwrap()
-                >= 1
+                .contains(&fixture.organization_id)
+        );
+        assert_eq!(
+            settle_organization(
+                &pool,
+                &stripe,
+                CreditEnforcement::On,
+                &fixture.organization_id,
+                false
+            )
+            .await
+            .unwrap(),
+            Settlement::Exhausted
         );
         assert!(exhausted(&pool, &fixture).await);
+        assert!(!exhausted(&pool, &bystander).await);
+        cleanup(&pool, bystander).await;
 
         // A pending top-up whose charge cannot be confirmed stays pending.
         let top_up: String = sqlx::query_scalar(
@@ -1323,11 +1352,13 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        sqlx::query("UPDATE organizations SET stripe_customer_id = 'cus_test' WHERE id = $1")
-            .bind(&fixture.organization_id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE organizations SET stripe_customer_id = 'cus_test_' || id WHERE id = $1",
+        )
+        .bind(&fixture.organization_id)
+        .execute(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             settle_organization(
                 &pool,
@@ -1344,8 +1375,9 @@ mod tests {
         // Its invoice is paid (here, by the webhook): EUR 20 once, and the
         // organization is no longer exhausted once the balance is positive.
         let before = balance(&pool, &fixture).await;
-        assert!(complete_top_up(&pool, &top_up, "in_test").await.unwrap());
-        assert!(!complete_top_up(&pool, &top_up, "in_test").await.unwrap());
+        let invoice = format!("in_{top_up}");
+        assert!(complete_top_up(&pool, &top_up, &invoice).await.unwrap());
+        assert!(!complete_top_up(&pool, &top_up, &invoice).await.unwrap());
         assert_eq!(
             balance(&pool, &fixture).await,
             before + 20 * NANO_EUR_PER_EURO
@@ -1373,9 +1405,14 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        fail_top_up(&pool, &refused, Some("in_declined"), "Insufficient Funds")
-            .await
-            .unwrap();
+        fail_top_up(
+            &pool,
+            &refused,
+            Some(&format!("in_{refused}")),
+            "Insufficient Funds",
+        )
+        .await
+        .unwrap();
         let state: (String, Option<String>) =
             sqlx::query_as("SELECT state, failure_code FROM billing_top_ups WHERE id = $1")
                 .bind(&refused)
