@@ -4,9 +4,6 @@
 //! through the host's potentially different SQLite build. Only fixed,
 //! non-secret fields needed by that smoke can be returned.
 
-// Predates this workspace lint; #4125 tracks removing the allow.
-#![allow(clippy::undocumented_unsafe_blocks)]
-
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("codewire-local-state-probe requires Linux");
@@ -732,8 +729,7 @@ mod linux {
     }
 
     fn validate_owner_only(metadata: &fs::Metadata, directory: bool, mode: u32) -> ProbeResult<()> {
-        // SAFETY: geteuid has no preconditions and cannot mutate process state.
-        let uid = unsafe { libc::geteuid() };
+        let uid = rustix::process::geteuid().as_raw();
         require(metadata.uid() == uid)?;
         require(metadata.permissions().mode() & 0o777 == mode)?;
         require(if directory {
@@ -883,7 +879,7 @@ mod linux {
                 socket: SocketIdentity {
                     device: 1,
                     inode: 2,
-                    uid: unsafe { libc::geteuid() },
+                    uid: rustix::process::geteuid().as_raw(),
                     mode: 0o140600,
                 },
                 artifact_generation: "b".repeat(64),

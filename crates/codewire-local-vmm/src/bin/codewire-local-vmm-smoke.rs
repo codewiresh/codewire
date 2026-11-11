@@ -5,9 +5,6 @@
 //! process. Output is a controlled receipt: guest serial data, ambient host
 //! environment values, and daemon credentials are never emitted.
 
-// Predates this workspace lint; #4125 tracks removing the allow.
-#![allow(clippy::undocumented_unsafe_blocks)]
-
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("codewire-local-vmm-smoke requires Linux");
@@ -2095,7 +2092,7 @@ mod linux {
         ] {
             let metadata = fs::symlink_metadata(directory)?;
             if !metadata.is_dir()
-                || metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.uid() != rustix::process::geteuid().as_raw()
                 || metadata.mode() & 0o777 != 0o700
             {
                 return Err(failure("runtime directory identity or mode is unsafe"));
@@ -3411,7 +3408,7 @@ mod linux {
         }
         let metadata = fs::symlink_metadata(path)?;
         if !metadata.is_file()
-            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.uid() != rustix::process::geteuid().as_raw()
             || metadata.mode() & 0o777 != 0o600
             || metadata.nlink() != 1
             || metadata.len() < STATE_DISK_BYTES
@@ -3684,7 +3681,7 @@ mod linux {
     }
 
     fn require_metadata_mode(metadata: &Metadata, mode: u32) -> SmokeResult<()> {
-        if metadata.uid() != unsafe { libc::geteuid() }
+        if metadata.uid() != rustix::process::geteuid().as_raw()
             || metadata.mode() & 0o777 != mode
             || metadata.nlink() != 1
         {

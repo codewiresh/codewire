@@ -1,9 +1,6 @@
 #![cfg(target_os = "linux")]
 // A test reports failure by panicking, so it may unwrap.
 #![allow(clippy::unwrap_used)]
-// Predates this workspace lint; #4125 tracks removing the allow.
-#![allow(clippy::undocumented_unsafe_blocks)]
-
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -87,8 +84,12 @@ fn spawn_broker(
 
 /// Every source is duplicated above all fixed targets, as the runner does.
 fn above_targets(descriptor: &impl std::os::fd::AsRawFd) -> OwnedFd {
+    // SAFETY: `descriptor` is borrowed and open for the call; F_DUPFD_CLOEXEC
+    // takes an integer and returns a new descriptor or -1.
     let duplicated = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
     assert!(duplicated >= 64);
+    // SAFETY: `duplicated` is a descriptor this function just created, and
+    // nothing else owns it.
     unsafe { OwnedFd::from_raw_fd(duplicated) }
 }
 

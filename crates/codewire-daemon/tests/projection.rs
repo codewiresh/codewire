@@ -4,9 +4,6 @@
 #![cfg(target_os = "linux")]
 // A test reports failure by panicking, so it may unwrap.
 #![allow(clippy::unwrap_used)]
-// Predates this workspace lint; #4125 tracks removing the allow.
-#![allow(clippy::undocumented_unsafe_blocks)]
-
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::future::Future;
@@ -111,8 +108,8 @@ fn projection_daemon_child() {
                 environment_id: environment,
                 environment_generation: GENERATION,
                 ingress_socket: root.join("provider.sock"),
-                ingress_uid: unsafe { libc::geteuid() },
-                ingress_gid: unsafe { libc::getegid() },
+                ingress_uid: rustix::process::geteuid().as_raw(),
+                ingress_gid: rustix::process::getegid().as_raw(),
             }),
             managed_credential_clients: Default::default(),
             host: None,

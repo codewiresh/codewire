@@ -5,9 +5,6 @@
 //! uses only repository-owned synthetic upstream responses. OpenAI is a Node
 //! HTTP/API configuration proof, not an OpenAI SDK compatibility claim.
 
-// Predates this workspace lint; #4125 tracks removing the allow.
-#![allow(clippy::undocumented_unsafe_blocks)]
-
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("codewire-local-codex-bridge-smoke requires Linux");
@@ -1873,7 +1870,7 @@ function generalEgress(){
         let Ok(metadata) = fs::metadata(&process) else {
             return false;
         };
-        if metadata.uid() != unsafe { libc::geteuid() } {
+        if metadata.uid() != rustix::process::geteuid().as_raw() {
             return false;
         }
         let Some(parent_pid) = process_parent_pid(&process) else {
@@ -1905,7 +1902,7 @@ function generalEgress(){
             return false;
         };
         let expected_argv = expected_authority_argv(args);
-        metadata.uid() == unsafe { libc::geteuid() }
+        metadata.uid() == rustix::process::geteuid().as_raw()
             && fs::read_link(process.join("exe")).ok().as_deref() == Some(args.cw_bin.as_path())
             && exact_process_argv(&process, &expected_argv)
     }

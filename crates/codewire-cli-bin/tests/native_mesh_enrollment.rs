@@ -1,9 +1,6 @@
 #![cfg(target_os = "linux")]
 // A test reports failure by panicking, so it may unwrap.
 #![allow(clippy::unwrap_used)]
-// Predates this workspace lint; #4125 tracks removing the allow.
-#![allow(clippy::undocumented_unsafe_blocks)]
-
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::net::SocketAddr;
@@ -161,7 +158,7 @@ fn spawn_issuer(
         .unwrap();
     let control_source = control_child.as_raw_fd();
     let transfer_source = transfer_child.as_raw_fd();
-    let expected_parent = unsafe { libc::getpid() };
+    let expected_parent = libc::pid_t::try_from(std::process::id()).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_cw"));
     command
         .arg("__native-mesh-enrollment-broker")
@@ -178,6 +175,8 @@ fn spawn_issuer(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // SAFETY: the hook performs only async-signal-safe descriptor/prctl
+    // syscalls and installs exactly the two private connected capabilities.
     unsafe {
         command.pre_exec(move || {
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1
