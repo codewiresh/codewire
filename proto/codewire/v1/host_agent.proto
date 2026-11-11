@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "codewire/v1/host.proto";
+
+// HostAgentService is the session a host keeps open to the control plane
+// (#3609): one outbound stream from the computer, so it works behind home NAT
+// with no port forwarding.
+//
+// The host authenticates itself, not a user: the stream carries no user
+// credential, and the service accepts none. The host proves it holds the
+// private key of a host record by signing a fresh challenge, at the start and
+// every 10 minutes after. A revoked host is refused, and a host revoked while
+// attached is told so and its stream ends.
+//
+// This slice carries liveness only: no operation crosses the stream yet.
+service HostAgentService {
+  // AttachHost runs one host session:
+  //
+  // 1. The host sends `open` naming its host ID.
+  // 2. The control plane answers `challenge` with a fresh nonce.
+  // 3. The host sends `proof`: the Ed25519 signature, by the host key, of the
+  //    line "codewire-host-attach-v1", then the host ID and the lowercase hex
+  //    of the nonce, each on its own line ending in "\n".
+  // 4. The control plane answers `attached`. The host sends `hello`, then a
+  //    `ping` every `ping_interval_seconds`; each is answered with `pong`.
+  // 5. Every `rechallenge_interval_seconds` the control plane sends another
+  //    `challenge`, which the host must answer with `proof` within
+  //    `proof_timeout_seconds`.
+  //
+  // An unknown host or a bad proof ends the stream with UNAUTHENTICATED,
+  // without saying which. A revoked host is refused with PERMISSION_DENIED,
+  // or, once attached, sent `revoked` before the stream ends. A message out
+  // of order ends it with INVALID_ARGUMENT.
+  rpc AttachHost(stream AttachHostRequest) returns (stream AttachHostResponse);
+}
+
+message AttachHostRequest {
+  oneof input {
+    HostAttachOpen open = 1;
+    HostAttachProof proof = 2;
+    HostHello hello = 3;
+    HostPing ping = 4;
+  }
+}
+
+message AttachHostResponse {
+  oneof output {
+    HostChallenge challenge = 1;
+    HostAttached attached = 2;
+    HostPong pong = 3;
+    HostRevoked revoked = 4;
+  }
+}
+
+message HostAttachOpen {
+  string host_id = 1;
+}
+
+message HostChallenge {
+  // 32 random bytes, used once.
+  bytes nonce = 1;
+}
+
+message HostAttachProof {
+  // The 64-byte Ed25519 signature of the attach statement for the last
+  // challenge.
+  bytes signature = 1;
+}
+
+message HostAttached {
+  uint32 ping_interval_seconds = 1;
+  // The host is shown offline when unheard for this long.
+  uint32 offline_after_seconds = 2;
+  uint32 rechallenge_interval_seconds = 3;
+  uint32 proof_timeout_seconds = 4;
+}
+
+// What the host runs, sent once after `attached`.
+message HostHello {
+  // The host capability version; it must be at least 1. It replaces the one
+  // recorded at enrollment.
+  uint32 capability_version = 1;
+  // Must be the platform the host enrolled with; a different one ends the
+  // stream with FAILED_PRECONDITION.
+  HostPlatform platform = 2;
+}
+
+message HostPing {}
+
+message HostPong {}
+
+message HostRevoked {}

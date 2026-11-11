@@ -137,6 +137,13 @@ spec:
                 name: codewire-orchestration-grpc
                 port:
                   name: grpc
+          - path: /codewire\.v1\.HostAgentService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-orchestration-grpc
+                port:
+                  name: grpc
           - path: /codewire\.v1\.CredentialDelegationService/
             pathType: ImplementationSpecific
             backend:

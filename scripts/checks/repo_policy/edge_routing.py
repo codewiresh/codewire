@@ -517,21 +517,27 @@ def credential_mutation_edges_self_test(per_file: dict[str, dict[str, Any]]) -> 
 def assert_credential_delegation_ingress_shape(
     document: str | None, label: str, fail: Callable[[str], None]
 ) -> None:
-    # The two admitted first-party bidi paths share the existing object and its
-    # TLS/host patches, but retain distinct exact Service/port backends.
+    # The admitted first-party bidi paths share the existing object and its
+    # TLS/host patches, but retain distinct exact Service/port backends. Host
+    # sessions (#3609) ride the session service's orchestration gRPC backend.
     assert_environment_session_ingress_shape(document, label, fail)
     if document is None:
         return
     paths = re.findall(r"^\s*(?:-\s+)?path:\s+(\S+)\s*$", document, re.MULTILINE)
     expected_paths = {
         r"/codewire\.v1\.EnvironmentSessionService/",
+        r"/codewire\.v1\.HostAgentService/",
         r"/codewire\.v1\.CredentialDelegationService/",
     }
-    if len(paths) != 2 or set(paths) != expected_paths:
-        fail(f"{label}: native-bidi ingress must share only the two exact session/delegation paths")
+    if len(paths) != 3 or set(paths) != expected_paths:
+        fail(
+            f"{label}: native-bidi ingress must share only the exact session, host-agent "
+            "and delegation paths"
+        )
     flat = re.sub(r"\s+", " ", document)
     for service, backend, port in [
         ("EnvironmentSessionService", "codewire-orchestration-grpc", "grpc"),
+        ("HostAgentService", "codewire-orchestration-grpc", "grpc"),
         ("CredentialDelegationService", "codewire-credential-service", "http"),
     ]:
         expected = (
@@ -615,7 +621,8 @@ def credential_delegation_edges_self_test(per_file: dict[str, dict[str, Any]]) -
                 ('proxy-read-timeout: "3600"', 'proxy-read-timeout: "30"', "proxy-read-timeout must be 3600"),
                 ('proxy-send-timeout: "3600"', 'proxy-send-timeout: "30"', "proxy-send-timeout must be 3600"),
                 (r"/codewire\.v1\.EnvironmentSessionService/", r"/codewire\.v1\.CredentialMutationService/", "EnvironmentSessionService Ingress"),
-                (r"/codewire\.v1\.CredentialDelegationService/", r"/codewire\.v1\.CredentialService/", "share only the two exact"),
+                (r"/codewire\.v1\.CredentialDelegationService/", r"/codewire\.v1\.CredentialService/", "share only the exact"),
+                (r"/codewire\.v1\.HostAgentService/", r"/codewire\.v1\.HostService/", "share only the exact"),
             ]
         for before, after, wanted in mutations:
             if before not in scope:
@@ -1922,15 +1929,19 @@ def assert_native_grpc_opt_in_sites(
     expected = {
         "crates/codewire-coordinator/src/connect.rs": 1,
         "crates/codewire-mesh/src/server.rs": 1,
-        "crates/codewire-orchestration/src/main.rs": 1,
+        # EnvironmentSessionService and HostAgentService (#3609).
+        "crates/codewire-orchestration/src/main.rs": 2,
         "crates/codewire-credential-service/src/delegation/wire.rs": 1,
     }
     actual: dict[str, int] = {}
     for rel_path in git_source_files() if sources is None else sources:
+        # Test-only modules (`tests.rs`, `*_tests.rs`, `tests/`) mount
+        # routers to exercise them and serve nothing.
         if (
             not rel_path.endswith(".rs")
             or "/tests/" in rel_path
             or rel_path.endswith("/tests.rs")
+            or rel_path.endswith("_tests.rs")
         ):
             continue
         if rel_path == "crates/codewire-server-core/src/connect.rs":
@@ -1941,7 +1952,8 @@ def assert_native_grpc_opt_in_sites(
     if actual != expected:
         fail(
             "native-gRPC policy opt-ins must be exactly CoordinatorService, "
-            "MeshCoordinatorService, EnvironmentSessionService, and the isolated CredentialDelegationService: "
+            "MeshCoordinatorService, EnvironmentSessionService, HostAgentService, and the isolated "
+            "CredentialDelegationService: "
             f"got {actual}, want {expected}"
         )
 
@@ -1958,6 +1970,7 @@ def native_grpc_opt_in_sites_self_test() -> None:
     for path in [
         "crates/codewire-credential-service/src/delegation/wire/lifetime/tests.rs",
         "crates/codewire-credential-service/src/delegation/authority/tests/public_wire.rs",
+        "crates/codewire-orchestration/src/connect/host_agent/database_tests.rs",
     ]:
         with_tests[path] = "ProtocolPolicy::ConnectAndGrpc"
     failures: list[str] = []

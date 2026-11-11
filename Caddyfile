@@ -82,6 +82,14 @@ codewire.localhost {
 			}
 		}
 	}
+	# Host sessions (#3609) are the hosts' native bidi stream to orchestration.
+	handle /codewire.v1.HostAgentService/* {
+		reverse_proxy localhost:8084 {
+			transport http {
+				versions h2c 2
+			}
+		}
+	}
 
 	# Everything else lands on orchestration (the Connect twin of the
 	# /api/* fallback below), so an unmatched RPC path

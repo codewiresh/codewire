@@ -829,6 +829,13 @@ async fn main() -> anyhow::Result<()> {
             codewire_orchestration::connect::file::router(api_state.clone()),
             connect_auth,
         )
+        // The host session (#3609) authenticates the host by its key inside
+        // the stream, so it takes no user credential at the HTTP layer. Its
+        // public CLI edge is native gRPC, like EnvironmentSessionService.
+        .with_connect_routes_and_protocol_policy(
+            codewire_orchestration::connect::host_agent::router(api_state.pool.clone()),
+            codewire_server_core::connect::ProtocolPolicy::ConnectAndGrpc,
+        )
         // Connect conformance probe (doc 03 D8) — no-op unless
         // CONNECT_TESTING_SURFACE=1 (dev-stack/CI/kind only).
         .with_connect_testing_surface(auth.clone())
