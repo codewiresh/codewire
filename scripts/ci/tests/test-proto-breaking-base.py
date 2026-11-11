@@ -87,6 +87,43 @@ class GitFixture(unittest.TestCase):
 
 
 class ResolverTests(GitFixture):
+    def test_a_head_that_predates_a_new_main_proto_does_not_delete_it(self):
+        """#4178: main adds a proto after a pull request branched; against
+        main's tip the head looks like it deletes it, against the merge base
+        it changes nothing."""
+        source = self.work / "source"
+        source.mkdir()
+        self.git(source, "init", "-q", "-b", "main")
+        schemas = source / "proto/codewire/v1"
+        schemas.mkdir(parents=True)
+        (schemas / "fixture.proto").write_text('syntax = "proto3";\npackage codewire.v1;\n')
+        ledger = source / "scripts/checks/contracts/proto-breaking-preimages.sha256"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text("# synthetic immutable preimage ledger\n")
+        self.git(source, "add", "proto", "scripts")
+        self.git(source, "commit", "-qm", "synthetic branch point")
+        branch_point = self.git(source, "rev-parse", "HEAD").stdout.strip()
+        (schemas / "host.proto").write_text('syntax = "proto3";\npackage codewire.v1;\n')
+        self.git(source, "add", "proto")
+        self.git(source, "commit", "-qm", "synthetic main adds a proto")
+        main_tip = self.git(source, "rev-parse", "HEAD").stdout.strip()
+        self.git(source, "checkout", "-q", "--detach", branch_point)
+        for name, value in (("ROOT", source), ("PREIMAGES", ledger)):
+            patch = mock.patch.object(policy, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+        self.assertEqual(policy.merge_base_of_head(main_tip), branch_point)
+        self.assertIn("proto/codewire/v1/host.proto", policy.changed_proto_digests(main_tip, "D"))
+        self.assertEqual(policy.changed_proto_digests(branch_point, "D"), {})
+        with mock.patch.dict(os.environ, {"BUF": ""}), \
+                mock.patch.object(policy.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(policy.PolicyError, "unreviewed proto deletion"):
+                policy.run_breaking(main_tip)
+            # Past the deletion review, only the missing buf stops it.
+            with self.assertRaisesRegex(policy.PolicyError, "buf executable not found"):
+                policy.run_breaking(main_tip, merge_base=True)
+
     def test_fixture_commits_start_no_background_maintenance(self):
         self.graph()
         self.assertEqual(self.git(self.work / "source", "config", "--get", "maintenance.auto")

@@ -176,7 +176,8 @@ ensure_buf() {
 }
 proto_lint() { (cd proto && buf lint); }
 proto_breaking() {
-  BUF="$(command -v buf)" python3 scripts/checks/proto_breaking.py --base-sha "$BASE"
+  # The branch is compared with where it left the base, not its tip (#4178).
+  BUF="$(command -v buf)" python3 scripts/checks/proto_breaking.py --base-sha "$BASE" --merge-base
 }
 if [ "$proto_changed" = true ]; then
   step proto-buf ensure_buf

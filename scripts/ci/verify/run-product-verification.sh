@@ -966,7 +966,11 @@ run_contracts_proto() {
   )
   python3 scripts/checks/proto_breaking.py --self-test
   BUF="$(command -v buf)" python3 scripts/ci/tests/test-proto-breaking-base.py BufPreimageTests
-  BUF="$(command -v buf)" python3 scripts/checks/proto_breaking.py --base-sha "$base_sha"
+  # A pull request is compared with where it left main, not main's tip (#4178).
+  local merge_base=()
+  [ -z "${VERIFICATION_PR_BASE_SHA:-}" ] || merge_base=(--merge-base)
+  BUF="$(command -v buf)" python3 scripts/checks/proto_breaking.py --base-sha "$base_sha" \
+    ${merge_base[@]+"${merge_base[@]}"}
   (
     cd proto
     rm -rf \

@@ -158,6 +158,20 @@ def resolve_base(base_sha: str) -> str:
     return base_sha
 
 
+def merge_base_of_head(base_sha: str) -> str:
+    """Where HEAD's history left `base_sha`'s: a pull request changes the
+    protobufs relative to it, not to a main tip that moved on after the branch
+    point (#4178). A head that predates a proto added to main does not delete it."""
+    result = subprocess.run(
+        ["git", "merge-base", "HEAD", base_sha],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    merge_base = result.stdout.strip()
+    if result.returncode != 0 or COMMIT_RE.fullmatch(merge_base) is None:
+        raise PolicyError(f"HEAD shares no history with the protobuf base {base_sha}")
+    return merge_base
+
+
 def changed_proto_digests(base_sha: str, diff_filter: str) -> dict[str, str]:
     paths = git_output(
         "diff",
@@ -195,8 +209,10 @@ def base_preimages(base_sha: str) -> set[Preimage]:
     return parse_preimages(git_output("show", f"{base_sha}:{relative}"))
 
 
-def run_breaking(base_sha: str) -> None:
+def run_breaking(base_sha: str, merge_base: bool = False) -> None:
     resolved_base = resolve_base(base_sha)
+    if merge_base:
+        resolved_base = merge_base_of_head(resolved_base)
     current_preimages = parse_preimages(PREIMAGES.read_text(encoding="utf-8"))
     historical_preimages = base_preimages(resolved_base)
     deleted = changed_proto_digests(resolved_base, "D")
@@ -390,6 +406,9 @@ def self_test() -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-sha")
+    # A pull request, or a branch about to be pushed, is compared with where
+    # it left the base's history; a main push keeps its exact previous tip.
+    parser.add_argument("--merge-base", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     try:
@@ -398,7 +417,7 @@ def main() -> int:
         else:
             if not args.base_sha:
                 parser.error("--base-sha is required unless --self-test is used")
-            run_breaking(args.base_sha)
+            run_breaking(args.base_sha, merge_base=args.merge_base)
             buf = os.environ.get("BUF") or shutil.which("buf")
             if not buf:
                 raise PolicyError("buf executable not found")
