@@ -97,6 +97,7 @@ use crate::supervisor_metadata::{
     validate_host_ports_for_project, validate_mesh_for_project, validate_project_intent,
     workspace_storage_generation,
 };
+pub use crate::supervisor_store::{IndexedEnvironment, read_environment_index};
 use crate::supervisor_store::{
     OperationKind, OperationPhase, OperationRecord, SupervisorOperationReader, SupervisorStore,
     SupervisorStoreError,

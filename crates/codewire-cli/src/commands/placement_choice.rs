@@ -21,9 +21,16 @@ pub(crate) enum LocalAnswer<T> {
 }
 
 impl LocalAnswer<codewire_local_vmm::control::v1::Environment> {
-    /// Asks the local VM supervisor for `target_ref`, keeping a failure as
-    /// an answer instead of ending the lookup.
+    /// Asks the local VMs for `target_ref`, keeping a failure as an answer
+    /// instead of ending the lookup. Only a name they hold reaches their
+    /// supervisor, which may start then; any other name starts nothing
+    /// (#4156).
     pub(crate) async fn ask(target_ref: &str) -> Self {
+        match local_environment_named(target_ref).await {
+            Ok(true) => {}
+            Ok(false) => return Self::Absent,
+            Err(error) => return Self::Unavailable(error),
+        }
         match native_environment(target_ref).await {
             Ok(Some(environment)) => Self::Found(environment),
             Ok(None) => Self::Absent,

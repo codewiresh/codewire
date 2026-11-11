@@ -1742,6 +1742,47 @@ pub(crate) fn print_native_orphan_report(
     Ok(())
 }
 
+/// Whether `target_ref` names a local VM, decided without starting their
+/// supervisor (#4156): a lookup of a cloud name must never start one on this
+/// user's state. The supervisor's state database is read read-only; only when
+/// that read fails is a supervisor that already runs asked. A database this
+/// cw does not know is an error, never a reason to start one.
+pub(crate) async fn local_environment_named(target_ref: &str) -> anyhow::Result<bool> {
+    local_environment_named_at(&native_runtime_config()?, target_ref).await
+}
+
+pub(crate) async fn local_environment_named_at(
+    config: &NativeRuntimeConfig,
+    target_ref: &str,
+) -> anyhow::Result<bool> {
+    let Some(target_ref) = trimmed_str(target_ref) else {
+        return Ok(false);
+    };
+    let named = |id: &str, name: &str| match uuid::Uuid::parse_str(target_ref) {
+        Ok(wanted) => id == wanted.to_string(),
+        Err(_) => name == target_ref,
+    };
+    let read = match codewire_local_vmm::supervisor::read_environment_index(&config.root) {
+        Ok(index) => {
+            return Ok(index
+                .unwrap_or_default()
+                .iter()
+                .any(|environment| named(&environment.id, &environment.name)));
+        }
+        Err(read) => read,
+    };
+    let Ok(mut client) = NativeSupervisorClient::connect_runtime(config).await else {
+        return Err(anyhow::Error::new(read)
+            .context("the local VMs' names could not be read without starting their supervisor"));
+    };
+    Ok(client
+        .list()
+        .await
+        .context("ask the running local VM supervisor for its VMs")?
+        .iter()
+        .any(|environment| named(&environment.id, &environment.name)))
+}
+
 pub(crate) async fn native_environment(name: &str) -> anyhow::Result<Option<v1::Environment>> {
     let name = match trimmed_str(name) {
         Some(name) => name,
@@ -4427,6 +4468,90 @@ fn native_status(status: tonic::Status) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A native runtime whose state root is `root`, as a cw run with
+    /// CODEWIRE_NATIVE_STATE_ROOT sees it.
+    fn runtime_at(root: &Path) -> NativeRuntimeConfig {
+        NativeRuntimeConfig {
+            root: root.to_owned(),
+            artifact_root: root.join("artifacts"),
+            artifact_lock: root.join("artifacts.lock.json"),
+            mesh_data_dir: root.join("mesh"),
+            platform_config_dir: root.join("platform"),
+            credential_authority_root: root.join("credentials"),
+            executable: PathBuf::from("/usr/bin/cw"),
+        }
+    }
+
+    /// A name lookup never starts the local VM supervisor (#4156): with no
+    /// local state a name is not local, and nothing is created.
+    #[tokio::test]
+    async fn a_name_lookup_without_local_state_is_not_local_and_creates_nothing() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("native-v1");
+        let config = runtime_at(&root);
+        assert!(
+            !local_environment_named_at(&config, "cloud-env")
+                .await
+                .unwrap()
+        );
+        assert!(!root.exists(), "the lookup created the native state root");
+    }
+
+    /// State the lookup cannot read, with no supervisor running, is an
+    /// error that says so; it never starts one to ask (#4156).
+    #[tokio::test]
+    async fn unreadable_local_state_is_an_error_and_never_starts_a_supervisor() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Private, as the supervisor requires, so a start would really run.
+        let parent = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = parent.path().join("native-v1");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let database = root.join("supervisor.db");
+        std::fs::write(&database, b"not a sqlite database").unwrap();
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // The executable a supervisor would be started from records any start.
+        let started = parent.path().join("started");
+        let executable = parent.path().join("cw");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\ntouch '{}'\n", started.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = NativeRuntimeConfig {
+            executable,
+            ..runtime_at(&root)
+        };
+
+        let error = local_environment_named_at(&config, "cloud-env")
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains(
+                "the local VMs' names could not be read without starting their supervisor"
+            ),
+            "{error:#}"
+        );
+        assert!(!started.exists(), "the lookup started a supervisor");
+        assert!(
+            !config.supervisor_socket().exists(),
+            "the lookup left a supervisor socket"
+        );
+        let entries: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            ["supervisor.db"],
+            "the lookup wrote into the state root"
+        );
+    }
 
     /// The plan from `dir`'s own codewire.yaml, or from no file.
     fn yaml_in(dir: &Path) -> anyhow::Result<NativeProjectPlan> {

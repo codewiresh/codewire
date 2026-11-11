@@ -306,8 +306,11 @@ pub(crate) async fn resolve_host_reference(
     if requested == host.id {
         return Ok(Some(host));
     }
+    // Only a name the local VMs hold reaches their supervisor (#4156).
     #[cfg(target_os = "linux")]
-    if let Some(native) = native_environment(requested).await? {
+    if local_environment_named(requested).await?
+        && let Some(native) = native_environment(requested).await?
+    {
         anyhow::bail!(
             "local environment name {requested:?} is ambiguous between host {} and sandbox {}; use an exact environment ID",
             host.id,

@@ -814,6 +814,59 @@ impl SupervisorStore {
     }
 }
 
+/// One local VM as the supervisor's state database names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedEnvironment {
+    pub id: String,
+    pub name: String,
+}
+
+/// The local VMs' IDs and names, read from the state database with no
+/// supervisor (#4156), so that a name lookup finds a stopped local VM without
+/// starting one. SQLite is the supervisor's sole authority. The read is
+/// read-only and query-only with no busy wait: it never writes, never waits on
+/// the supervisor and never takes the writer. A database of a schema this cw
+/// does not know is refused, never read. `None` when the root holds no
+/// database.
+pub fn read_environment_index(
+    root: &Path,
+) -> Result<Option<Vec<IndexedEnvironment>>, SupervisorStoreError> {
+    let root = match PrivateRoot::open(root) {
+        Ok(root) => root,
+        Err(error) if path_error_is_not_found(&error) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let relative = Path::new(DATABASE_FILE);
+    let opened = match root.open_regular(relative, false, None, false, Some(0o600)) {
+        Ok(opened) => opened,
+        Err(error) if path_error_is_not_found(&error) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let identity = opened.identity().clone();
+    drop(opened);
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let connection = Connection::open_with_flags(root.path().join(relative), flags)?;
+    connection.busy_timeout(Duration::ZERO)?;
+    connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    connection.pragma_update(None, "query_only", true)?;
+    connection.pragma_update(None, "trusted_schema", false)?;
+    validate_readable_schema(&connection)?;
+    let environments = connection
+        .prepare("SELECT id, name FROM environments ORDER BY name")?
+        .query_map([], |row| {
+            Ok(IndexedEnvironment {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let reopened = root.open_regular(relative, false, None, false, Some(0o600))?;
+    if reopened.identity() != &identity {
+        return Err(SupervisorStoreError::DatabaseIdentityChanged);
+    }
+    Ok(Some(environments))
+}
+
 impl SupervisorOperationReader {
     pub(crate) fn open(root: &PrivateRoot) -> Result<Self, SupervisorStoreError> {
         let relative = Path::new(DATABASE_FILE);
@@ -2115,6 +2168,48 @@ mod tests {
         value.as_object_mut().unwrap().remove("artifact_generation");
 
         assert!(serde_json::from_value::<RunnerRecord>(value).is_err());
+    }
+
+    #[test]
+    fn the_environment_index_names_stopped_vms_without_a_supervisor_and_writes_nothing() {
+        let (_parent, root) = root();
+        assert_eq!(read_environment_index(root.path()).unwrap(), None);
+        // A VM saved before the supervisor ended, as after a reboot (#4156).
+        let stopped = environment(StoredEnvironmentState::Stopped, None);
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        store.replace_state(&state(stopped.clone())).unwrap();
+        drop(store);
+        let database = root.path().join(DATABASE_FILE);
+        let before = fs::read(&database).unwrap();
+        assert_eq!(
+            read_environment_index(root.path()).unwrap(),
+            Some(vec![IndexedEnvironment {
+                id: stopped.id.to_string(),
+                name: "dev".to_owned(),
+            }])
+        );
+        assert_eq!(
+            fs::read(&database).unwrap(),
+            before,
+            "the index read wrote the database"
+        );
+
+        // The read still answers while a writer holds the database.
+        let writer = Connection::open(&database).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(read_environment_index(root.path()).unwrap().is_some());
+        writer.execute_batch("ROLLBACK").unwrap();
+
+        // A schema this cw does not know is refused, never read.
+        writer.pragma_update(None, "user_version", 99_i64).unwrap();
+        drop(writer);
+        assert!(matches!(
+            read_environment_index(root.path()),
+            Err(SupervisorStoreError::UnsupportedSchema {
+                schema_version: 99,
+                ..
+            })
+        ));
     }
 
     fn state(environment: EnvironmentRecord) -> SupervisorState {

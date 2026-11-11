@@ -240,9 +240,10 @@ pub(crate) async fn handle_logs(globals: &Globals, args: LogsArgs) -> anyhow::Re
     // Without a placement, a local VM's name is answered as local rather
     // than looked up, and missed, in the cloud. Only the cloud keeps setup
     // logs, so a local supervisor that cannot be asked leaves the lookup to
-    // the cloud (#3560).
+    // the cloud (#3560). Asking never starts their supervisor (#4156).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if globals.placement.is_none() && matches!(native_environment(&environment).await, Ok(Some(_)))
+    if globals.placement.is_none()
+        && matches!(local_environment_named(&environment).await, Ok(true))
     {
         anyhow::bail!(
             "{environment} is a local VM, whose setup shows as `cw start` or `cw create` runs; setup logs are kept for cloud environments (`cw --cloud logs {environment} --setup`)"
