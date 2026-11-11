@@ -36,6 +36,10 @@ TARGETS = (release.RUNTIME_TARGET, "aarch64-unknown-linux-musl")
 # Files Cargo itself keeps in its home: package-cache locks and the cache
 # tracker used for automatic cleanup.
 CARGO_BOOKKEEPING = (".global-cache", ".package-cache", ".package-cache-mutate")
+# A hang guard, not a timing assertion: a cold build takes 758-821 s on an idle
+# 16-core workstation and longer under load, so the bound sits well above any
+# working build and stops only a stuck one (#3760).
+BUILD_HANG_GUARD_SECONDS = 3600
 
 
 def bounded_build(command, environment, output, timeout):
@@ -152,7 +156,7 @@ def main():
                "--target", args.target, "-p", "codewire-cli-bin", "--bin", "cw"]
     log = args.output / "build.log"
     with log.open("wb") as output:
-        exit_code = bounded_build(command, environment, output, 1200)
+        exit_code = bounded_build(command, environment, output, BUILD_HANG_GUARD_SECONDS)
     if exit_code:
         raise RuntimeError(f"static cw build exit{exit_code}; inspect {log}")
     binary = target_dir / args.target / "ci/cw"

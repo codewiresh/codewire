@@ -587,6 +587,19 @@ class SourceDigestTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, f"needs {gcc}, or cargo-zigbuild and zig"):
                         native.compiler_route(target, path, home)
 
+    def test_native_managed_build_bound_is_a_hang_guard(self):
+        spec = importlib.util.spec_from_file_location(
+            "build_native_managed_agent", ROOT / "scripts/dev/build-native-managed-agent.py")
+        native = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native)
+        # The slowest cold build measured on an idle 16-core workstation (#3760).
+        measured_idle_seconds = 821
+        self.assertGreaterEqual(native.BUILD_HANG_GUARD_SECONDS, 3 * measured_idle_seconds,
+                                "the compile bound must stop a stuck build, not a slow one")
+        source = (ROOT / "scripts/dev/build-native-managed-agent.py").read_text()
+        self.assertIn("bounded_build(command, environment, output, BUILD_HANG_GUARD_SECONDS)",
+                      source, "the build must use the named hang guard")
+
     def test_native_managed_build_reuses_one_public_cargo_home_per_target(self):
         spec = importlib.util.spec_from_file_location(
             "build_native_managed_agent", ROOT / "scripts/dev/build-native-managed-agent.py")
