@@ -1149,6 +1149,14 @@ mod tests {
         wrappers::{ReceiverStream, TcpListenerStream},
     };
     use tonic::metadata::{Ascii, MetadataValue};
+
+    /// Bounds writing a test transcript through the real append path, so a
+    /// hang fails instead of stalling the run. Each 32 KiB frame is synced to
+    /// disk, so a 9 MiB transcript is hundreds of syncs, and a contended CI
+    /// disk can take seconds for them all (main CI, 2026-11-11: 30 s ran out
+    /// before any attach control was tested). It is never the expected
+    /// duration; what these tests time is the controls after it.
+    const TRANSCRIPT_HANG: Duration = Duration::from_secs(300);
     use tonic::service::Interceptor;
     use tonic::service::interceptor::InterceptedService;
     use tonic::transport::Channel;
@@ -2284,7 +2292,8 @@ mod tests {
         let (temp, engine) = attach_engine();
         let session = engine.launch(v1::LaunchSessionRequest {
             command: vec!["sh".into(), "-c".into(),
-                "stty -echo; printf ready > attach-ready; IFS= read -r line; printf '%s' \"$line\" > attach-input; stty size > attach-size; exec sleep 30".into()],
+                 // The shell outlives TRANSCRIPT_HANG; the test stops it.
+                "stty -echo; printf ready > attach-ready; IFS= read -r line; printf '%s' \"$line\" > attach-input; stty size > attach-size; exec sleep 600".into()],
             pty: true,
             term: "xterm-256color".into(),
             width: 80,
@@ -2295,7 +2304,7 @@ mod tests {
         // Prepare the full production-sized transcript deterministically. This
         // is disk setup, not part of what the controls below prove.
         tokio::time::timeout(
-            Duration::from_secs(30),
+            TRANSCRIPT_HANG,
             engine.append_test_output(&session.session_id, &vec![0; output_bytes as usize]),
         )
         .await
@@ -2423,7 +2432,8 @@ mod tests {
         let (temp, engine) = attach_engine();
         let session = engine.launch(v1::LaunchSessionRequest {
             command: vec!["sh".into(), "-c".into(),
-                "stty -echo; printf ready > attach-ready; IFS= read -r line; printf '%s' \"$line\" > later-gap-input; exec sleep 60".into()],
+                 // The shell outlives TRANSCRIPT_HANG; the test stops it.
+                "stty -echo; printf ready > attach-ready; IFS= read -r line; printf '%s' \"$line\" > later-gap-input; exec sleep 600".into()],
             pty: true,
             term: "xterm-256color".into(),
             width: 80,
@@ -2432,7 +2442,7 @@ mod tests {
         }).await.unwrap();
         wait_attach_fixture_ready(&temp, &engine, &session.session_id).await;
         tokio::time::timeout(
-            Duration::from_secs(30),
+            TRANSCRIPT_HANG,
             engine.append_test_output(&session.session_id, &vec![0; 262144]),
         )
         .await
@@ -2479,7 +2489,7 @@ mod tests {
         .expect("input is consumed while replay is blocked");
         assert_eq!(capacity.capacity(), 0);
         tokio::time::timeout(
-            Duration::from_secs(30),
+            TRANSCRIPT_HANG,
             engine.append_test_output(&session.session_id, &vec![0; 9437184]),
         )
         .await
