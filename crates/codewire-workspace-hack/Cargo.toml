@@ -277,6 +277,7 @@ tungstenite = { version = "0.28.0", default-features = false, features = ["__rus
 typenum = { version = "1.20.1", default-features = false, features = ["const-generics"] }
 url = { version = "2.5.8" }
 uuid = { version = "1.23.2", features = ["serde", "v4"] }
+winnow-ca01ad9e24f5d932 = { package = "winnow", version = "0.7.15" }
 zeroize = { version = "1.9.0", features = ["aarch64", "serde", "zeroize_derive"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
@@ -297,7 +298,7 @@ toml_datetime = { version = "1.1.1", features = ["serde"] }
 toml_parser = { version = "1.1.2" }
 tower = { version = "0.5.3", default-features = false, features = ["timeout"] }
 tower-http = { version = "0.6.11", default-features = false, features = ["follow-redirect"] }
-winnow = { version = "1.0.3" }
+winnow-dff4ba8e3ae991db = { package = "winnow", version = "1.0.3" }
 zeroize = { version = "1.9.0", default-features = false, features = ["derive"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
@@ -316,7 +317,7 @@ toml_datetime = { version = "1.1.1", features = ["serde"] }
 toml_parser = { version = "1.1.2" }
 tower = { version = "0.5.3", default-features = false, features = ["timeout"] }
 tower-http = { version = "0.6.11", default-features = false, features = ["follow-redirect"] }
-winnow = { version = "1.0.3" }
+winnow-dff4ba8e3ae991db = { package = "winnow", version = "1.0.3" }
 zeroize = { version = "1.9.0", default-features = false, features = ["derive"] }
 
 [target.aarch64-apple-darwin.dependencies]

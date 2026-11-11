@@ -246,6 +246,12 @@ fan-out where a service needs it.
 | Guest daemon | the same crates | The daemon inside a local VM, from the runtime pack the release pins. |
 | Release identity | `crates/codewire-cw-release` | The immutable version store behind the managed installation and `cw upgrade` ([docs/dev/CLI-MANAGED-INSTALL.md](docs/dev/CLI-MANAGED-INSTALL.md)). |
 
+### Native apps
+
+| Component | Crate | Role |
+| --- | --- | --- |
+| iOS shell connection | `crates/codewire-client-ffi` | The iOS app's shell: `codewire-client`'s hosted shell, the loop `cw shell` runs, behind UniFFI bindings for Swift (#3825). |
+
 ### Local VM runtime
 
 | Component | Crate | Role |

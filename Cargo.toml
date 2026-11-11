@@ -7,6 +7,7 @@ members = [
     "crates/codewire-admin-proto",
     "crates/codewire-billing",
     "crates/codewire-client",
+    "crates/codewire-client-ffi",
     "crates/codewire-dashboard-web",
     "crates/codewire-coordinator",
     "crates/codewire-daemon",
@@ -62,6 +63,7 @@ authors = ["Sonica"]
 # Internal crates
 codewire-access = { path = "crates/codewire-access" }
 codewire-client = { path = "crates/codewire-client" }
+codewire-client-ffi = { path = "crates/codewire-client-ffi" }
 codewire-types = { path = "crates/codewire-types" }
 codewire-workspace-image = { path = "crates/codewire-workspace-image" }
 codewire-server-core = { path = "crates/codewire-server-core" }

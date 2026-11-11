@@ -1,0 +1,22 @@
+[package]
+name = "codewire-client-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-only"
+description = "The iOS app's shell connection: codewire-client's hosted shell behind a UniFFI surface (#3825)."
+
+[lib]
+# staticlib links into the iOS app; lib serves the host tests.
+crate-type = ["lib", "staticlib"]
+
+[dependencies]
+anyhow = { workspace = true }
+codewire-client = { workspace = true, features = ["tailnet-session"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uniffi = { version = "=0.31.1", default-features = false }
+
+[dev-dependencies]
+codewire-workspace-hack.workspace = true
