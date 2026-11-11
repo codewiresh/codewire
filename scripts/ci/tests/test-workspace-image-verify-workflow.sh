@@ -32,7 +32,8 @@ for generated_python in '**/__pycache__' '**/*.pyc' '**/*.pyo'; do
     fail "generated Python exclusion is overridden by a later Docker context re-inclusion: $generated_python"
 done
 # Exactly the jobs that build the base or workspace image set the apt snapshot
-# cache, at job level, on the heavy or protected pools, with one exact value.
+# cache, at job level, on the heavy or protected pools, with one exact value
+# each.
 python3 - "$ROOT/.gitea/workflows" <<'PY' || fail 'apt snapshot cache is not scoped to base/workspace image builders'
 import pathlib
 import re
@@ -41,6 +42,9 @@ import sys
 import yaml
 
 MIRROR = "http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080"
+# The arm64 support legs build on the remote ci-arm64-builder node outside the
+# cluster and read the same cache on its one admitted Tailnet front-door port.
+TAILNET_MIRROR = "http://10.47.0.10:8080"
 NAME = "CODEWIRE_APT_SNAPSHOT_MIRROR"
 BUILDER = re.compile(
     r"verify-workspace-image\.sh|build-push-image\.sh (base|workspace) "
@@ -54,19 +58,18 @@ import ci_runner_fixtures as runners  # noqa: E402
 # sized metal Heavy and Medium guests carry the heavy pool's policy, and the
 # trusted light runner is the protected pool.
 CACHE_RUNNERS = {runners.KIND, runners.HEAVY, runners.MEDIUM, runners.TRUSTED_LIGHT}
-# Jobs that call an image builder without the cache: the arm64 support legs
-# build on the remote ci-arm64-builder node outside the cluster, and the
-# support join only assembles the two platform digests. A release's own pair
+# The one job that calls an image builder without the cache: the support join
+# only assembles the two platform digests. A release's own pair
 # (deploy-prod.yaml) builds exactly as support-images does.
 CANONICAL = {
-    "deploy-prod.yaml:build-support-arm64",
-    "support-images.yaml:build-support-arm64",
     "support-images.yaml:publish-support-images",
 }
 EXPECTED = {
-    "ci.yaml:kind-workspace",
-    "deploy-prod.yaml:build-support-amd64",
-    "support-images.yaml:build-support-amd64",
+    "ci.yaml:kind-workspace": MIRROR,
+    "deploy-prod.yaml:build-support-amd64": MIRROR,
+    "deploy-prod.yaml:build-support-arm64": TAILNET_MIRROR,
+    "support-images.yaml:build-support-amd64": MIRROR,
+    "support-images.yaml:build-support-arm64": TAILNET_MIRROR,
 }
 builders, configured = set(), set()
 for path in sorted(pathlib.Path(sys.argv[1]).glob("*.y*ml")):
@@ -83,15 +86,16 @@ for path in sorted(pathlib.Path(sys.argv[1]).glob("*.y*ml")):
         if BUILDER.search("\n".join(str(step.get("run", "")) for step in steps)):
             builders.add(key)
         if NAME in (job.get("env") or {}):
-            if job["env"][NAME] != MIRROR:
+            if job["env"][NAME] != EXPECTED.get(key):
                 raise SystemExit(f"{key}: unexpected apt snapshot cache value")
             if job.get("runs-on") not in CACHE_RUNNERS:
                 raise SystemExit(f"{key}: apt snapshot cache set outside the heavy and protected pools")
             configured.add(key)
             file_jobs += 1
-    if text.count(NAME) != file_jobs or text.count("apt-snapshot-cache.") != file_jobs:
+    if text.count(NAME) != file_jobs or (
+            text.count("apt-snapshot-cache.") + text.count(TAILNET_MIRROR) != file_jobs):
         raise SystemExit(f"{path.name}: the apt snapshot cache appears outside job env")
-if builders != EXPECTED | CANONICAL or configured != EXPECTED:
+if builders != set(EXPECTED) | CANONICAL or configured != set(EXPECTED):
     raise SystemExit(f"builders={sorted(builders)} configured={sorted(configured)}")
 PY
 grep -qF "trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification-plan.py'" \

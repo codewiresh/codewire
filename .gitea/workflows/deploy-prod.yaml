@@ -305,8 +305,7 @@ jobs:
       workspace_digest: ${{ steps.contract.outputs.workspace_digest }}
     env:
       # In-cluster cache of the dated apt snapshots, passed to BuildKit as a
-      # secret. The arm64 leg builds on the remote node and keeps the
-      # canonical snapshots.
+      # secret. The arm64 leg reads the same cache over the Tailnet.
       CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
       # amd64 builds on the trusted BuildKit builder and fails fast when it is
       # unreachable; only the owner's in_job_build dispatch builds it here.
@@ -362,6 +361,15 @@ jobs:
     outputs:
       base_digest: ${{ steps.build.outputs.base_digest }}
       workspace_digest: ${{ steps.build.outputs.workspace_digest }}
+    env:
+      # The same apt snapshot cache as the amd64 leg, passed to BuildKit as a
+      # secret. The remote ci-arm64-builder node is outside the cluster, so it
+      # reaches the cache on the Tailnet front door, the one address and port
+      # its Tailnet identity is admitted to besides the registry. The cache
+      # keeps serving stored snapshots when upstream fails; APT still verifies
+      # each signed InRelease and every package hash, and falls back to the
+      # canonical snapshots when the cache is unavailable.
+      CODEWIRE_APT_SNAPSHOT_MIRROR: http://10.47.0.10:8080
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
