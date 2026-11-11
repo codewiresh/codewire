@@ -246,6 +246,80 @@ pub(crate) async fn send_access_request_received_email(
         .await
 }
 
+/// The notice an account's address gets when a provider is linked to it.
+/// `provider` is a fixed label ("GitHub", "Google"), never provider text.
+pub(crate) async fn send_provider_linked_email(
+    email: &EmailClient,
+    to: &str,
+    provider: &'static str,
+    settings_url: &str,
+) -> anyhow::Result<()> {
+    let html = format!(
+        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+	<h2>{provider} was linked to your Codewire account</h2>
+	<p>Someone signed in to Codewire with a {provider} account that has this verified email address, so it can now be used to sign in to your account. Your two-factor authentication still applies.</p>
+	<p>If this wasn't you, change your password and review your account's sessions.</p>
+	<p><a href="{settings_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 999px;">Review your account</a></p>
+</div>"#
+    );
+    email
+        .send_html(
+            to,
+            &format!("{provider} was linked to your Codewire account"),
+            &html,
+        )
+        .await
+}
+
+/// Escape text for an HTML email body.
+fn html_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+/// The one-time confirmation that links a provider identity to an existing
+/// account, sent to that account's own address. `provider` is a fixed label;
+/// `account` (a GitHub login or Google email) comes from the provider, so it
+/// is escaped and kept out of the subject.
+pub(crate) async fn send_provider_link_confirmation_email(
+    email: &EmailClient,
+    to: &str,
+    provider: &'static str,
+    account: &str,
+    confirm_url: &str,
+) -> anyhow::Result<()> {
+    let html = provider_link_confirmation_html(provider, account, confirm_url);
+    email
+        .send_html(
+            to,
+            &format!("Connect {provider} to your Codewire account"),
+            &html,
+        )
+        .await
+}
+
+fn provider_link_confirmation_html(provider: &str, account: &str, confirm_url: &str) -> String {
+    let account = html_text(account);
+    format!(
+        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+	<h2>Connect the {provider} account {account} to your Codewire account?</h2>
+	<p>Someone signed in to Codewire with the {provider} account <strong>{account}</strong>, which uses this email address. If that was you, open this link in the same browser and confirm, and that {provider} account will be able to sign in to your Codewire account:</p>
+	<p><a href="{confirm_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 999px;">Review and connect</a></p>
+	<p style="color: #666; font-size: 14px;">The link works once, only in the browser where you started signing in, and expires in 30 minutes. Your two-factor authentication still applies when you sign in. If you don't recognize {account}, ignore this email and nothing changes.</p>
+</div>"#
+    )
+}
+
 pub(crate) async fn send_access_enabled_email(
     email: &EmailClient,
     to: &str,
@@ -481,6 +555,21 @@ pub fn router(pool: PgPool, frontend_url: String, email: EmailClient, auth: Auth
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_confirmation_names_and_escapes_the_provider_account() {
+        let html = provider_link_confirmation_html(
+            "GitHub",
+            "octocat<script>",
+            "https://app.example/login/link?token=t",
+        );
+        assert!(html.contains(
+            "Connect the GitHub account octocat&lt;script&gt; to your Codewire account?"
+        ));
+        assert!(html.contains("<strong>octocat&lt;script&gt;</strong>"));
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("href=\"https://app.example/login/link?token=t\""));
+    }
 
     #[test]
     fn verification_digests_are_purpose_bound_and_value_blind() {

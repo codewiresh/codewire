@@ -1,6 +1,9 @@
 <!doctype html>
 {% let is_login = view.action == "/login/_actions/sign-in" %}
 {% let is_signup = view.action == "/signup/_actions/sign-up" %}
+{% let is_signup_complete = view.action == "/signup/complete/_actions/complete" %}
+{% let is_link_confirm = view.action == "/login/link/_actions/confirm" %}
+{% let has_turnstile = (is_signup || is_signup_complete) && !view.turnstile_site_key.is_empty() %}
 <html lang="en">
   <head>
     <meta charset="utf-8">
@@ -10,7 +13,7 @@
     <link rel="icon" href="/assets/codewire/brand-icon-v1.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/assets/codewire/design-v1.css">
     <link rel="stylesheet" href="/assets/codewire/routes/auth-v2.css">
-    {% if is_signup && !view.turnstile_site_key.is_empty() %}
+    {% if has_turnstile %}
     <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
     {% endif %}
   </head>
@@ -30,12 +33,20 @@
           {% else if is_signup %}
           <p class="cw-auth-switch">Already have an account? <a href="{{ view.secondary_url }}">Sign in.</a></p>
           {% endif %}
-          {% if !is_login && !is_signup %}
+          {% if is_signup_complete %}
+          <p class="cw-auth-copy">You're signing up with {{ view.identity_provider }} as <strong>{{ view.identity_account }}</strong>.</p>
+          {% else if is_link_confirm %}
+          <p class="cw-auth-copy">Connect the {{ view.identity_provider }} account <strong>{{ view.identity_account }}</strong> to your Codewire account?</p>
+          <p class="cw-auth-copy">{{ view.description }}</p>
+          {% else if !is_login && !is_signup %}
           <p class="cw-auth-copy">{{ view.description }}</p>
           {% endif %}
         </header>
         {% if !view.error.is_empty() %}
         <div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>
+        {% endif %}
+        {% if !view.notice.is_empty() %}
+        <div class="cw-alert cw-alert--info" role="status">{{ view.notice }}</div>
         {% endif %}
         <form class="cw-form" method="post" action="{{ view.action }}">
           <input type="hidden" name="_csrf" value="{{ view.csrf_token }}">
@@ -86,7 +97,7 @@
             <p class="cw-help">This helps us review your request.</p>
           </div>
           {% endif %}
-          {% if is_signup && !view.turnstile_site_key.is_empty() %}
+          {% if has_turnstile %}
           <div class="cw-field">
             <div class="cf-turnstile" data-sitekey="{{ view.turnstile_site_key }}" data-action="signup"></div>
           </div>
@@ -99,6 +110,16 @@
           {% endif %}
           <button class="cw-button cw-button--pill cw-button--large cw-auth-submit" type="submit">{{ view.submit_label }}</button>
         </form>
+        {% if !view.oauth_providers.is_empty() %}
+        <div class="cw-auth-alternatives">
+          <p class="cw-auth-divider">or</p>
+          <ul class="cw-auth-providers">
+            {% for provider in view.oauth_providers %}
+            <li><a class="cw-button cw-button--outline cw-button--pill cw-button--large" href="{{ provider.href }}"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#{{ provider.icon }}"/></svg><span>Continue with {{ provider.label }}</span></a></li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
         {% if !is_login && !is_signup && !view.secondary_label.is_empty() %}
         <p class="cw-auth-secondary"><a href="{{ view.secondary_url }}">{{ view.secondary_label }}</a></p>
         {% endif %}

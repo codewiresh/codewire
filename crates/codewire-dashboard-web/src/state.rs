@@ -25,6 +25,8 @@ pub(crate) struct AppState {
     pub(crate) stream_http: reqwest::Client,
     /// The sign-up credit the pricing page last read.
     pub(crate) signup_credit: std::sync::Arc<crate::billing_connect::SignupCreditCache>,
+    /// The sign-in providers the IdP last named.
+    pub(crate) oauth_providers: std::sync::Arc<crate::raw_auth::OAuthProvidersCache>,
 }
 
 impl AppState {
@@ -66,6 +68,7 @@ impl AppState {
                 .build()
                 .expect("static dashboard stream HTTP client configuration"),
             signup_credit: std::sync::Arc::default(),
+            oauth_providers: std::sync::Arc::default(),
         }
     }
 }

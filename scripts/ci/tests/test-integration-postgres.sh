@@ -952,6 +952,7 @@ service_lanes_case() {
     run_idp_two_factor() { suite idp_two_factor; }
     run_idp_session_inventory() { suite idp_session_inventory; }
     run_idp_rewrap_cli() { suite idp_rewrap_cli; }
+    run_idp_oauth_sign_in() { suite idp_oauth_sign_in; }
     run_connect_auth_matrix() { suite connect_auth; }
     run_billing() { suite billing; }
     run_billing_temporal() { suite billing_temporal; }
@@ -983,7 +984,7 @@ grep -qF '[product-integration] service lanes: 6 at a time: idp-two-factor idp-f
   { echo 'the six control-plane lanes did not run at the same time' >&2; exit 1; }
 service_lane_check full idp-two-factor 'postgres://codewire:codewire@codewire-integration-postgres:5432/codewire' idp_two_factor
 service_lane_check full idp-flow "$(service_lane_url idp-flow)" idp_flow
-service_lane_check full idp-sessions "$(service_lane_url idp-sessions)" 'idp_session_inventory idp_rewrap_cli'
+service_lane_check full idp-sessions "$(service_lane_url idp-sessions)" 'idp_session_inventory idp_rewrap_cli idp_oauth_sign_in'
 service_lane_check full connect-auth "$(service_lane_url connect-auth)" connect_auth
 service_lane_check full billing "$(service_lane_url billing)" 'billing billing_temporal'
 service_lane_check full coordinator "$(service_lane_url coordinator)" coordinator
@@ -1014,7 +1015,7 @@ if service_lanes_case failed "$full" idp_two_factor; then
 fi
 grep -qF '::error::service lane idp-two-factor failed' "$TMP/service-lanes-failed/out" ||
   { cat "$TMP/service-lanes-failed/out" >&2; echo 'the failed control-plane lane was not reported' >&2; exit 1; }
-[ "$(grep -c '^end ' "$TMP/service-lanes-failed/trace")" -eq 7 ] ||
+[ "$(grep -c '^end ' "$TMP/service-lanes-failed/trace")" -eq 8 ] ||
   { echo 'the other control-plane lanes did not run to their end' >&2; exit 1; }
 
 # Building archives on the build runner (database-archives and
@@ -1167,7 +1168,7 @@ grep -qF '::error::the server_core build batch failed' "$TMP/archive-build-datab
 
 EXPECTED_SERVICES_CONTROL_ARCHIVES='build --locked -p codewire-server-core --bin codewire-db-migrate
 build --locked -p codewire-idp -p codewire-coordinator -p codewire-billing
-nextest archive --locked -p codewire-idp --test db_flow --test session_inventory --test two_factor_replacement --test rewrap_cli --archive-file OUT/codewire-idp.tar.zst
+nextest archive --locked -p codewire-idp --test db_flow --test session_inventory --test two_factor_replacement --test rewrap_cli --test oauth_sign_in --archive-file OUT/codewire-idp.tar.zst
 nextest archive --locked -p codewire-coordinator --lib --test wire_contract --archive-file OUT/codewire-coordinator.tar.zst
 nextest archive --locked -p codewire-billing --test wire_contract --archive-file OUT/codewire-billing.tar.zst
 nextest archive --locked -p codewire-server-core --test connect_auth --archive-file OUT/codewire-server-core.tar.zst'
@@ -1182,7 +1183,7 @@ services_control/batch-billing:
 services_control/batch-coordinator:
   nextest archive --locked -p codewire-coordinator --lib --test wire_contract --archive-file OUT/codewire-coordinator.tar.zst
 services_control/batch-idp:
-  nextest archive --locked -p codewire-idp --test db_flow --test session_inventory --test two_factor_replacement --test rewrap_cli --archive-file OUT/codewire-idp.tar.zst' 4
+  nextest archive --locked -p codewire-idp --test db_flow --test session_inventory --test two_factor_replacement --test rewrap_cli --test oauth_sign_in --archive-file OUT/codewire-idp.tar.zst' 4
 for binary in codewire-db-migrate codewire-idp codewire-coordinator codewire-billing; do
   [ -x "$TMP/archive-build-control/out/$binary" ] ||
     { echo "the control-plane archive build did not keep $binary" >&2; exit 1; }

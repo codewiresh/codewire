@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="../../theme.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Finish creating your account · Codewire</title>
+    <link rel="icon" href="../../assets/brand-icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="../../styles.css">
+    <link rel="stylesheet" href="../../components.css">
+    <link rel="stylesheet" href="../../routes/auth.css">
+  </head>
+  <body class="cw-body cw-auth-body" data-route="auth">
+    <main class="cw-auth-shell">
+      <a class="cw-auth-brand" href="home.html" aria-label="Codewire home">
+        <img src="../../assets/brand-icon.svg" width="48" height="48" alt="Codewire">
+      </a>
+      <section class="cw-auth-panel" aria-labelledby="auth-title">
+        <header class="cw-auth-header">
+          <h1 id="auth-title" class="cw-page-title">Finish creating your account</h1>
+          <p class="cw-auth-copy">You're signing up with GitHub as <strong>ada@example.com</strong>.</p>
+        </header>
+        <form class="cw-form" method="post" action="/signup/complete/_actions/complete">
+          <div class="cw-field">
+            <label class="cw-label" for="invite-code">Invite code <span class="cw-muted">(optional)</span></label>
+            <input class="cw-input cw-input--mono cw-input--large" id="invite-code" name="invite_code" autocomplete="off">
+          </div>
+          <div class="cw-field">
+            <label class="cw-label" for="reason">What would you like to build?</label>
+            <textarea class="cw-textarea cw-auth-reason" id="reason" name="reason" rows="4" maxlength="2000" required></textarea>
+            <p class="cw-help">This helps us review your request.</p>
+          </div>
+          <button class="cw-button cw-button--pill cw-button--large cw-auth-submit" type="submit">Request access</button>
+        </form>
+        <p class="cw-auth-secondary"><a href="/signup">Use a different account</a></p>
+      </section>
+    </main>
+  </body>
+</html>

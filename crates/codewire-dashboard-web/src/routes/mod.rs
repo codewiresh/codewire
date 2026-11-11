@@ -65,6 +65,16 @@ pub(crate) fn router() -> Router<AppState> {
             "/signup/_actions/sign-up",
             post(authentication::signup_action),
         )
+        .route("/login/link", get(authentication::link_confirm))
+        .route(
+            "/login/link/_actions/confirm",
+            post(authentication::link_confirm_action),
+        )
+        .route("/signup/complete", get(authentication::signup_complete))
+        .route(
+            "/signup/complete/_actions/complete",
+            post(authentication::signup_complete_action),
+        )
         .route("/forgot-password", get(authentication::forgot_password))
         .route(
             "/forgot-password/_actions/request",

@@ -18,6 +18,16 @@ pub(crate) struct AuthQuery {
     pub(crate) token: String,
     #[serde(default)]
     pub(crate) user_code: String,
+    /// A fixed code the IdP sends a failed provider sign-in back with.
+    #[serde(default)]
+    pub(crate) oauth_error: String,
+    /// A fixed code the IdP sends a provider sign-in back with when it needs
+    /// the person's attention but did not fail (`link_sent`).
+    #[serde(default)]
+    pub(crate) oauth_notice: String,
+    /// The provider an `oauth_notice` names (`github` or `google`).
+    #[serde(default)]
+    pub(crate) provider: String,
 }
 
 impl fmt::Debug for AuthQuery {
@@ -28,8 +38,21 @@ impl fmt::Debug for AuthQuery {
             .field("return_to", &redacted(&self.return_to))
             .field("token", &redacted(&self.token))
             .field("user_code", &redacted(&self.user_code))
+            .field("oauth_error", &self.oauth_error)
+            .field("oauth_notice", &self.oauth_notice)
+            .field("provider", &self.provider)
             .finish()
     }
+}
+
+/// A "Continue with …" link on the sign-in and sign-up pages. It is a plain
+/// link (`GET`) to the IdP's start endpoint, so the page's
+/// `form-action 'self'` policy is unchanged.
+pub(crate) struct OAuthProviderLink {
+    pub(crate) label: &'static str,
+    /// The `icons-v2.svg` symbol.
+    pub(crate) icon: &'static str,
+    pub(crate) href: String,
 }
 
 #[derive(Deserialize)]
@@ -83,6 +106,8 @@ pub(crate) struct AuthFormView {
     pub(crate) action: &'static str,
     pub(crate) submit_label: &'static str,
     pub(crate) error: String,
+    /// A fixed, non-error message shown above the form.
+    pub(crate) notice: &'static str,
     pub(crate) csrf_token: String,
     pub(crate) auth_request_id: String,
     pub(crate) return_to: String,
@@ -100,6 +125,13 @@ pub(crate) struct AuthFormView {
     pub(crate) preview_sign_in: bool,
     pub(crate) secondary_label: &'static str,
     pub(crate) secondary_url: String,
+    /// The configured providers' buttons; empty hides the group.
+    pub(crate) oauth_providers: Vec<OAuthProviderLink>,
+    /// On `/signup/complete`: the provider and the email it verified. On
+    /// `/login/link`: the provider and its account (GitHub login or Google
+    /// email) the confirmation would connect.
+    pub(crate) identity_provider: &'static str,
+    pub(crate) identity_account: String,
 }
 
 pub(crate) struct AccountAccessView {
@@ -2532,6 +2564,9 @@ mod secret_debug_tests {
             return_to: format!("/accept-invite?token={MARKER}"),
             token: MARKER.into(),
             user_code: MARKER.into(),
+            oauth_error: String::new(),
+            oauth_notice: String::new(),
+            provider: String::new(),
         };
         let submission = AuthFormSubmission {
             csrf: MARKER.into(),

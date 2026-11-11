@@ -77,6 +77,33 @@ spec:
                   name: codewire-idp-ses
                   key: AWS_SECRET_ACCESS_KEY
                   optional: true
+            # Sign in with GitHub or Google (#4062). Every key is optional:
+            # with none the providers are off, and half a provider's pair
+            # stops the IdP at start. Infra projects the Secret from OpenBao.
+            - name: CODEWIRE_OAUTH_GITHUB_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-idp-oauth
+                  key: CODEWIRE_OAUTH_GITHUB_CLIENT_ID
+                  optional: true
+            - name: CODEWIRE_OAUTH_GITHUB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-idp-oauth
+                  key: CODEWIRE_OAUTH_GITHUB_CLIENT_SECRET
+                  optional: true
+            - name: CODEWIRE_OAUTH_GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-idp-oauth
+                  key: CODEWIRE_OAUTH_GOOGLE_CLIENT_ID
+                  optional: true
+            - name: CODEWIRE_OAUTH_GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-idp-oauth
+                  key: CODEWIRE_OAUTH_GOOGLE_CLIENT_SECRET
+                  optional: true
             - name: IDP_PORT
               value: "8091"
             - name: IDP_SIGNING_KEK_DIR

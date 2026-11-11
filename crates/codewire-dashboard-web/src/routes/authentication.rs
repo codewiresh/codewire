@@ -12,11 +12,12 @@ use serde::{Deserialize, Serialize};
 use crate::{
     auth::authenticated_identity,
     error::WebError,
-    raw_auth::{forward_session_cookies, post_json, user_message},
+    raw_auth::{forward_session_cookies, oauth_providers, post_json, user_message},
     response::{error_page, redirect, render_page, render_template, safe_auth_continuation},
     security::{
-        PASSWORD_RESET_COOKIE, TWO_FACTOR_CHALLENGE_COOKIE, canonical_cookie, clear_scoped_cookie,
-        cookie_value, csrf_cookie, lax_scoped_secret_cookie, new_csrf_token,
+        OAUTH_LINK_COOKIE, OAUTH_LINK_PATH, OAUTH_LINK_REQUESTER_COOKIE, OAUTH_SIGNUP_COOKIE,
+        OAUTH_SIGNUP_PATH, PASSWORD_RESET_COOKIE, TWO_FACTOR_CHALLENGE_COOKIE, canonical_cookie,
+        clear_scoped_cookie, cookie_value, csrf_cookie, lax_scoped_secret_cookie, new_csrf_token,
         request_has_same_origin, scoped_secret_cookie, valid_csrf_token, with_csrf_cookie,
         with_response_cookie,
     },
@@ -25,11 +26,19 @@ use crate::{
         AuthFormTemplate, AuthStatusTemplate, SetupTwoFactorTemplate, TwoFactorRecoveryTemplate,
     },
     view::{
-        AuthFormSubmission, AuthFormView, AuthQuery, SetupTwoFactorView, TwoFactorRecoveryView,
+        AuthFormSubmission, AuthFormView, AuthQuery, OAuthProviderLink, SetupTwoFactorView,
+        TwoFactorRecoveryView,
     },
 };
 
 const SECRET_TTL_SECONDS: u32 = 10 * 60;
+const LOGIN_ACTION: &str = "/login/_actions/sign-in";
+const SIGNUP_ACTION: &str = "/signup/_actions/sign-up";
+pub(crate) const SIGNUP_COMPLETE_ACTION: &str = "/signup/complete/_actions/complete";
+const LINK_CONFIRM_ACTION: &str = "/login/link/_actions/confirm";
+/// The emailed link confirmation is valid for thirty minutes; its cookie
+/// lasts as long, so a page left open can still be confirmed.
+const LINK_CONFIRM_TTL_SECONDS: u32 = 30 * 60;
 /// Where the private-preview sign-in redirect returns a signed-out visitor:
 /// the orchestration handoff (`AUTHORIZE_PATH`) with one sealed, URL-safe
 /// base64 `challenge` (crates/codewire-orchestration/src/api/preview).
@@ -51,6 +60,55 @@ struct SignUpRequest<'a> {
     reason: &'a str,
     #[serde(rename = "turnstile_token")]
     turnstile_token: &'a str,
+}
+
+#[derive(Serialize)]
+struct OAuthSignupToken<'a> {
+    token: &'a str,
+}
+
+#[derive(Serialize)]
+struct OAuthSignupRequest<'a> {
+    token: &'a str,
+    invite_code: &'a str,
+    reason: &'a str,
+    #[serde(rename = "turnstile_token")]
+    turnstile_token: &'a str,
+}
+
+/// The pending provider sign-up `/signup/complete` finishes.
+#[derive(Deserialize)]
+struct OAuthPendingSignup {
+    provider: String,
+    email: String,
+}
+
+impl fmt::Debug for OAuthPendingSignup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthPendingSignup")
+            .field("provider", &self.provider)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Deserialize)]
+struct OAuthSignupResponse {
+    #[serde(default, rename = "accessPending")]
+    access_pending: bool,
+    #[serde(default)]
+    auth_request_id: String,
+    #[serde(default)]
+    return_to: String,
+}
+
+impl fmt::Debug for OAuthSignupResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthSignupResponse")
+            .field("access_pending", &self.access_pending)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Serialize)]
@@ -168,7 +226,88 @@ pub(super) async fn login(
     State(state): State<AppState>,
     Query(query): Query<AuthQuery>,
 ) -> Response {
-    auth_form_response(&state, StatusCode::OK, login_view(query, String::new()))
+    let error = oauth_error_message(&query.oauth_error)
+        .unwrap_or_default()
+        .to_owned();
+    let notice = oauth_notice_message(&query.oauth_notice, &query.provider);
+    let mut view = login_view(query, error);
+    view.notice = notice.unwrap_or_default();
+    auth_entry_response(&state, StatusCode::OK, view).await
+}
+
+/// The message for a provider sign-in that needs the person's attention. It
+/// names only a known provider; any other notice or provider shows nothing.
+fn oauth_notice_message(code: &str, provider: &str) -> Option<&'static str> {
+    match (code, provider) {
+        ("link_sent", "github") => Some(
+            "We emailed a link to your account's address. Open it to connect GitHub, then sign in with GitHub.",
+        ),
+        ("link_sent", "google") => Some(
+            "We emailed a link to your account's address. Open it to connect Google, then sign in with Google.",
+        ),
+        _ => None,
+    }
+}
+
+/// The message for each fixed code the IdP sends a failed provider sign-in
+/// back with. Provider text is never shown; an unknown code gets the generic
+/// message.
+fn oauth_error_message(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "" => return None,
+        "unavailable" => {
+            "That sign-in option isn't available right now. Sign in with your email and password."
+        }
+        "cancelled" => "Sign-in was cancelled. Choose how you'd like to sign in.",
+        "expired" => "That sign-in attempt expired or was started in another browser. Try again.",
+        "unverified_email" => {
+            "Your account with that provider has no verified email address. Verify it there, then try again."
+        }
+        "link_required" => {
+            "An account with this email already exists. Sign in with your email and password, then link the provider from Settings."
+        }
+        "locked" => "Too many sign-in attempts. Wait a few minutes and try again.",
+        "rate_limited" => {
+            "Too many sign-in attempts from this network. Wait a few minutes and try again."
+        }
+        "disabled" => {
+            "This account's access isn't enabled. If you requested access, we'll email you when it's ready."
+        }
+        _ => {
+            "Sign-in with that provider didn't finish. Try again, or sign in with your email and password."
+        }
+    })
+}
+
+/// A "Continue with …" link for each provider the IdP has configured,
+/// carrying the page's return target. None when the IdP doesn't answer.
+async fn provider_links(state: &AppState, view: &AuthFormView) -> Vec<OAuthProviderLink> {
+    oauth_providers(state)
+        .await
+        .into_iter()
+        .filter_map(|provider| {
+            let (label, icon) = match provider {
+                "github" => ("GitHub", "icon-github"),
+                "google" => ("Google", "icon-google"),
+                _ => return None,
+            };
+            Some(OAuthProviderLink {
+                label,
+                icon,
+                href: auth_path_from_view(&format!("/api/auth/oauth/{provider}/start"), view),
+            })
+        })
+        .collect()
+}
+
+/// The sign-in and sign-up pages, with the provider buttons.
+async fn auth_entry_response(
+    state: &AppState,
+    status: StatusCode,
+    mut view: AuthFormView,
+) -> Response {
+    view.oauth_providers = provider_links(state, &view).await;
+    auth_form_response(state, status, view)
 }
 
 pub(super) async fn login_action(
@@ -181,11 +320,12 @@ pub(super) async fn login_action(
     }
     let query = form_query(&form);
     if form.email.trim().is_empty() || form.password.is_empty() {
-        return auth_form_response(
+        return auth_entry_response(
             &state,
             StatusCode::UNPROCESSABLE_ENTITY,
             login_view(query, "Email and password are required.".to_owned()),
-        );
+        )
+        .await;
     }
     let identity = match post_json::<_, SignInResponse>(
         &state,
@@ -200,22 +340,24 @@ pub(super) async fn login_action(
     {
         Ok(response) => response,
         Err(()) => {
-            return auth_form_response(
+            return auth_entry_response(
                 &state,
                 StatusCode::BAD_GATEWAY,
                 login_view(
                     query,
                     "The identity service is temporarily unavailable.".to_owned(),
                 ),
-            );
+            )
+            .await;
         }
     };
     if !identity.status.is_success() {
-        return auth_form_response(
+        return auth_entry_response(
             &state,
             identity.status,
             login_view(query, user_message(identity.status, "sign-in").to_owned()),
-        );
+        )
+        .await;
     }
     let body = match identity.body.as_ref() {
         Some(body) => body,
@@ -251,7 +393,7 @@ pub(super) async fn signup(
     State(state): State<AppState>,
     Query(query): Query<AuthQuery>,
 ) -> Response {
-    auth_form_response(&state, StatusCode::OK, signup_view(query, String::new()))
+    auth_entry_response(&state, StatusCode::OK, signup_view(query, String::new())).await
 }
 
 pub(super) async fn signup_action(
@@ -274,11 +416,12 @@ pub(super) async fn signup_action(
         } else {
             error
         };
-        return auth_form_response(
+        return auth_entry_response(
             &state,
             StatusCode::UNPROCESSABLE_ENTITY,
             signup_view(query, error),
-        );
+        )
+        .await;
     }
     let identity = match post_json::<_, AuthResponse>(
         &state,
@@ -297,22 +440,24 @@ pub(super) async fn signup_action(
     {
         Ok(response) => response,
         Err(()) => {
-            return auth_form_response(
+            return auth_entry_response(
                 &state,
                 StatusCode::BAD_GATEWAY,
                 signup_view(
                     query,
                     "The identity service is temporarily unavailable.".to_owned(),
                 ),
-            );
+            )
+            .await;
         }
     };
     if !identity.status.is_success() {
-        return auth_form_response(
+        return auth_entry_response(
             &state,
             identity.status,
             signup_view(query, user_message(identity.status, "sign-up").to_owned()),
-        );
+        )
+        .await;
     }
     if identity
         .body
@@ -331,6 +476,196 @@ pub(super) async fn signup_action(
         redirect(auth_url_for_target("/setup-2fa", &completion), &headers),
         &identity,
     )
+}
+
+/// `/signup/complete`: the last step of a provider sign-up for an email with
+/// no Codewire account. It shows the provider and the email it verified and
+/// asks what email sign-up asks besides the password: the access-request
+/// reason, an optional invite code and Turnstile.
+pub(super) async fn signup_complete(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(token) = cookie_value(&headers, OAUTH_SIGNUP_COOKIE) else {
+        return expired_oauth_signup(&state);
+    };
+    match pending_oauth_signup(&state, token).await {
+        Ok(pending) => auth_form_response(
+            &state,
+            StatusCode::OK,
+            signup_complete_view(&pending, String::new()),
+        ),
+        Err(unavailable) => unavailable.response(&state),
+    }
+}
+
+pub(super) async fn signup_complete_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<AuthFormSubmission>,
+) -> Response {
+    if !valid_form_request(&state, &headers, &form.csrf) {
+        return error_page(WebError::CsrfRejected);
+    }
+    let Some(token) = cookie_value(&headers, OAUTH_SIGNUP_COOKIE) else {
+        return expired_oauth_signup(&state);
+    };
+    let pending = match pending_oauth_signup(&state, token).await {
+        Ok(pending) => pending,
+        Err(unavailable) => return unavailable.response(&state),
+    };
+    if form.reason.trim().is_empty() {
+        return auth_form_response(
+            &state,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            signup_complete_view(&pending, "Tell us what you want to build.".to_owned()),
+        );
+    }
+    let identity = match post_json::<_, OAuthSignupResponse>(
+        &state,
+        "/api/auth/oauth/signup/complete",
+        None,
+        &OAuthSignupRequest {
+            token,
+            invite_code: form.invite_code.trim(),
+            reason: form.reason.trim(),
+            turnstile_token: form.turnstile_response.trim(),
+        },
+    )
+    .await
+    {
+        Ok(identity) => identity,
+        Err(()) => {
+            return auth_form_response(
+                &state,
+                StatusCode::BAD_GATEWAY,
+                signup_complete_view(
+                    &pending,
+                    "The identity service is temporarily unavailable.".to_owned(),
+                ),
+            );
+        }
+    };
+    let clear = clear_scoped_cookie(&state.public_origin, OAUTH_SIGNUP_COOKIE, OAUTH_SIGNUP_PATH);
+    match (identity.status, identity.body.as_ref()) {
+        (status, Some(body)) if status.is_success() && body.access_pending => with_response_cookie(
+            render_page(AuthStatusTemplate {
+                title: "Access requested",
+                description: "Your email is verified and your access request is ready for review. We will email you when your account is enabled.",
+                primary_label: "Back to Codewire",
+                primary_url: "/",
+            }),
+            clear,
+        ),
+        (status, Some(body)) if status.is_success() => {
+            let completion = completion_target(&body.auth_request_id, &body.return_to);
+            let response = forward_session_cookies(
+                redirect(auth_url_for_target("/setup-2fa", &completion), &headers),
+                &identity,
+            );
+            with_response_cookie(response, clear)
+        }
+        (StatusCode::NOT_FOUND, _) => expired_oauth_signup(&state),
+        (StatusCode::CONFLICT, _) => with_response_cookie(
+            render_template(
+                StatusCode::CONFLICT,
+                AuthStatusTemplate {
+                    title: "Account already exists",
+                    description: "An account with this email already exists. Sign in with it, then link the provider from Settings.",
+                    primary_label: "Sign in",
+                    primary_url: "/login",
+                },
+            ),
+            clear,
+        ),
+        (status, _) => auth_form_response(
+            &state,
+            if status.is_success() {
+                StatusCode::BAD_GATEWAY
+            } else {
+                status
+            },
+            signup_complete_view(&pending, user_message(status, "oauth-sign-up").to_owned()),
+        ),
+    }
+}
+
+/// Read the pending sign-up the cookie names, or the page to show when it has
+/// expired or the IdP can't be reached.
+async fn pending_oauth_signup(
+    state: &AppState,
+    token: &str,
+) -> Result<OAuthPendingSignup, PendingSignupUnavailable> {
+    match post_json::<_, OAuthPendingSignup>(
+        state,
+        "/api/auth/oauth/signup/pending",
+        None,
+        &OAuthSignupToken { token },
+    )
+    .await
+    {
+        Ok(response) if response.status.is_success() => match response.body {
+            Some(body) if provider_label(&body.provider).is_some() => Ok(body),
+            _ => Err(PendingSignupUnavailable::Identity),
+        },
+        Ok(response) if response.status == StatusCode::NOT_FOUND => {
+            Err(PendingSignupUnavailable::Expired)
+        }
+        _ => Err(PendingSignupUnavailable::Identity),
+    }
+}
+
+/// Why `/signup/complete` cannot show a pending sign-up.
+enum PendingSignupUnavailable {
+    Expired,
+    Identity,
+}
+
+impl PendingSignupUnavailable {
+    fn response(self, state: &AppState) -> Response {
+        match self {
+            Self::Expired => expired_oauth_signup(state),
+            Self::Identity => error_page(WebError::IdentityUnavailable),
+        }
+    }
+}
+
+fn provider_label(provider: &str) -> Option<&'static str> {
+    match provider {
+        "github" => Some("GitHub"),
+        "google" => Some("Google"),
+        _ => None,
+    }
+}
+
+fn expired_oauth_signup(state: &AppState) -> Response {
+    with_response_cookie(
+        render_template(
+            StatusCode::BAD_REQUEST,
+            AuthStatusTemplate {
+                title: "Sign-up expired",
+                description: "This sign-up has expired or was already used. Start again to create your account.",
+                primary_label: "Start again",
+                primary_url: "/signup",
+            },
+        ),
+        clear_scoped_cookie(&state.public_origin, OAUTH_SIGNUP_COOKIE, OAUTH_SIGNUP_PATH),
+    )
+}
+
+fn signup_complete_view(pending: &OAuthPendingSignup, error: String) -> AuthFormView {
+    let mut view = base_view(AuthQuery::default());
+    view.title = "Finish creating your account";
+    view.description = "Tell us what you want to build with Codewire.";
+    view.action = SIGNUP_COMPLETE_ACTION;
+    view.submit_label = "Request access";
+    view.error = error;
+    view.show_reason = true;
+    view.show_invite_code = true;
+    view.identity_provider = provider_label(&pending.provider).unwrap_or_default();
+    view.identity_account = pending.email.clone();
+    view.secondary_label = "Use a different account";
+    view.secondary_url = "/signup".to_owned();
+    // The IdP keeps the return target with the pending sign-up.
+    view.return_to = String::new();
+    view
 }
 
 pub(super) async fn forgot_password(State(state): State<AppState>) -> Response {
@@ -376,6 +711,220 @@ pub(super) async fn forgot_password_action(
         &state,
         StatusCode::BAD_GATEWAY,
         forgot_password_view("The reset request could not be completed. Try again.".to_owned()),
+    )
+}
+
+#[derive(Deserialize)]
+struct OAuthLinkResponse {
+    provider: String,
+    #[serde(default)]
+    account: String,
+}
+
+#[derive(Serialize)]
+struct OAuthLinkConfirmRequest<'a> {
+    token: &'a str,
+    requester: &'a str,
+}
+
+impl fmt::Debug for OAuthLinkResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthLinkResponse")
+            .field("provider", &self.provider)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `/login/link`: the page an emailed link confirmation opens. Opening it
+/// changes nothing, so a mail scanner that fetches the link uses nothing up:
+/// the token moves from the URL into a cookie scoped to this page (Lax,
+/// because the link is opened from another site), and the page asks for a
+/// CSRF-checked POST that connects the provider.
+pub(super) async fn link_confirm(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
+) -> Response {
+    if !query.token.is_empty() {
+        let Some(cookie) = lax_scoped_secret_cookie(
+            &state.public_origin,
+            OAUTH_LINK_COOKIE,
+            &query.token,
+            OAUTH_LINK_PATH,
+            LINK_CONFIRM_TTL_SECONDS,
+        ) else {
+            return expired_link(&state);
+        };
+        return with_response_cookie(redirect(OAUTH_LINK_PATH.to_owned(), &headers), cookie);
+    }
+    let Some(token) = cookie_value(&headers, OAUTH_LINK_COOKIE) else {
+        return expired_link(&state);
+    };
+    match post_json::<_, OAuthLinkResponse>(
+        &state,
+        "/api/auth/oauth/link/pending",
+        None,
+        &OAuthSignupToken { token },
+    )
+    .await
+    {
+        Ok(response) if response.status.is_success() => {
+            match response
+                .body
+                .as_ref()
+                .and_then(|body| link_confirm_view(&body.provider, &body.account))
+            {
+                Some(view) => auth_form_response(&state, StatusCode::OK, view),
+                None => error_page(WebError::IdentityUnavailable),
+            }
+        }
+        Ok(response) if response.status == StatusCode::NOT_FOUND => expired_link(&state),
+        _ => error_page(WebError::IdentityUnavailable),
+    }
+}
+
+pub(super) async fn link_confirm_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<crate::view::CsrfSubmission>,
+) -> Response {
+    if !valid_form_request(&state, &headers, &form.csrf) {
+        return error_page(WebError::CsrfRejected);
+    }
+    let Some(token) = cookie_value(&headers, OAUTH_LINK_COOKIE) else {
+        return expired_link(&state);
+    };
+    // The browser that started the sign-in holds the requester secret under
+    // this page's path; any other browser sends none and is refused.
+    let requester = cookie_value(&headers, OAUTH_LINK_REQUESTER_COOKIE).unwrap_or_default();
+    let result = post_json::<_, OAuthLinkResponse>(
+        &state,
+        "/api/auth/oauth/link/confirm",
+        None,
+        &OAuthLinkConfirmRequest { token, requester },
+    )
+    .await;
+    let clear = clear_scoped_cookie(&state.public_origin, OAUTH_LINK_COOKIE, OAUTH_LINK_PATH);
+    let clear_requester = clear_scoped_cookie(
+        &state.public_origin,
+        OAUTH_LINK_REQUESTER_COOKIE,
+        OAUTH_LINK_PATH,
+    );
+    let page = match result {
+        Ok(response) if response.status.is_success() => {
+            let connected = response.body.as_ref().and_then(|body| match body.provider.as_str() {
+                "github" => Some(AuthStatusTemplate {
+                    title: "GitHub is connected",
+                    description: "GitHub is connected to your Codewire account. Sign in with GitHub; your two-factor authentication still applies.",
+                    primary_label: "Sign in",
+                    primary_url: "/login",
+                }),
+                "google" => Some(AuthStatusTemplate {
+                    title: "Google is connected",
+                    description: "Google is connected to your Codewire account. Sign in with Google; your two-factor authentication still applies.",
+                    primary_label: "Sign in",
+                    primary_url: "/login",
+                }),
+                _ => None,
+            });
+            match connected {
+                Some(page) => with_response_cookie(render_page(page), clear_requester),
+                None => error_page(WebError::IdentityUnavailable),
+            }
+        }
+        // Another browser: nothing changed and the link still works where
+        // the sign-in started, so its cookie stays.
+        Ok(response) if response.status == StatusCode::PRECONDITION_FAILED => {
+            return wrong_browser(&state, token).await;
+        }
+        Ok(response) if response.status == StatusCode::NOT_FOUND => return expired_link(&state),
+        Ok(response) if response.status == StatusCode::FORBIDDEN => render_template(
+            StatusCode::FORBIDDEN,
+            AuthStatusTemplate {
+                title: "This account can't be connected",
+                description: "The account can't be connected right now. Sign in with your email and password, or contact support.",
+                primary_label: "Back to sign in",
+                primary_url: "/login",
+            },
+        ),
+        Ok(response) if response.status == StatusCode::CONFLICT => render_template(
+            StatusCode::CONFLICT,
+            AuthStatusTemplate {
+                title: "Already connected elsewhere",
+                description: "That provider account is connected to another Codewire account, so it wasn't connected to this one.",
+                primary_label: "Back to sign in",
+                primary_url: "/login",
+            },
+        ),
+        _ => return error_page(WebError::IdentityUnavailable),
+    };
+    with_response_cookie(page, clear)
+}
+
+/// The page for a confirmation opened in a browser other than the one that
+/// started the sign-in, naming the provider when the link is still live.
+async fn wrong_browser(state: &AppState, token: &str) -> Response {
+    let provider = post_json::<_, OAuthLinkResponse>(
+        state,
+        "/api/auth/oauth/link/pending",
+        None,
+        &OAuthSignupToken { token },
+    )
+    .await
+    .ok()
+    .and_then(|response| response.body)
+    .map(|body| body.provider);
+    render_template(
+        StatusCode::FORBIDDEN,
+        AuthStatusTemplate {
+            title: "Open this link where you signed in",
+            description: match provider.as_deref() {
+                Some("github") => {
+                    "Open this link in the browser where you started signing in with GitHub."
+                }
+                Some("google") => {
+                    "Open this link in the browser where you started signing in with Google."
+                }
+                _ => "Open this link in the browser where you started signing in.",
+            },
+            primary_label: "Back to sign in",
+            primary_url: "/login",
+        },
+    )
+}
+
+fn link_confirm_view(provider: &str, account: &str) -> Option<AuthFormView> {
+    let (title, submit_label) = match provider {
+        "github" => ("Connect GitHub to your Codewire account", "Connect GitHub"),
+        "google" => ("Connect Google to your Codewire account", "Connect Google"),
+        _ => return None,
+    };
+    let mut view = base_view(AuthQuery::default());
+    view.title = title;
+    view.description = "Only confirm if you just signed in with it yourself. It will then be able to sign in to your Codewire account; your two-factor authentication still applies.";
+    view.action = LINK_CONFIRM_ACTION;
+    view.submit_label = submit_label;
+    view.secondary_label = "Not you? Back to sign in";
+    view.secondary_url = "/login".to_owned();
+    view.return_to = String::new();
+    view.identity_provider = provider_label(provider)?;
+    view.identity_account = account.to_owned();
+    Some(view)
+}
+
+fn expired_link(state: &AppState) -> Response {
+    with_response_cookie(
+        render_template(
+            StatusCode::BAD_REQUEST,
+            AuthStatusTemplate {
+                title: "Link expired",
+                description: "This link has expired or was already used. Sign in with the provider again to get a new one.",
+                primary_label: "Back to sign in",
+                primary_url: "/login",
+            },
+        ),
+        clear_scoped_cookie(&state.public_origin, OAUTH_LINK_COOKIE, OAUTH_LINK_PATH),
     )
 }
 
@@ -761,7 +1310,7 @@ fn valid_form_request(state: &AppState, headers: &HeaderMap, csrf: &str) -> bool
 fn auth_form_response(state: &AppState, status: StatusCode, mut view: AuthFormView) -> Response {
     let csrf = new_csrf_token();
     view.csrf_token = csrf.clone();
-    if view.action == "/signup/_actions/sign-up" {
+    if view.action == SIGNUP_ACTION || view.action == SIGNUP_COMPLETE_ACTION {
         view.turnstile_site_key = state.turnstile_site_key.clone();
     }
     let mut response = with_csrf_cookie(
@@ -792,6 +1341,7 @@ fn base_view(query: AuthQuery) -> AuthFormView {
         action: "",
         submit_label: "Continue",
         error: String::new(),
+        notice: "",
         csrf_token: String::new(),
         auth_request_id: clean_auth_request_id(&query.auth_request_id),
         return_to: safe_target(&query.return_to),
@@ -808,6 +1358,9 @@ fn base_view(query: AuthQuery) -> AuthFormView {
         preview_sign_in: false,
         secondary_label: "",
         secondary_url: String::new(),
+        oauth_providers: Vec::new(),
+        identity_provider: "",
+        identity_account: String::new(),
     }
 }
 
@@ -815,7 +1368,7 @@ fn login_view(query: AuthQuery, error: String) -> AuthFormView {
     let mut view = base_view(query);
     view.title = "Sign in";
     view.description = "Welcome back to Codewire.";
-    view.action = "/login/_actions/sign-in";
+    view.action = LOGIN_ACTION;
     view.submit_label = "Sign in";
     view.error = error;
     view.show_email = true;
@@ -850,7 +1403,7 @@ fn signup_view(query: AuthQuery, error: String) -> AuthFormView {
     let mut view = base_view(query);
     view.title = "Request Codewire access";
     view.description = "Tell us what you want to build with Codewire.";
-    view.action = "/signup/_actions/sign-up";
+    view.action = SIGNUP_ACTION;
     view.submit_label = "Request access";
     view.error = error;
     view.show_email = true;
@@ -1005,6 +1558,10 @@ fn auth_path_from_view(path: &str, view: &AuthFormView) -> String {
 fn setup_continuation(query: &AuthQuery) -> &str {
     safe_auth_continuation(&query.return_to).unwrap_or("/dashboard/")
 }
+
+#[cfg(test)]
+#[path = "oauth_sign_in_tests.rs"]
+mod oauth_sign_in_tests;
 
 #[cfg(test)]
 mod tests {

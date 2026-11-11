@@ -230,6 +230,15 @@ spec:
                 name: codewire-idp
                 port:
                   name: http
+          # Sign in with GitHub or Google: start, callback, the providers
+          # list and the sign-up completion the dashboard calls.
+          - path: /api/auth/oauth
+            pathType: Prefix
+            backend:
+              service:
+                name: codewire-idp
+                port:
+                  name: http
           - path: /api/auth/sessions
             pathType: Prefix
             backend:

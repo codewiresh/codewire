@@ -113,6 +113,32 @@ async fn serve() -> anyhow::Result<()> {
         idp_cfg.turnstile_secret_key.clone(),
         idp_cfg.turnstile_bypass_email.clone(),
     );
+    // Sign in with GitHub or Google: off unless a provider's client pair is
+    // configured; half a pair stops startup.
+    let oauth_providers = codewire_idp::oauth::OAuthProviders::from_env()?;
+    tracing::info!(
+        providers = ?oauth_providers
+            .configured()
+            .into_iter()
+            .map(codewire_idp::oauth::Provider::as_str)
+            .collect::<Vec<_>>(),
+        "oauth sign-in providers"
+    );
+    let oauth = codewire_idp::oauth::router(
+        pool.clone(),
+        secure,
+        idp_cfg.signup_invite_policy.clone(),
+        idp_cfg.frontend_url.clone(),
+        email.clone(),
+        idp_cfg.turnstile_secret_key.clone(),
+        idp_cfg.turnstile_bypass_email.clone(),
+        oauth_providers,
+        codewire_server_core::internal_hmac::derive_internal_hmac_secret(
+            &cfg.session_secret,
+            codewire_idp::oauth::CLIENT_ADDRESS_KEY_LABEL,
+        )
+        .map_err(|_| anyhow::anyhow!("the session secret for OAuth sign-in is not set"))?,
+    );
     let email_password = codewire_idp::email_password::router(
         pool.clone(),
         idp_cfg.frontend_url.clone(),
@@ -147,6 +173,7 @@ async fn serve() -> anyhow::Result<()> {
         .merge(oidc)
         .merge(device_verification)
         .merge(session_auth)
+        .merge(oauth)
         .merge(email_password)
         .merge(access_admin)
         .merge(two_factor)

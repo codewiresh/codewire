@@ -99,6 +99,31 @@ With neither, the workload starts with email delivery disabled.
 The Kind overlays provide neither credential, so local email delivery stays
 disabled and needs no sender.
 
+## Sign in with GitHub or Google
+
+The IdP offers "Continue with GitHub" and "Continue with Google" on the
+sign-in and sign-up pages for each provider whose OAuth client is configured.
+Each provider's pair is all or none: with neither value the provider is off
+and its button is not shown; with only one, the IdP refuses to start. Both
+providers are off by default, including when self-hosting. The client secrets
+are never logged. In the Kubernetes manifests the IdP reads all four keys,
+each optional, from the Secret `codewire-idp-oauth`.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `CODEWIRE_OAUTH_GITHUB_CLIENT_ID` | With its secret | The GitHub OAuth App's client ID. | `Ov23li…` |
+| `CODEWIRE_OAUTH_GITHUB_CLIENT_SECRET` | With its client ID | That OAuth App's client secret. | |
+| `CODEWIRE_OAUTH_GOOGLE_CLIENT_ID` | With its secret | The Google OAuth client's ID (a web application client). | `…apps.googleusercontent.com` |
+| `CODEWIRE_OAUTH_GOOGLE_CLIENT_SECRET` | With its client ID | That client's secret. | |
+
+Register each provider's callback as `FRONTEND_URL` plus
+`/api/auth/oauth/github/callback` or `/api/auth/oauth/google/callback`, for
+example `https://codewire.example.com/api/auth/oauth/github/callback`. The IdP
+asks GitHub for `read:user user:email` and Google for `openid email profile`.
+The edge must send `/api/auth/oauth/` to the IdP, as the manifests and
+Caddyfiles do. [dev/AUTH-POLICY.md](dev/AUTH-POLICY.md) says how a provider
+identity becomes a Codewire account.
+
 ## Stripe billing
 
 Billing is disabled unless `STRIPE_SECRET_KEY` is set.

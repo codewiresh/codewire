@@ -47,6 +47,68 @@ with ICU collation and60 mixed-case/punctuation IDs across the50-row boundary;
 public/migrated tables are unchanged. Its old query fails byte-order equality,
 and the explicit C-collation query preserves both ordering and cursor progress.
 
+## Sign in with GitHub or Google
+
+The sign-in and sign-up pages ask the IdP's `GET /api/auth/oauth/providers`
+which providers are configured, keep the answer for a minute, and show a
+"Continue with …" link for each; when the IdP does not answer there are no
+links and the password form works as before. The links are plain `GET`s to
+`/api/auth/oauth/{github|google}/start` carrying the page's `authRequestID` or
+`return_to`, so the pages' `form-action 'self'` policy is unchanged and
+`cw login`'s device page, which sends a signed-out browser to `/login` with a
+return target, resumes after a provider sign-in too. The rules are in
+[AUTH-POLICY.md](AUTH-POLICY.md#sign-in-with-github-or-google).
+
+Every browser step of the round trip is a top-level `GET` that began on the
+provider's site, so each cookie the IdP sets on the way is HttpOnly,
+`SameSite=Lax`, `Secure` on HTTPS and scoped to the one path that reads it:
+
+| Cookie | Path | Life | Set when |
+|---|---|---|---|
+| `codewire_oauth_state` | `/api/auth/oauth/` | 10 minutes, cleared by the callback | Start |
+| `codewire.session_token` | `/` | 8 hours | The callback signs an account in |
+| `codewire_2fa_challenge` | `/two-factor` | 10 minutes | The account has a second factor: the dashboard's `/two-factor` page finishes the sign-in, as after a password |
+| `codewire_oauth_signup` | `/signup/complete` | 30 minutes, cleared on completion | The email has no account |
+
+A signed-in browser goes to `/setup-2fa` and then its return target, as after
+a password. A failed or cancelled round trip goes to
+`/login?oauth_error=<code>`, carrying the return target, and the page shows a
+fixed message for the code.
+
+`/signup/complete` reads the pending sign-up through
+`POST /api/auth/oauth/signup/pending` (`token` in, `provider` and `email` out)
+and submits it with the dashboard's CSRF and same-origin checks to
+`POST /api/auth/oauth/signup/complete` (`token`, `reason`, `invite_code`,
+`turnstile_token`). That answers 200 with a session cookie for an invited
+account, 202 `accessPending` for one waiting for review, 400 for a missing
+reason or failed challenge, 404 for a used or expired sign-up and 409 when the
+email or identity now belongs to an account.
+
+When an unlinked identity's email matches an account that must confirm the
+link by email, the callback lands on
+`/login?oauth_notice=link_sent&provider=<github|google>`, which says a link
+was emailed, and sets `codewire_oauth_link_requester` (HttpOnly,
+`SameSite=Lax`, scoped to `/login/link`, 30 minutes) on that browser. The
+emailed link is `/login/link?token=…`. Opening it only moves the token into an
+HttpOnly `SameSite=Lax` cookie `codewire_oauth_link` scoped to `/login/link`
+for 30 minutes and shows a "Connect the GitHub account octocat" page read
+through `POST /api/auth/oauth/link/pending` (`token` in, `provider` and
+`account` out), so a mail scanner that fetches the link uses nothing up. Its
+button is a CSRF-checked, same-origin `POST` that calls
+`POST /api/auth/oauth/link/confirm` (`token`, and `requester` from the
+browser's cookie): 200 when connected (no session cookie; the page says to
+sign in with the provider), 412 from a browser without the matching requester
+secret (nothing changes, the link stays usable, and the page says to open it
+where the sign-in started), 404 for an expired, used or unknown link, 403 when
+the account is disabled, locked out or no longer has that address, and 409
+when the identity belongs to another account.
+
+Focused proof is `cargo test -p codewire-idp --lib oauth`, the eighteen
+PostgreSQL tests in `crates/codewire-idp/tests/oauth_sign_in.rs` against an
+in-process fake of both providers and a recording mailer (the `idp-sessions`
+service lane requires all eighteen), the dashboard's `oauth_sign_in_tests`,
+and the 0016 upgrade test in `codewire-server-core`'s `migrate::` suite.
+
 ## Authenticator replacement and recovery codes
 
 Three more cookie-only IdP routes change an enrolled factor. They share the

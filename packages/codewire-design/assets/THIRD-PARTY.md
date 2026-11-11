@@ -1,5 +1,20 @@
 # Third-party provider marks
 
+## Google
+
+`icons.svg#icon-google` is Google's four-colour "G" mark, drawn with the
+standard path and colours Google's sign-in button uses, so "Continue with
+Google" on the sign-in and sign-up pages shows the mark Google's sign-in
+branding guidelines ask for. The paths carry their own fills and no stroke.
+The Google name and "G" mark belong to Google LLC. This use identifies the
+provider; it does not imply endorsement. See
+[Sign in with Google branding guidelines](https://developers.google.com/identity/branding-guidelines).
+
+## GitHub
+
+"Continue with GitHub" uses the sprite's existing outline `icon-github`, the
+same symbol the credentials pages use for GitHub.
+
 ## Codex
 
 `codex.svg` is the unmodified monochrome Codex mark downloaded from

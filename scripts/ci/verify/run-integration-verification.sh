@@ -1532,7 +1532,8 @@ service_build_binaries() {
 service_build_idp() {
   if selected service_idp; then
     cargo_ci test --locked --profile ci -p codewire-idp --test db_flow \
-      --test session_inventory --test two_factor_replacement --test rewrap_cli --no-run
+      --test session_inventory --test two_factor_replacement --test rewrap_cli \
+      --test oauth_sign_in --no-run
   fi
 }
 service_build_coordinator() {
@@ -1640,11 +1641,25 @@ run_idp_rewrap_cli() {
   assert_passed_count "idp rewrap CLI" "$logfile" 2
 }
 
+# Sign in with GitHub or Google (#4062), against in-process fake providers.
+run_idp_oauth_sign_in() {
+  local logfile="$RUN_DIR/idp-oauth-sign-in.log"
+  DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo_ci test --profile ci -p codewire-idp --test oauth_sign_in -- --nocapture \
+    | tee "$logfile"
+  if grep -q 'DATABASE_URL unset' "$logfile"; then
+    echo "::error::idp OAuth sign-in DB tests skipped"
+    return 1
+  fi
+  assert_passed_count "idp OAuth sign-in" "$logfile" 18
+}
+
 run_idp() {
   run_idp_flow
   run_idp_session_inventory
   run_idp_two_factor
   run_idp_rewrap_cli
+  run_idp_oauth_sign_in
 }
 
 run_coordinator() {
@@ -2241,12 +2256,13 @@ run_nats() {
 # (idp, coordinator, billing and Temporal), so no lane shares a schema, a
 # row or a listener with another. The idp suites split three ways: the JWKS
 # check and db_flow (38 s), two_factor_replacement (37 s), and session
-# inventory with the rewrap CLI (8 s). The first lane runs against the job's
-# own database, and every other lane against a PostgreSQL of its own.
+# inventory with the rewrap CLI (8 s) and OAuth sign-in (under 1 s locally).
+# The first lane runs against the job's own database, and every other lane
+# against a PostgreSQL of its own.
 readonly SERVICE_CONTROL_LANES=(
   idp-two-factor # idp two-factor replacement
   idp-flow       # idp JWKS readiness and db_flow
-  idp-sessions   # idp session inventory and the signing-key rewrap CLI
+  idp-sessions   # idp session inventory, the signing-key rewrap CLI and OAuth sign-in
   connect-auth   # the Connect auth matrix
   billing        # the billing wire contract, then its Temporal workflow
   coordinator    # the coordinator protocol auth matrix and wire contract
@@ -2259,6 +2275,7 @@ run_service_lane() {
     idp-sessions)
       run_idp_session_inventory
       run_idp_rewrap_cli
+      run_idp_oauth_sign_in
       ;;
     connect-auth) run_connect_auth_matrix ;;
     billing)

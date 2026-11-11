@@ -341,6 +341,8 @@ test("buttons with an icon centre their label's capitals", { tag: "@mobile" }, a
     ["create-sandbox.html", "+ Add custom Git URL", page.getByRole("button", { name: "Add custom Git URL" })],
     ["settings-credentials.html", "Reconnect", page.getByRole("button", { name: "Reconnect Work Codex" })],
     ["components.html", "< Back", page.getByRole("button", { name: "Back" })],
+    ["login.html", "Continue with GitHub", page.getByRole("link", { name: "Continue with GitHub" })],
+    ["login.html", "Continue with Google", page.getByRole("link", { name: "Continue with Google" })],
   ] as const) {
     await page.goto(`${origin}/reference/fixtures/${fixture}`);
     await page.evaluate(() => document.fonts.ready);

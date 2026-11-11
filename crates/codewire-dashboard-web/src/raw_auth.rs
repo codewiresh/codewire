@@ -34,6 +34,63 @@ where
     decode_identity_response(response).await
 }
 
+/// The sign-in providers the IdP has configured, as it last said, for the
+/// sign-in and sign-up buttons. A minute's answer is kept; a failed read
+/// shows no buttons and is asked again after ten seconds.
+#[derive(Default)]
+pub(crate) struct OAuthProvidersCache(
+    tokio::sync::Mutex<Option<(std::time::Instant, std::time::Duration, Vec<&'static str>)>>,
+);
+
+const OAUTH_PROVIDERS_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const OAUTH_PROVIDERS_FAILURE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+const OAUTH_PROVIDERS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The providers this dashboard knows how to show, in the IdP's order.
+pub(crate) const KNOWN_OAUTH_PROVIDERS: [&str; 2] = ["github", "google"];
+
+#[derive(serde::Deserialize)]
+struct OAuthProvidersBody {
+    providers: Vec<String>,
+}
+
+pub(crate) async fn oauth_providers(state: &AppState) -> Vec<&'static str> {
+    let mut cached = state.oauth_providers.0.lock().await;
+    if let Some((read_at, ttl, providers)) = cached.as_ref()
+        && read_at.elapsed() < *ttl
+    {
+        return providers.clone();
+    }
+    let read = async {
+        let response = state
+            .http
+            .get(format!(
+                "{}/api/auth/oauth/providers",
+                state.identity_origin_string
+            ))
+            .timeout(OAUTH_PROVIDERS_TIMEOUT)
+            .send()
+            .await
+            .ok()?;
+        decode_identity_response::<OAuthProvidersBody>(response)
+            .await
+            .ok()?
+            .body
+    };
+    let (ttl, providers) = match read.await {
+        Some(body) => (
+            OAUTH_PROVIDERS_TTL,
+            KNOWN_OAUTH_PROVIDERS
+                .into_iter()
+                .filter(|known| body.providers.iter().any(|provider| provider == known))
+                .collect(),
+        ),
+        None => (OAUTH_PROVIDERS_FAILURE_TTL, Vec::new()),
+    };
+    *cached = Some((std::time::Instant::now(), ttl, providers.clone()));
+    providers
+}
+
 pub(crate) async fn post_json<I, O>(
     state: &AppState,
     path: &str,
@@ -123,6 +180,12 @@ pub(crate) fn user_message(status: StatusCode, operation: &'static str) -> &'sta
         (StatusCode::NOT_FOUND, "device") => "The device code is invalid or expired.",
         (StatusCode::BAD_REQUEST, "device") => "The device code has already been used.",
         (StatusCode::UNAUTHORIZED, "two-factor") => "The verification code is invalid.",
+        (StatusCode::BAD_REQUEST, "oauth-sign-up") => {
+            "Tell us what you want to build and complete the human verification."
+        }
+        (StatusCode::SERVICE_UNAVAILABLE, "oauth-sign-up") => {
+            "Human verification is temporarily unavailable. Try again shortly."
+        }
         (StatusCode::BAD_REQUEST, "two-factor-setup") => {
             "The verification code is invalid. Enter the current code from your authenticator."
         }

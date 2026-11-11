@@ -76,14 +76,14 @@ pub(crate) const SESSION_DURATION_SECS: i64 = 8 * 60 * 60;
 /// Account lockout window after 5 failed sign-ins: 15 minutes.
 pub(crate) const LOCKOUT_DURATION_SECS: i64 = 15 * 60;
 /// 2FA challenge-token lifetime: 10 minutes.
-const TWO_FACTOR_TOKEN_TTL_SECS: i64 = 10 * 60;
+pub(crate) const TWO_FACTOR_TOKEN_TTL_SECS: i64 = 10 * 60;
 /// Failed-attempt threshold that triggers the lockout.
 pub(crate) const MAX_FAILED_ATTEMPTS: i32 = 5;
 
 const SIGNUP_INVITE_CODE_HASHES_ENV: &str = "IDP_SIGNUP_INVITE_CODE_HASHES";
 const SHA256_DIGEST_BYTES: usize = 32;
 const SHA256_HEX_CHARS: usize = SHA256_DIGEST_BYTES * 2;
-const MAX_ACCESS_REASON_CHARS: usize = 2_000;
+pub(crate) const MAX_ACCESS_REASON_CHARS: usize = 2_000;
 const MAX_TURNSTILE_TOKEN_BYTES: usize = 2_048;
 const TURNSTILE_SITEVERIFY_URL: &str = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
@@ -146,7 +146,7 @@ impl SignupInvitePolicy {
         !self.accepted_hashes.is_empty()
     }
 
-    fn accepts(&self, invite_code: &str) -> bool {
+    pub(crate) fn accepts(&self, invite_code: &str) -> bool {
         if self.open_signup {
             return true;
         }
@@ -202,7 +202,7 @@ fn constant_time_digest_eq(
 }
 
 #[derive(Clone)]
-enum HumanVerification {
+pub(crate) enum HumanVerification {
     /// `router` is retained as a trusted in-process test entrypoint.
     TrustedTest,
     /// Production configuration intentionally fails closed until its
@@ -220,9 +220,9 @@ enum HumanVerification {
 pub struct SessionAuthState {
     pub pool: PgPool,
     pub secure: bool,
-    signup_invite_policy: SignupInvitePolicy,
-    frontend_url: String,
-    email: EmailClient,
+    pub(crate) signup_invite_policy: SignupInvitePolicy,
+    pub(crate) frontend_url: String,
+    pub(crate) email: EmailClient,
     human_verification: HumanVerification,
     turnstile_bypass_email: String,
     http: reqwest::Client,
@@ -798,7 +798,7 @@ pub(crate) fn user_response(r: UserAuthRow) -> UserResponse {
     }
 }
 
-async fn validate_turnstile(
+pub(crate) async fn validate_turnstile(
     state: &SessionAuthState,
     email: &str,
     token: &str,
@@ -1519,7 +1519,7 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
 /// Attach a `Set-Cookie` header to a JSON response. Falls back to the
 /// bare body if the cookie string somehow isn't a valid header value
 /// (it always is — ASCII only).
-fn with_cookie(cookie: String, body: impl IntoResponse) -> Response {
+pub(crate) fn with_cookie(cookie: String, body: impl IntoResponse) -> Response {
     match header::HeaderValue::from_str(&cookie) {
         Ok(v) => ([(header::SET_COOKIE, v)], body).into_response(),
         Err(_) => body.into_response(),
@@ -1531,15 +1531,12 @@ fn with_cookie(cookie: String, body: impl IntoResponse) -> Response {
 /// is optional-auth) — auth is resolved inside the handlers, so no
 /// `require_auth` layer is attached.
 pub fn router(pool: PgPool, secure: bool, signup_invite_policy: SignupInvitePolicy) -> Router {
-    router_with_state(
+    router_with_state(SessionAuthState::trusted_test(
         pool,
         secure,
         signup_invite_policy,
         String::new(),
-        EmailClient::disabled(),
-        HumanVerification::TrustedTest,
-        String::new(),
-    )
+    ))
 }
 
 pub fn router_with_signup_delivery(
@@ -1551,49 +1548,81 @@ pub fn router_with_signup_delivery(
     turnstile_secret_key: String,
     turnstile_bypass_email: String,
 ) -> Router {
-    let hostname = reqwest::Url::parse(&frontend_url)
+    let human_verification = configured_human_verification(&frontend_url, turnstile_secret_key);
+    router_with_state(SessionAuthState::new(
+        pool,
+        secure,
+        signup_invite_policy,
+        frontend_url,
+        email,
+        human_verification,
+        turnstile_bypass_email,
+    ))
+}
+
+/// Turnstile bound to the frontend's hostname, or unavailable (fail closed)
+/// when the secret or the hostname is missing.
+pub(crate) fn configured_human_verification(
+    frontend_url: &str,
+    turnstile_secret_key: String,
+) -> HumanVerification {
+    let hostname = reqwest::Url::parse(frontend_url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned));
-    let human_verification = match (turnstile_secret_key.trim().is_empty(), hostname) {
+    match (turnstile_secret_key.trim().is_empty(), hostname) {
         (false, Some(hostname)) if !hostname.is_empty() => HumanVerification::Configured {
             secret: turnstile_secret_key,
             hostname,
         },
         _ => HumanVerification::Unavailable,
-    };
-    router_with_state(
-        pool,
-        secure,
-        signup_invite_policy,
-        frontend_url,
-        email,
-        human_verification,
-        turnstile_bypass_email,
-    )
+    }
 }
 
-fn router_with_state(
-    pool: PgPool,
-    secure: bool,
-    signup_invite_policy: SignupInvitePolicy,
-    frontend_url: String,
-    email: EmailClient,
-    human_verification: HumanVerification,
-    turnstile_bypass_email: String,
-) -> Router {
-    let state = SessionAuthState {
-        pool,
-        secure,
-        signup_invite_policy,
-        frontend_url,
-        email,
-        human_verification,
-        turnstile_bypass_email,
-        http: reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .expect("static signup HTTP client configuration"),
-    };
+impl SessionAuthState {
+    pub(crate) fn new(
+        pool: PgPool,
+        secure: bool,
+        signup_invite_policy: SignupInvitePolicy,
+        frontend_url: String,
+        email: EmailClient,
+        human_verification: HumanVerification,
+        turnstile_bypass_email: String,
+    ) -> Self {
+        Self {
+            pool,
+            secure,
+            signup_invite_policy,
+            frontend_url,
+            email,
+            human_verification,
+            turnstile_bypass_email,
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("static signup HTTP client configuration"),
+        }
+    }
+
+    /// The trusted in-process test state: no Turnstile, no email delivery.
+    pub(crate) fn trusted_test(
+        pool: PgPool,
+        secure: bool,
+        signup_invite_policy: SignupInvitePolicy,
+        frontend_url: String,
+    ) -> Self {
+        Self::new(
+            pool,
+            secure,
+            signup_invite_policy,
+            frontend_url,
+            EmailClient::disabled(),
+            HumanVerification::TrustedTest,
+            String::new(),
+        )
+    }
+}
+
+fn router_with_state(state: SessionAuthState) -> Router {
     Router::new()
         .route("/api/auth/sign-up", post(sign_up))
         .route("/api/auth/sign-in", post(sign_in))

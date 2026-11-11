@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="../../theme.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Connect GitHub to your Codewire account · Codewire</title>
+    <link rel="icon" href="../../assets/brand-icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="../../styles.css">
+    <link rel="stylesheet" href="../../components.css">
+    <link rel="stylesheet" href="../../routes/auth.css">
+  </head>
+  <body class="cw-body cw-auth-body" data-route="auth">
+    <main class="cw-auth-shell">
+      <a class="cw-auth-brand" href="home.html" aria-label="Codewire home">
+        <img src="../../assets/brand-icon.svg" width="48" height="48" alt="Codewire">
+      </a>
+      <section class="cw-auth-panel" aria-labelledby="auth-title">
+        <header class="cw-auth-header">
+          <h1 id="auth-title" class="cw-page-title">Connect GitHub to your Codewire account</h1>
+          <p class="cw-auth-copy">Connect the GitHub account <strong>octocat</strong> to your Codewire account?</p>
+          <p class="cw-auth-copy">Only confirm if you just signed in with it yourself. It will then be able to sign in to your Codewire account; your two-factor authentication still applies.</p>
+        </header>
+        <form class="cw-form" method="post" action="/login/link/_actions/confirm">
+          <button class="cw-button cw-button--pill cw-button--large cw-auth-submit" type="submit">Connect GitHub</button>
+        </form>
+        <p class="cw-auth-secondary"><a href="/login">Not you? Back to sign in</a></p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -55,6 +55,78 @@ workspace daemon uses to fetch its binding.
   context. Credential values never belong in protobuf fields, logs, traces,
   metrics, errors, retries, persistence, or response metadata.
 
+## Sign-in with GitHub or Google
+
+GitHub and Google are ways to prove who signs in to the browser login page,
+not credential flavors: a successful provider sign-in ends in the same
+session cookie (flavor 1) as a password, and Codewire keeps no provider access,
+refresh or ID token. The IdP is the OAuth client and owns the whole round
+trip; the configuration is in [../CONFIGURATION.md](../CONFIGURATION.md).
+
+- A provider identity is an `accounts` row with `provider_id` `github` or
+  `google` and the provider's stable subject (GitHub's numeric user id,
+  Google's `sub`) as `account_id`. A unique index gives each identity one
+  owner.
+- Each round trip has a single-use `oauth_states` row holding a SHA-256 of a
+  random state, the PKCE (S256) verifier, a Google nonce and the return
+  target, valid for 10 minutes; the browser holds the raw state in an HttpOnly
+  `SameSite=Lax` cookie scoped to `/api/auth/oauth/`. The callback requires
+  the `state` parameter to equal that cookie, deletes the row in the statement
+  that reads it and refuses a row that is expired or for another provider.
+  The code is exchanged server-side with the verifier.
+- Only a verified email counts: GitHub's primary email marked `verified`, or
+  Google's ID token with `email_verified`. The ID token comes straight from
+  Google's token endpoint over TLS, and its `iss`, `aud`, `exp` and `nonce`
+  are checked.
+- An identity already linked signs in to its account with the gates password
+  sign-in applies after the password: lockout, then `enabled`, then the
+  account's second factor when enrolled. A provider sign-in never skips
+  Codewire two-factor authentication.
+- A start is an unauthenticated `GET` that writes a row, so each client
+  address (an IPv4 address or IPv6 /64, stored only as an HMAC under a key
+  derived from the session secret) may hold at most 30 unfinished sign-ins;
+  past that, `/login` says to wait. A finished or abandoned round trip frees
+  its place within ten minutes.
+- An unlinked identity whose email belongs to an account that verified that
+  email (matched without regard to case) is linked to it only in two ways
+  (owner, 2026-11-11, #4062), and never before the account's second factor
+  could be asked:
+  - **At once**, only when Google vouches for the whole address (a
+    `@gmail.com` address, or its domain is the ID token's `hd`, the Google
+    Workspace domain that manages the account) and the account has no second
+    factor. The link is audited (`user.oauth.linked`, `confirmed_by:
+    "provider"`), the account's address is told, and the sign-in continues as
+    a linked one.
+  - **From the account's own email** in every other case: every GitHub
+    match, Google without a vouched domain, and any account with a second
+    factor. Nothing is linked and no session is made; the account's address
+    gets a single-use link valid for 30 minutes (stored only as a hash, one per
+    account and provider, a new one replacing the old) naming the provider
+    account (GitHub login or Google email), and `/login` says so. The browser
+    that started the sign-in also gets a second random secret in an HttpOnly
+    cookie for `/login/link`, stored only as a hash. The emailed link proves
+    only that someone reads the account's mail, so it completes only in that
+    browser: from any other, nothing changes and the link stays usable. This
+    keeps a stranger whose provider account carries a stale copy of the
+    address from having the owner click the stranger's identity in. Opening
+    the link changes nothing; confirming it on that page links the identity
+    if the account is still enabled, not locked out, still has that address
+    and the identity belongs to no one else, audits it (`confirmed_by:
+    "email"`) and tells the account's address, but signs no one in. The
+    person then signs in with the provider through every gate.
+  A disabled or locked-out account is refused as its sign-in would be, and
+  nothing is linked or sent.
+- An unlinked identity whose email belongs to an account that never verified
+  it is refused, so whoever registered the address first cannot take over the
+  account. The person signs in to that account and links the provider from
+  Settings.
+- An email with no account becomes a sign-up: the same access-request reason,
+  invite policy and Turnstile as email sign-up, on the dashboard's
+  `/signup/complete` page. The account starts with `email_verified` true and no
+  password; `enabled` follows the invite policy.
+- Every refusal lands on `/login` with a fixed code the dashboard turns into a
+  fixed message; provider error text is never shown.
+
 ## Account access revocation
 
 `users.enabled = false` is a security revocation boundary. The disabling

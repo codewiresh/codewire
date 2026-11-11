@@ -26,6 +26,7 @@ pub mod email_password;
 pub mod jwk;
 pub mod jwk_envelope;
 pub mod keys;
+pub mod oauth;
 pub mod provisioning;
 pub mod service;
 pub mod tokens;

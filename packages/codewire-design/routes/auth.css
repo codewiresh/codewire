@@ -19,6 +19,14 @@
 .cw-auth-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
 .cw-auth-code { text-align: center; }
 
+/* Provider sign-in (GitHub, Google): one full-width outline button per
+   configured provider, then a rule with "or" before the email form. */
+.cw-auth-alternatives { display: grid; gap: var(--space-6); }
+.cw-auth-providers { display: grid; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
+.cw-auth-providers .cw-button { width: 100%; }
+.cw-auth-divider { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: var(--space-3); margin: 0; color: var(--fg-secondary); font-size: var(--text-small); }
+.cw-auth-divider::before, .cw-auth-divider::after { content: ""; border-top: var(--border-width) solid var(--border); }
+
 /* Device authorization: eight one-character slots with a fixed separator. */
 .cw-device-code-field { min-width: 0; margin: 0; padding: 0; border: 0; }
 .cw-device-code { display: grid; width: 100%; max-width: 23rem; margin: var(--space-2) auto 0; grid-template-columns: repeat(4, minmax(0, 1fr)) auto repeat(4, minmax(0, 1fr)); align-items: center; gap: clamp(var(--space-1), 1.2vw, var(--space-2)); }

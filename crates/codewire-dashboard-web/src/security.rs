@@ -23,6 +23,17 @@ const GITHUB_APP_NAVIGATION_COOKIE_VERSION: u8 = 2;
 const GITHUB_APP_RECONNECT_ID_BYTES: usize = 36;
 pub(crate) const TWO_FACTOR_CHALLENGE_COOKIE: &str = "codewire_2fa_challenge";
 pub(crate) const PASSWORD_RESET_COOKIE: &str = "codewire_password_reset";
+/// The IdP sets this after a provider callback for an unknown email; it names
+/// the pending sign-up `/signup/complete` finishes.
+pub(crate) const OAUTH_SIGNUP_COOKIE: &str = "codewire_oauth_signup";
+pub(crate) const OAUTH_SIGNUP_PATH: &str = "/signup/complete";
+/// The emailed link confirmation's token, moved out of the URL into a cookie
+/// that only `/login/link` reads.
+pub(crate) const OAUTH_LINK_COOKIE: &str = "codewire_oauth_link";
+pub(crate) const OAUTH_LINK_PATH: &str = "/login/link";
+/// The IdP sets this on the browser that started a sign-in needing a link
+/// confirmation; the confirmation completes only with it.
+pub(crate) const OAUTH_LINK_REQUESTER_COOKIE: &str = "codewire_oauth_link_requester";
 
 pub(crate) fn canonical_cookie(headers: &HeaderMap) -> Result<HeaderValue, ()> {
     let token = session_cookie(headers).ok_or(())?;
