@@ -319,6 +319,27 @@ pub enum Settlement {
     NotEnforced,
 }
 
+/// The largest single charge, as `billing_top_ups` allows: EUR 1,000.
+const MAX_CHARGE_CENTS: i64 = 100_000;
+
+/// What one top-up charges: as many whole top-ups as it takes to lift the
+/// balance above zero, in one charge (owner, 2026-11-11, #3381): EUR 20
+/// top-ups at -EUR 27.14 charge EUR 40. One charge never exceeds EUR 1,000;
+/// a deeper balance stays due and the next pass charges again.
+pub(crate) fn top_up_charge_cents(balance_nano_eur: i64, top_up_cents: i32) -> i32 {
+    let unit = i64::from(top_up_cents.max(1));
+    let deficit_cents = balance_nano_eur
+        .min(0)
+        .unsigned_abs()
+        .div_ceil(NANO_EUR_PER_CENT as u64);
+    // The smallest number of top-ups whose sum exceeds the deficit.
+    let units = i64::try_from(deficit_cents / unit as u64)
+        .unwrap_or(i64::MAX)
+        .saturating_add(1);
+    let most = (MAX_CHARGE_CENTS / unit).max(1);
+    i32::try_from(units.min(most) * unit).unwrap_or(top_up_cents)
+}
+
 /// Settles one organization: tops it up from its card when it charges, has
 /// no credit and allows it, else records it as exhausted. `after_new_card`
 /// tries again even after a recent refusal.
@@ -379,6 +400,7 @@ pub async fn settle_organization(
                 mark_exhausted(pool, organization_id).await?;
                 return Ok(Settlement::Exhausted);
             }
+            let charge_cents = top_up_charge_cents(balance, top_up_cents);
             let created: Option<String> = sqlx::query_scalar(
                 r#"INSERT INTO billing_top_ups (organization_id, amount_cents)
                    VALUES ($1, $2)
@@ -386,11 +408,11 @@ pub async fn settle_organization(
                    RETURNING id"#,
             )
             .bind(organization_id)
-            .bind(top_up_cents)
+            .bind(charge_cents)
             .fetch_optional(pool)
             .await?;
             match created {
-                Some(id) => (id, top_up_cents),
+                Some(id) => (id, charge_cents),
                 // Another settle created it first; it charges.
                 None => return Ok(Settlement::Pending),
             }
@@ -469,6 +491,17 @@ async fn organizations_due(pool: &PgPool) -> anyhow::Result<Vec<String>> {
                   -- A refused card is tried again a day later. One that was
                   -- never charged (no card) waits for a new card, which
                   -- settles at once, so nothing asks Stripe every minute.
+                  -- A charge that went through but left the balance at or
+                  -- below zero (it was capped, or usage ran on) charges again.
+                  OR (o.auto_top_up_enabled AND o.stripe_customer_id IS NOT NULL
+                      AND COALESCE(b.balance_nano_eur, 0) <= 0
+                      AND EXISTS (
+                          SELECT 1 FROM billing_top_ups t WHERE t.organization_id = o.id
+                            AND t.state = 'paid' AND t.completed_at >= o.credit_exhausted_at)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM billing_top_ups t WHERE t.organization_id = o.id
+                            AND t.state = 'failed'
+                            AND t.completed_at > now() - interval '24 hours'))
                   OR (o.auto_top_up_enabled AND o.stripe_customer_id IS NOT NULL
                       AND EXISTS (
                           SELECT 1 FROM billing_top_ups t WHERE t.organization_id = o.id
@@ -624,6 +657,25 @@ mod tests {
             disk_gib: disk,
             microseconds,
         }
+    }
+
+    #[test]
+    fn a_top_up_charges_whole_top_ups_until_the_balance_is_above_zero() {
+        let euros = |cents: i64| cents * NANO_EUR_PER_CENT;
+        // At zero or just below, one top-up.
+        assert_eq!(top_up_charge_cents(0, 2_000), 2_000);
+        assert_eq!(top_up_charge_cents(euros(-1), 2_000), 2_000);
+        assert_eq!(top_up_charge_cents(euros(-1_999), 2_000), 2_000);
+        // The owner's case: -EUR 27.14 with EUR 20 top-ups charges EUR 40.
+        assert_eq!(top_up_charge_cents(euros(-2_714), 2_000), 4_000);
+        // Exactly one top-up short still has to end above zero.
+        assert_eq!(top_up_charge_cents(euros(-2_000), 2_000), 4_000);
+        // A fraction of a cent counts as a cent owed.
+        assert_eq!(top_up_charge_cents(euros(-2_000) - 1, 2_000), 4_000);
+        // Never more than EUR 1,000 in one charge, in whole top-ups.
+        assert_eq!(top_up_charge_cents(euros(-500_000), 2_000), 100_000);
+        assert_eq!(top_up_charge_cents(euros(-500_000), 3_000), 99_000);
+        assert_eq!(top_up_charge_cents(euros(-500_000), 100_000), 100_000);
     }
 
     #[test]
@@ -1298,6 +1350,70 @@ mod tests {
             Settlement::Exhausted
         );
         assert!(exhausted(&pool, &fixture).await);
+        cleanup(&pool, fixture).await;
+    }
+
+    #[tokio::test]
+    async fn db_a_paid_top_up_that_left_the_balance_below_zero_is_due_again() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let fixture = seed(&pool, "regular").await;
+        // Out of credit with a card and top-up on, then one EUR 20 top-up
+        // paid that did not cover the usage (the owner's Dev walk, #3381).
+        sqlx::query(
+            "INSERT INTO billing_credit_ledger \
+             (organization_id, entry_kind, amount_nano_eur, idempotency_key, actor_user_id, reason) \
+             VALUES ($1, 'adjustment', $2, 'deficit', 'test', 'usage beyond the balance')",
+        )
+        .bind(&fixture.organization_id)
+        .bind(-2_714 * NANO_EUR_PER_CENT)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE organizations SET credit_exhausted_at = now() - interval '1 hour', \
+             stripe_customer_id = 'cus_deficit_' || id, auto_top_up_enabled = true WHERE id = $1",
+        )
+        .bind(&fixture.organization_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let top_up: String = sqlx::query_scalar(
+            "INSERT INTO billing_top_ups (organization_id, amount_cents) VALUES ($1, 2000) \
+             RETURNING id",
+        )
+        .bind(&fixture.organization_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            complete_top_up(&pool, &top_up, &format!("in_{top_up}"))
+                .await
+                .unwrap()
+        );
+        assert_eq!(balance(&pool, &fixture).await, -714 * NANO_EUR_PER_CENT);
+        assert!(exhausted(&pool, &fixture).await);
+        assert!(
+            organizations_due(&pool)
+                .await
+                .unwrap()
+                .contains(&fixture.organization_id),
+            "a charged but still exhausted organization is settled again"
+        );
+
+        // With automatic top-up off it waits for the owner instead.
+        sqlx::query("UPDATE organizations SET auto_top_up_enabled = false WHERE id = $1")
+            .bind(&fixture.organization_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            !organizations_due(&pool)
+                .await
+                .unwrap()
+                .contains(&fixture.organization_id)
+        );
         cleanup(&pool, fixture).await;
     }
 
