@@ -4,7 +4,7 @@
 #   which is how the #[ignore] convention keeps the database, service and
 #   fixture tests out of a default run;
 # - no retries, so a flaky test fails as it does under cargo test;
-# - no timeout kills a test; a slow one is reported.
+# - a slow test is reported; only CI kills one, after ten slow periods (a hang).
 # Feature sets are chosen when the archive is built: CI tests the default
 # features, and each explicit feature lane (for example the credential broker
 # with --no-default-features --features platform) gets its own archive.
@@ -24,7 +24,12 @@ fail-fast = false
 # (durable writes within a deadline, poll races) missed their marks on a busy
 # metal guest (codewire runs 21672, 21687), so a CI run uses half of them.
 test-threads = 32
-slow-timeout = { period = "60s" }
+# A hung test is killed after ten slow periods (10 minutes). The longest
+# passing test in a full main run takes about 91 s (run 42600, 2026-11-11), and
+# today's worst host contention made tests 3.3 times slower, so a real test
+# keeps ample headroom; a hang no longer holds its job until the job's own
+# timeout (codewire#4117 held one for 28 minutes).
+slow-timeout = { period = "60s", terminate-after = 10 }
 failure-output = "immediate-final"
 
 [profile.ci.junit]
