@@ -156,10 +156,13 @@ exec python3 \"\$REPO/scripts/dev/build-native-managed-agent.py\" --target \"\$T
 . "$repo/scripts/ci/release/runtime-container.sh"
 runtime_container_mounts "$job_container" "$repo" "$git_common" "${rust_std[@]}" "$protoc_zip" "$zig" -- "$parent" ||
   die "the build's paths cannot be mounted"
+# shellcheck source=scripts/dev/cpu-slice.sh
+. "$repo/scripts/dev/cpu-slice.sh"
+cpu_slice_docker_args
 started="$(date +%s)"
 # The job's bounded cargo network settings (cli-release.yaml), when set,
 # reach the dependency fetches too (#2691).
-docker run --rm --init "${RUNTIME_MOUNTS[@]}" \
+docker run --rm --init ${CPU_SLICE_DOCKER_ARGS[@]+"${CPU_SLICE_DOCKER_ARGS[@]}"} "${RUNTIME_MOUNTS[@]}" \
   -e BUILD_UID="$uid" -e BUILD_GID="$gid" -e REPO="$repo" -e SCRATCH="$scratch" \
   -e MEMBERS="$members" -e PROTOC_ZIP="$protoc_zip" -e ZIG="$zig" -e ZIGBUILD="$zigbuild" \
   -e TARGET="$target" -e VERSION="$version" -e JOBS="$jobs" \

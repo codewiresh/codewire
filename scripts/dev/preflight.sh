@@ -77,6 +77,13 @@ case "$PREFLIGHT_MODE" in
     exit 2
     ;;
 esac
+# Compiles and tests run inside the workstation CPU slice, wherever this was
+# started from; the pre-push hook starts it from user.slice (#4126).
+if [ "$PREFLIGHT_MODE" != explain ]; then
+  # shellcheck source=scripts/dev/cpu-slice.sh
+  . "$REPO_ROOT/scripts/dev/cpu-slice.sh"
+  cpu_slice_enter preflight
+fi
 
 preflight_git_local_env_names="$(git rev-parse --local-env-vars)"
 while IFS= read -r git_env_name; do

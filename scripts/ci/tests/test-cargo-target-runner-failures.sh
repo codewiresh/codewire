@@ -353,7 +353,8 @@ for helper in [*policy_helpers, 'scripts/ci/verify/check-shell-scripts.sh',
         destination.chmod(0o755)
     else:
         shutil.copy(tool, destination)
-for helper in ('scripts/dev/preflight.sh', 'scripts/ci/select/select-verification.sh'):
+for helper in ('scripts/dev/preflight.sh', 'scripts/dev/cpu-slice.sh',
+               'scripts/ci/select/select-verification.sh'):
     destination = fixture / helper
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(source_root / helper, destination)
@@ -363,7 +364,12 @@ environment_check = fixture / 'scripts/dev/preflight-environment.sh'
 environment_check.write_text('#!/usr/bin/env bash\nexit 0\n')
 environment_check.chmod(0o755)
 (fixture / '.gitignore').write_text('.tmp/\n')
-git_env = dict(environment, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null')
+# Preflight reads its cgroup to join the workstation CPU slice (#4126); this
+# fixture says it is already there, so no case moves the test's processes.
+slice_cgroup = temporary / 'rust-composition-cgroup'
+slice_cgroup.write_text('0::/cwvmtest.slice/composition-fixture.scope\n')
+git_env = dict(environment, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
+               CPU_SLICE_CGROUP_FILE=str(slice_cgroup))
 
 def git(*args):
     return subprocess.run(['git', '-C', str(fixture), *args], env=git_env,

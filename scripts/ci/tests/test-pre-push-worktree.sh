@@ -50,7 +50,7 @@ git -C "$repo" config tag.gpgSign false
 mkdir -p "$repo"/{.githooks,docs,scripts/dev,scripts/ci/select,scripts/ci/verify} \
   "$repo"/{scripts/ci/release,scripts/ci/images,crates/codewire-cli/src} "$TMP/bin"
 for path in .githooks/pre-push scripts/dev/pre-push.sh scripts/dev/preflight.sh \
-    scripts/dev/preflight-push.sh scripts/dev/install-hooks.sh \
+    scripts/dev/preflight-push.sh scripts/dev/install-hooks.sh scripts/dev/cpu-slice.sh \
     scripts/ci/select/select-verification.sh scripts/ci/select/main-push-switch.sh \
     scripts/ci/verify/resolve-cargo-target-dir.sh scripts/ci/verify/shellcheck-baseline.sh; do
   install -m 755 "$ROOT/$path" "$repo/$path"
@@ -87,6 +87,18 @@ EOF
 chmod +x "$TMP/bin/tool-stub"
 for tool in bun cargo rustc supplychain; do ln -s tool-stub "$TMP/bin/$tool"; done
 export PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$log"
+# The workstation CPU helper is a stub logging to its own file, and the fixture
+# names the cgroup it reads, so no case moves this test's own processes.
+cpu_log="$TMP/cpu.log"
+cat > "$TMP/bin/codewire-cpu" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "$cpu_log"
+exit "\${CPU_STUB_EXIT:-0}"
+EOF
+chmod +x "$TMP/bin/codewire-cpu"
+printf '0::/user.slice/user-1000.slice/session-2.scope\n' > "$TMP/cgroup-outside"
+printf '0::/cwvmtest.slice/codewire-vmtest-1-1.scope\n' > "$TMP/cgroup-inside"
+export CPU_SLICE_CGROUP_FILE="$TMP/cgroup-outside"
 printf 'base\n' > "$repo/docs/base.md"
 git -C "$repo" add -A && git -C "$repo" -c commit.gpgsign=false commit -q -m 'test: seed'
 git init -q --bare "$TMP/remote.git"
@@ -211,6 +223,56 @@ if output="$(cd "$repo" && PREFLIGHT_TEST_FAIL_FAMILY=rust scripts/dev/preflight
   fail 'preflight --all passed a failing family'
 fi
 assert_contains all_failure "$output" 'preflight: Rust verification FAILED'
+
+# Preflight moves itself into the workstation CPU slice (#4126): from outside
+# it, never when already inside, never in CI, never for --explain, and a
+# failing helper leaves the run going.
+on_workstation() { env -u CI -u GITHUB_ACTIONS "$@"; }
+: > "$cpu_log"
+output="$(cd "$repo" && on_workstation scripts/dev/preflight.sh --all 2>&1)" ||
+  fail "preflight outside the slice failed: $output"
+grep -Eqx 'run [0-9]+' "$cpu_log" || fail "preflight did not move itself into the slice: $(cat "$cpu_log")"
+assert_contains slice_enter "$output" 'preflight: moved into cwvmtest.slice'
+for case in inside ci explain; do
+  : > "$cpu_log"
+  case "$case" in
+    inside) (cd "$repo" && CPU_SLICE_CGROUP_FILE="$TMP/cgroup-inside" on_workstation scripts/dev/preflight.sh --all >/dev/null 2>&1) ;;
+    ci) (cd "$repo" && CI=true scripts/dev/preflight.sh --all >/dev/null 2>&1) ;;
+    explain) (cd "$repo" && on_workstation scripts/dev/preflight.sh --explain >/dev/null 2>&1) ;;
+  esac || fail "preflight ($case) failed"
+  [ ! -s "$cpu_log" ] || fail "preflight ($case) called the CPU helper: $(cat "$cpu_log")"
+done
+output="$(cd "$repo" && CPU_STUB_EXIT=1 on_workstation scripts/dev/preflight.sh --all 2>&1)" ||
+  fail "a failing CPU helper failed preflight: $output"
+assert_contains slice_failure "$output" 'preflight: codewire-cpu run failed; running outside cwvmtest.slice'
+
+# The helper itself: its slice is workstation-cpu.sh's, it does nothing without
+# codewire-cpu, and builder containers join the slice only from inside it.
+grep -qx 'readonly SLICE=cwvmtest.slice' "$ROOT/scripts/dev/workstation-cpu.sh" ||
+  fail 'workstation-cpu.sh no longer names the slice cpu-slice.sh uses'
+slice_probe() { # CGROUP_FILE SHELL_CODE, without CI, from the real helper
+  env -u CI -u GITHUB_ACTIONS CPU_SLICE_CGROUP_FILE="$1" \
+    bash -c ". '$ROOT/scripts/dev/cpu-slice.sh'; $2" 2>&1
+}
+: > "$cpu_log"
+output="$(PATH=/usr/bin:/bin slice_probe "$TMP/cgroup-outside" 'cpu_slice_enter probe; echo "var=${CODEWIRE_CPU_SLICE:-}"')"
+[ "$output" = var= ] || fail "the helper acted without codewire-cpu: $output"
+[ ! -s "$cpu_log" ] || fail 'the helper ran a codewire-cpu outside PATH'
+output="$(slice_probe "$TMP/cgroup-inside" 'cpu_slice_enter probe; echo "var=${CODEWIRE_CPU_SLICE:-}"')"
+[ "$output" = var=cwvmtest.slice ] || fail "inside the slice, the helper did not export it: $output"
+args='cpu_slice_docker_args; echo "args=${CPU_SLICE_DOCKER_ARGS[*]-}"'
+[ "$(slice_probe "$TMP/cgroup-inside" "$args")" = 'args=--cgroup-parent=cwvmtest.slice' ] ||
+  fail 'a builder started inside the slice would leave it'
+[ "$(slice_probe "$TMP/cgroup-outside" "$args")" = 'args=' ] ||
+  fail 'a builder started outside the slice was given its cgroup parent'
+[ "$(CI=true CPU_SLICE_CGROUP_FILE="$TMP/cgroup-inside" bash -c ". '$ROOT/scripts/dev/cpu-slice.sh'; $args")" = 'args=' ] ||
+  fail 'a CI builder was given the workstation cgroup parent'
+for builder in build-runtime-cw.sh build-runtime-guest-root.sh; do
+  grep -qF 'docker run --rm --init ${CPU_SLICE_DOCKER_ARGS[@]+"${CPU_SLICE_DOCKER_ARGS[@]}"}' \
+    "$ROOT/scripts/ci/release/$builder" || fail "$builder starts its container outside the slice"
+done
+grep -qx '  cpu_slice_enter build-local-runtime' "$ROOT/scripts/ci/release/build-local-runtime.sh" ||
+  fail 'build-local-runtime.sh no longer enters the slice'
 printf '[test-pre-push-worktree] hook and preflight cases passed\n'
 
 # ---------------------------------------------------------------------------

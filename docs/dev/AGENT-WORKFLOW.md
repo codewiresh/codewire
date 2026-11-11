@@ -381,12 +381,16 @@ codewire-cpu apply    # set the standing limits
 codewire-cpu reset    # remove them all, back to systemd's defaults
 ```
 
-Start each `preflight.sh --all`, local VM run and load-sensitive test in the
-preflight and local VM slice (`cwvmtest.slice`), and record that in the
-evidence:
+`scripts/dev/preflight.sh` (including the pre-push check) and the Linux side of
+`scripts/ci/release/build-local-runtime.sh` move themselves into the preflight
+and local VM slice (`cwvmtest.slice`) when they are not already in it, and the
+runtime builder containers they start join it with `--cgroup-parent`
+(`scripts/dev/cpu-slice.sh`, #4126). Start every other local VM run,
+load-sensitive test and long cargo run in the slice yourself, and record that
+in the evidence:
 
 ```sh
-sh -c 'codewire-cpu run $$ && exec scripts/dev/preflight.sh --all' </dev/null
+sh -c 'codewire-cpu run $$ && exec cargo test -p codewire-local-vmm' </dev/null
 ```
 
 | Group | Weight | Ceiling |
@@ -399,7 +403,10 @@ sh -c 'codewire-cpu run $$ && exec scripts/dev/preflight.sh --all' </dev/null
 
 A weight matters only when the cores are contended; a ceiling applies even
 when cores are idle. Desktop terminals keep the default weight because many of
-them run agents. Kind nodes and other containers are not capped.
+them run agents. Kind nodes and other containers are not capped. Work in the
+slice ranks below the desktop and below interactive work in `user.slice`, and
+together it never takes more than 12 of the 16 cores; heavy work left in
+`user.slice` outranks it, which is why the dev loop's own entry points join it.
 
 The limits are runtime state. A reboot clears them, and the next `apply` or
 `run` sets them again, so a `reset` lasts until then. To change a value, edit

@@ -133,11 +133,14 @@ exec setpriv --reuid="$BUILD_UID" --regid="$BUILD_GID" --init-groups \
 . "$repo/scripts/ci/release/runtime-container.sh"
 runtime_container_mounts "$job_container" "$repo" "$busybox" "${rust_std[@]}" "$protoc_zip" -- "$parent" ||
   die "the build's paths cannot be mounted"
+# shellcheck source=scripts/dev/cpu-slice.sh
+. "$repo/scripts/dev/cpu-slice.sh"
+cpu_slice_docker_args
 started="$(date +%s)"
 # The job's bounded cargo network settings (cli-release.yaml), when set,
 # reach the probe build's git dependency fetches too (#2691), and a caller's
 # CARGO_BUILD_JOBS bounds its parallelism.
-docker run --rm --init "${RUNTIME_MOUNTS[@]}" \
+docker run --rm --init ${CPU_SLICE_DOCKER_ARGS[@]+"${CPU_SLICE_DOCKER_ARGS[@]}"} "${RUNTIME_MOUNTS[@]}" \
   -e BUILD_UID="$uid" -e BUILD_GID="$gid" -e REPO="$repo" -e SCRATCH="$scratch" -e TARGET="$target" \
   -e MEMBERS="$members" -e PROTOC_ZIP="$protoc_zip" \
   -e BUSYBOX="$busybox" -e BUSYBOX_SHA256="$busybox_sha256" -e RUNC="$scratch/runc" -e RUNC_SHA256="$runc_sha256" \

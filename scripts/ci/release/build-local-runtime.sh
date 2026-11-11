@@ -110,6 +110,13 @@ fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 release_dir="$root/scripts/ci/release"
 pins="$release_dir/local-runtime-sources.json"
+# The parts compile inside the workstation CPU slice when there is one, and
+# their builder containers follow it there (#4126).
+if [ "$mode" = linux ] && [ -z "$check" ]; then
+  # shellcheck source=scripts/dev/cpu-slice.sh
+  . "$root/scripts/dev/cpu-slice.sh"
+  cpu_slice_enter build-local-runtime
+fi
 parts="$release_dir/local_runtime_parts.py"
 pin() {
   python3 -c 'import json, sys
