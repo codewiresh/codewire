@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:-1.27.3}"
+version="${1:-1.27.4}"
 goos="${GO_OS:-linux}"
 goarch="${GO_ARCH:-amd64}"
 
@@ -11,9 +11,9 @@ if [[ "$goos" != "linux" || "$goarch" != "amd64" ]]; then
 fi
 
 case "$version" in
-  1.27.3)
-    official_url="https://go.dev/dl/go1.27.3.linux-amd64.tar.gz"
-    official_sha256="65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40"
+  1.27.4)
+    official_url="https://go.dev/dl/go1.27.4.linux-amd64.tar.gz"
+    official_sha256="7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840"
     ;;
   *)
     echo "unsupported Go version: ${version}" >&2

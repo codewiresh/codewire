@@ -482,9 +482,9 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         run: scripts/ci/setup/bound-cargo-jobs.sh
 
-      - name: Set up Go 1.27.3
+      - name: Set up Go 1.27.4
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|contracts|') }}
-        run: scripts/ci/setup/setup-go.sh 1.27.3
+        run: scripts/ci/setup/setup-go.sh 1.27.4
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|contracts|') }}
@@ -555,9 +555,9 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         run: scripts/ci/setup/bound-cargo-jobs.sh
 
-      - name: Set up Go 1.27.3
+      - name: Set up Go 1.27.4
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|go_support|') || contains(needs.verification-selection.outputs.selection, '|sdk_go|')) }}
-        run: scripts/ci/setup/setup-go.sh 1.27.3
+        run: scripts/ci/setup/setup-go.sh 1.27.4
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|')) }}
@@ -639,9 +639,9 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         run: scripts/ci/setup/bound-cargo-jobs.sh
 
-      - name: Set up Go 1.27.3 for security checks
+      - name: Set up Go 1.27.4 for security checks
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|security_go|') }}
-        run: scripts/ci/setup/setup-go.sh 1.27.3
+        run: scripts/ci/setup/setup-go.sh 1.27.4
 
       - uses: noel/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|dev_smoke_script_tests|') }}
@@ -1100,9 +1100,9 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/verify/run-product-verification.sh rust-curated-locks
 
-      - name: Set up Go 1.27.3 for DERP interop
+      - name: Set up Go 1.27.4 for DERP interop
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|transport_derp_contract|') }}
-        run: scripts/ci/setup/setup-go.sh 1.27.3
+        run: scripts/ci/setup/setup-go.sh 1.27.4
 
       - name: Install pinned protoc for Rust and guest builds
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|') || contains(needs.verification-selection.outputs.selection, '|transport_pkg_codewire_vmm_guest_probe|') || needs.verification-selection.outputs.desktop_package_selected == 'true') && steps.local-vmm-archives.outputs.ready != 'true' }}
