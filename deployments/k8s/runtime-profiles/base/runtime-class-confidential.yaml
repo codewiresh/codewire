@@ -12,6 +12,15 @@ handler: kata-qemu-snp
 # overhead. Preserve upstream qemu-snp's 1920 MiB host-side margin (its 2048
 # MiB RuntimeClass budget minus the upstream 128 MiB guest overhead), because
 # QEMU runs inside the pod cgroup: 2048 + (2048 - 128) = 3968 MiB.
+#
+# Measured on 2026-11-11 (#3723): a 16 GB environment holding guest RAM full
+# while writing 45 GiB to /workspace peaked at 851-853 MiB of host memory
+# beyond the guest, in 3 of 3 runs, so the 1920 MiB margin holds. It holds
+# because QEMU opens every writable disk with O_DIRECT (read from its fdinfo),
+# so disk writes leave no host page cache in the pod cgroup. The Kata
+# configuration says block_device_cache_direct = false, so nothing here
+# guarantees that; the ConfidentialSandboxHostPageCache alert (infra#2436)
+# fires if a build goes back to buffered I/O.
 overhead:
   podFixed:
     cpu: "1"
