@@ -1199,37 +1199,67 @@ mod tests {
 
     /// A forked child's copy of the descriptor, as another thread's spawn
     /// holds until it execs: `try_clone` duplicates the descriptor onto the
-    /// same open file description, as `fork` does.
+    /// same open file description, as `fork` does. Another thread keeps
+    /// spawning throughout, as other tests and the supervisor do, so every
+    /// step must hold whichever child copies the descriptors meanwhile; an
+    /// earlier version of this test assumed none did and failed under load.
     #[test]
     fn a_held_flock_is_released_even_while_a_forked_copy_of_its_descriptor_lives() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
         let directory = tempfile::tempdir().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let spawned = Arc::new(AtomicUsize::new(0));
+        let forker = {
+            let (stop, spawned) = (stop.clone(), spawned.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = std::process::Command::new("true").status();
+                    spawned.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+        // A probe releases its own lock explicitly, or a child forked while
+        // it held one would keep it.
         let exclusive = || {
-            flock(
+            HeldFlock::try_lock(
                 File::open(directory.path()).unwrap(),
                 FlockOperation::NonBlockingLockExclusive,
             )
+            .map(drop)
         };
 
-        // The cause: dropping the descriptor alone leaves the lock held while
-        // a copy lives.
-        let plain = File::open(directory.path()).unwrap();
-        flock(&plain, FlockOperation::NonBlockingLockShared).unwrap();
-        let child = plain.try_clone().unwrap();
-        drop(plain);
-        assert!(exclusive().is_err(), "the copy still holds the lock");
-        drop(child);
-        exclusive().unwrap();
+        // Enough rounds, and enough spawns among them, that a step which
+        // assumed no fork fails here (as the earlier version did, every run).
+        let mut rounds = 0;
+        while rounds < 300 || spawned.load(Ordering::Relaxed) < 100 {
+            rounds += 1;
+            // The cause: dropping the descriptor alone leaves the lock held
+            // while a copy lives. Unlocking through any copy releases it for
+            // all of them, which is what HeldFlock does.
+            let plain = File::open(directory.path()).unwrap();
+            flock(&plain, FlockOperation::NonBlockingLockShared).unwrap();
+            let child = plain.try_clone().unwrap();
+            drop(plain);
+            assert!(exclusive().is_err(), "the copy still holds the lock");
+            flock(&child, FlockOperation::Unlock).unwrap();
+            exclusive().unwrap();
+            drop(child);
 
-        let held = HeldFlock::try_lock(
-            File::open(directory.path()).unwrap(),
-            FlockOperation::NonBlockingLockShared,
-        )
-        .unwrap();
-        let child = held.file().try_clone().unwrap();
-        assert!(exclusive().is_err(), "held while the guard lives");
-        drop(held);
-        exclusive().unwrap();
-        drop(child);
+            let held = HeldFlock::try_lock(
+                File::open(directory.path()).unwrap(),
+                FlockOperation::NonBlockingLockShared,
+            )
+            .unwrap();
+            let child = held.file().try_clone().unwrap();
+            assert!(exclusive().is_err(), "held while the guard lives");
+            drop(held);
+            exclusive().unwrap();
+            drop(child);
+        }
+        stop.store(true, Ordering::Relaxed);
+        forker.join().unwrap();
     }
 
     fn private_root() -> (tempfile::TempDir, PrivateRoot) {
