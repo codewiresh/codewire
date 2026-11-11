@@ -59,3 +59,6 @@ codewire-credential-broker = { path = "../codewire-credential-broker", default-f
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 codewire-workspace-hack.workspace = true
+
+[lints]
+workspace = true

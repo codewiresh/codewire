@@ -73,3 +73,6 @@ connectrpc = { workspace = true, features = ["server"] }
 rustix = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

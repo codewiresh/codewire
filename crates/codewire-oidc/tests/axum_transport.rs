@@ -2,6 +2,8 @@
 //! `tower::ServiceExt::oneshot` so requests exercise real parsing, status
 //! codes, and headers.
 #![cfg(feature = "axum")]
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

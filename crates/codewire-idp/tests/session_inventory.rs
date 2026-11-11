@@ -1,6 +1,9 @@
 //! Synthetic database proof for browser-session inventory/revocation.
 //! The integration runner rejects a missing DATABASE_URL skip.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use axum::http::{HeaderMap, Request};
 use axum::{Router, body::Body};
 use codewire_idp::auth_session::{

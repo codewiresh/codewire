@@ -28,6 +28,9 @@
 //! Postgres initialized through the standard SQLx entrypoint and fails on
 //! skip.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 

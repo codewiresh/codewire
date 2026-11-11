@@ -1,4 +1,6 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
 
 use std::fs;
 use std::io::Write as _;

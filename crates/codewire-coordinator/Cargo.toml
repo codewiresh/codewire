@@ -35,3 +35,6 @@ connectrpc = { workspace = true, features = ["axum", "client"] }
 reqwest = { workspace = true }
 tower = { workspace = true }
 codewire-workspace-hack.workspace = true
+
+[lints]
+workspace = true

@@ -2,6 +2,9 @@
 //! exact browser origin, and an unlisted origin never gets
 //! `Access-Control-Allow-Origin`.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use std::net::SocketAddr;
 
 use axum::Router;

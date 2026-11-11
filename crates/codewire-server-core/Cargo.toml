@@ -97,3 +97,6 @@ reqwest = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
 connectrpc = { workspace = true, features = ["axum", "client"] }
 codewire-workspace-hack.workspace = true
+
+[lints]
+workspace = true

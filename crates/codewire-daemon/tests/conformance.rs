@@ -1,3 +1,6 @@
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 mod support;
 
 use std::time::Duration;

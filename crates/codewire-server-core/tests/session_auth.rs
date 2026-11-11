@@ -1,5 +1,8 @@
 //! Contract tests for the browser-session-only identity boundary.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use axum::middleware;

@@ -175,6 +175,13 @@ iteration checkpoint gates landing, not local development: edit locally, review
 the real application, and do not commit, push, open a PR or run hosted CI until
 the owner says "land it".
 
+## Rust
+
+The `codewire-rust` skill (`.agents/skills/codewire-rust/SKILL.md`) is the
+home of the Rust structure rules: file and function size, enum state, typed
+errors, unsafe and syscall wrappers, row structs. Lint levels live in
+`[workspace.lints]` in `Cargo.toml` (owner, 2026-11-11; cited on #3013).
+
 ## Repository invariants
 
 - Migrations require compatibility, database proof and rollback. Applied

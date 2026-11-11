@@ -4,6 +4,8 @@
 //! binary with distinct trailing bytes. They live below Cargo's target
 //! temporary directory because the system temporary directory may be noexec.
 #![cfg(unix)]
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write as _};

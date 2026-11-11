@@ -1,4 +1,6 @@
 #![cfg(target_os = "linux")]
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
 
 use std::path::Path;
 use std::process::Output;

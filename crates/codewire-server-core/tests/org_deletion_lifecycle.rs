@@ -3,6 +3,9 @@
 //! The database capability gate runs this suite with `DATABASE_URL` and
 //! rejects the skip sentinel or an unexpected executed-test count.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

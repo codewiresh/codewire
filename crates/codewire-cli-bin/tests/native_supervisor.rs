@@ -1,4 +1,8 @@
 #![cfg(target_os = "macos")]
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;

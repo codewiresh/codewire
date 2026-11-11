@@ -44,3 +44,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # For exercising the optional axum transport with `oneshot` in tests.
 tower = { workspace = true }
 http-body-util = "0.1"
+
+[lints]
+workspace = true

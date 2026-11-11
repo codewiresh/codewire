@@ -2,6 +2,10 @@
 //! Run with an executable TMPDIR (the host's /tmp is mounted noexec). The daemon
 //! is itself an env-cleared child so native inheritance cannot copy owner auth.
 #![cfg(target_os = "linux")]
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;

@@ -51,3 +51,6 @@ zeroize = { workspace = true }
 [dev-dependencies]
 codewire-workspace-hack.workspace = true
 codewire-workspace-image = { workspace = true }
+
+[lints]
+workspace = true

@@ -16,6 +16,11 @@
 //! (every default one as root in a CI container, an inherited one in some
 //! shells), so a serving role with none proves that it discarded them itself.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read as _, Write as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};

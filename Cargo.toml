@@ -289,6 +289,16 @@ regorus = { git = "https://github.com/microsoft/regorus", rev = "898643129e3652e
 # Embedded web browser
 wry = "0.54"
 
+# Lint levels for every workspace crate. A crate opts in with `[lints]
+# workspace = true`; `repo_checks.py workspace-lints` fails one that does not.
+# compile-all-targets.sh runs clippy with `-D warnings`, so "warn" here fails
+# CI. A crate root that predates a lint carries a crate-level allow, and the
+# same check holds that list so it only shrinks (#4125). Thresholds are in
+# clippy.toml; the rules no lint can check are in the codewire-rust skill.
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+unwrap_used = "warn"
+
 # The cw CLI release assets and the release tools. Thin LTO with the default
 # codegen units builds faster than fat LTO with one unit, for a bigger cw
 # (owner, 2026-10-22: "use thin lto"; 2026-10-15: "bigger cw is FINE").

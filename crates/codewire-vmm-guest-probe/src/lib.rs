@@ -1,6 +1,9 @@
 //! Shared seed codec, canonical initramfs writer, and Linux guest helpers for
 //! the Codewire-owned microVM spike.
 
+// Predates these workspace lints; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks, clippy::unwrap_used)]
+
 mod checkpoint_protocol;
 mod network;
 

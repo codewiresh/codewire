@@ -51,3 +51,6 @@ url = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { workspace = true }
 codewire-workspace-hack.workspace = true
+
+[lints]
+workspace = true

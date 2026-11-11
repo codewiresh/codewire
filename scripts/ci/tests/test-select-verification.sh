@@ -1153,6 +1153,10 @@ run_paths_case rust_root_manifest pull_request refs/pull/50/head false \
 run_paths_case rust_root_toolchain pull_request refs/pull/500/head false \
   'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   rust-toolchain.toml
+# clippy.toml sets options for the lints every workspace crate is held to.
+run_paths_case rust_root_clippy_config pull_request refs/pull/5020/head false \
+  'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  clippy.toml
 run_paths_case rust_workspace_hack_config pull_request refs/pull/5021/head false \
   'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   .config/hakari.toml

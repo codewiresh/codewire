@@ -6,6 +6,9 @@
 //! and one workflow per environment id serializes commands. The NATS
 //! consumer plane and the `TENANT_LOCKS` distributed lock are retired.
 
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::unwrap_used)]
+
 pub mod access_profiles;
 pub mod api;
 pub mod confidential_storage;

@@ -45,3 +45,6 @@ tonic-prost-build = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 codewire-workspace-hack.workspace = true
+
+[lints]
+workspace = true

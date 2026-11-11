@@ -8,6 +8,9 @@
 //!
 //! Run with: `cargo run -p codewire-oidc --example in_memory`.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

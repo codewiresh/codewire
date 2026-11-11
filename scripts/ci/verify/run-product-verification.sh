@@ -702,6 +702,8 @@ run_repo_rules() {
   python3 scripts/checks/repo_checks.py webpki-roots-floor
   python3 scripts/checks/repo_checks.py sqlx-sqlite-unused --self-test
   python3 scripts/checks/repo_checks.py sqlx-sqlite-unused
+  python3 scripts/checks/repo_checks.py workspace-lints --self-test
+  python3 scripts/checks/repo_checks.py workspace-lints
   python3 scripts/checks/repo_checks.py os-splits --self-test
   python3 scripts/checks/repo_checks.py os-splits
   scripts/ci/release/check-mirror-content.sh --tree

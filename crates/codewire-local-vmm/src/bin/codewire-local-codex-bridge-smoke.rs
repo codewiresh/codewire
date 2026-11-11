@@ -5,6 +5,9 @@
 //! uses only repository-owned synthetic upstream responses. OpenAI is a Node
 //! HTTP/API configuration proof, not an OpenAI SDK compatibility claim.
 
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("codewire-local-codex-bridge-smoke requires Linux");

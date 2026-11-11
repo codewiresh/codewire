@@ -27,3 +27,6 @@ bindgen = ["uniffi/bindgen"]
 [dev-dependencies]
 codewire-workspace-hack.workspace = true
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

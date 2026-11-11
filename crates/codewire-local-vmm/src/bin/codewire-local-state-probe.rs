@@ -4,6 +4,9 @@
 //! through the host's potentially different SQLite build. Only fixed,
 //! non-secret fields needed by that smoke can be returned.
 
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("codewire-local-state-probe requires Linux");

@@ -9,3 +9,6 @@ description = "Local status, diff, and chat display primitives for the Codewire 
 
 [dependencies]
 serde.workspace = true
+
+[lints]
+workspace = true

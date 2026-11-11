@@ -1,6 +1,9 @@
 //! Explicit OAuth-only Connect policy. All credentials and login roles below
 //! are synthetic; the ignored case creates and removes one exact test database.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};

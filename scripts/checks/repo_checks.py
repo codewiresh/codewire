@@ -27,6 +27,7 @@ from repo_policy.workspace_identity import check_identity_free_workspace
 from repo_policy.webpki_roots_floor import check_webpki_roots_floor
 from repo_policy.sqlx_sqlite_unused import check_sqlx_sqlite_unused
 from repo_policy.workspace_image_pin import check_workspace_image_pin
+from repo_policy.workspace_lints import check_workspace_lints
 from repo_policy.source_classification import (
     check_go_source_classification,
     check_retired_reference_source,
@@ -103,6 +104,9 @@ def main(argv: list[str] | None = None) -> int:
     sqlx_sqlite_parser = subparsers.add_parser("sqlx-sqlite-unused")
     sqlx_sqlite_parser.add_argument("--self-test", action="store_true")
     sqlx_sqlite_parser.set_defaults(func=check_sqlx_sqlite_unused)
+    workspace_lints_parser = subparsers.add_parser("workspace-lints")
+    workspace_lints_parser.add_argument("--self-test", action="store_true")
+    workspace_lints_parser.set_defaults(func=check_workspace_lints)
     material_cache_parser = subparsers.add_parser("epoch-material-cache-owner")
     material_cache_parser.add_argument("--self-test", action="store_true")
     material_cache_parser.set_defaults(func=check_epoch_material_cache_owner)

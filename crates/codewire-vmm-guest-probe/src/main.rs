@@ -1,3 +1,6 @@
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 #[cfg(target_os = "linux")]
 use std::ffi::{OsStr, OsString};
 #[cfg(target_os = "linux")]

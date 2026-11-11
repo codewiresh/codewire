@@ -1,0 +1,7 @@
+# Thresholds and options for the lints `[workspace.lints]` in Cargo.toml turns on.
+
+# `unwrap_used` covers production code. Unit tests may unwrap: a panic is how
+# a test reports failure. An integration test or example root says the same
+# with `#![allow(clippy::unwrap_used)]`, since this option reaches only
+# `#[test]` functions and `#[cfg(test)]` modules.
+allow-unwrap-in-tests = true

@@ -9,6 +9,9 @@
 //! Claude sign-in, have their own sealed formats in [`seal_codex_login`] and
 //! [`seal_claude_login`].
 
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::unwrap_used)]
+
 mod claude_login;
 mod codex_login;
 mod composition_plan;

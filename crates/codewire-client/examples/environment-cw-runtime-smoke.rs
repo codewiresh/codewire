@@ -7,6 +7,9 @@
 //! Ordinary UID1000 sessions are covered. The explicit managed Kind mode also
 //! retains the original stock worker families through the same update journey.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 #[cfg(target_os = "linux")]
 #[path = "support/platform_managed.rs"]
 mod platform_managed;

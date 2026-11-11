@@ -3,6 +3,12 @@
 //! The local Mesh owner with its real embedded roles, on Linux and macOS
 //! (#3797). Every case runs in its own test process, which on Linux becomes
 //! the subreaper of what it starts, so its cleanup can be proved by reaping.
+
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 use std::fs;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};

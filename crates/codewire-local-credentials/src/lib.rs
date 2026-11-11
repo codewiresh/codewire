@@ -10,6 +10,9 @@
 //! RPC process on bounded blocking workers. The VM supervisor does not link or
 //! own that material-bearing authority.
 
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::unwrap_used)]
+
 mod broker_channel;
 mod broker_log;
 mod broker_process;

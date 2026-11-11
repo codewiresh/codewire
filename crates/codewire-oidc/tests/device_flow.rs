@@ -1,5 +1,8 @@
 //! End-to-end exercise of the device authorization grant (RFC 8628).
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

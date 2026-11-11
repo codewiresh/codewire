@@ -1,6 +1,9 @@
 //! Host-loopback synthetic SSH repository for Linux initial checkout acceptance.
 //! Never installed as a product binary; accepts a public client key only.
 
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 #[cfg(target_os = "linux")]
 #[path = "initial_private_checkout_fixture/linux.rs"]
 mod linux;

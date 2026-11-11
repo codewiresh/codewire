@@ -28,6 +28,9 @@
 //! fallback. #257 adds the shared UDP peer-relay data path so relayed UDP can
 //! report as `peer_relay` instead of pretending to be `direct_udp`.
 
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::unwrap_used)]
+
 /// DERP relay client (transport). Interops with the Codewire
 /// `codewire-derp` server binary.
 pub mod derp;

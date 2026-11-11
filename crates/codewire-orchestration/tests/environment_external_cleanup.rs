@@ -1,5 +1,8 @@
 //! DB-backed acceptance for the durable environment external-cleanup marker.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use codewire_orchestration::lifecycle::{PgLifecycleStore, RuntimeAbsenceProof, Service};
 use codewire_server_core::AppError;
 use codewire_server_core::org_deletion::{

@@ -1,3 +1,6 @@
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::unwrap_used)]
+
 pub mod config;
 mod connect;
 mod derp_verify;

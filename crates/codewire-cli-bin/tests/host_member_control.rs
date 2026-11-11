@@ -2,6 +2,12 @@
 //! Two independent cw endpoints on one Linux host. This proves direct UDP and
 //! actual TLS DERP terminal execution; it does not claim NAT traversal.
 //! The topology is the existing native_mesh_transport Mesh/TLS-DERP/STUN route.
+
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 use codewire_client::{ClientConfig, CodewireClient, StaticTokenProvider};
 use codewire_derp::{Relay, self_signed_tls_config, serve_stun, serve_tls};
 use codewire_mesh::{Config, LocalMeshAuthorizationConfig, StunServerConfig};

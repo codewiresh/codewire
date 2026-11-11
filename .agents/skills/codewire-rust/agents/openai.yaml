@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codewire Rust"
+  short_description: "Rust structure rules no lint can check"
+  default_prompt: "Use $codewire-rust for this Codewire Rust change."

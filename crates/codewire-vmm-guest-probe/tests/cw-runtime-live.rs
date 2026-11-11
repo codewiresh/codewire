@@ -4,6 +4,11 @@
 //! Actual kernel mounts and the source-built trusted launcher. The tiny A/B
 //! ELFs are closed synthetic workload fixtures, not production cw/image proof.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 use std::ffi::CString;
 use std::fs;
 use std::os::fd::AsRawFd as _;

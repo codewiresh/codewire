@@ -34,3 +34,6 @@ tokio-stream = { workspace = true }
 tonic = { workspace = true }
 uuid = { workspace = true }
 codewire-workspace-hack.workspace = true
+
+[lints]
+workspace = true

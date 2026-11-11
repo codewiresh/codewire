@@ -2,6 +2,9 @@
 //! backing: happy path, PKCE enforcement, single-use codes, and the
 //! pre-redirect validation gates.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

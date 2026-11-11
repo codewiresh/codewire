@@ -11,3 +11,6 @@ description = "The published Codewire workspace image every consumer pins"
 
 [dev-dependencies]
 codewire-workspace-hack.workspace = true
+
+[lints]
+workspace = true

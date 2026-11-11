@@ -8,6 +8,9 @@
 //! broker process. It has no public listener or persistent state. Secret-bearing
 //! values must remain inside that process.
 
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::unwrap_used)]
+
 pub mod anthropic;
 mod bridge;
 mod claude_oauth;

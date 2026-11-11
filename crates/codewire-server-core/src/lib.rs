@@ -29,6 +29,9 @@
 //! Each module is documented at its own level; this crate root just
 //! re-exports the most common entry points.
 
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 pub mod account_deletion;
 pub mod auth;
 pub mod bounded_http1;

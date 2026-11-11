@@ -14,6 +14,10 @@ rust-version = "1.99.1"
 license = "BSD-3-Clause"
 authors = ["Sonica"]
 
+# The member crates inherit `[lints]` from their workspace, so the table must
+# exist. It sets no levels: clippy runs only in the root workspace.
+[workspace.lints]
+
 [workspace.dependencies]
 codewire-netstack = { path = "crates/codewire-netstack" }
 codewire-proto = { path = "crates/codewire-proto", default-features = false }

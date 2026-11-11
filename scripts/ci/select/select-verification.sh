@@ -1016,7 +1016,7 @@ if [ "$event_selected" = false ]; then
         kind_relevant=true
         recognized=true
         ;;
-      Cargo.toml|Cargo.lock|rust-toolchain.toml|.config/hakari.toml)
+      Cargo.toml|Cargo.lock|rust-toolchain.toml|.config/hakari.toml|clippy.toml)
         select_rust_workspace
         recognized=true
         ;;

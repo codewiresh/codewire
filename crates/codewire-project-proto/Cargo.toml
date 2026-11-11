@@ -14,3 +14,6 @@ codewire-proto = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 codewire-workspace-hack.workspace = true
+
+[lints]
+workspace = true

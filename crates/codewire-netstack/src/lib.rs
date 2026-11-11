@@ -31,6 +31,9 @@
 //! dequeued. Consumers still own admission, DNS, egress policy,
 //! connected-stream injection, and the authenticated packet transport.
 
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::unwrap_used)]
+
 mod device;
 mod dns;
 mod driver;

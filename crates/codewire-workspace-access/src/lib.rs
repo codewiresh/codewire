@@ -3,6 +3,9 @@
 //! the daemon client it uses, SSH host-key handling, and the environment's
 //! tailnet peer machinery.
 
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::unwrap_used)]
+
 pub mod daemon;
 #[cfg(unix)]
 pub mod daemon_access;

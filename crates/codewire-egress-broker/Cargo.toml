@@ -22,3 +22,6 @@ zeroize = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 codewire-workspace-hack.workspace = true
+
+[lints]
+workspace = true

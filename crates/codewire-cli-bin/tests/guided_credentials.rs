@@ -1,5 +1,9 @@
 //! Built-CLI journeys against a synthetic HTTP/2 credential authority.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
 
 use std::fs::File;
 use std::io::{Read as _, Write as _};

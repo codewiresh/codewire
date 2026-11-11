@@ -46,3 +46,6 @@ tokio-vsock = { workspace = true, features = ["tonic014"] }
 [dev-dependencies]
 tempfile = { workspace = true }
 codewire-workspace-hack.workspace = true
+
+[lints]
+workspace = true

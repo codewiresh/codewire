@@ -5,6 +5,9 @@
 //! implementation behind the same higher-level supervisor, not a lowest-common-
 //! denominator VMM abstraction.
 
+// Predates these workspace lints; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks, clippy::unwrap_used)]
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod artifact;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

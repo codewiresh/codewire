@@ -6,6 +6,11 @@
 //! worker's descriptor table with libproc. That Seatbelt refuses new files and
 //! internet sockets after confinement is proved by the `darwin::sandbox` tests.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 use std::io::{Read as _, Write as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;

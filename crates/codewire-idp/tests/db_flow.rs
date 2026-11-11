@@ -9,6 +9,9 @@
 //! database is a no-op); CI's integration job runs it against a Postgres
 //! initialized through the standard SQLx migration entrypoint.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use base64::Engine;
 use codewire_idp::{
     IdpConfig, PgAuthorizationStore, PgDeviceAuthorizationStore, SigningKekKeyring, build_provider,

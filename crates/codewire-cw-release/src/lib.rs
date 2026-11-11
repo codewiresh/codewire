@@ -9,6 +9,9 @@
 //! An ordinary store is writable by its owner. It is not an OS-enforced
 //! immutable boundary and is never a trusted managed-helper source.
 
+// Predates these workspace lints; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks, clippy::unwrap_used)]
+
 #[cfg(unix)]
 pub mod build_record;
 pub mod identity;

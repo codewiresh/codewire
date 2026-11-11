@@ -1,3 +1,6 @@
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};

@@ -1,3 +1,6 @@
+// Predates these workspace lints; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks, clippy::unwrap_used)]
+
 pub mod access;
 #[cfg(target_os = "linux")]
 mod agent_login;

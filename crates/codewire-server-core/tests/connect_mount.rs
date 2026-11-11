@@ -15,6 +15,9 @@
 //! - `Connect-Protocol-Version` is validated when present but never
 //!   required (the D6b decision recorded at WI-1).
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};

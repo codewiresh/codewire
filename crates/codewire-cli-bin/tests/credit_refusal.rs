@@ -4,6 +4,8 @@
 //! with the `CREDIT_EXHAUSTED` reason. The CLI names the organization, links
 //! its billing page and points at local sandboxes, in text and `--output json`.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
 
 use std::path::Path;
 use std::process::{Output, Stdio};

@@ -8,6 +8,9 @@
 //! and must not reuse a channel across newly admitted credential requests.
 //! There is no plaintext, native-root, key-log or last-good-file fallback.
 
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 mod client;
 mod connect;
 mod files;

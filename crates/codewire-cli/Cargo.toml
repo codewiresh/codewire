@@ -88,3 +88,6 @@ codewire-workspace-hack.workspace = true
 
 [build-dependencies]
 codewire-cw-release = { workspace = true }
+
+[lints]
+workspace = true

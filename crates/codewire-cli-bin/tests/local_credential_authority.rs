@@ -3,6 +3,9 @@
 //! The packaged cw starts its macOS credential authority as a detached,
 //! empty-environment child and serves local storage through it.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use std::fs;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};

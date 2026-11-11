@@ -49,3 +49,6 @@ codewire-client = { workspace = true }
 reqwest = { workspace = true }
 tower = { workspace = true }
 codewire-workspace-hack.workspace = true
+
+[lints]
+workspace = true

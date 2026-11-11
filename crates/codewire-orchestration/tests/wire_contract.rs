@@ -7,6 +7,9 @@
 //! scope repeats only the fake-Kubernetes boundary after the harness restarts
 //! orchestration without a Kubernetes client.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 #[path = "wire_contract/mod.rs"]
 mod contract;
 

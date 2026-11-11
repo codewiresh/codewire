@@ -14,6 +14,9 @@
 //! membership is required even for the creator. The private projector seals
 //! only the runtime's selected application winners to one actual launcher.
 
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::unwrap_used)]
+
 mod authority;
 #[cfg(feature = "enrollment")]
 pub mod delegation;

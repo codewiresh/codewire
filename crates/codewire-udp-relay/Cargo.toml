@@ -33,3 +33,6 @@ codewire-tls = { workspace = true, features = ["test-support"] }
 reqwest = { workspace = true }
 tower = { workspace = true }
 codewire-workspace-hack.workspace = true
+
+[lints]
+workspace = true

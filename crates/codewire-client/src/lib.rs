@@ -4,6 +4,9 @@
 //! typed error decoding. Product consumers use it instead of constructing raw
 //! generated clients or formatting platform route strings themselves.
 
+// Predates this workspace lint; #4125 tracks removing the allow.
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 mod access_profiles;
 mod auth;
 mod config;

@@ -15,3 +15,6 @@ tokio = { workspace = true }
 [dev-dependencies]
 codewire-workspace-hack.workspace = true
 tempfile = { workspace = true }
+
+[lints]
+workspace = true
