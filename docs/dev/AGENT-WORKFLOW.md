@@ -51,6 +51,14 @@ candidate; they are not the debugging loop. After failure, move inward. Do not
 rebuild unchanged inputs, rerun unchanged qualifications, or add taxonomy in
 place of evidence. An unknown result blocks only the affected mutation.
 
+A deadline in a test is a hang guard, not a speed expectation: at least 30 s,
+or the product's own bound when longer. Only a test about a timeout uses a
+short deadline, and only for the step it times. A busy runner exceeds tighter
+bounds (#4078: a 10 s clone, a 5 s wait, a 1 s `printf`). A flake gets its
+cause and a fix plus a regression proof, such as a reproduction under load,
+never a bare rerun. The fail-fast watcher's "Stop at the first failed job" log
+keeps a main job's failed first attempt.
+
 ## Local verification
 
 Inspect the affected capabilities first:
