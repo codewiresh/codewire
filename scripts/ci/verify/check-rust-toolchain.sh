@@ -162,7 +162,7 @@ while IFS= read -r workflow; do
 done < <(grep -Rl --include='*.yaml' --include='*.yml' \
   -E -- '--default-toolchain[[:space:]]+stable' "$ROOT/.gitea/workflows" || true)
 
-rust_build_image="rust:${channel}-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6"
+rust_build_image="rust:${channel}-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c"
 [[ "$(grep -Fxc "ARG RUST_IMAGE=$rust_build_image" "$ROOT/$RUST_BUILD_BASE_DOCKERFILE" || true)" -eq 1 ]] ||
   die "$RUST_BUILD_BASE_DOCKERFILE does not declare exactly one reviewed $rust_build_image input"
 [[ "$(grep -Fxc "ARG RUST_IMAGE=$rust_build_image" "$ROOT/apps/dashboard/Dockerfile" || true)" -eq 1 ]] ||
@@ -189,7 +189,7 @@ for dockerfile in "${SHIPPED_RUST_DOCKERFILES[@]}"; do
     die "$dockerfile must not add cargo-chef ahead of the measured sccache experiment"
   fi
 done
-rust_workspace_image="rust:${channel}-slim-bookworm@sha256:2c3a22f0a5533ea2dd5a16627bc841228151faa2d4de2644ac9987e4a2f1f2fa"
+rust_workspace_image="rust:${channel}-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd"
 [[ "$(grep -Fxc "FROM $rust_workspace_image AS cw-toolchain" "$ROOT/$WORKSPACE_DOCKERFILE" || true)" -eq 1 ]] ||
   die "workspace build-stage compiler differs from $channel"
 # shellcheck disable=SC2016 # Match the literal Dockerfile platform argument.

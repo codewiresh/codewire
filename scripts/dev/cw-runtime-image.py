@@ -37,7 +37,7 @@ TARGET = "x86_64-unknown-linux-musl"
 TARGETS = {TARGET: ("amd64", 62), "aarch64-unknown-linux-musl": ("arm64", 183)}
 # The sealed release toolchains a cw payload may name, as the guest and host
 # admit them (crates/codewire-vmm-guest-probe/src/cw_runtime.rs).
-RUSTC_RELEASES = ("1.93.0", "1.99.0")
+RUSTC_RELEASES = ("1.93.0", "1.99.0", "1.99.1")
 CW_PATH = "usr/local/bin/cw"
 META_PATH = "usr/local/share/codewire/cw-runtime.json"
 DIRECTORIES = ("usr", "usr/local", "usr/local/bin", "usr/local/share", "usr/local/share/codewire")

@@ -58,7 +58,7 @@ CODEWIRE_APPROVED_IMAGE_REGISTRIES=ghcr.io/codewiresh/,docker.io/library/
 
 ### Workspace Rust toolchains
 
-The default workspace includes Rust 1.99.0 with rustfmt and Clippy outside the
+The default workspace includes Rust 1.99.1 with rustfmt and Clippy outside the
 persistent home, under `/opt/codewire/rust`. Cargo keeps its configuration,
 registry cache and installed commands in `/home/codewire/.cargo`; its `bin`
 directory takes precedence over the image's Rust commands.

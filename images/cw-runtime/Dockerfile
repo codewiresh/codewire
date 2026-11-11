@@ -4,7 +4,7 @@
 # than interpreting its name as a remotely fetched image.
 FROM scratch AS cw-source
 
-FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS cw-toolchain
+FROM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS cw-toolchain
 COPY images/workspace/debian.sources /etc/apt/sources.list.d/debian.sources
 COPY images/base/apt-transport.conf /etc/apt/apt.conf.d/80-codewire-transport
 COPY --chmod=0755 images/base/apt-get-with-retry /usr/local/sbin/apt-get-with-retry
@@ -32,12 +32,12 @@ RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
     install -m 0755 /tmp/sccache-v0.17.0-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache && \
     mkdir /opt/zig && tar -xJf /tmp/zig.tar.xz --strip-components=1 -C /opt/zig && \
     rm -rf /tmp/protoc.zip /tmp/sccache.tar.gz /tmp/zig.tar.xz /tmp/sccache-v0.17.0-x86_64-unknown-linux-musl && \
-    test "$(rustc --version)" = 'rustc 1.99.0 (b940084d7 2026-09-28)' && \
+    test "$(rustc --version)" = 'rustc 1.99.1 (58cf8f9c3 2026-10-13)' && \
     test "$(/opt/protoc/bin/protoc --version)" = 'libprotoc 35.1' && \
     test "$(sccache --version)" = 'sccache 0.17.0' && \
     test "$(/opt/zig/zig version)" = '0.15.2' && \
-    rustup target add --toolchain 1.99.0 x86_64-unknown-linux-musl && \
-    rustup component add --toolchain 1.99.0 clippy rustfmt && \
+    rustup target add --toolchain 1.99.1 x86_64-unknown-linux-musl && \
+    rustup component add --toolchain 1.99.1 clippy rustfmt && \
     cargo install --locked cargo-zigbuild --version 0.23.0 && \
     test "$(cargo-zigbuild --version)" = 'cargo-zigbuild 0.23.0'
 COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-rust-build

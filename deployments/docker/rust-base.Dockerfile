@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.20
 # Shared product-image build toolchain. This image is a build input only; no
 # product runtime inherits from it.
-ARG RUST_IMAGE=rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
+ARG RUST_IMAGE=rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c
 
 FROM ${RUST_IMAGE}
 ADD --checksum=sha256:6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 \
@@ -20,7 +20,7 @@ RUN unzip -q /tmp/protoc.zip -d /opt/protoc \
     && install -m 0755 /tmp/sccache-v0.17.0-x86_64-unknown-linux-musl/sccache /usr/local/bin/sccache \
     && tar -xzf /tmp/cargo-nextest.tar.gz -C /usr/local/cargo/bin cargo-nextest \
     && rm -rf /tmp/protoc.zip /tmp/sccache.tar.gz /tmp/sccache-v0.17.0-x86_64-unknown-linux-musl /tmp/cargo-nextest.tar.gz \
-    && test "$(rustc --version)" = 'rustc 1.99.0 (b940084d7 2026-09-28)' \
+    && test "$(rustc --version)" = 'rustc 1.99.1 (58cf8f9c3 2026-10-13)' \
     && test "$(/opt/protoc/bin/protoc --version)" = 'libprotoc 35.1' \
     && test "$(sccache --version)" = 'sccache 0.17.0' \
     && cargo nextest --version | head -n 1 | grep -q '^cargo-nextest 0\.9\.148 '

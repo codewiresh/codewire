@@ -195,7 +195,7 @@ tool_stage_inputs=(
 )
 # shellcheck disable=SC2016 # Match literal Dockerfile commands.
 compiler_inputs=(
-  'FROM --platform=$BUILDPLATFORM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS cw-cross-compiler'
+  'FROM --platform=$BUILDPLATFORM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS cw-cross-compiler'
   'COPY --from=build-protoc /protoc.zip /tmp/protoc.zip'
   'COPY --from=build-sccache /sccache.tar.gz /tmp/sccache.tar.gz'
   'COPY --from=build-zig /zig.tar.xz /tmp/zig.tar.xz'
@@ -204,7 +204,7 @@ compiler_inputs=(
   'test "$(sccache --version)" = '\''sccache 0.17.0'\'''
   'test "$(/opt/zig/zig version)" = '\''0.15.2'\'''
   'ENV PROTOC=/opt/protoc/bin/protoc'
-  'rustup target add --toolchain 1.99.0 aarch64-unknown-linux-musl'
+  'rustup target add --toolchain 1.99.1 aarch64-unknown-linux-musl'
   'cargo install --locked cargo-zigbuild --version 0.23.0'
   'test "$(cargo-zigbuild --version)" = '\''cargo-zigbuild 0.23.0'\'''
   'COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-rust-build'
@@ -222,7 +222,7 @@ workspace_cross_contract() {
   for input in "${builder_inputs[@]}"; do grep -qF -- "$input" <<<"$builder" || return 1; done
   # The image-platform toolchain only adds the shipped developer components.
   [[ "$(grep -c '^RUN ' <<<"$toolchain")" == 1 ]] || return 1
-  grep -qxF 'RUN rustup component add --toolchain 1.99.0 rustfmt clippy' <<<"$toolchain" || return 1
+  grep -qxF 'RUN rustup component add --toolchain 1.99.1 rustfmt clippy' <<<"$toolchain" || return 1
   ! grep -Eq '^(ADD|COPY) ' <<<"$toolchain" || return 1
   # Compiler tools follow the build platform, and only cross builds run Cargo.
   ! grep -Eq '^FROM (sccache|protoc|zig)-\$\{TARGETARCH\}' <<<"$recipe" || return 1
@@ -284,7 +284,7 @@ done
 # The Go tools cross-compile natively on the build platform, never under
 # emulation, still at @latest when the image is built.
 # shellcheck disable=SC2016 # Match the Dockerfile's literal variables.
-go_stage="$(sed -n '/^FROM --platform=$BUILDPLATFORM rust:1.99.0-bookworm@sha256:[0-9a-f]\{64\} AS workspace-floating-go$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
+go_stage="$(sed -n '/^FROM --platform=$BUILDPLATFORM rust:1.99.1-bookworm@sha256:[0-9a-f]\{64\} AS workspace-floating-go$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
 # shellcheck disable=SC2016
 for go_input in 'GOOS=linux GOARCH="$TARGETARCH" CGO_ENABLED=0' \
   '/usr/local/go/bin/go install golang.org/x/tools/gopls@latest' \
@@ -367,7 +367,7 @@ if grep -qF 'ghcr.io/codewiresh/base:latest' "$WORKSPACE_DOCKERFILE"; then
 fi
 grep -Eq '^FROM ubuntu:noble@sha256:[0-9a-f]{64}$' "$ROOT/images/base/Dockerfile" ||
   fail 'base image foundation is not digest-pinned'
-grep -Eq '^FROM rust:1\.99\.0-slim-bookworm@sha256:[0-9a-f]{64} AS cw-toolchain$' \
+grep -Eq '^FROM rust:1\.99\.1-slim-bookworm@sha256:[0-9a-f]{64} AS cw-toolchain$' \
   "$WORKSPACE_DOCKERFILE" || fail 'workspace builder foundation is not digest-pinned'
 for dockerfile in "$ROOT/images/base/Dockerfile" "$WORKSPACE_DOCKERFILE"; do
   grep -qF 'amd64)' "$dockerfile" || fail "$dockerfile omits amd64 installers"

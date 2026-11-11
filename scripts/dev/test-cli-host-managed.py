@@ -621,7 +621,7 @@ def admit_broker(path, receipt_path, source, producer):
                      ["schema", "source_revision", "source_tree_sha256", "executable_sha256", "executable_size", "toolchain",
                       "profile", "features", "inputs", "build_exit", "source_unchanged"], "broker build receipt")
     require(receipt["schema"] == "codewire.host-agent-broker-build/v1" and
-            hexdigest(receipt["source_revision"], 40) and receipt["toolchain"] == "1.99.0" and
+            hexdigest(receipt["source_revision"], 40) and receipt["toolchain"] == "1.99.1" and
             receipt["profile"] == "ci" and receipt["features"] == ["host-agent-synthetic-smoke"] and
             type(receipt["build_exit"]) is int and receipt["build_exit"] == 0 and receipt["source_unchanged"] is True and
             receipt["executable_sha256"] == hashlib.sha256(raw).hexdigest() and

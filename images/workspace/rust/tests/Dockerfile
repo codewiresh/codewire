@@ -2,7 +2,7 @@
 # cw-toolchain FROM reference from images/workspace/Dockerfile; never a tag.
 ARG RUST_TOOLCHAIN_IMAGE
 FROM ${RUST_TOOLCHAIN_IMAGE}
-RUN rustup component add --toolchain 1.99.0 rustfmt clippy && \
+RUN rustup component add --toolchain 1.99.1 rustfmt clippy && \
     groupadd --gid 1000 codewire && \
     useradd --uid 1000 --gid 1000 --create-home codewire && \
     mkdir -p /opt/codewire/rust/cargo /opt/codewire/rust/bin && \

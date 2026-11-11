@@ -25,11 +25,11 @@ done
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
 cargo --version
-rustc --version | grep -E '^rustc 1\.99\.0 '
+rustc --version | grep -E '^rustc 1\.99\.1 '
 rustfmt --version
 cargo clippy --version
 toolchain="$(selected)"
-[[ "$toolchain" = 1.99.0-* ]]
+[[ "$toolchain" = 1.99.1-* ]]
 compiler="$(rustup which rustc)"
 toolchain_path="${compiler%/bin/rustc}"
 [[ "$toolchain_path" = /opt/codewire/rust/rustup/toolchains/"$toolchain" ]]
@@ -58,9 +58,9 @@ rustup component add rustfmt --toolchain "$toolchain"
 # Use the pinned toolchain's own distribution manifest as an offline update
 # server. Do not rewrite update hashes or modify the installed manifest.
 mkdir "$work/dist"
-cp "$toolchain_path/lib/rustlib/multirust-channel-manifest.toml" "$work/dist/channel-rust-1.99.0.toml"
-(cd "$work/dist"; sha256sum channel-rust-1.99.0.toml >channel-rust-1.99.0.toml.sha256)
-RUSTUP_DIST_SERVER="file://$work" RUSTUP_UPDATE_ROOT=file:///nonexistent-rustup-update-root rustup update 1.99.0
+cp "$toolchain_path/lib/rustlib/multirust-channel-manifest.toml" "$work/dist/channel-rust-1.99.1.toml"
+(cd "$work/dist"; sha256sum channel-rust-1.99.1.toml >channel-rust-1.99.1.toml.sha256)
+RUSTUP_DIST_SERVER="file://$work" RUSTUP_UPDATE_ROOT=file:///nonexistent-rustup-update-root rustup update 1.99.1
 [[ "$(selected)" = "$toolchain" ]]
 
 # Existing user state wins; the dispatcher must neither migrate nor hide it.

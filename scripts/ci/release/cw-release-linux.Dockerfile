@@ -20,7 +20,7 @@ ARG ZIG_VERSION
 ARG ZIG_X86_64_LINUX_SHA256
 ARG CARGO_ZIGBUILD_VERSION
 ARG TOOLS_CARGO_BUILD_JOBS
-# rust-base carries Rust 1.99.0 and protoc 35.1 at their pins. The release
+# rust-base carries Rust 1.99.1 and protoc 35.1 at their pins. The release
 # targets and the components rust-toolchain.toml names are installed here, so
 # no build ever reaches rustup's network.
 RUN set -eu; \

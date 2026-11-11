@@ -5,8 +5,8 @@ ARG BASE_IMAGE_REF
 
 # The developer Rust toolchain shipped in the workspace, for the image's own
 # platform. The workspace copies only its Cargo and Rustup homes.
-FROM rust:1.99.0-slim-bookworm@sha256:2c3a22f0a5533ea2dd5a16627bc841228151faa2d4de2644ac9987e4a2f1f2fa AS cw-toolchain
-RUN rustup component add --toolchain 1.99.0 rustfmt clippy
+FROM rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd AS cw-toolchain
+RUN rustup component add --toolchain 1.99.1 rustfmt clippy
 
 # Checksum-pinned compiler tools, selected for the build platform. Only protoc
 # also enters the workspace, unpacked for the image's own platform.
@@ -51,7 +51,7 @@ FROM zig-${BUILDARCH} AS build-zig
 
 # The arm64 cw is cross-compiled natively on the build platform, never under
 # emulation, to the same static musl form as the admitted amd64 asset.
-FROM --platform=$BUILDPLATFORM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS cw-cross-compiler
+FROM --platform=$BUILDPLATFORM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS cw-cross-compiler
 COPY --from=build-protoc /protoc.zip /tmp/protoc.zip
 COPY --from=build-sccache /sccache.tar.gz /tmp/sccache.tar.gz
 COPY --from=build-zig /zig.tar.xz /tmp/zig.tar.xz
@@ -81,8 +81,8 @@ RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
     test "$(/opt/zig/zig version)" = '0.15.2'
 ENV PROTOC=/opt/protoc/bin/protoc
 ENV PATH="/opt/zig:${PATH}"
-RUN test "$(rustc --version)" = 'rustc 1.99.0 (b940084d7 2026-09-28)' && \
-    rustup target add --toolchain 1.99.0 aarch64-unknown-linux-musl && \
+RUN test "$(rustc --version)" = 'rustc 1.99.1 (58cf8f9c3 2026-10-13)' && \
+    rustup target add --toolchain 1.99.1 aarch64-unknown-linux-musl && \
     cargo install --locked cargo-zigbuild --version 0.23.0 && \
     test "$(cargo-zigbuild --version)" = 'cargo-zigbuild 0.23.0'
 COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-rust-build
@@ -92,7 +92,7 @@ COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-ru
 # them under emulation. They still resolve @latest at image-build time (every
 # builder bypasses this stage's cache, like workspace-floating-tools), and the
 # build information Go embeds in each binary keeps them visible to the SBOM.
-FROM --platform=$BUILDPLATFORM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS workspace-floating-go
+FROM --platform=$BUILDPLATFORM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS workspace-floating-go
 SHELL ["/bin/bash", "-c"]
 ARG BUILDARCH
 ARG TARGETARCH
