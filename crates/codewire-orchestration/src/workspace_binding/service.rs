@@ -23,19 +23,15 @@ use codewire_proto::codewire::internal::v1::{
 use codewire_server_core::bounded_http1::PeerAddr;
 use codewire_server_core::peer_token::{self, PEER_TOKEN_LIFETIME_SECS};
 use codewire_server_core::pod_identity::{
-    KubernetesPodIdentityVerifier, PodIdentityError, PodIdentityPurpose, VerifiedPodIdentity,
-    pre_review_bearer_filter,
+    PodIdentityError, VerifiedPodIdentity, pre_review_bearer_filter,
 };
 use connectrpc::{ConnectError, RequestContext, ServiceRequest, ServiceResult};
-use k8s_openapi::api::core::v1::{Node, Pod};
-use kube::Api;
-use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
 use tokio::time::Instant;
 
 use super::access::{
     self, AccessSettings, HttpRelayAllocator, RelayAllocationRequest, RelayAllocator, RelayError,
 };
-use super::authorize::{self, SandboxOwner, canonical_uid};
+use super::authorize::{self, canonical_uid};
 use super::limits::{PodSlot, RequestLimits};
 use super::metrics;
 use super::store::{
@@ -46,8 +42,8 @@ use super::{BINDING_REQUERY_INTERVAL, MAX_BIND_WAIT};
 use crate::environment_mesh::{
     ENROLLMENT_LIFETIME_SECS, enrollment_code_sha256, generate_enrollment_code,
 };
-use crate::runtime_transport::{RuntimeTransportZone, TRANSPORT_ZONE_LABEL};
-use crate::sandbox::{CRD_VERSION, SANDBOX_GROUP};
+use crate::runtime::{MemberFacts, Placement, RuntimeDriver};
+use crate::runtime_transport::RuntimeTransportZone;
 use crate::worker::environment_auth::{
     WorkspaceCredentialScope, issue_workspace_daemon_credential,
 };
@@ -114,8 +110,7 @@ fn identity_error(error: PodIdentityError) -> BindError {
 
 /// Shared state of the workspace-binding listener for one process.
 pub struct WorkspaceBindingState {
-    kube: Option<kube::Client>,
-    verifier: KubernetesPodIdentityVerifier,
+    runtime: Option<Arc<dyn RuntimeDriver>>,
     store: Arc<dyn BindingStore>,
     notifications: Arc<BindingNotifications>,
     limits: RequestLimits,
@@ -132,7 +127,7 @@ pub struct WorkspaceBindingState {
 struct Caller {
     identity: VerifiedPodIdentity,
     peer: IpAddr,
-    pod: Pod,
+    member: MemberFacts,
     _slot: PodSlot,
 }
 
@@ -144,18 +139,14 @@ struct BoundCaller {
 
 impl WorkspaceBindingState {
     pub fn new(
-        kube: Option<kube::Client>,
+        runtime: Option<Arc<dyn RuntimeDriver>>,
         store: Arc<dyn BindingStore>,
         notifications: Arc<BindingNotifications>,
         sandbox_namespace: &str,
         session_secret: &str,
     ) -> Self {
         Self {
-            verifier: KubernetesPodIdentityVerifier::new(
-                kube.clone(),
-                PodIdentityPurpose::WorkspaceBinding,
-            ),
-            kube,
+            runtime,
             store,
             notifications,
             limits: RequestLimits::default(),
@@ -189,11 +180,28 @@ impl WorkspaceBindingState {
         self
     }
 
-    fn kube(&self) -> Result<&kube::Client, BindError> {
-        self.kube.as_ref().ok_or(BindError::Unavailable)
+    fn runtime(&self) -> Result<&dyn RuntimeDriver, BindError> {
+        self.runtime.as_deref().ok_or(BindError::Unavailable)
     }
 
-    /// §4.1–§4.4 and S1, shared by every method.
+    /// The live Pod by the reviewed name; `None` when it is gone.
+    async fn attested_member(
+        &self,
+        identity: &VerifiedPodIdentity,
+    ) -> Result<Option<MemberFacts>, BindError> {
+        self.runtime()?
+            .attested_member(identity)
+            .await
+            .map_err(|_| BindError::Unavailable)
+    }
+
+    /// §4.1–§4.4 and S1, shared by every method, in this order. Garbage and
+    /// an over-budget peer are refused before any TokenReview (§4.1);
+    /// TokenReview is the only authentication (§4.2); the namespace and
+    /// per-Pod slot are checked before any Pod read (§4.3); then the live Pod
+    /// by the reviewed name must be the reviewed incarnation, called from its
+    /// own transport address (§4.4, S1). A missing Pod is `NotFound`, apart
+    /// from a Pod that may not bind.
     async fn authenticate(
         &self,
         headers: &HeaderMap,
@@ -214,8 +222,8 @@ impl WorkspaceBindingState {
                 .await
                 .ok_or(BindError::Unavailable)?;
             metrics::observe_token_review();
-            self.verifier
-                .authenticate(headers)
+            self.runtime()?
+                .review_member_credential(headers)
                 .await
                 .map_err(identity_error)?
         };
@@ -231,17 +239,18 @@ impl WorkspaceBindingState {
 
         // §4.4: the live Pod by the reviewed name and UID, called from its
         // own address (S1).
-        let pod = read_pod(self.kube()?, &identity)
+        let member = self
+            .attested_member(&identity)
             .await?
             .ok_or(BindError::NotFound)?;
-        authorize::bindable_pod(&pod, &identity).ok_or(BindError::PermissionDenied)?;
-        if !access::peer_is_pod(&pod, peer) {
+        authorize::bindable_pod(&member, &identity).ok_or(BindError::PermissionDenied)?;
+        if !authorize::peer_is_pod(&member, peer) {
             return Err(BindError::PermissionDenied);
         }
         Ok(Caller {
             identity,
             peer,
-            pod,
+            member,
             _slot: slot,
         })
     }
@@ -252,17 +261,20 @@ impl WorkspaceBindingState {
     async fn confirm(
         &self,
         caller: &Caller,
-        pod: &Pod,
+        member: &MemberFacts,
         binding: &LiveBinding,
     ) -> Result<(), BindError> {
         let identity = &caller.identity;
         let owner =
-            authorize::bound_pod(pod, identity, binding).ok_or(BindError::PermissionDenied)?;
-        if !access::peer_is_pod(pod, caller.peer) {
+            authorize::bound_pod(member, identity, binding).ok_or(BindError::PermissionDenied)?;
+        if !authorize::peer_is_pod(member, caller.peer) {
             return Err(BindError::PermissionDenied);
         }
-        let sandbox = read_sandbox(self.kube()?, &binding.namespace, &owner)
-            .await?
+        let sandbox = self
+            .runtime()?
+            .attested_runtime(&Placement::new(&binding.namespace), &owner.name)
+            .await
+            .map_err(|_| BindError::Unavailable)?
             .ok_or(BindError::PermissionDenied)?;
         if !authorize::bound_sandbox(&sandbox, &owner, binding) {
             return Err(BindError::PermissionDenied);
@@ -307,7 +319,7 @@ impl WorkspaceBindingState {
             .await
             .map_err(|_| BindError::Unavailable)?
             .ok_or(BindError::NotFound)?;
-        self.confirm(&caller, &caller.pod, &binding).await?;
+        self.confirm(&caller, &caller.member, &binding).await?;
         Ok(BoundCaller { caller, binding })
     }
 
@@ -331,11 +343,12 @@ impl WorkspaceBindingState {
 
         // §4.6: the Pod may have changed during the wait; re-read the chain,
         // then the binding itself.
-        let pod = read_pod(self.kube()?, &caller.identity)
+        let member = self
+            .attested_member(&caller.identity)
             .await?
             .ok_or(BindError::NotFound)?;
-        self.confirm(&caller, &pod, &binding).await?;
-        let access = self.access_grant(&pod, &binding).await?;
+        self.confirm(&caller, &member, &binding).await?;
+        let access = self.access_grant(&member, &binding).await?;
 
         // §4.7: respond only while the reviewed token is still valid.
         still_valid(&caller.identity)?;
@@ -349,7 +362,9 @@ impl WorkspaceBindingState {
         peer: Option<IpAddr>,
     ) -> Result<RefreshAccessResponse, BindError> {
         let bound = self.bound(headers, peer).await?;
-        let access = self.access_grant(&bound.caller.pod, &bound.binding).await?;
+        let access = self
+            .access_grant(&bound.caller.member, &bound.binding)
+            .await?;
         still_valid(&bound.caller.identity)?;
         Ok(RefreshAccessResponse {
             access: Some(access).into(),
@@ -409,7 +424,7 @@ impl WorkspaceBindingState {
         };
         let bound = self.bound(headers, peer).await?;
         let allocator_url = self
-            .node_zone(&bound.caller.pod)
+            .node_zone(&bound.caller.member)
             .await?
             .and_then(|zone| zone.peer_relay)
             .map(|relay| relay.allocator_url.trim().to_owned())
@@ -544,7 +559,7 @@ impl WorkspaceBindingState {
     /// generation and the public endpoints its daemon may use.
     async fn access_grant(
         &self,
-        pod: &Pod,
+        member: &MemberFacts,
         binding: &LiveBinding,
     ) -> Result<WorkspaceAccess, BindError> {
         let expires_at = i64::try_from(unix_now()?)
@@ -559,9 +574,11 @@ impl WorkspaceBindingState {
         .map_err(|_| BindError::Unavailable)?;
         // Endpoints are best effort: a missing Service or zone only narrows
         // the paths the daemon advertises.
+        let runtime = self.runtime()?;
+        let placement = Placement::new(&binding.namespace);
         let (direct_udp_endpoints, zone, app_ports, mesh) = tokio::join!(
-            access::direct_udp_endpoints(self.kube()?, &binding.namespace, &binding.environment_id),
-            self.node_zone(pod),
+            runtime.direct_udp_endpoints(&placement, &binding.environment_id),
+            self.node_zone(member),
             self.store.app_ports(&binding.environment_id),
             self.mesh_target(binding),
         );
@@ -591,31 +608,20 @@ impl WorkspaceBindingState {
     }
 
     /// The enabled transport zone of the Pod's node, if it has one.
-    async fn node_zone(&self, pod: &Pod) -> Result<Option<RuntimeTransportZone>, BindError> {
-        let Some(node_name) = pod
-            .spec
-            .as_ref()
-            .and_then(|spec| spec.node_name.as_deref())
-            .filter(|name| !name.is_empty())
-        else {
-            return Ok(None);
-        };
-        let nodes: Api<Node> = Api::all(self.kube()?.clone());
-        let node = nodes
-            .get_opt(node_name)
+    async fn node_zone(
+        &self,
+        member: &MemberFacts,
+    ) -> Result<Option<RuntimeTransportZone>, BindError> {
+        let Some(zone_name) = self
+            .runtime()?
+            .member_transport_zone(member)
             .await
-            .map_err(|_| BindError::Unavailable)?;
-        let Some(zone_name) = node
-            .as_ref()
-            .and_then(|node| node.metadata.labels.as_ref())
-            .and_then(|labels| labels.get(TRANSPORT_ZONE_LABEL))
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
+            .map_err(|_| BindError::Unavailable)?
         else {
             return Ok(None);
         };
         self.store
-            .transport_zone(zone_name)
+            .transport_zone(&zone_name)
             .await
             .map_err(|_| BindError::Unavailable)
     }
@@ -728,30 +734,6 @@ fn unix_now() -> Result<u64, BindError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs())
-        .map_err(|_| BindError::Unavailable)
-}
-
-async fn read_pod(
-    kube: &kube::Client,
-    identity: &VerifiedPodIdentity,
-) -> Result<Option<Pod>, BindError> {
-    let pods: Api<Pod> = Api::namespaced(kube.clone(), identity.namespace());
-    pods.get_opt(identity.pod_name())
-        .await
-        .map_err(|_| BindError::Unavailable)
-}
-
-async fn read_sandbox(
-    kube: &kube::Client,
-    namespace: &str,
-    owner: &SandboxOwner,
-) -> Result<Option<DynamicObject>, BindError> {
-    let gvk = GroupVersionKind::gvk(SANDBOX_GROUP, CRD_VERSION, "Sandbox");
-    let resource = ApiResource::from_gvk_with_plural(&gvk, "sandboxes");
-    let sandboxes: Api<DynamicObject> = Api::namespaced_with(kube.clone(), namespace, &resource);
-    sandboxes
-        .get_opt(&owner.name)
-        .await
         .map_err(|_| BindError::Unavailable)
 }
 

@@ -684,7 +684,7 @@ async fn main() -> anyhow::Result<()> {
     // allocator and its client certificate stay here.
     let workspace_binding_state = Arc::new(
         codewire_orchestration::workspace_binding::WorkspaceBindingState::new(
-            api_state.kube.clone(),
+            api_state.runtime.clone(),
             Arc::new(
                 codewire_orchestration::workspace_binding::PgBindingStore::connect_lazy(
                     &cfg.database_url,

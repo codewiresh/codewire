@@ -2,6 +2,7 @@
 //! for the placement's namespace, which does no I/O to build, and reads what
 //! comes back into the driver's own types.
 
+mod attestation;
 pub(crate) mod members;
 pub(crate) mod observation;
 pub(crate) mod pools;
@@ -14,6 +15,9 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
+use codewire_server_core::pod_identity::{
+    KubernetesPodIdentityVerifier, PodIdentityError, PodIdentityPurpose, VerifiedPodIdentity,
+};
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, DynamicObject, LogParams};
@@ -21,11 +25,12 @@ use kube::api::{Api, DynamicObject, LogParams};
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, DesiredPool,
     FailedLiveResize, KeptSnapshot, MemberFacts, MemberRef, MemberReplacement, Pick, Placement,
-    PoolBornClaim, PoolPass, PoolState, ProbeResult, ResizeState, RuntimeAccess, RuntimeClaims,
-    RuntimeDriver, RuntimeExec, RuntimeLifecycle, RuntimeMember, RuntimeObservation,
-    RuntimeObservations, RuntimePools, RuntimeResize, RuntimeSnapshots, RuntimeStorage,
-    RuntimeStream, RuntimeTeardown, SuspendedRuntime, VerifiedChain, VolumeGrowth, VolumeIdentity,
-    VolumeMode, VolumeRef, WantedPools, WorkspaceVolume,
+    PoolBornClaim, PoolPass, PoolState, ProbeResult, ResizeState, RuntimeAccess,
+    RuntimeAttestation, RuntimeClaims, RuntimeDriver, RuntimeExec, RuntimeFacts, RuntimeLifecycle,
+    RuntimeMember, RuntimeObservation, RuntimeObservations, RuntimePools, RuntimeResize,
+    RuntimeSnapshots, RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime,
+    VerifiedChain, VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef, WantedPools,
+    WorkspaceVolume,
 };
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::HostKeyStore;
@@ -41,14 +46,24 @@ pub struct KubernetesDriver {
     client: kube::Client,
     /// What earlier pool passes remembered, by placement.
     pool_memory: Mutex<BTreeMap<String, warm_pools::LoopState>>,
+    /// TokenReview at the workspace-binding audience, and nothing else.
+    binding_reviewer: KubernetesPodIdentityVerifier,
 }
 
 impl KubernetesDriver {
     pub fn shared(client: kube::Client) -> Arc<dyn RuntimeDriver> {
-        Arc::new(Self {
+        Arc::new(Self::new(client))
+    }
+
+    pub(crate) fn new(client: kube::Client) -> Self {
+        Self {
+            binding_reviewer: KubernetesPodIdentityVerifier::new(
+                Some(client.clone()),
+                PodIdentityPurpose::WorkspaceBinding,
+            ),
             client,
             pool_memory: Mutex::default(),
-        })
+        }
     }
 
     fn sandbox_client(&self, placement: &Placement) -> SandboxClient {
@@ -211,6 +226,43 @@ impl RuntimeClaims for KubernetesDriver {
         client
             .delete_pool_born_claim(environment_id, observed, timeout)
             .await
+    }
+}
+
+#[async_trait]
+impl RuntimeAttestation for KubernetesDriver {
+    async fn review_member_credential(
+        &self,
+        headers: &axum::http::HeaderMap,
+    ) -> Result<VerifiedPodIdentity, PodIdentityError> {
+        self.binding_reviewer.authenticate(headers).await
+    }
+
+    async fn attested_member(
+        &self,
+        identity: &VerifiedPodIdentity,
+    ) -> anyhow::Result<Option<MemberFacts>> {
+        attestation::member(&self.client, identity.namespace(), identity.pod_name()).await
+    }
+
+    async fn attested_runtime(
+        &self,
+        placement: &Placement,
+        name: &str,
+    ) -> anyhow::Result<Option<RuntimeFacts>> {
+        attestation::runtime(&self.client, &placement.namespace, name).await
+    }
+
+    async fn member_transport_zone(&self, member: &MemberFacts) -> anyhow::Result<Option<String>> {
+        attestation::transport_zone(&self.client, member).await
+    }
+
+    async fn direct_udp_endpoints(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> Vec<String> {
+        attestation::direct_udp_endpoints(&self.client, &placement.namespace, environment_id).await
     }
 }
 

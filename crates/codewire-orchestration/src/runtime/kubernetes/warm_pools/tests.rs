@@ -449,10 +449,7 @@ async fn the_driver_remembers_passes_by_placement_until_told_to_forget() {
         pools: vec![reconciled_shadow()],
         ..Cluster::default()
     }));
-    let driver = KubernetesDriver {
-        client: api(Arc::clone(&cluster)),
-        pool_memory: std::sync::Mutex::default(),
-    };
+    let driver = KubernetesDriver::new(api(Arc::clone(&cluster)));
     let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), false)
         .unwrap()
         .unwrap();

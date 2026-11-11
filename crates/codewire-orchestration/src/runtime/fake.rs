@@ -18,7 +18,10 @@ use super::{
     RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeMode,
     VolumeRef, WantedPools,
 };
-use super::{MemberFacts, RuntimeObservation, RuntimeObservations, VerifiedChain, WorkspaceVolume};
+use super::{
+    MemberFacts, RuntimeAttestation, RuntimeFacts, RuntimeObservation, RuntimeObservations,
+    VerifiedChain, WorkspaceVolume,
+};
 use crate::sandbox::ClaimOpts;
 use crate::sandbox::host_keys::HostKeyStore;
 use crate::sandbox::template::TemplateOpts;
@@ -187,6 +190,48 @@ impl RuntimeClaims for FakeRuntimeDriver {
     ) -> anyhow::Result<()> {
         self.placements.lock().unwrap().push(placement.clone());
         Ok(())
+    }
+}
+
+#[async_trait]
+impl RuntimeAttestation for FakeRuntimeDriver {
+    async fn review_member_credential(
+        &self,
+        _headers: &axum::http::HeaderMap,
+    ) -> Result<
+        codewire_server_core::pod_identity::VerifiedPodIdentity,
+        codewire_server_core::pod_identity::PodIdentityError,
+    > {
+        Err(codewire_server_core::pod_identity::PodIdentityError::Unavailable)
+    }
+
+    async fn attested_member(
+        &self,
+        _identity: &codewire_server_core::pod_identity::VerifiedPodIdentity,
+    ) -> anyhow::Result<Option<MemberFacts>> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn attested_runtime(
+        &self,
+        placement: &Placement,
+        _name: &str,
+    ) -> anyhow::Result<Option<RuntimeFacts>> {
+        self.placements.lock().unwrap().push(placement.clone());
+        anyhow::bail!("not scripted")
+    }
+
+    async fn member_transport_zone(&self, _member: &MemberFacts) -> anyhow::Result<Option<String>> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn direct_udp_endpoints(
+        &self,
+        placement: &Placement,
+        _environment_id: &str,
+    ) -> Vec<String> {
+        self.placements.lock().unwrap().push(placement.clone());
+        Vec::new()
     }
 }
 

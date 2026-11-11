@@ -538,6 +538,50 @@ pub trait RuntimeObservations: Send + Sync {
     ) -> anyhow::Result<()>;
 }
 
+/// How the workspace-binding service learns who is calling and what it is
+/// (#3628 PR 5b, design §4). Each method is one review or one read; the
+/// service keeps §4's order and every decision. Between
+/// [`review_member_credential`](Self::review_member_credential) and
+/// [`attested_member`](Self::attested_member) it applies the namespace check
+/// and the per-member slot, so no request limit crosses this trait.
+#[async_trait]
+pub trait RuntimeAttestation: Send + Sync {
+    /// Authenticate an incarnation's credential for the binding audience: the
+    /// only authentication. The identity it returns can be built nowhere else.
+    async fn review_member_credential(
+        &self,
+        headers: &axum::http::HeaderMap,
+    ) -> Result<
+        codewire_server_core::pod_identity::VerifiedPodIdentity,
+        codewire_server_core::pod_identity::PodIdentityError,
+    >;
+
+    /// The incarnation the reviewed identity names, read by its namespace and
+    /// name; `None` when there is none. The caller compares its UID with the
+    /// reviewed one.
+    async fn attested_member(
+        &self,
+        identity: &codewire_server_core::pod_identity::VerifiedPodIdentity,
+    ) -> anyhow::Result<Option<MemberFacts>>;
+
+    /// The runtime of this name; `None` when there is none.
+    async fn attested_runtime(
+        &self,
+        placement: &Placement,
+        name: &str,
+    ) -> anyhow::Result<Option<RuntimeFacts>>;
+
+    /// The transport zone the incarnation's node is labelled with, if any.
+    async fn member_transport_zone(&self, member: &MemberFacts) -> anyhow::Result<Option<String>>;
+
+    /// The environment's direct-UDP endpoints; empty when it has none.
+    async fn direct_udp_endpoints(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> Vec<String>;
+}
+
 /// How a running environment changes size without losing its identity.
 #[async_trait]
 pub trait RuntimeResize: Send + Sync {
@@ -809,6 +853,7 @@ pub trait RuntimeDriver:
     RuntimePools
     + RuntimeClaims
     + RuntimeObservations
+    + RuntimeAttestation
     + RuntimeLifecycle
     + RuntimeResize
     + RuntimeStorage
@@ -821,6 +866,7 @@ impl<
     T: RuntimePools
         + RuntimeClaims
         + RuntimeObservations
+        + RuntimeAttestation
         + RuntimeLifecycle
         + RuntimeResize
         + RuntimeStorage

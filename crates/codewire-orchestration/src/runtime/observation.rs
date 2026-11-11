@@ -22,6 +22,8 @@ pub struct VerifiedChain {
 }
 
 impl VerifiedChain {
+    /// The boundary is the `runtime` module: a driver calls this only after
+    /// its own chain read has verified every link's controller reference.
     pub(in crate::runtime) fn new(
         observation: RuntimeIdentityObservation,
         claim_uid: String,
@@ -96,7 +98,9 @@ pub struct VolumeFact {
 /// One controller reference: an owner reference marked as the controller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControllerFact {
+    pub api_version: String,
     pub kind: String,
+    pub name: String,
     pub uid: String,
 }
 
@@ -104,6 +108,7 @@ pub struct ControllerFact {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemberFacts {
     pub name: Option<String>,
+    pub namespace: Option<String>,
     pub uid: Option<String>,
     pub terminating: bool,
     pub service_account: Option<String>,
@@ -119,6 +124,12 @@ pub struct MemberFacts {
     /// then init containers, in their reported order.
     pub image_ids: Vec<(String, String)>,
     pub ip: String,
+    /// Every address it reports: the primary one, then the list, as given.
+    pub ips: Vec<String>,
+    /// Its phase, if reported.
+    pub phase: Option<String>,
+    /// The node it was scheduled to, if any.
+    pub node_name: Option<String>,
     /// The spec as a whole, for comparisons against a rendering.
     pub spec_json: Value,
 }
@@ -126,6 +137,15 @@ pub struct MemberFacts {
 /// Raw facts about the runtime an incarnation belongs to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeFacts {
+    /// Its API version and kind, when the read reported them.
+    pub api_version: Option<String>,
+    pub kind: Option<String>,
+    pub name: Option<String>,
+    pub namespace: Option<String>,
+    pub uid: Option<String>,
+    pub terminating: bool,
+    /// Owner references marked as the controller, in their order.
+    pub controllers: Vec<ControllerFact>,
     pub labels: BTreeMap<String, String>,
     /// Its template's containers and init containers, as rendered; `None`
     /// when the template has none.

@@ -5,15 +5,12 @@
 //! environment's own short-lived identity. The UDP peer-relay allocator and
 //! its credential stay here: orchestration allocates on the daemon's behalf.
 
-use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
 use codewire_tls::ClientTlsEndpoint;
-use k8s_openapi::api::core::v1::{Pod, Service};
-use kube::Api;
 use serde::{Deserialize, Serialize};
 
 /// Public settings the access grant names.
@@ -197,78 +194,9 @@ impl RelayAllocator for HttpRelayAllocator {
     }
 }
 
-/// The environment's direct-UDP endpoints: its own LoadBalancer Service's
-/// address and port. Empty when none is provisioned or it has no address.
-pub async fn direct_udp_endpoints(
-    kube: &kube::Client,
-    namespace: &str,
-    environment_id: &str,
-) -> Vec<String> {
-    let services: Api<Service> = Api::namespaced(kube.clone(), namespace);
-    let name = crate::sandbox::template::direct_udp_service_name(environment_id);
-    let Ok(Some(service)) = services.get_opt(&name).await else {
-        return Vec::new();
-    };
-    let ip = service
-        .status
-        .as_ref()
-        .and_then(|status| status.load_balancer.as_ref())
-        .and_then(|load_balancer| load_balancer.ingress.as_ref())
-        .and_then(|ingress| ingress.iter().find_map(|entry| entry.ip.clone()))
-        .or_else(|| {
-            service
-                .spec
-                .as_ref()
-                .and_then(|spec| spec.load_balancer_ip.clone())
-        })
-        .and_then(|ip| ip.parse::<IpAddr>().ok());
-    let port = service
-        .spec
-        .as_ref()
-        .and_then(|spec| spec.ports.as_ref())
-        .and_then(|ports| ports.first())
-        .map(|port| port.port)
-        .filter(|port| (1..=65535).contains(port));
-    match (ip, port) {
-        (Some(ip), Some(port)) => vec![std::net::SocketAddr::new(ip, port as u16).to_string()],
-        _ => Vec::new(),
-    }
-}
-
-/// Whether the TCP peer is this Pod's own address (design S1).
-pub fn peer_is_pod(pod: &Pod, peer: IpAddr) -> bool {
-    let Some(status) = pod.status.as_ref() else {
-        return false;
-    };
-    status
-        .pod_ip
-        .as_deref()
-        .into_iter()
-        .chain(
-            status
-                .pod_ips
-                .iter()
-                .flatten()
-                .map(|address| address.ip.as_str()),
-        )
-        .filter_map(|ip| ip.parse::<IpAddr>().ok())
-        .any(|ip| ip == peer || normalize(ip) == normalize(peer))
-}
-
-fn normalize(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V6(v6) => v6
-            .to_ipv4_mapped()
-            .map(IpAddr::V4)
-            .unwrap_or(IpAddr::V6(v6)),
-        v4 => v4,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_openapi::api::core::v1::{PodIP, PodStatus};
 
     const KEY: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
@@ -298,25 +226,6 @@ mod tests {
         assert!(!valid_disco_key(&key.to_uppercase()));
         assert!(!valid_disco_key(&format!("nodekey:{}", "ab".repeat(32))));
         assert!(!valid_disco_key("discokey:ab"));
-    }
-
-    #[test]
-    fn the_peer_must_be_one_of_the_pods_own_addresses() {
-        let pod = Pod {
-            status: Some(PodStatus {
-                pod_ip: Some("10.244.0.9".into()),
-                pod_ips: Some(vec![PodIP {
-                    ip: "fd00::9".into(),
-                }]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert!(peer_is_pod(&pod, "10.244.0.9".parse().unwrap()));
-        assert!(peer_is_pod(&pod, "::ffff:10.244.0.9".parse().unwrap()));
-        assert!(peer_is_pod(&pod, "fd00::9".parse().unwrap()));
-        assert!(!peer_is_pod(&pod, "10.244.0.10".parse().unwrap()));
-        assert!(!peer_is_pod(&Pod::default(), "10.244.0.9".parse().unwrap()));
     }
 }
 

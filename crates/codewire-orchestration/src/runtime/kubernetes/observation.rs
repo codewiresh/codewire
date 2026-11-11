@@ -3,6 +3,7 @@
 //! it before; the checks themselves stay in orchestration.
 
 use k8s_openapi::api::core::v1::{Container, Pod};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::api::DynamicObject;
 
 use super::super::observation::{
@@ -29,25 +30,30 @@ fn container_fact(container: &Container) -> ContainerFact {
     }
 }
 
+fn controllers(owners: Option<&Vec<OwnerReference>>) -> Vec<ControllerFact> {
+    owners
+        .into_iter()
+        .flatten()
+        .filter(|owner| owner.controller == Some(true))
+        .map(|owner| ControllerFact {
+            api_version: owner.api_version.clone(),
+            kind: owner.kind.clone(),
+            name: owner.name.clone(),
+            uid: owner.uid.clone(),
+        })
+        .collect()
+}
+
 pub(crate) fn member_facts(pod: &Pod) -> anyhow::Result<MemberFacts> {
     let spec = pod.spec.as_ref();
     let status = pod.status.as_ref();
     Ok(MemberFacts {
         name: pod.metadata.name.clone(),
+        namespace: pod.metadata.namespace.clone(),
         uid: pod.metadata.uid.clone(),
         terminating: pod.metadata.deletion_timestamp.is_some(),
         service_account: spec.and_then(|spec| spec.service_account_name.clone()),
-        controllers: pod
-            .metadata
-            .owner_references
-            .iter()
-            .flatten()
-            .filter(|owner| owner.controller == Some(true))
-            .map(|owner| ControllerFact {
-                kind: owner.kind.clone(),
-                uid: owner.uid.clone(),
-            })
-            .collect(),
+        controllers: controllers(pod.metadata.owner_references.as_ref()),
         labels: pod.metadata.labels.clone().unwrap_or_default(),
         has_spec: spec.is_some(),
         volumes: spec
@@ -91,12 +97,34 @@ pub(crate) fn member_facts(pod: &Pod) -> anyhow::Result<MemberFacts> {
         ip: status
             .and_then(|status| status.pod_ip.clone())
             .unwrap_or_default(),
+        ips: status
+            .into_iter()
+            .flat_map(|status| {
+                status.pod_ip.iter().cloned().chain(
+                    status
+                        .pod_ips
+                        .iter()
+                        .flatten()
+                        .map(|address| address.ip.clone()),
+                )
+            })
+            .collect(),
+        phase: status.and_then(|status| status.phase.clone()),
+        node_name: spec.and_then(|spec| spec.node_name.clone()),
         spec_json: serde_json::to_value(&pod.spec)?,
     })
 }
 
 pub(crate) fn runtime_facts(sandbox: &DynamicObject) -> anyhow::Result<RuntimeFacts> {
+    let types = sandbox.types.as_ref();
     Ok(RuntimeFacts {
+        api_version: types.map(|types| types.api_version.clone()),
+        kind: types.map(|types| types.kind.clone()),
+        name: sandbox.metadata.name.clone(),
+        namespace: sandbox.metadata.namespace.clone(),
+        uid: sandbox.metadata.uid.clone(),
+        terminating: sandbox.metadata.deletion_timestamp.is_some(),
+        controllers: controllers(sandbox.metadata.owner_references.as_ref()),
         labels: sandbox.metadata.labels.clone().unwrap_or_default(),
         template_containers: sandbox
             .data

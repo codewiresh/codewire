@@ -250,7 +250,9 @@ impl BindingStore for TwoPodStore {
 fn state(store: Arc<TwoPodStore>, reviews: Arc<AtomicUsize>) -> Arc<WorkspaceBindingState> {
     Arc::new(
         WorkspaceBindingState::new(
-            Some(cluster(reviews)),
+            Some(crate::runtime::kubernetes::KubernetesDriver::shared(
+                cluster(reviews),
+            )),
             store,
             Arc::new(BindingNotifications::default()),
             NAMESPACE,

@@ -22,6 +22,8 @@
 
 mod access;
 mod authorize;
+#[cfg(test)]
+mod authorize_reference;
 pub mod limits;
 mod metrics;
 mod service;

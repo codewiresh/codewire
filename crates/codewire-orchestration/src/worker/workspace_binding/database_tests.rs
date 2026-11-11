@@ -2242,6 +2242,76 @@ async fn db_an_early_bind_reads_the_chain_once() -> Result<()> {
     db.finish(result).await
 }
 
+/// #3628 PR 5a: each call site makes exactly the reads it made before the
+/// driver: the bind 7 (chain 3, Pod 1, PVC 3), the backfill 7, an early bind
+/// that records 3 then 4, and the daemon credential 3. No call site reads a
+/// method's object twice.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_each_call_site_makes_the_reads_it_made_before() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        set_state(&db.pool, ENV_A, "creating").await?;
+        let bind = FakeKube::runtime(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
+        ensure!(
+            enforced(&db.pool, &bind, ENV_A, POD_1, &["creating"]).await? == WriteOutcome::Recorded
+        );
+        ensure!(bind.gets() == 7, "the bind: {:?}", bind.requests());
+
+        let backfill = FakeKube::runtime(ENV_B, POD_2, WorkspaceCredentialScope::Environment);
+        ensure!(
+            record_backfill(&db.pool, backfill.driver().as_ref(), ENV_B).await?
+                == RecordResult::Recorded
+        );
+        ensure!(
+            backfill.gets() == 7,
+            "the backfill: {:?}",
+            backfill.requests()
+        );
+
+        let db_b = TestDatabase::create().await?;
+        let early = async {
+            seed(&db_b).await?;
+            set_state(&db_b.pool, ENV_A, "creating").await?;
+            let early = dind_starting(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
+            let authority = ActivityAuthority::capture(&db_b.pool, ENV_A, GENERATION).await?;
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                bind_before_ready(early.driver().as_ref(), None, &authority, &["creating"]),
+            )
+            .await??
+            .ok_or_else(|| anyhow::anyhow!("the early bind did not record"))?;
+            ensure!(
+                early.gets() == 3 + 4,
+                "the early bind: {:?}",
+                early.requests()
+            );
+
+            // With no live binding, a legacy current Pod's credential.
+            set_state(&db_b.pool, ENV_B, "running").await?;
+            let legacy = FakeKube::runtime(ENV_B, POD_2, WorkspaceCredentialScope::Environment);
+            environment_daemon_credential(
+                &db_b.pool,
+                Some(legacy.driver().as_ref()),
+                "synthetic-session-secret",
+                ENV_B,
+            )
+            .await?;
+            ensure!(
+                legacy.gets() == 3,
+                "the credential: {:?}",
+                legacy.requests()
+            );
+            Ok(())
+        }
+        .await;
+        db_b.finish(early).await
+    }
+    .await;
+    db.finish(result).await
+}
+
 /// #3627: a fresh warm bind, then the create loop's first ready action. The
 /// early bind hands back exactly what it checked, the ready action observes
 /// that same runtime, and the bootstrap the full reconcile would check is
@@ -2426,6 +2496,8 @@ async fn an_observation_carries_each_fact_as_the_objects_hold_it() {
         pod["metadata"]["labels"][crate::sandbox::template::SANDBOX_UID_LABEL] =
             json!(sandbox_uid(ENV_A));
         pod["status"]["podIP"] = json!("10.0.0.9");
+        pod["status"]["podIPs"] = json!([{"ip": "10.0.0.9"}, {"ip": "fd00::9"}]);
+        pod["spec"]["nodeName"] = json!("node-a");
         pod["spec"]["containers"][0]["env"] = json!([
             {"name": "LITERAL", "value": "1"},
             {"name": "SOURCED", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
@@ -2446,6 +2518,7 @@ async fn an_observation_carries_each_fact_as_the_objects_hold_it() {
     // The incarnation.
     let member = &observation.member;
     assert_eq!(member.name.as_deref(), pod["metadata"]["name"].as_str());
+    assert_eq!(member.namespace.as_deref(), Some(NAMESPACE));
     assert_eq!(member.uid.as_deref(), Some(POD_1));
     assert!(!member.terminating);
     assert_eq!(
@@ -2455,7 +2528,9 @@ async fn an_observation_carries_each_fact_as_the_objects_hold_it() {
     assert_eq!(
         member.controllers,
         [crate::runtime::ControllerFact {
+            api_version: "agents.x-k8s.io/v1beta1".into(),
             kind: "Sandbox".into(),
+            name: format!("sandbox-{ENV_A}"),
             uid: sandbox_uid(ENV_A),
         }]
     );
@@ -2521,9 +2596,31 @@ async fn an_observation_carries_each_fact_as_the_objects_hold_it() {
             .collect::<Vec<_>>()
     );
     assert_eq!(member.ip, "10.0.0.9");
+    assert_eq!(member.ips, ["10.0.0.9", "10.0.0.9", "fd00::9"]);
+    assert_eq!(member.phase.as_deref(), Some("Running"));
+    assert_eq!(member.node_name.as_deref(), Some("node-a"));
     assert_eq!(member.spec_json, pod["spec"]);
 
     // The runtime it belongs to.
+    let facts = &observation.runtime;
+    assert_eq!(
+        facts.api_version.as_deref(),
+        Some("agents.x-k8s.io/v1beta1")
+    );
+    assert_eq!(facts.kind.as_deref(), Some("Sandbox"));
+    assert_eq!(facts.name, Some(format!("sandbox-{ENV_A}")));
+    assert_eq!(facts.namespace.as_deref(), Some(NAMESPACE));
+    assert_eq!(facts.uid, Some(sandbox_uid(ENV_A)));
+    assert!(!facts.terminating);
+    assert_eq!(
+        facts.controllers,
+        [crate::runtime::ControllerFact {
+            api_version: "extensions.agents.x-k8s.io/v1beta1".into(),
+            kind: "SandboxClaim".into(),
+            name: format!("sandbox-{ENV_A}"),
+            uid: claim_uid(ENV_A),
+        }]
+    );
     assert_eq!(
         observation.runtime.template_containers.as_ref(),
         Some(&runtime["spec"]["podTemplate"]["spec"]["containers"])

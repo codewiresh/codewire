@@ -277,6 +277,8 @@ struct FakeCluster {
     sandboxes: Sequence<Option<Value>>,
     service: Mutex<Option<Value>>,
     node: Mutex<Option<Value>>,
+    /// Every request, as (method, path), in order.
+    requests: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeCluster {
@@ -292,7 +294,29 @@ impl FakeCluster {
             sandboxes: Sequence::of(sandboxes),
             service: Mutex::new(None),
             node: Mutex::new(None),
+            requests: Mutex::new(Vec::new()),
         })
+    }
+
+    /// How many requests of each kind it served: reviews, Pods, Sandboxes,
+    /// Nodes and Services.
+    fn served(&self) -> [usize; 5] {
+        let mut counts = [0; 5];
+        for (method, path) in self.requests.lock().unwrap().iter() {
+            let kind = if method == "POST" && path.ends_with("/tokenreviews") {
+                0
+            } else if path.contains("/pods/") {
+                1
+            } else if path.starts_with("/apis/agents.x-k8s.io/") {
+                2
+            } else if path.starts_with("/api/v1/nodes/") {
+                3
+            } else {
+                4
+            };
+            counts[kind] += 1;
+        }
+        counts
     }
 
     /// A scheduled Pod on a zoned node, with a provisioned direct-UDP
@@ -323,6 +347,11 @@ impl FakeCluster {
             async move {
                 let path = request.uri().path().to_owned();
                 let method = request.method().clone();
+                cluster
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .push((method.to_string(), path.clone()));
                 let response = if method == "POST"
                     && path == "/apis/authentication.k8s.io/v1/tokenreviews"
                 {
@@ -624,7 +653,9 @@ fn fixture_allocating(
     let notifications = Arc::new(BindingNotifications::default());
     let state = Arc::new(configure(
         WorkspaceBindingState::new(
-            Some(cluster.client()),
+            Some(crate::runtime::kubernetes::KubernetesDriver::shared(
+                cluster.client(),
+            )),
             store.clone(),
             notifications.clone(),
             NAMESPACE,
@@ -1054,7 +1085,11 @@ async fn a_pod_replaced_or_relabelled_during_the_wait_is_denied() {
     )]);
     let mut terminating = workspace_pod();
     terminating.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
-    for after in [replaced, relabelled, reowned, terminating] {
+    // The caller's address is checked again on the Pod read after the wait
+    // (S1): a Pod that now has another address is no longer the caller.
+    let mut readdressed = workspace_pod();
+    readdressed.status.as_mut().unwrap().pod_ip = Some(OTHER_PEER.to_string());
+    for after in [replaced, relabelled, reowned, terminating, readdressed] {
         let fixture = fixture(
             FakeCluster::new(
                 valid_review(),
@@ -2011,3 +2046,134 @@ async fn reports_are_recorded_for_the_bound_pod_only() {
         Err(BindError::FailedPrecondition)
     );
 }
+
+/// #3628 PR 5b, design §4 (cw-confidential's C2): each gate refuses before
+/// the reads it guards. Garbage reaches nothing; another namespace or a
+/// non-canonical Pod UID is refused after the review and before any Pod
+/// read; a missing Pod is `NotFound`, apart from a Pod that may not bind.
+#[tokio::test]
+async fn each_gate_refuses_before_the_reads_it_guards() {
+    let garbage = fixture(
+        FakeCluster::valid(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+    );
+    assert_eq!(
+        garbage
+            .state
+            .bind(&bearer("opaque-codewire-oauth-bearer"), Some(PEER), 0)
+            .await,
+        Err(BindError::Unauthenticated)
+    );
+    assert_eq!(garbage.cluster.served(), [0, 0, 0, 0, 0]);
+
+    let elsewhere = fixture(
+        FakeCluster::new(
+            review(
+                "other-sandboxes",
+                SANDBOX_SERVICE_ACCOUNT,
+                WORKSPACE_BINDING_TOKEN_AUDIENCE,
+            ),
+            vec![Some(workspace_pod())],
+            vec![Some(sandbox())],
+        ),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+    );
+    assert_eq!(elsewhere.bind(0).await, Err(BindError::PermissionDenied));
+    assert_eq!(elsewhere.cluster.served(), [1, 0, 0, 0, 0]);
+
+    let mut uppercase = valid_review();
+    uppercase
+        .user
+        .as_mut()
+        .unwrap()
+        .extra
+        .as_mut()
+        .unwrap()
+        .insert(
+            "authentication.kubernetes.io/pod-uid".into(),
+            vec![POD_UID.to_uppercase()],
+        );
+    let noncanonical = fixture(
+        FakeCluster::new(
+            uppercase,
+            vec![Some(workspace_pod())],
+            vec![Some(sandbox())],
+        ),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+    );
+    assert!(noncanonical.bind(0).await.is_err());
+    assert_eq!(noncanonical.cluster.served(), [1, 0, 0, 0, 0]);
+
+    let missing = fixture(
+        FakeCluster::new(valid_review(), vec![None], vec![Some(sandbox())]),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+    );
+    assert_eq!(missing.bind(0).await, Err(BindError::NotFound));
+    assert_eq!(missing.cluster.served(), [1, 1, 0, 0, 0]);
+
+    let mut terminating = workspace_pod();
+    terminating.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
+    let unbindable = fixture(
+        FakeCluster::new(
+            valid_review(),
+            vec![Some(terminating)],
+            vec![Some(sandbox())],
+        ),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+    );
+    assert_eq!(unbindable.bind(0).await, Err(BindError::PermissionDenied));
+    assert_eq!(unbindable.cluster.served(), [1, 1, 0, 0, 0]);
+}
+
+/// #3628 PR 5b: each method makes exactly the reads it made before the
+/// driver. Every one reviews once and reads the Pod once; `BindWorkspace`
+/// reads the Pod again after its wait, then the Sandbox, and the grant reads
+/// the Node and the direct-UDP Service; a bound-only method reads the Sandbox.
+#[tokio::test]
+async fn each_method_makes_the_reads_it_made_before() {
+    let bind = fixture(
+        FakeCluster::placed(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+    );
+    assert!(bind.bind(0).await.is_ok());
+    assert_eq!(bind.cluster.served(), [1, 2, 1, 1, 1]);
+
+    let refresh = fixture(
+        FakeCluster::placed(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+    );
+    assert!(
+        refresh
+            .state
+            .refresh_access(&valid_bearer(), Some(PEER))
+            .await
+            .is_ok()
+    );
+    assert_eq!(refresh.cluster.served(), [1, 1, 1, 1, 1]);
+
+    let host_key = fixture(
+        FakeCluster::placed(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+    );
+    assert!(
+        host_key
+            .state
+            .record_host_key(&valid_bearer(), Some(PEER), HOST_KEY)
+            .await
+            .is_ok()
+    );
+    assert_eq!(host_key.cluster.served(), [1, 1, 1, 0, 0]);
+    assert!(
+        [&bind, &refresh, &host_key].iter().all(|fixture| fixture
+            .cluster
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(method, path)| method == "GET" || path.ends_with("/tokenreviews"))),
+        "a review is the only write"
+    );
+}
+
+#[path = "authorize_tests.rs"]
+mod authorize_tests;
