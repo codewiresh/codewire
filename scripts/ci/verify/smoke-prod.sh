@@ -236,7 +236,9 @@ run_public_checks() {
   require_cmd jq
 
   log "checking public production endpoints"
-  assert_http_status "platform healthz" "$CODEWIRE_SERVER_URL/healthz" 200
+  # codewire.sh/healthz is the dashboard's, which answers 204 No Content, as
+  # the Kind smoke expects (kind/common.sh); readyz is orchestration's (#4155).
+  assert_http_status "dashboard healthz" "$CODEWIRE_SERVER_URL/healthz" 204
   assert_http_status "platform readyz" "$CODEWIRE_SERVER_URL/readyz" 200
 
   curl -fsS "$CODEWIRE_IDP_URL/.well-known/openid-configuration" |

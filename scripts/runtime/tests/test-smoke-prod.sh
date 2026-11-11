@@ -78,4 +78,29 @@ create="$(grep '^create ' "$TEST_TMP/calls")"
 [[ " $create " == *' --preset node '* && " $create " == *' --repo https://example.invalid/app.git '* ]] ||
   fail "the preset and repository did not reach the create: $create"
 
-printf 'smoke-prod tests: bare smoke, wrong user, empty whoami and preset passthrough checked\n'
+# The public checks (#4155): the dashboard's /healthz answers 204 and
+# orchestration's /readyz 200; a fake curl answers as Production does.
+cat >"$TEST_TMP/bin/curl" <<'FAKE_CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+url="${*: -1}"
+case "$url" in
+  */.well-known/openid-configuration) printf '{"issuer":"%s"}\n' "${url%/.well-known/openid-configuration}" ;;
+  */healthz) printf '%s' "${FAKE_HEALTHZ:-204}" ;;
+  */readyz|*/derp/latency-check) printf '200' ;;
+  *) exit 92 ;;
+esac
+FAKE_CURL
+chmod +x "$TEST_TMP/bin/curl"
+public() { # the public checks only, with the fake curl
+  env PATH="$TEST_TMP/bin:$PATH" "$SMOKE" --skip-kube >"$TEST_TMP/out" 2>&1
+}
+public || fail "the public checks refused Production's answers: $(cat "$TEST_TMP/out")"
+grep -q '^dashboard healthz *204 ' "$TEST_TMP/out" || fail "the dashboard healthz was not checked: $(cat "$TEST_TMP/out")"
+# A 200 there means /healthz no longer reaches the dashboard.
+if FAKE_HEALTHZ=200 public; then
+  fail 'the public checks accepted a healthz that is not the dashboard'
+fi
+grep -qF 'dashboard healthz returned HTTP 200' "$TEST_TMP/out" || fail "a wrong healthz was not named: $(cat "$TEST_TMP/out")"
+
+printf 'smoke-prod tests: bare smoke, wrong user, empty whoami, preset passthrough and public checks checked\n'
