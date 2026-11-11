@@ -42,8 +42,8 @@ use stripe_billing::subscription_item::{
 };
 use stripe_checkout::checkout_session::{
     CreateCheckoutSession, CreateCheckoutSessionLineItems,
-    CreateCheckoutSessionLineItemsAdjustableQuantity, CreateCheckoutSessionSubscriptionData,
-    ExpireCheckoutSession, ListCheckoutSession,
+    CreateCheckoutSessionLineItemsAdjustableQuantity, CreateCheckoutSessionPaymentMethodTypes,
+    CreateCheckoutSessionSubscriptionData, ExpireCheckoutSession, ListCheckoutSession,
 };
 use stripe_client_core::{RequestBuilder, StripeMethod};
 use stripe_core::customer::{
@@ -494,7 +494,8 @@ impl StripeHandle {
         org_id: &str,
     ) -> Result<String, AppError> {
         let client = self.client()?;
-        let request = setup_session_request(customer_id, success_url, cancel_url, org_id);
+        let window = setup_window(chrono::Utc::now());
+        let request = setup_session_request(customer_id, success_url, cancel_url, org_id, &window);
         let idempotency_key = parameter_key("setup", &request)?;
         let session = request
             .customize()
@@ -617,22 +618,44 @@ fn portal_session_request(customer_id: &str, return_url: &str) -> CreateBillingP
         .return_url(return_url)
 }
 
-/// The card setup session `create_setup_session` sends. Stripe refuses a
-/// setup-mode session without a currency when it picks the payment methods
-/// itself ("Missing required param: currency").
+/// How long a card setup session is reused. Within one window a double click
+/// opens one session; a later attempt, after a card was saved or declined,
+/// always gets a fresh one (#3381: a replayed, completed session left a user
+/// unable to replace a card for a day).
+const SETUP_SESSION_WINDOW_SECS: i64 = 300;
+
+/// The window `now` falls in, as the RFC 3339 time it starts.
+fn setup_window(now: chrono::DateTime<chrono::Utc>) -> String {
+    let start = now.timestamp() - now.timestamp().rem_euclid(SETUP_SESSION_WINDOW_SECS);
+    chrono::DateTime::<chrono::Utc>::from_timestamp(start, 0)
+        .unwrap_or(now)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// The card setup session `create_setup_session` sends.
+/// - Card only: a saved method has to pay automatic top-ups off-session.
+/// - A currency: Stripe refuses a setup-mode session without one ("Missing
+///   required param: currency").
+/// - The window in the metadata, so the parameter key, and with it the
+///   session, changes from one window to the next.
 fn setup_session_request(
     customer_id: &str,
     success_url: &str,
     cancel_url: &str,
     org_id: &str,
+    requested_window: &str,
 ) -> CreateCheckoutSession {
     CreateCheckoutSession::new()
         .customer(customer_id)
         .mode(stripe_shared::CheckoutSessionMode::Setup)
+        .payment_method_types([CreateCheckoutSessionPaymentMethodTypes::Card])
         .currency(BILLING_CURRENCY)
         .success_url(success_url)
         .cancel_url(cancel_url)
-        .metadata([("org_id".to_string(), org_id.to_string())])
+        .metadata([
+            ("org_id".to_string(), org_id.to_string()),
+            ("requested_window".to_string(), requested_window.to_string()),
+        ])
 }
 
 fn stripe_err<E: std::fmt::Debug>(e: E) -> AppError {
@@ -1139,6 +1162,17 @@ mod currency_tests {
                 "{key} in {form:?}"
             );
         }
+        // Card only, so the saved method can pay top-ups off-session.
+        assert_eq!(
+            form.get("payment_method_types[0]").map(String::as_str),
+            Some("card"),
+            "{form:?}"
+        );
+        assert!(!form.contains_key("payment_method_types[1]"), "{form:?}");
+        let window = form
+            .get("metadata[requested_window]")
+            .expect("requested_window");
+        assert!(window.ends_with(":00Z"), "{window}");
     }
 
     /// Overage was invoiced in USD although prices are in euros (#3381).
@@ -1200,7 +1234,7 @@ mod currency_tests {
 mod idempotency_key_tests {
     use super::{
         IDEMPOTENT_CALLS, IdempotencyKind, org_checkout_request, parameter_key,
-        portal_session_request, setup_session_request,
+        portal_session_request, setup_session_request, setup_window,
     };
 
     fn key(kind: &str, request: &impl serde::Serialize) -> String {
@@ -1222,17 +1256,47 @@ mod idempotency_key_tests {
 
     #[test]
     fn a_setup_session_key_changes_with_every_parameter() {
-        let k = |c, s, x, o| key("setup", &setup_session_request(c, s, x, o));
+        let w = "2026-11-11T11:00:00Z";
+        let k = |c, s, x, o, w| key("setup", &setup_session_request(c, s, x, o, w));
         all_distinct(
-            k("cus_1", "https://a/ok", "https://a/no", "org-1"),
-            k("cus_1", "https://a/ok", "https://a/no", "org-1"),
+            k("cus_1", "https://a/ok", "https://a/no", "org-1", w),
+            k("cus_1", "https://a/ok", "https://a/no", "org-1", w),
             vec![
-                k("cus_2", "https://a/ok", "https://a/no", "org-1"),
-                k("cus_1", "https://a/ok2", "https://a/no", "org-1"),
-                k("cus_1", "https://a/ok", "https://a/no2", "org-1"),
-                k("cus_1", "https://a/ok", "https://a/no", "org-2"),
+                k("cus_2", "https://a/ok", "https://a/no", "org-1", w),
+                k("cus_1", "https://a/ok2", "https://a/no", "org-1", w),
+                k("cus_1", "https://a/ok", "https://a/no2", "org-1", w),
+                k("cus_1", "https://a/ok", "https://a/no", "org-2", w),
+                k(
+                    "cus_1",
+                    "https://a/ok",
+                    "https://a/no",
+                    "org-1",
+                    "2026-11-11T11:05:00Z",
+                ),
             ],
         );
+    }
+
+    /// A double click inside one five-minute window reuses one session; a
+    /// later attempt, after a card was saved or declined, gets a new one.
+    #[test]
+    fn a_setup_session_is_reused_within_its_window_and_fresh_after_it() {
+        let at = |hms: &str| {
+            chrono::DateTime::parse_from_rfc3339(&format!("2026-11-11T{hms}Z"))
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let session = |hms| {
+            let window = setup_window(at(hms));
+            key(
+                "setup",
+                &setup_session_request("cus_1", "https://a/ok", "https://a/no", "org-1", &window),
+            )
+        };
+        assert_eq!(setup_window(at("11:03:59")), "2026-11-11T11:00:00Z");
+        assert_eq!(session("11:00:00"), session("11:04:59"));
+        assert_ne!(session("11:04:59"), session("11:05:00"));
+        assert_ne!(session("11:00:00"), session("12:00:00"));
     }
 
     #[test]
