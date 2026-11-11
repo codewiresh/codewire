@@ -260,6 +260,22 @@ jobs:
             done
           fi
 
+          # BEGIN scanner-configuration guard (#3991)
+          # osv-scanner and zizmor read configuration files from the tree
+          # they scan, so a candidate could carry its own ignores and hide
+          # findings before the protected source policy sees them. Exceptions
+          # live only in that policy, so no such file may be scanned.
+          scanner_configs="$(find . -path ./.git -prune -o \
+            \( -type f -o -type l \) \
+            \( -name osv-scanner.toml -o -name 'zizmor.y*ml' -o -name '.zizmor.y*ml' \) \
+            -print | sort)"
+          if [[ -n "$scanner_configs" ]]; then
+            printf '::error::scanner configuration in the scanned tree could hide findings; put exceptions in .supplychain/source-policy.json (#3991):\n%s\n' \
+              "$scanner_configs" >&2
+            exit 65
+          fi
+          # END scanner-configuration guard
+
           supplychain \
             --source-policy="$source_policy" \
             ci \

@@ -238,4 +238,39 @@ jq -e '
   fail 'scoped policy hid an unrelated path, near miss, altered armor, key format, or other rule'
 }
 
+# #3991: the scan refuses any scanner configuration in the scanned tree, so a
+# candidate cannot carry its own osv-scanner or zizmor ignores. The guard runs
+# as written in the workflow, against one tree per case.
+guard="$FIXTURE/scanner-config-guard.sh"
+sed -n '/# BEGIN scanner-configuration guard/,/# END scanner-configuration guard/p' "$WORKFLOW" |
+  sed 's/^          //' >"$guard"
+[[ "$(grep -c . "$guard")" -gt 5 ]] || fail 'scanner-configuration guard is missing from the scan step'
+guard_exit() { # TREE
+  (cd "$1" && bash -euo pipefail "$guard" >/dev/null 2>&1) && echo 0 || echo "$?"
+}
+scanner_tree() { # NAME, then files to create beneath it
+  local tree="$FIXTURE/scanner-$1" path
+  shift
+  mkdir -p "$tree/.git" "$tree/src"
+  printf 'fn main() {}\n' >"$tree/src/main.rs"
+  for path in "$@"; do
+    mkdir -p "$(dirname "$tree/$path")"
+    printf '[[IgnoredVulns]]\nid = "RUSTSEC-2021-0003"\n' >"$tree/$path"
+  done
+  printf '%s' "$tree"
+}
+[[ "$(guard_exit "$(scanner_tree clean)")" == 0 ]] ||
+  fail 'the scanner-configuration guard refused a clean tree'
+[[ "$(guard_exit "$(scanner_tree git-internal .git/osv-scanner.toml)")" == 0 ]] ||
+  fail 'the scanner-configuration guard looked inside .git'
+for case in osv-scanner.toml crates/nested/osv-scanner.toml .github/zizmor.yml zizmor.yaml .zizmor.yml; do
+  name="$(printf '%s' "$case" | tr '/.' '--')"
+  [[ "$(guard_exit "$(scanner_tree "$name" "$case")")" == 65 ]] ||
+    fail "the scanner-configuration guard admitted $case"
+done
+linked="$(scanner_tree linked)"
+ln -s src/main.rs "$linked/osv-scanner.toml"
+[[ "$(guard_exit "$linked")" == 65 ]] ||
+  fail 'the scanner-configuration guard admitted a symbolic link'
+
 printf '[test-source-approval-workflow] PASS\n'
