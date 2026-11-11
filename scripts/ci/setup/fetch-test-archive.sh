@@ -59,10 +59,13 @@ digest="$1" file="$2"
 if [ -z "$digest" ] && [ "$or_build" = true ]; then
   # The compile job builds the workspace archive whenever it succeeds. When
   # it succeeded but that digest is missing too, its outputs never reached
-  # this job: a rerun of only some jobs lost them, and building the whole
-  # workspace here ran a guest sized for tests out of memory (#4031).
+  # this job, and building the whole workspace here ran a guest sized for
+  # tests out of memory (#4031). A run rerun while the compile job's previous
+  # task was still running gets that task's success without its outputs and
+  # no new build; a whole rerun once no task of the run is running builds
+  # again, and rerun-run.sh refuses any other (#4141).
   if [ "${COMPILE_RESULT:-}" = success ] && [ -z "${COMPILE_ARCHIVE_SHA256:-}" ]; then
-    die 'no test archive for this head; rerun the whole run'
+    die 'the build job succeeded but its archive digest did not reach this job, as after a rerun started while its previous task was still running (#4141); rerun the whole run with scripts/dev/orchestrator/rerun-run.sh, which refuses while any task of it is still running'
   fi
   # The compile job did not run, or built no such leg for this selection.
   echo 'fetch-test-archive: no archive was built for this job; it builds its tests itself'

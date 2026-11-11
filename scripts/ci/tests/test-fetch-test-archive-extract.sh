@@ -102,15 +102,20 @@ for compile in 'skipped:' "success:$good"; do
 done
 
 # The compile job succeeded but reported no digest at all, not even the
-# workspace archive's: its outputs were lost, as on a partial rerun. The job
-# fails instead of building the whole workspace on a guest sized for tests.
+# workspace archive's: its outputs were lost, as when the run was rerun while
+# the compile job's previous task still ran and that task's success completed
+# the new attempt with no build (#4141, run 42471). The job fails instead of
+# building the whole workspace on a guest sized for tests, and names the rerun
+# that builds again, not the one that just lost the outputs.
 for mode in '' --extract; do
   # shellcheck disable=SC2086 # An empty mode adds no argument.
   if COMPILE_RESULT=success COMPILE_ARCHIVE_SHA256='' fetch --or-build $mode '' "$work/x/lost$mode"; then
     fail "lost compile outputs did not fail${mode:+ with $mode}"
   fi
-  grep -q 'no test archive for this head; rerun the whole run' "$work/fetch.log" ||
-    fail "lost compile outputs gave no reason${mode:+ with $mode}"
+  grep -qF 'its previous task was still running (#4141)' "$work/fetch.log" ||
+    fail "lost compile outputs did not say why${mode:+ with $mode}: $(cat "$work/fetch.log")"
+  grep -qF 'rerun the whole run with scripts/dev/orchestrator/rerun-run.sh' "$work/fetch.log" ||
+    fail "lost compile outputs did not name the rerun that builds again${mode:+ with $mode}"
   ! grep -q 'ready=' "$work/out" || fail "lost compile outputs reported readiness${mode:+ with $mode}"
 done
 

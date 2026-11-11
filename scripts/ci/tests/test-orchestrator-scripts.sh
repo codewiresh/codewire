@@ -56,8 +56,14 @@ case "$1 ${2:-}" in
       view) answer "run-$4.json" ;;
       logs) answer "log-$4" ;;
       watch) answer "watch-$4" ;;
+      rerun) printf '%s\n' "$4" >>"$FAKE/reruns" ;;
       *) exit 1 ;;
     esac
+    ;;
+  'actions tasks')
+    page=1
+    [[ "${3:-}" == -p ]] && page="$4"
+    answer "tasks-$page"
     ;;
   *) exit 1 ;;
 esac
@@ -299,4 +305,44 @@ grep -q 'conflicts' "$work/out" || fail "deploy-update-merge did not report the 
 [[ "$(git -C "$deploy_origin" rev-parse feature)" == "$conflicted" ]] || fail 'deploy-update-merge pushed a conflict'
 [[ "$(worktrees)" == 1 ]] || fail 'deploy-update-merge left its worktree after a conflict'
 
-printf '[test-orchestrator-scripts] merge queue, release watch, Dev settle and deploy update all decide on their evidence\n'
+# rerun-run: a whole-run rerun only once nothing of the run is alive (#4141).
+# Run 42471 read cancelled while its archive job's previous task still ran, so
+# a task list that names a live task refuses even when every job has ended.
+rerun_run() { "$SCRIPTS/rerun-run.sh" "$@" >"$work/out" 2>&1; }
+task_page() { # PAGE LINE...: one page of `fj actions tasks`, 20 lines when full
+  local page="$1"
+  shift
+  { printf '64504 tasks\n'; printf '%s\n' "$@"; } >"$FAKE/tasks-$page"
+}
+filler() { # N tasks of other runs
+  local i
+  for ((i = 0; i < $1; i++)); do printf '#9%03d (1111111111) success Policy verification 1m (push): other\n' "$i"; done
+}
+reset_fake
+jq -n '{run: {id: 42471, number: 27221, status: "cancelled"},
+  jobs: [{id: 1, name: "Build test archives", status: "running"}, {id: 2, name: "Rust / transport packages", status: "cancelled"}]}' \
+  >"$FAKE/run-42471.json"
+task_page 1 '#27221 (a054388b61) success Verification selection 36s (pull_request): t'
+rerun_run 42471 && fail 'rerun-run reran a run with a running job'
+grep -q '^job 1 is running: Build test archives$' "$work/out" || fail "rerun-run did not name the running job: $(cat "$work/out")"
+[[ ! -e "$FAKE/reruns" ]] || fail 'rerun-run reran a live run'
+jq '.jobs[0].status = "success"' "$FAKE/run-42471.json" >"$FAKE/run.tmp" && mv "$FAKE/run.tmp" "$FAKE/run-42471.json"
+# Every job has ended, but the second page holds the archive job's task, alive.
+mapfile -t others < <(filler 19)
+task_page 1 '#27221 (a054388b61) cancelled Policy verification 4m (pull_request): t' "${others[@]}"
+task_page 2 '#27221 (a054388b61) running Build test archives 13m (pull_request): t'
+rerun_run 42471 && fail 'rerun-run reran a run whose task was still running'
+grep -q '^task is running Build test archives 13m$' "$work/out" || fail "rerun-run did not name the live task: $(cat "$work/out")"
+[[ ! -e "$FAKE/reruns" ]] || fail 'rerun-run reran a run with a live task'
+task_page 2 '#27221 (a054388b61) success Build test archives 18m42s (pull_request): t'
+rerun_run 42471 || fail "rerun-run refused a run with nothing alive: $(cat "$work/out")"
+[[ "$(cat "$FAKE/reruns")" == 42471 ]] || fail 'rerun-run did not rerun the run by its ID'
+grep -q '^reran run 42471 (#27221)' "$work/out" || fail 'rerun-run did not report the rerun'
+rm -f "$FAKE/run-42471.json" "$FAKE/reruns"
+status=0
+rerun_run 42471 || status=$?
+[[ "$status" -eq 2 ]] || fail "rerun-run did not say it cannot tell when the run cannot be read (exit $status)"
+grep -q '^unknown: cannot read run 42471' "$work/out" || fail 'rerun-run gave no reason for an unreadable run'
+[[ ! -e "$FAKE/reruns" ]] || fail 'rerun-run reran a run it could not read'
+
+printf '[test-orchestrator-scripts] merge queue, release watch, Dev settle, deploy update and rerun all decide on their evidence\n'
