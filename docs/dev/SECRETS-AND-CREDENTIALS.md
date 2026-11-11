@@ -389,6 +389,9 @@ the new access token, and stores the login. It asks for Claude Code's claude.ai
 scopes (`user:profile user:inference user:sessions:claude_code
 user:mcp_servers user:file_upload user:plugins`), never `org:create_api_key`,
 and keeps both `user:inference` and `user:profile` or refuses the login. A
+login granted `org:create_api_key`, which can mint lasting API keys, is
+refused before it is stored, at sign-in and on every refresh; delivery still
+admits only the six sign-in scopes. A
 sign-in must be completed within 15 minutes of its start; a pasted code from
 another sign-in, or a malformed one, is refused before Claude is contacted.
 
@@ -413,7 +416,8 @@ The access token lives about 8 hours. The broker refreshes it at Claude's token
 endpoint when a request finds it within five minutes of expiry, through the
 same durable refresh journal as Codex: the refresh asks for exactly the
 granted scopes, keeps the previous refresh token when Claude returns none,
-and refuses a rotation that drops `user:inference` or `user:profile`. A refused
+and refuses a rotation that drops `user:inference` or `user:profile` or adds
+`org:create_api_key`. A refused
 or uncertain refresh is terminal and the credential reads **Reconnect needed**;
 the old refresh token is never sent again. Idle sign-ins are kept alive (see
 [Idle OAuth keep-alive](#idle-oauth-keep-alive)). The plan is read only at

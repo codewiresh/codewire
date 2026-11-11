@@ -266,7 +266,8 @@ async fn provider_refusals_and_outages_are_typed_without_provider_text() {
         assert_eq!(error, expected, "{status}");
         assert!(!error.to_string().contains("secret"));
     }
-    // A profile outage or a sign-in without the required scopes is no sign-in.
+    // A profile outage, a sign-in without the required scopes, or one that can
+    // create API keys is no sign-in.
     for (token, profile_status) in [
         (token_answer(), StatusCode::INTERNAL_SERVER_ERROR),
         (
@@ -275,6 +276,24 @@ async fn provider_refusals_and_outages_are_typed_without_provider_text() {
                 "refresh_token": "r",
                 "expires_in": 28_800,
                 "scope": "user:inference"
+            }),
+            StatusCode::OK,
+        ),
+        (
+            json!({
+                "access_token": "a",
+                "refresh_token": "r",
+                "expires_in": 28_800,
+                "scope": "user:profile user:inference org:create_api_key"
+            }),
+            StatusCode::OK,
+        ),
+        (
+            json!({
+                "access_token": "a",
+                "refresh_token": "r",
+                "expires_in": 28_800,
+                "scope": "user:profile org:create_api_key"
             }),
             StatusCode::OK,
         ),
@@ -413,9 +432,11 @@ async fn the_broker_exchange_validates_rotation_and_classifies_refusals() {
         );
     }
 
-    // A success that drops the profile scope, or has no lifetime, is refused.
+    // A success that drops the profile scope, adds one that can create API
+    // keys, or has no lifetime, is refused.
     for body in [
         json!({"access_token": "rotated", "expires_in": 3_600, "scope": "user:inference"}),
+        json!({"access_token": "rotated", "expires_in": 3_600, "scope": "user:profile user:inference org:create_api_key"}),
         json!({"access_token": "rotated"}),
         json!({"access_token": "", "expires_in": 3_600}),
     ] {

@@ -32,6 +32,11 @@ const MAX_REFRESH_TOKEN_LIFETIME_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
 /// profile for Claude Code's `/usage` and plan. A refresh that drops either is
 /// refused rather than stored.
 pub(crate) const REQUIRED_SCOPES: [&str; 2] = ["user:inference", "user:profile"];
+/// Scopes a stored Claude sign-in never carries: `org:create_api_key` mints
+/// lasting API keys, and Claude Code itself accepts a login that has it, so a
+/// sign-in or refresh granting it is refused here, outside the environment,
+/// rather than stored. Delivery separately admits only the sign-in scopes.
+const FORBIDDEN_SCOPES: [&str; 1] = ["org:create_api_key"];
 /// A delivered Claude login keeps at least this long (capped at half its
 /// lifetime): Claude Code itself refreshes only within five minutes of
 /// `expiresAt`, so while delivery works it never tries the placeholder.
@@ -386,7 +391,7 @@ pub(crate) fn within_sign_in_scopes(scopes: &[String]) -> bool {
 }
 
 /// The granted scopes, in the provider's order, without duplicates. Every
-/// required scope must be present.
+/// required scope must be present and no forbidden one.
 pub(crate) fn parse_scopes(value: &str) -> Result<Vec<String>, ClaudeOAuthMaterialError> {
     let mut scopes = Vec::new();
     for scope in value.split(' ').filter(|scope| !scope.is_empty()) {
@@ -422,6 +427,9 @@ fn valid_scopes(scopes: &[String]) -> bool {
         && REQUIRED_SCOPES
             .iter()
             .all(|required| scopes.iter().any(|scope| scope == required))
+        && !scopes
+            .iter()
+            .any(|scope| FORBIDDEN_SCOPES.contains(&scope.as_str()))
 }
 
 fn valid_token(value: &str) -> bool {
@@ -596,6 +604,62 @@ mod tests {
                 .unwrap()
                 .rate_limit_tier(),
             None
+        );
+    }
+
+    #[test]
+    fn a_login_that_can_create_api_keys_is_refused_when_stored() {
+        for scope in [
+            "user:inference user:profile",
+            "user:profile user:inference user:plugins",
+            SCOPES,
+        ] {
+            assert!(
+                import_tokens_at(issued(Some(scope)), profile(), NOW).is_ok(),
+                "{scope}"
+            );
+        }
+        let widened = format!("{SCOPES} org:create_api_key");
+        for scope in [
+            "user:inference user:profile org:create_api_key",
+            "org:create_api_key user:profile",
+            "org:create_api_key",
+            widened.as_str(),
+        ] {
+            assert_eq!(
+                import_tokens_at(issued(Some(scope)), profile(), NOW).err(),
+                Some(ClaudeOAuthMaterialError::Invalid),
+                "{scope}"
+            );
+        }
+        // A refresh that adds it is refused rather than stored.
+        assert_eq!(
+            credential()
+                .refreshed(
+                    ClaudeIssuedTokens {
+                        access_token: Zeroizing::new("widened".into()),
+                        refresh_token: None,
+                        expires_in: 3_600,
+                        refresh_token_expires_in: None,
+                        scope: Some("user:inference user:profile org:create_api_key".into()),
+                    },
+                    NOW + 100,
+                )
+                .err(),
+            Some(ClaudeOAuthMaterialError::Invalid)
+        );
+        // Stored material that carries it does not parse.
+        let (bundle, _) = import_tokens_at(issued(Some(SCOPES)), profile(), NOW)
+            .unwrap()
+            .into_parts();
+        let mut value = serde_json::from_slice::<serde_json::Value>(bundle.as_bytes()).unwrap();
+        value["scopes"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("org:create_api_key"));
+        assert_eq!(
+            ClaudeOAuthCredential::parse(&serde_json::to_vec(&value).unwrap()).err(),
+            Some(ClaudeOAuthMaterialError::Invalid)
         );
     }
 
