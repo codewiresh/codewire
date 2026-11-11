@@ -15,7 +15,8 @@ use async_trait::async_trait;
 use codewire_egress_policy::host_addresses::HostAddressSet;
 use codewire_egress_policy::lease::{
     Admission, AdmittedDnsQuery, AdmittedDnsResolution, DnsResolution, EgressLeaseTable,
-    LeaseError, LeaseInstant, PolicyReplacement, RefusalCounts, TcpAdmission, TcpVerdict,
+    LeaseError, LeaseInstant, PolicyReplacement, Readmission, RefusalCounts, TcpAdmission,
+    TcpVerdict,
 };
 use codewire_egress_policy::{CompiledPolicy, PolicyDecision, PolicyDigest, RouteClass};
 use thiserror::Error;
@@ -392,6 +393,10 @@ where
     /// expired lease would admit it, re-resolve that lease's own name once,
     /// never a guest-supplied one, and admit the dial only if the fresh
     /// answer, checked like any guest lookup, still contains its address.
+    ///
+    /// A dial the table would intercept is refused: the component that
+    /// receives intercepted connections arrives in a later change of #3999,
+    /// and until then such a dial must fail closed, never be dialled.
     async fn admit_tcp(&self, destination: SocketAddr) -> Result<TcpAdmission, BrokerError> {
         let expired = {
             let mut state = self.state.lock().await;
@@ -402,6 +407,10 @@ where
                 self.clock.now(),
             )? {
                 TcpVerdict::Allowed(admission) => return Ok(admission),
+                TcpVerdict::Intercepted(interception) => {
+                    let refusal = state.refuse_interception(interception);
+                    return Err(BrokerError::Denied(refusal.decision().clone()));
+                }
                 TcpVerdict::Refused(refusal) => {
                     return Err(BrokerError::Denied(refusal.decision().clone()));
                 }
@@ -427,9 +436,28 @@ where
             _ => None,
         };
         let mut state = self.state.lock().await;
-        state
-            .readmit_expired(expired, resolution, self.clock.now())?
-            .map_err(|refusal| BrokerError::Denied(refusal.decision().clone()))
+        match state.readmit_expired(expired, resolution, self.clock.now())? {
+            Ok(Readmission::Allowed(admission)) => Ok(admission),
+            // Refused as above until intercepted connections have a receiver.
+            Ok(Readmission::Intercepted(interception)) => Err(BrokerError::Denied(
+                state.refuse_interception(interception).decision().clone(),
+            )),
+            Err(refusal) => Err(BrokerError::Denied(refusal.decision().clone())),
+        }
+    }
+
+    /// Bind names for interception in tests only: nothing in this change
+    /// sets a non-empty set outside them (#3999).
+    #[cfg(test)]
+    async fn replace_intercepts_for_test(
+        &self,
+        intercepts: codewire_egress_policy::intercept::InterceptSet,
+    ) {
+        self.state.lock().await.replace_intercepts(
+            intercepts,
+            std::iter::empty::<((), &TcpAdmission)>(),
+            self.clock.now(),
+        );
     }
 }
 
@@ -440,6 +468,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
     use codewire_egress_policy::lease::{DnsAddress, DnsAlias, RefusalReason};
     use codewire_egress_policy::{DecisionReason, PolicyDocument};
 
@@ -841,6 +870,67 @@ rules:
         assert_eq!(connection.admission().hostname(), None);
         assert!(resolver.requests().is_empty());
         assert_eq!(connector.destinations(), [destination]);
+    }
+
+    #[tokio::test]
+    async fn a_dial_the_table_would_intercept_is_refused_and_never_dialled() {
+        // #3999: the open baseline allows every public address on 443 by
+        // CIDR, yet a bound name's lease makes the dial an interception.
+        // Nothing receives intercepted connections yet, so it is refused.
+        let resolver = Arc::new(FakeResolver::new([
+            positive(PUBLIC_V4, 60),
+            positive(PUBLIC_V4, 60),
+        ]));
+        let connector = Arc::new(FakeConnector::new([Ok(3)]));
+        let clock = Arc::new(FakeClock::default());
+        let broker = broker(
+            CompiledPolicy::developer_baseline(),
+            RouteClass::General,
+            Arc::clone(&resolver),
+            Arc::clone(&connector),
+            Arc::clone(&clock),
+        );
+        broker
+            .replace_intercepts_for_test(
+                InterceptSet::new([InterceptBinding::new("api.example.com", HTTPS).unwrap()])
+                    .unwrap(),
+            )
+            .await;
+        broker
+            .resolve_dns("api.example.com", DnsRecordFamily::Ipv4)
+            .await
+            .unwrap();
+
+        let destination = SocketAddr::new(PUBLIC_V4, HTTPS);
+        for result in [
+            broker.authorize_tcp(destination).await.err(),
+            broker.connect_tcp(destination).await.err(),
+        ] {
+            match result {
+                Some(BrokerError::Denied(decision)) => {
+                    assert_eq!(decision.reason_code(), "intercept-binding");
+                    assert!(!decision.is_allowed());
+                }
+                other => panic!("an intercepted dial was not refused: {other:?}"),
+            }
+        }
+        // Once the lease lapses, the re-resolve readmits the dial as an
+        // interception, which is refused the same way.
+        clock.set(61_000);
+        assert!(matches!(
+            broker.connect_tcp(destination).await,
+            Err(BrokerError::Denied(_))
+        ));
+        assert_eq!(resolver.requests().len(), 2);
+        let counts = broker.refusal_counts().await;
+        assert_eq!(counts.get(RefusalReason::InterceptUnavailable), 3);
+        assert_eq!(counts.total(), 3);
+        assert!(connector.destinations().is_empty());
+
+        // The name is bound on 443 only; another port dials as before.
+        let other_port = SocketAddr::new(PUBLIC_V4, 80);
+        assert_eq!(broker.connect_tcp(other_port).await.unwrap().stream(), &3);
+        assert_eq!(connector.destinations(), [other_port]);
     }
 
     #[derive(Default)]

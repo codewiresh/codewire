@@ -10,6 +10,11 @@
 //! the lease's own name and re-resolve it once ([`EgressLeaseTable::admit_tcp_or_expired`],
 //! [`EgressLeaseTable::readmit_expired`]). [`EgressLeaseTable::replace_policy`]
 //! swaps the policy in one call. Refusals are counted by reason.
+//!
+//! A name bound for interception (#3999) resolves even when no allow rule
+//! names it, and a dial its lease attributes is answered
+//! [`TcpVerdict::Intercepted`], never a dialable [`TcpAdmission`]. The set
+//! is empty unless its owner replaces it, and an empty set changes nothing.
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
@@ -19,9 +24,10 @@ use thiserror::Error;
 
 use crate::host_addresses::HostAddressSet;
 use crate::hostname::{canonical_hostname, protected_name};
+use crate::intercept::InterceptSet;
 use crate::{
-    CompiledPolicy, DecisionReason, EgressRequest, PolicyDecision, PolicyDigest, PolicyError,
-    RouteClass,
+    CompiledPolicy, DecisionAction, DecisionReason, EgressRequest, PolicyDecision, PolicyDigest,
+    PolicyError, RouteClass,
 };
 
 pub const MAX_CNAME_CHAIN: usize = 8;
@@ -268,6 +274,46 @@ impl TcpAdmission {
     }
 }
 
+/// One TCP dial the table hands to the local receiver instead of dialling it
+/// (#3999). It is a type of its own, not a [`TcpAdmission`], so a caller
+/// cannot dial it without first matching [`TcpVerdict::Intercepted`]. Its
+/// name is the bound name whose lease attributes the address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TcpInterception {
+    address: IpAddr,
+    port: u16,
+    route_class: RouteClass,
+    hostname: String,
+    lease_expires_at: LeaseInstant,
+    policy_digest: PolicyDigest,
+}
+
+impl TcpInterception {
+    pub fn address(&self) -> IpAddr {
+        self.address
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn route_class(&self) -> RouteClass {
+        self.route_class
+    }
+
+    pub fn hostname(&self) -> &str {
+        &self.hostname
+    }
+
+    pub fn lease_expires_at(&self) -> LeaseInstant {
+        self.lease_expires_at
+    }
+
+    pub fn policy_digest(&self) -> PolicyDigest {
+        self.policy_digest
+    }
+}
+
 /// Why the table refused a DNS question or a dial. Only the owner sees it;
 /// the guest gets NXDOMAIN or a reset whatever the reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -286,16 +332,20 @@ pub enum RefusalReason {
     ProtectedAddress,
     /// The address's lease expired and its name no longer answers it.
     LeaseExpired,
+    /// The dial is to a name bound for interception, and nothing receives
+    /// intercepted connections yet (#3999).
+    InterceptUnavailable,
 }
 
 impl RefusalReason {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::NameNotAllowed,
         Self::ProtectedAnswersOnly,
         Self::PortNotAllowed,
         Self::AddressNotAllowed,
         Self::ProtectedAddress,
         Self::LeaseExpired,
+        Self::InterceptUnavailable,
     ];
 
     /// The stable code logs and status report.
@@ -307,6 +357,7 @@ impl RefusalReason {
             Self::AddressNotAllowed => "address_not_allowed",
             Self::ProtectedAddress => "protected_address",
             Self::LeaseExpired => "lease_expired",
+            Self::InterceptUnavailable => "intercept_unavailable",
         }
     }
 
@@ -319,6 +370,7 @@ impl RefusalReason {
             Self::AddressNotAllowed => "address not allowed",
             Self::ProtectedAddress => "protected address",
             Self::LeaseExpired => "lease expired",
+            Self::InterceptUnavailable => "interception unavailable",
         }
     }
 
@@ -330,6 +382,7 @@ impl RefusalReason {
             Self::AddressNotAllowed => 3,
             Self::ProtectedAddress => 4,
             Self::LeaseExpired => 5,
+            Self::InterceptUnavailable => 6,
         }
     }
 }
@@ -431,10 +484,64 @@ impl ExpiredLease {
 #[derive(Debug, PartialEq, Eq)]
 pub enum TcpVerdict {
     Allowed(TcpAdmission),
+    /// Hand the connection to the local receiver; never dial it (#3999).
+    Intercepted(TcpInterception),
     Refused(Refusal),
     /// Re-resolve [`ExpiredLease::name`] once and pass the answer to
     /// [`EgressLeaseTable::readmit_expired`].
     LeaseExpired(ExpiredLease),
+}
+
+/// A dial [`EgressLeaseTable::readmit_expired`] admits once its name answers
+/// the address again: to dial, or to intercept.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Readmission {
+    Allowed(TcpAdmission),
+    Intercepted(TcpInterception),
+}
+
+/// An established flow the broker passes for judgement when the policy or
+/// the interception bindings are replaced, as it was admitted.
+#[derive(Clone, Copy, Debug)]
+pub enum EstablishedFlow<'a> {
+    Dialled(&'a TcpAdmission),
+    Intercepted(&'a TcpInterception),
+}
+
+impl<'a> From<&'a TcpAdmission> for EstablishedFlow<'a> {
+    fn from(admission: &'a TcpAdmission) -> Self {
+        Self::Dialled(admission)
+    }
+}
+
+impl<'a> From<&'a TcpInterception> for EstablishedFlow<'a> {
+    fn from(interception: &'a TcpInterception) -> Self {
+        Self::Intercepted(interception)
+    }
+}
+
+/// What [`EgressLeaseTable::replace_intercepts`] changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InterceptReplacement<K> {
+    dropped_leases: usize,
+    reset_flows: Vec<K>,
+}
+
+impl<K> InterceptReplacement<K> {
+    /// Leases only a removed binding admitted, removed from the table.
+    pub fn dropped_leases(&self) -> usize {
+        self.dropped_leases
+    }
+
+    /// The keys of the passed flows whose outcome the new bindings change, in
+    /// the order they were passed. The broker resets each of them.
+    pub fn reset_flows(&self) -> &[K] {
+        &self.reset_flows
+    }
+
+    pub fn into_reset_flows(self) -> Vec<K> {
+        self.reset_flows
+    }
 }
 
 /// What [`EgressLeaseTable::replace_policy`] changed.
@@ -460,8 +567,10 @@ impl<K> PolicyReplacement<K> {
         self.dropped_leases
     }
 
-    /// The keys of the passed flows the new revision refuses, in the order
-    /// they were passed. The broker resets each of them.
+    /// The keys of the passed flows the new revision refuses, or would now
+    /// treat otherwise (a dialled flow it would intercept, or an intercepted
+    /// one it would not), in the order they were passed. The broker resets
+    /// each of them.
     pub fn refused_flows(&self) -> &[K] {
         &self.refused_flows
     }
@@ -497,6 +606,7 @@ pub struct EgressLeaseTable {
     leases: Vec<DnsLease>,
     maximum_leases: usize,
     host_addresses: HostAddressSet,
+    intercepts: InterceptSet,
     refusals: RefusalCounters,
 }
 
@@ -510,6 +620,7 @@ impl EgressLeaseTable {
             leases: Vec::new(),
             maximum_leases: MAX_ACTIVE_DNS_LEASES,
             host_addresses: HostAddressSet::default(),
+            intercepts: InterceptSet::default(),
             refusals: RefusalCounters::default(),
         }
     }
@@ -538,6 +649,11 @@ impl EgressLeaseTable {
         self.policy.digest()
     }
 
+    /// The names bound for interception; empty unless replaced.
+    pub fn intercepts(&self) -> &InterceptSet {
+        &self.intercepts
+    }
+
     /// Refusal counts since the table was made or last reset.
     pub fn refusal_counts(&self) -> RefusalCounts {
         self.refusals.snapshot()
@@ -558,7 +674,7 @@ impl EgressLeaseTable {
         route_class: RouteClass,
     ) -> Result<Admission<AdmittedDnsQuery>, LeaseError> {
         let query = EgressRequest::dns_query(name, route_class)?;
-        let decision = self.policy.evaluate(&query);
+        let decision = judge_dns(&self.policy, &self.intercepts, &query);
         if !decision.is_allowed() {
             self.refusals.record(RefusalReason::NameNotAllowed);
             return Ok(Admission::Denied(decision));
@@ -639,11 +755,11 @@ impl EgressLeaseTable {
                 Some(class) => self
                     .policy
                     .deny(DecisionReason::ProtectedAddress(class), None),
-                None => self.policy.evaluate(&EgressRequest::dns_answer(
-                    &name,
-                    record.address,
-                    route_class,
-                )?),
+                None => judge_dns(
+                    &self.policy,
+                    &self.intercepts,
+                    &EgressRequest::dns_answer(&name, record.address, route_class)?,
+                ),
             };
             if decision.is_allowed() {
                 admitted.push(record.address);
@@ -753,6 +869,11 @@ impl EgressLeaseTable {
     ///
     /// When only an expired lease would admit the dial, the verdict is
     /// [`TcpVerdict::LeaseExpired`] and nothing is counted yet.
+    ///
+    /// A lease of a name bound on `port` for interception (#3999) is judged
+    /// before any allow rule: an active one answers
+    /// [`TcpVerdict::Intercepted`], an expired one [`TcpVerdict::LeaseExpired`],
+    /// unless [`Self::deny_beats_interception`] refuses the dial.
     pub fn admit_tcp_or_expired(
         &mut self,
         address: IpAddr,
@@ -773,6 +894,16 @@ impl EgressLeaseTable {
             ));
         }
         let direct_decision = self.policy.evaluate(&direct_request);
+        if matches!(direct_decision.reason, DecisionReason::ProtectedAddress(_)) {
+            return Ok(TcpVerdict::Refused(
+                self.refuse(RefusalReason::ProtectedAddress, direct_decision),
+            ));
+        }
+        // Before the direct allow, so a broad CIDR rule cannot carry a dial
+        // to a bound name past its interception.
+        if let Some(verdict) = self.intercept_verdict(address, port, route_class, now)? {
+            return Ok(verdict);
+        }
         if direct_decision.is_allowed() {
             return Ok(TcpVerdict::Allowed(TcpAdmission {
                 address,
@@ -782,11 +913,6 @@ impl EgressLeaseTable {
                 lease_expires_at: None,
                 decision: direct_decision,
             }));
-        }
-        if matches!(direct_decision.reason, DecisionReason::ProtectedAddress(_)) {
-            return Ok(TcpVerdict::Refused(
-                self.refuse(RefusalReason::ProtectedAddress, direct_decision),
-            ));
         }
 
         let mut expired = None;
@@ -826,6 +952,98 @@ impl EgressLeaseTable {
         Ok(TcpVerdict::Refused(self.refuse(reason, direct_decision)))
     }
 
+    /// The verdict on a dial whose address a kept lease of a name bound on
+    /// `port` attributes, or `None` when no bound name is in play. Bound names
+    /// are tried in the table's name order; any active one intercepts.
+    fn intercept_verdict(
+        &self,
+        address: IpAddr,
+        port: u16,
+        route_class: RouteClass,
+        now: LeaseInstant,
+    ) -> Result<Option<TcpVerdict>, LeaseError> {
+        let bound: Vec<&DnsLease> = self
+            .leases_at(address, route_class)
+            .filter(|lease| self.intercepts.binds(&lease.name, port))
+            .collect();
+        let Some(first) = bound.first() else {
+            return Ok(None);
+        };
+        if let Some((reason, decision)) = self.deny_beats_interception(
+            address,
+            port,
+            route_class,
+            bound.iter().map(|lease| lease.name.as_str()),
+        )? {
+            return Ok(Some(TcpVerdict::Refused(self.refuse(reason, decision))));
+        }
+        if let Some(lease) = bound.iter().find(|lease| lease.is_active(now)) {
+            return Ok(Some(TcpVerdict::Intercepted(TcpInterception {
+                address,
+                port,
+                route_class,
+                hostname: lease.name.clone(),
+                lease_expires_at: lease.expires_at,
+                policy_digest: self.policy.digest(),
+            })));
+        }
+        // The decision a lapsed re-resolve is refused with: no rule decides an
+        // intercepted dial, and a CIDR allow must not be reported.
+        Ok(Some(TcpVerdict::LeaseExpired(ExpiredLease {
+            name: first.name.clone(),
+            address,
+            port,
+            route_class,
+            decision: self.policy.deny(DecisionReason::InterceptBinding, None),
+        })))
+    }
+
+    /// Whether a user's deny rule refuses a dial that a bound name would
+    /// otherwise intercept (#3999). A deny rule beats interception: one that
+    /// matches the direct request, or the named request for any of the bound
+    /// names at the address, refuses the dial with that rule's decision. Only
+    /// a rule deny counts; the absence of an allow rule never does. This is
+    /// the one place that precedence is decided.
+    fn deny_beats_interception<'n>(
+        &self,
+        address: IpAddr,
+        port: u16,
+        route_class: RouteClass,
+        bound_names: impl IntoIterator<Item = &'n str>,
+    ) -> Result<Option<(RefusalReason, PolicyDecision)>, LeaseError> {
+        let direct = self
+            .policy
+            .evaluate(&EgressRequest::tcp(address, port, None, route_class)?);
+        if direct.reason == DecisionReason::RuleDeny {
+            return Ok(Some((RefusalReason::AddressNotAllowed, direct)));
+        }
+        for name in bound_names {
+            let named =
+                self.policy
+                    .evaluate(&EgressRequest::tcp(address, port, Some(name), route_class)?);
+            if named.reason == DecisionReason::RuleDeny {
+                return Ok(Some((RefusalReason::NameNotAllowed, named)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Refuse a dial the table answered [`TcpVerdict::Intercepted`], counted
+    /// as [`RefusalReason::InterceptUnavailable`]. The broker calls it while
+    /// nothing receives intercepted connections; it consumes the interception
+    /// so it cannot be handed on as well.
+    pub fn refuse_interception(&self, interception: TcpInterception) -> Refusal {
+        self.refuse(
+            RefusalReason::InterceptUnavailable,
+            PolicyDecision {
+                action: DecisionAction::Deny,
+                reason: DecisionReason::InterceptBinding,
+                rule_id: None,
+                policy_digest: interception.policy_digest,
+            },
+        )
+    }
+
     /// Finish a dial that found only an expired lease, with the answer the
     /// broker got by re-resolving [`ExpiredLease::name`] once, or `None` when
     /// that lookup produced no addresses or failed.
@@ -833,13 +1051,14 @@ impl EgressLeaseTable {
     /// The answer goes through the same admission as a guest lookup under the
     /// current policy, so protected addresses and addresses local to the host
     /// are refused again and the leases are refreshed. The dial is then
-    /// admitted only if the answer still contains its address.
+    /// admitted, to dial or to intercept, only if the answer still contains
+    /// its address.
     pub fn readmit_expired(
         &mut self,
         expired: ExpiredLease,
         resolution: Option<DnsResolution>,
         now: LeaseInstant,
-    ) -> Result<Result<TcpAdmission, Refusal>, LeaseError> {
+    ) -> Result<Result<Readmission, Refusal>, LeaseError> {
         let ExpiredLease {
             name,
             address,
@@ -859,7 +1078,8 @@ impl EgressLeaseTable {
         }
         Ok(
             match self.admit_tcp_or_expired(address, port, route_class, now)? {
-                TcpVerdict::Allowed(admission) => Ok(admission),
+                TcpVerdict::Allowed(admission) => Ok(Readmission::Allowed(admission)),
+                TcpVerdict::Intercepted(interception) => Ok(Readmission::Intercepted(interception)),
                 TcpVerdict::Refused(refusal) => Err(refusal),
                 TcpVerdict::LeaseExpired(again) => {
                     Err(self.refuse(RefusalReason::LeaseExpired, again.decision))
@@ -870,35 +1090,83 @@ impl EgressLeaseTable {
 
     /// Swap the policy for a new revision in one call: every lease the new
     /// revision refuses is dropped, and of the flows the broker passes, the
-    /// keys of those it refuses are returned so the broker resets them. Later
-    /// DNS questions and dials see only the new revision; nothing can observe
-    /// the table between the two.
-    pub fn replace_policy<'a, K>(
+    /// keys of those it refuses, or would now dial where it intercepted or
+    /// intercept where it dialled, are returned so the broker resets them.
+    /// Later DNS questions and dials see only the new revision; nothing can
+    /// observe the table between the two.
+    pub fn replace_policy<'a, K, F>(
         &mut self,
         policy: CompiledPolicy,
-        admitted: impl IntoIterator<Item = (K, &'a TcpAdmission)>,
+        flows: impl IntoIterator<Item = (K, F)>,
         now: LeaseInstant,
-    ) -> PolicyReplacement<K> {
+    ) -> PolicyReplacement<K>
+    where
+        F: Into<EstablishedFlow<'a>>,
+    {
         self.purge_expired(now);
         let previous = self.policy.digest();
         let before = self.leases.len();
         let leases = std::mem::take(&mut self.leases)
             .into_iter()
-            .filter(|lease| lease_allowed(&policy, lease))
+            .filter(|lease| lease_allowed(&policy, &self.intercepts, lease))
             .collect();
         self.policy = policy;
         self.leases = leases;
-        let refused_flows = admitted
-            .into_iter()
-            .filter(|(_, admission)| !self.still_admits(admission))
-            .map(|(key, _)| key)
-            .collect();
         PolicyReplacement {
             previous,
             current: self.policy.digest(),
             dropped_leases: before - self.leases.len(),
-            refused_flows,
+            refused_flows: self.flows_to_reset(flows),
         }
+    }
+
+    /// Swap the interception bindings in one call (#3999), as
+    /// [`Self::replace_policy`] swaps the policy: every lease only a removed
+    /// binding admitted is dropped, and of the flows the broker passes, the
+    /// keys of those whose outcome changes are returned so the broker resets
+    /// them: a dialled flow a binding would now intercept, an intercepted flow
+    /// no binding intercepts any more, or one now refused.
+    pub fn replace_intercepts<'a, K, F>(
+        &mut self,
+        intercepts: InterceptSet,
+        flows: impl IntoIterator<Item = (K, F)>,
+        now: LeaseInstant,
+    ) -> InterceptReplacement<K>
+    where
+        F: Into<EstablishedFlow<'a>>,
+    {
+        self.purge_expired(now);
+        let before = self.leases.len();
+        let leases = std::mem::take(&mut self.leases)
+            .into_iter()
+            .filter(|lease| lease_allowed(&self.policy, &intercepts, lease))
+            .collect();
+        self.intercepts = intercepts;
+        self.leases = leases;
+        InterceptReplacement {
+            dropped_leases: before - self.leases.len(),
+            reset_flows: self.flows_to_reset(flows),
+        }
+    }
+
+    fn flows_to_reset<'a, K, F>(&self, flows: impl IntoIterator<Item = (K, F)>) -> Vec<K>
+    where
+        F: Into<EstablishedFlow<'a>>,
+    {
+        flows
+            .into_iter()
+            .filter_map(|(key, flow)| {
+                let reset = match flow.into() {
+                    EstablishedFlow::Dialled(admission) => {
+                        self.meets_bound_name(admission) || !self.still_admits(admission)
+                    }
+                    EstablishedFlow::Intercepted(interception) => {
+                        !self.still_intercepts(interception)
+                    }
+                };
+                reset.then_some(key)
+            })
+            .collect()
     }
 
     /// Unexpired leases.
@@ -931,6 +1199,7 @@ impl EgressLeaseTable {
         let own_name = admission.hostname.as_deref().filter(|name| {
             lease_allowed(
                 &self.policy,
+                &self.intercepts,
                 &DnsLease {
                     name: (*name).to_owned(),
                     address,
@@ -951,6 +1220,71 @@ impl EgressLeaseTable {
                         .map(|lease| lease.name.as_str()),
                 )
                 .any(|hostname| allowed(Some(hostname)))
+    }
+
+    /// Whether a dialled flow's destination now meets a name bound on its
+    /// port, by its own attributed name or a lease kept for its address. A new
+    /// dial there would be intercepted or refused, never dialled, so the flow
+    /// is reset.
+    fn meets_bound_name(&self, admission: &TcpAdmission) -> bool {
+        admission
+            .hostname
+            .as_deref()
+            .into_iter()
+            .chain(
+                self.leases_at(admission.address, admission.route_class)
+                    .map(|lease| lease.name.as_str()),
+            )
+            .any(|name| self.intercepts.binds(name, admission.port))
+    }
+
+    /// Whether the current state would still intercept an established
+    /// intercepted flow under its own name. Like [`Self::still_admits`], the
+    /// name counts after its lease aged out while the name could still be
+    /// leased for the address.
+    fn still_intercepts(&self, interception: &TcpInterception) -> bool {
+        let TcpInterception {
+            address,
+            port,
+            route_class,
+            ref hostname,
+            ..
+        } = *interception;
+        if self.host_addresses.classify(address).is_some()
+            || !self.intercepts.binds(hostname, port)
+            || !lease_allowed(
+                &self.policy,
+                &self.intercepts,
+                &DnsLease {
+                    name: hostname.clone(),
+                    address,
+                    route_class,
+                    expires_at: LeaseInstant::ZERO,
+                },
+            )
+        {
+            return false;
+        }
+        let bound = std::iter::once(hostname.as_str()).chain(
+            self.leases_at(address, route_class)
+                .map(|lease| lease.name.as_str())
+                .filter(|name| self.intercepts.binds(name, port)),
+        );
+        matches!(
+            self.deny_beats_interception(address, port, route_class, bound),
+            Ok(None)
+        )
+    }
+
+    /// The kept leases, active or expired, for one address and route class.
+    fn leases_at(
+        &self,
+        address: IpAddr,
+        route_class: RouteClass,
+    ) -> impl Iterator<Item = &DnsLease> + '_ {
+        self.leases
+            .iter()
+            .filter(move |lease| lease.address == address && lease.route_class == route_class)
     }
 
     fn tcp_refusal_reason(&self, direct_request: &EgressRequest) -> RefusalReason {
@@ -994,14 +1328,40 @@ impl EgressLeaseTable {
     }
 }
 
-fn lease_allowed(policy: &CompiledPolicy, lease: &DnsLease) -> bool {
+fn lease_allowed(policy: &CompiledPolicy, intercepts: &InterceptSet, lease: &DnsLease) -> bool {
     let query = EgressRequest::dns_query(&lease.name, lease.route_class);
     let answer = EgressRequest::dns_answer(&lease.name, lease.address, lease.route_class);
     matches!(
         (query, answer),
         (Ok(query), Ok(answer))
-            if policy.evaluate(&query).is_allowed() && policy.evaluate(&answer).is_allowed()
+            if judge_dns(policy, intercepts, &query).is_allowed()
+                && judge_dns(policy, intercepts, &answer).is_allowed()
     )
+}
+
+/// The policy's decision on a DNS question or answer, except that a name
+/// bound for interception that the policy refuses only by default is
+/// admitted (#3999): a bound name must resolve to be intercepted. A rule
+/// deny, a protected name or a protected address still refuses it.
+fn judge_dns(
+    policy: &CompiledPolicy,
+    intercepts: &InterceptSet,
+    request: &EgressRequest,
+) -> PolicyDecision {
+    let decision = policy.evaluate(request);
+    if decision.reason == DecisionReason::DefaultDeny
+        && request
+            .hostname()
+            .is_some_and(|name| intercepts.binds_name(name))
+    {
+        return PolicyDecision {
+            action: DecisionAction::Allow,
+            reason: DecisionReason::InterceptBinding,
+            rule_id: None,
+            policy_digest: decision.policy_digest,
+        };
+    }
+    decision
 }
 
 #[derive(Debug, Error)]
@@ -1062,6 +1422,9 @@ mod tests {
             Ok(
                 match self.admit_tcp_or_expired(address, port, route_class, now)? {
                     TcpVerdict::Allowed(admission) => Admission::Allowed(admission),
+                    TcpVerdict::Intercepted(interception) => {
+                        panic!("unexpected interception: {interception:?}")
+                    }
                     TcpVerdict::Refused(refusal) => Admission::Denied(refusal.decision),
                     TcpVerdict::LeaseExpired(expired) => Admission::Denied(
                         self.readmit_expired(expired, None, now)?
@@ -1716,14 +2079,17 @@ rules:
         assert_eq!(expired.port(), 443);
         assert_eq!(table.refusal_counts().total(), 0, "nothing is refused yet");
 
-        let admission = table
+        let Readmission::Allowed(admission) = table
             .readmit_expired(
                 expired,
                 Some(resolution(&[(PUBLIC_V4, 120), (CDN_V4, 120)])),
                 at(61),
             )
             .unwrap()
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("expected a dial");
+        };
         assert_eq!(admission.hostname(), Some("allowed.example.com"));
         assert_eq!(admission.lease_expires_at(), Some(at(181)));
         assert_eq!(table.active_leases(at(61)), 2);
@@ -2001,6 +2367,7 @@ rules:
                 (RefusalReason::AddressNotAllowed, 1),
                 (RefusalReason::ProtectedAddress, 2),
                 (RefusalReason::LeaseExpired, 1),
+                (RefusalReason::InterceptUnavailable, 0),
             ]
         );
         assert_eq!(counts.total(), 7);
@@ -2030,6 +2397,7 @@ rules:
                 "address_not_allowed",
                 "protected_address",
                 "lease_expired",
+                "intercept_unavailable",
             ]
         );
         assert_eq!(
@@ -2041,6 +2409,7 @@ rules:
                 "address not allowed",
                 "protected address",
                 "lease expired",
+                "interception unavailable",
             ]
         );
         for (index, reason) in RefusalReason::ALL.into_iter().enumerate() {
@@ -2385,5 +2754,369 @@ rules:
         for thread in threads {
             thread.join().unwrap();
         }
+    }
+
+    // #3999: interception bindings.
+
+    use crate::intercept::{InterceptBinding, InterceptSet};
+
+    const BOUND: &str = "api.example.com";
+
+    fn bind(table: &mut EgressLeaseTable, bound: &[(&str, u16)], now: LeaseInstant) {
+        let set = InterceptSet::new(
+            bound
+                .iter()
+                .map(|(name, port)| InterceptBinding::new(name, *port).unwrap()),
+        )
+        .unwrap();
+        table.replace_intercepts(set, std::iter::empty::<((), &TcpAdmission)>(), now);
+    }
+
+    fn intercepted(verdict: TcpVerdict) -> TcpInterception {
+        match verdict {
+            TcpVerdict::Intercepted(interception) => interception,
+            other => panic!("expected an interception, got {other:?}"),
+        }
+    }
+
+    fn rules(yaml: &str) -> CompiledPolicy {
+        PolicyDocument::parse_yaml(format!("version: 1\ndefault: deny\nrules:\n{yaml}").as_bytes())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_bound_name_resolves_without_an_allow_rule_and_its_dial_is_intercepted() {
+        let mut table = EgressLeaseTable::new(named_policy());
+        assert!(table.intercepts().is_empty(), "nothing is bound by default");
+        assert_eq!(
+            denied(
+                table
+                    .authorize_dns_query(BOUND, RouteClass::General)
+                    .unwrap()
+            )
+            .reason,
+            DecisionReason::DefaultDeny
+        );
+        table.reset_refusal_counts();
+
+        bind(&mut table, &[(BOUND, 443)], at(0));
+        let query = allowed(
+            table
+                .authorize_dns_query("API.Example.COM.", RouteClass::General)
+                .unwrap(),
+        );
+        assert_eq!(query.name(), BOUND);
+        assert_eq!(query.decision().reason_code(), "intercept-binding");
+        assert_eq!(query.decision().rule_id, None);
+        let dns = allowed(
+            table
+                .admit_dns(
+                    BOUND,
+                    RouteClass::General,
+                    resolution(&[(PUBLIC_V4, 60)]),
+                    at(0),
+                )
+                .unwrap(),
+        );
+        assert_eq!(dns.addresses(), [PUBLIC_V4]);
+        assert_eq!(dns.decision().reason, DecisionReason::InterceptBinding);
+
+        let interception = intercepted(verdict(&mut table, PUBLIC_V4, 443, at(1)));
+        assert_eq!(interception.hostname(), BOUND);
+        assert_eq!(interception.address(), PUBLIC_V4);
+        assert_eq!(interception.port(), 443);
+        assert_eq!(interception.route_class(), RouteClass::General);
+        assert_eq!(interception.lease_expires_at(), at(60));
+        assert_eq!(interception.policy_digest(), table.policy_digest());
+        assert_eq!(table.refusal_counts().total(), 0);
+
+        // The same address on a port the name is not bound on, and an
+        // address no lease names, are judged as without the binding.
+        let other_port = refused(verdict(&mut table, PUBLIC_V4, 80, at(1)));
+        assert_eq!(other_port.decision().reason, DecisionReason::DefaultDeny);
+        let literal = refused(verdict(&mut table, CDN_V4, 443, at(1)));
+        assert_eq!(literal.reason(), RefusalReason::AddressNotAllowed);
+
+        // A broker that has nothing to hand the connection to refuses it.
+        let refusal = table.refuse_interception(interception);
+        assert_eq!(refusal.reason(), RefusalReason::InterceptUnavailable);
+        assert_eq!(refusal.decision().reason_code(), "intercept-binding");
+        assert!(!refusal.decision().is_allowed());
+        assert_eq!(
+            table
+                .refusal_counts()
+                .get(RefusalReason::InterceptUnavailable),
+            1
+        );
+    }
+
+    #[test]
+    fn a_cidr_allow_does_not_carry_a_bound_name_past_interception() {
+        let mut table = EgressLeaseTable::new(typed(&[("93.0.0.0/8", &[80, 443])]));
+        bind(&mut table, &[(BOUND, 443)], at(0));
+        resolve(&mut table, BOUND, PUBLIC_V4, 60, at(0));
+
+        assert_eq!(
+            intercepted(verdict(&mut table, PUBLIC_V4, 443, at(1))).hostname(),
+            BOUND
+        );
+        // Another port, and a literal address no lease names, dial directly.
+        assert_eq!(
+            admitted(verdict(&mut table, PUBLIC_V4, 80, at(1))).hostname(),
+            None
+        );
+        assert_eq!(
+            admitted(verdict(&mut table, CDN_V4, 443, at(1))).hostname(),
+            None
+        );
+        // An expired lease of the bound name is re-resolved, never dialled by
+        // the CIDR rule.
+        let expired = expired_lease(verdict(&mut table, PUBLIC_V4, 443, at(60)));
+        assert_eq!(expired.name(), BOUND);
+    }
+
+    #[test]
+    fn a_shared_address_is_intercepted_when_one_of_its_names_is_bound() {
+        let mut table = EgressLeaseTable::new(named_policy());
+        bind(&mut table, &[(BOUND, 443)], at(0));
+        resolve(&mut table, "allowed.example.com", PUBLIC_V4, 60, at(0));
+        resolve(&mut table, BOUND, PUBLIC_V4, 60, at(0));
+        // Raw TCP carries no name, so the allowed name cannot win the dial
+        // away from the bound one.
+        assert_eq!(
+            intercepted(verdict(&mut table, PUBLIC_V4, 443, at(1))).hostname(),
+            BOUND
+        );
+    }
+
+    #[test]
+    fn a_deny_rule_beats_interception() {
+        let open = "  - id: open\n    action: allow\n    protocols: [tcp]\n    ports: [443]\n    cidrs: [0.0.0.0/0]\n    route_classes: [general]\n";
+        for (deny, rule_id, reason) in [
+            (
+                "  - id: deny-name\n    action: deny\n    protocols: [tcp]\n    destinations: [api.example.com]\n    route_classes: [general]\n",
+                "deny-name",
+                RefusalReason::NameNotAllowed,
+            ),
+            (
+                "  - id: deny-network\n    action: deny\n    protocols: [tcp]\n    cidrs: [93.184.216.0/24]\n    route_classes: [general]\n",
+                "deny-network",
+                RefusalReason::AddressNotAllowed,
+            ),
+        ] {
+            let mut table = EgressLeaseTable::new(rules(&format!("{deny}{open}")));
+            bind(&mut table, &[(BOUND, 443)], at(0));
+            resolve(&mut table, BOUND, PUBLIC_V4, 60, at(0));
+            let refusal = refused(verdict(&mut table, PUBLIC_V4, 443, at(1)));
+            assert_eq!(refusal.reason(), reason, "{rule_id}");
+            assert_eq!(refusal.decision().reason, DecisionReason::RuleDeny);
+            assert_eq!(refusal.decision().rule_id.as_deref(), Some(rule_id));
+            // Also once the lease lapsed: refused, not re-resolved.
+            refused(verdict(&mut table, PUBLIC_V4, 443, at(60)));
+        }
+
+        // A rule that denies the name's DNS keeps it from resolving at all.
+        let mut table = EgressLeaseTable::new(rules(&format!(
+            "  - id: deny-name\n    action: deny\n    protocols: [dns, tcp]\n    destinations: [api.example.com]\n    route_classes: [general]\n{open}"
+        )));
+        bind(&mut table, &[(BOUND, 443)], at(0));
+        let decision = denied(
+            table
+                .authorize_dns_query(BOUND, RouteClass::General)
+                .unwrap(),
+        );
+        assert_eq!(decision.reason, DecisionReason::RuleDeny);
+        denied(
+            table
+                .admit_dns(
+                    BOUND,
+                    RouteClass::General,
+                    resolution(&[(PUBLIC_V4, 60)]),
+                    at(0),
+                )
+                .unwrap(),
+        );
+        assert_eq!(table.active_leases(at(0)), 0);
+    }
+
+    #[test]
+    fn a_bound_name_never_leases_a_protected_or_host_address() {
+        let mut table = EgressLeaseTable::new(named_policy());
+        table.set_host_addresses(HostAddressSet::new([], [OTHER_PUBLIC_V4]).unwrap());
+        bind(&mut table, &[(BOUND, 443)], at(0));
+        let private: IpAddr = "10.0.0.7".parse().unwrap();
+        for answer in [private, OTHER_PUBLIC_V4] {
+            let decision = denied(
+                table
+                    .admit_dns(
+                        BOUND,
+                        RouteClass::General,
+                        resolution(&[(answer, 60)]),
+                        at(0),
+                    )
+                    .unwrap(),
+            );
+            assert!(matches!(
+                decision.reason,
+                DecisionReason::ProtectedAddress(_)
+            ));
+            let refusal = refused(verdict(&mut table, answer, 443, at(1)));
+            assert_eq!(refusal.reason(), RefusalReason::ProtectedAddress);
+        }
+        assert_eq!(table.active_leases(at(1)), 0);
+        // A mixed answer keeps only its public address, as for any name.
+        let dns = allowed(
+            table
+                .admit_dns(
+                    BOUND,
+                    RouteClass::General,
+                    resolution(&[(private, 60), (PUBLIC_V4, 60)]),
+                    at(1),
+                )
+                .unwrap(),
+        );
+        assert_eq!(dns.addresses(), [PUBLIC_V4]);
+    }
+
+    #[test]
+    fn an_expired_bound_lease_re_resolves_into_interception_or_refusal() {
+        let mut table = EgressLeaseTable::new(named_policy());
+        bind(&mut table, &[(BOUND, 443)], at(0));
+        resolve(&mut table, BOUND, PUBLIC_V4, 60, at(0));
+
+        let expired = expired_lease(verdict(&mut table, PUBLIC_V4, 443, at(60)));
+        assert_eq!(expired.name(), BOUND);
+        assert_eq!(table.refusal_counts().total(), 0, "nothing is refused yet");
+        let readmission = table
+            .readmit_expired(expired, Some(resolution(&[(PUBLIC_V4, 120)])), at(61))
+            .unwrap()
+            .unwrap();
+        let Readmission::Intercepted(interception) = readmission else {
+            panic!("expected an interception, got {readmission:?}");
+        };
+        assert_eq!(interception.hostname(), BOUND);
+        assert_eq!(interception.lease_expires_at(), at(181));
+
+        // The name moved elsewhere, or did not answer: lease_expired.
+        for answer in [Some(resolution(&[(CDN_V4, 60)])), None] {
+            let expired = expired_lease(verdict(&mut table, PUBLIC_V4, 443, at(181)));
+            let refusal = table
+                .readmit_expired(expired, answer, at(181))
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(refusal.reason(), RefusalReason::LeaseExpired);
+            assert_eq!(refusal.decision().reason, DecisionReason::InterceptBinding);
+            assert!(!refusal.decision().is_allowed());
+        }
+        only(table.refusal_counts(), RefusalReason::LeaseExpired, 2);
+    }
+
+    #[test]
+    fn replacing_the_bindings_resets_only_the_flows_whose_outcome_changes() {
+        let mut table = EgressLeaseTable::new(rules(
+            "  - id: dns\n    action: allow\n    protocols: [dns]\n    destinations: [api.example.com, other.example.com]\n    route_classes: [general]\n  - id: open\n    action: allow\n    protocols: [tcp]\n    ports: [443]\n    cidrs: [0.0.0.0/0]\n    route_classes: [general]\n",
+        ));
+        bind(&mut table, &[("old.example.com", 443)], at(0));
+        resolve(&mut table, BOUND, PUBLIC_V4, 60, at(0));
+        resolve(&mut table, "other.example.com", OTHER_PUBLIC_V4, 60, at(0));
+        // No rule lets this name resolve; only its binding does.
+        resolve(&mut table, "old.example.com", CDN_V4, 60, at(0));
+        let soon_bound = admitted(verdict(&mut table, PUBLIC_V4, 443, at(1)));
+        let unaffected = admitted(verdict(&mut table, OTHER_PUBLIC_V4, 443, at(1)));
+        let unbound = intercepted(verdict(&mut table, CDN_V4, 443, at(1)));
+
+        let set = InterceptSet::new([InterceptBinding::new(BOUND, 443).unwrap()]).unwrap();
+        let replacement = table.replace_intercepts(
+            set.clone(),
+            [
+                ("soon-bound", EstablishedFlow::from(&soon_bound)),
+                ("unaffected", EstablishedFlow::from(&unaffected)),
+                ("unbound", EstablishedFlow::from(&unbound)),
+            ],
+            at(2),
+        );
+        assert_eq!(replacement.reset_flows(), ["soon-bound", "unbound"]);
+        assert_eq!(replacement.dropped_leases(), 1);
+        assert!(
+            table
+                .leases
+                .iter()
+                .all(|lease| lease.name != "old.example.com")
+        );
+        assert_eq!(table.intercepts(), &set);
+
+        // New dials see the new bindings only.
+        let now_bound = intercepted(verdict(&mut table, PUBLIC_V4, 443, at(3)));
+        assert_eq!(now_bound.hostname(), BOUND);
+        assert_eq!(
+            admitted(verdict(&mut table, CDN_V4, 443, at(3))).hostname(),
+            None
+        );
+        denied(
+            table
+                .authorize_dns_query("old.example.com", RouteClass::General)
+                .unwrap(),
+        );
+
+        // The same bindings again change nothing.
+        let again = table.replace_intercepts(
+            set,
+            [
+                ("unaffected", EstablishedFlow::from(&unaffected)),
+                ("now-bound", EstablishedFlow::from(&now_bound)),
+            ],
+            at(4),
+        );
+        assert!(again.reset_flows().is_empty());
+        assert_eq!(again.dropped_leases(), 0);
+
+        // Removing every binding resets the intercepted flow. Its lease stays,
+        // because a rule lets the name resolve.
+        let cleared = table.replace_intercepts(
+            InterceptSet::default(),
+            [
+                ("unaffected", EstablishedFlow::from(&unaffected)),
+                ("now-bound", EstablishedFlow::from(&now_bound)),
+            ],
+            at(5),
+        );
+        assert_eq!(cleared.dropped_leases(), 0);
+        assert_eq!(cleared.into_reset_flows(), ["now-bound"]);
+        assert_eq!(table.active_leases(at(5)), 2);
+    }
+
+    #[test]
+    fn a_policy_replacement_rejudges_intercepted_flows() {
+        let mut table = EgressLeaseTable::new(named_policy());
+        bind(&mut table, &[(BOUND, 443)], at(0));
+        resolve(&mut table, BOUND, PUBLIC_V4, 60, at(0));
+        let flow = intercepted(verdict(&mut table, PUBLIC_V4, 443, at(1)));
+
+        let kept = table.replace_policy(named_policy(), [(1, &flow)], at(2));
+        assert!(kept.refused_flows().is_empty());
+        assert_eq!(kept.dropped_leases(), 0);
+
+        // A deny rule for the bound name ends the intercepted flow, and its
+        // DNS still resolves, so the lease is kept for the refusal's sake.
+        let deny = rules(
+            "  - id: deny-name\n    action: deny\n    protocols: [tcp]\n    destinations: [api.example.com]\n    route_classes: [general]\n",
+        );
+        let replacement = table.replace_policy(deny, [(1, &flow)], at(3));
+        assert_eq!(replacement.refused_flows(), [1]);
+        assert_eq!(replacement.dropped_leases(), 0);
+        assert_eq!(
+            refused(verdict(&mut table, PUBLIC_V4, 443, at(4)))
+                .decision()
+                .reason,
+            DecisionReason::RuleDeny
+        );
+
+        // A rule that denies the name's DNS drops its lease as well.
+        let deny_dns = rules(
+            "  - id: deny-name\n    action: deny\n    protocols: [dns]\n    destinations: [api.example.com]\n    route_classes: [general]\n",
+        );
+        let replacement = table.replace_policy(deny_dns, [(1, &flow)], at(5));
+        assert_eq!(replacement.refused_flows(), [1]);
+        assert_eq!(replacement.dropped_leases(), 1);
     }
 }

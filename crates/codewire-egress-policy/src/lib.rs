@@ -17,6 +17,7 @@ pub mod check;
 mod cidr;
 pub mod host_addresses;
 mod hostname;
+pub mod intercept;
 pub mod lease;
 pub mod reference;
 pub mod typed;
@@ -202,6 +203,9 @@ pub enum DecisionReason {
     DefaultDeny,
     ProtectedAddress(AddressClass),
     ProtectedName(NameClass),
+    /// The name is bound for interception (#3999), and the policy refused
+    /// its DNS only by default. Never a rule's decision, so no rule id.
+    InterceptBinding,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,6 +262,7 @@ impl PolicyDecision {
             DecisionReason::ProtectedName(NameClass::Home) => "protected-name-home",
             DecisionReason::ProtectedName(NameClass::Metadata) => "protected-name-metadata",
             DecisionReason::ProtectedName(NameClass::Reserved) => "protected-name-reserved",
+            DecisionReason::InterceptBinding => "intercept-binding",
         }
     }
 }
