@@ -630,3 +630,41 @@ fn host_control_store_regrant_refusals_preserve_exact_book_and_receipt_bytes() {
         assert!(!temp.path().join("state/sessions").exists());
     }
 }
+
+#[test]
+fn only_a_root_owned_sticky_tmp_or_dev_shm_may_be_world_writable() {
+    const DIR: u32 = 0o040000;
+    for (path, uid, mode, admitted) in [
+        ("/tmp", 0, 0o1777, true),
+        ("/dev/shm", 0, 0o1777, true),
+        ("/dev/shm", 0, 0o0777, false),
+        ("/dev/shm", 0, 0o1775, false),
+        ("/dev/shm", 1000, 0o1777, false),
+        ("/tmp", 1000, 0o1777, false),
+        ("/var/tmp", 0, 0o1777, false),
+        ("/dev/shm/nested", 0, 0o1777, false),
+    ] {
+        assert_eq!(
+            shared_sticky_ancestor(Path::new(path), uid, DIR | mode),
+            admitted,
+            "{path} uid {uid} mode {mode:o}"
+        );
+    }
+}
+
+/// The member journey keeps its roots under `/dev/shm` (#4059).
+#[test]
+fn a_state_root_under_a_sticky_dev_shm_opens() {
+    let shm = Path::new("/dev/shm");
+    let Ok(metadata) = std::fs::metadata(shm) else {
+        eprintln!("no /dev/shm here");
+        return;
+    };
+    if metadata.uid() != 0 || metadata.mode() & 0o7777 != 0o1777 {
+        eprintln!("/dev/shm is not root-owned sticky 1777 here");
+        return;
+    }
+    let temp = tempfile::tempdir_in(shm).unwrap();
+    let mut store = admitted(temp.path());
+    store.register(&launch(3, &scope(), "exit 0")).unwrap();
+}

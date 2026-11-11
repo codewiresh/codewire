@@ -1779,12 +1779,32 @@ fn reap_all_until(deadline: Instant) -> bool {
     }
 }
 
+/// A journey root in memory (#4059). The journey makes hundreds of fsyncs,
+/// and on a busy CI disk they outlast the member path's fixed bounds, which
+/// this test is not about (#4070 is the product side). A root holds about
+/// 124 KiB. The host store admits a root-owned sticky 1777 `/dev/shm` as it
+/// does `/tmp`.
+fn journey_root() -> PathBuf {
+    let shm = Path::new("/dev/shm");
+    match fs::metadata(shm) {
+        Ok(metadata) if metadata.uid() == 0 && metadata.mode() & 0o7777 == 0o1777 => {
+            tempfile::tempdir_in(shm).unwrap().keep()
+        }
+        _ => {
+            eprintln!(
+                "/dev/shm is not a root-owned sticky 1777 directory; the journey root is on disk"
+            );
+            tempfile::tempdir().unwrap().keep()
+        }
+    }
+}
+
 #[test]
 fn host_members_two_real_endpoints_direct_and_tls_derp() {
     // Each journey owns a separate subreaper process, rather than changing the
     // Cargo test parent's process-wide custody while other tests may execute.
     for transport in ["direct", "derp"] {
-        let root = tempfile::tempdir().unwrap().keep();
+        let root = journey_root();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         // Cargo runs an integration test in its package directory. Stage
         // executable payloads under the repository's owned .tmp, not /tmp

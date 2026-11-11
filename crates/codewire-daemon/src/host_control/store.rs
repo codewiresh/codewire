@@ -378,6 +378,15 @@ impl Identity {
     }
 }
 
+/// The world-writable ancestors a state root may have: exactly `/tmp` or
+/// `/dev/shm`, root-owned and sticky 1777, so no other user can rename or
+/// remove the entries beneath it (#4059).
+fn shared_sticky_ancestor(path: &Path, uid: u32, mode: u32) -> bool {
+    (path == Path::new("/tmp") || path == Path::new("/dev/shm"))
+        && uid == 0
+        && mode & 0o7777 == 0o1777
+}
+
 struct DirectoryPin {
     file: File,
     path: PathBuf,
@@ -399,11 +408,10 @@ impl DirectoryPin {
     fn validate(path: &Path, metadata: &Metadata, leaf: bool) -> Result<(), Error> {
         // SAFETY: geteuid reads the process identity.
         let uid = unsafe { libc::geteuid() };
-        let sticky_tmp =
-            path == Path::new("/tmp") && metadata.uid() == 0 && metadata.mode() & 0o7777 == 0o1777;
+        let sticky_shared = shared_sticky_ancestor(path, metadata.uid(), metadata.mode());
         if !metadata.is_dir()
             || (!matches!(metadata.uid(), 0) && metadata.uid() != uid)
-            || (!sticky_tmp && metadata.mode() & 0o022 != 0)
+            || (!sticky_shared && metadata.mode() & 0o022 != 0)
             || (leaf && (metadata.uid() != uid || metadata.mode() & 0o7777 != 0o700))
         {
             return Err(Error::Storage);
