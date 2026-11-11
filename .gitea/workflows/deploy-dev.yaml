@@ -106,9 +106,8 @@ jobs:
     outputs:
       turn: ${{ steps.turn.outputs.turn }}
     steps:
+      # The script reads run state only; it orders runs by run ID, not ancestry.
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
 
       - name: Wait for this delivery's turn
         id: turn

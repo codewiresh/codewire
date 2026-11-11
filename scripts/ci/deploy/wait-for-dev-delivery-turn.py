@@ -24,8 +24,12 @@ Each Deploy Dev push run on main that selected a delivery runs this as its
   and only while it moves Dev forward, so a red commit's delivery ends
   without publishing and the next one starts.
 
-A run of the workflow from before this job counts as in flight while its
-builds or publish job has not ended.
+A newer commit's run is one with a higher run ID: on main every later push
+gets a higher one, and a rerun keeps its run's ID. Ancestry cannot decide it,
+because this job's checkout holds only its own commit, not a newer one (the
+first version did, and so never saw itself replaced). A run of the workflow
+from before this job counts as in flight while its builds or publish job has
+not ended.
 
 This job may delay a delivery but never prevents one: anything unreadable for
 UNREADABLE_LIMIT polls in a row, or a wait past WAIT_SECONDS, lets this run
@@ -37,7 +41,6 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -75,19 +78,6 @@ def load(name: str, path: Path) -> ModuleType:
 
 verdicts = load("codewire_ci_dev_delivery_turn_verdict", HERE.parent / "plan" / "main-ci-verdict.py")
 Unproven = verdicts.Unproven
-
-
-def git(repository: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=repository, stdin=subprocess.DEVNULL,
-        capture_output=True, text=True, check=False, timeout=60,
-    )
-
-
-def is_proper_ancestor(repository: Path, older: str, newer: str) -> bool:
-    if older == newer:
-        return False
-    return git(repository, "merge-base", "--is-ancestor", older, newer).returncode == 0
 
 
 def unfinished_main_runs(api) -> list[dict]:
@@ -144,7 +134,7 @@ def in_flight(jobs: list[dict], run_id: int) -> bool:
     return turn == "success" and delivering(jobs, run_id)
 
 
-def decide(api, repository: Path, head: str, own_run_id: int) -> tuple[str, str]:
+def decide(api, head: str, own_run_id: int) -> tuple[str, str]:
     """GO, WAIT or REPLACED for this run, with the reason."""
     waiting_for = None
     for run in sorted(unfinished_main_runs(api), key=lambda record: record["id"], reverse=True):
@@ -153,7 +143,7 @@ def decide(api, repository: Path, head: str, own_run_id: int) -> tuple[str, str]
         if run_id == own_run_id or commit == head:
             continue
         jobs = verdicts.jobs_of(api, run_id)
-        if is_proper_ancestor(repository, head, commit):
+        if run_id > own_run_id:
             if claims_turn(jobs, run_id):
                 return REPLACED, f"Deploy Dev run {run_id} for the newer {commit} has reached its turn"
             continue
@@ -166,7 +156,6 @@ def decide(api, repository: Path, head: str, own_run_id: int) -> tuple[str, str]
 
 def wait_for_turn(
     api,
-    repository: Path,
     head: str,
     own_run_id: int,
     *,
@@ -182,7 +171,7 @@ def wait_for_turn(
     last_reason = None
     while True:
         try:
-            verdict, reason = decide(api, repository, head, own_run_id)
+            verdict, reason = decide(api, head, own_run_id)
             unreadable = 0
         except Unproven as exc:
             unreadable += 1
@@ -208,6 +197,11 @@ def wait_for_turn(
         sleep(poll_seconds)
 
 
+def say(line: str) -> None:
+    # Each decision reaches the job log as it is made, not at exit.
+    print(line, flush=True)
+
+
 def main() -> int:
     # Reading the other runs needs only the job token, never OIDC request credentials.
     for name in ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL"):
@@ -223,7 +217,7 @@ def main() -> int:
     else:
         try:
             api = verdicts.ForgejoAPI.from_environ(environ)
-            turn = wait_for_turn(api, Path.cwd(), head, int(run_id))
+            turn = wait_for_turn(api, head, int(run_id), log=say)
         except Exception as exc:  # noqa: BLE001 - the turn may delay a delivery, never prevent it
             print(f"::warning::the Dev delivery turn stopped ({exc}); building now")
             turn = GO

@@ -142,7 +142,7 @@ class DevDeliveryTurn(unittest.TestCase):
         self.directory.cleanup()
 
     def decide(self, state: dict, head: str, own: int):
-        return turn.decide(FakeForgejo([state]), self.repo, head, own)
+        return turn.decide(FakeForgejo([state]), head, own)
 
     def wait(self, polls: list, head: str, own: int, **options):
         api = FakeForgejo(polls)
@@ -152,7 +152,7 @@ class DevDeliveryTurn(unittest.TestCase):
         def sleep(_seconds: float) -> None:
             api.poll += 1
 
-        result = turn.wait_for_turn(api, self.repo, head, own, sleep=sleep,
+        result = turn.wait_for_turn(api, head, own, sleep=sleep,
                                     clock=lambda: next(clock), log=lines.append, **options)
         return result, "\n".join(lines), api
 
@@ -200,6 +200,17 @@ class DevDeliveryTurn(unittest.TestCase):
                 verdict, _ = self.decide({10: (self.a, "building"), 20: (self.b, "waiting"),
                                           30: (self.c, phase)}, self.b, 20)
                 self.assertEqual(verdict, expected)
+
+    def test_a_newer_run_is_known_by_its_run_id_not_by_this_checkout(self) -> None:
+        # The turn job's checkout holds only its own commit, so a newer commit is
+        # not in it; seen live on 2026-11-11 (runs 41659 and 41685 kept waiting
+        # beside the newer 41693). A higher run ID is a later push on main.
+        unknown = "f" * 40
+        self.assertEqual(self.decide({10: (self.a, "building"), 20: (self.b, "waiting"),
+                                      30: (unknown, "waiting")}, self.b, 20)[0], turn.REPLACED)
+        # A lower run ID is an older push, even when its commit is unknown here.
+        self.assertEqual(self.decide({10: (unknown, "waiting"), 20: (self.b, "waiting")}, self.b, 20)[0],
+                         turn.GO)
 
     def test_an_older_waiting_run_is_not_in_flight(self) -> None:
         # B waits while nothing is in flight: the newer C goes now, and B steps aside.
