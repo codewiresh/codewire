@@ -95,31 +95,37 @@ done
 [[ ! -e "$ROOT/scripts/ci/deploy/require-main-head.sh" ]] ||
   fail "the retired main-head check remains in the repository"
 
-# A newer push cancels an older delivery only once that commit's own main CI
-# can no longer verify it, and only before it publishes (#2892); the contract
-# of that decision is test-cancel-superseded-deliveries.py. Here: the step
-# runs it with the job token, before planning, and it can neither fail nor
-# hold up this run's own delivery.
-python3 - "$WORKFLOW" <<'PY' || fail "the superseded-delivery cancellation is not a bounded, non-gating step before planning"
+[[ ! -e "$ROOT/scripts/ci/deploy/cancel-superseded-deliveries.py" ]] ||
+  fail "the retired superseded-delivery cancellation remains in the repository"
+
+# One delivery in flight at a time; the newest waits and a newer commit
+# replaces it (owner, 2026-11-10, #4071). The contract of that decision is
+# test-wait-for-dev-delivery-turn.py. Here: its job sits between selection and
+# every build and the publish job, which run only on its "go".
+python3 - "$WORKFLOW" <<'PY' || fail "the Dev delivery turn does not gate the builds and the publish job"
 import sys
 
 import yaml
 
-steps = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["jobs"]["deploy-selection"]["steps"]
-runs = [str(step.get("run", "")) for step in steps]
-cancel = [i for i, run in enumerate(runs) if "scripts/ci/deploy/cancel-superseded-deliveries.py" in run]
-plan = [i for i, run in enumerate(runs) if "scripts/ci/plan/planner.py" in run]
-assert len(cancel) == 1 and plan and cancel[0] < plan[0], (cancel, plan)
-step = steps[cancel[0]]
-assert step.get("continue-on-error") is True and isinstance(step.get("timeout-minutes"), int), step
+jobs = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["jobs"]
+turn = jobs["dev-delivery-turn"]
+assert turn["needs"] == ["deploy-selection"], turn["needs"]
+assert "deploy_dev == 'true'" in turn["if"], turn["if"]
+assert any("scripts/ci/deploy/wait-for-dev-delivery-turn.py" in str(step.get("run", "")) for step in turn["steps"])
+for name in ("build-service-images", "build-daemon-image", "publish-runtime-images"):
+    job = jobs[name]
+    assert "dev-delivery-turn" in job["needs"], (name, job["needs"])
+    assert "needs.dev-delivery-turn.outputs.turn == 'go'" in job["if"], (name, job["if"])
+steps = jobs["deploy-selection"]["steps"]
+assert not any("cancel" in str(step.get("run", "")) for step in steps), "selection still cancels runs"
 PY
-# The only run cancellations anywhere are that script's and the pull request
-# fail-fast watcher's, which cancels only after another job has failed: no job
-# cancels its own run (#3119 A17; infra#1632).
+# The only run cancellations anywhere are the pull request fail-fast
+# watcher's, which cancels only after another job has failed: no job cancels
+# its own run (#3119 A17; infra#1632), and no Dev delivery is cancelled.
 cancel_users="$(grep -rE '/actions/runs/[^ ]*/cancel' "$ROOT/.gitea/workflows" "$ROOT/scripts" |
   grep -v '/tests/' | cut -d: -f1 | sed "s|^$ROOT/||" | sort -u)"
-[[ "$cancel_users" == $'scripts/ci/deploy/cancel-superseded-deliveries.py\nscripts/ci/select/fail-fast-watch.py' ]] ||
-  fail "a run is cancelled outside cancel-superseded-deliveries.py and fail-fast-watch.py: $cancel_users"
+[[ "$cancel_users" == 'scripts/ci/select/fail-fast-watch.py' ]] ||
+  fail "a run is cancelled outside fail-fast-watch.py: $cancel_users"
 
 # The runtime set builds in two protected halves, joined by one publishing job.
 service_job="$(sed -n '/^  build-service-images:/,/^  build-daemon-image:/p' "$WORKFLOW")"

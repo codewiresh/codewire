@@ -361,8 +361,11 @@ class ContractTests(unittest.TestCase):
         publish_job = next(job for job in workflow["jobs"].values() if job["name"] == publish.PUBLISH_JOB)
         self.assertEqual(
             set(publish_job["needs"]),
-            {"deploy-selection", "build-service-images", "build-daemon-image"},
+            {"deploy-selection", "dev-delivery-turn", "build-service-images", "build-daemon-image"},
         )
+        # A rerun of only the publish job keeps the turn job's "go" from its
+        # run, so a delivery that had its turn still publishes (#4071).
+        self.assertIn("needs.dev-delivery-turn.outputs.turn == 'go'", publish_job["if"])
 
     def test_delivered_line_is_dispatch_deploy_devs_own(self) -> None:
         dispatcher = (ROOT / "scripts/ci/deploy/dispatch-deploy-dev.sh").read_text()

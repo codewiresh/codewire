@@ -135,11 +135,13 @@ gate.
   claim needs it. Kind CI is off on the schedule and on dispatch until the
   owner revisits it (owner, 2026-10-25); where it will run is infra
   `docs/ci/runners.md` and `private-docs: designs/ci-vm-model.md`.
-- **Dev** runs only commits whose `main` CI passed, and every green `main`
-  commit newer than Dev's source is delivered (owner, 2026-10-24); a newer
-  green commit cancels an older delivery that has not started publishing, and
-  a run that has started publishing is never cancelled. The mechanism is
-  `docs/dev/CI-CONFIGURATION.md` and codewire/deploy.
+- **Dev** runs only commits whose `main` CI passed. One Dev delivery is in
+  flight at a time and always finishes and publishes; at most one waits behind
+  it, the newest, a newer commit replaces the waiting one, and no delivery is
+  cancelled (owner, 2026-11-10, #4071; replaces the 2026-10-24 cancel rule and
+  the 2026-10-21 two-building limit). The mechanism is the "Dev delivery turn"
+  job in `.gitea/workflows/deploy-dev.yaml`, `docs/dev/CI-CONFIGURATION.md` and
+  codewire/deploy.
 - **Release candidates.** A release tag's receipt needs green `main` CI, a
   green dry run and Dev acceptance of the exact candidate commit
   (`scripts/ci/receipts/verify-release-tag-receipt.sh`; what a push to `main`

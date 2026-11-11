@@ -504,7 +504,7 @@ WORKFLOW_MUTATIONS = {
     "the workspace-pin bot token is read on the untrusted runner": ("support-images.yaml", lambda t: in_job(
         t, "propose-workspace-image-pin", f"runs-on: {runners.TRUSTED_LIGHT}", f"runs-on: {runners.UNTRUSTED_LIGHT}")),
     "a Dev build drops the selection it reads": ("deploy-dev.yaml", lambda t: in_job(
-        t, "build-service-images", "    needs: [deploy-selection]\n", "")),
+        t, "build-service-images", "    needs: [deploy-selection, dev-delivery-turn]\n", "")),
 }
 
 

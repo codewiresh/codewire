@@ -1717,7 +1717,7 @@ run_deploy() {
   scripts/ci/tests/test-deploy-dev.sh
   scripts/ci/tests/test-build-push-runtime-images.sh
   python3 -B scripts/ci/tests/test-rerun-dev-publish.py
-  python3 -B scripts/ci/tests/test-cancel-superseded-deliveries.py
+  python3 -B scripts/ci/tests/test-wait-for-dev-delivery-turn.py
   install_kustomize
   python3 scripts/checks/repo_checks.py orchestration-authz --self-test
 

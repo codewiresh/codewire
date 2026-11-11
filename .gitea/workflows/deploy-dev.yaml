@@ -9,18 +9,14 @@ on:
 # pushes the runtime images by digest, unsigned. Its publish job signs and
 # dispatches them only after main CI's verdict for this exact commit, and only
 # while the commit descends from the source Dev runs; when main CI finishes
-# later, its final job reruns that publish job. Runs of different commits
-# never cancel or queue behind each other through concurrency: each commit has
-# its own group, so only a rerun of the same commit queues. Every green main
-# commit newer than Dev's source is delivered (owner, 2026-10-24), and at most
-# two deliveries build at once (owner, 2026-10-21, on infra#1594; #2892): a
-# newer push cancels this run, before it publishes, only once a newer commit is
-# green, once this commit's own main CI can no longer verify it, or while this
-# commit is still unverified beyond the two building; a green delivery is never
-# cancelled for one that may still go red. A delivery cancelled before its
-# commit turned green is restarted by main CI's final job. See "Cancel the
-# older deliveries this push supersedes". Leaving the block out would cancel
-# on every push.
+# later, its final job reruns that publish job. One Dev delivery is in flight
+# at a time and always finishes; at most one waits behind it, the newest, and
+# a newer commit replaces the waiting one (owner, 2026-11-10, #4071; replaces
+# the 2026-10-21 and 2026-10-24 cancel rules). The "Dev delivery turn" job
+# decides; no delivery is ever cancelled. Runs of different commits never queue
+# behind each other through concurrency: each commit has its own group, so
+# only a rerun of the same commit queues. Leaving the block out would cancel on
+# every push.
 concurrency:
   group: deploy-dev-${{ github.sha }}
   cancel-in-progress: false
@@ -63,19 +59,6 @@ jobs:
       - name: Verify sealed Rust toolchain
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
-      # The only place one delivery stops another: this push cancels an older
-      # commit's run, before that run publishes, when two newer deliveries are
-      # building or when that commit's own main CI can no longer verify it, so
-      # it could never sign. A run that started publishing always finishes,
-      # so a cancelled run never signs or dispatches. An optimisation, never a
-      # gate: it cannot fail or hold up this run's own delivery.
-      - name: Cancel the older deliveries this push supersedes
-        timeout-minutes: 5
-        continue-on-error: true
-        env:
-          GITEA_TOKEN: ${{ github.token }}
-        run: python3 -I -B scripts/ci/deploy/cancel-superseded-deliveries.py
-
       - name: Resolve untrusted deployed Dev source
         run: |
           set -euo pipefail
@@ -108,6 +91,31 @@ jobs:
         if: ${{ always() }}
         run: rm -f -- "$RUNNER_TEMP/codewire-deployed-source-candidate.json"
 
+  # One delivery in flight at a time; the newest waits, and a newer commit
+  # replaces the waiting one (owner, 2026-11-10, #4071). This only waits or
+  # steps aside; it never stops another run, and anything unreadable lets this
+  # run build.
+  dev-delivery-turn:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job reads run state with the job token only.
+    name: Dev delivery turn
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    # Longer than one delivery, so a waiting run outlasts the one in flight.
+    timeout-minutes: 90
+    needs: [deploy-selection]
+    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
+    outputs:
+      turn: ${{ steps.turn.outputs.turn }}
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Wait for this delivery's turn
+        id: turn
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/deploy/wait-for-dev-delivery-turn.py
+
   # The runtime set builds in two protected halves on separate workers: the
   # daemon's static CW producer is the longest single build, so it runs beside
   # the service images instead of before them. The halves share no image, so
@@ -119,8 +127,8 @@ jobs:
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 110
-    needs: [deploy-selection]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
+    needs: [deploy-selection, dev-delivery-turn]
+    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.dev-delivery-turn.outputs.turn == 'go' }}
     outputs:
       dashboard_candidate_ref: ${{ steps.build.outputs.dashboard_candidate_ref }}
       dashboard_built_from: ${{ steps.build.outputs.dashboard_built_from }}
@@ -184,8 +192,8 @@ jobs:
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 110
-    needs: [deploy-selection]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
+    needs: [deploy-selection, dev-delivery-turn]
+    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.dev-delivery-turn.outputs.turn == 'go' }}
     outputs:
       daemon_candidate_ref: ${{ steps.build.outputs.daemon_candidate_ref }}
       daemon_built_from: ${{ steps.build.outputs.daemon_built_from }}
@@ -240,8 +248,8 @@ jobs:
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 45
-    needs: [deploy-selection, build-service-images, build-daemon-image]
-    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
+    needs: [deploy-selection, dev-delivery-turn, build-service-images, build-daemon-image]
+    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.dev-delivery-turn.outputs.turn == 'go' }}
     env:
       OPENBAO_ROLE: codewire-source-dev-publisher
       CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}

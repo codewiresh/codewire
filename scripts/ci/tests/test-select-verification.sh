@@ -837,8 +837,8 @@ run_paths_case dev_delivery_descent_check push refs/heads/main false \
   scripts/ci/deploy/require-dev-descent.sh
 run_paths_case dev_delivery_cancel_superseded push refs/heads/main false \
   'deploy policy security security_js' \
-  scripts/ci/deploy/cancel-superseded-deliveries.py \
-  scripts/ci/tests/test-cancel-superseded-deliveries.py
+  scripts/ci/deploy/wait-for-dev-delivery-turn.py \
+  scripts/ci/tests/test-wait-for-dev-delivery-turn.py
 run_paths_case dev_delivery_trigger push refs/heads/main false \
   'deploy policy security security_js' \
   scripts/ci/deploy/rerun-dev-publish.py \
@@ -3204,7 +3204,7 @@ defer_slow_check python3 "$ROOT/scripts/ci/plan/tests/test_plan_main_push.py"
 # Main CI's verdict, and the final job that starts Dev delivery from it (#2892).
 defer_slow_check python3 -B "$ROOT/scripts/ci/plan/tests/test_main_ci_verdict.py"
 defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-rerun-dev-publish.py"
-defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-cancel-superseded-deliveries.py"
+defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-wait-for-dev-delivery-turn.py"
 # A pull request's run stops at its first failed job (infra#1632).
 defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-fail-fast-watch.py"
 if grep -qF 'selector_version=v2' "$selection_block" \
