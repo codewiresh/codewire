@@ -171,6 +171,20 @@ pub(crate) struct DashboardTemplate<'a> {
     pub(crate) view: &'a DashboardView,
 }
 
+/// The account home's shell: the checklist and organization cards load
+/// after it as `AccountOverviewTemplate`.
+#[derive(Template)]
+#[template(path = "account-home.html")]
+pub(crate) struct AccountHomeTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+}
+
+#[derive(Template)]
+#[template(path = "account-overview.html")]
+pub(crate) struct AccountOverviewTemplate<'a> {
+    pub(crate) overview: &'a crate::account_home::AccountOverviewView,
+}
+
 #[derive(Template)]
 #[template(path = "organization-list.html")]
 pub(crate) struct OrganizationListTemplate<'a> {

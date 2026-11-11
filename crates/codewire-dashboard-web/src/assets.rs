@@ -26,6 +26,7 @@ pub(crate) const SECRET_MANAGEMENT_STYLE_PATH: &str =
 pub(crate) const ENVIRONMENTS_STYLE_PATH: &str = "/assets/codewire/routes/environments-v2.css";
 pub(crate) const TERMINAL_STYLE_PATH: &str = "/assets/codewire/routes/terminal-v2.css";
 pub(crate) const BILLING_ADMIN_STYLE_PATH: &str = "/assets/codewire/routes/billing-admin-v1.css";
+pub(crate) const OVERVIEW_STYLE_PATH: &str = "/assets/codewire/routes/overview-v1.css";
 pub(crate) const XTERM_STYLE_PATH: &str = "/assets/codewire/xterm-6.0.0.css";
 pub(crate) const SCRIPT_PATH: &str = "/assets/codewire/dashboard-v1.js";
 pub(crate) const PUBLIC_SCRIPT_PATH: &str = "/assets/codewire/public-v2.js";
@@ -77,6 +78,7 @@ const ENVIRONMENTS_STYLES: &str =
 const TERMINAL_STYLES: &str = include_str!("../../../packages/codewire-design/routes/terminal.css");
 const BILLING_ADMIN_STYLES: &str =
     include_str!("../../../packages/codewire-design/routes/billing-admin.css");
+const OVERVIEW_STYLES: &str = include_str!("../../../packages/codewire-design/routes/overview.css");
 const XTERM_STYLES: &str = include_str!("../assets/xterm/xterm-6.0.0.css");
 const DASHBOARD_SCRIPT: &str = concat!(
     include_str!("../../../packages/codewire-design/dashboard.js"),
@@ -178,6 +180,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             BILLING_ADMIN_STYLE_PATH,
             static_asset("text/css; charset=utf-8", BILLING_ADMIN_STYLES),
+        )
+        .route(
+            OVERVIEW_STYLE_PATH,
+            static_asset("text/css; charset=utf-8", OVERVIEW_STYLES),
         )
         .route(
             XTERM_STYLE_PATH,

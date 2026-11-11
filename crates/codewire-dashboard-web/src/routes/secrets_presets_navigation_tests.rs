@@ -733,10 +733,16 @@ async fn organization_context_stays_out_of_urls_and_switching_keeps_the_page() {
     assert!(html.contains("href=\"/settings/secrets/\""));
     assert!(!html.replace("href=\"?org=", "").contains("org="));
 
-    // The account home is the remembered organization's home.
+    // The account home is its own page (owner, 2026-11-10). Its navigation
+    // shows the remembered organization, whose checklist it loads, with
+    // clean links.
     let response = get("/dashboard/", headers).await.unwrap();
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(response.headers()[header::LOCATION], "/synthetic/");
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = response.text().await.unwrap();
+    assert!(html.contains("Welcome to Codewire"));
+    assert!(html.contains(r#"<span class="cw-org-switcher-label">Synthetic organization</span>"#));
+    assert!(html.contains(r#"hx-get="/dashboard/_fragments/overview?current=synthetic""#));
+    assert!(!html.replace("href=\"?org=", "").contains("org="));
 
     // A remembered organization the account cannot see selects nothing.
     let mut headers = authority("unused");

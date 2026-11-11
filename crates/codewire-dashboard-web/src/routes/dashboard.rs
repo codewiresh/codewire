@@ -1,46 +1,55 @@
 use axum::{
     extract::{Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::Response,
 };
 use serde::Deserialize;
 
 use crate::{
+    account_home,
     auth::{IdentityUser, authenticated_identity, enforce_two_factor},
     connect::organizations,
     dependency::{DependencyResult, PageDependency, resolve_web},
     error::WebError,
-    response::{error_page, login_redirect, redirect, render_page, two_factor_redirect},
+    response::{error_page, login_redirect, render_page, render_template, two_factor_redirect},
     routes::{DASHBOARD_PATH, NEW_ORGANIZATION_PATH},
     security::{canonical_cookie, cookie_value},
     state::AppState,
-    templates::DashboardTemplate,
-    view::{DashboardView, OrganizationRow, PageCsrfToken},
+    templates::{AccountHomeTemplate, AccountOverviewTemplate, DashboardTemplate},
+    view::{DashboardView, OrganizationContext, OrganizationRow, PageCsrfToken},
 };
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct DashboardQuery {
+    /// The remembered organization, added by `remember_organization`.
     #[serde(default)]
     org: String,
 }
 
-/// The account home. With an organization it is that organization's home,
-/// `/{slug}/`, chosen from the remembered organization or else the first one;
-/// without one it offers to create an organization.
+/// The account home, "Welcome to Codewire" (owner, 2026-11-10). The sidebar
+/// shows the remembered organization, or else the first, and the page answers
+/// before anything about an organization is read: its Get started checklist
+/// and organization cards load as one fragment (`overview_fragment`). Without
+/// an organization it offers to create one.
 pub(super) async fn dashboard(
     State(state): State<AppState>,
     Query(query): Query<DashboardQuery>,
     headers: HeaderMap,
 ) -> Response {
     match dashboard_view(&state, &headers).await {
-        Ok(view) => {
-            let home = view
+        Ok(mut view) => {
+            let current = view
                 .organizations
                 .iter()
                 .find(|organization| organization.slug == query.org)
-                .or_else(|| view.organizations.first());
-            match home {
-                Some(organization) => redirect(format!("/{}/", organization.slug), &headers),
+                .or_else(|| view.organizations.first())
+                .map(OrganizationContext::from_row);
+            match current {
+                Some(organization) => {
+                    view.select_organization(&organization, Vec::new(), false);
+                    view.sandbox_rail_loading = true;
+                    render_page(AccountHomeTemplate { view: &view })
+                }
                 None => render_page(DashboardTemplate { view: &view }),
             }
         }
@@ -48,6 +57,53 @@ pub(super) async fn dashboard(
         Err(WebError::TwoFactorRequired) => two_factor_redirect(DASHBOARD_PATH, &headers),
         Err(error) => error_page(error),
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct OverviewQuery {
+    /// The organization the shell named; the checklist follows it. Only a
+    /// hint: it is matched against the caller's own organizations.
+    #[serde(default)]
+    current: String,
+}
+
+/// The account home's checklist and organization cards. Every organization is
+/// read at once, each read within a short deadline, and one that fails keeps
+/// its card without its figures (`account_home::overview`).
+pub(super) async fn overview_fragment(
+    State(state): State<AppState>,
+    Query(query): Query<OverviewQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(cookie) = canonical_cookie(&headers) else {
+        return login_redirect(DASHBOARD_PATH, &headers);
+    };
+    let (identity, organizations) =
+        identity_and_organizations(&state, &headers, cookie.clone()).await;
+    let read = identity.and_then(|identity| {
+        enforce_two_factor(&identity)?;
+        Ok((identity, organizations?))
+    });
+    let (identity, organizations) = match read {
+        Ok(read) => read,
+        Err(WebError::Unauthorized) => return login_redirect(DASHBOARD_PATH, &headers),
+        Err(WebError::TwoFactorRequired) => return two_factor_redirect(DASHBOARD_PATH, &headers),
+        Err(error) => return error_page(error),
+    };
+    let overview = account_home::overview(
+        &state,
+        cookie,
+        identity.cli_signed_in(),
+        &organizations,
+        &query.current,
+    )
+    .await;
+    render_template(
+        StatusCode::OK,
+        AccountOverviewTemplate {
+            overview: &overview,
+        },
+    )
 }
 
 pub(super) async fn dashboard_view(
@@ -335,6 +391,10 @@ pub(super) async fn select_shell_organization(
     view.select_organization(&organization, rail.unwrap_or_default(), rail_available);
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "account_home_tests.rs"]
+mod account_home_tests;
 
 #[cfg(test)]
 mod tests {

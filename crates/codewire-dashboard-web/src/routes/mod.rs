@@ -42,6 +42,7 @@ use crate::state::AppState;
 
 pub(crate) const DASHBOARD_PATH: &str = "/dashboard/";
 pub(crate) const ORGANIZATIONS_FRAGMENT_PATH: &str = "/dashboard/_fragments/organizations";
+pub(crate) const ACCOUNT_OVERVIEW_FRAGMENT_PATH: &str = "/dashboard/_fragments/overview";
 pub(crate) const NEW_ORGANIZATION_PATH: &str = "/organizations/new/";
 pub(crate) const CREATE_ORGANIZATION_ACTION_PATH: &str = "/organizations/_actions/create";
 
@@ -94,6 +95,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/accept-invite/_actions/accept", post(invitations::accept))
         .route("/dashboard", get(slash_redirect))
         .route(DASHBOARD_PATH, get(dashboard::dashboard))
+        .route(
+            ACCOUNT_OVERVIEW_FRAGMENT_PATH,
+            get(dashboard::overview_fragment),
+        )
         .route("/admin", get(slash_redirect))
         .route("/admin/", get(admin::overview))
         .route("/admin/accounts", get(slash_redirect))

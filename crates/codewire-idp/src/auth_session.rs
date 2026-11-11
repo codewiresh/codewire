@@ -266,6 +266,10 @@ pub(crate) struct UserResponse {
     pub(crate) image: Option<String>,
     pub(crate) is_admin: bool,
     pub(crate) two_factor_enabled: bool,
+    /// The account's CLI has signed in through the device sign-in at least
+    /// once (`users.cli_signed_in_at`); signing the CLI out does not clear
+    /// it. The dashboard's Get started checklist reads it.
+    pub(crate) cli_signed_in: bool,
     pub(crate) created_at: String,
 }
 
@@ -367,6 +371,7 @@ pub(crate) struct UserAuthRow {
     pub(crate) image: Option<String>,
     pub(crate) is_admin: Option<bool>,
     pub(crate) two_factor_enabled: Option<bool>,
+    pub(crate) cli_signed_in: bool,
     pub(crate) enabled: bool,
     pub(crate) locked_until: Option<NaiveDateTime>,
     pub(crate) created_at: Option<NaiveDateTime>,
@@ -400,6 +405,7 @@ struct ApiKeySessionRow {
     image: Option<String>,
     is_admin: Option<bool>,
     two_factor_enabled: Option<bool>,
+    cli_signed_in: bool,
     enabled: bool,
     locked_until: Option<NaiveDateTime>,
     created_at: Option<NaiveDateTime>,
@@ -787,6 +793,7 @@ pub(crate) fn user_response(r: UserAuthRow) -> UserResponse {
         image: r.image,
         is_admin: r.is_admin.unwrap_or(false),
         two_factor_enabled: r.two_factor_enabled.unwrap_or(false),
+        cli_signed_in: r.cli_signed_in,
         created_at: r.created_at.map(format_time).unwrap_or_default(),
     }
 }
@@ -875,6 +882,8 @@ fn pending_access_user_response(row: &PendingAccessSignupRow) -> UserResponse {
         image: row.image.clone(),
         is_admin: row.is_admin,
         two_factor_enabled: row.two_factor_enabled,
+        // Waiting for review, so disabled: no device grant was redeemed.
+        cli_signed_in: false,
         created_at: format_time(row.created_at),
     }
 }
@@ -1126,6 +1135,7 @@ async fn sign_up(
         image: None,
         is_admin: false,
         two_factor_enabled: false,
+        cli_signed_in: false,
         created_at: format_time(created_at),
     };
 
@@ -1158,7 +1168,8 @@ async fn sign_in(
     let user: Option<UserAuthRow> = sqlx::query_as(
         r#"
         SELECT id, email, email_verified, name, image, is_admin,
-               two_factor_enabled, enabled, locked_until, created_at
+               two_factor_enabled, cli_signed_in_at IS NOT NULL AS cli_signed_in,
+               enabled, locked_until, created_at
         FROM users WHERE email = $1
         "#,
     )
@@ -1380,7 +1391,8 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
             r#"
             SELECT ak.id AS key_id,
                    u.id, u.email, u.email_verified, u.name, u.image, u.is_admin,
-                   u.two_factor_enabled, u.enabled, u.locked_until, u.created_at
+                   u.two_factor_enabled, u.cli_signed_in_at IS NOT NULL AS cli_signed_in,
+                   u.enabled, u.locked_until, u.created_at
               FROM api_keys ak
               JOIN users u ON u.id = ak.user_id
               -- A key acts only for a current member of its organization (#3254).
@@ -1418,6 +1430,7 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
             image: row.image,
             is_admin: row.is_admin,
             two_factor_enabled: row.two_factor_enabled,
+            cli_signed_in: row.cli_signed_in,
             enabled: row.enabled,
             locked_until: row.locked_until,
             created_at: row.created_at,
@@ -1469,7 +1482,8 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
     let user: Option<UserAuthRow> = match sqlx::query_as(
         r#"
         SELECT id, email, email_verified, name, image, is_admin,
-               two_factor_enabled, enabled, locked_until, created_at
+               two_factor_enabled, cli_signed_in_at IS NOT NULL AS cli_signed_in,
+               enabled, locked_until, created_at
         FROM users WHERE id = $1 AND enabled
         "#,
     )
@@ -1905,6 +1919,7 @@ mod tests {
                 image: None,
                 is_admin: false,
                 two_factor_enabled: false,
+                cli_signed_in: false,
                 created_at: "2021-01-01T00:00:00Z".into(),
             },
             session: SessionResponse {

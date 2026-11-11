@@ -19,7 +19,7 @@
         <li><span class="cw-start-check"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-check"/></svg></span><span>A stopped sandbox costs nothing</span></li>
         <li><span class="cw-start-check"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-check"/></svg></span><span>Preview URLs, SSH from any device and the credential proxy</span></li>
       </ul>
-      {% if start.hourly.is_some() %}<p class="cw-start-note">2 vCPU · 8 GB memory · 100 GB disk at that price.{% if !start.has_card %} Adding a card charges nothing.{% endif %}</p>{% endif %}
+      {% if start.hourly.is_some() %}<p class="cw-start-note">2 vCPU · 8 GB memory · 100 GB disk at that price.</p>{% endif %}
       <footer>{% if start.metered && !start.has_card %}{% if organization.can_admin %}<a class="cw-button cw-button--accent" href="{{ organization.billing_url }}">Add a card</a><span class="cw-start-or">then create it here or with <code>cw create --cloud</code></span>{% else %}<p class="cw-start-or">An organization owner or admin adds a card on the Billing page.</p>{% endif %}{% else %}<a class="cw-button cw-button--accent" href="{{ organization.environments_url }}new/" data-drawer-trigger><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg><span>Create Sandbox</span></a><span class="cw-start-or">or with <code>cw create --cloud</code></span>{% endif %}</footer>
     </article></li>
   </ul>

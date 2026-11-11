@@ -3696,7 +3696,10 @@ mod tests {
         assert!(html.contains("<code>cw create --local --name app --path .</code>"));
         assert!(html.contains("data-copy-prompt"));
         assert!(html.contains(r#"<span class="cw-badge">€0.2091 / hour</span>"#));
-        assert!(html.contains("Adding a card charges nothing."));
+        // A card added while the balance is empty is charged a top-up at once
+        // when credit is enforced, so the panel never claims it costs nothing.
+        assert!(html.contains("100 GB disk at that price."));
+        assert!(!html.contains("charges nothing"));
         assert!(html.contains(
             r#"<a class="cw-button cw-button--accent" href="/test/billing/">Add a card</a>"#
         ));
@@ -3708,7 +3711,7 @@ mod tests {
         // A card on file: the price and Create Sandbox.
         let html = render_start(Some(metered(true)), true);
         assert!(html.contains("€0.2091 / hour"));
-        assert!(!html.contains("Adding a card charges nothing."));
+        assert!(!html.contains("charges nothing"));
         assert!(html.contains(r#"href="/test/new/" data-drawer-trigger>"#));
         // Unmetered, or billing unavailable: no price, Create Sandbox.
         let html = render_start(Some(SandboxStartView::default()), true);

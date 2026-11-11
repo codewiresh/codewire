@@ -465,10 +465,15 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await page.locator(`.cw-sidebar-slot .cw-org-menu a[href="?org=${other}"]`).click();
     await expect(page).toHaveURL(`/${other}/snapshots/`);
 
-    // The account home is the remembered organization's home.
+    // The account home stays itself and names the remembered organization
+    // (owner, 2026-11-10).
     const home = await page.request.get("/dashboard/", { maxRedirects: 0 });
-    expect(home.status()).toBe(303);
-    expect(home.headers().location).toBe(`/${other}/`);
+    expect(home.status()).toBe(200);
+    await page.goto("/dashboard/");
+    await expect(page).toHaveURL("/dashboard/");
+    await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(
+      "Switch Routes Organization",
+    );
 
     const adminRedirect = await page.request.get(`/admin/?org=${cleanRoutesOrgSlug}`, {
       maxRedirects: 0,

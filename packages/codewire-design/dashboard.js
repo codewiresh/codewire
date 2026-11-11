@@ -1415,3 +1415,77 @@ if (app) {
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", apply);
   else apply();
 })();
+
+// The account home renders its shell first; its checklist and organization
+// cards arrive as one fragment. While it loads the region is busy beside a
+// status, which says "Still loading…" after 5 seconds. A transient failure
+// (no response, a timeout, 5xx or 429) is retried after 1 s and then 3 s,
+// saying so; after that, or at once for a definite failure, the status says
+// what failed and a Retry button starts again.
+(() => {
+  "use strict";
+  const retryDelays = [1_000, 3_000];
+  const states = new WeakMap();
+  const regionOf = (event) =>
+    event.target instanceof Element && event.target.matches("[data-account-overview]") ? event.target : null;
+  const stateOf = (region) => {
+    if (!states.has(region)) states.set(region, { attempt: 0, slow: 0 });
+    return states.get(region);
+  };
+  const say = (region, text) => {
+    const status = region.querySelector("[data-account-overview-status]");
+    if (status) status.textContent = text;
+  };
+  const show = (region, selector, shown) => {
+    const node = region.querySelector(selector);
+    if (node) node.hidden = !shown;
+  };
+  document.addEventListener("htmx:beforeRequest", (event) => {
+    const region = regionOf(event);
+    if (!region) return;
+    const state = stateOf(region);
+    region.setAttribute("aria-busy", "true");
+    window.clearTimeout(state.slow);
+    state.slow = window.setTimeout(() => say(region, "Still loading…"), 5_000);
+  });
+  document.addEventListener("htmx:afterRequest", (event) => {
+    const region = regionOf(event);
+    if (!region) return;
+    const state = stateOf(region);
+    window.clearTimeout(state.slow);
+    if (event.detail?.successful) {
+      state.attempt = 0;
+      region.setAttribute("aria-busy", "false");
+    }
+  });
+  const failed = (event) => {
+    const region = regionOf(event);
+    if (!region) return;
+    const state = stateOf(region);
+    const status = event.detail?.xhr?.status ?? 0;
+    const transient = event.type !== "htmx:responseError" || status === 0 || status === 429 || status >= 500;
+    if (transient && state.attempt < retryDelays.length) {
+      state.attempt += 1;
+      say(region, `Retrying (${state.attempt} of ${retryDelays.length})…`);
+      window.setTimeout(() => region.dispatchEvent(new CustomEvent("account-overview-retry")), retryDelays[state.attempt - 1]);
+      return;
+    }
+    region.setAttribute("aria-busy", "false");
+    say(region, "Your organizations could not be loaded.");
+    show(region, "[data-account-overview-spinner]", false);
+    show(region, "[data-account-overview-skeleton]", false);
+    show(region, "[data-account-overview-failed]", true);
+  };
+  ["htmx:sendError", "htmx:responseError", "htmx:timeout"].forEach((name) => document.addEventListener(name, failed));
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element) || !event.target.closest("[data-account-overview-retry]")) return;
+    const region = event.target.closest("[data-account-overview]");
+    if (!region) return;
+    stateOf(region).attempt = 0;
+    say(region, "Loading your organizations…");
+    show(region, "[data-account-overview-spinner]", true);
+    show(region, "[data-account-overview-skeleton]", true);
+    show(region, "[data-account-overview-failed]", false);
+    region.dispatchEvent(new CustomEvent("account-overview-retry"));
+  });
+})();

@@ -64,5 +64,5 @@ export async function getOrgForUser(
   } : null;
 }
 
-/** The account home: an organization's home, or the dashboard for an account without one. */
-export const ACCOUNT_HOME = /\/(?:dashboard|[a-z0-9]+(?:-[a-z0-9]+)*)\/$/;
+/** The account home: "Welcome to Codewire", or the offer to create an organization for an account without one. */
+export const ACCOUNT_HOME = /\/dashboard\/$/;

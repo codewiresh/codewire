@@ -4,6 +4,7 @@
 //! on the raw IdP session contract and product data stays on generated Connect
 //! services. Only the canonical browser session cookie crosses those bounds.
 
+mod account_home;
 mod account_sessions;
 mod account_two_factor;
 mod admin_connect;

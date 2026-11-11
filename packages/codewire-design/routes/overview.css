@@ -1,0 +1,30 @@
+/* The account home, "Welcome to Codewire": a Get started checklist that
+   ticks itself off, then one card per organization with its balance, this
+   month's usage, its running Sandboxes and the last 24 hours of cost (the
+   Billing page's chart). */
+.cw-overview { display: grid; min-width: 0; gap: var(--space-4); }
+.cw-checklist { display: grid; margin: 0; padding: 0; list-style: none; }
+.cw-checklist > li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: var(--space-3); padding: var(--space-4) 0; border-top: 1px solid var(--border-subtle); }
+.cw-checklist > li:first-child { padding-top: 0; border-top: 0; }
+.cw-checklist > li:last-child { padding-bottom: 0; }
+.cw-checklist-mark { display: grid; width: var(--control-height-sm); height: var(--control-height-sm); place-items: center; border: 1px solid var(--border); border-radius: var(--radius-pill); color: var(--fg-tertiary); }
+.cw-checklist-mark .cw-icon { width: var(--icon-size-sm); height: var(--icon-size-sm); }
+.cw-checklist > li[data-done="true"] .cw-checklist-mark { border-color: var(--success-border); background: var(--success-muted); color: var(--success); }
+.cw-checklist > li[data-done="true"] strong { color: var(--fg-secondary); }
+.cw-checklist-text { display: grid; gap: var(--space-2); min-width: 0; }
+.cw-checklist-text strong { font-weight: var(--weight-medium); }
+.cw-checklist-text > p { margin: 0; color: var(--fg-tertiary); font-size: var(--text-small); }
+.cw-org-overview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); margin: 0; padding: 0; list-style: none; }
+.cw-org-overview > li { min-width: 0; }
+.cw-org-overview .cw-card { height: 100%; }
+.cw-org-overview .cw-card-body { display: grid; align-content: start; gap: var(--space-4); }
+.cw-org-overview .cw-usage-chart { margin-top: 0; }
+.cw-org-overview-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.cw-org-overview-header h3 { margin: 0; font-size: var(--text-body); font-weight: var(--weight-semibold); }
+.cw-org-overview-links { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+
+@media (max-width: 48rem) {
+  .cw-org-overview { grid-template-columns: minmax(0, 1fr); }
+  .cw-checklist > li { grid-template-columns: auto minmax(0, 1fr); }
+  .cw-checklist > li > :last-child:not(.cw-checklist-text) { grid-column: 2; justify-self: start; }
+}

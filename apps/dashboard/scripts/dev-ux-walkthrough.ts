@@ -183,6 +183,41 @@ async function apiKeyTable(page: Page, columns: string[], empty: string): Promis
   }
 }
 
+// The account home, "Welcome to Codewire" (owner, 2026-11-10): the cards load
+// after the page, one per organization, each with its figures in words or a
+// note that they are unavailable. The checklist is the account's own state, so
+// only its shape is checked when it shows.
+async function accountHome(page: Page, slug: string): Promise<void> {
+  await visit(page, "/dashboard/");
+  await pageTitle(page.locator("main .cw-page-header"), "Welcome to Codewire");
+  await expect(page.locator(".cw-console-breadcrumb")).toHaveText("home");
+  const overview = page.locator("[data-account-overview]");
+  await expect(overview).toHaveAttribute("aria-busy", "false");
+  const card = overview.locator(".cw-org-overview > li > article.cw-card").filter({
+    has: page.locator(`#${slug}-name`),
+  });
+  await expect(card).toHaveCount(1);
+  await expect(card.getByRole("link", { name: "Sandboxes", exact: true })).toHaveAttribute("href", `/${slug}/`);
+  if (await card.locator("dl.cw-stat-grid").count()) {
+    await expect(card.locator("dl.cw-stat-grid dt")).toHaveText(["Balance", "This month", "Running"]);
+    await expect(card.locator("dl.cw-stat-grid dd").nth(0)).toHaveText(/^(?:Unlimited|-?€\d+\.\d{2,6})$/);
+    await expect(card.locator("dl.cw-stat-grid dd").nth(2)).toHaveText(/^\d+$/);
+  } else {
+    await expect(card.getByText("Its balance and usage are unavailable right now.", { exact: true })).toBeVisible();
+  }
+  const checklist = overview.getByRole("region", { name: "Get started" });
+  if (await checklist.count()) {
+    await expect(checklist.locator(".cw-card-description")).toHaveText(
+      /^[0-2] of 3 done\. Each step ticks itself off, and this goes away when all three are\.$/,
+    );
+    await expect(checklist.locator(".cw-checklist > li strong")).toHaveText([
+      "Install the CLI", "Add a card", "Create your first cloud sandbox",
+    ]);
+  }
+  await noUnsetValues(page);
+  await fits(page);
+}
+
 // View only: never fill or submit this form.
 async function createOrganization(page: Page): Promise<void> {
   await visit(page, "/organizations/new/");
@@ -509,6 +544,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
   const socketsOf = (id: string | null) => terminalSockets.filter((socket) => socket.sessionId === id);
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
+    await stage(`account-home-${width}`, () => accountHome(page, slug));
     await credentials(page, slug, width);
     await settings(page, slug, width);
     if (width === 1440) {

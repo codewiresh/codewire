@@ -217,6 +217,71 @@ pub(crate) async fn sandbox_start(
     }
 }
 
+/// What the account home shows of an organization's billing overview.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BillingSummary {
+    pub(crate) has_card: bool,
+    /// The organization pays for cloud use: billing on and not unmetered.
+    pub(crate) metered: bool,
+    pub(crate) balance_nano_eur: i64,
+    /// Drawn from credit since the start of the month.
+    pub(crate) month_nano_eur: i64,
+}
+
+/// One hour of an organization's Sandbox cost, as the Billing page's chart
+/// reads it: the hour's start in Unix seconds and its cost in cents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HourCost {
+    pub(crate) hour: i64,
+    pub(crate) cost_cents: i32,
+}
+
+pub(crate) async fn account_home_overview(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: &str,
+) -> Result<BillingSummary, ConnectError> {
+    let overview = client(state, cookie)
+        .get_billing_overview(GetBillingOverviewRequest {
+            org_id: org_id.to_owned(),
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    Ok(BillingSummary {
+        has_card: overview.has_payment_method,
+        metered: overview.billing_enabled && !overview.unmetered,
+        balance_nano_eur: overview.credit_balance_nano_eur,
+        month_nano_eur: overview.month_usage_nano_eur,
+    })
+}
+
+/// The hourly cost billing reports for the organization's recent hours (the
+/// last 72; hours without usage may be left out).
+pub(crate) async fn account_home_hourly(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: &str,
+) -> Result<Vec<HourCost>, ConnectError> {
+    let usage = client(state, cookie)
+        .get_environment_usage(GetEnvironmentUsageRequest {
+            org_id: org_id.to_owned(),
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    Ok(usage
+        .hourly_breakdown
+        .into_iter()
+        .filter_map(|entry| {
+            Some(HourCost {
+                hour: entry.hour.into_option()?.seconds,
+                cost_cents: entry.cost_cents,
+            })
+        })
+        .collect())
+}
+
 fn client(state: &AppState, cookie: HeaderValue) -> BillingServiceClient<BrowserTransport> {
     BillingServiceClient::new(
         BrowserTransport {

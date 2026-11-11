@@ -29,16 +29,22 @@ test.describe("server-rendered dashboard", () => {
     if (!testInfo.project.use.isMobile) await cleanupTestOrg(dashboardOrgSlug);
   });
 
-  test("opens the organization home in the shared console shell", { tag: "@smoke" }, async ({ page, isMobile }) => {
+  test("opens the account home in the shared console shell", { tag: "@smoke" }, async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop visual contract");
     const browserRequests: string[] = [];
     page.on("request", (request) => browserRequests.push(request.url()));
 
-    // The account home is the remembered or first organization's home.
+    // The account home is its own page (owner, 2026-11-10): the shell names
+    // the remembered or first organization, and the organization cards load
+    // after it.
     const response = await page.goto("/dashboard/");
     expect(response?.status()).toBe(200);
-    await expect(page).toHaveURL(/\/[a-z0-9-]+\/$/);
-    await expect(page.locator("main").getByRole("heading", { name: "Sandboxes", exact: true })).toBeVisible();
+    await expect(page).toHaveURL(/\/dashboard\/$/);
+    await expect(page.locator("main").getByRole("heading", { name: "Welcome to Codewire", exact: true, level: 1 })).toBeVisible();
+    await expect(page.locator(".cw-console-breadcrumb")).toHaveText("home");
+    const overview = page.locator("[data-account-overview]");
+    await expect(overview).toHaveAttribute("aria-busy", "false");
+    await expect(overview.locator(".cw-org-overview > li > article.cw-card").first()).toBeVisible();
     await expect(page.getByRole("navigation", { name: "Main navigation" }).first()).toBeVisible();
     const sandboxNavigation = page.locator(".cw-sidebar-slot").getByRole("region", {
       name: "Sandboxes",
@@ -128,10 +134,10 @@ test.describe("server-rendered dashboard", () => {
         httpOnly: true,
         sameSite: "Lax",
       }]);
-      // Without an organization the account home stays here; with one it is
-      // that organization's home. Both render the shared sidebar.
+      // The account home renders the shared sidebar, with or without an
+      // organization.
       await page.goto("/dashboard/");
-      await expect(page).toHaveURL(/\/[a-z0-9-]+\/$/);
+      await expect(page).toHaveURL(/\/dashboard\/$/);
       await page.getByRole("button", { name: "Toggle sidebar" }).click();
       await expect(page.locator("[data-dashboard-app]")).toHaveAttribute("data-mobile-open", "true");
       await expect(page.locator(".cw-mobile-drawer")).toBeVisible();

@@ -21,6 +21,10 @@ pub(crate) struct IdentityUser {
     two_factor_enabled: bool,
     #[serde(default)]
     email_verified: bool,
+    /// The account's CLI has signed in through the device sign-in at least
+    /// once. An identity provider that does not say is read as not yet.
+    #[serde(default)]
+    cli_signed_in: bool,
     #[serde(default)]
     created_at: String,
     #[serde(skip)]
@@ -45,6 +49,10 @@ impl IdentityUser {
 
     pub(crate) fn email_verified(&self) -> bool {
         self.email_verified
+    }
+
+    pub(crate) fn cli_signed_in(&self) -> bool {
+        self.cli_signed_in
     }
 
     pub(crate) fn created_at(&self) -> &str {
@@ -164,6 +172,24 @@ mod tests {
         );
     }
 
+    /// The Get started checklist's "Install the CLI" reads the session's
+    /// `cli_signed_in`; an identity provider that does not send it yet means
+    /// not yet.
+    #[test]
+    fn the_cli_sign_in_is_read_from_the_session_and_defaults_to_not_yet() {
+        let user = |extra: serde_json::Value| {
+            let mut body =
+                serde_json::json!({"id": "synthetic-account", "email": "synthetic@example.test"});
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<IdentityUser>(body).unwrap()
+        };
+        assert!(!user(serde_json::json!({})).cli_signed_in());
+        assert!(!user(serde_json::json!({"cli_signed_in": false})).cli_signed_in());
+        assert!(user(serde_json::json!({"cli_signed_in": true})).cli_signed_in());
+    }
+
     #[test]
     fn two_factor_gate_preserves_the_identity_opt_out() {
         let mut user = IdentityUser {
@@ -173,6 +199,7 @@ mod tests {
             is_admin: false,
             two_factor_enabled: false,
             email_verified: false,
+            cli_signed_in: false,
             created_at: String::new(),
             skip_2fa_setup: false,
         };

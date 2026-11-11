@@ -164,19 +164,44 @@ impl DeviceAuthorizationStore for PgDeviceAuthorizationStore {
         // Atomic single-use: delete-and-return the still-valid approved row.
         // A concurrent poller gets no row and therefore cannot issue another
         // access/refresh pair from the same device code.
+        //
+        // The same statement records the account's first CLI sign-in, which
+        // the dashboard's Get started checklist reads; it is set once and
+        // never cleared. Writing the account row means taking its lock, so
+        // the account is locked first, in the order account disablement
+        // takes them (the account, then its device grants): a disablement
+        // that wins leaves no enabled account here and nothing is redeemed.
         let device_code_hash = hash_oauth_token(device_code);
         sqlx::query_as::<_, DeviceRow>(
             r#"
-            DELETE FROM oidc_device_authorizations AS device_auth
-            USING users AS user_account
-            WHERE device_auth.device_code_hash = $1
-              AND device_auth.expires_at > NOW()
-              AND device_auth.status = 'approved'
-              AND device_auth.user_id = user_account.id
-              AND user_account.enabled
-            RETURNING device_auth.client_id, device_auth.scopes,
-                      device_auth.status, device_auth.user_id,
-                      device_auth.auth_time
+            WITH account AS (
+                SELECT user_account.id
+                  FROM oidc_device_authorizations AS pending
+                  JOIN users AS user_account ON user_account.id = pending.user_id
+                 WHERE pending.device_code_hash = $1
+                   AND pending.expires_at > NOW()
+                   AND pending.status = 'approved'
+                   AND user_account.enabled
+                   FOR NO KEY UPDATE OF user_account
+            ),
+            consumed AS (
+                DELETE FROM oidc_device_authorizations AS device_auth
+                 USING account
+                 WHERE device_auth.device_code_hash = $1
+                   AND device_auth.expires_at > NOW()
+                   AND device_auth.status = 'approved'
+                   AND device_auth.user_id = account.id
+                RETURNING device_auth.client_id, device_auth.scopes,
+                          device_auth.status, device_auth.user_id,
+                          device_auth.auth_time
+            ),
+            first_cli_sign_in AS (
+                UPDATE users
+                   SET cli_signed_in_at = NOW()
+                 WHERE id IN (SELECT user_id FROM consumed)
+                   AND cli_signed_in_at IS NULL
+            )
+            SELECT client_id, scopes, status, user_id, auth_time FROM consumed
             "#,
         )
         .bind(device_code_hash)

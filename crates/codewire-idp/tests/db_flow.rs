@@ -2010,6 +2010,24 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
         assert_eq!(status, 404, "retired route remains mounted: {path}");
     }
 
+    // Until the CLI redeems a device grant, the account has not signed in
+    // with it, and get-session says so.
+    let sessions = codewire_idp::auth_session::router(
+        pool.clone(),
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::open(),
+    );
+    let (status, body, _) = sess_req(
+        &sessions,
+        "GET",
+        "/api/auth/get-session",
+        Some(&session),
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "get-session before redemption: {body}");
+    assert_eq!(body["user"]["cli_signed_in"], false);
+
     let (first_exchange, second_exchange) = tokio::join!(
         provider.exchange_device_code("codewire-cli", None, &device.device_code),
         provider.exchange_device_code("codewire-cli", None, &device.device_code),
@@ -2056,6 +2074,24 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
     .await
     .unwrap();
     assert_eq!(pending_rows, 0, "device code is single-use");
+    // The redemption recorded the account's first CLI sign-in.
+    let marked: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT cli_signed_in_at FROM users WHERE id = $1")
+            .bind(&user)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(marked.is_some(), "redemption marks the CLI sign-in");
+    let (status, body, _) = sess_req(
+        &sessions,
+        "GET",
+        "/api/auth/get-session",
+        Some(&session),
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "get-session after redemption: {body}");
+    assert_eq!(body["user"]["cli_signed_in"], true);
 
     // Disabling before browser approval removes the session that proves the
     // user identity, so a pending device grant cannot be approved. The
@@ -2191,6 +2227,8 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
 /// user-before-capability lock order. These barriers prove both orders for
 /// the current device store: approval first is purged by disablement, while
 /// disablement first cannot bind a pending grant or deadlock the worker.
+/// Device redemption, which also records the first CLI sign-in, takes the
+/// same order (`device_redemption_marks_the_first_cli_sign_in_in_both_orders`).
 #[tokio::test]
 async fn account_access_completion_paths_serialize_in_both_orders_against_postgres() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
@@ -2689,6 +2727,223 @@ async fn account_access_completion_paths_serialize_in_both_orders_against_postgr
         .bind(&client_id)
         .execute(&pool)
         .await;
+
+    device_redemption_marks_the_first_cli_sign_in_in_both_orders(&pool, &url, suffix).await;
+}
+
+/// Redeeming an approved device grant records the account's first CLI sign-in
+/// in the same statement (the dashboard's Get started checklist), once: a
+/// later redemption keeps the first time. Writing the account takes its lock,
+/// so redemption locks the account before the grant, in the order account
+/// disablement takes them. These barriers prove both orders: redemption first
+/// finishes and then disablement proceeds; disablement first leaves nothing
+/// redeemed and nothing marked. Neither deadlocks.
+async fn device_redemption_marks_the_first_cli_sign_in_in_both_orders(
+    pool: &PgPool,
+    url: &str,
+    suffix: u32,
+) {
+    let pool = pool.clone();
+    let client_id = format!("device-redemption-marker-client-{suffix}");
+    for statement in [
+        "DELETE FROM oidc_device_authorizations WHERE client_id = $1",
+        "DELETE FROM oidc_clients WHERE id = $1",
+    ] {
+        let _ = sqlx::query(statement).bind(&client_id).execute(&pool).await;
+    }
+    sqlx::query(
+        "INSERT INTO oidc_clients (id, name, application_type, auth_method, redirect_uris, grant_types) \
+         VALUES ($1, 'Device redemption marker', 'native', 'none', ARRAY[]::text[], \
+                 ARRAY['urn:ietf:params:oauth:grant-type:device_code'])",
+    )
+    .bind(&client_id)
+    .execute(&pool)
+    .await
+    .expect("create redemption client");
+    let marked_at = |user_id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT extract(epoch FROM cli_signed_in_at)::bigint FROM users WHERE id = $1",
+            )
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read CLI sign-in marker")
+        }
+    };
+
+    for label in ["already-marked", "redemption-first", "disable-first"] {
+        let user_id = format!("device-redemption-{label}-{suffix}");
+        let device_code = format!("device-redemption-code-{label}-{suffix}");
+        let worker_name = format!("codewire-device-redemption-{label}-{suffix}");
+        let _ = sqlx::query("DELETE FROM oidc_device_authorizations WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+            .bind(&user_id)
+            .bind(format!("{user_id}@example.test"))
+            .execute(&pool)
+            .await
+            .expect("create redemption user");
+        if label == "already-marked" {
+            sqlx::query("UPDATE users SET cli_signed_in_at = to_timestamp(1) WHERE id = $1")
+                .bind(&user_id)
+                .execute(&pool)
+                .await
+                .expect("mark an earlier CLI sign-in");
+        }
+
+        let worker_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url_with_application_name(url, &worker_name))
+            .await
+            .expect("connect redemption worker");
+        let store =
+            PgDeviceAuthorizationStore::new(worker_pool.clone(), TEST_CAPABILITY_HMAC_SECRET)
+                .expect("create redemption store");
+        let pending = DeviceAuthorization {
+            device_code: device_code.clone(),
+            user_code: format!("REDEEM-{label}-{suffix}"),
+            client_id: client_id.clone(),
+            scopes: Scopes(vec!["openid".into()]),
+            status: DeviceStatus::Pending,
+        };
+        store
+            .store_device(pending.clone(), 3600)
+            .await
+            .expect("store pending device authorization");
+        store
+            .update(&DeviceAuthorization {
+                status: DeviceStatus::Approved {
+                    subject: Subject(user_id.clone()),
+                    auth_time: Some(1),
+                },
+                ..pending
+            })
+            .await
+            .expect("approve device authorization");
+
+        match label {
+            "already-marked" => {
+                let redeemed = store
+                    .consume_approved(&device_code)
+                    .await
+                    .expect("redeem device authorization");
+                assert!(redeemed.is_some(), "an approved grant is redeemed");
+                assert_eq!(
+                    marked_at(user_id.clone()).await,
+                    Some(1),
+                    "a later redemption keeps the first CLI sign-in"
+                );
+            }
+            "redemption-first" => {
+                // Hold the grant's row so redemption stops after taking the
+                // account; disablement then waits for redemption.
+                let mut row_locker = pool.begin().await.expect("begin grant row locker");
+                let locker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *row_locker)
+                    .await
+                    .expect("read grant row-lock backend pid");
+                sqlx::query(
+                    "SELECT device_code_hash FROM oidc_device_authorizations \
+                     WHERE device_code_hash = $1 FOR UPDATE",
+                )
+                .bind(hash_oauth_token(&device_code))
+                .fetch_one(&mut *row_locker)
+                .await
+                .expect("lock approved device authorization");
+                let redeem_store = store.clone();
+                let redeem_code = device_code.clone();
+                let redeem =
+                    tokio::spawn(async move { redeem_store.consume_approved(&redeem_code).await });
+                let redeem_pid =
+                    wait_for_application_lock_blocker(&pool, &worker_name, locker_pid).await;
+                let (disable_pid, disable_task) =
+                    spawn_account_disable(pool.clone(), user_id.clone()).await;
+                wait_for_pid_lock_blocker(&pool, disable_pid, redeem_pid).await;
+                row_locker.commit().await.expect("release grant row lock");
+                let redeemed = tokio::time::timeout(HANG, redeem)
+                    .await
+                    .expect("device redemption deadlocked")
+                    .expect("device redemption task panicked")
+                    .expect("redeem device authorization");
+                assert!(
+                    redeemed.is_some(),
+                    "redemption first completes before disablement"
+                );
+                finish_completion_path_task(
+                    disable_task,
+                    "account disablement deadlocked device redemption",
+                )
+                .await;
+                assert!(
+                    marked_at(user_id.clone()).await.is_some(),
+                    "redemption marks the CLI sign-in"
+                );
+            }
+            _ => {
+                let mut disable = pool.begin().await.expect("begin disablement");
+                let disable_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *disable)
+                    .await
+                    .expect("read disablement backend pid");
+                sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+                    .bind(&user_id)
+                    .fetch_one(&mut *disable)
+                    .await
+                    .expect("lock the account before disablement");
+                let redeem_store = store.clone();
+                let redeem_code = device_code.clone();
+                let redeem =
+                    tokio::spawn(async move { redeem_store.consume_approved(&redeem_code).await });
+                let _ = wait_for_application_lock_blocker(&pool, &worker_name, disable_pid).await;
+                sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
+                    .bind(&user_id)
+                    .execute(&mut *disable)
+                    .await
+                    .expect("disable the account");
+                disable.commit().await.expect("commit disablement");
+                let redeemed = tokio::time::timeout(HANG, redeem)
+                    .await
+                    .expect("device redemption did not finish after disablement")
+                    .expect("device redemption task panicked")
+                    .expect("redemption after disablement answers");
+                assert!(
+                    redeemed.is_none(),
+                    "a disabled account redeemed a device grant"
+                );
+                assert_eq!(
+                    marked_at(user_id.clone()).await,
+                    None,
+                    "nothing redeemed, nothing marked"
+                );
+            }
+        }
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM oidc_device_authorizations WHERE user_id = $1",
+        )
+        .bind(&user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read remaining device grants");
+        assert_eq!(remaining, 0, "{label}: the grant is gone");
+
+        worker_pool.close().await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+    }
+    let _ = sqlx::query("DELETE FROM oidc_clients WHERE id = $1")
+        .bind(&client_id)
+        .execute(&pool)
+        .await;
 }
 
 async fn device_post(
@@ -3006,6 +3261,8 @@ async fn get_session_accepts_codewire_api_key_against_postgres() {
     assert_eq!(body["user"]["email"], email);
     assert_eq!(body["session"]["id"], "");
     assert!(body["session"].get("token").is_none());
+    // An API key is not a CLI sign-in.
+    assert_eq!(body["user"]["cli_signed_in"], false);
 
     // Usage is recorded best-effort and detached (#1851): each request's
     // touch gives up after 250 ms, so on a loaded host one can be dropped.

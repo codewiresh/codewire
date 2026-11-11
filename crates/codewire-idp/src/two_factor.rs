@@ -468,7 +468,8 @@ async fn complete_login(
     let user: UserAuthRow = sqlx::query_as(
         r#"
         SELECT id, email, email_verified, name, image, is_admin,
-               two_factor_enabled, enabled, failed_login_attempts, locked_until, created_at
+               two_factor_enabled, cli_signed_in_at IS NOT NULL AS cli_signed_in,
+               enabled, failed_login_attempts, locked_until, created_at
         FROM users WHERE id = $1 AND enabled
         "#,
     )
