@@ -142,6 +142,7 @@ fn claude_code_request() -> CredentialBridgeRequest {
             header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20"),
         ],
         body: br#"{"model":"synthetic","max_tokens":1,"messages":[]}"#.to_vec(),
+        intercepted_host: String::new(),
     }
 }
 

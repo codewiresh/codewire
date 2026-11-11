@@ -2073,6 +2073,12 @@ function generalEgress(){
                     Some(Payload::Ssh(_)) => stage("unexpected-ssh-request"),
                     Some(Payload::CodexLogin(_)) => stage("unexpected-codex-login"),
                     Some(Payload::ClaudeLogin(_)) => stage("unexpected-claude-login"),
+                    Some(
+                        Payload::Upgrade(_)
+                        | Payload::StreamData(_)
+                        | Payload::StreamCredit(_)
+                        | Payload::StreamClose(_),
+                    ) => stage("unexpected-front-door-frame"),
                     None => stage("unexpected-empty-bridge-frame"),
                 }
                 Err(failed())

@@ -90,6 +90,74 @@ fn ready_cannot_reappear_in_the_transparent_operation_stream() {
     assert!(valid_remaining_frame(&cancel));
 }
 
+/// A front-door session's frames cross a delegation in neither direction:
+/// each is refused exactly as an unknown frame (an empty payload, which an
+/// older peer decodes one as) is.
+#[test]
+fn front_door_frames_are_refused_as_unknown_frames_both_ways() {
+    use bridge::credential_bridge_guest_message::Payload as Guest;
+    use bridge::credential_bridge_host_message::Payload as Host;
+    let request_id = Uuid::new_v4().to_string();
+    for payload in [
+        None,
+        Some(Guest::Upgrade(bridge::CredentialBridgeUpgrade {
+            request_id: request_id.clone(),
+            method: "GET".into(),
+            path: "/v1/responses".into(),
+            intercepted_host: "chatgpt.com".into(),
+            initial_credit_bytes: 65_536,
+            ..Default::default()
+        })),
+        Some(Guest::StreamData(bridge::CredentialBridgeStreamData {
+            request_id: request_id.clone(),
+            data: b"frame".to_vec(),
+        })),
+        Some(Guest::StreamCredit(bridge::CredentialBridgeStreamCredit {
+            request_id: request_id.clone(),
+            credit_bytes: 1024,
+        })),
+        Some(Guest::StreamClose(bridge::CredentialBridgeStreamClose {
+            request_id: request_id.clone(),
+            kind: bridge::CredentialBridgeStreamCloseKind::Reset as i32,
+        })),
+    ] {
+        assert!(!valid_remaining_frame(
+            &bridge::CredentialBridgeGuestMessage { payload }
+        ));
+    }
+    for payload in [
+        None,
+        Some(Host::UpgradeAccepted(
+            bridge::CredentialBridgeUpgradeAccepted {
+                request_id: request_id.clone(),
+                headers: Vec::new(),
+            },
+        )),
+        Some(Host::StreamData(bridge::CredentialBridgeStreamData {
+            request_id: request_id.clone(),
+            data: b"frame".to_vec(),
+        })),
+        Some(Host::StreamCredit(bridge::CredentialBridgeStreamCredit {
+            request_id: request_id.clone(),
+            credit_bytes: 1024,
+        })),
+        Some(Host::StreamClose(bridge::CredentialBridgeStreamClose {
+            request_id: request_id.clone(),
+            kind: bridge::CredentialBridgeStreamCloseKind::HalfClose as i32,
+        })),
+        Some(Host::InterceptionHint(
+            bridge::CredentialBridgeInterceptionHint {
+                request_id: request_id.clone(),
+                origin: "https://chatgpt.com".into(),
+            },
+        )),
+    ] {
+        assert!(!valid_host_frame(&bridge::CredentialBridgeHostMessage {
+            payload
+        }));
+    }
+}
+
 enum ConnectorMode {
     Admit(VecDeque<Result<bridge::CredentialBridgeHostMessage, Status>>),
     Pending,

@@ -535,3 +535,84 @@ async fn a_claude_login_passes_the_composer_unchanged_both_ways() {
     assert!(f.composer.pending.lock().await.is_empty());
     assert_eq!(f.store.reads.load(Ordering::Relaxed), 0);
 }
+
+/// A front-door guest frame is refused by the composer exactly as an unknown
+/// frame (an empty payload, which an older peer decodes one as) is, before
+/// any projection state or local read. A front-door host frame passes
+/// `complete` as an unknown one does; the delegation's host-frame check then
+/// refuses both.
+#[tokio::test]
+async fn front_door_frames_meet_the_composer_as_unknown_frames_do() {
+    use bridge::credential_bridge_guest_message::Payload as Guest;
+    use bridge::credential_bridge_host_message::Payload as Host;
+    let f = fixture(true);
+    let request_id = Uuid::new_v4().to_string();
+    for payload in [
+        None,
+        Some(Guest::Upgrade(bridge::CredentialBridgeUpgrade {
+            request_id: request_id.clone(),
+            method: "GET".into(),
+            path: "/v1/responses".into(),
+            intercepted_host: "chatgpt.com".into(),
+            initial_credit_bytes: 65_536,
+            ..Default::default()
+        })),
+        Some(Guest::StreamData(bridge::CredentialBridgeStreamData {
+            request_id: request_id.clone(),
+            data: b"frame".to_vec(),
+        })),
+        Some(Guest::StreamCredit(bridge::CredentialBridgeStreamCredit {
+            request_id: request_id.clone(),
+            credit_bytes: 1024,
+        })),
+        Some(Guest::StreamClose(bridge::CredentialBridgeStreamClose {
+            request_id: request_id.clone(),
+            kind: bridge::CredentialBridgeStreamCloseKind::Reset as i32,
+        })),
+    ] {
+        assert!(
+            Arc::clone(&f.composer)
+                .prepare(bridge::CredentialBridgeGuestMessage { payload })
+                .await
+                .is_err()
+        );
+    }
+    for payload in [
+        None,
+        Some(Host::UpgradeAccepted(
+            bridge::CredentialBridgeUpgradeAccepted {
+                request_id: request_id.clone(),
+                headers: Vec::new(),
+            },
+        )),
+        Some(Host::StreamData(bridge::CredentialBridgeStreamData {
+            request_id: request_id.clone(),
+            data: b"frame".to_vec(),
+        })),
+        Some(Host::StreamCredit(bridge::CredentialBridgeStreamCredit {
+            request_id: request_id.clone(),
+            credit_bytes: 1024,
+        })),
+        Some(Host::StreamClose(bridge::CredentialBridgeStreamClose {
+            request_id: request_id.clone(),
+            kind: bridge::CredentialBridgeStreamCloseKind::HalfClose as i32,
+        })),
+        Some(Host::InterceptionHint(
+            bridge::CredentialBridgeInterceptionHint {
+                request_id: request_id.clone(),
+                origin: "https://chatgpt.com".into(),
+            },
+        )),
+    ] {
+        let frame = bridge::CredentialBridgeHostMessage { payload };
+        assert_eq!(
+            Arc::clone(&f.composer)
+                .complete(frame.clone())
+                .await
+                .unwrap(),
+            frame
+        );
+    }
+    assert!(f.composer.pending.lock().await.is_empty());
+    assert_eq!(f.store.reads.load(Ordering::Relaxed), 0);
+}

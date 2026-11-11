@@ -394,6 +394,55 @@ async fn out_of_order_or_unknown_host_frames_fail_closed() {
     }
 }
 
+/// The host frames of a front-door session. No epoch of this bridge is one.
+fn front_door_host_payloads() -> Vec<HostPayload> {
+    vec![
+        HostPayload::UpgradeAccepted(v1::CredentialBridgeUpgradeAccepted {
+            request_id: "front-door".to_owned(),
+            headers: Vec::new(),
+        }),
+        HostPayload::StreamData(v1::CredentialBridgeStreamData {
+            request_id: "front-door".to_owned(),
+            data: b"frame".to_vec(),
+        }),
+        HostPayload::StreamCredit(v1::CredentialBridgeStreamCredit {
+            request_id: "front-door".to_owned(),
+            credit_bytes: 1024,
+        }),
+        HostPayload::StreamClose(v1::CredentialBridgeStreamClose {
+            request_id: "front-door".to_owned(),
+            kind: v1::CredentialBridgeStreamCloseKind::Reset as i32,
+        }),
+        HostPayload::InterceptionHint(v1::CredentialBridgeInterceptionHint {
+            request_id: "front-door".to_owned(),
+            origin: "https://chatgpt.com".to_owned(),
+        }),
+    ]
+}
+
+/// Each front-door frame ends the epoch exactly as an unknown frame (an
+/// empty payload, which an older host's frame decodes as) does: the epoch
+/// ends with the same status and its pending request fails the same way.
+#[tokio::test]
+async fn front_door_host_frames_end_the_epoch_as_an_unknown_frame_does() {
+    for payload in std::iter::once(None).chain(front_door_host_payloads().into_iter().map(Some)) {
+        let mut harness = Harness::new().await;
+        let (task, _request) = harness.submit().await;
+        bounded(
+            harness
+                .input
+                .send(Ok(v1::CredentialBridgeHostMessage { payload })),
+        )
+        .await
+        .unwrap();
+        harness.terminal(tonic::Code::InvalidArgument).await;
+        let response = bounded(task).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        in_flight_reaches(&harness.bridge, 0).await;
+        harness.stop().await;
+    }
+}
+
 #[tokio::test]
 async fn cancelled_guest_request_tolerates_late_host_frames_without_detaching_bridge() {
     for after_start in [false, true] {

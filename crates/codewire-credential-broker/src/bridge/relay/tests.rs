@@ -239,3 +239,126 @@ async fn relay_carries_the_claude_login_request_and_its_answer() {
     assert_eq!(result, Err(BrokerBridgeError::Unavailable));
     assert_eq!(host_rx.recv().await, Some(expected));
 }
+
+fn front_door_guest_payloads() -> Vec<v1::credential_bridge_guest_message::Payload> {
+    use v1::credential_bridge_guest_message::Payload;
+    vec![
+        Payload::Upgrade(v1::CredentialBridgeUpgrade {
+            request_id: Uuid::new_v4().to_string(),
+            method: "GET".into(),
+            path: "/v1/responses".into(),
+            intercepted_host: "chatgpt.com".into(),
+            initial_credit_bytes: 65_536,
+            ..Default::default()
+        }),
+        Payload::StreamData(v1::CredentialBridgeStreamData {
+            request_id: Uuid::new_v4().to_string(),
+            data: b"frame".to_vec(),
+        }),
+        Payload::StreamCredit(v1::CredentialBridgeStreamCredit {
+            request_id: Uuid::new_v4().to_string(),
+            credit_bytes: 1024,
+        }),
+        Payload::StreamClose(v1::CredentialBridgeStreamClose {
+            request_id: Uuid::new_v4().to_string(),
+            kind: v1::CredentialBridgeStreamCloseKind::Reset as i32,
+        }),
+    ]
+}
+
+fn front_door_host_payloads() -> Vec<v1::credential_bridge_host_message::Payload> {
+    use v1::credential_bridge_host_message::Payload;
+    vec![
+        Payload::UpgradeAccepted(v1::CredentialBridgeUpgradeAccepted {
+            request_id: Uuid::new_v4().to_string(),
+            headers: Vec::new(),
+        }),
+        Payload::StreamData(v1::CredentialBridgeStreamData {
+            request_id: Uuid::new_v4().to_string(),
+            data: b"frame".to_vec(),
+        }),
+        Payload::StreamCredit(v1::CredentialBridgeStreamCredit {
+            request_id: Uuid::new_v4().to_string(),
+            credit_bytes: 1024,
+        }),
+        Payload::StreamClose(v1::CredentialBridgeStreamClose {
+            request_id: Uuid::new_v4().to_string(),
+            kind: v1::CredentialBridgeStreamCloseKind::HalfClose as i32,
+        }),
+        Payload::InterceptionHint(v1::CredentialBridgeInterceptionHint {
+            request_id: Uuid::new_v4().to_string(),
+            origin: "https://chatgpt.com".into(),
+        }),
+    ]
+}
+
+/// A front-door guest frame ends the relayed input exactly as an unknown
+/// frame (an empty payload, which an older guest's frame decodes as) does:
+/// the remote authority sees the stream end, never the frame.
+#[tokio::test]
+async fn relay_ends_the_input_on_a_front_door_guest_frame_as_on_an_unknown_one() {
+    for payload in std::iter::once(None).chain(front_door_guest_payloads().into_iter().map(Some)) {
+        let environment_id = Uuid::new_v4();
+        let (guest_tx, guest_rx) = mpsc::channel(2);
+        let (host_tx, mut host_rx) = mpsc::channel(1);
+        guest_tx.send(ready(environment_id, 5)).await.unwrap();
+        guest_tx
+            .send(v1::CredentialBridgeGuestMessage { payload })
+            .await
+            .unwrap();
+        let admitted = super::super::admit_credential_bridge(
+            FakeBridge {
+                input: guest_rx,
+                output: FakeResponseSink(host_tx),
+            },
+            environment_id,
+            5,
+        )
+        .await
+        .unwrap();
+
+        let result =
+            run_admitted_credential_bridge_relay(admitted, |_actual, mut input| async move {
+                assert!(input.next().await.is_none());
+                Ok(Box::pin(stream::empty()) as CredentialBridgeRelayOutput)
+            })
+            .await;
+
+        assert_eq!(result, Err(BrokerBridgeError::Unavailable));
+        assert!(host_rx.try_recv().is_err());
+        drop(guest_tx);
+    }
+}
+
+/// A front-door host frame ends the relay exactly as an unknown frame does:
+/// with InvalidProtocol, and the guest is sent nothing.
+#[tokio::test]
+async fn relay_refuses_a_front_door_host_frame_as_an_unknown_one() {
+    for payload in std::iter::once(None).chain(front_door_host_payloads().into_iter().map(Some)) {
+        let environment_id = Uuid::new_v4();
+        let (guest_tx, guest_rx) = mpsc::channel(1);
+        let (host_tx, mut host_rx) = mpsc::channel(1);
+        guest_tx.send(ready(environment_id, 6)).await.unwrap();
+        let admitted = super::super::admit_credential_bridge(
+            FakeBridge {
+                input: guest_rx,
+                output: FakeResponseSink(host_tx),
+            },
+            environment_id,
+            6,
+        )
+        .await
+        .unwrap();
+
+        let result = run_admitted_credential_bridge_relay(admitted, |_actual, _input| async {
+            Ok(Box::pin(stream::iter([Ok(v1::CredentialBridgeHostMessage {
+                payload,
+            })])) as CredentialBridgeRelayOutput)
+        })
+        .await;
+
+        assert_eq!(result, Err(BrokerBridgeError::InvalidProtocol));
+        assert!(host_rx.try_recv().is_err());
+        drop(guest_tx);
+    }
+}

@@ -2871,6 +2871,12 @@ struct ValidatedGuestRequest {
 
 impl ValidatedGuestRequest {
     fn parse(request: v1::CredentialBridgeRequest) -> Result<Self, BrokerRequestError> {
+        // Only a front-door session names the host it intercepted, and no
+        // session served here is one: such a request is refused before any
+        // credential lease.
+        if !request.intercepted_host.is_empty() {
+            return Err(BrokerRequestError::InvalidRequest);
+        }
         if !matches!(
             (request.capability_slot.as_str(), request.route.as_str()),
             ("codex" | "openai", "openai-api")
@@ -4162,6 +4168,7 @@ mod tests {
                 value: b"application/json".to_vec(),
             }],
             body: br#"{"input":"hello"}"#.to_vec(),
+            intercepted_host: String::new(),
         }
     }
 
@@ -4365,6 +4372,28 @@ mod tests {
             Err(BrokerRequestError::Denied)
         ));
         assert_eq!(lease_count.load(Ordering::Relaxed), 0);
+    }
+
+    /// Only a front-door session names the host it intercepted. A request on
+    /// any session served today that names one is refused before any lease;
+    /// the same request without it is served.
+    #[tokio::test]
+    async fn a_request_naming_an_intercepted_host_is_refused_before_any_lease() {
+        let (broker, lease_count) = broker_with_lease_count();
+        for host in ["api.openai.com", "chatgpt.com", " "] {
+            let mut intercepted = request();
+            intercepted.intercepted_host = host.into();
+            assert!(matches!(
+                broker.execute(intercepted).await,
+                Err(BrokerRequestError::InvalidRequest)
+            ));
+        }
+        assert_eq!(lease_count.load(Ordering::Relaxed), 0);
+
+        let response = broker.execute(request()).await.unwrap();
+        let (status, _, _) = response.into_parts();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(lease_count.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 //! Generated-RPC transport proof with synthetic peers. These fixtures do not
 //! claim Kubernetes authentication, provider success, or protected-store proof.
 mod budgets;
+mod front_door;
 mod relay;
 mod ssh_deadlines;
 

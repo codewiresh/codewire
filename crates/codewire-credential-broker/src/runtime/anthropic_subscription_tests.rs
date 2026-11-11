@@ -154,6 +154,7 @@ fn request(request_id: Uuid) -> v1::CredentialBridgeRequest {
             header("x-app", "cli"),
         ],
         body: br#"{"model":"synthetic","max_tokens":1,"messages":[]}"#.to_vec(),
+        intercepted_host: String::new(),
     }
 }
 

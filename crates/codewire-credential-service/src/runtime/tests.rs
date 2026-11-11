@@ -695,6 +695,7 @@ async fn open_refresh(
                         value: b"application/json".to_vec(),
                     }],
                     body: br#"{"input":"hello"}"#.to_vec(),
+                    intercepted_host: String::new(),
                 },
             )),
         })

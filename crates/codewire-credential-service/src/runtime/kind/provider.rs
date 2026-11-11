@@ -1831,6 +1831,7 @@ mod tests {
                 query: query.into(),
                 headers,
                 body: serde_json::to_vec(&body).unwrap(),
+                intercepted_host: String::new(),
             }
         }
 

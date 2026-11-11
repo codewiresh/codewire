@@ -343,7 +343,12 @@ fn decode_frame(
     let bytes = frame.encode_to_vec();
     let frame = bridge::CredentialBridgeGuestMessage::decode(bytes.as_slice())
         .map_err(|_| Status::permission_denied("credential delegation frame is invalid"))?;
-    if frame.payload.is_none() {
+    // A front-door session's frames are unknown frames on a delegation.
+    if frame
+        .payload
+        .as_ref()
+        .is_none_or(|payload| payload.is_front_door())
+    {
         return Err(Status::permission_denied(
             "credential delegation frame is invalid",
         ));
@@ -360,6 +365,10 @@ fn encode_frame(
             frame.payload,
             Some(bridge::credential_bridge_host_message::Payload::Open(_))
         )
+        || frame
+            .payload
+            .as_ref()
+            .is_some_and(|payload| payload.is_front_door())
     {
         return Err(connectrpc::ConnectError::internal(
             "credential delegation response is invalid",

@@ -253,6 +253,25 @@ pub const CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES: &[&str] = &[
     CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
     CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
 ];
+/// The session is a front door's: a TLS front door outside the environment
+/// speaking the guest side of the bridge, whose requests carry their
+/// `intercepted_host`. Nothing lists this yet.
+pub const CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR: &str = "front-door.v1";
+/// The session carries WebSocket upgrades and their byte streams. Nothing
+/// lists this yet.
+pub const CREDENTIAL_BRIDGE_CAPABILITY_WEBSOCKET: &str = "websocket.v1";
+/// The host reports origins it learns from a provider's routing reply.
+/// Nothing lists this yet.
+pub const CREDENTIAL_BRIDGE_CAPABILITY_ROUTED_ORIGIN: &str = "routed-origin.v1";
+/// Operations only a front-door session may list. Kept apart from
+/// [`CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES`], so the daemon client, which
+/// forwards only known names, never offers one to a session that belongs to
+/// an environment.
+pub const CREDENTIAL_BRIDGE_FRONT_DOOR_CAPABILITIES: &[&str] = &[
+    CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR,
+    CREDENTIAL_BRIDGE_CAPABILITY_WEBSOCKET,
+    CREDENTIAL_BRIDGE_CAPABILITY_ROUTED_ORIGIN,
+];
 pub const CREDENTIAL_BRIDGE_MAX_CAPABILITIES: usize = 8;
 pub const CREDENTIAL_BRIDGE_MAX_CAPABILITY_BYTES: usize = 64;
 
@@ -358,6 +377,39 @@ pub mod codewire {
     pub mod bridge {
         pub mod v1 {
             include!(concat!(env!("OUT_DIR"), "/codewire.bridge.v1.rs"));
+
+            impl credential_bridge_guest_message::Payload {
+                /// A front-door session's frame: an upgrade or one of its
+                /// byte stream's frames. Nothing sends one yet, and every
+                /// current reader treats one as an unknown frame, which is
+                /// what an older peer decodes it as.
+                pub fn is_front_door(&self) -> bool {
+                    matches!(
+                        self,
+                        Self::Upgrade(_)
+                            | Self::StreamData(_)
+                            | Self::StreamCredit(_)
+                            | Self::StreamClose(_)
+                    )
+                }
+            }
+
+            impl credential_bridge_host_message::Payload {
+                /// A front-door session's frame: an accepted upgrade, one of
+                /// its byte stream's frames, or an interception hint. Nothing
+                /// sends one yet, and every current reader treats one as an
+                /// unknown frame, which is what an older peer decodes it as.
+                pub fn is_front_door(&self) -> bool {
+                    matches!(
+                        self,
+                        Self::UpgradeAccepted(_)
+                            | Self::StreamData(_)
+                            | Self::StreamCredit(_)
+                            | Self::StreamClose(_)
+                            | Self::InterceptionHint(_)
+                    )
+                }
+            }
         }
     }
 }
@@ -519,6 +571,279 @@ mod tests {
         assert_eq!(
             CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
             CREDENTIAL_BRIDGE_CAPABILITIES_HEADER.to_ascii_lowercase()
+        );
+    }
+
+    #[test]
+    fn front_door_capabilities_are_canonical_and_never_known_to_daemon_sessions() {
+        for capability in [
+            CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR,
+            CREDENTIAL_BRIDGE_CAPABILITY_WEBSOCKET,
+            CREDENTIAL_BRIDGE_CAPABILITY_ROUTED_ORIGIN,
+        ] {
+            assert!(valid_credential_bridge_capability(capability));
+            assert!(CREDENTIAL_BRIDGE_FRONT_DOOR_CAPABILITIES.contains(&capability));
+        }
+        assert!(
+            CREDENTIAL_BRIDGE_FRONT_DOOR_CAPABILITIES.len() <= CREDENTIAL_BRIDGE_MAX_CAPABILITIES
+        );
+        for front_door in CREDENTIAL_BRIDGE_FRONT_DOOR_CAPABILITIES {
+            assert!(valid_credential_bridge_capability(front_door));
+            assert!(
+                !CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES.contains(front_door),
+                "{front_door} must not reach a daemon session"
+            );
+        }
+    }
+
+    fn front_door_guest_payloads()
+    -> Vec<codewire::bridge::v1::credential_bridge_guest_message::Payload> {
+        use bridge_v1::credential_bridge_guest_message::Payload;
+        use codewire::bridge::v1 as bridge_v1;
+        vec![
+            Payload::Upgrade(bridge_v1::CredentialBridgeUpgrade {
+                request_id: "r".to_owned(),
+                method: "GET".to_owned(),
+                path: "/v1/responses".to_owned(),
+                query: "a=1".to_owned(),
+                headers: vec![bridge_v1::CredentialHttpHeader {
+                    name: "upgrade".to_owned(),
+                    value: b"websocket".to_vec(),
+                }],
+                capability_slot: "codex".to_owned(),
+                route: "openai-api".to_owned(),
+                intercepted_host: "chatgpt.com".to_owned(),
+                initial_credit_bytes: 65_536,
+            }),
+            Payload::StreamData(bridge_v1::CredentialBridgeStreamData {
+                request_id: "r".to_owned(),
+                data: vec![0x81, 0x00],
+            }),
+            Payload::StreamCredit(bridge_v1::CredentialBridgeStreamCredit {
+                request_id: "r".to_owned(),
+                credit_bytes: 4096,
+            }),
+            Payload::StreamClose(bridge_v1::CredentialBridgeStreamClose {
+                request_id: "r".to_owned(),
+                kind: bridge_v1::CredentialBridgeStreamCloseKind::Reset as i32,
+            }),
+        ]
+    }
+
+    fn front_door_host_payloads()
+    -> Vec<codewire::bridge::v1::credential_bridge_host_message::Payload> {
+        use bridge_v1::credential_bridge_host_message::Payload;
+        use codewire::bridge::v1 as bridge_v1;
+        vec![
+            Payload::UpgradeAccepted(bridge_v1::CredentialBridgeUpgradeAccepted {
+                request_id: "r".to_owned(),
+                headers: vec![bridge_v1::CredentialHttpHeader {
+                    name: "sec-websocket-accept".to_owned(),
+                    value: b"synthetic".to_vec(),
+                }],
+            }),
+            Payload::StreamData(bridge_v1::CredentialBridgeStreamData {
+                request_id: "r".to_owned(),
+                data: vec![0x81, 0x00],
+            }),
+            Payload::StreamCredit(bridge_v1::CredentialBridgeStreamCredit {
+                request_id: "r".to_owned(),
+                credit_bytes: 4096,
+            }),
+            Payload::StreamClose(bridge_v1::CredentialBridgeStreamClose {
+                request_id: "r".to_owned(),
+                kind: bridge_v1::CredentialBridgeStreamCloseKind::HalfClose as i32,
+            }),
+            Payload::InterceptionHint(bridge_v1::CredentialBridgeInterceptionHint {
+                request_id: "r".to_owned(),
+                origin: "https://chatgpt.com".to_owned(),
+            }),
+        ]
+    }
+
+    /// The bridge frames as they were before the front-door variants: what
+    /// an older peer decodes with.
+    mod previous {
+        use super::codewire::bridge::v1 as bridge_v1;
+
+        #[derive(Clone, PartialEq, prost::Message)]
+        pub struct GuestMessage {
+            #[prost(oneof = "Guest", tags = "1, 2, 3, 4, 5, 6, 7")]
+            pub payload: Option<Guest>,
+        }
+
+        #[derive(Clone, PartialEq, prost::Oneof)]
+        pub enum Guest {
+            #[prost(message, tag = "1")]
+            Ready(bridge_v1::CredentialBridgeReady),
+            #[prost(message, tag = "2")]
+            Request(Request),
+            #[prost(message, tag = "3")]
+            Cancel(bridge_v1::CredentialBridgeCancel),
+            #[prost(message, tag = "4")]
+            EnvironmentProjection(bridge_v1::EnvironmentProjectionRequest),
+            #[prost(message, tag = "5")]
+            Ssh(bridge_v1::CredentialSshRequest),
+            #[prost(message, tag = "6")]
+            CodexLogin(bridge_v1::CodexLoginRequest),
+            #[prost(message, tag = "7")]
+            ClaudeLogin(bridge_v1::ClaudeLoginRequest),
+        }
+
+        /// CredentialBridgeRequest without `intercepted_host`.
+        #[derive(Clone, PartialEq, prost::Message)]
+        pub struct Request {
+            #[prost(string, tag = "1")]
+            pub request_id: String,
+            #[prost(string, tag = "2")]
+            pub method: String,
+            #[prost(string, tag = "3")]
+            pub path: String,
+            #[prost(string, tag = "4")]
+            pub query: String,
+            #[prost(message, repeated, tag = "5")]
+            pub headers: Vec<bridge_v1::CredentialHttpHeader>,
+            #[prost(bytes = "vec", tag = "6")]
+            pub body: Vec<u8>,
+            #[prost(string, tag = "7")]
+            pub capability_slot: String,
+            #[prost(string, tag = "8")]
+            pub route: String,
+        }
+
+        #[derive(Clone, PartialEq, prost::Message)]
+        pub struct HostMessage {
+            #[prost(oneof = "Host", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9")]
+            pub payload: Option<Host>,
+        }
+
+        #[derive(Clone, PartialEq, prost::Oneof)]
+        pub enum Host {
+            #[prost(message, tag = "1")]
+            Open(bridge_v1::CredentialBridgeOpen),
+            #[prost(message, tag = "2")]
+            ResponseStart(bridge_v1::CredentialBridgeResponseStart),
+            #[prost(message, tag = "3")]
+            ResponseBody(bridge_v1::CredentialBridgeResponseBody),
+            #[prost(message, tag = "4")]
+            ResponseEnd(bridge_v1::CredentialBridgeResponseEnd),
+            #[prost(message, tag = "5")]
+            ResponseFailure(bridge_v1::CredentialBridgeResponseFailure),
+            #[prost(message, tag = "6")]
+            EnvironmentProjection(bridge_v1::EnvironmentProjectionResponse),
+            #[prost(message, tag = "7")]
+            Ssh(bridge_v1::CredentialSshResponse),
+            #[prost(message, tag = "8")]
+            CodexLogin(bridge_v1::CodexLoginResponse),
+            #[prost(message, tag = "9")]
+            ClaudeLogin(bridge_v1::ClaudeLoginResponse),
+        }
+    }
+
+    #[test]
+    fn front_door_frames_round_trip_and_an_older_peer_decodes_them_as_unknown() {
+        use codewire::bridge::v1 as bridge_v1;
+
+        let guest = front_door_guest_payloads();
+        let host = front_door_host_payloads();
+        assert_eq!((guest.len(), host.len()), (4, 5));
+        for payload in guest {
+            assert!(payload.is_front_door());
+            let frame = bridge_v1::CredentialBridgeGuestMessage {
+                payload: Some(payload),
+            };
+            let bytes = frame.encode_to_vec();
+            assert_eq!(
+                bridge_v1::CredentialBridgeGuestMessage::decode(bytes.as_slice()).unwrap(),
+                frame
+            );
+            // An older peer decodes the frame without error and finds no
+            // payload: its unknown-frame path.
+            let previous = previous::GuestMessage::decode(bytes.as_slice()).unwrap();
+            assert_eq!(previous.payload, None);
+        }
+        for payload in host {
+            assert!(payload.is_front_door());
+            let frame = bridge_v1::CredentialBridgeHostMessage {
+                payload: Some(payload),
+            };
+            let bytes = frame.encode_to_vec();
+            assert_eq!(
+                bridge_v1::CredentialBridgeHostMessage::decode(bytes.as_slice()).unwrap(),
+                frame
+            );
+            let previous = previous::HostMessage::decode(bytes.as_slice()).unwrap();
+            assert_eq!(previous.payload, None);
+        }
+    }
+
+    #[test]
+    fn existing_frames_are_not_front_door_frames_and_keep_their_bytes() {
+        use bridge_v1::credential_bridge_guest_message::Payload as Guest;
+        use bridge_v1::credential_bridge_host_message::Payload as Host;
+        use codewire::bridge::v1 as bridge_v1;
+
+        for payload in [
+            Guest::Ready(Default::default()),
+            Guest::Request(Default::default()),
+            Guest::Cancel(Default::default()),
+            Guest::EnvironmentProjection(Default::default()),
+            Guest::Ssh(Default::default()),
+            Guest::CodexLogin(Default::default()),
+            Guest::ClaudeLogin(Default::default()),
+        ] {
+            assert!(!payload.is_front_door(), "{payload:?}");
+        }
+        for payload in [
+            Host::Open(Default::default()),
+            Host::ResponseStart(Default::default()),
+            Host::ResponseBody(Default::default()),
+            Host::ResponseEnd(Default::default()),
+            Host::ResponseFailure(Default::default()),
+            Host::EnvironmentProjection(Default::default()),
+            Host::Ssh(Default::default()),
+            Host::CodexLogin(Default::default()),
+            Host::ClaudeLogin(Default::default()),
+        ] {
+            assert!(!payload.is_front_door(), "{payload:?}");
+        }
+
+        // A request that leaves `intercepted_host` empty encodes exactly as
+        // before, and an older peer reads one that sets it as the same
+        // request without it.
+        let request = bridge_v1::CredentialBridgeRequest {
+            request_id: "r".to_owned(),
+            method: "POST".to_owned(),
+            path: "/v1/responses".to_owned(),
+            query: String::new(),
+            headers: Vec::new(),
+            body: b"{}".to_vec(),
+            capability_slot: "codex".to_owned(),
+            route: "openai-api".to_owned(),
+            intercepted_host: String::new(),
+        };
+        let previous_request = previous::Request {
+            request_id: request.request_id.clone(),
+            method: request.method.clone(),
+            path: request.path.clone(),
+            query: String::new(),
+            headers: Vec::new(),
+            body: request.body.clone(),
+            capability_slot: request.capability_slot.clone(),
+            route: request.route.clone(),
+        };
+        assert_eq!(request.encode_to_vec(), previous_request.encode_to_vec());
+        let intercepted = bridge_v1::CredentialBridgeGuestMessage {
+            payload: Some(Guest::Request(bridge_v1::CredentialBridgeRequest {
+                intercepted_host: "api.openai.com".to_owned(),
+                ..request
+            })),
+        };
+        assert_eq!(
+            previous::GuestMessage::decode(intercepted.encode_to_vec().as_slice())
+                .unwrap()
+                .payload,
+            Some(previous::Guest::Request(previous_request))
         );
     }
 

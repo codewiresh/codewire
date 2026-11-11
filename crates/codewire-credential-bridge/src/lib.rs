@@ -536,7 +536,17 @@ impl CredentialBridge {
             Some(Payload::ClaudeLogin(response)) => {
                 self.apply_claude_login_response(epoch, response).await
             }
-            Some(Payload::Open(_)) | None => Err(invalid_host_frame()),
+            // A front-door session's frames are an unknown frame here: no
+            // epoch of this bridge is one.
+            Some(
+                Payload::Open(_)
+                | Payload::UpgradeAccepted(_)
+                | Payload::StreamData(_)
+                | Payload::StreamCredit(_)
+                | Payload::StreamClose(_)
+                | Payload::InterceptionHint(_),
+            )
+            | None => Err(invalid_host_frame()),
         }
     }
 
@@ -926,6 +936,8 @@ async fn prepare_guest_request(
         query,
         headers,
         body: body.to_vec(),
+        // Only a front-door session names the host it intercepted.
+        intercepted_host: String::new(),
     })
 }
 

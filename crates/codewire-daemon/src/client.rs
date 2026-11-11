@@ -810,16 +810,8 @@ impl PreparedHostedCredentialBridge {
         self,
         capabilities: &[String],
     ) -> Result<CredentialBridgeResponseSender, SessionClientError> {
-        let mut forwarded = Vec::new();
-        for capability in capabilities {
-            if codewire_daemon_proto::CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES
-                .contains(&capability.as_str())
-                && !forwarded.contains(capability)
-                && forwarded.len() < codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
-            {
-                forwarded.push(capability.clone());
-            }
-        }
+        let forwarded =
+            known_credential_bridge_capabilities(capabilities.iter().map(String::as_str));
         self.input
             .send(bridge_v1::CredentialBridgeHostMessage {
                 payload: Some(bridge_v1::credential_bridge_host_message::Payload::Open(
@@ -971,15 +963,7 @@ impl SessionClient {
         if environment_id.is_nil() || environment_generation == 0 {
             return Err(SessionClientError::InvalidCredential);
         }
-        let mut listed = Vec::new();
-        for capability in capabilities {
-            if codewire_daemon_proto::CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES.contains(capability)
-                && !listed.iter().any(|known: &String| known == capability)
-                && listed.len() < codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
-            {
-                listed.push((*capability).to_owned());
-            }
-        }
+        let listed = known_credential_bridge_capabilities(capabilities.iter().copied());
         let (input, receiver) = mpsc::channel(32);
         input
             .send(bridge_v1::CredentialBridgeHostMessage {
@@ -1449,6 +1433,24 @@ impl CredentialBridgeResponseSender {
             .await
             .map_err(|_| SessionClientError::RequestClosed)
     }
+}
+
+/// The bounded, deduplicated optional operations an Open may list: only the
+/// names this build knows for a daemon's epoch. A front-door session's
+/// capabilities are never among them.
+fn known_credential_bridge_capabilities<'a>(
+    capabilities: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    let mut known = Vec::new();
+    for capability in capabilities {
+        if codewire_daemon_proto::CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES.contains(&capability)
+            && !known.iter().any(|listed: &String| listed == capability)
+            && known.len() < codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
+        {
+            known.push(capability.to_owned());
+        }
+    }
+    known
 }
 
 fn validate_credential_bridge_guest_message(

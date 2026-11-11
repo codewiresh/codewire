@@ -56,7 +56,12 @@ where
             return Err(BrokerBridgeError::InvalidProtocol);
         }
         let payload = match frame.payload {
+            // A front-door session's frames are unknown frames on the
+            // guest connections this relay carries.
             Some(v1::credential_bridge_host_message::Payload::Open(_)) | None => {
+                return Err(BrokerBridgeError::InvalidProtocol);
+            }
+            Some(payload) if payload.is_front_door() => {
                 return Err(BrokerBridgeError::InvalidProtocol);
             }
             Some(payload) => payload,

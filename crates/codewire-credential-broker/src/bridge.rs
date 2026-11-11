@@ -323,7 +323,13 @@ impl CredentialBridgeResponseSink for CredentialBridgeResponseSender {
             v1::credential_bridge_host_message::Payload::ResponseFailure(response) => {
                 self.send_response_failure(response).await
             }
-            v1::credential_bridge_host_message::Payload::Open(_) => {
+            // No session this sink serves is a front door's.
+            v1::credential_bridge_host_message::Payload::Open(_)
+            | v1::credential_bridge_host_message::Payload::UpgradeAccepted(_)
+            | v1::credential_bridge_host_message::Payload::StreamData(_)
+            | v1::credential_bridge_host_message::Payload::StreamCredit(_)
+            | v1::credential_bridge_host_message::Payload::StreamClose(_)
+            | v1::credential_bridge_host_message::Payload::InterceptionHint(_) => {
                 return Err(BrokerBridgeError::InvalidProtocol);
             }
         };
@@ -665,7 +671,16 @@ where
                         // cancellation cannot strand an OAuth refresh reservation
                         // or interrupt protected-store staging after rotation.
                     }
-                    Some(v1::credential_bridge_guest_message::Payload::Ready(_)) | None => {
+                    // A front-door session's frames are unknown frames on
+                    // every session this runner serves today.
+                    Some(
+                        v1::credential_bridge_guest_message::Payload::Ready(_)
+                        | v1::credential_bridge_guest_message::Payload::Upgrade(_)
+                        | v1::credential_bridge_guest_message::Payload::StreamData(_)
+                        | v1::credential_bridge_guest_message::Payload::StreamCredit(_)
+                        | v1::credential_bridge_guest_message::Payload::StreamClose(_),
+                    )
+                    | None => {
                         tasks.shutdown().await;
                         return Err(BrokerBridgeError::InvalidProtocol);
                     }
@@ -1119,6 +1134,7 @@ pub(crate) mod tests {
                     query: String::new(),
                     headers: Vec::new(),
                     body: Vec::new(),
+                    intercepted_host: String::new(),
                 },
             )),
         }
@@ -1570,6 +1586,70 @@ pub(crate) mod tests {
         input_tx.send(request(request_id, "/slow")).await.unwrap();
         assert_eq!(task.await.unwrap(), Err(BrokerBridgeError::InvalidProtocol));
         assert!(output_rx.try_recv().is_err());
+    }
+
+    fn front_door_guest_payloads() -> Vec<v1::credential_bridge_guest_message::Payload> {
+        use v1::credential_bridge_guest_message::Payload;
+        let request_id = Uuid::new_v4().to_string();
+        vec![
+            Payload::Upgrade(v1::CredentialBridgeUpgrade {
+                request_id: request_id.clone(),
+                method: "GET".into(),
+                path: "/slow".into(),
+                query: String::new(),
+                headers: Vec::new(),
+                capability_slot: "codex".into(),
+                route: "openai-api".into(),
+                intercepted_host: "chatgpt.com".into(),
+                initial_credit_bytes: 65_536,
+            }),
+            Payload::StreamData(v1::CredentialBridgeStreamData {
+                request_id: request_id.clone(),
+                data: b"frame".to_vec(),
+            }),
+            Payload::StreamCredit(v1::CredentialBridgeStreamCredit {
+                request_id: request_id.clone(),
+                credit_bytes: 1024,
+            }),
+            Payload::StreamClose(v1::CredentialBridgeStreamClose {
+                request_id,
+                kind: v1::CredentialBridgeStreamCloseKind::HalfClose as i32,
+            }),
+        ]
+    }
+
+    /// Each front-door frame ends the epoch exactly as an unknown frame (an
+    /// empty payload, which an older guest's frame decodes as) does: with
+    /// InvalidProtocol, nothing executed and nothing sent back.
+    #[tokio::test]
+    async fn front_door_guest_frames_end_the_epoch_as_an_unknown_frame_does() {
+        for payload in
+            std::iter::once(None).chain(front_door_guest_payloads().into_iter().map(Some))
+        {
+            let environment_id = Uuid::new_v4();
+            let (input_tx, input_rx) = mpsc::channel(2);
+            let (output_tx, mut output_rx) = mpsc::channel(1);
+            let slow_started = Arc::new(AtomicBool::new(false));
+            let task = tokio::spawn(run_bridge(
+                Arc::new(FakeExecutor {
+                    slow_started: Arc::clone(&slow_started),
+                }),
+                FakeBridge {
+                    input: input_rx,
+                    output: output_tx,
+                },
+                environment_id,
+                3,
+            ));
+            input_tx.send(ready(environment_id, 3)).await.unwrap();
+            input_tx
+                .send(v1::CredentialBridgeGuestMessage { payload })
+                .await
+                .unwrap();
+            assert_eq!(task.await.unwrap(), Err(BrokerBridgeError::InvalidProtocol));
+            assert!(output_rx.try_recv().is_err());
+            assert!(!slow_started.load(Ordering::Acquire));
+        }
     }
 
     /// Answers by path: one provider's upstream failure, an authority

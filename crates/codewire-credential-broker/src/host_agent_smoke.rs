@@ -548,6 +548,7 @@ async fn handle(
             "anthropic-api"
         }
         .into(),
+        intercepted_host: String::new(),
     };
     let response = match timeout(PREPARE_DEADLINE, state.broker.execute(request)).await {
         Ok(Ok(response)) => response,

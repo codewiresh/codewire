@@ -415,11 +415,16 @@ fn keepalive_request() -> DelegateCredentialsRequest {
 fn encode(
     frame: bridge::CredentialBridgeGuestMessage,
 ) -> Result<DelegateCredentialsRequest, Status> {
+    // A front-door session's frames are unknown frames on a delegation.
     if frame.payload.is_none()
         || matches!(
             frame.payload,
             Some(bridge::credential_bridge_guest_message::Payload::Ready(_))
         )
+        || frame
+            .payload
+            .as_ref()
+            .is_some_and(|payload| payload.is_front_door())
         || frame.encoded_len() > CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
     {
         return Err(denied());
@@ -448,8 +453,17 @@ fn decode(
     {
         return Err(denied());
     }
-    bridge::CredentialBridgeHostMessage::decode(frame.encode_to_vec().as_slice())
-        .map_err(|_| denied())
+    let frame = bridge::CredentialBridgeHostMessage::decode(frame.encode_to_vec().as_slice())
+        .map_err(|_| denied())?;
+    // A front-door session's frames are unknown frames on a delegation.
+    if frame
+        .payload
+        .as_ref()
+        .is_some_and(|payload| payload.is_front_door())
+    {
+        return Err(denied());
+    }
+    Ok(frame)
 }
 
 fn live(deadline: Instant) -> Result<(), Status> {

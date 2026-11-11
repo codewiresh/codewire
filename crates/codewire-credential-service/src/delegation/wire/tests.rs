@@ -226,6 +226,77 @@ fn delegation_response_preserves_sealed_bytes_and_rejects_open_or_empty() {
     );
 }
 
+/// A front-door session's frames cross the delegation in neither direction:
+/// each is refused exactly as an unknown or empty frame is.
+#[test]
+fn delegation_refuses_front_door_frames_as_unknown_frames() {
+    use bridge::credential_bridge_guest_message::Payload as Guest;
+    use bridge::credential_bridge_host_message::Payload as Host;
+    let request_id = Uuid::new_v4().to_string();
+    for payload in [
+        Guest::Upgrade(bridge::CredentialBridgeUpgrade {
+            request_id: request_id.clone(),
+            method: "GET".into(),
+            path: "/v1/responses".into(),
+            intercepted_host: "chatgpt.com".into(),
+            initial_credit_bytes: 65_536,
+            ..Default::default()
+        }),
+        Guest::StreamData(bridge::CredentialBridgeStreamData {
+            request_id: request_id.clone(),
+            data: b"frame".to_vec(),
+        }),
+        Guest::StreamCredit(bridge::CredentialBridgeStreamCredit {
+            request_id: request_id.clone(),
+            credit_bytes: 1024,
+        }),
+        Guest::StreamClose(bridge::CredentialBridgeStreamClose {
+            request_id: request_id.clone(),
+            kind: bridge::CredentialBridgeStreamCloseKind::Reset as i32,
+        }),
+    ] {
+        let bytes = bridge::CredentialBridgeGuestMessage {
+            payload: Some(payload),
+        }
+        .encode_to_vec();
+        let public =
+            public_bridge::CredentialBridgeGuestMessage::decode_from_slice(&bytes).unwrap();
+        assert_eq!(
+            decode_frame(request(public)).unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+    for payload in [
+        Host::UpgradeAccepted(bridge::CredentialBridgeUpgradeAccepted {
+            request_id: request_id.clone(),
+            headers: Vec::new(),
+        }),
+        Host::StreamData(bridge::CredentialBridgeStreamData {
+            request_id: request_id.clone(),
+            data: b"frame".to_vec(),
+        }),
+        Host::StreamCredit(bridge::CredentialBridgeStreamCredit {
+            request_id: request_id.clone(),
+            credit_bytes: 1024,
+        }),
+        Host::StreamClose(bridge::CredentialBridgeStreamClose {
+            request_id: request_id.clone(),
+            kind: bridge::CredentialBridgeStreamCloseKind::HalfClose as i32,
+        }),
+        Host::InterceptionHint(bridge::CredentialBridgeInterceptionHint {
+            request_id: request_id.clone(),
+            origin: "https://chatgpt.com".into(),
+        }),
+    ] {
+        assert!(
+            encode_frame(bridge::CredentialBridgeHostMessage {
+                payload: Some(payload)
+            })
+            .is_err()
+        );
+    }
+}
+
 #[test]
 fn delegation_error_mapping_discards_upstream_diagnostics() {
     for status in [

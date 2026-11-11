@@ -195,6 +195,7 @@ fn request(
         query: String::new(),
         headers,
         body: body.to_vec(),
+        intercepted_host: String::new(),
     }
 }
 

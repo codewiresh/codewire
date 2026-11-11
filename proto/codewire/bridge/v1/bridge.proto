@@ -57,6 +57,59 @@ message CredentialBridgeResponseFailure {
   CredentialBridgeFailureReason reason = 2;
 }
 
+// Frames for a front-door session: a TLS front door outside the environment
+// that speaks the guest side of this protocol on its own session, and carries
+// a WebSocket's bytes after the upgrade. Nothing sends or serves these yet.
+// Every current peer treats each one as an unknown frame and ends the epoch,
+// which is also what an older peer does, since it decodes one as an empty
+// payload.
+
+// The host dialled the upgrade's destination and it answered 101. From here
+// both sides carry only the stream frames below for this request. Nothing
+// sends this yet.
+message CredentialBridgeUpgradeAccepted {
+  string request_id = 1;
+  repeated CredentialHttpHeader headers = 2;
+}
+
+// Opaque bytes of an upgraded stream, in either direction. They are never
+// parsed. The sender sends no more than the credit its peer has granted.
+// Nothing sends this yet.
+message CredentialBridgeStreamData {
+  string request_id = 1;
+  bytes data = 2;
+}
+
+// Grants the peer this many more bytes of stream data for the request.
+// Nothing sends this yet.
+message CredentialBridgeStreamCredit {
+  string request_id = 1;
+  uint32 credit_bytes = 2;
+}
+
+enum CredentialBridgeStreamCloseKind {
+  CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_UNSPECIFIED = 0;
+  // The sender sends no more data; it still reads what its peer sends.
+  CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_HALF_CLOSE = 1;
+  // Both directions end at once, and unsent data is dropped.
+  CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_RESET = 2;
+}
+
+// Ends one or both directions of an upgraded stream. Nothing sends this yet.
+message CredentialBridgeStreamClose {
+  string request_id = 1;
+  CredentialBridgeStreamCloseKind kind = 2;
+}
+
+// An origin the host learned while answering the request, such as the host a
+// provider's routing reply names for later traffic. The front door decides
+// from its own fixed list whether to intercept it; the hint confers no
+// authority. Nothing sends this yet.
+message CredentialBridgeInterceptionHint {
+  string request_id = 1;
+  string origin = 2;
+}
+
 message CredentialBridgeHostMessage {
   oneof payload {
     CredentialBridgeOpen open = 1;
@@ -68,6 +121,12 @@ message CredentialBridgeHostMessage {
     CredentialSshResponse ssh = 7;
     CodexLoginResponse codex_login = 8;
     ClaudeLoginResponse claude_login = 9;
+    // Front-door session frames; nothing sends them yet.
+    CredentialBridgeUpgradeAccepted upgrade_accepted = 10;
+    CredentialBridgeStreamData stream_data = 11;
+    CredentialBridgeStreamCredit stream_credit = 12;
+    CredentialBridgeStreamClose stream_close = 13;
+    CredentialBridgeInterceptionHint interception_hint = 14;
   }
 }
 
@@ -88,6 +147,25 @@ message CredentialBridgeRequest {
   // confer authority; the broker rederives the exact selected-profile grant.
   string capability_slot = 7;
   string route = 8;
+  // The bound host a front-door request was made to. Empty on every other
+  // session, which refuses a request that sets it before any credential
+  // lease. Nothing sets it yet.
+  string intercepted_host = 9;
+}
+
+// A front-door request to upgrade to a WebSocket: the request fields of
+// CredentialBridgeRequest without a body. `initial_credit_bytes` is how many
+// stream bytes the guest accepts before it grants more. Nothing sends this yet.
+message CredentialBridgeUpgrade {
+  string request_id = 1;
+  string method = 2;
+  string path = 3;
+  string query = 4;
+  repeated CredentialHttpHeader headers = 5;
+  string capability_slot = 6;
+  string route = 7;
+  string intercepted_host = 8;
+  uint32 initial_credit_bytes = 9;
 }
 
 message CredentialBridgeCancel {
@@ -103,6 +181,11 @@ message CredentialBridgeGuestMessage {
     CredentialSshRequest ssh = 5;
     CodexLoginRequest codex_login = 6;
     ClaudeLoginRequest claude_login = 7;
+    // Front-door session frames; nothing sends them yet.
+    CredentialBridgeUpgrade upgrade = 8;
+    CredentialBridgeStreamData stream_data = 9;
+    CredentialBridgeStreamCredit stream_credit = 10;
+    CredentialBridgeStreamClose stream_close = 11;
   }
 }
 

@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/bridge/v1/bridge.proto.
  */
 export const file_codewire_bridge_v1_bridge: GenFile = /*@__PURE__*/
-  fileDesc("Ch9jb2Rld2lyZS9icmlkZ2UvdjEvYnJpZGdlLnByb3RvEhJjb2Rld2lyZS5icmlkZ2UudjEifgoUQ3JlZGVudGlhbEJyaWRnZU9wZW4SGAoQcHJvdG9jb2xfdmVyc2lvbhgBIAEoDRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRIeChZlbnZpcm9ubWVudF9nZW5lcmF0aW9uGAMgASgEEhQKDGNhcGFiaWxpdGllcxgEIAMoCSIzChRDcmVkZW50aWFsSHR0cEhlYWRlchIMCgRuYW1lGAEgASgJEg0KBXZhbHVlGAIgASgMIoMBCh1DcmVkZW50aWFsQnJpZGdlUmVzcG9uc2VTdGFydBISCgpyZXF1ZXN0X2lkGAEgASgJEhMKC3N0YXR1c19jb2RlGAIgASgNEjkKB2hlYWRlcnMYAyADKAsyKC5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEh0dHBIZWFkZXIiQAocQ3JlZGVudGlhbEJyaWRnZVJlc3BvbnNlQm9keRISCgpyZXF1ZXN0X2lkGAEgASgJEgwKBGRhdGEYAiABKAwiMQobQ3JlZGVudGlhbEJyaWRnZVJlc3BvbnNlRW5kEhIKCnJlcXVlc3RfaWQYASABKAkieAofQ3JlZGVudGlhbEJyaWRnZVJlc3BvbnNlRmFpbHVyZRISCgpyZXF1ZXN0X2lkGAEgASgJEkEKBnJlYXNvbhgCIAEoDjIxLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlRmFpbHVyZVJlYXNvbiKjBQobQ3JlZGVudGlhbEJyaWRnZUhvc3RNZXNzYWdlEjgKBG9wZW4YASABKAsyKC5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZU9wZW5IABJLCg5yZXNwb25zZV9zdGFydBgCIAEoCzIxLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlUmVzcG9uc2VTdGFydEgAEkkKDXJlc3BvbnNlX2JvZHkYAyABKAsyMC5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZVJlc3BvbnNlQm9keUgAEkcKDHJlc3BvbnNlX2VuZBgEIAEoCzIvLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlUmVzcG9uc2VFbmRIABJPChByZXNwb25zZV9mYWlsdXJlGAUgASgLMjMuY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VSZXNwb25zZUZhaWx1cmVIABJTChZlbnZpcm9ubWVudF9wcm9qZWN0aW9uGAYgASgLMjEuY29kZXdpcmUuYnJpZGdlLnYxLkVudmlyb25tZW50UHJvamVjdGlvblJlc3BvbnNlSAASOAoDc3NoGAcgASgLMikuY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxTc2hSZXNwb25zZUgAEj0KC2NvZGV4X2xvZ2luGAggASgLMiYuY29kZXdpcmUuYnJpZGdlLnYxLkNvZGV4TG9naW5SZXNwb25zZUgAEj8KDGNsYXVkZV9sb2dpbhgJIAEoCzInLmNvZGV3aXJlLmJyaWRnZS52MS5DbGF1ZGVMb2dpblJlc3BvbnNlSABCCQoHcGF5bG9hZCJpChVDcmVkZW50aWFsQnJpZGdlUmVhZHkSGAoQcHJvdG9jb2xfdmVyc2lvbhgBIAEoDRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRIeChZlbnZpcm9ubWVudF9nZW5lcmF0aW9uGAMgASgEIssBChdDcmVkZW50aWFsQnJpZGdlUmVxdWVzdBISCgpyZXF1ZXN0X2lkGAEgASgJEg4KBm1ldGhvZBgCIAEoCRIMCgRwYXRoGAMgASgJEg0KBXF1ZXJ5GAQgASgJEjkKB2hlYWRlcnMYBSADKAsyKC5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEh0dHBIZWFkZXISDAoEYm9keRgGIAEoDBIXCg9jYXBhYmlsaXR5X3Nsb3QYByABKAkSDQoFcm91dGUYCCABKAkiLAoWQ3JlZGVudGlhbEJyaWRnZUNhbmNlbBISCgpyZXF1ZXN0X2lkGAEgASgJIu4DChxDcmVkZW50aWFsQnJpZGdlR3Vlc3RNZXNzYWdlEjoKBXJlYWR5GAEgASgLMikuY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VSZWFkeUgAEj4KB3JlcXVlc3QYAiABKAsyKy5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZVJlcXVlc3RIABI8CgZjYW5jZWwYAyABKAsyKi5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZUNhbmNlbEgAElIKFmVudmlyb25tZW50X3Byb2plY3Rpb24YBCABKAsyMC5jb2Rld2lyZS5icmlkZ2UudjEuRW52aXJvbm1lbnRQcm9qZWN0aW9uUmVxdWVzdEgAEjcKA3NzaBgFIAEoCzIoLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsU3NoUmVxdWVzdEgAEjwKC2NvZGV4X2xvZ2luGAYgASgLMiUuY29kZXdpcmUuYnJpZGdlLnYxLkNvZGV4TG9naW5SZXF1ZXN0SAASPgoMY2xhdWRlX2xvZ2luGAcgASgLMiYuY29kZXdpcmUuYnJpZGdlLnYxLkNsYXVkZUxvZ2luUmVxdWVzdEgAQgkKB3BheWxvYWQi2QEKFENyZWRlbnRpYWxTc2hSZXF1ZXN0EhIKCnJlcXVlc3RfaWQYASABKAkSGAoQZGVhZGxpbmVfdW5peF9tcxgCIAEoBBJICgppZGVudGl0aWVzGAMgASgLMjIuY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxTc2hJZGVudGl0aWVzUmVxdWVzdEgAEjwKBHNpZ24YBCABKAsyLC5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbFNzaFNpZ25SZXF1ZXN0SABCCwoJb3BlcmF0aW9uIiAKHkNyZWRlbnRpYWxTc2hJZGVudGl0aWVzUmVxdWVzdCJVChhDcmVkZW50aWFsU3NoU2lnblJlcXVlc3QSFwoPcHVibGljX2tleV9ibG9iGAEgASgMEhEKBGRhdGEYAiABKAxCA4ABARINCgVmbGFncxgDIAEoDSIwChVDcmVkZW50aWFsU3NoSWRlbnRpdHkSFwoPcHVibGljX2tleV9ibG9iGAEgASgMIjUKFkNyZWRlbnRpYWxTc2hTaWduYXR1cmUSGwoOc2lnbmF0dXJlX2Jsb2IYASABKAxCA4ABASL7AQoVQ3JlZGVudGlhbFNzaFJlc3BvbnNlEhIKCnJlcXVlc3RfaWQYASABKAkSPQoIaWRlbnRpdHkYAiABKAsyKS5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbFNzaElkZW50aXR5SAASPwoJc2lnbmF0dXJlGAMgASgLMiouY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxTc2hTaWduYXR1cmVIABJECgdmYWlsdXJlGAQgASgOMjEuY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VGYWlsdXJlUmVhc29uSABCCAoGcmVzdWx0ItMBChxFbnZpcm9ubWVudFByb2plY3Rpb25SZXF1ZXN0EhIKCnJlcXVlc3RfaWQYASABKAkSHAoUcmVjaXBpZW50X3B1YmxpY19rZXkYAiABKAwSGAoQc2VsZWN0aW9uX3NoYTI1NhgDIAEoDBIYChBkZWFkbGluZV91bml4X21zGAQgASgEEk0KEWxvY2FsX2ludmVudG9yaWVzGAUgAygLMjIuY29kZXdpcmUuYnJpZGdlLnYxLkVudmlyb25tZW50UHJvamVjdGlvbkludmVudG9yeSLtAQodRW52aXJvbm1lbnRQcm9qZWN0aW9uUmVzcG9uc2USEgoKcmVxdWVzdF9pZBgBIAEoCRIbChFzZWFsZWRfcHJvamVjdGlvbhgCIAEoDEgAEkQKB2ZhaWx1cmUYAyABKA4yMS5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZUZhaWx1cmVSZWFzb25IABJLCgtjb21wb3NpdGlvbhgEIAEoCzI0LmNvZGV3aXJlLmJyaWRnZS52MS5FbnZpcm9ubWVudFByb2plY3Rpb25Db21wb3NpdGlvbkgAQggKBnJlc3VsdCKIAQoeRW52aXJvbm1lbnRQcm9qZWN0aW9uSW52ZW50b3J5Ej8KBnNvdXJjZRgBIAEoDjIvLmNvZGV3aXJlLmJyaWRnZS52MS5FbnZpcm9ubWVudFByb2plY3Rpb25Tb3VyY2USFwoPc291cmNlX2lkZW50aXR5GAIgASgJEgwKBGtleXMYAyADKAkilgEKIEVudmlyb25tZW50UHJvamVjdGlvbkNvbXBvc2l0aW9uEiAKGHNlYWxlZF9wbGF0Zm9ybV9mcmFnbWVudBgBIAEoDBJQChRwbGF0Zm9ybV9pbnZlbnRvcmllcxgCIAMoCzIyLmNvZGV3aXJlLmJyaWRnZS52MS5FbnZpcm9ubWVudFByb2plY3Rpb25JbnZlbnRvcnkiXwoRQ29kZXhMb2dpblJlcXVlc3QSEgoKcmVxdWVzdF9pZBgBIAEoCRIcChRyZWNpcGllbnRfcHVibGljX2tleRgCIAEoDBIYChBkZWFkbGluZV91bml4X21zGAMgASgEIpUBChJDb2RleExvZ2luUmVzcG9uc2USEgoKcmVxdWVzdF9pZBgBIAEoCRIbCgxzZWFsZWRfbG9naW4YAiABKAxCA4ABAUgAEkQKB2ZhaWx1cmUYAyABKA4yMS5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZUZhaWx1cmVSZWFzb25IAEIICgZyZXN1bHQiYAoSQ2xhdWRlTG9naW5SZXF1ZXN0EhIKCnJlcXVlc3RfaWQYASABKAkSHAoUcmVjaXBpZW50X3B1YmxpY19rZXkYAiABKAwSGAoQZGVhZGxpbmVfdW5peF9tcxgDIAEoBCKWAQoTQ2xhdWRlTG9naW5SZXNwb25zZRISCgpyZXF1ZXN0X2lkGAEgASgJEhsKDHNlYWxlZF9sb2dpbhgCIAEoDEIDgAEBSAASRAoHZmFpbHVyZRgDIAEoDjIxLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlRmFpbHVyZVJlYXNvbkgAQggKBnJlc3VsdCqfAgodQ3JlZGVudGlhbEJyaWRnZUZhaWx1cmVSZWFzb24SMAosQ1JFREVOVElBTF9CUklER0VfRkFJTFVSRV9SRUFTT05fVU5TUEVDSUZJRUQQABIrCidDUkVERU5USUFMX0JSSURHRV9GQUlMVVJFX1JFQVNPTl9ERU5JRUQQARIwCixDUkVERU5USUFMX0JSSURHRV9GQUlMVVJFX1JFQVNPTl9VTkFWQUlMQUJMRRACEjQKMENSRURFTlRJQUxfQlJJREdFX0ZBSUxVUkVfUkVBU09OX1VQU1RSRUFNX0ZBSUxFRBADEjcKM0NSRURFTlRJQUxfQlJJREdFX0ZBSUxVUkVfUkVBU09OX1JFU1BPTlNFX1RPT19MQVJHRRAEKs8BChtFbnZpcm9ubWVudFByb2plY3Rpb25Tb3VyY2USLQopRU5WSVJPTk1FTlRfUFJPSkVDVElPTl9TT1VSQ0VfVU5TUEVDSUZJRUQQABIuCipFTlZJUk9OTUVOVF9QUk9KRUNUSU9OX1NPVVJDRV9PUkdBTklaQVRJT04QARIpCiVFTlZJUk9OTUVOVF9QUk9KRUNUSU9OX1NPVVJDRV9QUk9KRUNUEAISJgoiRU5WSVJPTk1FTlRfUFJPSkVDVElPTl9TT1VSQ0VfVVNFUhADQtcBChZjb20uY29kZXdpcmUuYnJpZGdlLnYxQgtCcmlkZ2VQcm90b1ABWkZnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvYnJpZGdlL3YxO2JyaWRnZXYxogIDQ0JYqgISQ29kZXdpcmUuQnJpZGdlLlYxygISQ29kZXdpcmVcQnJpZGdlXFYx4gIeQ29kZXdpcmVcQnJpZGdlXFYxXEdQQk1ldGFkYXRh6gIUQ29kZXdpcmU6OkJyaWRnZTo6VjFiBnByb3RvMw");
+  fileDesc("Ch9jb2Rld2lyZS9icmlkZ2UvdjEvYnJpZGdlLnByb3RvEhJjb2Rld2lyZS5icmlkZ2UudjEifgoUQ3JlZGVudGlhbEJyaWRnZU9wZW4SGAoQcHJvdG9jb2xfdmVyc2lvbhgBIAEoDRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRIeChZlbnZpcm9ubWVudF9nZW5lcmF0aW9uGAMgASgEEhQKDGNhcGFiaWxpdGllcxgEIAMoCSIzChRDcmVkZW50aWFsSHR0cEhlYWRlchIMCgRuYW1lGAEgASgJEg0KBXZhbHVlGAIgASgMIoMBCh1DcmVkZW50aWFsQnJpZGdlUmVzcG9uc2VTdGFydBISCgpyZXF1ZXN0X2lkGAEgASgJEhMKC3N0YXR1c19jb2RlGAIgASgNEjkKB2hlYWRlcnMYAyADKAsyKC5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEh0dHBIZWFkZXIiQAocQ3JlZGVudGlhbEJyaWRnZVJlc3BvbnNlQm9keRISCgpyZXF1ZXN0X2lkGAEgASgJEgwKBGRhdGEYAiABKAwiMQobQ3JlZGVudGlhbEJyaWRnZVJlc3BvbnNlRW5kEhIKCnJlcXVlc3RfaWQYASABKAkieAofQ3JlZGVudGlhbEJyaWRnZVJlc3BvbnNlRmFpbHVyZRISCgpyZXF1ZXN0X2lkGAEgASgJEkEKBnJlYXNvbhgCIAEoDjIxLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlRmFpbHVyZVJlYXNvbiJwCh9DcmVkZW50aWFsQnJpZGdlVXBncmFkZUFjY2VwdGVkEhIKCnJlcXVlc3RfaWQYASABKAkSOQoHaGVhZGVycxgCIAMoCzIoLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsSHR0cEhlYWRlciI+ChpDcmVkZW50aWFsQnJpZGdlU3RyZWFtRGF0YRISCgpyZXF1ZXN0X2lkGAEgASgJEgwKBGRhdGEYAiABKAwiSAocQ3JlZGVudGlhbEJyaWRnZVN0cmVhbUNyZWRpdBISCgpyZXF1ZXN0X2lkGAEgASgJEhQKDGNyZWRpdF9ieXRlcxgCIAEoDSJ0ChtDcmVkZW50aWFsQnJpZGdlU3RyZWFtQ2xvc2USEgoKcmVxdWVzdF9pZBgBIAEoCRJBCgRraW5kGAIgASgOMjMuY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VTdHJlYW1DbG9zZUtpbmQiRgogQ3JlZGVudGlhbEJyaWRnZUludGVyY2VwdGlvbkhpbnQSEgoKcmVxdWVzdF9pZBgBIAEoCRIOCgZvcmlnaW4YAiABKAkioggKG0NyZWRlbnRpYWxCcmlkZ2VIb3N0TWVzc2FnZRI4CgRvcGVuGAEgASgLMiguY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VPcGVuSAASSwoOcmVzcG9uc2Vfc3RhcnQYAiABKAsyMS5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZVJlc3BvbnNlU3RhcnRIABJJCg1yZXNwb25zZV9ib2R5GAMgASgLMjAuY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VSZXNwb25zZUJvZHlIABJHCgxyZXNwb25zZV9lbmQYBCABKAsyLy5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZVJlc3BvbnNlRW5kSAASTwoQcmVzcG9uc2VfZmFpbHVyZRgFIAEoCzIzLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlUmVzcG9uc2VGYWlsdXJlSAASUwoWZW52aXJvbm1lbnRfcHJvamVjdGlvbhgGIAEoCzIxLmNvZGV3aXJlLmJyaWRnZS52MS5FbnZpcm9ubWVudFByb2plY3Rpb25SZXNwb25zZUgAEjgKA3NzaBgHIAEoCzIpLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsU3NoUmVzcG9uc2VIABI9Cgtjb2RleF9sb2dpbhgIIAEoCzImLmNvZGV3aXJlLmJyaWRnZS52MS5Db2RleExvZ2luUmVzcG9uc2VIABI/CgxjbGF1ZGVfbG9naW4YCSABKAsyJy5jb2Rld2lyZS5icmlkZ2UudjEuQ2xhdWRlTG9naW5SZXNwb25zZUgAEk8KEHVwZ3JhZGVfYWNjZXB0ZWQYCiABKAsyMy5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZVVwZ3JhZGVBY2NlcHRlZEgAEkUKC3N0cmVhbV9kYXRhGAsgASgLMi4uY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VTdHJlYW1EYXRhSAASSQoNc3RyZWFtX2NyZWRpdBgMIAEoCzIwLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlU3RyZWFtQ3JlZGl0SAASRwoMc3RyZWFtX2Nsb3NlGA0gASgLMi8uY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VTdHJlYW1DbG9zZUgAElEKEWludGVyY2VwdGlvbl9oaW50GA4gASgLMjQuY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VJbnRlcmNlcHRpb25IaW50SABCCQoHcGF5bG9hZCJpChVDcmVkZW50aWFsQnJpZGdlUmVhZHkSGAoQcHJvdG9jb2xfdmVyc2lvbhgBIAEoDRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRIeChZlbnZpcm9ubWVudF9nZW5lcmF0aW9uGAMgASgEIuUBChdDcmVkZW50aWFsQnJpZGdlUmVxdWVzdBISCgpyZXF1ZXN0X2lkGAEgASgJEg4KBm1ldGhvZBgCIAEoCRIMCgRwYXRoGAMgASgJEg0KBXF1ZXJ5GAQgASgJEjkKB2hlYWRlcnMYBSADKAsyKC5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEh0dHBIZWFkZXISDAoEYm9keRgGIAEoDBIXCg9jYXBhYmlsaXR5X3Nsb3QYByABKAkSDQoFcm91dGUYCCABKAkSGAoQaW50ZXJjZXB0ZWRfaG9zdBgJIAEoCSL1AQoXQ3JlZGVudGlhbEJyaWRnZVVwZ3JhZGUSEgoKcmVxdWVzdF9pZBgBIAEoCRIOCgZtZXRob2QYAiABKAkSDAoEcGF0aBgDIAEoCRINCgVxdWVyeRgEIAEoCRI5CgdoZWFkZXJzGAUgAygLMiguY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxIdHRwSGVhZGVyEhcKD2NhcGFiaWxpdHlfc2xvdBgGIAEoCRINCgVyb3V0ZRgHIAEoCRIYChBpbnRlcmNlcHRlZF9ob3N0GAggASgJEhwKFGluaXRpYWxfY3JlZGl0X2J5dGVzGAkgASgNIiwKFkNyZWRlbnRpYWxCcmlkZ2VDYW5jZWwSEgoKcmVxdWVzdF9pZBgBIAEoCSKJBgocQ3JlZGVudGlhbEJyaWRnZUd1ZXN0TWVzc2FnZRI6CgVyZWFkeRgBIAEoCzIpLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlUmVhZHlIABI+CgdyZXF1ZXN0GAIgASgLMisuY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VSZXF1ZXN0SAASPAoGY2FuY2VsGAMgASgLMiouY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VDYW5jZWxIABJSChZlbnZpcm9ubWVudF9wcm9qZWN0aW9uGAQgASgLMjAuY29kZXdpcmUuYnJpZGdlLnYxLkVudmlyb25tZW50UHJvamVjdGlvblJlcXVlc3RIABI3CgNzc2gYBSABKAsyKC5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbFNzaFJlcXVlc3RIABI8Cgtjb2RleF9sb2dpbhgGIAEoCzIlLmNvZGV3aXJlLmJyaWRnZS52MS5Db2RleExvZ2luUmVxdWVzdEgAEj4KDGNsYXVkZV9sb2dpbhgHIAEoCzImLmNvZGV3aXJlLmJyaWRnZS52MS5DbGF1ZGVMb2dpblJlcXVlc3RIABI+Cgd1cGdyYWRlGAggASgLMisuY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VVcGdyYWRlSAASRQoLc3RyZWFtX2RhdGEYCSABKAsyLi5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZVN0cmVhbURhdGFIABJJCg1zdHJlYW1fY3JlZGl0GAogASgLMjAuY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VTdHJlYW1DcmVkaXRIABJHCgxzdHJlYW1fY2xvc2UYCyABKAsyLy5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZVN0cmVhbUNsb3NlSABCCQoHcGF5bG9hZCLZAQoUQ3JlZGVudGlhbFNzaFJlcXVlc3QSEgoKcmVxdWVzdF9pZBgBIAEoCRIYChBkZWFkbGluZV91bml4X21zGAIgASgEEkgKCmlkZW50aXRpZXMYAyABKAsyMi5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbFNzaElkZW50aXRpZXNSZXF1ZXN0SAASPAoEc2lnbhgEIAEoCzIsLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsU3NoU2lnblJlcXVlc3RIAEILCglvcGVyYXRpb24iIAoeQ3JlZGVudGlhbFNzaElkZW50aXRpZXNSZXF1ZXN0IlUKGENyZWRlbnRpYWxTc2hTaWduUmVxdWVzdBIXCg9wdWJsaWNfa2V5X2Jsb2IYASABKAwSEQoEZGF0YRgCIAEoDEIDgAEBEg0KBWZsYWdzGAMgASgNIjAKFUNyZWRlbnRpYWxTc2hJZGVudGl0eRIXCg9wdWJsaWNfa2V5X2Jsb2IYASABKAwiNQoWQ3JlZGVudGlhbFNzaFNpZ25hdHVyZRIbCg5zaWduYXR1cmVfYmxvYhgBIAEoDEIDgAEBIvsBChVDcmVkZW50aWFsU3NoUmVzcG9uc2USEgoKcmVxdWVzdF9pZBgBIAEoCRI9CghpZGVudGl0eRgCIAEoCzIpLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsU3NoSWRlbnRpdHlIABI/CglzaWduYXR1cmUYAyABKAsyKi5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbFNzaFNpZ25hdHVyZUgAEkQKB2ZhaWx1cmUYBCABKA4yMS5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZUZhaWx1cmVSZWFzb25IAEIICgZyZXN1bHQi0wEKHEVudmlyb25tZW50UHJvamVjdGlvblJlcXVlc3QSEgoKcmVxdWVzdF9pZBgBIAEoCRIcChRyZWNpcGllbnRfcHVibGljX2tleRgCIAEoDBIYChBzZWxlY3Rpb25fc2hhMjU2GAMgASgMEhgKEGRlYWRsaW5lX3VuaXhfbXMYBCABKAQSTQoRbG9jYWxfaW52ZW50b3JpZXMYBSADKAsyMi5jb2Rld2lyZS5icmlkZ2UudjEuRW52aXJvbm1lbnRQcm9qZWN0aW9uSW52ZW50b3J5Iu0BCh1FbnZpcm9ubWVudFByb2plY3Rpb25SZXNwb25zZRISCgpyZXF1ZXN0X2lkGAEgASgJEhsKEXNlYWxlZF9wcm9qZWN0aW9uGAIgASgMSAASRAoHZmFpbHVyZRgDIAEoDjIxLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlRmFpbHVyZVJlYXNvbkgAEksKC2NvbXBvc2l0aW9uGAQgASgLMjQuY29kZXdpcmUuYnJpZGdlLnYxLkVudmlyb25tZW50UHJvamVjdGlvbkNvbXBvc2l0aW9uSABCCAoGcmVzdWx0IogBCh5FbnZpcm9ubWVudFByb2plY3Rpb25JbnZlbnRvcnkSPwoGc291cmNlGAEgASgOMi8uY29kZXdpcmUuYnJpZGdlLnYxLkVudmlyb25tZW50UHJvamVjdGlvblNvdXJjZRIXCg9zb3VyY2VfaWRlbnRpdHkYAiABKAkSDAoEa2V5cxgDIAMoCSKWAQogRW52aXJvbm1lbnRQcm9qZWN0aW9uQ29tcG9zaXRpb24SIAoYc2VhbGVkX3BsYXRmb3JtX2ZyYWdtZW50GAEgASgMElAKFHBsYXRmb3JtX2ludmVudG9yaWVzGAIgAygLMjIuY29kZXdpcmUuYnJpZGdlLnYxLkVudmlyb25tZW50UHJvamVjdGlvbkludmVudG9yeSJfChFDb2RleExvZ2luUmVxdWVzdBISCgpyZXF1ZXN0X2lkGAEgASgJEhwKFHJlY2lwaWVudF9wdWJsaWNfa2V5GAIgASgMEhgKEGRlYWRsaW5lX3VuaXhfbXMYAyABKAQilQEKEkNvZGV4TG9naW5SZXNwb25zZRISCgpyZXF1ZXN0X2lkGAEgASgJEhsKDHNlYWxlZF9sb2dpbhgCIAEoDEIDgAEBSAASRAoHZmFpbHVyZRgDIAEoDjIxLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlRmFpbHVyZVJlYXNvbkgAQggKBnJlc3VsdCJgChJDbGF1ZGVMb2dpblJlcXVlc3QSEgoKcmVxdWVzdF9pZBgBIAEoCRIcChRyZWNpcGllbnRfcHVibGljX2tleRgCIAEoDBIYChBkZWFkbGluZV91bml4X21zGAMgASgEIpYBChNDbGF1ZGVMb2dpblJlc3BvbnNlEhIKCnJlcXVlc3RfaWQYASABKAkSGwoMc2VhbGVkX2xvZ2luGAIgASgMQgOAAQFIABJECgdmYWlsdXJlGAMgASgOMjEuY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VGYWlsdXJlUmVhc29uSABCCAoGcmVzdWx0Kp8CCh1DcmVkZW50aWFsQnJpZGdlRmFpbHVyZVJlYXNvbhIwCixDUkVERU5USUFMX0JSSURHRV9GQUlMVVJFX1JFQVNPTl9VTlNQRUNJRklFRBAAEisKJ0NSRURFTlRJQUxfQlJJREdFX0ZBSUxVUkVfUkVBU09OX0RFTklFRBABEjAKLENSRURFTlRJQUxfQlJJREdFX0ZBSUxVUkVfUkVBU09OX1VOQVZBSUxBQkxFEAISNAowQ1JFREVOVElBTF9CUklER0VfRkFJTFVSRV9SRUFTT05fVVBTVFJFQU1fRkFJTEVEEAMSNwozQ1JFREVOVElBTF9CUklER0VfRkFJTFVSRV9SRUFTT05fUkVTUE9OU0VfVE9PX0xBUkdFEAQquQEKH0NyZWRlbnRpYWxCcmlkZ2VTdHJlYW1DbG9zZUtpbmQSMwovQ1JFREVOVElBTF9CUklER0VfU1RSRUFNX0NMT1NFX0tJTkRfVU5TUEVDSUZJRUQQABIyCi5DUkVERU5USUFMX0JSSURHRV9TVFJFQU1fQ0xPU0VfS0lORF9IQUxGX0NMT1NFEAESLQopQ1JFREVOVElBTF9CUklER0VfU1RSRUFNX0NMT1NFX0tJTkRfUkVTRVQQAirPAQobRW52aXJvbm1lbnRQcm9qZWN0aW9uU291cmNlEi0KKUVOVklST05NRU5UX1BST0pFQ1RJT05fU09VUkNFX1VOU1BFQ0lGSUVEEAASLgoqRU5WSVJPTk1FTlRfUFJPSkVDVElPTl9TT1VSQ0VfT1JHQU5JWkFUSU9OEAESKQolRU5WSVJPTk1FTlRfUFJPSkVDVElPTl9TT1VSQ0VfUFJPSkVDVBACEiYKIkVOVklST05NRU5UX1BST0pFQ1RJT05fU09VUkNFX1VTRVIQA0LXAQoWY29tLmNvZGV3aXJlLmJyaWRnZS52MUILQnJpZGdlUHJvdG9QAVpGZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL2JyaWRnZS92MTticmlkZ2V2MaICA0NCWKoCEkNvZGV3aXJlLkJyaWRnZS5WMcoCEkNvZGV3aXJlXEJyaWRnZVxWMeICHkNvZGV3aXJlXEJyaWRnZVxWMVxHUEJNZXRhZGF0YeoCFENvZGV3aXJlOjpCcmlkZ2U6OlYxYgZwcm90bzM");
 
 /**
  * Frames shared by the private native and platform credential bridges. These
@@ -172,6 +172,134 @@ export const CredentialBridgeResponseFailureSchema: GenMessage<CredentialBridgeR
   messageDesc(file_codewire_bridge_v1_bridge, 5);
 
 /**
+ * The host dialled the upgrade's destination and it answered 101. From here
+ * both sides carry only the stream frames below for this request. Nothing
+ * sends this yet.
+ *
+ * @generated from message codewire.bridge.v1.CredentialBridgeUpgradeAccepted
+ */
+export type CredentialBridgeUpgradeAccepted = Message<"codewire.bridge.v1.CredentialBridgeUpgradeAccepted"> & {
+  /**
+   * @generated from field: string request_id = 1;
+   */
+  requestId: string;
+
+  /**
+   * @generated from field: repeated codewire.bridge.v1.CredentialHttpHeader headers = 2;
+   */
+  headers: CredentialHttpHeader[];
+};
+
+/**
+ * Describes the message codewire.bridge.v1.CredentialBridgeUpgradeAccepted.
+ * Use `create(CredentialBridgeUpgradeAcceptedSchema)` to create a new message.
+ */
+export const CredentialBridgeUpgradeAcceptedSchema: GenMessage<CredentialBridgeUpgradeAccepted> = /*@__PURE__*/
+  messageDesc(file_codewire_bridge_v1_bridge, 6);
+
+/**
+ * Opaque bytes of an upgraded stream, in either direction. They are never
+ * parsed. The sender sends no more than the credit its peer has granted.
+ * Nothing sends this yet.
+ *
+ * @generated from message codewire.bridge.v1.CredentialBridgeStreamData
+ */
+export type CredentialBridgeStreamData = Message<"codewire.bridge.v1.CredentialBridgeStreamData"> & {
+  /**
+   * @generated from field: string request_id = 1;
+   */
+  requestId: string;
+
+  /**
+   * @generated from field: bytes data = 2;
+   */
+  data: Uint8Array;
+};
+
+/**
+ * Describes the message codewire.bridge.v1.CredentialBridgeStreamData.
+ * Use `create(CredentialBridgeStreamDataSchema)` to create a new message.
+ */
+export const CredentialBridgeStreamDataSchema: GenMessage<CredentialBridgeStreamData> = /*@__PURE__*/
+  messageDesc(file_codewire_bridge_v1_bridge, 7);
+
+/**
+ * Grants the peer this many more bytes of stream data for the request.
+ * Nothing sends this yet.
+ *
+ * @generated from message codewire.bridge.v1.CredentialBridgeStreamCredit
+ */
+export type CredentialBridgeStreamCredit = Message<"codewire.bridge.v1.CredentialBridgeStreamCredit"> & {
+  /**
+   * @generated from field: string request_id = 1;
+   */
+  requestId: string;
+
+  /**
+   * @generated from field: uint32 credit_bytes = 2;
+   */
+  creditBytes: number;
+};
+
+/**
+ * Describes the message codewire.bridge.v1.CredentialBridgeStreamCredit.
+ * Use `create(CredentialBridgeStreamCreditSchema)` to create a new message.
+ */
+export const CredentialBridgeStreamCreditSchema: GenMessage<CredentialBridgeStreamCredit> = /*@__PURE__*/
+  messageDesc(file_codewire_bridge_v1_bridge, 8);
+
+/**
+ * Ends one or both directions of an upgraded stream. Nothing sends this yet.
+ *
+ * @generated from message codewire.bridge.v1.CredentialBridgeStreamClose
+ */
+export type CredentialBridgeStreamClose = Message<"codewire.bridge.v1.CredentialBridgeStreamClose"> & {
+  /**
+   * @generated from field: string request_id = 1;
+   */
+  requestId: string;
+
+  /**
+   * @generated from field: codewire.bridge.v1.CredentialBridgeStreamCloseKind kind = 2;
+   */
+  kind: CredentialBridgeStreamCloseKind;
+};
+
+/**
+ * Describes the message codewire.bridge.v1.CredentialBridgeStreamClose.
+ * Use `create(CredentialBridgeStreamCloseSchema)` to create a new message.
+ */
+export const CredentialBridgeStreamCloseSchema: GenMessage<CredentialBridgeStreamClose> = /*@__PURE__*/
+  messageDesc(file_codewire_bridge_v1_bridge, 9);
+
+/**
+ * An origin the host learned while answering the request, such as the host a
+ * provider's routing reply names for later traffic. The front door decides
+ * from its own fixed list whether to intercept it; the hint confers no
+ * authority. Nothing sends this yet.
+ *
+ * @generated from message codewire.bridge.v1.CredentialBridgeInterceptionHint
+ */
+export type CredentialBridgeInterceptionHint = Message<"codewire.bridge.v1.CredentialBridgeInterceptionHint"> & {
+  /**
+   * @generated from field: string request_id = 1;
+   */
+  requestId: string;
+
+  /**
+   * @generated from field: string origin = 2;
+   */
+  origin: string;
+};
+
+/**
+ * Describes the message codewire.bridge.v1.CredentialBridgeInterceptionHint.
+ * Use `create(CredentialBridgeInterceptionHintSchema)` to create a new message.
+ */
+export const CredentialBridgeInterceptionHintSchema: GenMessage<CredentialBridgeInterceptionHint> = /*@__PURE__*/
+  messageDesc(file_codewire_bridge_v1_bridge, 10);
+
+/**
  * @generated from message codewire.bridge.v1.CredentialBridgeHostMessage
  */
 export type CredentialBridgeHostMessage = Message<"codewire.bridge.v1.CredentialBridgeHostMessage"> & {
@@ -232,6 +360,38 @@ export type CredentialBridgeHostMessage = Message<"codewire.bridge.v1.Credential
      */
     value: ClaudeLoginResponse;
     case: "claudeLogin";
+  } | {
+    /**
+     * Front-door session frames; nothing sends them yet.
+     *
+     * @generated from field: codewire.bridge.v1.CredentialBridgeUpgradeAccepted upgrade_accepted = 10;
+     */
+    value: CredentialBridgeUpgradeAccepted;
+    case: "upgradeAccepted";
+  } | {
+    /**
+     * @generated from field: codewire.bridge.v1.CredentialBridgeStreamData stream_data = 11;
+     */
+    value: CredentialBridgeStreamData;
+    case: "streamData";
+  } | {
+    /**
+     * @generated from field: codewire.bridge.v1.CredentialBridgeStreamCredit stream_credit = 12;
+     */
+    value: CredentialBridgeStreamCredit;
+    case: "streamCredit";
+  } | {
+    /**
+     * @generated from field: codewire.bridge.v1.CredentialBridgeStreamClose stream_close = 13;
+     */
+    value: CredentialBridgeStreamClose;
+    case: "streamClose";
+  } | {
+    /**
+     * @generated from field: codewire.bridge.v1.CredentialBridgeInterceptionHint interception_hint = 14;
+     */
+    value: CredentialBridgeInterceptionHint;
+    case: "interceptionHint";
   } | { case: undefined; value?: undefined };
 };
 
@@ -240,7 +400,7 @@ export type CredentialBridgeHostMessage = Message<"codewire.bridge.v1.Credential
  * Use `create(CredentialBridgeHostMessageSchema)` to create a new message.
  */
 export const CredentialBridgeHostMessageSchema: GenMessage<CredentialBridgeHostMessage> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 6);
+  messageDesc(file_codewire_bridge_v1_bridge, 11);
 
 /**
  * @generated from message codewire.bridge.v1.CredentialBridgeReady
@@ -267,7 +427,7 @@ export type CredentialBridgeReady = Message<"codewire.bridge.v1.CredentialBridge
  * Use `create(CredentialBridgeReadySchema)` to create a new message.
  */
 export const CredentialBridgeReadySchema: GenMessage<CredentialBridgeReady> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 7);
+  messageDesc(file_codewire_bridge_v1_bridge, 12);
 
 /**
  * @generated from message codewire.bridge.v1.CredentialBridgeRequest
@@ -315,6 +475,15 @@ export type CredentialBridgeRequest = Message<"codewire.bridge.v1.CredentialBrid
    * @generated from field: string route = 8;
    */
   route: string;
+
+  /**
+   * The bound host a front-door request was made to. Empty on every other
+   * session, which refuses a request that sets it before any credential
+   * lease. Nothing sets it yet.
+   *
+   * @generated from field: string intercepted_host = 9;
+   */
+  interceptedHost: string;
 };
 
 /**
@@ -322,7 +491,68 @@ export type CredentialBridgeRequest = Message<"codewire.bridge.v1.CredentialBrid
  * Use `create(CredentialBridgeRequestSchema)` to create a new message.
  */
 export const CredentialBridgeRequestSchema: GenMessage<CredentialBridgeRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 8);
+  messageDesc(file_codewire_bridge_v1_bridge, 13);
+
+/**
+ * A front-door request to upgrade to a WebSocket: the request fields of
+ * CredentialBridgeRequest without a body. `initial_credit_bytes` is how many
+ * stream bytes the guest accepts before it grants more. Nothing sends this yet.
+ *
+ * @generated from message codewire.bridge.v1.CredentialBridgeUpgrade
+ */
+export type CredentialBridgeUpgrade = Message<"codewire.bridge.v1.CredentialBridgeUpgrade"> & {
+  /**
+   * @generated from field: string request_id = 1;
+   */
+  requestId: string;
+
+  /**
+   * @generated from field: string method = 2;
+   */
+  method: string;
+
+  /**
+   * @generated from field: string path = 3;
+   */
+  path: string;
+
+  /**
+   * @generated from field: string query = 4;
+   */
+  query: string;
+
+  /**
+   * @generated from field: repeated codewire.bridge.v1.CredentialHttpHeader headers = 5;
+   */
+  headers: CredentialHttpHeader[];
+
+  /**
+   * @generated from field: string capability_slot = 6;
+   */
+  capabilitySlot: string;
+
+  /**
+   * @generated from field: string route = 7;
+   */
+  route: string;
+
+  /**
+   * @generated from field: string intercepted_host = 8;
+   */
+  interceptedHost: string;
+
+  /**
+   * @generated from field: uint32 initial_credit_bytes = 9;
+   */
+  initialCreditBytes: number;
+};
+
+/**
+ * Describes the message codewire.bridge.v1.CredentialBridgeUpgrade.
+ * Use `create(CredentialBridgeUpgradeSchema)` to create a new message.
+ */
+export const CredentialBridgeUpgradeSchema: GenMessage<CredentialBridgeUpgrade> = /*@__PURE__*/
+  messageDesc(file_codewire_bridge_v1_bridge, 14);
 
 /**
  * @generated from message codewire.bridge.v1.CredentialBridgeCancel
@@ -339,7 +569,7 @@ export type CredentialBridgeCancel = Message<"codewire.bridge.v1.CredentialBridg
  * Use `create(CredentialBridgeCancelSchema)` to create a new message.
  */
 export const CredentialBridgeCancelSchema: GenMessage<CredentialBridgeCancel> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 9);
+  messageDesc(file_codewire_bridge_v1_bridge, 15);
 
 /**
  * @generated from message codewire.bridge.v1.CredentialBridgeGuestMessage
@@ -390,6 +620,32 @@ export type CredentialBridgeGuestMessage = Message<"codewire.bridge.v1.Credentia
      */
     value: ClaudeLoginRequest;
     case: "claudeLogin";
+  } | {
+    /**
+     * Front-door session frames; nothing sends them yet.
+     *
+     * @generated from field: codewire.bridge.v1.CredentialBridgeUpgrade upgrade = 8;
+     */
+    value: CredentialBridgeUpgrade;
+    case: "upgrade";
+  } | {
+    /**
+     * @generated from field: codewire.bridge.v1.CredentialBridgeStreamData stream_data = 9;
+     */
+    value: CredentialBridgeStreamData;
+    case: "streamData";
+  } | {
+    /**
+     * @generated from field: codewire.bridge.v1.CredentialBridgeStreamCredit stream_credit = 10;
+     */
+    value: CredentialBridgeStreamCredit;
+    case: "streamCredit";
+  } | {
+    /**
+     * @generated from field: codewire.bridge.v1.CredentialBridgeStreamClose stream_close = 11;
+     */
+    value: CredentialBridgeStreamClose;
+    case: "streamClose";
   } | { case: undefined; value?: undefined };
 };
 
@@ -398,7 +654,7 @@ export type CredentialBridgeGuestMessage = Message<"codewire.bridge.v1.Credentia
  * Use `create(CredentialBridgeGuestMessageSchema)` to create a new message.
  */
 export const CredentialBridgeGuestMessageSchema: GenMessage<CredentialBridgeGuestMessage> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 10);
+  messageDesc(file_codewire_bridge_v1_bridge, 16);
 
 /**
  * Closed, material-free operations for the selected ssh identity. The authority
@@ -442,7 +698,7 @@ export type CredentialSshRequest = Message<"codewire.bridge.v1.CredentialSshRequ
  * Use `create(CredentialSshRequestSchema)` to create a new message.
  */
 export const CredentialSshRequestSchema: GenMessage<CredentialSshRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 11);
+  messageDesc(file_codewire_bridge_v1_bridge, 17);
 
 /**
  * @generated from message codewire.bridge.v1.CredentialSshIdentitiesRequest
@@ -455,7 +711,7 @@ export type CredentialSshIdentitiesRequest = Message<"codewire.bridge.v1.Credent
  * Use `create(CredentialSshIdentitiesRequestSchema)` to create a new message.
  */
 export const CredentialSshIdentitiesRequestSchema: GenMessage<CredentialSshIdentitiesRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 12);
+  messageDesc(file_codewire_bridge_v1_bridge, 18);
 
 /**
  * @generated from message codewire.bridge.v1.CredentialSshSignRequest
@@ -482,7 +738,7 @@ export type CredentialSshSignRequest = Message<"codewire.bridge.v1.CredentialSsh
  * Use `create(CredentialSshSignRequestSchema)` to create a new message.
  */
 export const CredentialSshSignRequestSchema: GenMessage<CredentialSshSignRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 13);
+  messageDesc(file_codewire_bridge_v1_bridge, 19);
 
 /**
  * Exactly one authority-selected public identity. Imported comments are never
@@ -502,7 +758,7 @@ export type CredentialSshIdentity = Message<"codewire.bridge.v1.CredentialSshIde
  * Use `create(CredentialSshIdentitySchema)` to create a new message.
  */
 export const CredentialSshIdentitySchema: GenMessage<CredentialSshIdentity> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 14);
+  messageDesc(file_codewire_bridge_v1_bridge, 20);
 
 /**
  * @generated from message codewire.bridge.v1.CredentialSshSignature
@@ -521,7 +777,7 @@ export type CredentialSshSignature = Message<"codewire.bridge.v1.CredentialSshSi
  * Use `create(CredentialSshSignatureSchema)` to create a new message.
  */
 export const CredentialSshSignatureSchema: GenMessage<CredentialSshSignature> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 15);
+  messageDesc(file_codewire_bridge_v1_bridge, 21);
 
 /**
  * @generated from message codewire.bridge.v1.CredentialSshResponse
@@ -561,7 +817,7 @@ export type CredentialSshResponse = Message<"codewire.bridge.v1.CredentialSshRes
  * Use `create(CredentialSshResponseSchema)` to create a new message.
  */
 export const CredentialSshResponseSchema: GenMessage<CredentialSshResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 16);
+  messageDesc(file_codewire_bridge_v1_bridge, 22);
 
 /**
  * One actual launcher asks for the environment's already-selected application
@@ -607,7 +863,7 @@ export type EnvironmentProjectionRequest = Message<"codewire.bridge.v1.Environme
  * Use `create(EnvironmentProjectionRequestSchema)` to create a new message.
  */
 export const EnvironmentProjectionRequestSchema: GenMessage<EnvironmentProjectionRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 17);
+  messageDesc(file_codewire_bridge_v1_bridge, 23);
 
 /**
  * @generated from message codewire.bridge.v1.EnvironmentProjectionResponse
@@ -649,7 +905,7 @@ export type EnvironmentProjectionResponse = Message<"codewire.bridge.v1.Environm
  * Use `create(EnvironmentProjectionResponseSchema)` to create a new message.
  */
 export const EnvironmentProjectionResponseSchema: GenMessage<EnvironmentProjectionResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 18);
+  messageDesc(file_codewire_bridge_v1_bridge, 24);
 
 /**
  * Complete, bounded names for one exact already-selected source. The owning
@@ -680,7 +936,7 @@ export type EnvironmentProjectionInventory = Message<"codewire.bridge.v1.Environ
  * Use `create(EnvironmentProjectionInventorySchema)` to create a new message.
  */
 export const EnvironmentProjectionInventorySchema: GenMessage<EnvironmentProjectionInventory> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 19);
+  messageDesc(file_codewire_bridge_v1_bridge, 25);
 
 /**
  * @generated from message codewire.bridge.v1.EnvironmentProjectionComposition
@@ -702,7 +958,7 @@ export type EnvironmentProjectionComposition = Message<"codewire.bridge.v1.Envir
  * Use `create(EnvironmentProjectionCompositionSchema)` to create a new message.
  */
 export const EnvironmentProjectionCompositionSchema: GenMessage<EnvironmentProjectionComposition> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 20);
+  messageDesc(file_codewire_bridge_v1_bridge, 26);
 
 /**
  * The workspace daemon asks for the Sandbox creator's personal Codex ChatGPT
@@ -738,7 +994,7 @@ export type CodexLoginRequest = Message<"codewire.bridge.v1.CodexLoginRequest"> 
  * Use `create(CodexLoginRequestSchema)` to create a new message.
  */
 export const CodexLoginRequestSchema: GenMessage<CodexLoginRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 21);
+  messageDesc(file_codewire_bridge_v1_bridge, 27);
 
 /**
  * @generated from message codewire.bridge.v1.CodexLoginResponse
@@ -779,7 +1035,7 @@ export type CodexLoginResponse = Message<"codewire.bridge.v1.CodexLoginResponse"
  * Use `create(CodexLoginResponseSchema)` to create a new message.
  */
 export const CodexLoginResponseSchema: GenMessage<CodexLoginResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 22);
+  messageDesc(file_codewire_bridge_v1_bridge, 28);
 
 /**
  * The workspace daemon asks for the Sandbox creator's personal Claude sign-in,
@@ -816,7 +1072,7 @@ export type ClaudeLoginRequest = Message<"codewire.bridge.v1.ClaudeLoginRequest"
  * Use `create(ClaudeLoginRequestSchema)` to create a new message.
  */
 export const ClaudeLoginRequestSchema: GenMessage<ClaudeLoginRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 23);
+  messageDesc(file_codewire_bridge_v1_bridge, 29);
 
 /**
  * @generated from message codewire.bridge.v1.ClaudeLoginResponse
@@ -859,7 +1115,7 @@ export type ClaudeLoginResponse = Message<"codewire.bridge.v1.ClaudeLoginRespons
  * Use `create(ClaudeLoginResponseSchema)` to create a new message.
  */
 export const ClaudeLoginResponseSchema: GenMessage<ClaudeLoginResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_bridge_v1_bridge, 24);
+  messageDesc(file_codewire_bridge_v1_bridge, 30);
 
 /**
  * @generated from enum codewire.bridge.v1.CredentialBridgeFailureReason
@@ -898,6 +1154,36 @@ export const CredentialBridgeFailureReasonSchema: GenEnum<CredentialBridgeFailur
   enumDesc(file_codewire_bridge_v1_bridge, 0);
 
 /**
+ * @generated from enum codewire.bridge.v1.CredentialBridgeStreamCloseKind
+ */
+export enum CredentialBridgeStreamCloseKind {
+  /**
+   * @generated from enum value: CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * The sender sends no more data; it still reads what its peer sends.
+   *
+   * @generated from enum value: CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_HALF_CLOSE = 1;
+   */
+  HALF_CLOSE = 1,
+
+  /**
+   * Both directions end at once, and unsent data is dropped.
+   *
+   * @generated from enum value: CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_RESET = 2;
+   */
+  RESET = 2,
+}
+
+/**
+ * Describes the enum codewire.bridge.v1.CredentialBridgeStreamCloseKind.
+ */
+export const CredentialBridgeStreamCloseKindSchema: GenEnum<CredentialBridgeStreamCloseKind> = /*@__PURE__*/
+  enumDesc(file_codewire_bridge_v1_bridge, 1);
+
+/**
  * @generated from enum codewire.bridge.v1.EnvironmentProjectionSource
  */
 export enum EnvironmentProjectionSource {
@@ -926,5 +1212,5 @@ export enum EnvironmentProjectionSource {
  * Describes the enum codewire.bridge.v1.EnvironmentProjectionSource.
  */
 export const EnvironmentProjectionSourceSchema: GenEnum<EnvironmentProjectionSource> = /*@__PURE__*/
-  enumDesc(file_codewire_bridge_v1_bridge, 1);
+  enumDesc(file_codewire_bridge_v1_bridge, 2);
 

@@ -199,6 +199,7 @@ fn claude_code_request() -> CredentialBridgeRequest {
             header("authorization", "Bearer synthetic-guest-copy"),
         ],
         body: br#"{"model":"synthetic","max_tokens":1,"messages":[]}"#.to_vec(),
+        intercepted_host: String::new(),
     }
 }
 

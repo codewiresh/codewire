@@ -228,6 +228,7 @@ fn request_frame() -> (String, v1::CredentialBridgeGuestMessage) {
                         value: b"application/json".to_vec(),
                     }],
                     body: br#"{"input":"hello"}"#.to_vec(),
+                    intercepted_host: String::new(),
                 },
             )),
         },

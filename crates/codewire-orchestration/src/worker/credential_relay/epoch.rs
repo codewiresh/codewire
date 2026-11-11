@@ -1010,10 +1010,11 @@ async fn forward_guest(
             _ = cancellation.cancelled() => return Ok(()),
             frame = output.message() => match frame { Ok(Some(frame)) => frame, _ => return Ok(()) },
         };
-        if matches!(
-            frame.payload,
-            None | Some(v1::credential_bridge_guest_message::Payload::Ready(_))
-        ) {
+        // A front-door session's frames are unknown frames from a daemon.
+        if match &frame.payload {
+            None | Some(v1::credential_bridge_guest_message::Payload::Ready(_)) => true,
+            Some(payload) => payload.is_front_door(),
+        } {
             return Ok(());
         }
         // A malformed SSH frame ends the epoch. Its deadline is the request's
@@ -1076,7 +1077,16 @@ async fn forward_host(
         // Opaque recipient-sealed ciphertext; this relay cannot open either.
         Some(Payload::CodexLogin(value)) => sender.send_codex_login(value).await,
         Some(Payload::ClaudeLogin(value)) => sender.send_claude_login(value).await,
-        Some(Payload::Open(_)) | None => {
+        // A front-door session's frames are unknown frames toward a daemon.
+        Some(
+            Payload::Open(_)
+            | Payload::UpgradeAccepted(_)
+            | Payload::StreamData(_)
+            | Payload::StreamCredit(_)
+            | Payload::StreamClose(_)
+            | Payload::InterceptionHint(_),
+        )
+        | None => {
             return Err(Status::unavailable("credential relay frame is invalid"));
         }
     };

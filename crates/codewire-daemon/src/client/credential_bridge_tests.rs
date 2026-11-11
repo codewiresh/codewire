@@ -194,3 +194,71 @@ fn non_ssh_guest_frames_keep_the_existing_cancel_path() {
     };
     assert!(validate_credential_bridge_guest_message(&cancel).is_ok());
 }
+
+/// Receipt checks only an SSH frame's shape and decides nothing else: a
+/// front-door frame passes it unchanged, exactly as an unknown frame (an
+/// empty payload, which an older daemon's frame decodes as) does, and the
+/// broker that reads it ends the epoch.
+#[test]
+fn front_door_guest_frames_pass_receipt_as_an_unknown_frame_does() {
+    use v1::credential_bridge_guest_message::Payload;
+    for payload in [
+        None,
+        Some(Payload::Upgrade(v1::CredentialBridgeUpgrade {
+            request_id: REQUEST_ID.into(),
+            method: "GET".into(),
+            path: "/v1/responses".into(),
+            intercepted_host: "chatgpt.com".into(),
+            initial_credit_bytes: 65_536,
+            ..Default::default()
+        })),
+        Some(Payload::StreamData(v1::CredentialBridgeStreamData {
+            request_id: REQUEST_ID.into(),
+            data: b"frame".to_vec(),
+        })),
+        Some(Payload::StreamCredit(v1::CredentialBridgeStreamCredit {
+            request_id: REQUEST_ID.into(),
+            credit_bytes: 1024,
+        })),
+        Some(Payload::StreamClose(v1::CredentialBridgeStreamClose {
+            request_id: REQUEST_ID.into(),
+            kind: v1::CredentialBridgeStreamCloseKind::Reset as i32,
+        })),
+    ] {
+        let message = v1::CredentialBridgeGuestMessage { payload };
+        let exact = message.clone();
+        validate_credential_bridge_guest_message(&message).unwrap();
+        assert_eq!(message, exact);
+    }
+}
+
+/// An Open lists only the operations this build knows for a daemon's epoch,
+/// once each and bounded. A front-door session's capabilities are dropped
+/// wherever they come from, as an unknown name is.
+#[test]
+fn an_open_never_lists_a_front_door_capability() {
+    let mut offered = vec![
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
+        "future-op",
+    ];
+    offered.extend(codewire_daemon_proto::CREDENTIAL_BRIDGE_FRONT_DOOR_CAPABILITIES);
+    offered.extend([
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
+    ]);
+    assert_eq!(
+        known_credential_bridge_capabilities(offered),
+        [
+            codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
+            codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
+        ]
+    );
+    assert!(
+        known_credential_bridge_capabilities(
+            codewire_daemon_proto::CREDENTIAL_BRIDGE_FRONT_DOOR_CAPABILITIES
+                .iter()
+                .copied()
+        )
+        .is_empty()
+    );
+}
