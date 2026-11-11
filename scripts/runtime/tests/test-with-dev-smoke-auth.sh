@@ -35,7 +35,7 @@ make_fake_tools() {
   cat >"$bin/bao" <<'FAKE_BAO'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$*" == 'kv get -format=json apps/codewire/dev/ci-smoke' ]] || exit 90
+[[ "$*" == "kv get -format=json $MOCK_OPENBAO_PATH" ]] || exit 90
 [[ "${BAO_ADDR:-}" == 'https://openbao.example.invalid' ]] || exit 91
 [[ "${BAO_TOKEN:-}" == 'synthetic-bao-token-4060' ]] || exit 93
 [[ "$HOME" == */bao-home && -d "$HOME" ]] || exit 94
@@ -105,8 +105,11 @@ CHILD
   chmod 0755 "$child"
 }
 
+# run_case MODE success|failure [ERROR [READS [WRAPPER ARGS...]]]; CASE_OPENBAO_PATH
+# is the document the fake bao expects.
 run_case() {
   local mode="$1" expected="$2" expected_error="${3:-}" reads="${4:-1}"
+  shift "$(( $# < 4 ? $# : 4 ))"
   local dir="$TEST_TMP/$mode" rc
   mkdir -p "$dir/bin" "$dir/state" "$dir/tmp"
   chmod 0700 "$dir/state" "$dir/tmp"
@@ -127,12 +130,13 @@ run_case() {
 
   set +e
   PATH="$dir/bin" MOCK_MODE="$mode" MOCK_STATE="$dir/state" TMPDIR="$dir/tmp" \
+    MOCK_OPENBAO_PATH="${CASE_OPENBAO_PATH:-apps/codewire/dev/ci-smoke}" \
     BAO_ADDR='https://openbao.example.invalid' BAO_TOKEN='stale-owner-token' \
     CODEWIRE_ACCESS_CLIENT="$access" CODEWIRE_INFRA_DIR="$infra" \
     CODEWIRE_DEV_SMOKE_API_KEY="$STALE_API_KEY" \
     EXPECTED_CODEWIRE_SMOKE_USER_EMAIL="$STALE_EMAIL" \
     CODEWIRE_API_KEY="$STALE_API_KEY" \
-    "$WRAPPER" -- "$dir/child" >"$dir/out" 2>"$dir/err"
+    "$WRAPPER" "$@" -- "$dir/child" >"$dir/out" 2>"$dir/err"
   rc=$?
   set -e
 
@@ -152,7 +156,7 @@ run_case() {
 }
 
 grep -F 'readonly OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"' "$WRAPPER" >/dev/null
-grep -F 'readonly OPENBAO_PATH="apps/codewire/dev/ci-smoke"' "$WRAPPER" >/dev/null
+grep -F 'readonly SMOKE_OPENBAO_PATH="apps/codewire/dev/ci-smoke"' "$WRAPPER" >/dev/null
 if grep -Eqi 'secret-tool|platform_project' "$WRAPPER"; then
   fail 'auth wrapper still contains an unreviewed credential source'
 fi
@@ -165,7 +169,18 @@ run_case via_infra_dir success
 run_case access_closed failure 'the access client session is closed' 0
 run_case revoke_refused failure 'was not confirmed revoked'
 run_case read_failure failure 'failed to fetch the canonical Dev smoke document'
-run_case permission failure 'the access client token lacks the exact Dev smoke path'
+run_case permission failure 'the access client token lacks the exact Dev path apps/codewire/dev/ci-smoke'
+# --openbao-path reads another Dev identity's document, and only a Dev one.
+CASE_OPENBAO_PATH=apps/codewire/dev/ci-billing-rehearsal run_case rehearsal_path success '' 1 \
+  --openbao-path apps/codewire/dev/ci-billing-rehearsal
+grep -F 'loaded the two Dev identity values from canonical OpenBao apps/codewire/dev/ci-billing-rehearsal' \
+  "$TEST_TMP/rehearsal_path/err" >/dev/null || fail 'rehearsal_path did not name the document it read'
+run_case prod_path failure 'OpenBao path must be apps/codewire/dev/<lowercase-slug>' 0 \
+  --openbao-path apps/codewire/prod/ci-smoke
+run_case traversal_path failure 'OpenBao path must be apps/codewire/dev/<lowercase-slug>' 0 \
+  --openbao-path apps/codewire/dev/../prod/ci-smoke
+run_case missing_path failure 'OpenBao path must be apps/codewire/dev/<lowercase-slug>' 0 \
+  --openbao-path ''
 run_case wrong_shape failure 'unexpected shape'
 run_case extra_field failure 'unexpected shape'
 run_case invalid_key failure 'unexpected shape'

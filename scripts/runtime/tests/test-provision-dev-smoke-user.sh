@@ -49,6 +49,12 @@ make_fake_tools() {
 set -euo pipefail
 [[ "${INFRA_KUBECONFIG_DIR:-}" == "$MOCK_STATE/kube" ]]
 [[ "${KUBECONFIG:-}" == "$MOCK_STATE/kube/scoped.yaml" ]]
+if [[ "$*" == '-n dev get pods -l cnpg.io/cluster=codewire-db,cnpg.io/instanceRole=primary -o name' ]]; then
+  printf 'lookup\n' >>"$MOCK_STATE/primary-lookups"
+  [[ -z "$MOCK_PRIMARIES" ]] || printf '%s\n' "$MOCK_PRIMARIES"
+  exit 0
+fi
+[[ "$1 $2 $3 $4" == "-n dev exec -i" ]] || exit 91
 sql="$(sed -n '1,$p')"
 printf '%s\n-- statement boundary --\n' "$sql" >>"$MOCK_STATE/psql.sql"
 printf '%s\n' "$*" >>"$MOCK_STATE/psql.args"
@@ -156,7 +162,7 @@ FAKE_CW
 
   chmod 0755 "$bin/kubectl" "$bin/bao" "$bin/cw"
   for name in awk bash cat chmod dirname find grep jq mkdir mktemp mv \
-    rg rmdir rm sed sha256sum shred stat; do
+    rg rmdir rm sed sha256sum shred stat wc; do
     ln -s "$(command -v "$name")" "$bin/$name"
   done
 }
@@ -171,6 +177,7 @@ prepare_case() {
   : >"$dir/state/events"
   : >"$dir/state/psql.sql"
   : >"$dir/state/psql.args"
+  : >"$dir/state/primary-lookups"
   if [[ "${CASE_DOCUMENT:-present}" == absent ]]; then
     printf '0' >"$dir/state/active-keys"
   else
@@ -197,6 +204,7 @@ invoke_case() {
   PATH="$dir/bin" MOCK_MODE="$mode" MOCK_STATE="$dir/state" TMPDIR="$dir/tmp" \
     MOCK_OPENBAO_PATH="${CASE_OPENBAO_PATH:-$SMOKE_PATH}" \
     MOCK_ORG_SLUG="${CASE_ORG_SLUG:-codewire-dev-smoke}" \
+    MOCK_PRIMARIES="${CASE_PRIMARIES-pod/codewire-db-3}" \
     INFRA_KUBECONFIG_DIR="$dir/state/kube" \
     KUBECONFIG="$dir/state/kube/scoped.yaml" \
     BAO_ADDR='https://openbao.example.invalid' CW_BIN="$dir/bin/cw" \
@@ -251,6 +259,12 @@ run_refusal() {
 success_events=$'bao-get\ndb-stage\nbao-put\nbao-get\nprobe\nbao-get\ndb-finalize\ndb-verify\nbao-get'
 run_case success success success "$success_events"
 run_case interrupted interrupted success "$success_events"
+run_case postgres_pod_override success success "$success_events" '' \
+  --postgres-pod codewire-db-2
+CASE_PRIMARIES='' run_case no_primary success failure '' \
+  'expected exactly one codewire-db primary'
+CASE_PRIMARIES=$'pod/codewire-db-2\npod/codewire-db-3' run_case two_primaries success failure '' \
+  'expected exactly one codewire-db primary'
 run_case cas_failure cas_failure failure $'bao-get\ndb-stage\nbao-put\ndb-rollback' \
   'CAS publication failed; candidate database key was disabled'
 run_case probe_failure probe_failure failure \
@@ -382,6 +396,22 @@ jq -e '.data.metadata.version == 1' "$TEST_TMP/rehearsal_create/state/openbao.js
   fail 'create mode did not create the first document version'
 [[ "$(<"$TEST_TMP/rehearsal_rotate/state/put-cas")" == '-cas=7' ]] ||
   fail 'rotation did not publish against the version it read'
+# The database pod is the CloudNativePG primary, looked up once per run, unless
+# --postgres-pod names one; anything but exactly one primary stops the run
+# before OpenBao or the database is touched.
+[[ "$(wc -l <"$TEST_TMP/success/state/primary-lookups")" == 1 ]] ||
+  fail 'the primary was not looked up exactly once'
+[[ "$(grep -c '' "$TEST_TMP/success/state/psql.args")" -gt 0 &&
+  "$(grep -vc -- '^-n dev exec -i codewire-db-3 ' "$TEST_TMP/success/state/psql.args")" == 0 ]] ||
+  fail 'queries did not all run on the looked-up primary'
+[[ ! -s "$TEST_TMP/postgres_pod_override/state/primary-lookups" ]] ||
+  fail '--postgres-pod still looked up the primary'
+[[ "$(grep -vc -- '^-n dev exec -i codewire-db-2 ' "$TEST_TMP/postgres_pod_override/state/psql.args")" == 0 ]] ||
+  fail '--postgres-pod did not choose the database pod'
+for name in no_primary two_primaries; do
+  [[ ! -s "$TEST_TMP/$name/state/psql.sql" ]] || fail "$name reached the database"
+done
+
 for name in rehearsal_create_existing rehearsal_missing missing_document; do
   [[ ! -s "$TEST_TMP/$name/state/psql.sql" ]] || fail "$name reached the database"
 done

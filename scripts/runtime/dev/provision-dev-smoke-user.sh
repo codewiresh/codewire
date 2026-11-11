@@ -30,7 +30,8 @@ PLAN_KEY_GIVEN=false
 
 KUBE_CONTEXT="${KUBE_CONTEXT:-}"
 KUBE_NAMESPACE="${KUBE_NAMESPACE:-dev}"
-POSTGRES_POD="${POSTGRES_POD:-codewire-db-1}"
+# Empty means the CloudNativePG primary, resolved by label before the first query.
+POSTGRES_POD="${POSTGRES_POD:-}"
 POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-postgres}"
 POSTGRES_DB="${POSTGRES_DB:-codewire}"
 POSTGRES_USER="${POSTGRES_USER:-postgres}"
@@ -91,7 +92,8 @@ Options:
                             exists. Without it a missing document is refused.
   --context NAME            Optional Kubernetes context inside scoped kube-access
   --namespace NAME          Kubernetes namespace (default: dev)
-  --postgres-pod NAME       PostgreSQL pod (default: codewire-db-1)
+  --postgres-pod NAME       PostgreSQL pod (default: the codewire-db primary,
+                            found by its CloudNativePG labels)
   -h, --help                Show this help
 
 Safety:
@@ -204,7 +206,7 @@ else
     "$SMOKE_ORG_SLUG" != "$REHEARSAL_ORG_SLUG" ]] ||
     die 'the billing-rehearsal identity is never unlimited; use --rate-card regular'
 fi
-for command in awk bao find jq kubectl mktemp rg rm rmdir sha256sum stat; do
+for command in awk bao find jq kubectl mktemp rg rm rmdir sha256sum stat wc; do
   require_cmd "$command"
 done
 [[ -x "$CW_BIN" ]] || die "Codewire CLI is unavailable: $CW_BIN"
@@ -240,6 +242,17 @@ done
 
 KUBECTL=(kubectl)
 [[ -z "$KUBE_CONTEXT" ]] || KUBECTL+=(--context "$KUBE_CONTEXT")
+# Instances are replaced and the primary moves on failover, so a fixed name can
+# miss it (on 2026-11-11 codewire-db-1 no longer existed on Dev).
+if [[ -z "$POSTGRES_POD" ]]; then
+  primaries="$("${KUBECTL[@]}" -n "$KUBE_NAMESPACE" get pods \
+    -l cnpg.io/cluster=codewire-db,cnpg.io/instanceRole=primary -o name)" ||
+    die 'cannot list the codewire-db primary'
+  [[ "$(wc -l <<<"$primaries")" == 1 && "$primaries" == pod/codewire-db-* ]] ||
+    die 'expected exactly one codewire-db primary'
+  POSTGRES_POD="${primaries#pod/}"
+fi
+readonly POSTGRES_POD
 run_psql() {
   "${KUBECTL[@]}" -n "$KUBE_NAMESPACE" exec -i "$POSTGRES_POD" \
     -c "$POSTGRES_CONTAINER" -- psql -X -qAt -v ON_ERROR_STOP=1 \

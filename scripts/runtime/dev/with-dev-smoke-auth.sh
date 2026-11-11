@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
-# Load the dedicated Dev smoke identity from its canonical OpenBao document,
-# scrub the owner credential surface, and exec exactly one child.
+# Load a dedicated Dev identity (the smoke identity unless --openbao-path names
+# another, such as the billing-rehearsal one) from its canonical OpenBao
+# document, scrub the owner credential surface, and exec exactly one child.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 readonly OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
-readonly OPENBAO_PATH="apps/codewire/dev/ci-smoke"
+readonly SMOKE_OPENBAO_PATH="apps/codewire/dev/ci-smoke"
+OPENBAO_PATH="$SMOKE_OPENBAO_PATH"
 
 AUTH_TMPDIR=""
 
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/runtime/dev/with-dev-smoke-auth.sh [--] [command args...]
+  scripts/runtime/dev/with-dev-smoke-auth.sh [--openbao-path PATH] [--] [command args...]
 
-Loads the two dedicated Dev smoke values from the canonical OpenBao document,
-removes all OpenBao and inherited smoke credentials, and execs the requested
-command. With no command, runs:
+Loads the two dedicated Dev identity values (apiKey, userEmail) from a canonical
+OpenBao document, by default apps/codewire/dev/ci-smoke, the smoke identity.
+--openbao-path names another Dev identity document, apps/codewire/dev/<slug>,
+such as apps/codewire/dev/ci-billing-rehearsal (#3381). The values reach the
+command as CODEWIRE_DEV_SMOKE_API_KEY and EXPECTED_CODEWIRE_SMOKE_USER_EMAIL.
+The wrapper removes all OpenBao and inherited smoke credentials, and execs the
+requested command. With no command, runs:
 
   scripts/runtime/dev/smoke-dev-commodity.sh
 
@@ -67,6 +73,14 @@ trap 'exit 130' HUP INT TERM
 
 case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
 if [[ "${1:-}" == '-h' || "${1:-}" == '--help' ]]; then usage; exit 0; fi
+if [[ "${1:-}" == '--openbao-path' ]]; then
+  [[ $# -ge 2 ]] || die '--openbao-path requires a value'
+  OPENBAO_PATH="$2"
+  shift 2
+fi
+[[ "$OPENBAO_PATH" =~ ^apps/codewire/dev/[a-z0-9]+(-[a-z0-9]+)*$ ]] ||
+  die 'OpenBao path must be apps/codewire/dev/<lowercase-slug>'
+readonly OPENBAO_PATH
 for command in bao cmp find grep jq mktemp rm sed stat wc; do
   command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"
 done
@@ -95,7 +109,7 @@ done
 openbao_access_acquire "$AUTH_TMPDIR" || die 'no OpenBao token from the access client'
 if ! openbao_access_kv_get "$AUTH_TMPDIR" "$OPENBAO_ADDR" "$OPENBAO_PATH" "$DOCUMENT" "$ERROR_FILE"; then
   if grep -Eqi 'permission denied|status code: 403|code 403' "$ERROR_FILE"; then
-    die 'the access client token lacks the exact Dev smoke path'
+    die "the access client token lacks the exact Dev path $OPENBAO_PATH"
   fi
   die 'failed to fetch the canonical Dev smoke document; output suppressed'
 fi
@@ -124,5 +138,5 @@ export CODEWIRE_DEV_SMOKE_API_KEY EXPECTED_CODEWIRE_SMOKE_USER_EMAIL
 if [[ "${1:-}" == '--' ]]; then shift; fi
 if [[ "$#" -eq 0 ]]; then set -- "$ROOT/scripts/runtime/dev/smoke-dev-commodity.sh"; fi
 
-log 'loaded the two fixed Dev smoke values from canonical OpenBao'
+log "loaded the two Dev identity values from canonical OpenBao $OPENBAO_PATH"
 exec "$@"
