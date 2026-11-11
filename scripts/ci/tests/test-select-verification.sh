@@ -4479,6 +4479,7 @@ bash -n \
 
 defer_slow_check "$ROOT/scripts/ci/tests/test-pre-push-worktree.sh"
 defer_slow_check "$ROOT/scripts/ci/tests/test-push-check-shellcheck.sh"
+defer_check "$ROOT/scripts/ci/tests/test-push-check-desktop-lock.sh"
 defer_slow_check "$ROOT/scripts/ci/tests/test-emit-verification-matrices.sh"
 
 # Main CI runs start at once, one group per commit. A main push whose

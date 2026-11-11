@@ -125,10 +125,20 @@ fi
 if [ "${#bin_packages[@]}" -gt 0 ]; then
   step rust-unit-tests-bin cargo test --locked "${bin_packages[@]}" --bins
 fi
+desktop_manifest=crates/codewire-desktop/Cargo.toml
+# The desktop is its own workspace with its own lock, and it uses workspace
+# crates such as codewire-client: a dependency change there must update its
+# lock too. The same read as CI's planner and test archives, which failed
+# #4019's first run; without --no-deps, so a stale lock fails.
+desktop_lock() {
+  cargo metadata --locked --manifest-path "$desktop_manifest" --format-version=1 \
+    --all-features --filter-platform x86_64-unknown-linux-gnu >/dev/null
+}
 if [ "$detached_desktop" = true ]; then
-  desktop_manifest=crates/codewire-desktop/Cargo.toml
   step desktop-fmt cargo fmt --manifest-path "$desktop_manifest" --check
   step desktop-check cargo check --locked --manifest-path "$desktop_manifest"
+elif [ "${#packages[@]}" -gt 0 ] || [ "$rust_workspace" = true ]; then
+  step desktop-lock desktop_lock
 fi
 
 shellcheck_changed() {

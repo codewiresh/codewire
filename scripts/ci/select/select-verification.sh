@@ -860,6 +860,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-verify-release-tag-receipt.sh|\
       scripts/ci/tests/test-pre-push-worktree.sh|\
       scripts/ci/tests/test-push-check-shellcheck.sh|\
+      scripts/ci/tests/test-push-check-desktop-lock.sh|\
       scripts/ci/tests/test-go-source-ownership.sh|\
       scripts/ci/tests/test-dev-deployment-smoke-receipt.sh|\
       scripts/ci/tests/test-agent-sandbox-pin.sh|\
