@@ -654,7 +654,35 @@ impl WorkspaceVolume {
             Self::Existing => "existing",
         }
     }
+
+    /// The argument `mount-workspace` takes: the state, with `-subfolder`
+    /// when `/workspace` is the filesystem's `workspace/` folder (#4026).
+    pub(crate) fn argument(self, subfolder: bool) -> String {
+        if subfolder {
+            format!("{}{SUBFOLDER_SUFFIX}", self.as_str())
+        } else {
+            self.as_str().to_owned()
+        }
+    }
+
+    /// Reads an [`Self::argument`] back: the state, and whether the Pod mounts
+    /// the subfolder. A Sandbox keeps the layout it was created with, whatever
+    /// `SANDBOX_WORKSPACE_LAYOUT` says later.
+    pub(crate) fn parse_argument(argument: &str) -> Option<(Self, bool)> {
+        let (state, subfolder) = match argument.strip_suffix(SUBFOLDER_SUFFIX) {
+            Some(state) => (state, true),
+            None => (argument, false),
+        };
+        let volume = match state {
+            "new" => Self::New,
+            "existing" => Self::Existing,
+            _ => return None,
+        };
+        Some((volume, subfolder))
+    }
 }
+
+const SUBFOLDER_SUFFIX: &str = "-subfolder";
 
 /// The guest-memory emptyDirs a Block workspace is mounted into, with the
 /// subfolder's when `/workspace` is one (#4026). They hold only mount
@@ -716,11 +744,7 @@ pub(crate) fn mount_workspace_init_container(
 ) -> Value {
     // The layout rides in the one argument, so the admitted argv keeps its
     // shape (infra's Kyverno policy pins five elements).
-    let state = if subfolder {
-        format!("{}-subfolder", volume.as_str())
-    } else {
-        volume.as_str().to_owned()
-    };
+    let state = volume.argument(subfolder);
     let command = json!([
         "sh",
         "-c",

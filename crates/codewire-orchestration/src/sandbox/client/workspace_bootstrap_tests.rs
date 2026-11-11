@@ -2742,6 +2742,126 @@ async fn a_duplicated_dind_container_fails_the_start_without_writes() {
     assert_eq!(state.sandbox, sandbox);
 }
 
+/// #4026: a Sandbox created with the subfolder layout stops into
+/// `existing-subfolder`, keeping its layout, even after
+/// `SANDBOX_WORKSPACE_LAYOUT` is turned back off: the stop reads the Sandbox,
+/// never the setting. Before this, its first stop failed ("names no workspace
+/// volume state") and left the environment in error.
+#[test]
+fn a_subfolder_workspace_stops_into_existing_subfolder_whatever_the_setting_says_now() {
+    use super::super::template::{MOUNT_WORKSPACE_CONTAINER, RUNTIME_PROFILE_COMMODITY};
+    let sandbox = |spec: Value| -> DynamicObject {
+        serde_json::from_value(json!({
+            "apiVersion":"agents.x-k8s.io/v1beta1","kind":"Sandbox",
+            "metadata":{"name":SANDBOX,"namespace":NS,"uid":"sandbox-incarnation"},
+            "spec":spec,
+        }))
+        .unwrap()
+    };
+    let on = TemplateOpts {
+        runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
+        disk_gib: 40,
+        workspace_subfolder: true,
+        ..binding_opts()
+    };
+    let created = sandbox(render_sandbox_template(NS, &on)["spec"].clone());
+    let index = block_workspace(&created).unwrap().unwrap();
+    let entry = format!("/spec/podTemplate/spec/initContainers/{index}");
+    assert_eq!(
+        created.data.pointer(&format!("{entry}/command/4")).unwrap(),
+        "new-subfolder"
+    );
+
+    // The setting is off again: a fresh render would be the whole volume, but
+    // the created Sandbox is what its stop patches.
+    let off = TemplateOpts {
+        workspace_subfolder: false,
+        ..on.clone()
+    };
+    assert_eq!(
+        render_sandbox_template(NS, &off)["spec"]["podTemplate"]["spec"]["initContainers"][index]["command"]
+            [4],
+        "new"
+    );
+    assert!(
+        workspace_volume_existing(&created, index, false)
+            .unwrap()
+            .is_empty(),
+        "a first Pod that failed before its format stays new"
+    );
+    let operations = workspace_volume_existing(&created, index, true).unwrap();
+    assert_eq!(
+        operations,
+        [
+            json!({"op":"test","path":format!("{entry}/name"),"value":MOUNT_WORKSPACE_CONTAINER}),
+            json!({"op":"test","path":format!("{entry}/command/4"),"value":"new-subfolder"}),
+            json!({"op":"replace","path":format!("{entry}/command/4"),"value":"existing-subfolder"}),
+        ]
+    );
+    let mut stopped = created.data.clone();
+    assert!(apply_patch_fixture(&mut stopped, &json!(operations)));
+    assert_eq!(
+        stopped.pointer(&format!("{entry}/command/4")).unwrap(),
+        "existing-subfolder"
+    );
+    // Its next Pod still mounts only the folder at /workspace.
+    let volumes = stopped.pointer("/spec/podTemplate/spec/volumes").unwrap();
+    assert!(
+        volumes
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|volume| volume["name"] == "mntws"),
+        "{volumes}"
+    );
+    let stopped = sandbox(stopped["spec"].clone());
+    assert!(
+        workspace_volume_existing(&stopped, index, true)
+            .unwrap()
+            .is_empty(),
+        "a second stop changes nothing"
+    );
+
+    // A fork of it restores a snapshot: existing from the start.
+    let fork = sandbox(
+        render_sandbox_template(
+            NS,
+            &TemplateOpts {
+                workspace_source_snapshot: Some("cw-kept-fork".into()),
+                ..on.clone()
+            },
+        )["spec"]
+            .clone(),
+    );
+    assert_eq!(
+        fork.data.pointer(&format!("{entry}/command/4")).unwrap(),
+        "existing-subfolder"
+    );
+    assert!(
+        workspace_volume_existing(&fork, index, true)
+            .unwrap()
+            .is_empty()
+    );
+
+    // Anything else is still refused.
+    for unknown in [
+        "subfolder",
+        "new-",
+        "new-subfolder-subfolder",
+        "existing-other",
+    ] {
+        let mut odd = created.data.clone();
+        *odd.pointer_mut(&format!("{entry}/command/4")).unwrap() = json!(unknown);
+        let error = workspace_volume_existing(&sandbox(odd["spec"].clone()), index, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("names no workspace volume state"),
+            "{unknown}: {error}"
+        );
+    }
+}
+
 /// #3718: once a Sandbox's live Pod has mounted its Block workspace, a stop or
 /// a Pod replacement turns the rendered `new` into `existing`, so no later
 /// Pod may format the volume. A first Pod whose `mount-workspace` failed
