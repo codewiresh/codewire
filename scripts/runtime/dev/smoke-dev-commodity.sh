@@ -1092,6 +1092,10 @@ prepare_cli() {
       ;;
     *) die "unsupported smoke auth mode: $SMOKE_AUTH_MODE" ;;
   esac
+  # A cloud command's local lookup starts a supervisor for the native state
+  # root it finds. With the user's own root, that supervisor would keep this
+  # smoke's configuration and temporary cw, and lock the user out (#3793).
+  export CODEWIRE_NATIVE_STATE_ROOT="$TMPDIR_SMOKE/native-v1"
 
   if [[ -z "$CW_BIN" ]]; then
     require_cmd cargo

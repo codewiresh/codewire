@@ -1690,9 +1690,30 @@ run_admin_oauth_contract_cases() {
     prepare_cli
     [[ "$CW_CONFIG_DIR" == "$config_dir" ]]
     [[ -z "${CODEWIRE_API_KEY+x}" ]]
+    [[ "$CODEWIRE_NATIVE_STATE_ROOT" == "$TMPDIR_SMOKE/native-v1" ]]
   ) >/dev/null 2>"$error" || {
     sed 's/[[:cntrl:]]//g' "$error" >&2 || true
     fail "valid saved admin OIDC contract was rejected"
+  }
+
+  # Neither auth mode lets the smoke's cw start a supervisor for the user's
+  # own native state root (#3793).
+  (
+    # shellcheck disable=SC1090 # Intentional dynamic source fixture.
+    source "$SMOKE"
+    export CODEWIRE_SERVER_URL="https://codewire-dev.example"
+    export EXPECTED_CODEWIRE_DEV_SERVER_URL="$CODEWIRE_SERVER_URL"
+    export SMOKE_AUTH_MODE="api-key"
+    export SMOKE_TMP_PARENT="$case_dir/tmp-native-root"
+    export CW_BIN="$cw_bin"
+    export CODEWIRE_DEV_SMOKE_API_KEY="cw_synthetic"
+    export CODEWIRE_NATIVE_STATE_ROOT="$HOME/.codewire/native-v1"
+    prepare_cli
+    [[ "$CODEWIRE_NATIVE_STATE_ROOT" == "$TMPDIR_SMOKE/native-v1" ]]
+    [[ "$CW_CONFIG_DIR" == "$TMPDIR_SMOKE/cw-config" ]]
+  ) >/dev/null 2>"$error" || {
+    sed 's/[[:cntrl:]]//g' "$error" >&2 || true
+    fail "API key smoke kept the user's native state root"
   }
 
   if (
