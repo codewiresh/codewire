@@ -76,6 +76,26 @@ pub(crate) fn render_credential_settings_page(template: impl Template) -> Respon
     response
 }
 
+/// The billing page's forms POST to billing's setup and portal actions, which
+/// answer with a redirect to Stripe's hosted Checkout or billing portal.
+/// Chromium applies this page's form-action to that cross-origin redirect too,
+/// so only these two Stripe hosts are added, and only here (#3381: "Add payment
+/// method" and "Manage in Stripe" did nothing).
+pub(crate) fn render_billing_page(template: impl Template) -> Response {
+    let mut response = render_page(template);
+    if response.status() == StatusCode::OK {
+        let policy = CONTENT_SECURITY_POLICY.replace(
+            "form-action 'self'",
+            "form-action 'self' https://checkout.stripe.com https://billing.stripe.com",
+        );
+        response.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_str(&policy).expect("static billing form policy"),
+        );
+    }
+    response
+}
+
 pub(crate) fn render_page_with_connect_origin(
     template: impl Template,
     connect_origin: &str,
@@ -326,6 +346,41 @@ mod tests {
             .map(str::trim)
             .find(|directive| directive.starts_with("img-src "));
         assert_eq!(img_src, Some("img-src 'self' data:"));
+    }
+
+    #[test]
+    fn only_the_billing_page_allows_the_stripe_form_redirects() {
+        #[derive(Template)]
+        #[template(source = "<main>Billing</main>", ext = "html")]
+        struct Billing;
+
+        let response = render_billing_page(Billing);
+        assert_eq!(response.status(), StatusCode::OK);
+        let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert!(
+            policy.contains(
+                "form-action 'self' https://checkout.stripe.com https://billing.stripe.com;"
+            ),
+            "{policy}"
+        );
+        assert_eq!(
+            policy.replace(
+                "form-action 'self' https://checkout.stripe.com https://billing.stripe.com",
+                "form-action 'self'"
+            ),
+            CONTENT_SECURITY_POLICY
+        );
+        for other in [
+            render_page(Billing),
+            render_credential_settings_page(Billing),
+        ] {
+            let policy = other.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap();
+            assert!(!policy.contains("stripe.com"), "{policy}");
+        }
     }
 
     #[test]

@@ -12,7 +12,7 @@ use serde::Deserialize;
 use crate::{
     billing_banner::{BannerViewer, SandboxLoad, billing_banner},
     billing_connect, environment_connect,
-    response::{login_redirect, redirect, render_page, render_template},
+    response::{login_redirect, redirect, render_billing_page, render_template},
     routes::organization_governance::{
         action_context, connect_page_error, get_context, get_context_without_rail,
         mutation_redirect,
@@ -78,7 +78,7 @@ pub(super) async fn page(
         Err(error) => return connect_page_error(error, &continuation, &headers),
     };
     with_csrf_cookie(
-        render_page(OrganizationBillingTemplate {
+        render_billing_page(OrganizationBillingTemplate {
             view: &dashboard,
             organization: &organization,
             billing: &billing,
