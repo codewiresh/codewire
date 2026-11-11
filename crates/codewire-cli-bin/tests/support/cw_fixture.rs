@@ -12,6 +12,15 @@ use std::time::Instant;
 #[cfg(target_os = "linux")]
 const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
 
+/// A hang guard for stripping the copy, not a speed expectation
+/// (docs/dev/AGENT-WORKFLOW.md "Failure convergence"). The strip takes about
+/// a second on an idle machine, but it reads the whole debug CW (1.4 GB)
+/// that this test has just written, beside every other test doing the same,
+/// and a busy CI runner took more than 30 s (#4150). CI's nextest still kills
+/// a hung test after ten minutes.
+#[cfg(target_os = "linux")]
+const STRIP_HANG_GUARD: Duration = Duration::from_secs(5 * 60);
+
 #[cfg(target_os = "linux")]
 struct StripChild(Child);
 
@@ -97,7 +106,7 @@ fn strip_linux_copy(path: &Path) {
             .spawn()
             .expect("strip debugging information from the owned CW copy"),
     );
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + STRIP_HANG_GUARD;
     loop {
         if let Some(status) = strip.0.try_wait().unwrap() {
             assert!(status.success(), "strip owned CW copy: {status}");
