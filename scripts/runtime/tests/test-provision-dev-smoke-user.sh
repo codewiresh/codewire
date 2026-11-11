@@ -12,6 +12,19 @@ readonly OLD_KEY="cw_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 readonly CANDIDATE_KEY="cw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 readonly CONCURRENT_KEY="cw_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 readonly EMAIL="codewire-dev-smoke@codewire-dev.sh"
+readonly SMOKE_PATH="apps/codewire/dev/ci-smoke"
+readonly REHEARSAL_PATH="apps/codewire/dev/ci-billing-rehearsal"
+readonly REHEARSAL_EMAIL="codewire-dev-billing-rehearsal@codewire-dev.sh"
+readonly REHEARSAL_SLUG="codewire-dev-billing-rehearsal"
+REHEARSAL_ARGS=(
+  --email "$REHEARSAL_EMAIL"
+  --name 'Codewire Dev billing rehearsal'
+  --org-name 'Codewire Dev billing rehearsal'
+  --org-slug "$REHEARSAL_SLUG"
+  --key-name dev-billing-rehearsal
+  --openbao-path "$REHEARSAL_PATH"
+  --rate-card regular
+)
 
 cleanup() { rm -rf -- "$TEST_TMP"; }
 trap cleanup EXIT
@@ -28,7 +41,7 @@ assert_redacted() {
 }
 
 make_fake_tools() {
-  local bin="$1"
+  local bin="$1" name
   mkdir -p "$bin"
 
   cat >"$bin/kubectl" <<'FAKE_KUBECTL'
@@ -38,6 +51,7 @@ set -euo pipefail
 [[ "${KUBECONFIG:-}" == "$MOCK_STATE/kube/scoped.yaml" ]]
 sql="$(sed -n '1,$p')"
 printf '%s\n-- statement boundary --\n' "$sql" >>"$MOCK_STATE/psql.sql"
+printf '%s\n' "$*" >>"$MOCK_STATE/psql.args"
 active="$(<"$MOCK_STATE/active-keys")"
 if grep -F 'SELECT raw_key.value' <<<"$sql" >/dev/null; then
   printf 'db-stage\n' >>"$MOCK_STATE/events"
@@ -52,7 +66,7 @@ elif grep -F 'api_keys.key_hash <>' <<<"$sql" >/dev/null; then
   printf '1' >"$MOCK_STATE/active-keys"
 elif grep -F 'final database state assertion' <<<"$sql" >/dev/null; then
   printf 'db-verify\n' >>"$MOCK_STATE/events"
-  if [[ "$MOCK_MODE" == finalize_verify_failure ]]; then
+  if [[ "$MOCK_MODE" == *finalize_verify_failure ]]; then
     printf '1|2|1\n'
   else
     printf '1|%s|1\n' "$(<"$MOCK_STATE/active-keys")"
@@ -67,7 +81,7 @@ FAKE_KUBECTL
 set -euo pipefail
 case "$1 $2" in
   'kv get')
-    [[ "$3" == '-format=json' && "$4" == 'apps/codewire/dev/ci-smoke' ]]
+    [[ "$3" == '-format=json' && "$4" == "$MOCK_OPENBAO_PATH" ]]
     printf 'bao-get\n' >>"$MOCK_STATE/events"
     if [[ "$MOCK_MODE" == read_failure ]]; then
       printf 'connection refused\n' >&2
@@ -80,6 +94,10 @@ case "$1 $2" in
     if [[ "$MOCK_MODE" == malformed ]]; then
       printf '%s\n' '{"data":{"metadata":{"version":1},"data":[]}}'
       exit 0
+    fi
+    if [[ ! -f "$MOCK_STATE/openbao.json" ]]; then
+      printf 'No value found at %s\n' "${4/\/codewire\//\/data\/codewire\/}" >&2
+      exit 2
     fi
     get_count=0
     [[ ! -f "$MOCK_STATE/get-count" ]] || get_count="$(<"$MOCK_STATE/get-count")"
@@ -98,13 +116,17 @@ case "$1 $2" in
     [[ ! -f "$MOCK_STATE/put-count" ]] || count="$(<"$MOCK_STATE/put-count")"
     count=$((count + 1))
     printf '%s' "$count" >"$MOCK_STATE/put-count"
-    [[ "$3" == -cas=* && "$4" == 'apps/codewire/dev/ci-smoke' && "$5" == @* ]]
-    if [[ "$MOCK_MODE" == cas_failure && "$count" == 1 ]]; then
+    [[ "$3" == -cas=* && "$4" == "$MOCK_OPENBAO_PATH" && "$5" == @* ]]
+    printf '%s\n' "$3" >>"$MOCK_STATE/put-cas"
+    if [[ "$MOCK_MODE" == *cas_failure && "$count" == 1 ]]; then
       printf 'check-and-set parameter did not match current version\n' >&2
       exit 2
     fi
     expected="${3#-cas=}"
-    actual="$(jq -er '.data.metadata.version' "$MOCK_STATE/openbao.json")"
+    # -cas=0 writes only when the path has no document yet.
+    actual=0
+    [[ ! -f "$MOCK_STATE/openbao.json" ]] ||
+      actual="$(jq -er '.data.metadata.version' "$MOCK_STATE/openbao.json")"
     [[ "$expected" == "$actual" ]] || exit 93
     payload="${5#@}"
     [[ -f "$payload" && "$(stat -c '%a' "$payload")" == 600 ]]
@@ -125,11 +147,11 @@ printf 'probe\n' >>"$MOCK_STATE/events"
 [[ "${CODEWIRE_API_KEY:-}" == 'cw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ]]
 [[ -n "${CW_CONFIG_DIR:-}" && -d "$CW_CONFIG_DIR" ]]
 [[ "$*" == '--server https://codewire-dev.sh org list --output json' ]]
-if [[ "$MOCK_MODE" == probe_failure ]]; then
+if [[ "$MOCK_MODE" == *probe_failure ]]; then
   printf 'session expired or invalid\n' >&2
   exit 1
 fi
-printf '%s\n' '[{"slug":"codewire-dev-smoke","role":"owner"}]'
+jq -cn --arg slug "$MOCK_ORG_SLUG" '[{slug:$slug,role:"owner"}]'
 FAKE_CW
 
   chmod 0755 "$bin/kubectl" "$bin/bao" "$bin/cw"
@@ -139,75 +161,160 @@ FAKE_CW
   done
 }
 
-run_case() {
-  local mode="$1" expected="$2" expected_events="$3" expected_error="${4:-}"
-  local dir="$TEST_TMP/$mode" rc
+# CASE_DOCUMENT=absent starts with no OpenBao document and no active key;
+# CASE_OPENBAO_PATH and CASE_ORG_SLUG tell the fakes which identity to expect.
+prepare_case() {
+  local dir="$1"
   mkdir -p "$dir/bin" "$dir/state/kube" "$dir/tmp"
   chmod 0700 "$dir/state" "$dir/state/kube" "$dir/tmp"
   : >"$dir/state/kube/scoped.yaml"
   : >"$dir/state/events"
   : >"$dir/state/psql.sql"
-  if [[ "$mode" == interrupted ]]; then
-    printf '2' >"$dir/state/active-keys"
+  : >"$dir/state/psql.args"
+  if [[ "${CASE_DOCUMENT:-present}" == absent ]]; then
+    printf '0' >"$dir/state/active-keys"
   else
-    printf '1' >"$dir/state/active-keys"
+    if [[ "$(basename "$dir")" == interrupted ]]; then
+      printf '2' >"$dir/state/active-keys"
+    else
+      printf '1' >"$dir/state/active-keys"
+    fi
+    jq -n --arg apiKey "$OLD_KEY" --arg userEmail "$EMAIL" \
+      '{data:{metadata:{version:7},data:{apiKey:$apiKey,userEmail:$userEmail}}}' \
+      >"$dir/state/openbao.json"
   fi
-  jq -n --arg apiKey "$OLD_KEY" --arg userEmail "$EMAIL" \
-    '{data:{metadata:{version:7},data:{apiKey:$apiKey,userEmail:$userEmail}}}' \
-    >"$dir/state/openbao.json"
   make_fake_tools "$dir/bin"
+}
 
+# Runs the provisioner in a prepared case directory and checks its outcome.
+invoke_case() {
+  local dir="$1" mode="$2" expected="$3" expected_events="$4" expected_error="$5"
+  shift 5
+  local name rc
+  name="$(basename "$dir")"
+  : >"$dir/state/events"
   set +e
   PATH="$dir/bin" MOCK_MODE="$mode" MOCK_STATE="$dir/state" TMPDIR="$dir/tmp" \
+    MOCK_OPENBAO_PATH="${CASE_OPENBAO_PATH:-$SMOKE_PATH}" \
+    MOCK_ORG_SLUG="${CASE_ORG_SLUG:-codewire-dev-smoke}" \
     INFRA_KUBECONFIG_DIR="$dir/state/kube" \
     KUBECONFIG="$dir/state/kube/scoped.yaml" \
     BAO_ADDR='https://openbao.example.invalid' CW_BIN="$dir/bin/cw" \
-    "$PROVISIONER" >"$dir/out" 2>"$dir/err"
+    "$PROVISIONER" "$@" >"$dir/out" 2>"$dir/err"
   rc=$?
   set -e
-
   if [[ "$expected" == success ]]; then
-    [[ "$rc" == 0 ]] || fail "$mode unexpectedly failed"
+    [[ "$rc" == 0 ]] || fail "$name unexpectedly failed"
     grep -F 'PASS canonical_store=openbao api_probe=true active_database_keys=1' \
-      "$dir/err" >/dev/null || fail "$mode omitted success receipt"
+      "$dir/err" >/dev/null || fail "$name omitted success receipt"
     jq -e --arg key "$CANDIDATE_KEY" '.data.data.apiKey == $key' \
-      "$dir/state/openbao.json" >/dev/null || fail "$mode did not retain candidate"
+      "$dir/state/openbao.json" >/dev/null || fail "$name did not retain candidate"
   else
-    [[ "$rc" != 0 ]] || fail "$mode unexpectedly succeeded"
-    grep -F "$expected_error" "$dir/err" >/dev/null || fail "$mode emitted wrong failure class"
+    [[ "$rc" != 0 ]] || fail "$name unexpectedly succeeded"
+    grep -F -e "$expected_error" "$dir/err" >/dev/null || fail "$name emitted wrong failure class"
   fi
-  printf '%s\n' "$expected_events" >"$dir/expected-events"
+  if [[ -n "$expected_events" ]]; then
+    printf '%s\n' "$expected_events" >"$dir/expected-events"
+  else
+    : >"$dir/expected-events"
+  fi
   cmp -s "$dir/expected-events" "$dir/state/events" || {
     sed -n '1,80p' "$dir/state/events" >&2
-    fail "$mode crossed an unexpected transaction boundary"
+    fail "$name crossed an unexpected transaction boundary"
   }
-  find "$dir/tmp" -mindepth 1 -print -quit | grep -q . && fail "$mode left private files"
+  find "$dir/tmp" -mindepth 1 -print -quit | grep -q . && fail "$name left private files"
   assert_redacted "$dir/out"
   assert_redacted "$dir/err"
   assert_redacted "$dir/state/events"
   if [[ "$expected" == success ]]; then
     [[ "$(<"$dir/state/active-keys")" == 1 ]] ||
-      fail "$mode did not converge interrupted database state"
+      fail "$name did not converge interrupted database state"
   fi
 }
 
+# run_case NAME MODE success|failure EVENTS [ERROR [SCRIPT ARGS...]]
+run_case() {
+  local name="$1" mode="$2"
+  shift 2
+  [[ "$#" -ge 3 ]] || set -- "$@" ''
+  prepare_case "$TEST_TMP/$name"
+  invoke_case "$TEST_TMP/$name" "$mode" "$@"
+}
+
+# A refusal before any OpenBao or database call.
+run_refusal() {
+  local name="$1" expected_error="$2"
+  shift 2
+  run_case "$name" success failure '' "$expected_error" "$@"
+}
+
 success_events=$'bao-get\ndb-stage\nbao-put\nbao-get\nprobe\nbao-get\ndb-finalize\ndb-verify\nbao-get'
-run_case success success "$success_events"
-run_case interrupted success "$success_events"
-run_case cas_failure failure $'bao-get\ndb-stage\nbao-put\ndb-rollback' \
+run_case success success success "$success_events"
+run_case interrupted interrupted success "$success_events"
+run_case cas_failure cas_failure failure $'bao-get\ndb-stage\nbao-put\ndb-rollback' \
   'CAS publication failed; candidate database key was disabled'
-run_case probe_failure failure \
+run_case probe_failure probe_failure failure \
   $'bao-get\ndb-stage\nbao-put\nbao-get\nprobe\nbao-get\nbao-put\nbao-get\ndb-rollback' \
   'candidate API authentication failed; prior document was restored and candidate disabled'
-run_case concurrent_publish failure \
+run_case concurrent_publish concurrent_publish failure \
   $'bao-get\ndb-stage\nbao-put\nbao-get\nprobe\nbao-get' \
   'canonical OpenBao document changed concurrently; active keys were retained'
-run_case finalize_verify_failure failure \
+run_case finalize_verify_failure finalize_verify_failure failure \
   $'bao-get\ndb-stage\nbao-put\nbao-get\nprobe\nbao-get\ndb-finalize\ndb-verify' \
   'post-commit database verification did not observe the exact one-key/one-owner state'
-run_case read_failure failure 'bao-get' 'unable to read the canonical Dev smoke document'
-run_case permission failure 'bao-get' 'OpenBao OIDC session is stale or lacks the exact Dev smoke path'
-run_case malformed failure 'bao-get' 'unexpected shape'
+run_case read_failure read_failure failure 'bao-get' 'unable to read the canonical Dev document'
+run_case permission permission failure 'bao-get' \
+  "OpenBao OIDC session is stale or lacks the exact Dev path $SMOKE_PATH"
+run_case malformed malformed failure 'bao-get' 'unexpected shape'
+CASE_DOCUMENT=absent run_case missing_document success failure 'bao-get' \
+  "canonical Dev document $SMOKE_PATH does not exist; pass --create-document only for a new identity"
+
+# The billing-rehearsal identity: regular rate card, its own document.
+CASE_DOCUMENT=absent CASE_OPENBAO_PATH="$REHEARSAL_PATH" CASE_ORG_SLUG="$REHEARSAL_SLUG" \
+  run_case rehearsal_create success success "$success_events" '' \
+  "${REHEARSAL_ARGS[@]}" --create-document
+CASE_OPENBAO_PATH="$REHEARSAL_PATH" CASE_ORG_SLUG="$REHEARSAL_SLUG" \
+  run_case rehearsal_rotate success success "$success_events" '' "${REHEARSAL_ARGS[@]}"
+CASE_OPENBAO_PATH="$REHEARSAL_PATH" CASE_ORG_SLUG="$REHEARSAL_SLUG" \
+  run_case rehearsal_create_existing success failure 'bao-get' \
+  "OpenBao $REHEARSAL_PATH already exists; rerun without --create-document" \
+  "${REHEARSAL_ARGS[@]}" --create-document
+CASE_DOCUMENT=absent CASE_OPENBAO_PATH="$REHEARSAL_PATH" CASE_ORG_SLUG="$REHEARSAL_SLUG" \
+  run_case rehearsal_missing success failure 'bao-get' \
+  "canonical Dev document $REHEARSAL_PATH does not exist" "${REHEARSAL_ARGS[@]}"
+CASE_DOCUMENT=absent CASE_OPENBAO_PATH="$REHEARSAL_PATH" CASE_ORG_SLUG="$REHEARSAL_SLUG" \
+  run_case rehearsal_create_cas_failure create_cas_failure failure \
+  $'bao-get\ndb-stage\nbao-put\ndb-rollback' \
+  'CAS publication failed; candidate database key was disabled' \
+  "${REHEARSAL_ARGS[@]}" --create-document
+created_disabled="OpenBao $REHEARSAL_PATH was created by this run and now holds a disabled key; rerun without --create-document to rotate it"
+CASE_DOCUMENT=absent CASE_OPENBAO_PATH="$REHEARSAL_PATH" CASE_ORG_SLUG="$REHEARSAL_SLUG" \
+  run_case rehearsal_create_probe_failure create_probe_failure failure \
+  $'bao-get\ndb-stage\nbao-put\nbao-get\nprobe\ndb-rollback' "$created_disabled" \
+  "${REHEARSAL_ARGS[@]}" --create-document
+CASE_DOCUMENT=absent CASE_OPENBAO_PATH="$REHEARSAL_PATH" CASE_ORG_SLUG="$REHEARSAL_SLUG" \
+  run_case rehearsal_create_finalize_failure create_finalize_verify_failure failure \
+  $'bao-get\ndb-stage\nbao-put\nbao-get\nprobe\nbao-get\ndb-finalize\ndb-verify\ndb-rollback' \
+  "$created_disabled" "${REHEARSAL_ARGS[@]}" --create-document
+
+# Refusals that touch neither OpenBao nor the database.
+run_refusal plan_key_regular '--plan-key applies only to --rate-card unlimited' \
+  "${REHEARSAL_ARGS[@]}" --plan-key unlimited
+run_refusal rate_card_unknown '--rate-card must be unlimited or regular' --rate-card discounted
+run_refusal smoke_regular 'the Dev smoke identity stays unlimited' --rate-card regular \
+  --openbao-path "$REHEARSAL_PATH"
+run_refusal rehearsal_unlimited 'the billing-rehearsal identity is never unlimited' \
+  "${REHEARSAL_ARGS[@]}" --rate-card unlimited
+run_refusal acceptance_account 'the browser acceptance account is never provisioned' \
+  "${REHEARSAL_ARGS[@]}" --email hello@codewire.sh
+bad_path_index=0
+for bad_path in apps/codewire/prod/ci-smoke apps/codewire/dev/ apps/codewire/dev/Ci-smoke \
+  apps/codewire/dev/ci_smoke apps/codewire/dev/ci-smoke/extra apps/codewire/dev/-ci \
+  apps/codewire/dev/../prod/ci-smoke ' apps/codewire/dev/ci-smoke'; do
+  bad_path_index=$((bad_path_index + 1))
+  run_refusal "bad_openbao_path_$bad_path_index" \
+    'OpenBao path must be apps/codewire/dev/<lowercase-slug>' --openbao-path "$bad_path"
+done
 
 jq -e --arg key "$OLD_KEY" '.data.data.apiKey == $key' \
   "$TEST_TMP/probe_failure/state/openbao.json" >/dev/null ||
@@ -233,4 +340,72 @@ grep -F 'api_keys.created_at < candidate_key.created_at' \
   fail 'finalization can disable keys created by a concurrent rotation'
 grep -F 'final database state assertion' "$TEST_TMP/success/state/psql.sql" >/dev/null ||
   fail 'final database state is not verified in a separate statement'
+# The default staging statement is the smoke identity's: the confidential-plan
+# upsert and an unlimited, billing-exempt organization.
+success_sql="$TEST_TMP/success/state/psql.sql"
+for expected in 'INSERT INTO billing_catalog_plans' "'active'::text AS billing_status" \
+  'true AS billing_exempt' "'unlimited'::text AS rate_card" "SELECT 'confidential_sandbox', :'plan_key'::text"; do
+  grep -F "$expected" "$success_sql" >/dev/null ||
+    fail "default staging statement lost: $expected"
+done
+grep -F -- '--set plan_key=unlimited' "$TEST_TMP/success/state/psql.args" >/dev/null ||
+  fail 'default staging statement lost its plan key'
+
+# The regular staging statement: no confidential-plan upsert, no plan key, and
+# an ordinary organization (plan none, status none, not exempt, regular).
+for name in rehearsal_create rehearsal_rotate; do
+  rehearsal_sql="$TEST_TMP/$name/state/psql.sql"
+  for unexpected in billing_catalog_plans confidential_plan plan_key "'unlimited'" \
+    'true AS billing_exempt' "'active'"; do
+    if grep -F "$unexpected" "$rehearsal_sql" >/dev/null; then
+      fail "$name staging statement contains $unexpected"
+    fi
+  done
+  for expected in "'none'::text AS billing_plan" "'none'::text AS billing_status" \
+    'false AS billing_exempt' "'regular'::text AS rate_card" 'FROM input, smoke_user, org_billing'; do
+    grep -F "$expected" "$rehearsal_sql" >/dev/null || fail "$name staging statement lacks $expected"
+  done
+  if grep -F 'plan_key' "$TEST_TMP/$name/state/psql.args" >/dev/null; then
+    fail "$name sent a plan key"
+  fi
+  grep -F -- "--set org_slug=$REHEARSAL_SLUG" "$TEST_TMP/$name/state/psql.args" >/dev/null ||
+    fail "$name did not stage the rehearsal organization"
+  jq -e --arg email "$REHEARSAL_EMAIL" '.data.data.userEmail == $email' \
+    "$TEST_TMP/$name/state/openbao.json" >/dev/null || fail "$name published the wrong user"
+done
+
+# Create mode publishes with -cas=0 and leaves a first version; a rotation
+# compares against the version it read.
+[[ "$(<"$TEST_TMP/rehearsal_create/state/put-cas")" == '-cas=0' ]] ||
+  fail 'create mode did not publish with -cas=0'
+jq -e '.data.metadata.version == 1' "$TEST_TMP/rehearsal_create/state/openbao.json" >/dev/null ||
+  fail 'create mode did not create the first document version'
+[[ "$(<"$TEST_TMP/rehearsal_rotate/state/put-cas")" == '-cas=7' ]] ||
+  fail 'rotation did not publish against the version it read'
+for name in rehearsal_create_existing rehearsal_missing missing_document; do
+  [[ ! -s "$TEST_TMP/$name/state/psql.sql" ]] || fail "$name reached the database"
+done
+[[ ! -f "$TEST_TMP/rehearsal_create_cas_failure/state/openbao.json" ]] ||
+  fail 'a failed create-mode publication left a document'
+[[ "$(<"$TEST_TMP/rehearsal_create_cas_failure/state/active-keys")" == 0 ]] ||
+  fail 'a failed create-mode publication left the candidate active'
+
+# A create-mode failure after publication leaves the documented state: the
+# document holds the candidate, now disabled, and no key is active. Rerunning
+# without --create-document then rotates normally.
+for name in rehearsal_create_probe_failure rehearsal_create_finalize_failure; do
+  dir="$TEST_TMP/$name"
+  jq -e --arg key "$CANDIDATE_KEY" '.data.data.apiKey == $key and .data.metadata.version == 1' \
+    "$dir/state/openbao.json" >/dev/null || fail "$name did not leave the created document"
+  [[ "$(<"$dir/state/active-keys")" == 0 ]] || fail "$name left the candidate key active"
+  grep -F 'prior document was restored' "$dir/err" >/dev/null &&
+    fail "$name claimed a restore that create mode cannot do"
+  rm -f -- "$dir/state/get-count"
+  CASE_OPENBAO_PATH="$REHEARSAL_PATH" CASE_ORG_SLUG="$REHEARSAL_SLUG" \
+    invoke_case "$dir" success success "$success_events" '' "${REHEARSAL_ARGS[@]}"
+  jq -e '.data.metadata.version == 2' "$dir/state/openbao.json" >/dev/null ||
+    fail "$name rerun did not rotate the created document"
+  [[ "$(sed -n '$p' "$dir/state/put-cas")" == '-cas=1' ]] ||
+    fail "$name rerun did not publish against the created version"
+done
 printf 'dev smoke OpenBao rotation tests: OK\n'
