@@ -87,6 +87,7 @@ kube-core = { version = "3.1.0", default-features = false, features = ["jsonpatc
 libc = { version = "0.2.186", features = ["extra_traits"] }
 log = { version = "0.4.30", default-features = false, features = ["std"] }
 memchr = { version = "2.8.1" }
+num-bigint = { version = "0.4.6" }
 num-integer = { version = "0.1.46", features = ["i128"] }
 num-traits = { version = "0.2.19", features = ["i128"] }
 once_cell = { version = "1.21.4", features = ["critical-section"] }
@@ -102,6 +103,7 @@ prost = { version = "0.14.4" }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9.4" }
 rand-93f6ce9d446188ac = { package = "rand", version = "0.10.1" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8.6" }
+rcgen = { version = "0.13.2", features = ["zeroize"] }
 regex = { version = "1.12.3" }
 regex-automata = { version = "0.4.14", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8.10" }
@@ -127,7 +129,7 @@ ssh-key = { version = "0.7.0-rc.11", features = ["ed25519", "encryption", "p256"
 subtle = { version = "2.6.1", features = ["const-generics"] }
 sync_wrapper = { version = "1.0.2", default-features = false, features = ["futures"] }
 thiserror = { version = "2.0.18" }
-time = { version = "0.3.47", features = ["serde-well-known"] }
+time = { version = "0.3.47", features = ["macros", "serde-well-known"] }
 tokio = { version = "1.54.1", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
 tokio-stream = { version = "0.1.18", features = ["fs", "net"] }
@@ -177,6 +179,7 @@ derive_more = { version = "2.1.1", features = ["constructor", "debug", "display"
 derive_more-impl = { version = "2.1.1", features = ["constructor", "debug", "display", "from", "into", "try_into"] }
 digest-93f6ce9d446188ac = { package = "digest", version = "0.10.7", features = ["mac", "std"] }
 digest-a6292c17cd707f01 = { package = "digest", version = "0.11.3", features = ["alloc", "mac", "oid", "rand_core"] }
+displaydoc = { version = "0.2.6" }
 ecdsa = { version = "0.17.0", features = ["algorithm", "getrandom", "pem", "std"] }
 ed25519-7b89eefb6aaa9bf3 = { package = "ed25519", version = "3.0.0", default-features = false, features = ["alloc", "pkcs8"] }
 ed25519-dalek-7b89eefb6aaa9bf3 = { package = "ed25519-dalek", version = "3.0.0", features = ["alloc", "pkcs8", "rand_core"] }
@@ -218,6 +221,7 @@ kube-core = { version = "3.1.0", default-features = false, features = ["jsonpatc
 libc = { version = "0.2.186", features = ["extra_traits"] }
 log = { version = "0.4.30", default-features = false, features = ["std"] }
 memchr = { version = "2.8.1" }
+num-bigint = { version = "0.4.6" }
 num-integer = { version = "0.1.46", features = ["i128"] }
 num-traits = { version = "0.2.19", features = ["i128"] }
 once_cell = { version = "1.21.4", features = ["critical-section"] }
@@ -235,6 +239,7 @@ quote = { version = "1.0.45" }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9.4" }
 rand-93f6ce9d446188ac = { package = "rand", version = "0.10.1" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8.6" }
+rcgen = { version = "0.13.2", features = ["zeroize"] }
 regex = { version = "1.12.3" }
 regex-automata = { version = "0.4.14", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8.10" }
@@ -261,7 +266,8 @@ subtle = { version = "2.6.1", features = ["const-generics"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2.0.117", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 sync_wrapper = { version = "1.0.2", default-features = false, features = ["futures"] }
 thiserror = { version = "2.0.18" }
-time = { version = "0.3.47", features = ["serde-well-known"] }
+time = { version = "0.3.47", features = ["macros", "serde-well-known"] }
+time-macros = { version = "0.2.27", default-features = false, features = ["formatting", "parsing", "serde"] }
 tokio = { version = "1.54.1", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
 tokio-stream = { version = "0.1.18", features = ["fs", "net"] }

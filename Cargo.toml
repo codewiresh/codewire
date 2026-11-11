@@ -14,6 +14,7 @@ members = [
     "crates/codewire-daemon-bridge",
     "crates/codewire-derp",
     "crates/codewire-egress-broker",
+    "crates/codewire-egress-front-door",
     "crates/codewire-egress-policy",
     "crates/codewire-ext4-scrub",
     "crates/codewire-email",
@@ -81,6 +82,7 @@ codewire-daemon = { path = "crates/codewire-daemon" }
 codewire-daemon-bridge = { path = "crates/codewire-daemon-bridge" }
 codewire-derp = { path = "crates/codewire-derp" }
 codewire-egress-broker = { path = "crates/codewire-egress-broker" }
+codewire-egress-front-door = { path = "crates/codewire-egress-front-door" }
 codewire-egress-policy = { path = "crates/codewire-egress-policy" }
 codewire-ext4-scrub = { path = "crates/codewire-ext4-scrub" }
 codewire-email = { path = "crates/codewire-email" }
@@ -140,6 +142,8 @@ prometheus = "0.14"
 
 # Time
 chrono = { version = "0.4", default-features = false, features = ["now", "serde", "std"] }
+# Certificate validity times: rcgen takes them as time::OffsetDateTime.
+time = { version = "0.3", default-features = false, features = ["std"] }
 
 # UUID
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -273,6 +277,8 @@ qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }
 # Testing
 tempfile = "3"
 wiremock = "=0.6.5"
+# Certificate assertions in tests only; never linked into a binary.
+x509-parser = { version = "=0.18.1", default-features = false, features = ["verify"] }
 # Match the policy engine revision embedded by the pinned Kata runtime. Agent
 # policy is an executable security boundary, so syntax-only assertions are
 # insufficient.

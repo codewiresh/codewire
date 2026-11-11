@@ -121,6 +121,9 @@ map_token() {
     # Block clearing in a clearing Sandbox on a snapshot class Kind doesn't have.
     rust_pkg_codewire_ext4_scrub)
       unobserved "$token" 'local microVM snapshots and hosted Block clearing; observed on Dev' ;;
+    # Nothing links the TLS front door yet (#3999), so nothing runs it in Kind.
+    rust_pkg_codewire_egress_front_door)
+      unobserved "$token" 'no binary uses it yet' ;;
     # Kind runs the relay (tests/e2e/kind/tailnet.yaml), but no retained suite
     # drives a tailnet through it yet: walk the host tailnet journey.
     transport_pkg_codewire_derp)

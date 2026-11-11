@@ -1,0 +1,35 @@
+[package]
+name = "codewire-egress-front-door"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "AGPL-3.0-only"
+authors.workspace = true
+description = "TLS front door for an environment's bound egress hosts, with a per-environment CA"
+
+[dependencies]
+bytes = { workspace = true }
+codewire-egress-policy = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["http1", "http2", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+# Default features (ring, PEM) plus zeroize, so the CA and leaf key encodings
+# are wiped on drop.
+rcgen = { version = "0.13", features = ["zeroize"] }
+# The same ring-only Rustls as codewire-tls: one provider, named explicitly.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }
+hyper = { workspace = true, features = ["client", "http1", "http2", "server"] }
+tokio = { workspace = true, features = ["test-util"] }
+x509-parser = { workspace = true }
+codewire-workspace-hack.workspace = true
