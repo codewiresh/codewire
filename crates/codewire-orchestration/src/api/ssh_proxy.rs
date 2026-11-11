@@ -193,7 +193,6 @@ pub async fn ssh_proxy_check(
 
     let (shim_healthy, shim_error) = probe_shim_health(
         runtime,
-        state.kube.as_ref(),
         &placement,
         &state.pool,
         &target.environment_id,
@@ -318,7 +317,6 @@ where
 
 async fn probe_shim_health(
     runtime: &dyn RuntimeDriver,
-    kube: Option<&kube::Client>,
     placement: &Placement,
     pool: &sqlx::PgPool,
     env_id: &str,
@@ -329,10 +327,11 @@ async fn probe_shim_health(
         Err(err) => return (false, format!("port-forward: {err}")),
     };
     // The live binding decides the credential (design §7), never a name.
-    let token = match environment_daemon_credential(pool, kube, session_secret, env_id).await {
-        Ok(token) => token,
-        Err(_) => return (false, "authorize daemon health probe".into()),
-    };
+    let token =
+        match environment_daemon_credential(pool, Some(runtime), session_secret, env_id).await {
+            Ok(token) => token,
+            Err(_) => return (false, "authorize daemon health probe".into()),
+        };
     let channel = match daemon_channel_from_port_forward(stream).await {
         Ok(channel) => channel,
         Err(error) => return (false, format!("daemon transport: {error}")),

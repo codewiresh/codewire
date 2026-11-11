@@ -273,13 +273,14 @@ pub async fn list_environment_daemon_sessions_core(
 /// [`list_environment_daemon_sessions_for_worker`].
 pub(crate) async fn environment_daemon_status_for_worker(
     pool: &PgPool,
-    kube: Option<&kube::Client>,
+    runtime: Option<&dyn RuntimeDriver>,
     session_secret: &str,
     namespace: &str,
     environment_id: &str,
 ) -> AppResult<EnvironmentDaemonStatus> {
     let (channel, token) =
-        daemon_channel_for_runtime(pool, kube, session_secret, namespace, environment_id).await?;
+        daemon_channel_for_runtime(pool, runtime, session_secret, namespace, environment_id)
+            .await?;
     query_daemon(channel, token, "").await
 }
 
@@ -301,13 +302,14 @@ pub(crate) fn daemon_state_token(state: v1::DaemonState) -> &'static str {
 /// service without manufacturing a public user identity.
 pub(crate) async fn list_environment_daemon_sessions_for_worker(
     pool: &PgPool,
-    kube: Option<&kube::Client>,
+    runtime: Option<&dyn RuntimeDriver>,
     session_secret: &str,
     namespace: &str,
     environment_id: &str,
 ) -> AppResult<Vec<v1::SessionRecord>> {
     let (channel, token) =
-        daemon_channel_for_runtime(pool, kube, session_secret, namespace, environment_id).await?;
+        daemon_channel_for_runtime(pool, runtime, session_secret, namespace, environment_id)
+            .await?;
     let mut client = v1::daemon_service_client::DaemonServiceClient::new(channel);
     require_ready_daemon(&mut client, &token, &[DAEMON_CAPABILITY_SESSIONS]).await?;
     Ok(client
@@ -320,14 +322,15 @@ pub(crate) async fn list_environment_daemon_sessions_for_worker(
 
 pub(crate) async fn stop_environment_daemon_session_for_worker(
     pool: &PgPool,
-    kube: Option<&kube::Client>,
+    runtime: Option<&dyn RuntimeDriver>,
     session_secret: &str,
     namespace: &str,
     environment_id: &str,
     session_id: &str,
 ) -> AppResult<v1::SessionRecord> {
     let (channel, token) =
-        daemon_channel_for_runtime(pool, kube, session_secret, namespace, environment_id).await?;
+        daemon_channel_for_runtime(pool, runtime, session_secret, namespace, environment_id)
+            .await?;
     let mut client = v1::daemon_service_client::DaemonServiceClient::new(channel);
     require_ready_daemon(&mut client, &token, &[DAEMON_CAPABILITY_SESSIONS]).await?;
     client
@@ -644,10 +647,6 @@ pub async fn repair_environment_daemon_core(
     let target = resolve_running_sandbox_target_for_repair(state, user, org_id, environment_id)
         .await
         .map_err(|(status, message)| huma_error(status, message))?;
-    let kube = state
-        .kube
-        .as_ref()
-        .ok_or_else(|| AppError::ServiceUnavailable("sandbox client not configured".into()))?;
     let runtime = state
         .runtime
         .clone()
@@ -715,7 +714,6 @@ pub async fn repair_environment_daemon_core(
         org_id,
         DaemonRepair {
             pool: state.pool.clone(),
-            kube: kube.clone(),
             runtime,
             session_secret: state.session_secret.clone(),
             daemon_endpoints: state.environment_daemon_endpoints.clone(),
@@ -734,7 +732,6 @@ pub async fn repair_environment_daemon_core(
 /// outlive the request that started it.
 struct DaemonRepair {
     pool: PgPool,
-    kube: kube::Client,
     runtime: Arc<dyn RuntimeDriver>,
     session_secret: String,
     daemon_endpoints: EnvironmentDaemonEndpointOverrides,
@@ -831,7 +828,7 @@ impl DaemonRepair {
         // identity-free daemon listens only once bound, so the wait would
         // otherwise never succeed.
         if let Err(error) = bind_replacement_runtime(
-            &self.kube,
+            self.runtime.as_ref(),
             &self.authority,
             &["running"],
             &replacement,
@@ -954,7 +951,7 @@ impl DaemonRepair {
     async fn daemon_status(&self, known_pod_name: &str) -> AppResult<EnvironmentDaemonStatus> {
         let (channel, token) = daemon_channel_for_endpoint(
             &self.pool,
-            Some(&self.kube),
+            Some(self.runtime.as_ref()),
             &self.session_secret,
             &self.environment_id,
             self.daemon_endpoints
@@ -1061,7 +1058,7 @@ async fn session_client_for_target(
     let target = resolve_target(state, user, org_id, environment_id).await?;
     let (channel, token) = daemon_channel_for_endpoint(
         &state.pool,
-        state.kube.as_ref(),
+        state.runtime.as_deref(),
         &state.session_secret,
         &target.environment_id,
         state
@@ -1108,7 +1105,7 @@ async fn daemon_channel_for_target(
 ) -> AppResult<(Channel, String)> {
     daemon_channel_for_endpoint(
         &state.pool,
-        state.kube.as_ref(),
+        state.runtime.as_deref(),
         &state.session_secret,
         environment_id,
         state
@@ -1121,14 +1118,14 @@ async fn daemon_channel_for_target(
 
 async fn daemon_channel_for_runtime(
     pool: &PgPool,
-    kube: Option<&kube::Client>,
+    runtime: Option<&dyn RuntimeDriver>,
     session_secret: &str,
     namespace: &str,
     environment_id: &str,
 ) -> AppResult<(Channel, String)> {
     daemon_channel_for_endpoint(
         pool,
-        kube,
+        runtime,
         session_secret,
         environment_id,
         cluster_daemon_endpoint(namespace, environment_id),
@@ -1143,7 +1140,7 @@ async fn daemon_channel_for_runtime(
 /// next access renewal restates the set.
 pub(crate) async fn push_environment_app_ports(
     pool: &PgPool,
-    kube: Option<&kube::Client>,
+    runtime: Option<&dyn RuntimeDriver>,
     session_secret: &str,
     endpoints: Option<&EnvironmentDaemonEndpointOverrides>,
     environment_id: &str,
@@ -1168,7 +1165,7 @@ pub(crate) async fn push_environment_app_ports(
         };
         let (channel, token) = daemon_channel_for_endpoint(
             pool,
-            kube,
+            runtime,
             session_secret,
             environment_id,
             endpoint,
@@ -1224,7 +1221,7 @@ pub(crate) fn cluster_daemon_endpoint(namespace: &str, environment_id: &str) -> 
 
 async fn daemon_channel_for_endpoint(
     pool: &PgPool,
-    kube: Option<&kube::Client>,
+    runtime: Option<&dyn RuntimeDriver>,
     session_secret: &str,
     environment_id: &str,
     endpoint: String,
@@ -1232,7 +1229,7 @@ async fn daemon_channel_for_endpoint(
 ) -> AppResult<(Channel, String)> {
     // The live binding decides the credential (design §7); never a name. An
     // unbound Pod gets the environment token only when it is a legacy Pod.
-    let token = environment_daemon_credential(pool, kube, session_secret, environment_id)
+    let token = environment_daemon_credential(pool, runtime, session_secret, environment_id)
         .await
         .map_err(|error| {
             if error.downcast_ref::<DaemonNotBound>().is_some() {

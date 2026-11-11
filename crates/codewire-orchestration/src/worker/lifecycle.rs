@@ -186,12 +186,6 @@ fn workspace_claim(
     }
 }
 
-fn require_kube(ctx: &WorkerContext) -> anyhow::Result<&kube::Client> {
-    ctx.kube
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("sandbox backend is not configured"))
-}
-
 fn sandbox_client(ctx: &WorkerContext, namespace: &str) -> anyhow::Result<SandboxClient> {
     let Some(kube) = &ctx.kube else {
         anyhow::bail!("sandbox backend is not configured");
@@ -349,7 +343,7 @@ pub async fn handle_environment_stop(
         .await?;
     // Design §10: the Pod is observed absent, so its binding is released. A
     // later start binds the new Pod UID.
-    release_workspace_binding(require_kube(ctx)?, authority, STOP_MUTATION_STATES).await?;
+    release_workspace_binding(ctx.require_runtime()?, authority, STOP_MUTATION_STATES).await?;
     // B2c: with the Pod gone, a stopped confidential environment authorizes
     // no guest; the next start authorizes exactly what it boots.
     if env.isolation_tier == "confidential" {
@@ -547,7 +541,7 @@ pub(super) async fn restart_workspace_bootstrap(
     .await?;
     // Every previous Pod is gone: release its binding before the resumed Pod
     // gets a new UID and its own binding.
-    release_workspace_binding(require_kube(ctx)?, authority, states).await?;
+    release_workspace_binding(ctx.require_runtime()?, authority, states).await?;
     refresh_workspace_bootstrap(ctx, env, backend, opts, &suspended, authority, states).await?;
     // Converge the identity labels for this generation before resume, so the
     // resumed Pod carries them and can be bound before Claim Ready (design
@@ -1163,9 +1157,9 @@ pub async fn handle_environment_destroy(
     // Destroying is not a bindable state and neither the environment ID nor
     // a Pod UID is ever reused, so a recreated environment or Pod cannot meet
     // this binding; the cleanup marker below refuses while it is still live.
-    if let Some(kube) = ctx.kube.as_ref()
+    if let Some(runtime) = ctx.runtime.as_deref()
         && let Err(error) =
-            release_workspace_binding(kube, authority, DESTROY_CLEANUP_MUTATION_STATES).await
+            release_workspace_binding(runtime, authority, DESTROY_CLEANUP_MUTATION_STATES).await
     {
         record_environment_error(&svc, authority, env_id, &format!("{error:#}")).await?;
         return Err(anyhow::anyhow!("release workspace binding: {error:#}"));

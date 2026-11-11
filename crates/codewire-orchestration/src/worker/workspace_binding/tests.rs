@@ -6,6 +6,13 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference,
 use serde_json::json;
 
 use super::*;
+use std::collections::BTreeMap;
+
+use codewire_daemon_proto::{SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
+use k8s_openapi::api::core::v1::{Container, ContainerStatus, Pod};
+use kube::api::DynamicObject;
+
+use crate::sandbox::LABEL_OPERATION_GENERATION;
 
 const POD_UID: &str = "7e7b20f6-0bd2-4f11-8b16-9c239851eb52";
 const SANDBOX_UID: &str = "5a4db0c5-6d1e-4b0f-9b3c-2f0e7c1d9a11";
@@ -13,6 +20,16 @@ const WORKSPACE_IMAGE: &str = "registry.example.test/codewire/workspace@sha256:1
 const INIT_IMAGE: &str = "registry.example.test/codewire/daemon@sha256:2222222222222222222222222222222222222222222222222222222222222222";
 const DIND_IMAGE: &str = "docker.io/library/docker:28-dind";
 const DIGEST: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+
+/// The facts a driver reads off `pod`.
+fn facts(pod: &Pod) -> crate::runtime::MemberFacts {
+    crate::runtime::kubernetes::observation::member_facts(pod).unwrap()
+}
+
+/// The facts a driver reads off `sandbox`.
+fn runtime_of(sandbox: &DynamicObject) -> crate::runtime::RuntimeFacts {
+    crate::runtime::kubernetes::observation::runtime_facts(sandbox).unwrap()
+}
 
 fn env(name: &str, value: &str) -> EnvVar {
     EnvVar {
@@ -144,7 +161,7 @@ fn binding_volume(audience: &str) -> Volume {
 #[test]
 fn the_credential_scope_follows_what_the_pod_was_rendered_with() {
     assert_eq!(
-        credential_scope(&legacy_pod(token_env())),
+        credential_scope(&facts(&legacy_pod(token_env()))),
         Some(WorkspaceCredentialScope::Environment)
     );
 
@@ -158,7 +175,7 @@ fn the_credential_scope_follows_what_the_pod_was_rendered_with() {
         .unwrap()
         .push(binding_volume(WORKSPACE_BINDING_TOKEN_AUDIENCE));
     assert_eq!(
-        credential_scope(&binding),
+        credential_scope(&facts(&binding)),
         Some(WorkspaceCredentialScope::Pod)
     );
 
@@ -171,8 +188,8 @@ fn the_credential_scope_follows_what_the_pod_was_rendered_with() {
         .as_mut()
         .unwrap()
         .push(binding_volume(WORKSPACE_BINDING_TOKEN_AUDIENCE));
-    assert_eq!(credential_scope(&both), None);
-    assert_eq!(credential_scope(&legacy_pod(Vec::new())), None);
+    assert_eq!(credential_scope(&facts(&both)), None);
+    assert_eq!(credential_scope(&facts(&legacy_pod(Vec::new()))), None);
     let mut wrong_audience = legacy_pod(Vec::new());
     wrong_audience
         .spec
@@ -184,7 +201,7 @@ fn the_credential_scope_follows_what_the_pod_was_rendered_with() {
         .push(binding_volume(
             codewire_daemon_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
         ));
-    assert_eq!(credential_scope(&wrong_audience), None);
+    assert_eq!(credential_scope(&facts(&wrong_audience)), None);
 }
 
 #[test]
@@ -196,7 +213,7 @@ fn a_legacy_pod_records_what_it_was_rendered_with() {
         env(MANAGED_CLIENTS_ENV, github_clients()),
     ]);
     assert_eq!(
-        environment_scope_capture(&legacy_pod(rendered)),
+        environment_scope_capture(&facts(&legacy_pod(rendered))),
         Some(CapturedBootstrap {
             operation_generation: 6,
             projection_selection_sha256: Some(DIGEST.into()),
@@ -206,7 +223,7 @@ fn a_legacy_pod_records_what_it_was_rendered_with() {
     // Without a projection there is no generation variable: the converged
     // generation label stands in, with no digest and no managed client.
     assert_eq!(
-        environment_scope_capture(&legacy_pod(token_env())),
+        environment_scope_capture(&facts(&legacy_pod(token_env()))),
         Some(CapturedBootstrap {
             operation_generation: 7,
             projection_selection_sha256: None,
@@ -241,19 +258,25 @@ fn ambiguous_or_malformed_rendered_values_are_refused() {
     ] {
         let mut rendered = token_env();
         rendered.extend(invalid);
-        assert_eq!(environment_scope_capture(&legacy_pod(rendered)), None);
+        assert_eq!(
+            environment_scope_capture(&facts(&legacy_pod(rendered))),
+            None
+        );
     }
 }
 
 #[test]
 fn images_must_equal_the_sandbox_template_and_pinned_digests() {
     let sandbox = sandbox();
-    assert!(images_match(&sandbox, &legacy_pod(token_env())));
+    assert!(images_match(
+        &runtime_of(&sandbox),
+        &facts(&legacy_pod(token_env()))
+    ));
 
     let mut retagged = legacy_pod(token_env());
     retagged.spec.as_mut().unwrap().containers[1].image =
         Some("docker.io/library/docker:27-dind".into());
-    assert!(!images_match(&sandbox, &retagged));
+    assert!(!images_match(&runtime_of(&sandbox), &facts(&retagged)));
 
     let mut extra = legacy_pod(token_env());
     extra
@@ -262,11 +285,11 @@ fn images_must_equal_the_sandbox_template_and_pinned_digests() {
         .unwrap()
         .containers
         .push(container("sidecar", DIND_IMAGE, Vec::new()));
-    assert!(!images_match(&sandbox, &extra));
+    assert!(!images_match(&runtime_of(&sandbox), &facts(&extra)));
 
     let mut other_init = legacy_pod(token_env());
     other_init.spec.as_mut().unwrap().init_containers = Some(Vec::new());
-    assert!(!images_match(&sandbox, &other_init));
+    assert!(!images_match(&runtime_of(&sandbox), &facts(&other_init)));
 
     // A pinned reference whose running digest differs is a stale member.
     let mut stale = legacy_pod(token_env());
@@ -278,43 +301,55 @@ fn images_must_equal_the_sandbox_template_and_pinned_digests() {
         .as_mut()
         .unwrap()[0]
         .image_id = format!("registry.example.test/codewire/workspace@sha256:{DIGEST}");
-    assert!(!images_match(&sandbox, &stale));
+    assert!(!images_match(&runtime_of(&sandbox), &facts(&stale)));
 
     let mut unreported = legacy_pod(token_env());
     unreported.status.as_mut().unwrap().init_container_statuses = None;
-    assert!(!images_match(&sandbox, &unreported));
+    assert!(!images_match(&runtime_of(&sandbox), &facts(&unreported)));
 }
 
 #[test]
 fn the_pod_must_still_be_the_observed_incarnation_and_mount_the_resolved_pvc() {
     let pod = legacy_pod(token_env());
-    assert!(pod_still_observed(&pod, POD_UID, SANDBOX_UID));
-    assert!(!pod_still_observed(&pod, SANDBOX_UID, SANDBOX_UID));
-    assert!(!pod_still_observed(&pod, POD_UID, POD_UID));
+    assert!(member_still_observed(&facts(&pod), POD_UID, SANDBOX_UID));
+    assert!(!member_still_observed(
+        &facts(&pod),
+        SANDBOX_UID,
+        SANDBOX_UID
+    ));
+    assert!(!member_still_observed(&facts(&pod), POD_UID, POD_UID));
     let mut terminating = legacy_pod(token_env());
     terminating.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
-    assert!(!pod_still_observed(&terminating, POD_UID, SANDBOX_UID));
+    assert!(!member_still_observed(
+        &facts(&terminating),
+        POD_UID,
+        SANDBOX_UID
+    ));
     let mut other_account = legacy_pod(token_env());
     other_account.spec.as_mut().unwrap().service_account_name = Some("default".into());
-    assert!(!pod_still_observed(&other_account, POD_UID, SANDBOX_UID));
+    assert!(!member_still_observed(
+        &facts(&other_account),
+        POD_UID,
+        SANDBOX_UID
+    ));
 
     let resolved = WorkspacePvc::Claim {
         name: "workspace-sandbox".into(),
         uid: POD_UID.into(),
         bound: true,
     };
-    assert!(pvc_matches(&pod, &resolved));
-    assert!(!pvc_matches(&pod, &WorkspacePvc::VolumeLess));
-    assert!(!pvc_matches(
-        &pod,
+    assert!(volume_matches(&facts(&pod), &resolved));
+    assert!(!volume_matches(&facts(&pod), &WorkspacePvc::VolumeLess));
+    assert!(!volume_matches(
+        &facts(&pod),
         &WorkspacePvc::Claim {
             name: "workspace-sandbox".into(),
             uid: POD_UID.into(),
             bound: false,
         }
     ));
-    assert!(!pvc_matches(
-        &pod,
+    assert!(!volume_matches(
+        &facts(&pod),
         &WorkspacePvc::Claim {
             name: "workspace-other".into(),
             uid: POD_UID.into(),
@@ -323,7 +358,10 @@ fn the_pod_must_still_be_the_observed_incarnation_and_mount_the_resolved_pvc() {
     ));
     let mut volume_less = legacy_pod(token_env());
     volume_less.spec.as_mut().unwrap().volumes = None;
-    assert!(pvc_matches(&volume_less, &WorkspacePvc::VolumeLess));
+    assert!(volume_matches(
+        &facts(&volume_less),
+        &WorkspacePvc::VolumeLess
+    ));
 }
 
 #[test]
@@ -530,26 +568,29 @@ fn a_confidential_pod_binds_with_pod_scope_like_a_standard_one() {
     assert_eq!(spec.runtime_class_name.as_deref(), Some("confidential"));
     // The binding token and no environment token: Pod scope, which 8087
     // binds, records a host key for and serves access to.
-    assert_eq!(credential_scope(&pod), Some(WorkspaceCredentialScope::Pod));
+    assert_eq!(
+        credential_scope(&facts(&pod)),
+        Some(WorkspaceCredentialScope::Pod)
+    );
     // The init container's support image counts like any other image, and the
     // kubelet-reported digests must match the pinned references.
-    assert!(images_match(&sandbox, &pod));
+    assert!(images_match(&runtime_of(&sandbox), &facts(&pod)));
     let mut substituted = pod.clone();
     substituted.spec.as_mut().unwrap().init_containers.as_mut().unwrap()[0].image = Some(
         "registry.example.test/codewire/gateway@sha256:5555555555555555555555555555555555555555555555555555555555555555"
             .into(),
     );
-    assert!(!images_match(&sandbox, &substituted));
+    assert!(!images_match(&runtime_of(&sandbox), &facts(&substituted)));
     // A block-mode claim attached as a device still resolves by its volume.
-    assert!(pvc_matches(
-        &pod,
+    assert!(volume_matches(
+        &facts(&pod),
         &WorkspacePvc::Claim {
             name: "workspace-sandbox".into(),
             uid: POD_UID.into(),
             bound: true,
         }
     ));
-    assert!(pod_still_observed(&pod, POD_UID, SANDBOX_UID));
+    assert!(member_still_observed(&facts(&pod), POD_UID, SANDBOX_UID));
     // A confidential Pod that still carried the environment token would be
     // ambiguous and refused, never bound.
     let mut both = pod.clone();
@@ -558,5 +599,5 @@ fn a_confidential_pod_binds_with_pod_scope_like_a_standard_one() {
         .as_mut()
         .unwrap()
         .push(env(DAEMON_AUTH_TOKEN_ENV, "synthetic-environment-token"));
-    assert_eq!(credential_scope(&both), None);
+    assert_eq!(credential_scope(&facts(&both)), None);
 }

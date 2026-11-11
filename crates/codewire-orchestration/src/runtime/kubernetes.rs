@@ -3,6 +3,7 @@
 //! comes back into the driver's own types.
 
 pub(crate) mod members;
+pub(crate) mod observation;
 pub(crate) mod pools;
 mod suspension;
 pub(crate) mod warm_pools;
@@ -14,15 +15,17 @@ use std::time::Duration;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Api, LogParams};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use kube::api::{Api, DynamicObject, LogParams};
 
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, DesiredPool,
-    FailedLiveResize, KeptSnapshot, MemberRef, MemberReplacement, Pick, Placement, PoolBornClaim,
-    PoolPass, PoolState, ProbeResult, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeDriver,
-    RuntimeExec, RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeResize, RuntimeSnapshots,
-    RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity,
-    VolumeMode, VolumeRef, WantedPools,
+    FailedLiveResize, KeptSnapshot, MemberFacts, MemberRef, MemberReplacement, Pick, Placement,
+    PoolBornClaim, PoolPass, PoolState, ProbeResult, ResizeState, RuntimeAccess, RuntimeClaims,
+    RuntimeDriver, RuntimeExec, RuntimeLifecycle, RuntimeMember, RuntimeObservation,
+    RuntimeObservations, RuntimePools, RuntimeResize, RuntimeSnapshots, RuntimeStorage,
+    RuntimeStream, RuntimeTeardown, SuspendedRuntime, VerifiedChain, VolumeGrowth, VolumeIdentity,
+    VolumeMode, VolumeRef, WantedPools, WorkspaceVolume,
 };
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::HostKeyStore;
@@ -207,6 +210,134 @@ impl RuntimeClaims for KubernetesDriver {
         client.delete_warm_member_bridge(environment_id).await?;
         client
             .delete_pool_born_claim(environment_id, observed, timeout)
+            .await
+    }
+}
+
+#[async_trait]
+impl RuntimeObservations for KubernetesDriver {
+    async fn observe(&self, claim: &ClaimRef) -> anyhow::Result<RuntimeObservation> {
+        let runtime = self
+            .sandbox_client(&claim.placement)
+            .read_bindable_runtime(&suspension::claim_opts(claim), &claim.name, &claim.uid)
+            .await?;
+        observation::observation(&claim.uid, runtime)
+    }
+
+    async fn observe_member(
+        &self,
+        placement: &Placement,
+        member_name: &str,
+    ) -> anyhow::Result<Option<MemberFacts>> {
+        self.sandbox_client(placement)
+            .get_workspace_pod(member_name)
+            .await?
+            .as_ref()
+            .map(observation::member_facts)
+            .transpose()
+    }
+
+    async fn current_member_facts(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<MemberFacts> {
+        let pod = self
+            .sandbox_client(placement)
+            .current_workspace_pod_object(environment_id)
+            .await?;
+        observation::member_facts(&pod)
+    }
+
+    async fn workspace_volume(
+        &self,
+        placement: &Placement,
+        volume: &VolumeRef,
+    ) -> anyhow::Result<WorkspaceVolume> {
+        self.sandbox_client(placement)
+            .resolve_workspace_pvc(
+                &volume.claim_name,
+                &volume.claim_uid,
+                volume.recorded_pvc_uid.as_deref(),
+            )
+            .await
+    }
+
+    async fn wait_member_change(
+        &self,
+        placement: &Placement,
+        observation: &RuntimeObservation,
+        poll: Duration,
+        fallback: Duration,
+    ) {
+        // The wait reads the observed incarnation's name, UID and revision.
+        let mut observed = Pod::default();
+        observed.metadata.name = observation.member.name.clone();
+        observed.metadata.uid = observation.member.uid.clone();
+        observed.metadata.resource_version =
+            Some(observation.member_revision.clone()).filter(|revision| !revision.is_empty());
+        self.sandbox_client(placement)
+            .wait_for_workspace_pod_revision(&observed, poll, fallback)
+            .await;
+    }
+
+    async fn wait_claim_change(
+        &self,
+        placement: &Placement,
+        observation: &RuntimeObservation,
+        fallback: Duration,
+    ) {
+        // The wait reads the observed claim's name and revision.
+        let observed = DynamicObject {
+            types: None,
+            metadata: ObjectMeta {
+                name: Some(observation.claim_name.clone()),
+                resource_version: Some(observation.claim_revision.clone())
+                    .filter(|revision| !revision.is_empty()),
+                ..ObjectMeta::default()
+            },
+            data: serde_json::Value::Null,
+        };
+        self.sandbox_client(placement)
+            .wait_for_claim_change(&observed, fallback)
+            .await;
+    }
+
+    async fn wait_runtime_identity(
+        &self,
+        claim: &ClaimRef,
+        chain: &VerifiedChain,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(&claim.placement)
+            .wait_for_claim_runtime_identity(
+                &suspension::claim_opts(claim),
+                &claim.name,
+                &claim.uid,
+                chain.observation(),
+                timeout,
+            )
+            .await
+    }
+
+    async fn repin_daemon_image(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        support_image: &str,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .repin_daemon_image(environment_id, support_image)
+            .await
+    }
+
+    async fn delete_refused_member(
+        &self,
+        placement: &Placement,
+        member: &MemberRef,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .delete_workspace_pod_if_uid(&member.name, &member.uid)
             .await
     }
 }

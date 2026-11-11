@@ -13,6 +13,9 @@ use super::*;
 use crate::start_metrics::StartPath;
 use crate::test_database_support::TestDatabase;
 use crate::workspace_binding::{BindingStore, PgBindingStore, WORKSPACE_BINDINGS_CHANNEL};
+use codewire_daemon_proto::WORKSPACE_BINDING_TOKEN_AUDIENCE;
+
+use crate::sandbox::client::SandboxClient;
 
 const CREATOR: &str = "workspace-binding-creator";
 const ORGANIZATION: &str = "workspace-binding-organization";
@@ -622,6 +625,19 @@ impl FakeKube {
             .collect()
     }
 
+    /// The object this fake serves at `path`.
+    fn object(&self, path: &str) -> serde_json::Value {
+        self.objects.lock().unwrap()[path].clone()
+    }
+
+    /// GET requests served so far.
+    fn gets(&self) -> usize {
+        self.requests()
+            .iter()
+            .filter(|(method, _)| method == "GET")
+            .count()
+    }
+
     /// Every request served so far, as method and path.
     fn requests(&self) -> Vec<(String, String)> {
         self.requests
@@ -630,6 +646,11 @@ impl FakeKube {
             .iter()
             .map(|(method, path, _)| (method.clone(), path.clone()))
             .collect()
+    }
+
+    /// The Kubernetes driver over this fake's API.
+    fn driver(&self) -> std::sync::Arc<dyn crate::runtime::RuntimeDriver> {
+        crate::runtime::kubernetes::KubernetesDriver::shared(self.client())
     }
 
     fn client(&self) -> kube::Client {
@@ -771,8 +792,8 @@ impl FakeKube {
     }
 }
 
-fn observed(environment: &str, pod_uid: &str) -> RuntimeIdentityObservation {
-    RuntimeIdentityObservation::for_test(
+fn observed(environment: &str, pod_uid: &str) -> crate::runtime::VerifiedChain {
+    crate::runtime::VerifiedChain::for_test(
         &sandbox_uid(environment),
         &format!("sandbox-{environment}"),
         pod_uid,
@@ -799,7 +820,7 @@ async fn enforced(
     let backend = crate::worker::env_data::load_backend_row(pool, environment).await?;
     let authority = ActivityAuthority::capture(pool, environment, GENERATION).await?;
     record_workspace_binding(
-        &fake.client(),
+        fake.driver().as_ref(),
         None,
         &env,
         &backend,
@@ -1047,7 +1068,7 @@ async fn db_release_clears_the_pointer_and_every_live_lookup() -> Result<()> {
         present.update(&pod_path(ENV_A), |pod| {
             pod["metadata"]["deletionTimestamp"] = json!("2026-10-02T00:00:00Z");
         });
-        let error = release_workspace_binding(&present.client(), &authority, &["stopping"])
+        let error = release_workspace_binding(present.driver().as_ref(), &authority, &["stopping"])
             .await
             .expect_err("a binding was released while its Pod was present");
         ensure!(
@@ -1058,9 +1079,12 @@ async fn db_release_clears_the_pointer_and_every_live_lookup() -> Result<()> {
         ensure!(live_environment_binding(&db.pool, ENV_A).await?.is_some());
         // The same name on another Pod UID means the bound Pod is gone.
         let replaced = FakeKube::runtime(ENV_A, POD_2, WorkspaceCredentialScope::Pod);
-        ensure!(release_workspace_binding(&replaced.client(), &authority, &["stopping"]).await?);
-        let absent = FakeKube::default().client();
-        ensure!(!release_workspace_binding(&absent, &authority, &["stopping"]).await?);
+        ensure!(
+            release_workspace_binding(replaced.driver().as_ref(), &authority, &["stopping"])
+                .await?
+        );
+        let absent = FakeKube::default().driver();
+        ensure!(!release_workspace_binding(absent.as_ref(), &authority, &["stopping"]).await?);
         ensure!(present.deletes().is_empty() && replaced.deletes().is_empty());
         ensure!(pointer(&db.pool, ENV_A).await? == (None, false, Some(PVC.into())));
         ensure!(bindings(&db.pool).await? == vec![(POD_1.into(), ENV_A.into(), true)]);
@@ -1070,7 +1094,8 @@ async fn db_release_clears_the_pointer_and_every_live_lookup() -> Result<()> {
         // unreadable Pod, or no Kubernetes client gets no credential at all.
         let legacy = FakeKube::runtime(ENV_A, POD_2, WorkspaceCredentialScope::Environment);
         ensure!(
-            environment_daemon_credential(&db.pool, Some(&legacy.client()), secret, ENV_A).await?
+            environment_daemon_credential(&db.pool, Some(legacy.driver().as_ref()), secret, ENV_A)
+                .await?
                 == crate::worker::environment_auth::issue_token(
                     secret,
                     ENV_A,
@@ -1079,11 +1104,11 @@ async fn db_release_clears_the_pointer_and_every_live_lookup() -> Result<()> {
         );
         let unbound = FakeKube::runtime(ENV_A, POD_2, WorkspaceCredentialScope::Pod);
         for kube in [
-            Some(unbound.client()),
-            Some(FakeKube::default().client()),
+            Some(unbound.driver()),
+            Some(FakeKube::default().driver()),
             None,
         ] {
-            let error = environment_daemon_credential(&db.pool, kube.as_ref(), secret, ENV_A)
+            let error = environment_daemon_credential(&db.pool, kube.as_deref(), secret, ENV_A)
                 .await
                 .expect_err("an unbound non-legacy Pod received the environment token");
             ensure!(
@@ -1107,7 +1132,7 @@ async fn db_release_clears_the_pointer_and_every_live_lookup() -> Result<()> {
             .bind(GENERATION + 1)
             .execute(&db.pool)
             .await?;
-        let error = release_workspace_binding(&absent, &stale, &RUNNING)
+        let error = release_workspace_binding(absent.as_ref(), &stale, &RUNNING)
             .await
             .expect_err("a stale authority released a binding");
         ensure!(is_authority_lost(&error));
@@ -1151,11 +1176,11 @@ async fn db_a_restore_adoption_moves_the_pvc_uid_only_when_unbound_and_resolvabl
 
         // A same-name PVC without this Sandbox's tracking label never adopts.
         fake.put(pvc_path(ENV_A), restored(json!({"agents.x-k8s.io/sandbox-name-hash": "0123abcd"})));
-        let error = adopt_restored_workspace_pvc(&fake.client(), &authority, &["starting"], &backend, OTHER_PVC)
+        let error = adopt_restored_workspace_pvc(fake.driver().as_ref(), &authority, &["starting"], &backend, OTHER_PVC)
             .await
             .expect_err("an untracked PVC was adopted");
         ensure!(error.downcast_ref::<AdoptionRefused>() == Some(&AdoptionRefused::NotResolvable));
-        let error = adopt_restored_workspace_pvc(&fake.client(), &authority, &["starting"], &backend, "not-a-uid")
+        let error = adopt_restored_workspace_pvc(fake.driver().as_ref(), &authority, &["starting"], &backend, "not-a-uid")
             .await
             .expect_err("a malformed UID was adopted");
         ensure!(error.downcast_ref::<AdoptionRefused>() == Some(&AdoptionRefused::InvalidUid));
@@ -1169,14 +1194,14 @@ async fn db_a_restore_adoption_moves_the_pvc_uid_only_when_unbound_and_resolvabl
         set_state(&db.pool, ENV_A, "running").await?;
         fenced_write(&db.pool, &record(ENV_A, POD_1)).await?;
         set_state(&db.pool, ENV_A, "starting").await?;
-        let error = adopt_restored_workspace_pvc(&fake.client(), &authority, &["starting"], &backend, OTHER_PVC)
+        let error = adopt_restored_workspace_pvc(fake.driver().as_ref(), &authority, &["starting"], &backend, OTHER_PVC)
             .await
             .expect_err("a bound environment adopted a PVC");
         ensure!(error.downcast_ref::<AdoptionRefused>() == Some(&AdoptionRefused::Bound));
         // Stopped: the Pod is gone, so its binding is released.
         fake.objects.lock().unwrap().remove(&pod_path(ENV_A));
-        ensure!(release_workspace_binding(&fake.client(), &authority, &["starting"]).await?);
-        adopt_restored_workspace_pvc(&fake.client(), &authority, &["starting"], &backend, OTHER_PVC).await?;
+        ensure!(release_workspace_binding(fake.driver().as_ref(), &authority, &["starting"]).await?);
+        adopt_restored_workspace_pvc(fake.driver().as_ref(), &authority, &["starting"], &backend, OTHER_PVC).await?;
         ensure!(pointer(&db.pool, ENV_A).await? == (None, false, Some(OTHER_PVC.into())));
         // The resolver now accepts the restored PVC by its adopted UID.
         let anchor = crate::worker::env_data::workspace_pvc_anchor(
@@ -1193,7 +1218,7 @@ async fn db_a_restore_adoption_moves_the_pvc_uid_only_when_unbound_and_resolvabl
             .bind(GENERATION + 1)
             .execute(&db.pool)
             .await?;
-        let error = adopt_restored_workspace_pvc(&fake.client(), &authority, &["starting"], &backend, OTHER_PVC)
+        let error = adopt_restored_workspace_pvc(fake.driver().as_ref(), &authority, &["starting"], &backend, OTHER_PVC)
             .await
             .expect_err("a stale authority adopted a PVC");
         ensure!(is_authority_lost(&error));
@@ -1272,17 +1297,17 @@ async fn db_the_release_sweep_frees_only_bindings_whose_pod_is_absent() -> Resul
         kube.update(&pod_path(ENV_B), |pod| {
             pod["metadata"]["deletionTimestamp"] = json!("2026-10-02T00:00:00Z");
         });
-        let client = kube.client();
+        let client = kube.driver();
+        let client = client.as_ref();
         ensure!(
-            release_binding_if_pod_absent(&db.pool, &client, POD_1).await?
-                == RecordResult::Recorded
+            release_binding_if_pod_absent(&db.pool, client, POD_1).await? == RecordResult::Recorded
         );
         ensure!(
-            release_binding_if_pod_absent(&db.pool, &client, POD_2).await?
+            release_binding_if_pod_absent(&db.pool, client, POD_2).await?
                 == RecordResult::Unchanged
         );
         ensure!(
-            release_binding_if_pod_absent(&db.pool, &client, POD_1).await?
+            release_binding_if_pod_absent(&db.pool, client, POD_1).await?
                 == RecordResult::Unchanged
         );
         ensure!(live_environment_binding(&db.pool, ENV_A).await?.is_none());
@@ -1291,7 +1316,7 @@ async fn db_the_release_sweep_frees_only_bindings_whose_pod_is_absent() -> Resul
         // The stopped environment's Pod is replaced under the same name.
         let replaced = FakeKube::runtime(ENV_B, POD_3, WorkspaceCredentialScope::Pod);
         ensure!(
-            release_binding_if_pod_absent(&db.pool, &replaced.client(), POD_2).await?
+            release_binding_if_pod_absent(&db.pool, replaced.driver().as_ref(), POD_2).await?
                 == RecordResult::Recorded
         );
         ensure!(pointer(&db.pool, ENV_B).await? == (None, false, Some(PVC.into())));
@@ -1326,7 +1351,13 @@ async fn db_the_backfill_never_records_a_pod_scope_binding() -> Result<()> {
         seed(&db).await?;
         let identity_free = FakeKube::runtime(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
         ensure!(
-            record_backfill(&db.pool, &identity_free.client(), ENV_A).await?
+            record_backfill(
+                &db.pool,
+                crate::runtime::kubernetes::KubernetesDriver::shared(identity_free.client())
+                    .as_ref(),
+                ENV_A
+            )
+            .await?
                 == RecordResult::NotReady
         );
         ensure!(bindings(&db.pool).await?.is_empty());
@@ -1335,7 +1366,13 @@ async fn db_the_backfill_never_records_a_pod_scope_binding() -> Result<()> {
 
         let legacy = FakeKube::runtime(ENV_B, POD_2, WorkspaceCredentialScope::Environment);
         ensure!(
-            record_backfill(&db.pool, &legacy.client(), ENV_B).await? == RecordResult::Recorded
+            record_backfill(
+                &db.pool,
+                crate::runtime::kubernetes::KubernetesDriver::shared(legacy.client()).as_ref(),
+                ENV_B
+            )
+            .await?
+                == RecordResult::Recorded
         );
         let scope: String = sqlx::query_scalar(
             "SELECT credential_scope FROM sandbox_workspace_bindings WHERE pod_uid = $1",
@@ -1344,6 +1381,85 @@ async fn db_the_backfill_never_records_a_pod_scope_binding() -> Result<()> {
         .fetch_one(&db.pool)
         .await?;
         ensure!(scope == "environment");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// #3628 PR 5a: each backfill check, failing on its own, records nothing: a
+/// chain that has not converged waits, a failed check is denied, and a
+/// Pod-scope Pod is left to the enforced path before any check can deny it.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_each_failed_backfill_check_records_nothing() -> Result<()> {
+    let pod = pod_path(ENV_B);
+    let digest = |o: &mut serde_json::Value| {
+        o["status"]["containerStatuses"][0]["imageID"] = json!(
+            "registry.example.test/codewire/workspace@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+        )
+    };
+    type Case = (
+        &'static str,
+        WorkspaceCredentialScope,
+        fn(&mut serde_json::Value),
+        RecordResult,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "Pod not Ready",
+            WorkspaceCredentialScope::Environment,
+            |o| o["status"]["conditions"][0]["status"] = json!("False"),
+            RecordResult::NotReady,
+        ),
+        (
+            "Pod with another service account",
+            WorkspaceCredentialScope::Environment,
+            |o| o["spec"]["serviceAccountName"] = json!("default"),
+            RecordResult::Denied,
+        ),
+        (
+            "image digest",
+            WorkspaceCredentialScope::Environment,
+            digest,
+            RecordResult::Denied,
+        ),
+        (
+            "Pod mounting another claim",
+            WorkspaceCredentialScope::Environment,
+            |o| {
+                o["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] =
+                    json!("workspace-other")
+            },
+            RecordResult::Denied,
+        ),
+        (
+            "Pod-scope Pod with another image digest",
+            WorkspaceCredentialScope::Pod,
+            digest,
+            RecordResult::NotReady,
+        ),
+    ];
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        for (label, scope, change, expected) in &cases {
+            let fake = FakeKube::runtime(ENV_B, POD_2, *scope);
+            fake.update(&pod, *change);
+            let outcome = record_backfill(&db.pool, fake.driver().as_ref(), ENV_B).await?;
+            ensure!(outcome == *expected, "{label}: {outcome:?}");
+            ensure!(
+                bindings(&db.pool).await?.is_empty(),
+                "{label}: a binding was recorded"
+            );
+            ensure!(fake.deletes().is_empty(), "{label}: deleted");
+        }
+        // With every check passing it records.
+        let fake = FakeKube::runtime(ENV_B, POD_2, WorkspaceCredentialScope::Environment);
+        ensure!(
+            record_backfill(&db.pool, fake.driver().as_ref(), ENV_B).await?
+                == RecordResult::Recorded
+        );
         Ok(())
     }
     .await;
@@ -1391,7 +1507,7 @@ async fn db_a_bind_happens_while_dind_is_still_starting() -> Result<()> {
         let authority = ActivityAuthority::capture(&db.pool, ENV_A, GENERATION).await?;
         let bound = tokio::time::timeout(
             Duration::from_secs(5),
-            bind_before_ready(&starting.client(), None, &authority, &["creating"]),
+            bind_before_ready(starting.driver().as_ref(), None, &authority, &["creating"]),
         )
         .await??;
         ensure!(bound.is_some(), "the early bind did not record");
@@ -1413,7 +1529,7 @@ async fn db_a_bind_happens_while_dind_is_still_starting() -> Result<()> {
         ensure!(
             tokio::time::timeout(
                 Duration::from_secs(5),
-                bind_before_ready(&starting.client(), None, &authority, &["creating"]),
+                bind_before_ready(starting.driver().as_ref(), None, &authority, &["creating"]),
             )
             .await??
             .is_none()
@@ -1426,7 +1542,7 @@ async fn db_a_bind_happens_while_dind_is_still_starting() -> Result<()> {
         ensure!(
             tokio::time::timeout(
                 Duration::from_secs(5),
-                bind_before_ready(&legacy.client(), None, &authority, &["starting"]),
+                bind_before_ready(legacy.driver().as_ref(), None, &authority, &["starting"]),
             )
             .await??
             .is_none()
@@ -1607,6 +1723,12 @@ async fn db_each_missing_bind_condition_refuses_the_bind() -> Result<()> {
             false,
         ),
         (
+            "Pod with another service account",
+            edit(&pod, |o| o["spec"]["serviceAccountName"] = json!("default")),
+            BindRefused::PodChanged,
+            false,
+        ),
+        (
             "image digest",
             edit(&pod, |o| {
                 o["status"]["containerStatuses"][0]["imageID"] = json!(
@@ -1661,6 +1783,30 @@ async fn db_each_missing_bind_condition_refuses_the_bind() -> Result<()> {
             );
         }
 
+        // The chain the caller observed must be the one read now, link for
+        // link: the same Pod under another Sandbox is refused.
+        let fake = dind_starting(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
+        let env = load_environment(&db.pool, ENV_A).await?;
+        let backend = crate::worker::env_data::load_backend_row(&db.pool, ENV_A).await?;
+        let authority = ActivityAuthority::capture(&db.pool, ENV_A, GENERATION).await?;
+        let error = record_workspace_binding(
+            fake.driver().as_ref(),
+            None,
+            &env,
+            &backend,
+            &authority,
+            &["creating"],
+            &crate::runtime::VerifiedChain::for_test(OTHER_PVC, &format!("sandbox-{ENV_A}"), POD_1),
+            None,
+        )
+        .await
+        .expect_err("a chain under another Sandbox was bound");
+        ensure!(
+            bind_refused(&error) == Some(BindRefused::PodChanged),
+            "{error:#}"
+        );
+        ensure!(bindings(&db.pool).await?.is_empty() && fake.deletes().is_empty());
+
         // The environment must be authoritative: a non-bindable state.
         set_state(&db.pool, ENV_A, "stopped").await?;
         let fake = dind_starting(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
@@ -1676,7 +1822,7 @@ async fn db_each_missing_bind_condition_refuses_the_bind() -> Result<()> {
         backend.claim_uid = OTHER_PVC.into();
         let authority = ActivityAuthority::capture(&db.pool, ENV_A, GENERATION).await?;
         let error = record_workspace_binding(
-            &fake.client(),
+            fake.driver().as_ref(),
             None,
             &env,
             &backend,
@@ -1699,7 +1845,7 @@ async fn db_each_missing_bind_condition_refuses_the_bind() -> Result<()> {
             Ok(codewire_access::ManagedCredentialClients::from_profile_slots(["codex"])?);
         let backend = crate::worker::env_data::load_backend_row(&db.pool, ENV_A).await?;
         let error = record_workspace_binding(
-            &fake.client(),
+            fake.driver().as_ref(),
             None,
             &stale,
             &backend,
@@ -1870,7 +2016,7 @@ async fn enforced_with(
     let backend = crate::worker::env_data::load_backend_row(pool, environment).await?;
     let authority = ActivityAuthority::capture(pool, environment, GENERATION).await?;
     record_workspace_binding(
-        &fake.client(),
+        fake.driver().as_ref(),
         cfg,
         &env,
         &backend,
@@ -2065,7 +2211,12 @@ async fn db_an_early_bind_reads_the_chain_once() -> Result<()> {
         let authority = ActivityAuthority::capture(&db.pool, ENV_A, GENERATION).await?;
         let early = tokio::time::timeout(
             Duration::from_secs(5),
-            bind_before_ready(&adopted.client(), Some(&cfg), &authority, &["creating"]),
+            bind_before_ready(
+                adopted.driver().as_ref(),
+                Some(&cfg),
+                &authority,
+                &["creating"],
+            ),
         )
         .await??
         .ok_or_else(|| anyhow::anyhow!("the early bind did not record"))?;
@@ -2122,12 +2273,20 @@ async fn db_a_fresh_warm_bind_is_confirmed_without_binding_or_applying_access_ag
         let authority = ActivityAuthority::capture(&db.pool, ENV_A, GENERATION).await?;
         let early = tokio::time::timeout(
             Duration::from_secs(5),
-            bind_before_ready(&kube, Some(&cfg), &authority, &["creating"]),
+            bind_before_ready(
+                adopted.driver().as_ref(),
+                Some(&cfg),
+                &authority,
+                &["creating"],
+            ),
         )
         .await??
         .ok_or_else(|| anyhow::anyhow!("the early bind did not record"))?;
         ensure!(early.recorded.path == StartPath::Warm);
-        ensure!(early.observation == observed(ENV_A, POD_1) && early.pod_ip == "10.0.0.5");
+        ensure!(
+            early.chain.observation() == observed(ENV_A, POD_1).observation()
+                && early.pod_ip == "10.0.0.5"
+        );
         let fresh = FreshWarmBind::from_early_bind(early)
             .ok_or_else(|| anyhow::anyhow!("a warm bind did not qualify"))?;
 
@@ -2148,9 +2307,10 @@ async fn db_a_fresh_warm_bind_is_confirmed_without_binding_or_applying_access_ag
         let live = live_environment_binding(&db.pool, ENV_A).await?;
         ensure!(
             workspace_bootstrap_current(
-                &client,
+                adopted.driver().as_ref(),
+                &Placement::new(NAMESPACE),
                 &opts,
-                observed(ENV_A, POD_1).pod(),
+                observed(ENV_A, POD_1).member(),
                 live.as_ref()
             )
             .await?
@@ -2165,7 +2325,7 @@ async fn db_a_fresh_warm_bind_is_confirmed_without_binding_or_applying_access_ag
         ensure!(binds == 1, "{binds}");
         let served = adopted.requests().len();
         confirm_fresh_warm_bind_with(
-            &client,
+            adopted.driver().as_ref(),
             &env,
             &backend,
             &authority,
@@ -2205,7 +2365,7 @@ async fn db_a_fresh_warm_bind_is_confirmed_without_binding_or_applying_access_ag
                 },
                 environment: env.clone(),
                 backend: backend.clone(),
-                observation: observed(ENV_A, POD_1),
+                chain: observed(ENV_A, POD_1),
                 pod_ip: "10.0.0.5".into(),
             })
             .unwrap()
@@ -2220,7 +2380,7 @@ async fn db_a_fresh_warm_bind_is_confirmed_without_binding_or_applying_access_ag
         );
         ensure!(
             confirm_fresh_warm_bind_with(
-                &replaced_client,
+                replaced.driver().as_ref(),
                 &env,
                 &backend,
                 &authority,
@@ -2236,4 +2396,258 @@ async fn db_a_fresh_warm_bind_is_confirmed_without_binding_or_applying_access_ag
     }
     .await;
     db.finish(result).await
+}
+
+fn claim_path(environment: &str) -> String {
+    format!("{CLAIMS_API}/{NAMESPACE}/sandboxclaims/sandbox-{environment}")
+}
+
+fn runtime_path(environment: &str) -> String {
+    format!("{SANDBOXES_API}/{NAMESPACE}/sandboxes/sandbox-{environment}")
+}
+
+fn bind_claim(environment: &str) -> crate::runtime::ClaimRef {
+    crate::runtime::ClaimRef {
+        placement: Placement::new(NAMESPACE),
+        environment_id: environment.into(),
+        organization_id: ORGANIZATION.into(),
+        operation_generation: GENERATION,
+        name: format!("sandbox-{environment}"),
+        uid: claim_uid(environment),
+    }
+}
+
+/// #3628 PR 5a: every fact of an observation is the objects' own, field by
+/// field, as the checks read them before.
+#[tokio::test]
+async fn an_observation_carries_each_fact_as_the_objects_hold_it() {
+    let fake = FakeKube::runtime(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
+    fake.update(&pod_path(ENV_A), |pod| {
+        pod["metadata"]["labels"][crate::sandbox::template::SANDBOX_UID_LABEL] =
+            json!(sandbox_uid(ENV_A));
+        pod["status"]["podIP"] = json!("10.0.0.9");
+        pod["spec"]["containers"][0]["env"] = json!([
+            {"name": "LITERAL", "value": "1"},
+            {"name": "SOURCED", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
+        ]);
+    });
+    let observation = fake.driver().observe(&bind_claim(ENV_A)).await.unwrap();
+    let pod = fake.object(&pod_path(ENV_A));
+    let runtime = fake.object(&runtime_path(ENV_A));
+
+    // The chain, as the chain read verified it.
+    let chain = &observation.chain;
+    assert_eq!(chain.claim_uid(), claim_uid(ENV_A));
+    assert_eq!(chain.runtime_uid(), sandbox_uid(ENV_A));
+    assert_eq!(chain.member().name, format!("sandbox-{ENV_A}"));
+    assert_eq!(chain.member().uid, POD_1);
+    assert_eq!(chain.birth_runtime_uid(), Some(sandbox_uid(ENV_A).as_str()));
+
+    // The incarnation.
+    let member = &observation.member;
+    assert_eq!(member.name.as_deref(), pod["metadata"]["name"].as_str());
+    assert_eq!(member.uid.as_deref(), Some(POD_1));
+    assert!(!member.terminating);
+    assert_eq!(
+        member.service_account.as_deref(),
+        pod["spec"]["serviceAccountName"].as_str()
+    );
+    assert_eq!(
+        member.controllers,
+        [crate::runtime::ControllerFact {
+            kind: "Sandbox".into(),
+            uid: sandbox_uid(ENV_A),
+        }]
+    );
+    assert_eq!(
+        serde_json::to_value(&member.labels).unwrap(),
+        pod["metadata"]["labels"]
+    );
+    assert!(member.has_spec);
+    let volume = |name: &str| {
+        member
+            .volumes
+            .iter()
+            .find(|volume| volume.name == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        volume("workspace").claim_name,
+        Some(format!("workspace-sandbox-{ENV_A}"))
+    );
+    assert_eq!(
+        volume(WORKSPACE_BINDING_VOLUME).token_audiences,
+        [WORKSPACE_BINDING_TOKEN_AUDIENCE]
+    );
+    let containers: Vec<(String, Option<String>)> = member
+        .containers
+        .iter()
+        .map(|container| (container.name.clone(), container.image.clone()))
+        .collect();
+    assert_eq!(
+        containers,
+        [
+            ("workspace".to_owned(), Some(WORKSPACE_IMAGE.to_owned())),
+            ("dind".to_owned(), Some(DIND_IMAGE.to_owned())),
+        ]
+    );
+    assert_eq!(
+        member.containers[0].env,
+        [
+            crate::runtime::EnvFact {
+                name: "LITERAL".into(),
+                value: Some("1".into()),
+                from_source: false,
+            },
+            crate::runtime::EnvFact {
+                name: "SOURCED".into(),
+                value: None,
+                from_source: true,
+            },
+        ]
+    );
+    assert!(member.containers[1].env.is_empty());
+    assert!(member.init_containers.is_empty());
+    let statuses = pod["status"]["containerStatuses"].as_array().unwrap();
+    assert_eq!(
+        member.image_ids,
+        statuses
+            .iter()
+            .map(|status| (
+                status["name"].as_str().unwrap().to_owned(),
+                status["imageID"].as_str().unwrap().to_owned()
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(member.ip, "10.0.0.9");
+    assert_eq!(member.spec_json, pod["spec"]);
+
+    // The runtime it belongs to.
+    assert_eq!(
+        observation.runtime.template_containers.as_ref(),
+        Some(&runtime["spec"]["podTemplate"]["spec"]["containers"])
+    );
+    assert_eq!(observation.runtime.template_init_containers, None);
+    assert!(observation.runtime.labels.is_empty());
+    assert_eq!(
+        observation.runtime.json["metadata"]["uid"],
+        runtime["metadata"]["uid"]
+    );
+    assert_eq!(observation.runtime.json["spec"], runtime["spec"]);
+    assert_eq!(observation.pool, "");
+}
+
+/// #3628 PR 5a: each observation method makes exactly the reads its call
+/// site made before, so the bind makes 7 (chain 3, Pod 1, volume 3).
+#[tokio::test]
+async fn each_observation_method_makes_the_reads_it_made_before() {
+    let fake = FakeKube::runtime(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
+    let driver = fake.driver();
+    let placement = Placement::new(NAMESPACE);
+    let mut before = fake.gets();
+    let mut reads = |fake: &FakeKube| {
+        let now = fake.gets();
+        let made = now - before;
+        before = now;
+        made
+    };
+    driver.observe(&bind_claim(ENV_A)).await.unwrap();
+    assert_eq!(reads(&fake), 3, "the chain");
+    driver
+        .observe_member(&placement, &format!("sandbox-{ENV_A}"))
+        .await
+        .unwrap();
+    assert_eq!(reads(&fake), 1, "the incarnation again");
+    let volume = crate::runtime::VolumeRef {
+        claim_name: format!("sandbox-{ENV_A}"),
+        claim_uid: claim_uid(ENV_A),
+        recorded_pvc_uid: Some(PVC.into()),
+    };
+    driver.workspace_volume(&placement, &volume).await.unwrap();
+    assert_eq!(reads(&fake), 3, "the volume");
+    driver
+        .current_member_facts(&placement, ENV_A)
+        .await
+        .unwrap();
+    assert_eq!(reads(&fake), 3, "the current incarnation");
+    bound_pod_absent(
+        driver.as_ref(),
+        NAMESPACE,
+        &format!("sandbox-{ENV_A}"),
+        POD_1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(reads(&fake), 1, "an absent bound incarnation");
+    assert!(
+        fake.requests().iter().all(|(method, _)| method == "GET"),
+        "observing writes nothing"
+    );
+}
+
+/// #3628 PR 5a, #2034 invariant 2: a terminating, foreign or doubled link
+/// never yields an observation, so never a binding.
+#[tokio::test]
+async fn every_link_of_the_chain_is_refused_where_it_was_before() {
+    fn terminating(object: &mut serde_json::Value) {
+        object["metadata"]["deletionTimestamp"] = json!("2026-11-11T00:00:00Z");
+    }
+    fn foreign_controller(object: &mut serde_json::Value) {
+        object["metadata"]["ownerReferences"][0]["uid"] = json!(OTHER_PVC);
+    }
+    fn second_controller(object: &mut serde_json::Value) {
+        let mut second = object["metadata"]["ownerReferences"][0].clone();
+        second["name"] = json!("another");
+        object["metadata"]["ownerReferences"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+    }
+    type Edit = fn(&mut serde_json::Value);
+    // Every link is refused by the chain read itself: a terminating object
+    // is not current (`runtime_object_uid`), and each controller reference
+    // must be the single expected one.
+    let refused: [(&str, String, Edit); 7] = [
+        ("terminating claim", claim_path(ENV_A), terminating),
+        ("terminating runtime", runtime_path(ENV_A), terminating),
+        ("terminating incarnation", pod_path(ENV_A), terminating),
+        (
+            "runtime of another claim",
+            runtime_path(ENV_A),
+            foreign_controller,
+        ),
+        (
+            "runtime with two controllers",
+            runtime_path(ENV_A),
+            second_controller,
+        ),
+        (
+            "incarnation of another runtime",
+            pod_path(ENV_A),
+            foreign_controller,
+        ),
+        (
+            "incarnation with two controllers",
+            pod_path(ENV_A),
+            second_controller,
+        ),
+    ];
+    for (case, path, edit) in refused {
+        let fake = FakeKube::runtime(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
+        fake.update(&path, edit);
+        assert!(
+            fake.driver().observe(&bind_claim(ENV_A)).await.is_err(),
+            "{case} must fail the chain read"
+        );
+    }
+    // The fixture itself binds.
+    let fake = FakeKube::runtime(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
+    assert!(
+        fake.driver()
+            .observe(&bind_claim(ENV_A))
+            .await
+            .unwrap()
+            .bind_ready
+    );
 }

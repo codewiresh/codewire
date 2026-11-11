@@ -208,7 +208,7 @@ impl WorkspaceSandboxIdentity {
 
 /// Exact controller-owned objects observed before metadata publication. This
 /// contains no token and confers no credential authority.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeIdentityObservation {
     sandbox_uid: String,
     pod: WorkspacePodIdentity,

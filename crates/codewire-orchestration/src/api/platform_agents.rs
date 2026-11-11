@@ -215,7 +215,7 @@ async fn prepare_resume(
             "this conversation changed since it was listed; list it again",
         ));
     }
-    require_predecessor_absent(state.kube.as_ref(), &predecessor).await?;
+    require_predecessor_absent(state.runtime.as_deref(), &predecessor).await?;
     fill_resume(info, request, &predecessor.pod_uid, predecessor.agent)?;
     Ok(predecessor)
 }
@@ -224,12 +224,12 @@ async fn prepare_resume(
 /// A present Pod, terminating included, is still stopping; a failed read, or
 /// no Kubernetes client, refuses as unavailable (#2705).
 async fn require_predecessor_absent(
-    kube: Option<&kube::Client>,
+    runtime: Option<&dyn crate::runtime::RuntimeDriver>,
     predecessor: &ResumePredecessor,
 ) -> AppResult<()> {
-    let kube = kube.ok_or_else(unavailable)?;
+    let runtime = runtime.ok_or_else(unavailable)?;
     match crate::worker::workspace_binding::bound_pod_absent(
-        kube,
+        runtime,
         &predecessor.namespace,
         &predecessor.pod_name,
         &predecessor.pod_uid,

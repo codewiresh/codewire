@@ -1095,7 +1095,7 @@ impl WorkerSetupOps<'_> {
                         "setup recovery timed out waiting for replacement Pod {pod_name} readiness"
                     );
                 }
-                let kube = self.ctx.kube.as_ref().ok_or_else(|| {
+                let runtime = self.ctx.runtime.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("workspace setup: sandbox backend not configured")
                 })?;
                 // Boxed: the bind and access futures are large, and inline
@@ -1105,7 +1105,7 @@ impl WorkerSetupOps<'_> {
                     remaining,
                     Box::pin(bind_replacement_then_await_access(
                         bind_replacement_runtime(
-                            kube,
+                            runtime,
                             self.authority,
                             SETUP_MUTATION_STATES,
                             &replacement,
@@ -2208,7 +2208,7 @@ impl SetupOps for WorkerSetupOps<'_> {
             // The bound daemon serves these on its tailnet address (#2460).
             crate::api::environment_daemon::push_environment_app_ports(
                 &self.ctx.pool,
-                self.ctx.kube.as_ref(),
+                self.ctx.runtime.as_deref(),
                 &self.ctx.sandbox_cfg.session_secret,
                 None,
                 &input.environment_id,
@@ -2357,7 +2357,7 @@ async fn daemon_readiness(
 ) -> Option<DaemonReadiness> {
     read_daemon_readiness(
         ctx.pool.clone(),
-        ctx.kube.clone(),
+        ctx.runtime.clone(),
         ctx.sandbox_cfg.session_secret.clone(),
         namespace.to_owned(),
         env_id.to_owned(),
@@ -2385,18 +2385,18 @@ fn reported_defaults_generation(
 /// caller's borrow: create's read beside its own tail (#3684).
 pub(super) async fn read_daemon_readiness(
     pool: sqlx::PgPool,
-    kube: Option<kube::Client>,
+    runtime: Option<std::sync::Arc<dyn crate::runtime::RuntimeDriver>>,
     session_secret: String,
     namespace: String,
     env_id: String,
 ) -> Option<DaemonReadiness> {
     let env_id = env_id.as_str();
-    kube.as_ref()?;
+    runtime.as_ref()?;
     let status = tokio::time::timeout(
         DAEMON_STATUS_TIMEOUT,
         crate::api::environment_daemon::environment_daemon_status_for_worker(
             &pool,
-            kube.as_ref(),
+            runtime.as_deref(),
             &session_secret,
             &namespace,
             env_id,

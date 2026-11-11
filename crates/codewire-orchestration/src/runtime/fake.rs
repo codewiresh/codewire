@@ -18,6 +18,7 @@ use super::{
     RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeMode,
     VolumeRef, WantedPools,
 };
+use super::{MemberFacts, RuntimeObservation, RuntimeObservations, VerifiedChain, WorkspaceVolume};
 use crate::sandbox::ClaimOpts;
 use crate::sandbox::host_keys::HostKeyStore;
 use crate::sandbox::template::TemplateOpts;
@@ -186,6 +187,87 @@ impl RuntimeClaims for FakeRuntimeDriver {
     ) -> anyhow::Result<()> {
         self.placements.lock().unwrap().push(placement.clone());
         Ok(())
+    }
+}
+
+#[async_trait]
+impl RuntimeObservations for FakeRuntimeDriver {
+    async fn observe(&self, claim: &ClaimRef) -> anyhow::Result<RuntimeObservation> {
+        self.placements
+            .lock()
+            .unwrap()
+            .push(claim.placement.clone());
+        anyhow::bail!("not scripted")
+    }
+
+    async fn observe_member(
+        &self,
+        placement: &Placement,
+        _member_name: &str,
+    ) -> anyhow::Result<Option<MemberFacts>> {
+        self.placements.lock().unwrap().push(placement.clone());
+        anyhow::bail!("not scripted")
+    }
+
+    async fn current_member_facts(
+        &self,
+        placement: &Placement,
+        _environment_id: &str,
+    ) -> anyhow::Result<MemberFacts> {
+        self.placements.lock().unwrap().push(placement.clone());
+        anyhow::bail!("not scripted")
+    }
+
+    async fn workspace_volume(
+        &self,
+        placement: &Placement,
+        _volume: &VolumeRef,
+    ) -> anyhow::Result<WorkspaceVolume> {
+        self.placements.lock().unwrap().push(placement.clone());
+        anyhow::bail!("not scripted")
+    }
+
+    async fn wait_member_change(
+        &self,
+        _placement: &Placement,
+        _observation: &RuntimeObservation,
+        _poll: Duration,
+        _fallback: Duration,
+    ) {
+    }
+
+    async fn wait_claim_change(
+        &self,
+        _placement: &Placement,
+        _observation: &RuntimeObservation,
+        _fallback: Duration,
+    ) {
+    }
+
+    async fn wait_runtime_identity(
+        &self,
+        _claim: &ClaimRef,
+        _chain: &VerifiedChain,
+        _timeout: Duration,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn repin_daemon_image(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+        _support_image: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn delete_refused_member(
+        &self,
+        _placement: &Placement,
+        _member: &MemberRef,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
     }
 }
 

@@ -74,9 +74,12 @@ async fn resume_requires_the_predecessor_pod_proven_gone() {
         ),
     ] {
         let (client, seen) = kube(answer);
-        require_predecessor_absent(Some(&client), &predecessor())
-            .await
-            .unwrap();
+        require_predecessor_absent(
+            Some(crate::runtime::kubernetes::KubernetesDriver::shared(client.clone()).as_ref()),
+            &predecessor(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             *seen.lock().unwrap(),
             [format!(
@@ -87,7 +90,13 @@ async fn resume_requires_the_predecessor_pod_proven_gone() {
     // Still there, terminating or not: the Resume waits for it.
     for terminating in [false, true] {
         let (client, _) = kube((StatusCode::OK, pod(POD_UID, terminating)));
-        refused_as_stopping(require_predecessor_absent(Some(&client), &predecessor()).await);
+        refused_as_stopping(
+            require_predecessor_absent(
+                Some(crate::runtime::kubernetes::KubernetesDriver::shared(client.clone()).as_ref()),
+                &predecessor(),
+            )
+            .await,
+        );
     }
 }
 
@@ -107,7 +116,13 @@ async fn resume_refuses_as_unavailable_when_absence_cannot_be_read() {
             json!({"apiVersion": "v1", "kind": "Status", "status": "Failure",
                    "code": status.as_u16()}),
         ));
-        unavailable_error(require_predecessor_absent(Some(&client), &predecessor()).await);
+        unavailable_error(
+            require_predecessor_absent(
+                Some(crate::runtime::kubernetes::KubernetesDriver::shared(client.clone()).as_ref()),
+                &predecessor(),
+            )
+            .await,
+        );
     }
     // No Kubernetes client: nothing is proven.
     unavailable_error(require_predecessor_absent(None, &predecessor()).await);

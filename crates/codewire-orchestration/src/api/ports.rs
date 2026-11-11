@@ -415,14 +415,14 @@ pub(crate) async fn delete_port_core(
 /// application ports, without holding the request (#2460).
 fn spawn_app_ports_push(state: &ApiState, env_id: &str) {
     let pool = state.pool.clone();
-    let kube = state.kube.clone();
+    let runtime = state.runtime.clone();
     let session_secret = state.session_secret.clone();
     let endpoints = state.environment_daemon_endpoints.clone();
     let env_id = env_id.to_owned();
     tokio::spawn(async move {
         super::environment_daemon::push_environment_app_ports(
             &pool,
-            kube.as_ref(),
+            runtime.as_deref(),
             &session_secret,
             Some(&endpoints),
             &env_id,

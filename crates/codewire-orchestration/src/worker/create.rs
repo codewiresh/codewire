@@ -18,15 +18,14 @@ use super::start_timing::{
 };
 use super::workspace_binding::{
     EarlyBind, EnvironmentBinding, bind_before_ready, bind_workspace_runtime,
-    binding_bootstrap_current, credential_scope, definitive_refusal, live_environment_binding,
-    sandbox_bound_by_any,
+    binding_bootstrap_current, claim_of, credential_scope, definitive_refusal,
+    live_environment_binding, sandbox_bound_by_any,
 };
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
-use crate::runtime::{ClaimRef, Pick, Placement, RuntimeDriver};
+use crate::runtime::{ClaimRef, Pick, Placement, RuntimeDriver, VerifiedChain};
 use crate::sandbox::client::{
-    NoCapacity, ProbeResult, RuntimeIdentityObservation, SandboxClient, WorkspacePodIdentity,
-    WorkspaceSandboxIdentity,
+    NoCapacity, ProbeResult, SandboxClient, WorkspacePodIdentity, WorkspaceSandboxIdentity,
 };
 use crate::sandbox::host_keys::RecordedHostKeys;
 use crate::sandbox::template::{
@@ -2268,7 +2267,7 @@ impl DaemonRead {
     fn spawn(ctx: &WorkerContext, namespace: &str, env_id: &str) -> Self {
         Self(tokio::spawn(super::setup::read_daemon_readiness(
             ctx.pool.clone(),
-            ctx.kube.clone(),
+            ctx.runtime.clone(),
             ctx.sandbox_cfg.session_secret.clone(),
             namespace.to_owned(),
             env_id.to_owned(),
@@ -2323,7 +2322,7 @@ impl Drop for DaemonRead {
 #[derive(Debug, PartialEq)]
 pub(super) struct FreshWarmBind {
     runtime: ReconciledRuntime,
-    observation: RuntimeIdentityObservation,
+    chain: VerifiedChain,
 }
 
 impl FreshWarmBind {
@@ -2333,7 +2332,7 @@ impl FreshWarmBind {
         if early.recorded.path != StartPath::Warm || early.pod_ip.is_empty() {
             return None;
         }
-        let pod = early.observation.pod();
+        let pod = early.chain.member();
         let runtime = ReconciledRuntime {
             environment: early.environment,
             namespace: early.backend.namespace,
@@ -2345,7 +2344,7 @@ impl FreshWarmBind {
         };
         Some(Self {
             runtime,
-            observation: early.observation,
+            chain: early.chain,
         })
     }
 
@@ -2848,12 +2847,20 @@ async fn confirm_fresh_warm_bind(
     probe: &ProbeResult,
     fresh: &FreshWarmBind,
 ) -> anyhow::Result<()> {
-    let client = require_client(ctx, &backend.namespace)?;
-    confirm_fresh_warm_bind_with(&client, env, backend, authority, states, probe, fresh).await
+    confirm_fresh_warm_bind_with(
+        ctx.require_runtime()?,
+        env,
+        backend,
+        authority,
+        states,
+        probe,
+        fresh,
+    )
+    .await
 }
 
 pub(super) async fn confirm_fresh_warm_bind_with(
-    client: &SandboxClient,
+    runtime: &dyn RuntimeDriver,
     env: &EnvironmentRow,
     backend: &BackendRow,
     authority: &ActivityAuthority,
@@ -2865,20 +2872,13 @@ pub(super) async fn confirm_fresh_warm_bind_with(
         env.id == authority.environment_id(),
         "runtime identity authority does not match environment"
     );
-    let opts = ClaimOpts {
-        environment_id: env.id.clone(),
-        org_id: env.org_id.clone(),
-        operation_generation: authority.operation_generation(),
-        ..Default::default()
-    };
+    let claim = claim_of(env, backend, authority.operation_generation());
     authority
         .run_while_authoritative_for_states(
             states,
-            client.wait_for_claim_runtime_identity(
-                &opts,
-                &backend.claim_name,
-                &backend.claim_uid,
-                &fresh.observation,
+            runtime.wait_runtime_identity(
+                &claim,
+                &fresh.chain,
                 ready_timeout_for_isolation(&env.isolation_tier),
             ),
         )
@@ -2932,10 +2932,10 @@ async fn wait_with_early_bind_recording<T>(
     states: &[&str],
     wait: impl std::future::Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<(T, Option<EarlyBind>)> {
-    let Some(kube) = ctx.kube.as_ref() else {
+    let Some(runtime) = ctx.runtime.as_deref() else {
         return wait.await.map(|result| (result, None));
     };
-    let bind = bind_before_ready(kube, Some(&ctx.sandbox_cfg), authority, states);
+    let bind = bind_before_ready(runtime, Some(&ctx.sandbox_cfg), authority, states);
     tokio::pin!(wait);
     tokio::pin!(bind);
     let mut binding = true;
@@ -2976,15 +2976,9 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
         env.id == authority.environment_id(),
         "runtime identity authority does not match environment"
     );
-    let client = require_client(ctx, &backend.namespace)?;
+    let runtime = ctx.require_runtime()?;
     let template_opts =
         load_environment_template_opts(ctx, env, authority.operation_generation()).await?;
-    let opts = ClaimOpts {
-        environment_id: env.id.clone(),
-        org_id: env.org_id.clone(),
-        operation_generation: authority.operation_generation(),
-        ..Default::default()
-    };
     let mut guard = authority.begin_external_mutation(states).await?;
     let (namespace, claim_name, claim_uid, organization): (String, String, String, String) =
         sqlx::query_as(
@@ -3004,31 +2998,36 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
             && !claim_uid.is_empty(),
         "runtime identity backend association changed"
     );
-    let observation = await_external_mutation(async {
+    let claim = ClaimRef {
+        placement: Placement::new(&namespace),
+        environment_id: env.id.clone(),
+        organization_id: env.org_id.clone(),
+        operation_generation: authority.operation_generation(),
+        name: claim_name,
+        uid: claim_uid,
+    };
+    let chain = await_external_mutation(async {
         let current = load_environment_in(guard.transaction(), &env.id).await?;
         validate_template_metadata(&current, &template_opts)?;
-        let observation = client
-            .observe_claim_runtime_identity(&opts, &claim_name, &claim_uid)
-            .await?;
+        let chain = runtime.observe(&claim).await?.chain;
         anyhow::ensure!(
-            expected_pod.is_none_or(|expected| observation.pod() == expected),
+            expected_pod.is_none_or(|expected| chain.member() == expected),
             "workspace Pod changed after the ready observation"
         );
         let binding = live_environment_binding(&mut **guard.transaction(), &env.id).await?;
         if !workspace_bootstrap_current(
-            &client,
+            runtime,
+            &claim.placement,
             &template_opts,
-            observation.pod(),
+            chain.member(),
             binding.as_ref(),
         )
         .await?
         {
             return Err(WorkspaceBootstrapMismatch.into());
         }
-        client
-            .reconcile_claim_runtime_identity(&opts, &claim_name, &claim_uid)
-            .await?;
-        Ok(observation)
+        runtime.reconcile_identity(&claim).await?;
+        Ok(chain)
     })
     .await?;
     guard.commit().await?;
@@ -3046,28 +3045,22 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
         states,
         authority.run_while_authoritative_for_states(
             states,
-            client.wait_for_claim_runtime_identity(
-                &opts,
-                &claim_name,
-                &claim_uid,
-                &observation,
+            runtime.wait_runtime_identity(
+                &claim,
+                &chain,
                 ready_timeout_for_isolation(&env.isolation_tier),
             ),
         ),
     )
     .await?;
-    let kube = ctx
-        .kube
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("sandbox backend is not configured"))?;
     if let Some(recorded) = bind_workspace_runtime(
-        kube,
+        runtime,
         Some(&ctx.sandbox_cfg),
         env,
         backend,
         authority,
         states,
-        &observation,
+        &chain,
     )
     .await?
     {
@@ -3092,7 +3085,7 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
         &ctx.sandbox_cfg,
         env,
         &env.id,
-        &namespace,
+        &claim.placement.namespace,
         authority,
         states,
     )
@@ -3107,17 +3100,18 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
 /// current by construction, because its binding captures the current
 /// environment row under the same fence.
 pub(super) async fn workspace_bootstrap_current(
-    client: &SandboxClient,
+    runtime: &dyn RuntimeDriver,
+    placement: &Placement,
     template_opts: &TemplateOpts,
     pod: &WorkspacePodIdentity,
     binding: Option<&EnvironmentBinding>,
 ) -> anyhow::Result<bool> {
-    let live_pod = client
-        .get_workspace_pod(&pod.name)
+    let live = runtime
+        .observe_member(placement, &pod.name)
         .await?
-        .filter(|live| live.metadata.uid.as_deref() == Some(pod.uid.as_str()))
+        .filter(|live| live.uid.as_deref() == Some(pod.uid.as_str()))
         .ok_or_else(|| anyhow::anyhow!("workspace bootstrap Pod was replaced"))?;
-    match credential_scope(&live_pod) {
+    match credential_scope(&live) {
         // A Pod rendered before claim-time binding is never current: recovery
         // restarts it onto the binding rendering (no legacy compatibility).
         Some(WorkspaceCredentialScope::Environment) => Ok(false),
@@ -3969,11 +3963,7 @@ mod tests {
             },
             environment: environment.clone(),
             backend: backend.clone(),
-            observation: RuntimeIdentityObservation::for_test(
-                "sandbox-uid",
-                "sandbox-env",
-                pod_uid,
-            ),
+            chain: crate::runtime::VerifiedChain::for_test("sandbox-uid", "sandbox-env", pod_uid),
             pod_ip: "10.0.0.5".into(),
         }
     }

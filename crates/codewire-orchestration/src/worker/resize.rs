@@ -167,7 +167,7 @@ async fn enforce_session_policy(
     }
     let sessions = list_environment_daemon_sessions_for_worker(
         &ctx.pool,
-        ctx.kube.as_ref(),
+        ctx.runtime.as_deref(),
         &ctx.sandbox_cfg.session_secret,
         namespace,
         &operation.environment_id,
@@ -193,7 +193,7 @@ async fn enforce_session_policy(
             .run_external_mutation(RESIZE_MUTATION_STATES, async {
                 stop_environment_daemon_session_for_worker(
                     &ctx.pool,
-                    ctx.kube.as_ref(),
+                    ctx.runtime.as_deref(),
                     &ctx.sandbox_cfg.session_secret,
                     namespace,
                     &operation.environment_id,

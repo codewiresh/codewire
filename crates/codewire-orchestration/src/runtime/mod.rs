@@ -11,6 +11,7 @@
 #[cfg(test)]
 pub(crate) mod fake;
 pub mod kubernetes;
+pub mod observation;
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -21,9 +22,9 @@ use crate::sandbox::ClaimOpts;
 pub use crate::sandbox::client::{
     ClearingProgress, FailedLiveResize, KeptSnapshot, PodResizeInfeasible, PoolBornClaim,
     ProbeResult, WorkspacePodIdentity as MemberRef, WorkspacePodReplacement as MemberReplacement,
-    WorkspacePodResizeState as ResizeState, WorkspacePvcAnchor as VolumeRef,
-    WorkspaceSandboxIdentity as SuspendedRuntime, WorkspaceStorage as VolumeIdentity,
-    WorkspaceStorageResizeOutcome as VolumeGrowth,
+    WorkspacePodResizeState as ResizeState, WorkspacePvc as WorkspaceVolume,
+    WorkspacePvcAnchor as VolumeRef, WorkspaceSandboxIdentity as SuspendedRuntime,
+    WorkspaceStorage as VolumeIdentity, WorkspaceStorageResizeOutcome as VolumeGrowth,
 };
 pub use crate::sandbox::exec::WorkspaceExecHandle as RuntimeExec;
 use crate::sandbox::host_keys::HostKeyStore;
@@ -32,6 +33,10 @@ pub use crate::sandbox::snapshots::{ClearingOpts, VolumeMode};
 use crate::sandbox::template::TemplateOpts;
 pub use crate::sandbox::warm_pool::DesiredPool;
 use crate::sandbox::warm_pool::WarmPoolObjects;
+pub use observation::{
+    ContainerFact, ControllerFact, EnvFact, MemberFacts, RuntimeFacts, RuntimeObservation,
+    VerifiedChain, VolumeFact,
+};
 
 /// Where a runtime object lives. A caller names this rather than holding a
 /// client per location; for Kubernetes it is the namespace.
@@ -459,6 +464,80 @@ pub trait RuntimeLifecycle: Send + Sync {
     ) -> anyhow::Result<()>;
 }
 
+/// What the bind reads of an environment's runtime (#3628 PR 5a). Each method
+/// is one read, or one write of the bind's §5.6 enforcement; the bind's
+/// checks stay in orchestration and read what these return.
+#[async_trait]
+pub trait RuntimeObservations: Send + Sync {
+    /// Read the claim's chain once, without waiting. Every link's controller
+    /// reference is verified, or this fails.
+    async fn observe(&self, claim: &ClaimRef) -> anyhow::Result<RuntimeObservation>;
+
+    /// Read again the incarnation holding this name; `None` when it is gone.
+    async fn observe_member(
+        &self,
+        placement: &Placement,
+        member_name: &str,
+    ) -> anyhow::Result<Option<MemberFacts>>;
+
+    /// The incarnation the environment's claim names now, through its runtime.
+    async fn current_member_facts(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<MemberFacts>;
+
+    /// The workspace volume the claim's runtime owns, found through what the
+    /// backend recorded.
+    async fn workspace_volume(
+        &self,
+        placement: &Placement,
+        volume: &VolumeRef,
+    ) -> anyhow::Result<WorkspaceVolume>;
+
+    /// Return once the observed incarnation changed, polling only it every
+    /// `poll`, or once `fallback` elapses. A failed read counts as unchanged.
+    async fn wait_member_change(
+        &self,
+        placement: &Placement,
+        observation: &RuntimeObservation,
+        poll: Duration,
+        fallback: Duration,
+    );
+
+    /// Return on the first change to the claim after the observation, or once
+    /// `fallback` elapses.
+    async fn wait_claim_change(
+        &self,
+        placement: &Placement,
+        observation: &RuntimeObservation,
+        fallback: Duration,
+    );
+
+    /// Wait until the claim's chain, still exactly `chain`, has converged.
+    async fn wait_runtime_identity(
+        &self,
+        claim: &ClaimRef,
+        chain: &VerifiedChain,
+        timeout: Duration,
+    ) -> anyhow::Result<()>;
+
+    /// Re-pin the environment's runtime to `support_image` (§5.6).
+    async fn repin_daemon_image(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        support_image: &str,
+    ) -> anyhow::Result<()>;
+
+    /// Delete exactly this incarnation, only while it holds this UID (§5.6).
+    async fn delete_refused_member(
+        &self,
+        placement: &Placement,
+        member: &MemberRef,
+    ) -> anyhow::Result<()>;
+}
+
 /// How a running environment changes size without losing its identity.
 #[async_trait]
 pub trait RuntimeResize: Send + Sync {
@@ -729,6 +808,7 @@ pub trait RuntimeAccess: Send + Sync {
 pub trait RuntimeDriver:
     RuntimePools
     + RuntimeClaims
+    + RuntimeObservations
     + RuntimeLifecycle
     + RuntimeResize
     + RuntimeStorage
@@ -740,6 +820,7 @@ pub trait RuntimeDriver:
 impl<
     T: RuntimePools
         + RuntimeClaims
+        + RuntimeObservations
         + RuntimeLifecycle
         + RuntimeResize
         + RuntimeStorage
