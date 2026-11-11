@@ -422,6 +422,22 @@ mod tests {
         ResolverConfig::from_parts(None, vec![name("search-path.invalid.")], vec![server])
     }
 
+    /// The query timeout of the loopback resolvers below, none of which tests
+    /// the timeout. On a starved CI guest a one-second timeout fired before
+    /// the query was even sent (codewire runs 42107 and 42215, where tests
+    /// that take milliseconds took seconds), so it is generous.
+    const LOOPBACK_DNS_TIMEOUT: Duration = Duration::from_secs(20);
+
+    /// Wait for a loopback DNS server to finish. A server whose query never
+    /// arrives fails the test here instead of hanging it: one such hang held
+    /// a CI job for 28 minutes (codewire run 42107).
+    async fn finished(server: tokio::task::JoinHandle<()>) {
+        tokio::time::timeout(LOOPBACK_DNS_TIMEOUT, server)
+            .await
+            .expect("the loopback DNS server was never asked")
+            .unwrap();
+    }
+
     /// A resolver whose loopback server answers its one query with `answers`.
     async fn resolver_answering(
         answers: Vec<Record>,
@@ -441,11 +457,9 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let resolver = SystemDnsResolver::from_config(
-            loopback_resolver_config(address),
-            Duration::from_secs(1),
-        )
-        .unwrap();
+        let resolver =
+            SystemDnsResolver::from_config(loopback_resolver_config(address), LOOPBACK_DNS_TIMEOUT)
+                .unwrap();
         (resolver, server)
     }
 
@@ -589,11 +603,9 @@ mod tests {
                 .send((query.name().to_ascii(), query.query_type()))
                 .unwrap();
         });
-        let resolver = SystemDnsResolver::from_config(
-            loopback_resolver_config(address),
-            Duration::from_secs(1),
-        )
-        .unwrap();
+        let resolver =
+            SystemDnsResolver::from_config(loopback_resolver_config(address), LOOPBACK_DNS_TIMEOUT)
+                .unwrap();
         let options = resolver.resolver.options();
         assert_eq!(options.use_hosts_file, ResolveHosts::Never);
         assert_eq!(options.cache_size, DNS_CACHE_ENTRIES);
@@ -619,7 +631,7 @@ mod tests {
         let (observed_name, observed_type) = observed_receiver.await.unwrap();
         assert_eq!(observed_name.to_ascii_lowercase(), "allowed.example.com.");
         assert_eq!(observed_type, RecordType::A);
-        server.await.unwrap();
+        finished(server).await;
     }
 
     #[tokio::test]
@@ -642,7 +654,7 @@ mod tests {
             assert_eq!(resolution.aliases()[0].ttl_seconds(), 1);
             assert_eq!(resolution.addresses()[0].address(), IpAddr::V4(TEST_V4));
             assert_eq!(resolution.addresses()[0].ttl_seconds(), 1);
-            server.await.unwrap();
+            finished(server).await;
         }
     }
 
@@ -682,7 +694,7 @@ rules:
                 Arc::new(SystemBrokerClock::new()),
             );
             let resolved = broker.resolve_dns(TEST_NAME, DnsRecordFamily::Ipv4).await;
-            server.await.unwrap();
+            finished(server).await;
             (broker, resolved)
         };
 
@@ -748,11 +760,9 @@ rules:
                     .unwrap();
             }
         });
-        let resolver = SystemDnsResolver::from_config(
-            loopback_resolver_config(address),
-            Duration::from_secs(1),
-        )
-        .unwrap();
+        let resolver =
+            SystemDnsResolver::from_config(loopback_resolver_config(address), LOOPBACK_DNS_TIMEOUT)
+                .unwrap();
 
         assert_eq!(
             resolver.resolve_host_addresses(TEST_NAME).await.unwrap(),
@@ -762,7 +772,7 @@ rules:
             resolver.resolve_host_addresses("Allowed.Example.Com").await,
             Err(BrokerAdapterFailure::Malformed)
         );
-        server.await.unwrap();
+        finished(server).await;
     }
 
     #[tokio::test]
