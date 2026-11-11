@@ -22,8 +22,9 @@ command. With no command, runs:
   scripts/runtime/dev/smoke-dev-commodity.sh
 
 The wrapper is intentionally non-interactive. It takes a short-lived OpenBao
-token from the workstation access client named by CODEWIRE_ACCESS_CLIENT (an
-absolute path), uses it for the one read, and revokes it before the command
+token from the workstation access client (CODEWIRE_ACCESS_CLIENT, an absolute
+path; else an `access` on PATH; else $CODEWIRE_INFRA_DIR/scripts/access), uses
+it for the one read, and revokes it before the command
 runs. It never uses an inherited token or a saved bao session, and it never
 opens a browser.
 USAGE

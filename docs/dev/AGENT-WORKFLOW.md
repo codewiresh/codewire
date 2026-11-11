@@ -137,9 +137,10 @@ its separate VFS checks. No additional CI workflow is needed.
 
 For the longer cloud disk lifecycle journey, use the same configured Dev inputs
 and dedicated smoke identity as commodity acceptance. The smoke-auth wrappers
-take a short-lived OpenBao token from the workstation access client named by
-`CODEWIRE_ACCESS_CLIENT` (with `CODEWIRE_OPENBAO_ADDR`), revoke it before the
-command runs, and need no browser login:
+take a short-lived OpenBao token from the workstation access client
+(`CODEWIRE_ACCESS_CLIENT`; else an `access` on `PATH`; else
+`$CODEWIRE_INFRA_DIR/scripts/access`), with `CODEWIRE_OPENBAO_ADDR`, revoke it
+before the command runs, and need no browser login:
 
 ```bash
 scripts/runtime/dev/with-dev-smoke-auth.sh \

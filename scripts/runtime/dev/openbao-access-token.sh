@@ -4,21 +4,40 @@
 # access client instead of a browser OIDC login. Source it; it defines
 # functions only.
 #
-# CODEWIRE_ACCESS_CLIENT names the access client executable, which writes a
-# token for `bao human` to descriptor 3. The token lives only in a private
+# The access client writes a token for `bao human` to descriptor 3. It is
+# CODEWIRE_ACCESS_CLIENT when set (an absolute path), else an `access` on PATH,
+# else $CODEWIRE_INFRA_DIR/scripts/access. The token lives only in a private
 # file, reaches the one fixed KV read through that process's environment,
 # never argv or output, and is revoked and shredded afterwards. An inherited
 # BAO_TOKEN, VAULT_TOKEN or saved bao session is never used.
 
+# openbao_access_client_usable PATH: an absolute path to an executable file.
+openbao_access_client_usable() {
+  [[ "$1" == /* && -f "$1" && -x "$1" ]]
+}
+
 # openbao_access_admit: refuse to start without a usable access client and the
-# fixed revocation transport.
+# fixed revocation transport. Sets CODEWIRE_ACCESS_CLIENT to the client found.
 openbao_access_admit() {
   unset BAO_TOKEN VAULT_TOKEN
-  [[ -n "${CODEWIRE_ACCESS_CLIENT:-}" && "$CODEWIRE_ACCESS_CLIENT" == /* &&
-     -f "$CODEWIRE_ACCESS_CLIENT" && -x "$CODEWIRE_ACCESS_CLIENT" ]] || {
-    printf '%s\n' 'openbao-access: set CODEWIRE_ACCESS_CLIENT to the absolute path of the workstation access client' >&2
+  local found=''
+  if [[ -n "${CODEWIRE_ACCESS_CLIENT:-}" ]]; then
+    # Named explicitly: use exactly that, or stop; never fall back from it.
+    openbao_access_client_usable "$CODEWIRE_ACCESS_CLIENT" || {
+      printf '%s\n' 'openbao-access: CODEWIRE_ACCESS_CLIENT is not the absolute path of an executable access client' >&2
+      return 1
+    }
+    found="$CODEWIRE_ACCESS_CLIENT"
+  elif found="$(command -v access 2>/dev/null)" && openbao_access_client_usable "$found"; then
+    :
+  elif [[ -n "${CODEWIRE_INFRA_DIR:-}" ]] &&
+       openbao_access_client_usable "$CODEWIRE_INFRA_DIR/scripts/access"; then
+    found="$CODEWIRE_INFRA_DIR/scripts/access"
+  else
+    printf '%s\n' 'openbao-access: no access client found; set CODEWIRE_ACCESS_CLIENT to its absolute path, or CODEWIRE_INFRA_DIR to the infrastructure checkout that holds scripts/access, or put access on PATH' >&2
     return 1
-  }
+  fi
+  CODEWIRE_ACCESS_CLIENT="$found"
   local command
   for command in curl shred timeout; do
     command -v "$command" >/dev/null 2>&1 || {

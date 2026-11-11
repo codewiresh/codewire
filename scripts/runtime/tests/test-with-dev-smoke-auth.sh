@@ -113,15 +113,22 @@ run_case() {
   : >"$dir/state/events"
   : >"$dir/state/tokens"
   : >"$dir/state/revokes"
-  local access="$dir/access"
-  [[ "$mode" != no_client ]] || access=''
+  local access="$dir/access" infra=''
   make_fake_tools "$dir/bin"
+  # Without CODEWIRE_ACCESS_CLIENT: none at all, one on PATH, or one under
+  # CODEWIRE_INFRA_DIR; an explicit relative path is refused, not skipped.
+  case "$mode" in
+    no_client) access='' ;;
+    via_path) access=''; cp "$dir/access" "$dir/bin/access" ;;
+    via_infra_dir) access='' infra="$dir/infra"; mkdir -p "$infra/scripts"; cp "$dir/access" "$infra/scripts/access" ;;
+    relative_client) access='access' ;;
+  esac
   make_child "$dir/child"
 
   set +e
   PATH="$dir/bin" MOCK_MODE="$mode" MOCK_STATE="$dir/state" TMPDIR="$dir/tmp" \
     BAO_ADDR='https://openbao.example.invalid' BAO_TOKEN='stale-owner-token' \
-    CODEWIRE_ACCESS_CLIENT="$access" \
+    CODEWIRE_ACCESS_CLIENT="$access" CODEWIRE_INFRA_DIR="$infra" \
     CODEWIRE_DEV_SMOKE_API_KEY="$STALE_API_KEY" \
     EXPECTED_CODEWIRE_SMOKE_USER_EMAIL="$STALE_EMAIL" \
     CODEWIRE_API_KEY="$STALE_API_KEY" \
@@ -152,6 +159,9 @@ fi
 
 run_case success success
 run_case no_client failure 'set CODEWIRE_ACCESS_CLIENT' 0
+run_case relative_client failure 'is not the absolute path of an executable access client' 0
+run_case via_path success
+run_case via_infra_dir success
 run_case access_closed failure 'the access client session is closed' 0
 run_case revoke_refused failure 'was not confirmed revoked'
 run_case read_failure failure 'failed to fetch the canonical Dev smoke document'
