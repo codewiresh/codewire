@@ -364,6 +364,7 @@ mod tests {
                     supervisor: Some("/tmp/smoke/cw-config".into()),
                     requested: "/home/user/.config/cw".into(),
                 }],
+                this_cw: false,
             },
         ))
         .context("connect to native local supervisor");

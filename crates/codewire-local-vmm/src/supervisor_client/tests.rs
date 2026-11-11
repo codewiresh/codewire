@@ -1008,28 +1008,36 @@ fn a_supervisor_for_other_configuration_or_a_deleted_cw_names_its_recovery() {
             supervisor: Some(PathBuf::from("/tmp/smoke/cw-config")),
             requested: PathBuf::from("/home/user/.config/cw"),
         }],
+        this_cw: true,
     };
     assert_eq!(
         other.summary(),
         "they are served by a cw started with other configuration (process 7, /opt/cw/cw): --platform-config-dir is /tmp/smoke/cw-config, this cw uses /home/user/.config/cw"
     );
+    // It runs this very cw, so it ends itself once idle.
     assert_eq!(
         other.recovery().unwrap(),
-        "Stop its VMs with the cw and configuration that started it, then end it with `kill 7`; the next cw command starts this cw's own"
+        "It ends by itself once it holds no environments and no cw has connected for 10 minutes. To end it now, stop its VMs with the cw and configuration that started it, then end it with `kill 7`; the next cw command starts this cw's own"
     );
     assert_eq!(
         UdsError::SupervisorPeerAdmission(other).to_string(),
-        "your local VMs are served by a cw started with other configuration (process 7, /opt/cw/cw): --platform-config-dir is /tmp/smoke/cw-config, this cw uses /home/user/.config/cw. Stop its VMs with the cw and configuration that started it, then end it with `kill 7`; the next cw command starts this cw's own"
+        "your local VMs are served by a cw started with other configuration (process 7, /opt/cw/cw): --platform-config-dir is /tmp/smoke/cw-config, this cw uses /home/user/.config/cw. It ends by itself once it holds no environments and no cw has connected for 10 minutes. To end it now, stop its VMs with the cw and configuration that started it, then end it with `kill 7`; the next cw command starts this cw's own"
     );
     let unnamed = SupervisorRefusal::OtherConfiguration {
         pid: 7,
         executable: PathBuf::from("/opt/cw/cw"),
         differences: Vec::new(),
+        this_cw: false,
     };
     assert!(
         unnamed
             .summary()
             .ends_with(": its arguments differ from this cw's")
+    );
+    // Another cw may predate the idle exit, so none is promised.
+    assert_eq!(
+        unnamed.recovery().unwrap(),
+        "Stop its VMs with the cw and configuration that started it, then end it with `kill 7`; the next cw command starts this cw's own"
     );
     let deleted = SupervisorRefusal::DeletedExecutable {
         pid: 8,

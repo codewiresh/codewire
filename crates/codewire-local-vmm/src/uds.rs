@@ -319,10 +319,12 @@ fn supervisor_peer_error(error: crate::host::supervisor_peer::PeerError) -> UdsE
             pid,
             executable,
             differences,
+            this_cw,
         } => SupervisorRefusal::OtherConfiguration {
             pid,
             executable,
             differences,
+            this_cw,
         },
         #[cfg(target_os = "linux")]
         PeerError::DeletedExecutable { pid, executable } => {
@@ -477,6 +479,9 @@ pub enum SupervisorRefusal {
         pid: u32,
         executable: PathBuf,
         differences: Vec<ArgumentDifference>,
+        /// It runs this very cw, so it ends itself once idle (#3793); an
+        /// older cw may not.
+        this_cw: bool,
     },
     /// The peer's executable was deleted, so this cw cannot check it. Unlike
     /// a peer that is ending or being replaced, a retry never helps (#3793).
@@ -512,6 +517,11 @@ impl SupervisorRefusal {
                     "List its VMs with `{executable} --local ls` and stop any with `{executable} --local stop NAME`, then end it with `kill {pid}`; the next cw command starts this cw's own"
                 ))
             }
+            Self::OtherConfiguration {
+                pid, this_cw: true, ..
+            } => Some(format!(
+                "It ends by itself once it holds no environments and no cw has connected for 10 minutes. To end it now, stop its VMs with the cw and configuration that started it, then end it with `kill {pid}`; the next cw command starts this cw's own"
+            )),
             Self::OtherConfiguration { pid, .. } => Some(format!(
                 "Stop its VMs with the cw and configuration that started it, then end it with `kill {pid}`; the next cw command starts this cw's own"
             )),
@@ -534,6 +544,7 @@ impl SupervisorRefusal {
                 pid,
                 executable,
                 differences,
+                ..
             } => {
                 let differs = if differences.is_empty() {
                     "its arguments differ from this cw's".to_owned()

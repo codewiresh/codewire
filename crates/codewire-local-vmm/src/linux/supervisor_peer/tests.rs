@@ -260,9 +260,13 @@ async fn configured_peer_refuses_every_other_path_and_role_extension() {
                     pid,
                     executable,
                     differences,
+                    this_cw,
                 },
             )) => {
                 assert_eq!(pid, fixture.child.id());
+                // The request runs another executable, which may predate the
+                // idle exit.
+                assert!(!this_cw);
                 assert_eq!(executable, fixture.config.executable);
                 assert_eq!(
                     differences,
@@ -279,6 +283,16 @@ async fn configured_peer_refuses_every_other_path_and_role_extension() {
             .revalidate(&fixture.config.supervisor_socket())
             .unwrap();
         assert!(fixture.child.try_wait().unwrap().is_none());
+    }
+    // A cw like the supervisor's own, with another configuration, is told it
+    // ends by itself once idle.
+    let mut same_cw = fixture.config.clone();
+    same_cw.platform_config_dir = same_cw.platform_config_dir.with_file_name("other-platform");
+    match capture_supervisor_peer(&fixture.config.supervisor_socket(), Some(&same_cw)).await {
+        Err(crate::uds::UdsError::SupervisorPeerAdmission(
+            crate::uds::SupervisorRefusal::OtherConfiguration { this_cw, .. },
+        )) => assert!(this_cw),
+        other => panic!("the same cw was not refused as other configuration: {other:?}"),
     }
     // Arguments beyond the configuration flags differ without a flag to name.
     let extra = Fixture::start(true, &["--unadmitted"]);

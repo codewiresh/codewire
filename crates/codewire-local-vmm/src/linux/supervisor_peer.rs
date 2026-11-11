@@ -42,6 +42,7 @@ pub(crate) enum PeerError {
         pid: u32,
         executable: PathBuf,
         differences: Vec<ArgumentDifference>,
+        this_cw: bool,
     },
     #[error("native supervisor executable was deleted")]
     DeletedExecutable { pid: u32, executable: PathBuf },
@@ -98,6 +99,7 @@ impl SupervisorPeerPin {
                 pid,
                 executable: peer.executable().to_owned(),
                 differences: argument_differences(&argv, config),
+                this_cw: requested.is_some_and(|config| config.executable == peer.executable()),
             });
         }
         if requested.is_some_and(|config| config.executable != peer.executable()) {
