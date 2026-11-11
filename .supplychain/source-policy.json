@@ -23,14 +23,6 @@
     },
     {
       "kind": "osv",
-      "advisory_id": "RUSTSEC-2026-0459",
-      "package": "libsqlite3-sys",
-      "reason": "libsqlite3-sys 0.39.0 fixes a C SQLite CVE, but rusqlite 0.41 (which needs it) does not resolve against sqlx 0.8, whose sqlx-sqlite pins ^0.30.1 and shares links = sqlite3; moving off it is a design change tracked on #3980. Short expiry on purpose: the bundled SQLite ships in the CLI's local credential store and local VMM. Owner approved 2026-11-10 (#3013)",
-      "owner": "noel",
-      "expires": "2026-11-30"
-    },
-    {
-      "kind": "osv",
       "advisory_id": "RUSTSEC-2025-0012",
       "package": "backoff",
       "reason": "Informational unmaintained notice, not a vulnerability. Temporal owns this transitive dependency; migrate its retry path to backon when the SDK supports it.",

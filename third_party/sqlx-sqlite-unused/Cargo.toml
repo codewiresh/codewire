@@ -1,0 +1,20 @@
+[package]
+name = "sqlx-sqlite"
+version = "0.8.6"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Never built: stands in for sqlx's unused SQLite driver so its libsqlite3-sys links claim leaves the lockfile (#3980)."
+
+[features]
+any = []
+bundled = []
+chrono = []
+json = []
+migrate = []
+offline = []
+preupdate-hook = []
+regexp = []
+time = []
+unbundled = []
+uuid = []

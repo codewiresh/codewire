@@ -18,7 +18,6 @@ publish = false
 ### BEGIN HAKARI SECTION
 [dependencies]
 aead = { version = "0.5.2", features = ["alloc", "getrandom"] }
-ahash = { version = "0.8.12", features = ["serde"] }
 axum = { version = "0.8.9", features = ["http2", "macros", "ws"] }
 axum-core = { version = "0.5.6", default-features = false, features = ["tracing"] }
 base16ct = { version = "1.0.0", default-features = false, features = ["alloc"] }
@@ -71,7 +70,6 @@ getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2.17", defaul
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4.2", default-features = false, features = ["std", "sys_rng", "wasm_js"] }
 group = { version = "0.14.0", default-features = false, features = ["alloc"] }
 hashbrown-3575ec1268b04181 = { package = "hashbrown", version = "0.15.5", features = ["serde"] }
-hashbrown-582f2526e08bb6a0 = { package = "hashbrown", version = "0.14.5", default-features = false, features = ["ahash", "inline-more", "raw"] }
 hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17.1" }
 hmac = { version = "0.12.1", default-features = false, features = ["reset"] }
 hybrid-array = { version = "0.4.15", default-features = false, features = ["alloc", "ctutils", "extra-sizes", "subtle", "zeroize"] }
@@ -128,7 +126,7 @@ ssh-encoding = { version = "0.3.0", default-features = false, features = ["bigin
 ssh-key = { version = "0.7.0-rc.11", features = ["ed25519", "encryption", "p256", "p384", "p521", "ppk", "rsa", "sha1"] }
 subtle = { version = "2.6.1", features = ["const-generics"] }
 sync_wrapper = { version = "1.0.2", default-features = false, features = ["futures"] }
-thiserror = { version = "2.0.18" }
+thiserror = { version = "2.0.21" }
 time = { version = "0.3.47", features = ["macros", "serde-well-known"] }
 tokio = { version = "1.54.1", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
@@ -149,7 +147,6 @@ zeroize = { version = "1.9.0", features = ["aarch64", "serde", "zeroize_derive"]
 
 [build-dependencies]
 aead = { version = "0.5.2", features = ["alloc", "getrandom"] }
-ahash = { version = "0.8.12", features = ["serde"] }
 axum = { version = "0.8.9", features = ["http2", "macros", "ws"] }
 axum-core = { version = "0.5.6", default-features = false, features = ["tracing"] }
 base16ct = { version = "1.0.0", default-features = false, features = ["alloc"] }
@@ -205,7 +202,6 @@ getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2.17", defaul
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4.2", default-features = false, features = ["std", "sys_rng", "wasm_js"] }
 group = { version = "0.14.0", default-features = false, features = ["alloc"] }
 hashbrown-3575ec1268b04181 = { package = "hashbrown", version = "0.15.5", features = ["serde"] }
-hashbrown-582f2526e08bb6a0 = { package = "hashbrown", version = "0.14.5", default-features = false, features = ["ahash", "inline-more", "raw"] }
 hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17.1" }
 hmac = { version = "0.12.1", default-features = false, features = ["reset"] }
 hybrid-array = { version = "0.4.15", default-features = false, features = ["alloc", "ctutils", "extra-sizes", "subtle", "zeroize"] }
@@ -263,9 +259,10 @@ sqlx-postgres = { version = "0.8.6", default-features = false, features = ["chro
 ssh-encoding = { version = "0.3.0", default-features = false, features = ["bigint", "bytes", "ctutils", "digest", "pem"] }
 ssh-key = { version = "0.7.0-rc.11", features = ["ed25519", "encryption", "p256", "p384", "p521", "ppk", "rsa", "sha1"] }
 subtle = { version = "2.6.1", features = ["const-generics"] }
+syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.4", features = ["full", "visit-mut"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2.0.117", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 sync_wrapper = { version = "1.0.2", default-features = false, features = ["futures"] }
-thiserror = { version = "2.0.18" }
+thiserror = { version = "2.0.21" }
 time = { version = "0.3.47", features = ["macros", "serde-well-known"] }
 time-macros = { version = "0.2.27", default-features = false, features = ["formatting", "parsing", "serde"] }
 tokio = { version = "1.54.1", features = ["full", "test-util"] }
@@ -317,7 +314,7 @@ linux-raw-sys = { version = "0.12.1", default-features = false, features = ["aux
 nix = { version = "0.31.3", features = ["ioctl", "mman", "socket", "time", "user"] }
 num = { version = "0.4.3" }
 rustix = { version = "1.1.6", default-features = false, features = ["param", "system", "time"] }
-syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.4", features = ["extra-traits", "fold", "full", "visit-mut"] }
+syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.4", default-features = false, features = ["extra-traits", "fold"] }
 toml_datetime = { version = "1.1.1", features = ["serde"] }
 toml_parser = { version = "1.1.2" }
 tower = { version = "0.5.3", default-features = false, features = ["timeout"] }

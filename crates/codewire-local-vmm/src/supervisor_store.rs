@@ -1437,6 +1437,8 @@ fn write_state(
     )?;
     // Discriminators outlive their environment only while its create is
     // still journaled; a create records them before the environment exists.
+    let key_suffix_start = i64::try_from(DIRECT_SHARE_DISCRIMINATORS_KEY_PREFIX.len() + 1)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     transaction.execute(
         "DELETE FROM supervisor_metadata
          WHERE key GLOB ?1
@@ -1449,7 +1451,7 @@ fn write_state(
            )",
         params![
             format!("{DIRECT_SHARE_DISCRIMINATORS_KEY_PREFIX}*"),
-            DIRECT_SHARE_DISCRIMINATORS_KEY_PREFIX.len() + 1,
+            key_suffix_start,
         ],
     )?;
     if let Some(current) = &state.current {

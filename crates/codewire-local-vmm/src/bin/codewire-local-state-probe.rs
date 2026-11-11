@@ -327,10 +327,11 @@ mod linux {
                     // Return only the immutable root identity and a digest of
                     // its complete build record, never the embedded project
                     // configuration. Bound the SQL result before allocation.
+                    let maximum = i64::try_from(MAXIMUM_WORKSPACE_METADATA_BYTES)?;
                     let encoded: Vec<u8> = self.connection.query_row(
                         "SELECT active_workspace_generation_json FROM environments \
                          WHERE name = ?1 AND length(active_workspace_generation_json) BETWEEN 1 AND ?2",
-                        rusqlite::params![name, MAXIMUM_WORKSPACE_METADATA_BYTES],
+                        rusqlite::params![name, maximum],
                         |row| row.get(0),
                     )?;
                     let built: BuiltWorkspaceIdentity = serde_json::from_slice(&encoded)?;
@@ -487,6 +488,7 @@ mod linux {
 
         fn operations(&self) -> ProbeResult<Vec<OperationRow>> {
             let limit = i64::try_from(MAXIMUM_OPERATIONS + 1)?;
+            let maximum_json = i64::try_from(CwRuntimeJournalEvidence::MAXIMUM_JSON_BYTES)?;
             let mut statement = self.connection.prepare(
                 "SELECT kind, phase, checkpoint,
                    CASE WHEN kind IN ('update_cw_runtime', 'rollback_cw_runtime')
@@ -521,7 +523,7 @@ mod linux {
             )?;
             let rows = statement
                 .query_map(
-                    rusqlite::params![limit, CwRuntimeJournalEvidence::MAXIMUM_JSON_BYTES],
+                    rusqlite::params![limit, maximum_json],
                     decode_journal_operation,
                 )?
                 .collect::<Result<Vec<_>, _>>()?;

@@ -154,7 +154,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 dirs = "5"
 filetime = "0.2"
 rustix = { version = "=1.1.6", features = ["fs", "process", "thread"] }
-rusqlite = { version = "=0.32.1", features = ["bundled"] }
+rusqlite = { version = "=0.42.0", features = ["bundled"] }
 
 # OAuth & Keychain
 secret-service = "5.2"
@@ -330,3 +330,10 @@ inherits = "release"
 lto = false
 codegen-units = 16
 strip = false
+
+[patch.crates-io]
+# Never built: stands in for sqlx's unused SQLite driver, whose libsqlite3-sys
+# links claim would hold rusqlite on a vulnerable bundled SQLite. Delete with
+# third_party/sqlx-sqlite-unused (see its README) once sqlx allows
+# libsqlite3-sys 0.39 or later (#3980).
+sqlx-sqlite = { path = "third_party/sqlx-sqlite-unused" }
