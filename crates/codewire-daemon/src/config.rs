@@ -47,6 +47,10 @@ pub struct Config {
     pub listen_addr: String,
     pub workspace_root: PathBuf,
     pub home_root: PathBuf,
+    /// The environment's own live mounts below `workspace_root` (a local
+    /// VM's direct shares). A file request inside one resolves from its root,
+    /// because resolution never crosses a mount (#4102). Empty elsewhere.
+    pub mount_roots: Vec<DeclaredMount>,
     pub auth_token: DaemonAuthToken,
     pub process_execution: ProcessExecution,
     /// Local/platform placement-specific guest endpoint for material-free
@@ -63,6 +67,16 @@ pub struct Config {
     /// starts. Local and host daemons leave this None and keep their own
     /// defaults.
     pub session_working_dir: Option<PathBuf>,
+}
+
+/// One of the environment's own live mounts below `workspace_root`, and the
+/// kernel's ID of that mount when the daemon started, or none when nothing
+/// was mounted there. A file request resolves from it only while its opened
+/// root is that exact mount's root (#4102).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredMount {
+    pub path: PathBuf,
+    pub mount_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,6 +308,7 @@ impl HostedPlacement {
             session_working_dir: Some(self.workspace_root.clone()),
             workspace_root: self.workspace_root,
             home_root: self.home_root,
+            mount_roots: Vec::new(),
             auth_token,
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
@@ -799,6 +814,7 @@ mod tests {
             listen_addr: DEFAULT_LISTEN_ADDR.into(),
             workspace_root: DEFAULT_WORKSPACE_ROOT.into(),
             home_root: DEFAULT_HOME_ROOT.into(),
+            mount_roots: Vec::new(),
             auth_token: DaemonAuthToken::new("synthetic").unwrap(),
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
@@ -1666,6 +1682,7 @@ mod tests {
             listen_addr: DEFAULT_LISTEN_ADDR.into(),
             workspace_root: DEFAULT_WORKSPACE_ROOT.into(),
             home_root: DEFAULT_HOME_ROOT.into(),
+            mount_roots: Vec::new(),
             auth_token: DaemonAuthToken::new(marker).unwrap(),
             process_execution: ProcessExecution::Native,
             credential_bridge: None,

@@ -15,6 +15,7 @@ pub(crate) fn config(root: &Path) -> crate::Config {
         listen_addr: String::new(),
         workspace_root: root.join("workspace"),
         home_root: root.join("home"),
+        mount_roots: Vec::new(),
         auth_token: crate::DaemonAuthToken::new("synthetic-host-control-owner").unwrap(),
         process_execution: crate::execution::ProcessExecution::Native,
         credential_bridge: None,

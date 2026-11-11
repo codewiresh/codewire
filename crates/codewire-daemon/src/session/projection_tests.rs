@@ -153,6 +153,7 @@ async fn eof_during_actual_pending_projection_reaps_launcher_before_terminal_exi
         listen_addr: "unused:0".into(),
         workspace_root: temp.path().into(),
         home_root: temp.path().into(),
+        mount_roots: Vec::new(),
         auth_token: DaemonAuthToken::new("synthetic-pty-daemon-token").unwrap(),
         process_execution: ProcessExecution::Native,
         credential_bridge: Some(CredentialBridgeConfig {

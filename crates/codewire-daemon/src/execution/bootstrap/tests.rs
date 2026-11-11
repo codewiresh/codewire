@@ -11,6 +11,7 @@ fn config(directory: &Path) -> Config {
         listen_addr: "unused:0".into(),
         workspace_root: "/workspace".into(),
         home_root: "/home/codewire".into(),
+        mount_roots: Vec::new(),
         auth_token: DaemonAuthToken::new("synthetic-bootstrap-daemon-token").unwrap(),
         process_execution: ProcessExecution::Runc(RuncExecution {
             helper_path: "/init".into(),

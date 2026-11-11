@@ -1110,7 +1110,9 @@ pub fn status_from_file_error(err: files::FileError) -> Status {
         | files::FileError::InvalidSize
         | files::FileError::IsDirectory => Status::invalid_argument(err.to_string()),
         files::FileError::TraversalDenied => Status::permission_denied(err.to_string()),
-        files::FileError::UntrustedRoot => Status::failed_precondition(err.to_string()),
+        files::FileError::UntrustedRoot | files::FileError::MountUnavailable => {
+            Status::failed_precondition(err.to_string())
+        }
         files::FileError::Io(err) => match err.kind() {
             std::io::ErrorKind::NotFound => Status::not_found(err.to_string()),
             std::io::ErrorKind::PermissionDenied => Status::permission_denied(err.to_string()),
@@ -1211,6 +1213,7 @@ mod tests {
             listen_addr: addr.to_string(),
             workspace_root,
             home_root,
+            mount_roots: Vec::new(),
             auth_token: DaemonAuthToken::new("synthetic-before").unwrap(),
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,
@@ -1774,6 +1777,7 @@ mod tests {
             listen_addr: "unused:0".into(),
             workspace_root,
             home_root,
+            mount_roots: Vec::new(),
             auth_token: DaemonAuthToken::new(TEST_AUTH_TOKEN).unwrap(),
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,
@@ -1805,6 +1809,7 @@ mod tests {
             listen_addr: "unused:0".into(),
             workspace_root: temp.path().to_path_buf(),
             home_root: temp.path().to_path_buf(),
+            mount_roots: Vec::new(),
             auth_token: DaemonAuthToken::new(TEST_AUTH_TOKEN).unwrap(),
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,
@@ -1854,6 +1859,7 @@ mod tests {
             listen_addr: "unused:0".into(),
             workspace_root: temp.path().to_path_buf(),
             home_root: temp.path().to_path_buf(),
+            mount_roots: Vec::new(),
             auth_token: DaemonAuthToken::new(TEST_AUTH_TOKEN).unwrap(),
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,
@@ -1923,6 +1929,7 @@ mod tests {
             listen_addr: "unused:0".into(),
             workspace_root: temp.path().to_path_buf(),
             home_root: temp.path().to_path_buf(),
+            mount_roots: Vec::new(),
             auth_token: DaemonAuthToken::new(TEST_AUTH_TOKEN).unwrap(),
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,
@@ -2731,6 +2738,7 @@ mod tests {
             listen_addr: "unused:0".into(),
             workspace_root: temp.path().join("workspace"),
             home_root: temp.path().join("home"),
+            mount_roots: Vec::new(),
             auth_token: DaemonAuthToken::new(TEST_AUTH_TOKEN).unwrap(),
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,
@@ -2908,6 +2916,7 @@ mod tests {
             listen_addr: addr.to_string(),
             workspace_root,
             home_root,
+            mount_roots: Vec::new(),
             auth_token: DaemonAuthToken::new(auth_token).expect("valid daemon test token"),
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,

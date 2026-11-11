@@ -391,6 +391,7 @@ mod tests {
             listen_addr: "127.0.0.1:0".into(),
             workspace_root: PathBuf::from("/workspace"),
             home_root,
+            mount_roots: Vec::new(),
             auth_token: crate::DaemonAuthToken::new("daemon-env-test-token").unwrap(),
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,

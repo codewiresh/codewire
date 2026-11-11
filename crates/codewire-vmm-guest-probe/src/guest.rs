@@ -545,6 +545,21 @@ pub async fn run_daemon() -> Result<()> {
     );
     let seed = read_seed_from_discovered_disk()?;
     let plan = load_active_workspace_plan()?;
+    // The environment's own live mounts below /workspace: file requests
+    // resolve beneath them from their own roots (#4102).
+    // Each with its mount ID now, so a file request reaches only that mount.
+    let mount_roots = codewire_daemon::files::declared_mounts(
+        load_direct_share_plan(&seed)?
+            .map(|shares| {
+                shares
+                    .mounts()
+                    .iter()
+                    .map(|share| PathBuf::from(share.destination()))
+                    .filter(|destination| destination != Path::new(WORKSPACE_PATH))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+    );
     let publisher = initialize_live_cw_runtime(&seed)?;
     let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, seed.daemon_vsock_port()))
         .with_context(|| {
@@ -560,6 +575,7 @@ pub async fn run_daemon() -> Result<()> {
         listen_addr: format!("vsock:any:{}", seed.daemon_vsock_port()),
         workspace_root: PathBuf::from(WORKSPACE_PATH),
         home_root: PathBuf::from(&plan.identity.home),
+        mount_roots,
         auth_token: codewire_daemon::DaemonAuthToken::new(seed.auth_token())
             .context("validate guest daemon auth token")?,
         managed_credential_clients: seed.managed_credential_clients(),
@@ -2842,6 +2858,16 @@ fn mount_direct_shares(
     seed: &Seed,
     identity: &WorkspaceIdentity,
 ) -> Result<Option<vm_only::Keeper>> {
+    let Some(plan) = load_direct_share_plan(seed)? else {
+        return Ok(None);
+    };
+    mount_direct_share_plan(&plan, identity)
+}
+
+/// The seed-bound direct-share plan, verified against the seed's digest, or
+/// none when the seed binds none. Boot mounts it; the daemon reads it to
+/// know which mounts below /workspace are the environment's own (#4102).
+fn load_direct_share_plan(seed: &Seed) -> Result<Option<DirectSharePlan>> {
     let expected = seed.direct_shares_sha256();
     let metadata = match fs::symlink_metadata(DIRECT_SHARE_PLAN_PATH) {
         Ok(metadata) => Some(metadata),
@@ -2870,8 +2896,15 @@ fn mount_direct_shares(
         Sha256Value::calculate(&bytes) == expected,
         "direct-share guest plan differs from its seed binding"
     );
-    let plan =
-        DirectSharePlan::decode_canonical(&bytes).context("validate direct-share guest plan")?;
+    DirectSharePlan::decode_canonical(&bytes)
+        .context("validate direct-share guest plan")
+        .map(Some)
+}
+
+fn mount_direct_share_plan(
+    plan: &DirectSharePlan,
+    identity: &WorkspaceIdentity,
+) -> Result<Option<vm_only::Keeper>> {
     let workspace = rustix::fs::open(
         PERSISTENT_WORKSPACE_PATH,
         RustixOFlags::PATH

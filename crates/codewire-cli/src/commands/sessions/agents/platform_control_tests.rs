@@ -326,6 +326,7 @@ fn session_config(
         listen_addr: "unused:0".into(),
         workspace_root: "/workspace".into(),
         home_root: home.to_owned(),
+        mount_roots: Vec::new(),
         auth_token: codewire_daemon::DaemonAuthToken::new("synthetic-session-environment").unwrap(),
         process_execution: codewire_daemon::execution::ProcessExecution::Native,
         host: None,

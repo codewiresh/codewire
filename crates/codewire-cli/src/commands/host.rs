@@ -857,6 +857,7 @@ fn host_daemon_config(
         home_root: env::var_os("HOME")
             .map(PathBuf::from)
             .context("HOME is required for trusted host execution")?,
+        mount_roots: Vec::new(),
         auth_token: codewire_daemon::DaemonAuthToken::new(token)?,
         process_execution: codewire_daemon::execution::ProcessExecution::Native,
         credential_bridge: None,

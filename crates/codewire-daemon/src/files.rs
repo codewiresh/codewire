@@ -18,7 +18,9 @@ use crate::config::{Config, clean_path};
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::{list, mkdir, open_file, read, readlink, remove, rename, set_stat, stat, write};
+pub use linux::{
+    declared_mounts, list, mkdir, open_file, read, readlink, remove, rename, set_stat, stat, write,
+};
 
 const GO_MODE_DIR: u32 = 1 << 31;
 const GO_MODE_SYMLINK: u32 = 1 << 27;
@@ -33,6 +35,8 @@ pub enum FileError {
     PathOutsideWorkspace,
     #[error("configured workspace root is not a stable canonical directory")]
     UntrustedRoot,
+    #[error("the live mount here is not mounted or has moved; restart the environment")]
+    MountUnavailable,
     #[error("path traversal through a symlink, magic link, or nested mount is denied")]
     TraversalDenied,
     #[error("operation requires a path below the workspace root")]
@@ -463,6 +467,7 @@ mod tests {
             listen_addr: "127.0.0.1:0".into(),
             workspace_root,
             home_root,
+            mount_roots: Vec::new(),
             auth_token: crate::DaemonAuthToken::new("daemon-files-test-token").unwrap(),
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,

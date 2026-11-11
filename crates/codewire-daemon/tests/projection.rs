@@ -99,6 +99,7 @@ fn projection_daemon_child() {
             listen_addr: endpoint.clone(),
             workspace_root: root.join("workspace"),
             home_root: root.join("home"),
+            mount_roots: Vec::new(),
             auth_token: DaemonAuthToken::new(TOKEN).unwrap(),
             process_execution: codewire_daemon::execution::ProcessExecution::Native,
             credential_bridge: Some(CredentialBridgeConfig {

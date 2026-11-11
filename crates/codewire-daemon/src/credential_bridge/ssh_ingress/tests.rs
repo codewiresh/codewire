@@ -39,6 +39,7 @@ fn daemon_config(root: &Path) -> Config {
         listen_addr: "127.0.0.1:0".into(),
         workspace_root: root.into(),
         home_root: root.into(),
+        mount_roots: Vec::new(),
         auth_token: codewire_daemon_proto::DaemonAuthToken::new("synthetic-ssh-daemon-token")
             .unwrap(),
         process_execution: crate::execution::ProcessExecution::Native,

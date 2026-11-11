@@ -803,6 +803,7 @@ mod tests {
                 listen_addr: "injected:credential-bridge".to_owned(),
                 workspace_root,
                 home_root,
+                mount_roots: Vec::new(),
                 auth_token: crate::DaemonAuthToken::new(TEST_TOKEN).unwrap(),
                 process_execution: ProcessExecution::Native,
                 host: None,

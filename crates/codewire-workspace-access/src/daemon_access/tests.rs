@@ -170,6 +170,7 @@ async fn spawn_daemon_ssh_with_access(ready: bool) -> DaemonSsh {
         listen_addr: "in-process".into(),
         workspace_root: workspace_root.clone(),
         home_root,
+        mount_roots: Vec::new(),
         auth_token: DaemonAuthToken::new(TEST_DAEMON_TOKEN).unwrap(),
         process_execution: ProcessExecution::Native,
         credential_bridge: None,

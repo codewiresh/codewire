@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsFd;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -19,7 +19,7 @@ use super::{
     GO_MODE_SOCKET, GO_MODE_SYMLINK, Result, file_mode_or_default, resolve_workspace_path,
     timestamp_from_system_time,
 };
-use crate::config::Config;
+use crate::config::{Config, DeclaredMount};
 
 /// This thread's filesystem identity, switched to the workload user until
 /// dropped. `setfsuid` and `setfsgid` report the previous value and never an
@@ -100,6 +100,29 @@ impl WorkspaceRoot {
             return Err(FileError::UntrustedRoot);
         }
         Ok(Self { directory })
+    }
+
+    /// For a declared mount: the opened root must be that exact mount's root,
+    /// checked on the descriptor itself, so a missing, moved or swapped mount
+    /// is refused rather than written beneath (#4102).
+    fn verify_mount(&self, expected: Option<u64>) -> Result<()> {
+        let expected = expected.ok_or(FileError::MountUnavailable)?;
+        let status = rustix::fs::statx(
+            self.directory.as_fd(),
+            "",
+            AtFlags::EMPTY_PATH,
+            rustix::fs::StatxFlags::MNT_ID,
+        )
+        .map_err(|error| FileError::Io(error.into()))?;
+        let mount_root = rustix::fs::StatxAttributes::MOUNT_ROOT;
+        if status.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() == 0
+            || !status.stx_attributes_mask.contains(mount_root)
+            || !status.stx_attributes.contains(mount_root)
+            || status.stx_mnt_id != expected
+        {
+            return Err(FileError::MountUnavailable);
+        }
+        Ok(())
     }
 
     fn open_directory(&self, relative: &Path) -> Result<File> {
@@ -186,19 +209,94 @@ impl WorkspaceRoot {
     }
 }
 
+/// The root a path resolves from, and the path relative to it: the deepest
+/// of the environment's own mounts below `/workspace` that holds it, else
+/// the workspace or the home root. Resolution never crosses a mount
+/// (`NO_XDEV`), so a declared mount must be its own root, and any other
+/// mount below `/workspace` stays refused (#4102).
+fn select_root<'a>(
+    config: &'a Config,
+    display: &'a Path,
+) -> Option<(&'a Path, &'a Path, Option<&'a DeclaredMount>)> {
+    config
+        .mount_roots
+        .iter()
+        .filter(|mount| mount.path.starts_with(&config.workspace_root))
+        .filter_map(|mount| {
+            Some((
+                mount.path.as_path(),
+                display.strip_prefix(&mount.path).ok()?,
+                Some(mount),
+            ))
+        })
+        .max_by_key(|(root, _, _)| root.components().count())
+        .or_else(|| {
+            [&config.workspace_root, &config.home_root]
+                .into_iter()
+                .find_map(|root| Some((root.as_path(), display.strip_prefix(root).ok()?, None)))
+        })
+}
+
+/// The kernel's ID of each declared mount, from this process's
+/// `/proc/self/mountinfo`, read when the daemon starts; none where nothing is
+/// mounted (#4102). The top of a stacked mount point wins.
+pub fn declared_mounts(paths: impl IntoIterator<Item = PathBuf>) -> Vec<DeclaredMount> {
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    paths
+        .into_iter()
+        .map(|path| DeclaredMount {
+            mount_id: mount_id_at(&mountinfo, &path),
+            path,
+        })
+        .collect()
+}
+
+/// The ID of the last mount `mountinfo` lists at `path`.
+fn mount_id_at(mountinfo: &str, path: &Path) -> Option<u64> {
+    mountinfo.lines().rev().find_map(|line| {
+        let mut fields = line.split(' ');
+        let id = fields.next()?.parse().ok()?;
+        let point = fields.nth(3)?;
+        (Path::new(&unescape_mountinfo(point)) == path).then_some(id)
+    })
+}
+
+/// `mountinfo` writes space, tab, newline and backslash in a path as `\\ooo`.
+fn unescape_mountinfo(field: &str) -> std::ffi::OsString {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let octal = (bytes[index] == b'\\')
+            .then(|| bytes.get(index + 1..index + 4))
+            .flatten()
+            .filter(|digits| digits.iter().all(|digit| (b'0'..=b'7').contains(digit)))
+            .and_then(|digits| u8::from_str_radix(std::str::from_utf8(digits).ok()?, 8).ok());
+        match octal {
+            Some(byte) => {
+                out.push(byte);
+                index += 4;
+            }
+            None => {
+                out.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+    std::ffi::OsString::from_vec(out)
+}
+
 impl WorkspacePath {
     fn resolve(config: &Config, raw: &str) -> Result<Self> {
         let display = resolve_workspace_path(config, raw)?;
-        let (root_path, relative) =
-            if let Ok(relative) = display.strip_prefix(&config.workspace_root) {
-                (&config.workspace_root, relative)
-            } else if let Ok(relative) = display.strip_prefix(&config.home_root) {
-                (&config.home_root, relative)
-            } else {
-                return Err(FileError::PathOutsideWorkspace);
-            };
+        let (root_path, relative, declared) =
+            select_root(config, &display).ok_or(FileError::PathOutsideWorkspace)?;
+        let root = WorkspaceRoot::open(root_path)?;
+        if let Some(declared) = declared {
+            root.verify_mount(declared.mount_id)?;
+        }
         Ok(Self {
-            root: WorkspaceRoot::open(root_path)?,
+            root,
             relative: relative.to_owned(),
             display,
         })
@@ -493,6 +591,129 @@ mod tests {
     use super::*;
     use crate::execution::ProcessExecution;
 
+    fn declared(path: PathBuf, mount_id: Option<u64>) -> DeclaredMount {
+        DeclaredMount { path, mount_id }
+    }
+
+    #[test]
+    fn a_declared_mount_is_its_own_root_and_nothing_else_is() {
+        let (_temp, mut config, workspace) = roots();
+        let app = workspace.join("app");
+        config.mount_roots = vec![
+            declared(app.clone(), Some(1)),
+            declared(workspace.join("app/deeper"), Some(2)),
+            declared(PathBuf::from("/elsewhere"), Some(3)),
+        ];
+        let root = |path: PathBuf| {
+            select_root(&config, &path).map(|(root, relative, mount)| {
+                (
+                    root.to_owned(),
+                    relative.to_owned(),
+                    mount.and_then(|mount| mount.mount_id),
+                )
+            })
+        };
+        // Inside a declared mount: resolved from it, so nothing is crossed.
+        assert_eq!(
+            root(app.join("src/main.rs")),
+            Some((app.clone(), PathBuf::from("src/main.rs"), Some(1)))
+        );
+        assert_eq!(
+            root(app.clone()),
+            Some((app.clone(), PathBuf::new(), Some(1)))
+        );
+        // The deepest declared mount wins.
+        assert_eq!(
+            root(app.join("deeper/x")),
+            Some((workspace.join("app/deeper"), PathBuf::from("x"), Some(2)))
+        );
+        // A name that only shares a prefix is not inside it, and an
+        // undeclared folder resolves from /workspace, where NO_XDEV refuses
+        // any mount it would cross.
+        assert_eq!(
+            root(workspace.join("application/x")),
+            Some((workspace.clone(), PathBuf::from("application/x"), None))
+        );
+        assert_eq!(
+            root(workspace.join("other/y")),
+            Some((workspace.clone(), PathBuf::from("other/y"), None))
+        );
+        // A declared root outside /workspace is never used.
+        assert_eq!(root(PathBuf::from("/elsewhere/z")), None);
+        assert_eq!(
+            root(config.home_root.join(".bashrc")),
+            Some((config.home_root.clone(), PathBuf::from(".bashrc"), None))
+        );
+    }
+
+    #[test]
+    fn mountinfo_gives_the_top_mount_at_an_exact_path() {
+        let mountinfo = "\
+22 1 0:20 / / rw - ext4 /dev/vda rw
+40 22 0:41 / /workspace rw - ext4 /dev/vdb rw
+41 40 0:42 / /workspace/my\\040app rw - virtiofs cw-direct-00 rw
+42 40 0:43 / /workspace/app rw - virtiofs cw-direct-01 rw
+43 42 0:44 / /workspace/app rw - virtiofs cw-direct-01 rw
+";
+        assert_eq!(
+            mount_id_at(mountinfo, Path::new("/workspace/my app")),
+            Some(41)
+        );
+        assert_eq!(
+            mount_id_at(mountinfo, Path::new("/workspace/app")),
+            Some(43)
+        );
+        assert_eq!(mount_id_at(mountinfo, Path::new("/workspace/ap")), None);
+        assert_eq!(mount_id_at(mountinfo, Path::new("/workspace/app/x")), None);
+    }
+
+    #[test]
+    fn a_declared_root_must_be_that_exact_mount() {
+        // /proc is a mount root in any test environment.
+        let proc_root = PathBuf::from("/proc");
+        let proc_id = declared_mounts([proc_root.clone()])[0]
+            .mount_id
+            .expect("/proc is mounted");
+        let root = WorkspaceRoot::open(&proc_root).expect("open /proc");
+        root.verify_mount(Some(proc_id))
+            .expect("the real mount is admitted");
+        assert!(matches!(
+            root.verify_mount(Some(proc_id + 1)),
+            Err(FileError::MountUnavailable)
+        ));
+        assert!(matches!(
+            root.verify_mount(None),
+            Err(FileError::MountUnavailable)
+        ));
+
+        // A declared path that is a plain directory (never mounted, or a mount
+        // moved away and the path recreated) is refused, even with the ID of
+        // the filesystem it is on, and nothing is listed or written there.
+        let (_temp, mut config, workspace) = roots();
+        let app = workspace.join("app");
+        fs::create_dir(&app).expect("app");
+        let containing = rustix::fs::statx(
+            fs::File::open(&app).expect("open app").as_fd(),
+            "",
+            AtFlags::EMPTY_PATH,
+            rustix::fs::StatxFlags::MNT_ID,
+        )
+        .expect("statx")
+        .stx_mnt_id;
+        for mount_id in [None, Some(containing)] {
+            config.mount_roots = vec![declared(app.clone(), mount_id)];
+            assert!(matches!(
+                list(&config, app.to_str().unwrap()),
+                Err(FileError::MountUnavailable)
+            ));
+            assert!(matches!(
+                write(&config, app.join("x.txt").to_str().unwrap(), 0, b"nope"),
+                Err(FileError::MountUnavailable)
+            ));
+        }
+        assert!(!app.join("x.txt").exists());
+    }
+
     fn roots() -> (tempfile::TempDir, Config, PathBuf) {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
@@ -503,6 +724,7 @@ mod tests {
             listen_addr: "127.0.0.1:0".into(),
             workspace_root: workspace.clone(),
             home_root: home,
+            mount_roots: Vec::new(),
             auth_token: crate::DaemonAuthToken::new("daemon-linux-files-test-token").unwrap(),
             process_execution: ProcessExecution::Native,
             credential_bridge: None,

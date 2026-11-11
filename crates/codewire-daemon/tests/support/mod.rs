@@ -160,6 +160,7 @@ impl DaemonHarness {
                     listen_addr: endpoint.clone(),
                     workspace_root: workspace_root.clone(),
                     home_root: home_root.clone(),
+                    mount_roots: Vec::new(),
                     auth_token: DaemonAuthToken::new(auth_token.clone())
                         .expect("valid daemon harness token"),
                     process_execution: codewire_daemon::execution::ProcessExecution::Native,
@@ -199,6 +200,7 @@ impl DaemonHarness {
                     listen_addr: addr.to_string(),
                     workspace_root: workspace_root.clone(),
                     home_root: home_root.clone(),
+                    mount_roots: Vec::new(),
                     auth_token: DaemonAuthToken::new(auth_token.clone())
                         .expect("valid daemon harness token"),
                     process_execution: codewire_daemon::execution::ProcessExecution::Native,

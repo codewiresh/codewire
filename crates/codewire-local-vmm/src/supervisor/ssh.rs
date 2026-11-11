@@ -390,6 +390,7 @@ mod tests {
             listen_addr: "in-process".into(),
             workspace_root,
             home_root,
+            mount_roots: Vec::new(),
             auth_token: DaemonAuthToken::new(TOKEN).unwrap(),
             process_execution: ProcessExecution::Native,
             credential_bridge: None,

@@ -851,6 +851,7 @@ fn only_a_hosted_daemon_with_the_sign_in_form_runs_the_writer() {
         listen_addr: "127.0.0.1:0".into(),
         workspace_root: "/workspace".into(),
         home_root: "/home/codewire".into(),
+        mount_roots: Vec::new(),
         auth_token: DaemonAuthToken::new("synthetic-daemon-token").unwrap(),
         process_execution: crate::execution::ProcessExecution::Native,
         credential_bridge: transport.map(|transport| CredentialBridgeConfig {
