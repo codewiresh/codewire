@@ -55,6 +55,11 @@ pub fn check_test_key_requirement(required: Option<&str>, key: Option<&str>) -> 
     }
 }
 
+/// The one currency every Stripe call that names one uses: prices and credit
+/// are in euros, so a charge, an invoice item or a card setup session in any
+/// other currency is wrong (#3381).
+const BILLING_CURRENCY: stripe_types::Currency = stripe_types::Currency::EUR;
+
 #[derive(Clone, Default)]
 pub struct StripeHandle {
     client: Option<Arc<stripe::Client>>,
@@ -158,7 +163,7 @@ impl StripeHandle {
         let item = CreateInvoiceItem::new()
             .customer(customer_id)
             .amount(amount_cents)
-            .currency(stripe_types::Currency::USD)
+            .currency(BILLING_CURRENCY)
             .description(description)
             .customize()
             .request_strategy(RequestStrategy::Idempotent(idempotency_key))
@@ -430,9 +435,12 @@ impl StripeHandle {
     ) -> Result<String, AppError> {
         let client = self.client()?;
         let idempotency_key = IdempotencyKey::new(idempotency_key).map_err(stripe_err)?;
+        // Stripe refuses a setup-mode session without a currency when it picks
+        // the payment methods itself ("Missing required param: currency").
         let session = CreateCheckoutSession::new()
             .customer(customer_id)
             .mode(stripe_shared::CheckoutSessionMode::Setup)
+            .currency(BILLING_CURRENCY)
             .success_url(success_url)
             .cancel_url(cancel_url)
             .metadata([("org_id".to_string(), org_id.to_string())])
@@ -815,7 +823,7 @@ impl StripeHandle {
         ]);
         let invoice = CreateInvoice::new()
             .customer(customer_id)
-            .currency(stripe_types::Currency::EUR)
+            .currency(BILLING_CURRENCY)
             .auto_advance(false)
             .collection_method(stripe_shared::InvoiceCollectionMethod::ChargeAutomatically)
             .pending_invoice_items_behavior(CreateInvoicePendingInvoiceItemsBehavior::Exclude)
@@ -836,7 +844,7 @@ impl StripeHandle {
             .customer(customer_id)
             .invoice(invoice_id.clone())
             .amount(amount_cents)
-            .currency(stripe_types::Currency::EUR)
+            .currency(BILLING_CURRENCY)
             .description("Compute credit")
             .customize()
             .request_strategy(RequestStrategy::Idempotent(
@@ -910,5 +918,151 @@ mod top_up_tests {
         assert_eq!(failure_code(Some("")), "card_declined");
         assert_eq!(failure_code(None), "card_declined");
         assert_eq!(failure_code(Some(&"x".repeat(300))).len(), 128);
+    }
+}
+
+#[cfg(test)]
+mod currency_tests {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use axum::Router;
+    use axum::extract::{OriginalUri, State};
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use serde_json::json;
+
+    use super::StripeHandle;
+
+    type Seen = Arc<Mutex<Vec<(String, BTreeMap<String, String>)>>>;
+
+    /// Records the path and form of every request, then refuses it, so a call
+    /// stops after its first Stripe request.
+    async fn record(
+        State(seen): State<Seen>,
+        uri: OriginalUri,
+        body: String,
+    ) -> (StatusCode, String) {
+        let form = url::form_urlencoded::parse(body.as_bytes())
+            .into_owned()
+            .collect();
+        seen.lock().unwrap().push((uri.path().to_owned(), form));
+        let error = json!({"error": {"type": "invalid_request_error", "message": "recorded"}});
+        (StatusCode::BAD_REQUEST, error.to_string())
+    }
+
+    async fn fake_stripe() -> (StripeHandle, Seen, tokio::task::JoinHandle<()>) {
+        let seen = Seen::default();
+        let app = Router::new()
+            .route("/v1/checkout/sessions", post(record))
+            .route("/v1/invoiceitems", post(record))
+            .route("/v1/invoices", post(record))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (
+            StripeHandle::for_test(&format!("http://{address}")),
+            seen,
+            server,
+        )
+    }
+
+    fn only_request(seen: &Seen, path: &str) -> BTreeMap<String, String> {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].0, path);
+        seen[0].1.clone()
+    }
+
+    /// Stripe refuses a setup-mode Checkout session without a currency
+    /// ("Missing required param: currency"), which failed every add-card on
+    /// Dev (#3381).
+    #[tokio::test]
+    async fn a_setup_session_asks_stripe_for_a_euro_setup_checkout() {
+        let (stripe, seen, server) = fake_stripe().await;
+        stripe
+            .create_setup_session(
+                "cus_synthetic",
+                "https://codewire.test/billing?setup=done",
+                "https://codewire.test/billing?setup=cancelled",
+                "org-1",
+                "cw-setup-synthetic",
+            )
+            .await
+            .unwrap_err();
+        server.abort();
+        let form = only_request(&seen, "/v1/checkout/sessions");
+        for (key, value) in [
+            ("mode", "setup"),
+            ("currency", "eur"),
+            ("customer", "cus_synthetic"),
+            ("success_url", "https://codewire.test/billing?setup=done"),
+            (
+                "cancel_url",
+                "https://codewire.test/billing?setup=cancelled",
+            ),
+            ("metadata[org_id]", "org-1"),
+        ] {
+            assert_eq!(
+                form.get(key).map(String::as_str),
+                Some(value),
+                "{key} in {form:?}"
+            );
+        }
+    }
+
+    /// Overage was invoiced in USD although prices are in euros (#3381).
+    #[tokio::test]
+    async fn an_overage_invoice_item_is_in_euros() {
+        let (stripe, seen, server) = fake_stripe().await;
+        stripe
+            .create_overage_invoice_item("cus_synthetic", 1234, "overage", "cw-overage-synthetic")
+            .await
+            .unwrap_err();
+        server.abort();
+        let form = only_request(&seen, "/v1/invoiceitems");
+        assert_eq!(
+            form.get("currency").map(String::as_str),
+            Some("eur"),
+            "{form:?}"
+        );
+        assert_eq!(
+            form.get("amount").map(String::as_str),
+            Some("1234"),
+            "{form:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_top_up_invoice_is_in_euros() {
+        let (stripe, seen, server) = fake_stripe().await;
+        stripe
+            .charge_top_up("cus_synthetic", "org-1", "top-up-1", 2000)
+            .await
+            .unwrap_err();
+        server.abort();
+        let form = only_request(&seen, "/v1/invoices");
+        assert_eq!(
+            form.get("currency").map(String::as_str),
+            Some("eur"),
+            "{form:?}"
+        );
+    }
+
+    /// Every Stripe call that names a currency names the one constant, the
+    /// top-up's invoice item included, which a fake Stripe only reaches with a
+    /// full invoice.
+    #[test]
+    fn every_currency_this_client_sends_is_the_billing_currency() {
+        let file = include_str!("stripe_client.rs");
+        let source = &file[..file.find("mod currency_tests").expect("this module")];
+        let calls = source.matches(".currency(").count();
+        let constant = source.matches(".currency(BILLING_CURRENCY)").count();
+        assert!(calls >= 4, "{calls}");
+        assert_eq!(
+            calls, constant,
+            "a Stripe call names a currency other than BILLING_CURRENCY"
+        );
     }
 }
