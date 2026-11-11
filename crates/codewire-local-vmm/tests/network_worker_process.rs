@@ -48,6 +48,11 @@ const NETWORK_DESCRIPTOR_MARKER: u8 = b'N';
 const HOST_PORT_DESCRIPTOR_MARKER: u8 = b'P';
 const MESH_INGRESS_DESCRIPTOR_MARKER: u8 = b'M';
 const CONTROL_BYTES: usize = 64;
+/// How long these tests wait on a child process before calling it hung. No
+/// test here is about the wait itself: five seconds was missed on a starved
+/// CI guest, where a worker took longer than that to write its status frame
+/// (#4144, run 42486), so the guard is far above any healthy run.
+const HANG_GUARD: Duration = Duration::from_secs(60);
 
 #[repr(C)]
 union ControlBuffer {
@@ -59,7 +64,7 @@ struct ChildGuard(Child);
 
 impl ChildGuard {
     fn wait_bounded(&mut self) -> ExitStatus {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             if let Some(status) = self.0.try_wait().unwrap() {
                 return status;
@@ -85,11 +90,9 @@ impl Drop for ChildGuard {
 fn confined_fixture_worker_completes_the_two_phase_authenticated_bootstrap() {
     let directory = tempfile::tempdir().unwrap();
     let (mut bootstrap_parent, bootstrap_child) = std::os::unix::net::UnixStream::pair().unwrap();
+    bootstrap_parent.set_read_timeout(Some(HANG_GUARD)).unwrap();
     bootstrap_parent
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    bootstrap_parent
-        .set_write_timeout(Some(Duration::from_secs(5)))
+        .set_write_timeout(Some(HANG_GUARD))
         .unwrap();
 
     let vm_id = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap();
@@ -143,12 +146,8 @@ fn confined_fixture_worker_completes_the_two_phase_authenticated_bootstrap() {
     );
 
     let (mut guest, worker_network) = std::os::unix::net::UnixStream::pair().unwrap();
-    guest
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    guest
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    guest.set_read_timeout(Some(HANG_GUARD)).unwrap();
+    guest.set_write_timeout(Some(HANG_GUARD)).unwrap();
     send_descriptor(
         bootstrap_parent.as_raw_fd(),
         worker_network.as_raw_fd(),
@@ -228,12 +227,8 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
     let broker_key = [0x5a; BROKER_IPC_KEY_LEN];
 
     let (mut broker_parent, broker_child_socket) = std::os::unix::net::UnixStream::pair().unwrap();
-    broker_parent
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    broker_parent
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    broker_parent.set_read_timeout(Some(HANG_GUARD)).unwrap();
+    broker_parent.set_write_timeout(Some(HANG_GUARD)).unwrap();
     let broker_source = broker_child_socket.as_raw_fd();
     let mut broker_command = Command::new(env!("CARGO_BIN_EXE_codewire-local-vmm-smoke"));
     broker_command
@@ -304,12 +299,8 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
     );
 
     let (mut worker_parent, worker_child_socket) = std::os::unix::net::UnixStream::pair().unwrap();
-    worker_parent
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    worker_parent
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    worker_parent.set_read_timeout(Some(HANG_GUARD)).unwrap();
+    worker_parent.set_write_timeout(Some(HANG_GUARD)).unwrap();
     let token = "product-worker-process-test-token-0123456789abcdef";
     let network_key = NetworkKey::derive(token, vm_id, generation).unwrap();
     let host_port_key = [0x7b; HOST_PORT_CONTROL_KEY_LEN];
@@ -364,12 +355,8 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
     );
 
     let (mut guest, worker_network) = std::os::unix::net::UnixStream::pair().unwrap();
-    guest
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    guest
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    guest.set_read_timeout(Some(HANG_GUARD)).unwrap();
+    guest.set_write_timeout(Some(HANG_GUARD)).unwrap();
     send_descriptor(
         worker_parent.as_raw_fd(),
         worker_network.as_raw_fd(),
@@ -404,7 +391,7 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
     // acknowledges the digest it enforces from then on (#2537).
     let locked = codewire_egress_policy::CompiledPolicy::locked();
     _host_address_control
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(HANG_GUARD))
         .unwrap();
     _host_address_control
         .write_all(&codewire_local_vmm::broker_control::encode_policy_frame(&locked).unwrap())
@@ -524,12 +511,8 @@ fn confined_mesh_fixture_completes_runner_handshake_and_stream_transfer() {
     let (enrollment_transfer, transport_enrollment) =
         std::os::unix::net::UnixStream::pair().unwrap();
     for stream in [&transport_control, &enrollment_control] {
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+        stream.set_write_timeout(Some(HANG_GUARD)).unwrap();
     }
 
     let mut transport_command = Command::new(env!("CARGO_BIN_EXE_codewire-local-vmm-smoke"));
@@ -640,12 +623,8 @@ fn confined_mesh_fixture_completes_runner_handshake_and_stream_transfer() {
         MESH_INGRESS_DESCRIPTOR_MARKER,
     );
     let mut stream = std::os::unix::net::UnixStream::from(descriptor);
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+    stream.set_write_timeout(Some(HANG_GUARD)).unwrap();
     let mut request = [0_u8; REQUEST.len()];
     stream.read_exact(&mut request).unwrap();
     assert_eq!(&request, REQUEST);
@@ -763,7 +742,8 @@ fn prepare_inherited_descriptor_pair(
 }
 
 fn read_status_frame(stream: &mut std::os::unix::net::UnixStream) -> Vec<u8> {
-    read_status_frame_result(stream).unwrap()
+    read_status_frame_result(stream)
+        .unwrap_or_else(|error| panic!("no status frame within the hang guard: {error}"))
 }
 
 fn read_status_frame_result(
