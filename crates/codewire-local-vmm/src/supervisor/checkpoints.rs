@@ -1112,8 +1112,11 @@ pub(in crate::supervisor) mod linux {
             path: source.path().to_owned(),
             source: error,
         })?;
-        rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockShared)
-            .map_err(|_| SupervisorError::InvalidState)?;
+        let held = crate::state::HeldFlock::try_lock(
+            held,
+            rustix::fs::FlockOperation::NonBlockingLockShared,
+        )
+        .map_err(|_| SupervisorError::InvalidState)?;
         let (_, manifest) = find_ready(config, &checkpoint_id.to_string(), true)
             .map_err(|_| SupervisorError::NotFound(checkpoint_id.to_string()))?;
         if manifest.source.environment_id != environment.id {

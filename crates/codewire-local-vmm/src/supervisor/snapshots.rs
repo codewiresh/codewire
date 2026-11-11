@@ -1187,6 +1187,7 @@ mod linux {
     use zeroize::Zeroizing;
 
     use super::*;
+    use crate::state::HeldFlock;
 
     /// The ready snapshot or VM checkpoint `id` and its verified manifest:
     /// a create from a VM checkpoint is a live fork (#3046 R4), which places
@@ -2109,7 +2110,7 @@ mod linux {
             source: source_error,
         })?;
         // Shared while this restore reads it; a delete takes it exclusively.
-        flock(&lock, FlockOperation::NonBlockingLockShared)
+        let lock = HeldFlock::try_lock(lock, FlockOperation::NonBlockingLockShared)
             .map_err(|_| SupervisorError::InvalidState)?;
         let (_, manifest) = ready_snapshot(config, snapshot_id)?;
         if manifest.resources.disk_bytes != disk_bytes
@@ -2413,12 +2414,13 @@ mod linux {
                 source,
             })
         })?;
-        flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|_| {
-            Status::failed_precondition(format!(
-                "an environment is being created from {noun} {}; remove it once that finishes",
-                row.name
-            ))
-        })?;
+        let lock =
+            HeldFlock::try_lock(lock, FlockOperation::NonBlockingLockExclusive).map_err(|_| {
+                Status::failed_precondition(format!(
+                    "an environment is being created from {noun} {}; remove it once that finishes",
+                    row.name
+                ))
+            })?;
         // Durable before the row changes: a directory so marked is being
         // deleted, even to a supervisor that lost the store.
         mark_directory_deleting(&directory).map_err(status)?;
@@ -2766,9 +2768,9 @@ mod linux {
             path: directory.path().to_owned(),
             source,
         })?;
-        if flock(&lock, FlockOperation::NonBlockingLockExclusive).is_err() {
+        let Ok(lock) = HeldFlock::try_lock(lock, FlockOperation::NonBlockingLockExclusive) else {
             return Ok(false);
-        }
+        };
         drop(directory);
         let trashed_name = format!("{TRASH_PREFIX}{}-{id}", Uuid::new_v4());
         snapshots.move_private_directory_to(

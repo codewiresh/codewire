@@ -506,8 +506,13 @@ async fn delete_waits_for_a_restore_and_then_removes_exactly_the_snapshot() {
     let snapshot = capture_named(&source, "s1").await.unwrap();
     let config = config(&source);
     let directory = snapshot_dir(&source, &snapshot);
-    let restore = File::open(&directory).unwrap();
-    flock(&restore, FlockOperation::LockShared).unwrap();
+    // A restore holds the snapshot as one does, so its release does not wait
+    // for a child another test forks to exec.
+    let restore = HeldFlock::try_lock(
+        File::open(&directory).unwrap(),
+        FlockOperation::NonBlockingLockShared,
+    )
+    .unwrap();
     let error = delete(&config, "s1").unwrap_err();
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
     assert!(directory.exists());
@@ -1592,8 +1597,11 @@ async fn reconcile_leaves_a_marked_snapshot_a_restore_holds() {
         .unwrap();
     mark_directory_deleting(&marked).unwrap();
     drop(marked);
-    let restore = File::open(&directory).unwrap();
-    flock(&restore, FlockOperation::LockShared).unwrap();
+    let restore = HeldFlock::try_lock(
+        File::open(&directory).unwrap(),
+        FlockOperation::NonBlockingLockShared,
+    )
+    .unwrap();
 
     reconcile(&engine, &store).unwrap();
 
@@ -1604,16 +1612,7 @@ async fn reconcile_leaves_a_marked_snapshot_a_restore_holds() {
     assert!(store.find("s1").unwrap().is_some(), "its row stays too");
 
     drop(restore);
-    // A child another test forks holds a copy of the restore's descriptor,
-    // and so its shared lock, until it execs; a pass then leaves the snapshot
-    // for a later one, as it would for a restore.
-    for _ in 0..100 {
-        reconcile(&engine, &store).unwrap();
-        if !directory.exists() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    reconcile(&engine, &store).unwrap();
     assert!(!directory.exists());
     assert!(store.find("s1").unwrap().is_none());
 }

@@ -126,9 +126,10 @@ impl VmPaths {
         let opened = root
             .create_regular(Path::new("vm.lock"), 0o600, false)
             .map_err(StateError::from)?;
-        flock(opened.file(), FlockOperation::NonBlockingLockExclusive)
-            .map_err(|_| StateError::AlreadyLocked)?;
-        Ok(VmLock(opened.into_file()))
+        let held =
+            HeldFlock::try_lock(opened.into_file(), FlockOperation::NonBlockingLockExclusive)
+                .map_err(|_| StateError::AlreadyLocked)?;
+        Ok(VmLock(held))
     }
 
     /// Removes endpoints a previous run left; the caller holds the VM lock,
@@ -248,7 +249,7 @@ pub fn valid_root_generation(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-pub struct VmLock(File);
+pub struct VmLock(HeldFlock);
 
 impl std::fmt::Debug for VmLock {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -258,7 +259,37 @@ impl std::fmt::Debug for VmLock {
 
 impl VmLock {
     pub fn file(&self) -> &File {
+        self.0.file()
+    }
+}
+
+/// A `flock` held through a `File` and released explicitly when dropped.
+///
+/// A `flock` belongs to the open file description, not the descriptor. A child
+/// another thread forks shares every description until it execs, `O_CLOEXEC`
+/// or not, so closing this descriptor alone would leave the lock held for
+/// that window, and a delete or restore racing a process spawn would be
+/// refused (#4116). `LOCK_UN` releases it for every descriptor sharing the
+/// description.
+pub struct HeldFlock(File);
+
+impl HeldFlock {
+    /// Takes `operation`, a shared or exclusive lock, on `file`.
+    pub fn try_lock(file: File, operation: FlockOperation) -> rustix::io::Result<Self> {
+        flock(&file, operation)?;
+        Ok(Self(file))
+    }
+
+    pub fn file(&self) -> &File {
         &self.0
+    }
+}
+
+impl Drop for HeldFlock {
+    fn drop(&mut self) {
+        // Closing the descriptor afterwards releases it anyway once no child
+        // holds a copy, so a failure here changes nothing.
+        let _ = flock(&self.0, FlockOperation::Unlock);
     }
 }
 
@@ -1165,6 +1196,41 @@ mod tests {
     use std::io::{Seek, SeekFrom, Write};
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
+
+    /// A forked child's copy of the descriptor, as another thread's spawn
+    /// holds until it execs: `try_clone` duplicates the descriptor onto the
+    /// same open file description, as `fork` does.
+    #[test]
+    fn a_held_flock_is_released_even_while_a_forked_copy_of_its_descriptor_lives() {
+        let directory = tempfile::tempdir().unwrap();
+        let exclusive = || {
+            flock(
+                File::open(directory.path()).unwrap(),
+                FlockOperation::NonBlockingLockExclusive,
+            )
+        };
+
+        // The cause: dropping the descriptor alone leaves the lock held while
+        // a copy lives.
+        let plain = File::open(directory.path()).unwrap();
+        flock(&plain, FlockOperation::NonBlockingLockShared).unwrap();
+        let child = plain.try_clone().unwrap();
+        drop(plain);
+        assert!(exclusive().is_err(), "the copy still holds the lock");
+        drop(child);
+        exclusive().unwrap();
+
+        let held = HeldFlock::try_lock(
+            File::open(directory.path()).unwrap(),
+            FlockOperation::NonBlockingLockShared,
+        )
+        .unwrap();
+        let child = held.file().try_clone().unwrap();
+        assert!(exclusive().is_err(), "held while the guard lives");
+        drop(held);
+        exclusive().unwrap();
+        drop(child);
+    }
 
     fn private_root() -> (tempfile::TempDir, PrivateRoot) {
         let parent = tempfile::tempdir().unwrap();
