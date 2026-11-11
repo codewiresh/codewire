@@ -4155,8 +4155,8 @@ fn mount_checked_out_repositories(
     })
 }
 
-/// Why `repository_destination` is not a checkout inside the folder mounted
-/// at `mount_destination`, if it is not. A link anywhere on the way is
+/// Why `repository_destination` is not a checkout in the folder mounted at
+/// `mount_destination`, the folder itself or inside it, if it is not. A link anywhere on the way is
 /// refused: the VM sees it as a link, and a link out of the folder leads
 /// nowhere there.
 fn checkout_problem(
@@ -4164,10 +4164,16 @@ fn checkout_problem(
     mount_destination: &str,
     repository_destination: &str,
 ) -> Option<String> {
-    let Some(relative) = repository_destination
+    // The mounted folder may itself be a declared repository, the root of
+    // repositories nested inside it (#4024).
+    let relative = if repository_destination == mount_destination {
+        ""
+    } else if let Some(relative) = repository_destination
         .strip_prefix(mount_destination)
         .and_then(|rest| rest.strip_prefix('/'))
-    else {
+    {
+        relative
+    } else {
         return Some(format!(
             "{repository_destination} is not inside {mount_destination}"
         ));
@@ -5336,6 +5342,37 @@ mod tests {
         let workspace =
             resolve_native_workspace(root, &mut project, Some(PathModeArg::Mount), None, true)?;
         Ok((project, workspace))
+    }
+
+    #[test]
+    fn mount_mode_accepts_the_mounted_folder_itself_as_the_root_repository() {
+        let (_temp, root) = folder_with_checkouts("");
+        let file = std::fs::read_to_string(root.join("codewire.yaml")).unwrap();
+        std::fs::write(
+            root.join("codewire.yaml"),
+            file.replace(
+                "repositories:\n",
+                "repositories:\n  - source: https://example.test/org/root.git\n    destination: /workspace/root\n",
+            ),
+        )
+        .unwrap();
+        // The folder is not a checkout yet: named, as any other.
+        let error = mount_plan(&root).unwrap_err().to_string();
+        assert!(
+            error.contains("/workspace/root: ") && error.contains("is not a Git checkout"),
+            "{error}"
+        );
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let (project, workspace) = mount_plan(&root).unwrap();
+        assert!(project.spec.repositories.is_empty());
+        assert_eq!(project.local_mounts[0].destination, "/workspace/root");
+        assert!(
+            workspace.description.ends_with(
+                "with its checkouts of /workspace/root, /workspace/root/a, /workspace/root/b"
+            ),
+            "{}",
+            workspace.description
+        );
     }
 
     #[test]

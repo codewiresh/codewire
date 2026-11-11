@@ -189,8 +189,8 @@ shows the resolved settings and asks before creating.
 `cw create --local --path-mode mount` with a file that lists repositories
 uses the checkouts already in the folder instead of cloning them. The folder
 is mounted live at `/workspace/<folder name>`, as it is without repositories,
-so each repository's `destination` must lie inside it and already be a Git
-checkout there:
+so each repository's `destination` must be that folder itself or lie inside
+it, and already be a Git checkout there:
 
 ```yaml
 # ~/src/platform/codewire.yaml: the folder holds web/ and api/ checkouts
