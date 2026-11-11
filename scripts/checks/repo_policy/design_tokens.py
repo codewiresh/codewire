@@ -56,7 +56,7 @@ DESIGN_FINGERPRINT_LIMIT = 160
 DESIGN_MARKUP_REQUIRED = {
     "select": ("cw-select",),
     "textarea": ("cw-textarea",),
-    "input:checkbox": ("cw-checkbox",),
+    "input:checkbox": ("cw-checkbox", "cw-switch"),
     "input:radio": ("cw-radio",),
     "details": ("cw-disclosure", "cw-menu"),
 }

@@ -721,6 +721,48 @@ mod tests {
     }
 
     #[test]
+    fn automatic_top_up_is_a_switch_with_its_terms_and_amount() {
+        let view = |enabled: bool| BillingPageView {
+            billing_enabled: true,
+            can_manage: true,
+            has_payment_method: true,
+            credit_balance: "€19.87".into(),
+            auto_top_up_enabled: enabled,
+            auto_top_up_euros: "20".into(),
+            csrf_token: "csrf".into(),
+            ..Default::default()
+        };
+        let terms = "Charge my saved payment method €20 whenever my credit balance runs out. \
+                     Charges continue until I turn this off, which I can do anytime on this \
+                     page or by contacting support.";
+
+        // On: the switch is checked and saves as it changes; the amount
+        // starts at the stored value and saves with its own button.
+        let on = render(&view(true));
+        assert!(on.contains(
+            r#"<h3 id="top-up-title">Automatic top-up <span class="cw-badge" data-tone="success">On</span></h3>"#
+        ));
+        assert!(on.contains(
+            r#"<input class="cw-switch" type="checkbox" role="switch" name="enabled" value="true" aria-labelledby="top-up-title" aria-describedby="top-up-terms" data-submit-on-change checked>"#
+        ));
+        assert!(on.contains(terms));
+        assert!(on.contains(r#"name="amount" inputmode="decimal""#));
+        assert!(on.contains(r#"value="20" aria-describedby="top-up-amount-hint" required"#));
+        assert!(on.contains(
+            r#"<button class="cw-button cw-button--outline" type="submit">Save</button>"#
+        ));
+
+        // Off: the same form with the switch unchecked; turning it on posts
+        // enabled=true, and saving while off posts no enabled at all.
+        let off = render(&view(false));
+        assert!(off.contains(r#"<span class="cw-badge">Off</span>"#));
+        assert!(off.contains(r#"data-submit-on-change>"#));
+        assert!(!off.contains(r#"data-submit-on-change checked"#));
+        assert!(off.contains(terms));
+        assert!(off.contains(r#"name="amount" inputmode="decimal""#));
+    }
+
+    #[test]
     fn compute_credit_shows_balance_rates_top_up_and_exhaustion() {
         let billing = BillingPageView {
             billing_enabled: true,
@@ -748,13 +790,16 @@ mod tests {
         assert!(body.contains(r#"action="/test/billing/_actions/setup""#));
         assert!(body.contains("<p class=\"cw-muted\">No payment method yet.</p>"));
         assert!(!body.contains("grants"));
-        // The top-up form is labelled and starts at the stored values.
+        // Automatic top-up without a card: shown off even though the stored
+        // setting is on (nothing can be charged), its switch disabled, saying
+        // a payment method comes first, and no amount to set.
         assert!(body.contains(r#"action="/test/billing/_actions/auto-top-up""#));
         assert!(body.contains(
-            r#"<label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="enabled" value="true" checked><span>Top up automatically</span></label>"#
+            r#"<h3 id="top-up-title">Automatic top-up <span class="cw-badge">Off</span></h3>"#
         ));
-        assert!(body.contains(r#"name="amount" inputmode="decimal""#));
-        assert!(body.contains(r#"value="20" required"#));
+        assert!(body.contains(r#"data-submit-on-change disabled>"#));
+        assert!(body.contains("Add a payment method to turn on automatic top-up."));
+        assert!(!body.contains(r#"name="amount""#));
         // No plan, seat or trial language is left.
         for retired in ["Plan", "trial", "Trial", "seat"] {
             assert!(!body.contains(retired), "{retired}");

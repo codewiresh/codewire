@@ -19,6 +19,7 @@
 .cw-org-overview .cw-card { height: 100%; }
 .cw-org-overview .cw-card-body { display: grid; align-content: start; gap: var(--space-4); }
 .cw-org-overview .cw-usage-chart { margin-top: 0; }
+.cw-org-overview .cw-usage-chart svg { height: 7rem; }
 .cw-org-overview-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .cw-org-overview-header h3 { margin: 0; font-size: var(--text-body); font-weight: var(--weight-semibold); }
 .cw-org-overview-links { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }

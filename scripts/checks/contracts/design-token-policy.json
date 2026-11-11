@@ -115,7 +115,8 @@
     "cw-select",
     "cw-textarea",
     "cw-checkbox",
-    "cw-radio"
+    "cw-radio",
+    "cw-switch"
   ],
   "js_hook_classes": {}
 }

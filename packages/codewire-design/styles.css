@@ -1214,6 +1214,41 @@ fieldset.cw-field > legend {
   background: var(--fg-disabled);
 }
 
+/* A switch turns one setting on or off at once: a checkbox with role="switch",
+   its knob on the left when off and on the right, in the accent, when on. */
+.cw-switch {
+  position: relative;
+  display: inline-block;
+  width: calc(2 * var(--choice-size) + var(--space-1));
+  height: calc(var(--choice-size) + var(--space-1));
+  flex: none;
+  margin: 0;
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-pill);
+  background: var(--bg-field);
+  cursor: pointer;
+  appearance: none;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.cw-switch::before {
+  position: absolute;
+  top: calc(var(--space-0-5) - var(--border-width));
+  left: calc(var(--space-0-5) - var(--border-width));
+  width: var(--choice-size);
+  height: var(--choice-size);
+  border-radius: var(--radius-pill);
+  background: var(--fg-tertiary);
+  content: "";
+  transition: translate 120ms ease, background-color 120ms ease;
+}
+
+.cw-switch:hover { border-color: var(--fg-tertiary); }
+.cw-switch:checked { border-color: var(--accent); background: var(--accent); }
+.cw-switch:checked::before { background: var(--fg-on-accent); translate: var(--choice-size) 0; }
+.cw-switch:disabled { border-color: var(--border); background: var(--bg-secondary); cursor: not-allowed; }
+.cw-switch:disabled::before { background: var(--fg-disabled); }
+
 .cw-choice {
   display: grid;
   grid-template-columns: var(--choice-size) minmax(0, 1fr);

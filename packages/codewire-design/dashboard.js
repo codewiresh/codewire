@@ -72,6 +72,12 @@ const app = document.querySelector("[data-dashboard-app]");
           !trigger?.matches(":hover") && !trigger?.matches(":focus-visible")) help.hidePopover();
     }, 120);
   };
+  // A switch saves as soon as it changes; its form's own button saves it
+  // without script.
+  document.addEventListener("change", (event) => {
+    const control = event.target;
+    if (control instanceof HTMLInputElement && control.matches("[data-submit-on-change]")) control.form?.requestSubmit();
+  });
   document.addEventListener("pointerover", (event) => {
     if (event.pointerType !== "mouse" || !(event.target instanceof Element)) return;
     const trigger = event.target.closest("[data-field-help-trigger]");

@@ -16,8 +16,9 @@ dl.cw-stat-grid { margin: 0; }
 .cw-stat small { color: var(--fg-tertiary); font-size: var(--text-small); font-weight: var(--weight-regular); }
 .cw-usage-chart { margin: var(--space-5) 0 0; padding-top: var(--space-4); border-top: 1px solid var(--border-subtle); }
 .cw-usage-chart figcaption { margin-bottom: var(--space-2); color: var(--fg-secondary); font-size: var(--text-small); }
-.cw-usage-chart svg { display: block; width: 100%; max-height: 11rem; }
-.cw-chart-axis { fill: none; stroke: var(--border-hover); stroke-width: 1; }
+/* The chart fills its figure's width; bars stretch with it and stop short of the axis, which keeps a one-pixel line from edge to edge. */
+.cw-usage-chart svg { display: block; width: 100%; height: 11rem; }
+.cw-chart-axis { fill: none; stroke: var(--border-hover); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .cw-chart-bar { fill: var(--accent); rx: 2; }
 .cw-chart-bar:is(:hover, :focus-visible) { fill: var(--fg-primary); }
 .cw-table-wrap { max-width: 100%; overflow-x: auto; }
@@ -39,6 +40,13 @@ dl.cw-stat-grid { margin: 0; }
 .cw-plan-form { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: var(--space-3); }
 .cw-price-form { grid-template-columns: repeat(5, minmax(0, 1fr)); margin-top: var(--space-3); }
 .cw-form-action { display: flex; align-items: end; }
+/* Automatic top-up: the title, its state and the switch on one line, the terms under it, then the amount. */
+.cw-top-up { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-base); }
+.cw-top-up-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
+.cw-top-up-head h3 { margin: 0; font-size: var(--text-body); font-weight: var(--weight-semibold); }
+.cw-top-up > p { margin: 0; }
+.cw-top-up-amount { display: flex; align-items: center; gap: var(--space-3); }
+.cw-top-up-amount .cw-input { width: var(--control-width-sm); }
 .cw-preview { display: grid; gap: var(--space-4); padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-base); }
 .cw-danger-zone, .cw-archive-form, .cw-setting-row { display: flex; align-items: end; gap: var(--space-3); }
 .cw-danger-zone { justify-content: flex-end; padding-top: var(--space-3); border-top: 1px solid var(--border-subtle); }

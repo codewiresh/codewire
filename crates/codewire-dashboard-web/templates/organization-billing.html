@@ -56,12 +56,20 @@
                 {% endif %}
               </div>
               {% if billing.can_manage && !billing.unmetered %}
-              <form class="cw-catalog-form" method="post" action="/{{ organization.slug }}/billing/_actions/auto-top-up" aria-label="Automatic top-up">
+              <form class="cw-top-up" method="post" action="/{{ organization.slug }}/billing/_actions/auto-top-up" aria-labelledby="top-up-title">
                 <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
-                <label class="cw-choice"><input class="cw-checkbox" type="checkbox" name="enabled" value="true"{% if billing.auto_top_up_enabled %} checked{% endif %}><span>Top up automatically</span></label>
-                <label class="cw-field"><span>Amount (EUR)</span><input class="cw-input" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" value="{{ billing.auto_top_up_euros }}" required></label>
-                <p class="cw-muted">When the balance runs out, the payment method is charged this amount, from €5 to €1,000.</p>
-                <div class="cw-form-action"><button class="cw-button cw-button--outline" type="submit">Save top-up</button></div>
+                <div class="cw-top-up-head">
+                  <h3 id="top-up-title">Automatic top-up {% if billing.auto_top_up_enabled && billing.has_payment_method %}<span class="cw-badge" data-tone="success">On</span>{% else %}<span class="cw-badge">Off</span>{% endif %}</h3>
+                  <input class="cw-switch" type="checkbox" role="switch" name="enabled" value="true" aria-labelledby="top-up-title" aria-describedby="top-up-terms" data-submit-on-change{% if billing.auto_top_up_enabled && billing.has_payment_method %} checked{% endif %}{% if !billing.has_payment_method %} disabled{% endif %}>
+                </div>
+                <p class="cw-muted" id="top-up-terms">{% if billing.has_payment_method %}Charge my saved payment method €{{ billing.auto_top_up_euros }} whenever my credit balance runs out. Charges continue until I turn this off, which I can do anytime on this page or by contacting support.{% else %}Add a payment method to turn on automatic top-up.{% endif %}</p>
+                {% if billing.has_payment_method %}
+                <div class="cw-field">
+                  <label class="cw-label" for="top-up-amount">Amount (EUR)</label>
+                  <div class="cw-top-up-amount"><input class="cw-input" id="top-up-amount" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" value="{{ billing.auto_top_up_euros }}" aria-describedby="top-up-amount-hint" required><button class="cw-button cw-button--outline" type="submit">Save</button></div>
+                  <p class="cw-field-help" id="top-up-amount-hint">From €5 to €1,000.</p>
+                </div>
+                {% endif %}
               </form>
               {% endif %}
               {% endif %}
@@ -82,10 +90,10 @@
               {% if !billing.usage_bars.is_empty() %}
               <figure class="cw-usage-chart">
                 <figcaption>Hourly cost, most recent 24 hours</figcaption>
-                <svg viewBox="0 0 304 88" role="img" aria-labelledby="usage-chart-title usage-chart-description">
+                <svg viewBox="0 0 304 88" preserveAspectRatio="none" role="img" aria-labelledby="usage-chart-title usage-chart-description">
                   <title id="usage-chart-title">Hourly Sandbox cost</title>
                   <desc id="usage-chart-description">Bar chart of hourly Sandbox cost. Exact values are available from each bar and the Sandbox table.</desc>
-                  <path class="cw-chart-axis" d="M4 80H300"/>
+                  <path class="cw-chart-axis" d="M0 84H304"/>
                   {% for bar in billing.usage_bars %}<rect class="cw-chart-bar" x="{{ bar.x }}" y="{{ bar.y }}" width="8" height="{{ bar.height }}" tabindex="0"><title>{{ bar.label }}</title></rect>{% endfor %}
                 </svg>
               </figure>
