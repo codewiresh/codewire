@@ -18,9 +18,12 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use support::{DaemonHarness, HarnessClient};
 
-/// Bounds a wait for a session's output to reach the daemon's disk, so a hang
-/// fails instead of stalling the run. It is never the expected duration.
-const OUTPUT_HANG: Duration = Duration::from_secs(300);
+/// Bounds a wait for anything the daemon persists before it answers: a
+/// session's output, which it syncs to disk frame by frame, and its state. A
+/// hang fails instead of stalling the run. On a contended disk one sync can
+/// take seconds (#4107: at 3 s per sync, a 5 s wait for attached output
+/// failed), so this is never the expected duration.
+const PERSIST_HANG: Duration = Duration::from_secs(300);
 
 #[tokio::test]
 async fn generated_session_client_authenticates_and_requires_ready_daemon() {
@@ -1089,7 +1092,7 @@ async fn retained_history_gap_precedes_replay_and_resuming_keeps_the_same_live_s
         .await
         .unwrap()
         .into_inner();
-    let first = tokio::time::timeout(Duration::from_secs(5), attached.message())
+    let first = tokio::time::timeout(PERSIST_HANG, attached.message())
         .await
         .unwrap()
         .unwrap()
@@ -1134,7 +1137,7 @@ async fn retained_history_gap_precedes_replay_and_resuming_keeps_the_same_live_s
     })
     .await
     .unwrap();
-    let message = tokio::time::timeout(Duration::from_secs(5), async {
+    let message = tokio::time::timeout(PERSIST_HANG, async {
         loop {
             let message = resumed.message().await.unwrap().unwrap();
             match message.payload {
@@ -1462,7 +1465,7 @@ async fn wait_for_session_state(
     session_id: &str,
     states: &[v1::SessionLifecycleState],
 ) -> v1::SessionRecord {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(PERSIST_HANG, async {
         loop {
             let session = get_session(client, session_id).await;
             let state = v1::SessionLifecycleState::try_from(session.state)
@@ -1486,7 +1489,7 @@ async fn wait_for_output(
     // own: the daemon syncs each frame to disk, so 8 MiB of output is hundreds
     // of fsyncs, and on a contended disk each can take a second (main run
     // 24679 passed 30 s). The bound only catches a hang.
-    tokio::time::timeout(OUTPUT_HANG, async {
+    tokio::time::timeout(PERSIST_HANG, async {
         loop {
             let session = get_session(client, session_id).await;
             if session.output_end_offset >= minimum_offset {
@@ -1573,7 +1576,7 @@ async fn wait_for_process_exit(pid: u32) {
 async fn next_attach_status(
     stream: &mut tonic::Streaming<v1::SessionAttachMessage>,
 ) -> v1::SessionStatus {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(PERSIST_HANG, async {
         loop {
             let message = stream
                 .message()
@@ -1593,7 +1596,7 @@ async fn next_attach_status_with_message(
     stream: &mut tonic::Streaming<v1::SessionAttachMessage>,
     expected: &str,
 ) -> v1::SessionStatus {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(PERSIST_HANG, async {
         loop {
             let status = next_attach_status(stream).await;
             if status.message == expected {
@@ -1609,7 +1612,7 @@ async fn collect_attach_output(
     stream: &mut tonic::Streaming<v1::SessionAttachMessage>,
     length: usize,
 ) -> Vec<u8> {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(PERSIST_HANG, async {
         let mut output = Vec::new();
         while output.len() < length {
             let message = stream
