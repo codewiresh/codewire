@@ -215,9 +215,16 @@ async fn provider_buttons_follow_the_providers_the_identity_service_names() {
                 .and_then(|(_, rest)| rest.split_once("</ul>"))
                 .map(|(list, _)| list.to_owned())
                 .unwrap_or_default();
+            // The button keeps the OIDC request and the return target; its icon
+            // comes from the sprite, whose URL carries the asset's content hash.
             assert!(providers_markup.contains(
-                "<a class=\"cw-button cw-button--outline cw-button--pill cw-button--large\" href=\"/api/auth/oauth/github/start?authRequestID=oidc-request&#38;return_to=%2Fdashboard%2F\"><svg class=\"cw-icon\" aria-hidden=\"true\"><use href=\"/assets/codewire/icons-v2.svg#icon-github\"/></svg><span>Continue with GitHub</span></a>"
+                "<a class=\"cw-button cw-button--outline cw-button--pill cw-button--large\" href=\"/api/auth/oauth/github/start?authRequestID=oidc-request&#38;return_to=%2Fdashboard%2F\"><svg class=\"cw-icon\" aria-hidden=\"true\"><use href=\"/assets/codewire/icons-v2.svg"
             ), "{providers_markup}");
+            assert!(
+                providers_markup
+                    .contains("#icon-github\"/></svg><span>Continue with GitHub</span></a>"),
+                "{providers_markup}"
+            );
             let (_, _, body) = page(&server, "/signup?return_to=%2Fdevice", None).await;
             assert!(body.contains("href=\"/api/auth/oauth/github/start?return_to=%2Fdevice\""));
         }

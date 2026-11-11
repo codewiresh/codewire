@@ -4,6 +4,9 @@
 //! the challenge the start sent) and answers with the identity a test chose.
 //! The integration runner rejects a missing DATABASE_URL skip.
 
+// A test reports failure by panicking, so it may unwrap.
+#![allow(clippy::unwrap_used)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
