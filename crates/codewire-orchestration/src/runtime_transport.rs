@@ -116,9 +116,13 @@ impl RuntimeTransportZone {
                 let url = url::Url::parse(peer_relay.allocator_url.trim()).with_context(|| {
                     format!("runtime transport zone {name} peer_relay.allocator_url")
                 })?;
+                // The relay allocates only over mutual TLS (#4011), so a
+                // plain URL is refused here, at startup, not at first use.
                 anyhow::ensure!(
-                    matches!(url.scheme(), "http" | "https"),
-                    "runtime transport zone {name} peer_relay.allocator_url must be http(s)"
+                    url.scheme() == "https",
+                    "runtime transport zone {name} peer_relay.allocator_url must be https, \
+                     the UDP relay's TLS allocator (got {:?})",
+                    url.scheme()
                 );
             }
             for bind_addr in &peer_relay.bind_addrs {
@@ -311,7 +315,7 @@ mod tests {
           "peer_relay": {
             "public_endpoints": ["203.0.113.35:41641"],
             "dns": "example-zone.mesh.codewire-dev.sh",
-            "allocator_url": "http://codewire-udp-relay.dev.svc.cluster.local:8095/internal/udp-relay/allocations",
+            "allocator_url": "https://codewire-udp-relay:8097/internal/udp-relay/allocations",
             "bind_addrs": ["codewire-udp-relay.dev.svc.cluster.local:41641"]
           },
           "direct_udp": {
@@ -349,6 +353,24 @@ mod tests {
           ]
         }"#;
         assert!(parse_catalog(raw).is_err());
+    }
+
+    #[test]
+    fn refuses_an_allocator_url_that_is_not_https() {
+        for allocator_url in [
+            "http://codewire-udp-relay:8095/internal/udp-relay/allocations",
+            "ftp://codewire-udp-relay:8097/internal/udp-relay/allocations",
+        ] {
+            let raw = DEV_CATALOG.replace(
+                "https://codewire-udp-relay:8097/internal/udp-relay/allocations",
+                allocator_url,
+            );
+            let error = parse_catalog(&raw).unwrap_err().to_string();
+            assert!(
+                error.contains("peer_relay.allocator_url must be https"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

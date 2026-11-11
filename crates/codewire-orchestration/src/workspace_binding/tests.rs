@@ -56,8 +56,7 @@ const NODE_NAME: &str = "runtime-node-1";
 const ZONE: &str = "dev-hel1";
 const COORDINATOR_URL: &str = "https://dev.codewire.sh";
 const MESH_URL: &str = "https://mesh.example.test";
-const ALLOCATOR_URL: &str =
-    "http://codewire-udp-relay.dev.svc.cluster.local:8095/internal/udp-relay/allocations";
+const ALLOCATOR_URL: &str = "https://codewire-udp-relay:8097/internal/udp-relay/allocations";
 const HOST_KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
 const OTHER_HOST_KEY: &str =

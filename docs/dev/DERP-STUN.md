@@ -64,17 +64,18 @@ VIP, DNS and firewall resources, and the catalog payload. Codewire ingests that
 payload into Postgres, then the workspace
 binding reads the bound workspace Pod's node labels and returns the selected
 zone's direct-UDP and peer-relay endpoints to the daemon. The daemon allocates
-relay slots through `AllocatePeerRelay`; the allocator and its token stay in
-orchestration. The relay's NetworkPolicy keeps relay data on UDP 41641 and its
-read-only endpoints on TCP 8096 (`/healthz`, `/readyz`, `/metrics`) open to every
-source, because Prometheus runs on host networking and matches no Pod selector.
-It admits only orchestration to the allocator. Traffic from the relay's own
+relay slots through `AllocatePeerRelay`; the allocator and its client
+certificate stay in orchestration. The relay's NetworkPolicy keeps relay data
+on UDP 41641 and its read-only endpoints on TCP 8096 (`/healthz`, `/readyz`,
+`/metrics`) open to every source, because Prometheus runs on host networking
+and matches no Pod selector. It admits only orchestration to the allocator. Traffic from the relay's own
 node isn't blocked by that policy, so the allocator also authenticates its
 caller with mutual TLS (#4011):
 
-- On TCP 8097 the relay serves the allocator over TLS and allocates only for
-  a client certificate that carries orchestration's name. A caller with no
-  certificate, or another one, gets `401`.
+- On TCP 8097, its only allocator port, the relay serves the allocator over
+  TLS and allocates only for a client certificate that carries
+  orchestration's name. A caller with no certificate, or another one, gets
+  `401`. There is no plain allocator.
 - The relay's server leaf and orchestration's client leaf come from one
   namespace-local authority, `codewire-udp-relay-allocator`, that signs
   nothing else. The site provisions it and publishes its public certificate
@@ -82,12 +83,17 @@ caller with mutual TLS (#4011):
   their leaf and those roots again for every connection, so a rotation needs
   no restart.
 - Orchestration verifies the relay by its short Service name, so a zone's
-  allocator URL for the TLS port is
+  allocator URL is
   `https://codewire-udp-relay:8097/internal/udp-relay/allocations`.
-- Plain TCP 8095 stays until orchestration has moved to 8097, and is then
-  removed. `codewire_udp_relay_allocator_calls_total{caller=...}` on
-  `/metrics` counts calls by `plain`, `orchestration`, `no_certificate` and
-  `another_certificate`, which shows when nothing uses the plain port.
+  Orchestration refuses to start with a catalog whose `allocator_url` is not
+  `https`, and never calls a plain URL.
+- `codewire_udp_relay_allocator_calls_total{caller=...}` on `/metrics` counts
+  calls by `orchestration`, `no_certificate` and `another_certificate`.
+- Allocator TLS files that are missing or unreadable close only the
+  allocator: the relay still carries relay data and serves `/healthz`,
+  `/readyz` and `/metrics`, and the allocator opens once the files can serve
+  a handshake. The relay ignores, and logs, the removed plain listener's
+  `CODEWIRE_UDP_RELAY_ALLOCATOR_ADDR` and `CODEWIRE_UDP_RELAY_ALLOCATOR_TOKEN`.
 
 Terminology:
 
@@ -111,7 +117,7 @@ your site's values are deployment inputs):
       "peer_relay": {
         "public_endpoints": ["203.0.113.35:41641"],
         "dns": "example-zone.mesh.example.invalid",
-        "allocator_url": "http://codewire-udp-relay.dev.svc.cluster.local:8095/internal/udp-relay/allocations",
+        "allocator_url": "https://codewire-udp-relay:8097/internal/udp-relay/allocations",
         "bind_addrs": ["codewire-udp-relay.dev.svc.cluster.local:41641"]
       },
       "direct_udp": {
@@ -308,7 +314,7 @@ already answered rejects it as a replay, so a slow response stays valid.
 | `STUN_PORT` | server configmap | `3478` | Public STUN edge port, advertised in DERPMap |
 | `STUN_SERVERS` | server configmap | optional comma-separated `host[:port]` list | Extra STUN candidates in the DERPMap |
 | `CODEWIRE_UDP_RELAY_ADVERTISE_ADDRS` | server configmap | dev: the peer relay VIP, such as `203.0.113.35:41641` | Public shared UDP peer-relay endpoint advertised in allocated relay descriptors |
-| `CODEWIRE_UDP_RELAY_ALLOCATOR_URL` | server configmap | cluster-local relay allocator URL | Internal HTTP allocation endpoint orchestration calls for `AllocatePeerRelay` |
+| `CODEWIRE_UDP_RELAY_ALLOCATOR_URL` | server configmap | empty | Predates the transport-zone catalog: without one, a value only opens the workspace's relay data egress, and nothing calls it. `AllocatePeerRelay` uses the zone's `https` `peer_relay.allocator_url` |
 | `DERP_HOST` | server configmap | `derp.codewire.sh` | DERP relay hostname |
 | `DERP_MESH_KEY` | secret | 64-char hex | Shared key for multi-replica DERP mesh |
 | `DERP_VERIFY_CLIENT_URLS` | DERP deployment | comma-separated `http://host:port` | Coordinator and Mesh node-key lookups; unset serves every client |

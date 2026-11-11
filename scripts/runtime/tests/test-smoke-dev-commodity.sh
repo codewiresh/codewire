@@ -844,7 +844,7 @@ EOF
       SANDBOX_DAEMON_IMAGE: "registry.example.invalid/codewire/daemon:test",
       CODEWIRE_RUNTIME_TRANSPORT_ZONES_JSON: ({zones: [{
         name: "zone-a", runtime_region: "region-a",
-        peer_relay: {public_endpoints: ["192.0.2.20:41641"], allocator_url: "http://relay.invalid/alloc", bind_addrs: ["relay.invalid:41641"]},
+        peer_relay: {public_endpoints: ["192.0.2.20:41641"], allocator_url: "https://relay.invalid/alloc", bind_addrs: ["relay.invalid:41641"]},
         direct_udp: {vip: $vip}
       }]} | tojson)
     }}' >"$config"
@@ -857,7 +857,7 @@ EOF
       EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp \
       EXPECTED_TAILNET_PEER_RELAY_ENDPOINT=192.0.2.20:41641 \
       EXPECTED_UDP_RELAY_BIND_ADDRS=relay.invalid:41641 \
-      EXPECTED_UDP_RELAY_ALLOCATOR_URL=http://relay.invalid/alloc \
+      EXPECTED_UDP_RELAY_ALLOCATOR_URL=https://relay.invalid/alloc \
       EXPECTED_TAILNET_DIRECT_UDP_LB_IP=192.0.2.10 \
       EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE=zone-a \
       EXPECTED_RUNTIME_TRANSPORT_REGION=region-a \

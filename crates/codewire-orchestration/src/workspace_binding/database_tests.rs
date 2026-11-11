@@ -246,7 +246,7 @@ async fn db_only_enabled_transport_zones_are_read() -> Result<()> {
             r#"{"version":1,"zones":[
                 {"name":"dev-hel1","runtime_region":"hel1","peer_relay":{
                     "public_endpoints":["198.51.100.4:41641"],
-                    "allocator_url":"http://codewire-udp-relay.dev.svc.cluster.local:8095/internal/udp-relay/allocations",
+                    "allocator_url":"https://codewire-udp-relay:8097/internal/udp-relay/allocations",
                     "bind_addrs":["10.0.0.4:41641"]}},
                 {"name":"dev-off","runtime_region":"hel1","enabled":false}
             ]}"#,

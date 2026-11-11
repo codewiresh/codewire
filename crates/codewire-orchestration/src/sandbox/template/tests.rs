@@ -774,20 +774,16 @@ mod tests {
     }
 
     #[test]
-    fn template_opts_debug_redacts_bearer_tokens_and_embedded_ca() {
+    fn template_opts_debug_redacts_the_embedded_ca() {
         let rendered = format!(
             "{:?}",
             TemplateOpts {
-                udp_relay_allocator_token: "relay-secret-value".into(),
                 kata_coco_kbs_ca_pem: "embedded-public-ca".into(),
                 ..Default::default()
             }
         );
 
-        assert!(rendered.contains("udp_relay_allocator_token: \"<redacted>\""));
         assert!(rendered.contains("kata_coco_kbs_ca_pem: \"<configured>\""));
-        assert!(!rendered.contains("daemon-secret-value"));
-        assert!(!rendered.contains("relay-secret-value"));
         assert!(!rendered.contains("embedded-public-ca"));
     }
 

@@ -277,7 +277,6 @@ pub struct TemplateOpts {
     pub direct_udp_lb_sharing_key: String,
     pub direct_udp_transport_zone: String,
     pub udp_relay_allocator_url: String,
-    pub udp_relay_allocator_token: String,
     pub udp_relay_bind_addrs: String,
     pub udp_relay_allocator_egress_enabled: bool,
     pub cpu_millicores: i64,
@@ -353,7 +352,6 @@ impl fmt::Debug for TemplateOpts {
             .field("direct_udp_lb_sharing_key", &self.direct_udp_lb_sharing_key)
             .field("direct_udp_transport_zone", &self.direct_udp_transport_zone)
             .field("udp_relay_allocator_url", &self.udp_relay_allocator_url)
-            .field("udp_relay_allocator_token", &"<redacted>")
             .field("udp_relay_bind_addrs", &self.udp_relay_bind_addrs)
             .field(
                 "udp_relay_allocator_egress_enabled",

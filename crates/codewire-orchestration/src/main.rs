@@ -61,11 +61,10 @@ const UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE_ENV: &str =
 const UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE_ENV: &str =
     "CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE";
 
-/// The relay allocator client. With none of the TLS files named it can call
-/// only a plain allocator URL; with some but not all it refuses to start,
-/// so a half-configured Pod never looks configured.
+/// The relay allocator client. With none of the TLS files named it allocates
+/// nothing; with some but not all it refuses to start, so a half-configured
+/// Pod never looks configured.
 fn relay_allocator(
-    token: String,
     getenv: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<codewire_orchestration::workspace_binding::HttpRelayAllocator> {
     use codewire_orchestration::workspace_binding::{HttpRelayAllocator, RelayAllocatorTls};
@@ -75,7 +74,7 @@ fn relay_allocator(
             .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from)
     };
-    let allocator = HttpRelayAllocator::new(Some(token));
+    let allocator = HttpRelayAllocator::new();
     match (
         file(UDP_RELAY_ALLOCATOR_ROOTS_FILE_ENV),
         file(UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE_ENV),
@@ -682,7 +681,7 @@ async fn main() -> anyhow::Result<()> {
         workspace_binding_notifications.clone(),
     );
     // Its daemons get the public coordinator and relay endpoints; the relay
-    // allocator and its token stay here.
+    // allocator and its client certificate stay here.
     let workspace_binding_state = Arc::new(
         codewire_orchestration::workspace_binding::WorkspaceBindingState::new(
             api_state.kube.clone(),
@@ -705,10 +704,7 @@ async fn main() -> anyhow::Result<()> {
                 ),
                 mesh_url: api_state.sandbox_cfg.mesh_public_url.clone(),
             },
-            Arc::new(relay_allocator(
-                api_state.sandbox_cfg.udp_relay_allocator_token.clone(),
-                |name| std::env::var(name).ok(),
-            )?),
+            Arc::new(relay_allocator(|name| std::env::var(name).ok())?),
         ),
     );
     // There is no plaintext form: inside a cluster it serves TLS with the
@@ -905,18 +901,15 @@ mod tests {
             move |name: &str| set.contains(&name).then(|| format!("/run/{name}"))
         };
         // A relative path would fail every allocation, so it fails startup.
-        assert!(relay_allocator(String::new(), |name| Some(format!("run/{name}"))).is_err());
-        assert!(relay_allocator(String::new(), |_| Some("/run/one-file".into())).is_err());
-        assert!(relay_allocator(String::new(), env(&[])).is_ok());
+        assert!(relay_allocator(|name| Some(format!("run/{name}"))).is_err());
+        assert!(relay_allocator(|_| Some("/run/one-file".into())).is_err());
+        assert!(relay_allocator(env(&[])).is_ok());
         assert!(
-            relay_allocator(
-                String::new(),
-                env(&[
-                    UDP_RELAY_ALLOCATOR_ROOTS_FILE_ENV,
-                    UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE_ENV,
-                    UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE_ENV,
-                ])
-            )
+            relay_allocator(env(&[
+                UDP_RELAY_ALLOCATOR_ROOTS_FILE_ENV,
+                UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE_ENV,
+                UDP_RELAY_ALLOCATOR_CLIENT_KEY_FILE_ENV,
+            ]))
             .is_ok()
         );
         for partial in [
@@ -927,7 +920,7 @@ mod tests {
             ],
         ] {
             let partial: &'static [&'static str] = partial;
-            assert!(relay_allocator(String::new(), env(partial)).is_err());
+            assert!(relay_allocator(env(partial)).is_err());
         }
     }
 

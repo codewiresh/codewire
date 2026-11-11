@@ -37,10 +37,8 @@ spec:
             - containerPort: 41641
               protocol: UDP
               name: udp
-            - containerPort: 8095
-              name: allocator
-            # The allocator again, over TLS, for orchestration's client
-            # certificate only (#4011). 8095 goes once orchestration uses it.
+            # The allocator, over TLS, for orchestration's client certificate
+            # only (#4011). There is no plain allocator port.
             - containerPort: 8097
               name: allocator-tls
             # Probes and metrics. The PodMonitor scrapes the port named http.

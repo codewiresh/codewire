@@ -275,7 +275,6 @@ pub struct SandboxWorkerCfg {
     pub direct_udp_lb_sharing_key: String,
     pub direct_udp_transport_zone: String,
     pub udp_relay_allocator_url: String,
-    pub udp_relay_allocator_token: String,
     pub udp_relay_bind_addrs: String,
     pub runtime_transport_zones_json: String,
     pub pod_namespace: String,
@@ -497,7 +496,6 @@ impl SandboxWorkerCfg {
             ),
             direct_udp_transport_zone: getenv("CODEWIRE_DIRECT_UDP_TRANSPORT_ZONE", ""),
             udp_relay_allocator_url: getenv("CODEWIRE_UDP_RELAY_ALLOCATOR_URL", ""),
-            udp_relay_allocator_token: getenv("CODEWIRE_UDP_RELAY_ALLOCATOR_TOKEN", ""),
             udp_relay_bind_addrs: getenv("CODEWIRE_UDP_RELAY_BIND_ADDRS", ""),
             runtime_transport_zones_json: getenv("CODEWIRE_RUNTIME_TRANSPORT_ZONES_JSON", ""),
             pod_namespace: std::env::var("POD_NAMESPACE").unwrap_or_default(),
@@ -769,11 +767,6 @@ pub fn shape_template_opts(
             String::new()
         } else {
             cfg.udp_relay_allocator_url.clone()
-        },
-        udp_relay_allocator_token: if uses_runtime_transport_registry {
-            String::new()
-        } else {
-            cfg.udp_relay_allocator_token.clone()
         },
         udp_relay_bind_addrs: if uses_runtime_transport_registry {
             String::new()
@@ -4931,9 +4924,7 @@ mod tests {
                 r#"{"version":1,"zones":[{"name":"example-zone","runtime_region":"dev-eu"}]}"#
                     .into(),
             udp_relay_allocator_url:
-                "http://codewire-udp-relay.dev.svc.cluster.local:8095/internal/udp-relay/allocations"
-                    .into(),
-            udp_relay_allocator_token: "relay-token".into(),
+                "https://codewire-udp-relay:8097/internal/udp-relay/allocations".into(),
             udp_relay_bind_addrs: "codewire-udp-relay.dev.svc.cluster.local:41641".into(),
             ..Default::default()
         };
@@ -4948,7 +4939,6 @@ mod tests {
         .unwrap();
 
         assert!(opts.udp_relay_allocator_url.is_empty());
-        assert!(opts.udp_relay_allocator_token.is_empty());
         assert!(opts.udp_relay_bind_addrs.is_empty());
     }
 

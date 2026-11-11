@@ -2828,8 +2828,12 @@ assert_tailnet_peer_relay_discovery_shape() {
     | length > 0
   ' "$daemon_policy_json" >/dev/null || \
     die "workspace NetworkPolicy does not allow the shared UDP relay data port 41641 in namespace $CODEWIRE_SERVER_NAMESPACE"
+  # Whatever port the allocator has, a rule to the relay that is not UDP,
+  # or names no port, reaches it.
   jq -e '
-    [.items[]?.spec.egress[]? | .ports[]? | select(.protocol == "TCP" and ((.port | tonumber) == 8095))]
+    [.items[]?.spec.egress[]?
+      | select(any(.to[]?; .podSelector.matchLabels["app.kubernetes.io/component"] == "udp-relay"))
+      | select((.ports // []) | length == 0 or any(.[]; .protocol != "UDP"))]
     | length == 0
   ' "$daemon_policy_json" >/dev/null || \
     die "workspace NetworkPolicy reaches the UDP relay allocator; orchestration allocates relay slots"

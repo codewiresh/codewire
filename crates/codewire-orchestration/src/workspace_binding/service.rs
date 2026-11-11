@@ -162,7 +162,7 @@ impl WorkspaceBindingState {
             sandbox_namespace: sandbox_namespace.to_owned(),
             session_secret: session_secret.to_owned(),
             access: AccessSettings::default(),
-            relay: Arc::new(HttpRelayAllocator::new(None)),
+            relay: Arc::new(HttpRelayAllocator::new()),
             max_wait: MAX_BIND_WAIT,
             requery_interval: BINDING_REQUERY_INTERVAL,
         }

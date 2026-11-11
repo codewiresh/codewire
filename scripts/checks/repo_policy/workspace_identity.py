@@ -656,7 +656,7 @@ def self_test(base: dict[str, Any]) -> None:
     rejected("relay allocator egress", lambda f: f["spec"]["networkPolicy"]["egress"].append(
         {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "dev"}},
                  "podSelector": {"matchLabels": {"app.kubernetes.io/component": "udp-relay"}}}],
-         "ports": [{"protocol": "TCP", "port": 8095}]}))
+         "ports": [{"protocol": "TCP", "port": 8097}]}))
     rejected("DERP TLS egress", lambda f: f["spec"]["networkPolicy"]["egress"].append(
         {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "dev"}},
                  "podSelector": {"matchLabels": {"app.kubernetes.io/component": "derp"}}}],

@@ -400,9 +400,8 @@ fn access_template_opts(namespace: &str) -> TemplateOpts {
         derp_port: 443,
         stun_host: "stun.codewire-dev.sh".into(),
         stun_port: 3478,
-        udp_relay_allocator_url: format!(
-            "http://codewire-udp-relay.{server_namespace}.svc.cluster.local:8095/internal/udp-relay/allocations"
-        ),
+        udp_relay_allocator_url: "https://codewire-udp-relay:8097/internal/udp-relay/allocations"
+            .into(),
         udp_relay_bind_addrs: format!(
             "codewire-udp-relay.{server_namespace}.svc.cluster.local:41641"
         ),

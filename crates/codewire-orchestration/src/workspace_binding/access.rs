@@ -7,7 +7,6 @@
 
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -113,29 +112,19 @@ pub struct RelayAllocatorTls {
     pub key: PathBuf,
 }
 
-/// HTTP allocator client. An `https` allocator URL is called over mutual TLS
-/// with orchestration's client certificate, and never without it. A plain
-/// URL is called as before, with the allocator token if there is one; the
-/// token never leaves this process on any other path.
+/// HTTP allocator client. The allocator is called over mutual TLS with
+/// orchestration's client certificate only: an `https` URL and the
+/// certificate, or no call at all (#4011).
+#[derive(Default)]
 pub struct HttpRelayAllocator {
-    http: reqwest::Client,
-    token: Option<Arc<str>>,
     tls: Option<RelayAllocatorTls>,
 }
 
 impl HttpRelayAllocator {
-    pub fn new(token: Option<String>) -> Self {
-        Self {
-            http: reqwest::Client::builder()
-                .timeout(ALLOCATION_TIMEOUT)
-                .build()
-                .expect("relay allocator client"),
-            token: token
-                .map(|token| token.trim().to_owned())
-                .filter(|token| !token.is_empty())
-                .map(Arc::from),
-            tls: None,
-        }
+    /// A client with no certificate, which allocates nothing until one is
+    /// added with [`Self::with_tls`].
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn with_tls(mut self, tls: RelayAllocatorTls) -> Self {
@@ -186,15 +175,13 @@ impl RelayAllocator for HttpRelayAllocator {
         request: &RelayAllocationRequest,
     ) -> Result<RelayAllocation, RelayError> {
         let url = url::Url::parse(allocator_url).map_err(|_| RelayError::Unavailable)?;
-        let call = if url.scheme() == "https" {
-            self.tls_client(&url).await?.post(url).json(request)
-        } else {
-            let call = self.http.post(url).json(request);
-            match &self.token {
-                Some(token) => call.bearer_auth(token),
-                None => call,
-            }
-        };
+        // The transport-zone catalog refuses any other scheme when it is
+        // loaded; this keeps a plain URL from ever being called.
+        if url.scheme() != "https" {
+            tracing::warn!("UDP relay allocation refused: the allocator URL is not https");
+            return Err(RelayError::Unavailable);
+        }
+        let call = self.tls_client(&url).await?.post(url).json(request);
         let response = call.send().await.map_err(|error| {
             tracing::warn!(error = %error, "UDP relay allocation failed");
             RelayError::Unavailable

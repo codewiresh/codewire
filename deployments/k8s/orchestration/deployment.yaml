@@ -78,8 +78,9 @@ spec:
               value: /run/codewire-orchestration-internal-tls/tls.key
             - name: ORCHESTRATION_WORKSPACE_BINDING_PORT
               value: "8087"
-            # Client certificate and relay roots for an https UDP relay
-            # allocator URL (#4011). Read again for every allocation.
+            # Client certificate and relay roots for the UDP relay allocator,
+            # which allocates only over mutual TLS (#4011). Read again for
+            # every allocation.
             - name: CODEWIRE_UDP_RELAY_ALLOCATOR_ROOTS_FILE
               value: /run/codewire-udp-relay-allocator-roots/ca.crt
             - name: CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_CERT_FILE

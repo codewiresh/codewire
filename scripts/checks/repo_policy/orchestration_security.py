@@ -538,6 +538,32 @@ WORLD_EXCEPTIONS = {
 
 UDP_RELAY = "codewire-udp-relay"
 UDP_RELAY_TLS_SECRET = "codewire-udp-relay-allocator-tls"
+# The allocator's TLS port 8097 is its only one; the plain port is gone (#4011).
+UDP_RELAY_PLAIN_ALLOCATOR_PORT = 8095
+# Rendered keys are sorted, so each list ends at the key that follows it.
+UDP_RELAY_PORTS = """
+ports:
+- containerPort: 41641
+  name: udp
+  protocol: UDP
+- containerPort: 8097
+  name: allocator-tls
+- containerPort: 8096
+  name: http
+readinessProbe:
+"""
+UDP_RELAY_SERVICE_PORTS = """
+spec:
+  ports:
+  - name: udp
+    port: 41641
+    protocol: UDP
+    targetPort: 41641
+  - name: allocator-tls
+    port: 8097
+    targetPort: 8097
+  selector:
+"""
 # The relay allocates over TLS only for the certificate with this name, which
 # orchestration's client leaf carries.
 UDP_RELAY_TLS_ENV = [
@@ -605,7 +631,8 @@ def assert_udp_relay(resources: list[str], label: str, output: list[str]) -> Non
     its allocator answers only orchestration (#3926). Its one Secret is its own
     TLS leaf, from the authority that signs nothing but that leaf and
     orchestration's client leaf, and its TLS listener allocates only for that
-    client's name (#4011). Relay data stays open to
+    client's name (#4011). That listener is the only allocator: no Deployment,
+    Service or policy names the plain port it replaced. Relay data stays open to
     every source, because the LoadBalancer sends the internet there, and so do the
     read-only endpoints, because Prometheus runs on host networking and matches no
     Pod selector. Those endpoints stay on the port named http, which the PodMonitor
@@ -620,19 +647,18 @@ def assert_udp_relay(resources: list[str], label: str, output: list[str]) -> Non
             f"{label}: the UDP relay must take no Secret but its own allocator TLS leaf, "
             "and its client roots from the published ConfigMap"
         )
-    if deployment and compact(
-        """
-        - containerPort: 8095
-          name: allocator
-        - containerPort: 8097
-          name: allocator-tls
-        - containerPort: 8096
-          name: http
-        """
-    ) not in compact(deployment):
+    if deployment and compact(UDP_RELAY_PORTS) not in compact(deployment):
         output.append(
-            f"{label}: the UDP relay must serve its allocator on 8095, over TLS on 8097, and the port named http on 8096"
+            f"{label}: the UDP relay must serve relay data on 41641/UDP, its allocator over TLS on 8097 only, "
+            "and the port named http on 8096"
         )
+    service = exactly_one(resources, "Service", UDP_RELAY, label, output)
+    if service and not compact(top_level_block(service, "spec")).startswith(compact(UDP_RELAY_SERVICE_PORTS)):
+        output.append(f"{label}: the UDP relay Service must expose 41641/UDP and the TLS allocator on 8097 only")
+    plain = re.compile(rf"\b(containerPort|port|targetPort): {UDP_RELAY_PLAIN_ALLOCATOR_PORT}\b")
+    for resource in (deployment, service):
+        if resource and plain.search(resource):
+            output.append(f"{label}: the UDP relay must not serve the plain allocator port {UDP_RELAY_PLAIN_ALLOCATOR_PORT}")
     for line in UDP_RELAY_TLS_ENV:
         name = line.split()[2]
         # Kubernetes takes the last of two entries with one name.
@@ -667,8 +693,6 @@ def assert_udp_relay(resources: list[str], label: str, output: list[str]) -> Non
                   app.kubernetes.io/component: orchestration
                   app.kubernetes.io/name: codewire
             ports:
-            - port: 8095
-              protocol: TCP
             - port: 8097
               protocol: TCP
           - ports:
@@ -684,7 +708,7 @@ def assert_udp_relay(resources: list[str], label: str, output: list[str]) -> Non
     )
     if compact(top_level_block(policy, "spec")) != expected:
         output.append(
-            f"{label}: UDP relay ingress must keep 41641/UDP and 8096 open and admit only orchestration on 8095 and 8097"
+            f"{label}: UDP relay ingress must keep 41641/UDP and 8096 open and admit only orchestration, on 8097 only"
         )
 
 
@@ -697,11 +721,16 @@ def udp_relay_self_test(resources: list[str]) -> None:
     for kind, name, before, after in [
         ("Deployment", "takes every shared secret", "envFrom:\n", "envFrom:\n        - secretRef:\n            name: codewire-secrets\n"),
         ("NetworkPolicy", "relay data closed", "port: 41641", "port: 41642"),
-        ("NetworkPolicy", "allocator open to every source", "  - from:\n", "  - ports:\n    - port: 8095\n      protocol: TCP\n  - from:\n"),
+        ("NetworkPolicy", "plain allocator open to every source", "  - from:\n", "  - ports:\n    - port: 8095\n      protocol: TCP\n  - from:\n"),
+        ("NetworkPolicy", "plain allocator open to orchestration", "    - port: 8097\n", "    - port: 8095\n      protocol: TCP\n    - port: 8097\n"),
+        ("Deployment", "the plain allocator port back", "        - containerPort: 8097\n", "        - containerPort: 8095\n          name: allocator\n        - containerPort: 8097\n"),
+        ("Deployment", "the plain allocator port after the others", "          name: http\n", "          name: http\n        - containerPort: 8095\n"),
+        ("Service", "the plain allocator port back", "  - name: allocator-tls\n", "  - name: allocator\n    port: 8095\n    targetPort: 8095\n  - name: allocator-tls\n"),
+        ("Service", "the plain allocator port after the others", "    targetPort: 8097\n", "    targetPort: 8097\n  - name: allocator\n    port: 8095\n"),
         ("NetworkPolicy", "another component", "app.kubernetes.io/component: orchestration", "app.kubernetes.io/component: dashboard"),
         ("NetworkPolicy", "read-only endpoints closed", "port: 8096", "port: 8098"),
         ("NetworkPolicy", "TLS allocator open to every source", "  - from:\n", "  - ports:\n    - port: 8097\n      protocol: TCP\n  - from:\n"),
-        ("Deployment", "metrics back on the allocator's port", "name: allocator\n", "name: http\n"),
+        ("Deployment", "metrics back on the allocator's port", "name: allocator-tls\n        - containerPort: 8096", "name: http\n        - containerPort: 8096"),
         ("Deployment", "another Secret mounted", "secretName: codewire-udp-relay-allocator-tls", "secretName: codewire-secrets"),
         ("Deployment", "a second Secret mounted", "      volumes:\n", "      volumes:\n      - name: extra\n        secret:\n          secretName: codewire-secrets\n"),
         ("Deployment", "a projected shared secret", "      volumes:\n", "      volumes:\n      - name: extra\n        projected:\n          sources:\n          - secret:\n              name: codewire-secrets\n"),

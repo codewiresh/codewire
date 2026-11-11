@@ -103,7 +103,7 @@ impl Relay {
 
     fn client(&self, name: &str) -> HttpRelayAllocator {
         let (cert_chain, key) = self.pki.client_identity(name);
-        HttpRelayAllocator::new(Some("allocator-token".into())).with_tls(RelayAllocatorTls {
+        HttpRelayAllocator::new().with_tls(RelayAllocatorTls {
             roots: self.pki.roots.clone(),
             cert_chain,
             key,
@@ -121,7 +121,7 @@ async fn an_https_allocator_is_called_with_orchestrations_certificate_and_no_tok
         .unwrap();
     assert_eq!(allocation.generation, 7);
     assert_eq!(allocation.endpoint.addr_ports, ["203.0.113.10:41641"]);
-    // The static token belongs to the plain listener only.
+    // The certificate is the whole credential: no bearer token is sent.
     assert_eq!(relay.bearers.load(Ordering::SeqCst), 0);
 }
 
@@ -142,7 +142,7 @@ async fn an_https_allocator_is_never_called_without_the_certificate_or_verified_
     let relay = Relay::start().await;
     // No client certificate configured: not attempted anonymously.
     assert_eq!(
-        HttpRelayAllocator::new(Some("allocator-token".into()))
+        HttpRelayAllocator::new()
             .allocate(&relay.url, &request())
             .await,
         Err(RelayError::Unavailable)
@@ -151,7 +151,7 @@ async fn an_https_allocator_is_never_called_without_the_certificate_or_verified_
     // Roots that did not sign the relay's leaf.
     let other = SyntheticPki::new("localhost");
     let (cert_chain, key) = relay.pki.client_identity(ORCHESTRATION);
-    let untrusting = HttpRelayAllocator::new(None).with_tls(RelayAllocatorTls {
+    let untrusting = HttpRelayAllocator::new().with_tls(RelayAllocatorTls {
         roots: other.roots.clone(),
         cert_chain: cert_chain.clone(),
         key,
@@ -162,7 +162,7 @@ async fn an_https_allocator_is_never_called_without_the_certificate_or_verified_
     );
 
     // A key file that is missing when the allocation is made.
-    let missing = HttpRelayAllocator::new(None).with_tls(RelayAllocatorTls {
+    let missing = HttpRelayAllocator::new().with_tls(RelayAllocatorTls {
         roots: relay.pki.roots.clone(),
         cert_chain,
         key: relay.pki.roots.with_file_name("absent.key"),
@@ -175,13 +175,11 @@ async fn an_https_allocator_is_never_called_without_the_certificate_or_verified_
 }
 
 #[tokio::test]
-async fn a_plain_allocator_is_still_called_with_the_token() {
-    let bearer = Arc::new(std::sync::Mutex::new(None::<String>));
-    let seen = bearer.clone();
-    let app = Router::new().fallback(post(move |headers: HeaderMap, body: Bytes| async move {
-        *seen.lock().unwrap() = headers
-            .get(AUTHORIZATION)
-            .map(|value| value.to_str().unwrap().to_owned());
+async fn a_plain_allocator_url_is_never_called() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let app = Router::new().fallback(post(move |body: Bytes| async move {
+        seen.fetch_add(1, Ordering::SeqCst);
         Json(allocation(generation(&body)))
     }));
     let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -192,15 +190,13 @@ async fn a_plain_allocator_is_still_called_with_the_token() {
     tokio::spawn(async move {
         let _ = axum::serve(socket, app).await;
     });
-    let allocation = HttpRelayAllocator::new(Some(" allocator-token ".into()))
-        .allocate(&url, &request())
-        .await
-        .unwrap();
-    assert_eq!(allocation.generation, 7);
+    // Even with orchestration's certificate configured.
+    let relay = Relay::start().await;
     assert_eq!(
-        bearer.lock().unwrap().as_deref(),
-        Some("Bearer allocator-token")
+        relay.client(ORCHESTRATION).allocate(&url, &request()).await,
+        Err(RelayError::Unavailable)
     );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

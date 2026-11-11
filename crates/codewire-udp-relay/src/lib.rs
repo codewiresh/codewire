@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -7,38 +8,43 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use codewire_tailnet::disco::{DiscoPrivate, UDPRelayEndpoint};
 use codewire_tailnet::node::DiscoPublic;
 use codewire_tailnet::udp_relay::{self, SocketHandle, SocketOptions, SocketServer};
-use codewire_tls::{ServerTlsFiles, TlsPeer};
+use codewire_tls::{PeerTlsListener, ServerTlsFiles, TlsPeer};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 
 pub const DEFAULT_UDP_BIND_ADDR: &str = "0.0.0.0:41641";
-pub const DEFAULT_ALLOCATOR_BIND_ADDR: &str = "0.0.0.0:8095";
 pub const DEFAULT_OPS_BIND_ADDR: &str = "0.0.0.0:8096";
 pub const DEFAULT_ALLOCATOR_TLS_BIND_ADDR: &str = "0.0.0.0:8097";
 
 pub const UDP_BIND_ADDR_ENV: &str = "CODEWIRE_UDP_RELAY_BIND_ADDR";
 pub const UDP_ADVERTISE_ADDRS_ENV: &str = "CODEWIRE_UDP_RELAY_ADVERTISE_ADDRS";
-pub const ALLOCATOR_BIND_ADDR_ENV: &str = "CODEWIRE_UDP_RELAY_ALLOCATOR_ADDR";
 pub const OPS_BIND_ADDR_ENV: &str = "CODEWIRE_UDP_RELAY_OPS_ADDR";
-pub const ALLOCATOR_TOKEN_ENV: &str = "CODEWIRE_UDP_RELAY_ALLOCATOR_TOKEN";
 pub const DISCO_PRIVATE_KEY_HEX_ENV: &str = "CODEWIRE_UDP_RELAY_DISCO_PRIVATE_KEY_HEX";
 pub const ALLOCATOR_TLS_BIND_ADDR_ENV: &str = "CODEWIRE_UDP_RELAY_ALLOCATOR_TLS_ADDR";
 pub const ALLOCATOR_TLS_CERT_ENV: &str = "CODEWIRE_UDP_RELAY_ALLOCATOR_TLS_CERT";
 pub const ALLOCATOR_TLS_KEY_ENV: &str = "CODEWIRE_UDP_RELAY_ALLOCATOR_TLS_KEY";
 pub const ALLOCATOR_CLIENT_ROOTS_ENV: &str = "CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_ROOTS";
 pub const ALLOCATOR_CLIENT_NAME_ENV: &str = "CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_NAME";
+/// The plain allocator listener's address and static token (#4011). Nothing
+/// reads them now: a relay that still names one starts without it, and says
+/// so, rather than refusing to carry relay data over a stale setting.
+pub const REMOVED_PLAIN_ALLOCATOR_ENVS: [&str; 2] = [
+    "CODEWIRE_UDP_RELAY_ALLOCATOR_ADDR",
+    "CODEWIRE_UDP_RELAY_ALLOCATOR_TOKEN",
+];
 
-/// The allocator's TLS listener (#4011): the relay's own mounted identity,
-/// the mounted roots that sign client certificates, and the one DNS name a
-/// client certificate must carry to be orchestration's. It allocates for
-/// that certificate and for no other caller.
+/// The allocator's TLS listener (#4011), the only way to allocate: the
+/// relay's own mounted identity, the mounted roots that sign client
+/// certificates, and the one DNS name a client certificate must carry to be
+/// orchestration's. It allocates for that certificate and for no other caller.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AllocatorTls {
     pub bind_addr: SocketAddr,
@@ -59,12 +65,13 @@ impl AllocatorTls {
 pub struct Config {
     pub udp_bind_addr: SocketAddr,
     pub udp_advertise_addr_ports: Vec<SocketAddr>,
-    pub allocator_bind_addr: SocketAddr,
     pub ops_bind_addr: SocketAddr,
-    pub allocator_token: Option<String>,
     /// Set by naming all four of its files and names, or none of them.
+    /// Without it nothing can allocate on this relay.
     pub allocator_tls: Option<AllocatorTls>,
     pub disco_private_key_hex: Option<String>,
+    /// The [`REMOVED_PLAIN_ALLOCATOR_ENVS`] that are still set.
+    pub ignored_envs: Vec<&'static str>,
 }
 
 impl Config {
@@ -84,19 +91,12 @@ impl Config {
         )?;
         let udp_advertise_addr_ports =
             parse_socket_addr_list_env(UDP_ADVERTISE_ADDRS_ENV, getenv(UDP_ADVERTISE_ADDRS_ENV))?;
-        let allocator_bind_addr = parse_socket_addr_env(
-            ALLOCATOR_BIND_ADDR_ENV,
-            getenv(ALLOCATOR_BIND_ADDR_ENV)
-                .as_deref()
-                .unwrap_or(DEFAULT_ALLOCATOR_BIND_ADDR),
-        )?;
         let ops_bind_addr = parse_socket_addr_env(
             OPS_BIND_ADDR_ENV,
             getenv(OPS_BIND_ADDR_ENV)
                 .as_deref()
                 .unwrap_or(DEFAULT_OPS_BIND_ADDR),
         )?;
-        let allocator_token = trim_env(&getenv, ALLOCATOR_TOKEN_ENV);
         const ALLOCATOR_TLS_ENVS: [&str; 5] = [
             ALLOCATOR_TLS_BIND_ADDR_ENV,
             ALLOCATOR_TLS_CERT_ENV,
@@ -127,6 +127,10 @@ impl Config {
             })
         };
         let disco_private_key_hex = trim_env(&getenv, DISCO_PRIVATE_KEY_HEX_ENV);
+        let ignored_envs = REMOVED_PLAIN_ALLOCATOR_ENVS
+            .into_iter()
+            .filter(|name| trim_env(&getenv, name).is_some())
+            .collect();
 
         if let Some(raw) = &disco_private_key_hex {
             parse_hex_32(DISCO_PRIVATE_KEY_HEX_ENV, raw)?;
@@ -135,11 +139,10 @@ impl Config {
         Ok(Self {
             udp_bind_addr,
             udp_advertise_addr_ports,
-            allocator_bind_addr,
             ops_bind_addr,
-            allocator_token,
             allocator_tls,
             disco_private_key_hex,
+            ignored_envs,
         })
     }
 
@@ -185,20 +188,17 @@ pub enum ConfigError {
 /// `codewire_udp_relay_allocator_calls_total`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllocatorCaller {
-    /// The plain listener, where no caller is identified.
-    Plain,
-    /// The TLS listener, with orchestration's verified certificate.
+    /// Orchestration's verified certificate.
     Orchestration,
-    /// The TLS listener, without a client certificate. Refused.
+    /// No client certificate. Refused.
     NoCertificate,
-    /// The TLS listener, with a verified certificate that does not carry
-    /// orchestration's name. Refused.
+    /// A verified certificate that does not carry orchestration's name.
+    /// Refused.
     AnotherCertificate,
 }
 
 impl AllocatorCaller {
-    const ALL: [Self; 4] = [
-        Self::Plain,
+    const ALL: [Self; 3] = [
         Self::Orchestration,
         Self::NoCertificate,
         Self::AnotherCertificate,
@@ -206,7 +206,6 @@ impl AllocatorCaller {
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Plain => "plain",
             Self::Orchestration => "orchestration",
             Self::NoCertificate => "no_certificate",
             Self::AnotherCertificate => "another_certificate",
@@ -215,7 +214,7 @@ impl AllocatorCaller {
 }
 
 #[derive(Default)]
-struct AllocatorCallCounters([AtomicU64; 4]);
+struct AllocatorCallCounters([AtomicU64; 3]);
 
 impl AllocatorCallCounters {
     fn record(&self, result: AllocatorCaller) {
@@ -230,23 +229,21 @@ impl AllocatorCallCounters {
 #[derive(Clone)]
 pub struct AppState {
     handle: SocketHandle,
-    allocator_token: Option<Arc<str>>,
     /// The DNS name orchestration's client certificate carries.
     allocator_client_name: Option<Arc<str>>,
     allocator_calls: Arc<AllocatorCallCounters>,
 }
 
 impl AppState {
-    pub fn new(handle: SocketHandle, allocator_token: Option<String>) -> Self {
+    pub fn new(handle: SocketHandle) -> Self {
         Self {
             handle,
-            allocator_token: allocator_token.map(Arc::from),
             allocator_client_name: None,
             allocator_calls: Arc::default(),
         }
     }
 
-    /// The TLS listener allocates only for a client certificate that carries
+    /// The allocator allocates only for a client certificate that carries
     /// `client_name`. Without this it allocates for nobody.
     pub fn with_allocator_client(mut self, client_name: &str) -> Self {
         self.allocator_client_name = Some(Arc::from(client_name));
@@ -266,20 +263,11 @@ pub struct RelayRuntime {
 impl RelayRuntime {
     pub async fn bind(config: &Config) -> anyhow::Result<Self> {
         let server = SocketServer::bind(config.disco_private()?, config.socket_options()).await?;
-        if config.allocator_token.is_none() {
-            tracing::warn!(
-                "udp-relay: {ALLOCATOR_TOKEN_ENV} is not set; the plain allocator listener accepts unauthenticated requests"
-            );
-        }
-        let mut state = AppState::new(server.handle(), config.allocator_token.clone());
+        let mut state = AppState::new(server.handle());
         if let Some(tls) = &config.allocator_tls {
             state = state.with_allocator_client(&tls.client_name);
         }
         Ok(Self { server, state })
-    }
-
-    pub fn allocator_app(&self) -> Router {
-        allocator_router(self.state.clone())
     }
 
     /// The allocator for [`codewire_tls::PeerTlsListener`]; serve it with
@@ -301,18 +289,105 @@ impl RelayRuntime {
     }
 }
 
-/// Only orchestration calls this. Its own port lets the NetworkPolicy keep the
-/// allocator closed while read-only endpoints stay open to Prometheus, which
-/// runs on host networking and so matches no Pod selector (#3926).
-pub fn allocator_router(state: AppState) -> Router {
-    Router::new()
-        .route("/internal/udp-relay/allocations", post(allocate))
-        .with_state(state)
+/// Runs the relay until `shutdown` completes: relay data, the read-only ops
+/// port and, when configured, the allocator's TLS listener.
+pub async fn serve<F>(cfg: &Config, shutdown: F) -> anyhow::Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    for name in &cfg.ignored_envs {
+        tracing::warn!(
+            env = name,
+            "udp relay ignores this setting: the plain allocator is gone and only the TLS allocator allocates (#4011)"
+        );
+    }
+    // Each handshake reads the identity and client roots again, so files
+    // that cannot serve one now only close the allocator until they are
+    // repaired. They never stop relay data or the ops port, which need none
+    // of them.
+    let allocator_tls = match &cfg.allocator_tls {
+        Some(tls) => {
+            let files = tls.files()?;
+            if let Err(error) = files.validate().await {
+                tracing::error!(
+                    %error,
+                    "udp relay allocator TLS files cannot serve a handshake; the allocator refuses every caller until they can"
+                );
+            }
+            Some((tls.bind_addr, files))
+        }
+        None => {
+            tracing::warn!("udp relay allocator TLS is not configured; nothing can allocate here");
+            None
+        }
+    };
+
+    let runtime = RelayRuntime::bind(cfg).await?;
+    let allocator_tls_app = runtime.allocator_tls_app();
+    let ops_app = runtime.ops_app();
+    let server = runtime.into_server();
+    let (stop, stopped) = watch::channel(false);
+    let stop = Arc::new(stop);
+    let until_stopped = move || {
+        let mut stopped = stopped.clone();
+        async move {
+            let _ = stopped.wait_for(|stop| *stop).await;
+        }
+    };
+    tokio::spawn({
+        let stop = stop.clone();
+        async move {
+            shutdown.await;
+            let _ = stop.send(true);
+        }
+    });
+    let udp_task = tokio::spawn(server.run_until(until_stopped()));
+
+    let ops_listener = tokio::net::TcpListener::bind(cfg.ops_bind_addr).await?;
+    tracing::info!(
+        ops_addr = %cfg.ops_bind_addr,
+        udp_addr = %cfg.udp_bind_addr,
+        advertise_count = cfg.udp_advertise_addr_ports.len(),
+        "codewire udp peer relay started"
+    );
+    let ops = axum::serve(ops_listener, ops_app)
+        .with_graceful_shutdown(until_stopped())
+        .into_future();
+    let allocator_tls = async {
+        let Some((addr, files)) = allocator_tls else {
+            return Ok(());
+        };
+        let listener = PeerTlsListener::new(tokio::net::TcpListener::bind(addr).await?, files)
+            .map_err(std::io::Error::other)?;
+        tracing::info!(
+            allocator_tls_addr = %addr,
+            "udp relay allocator TLS listener started"
+        );
+        axum::serve(
+            listener,
+            allocator_tls_app.into_make_service_with_connect_info::<TlsPeer>(),
+        )
+        .with_graceful_shutdown(until_stopped())
+        .await
+    };
+    let result = tokio::try_join!(ops, allocator_tls);
+    let _ = stop.send(true);
+    match tokio::time::timeout(Duration::from_secs(5), udp_task).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(err))) => return Err(err.into()),
+        Ok(Err(err)) => return Err(err.into()),
+        Err(_) => tracing::warn!("udp relay socket task did not stop within timeout"),
+    }
+    result?;
+    Ok(())
 }
 
-/// The same allocator behind the TLS listener, where the handshake has
-/// verified the caller's client certificate, if it presented one. Only
-/// orchestration's certificate allocates here (#4011).
+/// The allocator, behind the TLS listener, where the handshake has verified
+/// the caller's client certificate, if it presented one. Only orchestration's
+/// certificate allocates here (#4011). Its own port lets the NetworkPolicy
+/// keep the allocator closed while read-only endpoints stay open to
+/// Prometheus, which runs on host networking and so matches no Pod selector
+/// (#3926).
 pub fn allocator_tls_router(state: AppState) -> Router {
     Router::new()
         .route("/internal/udp-relay/allocations", post(allocate_tls))
@@ -379,16 +454,6 @@ async fn metrics(State(state): State<AppState>) -> Response {
         body,
     )
         .into_response()
-}
-
-async fn allocate(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<AllocationRequest>,
-) -> Result<Json<AllocationResponse>, ApiError> {
-    state.allocator_calls.record(AllocatorCaller::Plain);
-    authorize_static(&state, &headers)?;
-    allocate_endpoint(&state, request)
 }
 
 /// The caller is decided, counted and refused before its body is read, so
@@ -515,35 +580,6 @@ impl IntoResponse for ApiError {
     }
 }
 
-fn authorize_static(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
-    let Some(token) = &state.allocator_token else {
-        return Ok(());
-    };
-    let Some(value) = headers.get(header::AUTHORIZATION) else {
-        return Err(ApiError::Unauthorized);
-    };
-    let Ok(value) = value.to_str() else {
-        return Err(ApiError::Unauthorized);
-    };
-    match value.strip_prefix("Bearer ") {
-        Some(candidate) if token_matches(candidate.as_bytes(), token.as_bytes()) => Ok(()),
-        _ => Err(ApiError::Unauthorized),
-    }
-}
-
-/// Compares a presented token in time that does not depend on where it first
-/// differs from the configured one. Only the length can be learned.
-fn token_matches(candidate: &[u8], token: &[u8]) -> bool {
-    if candidate.len() != token.len() {
-        return false;
-    }
-    let diff = candidate
-        .iter()
-        .zip(token)
-        .fold(0u8, |acc, (a, b)| acc | (a ^ b));
-    std::hint::black_box(diff) == 0
-}
-
 /// A client name that could never match a certificate would leave the TLS
 /// listener allocating for nobody without saying why, so it is refused at
 /// startup: lowercase DNS labels only, no wildcard and no IP address.
@@ -643,7 +679,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(cfg.udp_bind_addr, "0.0.0.0:41641".parse().unwrap());
-        assert_eq!(cfg.allocator_bind_addr, "0.0.0.0:8095".parse().unwrap());
         assert_eq!(cfg.ops_bind_addr, "0.0.0.0:8096".parse().unwrap());
         assert_eq!(
             cfg.udp_advertise_addr_ports,
@@ -652,6 +687,7 @@ mod tests {
                 "[2001:db8::1]:41641".parse::<SocketAddr>().unwrap(),
             ]
         );
+        assert!(cfg.ignored_envs.is_empty());
     }
 
     #[test]
@@ -669,93 +705,61 @@ mod tests {
         );
     }
 
+    /// A Pod that still names the plain listener's address or token starts
+    /// with neither: the settings are reported and nothing listens for them.
+    #[test]
+    fn the_plain_allocator_settings_are_ignored_and_named() {
+        let mut cfg = Config::from_getenv(|key| match key {
+            "CODEWIRE_UDP_RELAY_ALLOCATOR_ADDR" => Some("0.0.0.0:8095".into()),
+            "CODEWIRE_UDP_RELAY_ALLOCATOR_TOKEN" => Some("stale".into()),
+            key => tls_env(key),
+        })
+        .unwrap();
+        assert_eq!(cfg.ignored_envs, REMOVED_PLAIN_ALLOCATOR_ENVS);
+        cfg.ignored_envs.clear();
+        assert_eq!(cfg, Config::from_getenv(tls_env).unwrap());
+    }
+
     #[tokio::test]
     async fn ops_listener_serves_read_only_endpoints_and_cannot_allocate() {
-        let app = ops_router(test_state(None).await);
+        let app = ops_router(test_state().await);
         for path in ["/healthz", "/readyz", "/metrics"] {
             let request = Request::builder().uri(path).body(Body::empty()).unwrap();
             let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK, "{path}");
         }
 
-        let response = app.oneshot(allocation_request(None)).await.unwrap();
+        let response = app.oneshot(allocation_request()).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
-    async fn allocator_listener_serves_only_allocations() {
-        let app = allocator_router(test_state(None).await);
-        for path in ["/healthz", "/readyz", "/metrics"] {
-            let request = Request::builder().uri(path).body(Body::empty()).unwrap();
-            let response = app.clone().oneshot(request).await.unwrap();
-            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
-        }
-
-        let response = app.oneshot(allocation_request(None)).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn allocation_requires_bearer_when_configured() {
-        let app = test_router(Some("secret-token".into())).await;
-        let request = allocation_request(None);
-        let response = app.oneshot(request).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn allocation_returns_reusable_endpoint_descriptor() {
-        let app = test_router(Some("secret-token".into())).await;
-        let request = allocation_request(Some("Bearer secret-token"));
-        let response = app.clone().oneshot(request).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
+    async fn metrics_count_only_tls_callers() {
+        let relay = Mutual::start().await;
+        let request = Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+        let response = ops_router(relay.state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        let body: AllocationResponse = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body.generation, 7);
-        assert_eq!(body.endpoint.vni, 1);
-        assert_eq!(body.endpoint.addr_ports, vec!["127.0.0.1:41641"]);
-
-        let second = app
-            .oneshot(allocation_request(Some("Bearer secret-token")))
-            .await
-            .unwrap();
-        let bytes = axum::body::to_bytes(second.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let second_body: AllocationResponse = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(second_body.endpoint.vni, body.endpoint.vni);
-        assert_eq!(second_body.endpoint.lamport_id, body.endpoint.lamport_id);
-    }
-
-    #[tokio::test]
-    async fn allocation_rejects_near_miss_tokens() {
-        let app = test_router(Some("secret-token".into())).await;
-        for auth in [
-            "Bearer secret-tokem",
-            "Bearer secret-toke",
-            "Bearer secret-token2",
-            "Bearer ",
-            "secret-token",
-        ] {
-            let response = app
-                .clone()
-                .oneshot(allocation_request(Some(auth)))
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{auth:?}");
-        }
-    }
-
-    #[test]
-    fn token_matches_only_identical_tokens() {
-        assert!(token_matches(b"secret-token", b"secret-token"));
-        assert!(!token_matches(b"secret-tokem", b"secret-token"));
-        assert!(!token_matches(b"secret-toke", b"secret-token"));
-        assert!(!token_matches(b"", b"secret-token"));
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        let callers: Vec<_> = body
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("codewire_udp_relay_allocator_calls_total{caller=\"")
+            })
+            .filter_map(|rest| rest.split_once('"'))
+            .map(|(caller, _)| caller)
+            .collect();
+        assert_eq!(
+            callers,
+            ["orchestration", "no_certificate", "another_certificate"]
+        );
     }
 
     const ORCHESTRATION: &str = "codewire-orchestration.codewire.svc";
@@ -834,9 +838,9 @@ mod tests {
     }
 
     impl Mutual {
-        async fn start(token: Option<String>) -> Self {
+        async fn start() -> Self {
             let pki = codewire_tls::test_support::SyntheticPki::new("localhost");
-            let state = test_state(token).await.with_allocator_client(ORCHESTRATION);
+            let state = test_state().await.with_allocator_client(ORCHESTRATION);
             let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = socket.local_addr().unwrap().port();
             let files = pki
@@ -863,6 +867,18 @@ mod tests {
         /// One allocation on a fresh connection, as the client certificate
         /// named `client`, or with none.
         async fn allocate(&self, client: Option<&str>) -> StatusCode {
+            let response = self.send(client).await;
+            StatusCode::from_u16(response.status().as_u16()).unwrap()
+        }
+
+        /// One allocation as orchestration.
+        async fn allocation(&self) -> AllocationResponse {
+            let response = self.send(Some(ORCHESTRATION)).await;
+            assert_eq!(response.status().as_u16(), 200);
+            response.json().await.unwrap()
+        }
+
+        async fn send(&self, client: Option<&str>) -> reqwest::Response {
             let origin = self.url.split("/internal").next().unwrap().to_owned();
             let mut endpoint =
                 codewire_tls::ClientTlsEndpoint::new(origin, self.pki.roots.clone()).unwrap();
@@ -870,7 +886,7 @@ mod tests {
                 let (certificate, key) = self.pki.client_identity(name);
                 endpoint = endpoint.with_client_identity(certificate, key).unwrap();
             }
-            let response = reqwest::Client::builder()
+            reqwest::Client::builder()
                 .no_proxy()
                 .use_preconfigured_tls(endpoint.rustls_config().await.unwrap())
                 .build()
@@ -885,11 +901,10 @@ mod tests {
                 }))
                 .send()
                 .await
-                .unwrap();
-            StatusCode::from_u16(response.status().as_u16()).unwrap()
+                .unwrap()
         }
 
-        async fn calls(&self) -> [u64; 4] {
+        async fn calls(&self) -> [u64; 3] {
             let request = Request::builder()
                 .uri("/metrics")
                 .body(Body::empty())
@@ -918,44 +933,39 @@ mod tests {
     #[tokio::test]
     async fn the_tls_listener_allocates_only_for_orchestrations_certificate() {
         // The certificate is the whole rule there: no static token is asked for.
-        let relay = Mutual::start(Some("secret-token".into())).await;
+        let relay = Mutual::start().await;
         assert_eq!(relay.allocate(Some(ORCHESTRATION)).await, StatusCode::OK);
         assert_eq!(relay.allocate(None).await, StatusCode::UNAUTHORIZED);
         assert_eq!(
             relay.allocate(Some("codewire-mesh.codewire.svc")).await,
             StatusCode::UNAUTHORIZED
         );
-        assert_eq!(relay.calls().await, [0, 1, 1, 1]);
+        assert_eq!(relay.calls().await, [1, 1, 1]);
     }
 
     #[tokio::test]
-    async fn the_plain_listener_keeps_its_rule_and_is_counted() {
-        let relay = Mutual::start(Some("secret-token".into())).await;
-        let plain = allocator_router(relay.state.clone());
-        let response = plain
-            .clone()
-            .oneshot(allocation_request(None))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let response = plain
-            .oneshot(allocation_request(Some("Bearer secret-token")))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(relay.calls().await, [2, 0, 0, 0]);
+    async fn allocation_returns_reusable_endpoint_descriptor() {
+        let relay = Mutual::start().await;
+        let first = relay.allocation().await;
+        assert_eq!(first.generation, 7);
+        assert_eq!(first.endpoint.vni, 1);
+        assert_eq!(first.endpoint.addr_ports, vec!["127.0.0.1:41641"]);
+
+        let second = relay.allocation().await;
+        assert_eq!(second.endpoint.vni, first.endpoint.vni);
+        assert_eq!(second.endpoint.lamport_id, first.endpoint.lamport_id);
     }
 
     #[tokio::test]
     async fn a_tls_listener_without_a_client_name_allocates_for_nobody() {
-        let relay = Mutual::start(None).await;
+        let relay = Mutual::start().await;
         let mut state = relay.state.clone();
         state.allocator_client_name = None;
         let peer = TlsPeer {
             address: "127.0.0.1:1".parse().unwrap(),
             client: None,
         };
-        let mut request = allocation_request(None);
+        let mut request = allocation_request();
         request.extensions_mut().insert(ConnectInfo(peer));
         let response = allocator_tls_router(state).oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -963,7 +973,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_tls_listener_refuses_and_counts_a_caller_before_reading_its_body() {
-        let relay = Mutual::start(None).await;
+        let relay = Mutual::start().await;
         let malformed = |peer: TlsPeer| {
             let mut request = Request::builder()
                 .method("POST")
@@ -982,14 +992,105 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(relay.calls().await, [0, 0, 1, 0]);
+        assert_eq!(relay.calls().await, [0, 1, 0]);
     }
 
-    async fn test_router(token: Option<String>) -> Router {
-        allocator_router(test_state(token).await)
+    /// The relay as `main` runs it, with allocator TLS files that do not
+    /// exist yet: relay data and the ops port serve, the allocator listens
+    /// but completes no handshake, and the files' arrival opens it with no
+    /// restart.
+    #[tokio::test]
+    async fn missing_allocator_tls_files_close_only_the_allocator() {
+        let pki = codewire_tls::test_support::SyntheticPki::new("localhost");
+        let mounted = pki.roots.with_file_name("mounted");
+        let [ops_addr, tls_addr] = {
+            let probes = [
+                std::net::TcpListener::bind("127.0.0.1:0").unwrap(),
+                std::net::TcpListener::bind("127.0.0.1:0").unwrap(),
+            ];
+            probes.map(|probe| probe.local_addr().unwrap())
+        };
+        let cfg = Config {
+            udp_bind_addr: "127.0.0.1:0".parse().unwrap(),
+            udp_advertise_addr_ports: vec!["127.0.0.1:41641".parse().unwrap()],
+            ops_bind_addr: ops_addr,
+            allocator_tls: Some(AllocatorTls {
+                bind_addr: tls_addr,
+                cert_chain: mounted.join("tls.crt"),
+                key: mounted.join("tls.key"),
+                client_roots: mounted.join("ca.crt"),
+                client_name: ORCHESTRATION.into(),
+            }),
+            disco_private_key_hex: None,
+            ignored_envs: Vec::new(),
+        };
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let relay = tokio::spawn(async move {
+            serve(&cfg, async {
+                let _ = stopped.await;
+            })
+            .await
+        });
+
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut ready = None;
+        for _ in 0..100 {
+            if let Ok(response) = http.get(format!("http://{ops_addr}/readyz")).send().await {
+                ready = Some(response);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let ready: serde_json::Value = ready.expect("ops port").json().await.unwrap();
+        assert_eq!(ready["status"], "ok");
+        assert_ne!(ready["local_addr"], "127.0.0.1:0", "relay data is bound");
+
+        let origin = format!("https://localhost:{}", tls_addr.port());
+        let url = format!("{origin}/internal/udp-relay/allocations");
+        let (certificate, key) = pki.client_identity(ORCHESTRATION);
+        let endpoint = codewire_tls::ClientTlsEndpoint::new(origin, pki.roots.clone())
+            .unwrap()
+            .with_client_identity(certificate, key)
+            .unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .use_preconfigured_tls(endpoint.rustls_config().await.unwrap())
+            .build()
+            .unwrap();
+        let allocate = || {
+            client.post(&url).json(&serde_json::json!({
+                "generation": 7,
+                "client_disco": [
+                    DiscoPublic::from_raw([0x11; 32]),
+                    DiscoPublic::from_raw([0x22; 32]),
+                ]
+            }))
+        };
+        tokio::net::TcpStream::connect(tls_addr)
+            .await
+            .expect("the allocator listens without its files");
+        assert!(
+            allocate().send().await.is_err(),
+            "no handshake without files"
+        );
+
+        std::fs::create_dir(&mounted).unwrap();
+        let issued = pki.roots.parent().unwrap();
+        for file in ["tls.crt", "tls.key", "ca.crt"] {
+            std::fs::copy(issued.join(file), mounted.join(file)).unwrap();
+        }
+        let response = allocate().send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), relay)
+            .await
+            .expect("the relay stops")
+            .unwrap()
+            .unwrap();
     }
 
-    async fn test_state(token: Option<String>) -> AppState {
+    async fn test_state() -> AppState {
         let server = SocketServer::bind(
             DiscoPrivate::from_raw([0x55; 32]),
             SocketOptions::new("127.0.0.1:0".parse().unwrap())
@@ -997,10 +1098,10 @@ mod tests {
         )
         .await
         .unwrap();
-        AppState::new(server.handle(), token)
+        AppState::new(server.handle())
     }
 
-    fn allocation_request(auth: Option<&str>) -> Request<Body> {
+    fn allocation_request() -> Request<Body> {
         let body = serde_json::json!({
             "generation": 7,
             "client_disco": [
@@ -1008,13 +1109,11 @@ mod tests {
                 serde_json::to_value(DiscoPublic::from_raw([0x22; 32])).unwrap(),
             ]
         });
-        let mut builder = Request::builder()
+        Request::builder()
             .method("POST")
             .uri("/internal/udp-relay/allocations")
-            .header(header::CONTENT_TYPE, "application/json");
-        if let Some(auth) = auth {
-            builder = builder.header(header::AUTHORIZATION, auth);
-        }
-        builder.body(Body::from(body.to_string())).unwrap()
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
     }
 }
