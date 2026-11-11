@@ -1,22 +1,29 @@
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use axum::{
     Form,
     extract::{Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::Response,
 };
 use connectrpc::ErrorCode;
 use serde::Deserialize;
 
 use crate::{
-    billing_connect,
-    response::{login_redirect, redirect, render_page},
+    billing_banner::{BannerViewer, SandboxLoad, billing_banner},
+    billing_connect, environment_connect,
+    response::{login_redirect, redirect, render_page, render_template},
     routes::organization_governance::{
-        action_context, connect_page_error, get_context, mutation_redirect,
+        action_context, connect_page_error, get_context, get_context_without_rail,
+        mutation_redirect,
     },
     security::{csrf_cookie, page_csrf_token, with_csrf_cookie},
     state::AppState,
-    templates::OrganizationBillingTemplate,
+    templates::{BillingBannerTemplate, OrganizationBillingTemplate},
 };
+
+/// How long the banner waits for the organization's Sandboxes.
+const BANNER_SANDBOXES_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct BillingQuery {
@@ -182,6 +189,60 @@ fn billing_message(value: &str) -> &'static str {
     }
 }
 
+/// The billing banner, loaded after an organization page has rendered so it
+/// never holds the page up. It answers with one `.cw-banner`, or with an
+/// empty body that removes the placeholder, whenever there is nothing to say
+/// or anything it needs is unavailable.
+pub(super) async fn banner_fragment(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let banner = match get_context_without_rail(&state, &headers, &slug, &billing_path(&slug)).await
+    {
+        Ok((_, organization, cookie)) => {
+            match billing_connect::credit_facts(&state, cookie.clone(), &organization.id).await {
+                Some(facts) => {
+                    // Only a banner that may show reads the Sandboxes.
+                    let sandboxes = if facts.banner_needs_sandboxes() {
+                        tokio::time::timeout(
+                            BANNER_SANDBOXES_TIMEOUT,
+                            environment_connect::environments(
+                                &state,
+                                cookie,
+                                &organization.id,
+                                false,
+                            ),
+                        )
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .map(|rows| rows.iter().map(SandboxLoad::from).collect::<Vec<_>>())
+                    } else {
+                        None
+                    };
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+                    billing_banner(
+                        &facts,
+                        sandboxes.as_deref(),
+                        &BannerViewer {
+                            can_admin: organization.can_admin,
+                            billing_url: &organization.billing_url,
+                        },
+                        now,
+                    )
+                }
+                None => None,
+            }
+        }
+        // The page itself answers for its session and organization.
+        Err(_) => None,
+    };
+    render_template(StatusCode::OK, BillingBannerTemplate { banner })
+}
+
 fn billing_error(value: &str) -> &'static str {
     match value {
         "not-authorized" => "You do not have permission to manage organization billing.",
@@ -222,3 +283,7 @@ mod tests {
         assert_eq!(billing_error("raw-upstream-detail"), "");
     }
 }
+
+#[cfg(test)]
+#[path = "billing_banner_tests.rs"]
+mod billing_banner_tests;

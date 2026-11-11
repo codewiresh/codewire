@@ -374,7 +374,9 @@
           replacement.dataset.createDraftId !== form.dataset.createDraftId ||
           replacement.dataset.createDraftReturn !== form.dataset.createDraftReturn ||
           replacement.querySelector('[name="_csrf"]')?.value !== draftFormValue(form, "_csrf")) throw new Error("invalid options response");
-      const regions = ["[data-create-image-options]", "[data-create-preview-hint]", "[data-create-optional-options]", "[data-github-browser]"];
+      // Credit arrives with the choices: when billing refuses cloud Sandboxes
+      // the alert fills its slot and billing replaces Create in the footer.
+      const regions = ["[data-create-credit]", "[data-create-image-options]", "[data-create-preview-hint]", "[data-create-optional-options]", "[data-github-browser]", "[data-create-footer]"];
       const updates = regions.map((selector) => {
         const current = form.querySelectorAll(selector);
         const next = replacement.querySelectorAll(selector);

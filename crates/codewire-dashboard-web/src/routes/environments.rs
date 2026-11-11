@@ -311,6 +311,7 @@ impl EnvironmentSubmission {
             disk_error: String::new(),
             ttl_error: String::new(),
             form_error: String::new(),
+            credit_refusal: None,
         }
     }
 
@@ -2171,6 +2172,7 @@ pub(super) fn default_create_form(token: String, expanded: bool) -> EnvironmentC
         disk_error: String::new(),
         ttl_error: String::new(),
         form_error: String::new(),
+        credit_refusal: None,
     }
 }
 
@@ -2182,6 +2184,7 @@ pub(super) fn hydrate_options(
     form.presets = options.presets;
     form.agents = options.agents;
     form.confidential_available = options.confidential_available;
+    form.credit_refusal = options.credit_refusal;
     let mut sources = options.sources;
     sources.retain_submission(&form.sources);
     form.sources = sources;
@@ -2593,6 +2596,7 @@ mod tests {
                     sources: Default::default(),
                     preview_base_domain: String::new(),
                     confidential_available: false,
+                    credit_refusal: None,
                 },
             );
             let html = EnvironmentCreateFormTemplate {
@@ -4111,6 +4115,7 @@ mod tests {
             preview_base_domain: String::new(),
             agents: vec![],
             confidential_available: false,
+            credit_refusal: None,
             sources: crate::view::EnvironmentSourceFieldsView {
                 application_selection_enabled: true,
                 credential_selection_enabled: true,
@@ -4159,6 +4164,7 @@ mod tests {
             preview_base_domain: String::new(),
             agents: vec![],
             confidential_available: false,
+            credit_refusal: None,
             sources: crate::view::EnvironmentSourceFieldsView {
                 application_selection_enabled: true,
                 credential_selection_enabled: true,
@@ -4409,6 +4415,7 @@ mod tests {
         let options = EnvironmentCreateOptions {
             preview_base_domain: String::new(),
             confidential_available: false,
+            credit_refusal: None,
             presets: vec![crate::view::EnvironmentPresetOption {
                 id: "preset-id".to_owned(),
                 name: "Preset".to_owned(),

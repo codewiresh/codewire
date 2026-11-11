@@ -1,0 +1,1 @@
+{% if view.has_selected_organization %}<div hx-get="/{{ view.selected_organization_slug }}/_fragments/billing-banner" hx-trigger="load" hx-swap="outerHTML"></div>{% endif %}

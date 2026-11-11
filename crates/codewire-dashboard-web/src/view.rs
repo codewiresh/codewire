@@ -1577,6 +1577,9 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) disk_error: String,
     pub(crate) ttl_error: String,
     pub(crate) form_error: String,
+    /// Billing refuses cloud Sandboxes for this organization: the drawer says
+    /// why and offers billing in place of Create. Read with the choices.
+    pub(crate) credit_refusal: Option<crate::billing_banner::CreditRefusal>,
 }
 
 /// Repository rows one Create form may submit (indexes `0..MAX`). The browser

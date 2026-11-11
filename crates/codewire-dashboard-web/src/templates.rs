@@ -4,6 +4,7 @@ use crate::admin_connect::{
     AdminCatalogView, AdminOrganizationRow, AdminOrganizationView, AdminStatsView, AuditLogRow,
     QuotaView,
 };
+use crate::billing_banner::BillingBannerView;
 use crate::billing_connect::BillingPageView;
 use crate::view::EnvironmentCreateFormView;
 use crate::view::{
@@ -315,6 +316,13 @@ pub(crate) struct EnvironmentCreateFormTemplate<'a> {
 pub(crate) struct EnvironmentListTemplate<'a> {
     pub(crate) organization: &'a OrganizationContext,
     pub(crate) page: &'a EnvironmentsPageView,
+}
+
+/// The billing banner fragment: one `.cw-banner`, or nothing.
+#[derive(Template)]
+#[template(path = "billing-banner.html")]
+pub(crate) struct BillingBannerTemplate {
+    pub(crate) banner: Option<BillingBannerView>,
 }
 
 #[derive(Template)]

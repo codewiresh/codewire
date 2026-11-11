@@ -316,6 +316,10 @@ pub(crate) fn router() -> Router<AppState> {
             "/{slug}/_fragments/sandbox-rail",
             get(environments::rail_fragment),
         )
+        .route(
+            "/{slug}/_fragments/billing-banner",
+            get(billing::banner_fragment),
+        )
         .route("/{slug}/new", get(organization_slash_redirect))
         .route("/{slug}/new/", get(environments::new_page))
         .route(

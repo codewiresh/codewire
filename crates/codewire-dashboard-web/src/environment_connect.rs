@@ -35,6 +35,9 @@ pub(crate) struct EnvironmentCreateOptions {
     pub(crate) agents: Vec<EnvironmentAgentView>,
     pub(crate) confidential_available: bool,
     pub(crate) sources: crate::view::EnvironmentSourceFieldsView,
+    /// Billing refuses cloud Sandboxes: the organization ran out of credit.
+    /// `None` also when billing did not answer; Create admission decides.
+    pub(crate) credit_refusal: Option<crate::billing_banner::CreditRefusal>,
 }
 
 fn transport(state: &AppState, cookie: HeaderValue) -> BrowserTransport {
@@ -280,14 +283,16 @@ pub(crate) async fn create_options(
         transport(state, cookie.clone()),
         client_config(state, UNARY_TIMEOUT),
     );
-    // Presets and sources are independent reads; waiting on each in turn
-    // only adds round trips before the choices appear.
-    let (setup, sources) = tokio::join!(
+    // Presets, sources and credit are independent reads; waiting on each in
+    // turn only adds round trips before the choices appear. Credit has its
+    // own short budget and never fails the choices.
+    let (setup, sources, credit) = tokio::join!(
         setup_client.get_environment_create_options(GetEnvironmentCreateOptionsRequest {
             org_id: org_id.to_owned(),
             ..Default::default()
         }),
-        crate::environment_sources::options(state, cookie, org_id),
+        crate::environment_sources::options(state, cookie.clone(), org_id),
+        crate::billing_connect::credit_facts(state, cookie, org_id),
     );
     let setup = setup?.into_owned();
     // The organization's opt-in decides it (#2497); no plan is involved
@@ -345,6 +350,7 @@ pub(crate) async fn create_options(
         agents: agent_catalog(),
         confidential_available,
         sources,
+        credit_refusal: credit.and_then(|facts| facts.create_refusal()),
     })
 }
 

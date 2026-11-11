@@ -148,6 +148,35 @@ test("late Create choices preserve edited core fields, focus, rows, and profile 
   await expect(page.locator("[data-github-browser]")).toBeVisible();
 });
 
+// Credit arrives with the late choices: when billing refuses cloud Sandboxes
+// the alert fills its slot and billing replaces Create in the footer.
+test("late Create choices that refuse cloud Sandboxes say why and offer billing in place of Create", async ({ page }) => {
+  const url = fixtureUrl();
+  let releaseOptions!: () => void;
+  const heldOptions = new Promise<void>((resolve) => { releaseOptions = resolve; });
+  await page.route(url, async (route) => {
+    const original = await route.fetch();
+    await route.fulfill({ response: original, body: loadingCreateFixture(await original.text()) });
+  });
+  await page.route("**/fixture/_fragments/create-options", async (route) => {
+    const refused = await route.fetch({ url: url.replace("create-sandbox.html", "create-sandbox-no-card.html"), method: "GET" });
+    const body = hydratedCreateCard(await refused.text());
+    await heldOptions;
+    await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body });
+  });
+  const pending = page.waitForRequest((request) => request.url().endsWith("/fixture/_fragments/create-options"));
+  await page.goto(url);
+  await pending;
+  const form = page.locator("[data-environment-form]");
+  await expect(form.locator('[type="submit"]')).toHaveCount(1);
+  await expect(form.locator("[data-create-credit]")).toBeHidden();
+  releaseOptions();
+  await expect(form).toHaveAttribute("data-create-options-loading", "false");
+  await expect(form.getByRole("status").filter({ hasText: "has no card yet, so it can't run cloud sandboxes." })).toBeVisible();
+  await expect(form.locator(".cw-drawer-footer").getByRole("link", { name: "Add a card" })).toBeVisible();
+  await expect(form.locator('[type="submit"]')).toHaveCount(0);
+});
+
 test("Create rejects choices returned for another organization without losing input", async ({ page }) => {
   const url = fixtureUrl();
   let hydratedHtml = "";

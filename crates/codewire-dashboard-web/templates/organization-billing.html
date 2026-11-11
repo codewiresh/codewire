@@ -14,6 +14,7 @@
     <script src="/assets/codewire/dashboard-v1.js" defer></script>
   </head>
   <body class="cw-body" data-route="organization">
+    {% include "billing-banner-slot.html" %}
     <div class="cw-app" data-dashboard-app data-mobile-open="false" data-sidebar-collapsed="{{ view.sidebar_collapsed }}">
       <aside class="cw-sidebar-slot">{% include "sidebar.html" %}</aside>
       <header class="cw-mobile-bar">

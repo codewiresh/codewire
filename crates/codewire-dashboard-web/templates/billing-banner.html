@@ -1,0 +1,1 @@
+{% if let Some(banner) = banner %}<aside class="cw-banner" data-tone="{{ banner.tone }}" aria-label="Billing"><p>{{ banner.text }}</p>{% if let Some(action) = banner.action %}<a class="cw-banner-action" href="{{ action.url }}">{{ action.label }}</a>{% endif %}</aside>{% endif %}

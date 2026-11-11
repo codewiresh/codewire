@@ -9,6 +9,7 @@ mod account_two_factor;
 mod admin_connect;
 mod assets;
 mod auth;
+mod billing_banner;
 mod billing_connect;
 mod config;
 mod connect;

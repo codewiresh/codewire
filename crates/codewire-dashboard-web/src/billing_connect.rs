@@ -10,6 +10,7 @@ use connectrpc::{ConnectError, client::ClientConfig};
 
 use crate::{
     admin_connect::euro_text,
+    billing_banner::CreditFacts,
     dependency::{DependencyResult, PageDependency, resolve_connect},
     state::AppState,
     time_display::calendar_date,
@@ -69,6 +70,44 @@ pub(crate) fn signup_credit_text(nano_eur: i64) -> Option<String> {
         } else {
             format!("€{}.{:02}", cents / 100, cents % 100)
         }
+    })
+}
+
+/// How long the billing banner and Create Sandbox wait for the overview
+/// before saying nothing about credit.
+const CREDIT_FACTS_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The organization's credit, as the billing banner and Create Sandbox read
+/// it. `None` when billing does not answer within its budget, which shows no
+/// banner and leaves Create as it is.
+pub(crate) async fn credit_facts(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: &str,
+) -> Option<CreditFacts> {
+    let billing = client(state, cookie);
+    let request = billing.get_billing_overview(GetBillingOverviewRequest {
+        org_id: org_id.to_owned(),
+        ..Default::default()
+    });
+    let Ok(Ok(overview)) = tokio::time::timeout(CREDIT_FACTS_TIMEOUT, request).await else {
+        return None;
+    };
+    let overview = overview.into_owned();
+    let rates = overview.rates.into_option().unwrap_or_default();
+    Some(CreditFacts {
+        balance_nano_eur: overview.credit_balance_nano_eur,
+        has_card: overview.has_payment_method,
+        auto_top_up: overview.auto_top_up_enabled,
+        billing_enabled: overview.billing_enabled,
+        unmetered: overview.unmetered,
+        cpu_nano_eur_per_vcpu_hour: rates.cpu_nano_eur_per_vcpu_hour,
+        memory_nano_eur_per_gib_hour: rates.memory_nano_eur_per_gib_hour,
+        disk_nano_eur_per_gib_hour: rates.disk_nano_eur_per_gib_hour,
+        exhausted_at: overview
+            .credit_exhausted_at
+            .into_option()
+            .map(|value| value.seconds),
     })
 }
 

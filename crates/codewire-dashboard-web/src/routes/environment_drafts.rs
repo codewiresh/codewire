@@ -489,7 +489,9 @@ mod tests {
                         "/GetEnvironmentCreateOptions",
                         "/ListSecretProjects",
                         "/ListAccessProfiles",
-                        "/ListCredentials"
+                        "/ListCredentials",
+                        // Credit, read with the choices for Create's refusal.
+                        "/GetBillingOverview"
                     ]
                     .iter()
                     .any(|suffix| path.ends_with(suffix)),

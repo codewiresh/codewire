@@ -13,6 +13,7 @@
     <input type="hidden" name="application_previews_explicit" value="true">
 
     <div class="cw-drawer-body">
+      <div data-create-credit{% if form.credit_refusal.is_none() %} hidden{% endif %}>{% if let Some(refusal) = form.credit_refusal %}<p class="cw-alert cw-alert--info" role="status">{% if refusal.has_card %}{{ organization.name }} is out of credit, so it can't run cloud sandboxes.{% else %}{{ organization.name }} has no card yet, so it can't run cloud sandboxes.{% endif %} {% if organization.can_admin %}<a href="{{ organization.billing_url }}" data-create-draft-setup>{% if refusal.has_card %}Add credit{% else %}Add a card{% endif %} on its Billing page</a>; this draft is kept.{% else %}An organization owner or admin adds {% if refusal.has_card %}credit{% else %}one{% endif %} on its Billing page.{% endif %} Local sandboxes stay free: <code>cw create --local</code>.</p>{% endif %}</div>
       {% if !form.form_error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ form.form_error }}</div>{% endif %}
       <div class="cw-field">
         <label class="cw-label" for="environment-name">Name</label>
@@ -102,7 +103,7 @@
       <div class="cw-create-draft-tools"><button class="cw-button cw-button--outline" type="button" data-restore-create-draft hidden>Restore saved draft</button><p class="cw-field-help" data-create-draft-status>{% if form.draft_restored %}Draft restored. Review current choices before creating a Sandbox.{% endif %}</p></div>
     </div>
 
-    <footer class="cw-drawer-footer"><button class="cw-button cw-button--accent cw-button--pill" type="submit"{% if form.options_loading %} disabled{% endif %}><span class="cw-submit-idle">Create Sandbox</span><span class="cw-submit-busy">Creating…</span></button></footer>
+    <footer class="cw-drawer-footer" data-create-footer{% if form.credit_refusal.is_some() && !organization.can_admin %} hidden{% endif %}>{% if let Some(refusal) = form.credit_refusal %}{% if organization.can_admin %}<a class="cw-button cw-button--accent cw-button--pill" href="{{ organization.billing_url }}" data-create-draft-setup>{% if refusal.has_card %}Add credit{% else %}Add a card{% endif %}</a>{% endif %}{% else %}<button class="cw-button cw-button--accent cw-button--pill" type="submit"{% if form.options_loading %} disabled{% endif %}><span class="cw-submit-idle">Create Sandbox</span><span class="cw-submit-busy">Creating…</span></button>{% endif %}</footer>
   </form>
 
 </section>
