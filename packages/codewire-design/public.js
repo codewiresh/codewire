@@ -169,10 +169,17 @@ void main() {
 }
 `;
 
-(() => {
+(async () => {
   document.documentElement.classList.add('js');   // the page's script runs: see html:not(.js) in public.css
   const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  // whether a WebGL program linked, once it has: KHR_parallel_shader_compile lets the GPU compile while the page runs,
+  // where asking for COMPILE_STATUS or LINK_STATUS at once holds the page until it is done (a quarter second for each shader on a first visit)
+  const linked = async (c, pr) => {
+    const par = c.getExtension('KHR_parallel_shader_compile');
+    if (par) while (!c.getProgramParameter(pr, par.COMPLETION_STATUS_KHR)) await new Promise(requestAnimationFrame);
+    return c.getProgramParameter(pr, c.LINK_STATUS);
+  };
   const NS_SVG = 'http://www.w3.org/2000/svg';
   const el = (tag, attrs, parent) => { const e = document.createElementNS(NS_SVG, tag); for (const k in attrs) { const v = attrs[k]; if ((k === 'fill' || k === 'stroke') && String(v).startsWith('var(')) e.style[k] = v; else e.setAttribute(k, v); } if (parent) parent.appendChild(e); return e; };
   const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -402,7 +409,8 @@ void main() {
       cv.width = WS; cv.height = HSP; cv.style.width = CS * SC + 'px'; cv.style.height = HS * SC + 'px';
       let gl = null, g = null, img = null, px = null;
       const cs = getComputedStyle(document.documentElement), SANS = cs.getPropertyValue('--f-sans').trim() || 'Helvetica, Arial, sans-serif', MONO = cs.getPropertyValue('--f-mono').trim() || 'monospace';
-      const layer = () => { const c = document.createElement('canvas'); c.width = WL; c.height = HL; const x = c.getContext('2d'); x.scale(dpr, dpr); x.fillStyle = x.strokeStyle = '#000'; return [c, x]; };
+      // the layers are read back once each, so they stay in CPU memory: a GPU canvas makes each getImageData wait on the GPU
+      const layer = () => { const c = document.createElement('canvas'); c.width = WL; c.height = HL; const x = c.getContext('2d', { willReadFrequently: true }); x.scale(dpr, dpr); x.fillStyle = x.strokeStyle = '#000'; return [c, x]; };
       const alpha = (c) => { const d = c.getContext('2d').getImageData(0, 0, WL, HL).data, a = new Float32Array(NL); for (let i = 0; i < NL; i++) a[i] = d[i * 4 + 3] / 255; return a; };
       const rrect = (x, X, Y, w, h, r) => { x.beginPath(); x.moveTo(X + r, Y); x.arcTo(X + w, Y, X + w, Y + h, r); x.arcTo(X + w, Y + h, X, Y + h, r); x.arcTo(X, Y + h, X, Y, r); x.arcTo(X, Y, X + w, Y, r); x.closePath(); };
       const spaced = (x, txt, X, Y, sp, right) => { let w = -sp; for (const ch of txt) w += x.measureText(ch).width + sp; let cx = right ? X - w : X; for (const ch of txt) { x.fillText(ch, cx, Y); cx += x.measureText(ch).width + sp; } };
@@ -622,22 +630,24 @@ void main() {
 }`;
       const glSetup = () => {
         const c = cv.getContext('webgl', { premultipliedAlpha: true, antialias: false, alpha: true });
-        if (!c) return null;
-        const sh = (type, src) => { const s = c.createShader(type); c.shaderSource(s, src); c.compileShader(s); return c.getShaderParameter(s, c.COMPILE_STATUS) ? s : (console.warn(c.getShaderInfoLog(s)), null); };
+        if (!c) return Promise.resolve(null);
+        const sh = (type, src) => { const s = c.createShader(type); c.shaderSource(s, src); c.compileShader(s); return s; };
         const vs = sh(c.VERTEX_SHADER, 'attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }'), fs = sh(c.FRAGMENT_SHADER, FS);
-        if (!vs || !fs) return null;
-        const pr = c.createProgram(); c.attachShader(pr, vs); c.attachShader(pr, fs); c.linkProgram(pr); if (!c.getProgramParameter(pr, c.LINK_STATUS)) return null;
-        c.useProgram(pr);
-        const b = c.createBuffer(); c.bindBuffer(c.ARRAY_BUFFER, b); c.bufferData(c.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), c.STATIC_DRAW);
-        const loc = c.getAttribLocation(pr, 'p'); c.enableVertexAttribArray(loc); c.vertexAttribPointer(loc, 2, c.FLOAT, false, 0, 0);
-        const tex = c.createTexture(); c.activeTexture(c.TEXTURE0); c.bindTexture(c.TEXTURE_2D, tex);
-        [c.TEXTURE_WRAP_S, c.TEXTURE_WRAP_T].forEach((k) => c.texParameteri(c.TEXTURE_2D, k, c.CLAMP_TO_EDGE));
-        c.texParameteri(c.TEXTURE_2D, c.TEXTURE_MIN_FILTER, c.LINEAR); c.texParameteri(c.TEXTURE_2D, c.TEXTURE_MAG_FILTER, c.LINEAR);
-        const U = {}; ['uRes', 'uMaskPx', 'uLab', 'uDpr', 'uT', 'uGeo', 'uTilt', 'uPtr', 'uAct', 'uMask'].forEach((k) => (U[k] = c.getUniformLocation(pr, k)));
-        c.uniform1i(U.uMask, 0); c.viewport(0, 0, WS, HSP);
-        c.uniform2f(U.uRes, WS, HSP); c.uniform2f(U.uMaskPx, WL, HL); c.uniform2f(U.uLab, CW, CH); c.uniform1f(U.uDpr, dpr);
-        c.uniform4f(U.uGeo, XO, YO, R, U0);
-        return { c, U };
+        const pr = c.createProgram(); c.attachShader(pr, vs); c.attachShader(pr, fs); c.linkProgram(pr);
+        return linked(c, pr).then((ok) => {
+          if (!ok) { [vs, fs].forEach((s) => c.getShaderParameter(s, c.COMPILE_STATUS) || console.warn(c.getShaderInfoLog(s))); return null; }
+          c.useProgram(pr);
+          const b = c.createBuffer(); c.bindBuffer(c.ARRAY_BUFFER, b); c.bufferData(c.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), c.STATIC_DRAW);
+          const loc = c.getAttribLocation(pr, 'p'); c.enableVertexAttribArray(loc); c.vertexAttribPointer(loc, 2, c.FLOAT, false, 0, 0);
+          const tex = c.createTexture(); c.activeTexture(c.TEXTURE0); c.bindTexture(c.TEXTURE_2D, tex);
+          [c.TEXTURE_WRAP_S, c.TEXTURE_WRAP_T].forEach((k) => c.texParameteri(c.TEXTURE_2D, k, c.CLAMP_TO_EDGE));
+          c.texParameteri(c.TEXTURE_2D, c.TEXTURE_MIN_FILTER, c.LINEAR); c.texParameteri(c.TEXTURE_2D, c.TEXTURE_MAG_FILTER, c.LINEAR);
+          const U = {}; ['uRes', 'uMaskPx', 'uLab', 'uDpr', 'uT', 'uGeo', 'uTilt', 'uPtr', 'uAct', 'uMask'].forEach((k) => (U[k] = c.getUniformLocation(pr, k)));
+          c.uniform1i(U.uMask, 0); c.viewport(0, 0, WS, HSP);
+          c.uniform2f(U.uRes, WS, HSP); c.uniform2f(U.uMaskPx, WL, HL); c.uniform2f(U.uLab, CW, CH); c.uniform1f(U.uDpr, dpr);
+          c.uniform4f(U.uGeo, XO, YO, R, U0);
+          return { c, U };
+        });
       };
       const upload = () => {
         const d = new Uint8Array(NL * 4); for (let i = 0; i < NL; i++) { d[i * 4] = shape[i] * 255; d[i * 4 + 1] = ink[i] * 255; d[i * 4 + 2] = micro[i] * 255; d[i * 4 + 3] = scr[i] * 255; }
@@ -646,8 +656,7 @@ void main() {
       const drawGL = (t) => {
         const { c, U } = gl, prox = pX == null ? 0 : Math.exp(-((G.x - CS / 2) ** 2 + (G.y - HS / 2) ** 2) / (2 * 300 * 300));
         c.uniform1f(U.uT, t); c.uniform2f(U.uTilt, T.x, T.y); c.uniform3f(U.uPtr, G.x, G.y, prox); c.uniform1f(U.uAct, Math.min(1, Math.max(act, prox * 0.5))); c.clearColor(0, 0, 0, 0); c.clear(c.COLOR_BUFFER_BIT); c.drawArrays(c.TRIANGLES, 0, 3); };
-      gl = glSetup();
-      if (!gl) { const c2 = cv.cloneNode(); cv.replaceWith(c2); cv = c2; g = cv.getContext('2d'); img = g.createImageData(WS, HSP); px = img.data; }
+      const cpu = () => { const c2 = cv.cloneNode(); cv.replaceWith(c2); cv = c2; g = cv.getContext('2d'); img = g.createImageData(WS, HSP); px = img.data; };
       // T: the label's tilt (sprung), G: the torch (the pointer, in canvas units), act: how awake the hologram is, show: the one showcase pass
       let vis = false, raf = 0, pX = null, pY = null, act = 0, lastT = 0, show = -1, gyro = null; const T = { x: 0.2, y: -0.2, tx: 0.2, ty: -0.2, vx: 0, vy: 0 }, G = { x: CS * 0.7, y: -160 };
       const cl1 = (q) => Math.max(-1, Math.min(1, q));
@@ -673,8 +682,18 @@ void main() {
       };
       const go = () => { if (reduce || !vis || !shape) return; target(); if (!raf) raf = requestAnimationFrame(tick); };
       const first = () => { build(); target(); L.x = L.tx; L.y = L.ty; T.x = T.tx; T.y = T.ty; if (gl) { upload(); drawGL(0); } else { buildField(); shade(); } };
-      first(); if (document.fonts && document.fonts.ready) document.fonts.ready.then(first);
-      new IntersectionObserver((es) => es.forEach((en) => { vis = en.isIntersecting; if (vis && show === -1 && gl && !reduce) show = performance.now() / 1000; go(); })).observe(cv);
+      // built once, after the fonts, when the label nears the screen or the page first goes idle: built during load it held the page and the wire's first frames for most of a second
+      let started = false;
+      const start = () => {
+        if (started) return; started = true;
+        Promise.all([glSetup(), document.fonts && document.fonts.ready]).then(([c]) => {
+          gl = c; if (!gl) cpu();
+          first();
+          new IntersectionObserver((es) => es.forEach((en) => { vis = en.isIntersecting; if (vis && show === -1 && gl && !reduce) show = performance.now() / 1000; go(); })).observe(cv);
+        });
+      };
+      new IntersectionObserver((es, io) => { if (es.some((en) => en.isIntersecting)) { io.disconnect(); start(); } }, { rootMargin: '100% 0px' }).observe(cv);
+      addEventListener('load', () => (window.requestIdleCallback ? requestIdleCallback(start, { timeout: 2000 }) : setTimeout(start, 500)), { once: true });
       addEventListener('pointermove', (e) => {
         if (e.pointerType === 'touch') return;
         // moving near the label wakes the hologram, more the closer and quicker
@@ -1135,11 +1154,12 @@ void main() {
     end:      { cam: [0.0, 0.0, 8.0],  tgt: [0.0, 1.2, 0],    roll: -0.1,  spread: 1.0, twist: 1.0, fade: 0.1,  fov: 40, ws: 1.0 },
   };
   if (!gl) { canvas.remove(); return; }
-  const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s)); return s; };
-  const prog = gl.createProgram();
-  gl.attachShader(prog, sh(gl.VERTEX_SHADER, 'attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }'));
-  gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, WIRE_SHADER));
-  gl.linkProgram(prog); gl.useProgram(prog);
+  const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+  const prog = gl.createProgram(), vs = sh(gl.VERTEX_SHADER, 'attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }'), fs = sh(gl.FRAGMENT_SHADER, WIRE_SHADER);
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+  // the rest of the wire waits here for its shader, while the page carries on
+  if (!(await linked(gl, prog))) [vs, fs].forEach((s) => gl.getShaderParameter(s, gl.COMPILE_STATUS) || console.error(gl.getShaderInfoLog(s)));
+  gl.useProgram(prog);
   const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
   const loc = gl.getAttribLocation(prog, 'p'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
   const U = {}; ['uRes', 'uTime', 'uTan', 'uRoll', 'uSpread', 'uTwist', 'uFade', 'uPulse', 'uWS', 'uCam', 'uTgt', 'uBg', 'uSteel', 'uSig', 'uRim', 'uSoft', 'uRainC', 'uRainH', 'uRain', 'uRainT', 'uPx', 'uRainG', 'uRainR', 'uRainN', 'uHov'].forEach((n) => (U[n] = gl.getUniformLocation(prog, n)));
