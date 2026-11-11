@@ -245,6 +245,16 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(watcher.failure_evidence("test a::b ... FAILED")[1], "a::b")
         self.assertEqual(watcher.failure_evidence("thread 'c::d' panicked at x.rs:1:1:")[1], "c::d")
         self.assertEqual(watcher.failure_evidence("all fine\nnothing here"), ([], None))
+        # A script-test family names only the failing script (#4040, main run
+        # 40975); a test-level name still wins when the log has both.
+        family = ("==> scripts/runtime/tests/test-a.sh: stopped after 2s\n"
+                  "==> first failure: scripts/runtime/tests/test-kill-test-round.sh\n"
+                  "::error::scripts/runtime/tests/test-kill-test-round.sh failed (exit 1) after 2s")
+        summary, first_test = watcher.failure_evidence(family)
+        self.assertEqual(first_test, "scripts/runtime/tests/test-kill-test-round.sh")
+        self.assertIn("| ==> first failure: scripts/runtime/tests/test-kill-test-round.sh", summary)
+        both = "        FAIL [   0.100s] crate tests::case\n" + family
+        self.assertEqual(watcher.failure_evidence(both)[1], "crate tests::case")
 
     def test_on_main_a_failed_log_fetch_still_reruns(self) -> None:
         for label, failure in (("forgejo", watcher.verdicts.Unproven("forgejo-api-unavailable")),

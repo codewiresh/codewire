@@ -79,15 +79,17 @@ EVIDENCE_LINE_CHARS = 400
 CONTEXT_BEFORE = 2
 CONTEXT_AFTER = 3
 EVIDENCE_RE = re.compile(
-    r"::error|FAIL |FAILED|panicked at|Error:|AssertionError|timed out|TIMEOUT"
+    r"::error|FAIL |FAILED|panicked at|Error:|AssertionError|timed out|TIMEOUT|==> first failure:"
 )
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 # The first failing test: nextest's FAIL line, libtest's "... FAILED" line,
-# then a panicking test thread.
+# a panicking test thread, then the script a family runner names on its
+# "==> first failure:" line (#4040: script-test families print only that).
 FIRST_TEST_RES = (
     re.compile(r"\bFAIL \[\s*[0-9.]+s\]\s+(?:\([^)]*\)\s+)?(\S.*?)\s*$"),
     re.compile(r"\btest (\S+) \.\.\. FAILED\b"),
     re.compile(r"thread '([^']+)' panicked at"),
+    re.compile(r"==> first failure: (\S.*?)\s*$"),
 )
 
 
