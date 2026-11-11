@@ -7923,8 +7923,11 @@ mod tests {
             .spawn()
             .unwrap();
         let mut stdout = child.stdout.take().unwrap();
+        // Only a hang reaches this deadline: the collection returns once the
+        // child exits, and the short deadline below is the one under test
+        // (#4066: a busy runner took over 1 s to run printf).
         let (status, output) =
-            wait_for_bounded_child_output(&mut child, &mut stdout, 64, Duration::from_secs(1))
+            wait_for_bounded_child_output(&mut child, &mut stdout, 64, Duration::from_secs(30))
                 .unwrap()
                 .unwrap();
         assert!(status.success());
