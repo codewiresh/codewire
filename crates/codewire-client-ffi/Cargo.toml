@@ -18,5 +18,12 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 uniffi = { version = "=0.31.1", default-features = false }
 
+[features]
+# The Swift bindings' generator, only for the check of the bindings committed
+# under apps/ios (src/swift_bindings_tests.rs). The library the app links
+# never has it.
+bindgen = ["uniffi/bindgen"]
+
 [dev-dependencies]
 codewire-workspace-hack.workspace = true
+tempfile = { workspace = true }

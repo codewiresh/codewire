@@ -46,3 +46,11 @@ workspace-members = [
     "codewire-tailnet",
     "codewire-types",
 ]
+
+# codewire-client-ffi's `bindgen` feature builds UniFFI's binding generator for
+# one test, the Swift bindings check (#3825). Unified here, the generator would
+# compile in every crate's test build.
+[traversal-excludes]
+third-party = [
+    { name = "uniffi" },
+]

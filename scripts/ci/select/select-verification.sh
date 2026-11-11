@@ -1370,6 +1370,14 @@ if [ "$event_selected" = false ]; then
         select_token web
         recognized=true
         ;;
+      apps/ios/Sources/CodewireClientFFI/*|apps/ios/FFI/*)
+        # The generated Swift bindings: codewire-client-ffi's check compares
+        # them with the crate (#3825).
+        select_token ios
+        select_token rust
+        select_token rust_pkg_codewire_client_ffi
+        recognized=true
+        ;;
       apps/ios/*)
         select_token ios
         recognized=true

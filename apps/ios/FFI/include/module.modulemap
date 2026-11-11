@@ -1,0 +1,7 @@
+module codewire_client_ffiFFI {
+    header "codewire_client_ffiFFI.h"
+    export *
+    use "Darwin"
+    use "_Builtin_stdbool"
+    use "_Builtin_stdint"
+}

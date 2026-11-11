@@ -1,8 +1,10 @@
-# Building the Codewire iOS App on Linux
+# Building the Codewire iOS app
 
-Pure-Swift build via [xtool](https://github.com/xtool-org/xtool). There is no
-Go carchive shell bridge in this app. Terminal support is disabled until the
-Rust/mobile-native Mesh transport bridge lands.
+The app builds with [xtool](https://github.com/xtool-org/xtool) on Linux or
+with Xcode on a Mac. Its terminal is Rust: `crates/codewire-client-ffi`, the
+same shell `cw shell` runs, linked as an xcframework that only a Mac can build
+today (see "The shell" below). Without that xcframework the app builds and runs
+without a shell, and the host tests run as before.
 
 ## Prerequisites
 
@@ -22,7 +24,7 @@ Rust/mobile-native Mesh transport bridge lands.
 3. **iOS SDK installed via xtool** — xtool extracts the iOS SDK and Darwin toolchain from an `Xcode.xip` or `Xcode.app` bundle. You download `Xcode.xip` from developer.apple.com (free Apple ID is sufficient to download, ~13 GB) and feed it to xtool once:
    ```bash
    xtool sdk install ~/Downloads/Xcode_16.x.xip
-   xtool sdk list    # verify the iOS SDK is registered
+   swift sdk list    # verify the iOS SDK is registered
    ```
 
 4. **Apple Developer Account** (free or paid)
@@ -61,22 +63,47 @@ xtool dev
 
 This builds the app, signs it with your configured Apple ID, installs it on the connected device, and launches it. First launch on a free developer account will need a one-time "Trust this developer" prompt in Settings → General → VPN & Device Management.
 
-## Terminal Shell Status
+## The shell
 
-The old Go `libcwshell.a` bridge was retired with the Go CLI source. The current
-`CwShellBridge` keeps the Swift app buildable and reports the shell as
-unavailable at runtime.
+The terminal's connection is `codewire_client::hosted_shell`, the loop
+`cw shell` runs: the environment's tailnet (direct UDP, then UDP relay, then
+DERP), the API when the tailnet can't connect, and reattaching to the same shell
+after a drop. `crates/codewire-client-ffi` puts it behind a UniFFI surface:
+`Shell.dial`, `read`, `write`, `resize`, `close`, and the connection's state
+through `ShellObserver`.
 
-The replacement should call into Rust/mobile-native transport primitives rather
-than reintroducing a Go carchive. It must preserve the platform transport ladder:
-direct WireGuard UDP, UDP relay, DERP, then WebSocket.
+On a Mac with Xcode and the Rust targets `aarch64-apple-ios` and
+`aarch64-apple-ios-sim`:
+
+```bash
+apps/ios/scripts/build-rust.sh          # release; `debug` for a faster build
+```
+
+This writes `Frameworks/CodewireClientFFI.xcframework` (git-ignored, about
+530 MB before the app links and strips it). `Package.swift` declares the shell
+only when that file exists, so the app then has a terminal. In the Simulator:
+
+```bash
+cd apps/ios
+xcodebuild test -scheme Codewire -destination "platform=iOS Simulator,name=iPhone 18 Pro"
+```
+
+The Swift bindings (`Sources/CodewireClientFFI`, and the header and module map
+in `FFI/include`) are generated and committed. After changing the crate's
+exported surface, regenerate them on any host with Rust:
+
+```bash
+apps/ios/scripts/generate-bindings.sh
+```
+
+CI runs the same check without updating, and fails when they differ.
 
 ## Troubleshooting
 
 ### xtool can't find the iOS SDK
 
 ```bash
-xtool sdk list       # is an iOS SDK registered?
+swift sdk list       # is an iOS SDK registered?
 xtool sdk install ~/Downloads/Xcode_16.x.xip   # re-run install if not
 ```
 
@@ -98,8 +125,7 @@ xtool uses Apple's developer-services auth, which occasionally needs an app-spec
 - Unlock the device and tap "Trust this computer."
 - On Linux you may need `usbmuxd` running — `sudo systemctl start usbmuxd`.
 
-## What's not in this BUILD.md yet
+## Not yet
 
-This document covers the current pure-Swift app path. The app lists orgs and
-environments, but it does not yet ship an in-app terminal session. The shell
-needs the Rust/mobile-native Mesh bridge before it can be enabled again.
+- Building the shell's xcframework with xtool on Linux (#3825).
+- The Ghostty terminal in place of SwiftTerm (#3825).

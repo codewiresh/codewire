@@ -81,7 +81,7 @@ terraform/tenant/workspaces/
 *.cer
 *.p12
 *.csr
-apps/ios/CwShellEngine.xcframework/
+apps/ios/Frameworks/
 apps/ios/.build/
 apps/ios/xtool/
 .dev-stack/

@@ -617,6 +617,10 @@ run_paths_case merge_message_template pull_request refs/pull/1/head false "$poli
 run_paths_case ios pull_request refs/pull/1/head false 'ios policy' \
   apps/ios/Sources/CodewireKit/Networking/CodewireClient.swift \
   apps/ios/Resources/Info.plist
+run_paths_case ios_swift_bindings pull_request refs/pull/1/head false \
+  'ios policy rust rust_pkg_codewire_client_ffi' \
+  apps/ios/Sources/CodewireClientFFI/codewire_client_ffi.swift \
+  apps/ios/FFI/include/module.modulemap
 run_paths_case repository_ignores pull_request refs/pull/10/head false "$policy" \
   .gitignore .dockerignore
 run_paths_case repository_attributes pull_request refs/pull/1010/head false "$policy" \

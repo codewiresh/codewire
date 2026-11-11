@@ -409,3 +409,6 @@ impl TerminalOutput for OutputSender {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "bindgen"))]
+mod swift_bindings_tests;

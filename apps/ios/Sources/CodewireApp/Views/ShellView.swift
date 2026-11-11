@@ -1,44 +1,34 @@
 #if canImport(SwiftUI)
 import SwiftUI
-import SwiftTerm
 import CodewireKit
-
-/// Wrapper to safely send non-Sendable values across actor boundaries
-/// when we know the usage is safe (e.g., only accessed on main actor).
-private struct UnsafeSend<T>: @unchecked Sendable {
-    let value: T
-}
+#if canImport(CodewireClientFFI)
+import CodewireClientFFI
+import SwiftTerm
+#endif
 
 struct ShellView: View {
     @EnvironmentObject var auth: AuthViewModel
     let env: CodewireKit.Environment
     @SwiftUI.Environment(\.dismiss) private var dismiss
 
-    @State private var error: String?
-    @State private var isConnecting = true
-    @State private var sessionEnded = false
-
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-
-            if isConnecting {
-                VStack(spacing: 16) {
-                    ProgressView()
-                        .tint(.white)
-                    Text("Connecting to \(env.name)...")
-                        .foregroundStyle(.white)
-                }
-            } else {
-                TerminalContainer(
-                    env: env,
-                    serverURL: auth.baseURL.absoluteString,
-                    token: auth.accessToken ?? "",
-                    onError: { msg in error = msg },
-                    onConnected: { isConnecting = false },
-                    onEnded: { sessionEnded = true }
-                )
-            }
+            #if canImport(CodewireClientFFI)
+            ShellSession(target: ShellTarget(
+                serverUrl: auth.baseURL.absoluteString,
+                accessToken: auth.accessToken ?? "",
+                orgId: env.orgId,
+                environmentId: env.id,
+                term: "xterm-256color",
+                columns: 80,
+                rows: 24
+            ))
+            #else
+            Text("This build has no shell. Build it on a Mac with apps/ios/scripts/build-rust.sh.")
+                .foregroundStyle(.white)
+                .padding()
+            #endif
         }
         .overlay(alignment: .topLeading) {
             Button {
@@ -50,147 +40,135 @@ struct ShellView: View {
             }
             .padding()
         }
-        .alert("Connection Failed", isPresented: .constant(error != nil)) {
-            Button("Retry") {
-                error = nil
-                isConnecting = true
+    }
+}
+
+#if canImport(CodewireClientFFI)
+/// A shell and, once it has ended, a fresh one on Retry.
+private struct ShellSession: View {
+    let target: ShellTarget
+    @State private var attempt = 0
+
+    var body: some View {
+        ShellAttempt(target: target) { attempt += 1 }
+            .id(attempt)
+    }
+}
+
+/// The terminal, with one status line under it: how the shell is connected,
+/// or why it ended.
+private struct ShellAttempt: View {
+    let target: ShellTarget
+    let retry: () -> Void
+    @StateObject private var status = ShellStatus()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TerminalContainer(target: target, status: status)
+            HStack {
+                Text(status.line)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(1)
+                Spacer()
+                if status.hasEnded {
+                    Button("Retry", action: retry)
+                }
             }
-            Button("Close") { dismiss() }
-        } message: {
-            Text(error ?? "")
-        }
-        .alert("Session Ended", isPresented: $sessionEnded) {
-            Button("Close") { dismiss() }
+            .padding(.horizontal)
+            .padding(.vertical, 6)
         }
     }
 }
 
 struct TerminalContainer: UIViewRepresentable {
-    let env: CodewireKit.Environment
-    let serverURL: String
-    let token: String
-    let onError: (String) -> Void
-    let onConnected: () -> Void
-    let onEnded: () -> Void
+    let target: ShellTarget
+    let status: ShellStatus
 
     func makeUIView(context: Context) -> TerminalView {
-        let tv = TerminalView()
-        tv.terminalDelegate = context.coordinator
-        context.coordinator.terminalView = tv
-        context.coordinator.connect()
-        return tv
+        let view = TerminalView()
+        view.terminalDelegate = context.coordinator
+        context.coordinator.connect(to: view)
+        return view
     }
 
-    func updateUIView(_ uiView: TerminalView, context: Context) {}
+    func updateUIView(_: TerminalView, context _: Context) {}
+
+    static func dismantleUIView(_: TerminalView, coordinator: Coordinator) {
+        coordinator.close()
+    }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(
-            env: env,
-            serverURL: serverURL,
-            token: token,
-            onError: onError,
-            onConnected: onConnected,
-            onEnded: onEnded
-        )
+        Coordinator(target: target, observer: status.observer())
     }
 
-    class Coordinator: NSObject, TerminalViewDelegate, @unchecked Sendable {
-        let env: CodewireKit.Environment
-        let serverURL: String
-        let token: String
-        let onError: (String) -> Void
-        let onConnected: () -> Void
-        let onEnded: () -> Void
+    /// Feeds the shell's output to the terminal and the terminal's keys and
+    /// size to the shell. A failed dial ends the status line with its reason.
+    @MainActor
+    final class Coordinator: NSObject {
+        private let target: ShellTarget
+        private let observer: ShellObserver
+        private var shell: Shell?
+        private var task: Task<Void, Never>?
 
-        weak var terminalView: TerminalView?
-        private var handle: CwShellHandle?
-        private var readTask: Task<Void, Never>?
-
-        init(env: CodewireKit.Environment, serverURL: String, token: String,
-             onError: @escaping (String) -> Void,
-             onConnected: @escaping () -> Void,
-             onEnded: @escaping () -> Void) {
-            self.env = env
-            self.serverURL = serverURL
-            self.token = token
-            self.onError = onError
-            self.onConnected = onConnected
-            self.onEnded = onEnded
+        init(target: ShellTarget, observer: ShellObserver) {
+            self.target = target
+            self.observer = observer
         }
 
-        func connect() {
-            // Use default size for initial dial; real size sent via resize() after layout
-            let cols: UInt16 = 80
-            let rows: UInt16 = 24
-            let serverURL = self.serverURL
-            let token = self.token
-            let orgId = self.env.orgId
-            let envId = self.env.id
-            let connected = UnsafeSend(value: self.onConnected)
-            let errHandler = UnsafeSend(value: self.onError)
-            let tv = UnsafeSend(value: self.terminalView)
-            let ended = UnsafeSend(value: self.onEnded)
-            Task.detached { [weak self] in
+        func connect(to view: TerminalView) {
+            let target = target
+            let observer = observer
+            task = Task { [weak self, weak view] in
+                let shell: Shell
                 do {
-                    let config = CwShellDialConfig(
-                        serverURL: serverURL, token: token,
-                        orgID: orgId, envID: envId,
-                        cols: cols, rows: rows
-                    )
-                    let h = try CwShellHandle.dial(config: config)
-                    self?.handle = h
-                    await MainActor.run { connected.value() }
-                    let readTask = Task.detached {
-                        var buffer = [UInt8](repeating: 0, count: 8192)
-                        while !Task.isCancelled {
-                            do {
-                                let n = try buffer.withUnsafeMutableBufferPointer { buf in
-                                    try h.read(into: buf.baseAddress!, length: buf.count)
-                                }
-                                if n == 0 { break }
-                                let slice = Array(buffer[0..<n])
-                                await MainActor.run { tv.value?.feed(byteArray: ArraySlice(slice)) }
-                            } catch {
-                                await MainActor.run { ended.value() }
-                                break
-                            }
-                        }
-                    }
-                    self?.readTask = readTask
+                    shell = try await Shell.dial(target: target, observer: observer)
                 } catch {
-                    await MainActor.run { errHandler.value("\(error)") }
+                    // A refused target fails before the shell reports any
+                    // state, and a shell that can't start may fail without
+                    // ending; either way the status line says why.
+                    let message = (error as? ShellError)?.message ?? "\(error)"
+                    observer.stateChanged(state: .ended(exitStatus: nil, error: message))
+                    return
+                }
+                guard let self, !Task.isCancelled else {
+                    shell.close()
+                    return
+                }
+                self.shell = shell
+                // The terminal may have laid out before the shell existed.
+                if let terminal = view?.getTerminal() {
+                    try? shell.resize(columns: UInt16(terminal.cols), rows: UInt16(terminal.rows))
+                }
+                while let data = await shell.read() {
+                    view?.feed(byteArray: ArraySlice([UInt8](data)))
                 }
             }
         }
 
-        deinit {
-            readTask?.cancel()
-            handle?.close()
+        func close() {
+            task?.cancel()
+            shell?.close()
+            shell = nil
         }
-
-        // MARK: - TerminalViewDelegate
-
-        func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            let bytes = Array(data)
-            guard let handle = self.handle else { return }
-            Task.detached {
-                try? handle.write(bytes)
-            }
-        }
-
-        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            guard let handle = self.handle else { return }
-            Task.detached {
-                try? handle.resize(cols: UInt16(newCols), rows: UInt16(newRows))
-            }
-        }
-
-        func scrolled(source: TerminalView, position: Double) {}
-        func setTerminalTitle(source: TerminalView, title: String) {}
-        func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
-        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
-        func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
-        func clipboardCopy(source: TerminalView, content: Data) {}
     }
 }
+
+extension TerminalContainer.Coordinator: @preconcurrency TerminalViewDelegate {
+    func send(source _: TerminalView, data: ArraySlice<UInt8>) {
+        try? shell?.write(data: Data(data))
+    }
+
+    func sizeChanged(source _: TerminalView, newCols: Int, newRows: Int) {
+        try? shell?.resize(columns: UInt16(newCols), rows: UInt16(newRows))
+    }
+
+    func scrolled(source _: TerminalView, position _: Double) {}
+    func setTerminalTitle(source _: TerminalView, title _: String) {}
+    func requestOpenLink(source _: TerminalView, link _: String, params _: [String: String]) {}
+    func hostCurrentDirectoryUpdate(source _: TerminalView, directory _: String?) {}
+    func rangeChanged(source _: TerminalView, startY _: Int, endY _: Int) {}
+    func clipboardCopy(source _: TerminalView, content _: Data) {}
+}
+#endif
 #endif

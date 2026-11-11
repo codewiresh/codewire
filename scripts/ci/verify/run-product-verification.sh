@@ -1339,6 +1339,11 @@ run_rust() {
       cargo run -p codewire-oidc --example in_memory >/dev/null
     fi
   fi
+  if selected rust_workspace || selected rust_pkg_codewire_client_ffi; then
+    # The Swift bindings committed under apps/ios match the crate (#3825).
+    shard_test client-ffi-swift-bindings '-E test(swift_bindings_tests::)' \
+      -p codewire-client-ffi --features bindgen --lib -- swift_bindings_tests::
+  fi
 }
 
 run_rust_curated_locks() {
