@@ -324,9 +324,13 @@ def workflow_errors(name, text):
             "fetch-openbao-" in str(step.get("run", "")) for step in job.get("steps") or [])
         # Forgejo's resolution: a job's own setting wins over the workflow's.
         holds_oidc = job.get("enable-openid-connect", workflow.get("enable-openid-connect"))
+        # An OIDC token is a credential even without an OpenBao role in scope:
+        # it mints Forgejo integrations, and the publisher roles bind no job or
+        # runner claim, so no job on the shared untrusted light runner holds
+        # one (#3674, #3758). ci.yaml's metal jobs split by event instead.
+        if holds_oidc and runner == runners.UNTRUSTED_LIGHT:
+            errors.append(f"{name} {job_name} holds OIDC on the untrusted light runner")
         if holds_oidc and reads_openbao:
-            if runner not in TRUSTED_ONLY:
-                errors.append(f"{name} {job_name} can log in to OpenBao on an untrusted runner")
             if unsafe:
                 errors.append(f"{name} {job_name} can log in to OpenBao in a run started by {unsafe}")
     # Workflow-wide OIDC reaches every job: only runs no pull request starts.
@@ -505,6 +509,8 @@ WORKFLOW_MUTATIONS = {
         t, "propose-workspace-image-pin", f"runs-on: {runners.TRUSTED_LIGHT}", f"runs-on: {runners.UNTRUSTED_LIGHT}")),
     "a Dev build drops the selection it reads": ("deploy-dev.yaml", lambda t: in_job(
         t, "build-service-images", "    needs: [deploy-selection, dev-delivery-turn]\n", "")),
+    "Dev selection holds OIDC on the untrusted runner": ("deploy-dev.yaml", lambda t: in_job(
+        t, "deploy-selection", f"runs-on: {runners.TRUSTED_LIGHT}", f"runs-on: {runners.UNTRUSTED_LIGHT}")),
 }
 
 

@@ -30,9 +30,12 @@ env:
 
 jobs:
   deploy-selection:
-    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this trusted planner receives only the read-only Deploy baseline integration.
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
+    # Its OIDC token mints the Deploy integration (write:repository on
+    # codewire/deploy) to read Dev's baseline, and the publisher role would
+    # accept it too, so it runs only on the trusted runner (#3758).
     name: Deploy selection
-    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 15
     outputs:
