@@ -650,10 +650,14 @@ fn provision_workspace_plan(
                     .direct_source(&forbidden_roots)
                     .map_err(|_| WorkspaceError::SourceChanged)?
                     .ok_or(WorkspaceError::InvalidWorkspacePlan)?;
-                fs::create_dir(&destination).map_err(|source| WorkspaceError::Io {
-                    path: destination.clone(),
-                    source,
-                })?;
+                // A share at /workspace itself mounts on the workspace
+                // folder created above, the plan's only input (#4025).
+                if input.destination() != codewire_vmm_guest_probe::WORKSPACE_ROOT {
+                    fs::create_dir(&destination).map_err(|source| WorkspaceError::Io {
+                        path: destination.clone(),
+                        source,
+                    })?;
+                }
                 fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)).map_err(
                     |source| WorkspaceError::Io {
                         path: destination.clone(),

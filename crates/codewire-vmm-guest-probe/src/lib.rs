@@ -49,7 +49,7 @@ pub use checkpoint_protocol::{
 pub use direct_share::{
     DIRECT_SHARE_PLAN_PATH, DIRECT_SHARE_PLAN_RELATIVE_PATH, DirectShareMount, DirectSharePlan,
     DirectSharePlanError, MAX_DIRECT_SHARE_PLAN_BYTES, MAX_DIRECT_SHARES,
-    VM_ONLY_CAPABILITY_MARKER,
+    VM_ONLY_CAPABILITY_MARKER, WORKSPACE_ROOT, WORKSPACE_ROOT_SHARE_CAPABILITY_MARKER,
 };
 /// Referenced by the guest entrypoint and read from the admitted init ELF: a
 /// boot whose init lacks it has no checkpoint hook, so it is never

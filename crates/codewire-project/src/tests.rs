@@ -890,3 +890,30 @@ fn destination_parents_and_depths_find_the_nearest_ancestor() {
     );
     assert_eq!(destination_depths(&destinations), [1, 0, 0, 2, 0]);
 }
+
+#[test]
+fn a_live_mount_may_be_the_whole_workspace_and_nothing_else() {
+    let document = parse_project_yaml(
+        "version: 1\nmounts: [{source: ., destination: /workspace, mode: direct, read_only: false}]\n",
+    )
+    .unwrap();
+    assert_eq!(document.local.mounts[0].destination, "/workspace");
+    let copy = parse_project_yaml(
+        "version: 1\nmounts: [{source: ., destination: /workspace, mode: copy}]\n",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(copy.contains("must be below /workspace"), "{copy}");
+    let beside = parse_project_yaml(
+        "version: 1\nmounts:\n  - {source: ., destination: /workspace, mode: direct, read_only: false}\n  - {source: ., destination: /workspace/b, mode: copy}\n",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(beside.contains("overlaps"), "{beside}");
+    let repository = parse_project_yaml(
+        "version: 1\nrepositories: [{source: https://example.test/org/a.git, destination: /workspace/a}]\nmounts: [{source: ., destination: /workspace, mode: direct, read_only: false}]\n",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(repository.contains("overlaps"), "{repository}");
+}

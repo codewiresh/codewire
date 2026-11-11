@@ -4352,16 +4352,25 @@ impl Supervisor {
         let keeps_paths = workspace_plan.inputs.iter().any(
             |input| matches!(input, WorkspaceInput::Direct { vm_only, .. } if !vm_only.is_empty()),
         );
-        if !keeps_paths {
+        let root_share = workspace_plan.inputs.iter().any(|input| {
+            matches!(input, WorkspaceInput::Direct { destination, .. }
+                if destination == codewire_vmm_guest_probe::WORKSPACE_ROOT)
+        });
+        if !keeps_paths && !root_share {
             return Ok(());
         }
         let engine = PrivateRoot::open(&self.config.engine_root())?;
-        RuntimeArtifactStore::create(&engine)
+        let artifacts = RuntimeArtifactStore::create(&engine)
             .map_err(artifact_store_error)?
             .open_generation(generation)
             .await
-            .map_err(artifact_store_error)?
-            .require_vm_only_guest()?;
+            .map_err(artifact_store_error)?;
+        if keeps_paths {
+            artifacts.require_vm_only_guest()?;
+        }
+        if root_share {
+            artifacts.require_workspace_root_share_guest()?;
+        }
         Ok(())
     }
 
@@ -8149,7 +8158,11 @@ fn validate_local_mount_requests(mounts: &[v1::LocalMountInput]) -> Result<(), S
         if mount.source_path.is_empty()
             || mount.source_path.len() > MAXIMUM_HOST_PATH_BYTES
             || mount.source_path.contains(&0)
-            || validate_local_mount_destination(&mount.destination).is_err()
+            || validate_local_mount_destination(
+                &mount.destination,
+                mount.mode == v1::LocalMountMode::Direct as i32,
+            )
+            .is_err()
         {
             return Err(SupervisorError::InvalidRequest);
         }
@@ -8720,7 +8733,7 @@ fn local_mounts_from_workspace_plan(
                 vm_only,
                 ..
             } => {
-                validate_local_mount_destination(destination)
+                validate_local_mount_destination(destination, false)
                     .map_err(|_| SupervisorError::InvalidState)?;
                 Ok(v1::LocalMountInput {
                     source_path: source_path.clone(),
@@ -8737,7 +8750,7 @@ fn local_mounts_from_workspace_plan(
                 vm_only,
                 ..
             } => {
-                validate_local_mount_destination(destination)
+                validate_local_mount_destination(destination, true)
                     .map_err(|_| SupervisorError::InvalidState)?;
                 Ok(v1::LocalMountInput {
                     source_path: source_path.clone(),
@@ -9862,7 +9875,8 @@ impl From<SupervisorError> for Status {
             }
             SupervisorError::Artifact(
                 crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(_)
-                | crate::artifact::ArtifactError::GuestVmOnlyUnsupported(_),
+                | crate::artifact::ArtifactError::GuestVmOnlyUnsupported(_)
+                | crate::artifact::ArtifactError::GuestWorkspaceRootShareUnsupported(_),
             ) => Status::failed_precondition(error.to_string()),
             SupervisorError::CwRuntime(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::VmStart(_)

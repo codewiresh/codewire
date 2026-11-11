@@ -26,10 +26,17 @@ pub const MAX_DIRECT_SHARE_PLAN_BYTES: usize = 128 * 1024;
 /// before it creates or starts a VM whose plan keeps folders on the VM's
 /// disk; an older guest would refuse or misread that plan only at boot.
 pub const VM_ONLY_CAPABILITY_MARKER: &[u8] = b"CODEWIRE_GUEST_VM_ONLY_V2\0";
+/// The guest init mounts a direct share at /workspace itself (#4025). Host
+/// preflight reads it before it creates or starts a VM whose plan has one;
+/// an older guest would refuse that plan only at boot.
+pub const WORKSPACE_ROOT_SHARE_CAPABILITY_MARKER: &[u8] =
+    b"CODEWIRE_GUEST_WORKSPACE_ROOT_SHARE_V1\0";
 
 const DIRECT_SHARE_PLAN_SCHEMA_VERSION: u32 = 1;
 const DIRECT_SHARE_TAG_PREFIX: &str = "cw-direct-";
 const WORKSPACE_PREFIX: &str = "/workspace/";
+/// A direct share here is the whole workspace, its only source (#4025).
+pub const WORKSPACE_ROOT: &str = "/workspace";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -181,6 +188,9 @@ impl DirectSharePlan {
 }
 
 fn valid_destination(destination: &str) -> bool {
+    if destination == WORKSPACE_ROOT {
+        return true;
+    }
     let Some(relative) = destination.strip_prefix(WORKSPACE_PREFIX) else {
         return false;
     };
@@ -220,8 +230,21 @@ mod tests {
 
     #[test]
     fn plan_rejects_noncanonical_tags_paths_and_overlap() {
-        assert!(DirectShareMount::for_index(0, "/workspace", true).is_err());
         assert!(DirectShareMount::for_index(0, "/workspace/a/../b", true).is_err());
+        assert!(DirectShareMount::for_index(0, "/workspace/", true).is_err());
+        // /workspace itself is a share's destination only as the plan's
+        // only share (#4025).
+        DirectSharePlan::new(vec![
+            DirectShareMount::for_index(0, "/workspace", false).unwrap(),
+        ])
+        .unwrap();
+        assert!(
+            DirectSharePlan::new(vec![
+                DirectShareMount::for_index(0, "/workspace", false).unwrap(),
+                DirectShareMount::for_index(1, "/workspace/b", true).unwrap(),
+            ])
+            .is_err()
+        );
         assert!(
             DirectSharePlan::new(vec![
                 DirectShareMount::for_index(0, "/workspace/a", true).unwrap(),

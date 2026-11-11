@@ -494,7 +494,6 @@ fn normalize_mounts(mounts: Vec<RawMountBlock>) -> Result<Vec<LocalMountIntent>,
             if destination.is_empty() {
                 return invalid("mounts.destination", "value is required");
             }
-            validate_workspace_path("mounts.destination", &destination, false)?;
             let mode = match mount.mode.trim().to_ascii_lowercase().as_str() {
                 "copy" => LocalMountMode::Copy,
                 "direct" => LocalMountMode::Direct,
@@ -506,6 +505,13 @@ fn normalize_mounts(mounts: Vec<RawMountBlock>) -> Result<Vec<LocalMountIntent>,
                     );
                 }
             };
+            // A live (direct) mount may be /workspace itself, as the
+            // environment's only workspace source (#4025).
+            validate_workspace_path(
+                "mounts.destination",
+                &destination,
+                mode == LocalMountMode::Direct,
+            )?;
             if mode == LocalMountMode::Copy && mount.read_only.is_some() {
                 return invalid("mounts.read_only", "only applies to direct mounts");
             }

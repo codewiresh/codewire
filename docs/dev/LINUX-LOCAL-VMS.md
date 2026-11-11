@@ -228,7 +228,8 @@ cw snapshot inspect good-toolchain
 cw snapshot rm good-toolchain   # environments made from it are unaffected
 ```
 
-**What it holds.** The VM's state disk (`/workspace` and the home), its Docker
+**What it holds.** The VM's state disk (`/workspace` and the home; with a live
+mount at `/workspace` itself, only the home and kept `vm_only` folders), its Docker
 data disk (images, containers, volumes) and its image root with everything
 installed into it. Where the state root's filesystem shares blocks between
 files (btrfs, XFS), each disk is a reflink and the snapshot costs almost

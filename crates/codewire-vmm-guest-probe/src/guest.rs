@@ -294,6 +294,7 @@ pub fn run_init() -> Result<()> {
     std::hint::black_box(crate::GUEST_CHECKPOINT_ABI_MARKER);
     std::hint::black_box(crate::cw_runtime_live::LIVE_RUNTIME_CAPABILITY_MARKER);
     std::hint::black_box(crate::VM_ONLY_CAPABILITY_MARKER);
+    std::hint::black_box(crate::WORKSPACE_ROOT_SHARE_CAPABILITY_MARKER);
     ensure!(
         unsafe { libc::getpid() } == 1,
         "guest init must run as PID 1"
@@ -2885,21 +2886,40 @@ fn mount_direct_shares(
         let relative = Path::new(share.destination())
             .strip_prefix(WORKSPACE_PATH)
             .context("derive direct-share workspace destination")?;
-        let target_path = Path::new(PERSISTENT_WORKSPACE_PATH).join(relative);
+        // A share at /workspace itself mounts on the persistent workspace
+        // folder, the plan's only share (#4025).
+        let workspace_root = share.destination() == crate::WORKSPACE_ROOT;
+        let target_path = if workspace_root {
+            PathBuf::from(PERSISTENT_WORKSPACE_PATH)
+        } else {
+            Path::new(PERSISTENT_WORKSPACE_PATH).join(relative)
+        };
         let target_path = target_path
             .to_str()
             .context("direct-share guest destination is not UTF-8")?;
-        let target = rustix::fs::openat2(
-            &workspace,
-            relative,
-            RustixOFlags::PATH
-                | RustixOFlags::DIRECTORY
-                | RustixOFlags::CLOEXEC
-                | RustixOFlags::NOFOLLOW,
-            RustixMode::empty(),
-            ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
-        )
-        .context("admit direct-share guest destination")?;
+        let target = if workspace_root {
+            rustix::fs::open(
+                PERSISTENT_WORKSPACE_PATH,
+                RustixOFlags::PATH
+                    | RustixOFlags::DIRECTORY
+                    | RustixOFlags::CLOEXEC
+                    | RustixOFlags::NOFOLLOW,
+                RustixMode::empty(),
+            )
+            .context("admit the persistent workspace as the direct-share destination")?
+        } else {
+            rustix::fs::openat2(
+                &workspace,
+                relative,
+                RustixOFlags::PATH
+                    | RustixOFlags::DIRECTORY
+                    | RustixOFlags::CLOEXEC
+                    | RustixOFlags::NOFOLLOW,
+                RustixMode::empty(),
+                ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+            )
+            .context("admit direct-share guest destination")?
+        };
         let stat = rustix::fs::fstat(&target).context("inspect direct-share guest destination")?;
         ensure!(
             RustixFileType::from_raw_mode(stat.st_mode) == RustixFileType::Directory,
@@ -4075,7 +4095,10 @@ fn expose_persistent_layout(plan: &WorkspacePlan) -> Result<()> {
         create_dir(home_parent, 0o755)?;
     }
     create_dir(home, 0o700)?;
-    bind_mount(PERSISTENT_WORKSPACE_PATH, WORKSPACE_PATH)?;
+    // Recursive, so init's /workspace (the daemon's file API and Docker's
+    // view) holds the direct shares and their kept folders, as the
+    // workload's rbind does (#4025).
+    bind_mount_tree(PERSISTENT_WORKSPACE_PATH, WORKSPACE_PATH)?;
 
     let relative_home = home
         .strip_prefix("/")
@@ -5009,6 +5032,20 @@ fn workspace_oci_config_with_cw(plan: &WorkspacePlan, cw_asset: bool) -> Result<
 fn bind_mount(source: &str, target: &str) -> Result<()> {
     mount_fs(source, target, "none", libc::MS_BIND, "")
         .with_context(|| format!("bind persistent guest path {source} at {target}"))?;
+    mount_fs(
+        source,
+        target,
+        "none",
+        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_NOSUID | libc::MS_NODEV,
+        "",
+    )
+    .with_context(|| format!("confine persistent guest bind mount {target}"))
+}
+
+/// [`bind_mount`] with every mount below `source`.
+fn bind_mount_tree(source: &str, target: &str) -> Result<()> {
+    mount_fs(source, target, "none", libc::MS_BIND | libc::MS_REC, "")
+        .with_context(|| format!("bind persistent guest tree {source} at {target}"))?;
     mount_fs(
         source,
         target,

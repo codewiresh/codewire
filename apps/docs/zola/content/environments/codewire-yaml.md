@@ -184,6 +184,26 @@ VMs, where `--path` is mounted live by default; a cloud create ignores
 `workspace.vm_only` and refuses `mounts` and host ports. `cw create --local`
 shows the resolved settings and asks before creating.
 
+### Mount a folder as /workspace itself
+
+A live (`direct`) mount may be `/workspace` itself, so the folder is the whole
+workspace rather than a folder inside it:
+
+```yaml
+mounts:
+  - source: .
+    destination: /workspace
+    mode: direct
+    read_only: false
+```
+
+It must be the environment's only workspace source: no `repositories` and no
+other `mounts`. `workspace.vm_only` folders are kept on the VM's disk inside
+it, as for any live mount. A snapshot of such a VM holds no workspace files,
+only the reference to this folder, so creating from it needs
+`--share-mounts`. An older local VM runtime refuses it before creating
+anything; `cw setup --local --replace` installs a current one.
+
 ### Use your own checkouts instead of clones
 
 `cw create --local --path-mode mount` with a file that lists repositories

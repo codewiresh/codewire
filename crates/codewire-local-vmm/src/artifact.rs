@@ -378,6 +378,24 @@ impl AdmittedArtifacts {
         Ok(())
     }
 
+    /// The guest init mounts a direct share at /workspace itself (#4025); an
+    /// older one would refuse such a plan only at boot.
+    pub(crate) fn require_workspace_root_share_guest(&self) -> Result<(), ArtifactError> {
+        let init = read_canonical_initramfs_entry(&self.initramfs, b"init")?;
+        let marker = codewire_vmm_guest_probe::WORKSPACE_ROOT_SHARE_CAPABILITY_MARKER;
+        if init
+            .windows(marker.len())
+            .filter(|bytes| *bytes == marker)
+            .count()
+            != 1
+        {
+            return Err(ArtifactError::GuestWorkspaceRootShareUnsupported(
+                self.initramfs.path().to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// The guest init answers the VM checkpoint hook (#3046 R4): only a boot
     /// of such a guest is checkpointed, and its checkpoints restored.
     #[cfg(target_os = "linux")]
@@ -432,6 +450,10 @@ pub enum ArtifactError {
         "this local VM runtime cannot keep codewire.yaml workspace.vm_only folders on the VM's disk; reinstall it with `cw setup --local --replace`, or set `workspace: {{vm_only: []}}`: {0}"
     )]
     GuestVmOnlyUnsupported(PathBuf),
+    #[error(
+        "this local VM runtime cannot mount a folder live at /workspace itself; reinstall it with `cw setup --local --replace`, or mount the folder below /workspace: {0}"
+    )]
+    GuestWorkspaceRootShareUnsupported(PathBuf),
     #[error("read artifact lock {path}: {source}")]
     ReadLock { path: PathBuf, source: io::Error },
     #[error("decode artifact lock {path}: {source}")]
@@ -1701,6 +1723,41 @@ mod tests {
                 assert!(matches!(
                     artifacts.require_vm_only_guest(),
                     Err(ArtifactError::GuestVmOnlyUnsupported(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_root_share_capability_requires_exactly_one_marker() {
+        let task = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = PrivateRoot::open(task.path()).unwrap();
+        let marker = codewire_vmm_guest_probe::WORKSPACE_ROOT_SHARE_CAPABILITY_MARKER;
+        for (index, capability) in [Vec::new(), marker.to_vec(), [marker, marker].concat()]
+            .into_iter()
+            .enumerate()
+        {
+            let mut init = vec![0; 64];
+            init[..4].copy_from_slice(b"\x7fELF");
+            init.extend(codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER);
+            init.extend(capability);
+            let archive = canonical_newc(&init).unwrap();
+            let name = format!("workspace-root-{index}");
+            write_artifact(&root.path().join(&name), &archive, 0o400);
+            let artifacts = AdmittedArtifacts::for_test(
+                AdmittedArtifact::for_test("/unused/ch"),
+                AdmittedArtifact::for_test("/unused/kernel"),
+                admit_one(&root, &spec(&name, &archive), false).unwrap(),
+            );
+            if index == 1 {
+                artifacts.require_workspace_root_share_guest().unwrap();
+            } else {
+                assert!(matches!(
+                    artifacts.require_workspace_root_share_guest(),
+                    Err(ArtifactError::GuestWorkspaceRootShareUnsupported(_))
                 ));
             }
         }

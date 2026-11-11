@@ -103,13 +103,24 @@ pub(super) fn admit_share(
         VmOnlyPatterns::parse(share.vm_only()).context("parse the share's vm_only patterns")?;
     super::mount_fs("none", target_path, "none", libc::MS_SHARED, "")
         .context("share the direct-share mount with the workspace")?;
-    let root = rustix::fs::openat2(
-        workspace,
-        relative,
-        RustixOFlags::PATH | RustixOFlags::DIRECTORY | RustixOFlags::CLOEXEC,
-        RustixMode::empty(),
-        BENEATH,
-    )
+    // A share at /workspace itself covers the persistent workspace, which
+    // `workspace` was opened on before the mount: open its root by path,
+    // and the device check below still tells the share from the disk.
+    let root = if relative.as_os_str().is_empty() {
+        rustix::fs::open(
+            target_path,
+            RustixOFlags::PATH | RustixOFlags::DIRECTORY | RustixOFlags::CLOEXEC,
+            RustixMode::empty(),
+        )
+    } else {
+        rustix::fs::openat2(
+            workspace,
+            relative,
+            RustixOFlags::PATH | RustixOFlags::DIRECTORY | RustixOFlags::CLOEXEC,
+            RustixMode::empty(),
+            BENEATH,
+        )
+    }
     .context("open the direct-share mount root")?;
     let filesystem = rustix::fs::fstatfs(&root).context("inspect the direct-share mount")?;
     let root_stat = rustix::fs::fstat(&root).context("inspect the direct-share mount root")?;

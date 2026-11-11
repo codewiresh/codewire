@@ -219,7 +219,7 @@ pub(crate) fn prepare_direct_input(
     vm_only: Vec<String>,
     forbidden_roots: &[PathBuf],
 ) -> Result<(WorkspaceInput, DirectShareDiscriminator), WorkspacePlanError> {
-    validate_local_mount_destination(destination)?;
+    validate_local_mount_destination(destination, true)?;
     let admitted = admit_direct_share(requested_source, forbidden_roots)
         .map_err(|_| WorkspacePlanError::DirectShareInvalid)?;
     Ok((
@@ -228,11 +228,15 @@ pub(crate) fn prepare_direct_input(
     ))
 }
 
+/// A copy goes below /workspace; a live (direct) mount may also be
+/// /workspace itself, as the environment's only workspace source (#4025),
+/// which the plan's overlap check enforces.
 pub(crate) fn validate_local_mount_destination(
     destination: &str,
+    direct: bool,
 ) -> Result<(), WorkspacePlanError> {
     validate_destination(destination)?;
-    if destination == "/workspace" {
+    if destination == "/workspace" && !direct {
         return Err(WorkspacePlanError::InvalidPlan);
     }
     Ok(())
@@ -1298,9 +1302,12 @@ mod tests {
 
     #[test]
     fn explicit_local_mount_destinations_must_be_below_workspace_root() {
-        assert!(validate_local_mount_destination("/workspace/fixtures").is_ok());
-        assert!(validate_local_mount_destination("/workspace").is_err());
-        assert!(validate_local_mount_destination("/tmp/fixtures").is_err());
+        for direct in [false, true] {
+            assert!(validate_local_mount_destination("/workspace/fixtures", direct).is_ok());
+            assert!(validate_local_mount_destination("/tmp/fixtures", direct).is_err());
+        }
+        assert!(validate_local_mount_destination("/workspace", false).is_err());
+        assert!(validate_local_mount_destination("/workspace", true).is_ok());
     }
 
     #[tokio::test]
