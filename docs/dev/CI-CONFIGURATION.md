@@ -19,6 +19,10 @@ credential: its only capabilities are repository read, code-scanning upload
 and GitHub OIDC for OpenSSF publication. The Zola OpenSSF page reads the public
 API at build time; it does not read GitHub or OpenSSF credentials.
 
+`.github/workflows/fuzz.yml` runs the cargo-fuzz targets in `fuzz/` on the
+public mirror daily and on manual dispatch, with read-only repository access;
+[FUZZING.md](FUZZING.md) describes the targets and how to reproduce a crash.
+
 ## Forgejo server
 
 - **Action resolution.** Workflows refer to actions by short references such

@@ -1,0 +1,6 @@
+# Seeded from the root lock by each run; see docs/dev/FUZZING.md.
+/Cargo.lock
+/target
+/corpus
+/artifacts
+/coverage

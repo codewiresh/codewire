@@ -1964,6 +1964,10 @@ run_paths_case sdk_release_workflows pull_request refs/pull/3512/head false \
 run_paths_case scorecard_workflow pull_request refs/pull/3512/head false \
   'confidential_script_tests go_consumer_interop go_support policy release security security_js' \
   .github/workflows/scorecard.yml scripts/ci/tests/test-scorecard-workflow.py
+run_paths_case fuzz_workflow pull_request refs/pull/3512/head false \
+  'confidential_script_tests go_consumer_interop go_support policy release security security_js' \
+  .github/workflows/fuzz.yml scripts/ci/tests/test-fuzz-workflow.py \
+  fuzz/Cargo.toml fuzz/.gitignore fuzz/fuzz_targets/disco_message.rs
 # Removing the token-based releases needs only the release proofs (#3512).
 run_paths_case retired_sdk_token_releases pull_request refs/pull/3512/head false \
   'confidential_script_tests go_consumer_interop go_support policy release security security_js' \

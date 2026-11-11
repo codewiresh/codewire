@@ -1,0 +1,48 @@
+[package]
+name = "codewire-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+description = "cargo-fuzz targets for Codewire's parsers of untrusted network and guest input."
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace: the targets build only with a nightly toolchain and
+# cargo-fuzz, so the root workspace's builds and checks never see them. The
+# fuzz job seeds Cargo.lock from the root lock (docs/dev/FUZZING.md).
+[workspace]
+
+[dependencies]
+codewire-netstack = { path = "../crates/codewire-netstack" }
+codewire-tailnet = { path = "../crates/codewire-tailnet" }
+libfuzzer-sys = "=0.4.13"
+
+[[bin]]
+name = "disco_message"
+path = "fuzz_targets/disco_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "udp_relay_packet"
+path = "fuzz_targets/udp_relay_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "netstack_ipv4_tcp"
+path = "fuzz_targets/netstack_ipv4_tcp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "netstack_dns_question"
+path = "fuzz_targets/netstack_dns_question.rs"
+test = false
+doc = false
+bench = false
