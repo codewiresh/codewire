@@ -1,7 +1,7 @@
 ---
 title: Usage and costs
 description: Organization plans, per-second metering of hosted sandboxes, reading your usage with cw cost, and the Billing page.
-updated: 2026-11-08
+updated: 2026-11-11
 weight: 4
 aliases: ["/reference/subscription-plans"]
 ---
@@ -54,6 +54,36 @@ what running sandboxes have drawn from it so far. `CPU hrs`, `Mem GB·hrs` and
 `Storage GB·hrs` are the month's metered use so far. `--org SLUG` picks an organization when you belong to several, and
 `--output json` gives the same numbers to a script. What counts toward the
 organization's limits is in [Resources and limits](@/environments/resources.md).
+
+## When credit runs out
+
+An organization with no compute credit can't create or start cloud
+sandboxes. `cw create`, `cw start` and any other command that creates or
+starts one exit with status 1 and say so:
+
+```text
+{organization} has no compute credit, so it can't run cloud sandboxes.
+Add a card or credit on its billing page: {server}/{slug}/billing/
+Local sandboxes stay free: cw create --local
+```
+
+With `--output json` the command also prints the refusal on stdout, with the
+stable code `credit_exhausted`:
+
+```json
+{
+  "error": {
+    "code": "credit_exhausted",
+    "message": "{organization} has no compute credit, so it can't run cloud sandboxes.",
+    "organization": { "id": "{id}", "name": "{organization}", "slug": "{slug}" },
+    "billing_url": "{server}/{slug}/billing/",
+    "local_create": "cw create --local"
+  }
+}
+```
+
+`organization` and `billing_url` are `null` when `cw` could not look the
+organization up.
 
 ## The Billing page
 

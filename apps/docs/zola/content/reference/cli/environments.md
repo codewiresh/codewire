@@ -1,7 +1,7 @@
 ---
 title: Environments
 description: ls, info, create, start, stop, restart, rm, update, ports, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh and preset.
-updated: 2026-11-10
+updated: 2026-11-11
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -141,6 +141,10 @@ script makes the start as long, so start servers in a session instead.
 Ctrl-C ends only the wait; the start carries on. With `--output json`, a
 cloud `start` prints `{"status": "running"}` when it returns, and `stop`
 prints `{"status": "stopped"}`.
+
+A cloud `create` or `start` in an organization with no compute credit exits
+with status 1, names the organization and links its billing page; see
+[When credit runs out](@/organizations/usage.md#when-credit-runs-out).
 
 `stop` and `restart` without `--session` act on the whole environment and
 need `ENV` (or `--in ENV`). With `--session` they act on one session instead;

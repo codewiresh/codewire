@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::CLI_VERSION;
 use crate::config::ResolvedPlatformConfig;
+use crate::credit_refusal::{self, CreditExhausted, RefusedOrganization};
 use crate::organization_client::preset_from_proto;
 use crate::presentation::*;
 
@@ -30,6 +31,23 @@ impl EnvironmentClient {
         Ok(Self {
             inner: connect_client(config)?,
         })
+    }
+
+    /// A create or start failure as the CLI shows it. A credit refusal
+    /// (#3381) names the organization `selector` picked (an ID or slug, or
+    /// empty for the caller's only one, as the server resolves it) and links
+    /// its billing page; when the lookup fails it is still a credit refusal.
+    async fn refusal(&self, error: ClientError, selector: &str) -> anyhow::Error {
+        if error.reason() != Some(credit_refusal::REASON) {
+            return display_client_error(error);
+        }
+        let organization = self
+            .inner
+            .list_organizations(rpc::ListOrganizationsRequest::default())
+            .await
+            .ok()
+            .and_then(|response| refused_organization(response.organizations, selector));
+        CreditExhausted::new(organization, self.inner.server_url()).into()
     }
 
     pub async fn list_environments(
@@ -58,11 +76,14 @@ impl EnvironmentClient {
         org_id: &str,
         request: &CreateEnvironmentRequest,
     ) -> anyhow::Result<Environment> {
-        let response = self
+        let response = match self
             .inner
             .create_environment(proto_create_environment_request(org_id, request))
             .await
-            .map_err(display_client_error)?;
+        {
+            Ok(response) => response,
+            Err(error) => return Err(self.refusal(error, org_id).await),
+        };
         let environment = response
             .environment
             .into_option()
@@ -82,11 +103,15 @@ impl EnvironmentClient {
     ) -> Result<Environment, ResolvingCreateError> {
         let mut message = proto_create_environment_request("", request);
         message.organization = Some(selector.to_owned());
-        let response = self
-            .inner
-            .create_environment(message)
-            .await
-            .map_err(ResolvingCreateError::from_client)?;
+        let response = match self.inner.create_environment(message).await {
+            Ok(response) => response,
+            Err(error) if error.reason() == Some(credit_refusal::REASON) => {
+                return Err(ResolvingCreateError::Other(
+                    self.refusal(error, selector).await,
+                ));
+            }
+            Err(error) => return Err(ResolvingCreateError::from_client(error)),
+        };
         let environment = response
             .environment
             .into_option()
@@ -667,7 +692,7 @@ impl EnvironmentClient {
         org_id: &str,
         environment_id: &str,
     ) -> anyhow::Result<StartResponse> {
-        let response = self
+        let response = match self
             .inner
             .start_environment(rpc::StartEnvironmentRequest {
                 org_id: org_id.to_string(),
@@ -675,7 +700,10 @@ impl EnvironmentClient {
                 ..Default::default()
             })
             .await
-            .map_err(display_client_error)?;
+        {
+            Ok(response) => response,
+            Err(error) => return Err(self.refusal(error, org_id).await),
+        };
         Ok(StartResponse {
             completes_with_log: response.completes_with_log,
         })
@@ -1133,7 +1161,38 @@ pub(crate) fn display_client_error(error: ClientError) -> anyhow::Error {
     if error.code() == ErrorCode::Unauthenticated {
         return anyhow::anyhow!("session expired or invalid");
     }
+    if error.reason() == Some(credit_refusal::REASON) {
+        return CreditExhausted::unnamed().into();
+    }
     error.into()
+}
+
+/// The membership `selector` names, by the server's create rule: an ID or
+/// slug, or when empty the caller's only organization.
+fn refused_organization(
+    memberships: Vec<rpc::OrganizationMembership>,
+    selector: &str,
+) -> Option<RefusedOrganization> {
+    let selector = selector.trim();
+    let organizations = memberships
+        .into_iter()
+        .filter_map(|membership| membership.organization.into_option())
+        .collect::<Vec<_>>();
+    let organization = if selector.is_empty() {
+        match <[_; 1]>::try_from(organizations) {
+            Ok([organization]) => organization,
+            Err(_) => return None,
+        }
+    } else {
+        organizations
+            .into_iter()
+            .find(|organization| organization.id == selector || organization.slug == selector)?
+    };
+    Some(RefusedOrganization {
+        id: organization.id,
+        name: organization.name,
+        slug: organization.slug,
+    })
 }
 
 /// One event from a following environment-log stream.
@@ -2644,6 +2703,49 @@ credentials: {profile: platform:user/work}
         assert!(metadata["repo_index"].is_f64(), "{metadata}");
         assert_eq!(metadata["repo_index"].as_f64(), Some(1.0));
         assert_eq!(metadata["stage"], "receiving_objects");
+    }
+
+    #[test]
+    fn a_credit_refusal_names_the_organization_the_server_resolved() {
+        let membership = |id: &str, slug: &str| rpc::OrganizationMembership {
+            organization: Some(rpc::Organization {
+                id: id.into(),
+                name: format!("Org {slug}"),
+                slug: slug.into(),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        let named = |selector: &str, memberships: Vec<rpc::OrganizationMembership>| {
+            refused_organization(memberships, selector).map(|organization| organization.slug)
+        };
+        let two = || vec![membership("org-a", "a"), membership("org-b", "b")];
+        assert_eq!(named("org-b", two()).as_deref(), Some("b"));
+        assert_eq!(named(" a ", two()).as_deref(), Some("a"));
+        assert_eq!(named("c", two()), None);
+        // Empty: the caller's only organization, or none when it has several.
+        assert_eq!(named("", two()), None);
+        assert_eq!(
+            named("", vec![membership("org-a", "a")]).as_deref(),
+            Some("a")
+        );
+
+        // Any other call that meets the refusal still says what it is.
+        let refused = connectrpc::ConnectError::new(ErrorCode::FailedPrecondition, "no credit")
+            .with_detail(connectrpc::ErrorDetail::from_message(
+                "google.rpc.ErrorInfo",
+                &codewire_proto::google::rpc::ErrorInfo {
+                    reason: credit_refusal::REASON.into(),
+                    domain: "codewire.sh".into(),
+                    ..Default::default()
+                },
+            ));
+        let error = display_client_error(ClientError::from(refused));
+        assert_eq!(
+            error.downcast_ref::<CreditExhausted>(),
+            Some(&CreditExhausted::unnamed())
+        );
     }
 
     #[tokio::test]

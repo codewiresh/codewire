@@ -1,6 +1,7 @@
 mod build_record;
 pub mod config;
 mod console_client;
+mod credit_refusal;
 mod environment_client;
 #[cfg(target_os = "linux")]
 mod hosted_access;
@@ -893,7 +894,8 @@ where
         placement,
         org: None,
     };
-    match cli.command {
+    let json = requested_json_output(&matches);
+    let result = match cli.command {
         Command::Config {
             command: ConfigCommand::Inspect { output },
         } => inspect_config(output),
@@ -1030,7 +1032,21 @@ where
             flat::operation(&globals, operation).await
         }
         Command::Help(args) => flat::handle_help(args),
-    }
+    };
+    credit_refusal::report(result, json)
+}
+
+/// Whether the invoked command, at any depth, asked for `--output json`.
+fn requested_json_output(matches: &clap::ArgMatches) -> bool {
+    std::iter::successors(Some(matches), |matches| {
+        matches.subcommand().map(|(_, matches)| matches)
+    })
+    .any(|matches| {
+        matches!(
+            matches.try_get_one::<OutputFormat>("output"),
+            Ok(Some(OutputFormat::Json))
+        )
+    })
 }
 
 /// `--local` / `--cloud` reach every command through the one global pair.
