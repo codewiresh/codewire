@@ -107,7 +107,7 @@ regex-automata = { version = "0.4.14", default-features = false, features = ["df
 regex-syntax = { version = "0.8.10" }
 ring = { version = "0.17.14" }
 rsa = { version = "0.10.0-rc.18", features = ["sha2"] }
-rustix = { version = "1.1.4", features = ["event", "fs", "net", "pipe", "process", "thread"] }
+rustix = { version = "1.1.6", features = ["event", "fs", "net", "pipe", "process", "thread"] }
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
 sec1 = { version = "0.8.1", features = ["ctutils", "pem", "std", "subtle"] }
@@ -240,7 +240,7 @@ regex-automata = { version = "0.4.14", default-features = false, features = ["df
 regex-syntax = { version = "0.8.10" }
 ring = { version = "0.17.14" }
 rsa = { version = "0.10.0-rc.18", features = ["sha2"] }
-rustix = { version = "1.1.4", features = ["event", "fs", "net", "pipe", "process", "thread"] }
+rustix = { version = "1.1.6", features = ["event", "fs", "net", "pipe", "process", "thread"] }
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
 sec1 = { version = "0.8.1", features = ["ctutils", "pem", "std", "subtle"] }
@@ -291,7 +291,7 @@ nix = { version = "0.31.3", features = ["ioctl", "mman", "socket", "time", "user
 num = { version = "0.4.3" }
 proc-macro2 = { version = "1.0.106" }
 quote = { version = "1.0.45" }
-rustix = { version = "1.1.4", default-features = false, features = ["param", "system", "time"] }
+rustix = { version = "1.1.6", default-features = false, features = ["param", "system", "time"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.4", features = ["extra-traits", "fold", "full", "visit-mut"] }
 toml_datetime = { version = "1.1.1", features = ["serde"] }
 toml_parser = { version = "1.1.2" }
@@ -310,7 +310,7 @@ ipnet = { version = "2.12.0", features = ["serde"] }
 linux-raw-sys = { version = "0.12.1", default-features = false, features = ["auxvec", "elf", "errno", "general", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
 nix = { version = "0.31.3", features = ["ioctl", "mman", "socket", "time", "user"] }
 num = { version = "0.4.3" }
-rustix = { version = "1.1.4", default-features = false, features = ["param", "system", "time"] }
+rustix = { version = "1.1.6", default-features = false, features = ["param", "system", "time"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.4", features = ["extra-traits", "fold", "full", "visit-mut"] }
 toml_datetime = { version = "1.1.1", features = ["serde"] }
 toml_parser = { version = "1.1.2" }
@@ -325,7 +325,7 @@ hyper-rustls = { version = "0.27.9", default-features = false, features = ["webp
 hyper-util = { version = "0.1.20", default-features = false, features = ["client-proxy"] }
 ipnet = { version = "2.12.0", features = ["serde"] }
 nix = { version = "0.31.3", features = ["mman", "time", "user"] }
-rustix = { version = "1.1.4", default-features = false, features = ["param", "system"] }
+rustix = { version = "1.1.6", default-features = false, features = ["param", "system"] }
 tower = { version = "0.5.3", default-features = false, features = ["timeout"] }
 tower-http = { version = "0.6.11", default-features = false, features = ["follow-redirect"] }
 
@@ -335,7 +335,7 @@ hyper-rustls = { version = "0.27.9", default-features = false, features = ["webp
 hyper-util = { version = "0.1.20", default-features = false, features = ["client-proxy"] }
 ipnet = { version = "2.12.0", features = ["serde"] }
 nix = { version = "0.31.3", features = ["mman", "time", "user"] }
-rustix = { version = "1.1.4", default-features = false, features = ["param", "system"] }
+rustix = { version = "1.1.6", default-features = false, features = ["param", "system"] }
 tower = { version = "0.5.3", default-features = false, features = ["timeout"] }
 tower-http = { version = "0.6.11", default-features = false, features = ["follow-redirect"] }
 

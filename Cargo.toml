@@ -145,7 +145,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Filesystem
 dirs = "5"
 filetime = "0.2"
-rustix = { version = "=1.1.4", features = ["fs", "process", "thread"] }
+rustix = { version = "=1.1.6", features = ["fs", "process", "thread"] }
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
 
 # OAuth & Keychain
