@@ -26,6 +26,7 @@ from repo_policy.proto import check_proto_package_boundaries
 from repo_policy.workspace_identity import check_identity_free_workspace
 from repo_policy.webpki_roots_floor import check_webpki_roots_floor
 from repo_policy.sqlx_sqlite_unused import check_sqlx_sqlite_unused
+from repo_policy.image_patch_paths import check_image_patch_paths
 from repo_policy.workspace_image_pin import check_workspace_image_pin
 from repo_policy.workspace_lints import check_workspace_lints
 from repo_policy.source_classification import (
@@ -107,6 +108,9 @@ def main(argv: list[str] | None = None) -> int:
     workspace_lints_parser = subparsers.add_parser("workspace-lints")
     workspace_lints_parser.add_argument("--self-test", action="store_true")
     workspace_lints_parser.set_defaults(func=check_workspace_lints)
+    image_patch_parser = subparsers.add_parser("image-patch-paths")
+    image_patch_parser.add_argument("--self-test", action="store_true")
+    image_patch_parser.set_defaults(func=check_image_patch_paths)
     material_cache_parser = subparsers.add_parser("epoch-material-cache-owner")
     material_cache_parser.add_argument("--self-test", action="store_true")
     material_cache_parser.set_defaults(func=check_epoch_material_cache_owner)

@@ -8,6 +8,8 @@ FROM codewire-rust-base AS builder
 # proto/codewire/** + proto/google/rpc/** at build time (connect-rpc 03 WI-2).
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+# Cargo needs every [patch] path the root manifest names (#3980).
+COPY third_party/sqlx-sqlite-unused ./third_party/sqlx-sqlite-unused
 COPY crates ./crates
 COPY proto ./proto
 ARG CODEWIRE_SCCACHE_MODE=disabled

@@ -3,6 +3,9 @@
 *
 !Cargo.toml
 !Cargo.lock
+!third_party
+!third_party/sqlx-sqlite-unused
+!third_party/sqlx-sqlite-unused/**
 !crates
 !proto
 !proto/**

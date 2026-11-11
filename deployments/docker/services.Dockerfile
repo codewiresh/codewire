@@ -72,6 +72,8 @@ USER 65532:65532
 FROM codewire-rust-base AS builder
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+# Cargo needs every [patch] path the root manifest names (#3980).
+COPY third_party/sqlx-sqlite-unused ./third_party/sqlx-sqlite-unused
 COPY crates ./crates
 # codewire-proto (a codewire-server-core dependency since connect-rpc 03
 # WI-2) compiles proto/codewire/** + proto/google/rpc/** at build time via

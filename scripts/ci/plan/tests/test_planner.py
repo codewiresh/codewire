@@ -587,6 +587,8 @@ dependencies = ["core"]
         self.write("libs/sdk-go/environment.go", "package codewire\n")
         self.write("packages/codewire-design/styles.css", ":root {}\n")
         self.write("proto/codewire/v1/api.proto", "syntax = \"proto3\";\n")
+        # The root manifest's [patch] stand-in, a daemon image input (#3980).
+        self.write("third_party/sqlx-sqlite-unused/Cargo.toml", "[package]\n")
         for family in ("daemon", "derp", "services", "mesh"):
             self.write(
                 f"deployments/docker/{family}.Dockerfile",

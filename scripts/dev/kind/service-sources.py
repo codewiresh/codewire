@@ -50,12 +50,14 @@ RECIPE_INPUTS = (
     "scripts/ci/images/run-rust-build.sh",
     "deployments/docker/kind-dev-binary.Dockerfile",
 )
-# Copied for every build: the workspace manifest and lock, the kind-dev Cargo
-# profile and the protobuf sources every service compiles through
-# codewire-daemon-proto; plus the recipe.
+# Copied for every build: the workspace manifest and lock, the [patch] path
+# the manifest names (#3980), the kind-dev Cargo profile and the protobuf
+# sources every service compiles through codewire-daemon-proto; plus the
+# recipe.
 SHARED_INPUTS = (
     "Cargo.toml",
     "Cargo.lock",
+    "third_party/sqlx-sqlite-unused",
     "scripts/dev/kind/cargo-profile.toml",
     "proto",
     "libs/daemon-proto",

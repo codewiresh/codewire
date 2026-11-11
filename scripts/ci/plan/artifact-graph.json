@@ -221,7 +221,8 @@
         "docker-bake.hcl",
         "libs/daemon-proto/**",
         "packages/codewire-design/**",
-        "proto/**"
+        "proto/**",
+        "third_party/sqlx-sqlite-unused/**"
       ]
     },
     "daemon_image": {
@@ -252,7 +253,8 @@
         "scripts/ci/images/compute-image-tags.sh",
         "scripts/ci/images/image-bundle.py",
         "scripts/ci/images/pipeline-identity.sh",
-        "scripts/ci/setup/fetch-openbao-harbor-credentials.sh"
+        "scripts/ci/setup/fetch-openbao-harbor-credentials.sh",
+        "third_party/sqlx-sqlite-unused/**"
       ]
     },
     "derp_image": {
@@ -282,7 +284,8 @@
         "deployments/docker/rust-base.Dockerfile",
         "docker-bake.hcl",
         "libs/daemon-proto/**",
-        "proto/**"
+        "proto/**",
+        "third_party/sqlx-sqlite-unused/**"
       ]
     },
     "mesh_image": {
@@ -295,7 +298,8 @@
         "deployments/docker/mesh.Dockerfile.dockerignore",
         "deployments/docker/rust-base.Dockerfile",
         "docker-bake.hcl",
-        "proto/**"
+        "proto/**",
+        "third_party/sqlx-sqlite-unused/**"
       ]
     },
     "base_image": {

@@ -22,6 +22,8 @@ COPY --from=codewire-verified-cw --chown=0:0 --chmod=0444 /provenance.json /out/
 FROM codewire-rust-base AS cw-builder-arm64
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+# Cargo needs every [patch] path the root manifest names (#3980).
+COPY third_party/sqlx-sqlite-unused ./third_party/sqlx-sqlite-unused
 COPY crates ./crates
 COPY proto ./proto
 COPY libs/daemon-proto ./libs/daemon-proto

@@ -19,6 +19,8 @@ ARG KIND_DEV_BASE=codewire-rust-base
 FROM ${KIND_DEV_BASE} AS builder
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+# Cargo needs every [patch] path the root manifest names (#3980).
+COPY third_party/sqlx-sqlite-unused ./third_party/sqlx-sqlite-unused
 COPY crates ./crates
 COPY proto ./proto
 COPY libs/daemon-proto ./libs/daemon-proto
@@ -69,7 +71,8 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     if [ -z "$bins$KIND_DEV_EXAMPLES$KIND_DEV_TEST" ]; then bins="$KIND_DEV_CRATE"; fi && \
     built="$CARGO_TARGET_DIR/kind-dev-sources.sha256" && \
     mkdir -p "$CARGO_TARGET_DIR" && \
-    find Cargo.toml Cargo.lock crates proto libs/daemon-proto packages/codewire-design apps/cli/install.sh \
+    find Cargo.toml Cargo.lock third_party/sqlx-sqlite-unused crates proto libs/daemon-proto \
+      packages/codewire-design apps/cli/install.sh \
       apps/cli/GPG_PUBLIC_KEY.asc scripts/ci/verify/kind/cw_runtime_probe.py \
       scripts/dev/kind/cargo-profile.toml \
       -type f -print0 | sort -z | xargs -0 sha256sum >/tmp/kind-dev-sources.sha256 && \

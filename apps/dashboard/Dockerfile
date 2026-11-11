@@ -34,6 +34,8 @@ FROM zola-${TARGETARCH} AS zola
 FROM codewire-rust-base AS builder
 WORKDIR /workspace
 COPY Cargo.toml Cargo.lock ./
+# Cargo needs every [patch] path the root manifest names (#3980).
+COPY third_party/sqlx-sqlite-unused ./third_party/sqlx-sqlite-unused
 COPY crates ./crates
 COPY proto ./proto
 COPY libs/daemon-proto ./libs/daemon-proto
