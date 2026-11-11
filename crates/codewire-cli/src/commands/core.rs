@@ -120,19 +120,7 @@ pub(crate) async fn handle_whoami_command(
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
-    let token = platform.token_provider()?.token().await?;
-    let response = codewire_client::OAuthClient::for_server_url(&platform.server_url)?
-        .userinfo(&token)
-        .await
-        .context("OAuth user info failed")?;
-    let user = PlatformUser {
-        id: response.sub,
-        email: response.email.unwrap_or_default(),
-        email_verified: response.email_verified.unwrap_or(false),
-        name: response.name.unwrap_or_default(),
-        image: response.picture.unwrap_or_default(),
-        ..PlatformUser::default()
-    };
+    let user = current_platform_user(&codewire_client(&platform)?, &platform.server_url).await?;
     print_platform_user(&user, &platform, args.output)
 }
 

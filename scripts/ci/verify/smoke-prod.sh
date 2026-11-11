@@ -25,19 +25,26 @@ usage() {
   cat <<'USAGE'
 Usage:
   scripts/ci/verify/smoke-prod.sh [options]
-  scripts/ci/verify/smoke-prod.sh --authenticated --allow-prod-mutation --preset PRESET --repo REPO
+  scripts/ci/verify/smoke-prod.sh --authenticated --allow-prod-mutation [--preset PRESET] [--repo REPO]
 
 Runs the production Rust release-candidate smoke checks. By default this runs
 only read-only Kubernetes rollout and public endpoint checks. The authenticated
 environment smoke is opt-in and requires both --authenticated and
 --allow-prod-mutation, plus CODEWIRE_PROD_SMOKE_API_KEY or CODEWIRE_API_KEY.
 
+As the Production smoke identity, which needs no preset or repository:
+  scripts/runtime/prod/with-prod-smoke-auth.sh -- \
+    scripts/ci/verify/smoke-prod.sh --authenticated --allow-prod-mutation
+Its cw must read an API key's identity in `cw whoami` (#4135): a release that
+includes it, or a cw built from main, passed with --cw-bin.
+
 Options:
   --authenticated          Run the authenticated environment smoke.
   --allow-prod-mutation    Required with --authenticated before creating or
                            deleting a production smoke environment.
-  --preset PRESET          Preset slug for the smoke environment.
-  --repo REPO              Repository URL for the smoke environment.
+  --preset PRESET          Preset slug for the smoke environment (optional).
+  --repo REPO              Repository URL for the smoke environment
+                           (optional). With neither, the environment is bare.
   --existing-env ID        Reuse an existing environment and keep it.
   --name NAME              Environment name for a new smoke environment.
   --ttl TTL                TTL for a new smoke environment (default: 2h).
@@ -57,6 +64,9 @@ Environment:
   CODEWIRE_PROD_SMOKE_API_KEY
                            Preferred API key for authenticated production smoke.
   CODEWIRE_API_KEY         Accepted when CODEWIRE_PROD_SMOKE_API_KEY is unset.
+  EXPECTED_CODEWIRE_PROD_SMOKE_USER_EMAIL
+                           When set, as with-prod-smoke-auth.sh does, cw whoami
+                           must name exactly this user.
 
 Safety:
   - refuses to run with shell tracing enabled
@@ -177,10 +187,6 @@ require_uint SMOKE_TIMEOUT_SECONDS "$SMOKE_TIMEOUT_SECONDS"
 if [[ "$SMOKE_SKIP_AUTHENTICATED" == "0" ]]; then
   [[ "$ALLOW_PROD_MUTATION" == "1" ]] || \
     die "--authenticated requires --allow-prod-mutation"
-  [[ -n "$SMOKE_ENV_ID" || -n "$SMOKE_PRESET" ]] || \
-    die "--authenticated requires --preset unless --existing-env is used"
-  [[ -n "$SMOKE_ENV_ID" || -n "$SMOKE_REPO" ]] || \
-    die "--authenticated requires --repo unless --existing-env is used"
 fi
 
 kubectl_prod() {
@@ -256,11 +262,16 @@ create_environment() {
   errors="$(mktemp "$ROOT/.tmp/prod-smoke-create-err.XXXXXX")"
   log "creating production smoke environment $SMOKE_NAME"
   # --no-file: only these flags configure the smoke, never a codewire.yaml
-  # in the directory it runs from.
+  # in the directory it runs from. --no-profile: the smoke needs no
+  # credentials. Without a preset or repository the environment is bare, as
+  # the Production smoke identity runs it (#4135).
+  local origin=()
+  [[ -z "$SMOKE_PRESET" ]] || origin+=(--preset "$SMOKE_PRESET")
+  [[ -z "$SMOKE_REPO" ]] || origin+=(--repo "$SMOKE_REPO")
   if ! cw_prod create \
       --no-file \
-      --preset "$SMOKE_PRESET" \
-      --repo "$SMOKE_REPO" \
+      --no-profile \
+      ${origin[@]+"${origin[@]}"} \
       --name "$SMOKE_NAME" \
       --ttl "$SMOKE_TTL" \
       --no-network \
@@ -338,7 +349,15 @@ run_authenticated_checks() {
   configure_cw_auth
   tmp_local="$(mktemp "$ROOT/.tmp/prod-smoke-file.XXXXXX")"
 
-  cw_prod whoami --output json | jq -e '.email and .email != ""' >/dev/null
+  local whoami email
+  whoami="$(cw_prod whoami --output json)" || die "cw whoami failed"
+  email="$(jq -r '.email // ""' <<<"$whoami")"
+  [[ -n "$email" ]] || die "cw whoami named no user"
+  # The key must be the Production smoke identity's, never another user's.
+  if [[ -n "${EXPECTED_CODEWIRE_PROD_SMOKE_USER_EMAIL:-}" &&
+    "$email" != "$EXPECTED_CODEWIRE_PROD_SMOKE_USER_EMAIL" ]]; then
+    die "cw whoami names another user than EXPECTED_CODEWIRE_PROD_SMOKE_USER_EMAIL"
+  fi
   printf '%-28s %s\n' "cw whoami" "ok"
 
   if [[ -z "$SMOKE_ENV_ID" ]]; then

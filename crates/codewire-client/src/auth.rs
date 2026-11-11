@@ -1228,7 +1228,12 @@ impl AuthClient {
             .send()
             .await?;
         let response = check_response(response).await?;
-        Ok(response.json::<AuthResponse>().await?)
+        // The server answers `null` when the credential is no session and no
+        // valid API key: no user, rather than an undecodable body (#4135).
+        Ok(response
+            .json::<Option<AuthResponse>>()
+            .await?
+            .unwrap_or_default())
     }
 
     pub async fn logout(&self) -> Result<(), AuthClientError> {
@@ -1987,6 +1992,28 @@ mod tests {
             "user_123"
         );
         authenticated.logout().await.expect("logout");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_null_session_is_no_user() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::Value::Null))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let session = AuthClient::authenticated(
+            ClientConfig::new(server.uri()).expect("config"),
+            Arc::new(StaticTokenProvider::new("cw_revoked").expect("token")),
+            reqwest::Client::new(),
+        )
+        .get_session()
+        .await
+        .expect("a null session decodes");
+        assert_eq!(session, AuthResponse::default());
         server.verify().await;
     }
 

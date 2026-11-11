@@ -1978,6 +1978,7 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/tests/test-smoke-dev-commodity.sh|\
       scripts/runtime/tests/test-smoke-dev-application-secrets.sh|\
       scripts/ci/verify/runtime-dev-commodity-smoke.sh|\
+      scripts/ci/verify/smoke-prod.sh|scripts/runtime/tests/test-smoke-prod.sh|\
       scripts/runtime/dev/smoke-dev-transport-matrix.sh|\
       scripts/runtime/dev/smoke-dev-candidate.sh|\
       scripts/runtime/tests/test-smoke-dev-transport-matrix.sh|\

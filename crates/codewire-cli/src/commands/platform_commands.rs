@@ -699,6 +699,52 @@ pub(crate) fn oauth_user_display_name(user: &OAuthUserInfo) -> String {
         .unwrap_or_else(|| "(unknown)".to_string())
 }
 
+pub(crate) fn platform_user_display_name(user: &PlatformUser) -> String {
+    [user.name.as_str(), user.email.as_str()]
+        .into_iter()
+        .find_map(trimmed_str)
+        .unwrap_or("(unknown)")
+        .to_string()
+}
+
+/// The user behind the platform credential (#4135). An OAuth access token
+/// answers at the OAuth userinfo endpoint. A `cw_` API key is no OAuth token:
+/// the session endpoint answers for it, with the user the key acts as, and the
+/// key never carries that user's admin authority.
+pub(crate) async fn current_platform_user(
+    client: &CodewireClient,
+    server_url: &str,
+) -> anyhow::Result<PlatformUser> {
+    let token = client
+        .bearer_token()
+        .await
+        .context("read the platform credential")?;
+    if token.expose_secret().starts_with("cw_") {
+        let session = client
+            .auth()
+            .get_session()
+            .await
+            .context("API key identity lookup failed")?;
+        let mut user = session
+            .user
+            .context("the API key is invalid, expired or disabled")?;
+        user.is_admin = false;
+        return Ok(user);
+    }
+    let response = OAuthClient::for_server_url(server_url)?
+        .userinfo(&token)
+        .await
+        .context("OAuth user info failed")?;
+    Ok(PlatformUser {
+        id: response.sub,
+        email: response.email.unwrap_or_default(),
+        email_verified: response.email_verified.unwrap_or(false),
+        name: response.name.unwrap_or_default(),
+        image: response.picture.unwrap_or_default(),
+        ..PlatformUser::default()
+    })
+}
+
 /// Open `url` in the person's browser, fully detached from this command: the
 /// opener and the browser it starts get null stdin, stdout and stderr and
 /// their own process group, and are never waited on. A browser's own messages
@@ -2066,38 +2112,17 @@ pub(crate) async fn doctor_platform_check(
         Ok(client) => client,
         Err(err) => return doctor_check("platform", DoctorStatus::Fail, err.to_string()),
     };
-    let token = match client.bearer_token().await {
-        Ok(token) => token,
-        Err(err) => {
-            return doctor_check(
-                "platform",
-                DoctorStatus::Fail,
-                format!("OAuth token failed: {err}"),
-            );
-        }
-    };
-    match OAuthClient::for_server_url(&platform.server_url) {
-        Ok(oauth) => match oauth.userinfo(&token).await {
-            Ok(user) => doctor_check(
-                "platform",
-                DoctorStatus::Ok,
-                format!(
-                    "{} on {}",
-                    oauth_user_display_name(&user),
-                    platform.server_url
-                ),
-            ),
-            Err(err) => doctor_check(
-                "platform",
-                DoctorStatus::Fail,
-                format!("OAuth user info failed: {err}"),
-            ),
-        },
-        Err(err) => doctor_check(
+    match current_platform_user(&client, &platform.server_url).await {
+        Ok(user) => doctor_check(
             "platform",
-            DoctorStatus::Fail,
-            format!("OAuth client failed: {err}"),
+            DoctorStatus::Ok,
+            format!(
+                "{} on {}",
+                platform_user_display_name(&user),
+                platform.server_url
+            ),
         ),
+        Err(err) => doctor_check("platform", DoctorStatus::Fail, format!("{err:#}")),
     }
 }
 

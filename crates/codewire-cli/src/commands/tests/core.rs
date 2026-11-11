@@ -1656,6 +1656,130 @@ fn format_whoami_text_omits_empty_default_org() {
     );
 }
 
+/// A platform client on `server` that presents `token`, as `cw` builds one.
+fn identity_client(server: &wiremock::MockServer, token: &str) -> codewire_client::CodewireClient {
+    codewire_client::CodewireClient::with_token_provider(
+        codewire_client::ClientConfig::new(server.uri()).unwrap(),
+        std::sync::Arc::new(codewire_client::StaticTokenProvider::new(token).unwrap()),
+    )
+    .unwrap()
+}
+
+/// `path` answers `body` to `token`, `calls` times.
+async fn identity_endpoint(
+    server: &wiremock::MockServer,
+    path: &str,
+    token: &str,
+    body: serde_json::Value,
+    calls: u64,
+) {
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path(path))
+        .and(wiremock::matchers::header(
+            "authorization",
+            format!("Bearer {token}"),
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(body))
+        .expect(calls)
+        .mount(server)
+        .await;
+}
+
+const SYNTHETIC_API_KEY: &str =
+    "cw_0000000000000000000000000000000000000000000000000000000000000000";
+
+#[tokio::test]
+async fn an_api_key_is_the_user_it_acts_as_without_admin_authority() {
+    let server = wiremock::MockServer::start().await;
+    identity_endpoint(
+        &server,
+        "/api/auth/get-session",
+        SYNTHETIC_API_KEY,
+        serde_json::json!({
+            "user": {
+                "id": "user-smoke",
+                "email": "smoke@example.invalid",
+                "email_verified": true,
+                "name": "Smoke",
+                "is_admin": true,
+            },
+            "session": {"id": "", "expires_at": ""},
+        }),
+        1,
+    )
+    .await;
+    // An API key is no OAuth token: userinfo would refuse it (#4135).
+    identity_endpoint(&server, "/api/oauth/userinfo", SYNTHETIC_API_KEY, serde_json::json!({}), 0)
+        .await;
+
+    let user = current_platform_user(&identity_client(&server, SYNTHETIC_API_KEY), &server.uri())
+        .await
+        .unwrap();
+    assert_eq!(user.id, "user-smoke");
+    assert_eq!(user.email, "smoke@example.invalid");
+    assert_eq!(user.name, "Smoke");
+    assert!(!user.is_admin, "a key never carries its owner's admin authority");
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_revoked_api_key_is_named_plainly() {
+    let server = wiremock::MockServer::start().await;
+    identity_endpoint(
+        &server,
+        "/api/auth/get-session",
+        SYNTHETIC_API_KEY,
+        serde_json::Value::Null,
+        1,
+    )
+    .await;
+
+    let error = current_platform_user(&identity_client(&server, SYNTHETIC_API_KEY), &server.uri())
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "the API key is invalid, expired or disabled");
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn an_oauth_login_is_the_userinfo_subject() {
+    let server = wiremock::MockServer::start().await;
+    identity_endpoint(
+        &server,
+        "/api/oauth/userinfo",
+        "synthetic-access",
+        serde_json::json!({
+            "sub": "user-owner",
+            "email": "owner@example.invalid",
+            "email_verified": true,
+            "name": "Owner",
+        }),
+        1,
+    )
+    .await;
+    identity_endpoint(&server, "/api/auth/get-session", "synthetic-access", serde_json::json!({}), 0)
+        .await;
+
+    let user = current_platform_user(&identity_client(&server, "synthetic-access"), &server.uri())
+        .await
+        .unwrap();
+    assert_eq!(user.id, "user-owner");
+    assert_eq!(user.email, "owner@example.invalid");
+    assert_eq!(platform_user_display_name(&user), "Owner");
+    server.verify().await;
+}
+
+#[test]
+fn platform_user_display_name_prefers_name_then_email() {
+    let email_only = PlatformUser {
+        name: " ".to_string(),
+        email: "n@example.com".to_string(),
+        ..PlatformUser::default()
+    };
+    assert_eq!(platform_user_display_name(&email_only), "n@example.com");
+    assert_eq!(platform_user_display_name(&PlatformUser::default()), "(unknown)");
+}
+
 fn test_environment(id: &str, name: Option<&str>, state: &str) -> Environment {
     Environment {
         id: id.to_string(),
