@@ -318,16 +318,15 @@ seed-e2e-users:
 # install` (pinned in the root package.json
 # devDependencies). The protoc built-in python/pyi generators need
 # protobuf-compiler (protoc) on PATH; protoc-gen-connectrpc and its runtime
-# compatibility protobuf are pinned into the repo-root .venv-proto venv.
+# compatibility protobuf are installed into the repo-root .venv-proto venv from
+# proto/python-tools.lock, which pins them with hashes.
 proto-tools:
 	go install github.com/bufbuild/buf/cmd/buf@v1.50.0
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.5
 	go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.18.1
 	python3 -m venv .venv-proto
-	.venv-proto/bin/python -m pip install --quiet \
-		'protobuf==7.35.1' \
-		'connectrpc==0.11.1' \
-		'protoc-gen-connectrpc==0.11.1'
+	.venv-proto/bin/python -m pip install --quiet --require-hashes \
+		-r proto/python-tools.lock
 	@if [ "$$(uname -s)-$$(uname -m)" != "Linux-x86_64" ]; then \
 		echo "proto-tools: pinned protoc download only wired for Linux x86_64;" \
 			"install protoc $(PROTOC_VERSION) at $(PROTOC_DIR)/bin/protoc manually" && exit 1; \

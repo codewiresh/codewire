@@ -249,8 +249,9 @@ error surface. When a client WI flips an area (05 onward):
 - **Python:** protoc built-in `python`/`pyi` generators (via the
   *pinned* protoc in `.proto-tools/` — their output is
   protoc-version-dependent and checked in) plus
-  `protoc-gen-connectrpc` with Google protobuf compatibility (pinned into
-  the repo-root `.venv-proto` venv) write `codewire/**` to
+  `protoc-gen-connectrpc` with Google protobuf compatibility (installed into
+  the repo-root `.venv-proto` venv from the hash-pinned
+  `proto/python-tools.lock`) write `codewire/**` to
   `libs/gen-python/`. The separate local
   `proto/buf.gen.google-rpc-python.yaml` template writes the vendored
   `google.rpc` error-detail messages beside them, so the Python SDK can decode

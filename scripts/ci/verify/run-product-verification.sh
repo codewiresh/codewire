@@ -952,10 +952,8 @@ install_contract_toolchain() {
   go_bin="$(go env GOPATH)/bin"
   export PATH="$HOME/.proto-tools/protoc/bin:$HOME/.proto-tools/bin:$go_bin:$PATH"
   python3 -m venv .venv-proto
-  .venv-proto/bin/python -m pip install --quiet \
-    'protobuf==7.35.1' \
-    'connectrpc==0.11.1' \
-    'protoc-gen-connectrpc==0.11.1'
+  .venv-proto/bin/python -m pip install --quiet --require-hashes \
+    -r proto/python-tools.lock
 }
 
 run_contracts_proto() {
@@ -1201,7 +1199,8 @@ run_sdk_python() {
   local package_work sdist wheel
   package_work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-sdk-python-package.XXXXXX")"
   python3 -m venv .venv-sdk
-  .venv-sdk/bin/python -m pip install --upgrade pip
+  .venv-sdk/bin/python -m pip install --require-hashes \
+    -r libs/sdk-python/requirements-pip.lock
   scripts/ci/release/package-sdk-python.sh "$package_work/dist"
   sdist="$(find "$package_work/dist" -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
   wheel="$(find "$package_work/dist" -maxdepth 1 -type f -name '*.whl' -print -quit)"
@@ -1871,8 +1870,8 @@ run_security() {
     go_bin="$(go env GOPATH)/bin"
     export PATH="$go_bin:$PATH"
     go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
-    go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
-    go install github.com/securego/gosec/v2/cmd/gosec@latest
+    go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+    go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
     for module in "${GO_MODULE_DIRS[@]}"; do
       (cd "$module" && GOWORK=off govulncheck ./...)
     done

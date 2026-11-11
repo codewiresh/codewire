@@ -1,0 +1,4 @@
+# The Python side of the proto toolchain; proto/python-tools.lock pins it with hashes.
+protobuf==7.35.1
+connectrpc==0.11.1
+protoc-gen-connectrpc==0.11.1

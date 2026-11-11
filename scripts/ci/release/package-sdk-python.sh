@@ -22,7 +22,8 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-sdk-python-build.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT
 
 python3 -m venv "$work/venv"
-"$work/venv/bin/python" -m pip install --quiet --upgrade pip
+"$work/venv/bin/python" -m pip install --quiet --require-hashes \
+  -r "$root/libs/sdk-python/requirements-pip.lock"
 "$work/venv/bin/python" -m pip install --quiet --require-hashes \
   -r "$root/libs/sdk-python/requirements-build.lock"
 "$work/venv/bin/python" -m build --no-isolation --outdir "$work/dist" "$root/libs/sdk-python"
