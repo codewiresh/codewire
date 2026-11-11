@@ -34,7 +34,11 @@ work, weaken a gate for momentum, or use destructive Git or filesystem
 operations without an explicit request.
 
 **Tier 3: recovery, unusual Production mutation and direct credential access
-need explicit, action-scoped authority from the owner.** Ordinary merge
+need explicit, action-scoped authority from the owner.** A Production
+configuration change observed working on Dev, with a written rollback, that
+ships through the normal release path is not unusual and needs no per-action
+approval (owner, 2026-11-11; cited on #3013; the full list is in the root
+`AGENTS.md`). Ordinary merge
 consequences already declared at the canonical base (CI, support-image
 publication, Dev delivery, GitHub mirroring) inherit merge authority; new
 destinations, workflow changes, recovery and unusual Production actions do not.
