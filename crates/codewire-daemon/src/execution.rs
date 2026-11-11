@@ -39,13 +39,22 @@ impl PtyLaunchGuard {
         self.0.take().expect("PTY launch child is owned")
     }
     pub(crate) async fn terminate_confirmed(&mut self, timeout: std::time::Duration) -> bool {
+        self.terminate_confirmed_spending(&crate::confirm::CheckBudget::new(timeout))
+            .await
+    }
+
+    /// [`Self::terminate_confirmed`], spending a cleanup's shared checks.
+    pub(crate) async fn terminate_confirmed_spending(
+        &mut self,
+        budget: &crate::confirm::CheckBudget,
+    ) -> bool {
         let Some(child) = self.0.as_mut() else {
             return true;
         };
         // A failed signal is not proof either way: the exact child may have
         // already exited. Only a successful reap establishes completion.
         let _ = child.kill();
-        let reaped = crate::confirm::check_within(timeout, || match child.try_wait() {
+        let reaped = crate::confirm::check_spending(budget, || match child.try_wait() {
             Ok(Some(_)) => Some(true),
             Err(_) => Some(false),
             Ok(None) => None,

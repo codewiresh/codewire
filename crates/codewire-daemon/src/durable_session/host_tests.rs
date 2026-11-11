@@ -1386,6 +1386,134 @@ impl FixtureDescendant {
             }
         }
     }
+
+    /// Ends a captured descendant that outlives the fixture on purpose,
+    /// through its pidfd, then joins it.
+    fn kill_and_reap(&self) {
+        assert_eq!(
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.pidfd.as_raw_fd(),
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                )
+            },
+            0
+        );
+        let mut ended = libc::pollfd {
+            fd: self.pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let wait = i32::try_from(HANG.as_millis()).unwrap();
+        assert_eq!(unsafe { libc::poll(&mut ended, 1, wait) }, 1);
+        self.reap();
+    }
+}
+
+/// A stop's cleanup steps share one budget that ends inside the 5 s a stop
+/// is given (#3777, #4153). An output drain held just over one second by a
+/// process that left the session, which the group's signals never reach,
+/// settles; one second per step used to leave such a stop unknown.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn host_stop_settles_an_output_drain_slower_than_one_second() {
+    if isolated_descendant_fixture("host_stop_settles_an_output_drain_slower_than_one_second").await
+    {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let engine = host_engine(temp.path());
+    let holder = temp.path().join("holder.pid");
+    // The holder names itself only once it has left the session, so the stop
+    // never meets it inside; its 1.6 s start when the stop does.
+    let go = temp.path().join("stop-started");
+    let script = format!(
+        "setsid sh -c 'echo $$ > \"{}\"; while [ ! -e \"{}\" ]; do sleep 0.05; done; exec sleep 1.6' & exec sleep 60",
+        holder.display(),
+        go.display()
+    );
+    let record = engine.launch(request(&script, false)).await.unwrap();
+    let holder_pid: u32 = wait_file(&holder).await.trim().parse().unwrap();
+    let holder = FixtureDescendant::capture(holder_pid);
+    std::fs::write(&go, b"").unwrap();
+    let started = std::time::Instant::now();
+    let stopped = tokio::time::timeout(HANG, engine.stop(&record.session_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(
+        stopped.state,
+        v1::SessionLifecycleState::Stopped as i32,
+        "{}",
+        stopped.status_message
+    );
+    assert!(!stopped.cleanup_unknown);
+    assert!(
+        elapsed > Duration::from_secs(1),
+        "the drain settled in {elapsed:?}, under the old step"
+    );
+    assert!(
+        !alive(holder_pid),
+        "holder {holder_pid} alive {:?} after the stop began: stat {:?}, stdout {:?}",
+        started.elapsed(),
+        std::fs::read_to_string(format!("/proc/{holder_pid}/stat")).ok(),
+        std::fs::read_link(format!("/proc/{holder_pid}/fd/1")).ok()
+    );
+    holder.reap();
+    engine.shutdown().await.unwrap();
+    assert_no_fixture_children();
+}
+
+/// A drain that never settles still leaves the stop's cleanup unknown, and
+/// the stop answers within the 5 s it is given (#3777).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn host_stop_reports_a_drain_that_never_settles_as_unknown_within_its_budget() {
+    if isolated_descendant_fixture(
+        "host_stop_reports_a_drain_that_never_settles_as_unknown_within_its_budget",
+    )
+    .await
+    {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let engine = host_engine(temp.path());
+    let holder = temp.path().join("holder.pid");
+    let script = format!(
+        "setsid sh -c 'echo $$ > \"{}\"; exec sleep 60' & exec sleep 60",
+        holder.display()
+    );
+    let record = engine.launch(request(&script, false)).await.unwrap();
+    let holder_pid: u32 = wait_file(&holder).await.trim().parse().unwrap();
+    let holder = FixtureDescendant::capture(holder_pid);
+    let started = std::time::Instant::now();
+    let stopped = tokio::time::timeout(HANG, engine.stop(&record.session_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(stopped.state, v1::SessionLifecycleState::Interrupted as i32);
+    assert!(stopped.cleanup_unknown);
+    assert!(
+        elapsed < codewire_daemon_proto::SESSION_INPUT_TIMEOUT,
+        "an unsettled cleanup answered after {elapsed:?}"
+    );
+    assert!(
+        alive(holder_pid),
+        "the process outside the session was signaled"
+    );
+    holder.kill_and_reap();
+    // Shutdown does not claim a clean end for a cleanup that stayed unknown.
+    let shutdown = engine.shutdown().await.unwrap_err();
+    assert!(
+        shutdown.to_string().contains("cleanup remains unconfirmed"),
+        "{shutdown}"
+    );
+    assert_no_fixture_children();
 }
 
 #[tokio::test]

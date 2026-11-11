@@ -4,28 +4,33 @@
 use std::io;
 use std::time::Duration;
 
+use crate::confirm::CheckBudget;
+
 pub(crate) const TERM_GRACE: Duration = Duration::from_millis(250);
-/// The product's bound on each step of a host group's cleanup: descendants
-/// settling after KILL, the leader's reap and the output drain. A step that
-/// outlasts it leaves cleanup unknown.
-pub(crate) const JOIN_TIMEOUT: Duration = Duration::from_secs(1);
+/// The product's bound on a host group's whole cleanup after [`TERM_GRACE`]:
+/// descendants settling after KILL, the leader's reap, and the control and
+/// output joins share it. With the grace it ends 4 s after a stop, inside the
+/// 5 s that host control and orchestration give a stop. Cleanup that has not
+/// settled by then is unknown. One bound per step (1 s) let an ordinary slow
+/// step report unknown (#3777).
+pub(crate) const CLEANUP_BUDGET: Duration = Duration::from_millis(3_750);
 
 pub(crate) struct OwnedProcessGroup {
     pid: libc::pid_t,
     armed: bool,
-    cleanup_bound: Duration,
+    cleanup: CheckBudget,
 }
 
 impl OwnedProcessGroup {
-    /// Owns `pid`'s group; `cleanup_bound` bounds each cleanup step, which
-    /// is [`JOIN_TIMEOUT`] in the product.
-    pub(crate) fn new(pid: u32, cleanup_bound: Duration) -> io::Result<Self> {
+    /// Owns `pid`'s group; `cleanup_budget` bounds its whole cleanup, which
+    /// is [`CLEANUP_BUDGET`] in the product.
+    pub(crate) fn new(pid: u32, cleanup_budget: Duration) -> io::Result<Self> {
         let pid = libc::pid_t::try_from(pid)
             .map_err(|_| io::Error::other("host leader PID is invalid"))?;
         let group = Self {
             pid,
             armed: true,
-            cleanup_bound,
+            cleanup: CheckBudget::new(cleanup_budget),
         };
         // The caller retains the Child. waitid checks ownership without reaping.
         group.exited()?;
@@ -63,8 +68,9 @@ impl OwnedProcessGroup {
         }))
     }
 
-    pub(crate) fn cleanup_bound(&self) -> Duration {
-        self.cleanup_bound
+    /// The checks every step of this group's cleanup spends.
+    pub(crate) fn cleanup(&self) -> &CheckBudget {
+        &self.cleanup
     }
 
     pub(crate) fn exited(&self) -> io::Result<bool> {
@@ -117,7 +123,7 @@ impl OwnedProcessGroup {
     /// PTY job control can create additional process groups without escaping the
     /// owned session. Linux pidfds signal those exact processes, never bare PIDs.
     async fn terminate_session_members(&self) -> io::Result<()> {
-        crate::confirm::check_within(self.cleanup_bound, || {
+        crate::confirm::check_spending(&self.cleanup, || {
             match self.signal_session_members(libc::SIGKILL) {
                 Ok(0) => Some(Ok(())),
                 Ok(_) => None,
