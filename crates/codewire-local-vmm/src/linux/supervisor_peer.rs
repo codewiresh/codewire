@@ -19,6 +19,7 @@ use super::path::{FileIdentity, SocketIdentity, current_uid};
 use super::process::ProcessIdentity;
 use crate::process_birth::{AdmissionError, ProcessBirth, admit_retained_version, in_a_store};
 use crate::supervisor_config::NativeRuntimeConfig;
+use crate::uds::ArgumentDifference;
 
 const MAX_ARGV_BYTES: usize = 16 * 1024;
 const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
@@ -36,6 +37,14 @@ pub(crate) enum PeerError {
     Provenance,
     #[error("native supervisor runs an executable no managed cw store holds")]
     Unverified { pid: u32, executable: PathBuf },
+    #[error("native supervisor serves this root for another configuration")]
+    OtherConfiguration {
+        pid: u32,
+        executable: PathBuf,
+        differences: Vec<ArgumentDifference>,
+    },
+    #[error("native supervisor executable was deleted")]
+    DeletedExecutable { pid: u32, executable: PathBuf },
 }
 
 impl From<AdmissionError> for PeerError {
@@ -73,7 +82,7 @@ impl SupervisorPeerPin {
         let deadline = Instant::now() + ADMISSION_TIMEOUT;
         let (pidfd, pid) = socket_pidfd(stream)?;
         require_live(&pidfd)?;
-        let peer = ProcessBirth::observe(pid).map_err(|_| PeerError::Identity)?;
+        let peer = ProcessBirth::observe(pid).map_err(|_| deleted_or_changed(pid))?;
         let argv = process_argv(pid)?;
         let config = requested
             .map(|config| {
@@ -85,7 +94,11 @@ impl SupervisorPeerPin {
         if let Some(config) = &config
             && argv != config.supervisor_argv()
         {
-            return Err(PeerError::Role);
+            return Err(PeerError::OtherConfiguration {
+                pid,
+                executable: peer.executable().to_owned(),
+                differences: argument_differences(&argv, config),
+            });
         }
         if requested.is_some_and(|config| config.executable != peer.executable()) {
             if !in_a_store(&peer) {
@@ -323,6 +336,49 @@ pub(crate) fn admit_known_birth_socket(
     }
     require_live(&pidfd)?;
     Ok(pidfd)
+}
+
+/// Why a live peer's birth could not be observed. A deleted or replaced
+/// executable stays so, unlike a peer that is ending, so it is named (#3793).
+fn deleted_or_changed(pid: u32) -> PeerError {
+    let Ok(link) = fs::read_link(format!("/proc/{pid}/exe")) else {
+        return PeerError::Identity;
+    };
+    match link.as_os_str().as_bytes().strip_suffix(b" (deleted)") {
+        Some(executable) if executable.starts_with(b"/") => PeerError::DeletedExecutable {
+            pid,
+            executable: PathBuf::from(OsString::from_vec(executable.to_vec())),
+        },
+        _ => PeerError::Identity,
+    }
+}
+
+/// The configuration flags whose values in the peer's arguments differ from
+/// the requested configuration's.
+fn argument_differences(
+    argv: &[OsString],
+    requested: &NativeRuntimeConfig,
+) -> Vec<ArgumentDifference> {
+    let held = |flag: &str| {
+        argv.iter()
+            .skip(2)
+            .position(|argument| argument.as_bytes() == flag.as_bytes())
+            .and_then(|index| argv.get(index + 3))
+    };
+    requested
+        .supervisor_flags()
+        .into_iter()
+        .filter_map(|(flag, value)| {
+            let supervisor = held(flag);
+            (supervisor.map(OsString::as_os_str) != Some(value.as_os_str())).then(|| {
+                ArgumentDifference {
+                    flag,
+                    supervisor: supervisor.map(PathBuf::from),
+                    requested: value.to_owned(),
+                }
+            })
+        })
+        .collect()
 }
 
 fn require_live(pidfd: &OwnedFd) -> Result<(), PeerError> {

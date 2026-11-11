@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::os::unix::ffi::OsStrExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
@@ -176,7 +176,16 @@ impl NativeRuntimeConfig {
             self.executable.as_os_str().to_owned(),
             "__native-supervisor".into(),
         ];
-        for (flag, path) in [
+        for (flag, path) in self.supervisor_flags() {
+            argv.push(flag.into());
+            argv.push(path.as_os_str().to_owned());
+        }
+        argv
+    }
+
+    /// Each configuration flag of [`Self::supervisor_argv`] with its value.
+    pub(crate) fn supervisor_flags(&self) -> [(&'static str, &Path); 6] {
+        [
             ("--root", &self.root),
             ("--artifact-root", &self.artifact_root),
             ("--artifact-lock", &self.artifact_lock),
@@ -186,11 +195,7 @@ impl NativeRuntimeConfig {
                 "--credential-authority-root",
                 &self.credential_authority_root,
             ),
-        ] {
-            argv.push(flag.into());
-            argv.push(path.as_os_str().to_owned());
-        }
-        argv
+        ]
     }
 
     /// Where a supervisor from before #2735 (protocol 10 and earlier) listens

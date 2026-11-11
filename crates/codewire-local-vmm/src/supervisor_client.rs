@@ -16,7 +16,7 @@ use crate::control::v1::local_supervisor_service_client::LocalSupervisorServiceC
 use crate::host::supervisor_peer::SupervisorPeerPin;
 use crate::supervisor_config::NativeRuntimeConfig;
 use crate::supervisor_config::{SupervisorConfigError, SupervisorFeature, admit_supervisor_info};
-pub use crate::uds::{SupervisorRefusal, UdsError};
+pub use crate::uds::{ArgumentDifference, SupervisorRefusal, UdsError};
 use crate::uds::{capture_supervisor_peer, connect_supervisor_peer};
 use std::sync::Arc;
 

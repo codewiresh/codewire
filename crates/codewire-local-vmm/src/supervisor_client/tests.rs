@@ -996,6 +996,55 @@ fn a_create_cleanup_outcome_keeps_the_error_code() {
     assert_eq!(status.code(), failure.code());
 }
 
+/// A supervisor this cw never uses names who holds the root and why, with a
+/// recovery instead of a retry that cannot succeed (#3793).
+#[test]
+fn a_supervisor_for_other_configuration_or_a_deleted_cw_names_its_recovery() {
+    let other = SupervisorRefusal::OtherConfiguration {
+        pid: 7,
+        executable: PathBuf::from("/opt/cw/cw"),
+        differences: vec![crate::uds::ArgumentDifference {
+            flag: "--platform-config-dir",
+            supervisor: Some(PathBuf::from("/tmp/smoke/cw-config")),
+            requested: PathBuf::from("/home/user/.config/cw"),
+        }],
+    };
+    assert_eq!(
+        other.summary(),
+        "they are served by a cw started with other configuration (process 7, /opt/cw/cw): --platform-config-dir is /tmp/smoke/cw-config, this cw uses /home/user/.config/cw"
+    );
+    assert_eq!(
+        other.recovery().unwrap(),
+        "Stop its VMs with the cw and configuration that started it, then end it with `kill 7`; the next cw command starts this cw's own"
+    );
+    assert_eq!(
+        UdsError::SupervisorPeerAdmission(other).to_string(),
+        "your local VMs are served by a cw started with other configuration (process 7, /opt/cw/cw): --platform-config-dir is /tmp/smoke/cw-config, this cw uses /home/user/.config/cw. Stop its VMs with the cw and configuration that started it, then end it with `kill 7`; the next cw command starts this cw's own"
+    );
+    let unnamed = SupervisorRefusal::OtherConfiguration {
+        pid: 7,
+        executable: PathBuf::from("/opt/cw/cw"),
+        differences: Vec::new(),
+    };
+    assert!(
+        unnamed
+            .summary()
+            .ends_with(": its arguments differ from this cw's")
+    );
+    let deleted = SupervisorRefusal::DeletedExecutable {
+        pid: 8,
+        executable: PathBuf::from("/src/target/debug/cw"),
+    };
+    assert_eq!(
+        deleted.summary(),
+        "they are served by process 8, whose executable /src/target/debug/cw was deleted or replaced, so this cw cannot check it"
+    );
+    assert_eq!(
+        deleted.recovery().unwrap(),
+        "End it with `kill 8` once nothing runs in its VMs; the next cw command starts this cw's own"
+    );
+}
+
 /// Every error that carries a supervisor refusal names it, however it is
 /// wrapped, so a caller can show its recovery instead of a retry (#3548).
 #[test]

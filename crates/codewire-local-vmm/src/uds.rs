@@ -175,6 +175,20 @@ fn supervisor_peer_error(error: crate::host::supervisor_peer::PeerError) -> UdsE
         PeerError::Unverified { pid, executable } => {
             SupervisorRefusal::Unverified { pid, executable }
         }
+        #[cfg(target_os = "linux")]
+        PeerError::OtherConfiguration {
+            pid,
+            executable,
+            differences,
+        } => SupervisorRefusal::OtherConfiguration {
+            pid,
+            executable,
+            differences,
+        },
+        #[cfg(target_os = "linux")]
+        PeerError::DeletedExecutable { pid, executable } => {
+            SupervisorRefusal::DeletedExecutable { pid, executable }
+        }
     })
 }
 
@@ -317,6 +331,27 @@ pub enum SupervisorRefusal {
     /// build. This cw cannot verify it, so it never uses it, and it ends no
     /// process it cannot verify: the person who started it does (#3548).
     Unverified { pid: u32, executable: PathBuf },
+    /// The peer serves this root for another configuration, such as another
+    /// `CW_CONFIG_DIR`. It would act with that configuration's login, so this
+    /// cw never uses it; it names what differs and who holds the root (#3793).
+    OtherConfiguration {
+        pid: u32,
+        executable: PathBuf,
+        differences: Vec<ArgumentDifference>,
+    },
+    /// The peer's executable was deleted, so this cw cannot check it. Unlike
+    /// a peer that is ending or being replaced, a retry never helps (#3793).
+    DeletedExecutable { pid: u32, executable: PathBuf },
+}
+
+/// One configuration argument the serving supervisor was started with that
+/// differs from this cw's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArgumentDifference {
+    pub flag: &'static str,
+    /// The supervisor's value; `None` when it was started without the flag.
+    pub supervisor: Option<PathBuf>,
+    pub requested: PathBuf,
 }
 
 impl SupervisorRefusal {
@@ -324,10 +359,7 @@ impl SupervisorRefusal {
     pub fn summary(&self) -> String {
         match self {
             Self::Check(reason) => format!("native supervisor admission refused: {reason}"),
-            Self::Unverified { pid, executable } => format!(
-                "they are served by a cw this one cannot verify (process {pid}, {}), not an installed cw version",
-                executable.display()
-            ),
+            _ => format!("they {}", self.served_by().unwrap_or_default()),
         }
     }
 
@@ -341,18 +373,69 @@ impl SupervisorRefusal {
                     "List its VMs with `{executable} --local ls` and stop any with `{executable} --local stop NAME`, then end it with `kill {pid}`; the next cw command starts this cw's own"
                 ))
             }
+            Self::OtherConfiguration { pid, .. } => Some(format!(
+                "Stop its VMs with the cw and configuration that started it, then end it with `kill {pid}`; the next cw command starts this cw's own"
+            )),
+            Self::DeletedExecutable { pid, .. } => Some(format!(
+                "End it with `kill {pid}` once nothing runs in its VMs; the next cw command starts this cw's own"
+            )),
+        }
+    }
+
+    /// Who serves this root and why this cw does not use it, for the named
+    /// refusals: "are served by …".
+    fn served_by(&self) -> Option<String> {
+        match self {
+            Self::Check(_) => None,
+            Self::Unverified { pid, executable } => Some(format!(
+                "are served by a cw this one cannot verify (process {pid}, {}), not an installed cw version",
+                executable.display()
+            )),
+            Self::OtherConfiguration {
+                pid,
+                executable,
+                differences,
+            } => {
+                let differs = if differences.is_empty() {
+                    "its arguments differ from this cw's".to_owned()
+                } else {
+                    differences
+                        .iter()
+                        .map(|difference| match &difference.supervisor {
+                            Some(value) => format!(
+                                "{} is {}, this cw uses {}",
+                                difference.flag,
+                                value.display(),
+                                difference.requested.display()
+                            ),
+                            None => format!(
+                                "{} is not set, this cw uses {}",
+                                difference.flag,
+                                difference.requested.display()
+                            ),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                };
+                Some(format!(
+                    "are served by a cw started with other configuration (process {pid}, {}): {differs}",
+                    executable.display()
+                ))
+            }
+            Self::DeletedExecutable { pid, executable } => Some(format!(
+                "are served by process {pid}, whose executable {} was deleted or replaced, so this cw cannot check it",
+                executable.display()
+            )),
         }
     }
 }
 
 impl std::fmt::Display for SupervisorRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match (self, self.recovery()) {
-            (Self::Unverified { pid, executable }, Some(recovery)) => write!(
-                formatter,
-                "your local VMs are served by a cw this one cannot verify (process {pid}, {}), not an installed cw version. {recovery}",
-                executable.display()
-            ),
+        match (self.served_by(), self.recovery()) {
+            (Some(served_by), Some(recovery)) => {
+                write!(formatter, "your local VMs {served_by}. {recovery}")
+            }
             _ => formatter.write_str(&self.summary()),
         }
     }

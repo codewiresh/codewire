@@ -170,11 +170,11 @@ mod tests {
 
     const CLOUD_ID: &str = "0b7f6a52-3c1e-4d5a-9f0e-2a6c1d8e4b37";
 
-    /// The error a local supervisor that refuses this cw's configuration
-    /// gives, wrapped as the CLI wraps it.
+    /// The error a local supervisor that is ending or being replaced gives,
+    /// wrapped as the CLI wraps it: a retry can still succeed.
     fn refused() -> anyhow::Error {
         anyhow::Error::new(UdsError::SupervisorPeerAdmission(SupervisorRefusal::Check(
-            "role or configuration arguments do not match",
+            "process, socket or executable identity changed",
         )))
         .context("connect to native local supervisor")
     }
@@ -217,7 +217,7 @@ mod tests {
             PlacementChoice::Cloud {
                 id: CLOUD_ID.to_owned(),
                 local_unavailable: Some(LocalUnavailable {
-                    reason: "native supervisor admission refused: role or configuration arguments do not match".to_owned(),
+                    reason: "native supervisor admission refused: process, socket or executable identity changed".to_owned(),
                     recovery: None,
                 }),
             }
@@ -262,7 +262,7 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 format!(
-                    "local VMs could not be checked (native supervisor admission refused: role or configuration arguments do not match), so \"app\" may also name a local VM; add --cloud to use cloud environment {CLOUD_ID}, or name it by that ID"
+                    "local VMs could not be checked (native supervisor admission refused: process, socket or executable identity changed), so \"app\" may also name a local VM; add --cloud to use cloud environment {CLOUD_ID}, or name it by that ID"
                 )
             );
         }
@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(
             cloud_answered_notice(CLOUD_ID, &LocalUnavailable::from_error(&refused()), plain),
             format!(
-                "! Local VMs could not be checked: native supervisor admission refused: role or configuration arguments do not match\n  {CLOUD_ID} is a cloud environment; the cloud answered.\n"
+                "! Local VMs could not be checked: native supervisor admission refused: process, socket or executable identity changed\n  {CLOUD_ID} is a cloud environment; the cloud answered.\n"
             )
         );
         assert!(
@@ -352,6 +352,26 @@ mod tests {
                 plain
             )
             .ends_with("→ List its VMs with `/src/target/debug/cw --local ls` and stop any with `/src/target/debug/cw --local stop NAME`, then end it with `kill 7`; the next cw command starts this cw's own\n")
+        );
+        // A supervisor started with another CW_CONFIG_DIR names the
+        // difference and its process, not a retry (#3793).
+        let other = anyhow::Error::new(UdsError::SupervisorPeerAdmission(
+            SupervisorRefusal::OtherConfiguration {
+                pid: 9,
+                executable: "/opt/cw/cw".into(),
+                differences: vec![codewire_local_vmm::supervisor_client::ArgumentDifference {
+                    flag: "--platform-config-dir",
+                    supervisor: Some("/tmp/smoke/cw-config".into()),
+                    requested: "/home/user/.config/cw".into(),
+                }],
+            },
+        ))
+        .context("connect to native local supervisor");
+        assert_eq!(
+            cloud_answered_notice(CLOUD_ID, &LocalUnavailable::from_error(&other), plain),
+            format!(
+                "! Local VMs could not be checked: they are served by a cw started with other configuration (process 9, /opt/cw/cw): --platform-config-dir is /tmp/smoke/cw-config, this cw uses /home/user/.config/cw\n  {CLOUD_ID} is a cloud environment; the cloud answered.\n→ Stop its VMs with the cw and configuration that started it, then end it with `kill 9`; the next cw command starts this cw's own\n"
+            )
         );
     }
 }

@@ -250,22 +250,75 @@ async fn configured_peer_refuses_every_other_path_and_role_extension() {
                     .with_file_name("other-authority")
             }
         }
-        assert!(
-            capture_supervisor_peer(&fixture.config.supervisor_socket(), Some(&request))
-                .await
-                .is_err()
-        );
+        // The refusal names the holding process and exactly the flag that
+        // differs, so the user can see why their cw is refused (#3793).
+        let held = fixture.config.supervisor_flags()[field];
+        let requested = request.supervisor_flags()[field];
+        match capture_supervisor_peer(&fixture.config.supervisor_socket(), Some(&request)).await {
+            Err(crate::uds::UdsError::SupervisorPeerAdmission(
+                crate::uds::SupervisorRefusal::OtherConfiguration {
+                    pid,
+                    executable,
+                    differences,
+                },
+            )) => {
+                assert_eq!(pid, fixture.child.id());
+                assert_eq!(executable, fixture.config.executable);
+                assert_eq!(
+                    differences,
+                    [ArgumentDifference {
+                        flag: held.0,
+                        supervisor: Some(held.1.to_owned()),
+                        requested: requested.1.to_owned(),
+                    }]
+                );
+            }
+            other => panic!("field {field} was not refused as other configuration: {other:?}"),
+        }
         identity
             .revalidate(&fixture.config.supervisor_socket())
             .unwrap();
         assert!(fixture.child.try_wait().unwrap().is_none());
     }
+    // Arguments beyond the configuration flags differ without a flag to name.
     let extra = Fixture::start(true, &["--unadmitted"]);
-    assert!(
-        capture_supervisor_peer(&extra.config.supervisor_socket(), Some(&extra.request()))
-            .await
-            .is_err()
-    );
+    match capture_supervisor_peer(&extra.config.supervisor_socket(), Some(&extra.request())).await {
+        Err(crate::uds::UdsError::SupervisorPeerAdmission(
+            crate::uds::SupervisorRefusal::OtherConfiguration { differences, .. },
+        )) => assert!(differences.is_empty()),
+        other => panic!("an extended role was not refused as other configuration: {other:?}"),
+    }
+}
+
+/// A supervisor whose executable was deleted can never be checked again, so
+/// it is named with its process instead of a retry (#3793).
+#[tokio::test]
+async fn a_peer_with_a_deleted_executable_is_named() {
+    let fixture = Fixture::start(false, &[]);
+    fs::remove_file(&fixture.config.executable).unwrap();
+    match capture_supervisor_peer(
+        &fixture.config.supervisor_socket(),
+        Some(&fixture.request()),
+    )
+    .await
+    {
+        Err(crate::uds::UdsError::SupervisorPeerAdmission(refusal)) => {
+            assert_eq!(
+                refusal,
+                crate::uds::SupervisorRefusal::DeletedExecutable {
+                    pid: fixture.child.id(),
+                    executable: fixture.config.executable.clone(),
+                }
+            );
+            assert!(
+                refusal
+                    .recovery()
+                    .unwrap()
+                    .contains(&format!("kill {}", fixture.child.id()))
+            );
+        }
+        other => panic!("a deleted executable was not named: {other:?}"),
+    }
 }
 
 /// Provenance is admitted once per process birth (#2549). A new admission
