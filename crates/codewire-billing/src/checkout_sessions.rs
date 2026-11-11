@@ -273,8 +273,6 @@ async fn build_checkout(
         (days > 0).then_some(days as u32)
     });
 
-    let idempotency_key =
-        checkout_idempotency_key(org_id, &body.plan, &body.success_url, &body.cancel_url);
     run_organization_billing_mutation(pool, org_id, async {
         state
             .stripe
@@ -287,21 +285,11 @@ async fn build_checkout(
                 trial_days,
                 &body.success_url,
                 &body.cancel_url,
-                &idempotency_key,
             )
             .await
             .map_err(OrganizationBillingMutationError::ambiguous)
     })
     .await
-}
-
-fn checkout_idempotency_key(
-    org_id: &str,
-    plan: &str,
-    success_url: &str,
-    cancel_url: &str,
-) -> String {
-    billing_idempotency_key("org-checkout", &[org_id, plan, success_url, cancel_url])
 }
 
 fn billing_idempotency_key(kind: &str, parts: &[&str]) -> String {
@@ -345,11 +333,10 @@ pub async fn create_portal_session(
             .await?;
     let result = match customer_id.flatten().filter(|c| !c.is_empty()) {
         Some(customer) => {
-            let idempotency_key = billing_idempotency_key("portal", &[org_id, &body.return_url]);
             run_organization_billing_mutation(&state.pool, org_id, async {
                 state
                     .stripe
-                    .create_portal_session(&customer, &body.return_url, &idempotency_key)
+                    .create_portal_session(&customer, &body.return_url)
                     .await
                     .map_err(OrganizationBillingMutationError::ambiguous)
             })
@@ -407,18 +394,10 @@ pub async fn create_setup_session(
                 .map_err(OrganizationBillingMutationError::ambiguous)
         })
         .await?;
-        let setup_idempotency_key =
-            billing_idempotency_key("setup", &[org_id, &body.success_url, &body.cancel_url]);
         run_organization_billing_mutation(&state.pool, org_id, async {
             state
                 .stripe
-                .create_setup_session(
-                    &customer_id,
-                    &body.success_url,
-                    &body.cancel_url,
-                    org_id,
-                    &setup_idempotency_key,
-                )
+                .create_setup_session(&customer_id, &body.success_url, &body.cancel_url, org_id)
                 .await
                 .map_err(OrganizationBillingMutationError::ambiguous)
         })
@@ -440,36 +419,6 @@ pub async fn create_setup_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn checkout_idempotency_key_is_stable_bounded_and_body_sensitive() {
-        let first = checkout_idempotency_key(
-            "org_123",
-            "starter",
-            "https://app.codewire.test/success",
-            "https://app.codewire.test/cancel",
-        );
-        assert_eq!(
-            first,
-            checkout_idempotency_key(
-                "org_123",
-                "starter",
-                "https://app.codewire.test/success",
-                "https://app.codewire.test/cancel",
-            )
-        );
-        assert!(first.starts_with("cw-org-checkout-"));
-        assert!(first.len() <= 255);
-        assert_ne!(
-            first,
-            checkout_idempotency_key(
-                "org_123",
-                "starter",
-                "https://app.codewire.test/other-success",
-                "https://app.codewire.test/cancel",
-            )
-        );
-    }
-
     #[test]
     fn frontend_origin_accepts_only_absolute_same_origin_http_urls() {
         let origin = FrontendOrigin::parse("https://app.codewire.test:443/base").unwrap();

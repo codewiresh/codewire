@@ -4,6 +4,27 @@
 //! `*billing.BillingClient` has: every method degrades to a harmless
 //! default when Stripe isn't configured (`STRIPE_SECRET_KEY` unset),
 //! mirroring `billing: disabled (no STRIPE_SECRET_KEY)` on the Go side.
+//!
+//! ## Idempotency keys
+//!
+//! Stripe remembers an idempotency key for 24 hours and refuses it with any
+//! other parameters. Every idempotent call here is one of two kinds, named in
+//! [`IDEMPOTENT_CALLS`]:
+//!
+//! - **Operation-keyed:** the key names one business operation (one customer
+//!   per organization, one charge per top-up, one invoice item per billing
+//!   period). A retry must never act twice, even when a parameter changed
+//!   between a failed attempt and its retry, for example across a deploy, so
+//!   the key ignores the parameters. A changed parameter then fails loudly
+//!   for 24 hours instead of creating a second customer or charging twice.
+//!   Every call that moves money or creates an identity is of this kind.
+//! - **Parameter-keyed:** the call only opens a hosted Stripe page (checkout,
+//!   card setup, billing portal) and moves no money, so a duplicate is
+//!   harmless. Its key hashes the exact request sent, so a retry with the same
+//!   parameters reuses the session, and any parameter change, by a user or by
+//!   a new release, gets a new key rather than 24 hours of refusals (#3381:
+//!   adding the currency stopped every add-card that had been tried in the
+//!   previous day).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,7 +79,83 @@ pub fn check_test_key_requirement(required: Option<&str>, key: Option<&str>) -> 
 /// The one currency every Stripe call that names one uses: prices and credit
 /// are in euros, so a charge, an invoice item or a card setup session in any
 /// other currency is wrong (#3381).
-const BILLING_CURRENCY: stripe_types::Currency = stripe_types::Currency::EUR;
+pub(crate) const BILLING_CURRENCY: stripe_types::Currency = stripe_types::Currency::EUR;
+
+/// How an idempotent Stripe call is keyed; see the module documentation.
+/// Only the guard test reads it; outside tests it documents the contract.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdempotencyKind {
+    Operation,
+    Parameters,
+}
+
+/// Every idempotent Stripe call this client makes. A test fails when an
+/// idempotent call is missing here or is keyed against its kind.
+#[cfg_attr(not(test), allow(dead_code))]
+const IDEMPOTENT_CALLS: &[(&str, IdempotencyKind)] = &[
+    ("create_overage_invoice_item", IdempotencyKind::Operation),
+    ("update_overage_invoice_item", IdempotencyKind::Operation),
+    ("delete_invoice_item", IdempotencyKind::Operation),
+    ("create_auto_advancing_invoice", IdempotencyKind::Operation),
+    ("finalize_invoice", IdempotencyKind::Operation),
+    ("ensure_customer", IdempotencyKind::Operation),
+    ("expire_checkout_session", IdempotencyKind::Operation),
+    ("cancel_subscription", IdempotencyKind::Operation),
+    ("update_subscription_item", IdempotencyKind::Operation),
+    ("set_default_payment_method", IdempotencyKind::Operation),
+    ("charge_top_up", IdempotencyKind::Operation),
+    ("create_org_checkout_session", IdempotencyKind::Parameters),
+    ("create_portal_session", IdempotencyKind::Parameters),
+    ("create_setup_session", IdempotencyKind::Parameters),
+];
+
+/// The key of a parameter-keyed call: a hash of the request exactly as it is
+/// serialized, with object keys sorted so a map's iteration order cannot
+/// change it.
+fn parameter_key(kind: &str, request: &impl serde::Serialize) -> Result<IdempotencyKey, AppError> {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+
+    fn feed(value: &serde_json::Value, hasher: &mut Sha256) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                hasher.update(b"{");
+                for key in keys {
+                    hasher.update((key.len() as u64).to_be_bytes());
+                    hasher.update(key.as_bytes());
+                    feed(&map[key], hasher);
+                }
+                hasher.update(b"}");
+            }
+            serde_json::Value::Array(items) => {
+                hasher.update(b"[");
+                for item in items {
+                    feed(item, hasher);
+                }
+                hasher.update(b"]");
+            }
+            scalar => {
+                let text = scalar.to_string();
+                hasher.update((text.len() as u64).to_be_bytes());
+                hasher.update(text.as_bytes());
+            }
+        }
+    }
+
+    let value = serde_json::to_value(request).map_err(|e| {
+        AppError::InternalMsg(format!("stripe request is not serializable: {e}").into())
+    })?;
+    let mut hasher = Sha256::new();
+    feed(&value, &mut hasher);
+    let mut key = format!("cw-{kind}-");
+    for byte in hasher.finalize() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    IdempotencyKey::new(key).map_err(stripe_err)
+}
 
 #[derive(Clone, Default)]
 pub struct StripeHandle {
@@ -333,9 +430,7 @@ impl StripeHandle {
         Ok(customer.id.to_string())
     }
 
-    /// Mirrors `billing.CreateOrgCheckoutSession`: subscription-mode
-    /// checkout with the plan price plus the adjustable seat add-on,
-    /// honoring any remaining trial days.
+    /// Opens a subscription checkout. Parameter-keyed: see the module docs.
     #[allow(clippy::too_many_arguments)]
     pub async fn create_org_checkout_session(
         &self,
@@ -347,74 +442,39 @@ impl StripeHandle {
         trial_days_remaining: Option<u32>,
         success_url: &str,
         cancel_url: &str,
-        idempotency_key: &str,
     ) -> Result<String, AppError> {
         let client = self.client()?;
-        let idempotency_key = IdempotencyKey::new(idempotency_key).map_err(stripe_err)?;
-
-        let mut line_items = vec![CreateCheckoutSessionLineItems {
-            price: Some(price_id.to_string()),
-            quantity: Some(1),
-            ..Default::default()
-        }];
-        if let Some(seat) = seat_price_id
-            && !seat.is_empty()
-        {
-            line_items.push(CreateCheckoutSessionLineItems {
-                price: Some(seat.to_string()),
-                quantity: Some(0),
-                adjustable_quantity: Some(CreateCheckoutSessionLineItemsAdjustableQuantity {
-                    enabled: true,
-                    minimum: Some(0),
-                    maximum: Some(1000),
-                }),
-                ..Default::default()
-            });
-        }
-
-        let sub_data = CreateCheckoutSessionSubscriptionData {
-            metadata: Some(
-                [
-                    ("org_id".to_string(), org_id.to_string()),
-                    ("plan".to_string(), plan_name.to_string()),
-                ]
-                .into(),
-            ),
-            trial_period_days: trial_days_remaining,
-            ..Default::default()
-        };
-
-        let request = CreateCheckoutSession::new()
-            .customer(customer_id)
-            .mode(stripe_shared::CheckoutSessionMode::Subscription)
-            .line_items(line_items)
-            .success_url(success_url)
-            .cancel_url(cancel_url)
-            .allow_promotion_codes(true)
-            .subscription_data(sub_data);
-
+        let request = org_checkout_request(
+            customer_id,
+            org_id,
+            plan_name,
+            price_id,
+            seat_price_id,
+            trial_days_remaining,
+            success_url,
+            cancel_url,
+        );
+        let idempotency_key = parameter_key("org-checkout", &request)?;
         let session = request
             .customize()
             .request_strategy(RequestStrategy::Idempotent(idempotency_key))
             .send(client)
             .await
             .map_err(stripe_err)?;
-
         Ok(session.url.unwrap_or_default())
     }
 
-    /// Mirrors `billing.CreatePortalSession`.
+    /// Mirrors `billing.CreatePortalSession`. Parameter-keyed: see the module
+    /// docs.
     pub async fn create_portal_session(
         &self,
         customer_id: &str,
         return_url: &str,
-        idempotency_key: &str,
     ) -> Result<String, AppError> {
         let client = self.client()?;
-        let idempotency_key = IdempotencyKey::new(idempotency_key).map_err(stripe_err)?;
-        let session = CreateBillingPortalSession::new()
-            .customer(customer_id)
-            .return_url(return_url)
+        let request = portal_session_request(customer_id, return_url);
+        let idempotency_key = parameter_key("portal", &request)?;
+        let session = request
             .customize()
             .request_strategy(RequestStrategy::Idempotent(idempotency_key))
             .send(client)
@@ -423,27 +483,20 @@ impl StripeHandle {
         Ok(session.url)
     }
 
-    /// Mirrors `billing.CreateSetupCheckoutSession`: setup-mode session
-    /// to collect a payment method without a subscription.
+    /// Mirrors `billing.CreateSetupCheckoutSession`: setup-mode session to
+    /// collect a payment method without a subscription. Parameter-keyed: see
+    /// the module docs.
     pub async fn create_setup_session(
         &self,
         customer_id: &str,
         success_url: &str,
         cancel_url: &str,
         org_id: &str,
-        idempotency_key: &str,
     ) -> Result<String, AppError> {
         let client = self.client()?;
-        let idempotency_key = IdempotencyKey::new(idempotency_key).map_err(stripe_err)?;
-        // Stripe refuses a setup-mode session without a currency when it picks
-        // the payment methods itself ("Missing required param: currency").
-        let session = CreateCheckoutSession::new()
-            .customer(customer_id)
-            .mode(stripe_shared::CheckoutSessionMode::Setup)
-            .currency(BILLING_CURRENCY)
-            .success_url(success_url)
-            .cancel_url(cancel_url)
-            .metadata([("org_id".to_string(), org_id.to_string())])
+        let request = setup_session_request(customer_id, success_url, cancel_url, org_id);
+        let idempotency_key = parameter_key("setup", &request)?;
+        let session = request
             .customize()
             .request_strategy(RequestStrategy::Idempotent(idempotency_key))
             .send(client)
@@ -503,6 +556,83 @@ impl StripeHandle {
         }
         Ok(page.data)
     }
+}
+
+/// The subscription checkout `create_org_checkout_session` sends.
+#[allow(clippy::too_many_arguments)]
+fn org_checkout_request(
+    customer_id: &str,
+    org_id: &str,
+    plan_name: &str,
+    price_id: &str,
+    seat_price_id: Option<&str>,
+    trial_days_remaining: Option<u32>,
+    success_url: &str,
+    cancel_url: &str,
+) -> CreateCheckoutSession {
+    let mut line_items = vec![CreateCheckoutSessionLineItems {
+        price: Some(price_id.to_string()),
+        quantity: Some(1),
+        ..Default::default()
+    }];
+    if let Some(seat) = seat_price_id
+        && !seat.is_empty()
+    {
+        line_items.push(CreateCheckoutSessionLineItems {
+            price: Some(seat.to_string()),
+            quantity: Some(0),
+            adjustable_quantity: Some(CreateCheckoutSessionLineItemsAdjustableQuantity {
+                enabled: true,
+                minimum: Some(0),
+                maximum: Some(1000),
+            }),
+            ..Default::default()
+        });
+    }
+    let sub_data = CreateCheckoutSessionSubscriptionData {
+        metadata: Some(
+            [
+                ("org_id".to_string(), org_id.to_string()),
+                ("plan".to_string(), plan_name.to_string()),
+            ]
+            .into(),
+        ),
+        trial_period_days: trial_days_remaining,
+        ..Default::default()
+    };
+    CreateCheckoutSession::new()
+        .customer(customer_id)
+        .mode(stripe_shared::CheckoutSessionMode::Subscription)
+        .line_items(line_items)
+        .success_url(success_url)
+        .cancel_url(cancel_url)
+        .allow_promotion_codes(true)
+        .subscription_data(sub_data)
+}
+
+/// The billing portal session `create_portal_session` sends.
+fn portal_session_request(customer_id: &str, return_url: &str) -> CreateBillingPortalSession {
+    CreateBillingPortalSession::new()
+        .customer(customer_id)
+        .return_url(return_url)
+}
+
+/// The card setup session `create_setup_session` sends. Stripe refuses a
+/// setup-mode session without a currency when it picks the payment methods
+/// itself ("Missing required param: currency").
+fn setup_session_request(
+    customer_id: &str,
+    success_url: &str,
+    cancel_url: &str,
+    org_id: &str,
+) -> CreateCheckoutSession {
+    CreateCheckoutSession::new()
+        .customer(customer_id)
+        .mode(stripe_shared::CheckoutSessionMode::Setup)
+        .currency(BILLING_CURRENCY)
+        .success_url(success_url)
+        .cancel_url(cancel_url)
+        .metadata([("org_id".to_string(), org_id.to_string())])
 }
 
 fn stripe_err<E: std::fmt::Debug>(e: E) -> AppError {
@@ -987,7 +1117,6 @@ mod currency_tests {
                 "https://codewire.test/billing?setup=done",
                 "https://codewire.test/billing?setup=cancelled",
                 "org-1",
-                "cw-setup-synthetic",
             )
             .await
             .unwrap_err();
@@ -1064,5 +1193,204 @@ mod currency_tests {
             calls, constant,
             "a Stripe call names a currency other than BILLING_CURRENCY"
         );
+    }
+}
+
+#[cfg(test)]
+mod idempotency_key_tests {
+    use super::{
+        IDEMPOTENT_CALLS, IdempotencyKind, org_checkout_request, parameter_key,
+        portal_session_request, setup_session_request,
+    };
+
+    fn key(kind: &str, request: &impl serde::Serialize) -> String {
+        format!("{:?}", parameter_key(kind, request).unwrap())
+    }
+
+    /// Asserts the first key is stable and every other one differs from it
+    /// and from each other.
+    fn all_distinct(base: String, again: String, variants: Vec<String>) {
+        assert_eq!(base, again, "the same request must give the same key");
+        let mut seen = std::collections::BTreeSet::from([base]);
+        for variant in variants {
+            assert!(
+                seen.insert(variant.clone()),
+                "a changed parameter kept a key: {variant}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_setup_session_key_changes_with_every_parameter() {
+        let k = |c, s, x, o| key("setup", &setup_session_request(c, s, x, o));
+        all_distinct(
+            k("cus_1", "https://a/ok", "https://a/no", "org-1"),
+            k("cus_1", "https://a/ok", "https://a/no", "org-1"),
+            vec![
+                k("cus_2", "https://a/ok", "https://a/no", "org-1"),
+                k("cus_1", "https://a/ok2", "https://a/no", "org-1"),
+                k("cus_1", "https://a/ok", "https://a/no2", "org-1"),
+                k("cus_1", "https://a/ok", "https://a/no", "org-2"),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_portal_session_key_changes_with_every_parameter() {
+        let k = |c, r| key("portal", &portal_session_request(c, r));
+        all_distinct(
+            k("cus_1", "https://a/back"),
+            k("cus_1", "https://a/back"),
+            vec![k("cus_2", "https://a/back"), k("cus_1", "https://a/back2")],
+        );
+    }
+
+    #[test]
+    fn an_org_checkout_key_changes_with_every_parameter() {
+        let k = |c, o, p, pr, seat, trial, s, x| {
+            key(
+                "org-checkout",
+                &org_checkout_request(c, o, p, pr, seat, trial, s, x),
+            )
+        };
+        let base = || {
+            k(
+                "cus_1",
+                "org-1",
+                "pro",
+                "price_1",
+                Some("seat_1"),
+                Some(7),
+                "https://a/ok",
+                "https://a/no",
+            )
+        };
+        all_distinct(
+            base(),
+            base(),
+            vec![
+                k(
+                    "cus_2",
+                    "org-1",
+                    "pro",
+                    "price_1",
+                    Some("seat_1"),
+                    Some(7),
+                    "https://a/ok",
+                    "https://a/no",
+                ),
+                k(
+                    "cus_1",
+                    "org-2",
+                    "pro",
+                    "price_1",
+                    Some("seat_1"),
+                    Some(7),
+                    "https://a/ok",
+                    "https://a/no",
+                ),
+                k(
+                    "cus_1",
+                    "org-1",
+                    "team",
+                    "price_1",
+                    Some("seat_1"),
+                    Some(7),
+                    "https://a/ok",
+                    "https://a/no",
+                ),
+                k(
+                    "cus_1",
+                    "org-1",
+                    "pro",
+                    "price_2",
+                    Some("seat_1"),
+                    Some(7),
+                    "https://a/ok",
+                    "https://a/no",
+                ),
+                k(
+                    "cus_1",
+                    "org-1",
+                    "pro",
+                    "price_1",
+                    None,
+                    Some(7),
+                    "https://a/ok",
+                    "https://a/no",
+                ),
+                k(
+                    "cus_1",
+                    "org-1",
+                    "pro",
+                    "price_1",
+                    Some("seat_1"),
+                    Some(6),
+                    "https://a/ok",
+                    "https://a/no",
+                ),
+                k(
+                    "cus_1",
+                    "org-1",
+                    "pro",
+                    "price_1",
+                    Some("seat_1"),
+                    Some(7),
+                    "https://a/ok2",
+                    "https://a/no",
+                ),
+                k(
+                    "cus_1",
+                    "org-1",
+                    "pro",
+                    "price_1",
+                    Some("seat_1"),
+                    Some(7),
+                    "https://a/ok",
+                    "https://a/no2",
+                ),
+            ],
+        );
+    }
+
+    /// Every function that sends an idempotent Stripe request is in
+    /// `IDEMPOTENT_CALLS`, and is keyed the way the table says.
+    #[test]
+    fn every_idempotent_call_is_named_and_keyed_by_its_kind() {
+        let file = include_str!("stripe_client.rs");
+        let source = &file[..file.find("mod currency_tests").expect("test module")];
+        let mut found = Vec::new();
+        for (start, _) in source.match_indices("async fn ") {
+            let name: String = source[start + 9..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let end = source[start..]
+                .find("\n    }\n")
+                .map_or(source.len(), |e| start + e);
+            let body = &source[start..end];
+            if !body.contains("RequestStrategy::Idempotent") {
+                continue;
+            }
+            let kind = IDEMPOTENT_CALLS
+                .iter()
+                .find(|(call, _)| *call == name)
+                .map(|(_, kind)| *kind)
+                .unwrap_or_else(|| {
+                    panic!("{name} is idempotent but missing from IDEMPOTENT_CALLS")
+                });
+            assert_eq!(
+                body.contains("parameter_key("),
+                kind == IdempotencyKind::Parameters,
+                "{name} is keyed against its kind {kind:?}"
+            );
+            found.push(name);
+        }
+        for (call, _) in IDEMPOTENT_CALLS {
+            assert!(
+                found.iter().any(|name| name == call),
+                "{call} is listed but not found"
+            );
+        }
     }
 }
