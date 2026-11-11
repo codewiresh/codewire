@@ -1,7 +1,7 @@
 ---
 title: Security model
 description: What isolates an environment, where secrets and credentials live, and what each placement does not protect.
-updated: 2026-11-10
+updated: 2026-11-11
 weight: 4
 aliases: ["/security"]
 ---

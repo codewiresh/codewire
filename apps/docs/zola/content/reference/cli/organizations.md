@@ -1,7 +1,7 @@
 ---
 title: Organizations
 description: setup, login, logout, whoami, org, api-keys and cost.
-updated: 2026-11-07
+updated: 2026-11-11
 weight: 7
 aliases: ["/cli/account"]
 ---

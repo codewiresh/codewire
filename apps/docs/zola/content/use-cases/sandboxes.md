@@ -1,7 +1,7 @@
 ---
 title: Sandboxes
 description: Run code you do not trust yet, a script, a dependency, a stranger's repository or an agent with full permissions, in a VM with a copy of your project and no credentials.
-updated: 2026-11-08
+updated: 2026-11-11
 weight: 5
 aliases: ["/use-cases/untrusted-code"]
 ---

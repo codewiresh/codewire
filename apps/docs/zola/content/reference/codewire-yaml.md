@@ -1,7 +1,7 @@
 ---
 title: codewire.yaml keys
 description: Every key codewire.yaml accepts, with its type and limits.
-updated: 2026-11-10
+updated: 2026-11-11
 weight: 2
 ---
 
