@@ -553,6 +553,8 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
     };
     let socket = config.supervisor_socket();
     let (listener, socket_identity) = bind_owner_only_listener(&socket)?;
+    let connections = crate::uds::Connections::new();
+    let listener = listener.tracked(Arc::clone(&connections));
     // One collection before any drain runs recovers what a crash left
     // behind; later ones run in the collector task (#2978).
     if service.supervisor.collect_if_idle().await.is_err() {
@@ -567,6 +569,9 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
     ));
     drop(tokio::spawn(
         Arc::clone(&service.supervisor).run_idle_runner_reaper(),
+    ));
+    drop(tokio::spawn(
+        Arc::clone(&service.supervisor).run_idle_exit(connections),
     ));
     // Nothing pending was admitted by this process, so every drain recovers.
     for name in service.supervisor.names_with_pending_work()? {
@@ -1104,6 +1109,59 @@ impl Supervisor {
                 }
             }
         }
+    }
+
+    /// The idle exit (#3793): a supervisor that holds nothing and has had no
+    /// client connected for [`IDLE_RUNNER_WINDOW`] shuts down, as on a
+    /// handoff. One started by a cw with another configuration, or by a cw
+    /// since deleted, would otherwise refuse the user's cw forever; the next
+    /// cw command starts its own.
+    async fn run_idle_exit(self: Arc<Self>, connections: Arc<crate::uds::Connections>) {
+        let mut sweeps = tokio::time::interval(IDLE_RUNNER_SWEEP);
+        sweeps.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut quiet_since = None;
+        loop {
+            sweeps.tick().await;
+            if self.idle_exit_due(&mut quiet_since, &connections, tokio::time::Instant::now()) {
+                diagnostic_log::record(self.log.as_deref(), "supervisor_idle_exit", &[]);
+                let _ = self.shutdown.send(true);
+                return;
+            }
+        }
+    }
+
+    /// Whether this supervisor has held nothing at every sweep since
+    /// `quiet_since`, and no client has been connected, for a whole window at
+    /// `now`. Anything held restarts the window.
+    fn idle_exit_due(
+        &self,
+        quiet_since: &mut Option<tokio::time::Instant>,
+        connections: &crate::uds::Connections,
+        now: tokio::time::Instant,
+    ) -> bool {
+        let Some(unconnected) = connections.idle_for(now).filter(|_| self.holds_nothing()) else {
+            *quiet_since = None;
+            return false;
+        };
+        let quiet = now.saturating_duration_since(*quiet_since.get_or_insert(now));
+        quiet.min(unconnected) >= IDLE_RUNNER_WINDOW
+    }
+
+    /// No environment, process, operation, content work or handoff: exiting
+    /// loses nothing a new supervisor would not recover.
+    fn holds_nothing(&self) -> bool {
+        let core = self.core();
+        core.state.environments.is_empty()
+            && core.children.is_empty()
+            && core.live_runners.is_empty()
+            && core.runtime_operations.is_empty()
+            && core.content_writers == 0
+            && !core.collecting
+            && !core.retiring
+            && core
+                .store
+                .pending_operations()
+                .is_ok_and(|pending| pending.is_empty())
     }
 
     /// Notes when each stopped environment's runner became idle, forgets the
@@ -20030,6 +20088,51 @@ mod retire_tests {
             environment.state = state;
             assert_eq!(may_run_a_vm(&environment), may_run, "{state:?}");
         }
+    }
+
+    /// #3793: a supervisor that holds nothing exits once no client has been
+    /// connected for [`IDLE_RUNNER_WINDOW`]; an environment it holds keeps it,
+    /// and a connection or held work starts the window again. Time is tokio's
+    /// paused clock: nothing sleeps.
+    #[tokio::test(start_paused = true)]
+    async fn a_supervisor_holding_nothing_exits_after_an_idle_window() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let supervisor = test_supervisor(core);
+        let connections = crate::uds::Connections::new();
+        let mut quiet_since = None;
+        let due = |quiet_since: &mut Option<tokio::time::Instant>| {
+            supervisor.idle_exit_due(quiet_since, &connections, tokio::time::Instant::now())
+        };
+
+        tokio::time::advance(IDLE_RUNNER_WINDOW * 2).await;
+        assert!(
+            !due(&mut quiet_since),
+            "an environment keeps its supervisor"
+        );
+
+        supervisor.core().state.environments.clear();
+        assert!(!due(&mut quiet_since));
+        tokio::time::advance(IDLE_RUNNER_WINDOW - Duration::from_secs(1)).await;
+        assert!(!due(&mut quiet_since));
+
+        // A client connects: the window starts again when it leaves.
+        let open = connections.opened();
+        tokio::time::advance(IDLE_RUNNER_WINDOW).await;
+        assert!(!due(&mut quiet_since), "a connected client keeps it");
+        drop(open);
+        tokio::time::advance(IDLE_RUNNER_WINDOW - Duration::from_secs(1)).await;
+        assert!(!due(&mut quiet_since));
+
+        // Held work also starts the window again.
+        supervisor.core().content_writers += 1;
+        assert!(!due(&mut quiet_since));
+        supervisor.core().content_writers -= 1;
+        // The window counts from the first sweep that finds nothing held.
+        assert!(!due(&mut quiet_since));
+        tokio::time::advance(IDLE_RUNNER_WINDOW - Duration::from_secs(1)).await;
+        assert!(!due(&mut quiet_since));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(due(&mut quiet_since), "a whole quiet window ends it");
     }
 
     /// #3270: a stopped environment's runner stays for [`IDLE_RUNNER_WINDOW`]

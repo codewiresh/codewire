@@ -105,6 +105,145 @@ impl axum::serve::Listener for OwnerOnlyUnixListener {
     }
 }
 
+impl OwnerOnlyUnixListener {
+    /// This listener, counting each admitted connection in `connections`
+    /// while it is open.
+    pub(crate) fn tracked(self, connections: Arc<Connections>) -> TrackedListener {
+        TrackedListener {
+            inner: self,
+            connections,
+        }
+    }
+}
+
+/// How many client connections a server has open, and since when none has
+/// been. A supervisor exits after a quiet window with nothing to serve
+/// (#3793); each cw command holds its connection until it exits.
+#[derive(Debug)]
+pub(crate) struct Connections {
+    /// The open count, and when it last fell to zero (or the count began).
+    state: std::sync::Mutex<(usize, tokio::time::Instant)>,
+}
+
+impl Connections {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: std::sync::Mutex::new((0, tokio::time::Instant::now())),
+        })
+    }
+
+    /// How long no connection has been open at `now`; `None` while one is.
+    pub(crate) fn idle_for(&self, now: tokio::time::Instant) -> Option<Duration> {
+        let (open, since) = *self.lock();
+        (open == 0).then(|| now.saturating_duration_since(since))
+    }
+
+    pub(crate) fn opened(self: &Arc<Self>) -> ConnectionGuard {
+        self.lock().0 += 1;
+        ConnectionGuard(Arc::clone(self))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, (usize, tokio::time::Instant)> {
+        // The count is plain data, valid whatever a panicking holder did.
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// One open connection; dropping it closes the count.
+#[derive(Debug)]
+pub(crate) struct ConnectionGuard(Arc<Connections>);
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        let mut state = self.0.lock();
+        state.0 -= 1;
+        if state.0 == 0 {
+            state.1 = tokio::time::Instant::now();
+        }
+    }
+}
+
+/// [`OwnerOnlyUnixListener`] counting its connections in [`Connections`].
+pub(crate) struct TrackedListener {
+    inner: OwnerOnlyUnixListener,
+    connections: Arc<Connections>,
+}
+
+impl axum::serve::Listener for TrackedListener {
+    type Io = TrackedStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (stream, address) = self.inner.accept().await;
+        let open = self.connections.opened();
+        (
+            TrackedStream {
+                stream,
+                _open: open,
+            },
+            address,
+        )
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+/// An admitted connection, counted open until it is dropped.
+pub(crate) struct TrackedStream {
+    stream: UnixStream,
+    _open: ConnectionGuard,
+}
+
+impl tokio::io::AsyncRead for TrackedStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_read(context, buffer)
+    }
+}
+
+impl tokio::io::AsyncWrite for TrackedStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_write(context, buffer)
+    }
+
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffers: &[io::IoSlice<'_>],
+    ) -> std::task::Poll<io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_write_vectored(context, buffers)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_shutdown(context)
+    }
+}
+
 pub(crate) fn bind_owner_only_listener(
     socket: &Path,
 ) -> Result<(OwnerOnlyUnixListener, SocketIdentity), UdsError> {
