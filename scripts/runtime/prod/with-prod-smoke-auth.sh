@@ -20,6 +20,9 @@ credentials, and execs the requested command with exactly:
 
   CODEWIRE_PROD_SMOKE_API_KEY            the smoke API key
   EXPECTED_CODEWIRE_PROD_SMOKE_USER_EMAIL the smoke user's email
+  CODEWIRE_NATIVE_STATE_ROOT             a local VM state root that does not exist,
+                                         so the child never reaches the owner's
+                                         local VMs or starts their supervisor
 
 There is no default command; for example:
 
@@ -126,10 +129,14 @@ jq -er '.data.data.userEmail' "$DOCUMENT" >"$EMAIL_FILE"
 
 IFS= read -r CODEWIRE_PROD_SMOKE_API_KEY <"$API_KEY_FILE"
 IFS= read -r EXPECTED_CODEWIRE_PROD_SMOKE_USER_EMAIL <"$EMAIL_FILE"
+# The child's cw must never reach the owner's local VM state: a lookup there
+# can start the owner's supervisor (#4156). This root lies in the private
+# folder cleanup removes, so it does not exist and nothing creates it.
+CODEWIRE_NATIVE_STATE_ROOT="$AUTH_TMPDIR/no-local-vm-state"
 cleanup || die 'failed to remove temporary smoke auth material'
 trap - EXIT HUP INT TERM
 unset_openbao_environment
-export CODEWIRE_PROD_SMOKE_API_KEY EXPECTED_CODEWIRE_PROD_SMOKE_USER_EMAIL
+export CODEWIRE_PROD_SMOKE_API_KEY EXPECTED_CODEWIRE_PROD_SMOKE_USER_EMAIL CODEWIRE_NATIVE_STATE_ROOT
 
 log 'loaded the two fixed Prod smoke values from canonical OpenBao'
 exec "$@"

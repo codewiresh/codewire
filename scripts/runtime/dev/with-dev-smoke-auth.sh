@@ -23,7 +23,9 @@ OpenBao document, by default apps/codewire/dev/ci-smoke, the smoke identity.
 such as apps/codewire/dev/ci-billing-rehearsal (#3381). The values reach the
 command as CODEWIRE_DEV_SMOKE_API_KEY and EXPECTED_CODEWIRE_SMOKE_USER_EMAIL.
 The wrapper removes all OpenBao and inherited smoke credentials, and execs the
-requested command. With no command, runs:
+requested command with CODEWIRE_NATIVE_STATE_ROOT naming a local VM state root
+that does not exist, so it never reaches the owner's local VMs or starts their
+supervisor. With no command, runs:
 
   scripts/runtime/dev/smoke-dev-commodity.sh
 
@@ -129,11 +131,15 @@ jq -er '.data.data.userEmail' "$DOCUMENT" >"$EMAIL_FILE"
 
 IFS= read -r CODEWIRE_DEV_SMOKE_API_KEY <"$API_KEY_FILE"
 IFS= read -r EXPECTED_CODEWIRE_SMOKE_USER_EMAIL <"$EMAIL_FILE"
+# The child's cw must never reach the owner's local VM state: a lookup there
+# can start the owner's supervisor (#3793, #4156). This root lies in the
+# private folder cleanup removes, so it does not exist and nothing creates it.
+CODEWIRE_NATIVE_STATE_ROOT="$AUTH_TMPDIR/no-local-vm-state"
 cleanup || die 'failed to remove temporary smoke auth material'
 trap - EXIT HUP INT TERM
 unset_openbao_environment
 unset CODEWIRE_API_KEY
-export CODEWIRE_DEV_SMOKE_API_KEY EXPECTED_CODEWIRE_SMOKE_USER_EMAIL
+export CODEWIRE_DEV_SMOKE_API_KEY EXPECTED_CODEWIRE_SMOKE_USER_EMAIL CODEWIRE_NATIVE_STATE_ROOT
 
 if [[ "${1:-}" == '--' ]]; then shift; fi
 if [[ "$#" -eq 0 ]]; then set -- "$ROOT/scripts/runtime/dev/smoke-dev-commodity.sh"; fi

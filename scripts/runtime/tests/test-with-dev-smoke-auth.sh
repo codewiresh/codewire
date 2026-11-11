@@ -96,6 +96,10 @@ set -euo pipefail
 [[ -z "${CODEWIRE_API_KEY+x}" ]]
 bao_names=( "${!BAO_@}" )
 [[ "${#bao_names[@]}" == 0 ]]
+# The child's local VM state root is private and absent, never the owner's
+# inherited one (#4156).
+[[ "$CODEWIRE_NATIVE_STATE_ROOT" == "$TMPDIR"/*/no-local-vm-state ]]
+[[ ! -e "$CODEWIRE_NATIVE_STATE_ROOT" && ! -e "$(dirname "$CODEWIRE_NATIVE_STATE_ROOT")" ]]
 shopt -s nullglob
 leftovers=( "$TMPDIR"/codewire-dev-smoke-auth.* )
 [[ "${#leftovers[@]}" == 0 ]]
@@ -136,6 +140,7 @@ run_case() {
     CODEWIRE_DEV_SMOKE_API_KEY="$STALE_API_KEY" \
     EXPECTED_CODEWIRE_SMOKE_USER_EMAIL="$STALE_EMAIL" \
     CODEWIRE_API_KEY="$STALE_API_KEY" \
+    CODEWIRE_NATIVE_STATE_ROOT="$HOME/.codewire/native-v1" \
     "$WRAPPER" "$@" -- "$dir/child" >"$dir/out" 2>"$dir/err"
   rc=$?
   set -e
