@@ -74,10 +74,48 @@ async fn outside_transaction(connection: &mut PgConnection) -> Result<bool, sqlx
     }
 }
 
+/// How long Postgres lets a service connection sit idle inside a transaction
+/// before it ends the session and rolls the transaction back (#4089).
+///
+/// The release check above closes a connection returned inside a transaction,
+/// but a transaction held across an await that never finishes stays open on a
+/// live connection, keeping its locks: on Dev one stalled 178 backends for at
+/// least 192 s (#3927). This bounds that stall. It does not protect the
+/// transaction's writes, which roll back. 60 s is about three times the longest
+/// legitimate idle-in-transaction time seen (18.6 s on Production). It is set
+/// on our own connections, not on the database cluster, so other roles, such
+/// as the backup dump, keep their own behaviour.
+const IDLE_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn bound_idle_transactions(
+    connection: &mut PgConnection,
+    timeout: Duration,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(&format!(
+        "SET idle_in_transaction_session_timeout = '{}ms'",
+        timeout.as_millis()
+    ))
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
 /// `PgPoolOptions` for every long-running service pool: a connection left
-/// inside a transaction is closed on release, never reused.
+/// inside a transaction is closed on release, never reused, and Postgres ends
+/// a transaction left idle for `IDLE_TRANSACTION_TIMEOUT`.
 pub fn checked_pool_options() -> PgPoolOptions {
-    PgPoolOptions::new().after_release(|connection, _| Box::pin(outside_transaction(connection)))
+    checked_pool_options_bounding(IDLE_TRANSACTION_TIMEOUT)
+}
+
+fn checked_pool_options_bounding(idle_transaction_timeout: Duration) -> PgPoolOptions {
+    PgPoolOptions::new()
+        .after_connect(move |connection, _| {
+            Box::pin(bound_idle_transactions(
+                connection,
+                idle_transaction_timeout,
+            ))
+        })
+        .after_release(|connection, _| Box::pin(outside_transaction(connection)))
 }
 
 /// The pool options every service shares, with `health` deciding when an
@@ -521,6 +559,70 @@ mod tests {
                 "a drop closed it"
             );
             pool.close().await;
+            Ok(())
+        }
+
+        /// Every service pool's connections carry the idle-transaction bound,
+        /// the shared options' and those that build on the checked ones.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        #[ignore = "requires TEST_DATABASE_URL"]
+        async fn service_connections_bound_idle_transactions() -> Result<()> {
+            for options in [pool_options(PoolHealth::default()), checked_pool_options()] {
+                let pool = one_connection_pool(options).await?;
+                let timeout: String =
+                    sqlx::query_scalar("SHOW idle_in_transaction_session_timeout")
+                        .fetch_one(&pool)
+                        .await?;
+                ensure!(timeout == "1min", "idle-transaction bound is {timeout}");
+                pool.close().await;
+            }
+            Ok(())
+        }
+
+        /// Postgres ends a transaction left idle past the bound and frees its
+        /// locks, instead of letting it hold them indefinitely.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        #[ignore = "requires TEST_DATABASE_URL"]
+        async fn an_idle_transaction_past_the_bound_is_ended() -> Result<()> {
+            let mut admin = PgConnection::connect_with(&database_options()?).await?;
+            let pool =
+                one_connection_pool(checked_pool_options_bounding(Duration::from_secs(1))).await?;
+            let backend = database_backend(&pool).await?;
+            let table = format!("pool_idle_transaction_{backend}");
+            sqlx::raw_sql(&format!(
+                "DROP TABLE IF EXISTS {table}; \
+                 CREATE TABLE {table} (id int PRIMARY KEY, value int); \
+                 INSERT INTO {table} VALUES (1, 0)"
+            ))
+            .execute(&mut admin)
+            .await?;
+
+            let mut stalled = pool.begin().await?;
+            sqlx::query(&format!("UPDATE {table} SET value = 1 WHERE id = 1"))
+                .execute(&mut *stalled)
+                .await?;
+            await_backend_state(&mut admin, backend, |state| state.is_none()).await?;
+            // Not blocked: the ended session's row lock is gone, and its
+            // uncommitted write was rolled back.
+            let mut locked = admin.begin().await?;
+            sqlx::query("SET LOCAL lock_timeout = '2s'")
+                .execute(&mut *locked)
+                .await?;
+            sqlx::query(&format!("UPDATE {table} SET value = 2 WHERE id = 1"))
+                .execute(&mut *locked)
+                .await?;
+            locked.commit().await?;
+            let value: i32 = sqlx::query_scalar(&format!("SELECT value FROM {table}"))
+                .fetch_one(&mut admin)
+                .await?;
+            ensure!(value == 2, "the stalled write survived: {value}");
+            drop(stalled);
+
+            sqlx::raw_sql(&format!("DROP TABLE {table}"))
+                .execute(&mut admin)
+                .await?;
+            pool.close().await;
+            admin.close().await?;
             Ok(())
         }
     }
