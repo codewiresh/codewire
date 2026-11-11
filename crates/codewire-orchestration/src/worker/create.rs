@@ -57,6 +57,9 @@ mod pod_marks_database_tests;
 mod projection_database_tests;
 
 #[cfg(test)]
+mod replacement_database_tests;
+
+#[cfg(test)]
 mod warm_pool_tests;
 
 /// Only an exactly owned Pod with stale immutable bootstrap may be restarted.
@@ -1146,20 +1149,19 @@ pub(super) async fn confidential_runtime_template_opts(
     Ok(template_opts)
 }
 
-pub(super) async fn reconcile_confidential_runtime_before_replacement(
+/// A confidential environment's measured runtime for the incarnation that
+/// replaces a terminal one, rendered and authorized; `None` for any other
+/// environment.
+pub(super) async fn authorize_confidential_runtime_before_replacement(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
     confidential_storage_manifest_uri: &str,
     authority: &ActivityAuthority,
     authoritative_states: &[&str],
-    placement: &Placement,
-    stale: &WorkspacePodIdentity,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<TemplateOpts>> {
     if env.isolation_tier != "confidential" {
-        return Ok(());
+        return Ok(None);
     }
-    let runtime = ctx.require_runtime()?;
-    let env_id = env.id.as_str();
     let template_opts = confidential_runtime_template_opts(
         ctx,
         env,
@@ -1168,28 +1170,78 @@ pub(super) async fn reconcile_confidential_runtime_before_replacement(
     )
     .await?;
     authorize_confidential_runtime(ctx, &template_opts, authority, authoritative_states).await?;
+    Ok(Some(template_opts))
+}
 
-    // Publish the measured runtime the authorization names, and see it on
-    // the stale Pod, before that Pod is deleted: the controller then
-    // recreates only the authorized rendering (B2c).
-    let init_data = run_template_mutation(
-        authority,
-        &template_opts,
-        authoritative_states,
-        runtime.publish_measured_runtime(placement, env_id, &stale.name, &template_opts),
-    )
-    .await?;
+/// What replacing one terminal incarnation needs.
+pub(super) struct StaleReplacement<'a> {
+    pub(super) placement: &'a Placement,
+    pub(super) stale: &'a WorkspacePodIdentity,
+    /// The environment is confidential, so it must have `measured`.
+    pub(super) confidential: bool,
+    /// The authorized measured runtime of a confidential environment.
+    pub(super) measured: Option<&'a TemplateOpts>,
+    pub(super) support_image: &'a str,
+    pub(super) ready_timeout: Duration,
+}
+
+/// Replace exactly the terminal incarnation `replacement` names, and wait for
+/// its replacement. A confidential environment's measured runtime is first
+/// published and seen on that same incarnation, so the controller recreates
+/// only the authorized rendering (B2c). A confidential replacement without a
+/// measured runtime is refused before anything is written.
+pub(super) async fn replace_stale_member(
+    runtime: &dyn RuntimeDriver,
+    authority: &ActivityAuthority,
+    states: &[&str],
+    replacement: &StaleReplacement<'_>,
+) -> anyhow::Result<()> {
+    let StaleReplacement {
+        placement,
+        stale,
+        confidential,
+        measured,
+        support_image,
+        ready_timeout,
+    } = *replacement;
+    anyhow::ensure!(
+        !confidential || measured.is_some(),
+        "a confidential replacement has no measured runtime"
+    );
+    let env_id = authority.environment_id();
+    if let Some(template_opts) = measured {
+        let init_data = run_template_mutation(
+            authority,
+            template_opts,
+            states,
+            runtime.publish_measured_runtime(placement, env_id, &stale.name, template_opts),
+        )
+        .await?;
+        authority
+            .run_while_authoritative_for_states(
+                states,
+                runtime.wait_measured_runtime(
+                    placement,
+                    stale,
+                    &init_data,
+                    RUNTIME_METADATA_PROPAGATION_TIMEOUT,
+                ),
+            )
+            .await?;
+    }
+    authority
+        .run_external_mutation(
+            states,
+            runtime.replace_member(placement, env_id, stale, support_image),
+        )
+        .await?;
     authority
         .run_while_authoritative_for_states(
-            authoritative_states,
-            runtime.wait_measured_runtime(
-                placement,
-                stale,
-                &init_data,
-                RUNTIME_METADATA_PROPAGATION_TIMEOUT,
-            ),
+            states,
+            runtime.wait_replacement(placement, stale, ready_timeout),
         )
-        .await
+        .await?;
+    Ok(())
 }
 
 /// Mirrors `RunEnvironmentCreateWithoutSetupPublish` — the create
@@ -2523,32 +2575,28 @@ async fn replace_terminal_workspace_pod(
             pod = %stale.name,
             "replacing terminal workspace Pod before waiting for claim readiness"
         );
-        reconcile_confidential_runtime_before_replacement(
+        let measured = authorize_confidential_runtime_before_replacement(
             ctx,
             env,
             &confidential_storage_manifest_uri,
             authority,
             CREATE_MUTATION_STATES,
-            placement,
-            &stale,
         )
         .await?;
-        authority
-            .run_external_mutation(
-                CREATE_MUTATION_STATES,
-                runtime.replace_member(placement, env_id, &stale, ctx.sandbox_cfg.support_image()),
-            )
-            .await?;
-        authority
-            .run_while_authoritative_for_states(
-                CREATE_MUTATION_STATES,
-                runtime.wait_replacement(
-                    placement,
-                    &stale,
-                    ready_timeout_for_isolation(isolation_tier),
-                ),
-            )
-            .await
+        replace_stale_member(
+            runtime,
+            authority,
+            CREATE_MUTATION_STATES,
+            &StaleReplacement {
+                placement,
+                stale: &stale,
+                confidential: env.isolation_tier == "confidential",
+                measured: measured.as_ref(),
+                support_image: ctx.sandbox_cfg.support_image(),
+                ready_timeout: ready_timeout_for_isolation(isolation_tier),
+            },
+        )
+        .await
     }
     .await;
 

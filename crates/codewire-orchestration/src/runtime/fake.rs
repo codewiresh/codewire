@@ -37,6 +37,11 @@ pub(crate) struct FakeRuntimeDriver {
     pub replacement: Mutex<Option<MemberReplacement>>,
     /// Each replacement and replacement wait asked for, in order.
     pub replacement_calls: Mutex<Vec<String>>,
+    /// What waiting for a replacement answers; unscripted, it fails.
+    pub replaced: Mutex<Option<MemberRef>>,
+    /// What publishing a measured runtime returns; unscripted, it fails. The
+    /// publish and its wait are recorded with the replacement calls, in order.
+    pub measured_runtime: Mutex<Option<String>>,
     /// The claim's readiness; an error is its message.
     pub claim_readiness: Mutex<Option<Result<ClaimReadiness, String>>>,
     /// Every placement a method was asked about, in order.
@@ -332,7 +337,11 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
             .lock()
             .unwrap()
             .push(format!("wait {} {}", previous.name, previous.uid));
-        anyhow::bail!("not scripted")
+        self.replaced
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("not scripted"))
     }
 
     async fn terminal_member(
@@ -347,21 +356,33 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
     async fn publish_measured_runtime(
         &self,
         _placement: &Placement,
-        _environment_id: &str,
-        _member_name: &str,
-        _rendering: &TemplateOpts,
+        environment_id: &str,
+        member_name: &str,
+        rendering: &TemplateOpts,
     ) -> anyhow::Result<String> {
-        anyhow::bail!("not scripted")
+        self.replacement_calls.lock().unwrap().push(format!(
+            "publish {environment_id} {member_name} {}",
+            rendering.name
+        ));
+        self.measured_runtime
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("not scripted"))
     }
 
     async fn wait_measured_runtime(
         &self,
         _placement: &Placement,
-        _member: &MemberRef,
-        _measured: &str,
+        member: &MemberRef,
+        measured: &str,
         _timeout: Duration,
     ) -> anyhow::Result<()> {
-        anyhow::bail!("not scripted")
+        self.replacement_calls.lock().unwrap().push(format!(
+            "wait-measured {} {} {measured}",
+            member.name, member.uid
+        ));
+        Ok(())
     }
 
     async fn refresh_bootstrap(
