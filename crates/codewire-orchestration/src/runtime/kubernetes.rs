@@ -28,7 +28,7 @@ use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::HostKeyStore;
 use crate::sandbox::sidecar::WORKSPACE_SSH_PORT;
 use crate::sandbox::snapshots::{clearing_volume_name, kept_snapshot_name, raw_snapshot_name};
-use crate::sandbox::template::TemplateOpts;
+use crate::sandbox::template::{KATA_COCO_INIT_DATA_ANNOTATION_KEY, TemplateOpts};
 use crate::sandbox::warm_pool::WarmPoolObjects;
 use crate::sandbox::{ClaimOpts, shadow_warm_pool_name};
 
@@ -397,6 +397,57 @@ impl RuntimeLifecycle for KubernetesDriver {
     ) -> anyhow::Result<MemberRef> {
         self.sandbox_client(placement)
             .wait_for_replacement_workspace_pod(&previous.name, &previous.uid, timeout)
+            .await
+    }
+
+    async fn terminal_member(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<Option<MemberRef>> {
+        self.sandbox_client(placement)
+            .workspace_pod_replacement_candidate(environment_id)
+            .await
+    }
+
+    async fn publish_measured_runtime(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        member_name: &str,
+        rendering: &TemplateOpts,
+    ) -> anyhow::Result<String> {
+        self.sandbox_client(placement)
+            .reconcile_per_environment_runtime(environment_id, member_name, rendering)
+            .await
+    }
+
+    async fn wait_measured_runtime(
+        &self,
+        placement: &Placement,
+        member: &MemberRef,
+        measured: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .wait_for_workspace_pod_annotation(
+                &member.name,
+                &member.uid,
+                KATA_COCO_INIT_DATA_ANNOTATION_KEY,
+                measured,
+                timeout,
+            )
+            .await
+    }
+
+    async fn refresh_bootstrap(
+        &self,
+        claim: &ClaimRef,
+        rendering: &TemplateOpts,
+        suspended: &SuspendedRuntime,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(&claim.placement)
+            .reconcile_workspace_bootstrap(rendering, &claim.name, &claim.uid, suspended)
             .await
     }
 }
@@ -2248,5 +2299,78 @@ mod tests {
         let (_, path, body) = writes.last().unwrap();
         assert!(path.ends_with("/sandboxes/cw-pool-a-x"), "{path}");
         assert!(body.contains("sandbox-uid"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_terminal_member_is_looked_for_only_in_the_placement() {
+        let (driver, requests) = driver_over_empty_cluster();
+        assert_eq!(
+            driver
+                .terminal_member(&Placement::new("dev-sandboxes"), "env-1")
+                .await
+                .unwrap(),
+            None
+        );
+        let requests = requests.lock().unwrap();
+        assert!(!requests.is_empty());
+        assert!(
+            requests
+                .iter()
+                .all(|request| request == "GET /api/v1/namespaces/dev-sandboxes/pods"),
+            "{requests:?}"
+        );
+    }
+
+    /// The measured runtime is seen on the exact incarnation through its
+    /// confidential init-data annotation.
+    #[tokio::test]
+    async fn a_measured_runtime_is_waited_for_on_that_exact_incarnation() {
+        let service = Router::new().fallback(move |request: Request<Body>| async move {
+            let path = request.uri().path().to_owned();
+            let pod = json!({"apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": "sandbox-a", "namespace": "dev-sandboxes", "uid": "pod-uid",
+                    "annotations": {KATA_COCO_INIT_DATA_ANNOTATION_KEY: "measured"}}});
+            let (status, body) = if path == "/api/v1/namespaces/dev-sandboxes/pods/sandbox-a" {
+                (StatusCode::OK, pod)
+            } else {
+                (
+                    StatusCode::NOT_FOUND,
+                    json!({"apiVersion": "v1", "kind": "Status",
+                        "status": "Failure", "reason": "NotFound", "code": 404}),
+                )
+            };
+            Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        });
+        let driver = KubernetesDriver::shared(kube::Client::new(service, "the-default-namespace"));
+        let placement = Placement::new("dev-sandboxes");
+        let member = MemberRef {
+            name: "sandbox-a".into(),
+            uid: "pod-uid".into(),
+        };
+        driver
+            .wait_measured_runtime(&placement, &member, "measured", Duration::from_secs(1))
+            .await
+            .unwrap();
+        // Another incarnation under the name is never taken for this one.
+        let replaced = MemberRef {
+            name: "sandbox-a".into(),
+            uid: "another-uid".into(),
+        };
+        assert!(
+            driver
+                .wait_measured_runtime(&placement, &replaced, "measured", Duration::from_secs(1))
+                .await
+                .is_err()
+        );
+        assert!(
+            driver
+                .wait_measured_runtime(&placement, &member, "other", Duration::from_millis(300))
+                .await
+                .is_err()
+        );
     }
 }

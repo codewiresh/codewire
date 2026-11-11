@@ -334,6 +334,48 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
             .push(format!("wait {} {}", previous.name, previous.uid));
         anyhow::bail!("not scripted")
     }
+
+    async fn terminal_member(
+        &self,
+        placement: &Placement,
+        _environment_id: &str,
+    ) -> anyhow::Result<Option<MemberRef>> {
+        self.placements.lock().unwrap().push(placement.clone());
+        Ok(None)
+    }
+
+    async fn publish_measured_runtime(
+        &self,
+        _placement: &Placement,
+        _environment_id: &str,
+        _member_name: &str,
+        _rendering: &TemplateOpts,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn wait_measured_runtime(
+        &self,
+        _placement: &Placement,
+        _member: &MemberRef,
+        _measured: &str,
+        _timeout: Duration,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn refresh_bootstrap(
+        &self,
+        claim: &ClaimRef,
+        _rendering: &TemplateOpts,
+        _suspended: &SuspendedRuntime,
+    ) -> anyhow::Result<()> {
+        self.placements
+            .lock()
+            .unwrap()
+            .push(claim.placement.clone());
+        Ok(())
+    }
 }
 
 #[async_trait]

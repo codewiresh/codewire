@@ -23,7 +23,7 @@ use super::workspace_binding::{
 };
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
-use crate::runtime::{Pick, Placement};
+use crate::runtime::{ClaimRef, Pick, Placement, RuntimeDriver};
 use crate::sandbox::client::{
     NoCapacity, ProbeResult, RuntimeIdentityObservation, SandboxClient, WorkspacePodIdentity,
     WorkspaceSandboxIdentity,
@@ -31,9 +31,8 @@ use crate::sandbox::client::{
 use crate::sandbox::host_keys::RecordedHostKeys;
 use crate::sandbox::template::{
     CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DOCKER_MODE_LOCAL_DIND_DIRECT,
-    KATA_COCO_INIT_DATA_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec,
-    TemplateOpts, WORKSPACE_READY_TIMEOUT, confidential_init_data, runtime_profile_spec,
-    validate_managed_runtime_profile,
+    RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec, TemplateOpts, WORKSPACE_READY_TIMEOUT,
+    confidential_init_data, runtime_profile_spec, validate_managed_runtime_profile,
 };
 use crate::sandbox::warm_pool::{WarmPoolObjects, WorkspaceShape, render_warm_pool};
 use crate::sandbox::{
@@ -1082,7 +1081,7 @@ pub(super) async fn refresh_workspace_bootstrap(
         env.id == authority.environment_id(),
         "bootstrap authority mismatch"
     );
-    let client = require_client(ctx, &backend.namespace)?;
+    let runtime = ctx.require_runtime()?;
     let mut guard = authority.begin_external_mutation(states).await?;
     await_external_mutation(async {
         let current = load_environment_in(guard.transaction(), &env.id).await?;
@@ -1101,9 +1100,15 @@ pub(super) async fn refresh_workspace_bootstrap(
                 && !claim_uid.is_empty(),
             "bootstrap backend association changed"
         );
-        client
-            .reconcile_workspace_bootstrap(opts, &claim_name, &claim_uid, suspended)
-            .await
+        let claim = ClaimRef {
+            placement: Placement::new(&namespace),
+            environment_id: env.id.clone(),
+            organization_id: env.org_id.clone(),
+            operation_generation: authority.operation_generation(),
+            name: claim_name,
+            uid: claim_uid,
+        };
+        runtime.refresh_bootstrap(&claim, opts, suspended).await
     })
     .await?;
     guard.commit().await
@@ -1147,12 +1152,13 @@ pub(super) async fn reconcile_confidential_runtime_before_replacement(
     confidential_storage_manifest_uri: &str,
     authority: &ActivityAuthority,
     authoritative_states: &[&str],
-    client: &SandboxClient,
+    placement: &Placement,
     stale: &WorkspacePodIdentity,
 ) -> anyhow::Result<()> {
     if env.isolation_tier != "confidential" {
         return Ok(());
     }
+    let runtime = ctx.require_runtime()?;
     let env_id = env.id.as_str();
     let template_opts = confidential_runtime_template_opts(
         ctx,
@@ -1170,16 +1176,15 @@ pub(super) async fn reconcile_confidential_runtime_before_replacement(
         authority,
         &template_opts,
         authoritative_states,
-        client.reconcile_per_environment_runtime(env_id, &stale.name, &template_opts),
+        runtime.publish_measured_runtime(placement, env_id, &stale.name, &template_opts),
     )
     .await?;
     authority
         .run_while_authoritative_for_states(
             authoritative_states,
-            client.wait_for_workspace_pod_annotation(
-                &stale.name,
-                &stale.uid,
-                KATA_COCO_INIT_DATA_ANNOTATION_KEY,
+            runtime.wait_measured_runtime(
+                placement,
+                stale,
                 &init_data,
                 RUNTIME_METADATA_PROPAGATION_TIMEOUT,
             ),
@@ -1389,8 +1394,8 @@ async fn run_environment_create(
                 .await?;
                 tracing::info!(env = env_id, "waiting for claim ready");
                 let backend = backend.as_ref().expect("wait_for_ready requires backend");
-                let client = match require_client(ctx, &backend.namespace) {
-                    Ok(c) => c,
+                let runtime = match ctx.require_runtime() {
+                    Ok(runtime) => runtime,
                     Err(e) => {
                         emit_authoritative_environment_log_for_states(
                             authority,
@@ -1411,6 +1416,7 @@ async fn run_environment_create(
                         return Err(e);
                     }
                 };
+                let placement = Placement::new(&backend.namespace);
                 if create_retry_recovery_required(&env.state)
                     && let Err(e) = replace_terminal_workspace_pod(
                         ctx,
@@ -1418,7 +1424,8 @@ async fn run_environment_create(
                         authority,
                         env_id,
                         &env.isolation_tier,
-                        &client,
+                        runtime,
+                        &placement,
                     )
                     .await
                 {
@@ -1447,7 +1454,8 @@ async fn run_environment_create(
                     CREATE_MUTATION_STATES,
                     authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
-                        readiness_wait(client.wait_for_ready(
+                        readiness_wait(runtime.wait_ready(
+                            &placement,
                             env_id,
                             ready_timeout_for_isolation(&env.isolation_tier),
                         )),
@@ -2487,9 +2495,10 @@ async fn replace_terminal_workspace_pod(
     authority: &ActivityAuthority,
     env_id: &str,
     isolation_tier: &str,
-    client: &SandboxClient,
+    runtime: &dyn RuntimeDriver,
+    placement: &Placement,
 ) -> anyhow::Result<()> {
-    let Some(stale) = client.workspace_pod_replacement_candidate(env_id).await? else {
+    let Some(stale) = runtime.terminal_member(placement, env_id).await? else {
         return Ok(());
     };
     let confidential_storage_manifest_uri = if env.isolation_tier == "confidential" {
@@ -2520,27 +2529,22 @@ async fn replace_terminal_workspace_pod(
             &confidential_storage_manifest_uri,
             authority,
             CREATE_MUTATION_STATES,
-            client,
+            placement,
             &stale,
         )
         .await?;
         authority
             .run_external_mutation(
                 CREATE_MUTATION_STATES,
-                client.replace_workspace_pod_if_uid(
-                    env_id,
-                    &stale.name,
-                    &stale.uid,
-                    ctx.sandbox_cfg.support_image(),
-                ),
+                runtime.replace_member(placement, env_id, &stale, ctx.sandbox_cfg.support_image()),
             )
             .await?;
         authority
             .run_while_authoritative_for_states(
                 CREATE_MUTATION_STATES,
-                client.wait_for_replacement_workspace_pod(
-                    &stale.name,
-                    &stale.uid,
+                runtime.wait_replacement(
+                    placement,
+                    &stale,
                     ready_timeout_for_isolation(isolation_tier),
                 ),
             )

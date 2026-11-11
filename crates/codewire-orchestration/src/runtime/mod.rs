@@ -419,6 +419,44 @@ pub trait RuntimeLifecycle: Send + Sync {
         previous: &MemberRef,
         timeout: Duration,
     ) -> anyhow::Result<MemberRef>;
+
+    /// The environment's incarnation that has ended and that a retry must
+    /// replace. A healthy or still-starting one is never returned.
+    async fn terminal_member(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+    ) -> anyhow::Result<Option<MemberRef>>;
+
+    /// Publish the measured confidential runtime `rendering` describes, so
+    /// that the incarnation replacing `member_name` runs it. Returns what
+    /// [`wait_measured_runtime`](Self::wait_measured_runtime) waits to see.
+    async fn publish_measured_runtime(
+        &self,
+        placement: &Placement,
+        environment_id: &str,
+        member_name: &str,
+        rendering: &TemplateOpts,
+    ) -> anyhow::Result<String>;
+
+    /// Wait until this exact incarnation shows the published measured runtime:
+    /// the proof that its replacement will run it.
+    async fn wait_measured_runtime(
+        &self,
+        placement: &Placement,
+        member: &MemberRef,
+        measured: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<()>;
+
+    /// Bring the claim's suspended runtime to `rendering` before it resumes.
+    /// It never changes a running incarnation.
+    async fn refresh_bootstrap(
+        &self,
+        claim: &ClaimRef,
+        rendering: &TemplateOpts,
+        suspended: &SuspendedRuntime,
+    ) -> anyhow::Result<()>;
 }
 
 /// How a running environment changes size without losing its identity.
