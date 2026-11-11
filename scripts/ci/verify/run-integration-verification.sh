@@ -1232,7 +1232,8 @@ start_lane_databases() {
   # One after another, the migrations took about 1.5 s each (run 22601).
   for lane in "${@:2}"; do
     (
-      integration_postgres_wait_ready "${lane_url[$lane]}" "lane $lane"
+      integration_postgres_wait_ready "${lane_url[$lane]}" "lane $lane" \
+        "${INTEGRATION_POSTGRES_CONTAINER}-lane-$lane"
       DATABASE_URL="${lane_url[$lane]}"
       DATABASE_URL_RUST="${lane_rust_url[$lane]}"
       reset_schema

@@ -209,8 +209,10 @@ integration_postgres_start_lane() {
   name="${INTEGRATION_POSTGRES_CONTAINER}-lane-${lane}"
   docker rm -f "$name" >/dev/null 2>&1 || true
   INTEGRATION_POSTGRES_LANE_CONTAINERS+=("$name")
+  # No --rm: a PostgreSQL that exits keeps its container, state and log for
+  # integration_postgres_report; the cleanup removes every lane's (#4196).
   if [ "${INTEGRATION_POSTGRES_SOURCE:-}" = managed ]; then
-    docker run -d --rm --name "$name" \
+    docker run -d --name "$name" \
       -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire "${INTEGRATION_FIXTURE_LABELS[@]}" \
       -p 127.0.0.1::5432 "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
     host=127.0.0.1
@@ -222,13 +224,13 @@ integration_postgres_start_lane() {
   else
     host="codewire-integration-postgres-${lane}"
     if [ "${2:-}" = background ]; then
-      docker run -d --rm --name "$name" --pids-limit 2048 \
+      docker run -d --name "$name" --pids-limit 2048 \
         --network "$INTEGRATION_DOCKER_NETWORK" --network-alias "$host" \
         -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire "${INTEGRATION_FIXTURE_LABELS[@]}" \
         "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null &
       INTEGRATION_POSTGRES_STARTING+=("$!")
     else
-      docker run -d --rm --name "$name" --pids-limit 2048 \
+      docker run -d --name "$name" --pids-limit 2048 \
         --network "$INTEGRATION_DOCKER_NETWORK" --network-alias "$host" \
         -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire "${INTEGRATION_FIXTURE_LABELS[@]}" \
         "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
@@ -258,15 +260,35 @@ integration_postgres_stop_lane() {
   docker rm -f "${INTEGRATION_POSTGRES_CONTAINER}-lane-$1" >/dev/null 2>&1 || true
 }
 
+# integration_postgres_report NAME: what Docker knows about a PostgreSQL that
+# did not become ready (#4196): its state (exit code, OOM, error) and the end
+# of its log. A container that is gone exited on its own; the lanes keep
+# theirs until the cleanup for exactly this.
+integration_postgres_report() {
+  local name="$1" state
+  if ! state="$(docker inspect --format '{{json .State}}' "$name" 2>&1)"; then
+    echo "[integration-postgres] $name no longer exists: $state" >&2
+    return 0
+  fi
+  echo "[integration-postgres] $name state: $state" >&2
+  echo "[integration-postgres] $name log (last 40 lines):" >&2
+  docker logs --tail 40 "$name" 2>&1 | sed 's/^/  | /' >&2 || true
+}
+
+# integration_postgres_wait_ready URL LABEL [CONTAINER]: wait until the
+# database answers; when it never does, say why: psql's last error and, given
+# its container, what Docker knows (#4196).
 integration_postgres_wait_ready() {
-  local url="$1" label="$2" _
+  local url="$1" label="$2" container="${3:-}" _ last=''
   for _ in $(seq 1 "${INTEGRATION_POSTGRES_READY_ATTEMPTS:-60}"); do
-    if psql "$url" -v ON_ERROR_STOP=1 -tAc 'SELECT 1' >/dev/null 2>&1; then
+    if last="$(psql "$url" -v ON_ERROR_STOP=1 -tAc 'SELECT 1' 2>&1 >/dev/null)"; then
       return 0
     fi
     sleep 1
   done
   echo "::error::${label} PostgreSQL did not become ready" >&2
+  echo "[integration-postgres] ${label} last psql error: ${last:-none}" >&2
+  [ -z "$container" ] || integration_postgres_report "$container"
   return 1
 }
 

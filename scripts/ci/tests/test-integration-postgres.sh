@@ -19,6 +19,12 @@ case "$1" in
     printf '%s\n' fake-container-id ;;
   port) printf '127.0.0.1:%s\n' "${FAKE_DOCKER_PORT:-45678}" ;;
   exec|rm) ;;
+  # A PostgreSQL that never answers (#4196): its state, or that it is gone,
+  # and its log.
+  inspect)
+    [ -z "${FAKE_DOCKER_GONE:-}" ] || { printf 'Error: No such object: %s\n' "${*: -1}" >&2; exit 1; }
+    printf '%s\n' "${FAKE_DOCKER_STATE:-{\"Status\":\"running\"\}}" ;;
+  logs) printf '%s\n' "${FAKE_DOCKER_LOGS:-}" ;;
   *) printf 'unexpected fake docker command: %s\n' "$1" >&2; exit 1 ;;
 esac
 EOF
@@ -27,6 +33,7 @@ cat > "$TMP/psql" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$FAKE_PSQL_LOG"
+[ -z "${FAKE_PSQL_FAIL:-}" ] || { printf 'psql: error: %s\n' "$FAKE_PSQL_FAIL" >&2; exit 2; }
 printf '%s\n' 1
 EOF
 chmod +x "$TMP/psql"
@@ -79,9 +86,29 @@ integration_postgres_lanes_available
 integration_postgres_start_lane credential-broker
 [ "$INTEGRATION_POSTGRES_LANE_URL" = "postgres://codewire:codewire@127.0.0.1:45678/codewire?sslmode=disable" ]
 [ "$INTEGRATION_POSTGRES_LANE_URL_RUST" = "postgres://codewire:codewire@127.0.0.1:45678/codewire" ]
-grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-credential-broker .*127.0.0.1::5432 docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
+grep -q "^run -d --name $INTEGRATION_POSTGRES_CONTAINER-lane-credential-broker .*127.0.0.1::5432 docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
 integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER$" "$FAKE_DOCKER_LOG"
+
+# A lane PostgreSQL that never answers says why (#4196): psql's last error,
+# the container's state and the end of its log; a container that is gone is
+# reported as gone. The lanes keep their containers (no --rm) for this.
+report="$(FAKE_PSQL_FAIL='could not translate host name "codewire-integration-postgres-billing" to address' \
+  FAKE_DOCKER_STATE='{"Status":"exited","ExitCode":1,"OOMKilled":false}' \
+  FAKE_DOCKER_LOGS='FATAL:  could not create shared memory segment' INTEGRATION_POSTGRES_READY_ATTEMPTS=2 \
+  integration_postgres_wait_ready postgres://x/codewire 'lane billing' fixture-lane-billing 2>&1)" &&
+  { echo 'a PostgreSQL that never answered was ready' >&2; exit 1; }
+for expected in '::error::lane billing PostgreSQL did not become ready' \
+    'lane billing last psql error: psql: error: could not translate host name' \
+    'fixture-lane-billing state: {"Status":"exited","ExitCode":1,"OOMKilled":false}' \
+    '  | FATAL:  could not create shared memory segment'; do
+  grep -qF -- "$expected" <<<"$report" || { echo "the readiness failure did not report: $expected" >&2; echo "$report" >&2; exit 1; }
+done
+report="$(FAKE_PSQL_FAIL='connection refused' FAKE_DOCKER_GONE=1 INTEGRATION_POSTGRES_READY_ATTEMPTS=1 \
+  integration_postgres_wait_ready postgres://x/codewire 'lane billing' fixture-lane-billing 2>&1)" &&
+  { echo 'a PostgreSQL that never answered was ready' >&2; exit 1; }
+grep -qF 'fixture-lane-billing no longer exists: Error: No such object: fixture-lane-billing' <<<"$report" ||
+  { echo "a removed container was not reported as gone: $report" >&2; exit 1; }
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER-lane-credential-broker$" "$FAKE_DOCKER_LOG"
 if integration_postgres_start_lane 'Bad Lane' >/dev/null 2>&1; then
   echo 'an invalid database lane name was accepted' >&2
@@ -101,7 +128,7 @@ INTEGRATION_DOCKER_NETWORK=codewire-fixture-net
 integration_postgres_lanes_available
 integration_postgres_start_lane orchestration
 [ "$INTEGRATION_POSTGRES_LANE_URL_RUST" = "postgres://codewire:codewire@codewire-integration-postgres-orchestration:5432/codewire" ]
-grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration --pids-limit 2048 --network codewire-fixture-net --network-alias codewire-integration-postgres-orchestration .* docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
+grep -q "^run -d --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration --pids-limit 2048 --network codewire-fixture-net --network-alias codewire-integration-postgres-orchestration .* docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
 integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration$" "$FAKE_DOCKER_LOG"
 # Lanes on the job network start at once in the background (their servers
@@ -114,7 +141,7 @@ FAKE_DOCKER_RUN_SECONDS=2 integration_postgres_start_lane core background
 FAKE_DOCKER_RUN_SECONDS=2 integration_postgres_start_lane broker-checked background
 integration_postgres_wait_started
 (( SECONDS - started < 4 )) || { echo 'the background lanes started one after another' >&2; exit 1; }
-[ "$(grep -c "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-" "$FAKE_DOCKER_LOG")" -eq 2 ]
+[ "$(grep -c "^run -d --name $INTEGRATION_POSTGRES_CONTAINER-lane-" "$FAKE_DOCKER_LOG")" -eq 2 ]
 [ "${#INTEGRATION_POSTGRES_STARTING[@]}" -eq 0 ]
 FAKE_DOCKER_FAIL_RUN=lane-orchestration integration_postgres_start_lane orchestration background
 if integration_postgres_wait_started 2>"$TMP/wait-started.err"; then
@@ -146,8 +173,8 @@ grep -q "@$INTEGRATION_POSTGRES_CONTAINER:5432/codewire?sslmode=disable.*SELECT 
 integration_postgres_lanes_available
 integration_postgres_start_lane orchestration
 [ "$INTEGRATION_POSTGRES_LANE_URL_RUST" = "postgres://codewire:codewire@codewire-integration-postgres-orchestration:5432/codewire" ]
-grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration --pids-limit 2048 --network codewire-fixture-net " "$FAKE_DOCKER_LOG"
-grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration .* --label codewire.ci.run=fixture-$$ --label codewire.ci.attempt=0 --label codewire.ci.job=local " "$FAKE_DOCKER_LOG"
+grep -q "^run -d --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration --pids-limit 2048 --network codewire-fixture-net " "$FAKE_DOCKER_LOG"
+grep -q "^run -d --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration .* --label codewire.ci.run=fixture-$$ --label codewire.ci.attempt=0 --label codewire.ci.job=local " "$FAKE_DOCKER_LOG"
 integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER$" "$FAKE_DOCKER_LOG"
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration$" "$FAKE_DOCKER_LOG"
@@ -676,11 +703,11 @@ def check_lanes(commands, case, complete=True):
     started = case_file(case, 'docker.log').read_text().splitlines()
     for lane in lane_order[1:]:
         name = 'codewire-product-postgres-local-'
-        runs = [line for line in started if line.startswith('run -d --rm --name ' + name) and line.split()[4].endswith('-lane-' + lane)]
+        runs = [line for line in started if line.startswith('run -d --name ' + name) and line.split()[3].endswith('-lane-' + lane)]
         assert len(runs) == 1 and '--network codewire-fixture-net --network-alias codewire-integration-postgres-' + lane in runs[0], started
         assert any(line.startswith('rm -f ') and line.endswith('-lane-' + lane) for line in started[started.index(runs[0]):]), started
         # A finished lane's PostgreSQL is removed then, not only at the end.
-        assert sum(line == 'rm -f ' + runs[0].split()[4] for line in started) >= 3, (lane, started)
+        assert sum(line == 'rm -f ' + runs[0].split()[3] for line in started) >= 3, (lane, started)
 lanes, lane_commands, lanes_environment = cases['lanes'].result()
 assert lanes.returncode == 0 and '[product-integration] green' in lanes.stdout, lanes.stdout + lanes.stderr
 # Without a CPU share (a cloud runner, a workstation) all ten lanes run at
@@ -993,7 +1020,7 @@ service_lane_check full coordinator "$(service_lane_url coordinator)" coordinato
 for lane in idp-flow idp-sessions connect-auth billing coordinator; do
   grep -qxF "migrate $(service_lane_url "$lane")" "$TMP/service-lanes-full/trace" ||
     { echo "service lane $lane did not migrate its database" >&2; exit 1; }
-  grep -q "^run -d --rm --name codewire-product-postgres-[^ ]*-lane-$lane .*--network-alias codewire-integration-postgres-$lane " \
+  grep -q "^run -d --name codewire-product-postgres-[^ ]*-lane-$lane .*--network-alias codewire-integration-postgres-$lane " \
     "$TMP/docker.log" || { echo "service lane $lane got no PostgreSQL of its own" >&2; exit 1; }
   grep -q "^rm -f codewire-product-postgres-[^ ]*-lane-$lane$" "$TMP/docker.log" ||
     { echo "service lane $lane's PostgreSQL was not removed" >&2; exit 1; }
