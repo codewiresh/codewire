@@ -98,11 +98,11 @@ ARG BUILDARCH
 ARG TARGETARCH
 # The same checksum-verified Go archive workspace-foundation installs. Go
 # installs a cross-compiled binary below bin/<goos>_<goarch>.
-ARG GO_VERSION=1.27.3
+ARG GO_VERSION=1.27.4
 RUN set -euo pipefail; \
     case "$BUILDARCH" in \
-      amd64) go_sha=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 ;; \
-      arm64) go_sha=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49 ;; \
+      amd64) go_sha=7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840 ;; \
+      arm64) go_sha=3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92 ;; \
       *) echo "unsupported build architecture: $BUILDARCH" >&2; exit 1 ;; \
     esac; \
     case "$TARGETARCH" in \
@@ -197,7 +197,7 @@ COPY --from=workspace-kubectl --chmod=0755 /kubectl /usr/local/bin/kubectl
 COPY --from=workspace-atmos --chmod=0755 /atmos /usr/local/bin/atmos
 RUN kubectl version --client && atmos version
 ARG NODE_VERSION=22.23.4
-ARG GO_VERSION=1.27.3
+ARG GO_VERSION=1.27.4
 
 # Node and Go are direct, checksum-verified upstream archives on both supported
 # architectures. Unknown architectures fail closed.
@@ -206,11 +206,11 @@ RUN set -euo pipefail; \
       amd64) \
         node_arch=x64; \
         node_sha=b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406; \
-        go_sha=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 ;; \
+        go_sha=7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840 ;; \
       arm64) \
         node_arch=arm64; \
         node_sha=f7a1e486dbc8b286847815b477d4fb5e9fb963ed4489c3e1588853d685f589f9; \
-        go_sha=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49 ;; \
+        go_sha=3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92 ;; \
       *) echo "unsupported workspace image architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
