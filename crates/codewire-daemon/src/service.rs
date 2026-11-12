@@ -49,6 +49,10 @@ pub struct DaemonServiceImpl {
     /// The token every RPC must present. It starts as `config.auth_token`;
     /// only a local guest daemon rotates it (`auth_rotation`).
     auth: crate::auth_rotation::DaemonAuth,
+    /// Runs before each session launch: a Sandbox's daemon trusts the
+    /// workspace's new repositories for Claude Code there
+    /// (`claude_home::WorkspaceTrust`).
+    before_launch: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -109,7 +113,15 @@ impl DaemonServiceImpl {
             runtime_state,
             app_ports: None,
             workload_sockets: crate::forward::WorkloadSockets::default(),
+            before_launch: None,
         }
+    }
+
+    /// The same service, running `hook` before each session launch. The
+    /// launch waits for it; it must not fail or block for long.
+    pub fn with_before_launch(mut self, hook: impl Fn() + Send + Sync + 'static) -> Self {
+        self.before_launch = Some(std::sync::Arc::new(hook));
+        self
     }
 
     fn require_guest(&self) -> Result<(), Status> {
@@ -241,6 +253,9 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::LaunchSessionRequest>,
     ) -> Result<Response<v1::LaunchSessionResponse>, Status> {
         self.authorize(&request)?;
+        if let Some(hook) = self.before_launch.clone() {
+            let _ = tokio::task::spawn_blocking(move || hook()).await;
+        }
         let session = self
             .session_engine
             .launch(request.into_inner())

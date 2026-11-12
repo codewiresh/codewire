@@ -1462,9 +1462,10 @@ async fn serve_hosted_daemon(
     codewire_daemon::codex_home::CodexHome::default().prepare(config.managed_credential_clients);
     // Claude Code runs its first-run onboarding, including a login picker,
     // unless `~/.claude.json` records it complete, and asks whether you trust
-    // each folder; while the Anthropic client is selected the daemon marks
-    // onboarding complete and the workspace root trusted, so Claude Code uses
-    // the managed credential at once in any checked-out repository. Unless
+    // each folder; the daemon marks the workspace root and its repositories
+    // trusted (again before each session, for repositories cloned since), and
+    // while the Anthropic client is selected onboarding complete, so Claude
+    // Code starts at once in any checked-out repository. Unless
     // the sign-in form is selected, it also removes Codewire's Claude login
     // from `~/.claude/.credentials.json`. A selection change restarts the
     // Sandbox.

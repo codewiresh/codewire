@@ -490,7 +490,7 @@ where
     config.validate_host()?;
     let (app_ports, pod_uid) = bound.unzip();
     #[cfg(target_os = "linux")]
-    let (codex_login, claude_login) = match logins {
+    let (codex_login, claude_login, workspace_trust) = match logins {
         Some(logins) => {
             // A local VM keeps Claude Code's login for the same workload user
             // as Codex's native home; a hosted daemon keeps its own.
@@ -513,9 +513,11 @@ where
             (
                 codex.map(|writer| (writer, logins.check_period)),
                 claude.map(|writer| (writer, logins.check_period)),
+                // A Sandbox's workspace, never a trusted host's.
+                Some(crate::claude_home::WorkspaceTrust::new(claude_home)),
             )
         }
-        None => (None, None),
+        None => (None, None, None),
     };
     #[cfg(not(target_os = "linux"))]
     let _ = logins;
@@ -533,6 +535,10 @@ where
     }
     if let Some(app_ports) = app_ports {
         implementation = implementation.with_app_ports(app_ports);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(trust) = workspace_trust {
+        implementation = implementation.with_before_launch(move || trust.refresh());
     }
     let session_owner = implementation.session_engine();
     #[cfg(target_os = "linux")]

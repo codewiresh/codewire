@@ -82,3 +82,14 @@ Claude Code opens full screen, with its input box on the bottom rows, as with
 its `"tui": "fullscreen"` setting: the image sets `CLAUDE_CODE_NO_FLICKER=1`.
 The variable outranks Claude's own `"tui"` setting, so for its inline renderer
 add `unset CLAUDE_CODE_NO_FLICKER` to your shell's rc file.
+
+Claude Code trusts `/workspace` in Codewire environments: it starts in the
+workspace, and in every Git repository up to three levels under it, without
+asking whether you trust the folder. That question guards against a folder's
+own Claude settings, such as hooks and MCP servers, running when Claude Code
+starts; the workspace holds your own checkouts. Claude Code stops looking for a trusted folder at a
+repository's root, so the environment marks the workspace and each repository
+root trusted in `~/.claude.json`, keeping everything else in the file. It
+does so when it starts and again before each session, so a repository you
+clone later is covered from your next session on. Folders outside the
+workspace, such as your home directory, still ask.
