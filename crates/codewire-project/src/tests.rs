@@ -892,6 +892,51 @@ fn destination_parents_and_depths_find_the_nearest_ancestor() {
 }
 
 #[test]
+fn a_repository_may_be_the_whole_workspace_with_others_inside_it() {
+    let document = parse_project_yaml(&repos_yaml(
+        &["/workspace", "/workspace/lib", "/workspace/lib/vendor"],
+        "",
+    ))
+    .unwrap();
+    let destinations = document
+        .spec
+        .repositories
+        .iter()
+        .map(|repository| repository.destination.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        destinations,
+        ["/workspace", "/workspace/lib", "/workspace/lib/vendor"]
+    );
+    assert_eq!(destination_parents(&destinations), [None, Some(0), Some(1)]);
+    assert_eq!(destination_depths(&destinations), [0, 1, 2]);
+    assert_eq!(document.spec.working_directory, "/workspace");
+
+    let alone = parse_project_yaml(&repos_yaml(&["/workspace"], "")).unwrap();
+    assert_eq!(alone.spec.working_directory, "/workspace");
+
+    let twice = parse_project_yaml(&repos_yaml(&["/workspace", "/workspace"], ""))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        twice.contains("duplicate destination /workspace"),
+        "{twice}"
+    );
+    for mount in [
+        "{source: ., destination: /workspace/m, mode: copy}",
+        "{source: ., destination: /workspace, mode: direct, read_only: false}",
+    ] {
+        let error = parse_project_yaml(&repos_yaml(
+            &["/workspace"],
+            &format!("mounts: [{mount}]\n"),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("overlaps"), "{mount}: {error}");
+    }
+}
+
+#[test]
 fn a_live_mount_may_be_the_whole_workspace_and_nothing_else() {
     let document = parse_project_yaml(
         "version: 1\nmounts: [{source: ., destination: /workspace, mode: direct, read_only: false}]\n",

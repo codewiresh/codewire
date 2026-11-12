@@ -1,7 +1,10 @@
 use std::path::Path;
 use std::process::Command;
 
-use super::{NESTED_CHECKOUT_GUARD, NESTED_CHECKOUT_TRACKED_EXIT};
+use super::{
+    CHECKOUT_PREPARATION, NESTED_CHECKOUT_GUARD, NESTED_CHECKOUT_TRACKED_EXIT,
+    WORKSPACE_ROOT_NOT_EMPTY_EXIT,
+};
 
 fn git(directory: &Path, arguments: &[&str]) {
     let status = Command::new("git")
@@ -79,5 +82,54 @@ fn the_guard_refuses_tracked_paths_and_excludes_a_nested_checkout() {
     assert!(
         code.is_some_and(|code| code != 0 && code != NESTED_CHECKOUT_TRACKED_EXIT),
         "{code:?}"
+    );
+}
+
+fn prepare(dir: &Path, root: &Path) -> Option<i32> {
+    Command::new("sh")
+        .args(["-c", CHECKOUT_PREPARATION, "sh"])
+        .arg(dir)
+        .arg(root)
+        .status()
+        .unwrap()
+        .code()
+}
+
+/// #4027: the workspace root is never removed or emptied before a clone. A
+/// repository there needs it empty already; with anything in it the
+/// preparation refuses and leaves every file where it was.
+#[test]
+fn the_workspace_root_is_refused_with_content_and_never_cleaned() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+
+    assert_eq!(prepare(&root, &root), Some(0), "an empty root is ready");
+    assert!(root.is_dir(), "an empty root is kept, not removed");
+
+    std::fs::create_dir(root.join(".codewire")).unwrap();
+    std::fs::write(root.join(".codewire/keep"), "the user's\n").unwrap();
+    std::fs::write(root.join(".gitconfig"), "[user]\n").unwrap();
+    assert_eq!(
+        prepare(&root, &root),
+        Some(WORKSPACE_ROOT_NOT_EMPTY_EXIT),
+        "a root with content is refused"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(".codewire/keep")).unwrap(),
+        "the user's\n"
+    );
+    assert!(root.join(".gitconfig").is_file());
+
+    // Any other destination is an earlier attempt's checkout: removed.
+    let checkout = root.join("app");
+    std::fs::create_dir_all(checkout.join("partial")).unwrap();
+    std::fs::write(checkout.join("partial/file"), "x\n").unwrap();
+    assert_eq!(prepare(&checkout, &root), Some(0));
+    assert!(!checkout.exists());
+    assert_eq!(prepare(&checkout, &root), Some(0), "an absent one is fine");
+    assert!(
+        root.join(".codewire/keep").is_file(),
+        "the root is untouched"
     );
 }

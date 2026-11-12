@@ -1,6 +1,7 @@
 //! Repository workspace-path normalization shared by the create API and setup
-//! worker. Setup removes an existing checkout before cloning, so every path is
-//! validated here before it can reach that destructive operation.
+//! worker. Setup removes an existing checkout before cloning (never the
+//! workspace root, #4027), so every path is validated here before it can reach
+//! that destructive operation.
 
 use std::fmt;
 
@@ -84,10 +85,18 @@ mod tests {
         );
     }
 
+    /// #4027: a repository may be the workspace itself.
+    #[test]
+    fn accepts_the_workspace_root() {
+        assert_eq!(
+            canonical_repository_mount("https://example.com/app", "/workspace").unwrap(),
+            "/workspace"
+        );
+    }
+
     #[test]
     fn rejects_unsafe_or_non_normalized_paths() {
         for path in [
-            "/workspace",
             "/workspace/",
             "/tmp/app",
             "workspace/app",

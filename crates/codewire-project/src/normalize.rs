@@ -225,7 +225,9 @@ fn normalize_repositories(
         } else {
             repository.destination.trim().to_string()
         };
-        validate_workspace_path("repositories.destination", &destination, false)?;
+        // A repository may be /workspace itself, with the others inside it
+        // (#4027); duplicates are refused below.
+        validate_workspace_path("repositories.destination", &destination, true)?;
         normalized.push(RepositorySpec {
             source,
             revision,

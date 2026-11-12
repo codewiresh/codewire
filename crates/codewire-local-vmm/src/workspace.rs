@@ -3175,6 +3175,86 @@ mod tests {
         );
     }
 
+    /// #4027: a repository at /workspace itself imports into the workspace
+    /// folder provisioning has already created, and a repository inside it
+    /// stays out of its status.
+    #[test]
+    fn a_root_repository_imports_into_the_existing_workspace_folder() {
+        let source = tempfile::tempdir().unwrap();
+        git(source.path(), &["init", "-q"]);
+        fs::write(source.path().join("README.md"), b"root\n").unwrap();
+        git(source.path(), &["add", "README.md"]);
+        git(
+            source.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "root",
+            ],
+        );
+        let commit = git_text(source.path(), &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_owned();
+        git(
+            source.path(),
+            &["update-ref", "refs/codewire/source", &commit],
+        );
+        let staging = tempfile::tempdir().unwrap();
+        let bundle = staging.path().join("root.bundle");
+        let status = Command::new(GIT)
+            .args(["bundle", "create"])
+            .arg(&bundle)
+            .arg("refs/codewire/source")
+            .current_dir(source.path())
+            .env_clear()
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("LC_ALL", "C")
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let root = staging_workspace_destination(staging.path(), "/workspace").unwrap();
+        assert_eq!(root, staging.path().join("workspace"));
+        fs::create_dir(&root).unwrap();
+        prepare_git_bundle(
+            &bundle,
+            &root,
+            staging.path(),
+            "https://example.invalid/acme/root.git",
+            &commit,
+            "main",
+        )
+        .unwrap();
+        assert_eq!(fs::read(root.join("README.md")).unwrap(), b"root\n");
+
+        reject_tracked_nested_path(&root, "lib", "/workspace", "/workspace/lib").unwrap();
+        assert_eq!(
+            staging_workspace_destination(staging.path(), "/workspace/lib").unwrap(),
+            root.join("lib")
+        );
+        fs::create_dir_all(root.join("lib/.git")).unwrap();
+        fs::write(root.join("lib/file"), b"lib\n").unwrap();
+        exclude_nested_repository(&root, "lib").unwrap();
+        let status = git_output(
+            &root,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+            MAX_GIT_CONTROL_OUTPUT,
+        )
+        .unwrap();
+        assert!(
+            status.stdout.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&status.stdout)
+        );
+    }
+
     #[test]
     fn repository_bundle_imports_only_the_resolved_commit_with_a_safe_origin() {
         let source = tempfile::tempdir().unwrap();

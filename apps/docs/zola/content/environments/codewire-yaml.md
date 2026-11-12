@@ -167,6 +167,24 @@ adds each inner path to the outer checkout's `.git/info/exclude`, so its
 tracks, or a file on the way to it, fails the create and is named. `mounts`
 cannot nest with repositories or each other.
 
+The outer repository may be `/workspace` itself, so the workspace is that
+checkout:
+
+```yaml
+repositories:
+  - source: https://github.com/your-org/platform.git
+    destination: /workspace
+  - source: https://github.com/your-org/web.git
+    destination: /workspace/web
+```
+
+`/workspace` must start empty for this. A local VM's always does, and with
+`--path-mode mount` the folder is mounted at `/workspace` itself. A cloud
+environment's does on the standard tier where the deployment mounts only the
+disk's `workspace/` folder there; elsewhere, and on the confidential tier for
+now, the create is refused (`workspace_root_repository_unavailable`) before
+anything starts. Codewire never removes or empties `/workspace` to make room.
+
 ## Keys
 
 Every key, its type and its limits are in

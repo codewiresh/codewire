@@ -79,7 +79,8 @@ pub fn is_valid_environment_key(key: &str) -> bool {
     codewire_workload_secrets::validate_workload_secret_key(key).is_ok()
 }
 
-const WORKSPACE_ROOT: &str = "/workspace";
+/// The workspace every repository, mount and working directory lies in, or is.
+pub const WORKSPACE_ROOT: &str = "/workspace";
 const MAX_SHORT_VALUE_BYTES: usize = 1024;
 const MAX_COMMAND_BYTES: usize = 64 * 1024;
 const MAX_ENVIRONMENT_VALUE_BYTES: usize = 64 * 1024;

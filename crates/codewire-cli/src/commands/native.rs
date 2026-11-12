@@ -4134,9 +4134,23 @@ fn mount_checked_out_repositories(
             "this local runtime has no virtiofsd, so it cannot mount {shown}; reinstall the runtime, or pass --path-mode clone to clone the repositories"
         );
     }
-    let destination = format!("/workspace/{}", workspace_directory_name(source_path));
+    // A repository at /workspace itself makes the folder the whole workspace,
+    // #4025's live mount at /workspace, with nested repositories inside it
+    // (#4027); otherwise the folder is mounted beside other workspace files.
+    let root = codewire_project::WORKSPACE_ROOT;
+    let destination = if project
+        .spec
+        .repositories
+        .iter()
+        .any(|repository| repository.destination == root)
+    {
+        root.to_owned()
+    } else {
+        format!("{root}/{}", workspace_directory_name(source_path))
+    };
     // Declared mounts stay beside the folder's, such as a checkout that lives
-    // outside it (#4020), but none may share or nest with it.
+    // outside it (#4020), but none may share or nest with it, so a folder at
+    // /workspace itself leaves no room for them.
     if let Some(mount) = project.local_mounts.iter().find(|mount| {
         let other = mount.destination.as_str();
         other == destination
@@ -5596,6 +5610,51 @@ mod tests {
         ));
         let error = mount_plan(&root).unwrap_err().to_string();
         assert!(error.contains("a local VM serves at most 16"), "{error}");
+    }
+
+    /// #4027: a repository at /workspace itself mounts the folder as the
+    /// whole workspace, with the repositories nested in it.
+    #[test]
+    fn mount_mode_mounts_a_root_repository_at_the_workspace_itself() {
+        let (_temp, root) = folder_with_checkouts("");
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(
+            root.join("codewire.yaml"),
+            "version: 1\nrepositories:\n  - source: https://example.test/org/root.git\n    destination: /workspace\n  - source: https://example.test/org/a.git\n    destination: /workspace/a\n  - source: https://example.test/org/b.git\n    destination: /workspace/b\n",
+        )
+        .unwrap();
+        let (project, workspace) = mount_plan(&root).unwrap();
+        assert!(project.spec.repositories.is_empty(), "nothing is cloned");
+        assert_eq!(project.spec.working_directory, "/workspace");
+        assert_eq!(project.local_mounts.len(), 1);
+        assert_eq!(project.local_mounts[0].destination, "/workspace");
+        assert!(
+            workspace
+                .description
+                .ends_with("with its checkouts of /workspace, /workspace/a, /workspace/b"),
+            "{}",
+            workspace.description
+        );
+
+        // A nested repository must still be checked out in the folder.
+        std::fs::remove_dir_all(root.join("b")).unwrap();
+        let error = mount_plan(&root).unwrap_err().to_string();
+        assert!(error.contains("/workspace/b: "), "{error}");
+        assert!(error.contains("mounted at /workspace:"), "{error}");
+
+        // The folder is the whole workspace, so a declared mount has no room
+        // beside it: codewire.yaml itself refuses one inside the repository.
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.join("codewire.yaml"),
+            format!(
+                "version: 1\nrepositories:\n  - source: https://example.test/org/root.git\n    destination: /workspace\nmounts:\n  - {{source: {}, destination: /workspace/infra, mode: direct, read_only: false}}\n",
+                outside.path().display()
+            ),
+        )
+        .unwrap();
+        let error = format!("{:#}", mount_plan(&root).unwrap_err());
+        assert!(error.contains("overlaps"), "{error}");
     }
 
     #[test]

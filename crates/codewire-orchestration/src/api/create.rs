@@ -361,6 +361,32 @@ fn validate_environment_repository_mounts(
     })
 }
 
+/// A repository at /workspace itself needs a workspace that starts empty
+/// (#4027): a standard commodity workspace in the subfolder layout (#4026).
+/// Anywhere else /workspace holds the home's files, and the setup worker
+/// never cleans it; a confidential workspace gets the layout with #4093.
+fn validate_workspace_root_repository(
+    repositories: &[codewire_project::RepositorySpec],
+    isolation_tier: &str,
+    runtime_profile: &str,
+    workspace_subfolder: bool,
+) -> AppResult<()> {
+    let at_root = repositories
+        .iter()
+        .any(|repository| repository.destination == codewire_project::WORKSPACE_ROOT);
+    let empty_workspace = isolation_tier == "standard"
+        && runtime_profile.trim() == crate::sandbox::template::RUNTIME_PROFILE_COMMODITY
+        && workspace_subfolder;
+    if !at_root || empty_workspace {
+        return Ok(());
+    }
+    Err(coded(
+        StatusCode::BAD_REQUEST,
+        "workspace_root_repository_unavailable",
+        "a repository at /workspace needs an empty workspace, which this environment does not have; choose a destination below /workspace",
+    ))
+}
+
 fn validate_environment_resources(
     cpu_millicores: Option<u32>,
     memory_mib: Option<u64>,
@@ -1123,6 +1149,12 @@ pub(crate) async fn create_environment_core(
 
     ensure_current_platform_runtime_support(&body)?;
     validate_environment_repository_mounts(&body.project_spec.repositories)?;
+    validate_workspace_root_repository(
+        &body.project_spec.repositories,
+        isolation_tier,
+        &state.sandbox_cfg.runtime_profile,
+        state.sandbox_cfg.workspace_subfolder,
+    )?;
     // Reject explicit bad values before preset lookup or auto-creation can
     // write preset state. The effective values are checked again after
     // preset resolution so invalid stored defaults cannot reach quota or the
@@ -1203,6 +1235,12 @@ pub(crate) async fn create_environment_core(
             body.project_spec.validate().map_err(invalid_project_spec)?;
             ensure_current_platform_runtime_support(&body)?;
             validate_environment_repository_mounts(&body.project_spec.repositories)?;
+            validate_workspace_root_repository(
+                &body.project_spec.repositories,
+                isolation_tier,
+                &state.sandbox_cfg.runtime_profile,
+                state.sandbox_cfg.workspace_subfolder,
+            )?;
 
             let cpu = body.project_spec.resources.cpu_millicores.unwrap();
             let memory_mib = body.project_spec.resources.memory_mib.unwrap();
@@ -1284,6 +1322,39 @@ pub(crate) async fn create_environment_core(
 mod tests {
     use super::*;
     use crate::api::environments::get_org_quota;
+
+    /// #4027: a repository at /workspace only where /workspace starts empty.
+    #[test]
+    fn a_repository_at_the_workspace_root_needs_the_subfolder_layout() {
+        let repository = |destination: &str| codewire_project::RepositorySpec {
+            source: "https://example.test/org/app.git".into(),
+            destination: destination.into(),
+            ..Default::default()
+        };
+        let code = |repositories: &[codewire_project::RepositorySpec], tier, profile, subfolder| {
+            match validate_workspace_root_repository(repositories, tier, profile, subfolder) {
+                Ok(()) => "ok",
+                Err(AppError::Coded { code, .. }) => code,
+                Err(_) => "other",
+            }
+        };
+        let root = [repository("/workspace"), repository("/workspace/lib")];
+        let below = [repository("/workspace/app")];
+        assert_eq!(code(&root, "standard", "commodity", true), "ok");
+        for (tier, profile, subfolder) in [
+            ("standard", "commodity", false),
+            ("standard", "runc", true),
+            ("confidential", "commodity", true),
+        ] {
+            assert_eq!(
+                code(&root, tier, profile, subfolder),
+                "workspace_root_repository_unavailable",
+                "{tier} {profile} {subfolder}"
+            );
+            assert_eq!(code(&below, tier, profile, subfolder), "ok");
+        }
+        assert_eq!(code(&[], "standard", "runc", false), "ok");
+    }
 
     #[test]
     fn a_create_from_a_snapshot_refuses_what_it_cannot_be() {

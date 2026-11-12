@@ -17,7 +17,7 @@ in every file merged with repeated `--file`; see
 | `version` | integer | `1` |
 | `preset` | string | a preset slug the platform resolves |
 | `image` | string | `workspace` for the Codewire image, or any OCI reference |
-| `repositories` | list | `source`, optional `branch` or `revision`, `destination` under `/workspace`, optional `known_hosts` lines for SSH sources other than `github.com`; up to 64; a destination may lie inside another repository's, which is cloned first |
+| `repositories` | list | `source`, optional `branch` or `revision`, `destination` under `/workspace` or `/workspace` itself, optional `known_hosts` lines for SSH sources other than `github.com`; up to 64; a destination may lie inside another repository's, which is cloned first |
 | `working_directory` | string | default `/workspace` |
 | `install_command`, `startup_script` | string | install runs once at setup; startup runs at every boot |
 | `environment` | map | plain variables, up to 256; never secret values |

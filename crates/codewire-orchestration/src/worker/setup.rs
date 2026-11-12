@@ -132,6 +132,34 @@ printf '/%s/
 ' "$relative" >> "$parent/.git/info/exclude"
 "#;
 
+/// Exit status of [`CHECKOUT_PREPARATION`] when the workspace root, a
+/// repository's destination, is not empty.
+const WORKSPACE_ROOT_NOT_EMPTY_EXIT: i32 = 4;
+
+/// Before a repository is cloned, its destination is made empty: an earlier
+/// attempt's checkout is removed. The workspace root (`$2`) is never removed
+/// or emptied: it is a mount point and may hold the user's files, so a
+/// repository there needs it empty already and is refused otherwise (#4027).
+const CHECKOUT_PREPARATION: &str = r#"set -eu
+dir=$1 root=$2
+if [ "$dir" = "$root" ]; then
+  if [ -n "$(ls -A -- "$dir")" ]; then exit 4; fi
+  exit 0
+fi
+rm -rf -- "$dir"
+"#;
+
+fn checkout_preparation(dir: &str) -> Vec<String> {
+    vec![
+        "sh".into(),
+        "-c".into(),
+        CHECKOUT_PREPARATION.into(),
+        "sh".into(),
+        dir.into(),
+        codewire_project::WORKSPACE_ROOT.into(),
+    ]
+}
+
 fn nested_checkout_guard(parent: &str, relative: &str) -> Vec<String> {
     vec![
         "sh".into(),
@@ -1970,13 +1998,24 @@ impl SetupOps for WorkerSetupOps<'_> {
                                 .await);
                         }
                     }
-                    let rm: Vec<String> = vec!["rm".into(), "-rf".into(), dir.clone()];
+                    let prepare = checkout_preparation(&dir);
                     if let Err(error) = this
-                        .workspace_exec(&namespace, &env_id, &rm, "", &BTreeMap::new())
+                        .workspace_exec(&namespace, &env_id, &prepare, "", &BTreeMap::new())
                         .await
-                        && is_setup_control_flow(&error)
                     {
-                        return Err(error);
+                        if is_setup_control_flow(&error) {
+                            return Err(error);
+                        }
+                        if exited_with(&error, WORKSPACE_ROOT_NOT_EMPTY_EXIT) {
+                            return Err(this
+                                .fence_failed_launch_group(
+                                    input,
+                                    error.context(format!(
+                                        "a repository at {dir} needs an empty workspace, and it is not empty"
+                                    )),
+                                )
+                                .await);
+                        }
                     }
                     this.phase_authority
                         .ensure_active(this.active_phase)
@@ -2018,7 +2057,7 @@ impl SetupOps for WorkerSetupOps<'_> {
                         // Git removed its partial checkout; make the empty
                         // destination exact before the HTTPS attempt.
                         if let Err(error) = this
-                            .workspace_exec(&namespace, &env_id, &rm, "", &BTreeMap::new())
+                            .workspace_exec(&namespace, &env_id, &prepare, "", &BTreeMap::new())
                             .await
                             && is_setup_control_flow(&error)
                         {
