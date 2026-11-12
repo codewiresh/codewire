@@ -1430,12 +1430,14 @@ if [ "$event_selected" = false ]; then
 
     case "$path" in
       apps/dashboard/e2e/ssr-dashboard.account-dialogs.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.anchor-lines.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.create-help.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.creation-disclosure.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.credential-dialogs.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.date-picker.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.design-system.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.durable-terminal.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.legal-pages.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.organization-layout.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.personal-api-keys.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.personal-secrets.ssr.ts|\
