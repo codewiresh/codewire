@@ -1,7 +1,7 @@
 ---
 title: Environments
-description: ls, info, create, start, stop, restart, rm, update, ports, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh, setup rex and preset.
-updated: 2026-11-11
+description: ls, info, create, start, stop, restart, rm, update, ports, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh, setup rex, checkpoint and preset.
+updated: 2026-11-12
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -299,6 +299,28 @@ Downloaded cpt:/workspace/result.txt -> ./result.txt (6 bytes)
 ```
 
 On a local VM the environment side must be under `/workspace`.
+
+## cw checkpoint (local, Linux)
+
+```sh
+cw checkpoint create ENV --name NAME
+cw checkpoint ls
+cw checkpoint inspect NAME
+cw checkpoint restore NAME [--yes]
+cw checkpoint rm NAME
+cw create --local --checkpoint NAME [--name NEW]
+```
+
+A VM checkpoint saves a running local VM's memory, device state and disks at
+one instant, on this host. It holds everything the VM's memory held, delivered
+sign-ins included, until they expire, and is never exported. The VM keeps
+running; it stands still for the moment its memory is written.
+
+`restore` puts the checkpoint's own environment back at that instant: its
+running processes and every disk change since are discarded, after asking
+unless `--yes` is given. To keep the environment and run the checkpoint beside
+it, fork it with `cw create --local --checkpoint NAME`. VM checkpoints need a
+Linux host for now; on macOS the command says so.
 
 ## Local VMs on an older cw
 

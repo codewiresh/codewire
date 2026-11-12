@@ -211,6 +211,7 @@ const HELP_SECTIONS: &[HelpSection] = &[
             "prune",
             "nuke",
             "refresh-skills",
+            "checkpoint",
         ],
     ),
     HelpSection::full("Reusable setup", &["preset"]),
@@ -488,9 +489,8 @@ enum Command {
     )]
     Snapshot(SnapshotArgs),
     #[command(
-        hide = true,
-        about = "Save, list and remove VM checkpoints of running local VMs",
-        long_about = "Save, list and remove VM checkpoints.\n\nA VM checkpoint saves a running local VM's memory, device state and disks at one instant, on this host (Linux). It holds everything the VM's memory held and is never exported.\n\n  cw checkpoint create app --name before-refactor\n  cw checkpoint ls\n  cw checkpoint inspect before-refactor\n  cw checkpoint rm before-refactor"
+        about = "Save, restore and fork VM checkpoints of running local VMs (Linux)",
+        long_about = "Save, restore and remove VM checkpoints.\n\nA VM checkpoint saves a running local VM's memory, device state and disks at one instant, on this host. It holds everything the VM's memory held, delivered sign-ins included, and is never exported. VM checkpoints need a Linux host for now; on another host the command says so.\n\n  cw checkpoint create app --name before-refactor\n  cw checkpoint ls\n  cw checkpoint inspect before-refactor\n  cw checkpoint restore before-refactor     (puts app back at that instant)\n  cw create --local --checkpoint before-refactor --name app-2\n                                            (runs it beside app instead)\n  cw checkpoint rm before-refactor"
     )]
     Checkpoint(CheckpointArgs),
     #[command(

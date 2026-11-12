@@ -2331,3 +2331,24 @@ fn every_way_of_asking_names_the_version() {
         );
     }
 }
+
+#[test]
+fn checkpoint_is_listed_with_restore_the_fork_and_its_host() {
+    let row = |help: &str| {
+        help.lines()
+            .any(|line| line.trim_start().starts_with("checkpoint "))
+    };
+    // An administration command: in `cw help --all`, not the everyday help.
+    assert!(row(&crate::cli_command_with(true).render_help().to_string()));
+    assert!(!row(&crate::cli_command_with(false).render_help().to_string()));
+    let help = Cli::try_parse_from(["cw", "checkpoint", "--help"])
+        .unwrap_err()
+        .to_string();
+    for needle in [
+        "cw checkpoint restore before-refactor",
+        "cw create --local --checkpoint before-refactor",
+        "need a Linux host",
+    ] {
+        assert!(help.contains(needle), "{needle}: {help}");
+    }
+}
