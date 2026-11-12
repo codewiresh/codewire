@@ -8,7 +8,7 @@ tree changes.
 What a deployment itself configures, such as the registries its runtime
 images come from, is in the [configuration reference](../CONFIGURATION.md).
 
-## GitHub-only OpenSSF publication
+## GitHub-only OpenSSF publication and code scanning
 
 `.github/workflows/scorecard.yml` runs the official OpenSSF Scorecard action on
 the GitHub mirror's `main` branch, weekly and on manual dispatch for retries.
@@ -18,6 +18,14 @@ The workflow is not CI authority or a required status and holds no mirror
 credential: its only capabilities are repository read, code-scanning upload
 and GitHub OIDC for OpenSSF publication. The Zola OpenSSF page reads the public
 API at build time; it does not read GitHub or OpenSSF credentials.
+
+`.github/workflows/codeql.yml` runs GitHub CodeQL static analysis on the public
+mirror daily and on manual dispatch, for Actions, Go, JavaScript and
+TypeScript, Python and Rust, and shows the alerts in GitHub code scanning. It
+is skipped while the mirror is private and, like Scorecard, is not CI
+authority: its only capabilities are repository read and code-scanning upload.
+It also satisfies Scorecard's SAST check, which looks for the CodeQL analyze
+action.
 
 `.github/workflows/fuzz.yml` runs the cargo-fuzz targets in `fuzz/` on the
 public mirror daily and on manual dispatch, with read-only repository access;

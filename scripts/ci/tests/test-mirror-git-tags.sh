@@ -13,19 +13,22 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 # npm and PyPI trust hosted CI for trusted SDK publishing (#3512), OpenSSF
-# accepts signed Scorecard results only from GitHub's hosted runner, and the
-# cargo-fuzz targets run on GitHub's hosted runners (docs/dev/FUZZING.md).
-# These GitHub-only workflows are allowed; any other stays retired.
+# accepts signed Scorecard results only from GitHub's hosted runner, CodeQL
+# code scanning runs only on GitHub, and the cargo-fuzz targets run on GitHub's
+# hosted runners (docs/dev/FUZZING.md). These GitHub-only workflows are
+# allowed; any other stays retired.
 if [ -d "$GITHUB_WORKFLOW_ROOT" ] &&
   find "$GITHUB_WORKFLOW_ROOT" -type f \
     ! -path "$GITHUB_WORKFLOW_ROOT/sdk-release.yml" \
     ! -path "$GITHUB_WORKFLOW_ROOT/scorecard.yml" \
-    ! -path "$GITHUB_WORKFLOW_ROOT/fuzz.yml" -print -quit | grep -q .; then
-  echo 'repository-authored GitHub Actions workflows other than sdk-release.yml, scorecard.yml and fuzz.yml must remain retired' >&2
+    ! -path "$GITHUB_WORKFLOW_ROOT/fuzz.yml" \
+    ! -path "$GITHUB_WORKFLOW_ROOT/codeql.yml" -print -quit | grep -q .; then
+  echo 'repository-authored GitHub Actions workflows other than sdk-release.yml, scorecard.yml, fuzz.yml and codeql.yml must remain retired' >&2
   find "$GITHUB_WORKFLOW_ROOT" -type f \
     ! -path "$GITHUB_WORKFLOW_ROOT/sdk-release.yml" \
     ! -path "$GITHUB_WORKFLOW_ROOT/scorecard.yml" \
-    ! -path "$GITHUB_WORKFLOW_ROOT/fuzz.yml" -print >&2
+    ! -path "$GITHUB_WORKFLOW_ROOT/fuzz.yml" \
+    ! -path "$GITHUB_WORKFLOW_ROOT/codeql.yml" -print >&2
   exit 1
 fi
 

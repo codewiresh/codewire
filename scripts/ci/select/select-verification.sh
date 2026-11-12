@@ -1293,10 +1293,12 @@ if [ "$event_selected" = false ]; then
         ;;
       .github/workflows/sdk-release.yml|scripts/ci/tests/test-sdk-release-workflow.py|\
       .github/workflows/scorecard.yml|scripts/ci/tests/test-scorecard-workflow.py|\
-      .github/workflows/fuzz.yml|scripts/ci/tests/test-fuzz-workflow.py|fuzz/*)
+      .github/workflows/fuzz.yml|scripts/ci/tests/test-fuzz-workflow.py|fuzz/*|\
+      .github/workflows/codeql.yml|scripts/ci/tests/test-codeql-workflow.py)
         # GitHub-only workflows: trusted SDK releases (#3512), the public
-        # OpenSSF Scorecard result and the cargo-fuzz targets, which build
-        # only with nightly in their own workspace (docs/dev/FUZZING.md).
+        # OpenSSF Scorecard result, CodeQL code scanning and the cargo-fuzz
+        # targets, which build only with nightly in their own workspace
+        # (docs/dev/FUZZING.md).
         select_token release
         recognized=true
         ;;
