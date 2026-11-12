@@ -791,7 +791,13 @@ jobs:
   rust-packages:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Rust / transport packages
-    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM') }}
+    # The heavy pair, as Database's (owner, 2026-11-12): a pull request's
+    # transport packages run on the large class, since on a 7.8 GiB medium
+    # guest 129 of 130 runs in 24 h hit the memory ceiling and thrashed (task
+    # 122614: 3.15M direct-scan pages, 38 s of host I/O stall in 363 s), even
+    # with the Docker disk on direct I/O. Main's heavy runner is its warm VM,
+    # as its medium one is.
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY') }}
     enable-openid-connect: true
     timeout-minutes: 30
     # Compile once (infra#1632): this shard runs the selected packages' tests

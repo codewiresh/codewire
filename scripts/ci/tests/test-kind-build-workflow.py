@@ -1019,12 +1019,15 @@ class MainPushDeferralContractTests(unittest.TestCase):
                 self.assertEqual(actions_value(runs_on, context), expected)
         heavy = self.workflow["jobs"]["database"]["runs-on"]
         self.assertEqual(heavy, runners.HEAVY)
+        # A pull request's transport packages need the large class's memory
+        # (owner, 2026-11-12): they take the heavy pair too.
+        self.assertEqual(self.workflow["jobs"]["rust-packages"]["runs-on"], runners.HEAVY)
         self.assertEqual(actions_value(heavy, self.context("push") | {
             "vars.CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY": "untrusted-heavy-label"}),
             "unset-CODEWIRE_CI_RUNNER_TRUSTED_HEAVY")
         # The medium class (infra#1534): a main push never falls through to
         # the untrusted medium label.
-        medium = self.workflow["jobs"]["rust-packages"]["runs-on"]
+        medium = self.workflow["jobs"]["rust-features"]["runs-on"]
         self.assertEqual(medium, runners.MEDIUM)
         self.assertEqual(actions_value(medium, self.context("push") | {
             "vars.CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM": "untrusted-medium-label"}),
