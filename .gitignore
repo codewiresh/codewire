@@ -17,6 +17,7 @@ apps/docs/.astro/
 !.claude/skills/
 .claude/skills/*
 !.claude/skills/codewire-design/
+!.claude/skills/codewire-rust/
 
 # Git worktrees
 .worktrees/

@@ -5,9 +5,8 @@ description: Codewire dashboard design and frontend patterns, with the proof eac
 
 # Codewire Design
 
-This skill is the one home of the dashboard rules (moved here from
-`AGENTS.md` "HTML and frontend" on 2026-10-29); `AGENTS.md` keeps only the UI
-iteration checkpoint, which gates landing. Do not restate these elsewhere.
+This skill is the one home of the dashboard rules; `AGENTS.md` keeps only the
+UI iteration checkpoint, which gates landing. Do not restate these elsewhere.
 
 - Never inject disposable diagnostic JavaScript, inline browser probes,
   temporary data attributes, console logging, forced scrolling or similar
@@ -200,7 +199,7 @@ simple." Don't over-tune: no optical offsets for text.
 
 ## 7. Semantics
 
-Follow `AGENTS.md`. In short:
+The semantic HTML rule at the top of this skill, in short:
 
 - buttons act and links navigate;
 - repeated rows are `ul`/`li`;
@@ -212,7 +211,8 @@ Follow `AGENTS.md`. In short:
 ## 8. Verification loop
 
 1. Iterate on fixtures with `make design-system`. List new fixture spec files in
-   `apps/dashboard/e2e/helpers/design-fixtures.ts`.
+   `apps/dashboard/e2e/helpers/design-fixtures.ts` and in the fixture case of
+   `scripts/ci/select/select-verification.sh`.
 2. Gate with `scripts/ci/verify/run-design-fixtures.sh`. It runs desktop 1440
    and mobile 390, and fails on any skip.
 3. Pin markup the scripts depend on with `cargo test -p codewire-dashboard-web`.

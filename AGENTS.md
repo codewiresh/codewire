@@ -131,10 +131,11 @@ gate.
   context for one reviewed exception PR and a second restores it; advisory and
   expiry checks otherwise stay blocking (owner, 2026-10-21).
 - **Forgejo checks the head, not the merged tree.** `main` CI verifies the
-  landed tree after merge and a failure there is fixed forward; never cancel a
-  `main` run by hand. Cancelling and rerunning runs is the orchestrator's call
-  under the `ci` skill (owner, 2026-10-29: cancel only what we don't need to
-  finish, after looking), and `main` CI and release publication always finish.
+  landed tree after merge and a failure there is fixed forward. Cancelling and
+  rerunning runs is the orchestrator's call alone, under the `ci` skill (owner,
+  2026-10-29: cancel only what we don't need to finish, after looking): a
+  `main` run is cancelled only when a newer `main` commit has replaced it, and
+  release publication always finishes.
 - **Pull-request CI** runs every family the change's paths select, as `main`
   does, except Kind; label the PR `ci-full` to add Kind when a hosted-only
   claim needs it. Kind CI is off on the schedule and on dispatch until the
@@ -143,8 +144,7 @@ gate.
 - **Dev** runs only commits whose `main` CI passed. One Dev delivery is in
   flight at a time and always finishes and publishes; at most one waits behind
   it, the newest, a newer commit replaces the waiting one, and no delivery is
-  cancelled (owner, 2026-11-10, #4071; replaces the 2026-10-24 cancel rule and
-  the 2026-10-21 two-building limit). The mechanism is the "Dev delivery turn"
+  cancelled (owner, 2026-11-10, #4071). The mechanism is the "Dev delivery turn"
   job in `.gitea/workflows/deploy-dev.yaml`, `docs/dev/CI-CONFIGURATION.md` and
   codewire/deploy.
 - **Release candidates.** A release tag's receipt needs green `main` CI, a
