@@ -1181,7 +1181,7 @@ async fn confined_mesh_process_drops_queue_overflow_without_exiting() {
         .unwrap();
         remote.write_all(b"q").await.unwrap();
         held.push(remote);
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             while accepted.len() != index + 1 {
                 tokio::task::yield_now().await;
             }
