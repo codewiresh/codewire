@@ -73,14 +73,19 @@ snapshot.
 ## Snapshot
 
 Saved state that Codewire can reuse or restore. Always qualify what was saved:
-a skill snapshot, workspace snapshot, or environment snapshot. Only skill
-snapshots are implemented today.
+a skill snapshot, disk snapshot, workspace snapshot, or environment snapshot.
+Skill snapshots and disk snapshots are implemented today: `cw snapshot` saves a
+stopped environment's disks, locally on Linux or in the cloud. A snapshot holds
+no memory; that is a VM checkpoint.
 
 ## VM checkpoint
 
-Saved running-VM execution state, including memory and device state. A
-checkpoint is backend-specific and is not an environment projection. Codewire
-does not implement VM checkpoints yet.
+Saved running-VM execution state, including memory and device state, together
+with the VM's disks. A checkpoint is backend-specific and is not an environment
+projection. `cw checkpoint` creates, lists, inspects, restores and removes VM
+checkpoints of local VMs on Linux, and `cw create --local --checkpoint` forks
+one into new environments with fresh identity. A VM checkpoint stays on the
+host that made it. Cloud environments do not have VM checkpoints yet.
 
 ## Session
 

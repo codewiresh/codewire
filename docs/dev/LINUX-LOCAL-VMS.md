@@ -312,8 +312,8 @@ cw's supervisor still serving your VMs refuses them until `cw upgrade --vms`.
 An older supervisor knows nothing of snapshots: after `cw upgrade rollback`, its
 garbage collection can remove the runtime a snapshot's root was built with, and
 a create from that snapshot then fails until that runtime is installed again.
-A snapshot is not a VM checkpoint, which would also keep a running VM's
-memory.
+A snapshot is not a VM checkpoint: `cw checkpoint` also saves a running VM's
+memory and device state, so its processes continue after a restore or fork.
 
 ## After a cw upgrade
 
