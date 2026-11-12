@@ -6,6 +6,12 @@ use serde_json::json;
 
 use super::*;
 
+/// The read timeout these tests give a loopback Prometheus: a hang guard, not
+/// a speed expectation (docs/dev/AGENT-WORKFLOW.md "Failure convergence"). A
+/// read that runs out leaves its numbers absent by design, so a 5 s timeout
+/// on an overloaded runner showed up as missing data (#4307).
+const PROMETHEUS_HANG_GUARD: Duration = Duration::from_secs(300);
+
 const GIB: i64 = 1024 * 1024 * 1024;
 
 fn reservation(cpu_millis: i128, memory_gib: f64) -> Reservation {
@@ -175,7 +181,7 @@ fn healthy(query: &str) -> axum::response::Response {
 async fn prometheus_gives_each_nodes_numbers_and_their_read_time() {
     let base = prometheus(healthy).await;
     let (reserved, used) =
-        read_prometheus(&reqwest::Client::new(), &base, Duration::from_secs(5)).await;
+        read_prometheus(&reqwest::Client::new(), &base, PROMETHEUS_HANG_GUARD).await;
     assert_eq!(
         reserved.get("one"),
         Some(&NodeReserved {
@@ -207,7 +213,7 @@ async fn no_pod_overhead_is_a_real_answer() {
     })
     .await;
     let (reserved, _) =
-        read_prometheus(&reqwest::Client::new(), &base, Duration::from_secs(5)).await;
+        read_prometheus(&reqwest::Client::new(), &base, PROMETHEUS_HANG_GUARD).await;
     assert_eq!(reserved["one"].cpu_millicores, 2_500);
     assert_eq!(reserved["one"].memory_bytes, GIB);
 }
@@ -215,7 +221,7 @@ async fn no_pod_overhead_is_a_real_answer() {
 #[tokio::test]
 async fn unset_prometheus_reads_nothing() {
     let (reserved, used) =
-        read_prometheus(&reqwest::Client::new(), "", Duration::from_secs(5)).await;
+        read_prometheus(&reqwest::Client::new(), "", PROMETHEUS_HANG_GUARD).await;
     assert!(reserved.is_empty() && used.is_empty());
 }
 
@@ -233,7 +239,7 @@ async fn a_failing_prometheus_leaves_numbers_absent_not_zero() {
         "http://127.0.0.1:9".to_owned(),
     ] {
         let (reserved, used) =
-            read_prometheus(&reqwest::Client::new(), &base, Duration::from_secs(5)).await;
+            read_prometheus(&reqwest::Client::new(), &base, PROMETHEUS_HANG_GUARD).await;
         assert!(reserved.is_empty(), "{base}: {reserved:?}");
         assert!(used.is_empty(), "{base}: {used:?}");
     }
@@ -250,7 +256,7 @@ async fn one_missing_series_leaves_that_node_unknown() {
     })
     .await;
     let (reserved, used) =
-        read_prometheus(&reqwest::Client::new(), &base, Duration::from_secs(5)).await;
+        read_prometheus(&reqwest::Client::new(), &base, PROMETHEUS_HANG_GUARD).await;
     assert!(reserved.is_empty(), "{reserved:?}");
     assert_eq!(used.len(), 1, "usage is its own family");
 }
@@ -258,7 +264,8 @@ async fn one_missing_series_leaves_that_node_unknown() {
 #[tokio::test]
 async fn a_slow_prometheus_is_cut_off_at_the_timeout() {
     let service = Router::new().fallback(|| async {
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        // Far longer than the test waits, so finishing at all proves the cutoff.
+        tokio::time::sleep(Duration::from_secs(300)).await;
         "too late"
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -269,7 +276,7 @@ async fn a_slow_prometheus_is_cut_off_at_the_timeout() {
         read_prometheus(&reqwest::Client::new(), &base, Duration::from_millis(200)).await;
     assert!(reserved.is_empty() && used.is_empty());
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(30),
         "{:?}",
         started.elapsed()
     );
@@ -279,7 +286,7 @@ async fn a_slow_prometheus_is_cut_off_at_the_timeout() {
 async fn an_oversized_answer_is_refused() {
     let base = prometheus(|_| "x".repeat(PROMETHEUS_RESPONSE_LIMIT + 1).into_response()).await;
     let (reserved, used) =
-        read_prometheus(&reqwest::Client::new(), &base, Duration::from_secs(5)).await;
+        read_prometheus(&reqwest::Client::new(), &base, PROMETHEUS_HANG_GUARD).await;
     assert!(reserved.is_empty() && used.is_empty());
 }
 

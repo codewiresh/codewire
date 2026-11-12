@@ -12,6 +12,10 @@ use crate::supervisor::tests::{
 };
 
 const MIB: u64 = 1024 * 1024;
+/// A hang guard for one capture, not a speed expectation
+/// (docs/dev/AGENT-WORKFLOW.md "Failure convergence"). A capture copies and
+/// scrubs whole disk images; an overloaded CI runner took 161 s (#4306).
+const CAPTURE_HANG_GUARD: Duration = Duration::from_secs(600);
 
 fn tool(name: &str) -> PathBuf {
     crate::host::e2fsprogs(name).expect("e2fsprogs for snapshot tests")
@@ -339,9 +343,10 @@ async fn capture_removes_every_delivered_sign_in_from_the_copy_only() {
         assert!(contains(&before, token.as_bytes()), "{token} planted");
     }
 
-    let started = std::time::Instant::now();
-    let snapshot = capture_named(&source, "s1").await.unwrap();
-    assert!(started.elapsed() < Duration::from_secs(60));
+    let snapshot = tokio::time::timeout(CAPTURE_HANG_GUARD, capture_named(&source, "s1"))
+        .await
+        .expect("the capture finishes")
+        .unwrap();
     assert_eq!(snapshot.removed_logins, 3);
     assert_eq!(snapshot.consistency, "clean");
     assert_eq!(snapshot.locations, ["local"]);
