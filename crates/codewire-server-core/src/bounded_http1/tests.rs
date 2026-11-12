@@ -466,35 +466,60 @@ async fn start_upgraded(
 
 #[tokio::test]
 async fn a_stalled_upgrade_holds_its_slots_and_closes_at_the_read_deadline() {
-    let limits = BoundedHttp1Limits {
-        header_read_timeout: Duration::from_millis(300),
-        request_read_timeout: Duration::from_millis(300),
-        ..limits()
-    };
-    let (server, handled) = start_upgraded(limits, StalledUpgrade).await;
+    // Held: the read deadline outlasts the test, so only the held slots can
+    // refuse the third connection, however slowly a loaded host accepts.
+    // The listener accepts in connect order, so the first two take this
+    // peer's two slots before the third is seen.
+    let hold = Duration::from_secs(60);
+    let (server, handled) = start_upgraded(
+        BoundedHttp1Limits {
+            header_read_timeout: hold,
+            request_read_timeout: hold,
+            connection_deadline: hold,
+            ..limits()
+        },
+        StalledUpgrade,
+    )
+    .await;
+    let _first = TcpStream::connect(server.addr).await.unwrap();
+    let _second = TcpStream::connect(server.addr).await.unwrap();
+    let mut third = TcpStream::connect(server.addr).await.unwrap();
+    // Refused at accept; an admitted third would stall until `hold`.
+    assert_eq!(
+        read_until_closed(&mut third, hold / 2).await,
+        Some(String::new())
+    );
+    assert_eq!(handled.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // Closed: each stalled upgrade ends at its read deadline, never
+    // sooner, and without a response. Without the deadline it would stall
+    // past the hang guard.
+    let read_deadline = Duration::from_millis(300);
+    let (server, handled) = start_upgraded(
+        BoundedHttp1Limits {
+            header_read_timeout: read_deadline,
+            request_read_timeout: read_deadline,
+            ..limits()
+        },
+        StalledUpgrade,
+    )
+    .await;
     let started = Instant::now();
     let mut first = TcpStream::connect(server.addr).await.unwrap();
     let mut second = TcpStream::connect(server.addr).await.unwrap();
-    // The stalled upgrades hold this peer's two slots: a third is refused.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let mut third = TcpStream::connect(server.addr).await.unwrap();
-    assert_eq!(
-        read_until_closed(&mut third, Duration::from_millis(200)).await,
-        Some(String::new())
-    );
     first
         .write_all(b"POST /counted HTTP/1.1\r\nhost: b\r\ncontent-length: 0\r\n\r\n")
         .await
         .unwrap();
     assert_eq!(
-        read_until_closed(&mut first, Duration::from_secs(3)).await,
+        read_until_closed(&mut first, hold / 2).await,
         Some(String::new())
     );
     assert_eq!(
-        read_until_closed(&mut second, Duration::from_secs(3)).await,
+        read_until_closed(&mut second, hold / 2).await,
         Some(String::new())
     );
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(started.elapsed() >= read_deadline);
     assert_eq!(handled.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
