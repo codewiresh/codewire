@@ -460,6 +460,10 @@ message ReadSessionOutputResponse {
 message AttachSessionRequest {
   string session_id = 1;
   uint64 output_offset = 2;
+  // The client's input stream and its position in it (#3993); see the public
+  // AttachSessionOpen. Empty keeps input without offsets.
+  string input_stream = 3;
+  uint64 input_offset = 4;
 }
 
 message DetachSessionRequest {
@@ -468,6 +472,9 @@ message DetachSessionRequest {
 
 message SessionInput {
   bytes data = 1;
+  // Where data[0] sits in the attachment's input stream; only on an
+  // attachment that named one.
+  optional uint64 offset = 2;
 }
 
 message SessionStatus {
@@ -477,6 +484,9 @@ message SessionStatus {
   uint64 output_end_offset = 4;
   string message = 5;
   uint64 output_start_offset = 6;
+  // How much of the attachment's input stream the session has written; only
+  // on an attachment that named one (#3993).
+  optional uint64 input_end_offset = 7;
 }
 
 message SessionOutputGap {

@@ -646,6 +646,18 @@ struct AttachInputQueue {
     bytes: usize,
 }
 
+/// Whether `next` joins `held` as one write: both without an offset, or
+/// `next` starting exactly where `held` ends in the input stream (#3993).
+fn continues(held: &v1::SessionInput, next: &v1::SessionInput) -> bool {
+    match (held.offset, next.offset) {
+        (None, None) => true,
+        (Some(held_offset), Some(next_offset)) => {
+            held_offset.checked_add(held.data.len() as u64) == Some(next_offset)
+        }
+        _ => false,
+    }
+}
+
 fn attach_input_cost(message: &Option<v1::SessionAttachMessage>) -> usize {
     match message {
         Some(v1::SessionAttachMessage {
@@ -667,6 +679,7 @@ impl AttachInputQueue {
             }),
         ) = (self.messages.back_mut(), &message)
             && held.data.len() + input.data.len() <= MAX_COALESCED_ATTACH_INPUT
+            && continues(held, input)
         {
             held.data.extend_from_slice(&input.data);
             return;
@@ -779,6 +792,21 @@ async fn run_attach_session<S>(
         async move { input.read(incoming).await }
     }));
     let session_id = attach.session_id;
+    // The client's input stream (#3993): its statuses carry how much of it
+    // the session has written, and its offset input is written once.
+    let input_stream = (!attach.input_stream.is_empty()).then_some(attach.input_stream);
+    if let Some(stream) = &input_stream
+        && let Err(error) = engine.open_input_stream(&session_id, stream, attach.input_offset)
+    {
+        finish_attach(&tx, Err(status_from_session_error(error))).await;
+        return;
+    }
+    let stamped = |mut status: v1::SessionStatus| {
+        status.input_end_offset = input_stream
+            .as_deref()
+            .and_then(|stream| engine.input_stream_offset(&session_id, stream));
+        status
+    };
     let mut cursor = attach.output_offset;
     let mut last_status = None;
     let mut record: Option<v1::SessionRecord> = None;
@@ -830,7 +858,17 @@ async fn run_attach_session<S>(
                 match message {
                     Some(message) => match message.payload {
                         Some(v1::session_attach_message::Payload::Input(input)) => {
-                            if let Err(error) = attach_control(&tx, engine.input(&session_id, input.data)).await {
+                            let written = match (&input_stream, input.offset) {
+                                (_, None) => attach_control(&tx, engine.input(&session_id, input.data)).await,
+                                (Some(stream), Some(offset)) => attach_control(
+                                    &tx,
+                                    engine.stream_input(&session_id, stream, offset, input.data),
+                                ).await.map(drop),
+                                (None, Some(_)) => Err(Status::invalid_argument(
+                                    "input has an offset but the attachment named no input stream",
+                                )),
+                            };
+                            if let Err(error) = written {
                                 finish_attach(&tx, Err(error)).await;
                                 return;
                             }
@@ -882,10 +920,10 @@ async fn run_attach_session<S>(
                                     // Never announce terminal completion before
                                     // pending output, even on explicit detach.
                                     if is_attached_session_live(record.state) || cursor >= record.output_end_offset {
-                                        let status = session_status(
+                                        let status = stamped(session_status(
                                             &record,
                                             Some("client detached; session remains running"),
-                                        );
+                                        ));
                                         finish_attach(&tx, Ok(v1::SessionAttachMessage {
                                             payload: Some(v1::session_attach_message::Payload::Status(status)),
                                         })).await;
@@ -932,13 +970,15 @@ async fn run_attach_session<S>(
                 } else if terminal_ready {
                     permit.send(Ok(v1::SessionAttachMessage {
                         payload: Some(v1::session_attach_message::Payload::Status(
-                            terminal_status.take().expect("terminal status is ready"),
+                            stamped(terminal_status.take().expect("terminal status is ready")),
                         )),
                     }));
                     return;
                 } else if let Some(status) = pending_status.take() {
+                    // Stamped as it goes out; `last_status` keeps the
+                    // unstamped one, so input alone never forces a status.
                     permit.send(Ok(v1::SessionAttachMessage {
-                        payload: Some(v1::session_attach_message::Payload::Status(status.clone())),
+                        payload: Some(v1::session_attach_message::Payload::Status(stamped(status.clone()))),
                     }));
                     last_status = Some(status);
                     heartbeat.reset();
@@ -1001,6 +1041,8 @@ fn session_status(record: &v1::SessionRecord, message: Option<&str>) -> v1::Sess
         output_end_offset: record.output_end_offset,
         output_start_offset: record.output_start_offset,
         message: message.unwrap_or(&record.status_message).into(),
+        // Each attachment stamps its own stream's offset as it sends.
+        input_end_offset: None,
     }
 }
 
@@ -1260,6 +1302,7 @@ mod tests {
                     v1::AttachSessionRequest {
                         session_id: session.session_id.clone(),
                         output_offset: 0,
+                        ..Default::default()
                     },
                 )),
             })
@@ -2081,6 +2124,7 @@ mod tests {
             v1::AttachSessionRequest {
                 session_id: session.session_id.clone(),
                 output_offset: 0,
+                ..Default::default()
             },
             output,
         ));
@@ -2091,7 +2135,10 @@ mod tests {
             input
                 .send(Ok(v1::SessionAttachMessage {
                     payload: Some(v1::session_attach_message::Payload::Input(
-                        v1::SessionInput { data: vec![byte] },
+                        v1::SessionInput {
+                            data: vec![byte],
+                            offset: None,
+                        },
                     )),
                 }))
                 .await
@@ -2159,6 +2206,7 @@ mod tests {
             v1::AttachSessionRequest {
                 session_id: session.session_id.clone(),
                 output_offset: 0,
+                ..Default::default()
             },
             output,
         ));
@@ -2170,6 +2218,7 @@ mod tests {
                         payload: Some(v1::session_attach_message::Payload::Input(
                             v1::SessionInput {
                                 data: frame.to_vec(),
+                                offset: None,
                             },
                         )),
                     }))
@@ -2217,6 +2266,7 @@ mod tests {
             Some(v1::SessionAttachMessage {
                 payload: Some(Payload::Input(v1::SessionInput {
                     data: data.to_vec(),
+                    offset: None,
                 })),
             })
         };
@@ -2327,6 +2377,7 @@ mod tests {
             v1::AttachSessionRequest {
                 session_id: session.session_id.clone(),
                 output_offset: 0,
+                ..Default::default()
             },
             output,
         ));
@@ -2352,6 +2403,7 @@ mod tests {
             }),
             v1::session_attach_message::Payload::Input(v1::SessionInput {
                 data: b"fair-input\n".to_vec(),
+                offset: None,
             }),
         ] {
             input
@@ -2457,6 +2509,7 @@ mod tests {
             v1::AttachSessionRequest {
                 session_id: session.session_id.clone(),
                 output_offset: 0,
+                ..Default::default()
             },
             output,
         ));
@@ -2472,6 +2525,7 @@ mod tests {
                 payload: Some(v1::session_attach_message::Payload::Input(
                     v1::SessionInput {
                         data: b"produce\n".to_vec(),
+                        offset: None,
                     },
                 )),
             }))
@@ -2559,6 +2613,7 @@ mod tests {
             v1::AttachSessionRequest {
                 session_id: session.session_id,
                 output_offset: 0,
+                ..Default::default()
             },
             output,
         ));
@@ -2646,6 +2701,7 @@ mod tests {
             v1::AttachSessionRequest {
                 session_id: session.session_id.clone(),
                 output_offset: 0,
+                ..Default::default()
             },
             output,
         ));
@@ -2673,6 +2729,7 @@ mod tests {
         control(v1::session_attach_message::Payload::Input(
             v1::SessionInput {
                 data: b"after-resize\n".to_vec(),
+                offset: None,
             },
         ))
         .await;

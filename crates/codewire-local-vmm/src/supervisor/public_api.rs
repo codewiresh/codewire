@@ -1389,15 +1389,14 @@ impl EnvironmentSessionBackend for LocalSessionBackend {
         _ctx: &RequestContext,
         org_id: &str,
         environment_id: &str,
-        session_id: &str,
-        output_offset: u64,
+        start: codewire_daemon_proto::daemon::v1::AttachSessionRequest,
     ) -> Result<Self::Attachment, connectrpc::ConnectError> {
         let client = self
             .supervisor
             .public_daemon_client(org_id, environment_id)
             .await?;
         let attachment = client
-            .attach(session_id.to_owned(), output_offset)
+            .attach_from(start)
             .await
             .map_err(local_session_error)?;
         Ok(LocalSessionAttachment { client, attachment })

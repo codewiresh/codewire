@@ -1248,16 +1248,25 @@ impl SessionClient {
         session_id: impl Into<String>,
         output_offset: u64,
     ) -> Result<SessionAttachment, SessionClientError> {
-        let session_id = session_id.into();
+        self.attach_from(v1::AttachSessionRequest {
+            session_id: session_id.into(),
+            output_offset,
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Attaches from a full start: the output cursor and, for a client that
+    /// keeps one, its input stream (#3993).
+    pub async fn attach_from(
+        &self,
+        start: v1::AttachSessionRequest,
+    ) -> Result<SessionAttachment, SessionClientError> {
+        let session_id = start.session_id.clone();
         let (input, rx) = mpsc::channel(32);
         input
             .send(v1::SessionAttachMessage {
-                payload: Some(v1::session_attach_message::Payload::Attach(
-                    v1::AttachSessionRequest {
-                        session_id: session_id.clone(),
-                        output_offset,
-                    },
-                )),
+                payload: Some(v1::session_attach_message::Payload::Attach(start)),
             })
             .await
             .map_err(|_| SessionClientError::RequestClosed)?;
@@ -1503,7 +1512,7 @@ impl SessionAttachment {
 impl SessionAttachmentInput {
     pub async fn send_input(&self, data: Vec<u8>) -> Result<(), SessionClientError> {
         self.send(v1::session_attach_message::Payload::Input(
-            v1::SessionInput { data },
+            v1::SessionInput { data, offset: None },
         ))
         .await
     }

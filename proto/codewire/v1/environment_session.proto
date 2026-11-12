@@ -74,6 +74,11 @@ message EnvironmentSession {
   // The session ends once no client has been attached for this many seconds;
   // zero means it never does. Set at launch.
   uint32 end_after_detached_seconds = 17;
+  // In an attachment's status: how much of the opening client's input stream
+  // (AttachSessionOpen.input_stream) the session has written to its terminal.
+  // Present only when the open named a stream and the server keeps offsets;
+  // its presence is what lets the client send AttachSessionInput (#3993).
+  optional uint64 input_end_offset = 18;
 }
 
 // Output offsets are absolute byte positions over the ordered output sequence.
@@ -188,11 +193,26 @@ message AttachSessionOpen {
   string environment_id = 2;
   string session_id = 3;
   uint64 output_offset = 4;
+  // The client's input stream: random, chosen once and kept across its
+  // reattachments, so the server writes each byte of it once (#3993). Empty
+  // keeps input without offsets.
+  string input_stream = 5;
+  // The client's position in that stream: the bytes it has sent. A server that
+  // doesn't know the stream takes it as written, so a resend never repeats a
+  // key.
+  uint64 input_offset = 6;
 }
 
 message AttachSessionResize {
   uint32 columns = 1;
   uint32 rows = 2;
+}
+
+// Input at a position in the client's input stream. The server writes only
+// the bytes it hasn't, and refuses input that would leave a gap.
+message AttachSessionInput {
+  bytes data = 1;
+  uint64 offset = 2;
 }
 
 message AttachSessionRequest {
@@ -201,6 +221,8 @@ message AttachSessionRequest {
     bytes stdin = 2;
     AttachSessionResize resize = 3;
     google.protobuf.Empty detach = 4;
+    // Only after the attachment's first status carried input_end_offset.
+    AttachSessionInput stdin_at = 5;
   }
 }
 

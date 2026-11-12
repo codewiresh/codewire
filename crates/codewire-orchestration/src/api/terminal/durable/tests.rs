@@ -60,6 +60,7 @@ fn status(state: v1::SessionLifecycleState, offset: u64) -> v1::SessionAttachMes
                 output_end_offset: offset,
                 output_start_offset: 0,
                 message: "private daemon diagnostic must not reach browser".into(),
+                input_end_offset: None,
             },
         )),
     }
@@ -503,7 +504,7 @@ async fn full_output_window_still_services_input_resize_and_render_acks() {
         .unwrap()
         .unwrap();
     assert!(
-        matches!(input.payload, Some(v1::session_attach_message::Payload::Input(v1::SessionInput { data })) if data == [3])
+        matches!(input.payload, Some(v1::session_attach_message::Payload::Input(v1::SessionInput { data, .. })) if data == [3])
     );
     send(&h.browser, json!({"type":"resize","columns":120,"rows":40})).await;
     let resize = timeout(Duration::from_secs(1), h.daemon_input.recv())
@@ -677,7 +678,7 @@ async fn blocked_daemon_input_has_a_fixed_deadline_and_detaches() {
     assert!(h.daemon_output.is_closed());
     let first = h.daemon_input.recv().await.unwrap();
     assert!(
-        matches!(first.payload, Some(v1::session_attach_message::Payload::Input(v1::SessionInput { data })) if data == b"a")
+        matches!(first.payload, Some(v1::session_attach_message::Payload::Input(v1::SessionInput { data, .. })) if data == b"a")
     );
     assert_eq!(h.daemon_input.recv().await, None);
 }

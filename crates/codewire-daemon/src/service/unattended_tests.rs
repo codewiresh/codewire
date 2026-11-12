@@ -45,6 +45,7 @@ impl Client {
             v1::AttachSessionRequest {
                 session_id: session_id.into(),
                 output_offset: 0,
+                ..Default::default()
             },
             tx,
         ));
@@ -301,6 +302,7 @@ async fn the_daemon_api_keeps_the_setting_and_its_attach_stream_counts_as_a_clie
                 v1::AttachSessionRequest {
                     session_id: session.session_id.clone(),
                     output_offset: 0,
+                    ..Default::default()
                 },
             )),
         })

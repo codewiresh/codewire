@@ -17,8 +17,8 @@ use std::io::IsTerminal as _;
 use std::time::{Duration, Instant};
 
 use codewire_client::hosted_shell::{
-    self, AttachedTerminal, HostedShellError, SHELL_GRACE, ShellLaunch, ShellNotice, ShellTerminal,
-    TerminalKeys, TerminalOutput, TerminalSizes,
+    self, AttachedTerminal, HostedShellError, InputNotice, SHELL_GRACE, ShellLaunch, ShellNotice,
+    ShellTerminal, TerminalKeys, TerminalOutput, TerminalSizes,
 };
 use codewire_client::{ClientError, CodewireClient, ErrorCode};
 use tokio::io::AsyncWriteExt as _;
@@ -158,6 +158,12 @@ impl ShellTerminal for ProcessTerminal {
             ShellNotice::Attached(via) => eprintln!("{}", via_line(&via)),
             ShellNotice::Reconnecting => {
                 eprintln!("[cw] connection lost; reconnecting to the same shell");
+            }
+            ShellNotice::Input(InputNotice::Resent(keys)) => {
+                eprintln!("[cw] resent {keys} key(s) typed during the drop");
+            }
+            ShellNotice::Input(InputNotice::Lost(keys)) => {
+                eprintln!("[cw] {keys} key(s) typed during the drop were lost");
             }
         }
     }

@@ -938,6 +938,7 @@ async fn attach_forwards_input_and_resumes_after_detach_or_transport_loss() {
             payload: Some(v1::session_attach_message::Payload::Input(
                 v1::SessionInput {
                     data: b"hello\n".to_vec(),
+                    offset: None,
                 },
             )),
         })
@@ -989,6 +990,150 @@ async fn attach_forwards_input_and_resumes_after_detach_or_transport_loss() {
         .stop_session(v1::StopSessionRequest { session_id })
         .await
         .expect("stop session after transport loss");
+}
+
+/// #3993: a client that names an input stream gets each byte of it written
+/// once: input it sends again is written only past what the session has, a
+/// reattachment is told how much that is, and input that would skip bytes is
+/// refused.
+#[tokio::test]
+async fn input_at_an_offset_is_written_once_across_a_reattachment() {
+    let harness = DaemonHarness::spawn().await;
+    let mut client = harness.client().await;
+    let session_id = launch_line_echo(&mut client).await;
+
+    let (request_tx, request_rx) = mpsc::channel(8);
+    request_tx
+        .send(stream_attach_message(&session_id, 0, "phone", 0))
+        .await
+        .expect("send attach start");
+    let mut attached = client
+        .attach_session(ReceiverStream::new(request_rx))
+        .await
+        .expect("attach with an input stream")
+        .into_inner();
+    assert_eq!(
+        next_attach_status(&mut attached).await.input_end_offset,
+        Some(0)
+    );
+    // The same bytes again, as after a drop: only "lo\n" is new.
+    request_tx
+        .send(offset_input(b"hel", 0))
+        .await
+        .expect("send input");
+    request_tx
+        .send(offset_input(b"hello\n", 0))
+        .await
+        .expect("send again");
+    assert_eq!(
+        collect_attach_output(&mut attached, 9).await,
+        b"got:hello",
+        "\"hel\" was written once"
+    );
+    drop(request_tx);
+    drop(attached);
+
+    let (resume_tx, resume_rx) = mpsc::channel(8);
+    resume_tx
+        .send(stream_attach_message(&session_id, 9, "phone", 6))
+        .await
+        .expect("send resume start");
+    let mut resumed = client
+        .attach_session(ReceiverStream::new(resume_rx))
+        .await
+        .expect("reattach")
+        .into_inner();
+    assert_eq!(
+        next_attach_status(&mut resumed).await.input_end_offset,
+        Some(6),
+        "the reattachment learns what was written"
+    );
+
+    resume_tx
+        .send(offset_input(b"x", 20))
+        .await
+        .expect("send gap");
+    let refused = tokio::time::timeout(PERSIST_HANG, async {
+        loop {
+            match resumed.message().await {
+                Ok(Some(_)) => continue,
+                Ok(None) => return None,
+                Err(status) => return Some(status),
+            }
+        }
+    })
+    .await
+    .expect("the attachment answered the gap")
+    .expect("a gap is refused, not ignored");
+    assert_eq!(
+        refused.code(),
+        tonic::Code::FailedPrecondition,
+        "{refused:?}"
+    );
+
+    client
+        .stop_session(v1::StopSessionRequest { session_id })
+        .await
+        .expect("stop session");
+}
+
+/// #3993: a client that names no input stream (every client before it) is
+/// answered as before: no input offset in its statuses, plain input written.
+#[tokio::test]
+async fn an_attachment_without_an_input_stream_is_answered_as_before() {
+    let harness = DaemonHarness::spawn().await;
+    let mut client = harness.client().await;
+    let session_id = launch_line_echo(&mut client).await;
+
+    let (request_tx, request_rx) = mpsc::channel(8);
+    request_tx
+        .send(attach_message(&session_id, 0))
+        .await
+        .expect("send attach start");
+    let mut attached = client
+        .attach_session(ReceiverStream::new(request_rx))
+        .await
+        .expect("attach")
+        .into_inner();
+    assert_eq!(
+        next_attach_status(&mut attached).await.input_end_offset,
+        None
+    );
+    request_tx
+        .send(v1::SessionAttachMessage {
+            payload: Some(v1::session_attach_message::Payload::Input(
+                v1::SessionInput {
+                    data: b"hello\n".to_vec(),
+                    offset: None,
+                },
+            )),
+        })
+        .await
+        .expect("send plain input");
+    assert_eq!(collect_attach_output(&mut attached, 9).await, b"got:hello");
+    client
+        .stop_session(v1::StopSessionRequest { session_id })
+        .await
+        .expect("stop session");
+}
+
+/// A session that echoes one line as `got:LINE`, then waits.
+async fn launch_line_echo(client: &mut HarnessClient) -> String {
+    client
+        .launch_session(v1::LaunchSessionRequest {
+            command: vec![
+                "sh".into(),
+                "-c".into(),
+                "IFS= read -r line; printf 'got:%s' \"$line\"; exec sleep 30".into(),
+            ],
+            ..Default::default()
+        })
+        .await
+        .expect("launch line echo")
+        .into_inner()
+        .session
+        .expect("line echo session")
+        .session_id
 }
 
 #[tokio::test]
@@ -1135,6 +1280,7 @@ async fn retained_history_gap_precedes_replay_and_resuming_keeps_the_same_live_s
         payload: Some(v1::session_attach_message::Payload::Input(
             v1::SessionInput {
                 data: b"okay\n".to_vec(),
+                offset: None,
             },
         )),
     })
@@ -1523,6 +1669,37 @@ fn attach_message(session_id: &str, output_offset: u64) -> v1::SessionAttachMess
             v1::AttachSessionRequest {
                 session_id: session_id.into(),
                 output_offset,
+                ..Default::default()
+            },
+        )),
+    }
+}
+
+/// An attach start for a client that keeps an input stream (#3993).
+fn stream_attach_message(
+    session_id: &str,
+    output_offset: u64,
+    input_stream: &str,
+    input_offset: u64,
+) -> v1::SessionAttachMessage {
+    v1::SessionAttachMessage {
+        payload: Some(v1::session_attach_message::Payload::Attach(
+            v1::AttachSessionRequest {
+                session_id: session_id.into(),
+                output_offset,
+                input_stream: input_stream.into(),
+                input_offset,
+            },
+        )),
+    }
+}
+
+fn offset_input(data: &[u8], offset: u64) -> v1::SessionAttachMessage {
+    v1::SessionAttachMessage {
+        payload: Some(v1::session_attach_message::Payload::Input(
+            v1::SessionInput {
+                data: data.to_vec(),
+                offset: Some(offset),
             },
         )),
     }

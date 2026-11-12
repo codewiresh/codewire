@@ -1,5 +1,6 @@
 use super::*;
 use crate::terminal_attach::{RawModeGuard, SessionScreen};
+use codewire_client::hosted_shell::{InputNotice, InputStream};
 #[cfg(unix)]
 pub(crate) mod agents;
 
@@ -2252,6 +2253,8 @@ async fn attach_environment_session(
     // reattachment while it lives (#3827).
     let mut tailnet = None;
     let mut retry_after = codewire_client::hosted_shell::TAILNET_RETRY_FIRST;
+    // This shell's input stream, kept across its reattachments (#3993).
+    let mut input_stream = InputStream::default();
     loop {
         let exit = match &target {
             #[cfg(unix)]
@@ -2274,6 +2277,7 @@ async fn attach_environment_session(
                 attach_platform_environment_session(
                     attachment,
                     output_offset,
+                    &mut input_stream,
                     session.pty,
                     true,
                     &mut screen,
@@ -2294,6 +2298,8 @@ async fn attach_environment_session(
                         environment_id: environment_id.clone(),
                         session_id: session.session_id.clone(),
                         output_offset,
+                        input_stream: input_stream.open().0,
+                        input_offset: input_stream.open().1,
                         ..Default::default()
                     },
                     &mut tailnet,
@@ -2323,6 +2329,7 @@ async fn attach_environment_session(
                         attach_platform_environment_session(
                             attachment,
                             output_offset,
+                            &mut input_stream,
                             session.pty,
                             true,
                             &mut screen,
@@ -2436,9 +2443,41 @@ async fn attach_environment_session(
 
 /// Carry one attachment opened at `start_offset`. It ends early if
 /// `tailnet_back` completes.
+/// Passes an attachment's status to its input stream (#3993): on the first
+/// one, sends the resend and the held keys and says what happened to the keys
+/// typed during a drop. False when the attachment closed meanwhile.
+async fn send_stream_status(
+    input: &codewire_client::EnvironmentSessionAttachmentInput,
+    input_stream: &mut InputStream,
+    status: &codewire_client::AttachSessionStatus,
+) -> bool {
+    let written = status
+        .session
+        .as_option()
+        .and_then(|session| session.input_end_offset);
+    let (requests, notices) = input_stream.status(written, std::time::Instant::now());
+    for notice in notices {
+        match notice {
+            InputNotice::Resent(keys) => {
+                eprint!("\r\n[cw] resent {keys} key(s) typed during the drop\r\n");
+            }
+            InputNotice::Lost(keys) => {
+                eprint!("\r\n[cw] {keys} key(s) typed during the drop were lost\r\n");
+            }
+        }
+    }
+    for request in requests {
+        if input.send(request).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 async fn attach_platform_environment_session(
     mut attachment: codewire_client::EnvironmentSessionAttachment,
     start_offset: u64,
+    input_stream: &mut InputStream,
     interactive: bool,
     raw_output: bool,
     screen: &mut SessionScreen,
@@ -2476,6 +2515,9 @@ async fn attach_platform_environment_session(
     if let Some(size) = window.current() {
         let _ = input.send(resize(size)).await;
     }
+    // Keys wait for this attachment's first status, which says whether the
+    // server keeps input offsets (#3993).
+    input_stream.attaching();
     loop {
         if !output_open && stdin_closed {
             return Ok(if terminal {
@@ -2522,6 +2564,7 @@ async fn attach_platform_environment_session(
                     }
                     Some(codewire_client::attach_session_response::Event::Status(status))
                         if status.session.as_option().is_some_and(platform_session_is_terminal) => {
+                        send_stream_status(&input, input_stream, &status).await;
                         terminal = true;
                         if !interactive {
                             return Ok(AttachExit::Terminal);
@@ -2529,7 +2572,12 @@ async fn attach_platform_environment_session(
                         screen.release();
                         eprint!("[cw] session exited; Ctrl+B r restarts, Ctrl+C leaves\r\n");
                     }
-                    Some(codewire_client::attach_session_response::Event::Status(_)) => {}
+                    Some(codewire_client::attach_session_response::Event::Status(status)) => {
+                        let sent = send_stream_status(&input, input_stream, &status).await;
+                        if !sent {
+                            return Ok(AttachExit::StreamInterrupted { output_offset });
+                        }
+                    }
                     None => {}
                 }
             }
@@ -2537,11 +2585,10 @@ async fn attach_platform_environment_session(
                 let read = read.context("read terminal input")?;
                 if read == 0 {
                     let pending = decoder.finish();
-                    if !pending.is_empty() {
-                        input.send(codewire_client::AttachSessionRequest {
-                            input: Some(codewire_client::attach_session_request::Input::Stdin(pending)),
-                            ..Default::default()
-                        }).await.map_err(display_client_error)?;
+                    if !pending.is_empty()
+                        && let Some(request) = input_stream.typed(pending, std::time::Instant::now())
+                    {
+                        input.send(request).await.map_err(display_client_error)?;
                     }
                     stdin_closed = true;
                     continue;
@@ -2561,11 +2608,10 @@ async fn attach_platform_environment_session(
                     }
                     continue;
                 }
-                if !forward.is_empty() {
-                    input.send(codewire_client::AttachSessionRequest {
-                        input: Some(codewire_client::attach_session_request::Input::Stdin(forward)),
-                        ..Default::default()
-                    }).await.map_err(display_client_error)?;
+                if !forward.is_empty()
+                    && let Some(request) = input_stream.typed(forward, std::time::Instant::now())
+                {
+                    input.send(request).await.map_err(display_client_error)?;
                 }
                 if let Some(action) = action {
                     if matches!(action, AttachExit::Detached) && output_open {
@@ -3134,6 +3180,7 @@ async fn follow_session_output(
     let _ = ansi;
     let mut reconnect_budget = AttachmentReconnectBudget::default();
     let mut pacing = super::tailnet_shell::ReconnectPacing::default();
+    let mut input_stream = InputStream::default();
     loop {
         let exit = match target {
             #[cfg(unix)]
@@ -3155,6 +3202,7 @@ async fn follow_session_output(
                 attach_platform_environment_session(
                     client.attach(&session.session_id, output_offset).await?,
                     output_offset,
+                    &mut input_stream,
                     false,
                     raw_output,
                     &mut SessionScreen::new(false),
@@ -3175,6 +3223,8 @@ async fn follow_session_output(
                         environment_id: environment_id.clone(),
                         session_id: session.session_id.clone(),
                         output_offset,
+                        input_stream: input_stream.open().0,
+                        input_offset: input_stream.open().1,
                         ..Default::default()
                     },
                 )
@@ -3185,6 +3235,7 @@ async fn follow_session_output(
                         attach_platform_environment_session(
                             attachment,
                             output_offset,
+                            &mut input_stream,
                             false,
                             raw_output,
                             &mut SessionScreen::new(false),
@@ -3322,6 +3373,7 @@ mod attach_offset_tests {
         attach_platform_environment_session(
             codewire_client::EnvironmentSessionAttachment::from_output(outputs),
             start_offset,
+            &mut InputStream::default(),
             false,
             false,
             &mut SessionScreen::new(false),

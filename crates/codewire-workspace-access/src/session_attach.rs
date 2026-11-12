@@ -21,7 +21,7 @@ use codewire_client::{AttachSessionRequest, attach_session_request};
 use codewire_daemon::client::{SessionAttachment, SessionAttachmentInput, SessionClient};
 use codewire_daemon_bridge::session::{
     EnvironmentSessionAttachment, FieldViolation, coordinate_violations, private_attach_input,
-    public_attach_output,
+    private_attach_start, public_attach_output,
 };
 use codewire_daemon_proto::daemon::v1;
 use connectrpc::ConnectError;
@@ -79,10 +79,11 @@ impl DaemonSessionAttachRunner {
                 self.environment_id, open.environment_id
             ));
         }
+        let start = private_attach_start(&open);
         let session_id = open.session_id;
         let attachment = self
             .client
-            .attach(session_id.clone(), open.output_offset)
+            .attach_from(start)
             .await
             .map_err(|_| format!("session {session_id} could not be attached"))?;
         let mut attachment = DaemonAttachment {

@@ -4,8 +4,10 @@
 //! and the connection's state through [`ShellObserver`].
 //!
 //! Each shell runs on a thread of its own with a single-threaded runtime, so
-//! the app's calls never wait on its network work. Keys typed while the
-//! connection is down are dropped, as `cw shell` drops them (#3993).
+//! the app's calls never wait on its network work. Keys sent just before a
+//! drop is noticed reach the shell once it's back, through the hosted shell's
+//! input stream; keys typed once the app knows the connection is down are
+//! dropped (#3993).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -343,6 +345,9 @@ impl ShellTerminal for ChannelTerminal {
                     reason: "the connection dropped".into(),
                 }
             }
+            // Keys resent or lost after a reattach (#3993) change no state;
+            // the terminal shows the shell's own echo of what arrived.
+            ShellNotice::Input(_) => return,
         };
         self.observer.state_changed(state);
     }

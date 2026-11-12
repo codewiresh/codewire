@@ -210,6 +210,9 @@ struct SessionHandle {
     presence: Mutex<unattended::Presence>,
     /// That launch setting, which the record keeps for its whole life.
     end_after_detached: Option<Duration>,
+    /// How much of each attached client's input stream the session has
+    /// written to its terminal (#3993).
+    input_streams: input_streams::InputStreams,
 }
 
 impl SessionHandle {
@@ -228,6 +231,7 @@ impl SessionHandle {
             launch_cancellation: watch::channel(false).0,
             presence: Mutex::new(unattended::Presence::default()),
             end_after_detached,
+            input_streams: input_streams::InputStreams::default(),
         })
     }
 }
@@ -1602,6 +1606,52 @@ impl SessionEngine {
                 ))
             })?
             .map_err(SessionError::FailedPrecondition)
+    }
+
+    /// Starts, or resumes, an attachment's input stream (#3993) and returns
+    /// how much of it the session has written. An unknown stream takes
+    /// `claimed`, the client's own position, as written.
+    pub fn open_input_stream(
+        &self,
+        session_id: &str,
+        stream: &str,
+        claimed: u64,
+    ) -> Result<u64, SessionError> {
+        Ok(self.handle(session_id)?.input_streams.open(stream, claimed))
+    }
+
+    /// How much of the input stream the session has written, if it knows it.
+    pub fn input_stream_offset(&self, session_id: &str, stream: &str) -> Option<u64> {
+        let handle = lock(&self.inner.sessions).get(session_id).cloned()?;
+        handle.input_streams.written(stream)
+    }
+
+    /// Input at `offset` in an attachment's input stream: writes only the
+    /// bytes the session hasn't, and refuses input that would leave a gap.
+    /// Returns the stream's written offset after it.
+    pub async fn stream_input(
+        &self,
+        session_id: &str,
+        stream: &str,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<u64, SessionError> {
+        let handle = self.handle(session_id)?;
+        let streams = &handle.input_streams;
+        let _writing = streams.write.lock().await;
+        // A stream evicted while attached is opened again at this input's
+        // offset: whatever came before it counts as delivered.
+        let written = streams
+            .written(stream)
+            .unwrap_or_else(|| streams.open(stream, offset));
+        let unwritten = input_streams::unwritten(offset, written, &data)
+            .map_err(|gap| SessionError::FailedPrecondition(gap.to_string()))?;
+        let end = written + unwritten.len() as u64;
+        if !unwritten.is_empty() {
+            self.input(session_id, unwritten.to_vec()).await?;
+        }
+        streams.advance(stream, end);
+        Ok(end)
     }
 
     pub async fn send_input(&self, session_id: &str, data: Vec<u8>) -> Result<(), SessionError> {
@@ -5896,6 +5946,7 @@ mod tests {
             launch_cancellation: watch::channel(false).0,
             presence: Mutex::new(unattended::Presence::default()),
             end_after_detached: None,
+            input_streams: input_streams::InputStreams::default(),
         }
     }
 
@@ -6480,6 +6531,9 @@ mod host_tests;
 
 #[path = "durable_session/unattended.rs"]
 mod unattended;
+
+#[path = "durable_session/input_streams.rs"]
+mod input_streams;
 
 #[cfg(target_os = "linux")]
 #[path = "durable_session/platform_managed.rs"]

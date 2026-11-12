@@ -193,8 +193,7 @@ impl EnvironmentSessionBackend for PlatformSessionBackend {
         ctx: &RequestContext,
         org_id: &str,
         environment_id: &str,
-        session_id: &str,
-        output_offset: u64,
+        start: v1::AttachSessionRequest,
     ) -> Result<Self::Attachment, connectrpc::ConnectError> {
         let user = auth_user(ctx)?.clone();
         let inner = attach_environment_daemon_session_core(
@@ -202,8 +201,7 @@ impl EnvironmentSessionBackend for PlatformSessionBackend {
             &user,
             org_id,
             environment_id,
-            session_id,
-            output_offset,
+            start,
         )
         .await
         .map_err(|error| workspace_rpc_error(&error, ctx))?;

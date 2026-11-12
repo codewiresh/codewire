@@ -498,8 +498,7 @@ pub async fn attach_environment_daemon_session_core(
     user: &AuthUser,
     org_id: &str,
     environment_id: &str,
-    session_id: &str,
-    output_offset: u64,
+    start: v1::AttachSessionRequest,
 ) -> AppResult<EnvironmentDaemonSessionAttachment> {
     let (mut client, token) = session_client_for_target(
         state,
@@ -513,12 +512,7 @@ pub async fn attach_environment_daemon_session_core(
     let (input, rx) = mpsc::channel(32);
     input
         .send(v1::SessionAttachMessage {
-            payload: Some(v1::session_attach_message::Payload::Attach(
-                v1::AttachSessionRequest {
-                    session_id: session_id.to_string(),
-                    output_offset,
-                },
-            )),
+            payload: Some(v1::session_attach_message::Payload::Attach(start)),
         })
         .await
         .map_err(|_| AppError::InternalMsg("failed to attach environment session".into()))?;
@@ -1887,6 +1881,7 @@ mod tests {
                     v1::AttachSessionRequest {
                         session_id: session_id.clone(),
                         output_offset: 0,
+                        ..Default::default()
                     },
                 )),
             })
@@ -1922,6 +1917,7 @@ mod tests {
                 payload: Some(v1::session_attach_message::Payload::Input(
                     v1::SessionInput {
                         data: b"hello\n".to_vec(),
+                        offset: None,
                     },
                 )),
             })

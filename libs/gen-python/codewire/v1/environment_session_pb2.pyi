@@ -42,7 +42,7 @@ ENVIRONMENT_SESSION_OUTPUT_STREAM_STDERR: EnvironmentSessionOutputStream
 ENVIRONMENT_SESSION_OUTPUT_STREAM_PTY: EnvironmentSessionOutputStream
 
 class EnvironmentSession(_message.Message):
-    __slots__ = ("session_id", "state", "command", "working_dir", "pty", "created_at", "started_at", "finished_at", "exit_code", "output_end_offset", "status_message", "output_start_offset", "name", "parent_session_id", "cleanup_unknown", "launch_generation", "end_after_detached_seconds")
+    __slots__ = ("session_id", "state", "command", "working_dir", "pty", "created_at", "started_at", "finished_at", "exit_code", "output_end_offset", "status_message", "output_start_offset", "name", "parent_session_id", "cleanup_unknown", "launch_generation", "end_after_detached_seconds", "input_end_offset")
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     STATE_FIELD_NUMBER: _ClassVar[int]
     COMMAND_FIELD_NUMBER: _ClassVar[int]
@@ -60,6 +60,7 @@ class EnvironmentSession(_message.Message):
     CLEANUP_UNKNOWN_FIELD_NUMBER: _ClassVar[int]
     LAUNCH_GENERATION_FIELD_NUMBER: _ClassVar[int]
     END_AFTER_DETACHED_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    INPUT_END_OFFSET_FIELD_NUMBER: _ClassVar[int]
     session_id: str
     state: EnvironmentSessionState
     command: _containers.RepeatedScalarFieldContainer[str]
@@ -77,7 +78,8 @@ class EnvironmentSession(_message.Message):
     cleanup_unknown: bool
     launch_generation: int
     end_after_detached_seconds: int
-    def __init__(self, session_id: _Optional[str] = ..., state: _Optional[_Union[EnvironmentSessionState, str]] = ..., command: _Optional[_Iterable[str]] = ..., working_dir: _Optional[str] = ..., pty: _Optional[bool] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., finished_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., exit_code: _Optional[int] = ..., output_end_offset: _Optional[int] = ..., status_message: _Optional[str] = ..., output_start_offset: _Optional[int] = ..., name: _Optional[str] = ..., parent_session_id: _Optional[str] = ..., cleanup_unknown: _Optional[bool] = ..., launch_generation: _Optional[int] = ..., end_after_detached_seconds: _Optional[int] = ...) -> None: ...
+    input_end_offset: int
+    def __init__(self, session_id: _Optional[str] = ..., state: _Optional[_Union[EnvironmentSessionState, str]] = ..., command: _Optional[_Iterable[str]] = ..., working_dir: _Optional[str] = ..., pty: _Optional[bool] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., finished_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., exit_code: _Optional[int] = ..., output_end_offset: _Optional[int] = ..., status_message: _Optional[str] = ..., output_start_offset: _Optional[int] = ..., name: _Optional[str] = ..., parent_session_id: _Optional[str] = ..., cleanup_unknown: _Optional[bool] = ..., launch_generation: _Optional[int] = ..., end_after_detached_seconds: _Optional[int] = ..., input_end_offset: _Optional[int] = ...) -> None: ...
 
 class EnvironmentSessionOutputChunk(_message.Message):
     __slots__ = ("offset", "next_offset", "stream", "data")
@@ -243,16 +245,20 @@ class ReadSessionOutputResponse(_message.Message):
     def __init__(self, chunks: _Optional[_Iterable[_Union[EnvironmentSessionOutputChunk, _Mapping]]] = ..., next_offset: _Optional[int] = ..., eof: _Optional[bool] = ..., retained_start_offset: _Optional[int] = ..., history_gap: _Optional[bool] = ...) -> None: ...
 
 class AttachSessionOpen(_message.Message):
-    __slots__ = ("org_id", "environment_id", "session_id", "output_offset")
+    __slots__ = ("org_id", "environment_id", "session_id", "output_offset", "input_stream", "input_offset")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_OFFSET_FIELD_NUMBER: _ClassVar[int]
+    INPUT_STREAM_FIELD_NUMBER: _ClassVar[int]
+    INPUT_OFFSET_FIELD_NUMBER: _ClassVar[int]
     org_id: str
     environment_id: str
     session_id: str
     output_offset: int
-    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., session_id: _Optional[str] = ..., output_offset: _Optional[int] = ...) -> None: ...
+    input_stream: str
+    input_offset: int
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., session_id: _Optional[str] = ..., output_offset: _Optional[int] = ..., input_stream: _Optional[str] = ..., input_offset: _Optional[int] = ...) -> None: ...
 
 class AttachSessionResize(_message.Message):
     __slots__ = ("columns", "rows")
@@ -262,17 +268,27 @@ class AttachSessionResize(_message.Message):
     rows: int
     def __init__(self, columns: _Optional[int] = ..., rows: _Optional[int] = ...) -> None: ...
 
+class AttachSessionInput(_message.Message):
+    __slots__ = ("data", "offset")
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    OFFSET_FIELD_NUMBER: _ClassVar[int]
+    data: bytes
+    offset: int
+    def __init__(self, data: _Optional[bytes] = ..., offset: _Optional[int] = ...) -> None: ...
+
 class AttachSessionRequest(_message.Message):
-    __slots__ = ("open", "stdin", "resize", "detach")
+    __slots__ = ("open", "stdin", "resize", "detach", "stdin_at")
     OPEN_FIELD_NUMBER: _ClassVar[int]
     STDIN_FIELD_NUMBER: _ClassVar[int]
     RESIZE_FIELD_NUMBER: _ClassVar[int]
     DETACH_FIELD_NUMBER: _ClassVar[int]
+    STDIN_AT_FIELD_NUMBER: _ClassVar[int]
     open: AttachSessionOpen
     stdin: bytes
     resize: AttachSessionResize
     detach: _empty_pb2.Empty
-    def __init__(self, open: _Optional[_Union[AttachSessionOpen, _Mapping]] = ..., stdin: _Optional[bytes] = ..., resize: _Optional[_Union[AttachSessionResize, _Mapping]] = ..., detach: _Optional[_Union[_empty_pb2.Empty, _Mapping]] = ...) -> None: ...
+    stdin_at: AttachSessionInput
+    def __init__(self, open: _Optional[_Union[AttachSessionOpen, _Mapping]] = ..., stdin: _Optional[bytes] = ..., resize: _Optional[_Union[AttachSessionResize, _Mapping]] = ..., detach: _Optional[_Union[_empty_pb2.Empty, _Mapping]] = ..., stdin_at: _Optional[_Union[AttachSessionInput, _Mapping]] = ...) -> None: ...
 
 class AttachSessionStatus(_message.Message):
     __slots__ = ("session",)

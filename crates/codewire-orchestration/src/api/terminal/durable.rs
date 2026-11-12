@@ -276,8 +276,11 @@ pub(super) async fn websocket(
             &user,
             &org_id,
             &env_id,
-            &coordinates.session_id,
-            coordinates.output_offset,
+            v1::AttachSessionRequest {
+                session_id: coordinates.session_id.clone(),
+                output_offset: coordinates.output_offset,
+                ..Default::default()
+            },
         )
         .await
         .map_err(|error| error.into_response().status())
@@ -655,6 +658,7 @@ where
                         let bytes = data.len();
                         (v1::session_attach_message::Payload::Input(v1::SessionInput {
                             data: data.into_bytes(),
+                            offset: None,
                         }), bytes)
                     }
                     ClientFrame::Resize { columns, rows } if columns > 0 && rows > 0 => {

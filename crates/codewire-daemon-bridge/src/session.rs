@@ -109,13 +109,14 @@ pub trait EnvironmentSessionBackend: Clone + Send + Sync + 'static {
         request: v1::ReadSessionOutputRequest,
     ) -> Result<v1::ReadSessionOutputResponse, connectrpc::ConnectError>;
 
+    /// `start` names the session, the output cursor and the client's input
+    /// stream (#3993).
     async fn attach(
         &self,
         ctx: &RequestContext,
         org_id: &str,
         environment_id: &str,
-        session_id: &str,
-        output_offset: u64,
+        start: v1::AttachSessionRequest,
     ) -> Result<Self::Attachment, connectrpc::ConnectError>;
 }
 
@@ -414,8 +415,7 @@ where
                 &ctx,
                 &open.org_id,
                 &open.environment_id,
-                &open.session_id,
-                open.output_offset,
+                private_attach_start(&open),
             )
             .await?;
         let (tx, rx) = mpsc::channel(STREAM_BUFFER);
@@ -503,13 +503,31 @@ async fn bridge_attachment<B>(
 /// One public attach request after `open`, as the daemon's attach message.
 /// Shared by the API relay and the daemon's `session@codewire.sh` SSH
 /// subsystem (#3827), so both transports accept exactly the same input.
+/// The daemon's attach start for a public open: the session, the output
+/// cursor and the client's input stream (#3993). Shared by the API relay and
+/// the `session@codewire.sh` SSH subsystem.
+pub fn private_attach_start(open: &proto::AttachSessionOpen) -> v1::AttachSessionRequest {
+    v1::AttachSessionRequest {
+        session_id: open.session_id.clone(),
+        output_offset: open.output_offset,
+        input_stream: open.input_stream.clone(),
+        input_offset: open.input_offset,
+    }
+}
+
 pub fn private_attach_input(
     request: proto::AttachSessionRequest,
     session_id: &str,
 ) -> Result<v1::SessionAttachMessage, Vec<FieldViolation>> {
     let payload = match request.input {
         Some(proto::attach_session_request::Input::Stdin(data)) => {
-            v1::session_attach_message::Payload::Input(v1::SessionInput { data })
+            v1::session_attach_message::Payload::Input(v1::SessionInput { data, offset: None })
+        }
+        Some(proto::attach_session_request::Input::StdinAt(input)) => {
+            v1::session_attach_message::Payload::Input(v1::SessionInput {
+                data: input.data,
+                offset: Some(input.offset),
+            })
         }
         Some(proto::attach_session_request::Input::Resize(resize)) => {
             v1::session_attach_message::Payload::Resize(v1::ResizeRequest {
@@ -581,6 +599,7 @@ where
             // to cross the bridge. Keep static record fields from the lookup,
             // but preserve the streamed lifecycle snapshot so terminal status
             // remains the final public event.
+            let input_end_offset = status.input_end_offset;
             record.state = status.state;
             record.exit_code = status.exit_code;
             record.output_end_offset = status.output_end_offset;
@@ -598,7 +617,13 @@ where
                 record.finished_at = None;
             }
             proto::attach_session_response::Event::Status(Box::new(proto::AttachSessionStatus {
-                session: Some(public_session(record)).into(),
+                session: Some(proto::EnvironmentSession {
+                    // The opening client's input stream (#3993); only this
+                    // attachment's status carries it.
+                    input_end_offset,
+                    ..public_session(record)
+                })
+                .into(),
                 ..Default::default()
             }))
         }
@@ -793,6 +818,7 @@ mod tests {
                 (15, "cleanup_unknown"),
                 (16, "launch_generation"),
                 (17, "end_after_detached_seconds"),
+                (18, "input_end_offset"),
             ],
         ),
         (
@@ -885,6 +911,8 @@ mod tests {
                 (2, "environment_id"),
                 (3, "session_id"),
                 (4, "output_offset"),
+                (5, "input_stream"),
+                (6, "input_offset"),
             ],
         ),
         (
@@ -893,9 +921,19 @@ mod tests {
         ),
         (
             "codewire.v1.AttachSessionRequest",
-            &[(1, "open"), (2, "stdin"), (3, "resize"), (4, "detach")],
+            &[
+                (1, "open"),
+                (2, "stdin"),
+                (3, "resize"),
+                (4, "detach"),
+                (5, "stdin_at"),
+            ],
         ),
         ("codewire.v1.AttachSessionStatus", &[(1, "session")]),
+        (
+            "codewire.v1.AttachSessionInput",
+            &[(1, "data"), (2, "offset")],
+        ),
         (
             "codewire.v1.EnvironmentSessionOutputGap",
             &[(1, "requested_offset"), (2, "retained_start_offset")],
@@ -1109,8 +1147,7 @@ mod tests {
             _ctx: &RequestContext,
             _org_id: &str,
             _environment_id: &str,
-            _session_id: &str,
-            _output_offset: u64,
+            _start: v1::AttachSessionRequest,
         ) -> Result<Self::Attachment, connectrpc::ConnectError> {
             unreachable!("not used by bridge unit tests")
         }
@@ -1317,6 +1354,7 @@ mod tests {
                             output_end_offset: 12,
                             output_start_offset: 0,
                             message: "session exited with status 0".into(),
+                            input_end_offset: None,
                         },
                     )),
                 },
@@ -1479,6 +1517,7 @@ mod tests {
                     output_end_offset: 0,
                     output_start_offset: 0,
                     message: "session running".into(),
+                    input_end_offset: None,
                 },
             )),
         };
@@ -1498,6 +1537,109 @@ mod tests {
         assert_eq!(session.output_end_offset, 0);
         assert_eq!(session.status_message, "session running");
         assert!(session.finished_at.as_option().is_none());
+    }
+
+    /// #3993: the client's input stream crosses the bridge both ways, and a
+    /// client without one is converted exactly as before.
+    #[tokio::test]
+    async fn the_input_stream_crosses_the_bridge_both_ways() {
+        let open = proto::AttachSessionOpen {
+            org_id: "org".into(),
+            environment_id: "env".into(),
+            session_id: "session-1".into(),
+            output_offset: 4,
+            input_stream: "phone".into(),
+            input_offset: 6,
+            ..Default::default()
+        };
+        assert_eq!(
+            private_attach_start(&open),
+            v1::AttachSessionRequest {
+                session_id: "session-1".into(),
+                output_offset: 4,
+                input_stream: "phone".into(),
+                input_offset: 6,
+            }
+        );
+        let without_stream = proto::AttachSessionOpen {
+            input_stream: String::new(),
+            input_offset: 0,
+            ..open
+        };
+        assert_eq!(private_attach_start(&without_stream).input_stream, "");
+
+        let input = |input| proto::AttachSessionRequest {
+            input: Some(input),
+            ..Default::default()
+        };
+        let numbered = private_attach_input(
+            input(proto::attach_session_request::Input::StdinAt(Box::new(
+                proto::AttachSessionInput {
+                    data: b"hi".to_vec(),
+                    offset: 6,
+                    ..Default::default()
+                },
+            ))),
+            "session-1",
+        )
+        .unwrap();
+        assert_eq!(
+            numbered.payload,
+            Some(v1::session_attach_message::Payload::Input(
+                v1::SessionInput {
+                    data: b"hi".to_vec(),
+                    offset: Some(6),
+                }
+            ))
+        );
+        let plain = private_attach_input(
+            input(proto::attach_session_request::Input::Stdin(b"hi".to_vec())),
+            "session-1",
+        )
+        .unwrap();
+        assert_eq!(
+            plain.payload,
+            Some(v1::session_attach_message::Payload::Input(
+                v1::SessionInput {
+                    data: b"hi".to_vec(),
+                    offset: None,
+                }
+            ))
+        );
+
+        for written in [Some(8), None] {
+            let mut attachment = RecordingAttachment {
+                inputs: Arc::new(Mutex::new(Vec::new())),
+                half_closed: Arc::new(AtomicBool::new(true)),
+                half_close_notify: Arc::new(Notify::new()),
+                outputs: VecDeque::new(),
+                session_result: Ok(v1::SessionRecord {
+                    session_id: "session-1".into(),
+                    state: v1::SessionLifecycleState::Running as i32,
+                    ..Default::default()
+                }),
+            };
+            let status = v1::SessionAttachMessage {
+                payload: Some(v1::session_attach_message::Payload::Status(
+                    v1::SessionStatus {
+                        session_id: "session-1".into(),
+                        state: v1::SessionLifecycleState::Running as i32,
+                        input_end_offset: written,
+                        ..Default::default()
+                    },
+                )),
+            };
+            let response = public_attach_output(status, &mut attachment, "session-1")
+                .await
+                .expect("status");
+            let Some(proto::attach_session_response::Event::Status(status)) = response.event else {
+                panic!("bridge response must contain status");
+            };
+            assert_eq!(
+                status.session.into_option().unwrap().input_end_offset,
+                written
+            );
+        }
     }
 
     #[tokio::test]

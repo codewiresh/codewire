@@ -22,6 +22,7 @@ use crate::{
     EnvironmentSession, EnvironmentSessionAttachment, EnvironmentSessionState,
     LaunchSessionRequest, SshTransportMode, attach_session_request, attach_session_response,
 };
+pub use input_stream::{InputNotice, InputStream};
 
 /// How long the shell keeps running with no client attached (owner,
 /// 2026-11-01, on #3827), and so how long a client keeps trying to reattach
@@ -70,6 +71,9 @@ pub enum ShellNotice {
     Attached(Via),
     /// The connection dropped; reconnecting to the same shell. Once per drop.
     Reconnecting,
+    /// After a reattach: the keys typed during the drop were sent again, or
+    /// were lost (#3993).
+    Input(InputNotice),
 }
 
 /// The local end of a hosted shell: where its keys come from, where its
@@ -152,15 +156,19 @@ pub async fn run(
 
     let mut tailnet = None;
     let mut output_offset = 0;
+    let mut input_stream = InputStream::default();
     let mut dropped_at: Option<Instant> = None;
     let mut attempt = 0_u32;
     let mut retry_after = TAILNET_RETRY_FIRST;
     loop {
+        let (stream, input_offset) = input_stream.open();
         let open = AttachSessionOpen {
             org_id: org_id.into(),
             environment_id: environment_id.into(),
             session_id: session_id.clone(),
             output_offset,
+            input_stream: stream,
+            input_offset,
             ..Default::default()
         };
         let pumped = match attach(client, open, &mut tailnet).await {
@@ -178,7 +186,7 @@ pub async fn run(
                     }
                     tailnet_again(client, org_id, environment_id, retry_after).await
                 };
-                pump(attachment, output_offset, terminal, back).await?
+                pump(attachment, output_offset, &mut input_stream, terminal, back).await?
             }
             Err(error) if dropped_at.is_some() => {
                 tracing::debug!(error = %error_chain(&error), "reattach failed");
@@ -372,6 +380,7 @@ enum Pumped<T> {
 async fn pump<T>(
     mut attachment: EnvironmentSessionAttachment,
     mut output_offset: u64,
+    input_stream: &mut InputStream,
     terminal: &mut impl ShellTerminal,
     tailnet_back: impl Future<Output = T>,
 ) -> Result<Pumped<T>, HostedShellError> {
@@ -385,6 +394,7 @@ async fn pump<T>(
     if let Some((columns, rows)) = sizes.current() {
         let _ = input.send(resize(columns, rows)).await;
     }
+    input_stream.attaching();
     let mut keys_open = true;
     let pumped = loop {
         tokio::select! {
@@ -392,11 +402,9 @@ async fn pump<T>(
             read = keys.read(), if keys_open => match read {
                 None => keys_open = false,
                 Some(keys) => {
-                    let request = AttachSessionRequest {
-                        input: Some(attach_session_request::Input::Stdin(keys)),
-                        ..Default::default()
-                    };
-                    if input.send(request).await.is_err() {
+                    if let Some(request) = input_stream.typed(keys, Instant::now())
+                        && input.send(request).await.is_err()
+                    {
                         break Pumped::Interrupted { output_offset };
                     }
                 }
@@ -416,6 +424,18 @@ async fn pump<T>(
                         output_offset = gap.retained_start_offset;
                     }
                     Some(attach_session_response::Event::Status(status)) => {
+                        let written = status.session.as_option().and_then(|session| session.input_end_offset);
+                        let (requests, notices) = input_stream.status(written, Instant::now());
+                        let mut sent = true;
+                        for request in requests {
+                            sent &= input.send(request).await.is_ok();
+                        }
+                        for notice in notices {
+                            terminal.notice(ShellNotice::Input(notice));
+                        }
+                        if !sent {
+                            break Pumped::Interrupted { output_offset };
+                        }
                         if let Some(session) = status.session.as_option()
                             && session_has_ended(session)
                         {
@@ -453,6 +473,9 @@ fn resize(columns: u16, rows: u16) -> AttachSessionRequest {
         ..Default::default()
     }
 }
+
+#[path = "hosted_shell/input_stream.rs"]
+mod input_stream;
 
 #[cfg(test)]
 mod tests {
@@ -541,7 +564,15 @@ mod tests {
             "tailnet"
         };
         let attachment = EnvironmentSessionAttachment::from_output(outputs);
-        let pumped = pump(attachment, 0, &mut Detached, back).await.unwrap();
+        let pumped = pump(
+            attachment,
+            0,
+            &mut InputStream::default(),
+            &mut Detached,
+            back,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             pumped,
             Pumped::TailnetBack {
@@ -561,7 +592,15 @@ mod tests {
         });
         let attachment = EnvironmentSessionAttachment::from_output(outputs);
         let back = std::future::pending::<()>();
-        let pumped = pump(attachment, 0, &mut Detached, back).await.unwrap();
+        let pumped = pump(
+            attachment,
+            0,
+            &mut InputStream::default(),
+            &mut Detached,
+            back,
+        )
+        .await
+        .unwrap();
         carrier.await.unwrap();
         assert_eq!(pumped, Pumped::Interrupted { output_offset: 9 });
     }

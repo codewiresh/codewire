@@ -64,7 +64,7 @@ pub use codewire_proto::codewire::console::v1::{
     UsageSummary,
 };
 pub use codewire_proto::codewire::v1::{
-    AccessGrant, AccessPermission, ApiKey, ApplicationPort, AttachSessionOpen,
+    AccessGrant, AccessPermission, ApiKey, ApplicationPort, AttachSessionInput, AttachSessionOpen,
     AttachSessionRequest, AttachSessionResize, AttachSessionResponse, AttachSessionResponseView,
     AttachSessionStatus, CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse,
     CreateApiKeyRequest, CreateApiKeyResponse, CreateEnvironmentRequest, CreateEnvironmentResponse,
