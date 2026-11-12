@@ -19,7 +19,9 @@ use temporalio_client::{
     WorkflowSignalOptions, WorkflowStartOptions, WorkflowTerminateOptions,
 };
 use temporalio_common::HasWorkflowDefinition;
-use temporalio_common::data_converters::{DataConverter, SerializationContextData};
+use temporalio_common::data_converters::{
+    ActivitySerializationContext, DataConverter, SerializationContextData,
+};
 use temporalio_common::protos::temporal::api::history::v1::history_event::Attributes;
 
 use codewire_orchestration::temporal::{
@@ -55,7 +57,10 @@ async fn verify_activity_input(
 
     if name == "EnvironmentClaimAuthorityActivity" {
         let input: EnvironmentClaimInput = converter
-            .from_payloads(&SerializationContextData::Activity, payloads)
+            .from_payloads(
+                &SerializationContextData::Activity(ActivitySerializationContext::new()),
+                payloads,
+            )
             .await?;
         if input.environment_id != env_id {
             anyhow::bail!("claim input environment mismatch: {input:?}");
@@ -63,14 +68,20 @@ async fn verify_activity_input(
     } else if name == "EnvironmentClaimAndCreateActivity" {
         // It claims the generation itself, so its input carries none (#3630).
         let input: EnvironmentClaimAndCreateInput = converter
-            .from_payloads(&SerializationContextData::Activity, payloads)
+            .from_payloads(
+                &SerializationContextData::Activity(ActivitySerializationContext::new()),
+                payloads,
+            )
             .await?;
         if input.environment_id != env_id || input.requested_by != "temporal-smoke" {
             anyhow::bail!("claim-and-create input mismatch: {input:?}");
         }
     } else {
         let input: EnvironmentActivityCommand = converter
-            .from_payloads(&SerializationContextData::Activity, payloads)
+            .from_payloads(
+                &SerializationContextData::Activity(ActivitySerializationContext::new()),
+                payloads,
+            )
             .await?;
         if input.environment_id != env_id
             || input.operation_generation != generation
@@ -129,9 +140,9 @@ async fn verify_final_protocol<W: HasWorkflowDefinition>(
         .await?;
         let history = handle
             .fetch_history(WorkflowFetchHistoryOptions::default())
+            .into_events()
             .await?;
         let completed: HashSet<i64> = history
-            .events()
             .iter()
             .filter_map(|event| match event.attributes.as_ref() {
                 Some(Attributes::ActivityTaskCompletedEventAttributes(done)) => {
@@ -141,7 +152,6 @@ async fn verify_final_protocol<W: HasWorkflowDefinition>(
             })
             .collect();
         let scheduled: Vec<_> = history
-            .events()
             .iter()
             .filter_map(|event| {
                 let attributes = event.attributes.as_ref()?;

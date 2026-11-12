@@ -561,6 +561,7 @@ mod enabled {
         {
             let history = match handle
                 .fetch_history(WorkflowFetchHistoryOptions::default())
+                .into_events()
                 .await
             {
                 Ok(history) => history,
@@ -572,7 +573,7 @@ mod enabled {
                     };
                 }
             };
-            let scheduled = history.events().iter().find_map(|event| {
+            let scheduled = history.iter().find_map(|event| {
                 let Some(Attributes::ActivityTaskScheduledEventAttributes(attributes)) =
                     event.attributes.as_ref()
                 else {
@@ -587,7 +588,6 @@ mod enabled {
             let attempt = scheduled
                 .map(|scheduled| {
                     history
-                        .events()
                         .iter()
                         .filter_map(|event| {
                             let Some(Attributes::ActivityTaskStartedEventAttributes(started)) =
@@ -602,7 +602,6 @@ mod enabled {
                 })
                 .unwrap_or_default();
             let terminal = history
-                .events()
                 .iter()
                 .rev()
                 .find(|event| event.is_final_wf_execution_event())
@@ -1619,9 +1618,9 @@ mod enabled {
                 );
             let history = workflow
                 .fetch_history(WorkflowFetchHistoryOptions::default())
+                .into_events()
                 .await?;
             let starts = history
-                .events()
                 .iter()
                 .filter(|event| {
                     matches!(
@@ -1799,8 +1798,9 @@ mod enabled {
     {
         let history = handle
             .fetch_history(WorkflowFetchHistoryOptions::default())
+            .into_events()
             .await?;
-        let scheduled = history.events().iter().find_map(|event| {
+        let scheduled = history.iter().find_map(|event| {
             let Some(Attributes::ActivityTaskScheduledEventAttributes(attributes)) =
                 event.attributes.as_ref()
             else {
@@ -1815,7 +1815,7 @@ mod enabled {
         let Some(scheduled) = scheduled else {
             return Ok(false);
         };
-        Ok(!history.events().iter().any(|event| {
+        Ok(!history.iter().any(|event| {
             matches!(
                 event.attributes.as_ref(),
                 Some(Attributes::ActivityTaskCompletedEventAttributes(done))
@@ -1853,8 +1853,9 @@ mod enabled {
     {
         let history = handle
             .fetch_history(WorkflowFetchHistoryOptions::default())
+            .into_events()
             .await?;
-        let scheduled = history.events().iter().find_map(|event| {
+        let scheduled = history.iter().find_map(|event| {
             let Some(Attributes::ActivityTaskScheduledEventAttributes(attributes)) =
                 event.attributes.as_ref()
             else {
@@ -1869,7 +1870,6 @@ mod enabled {
         let maximum_attempt = scheduled
             .map(|scheduled| {
                 history
-                    .events()
                     .iter()
                     .filter_map(|event| {
                         let Some(Attributes::ActivityTaskStartedEventAttributes(started)) =
@@ -1884,7 +1884,6 @@ mod enabled {
             })
             .unwrap_or_default();
         let terminal = history
-            .events()
             .iter()
             .rev()
             .find(|event| event.is_final_wf_execution_event())

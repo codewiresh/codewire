@@ -21,15 +21,14 @@ use codewire_server_core::account_deletion::{self, AccountDeletionWorkflowInput}
 use codewire_server_core::obs::TraceContext;
 use serde::{Deserialize, Serialize};
 use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions};
-use temporalio_common::protos::coresdk::workflow_commands::ActivityCancellationType;
 use temporalio_common::protos::temporal::api::common::v1::RetryPolicy;
 use temporalio_macros::{activities, workflow, workflow_methods};
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
+use temporalio_sdk::runtime::{Runtime, RuntimeOptions};
 use temporalio_sdk::{
-    ActivityOptions, SyncWorkflowContext, Worker, WorkerOptions, WorkflowContext,
-    WorkflowContextView, WorkflowResult,
+    ActivityCancellationType, ActivityOptions, ApplicationFailure, SyncWorkflowContext, Worker,
+    WorkerOptions, WorkflowContext, WorkflowContextView, WorkflowResult,
 };
-use temporalio_sdk_core::{CoreRuntime, RuntimeOptions};
 use tracing::Instrument as _;
 
 use crate::worker::activity_authority::{ActivityAuthority, AuthorityLost, is_authority_lost};
@@ -235,6 +234,15 @@ async fn required_authority(
     }
 }
 
+/// Records an empty heartbeat. The SDK encodes it before handing it to the
+/// worker, which throttles and sends it; encoding `()` cannot fail, and a
+/// heartbeat that cannot be sent is never a reason to fail the activity.
+async fn record_heartbeat(ctx: &ActivityContext) {
+    if let Err(error) = ctx.record_heartbeat(()).await {
+        tracing::warn!(%error, "activity heartbeat could not be encoded");
+    }
+}
+
 async fn run_environment_activity<T, F>(ctx: ActivityContext, future: F) -> Result<T, ActivityError>
 where
     T: Default,
@@ -242,7 +250,7 @@ where
 {
     let cancel_ctx = ctx.clone();
     let heartbeat_ctx = ctx;
-    heartbeat_ctx.record_heartbeat(Vec::new());
+    record_heartbeat(&heartbeat_ctx).await;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut future = Box::pin(future);
@@ -250,7 +258,7 @@ where
     loop {
         tokio::select! {
             _ = cancel_ctx.cancelled() => return Err(ActivityError::cancelled()),
-            _ = heartbeat.tick() => heartbeat_ctx.record_heartbeat(Vec::new()),
+            _ = heartbeat.tick() => record_heartbeat(&heartbeat_ctx).await,
             result = &mut future => {
                 return match result {
                     Ok(value) => Ok(value),
@@ -266,7 +274,7 @@ async fn run_claim_activity<F>(ctx: ActivityContext, future: F) -> Result<i64, A
 where
     F: std::future::Future<Output = anyhow::Result<i64>>,
 {
-    ctx.record_heartbeat(Vec::new());
+    record_heartbeat(&ctx).await;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut future = Box::pin(future);
@@ -274,7 +282,7 @@ where
     loop {
         tokio::select! {
             _ = ctx.cancelled() => return Err(ActivityError::cancelled()),
-            _ = heartbeat.tick() => ctx.record_heartbeat(Vec::new()),
+            _ = heartbeat.tick() => record_heartbeat(&ctx).await,
             result = &mut future => return result.map_err(Into::into),
         }
     }
@@ -292,7 +300,7 @@ where
     T: Default,
     F: std::future::Future<Output = anyhow::Result<T>>,
 {
-    ctx.record_heartbeat(Vec::new());
+    record_heartbeat(&ctx).await;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // On the heap: an activity's state machine is large, and this one is
@@ -301,7 +309,7 @@ where
 
     loop {
         tokio::select! {
-            _ = heartbeat.tick() => ctx.record_heartbeat(Vec::new()),
+            _ = heartbeat.tick() => record_heartbeat(&ctx).await,
             result = &mut future => {
                 return match result {
                     Ok(value) => Ok(value),
@@ -322,9 +330,9 @@ where
 fn claim_authority_metadata(ctx: &ActivityContext) -> anyhow::Result<(String, i64)> {
     let info = ctx.info();
     let workflow_run_id = info
-        .workflow_execution
-        .as_ref()
-        .map(|execution| execution.run_id.trim())
+        .workflow_run_id
+        .as_deref()
+        .map(str::trim)
         .filter(|run_id| !run_id.is_empty())
         .ok_or(AuthorityLost)?
         .to_string();
@@ -745,7 +753,7 @@ fn environment_activity_opts() -> ActivityOptions {
 
 fn short_activity_opts() -> ActivityOptions {
     let mut opts = ActivityOptions::start_to_close_timeout(Duration::from_secs(30 * 60));
-    opts.retry_policy = Some(retry_policy());
+    opts.retry_policy = Some(retry_policy().into());
     opts
 }
 
@@ -778,7 +786,7 @@ fn ensure_workflow_environment(
 /// Mirrors `orchestration.EnvironmentWorkflow`: a signal-driven
 /// command queue; `destroy` completes the workflow; unknown actions
 /// are logged and ignored.
-#[workflow(name = "EnvironmentWorkflow")]
+#[workflow]
 #[derive(Default)]
 pub struct EnvironmentWorkflow {
     queue: VecDeque<EnvironmentCommand>,
@@ -795,12 +803,12 @@ impl EnvironmentWorkflow {
         Self { queue }
     }
 
-    #[run]
+    #[run(name = "EnvironmentWorkflow")]
     pub async fn run(ctx: &mut WorkflowContext<Self>) -> WorkflowResult<()> {
         let mut operation_generation = None;
         let mut environment_id = None;
         loop {
-            ctx.wait_condition(|s| !s.queue.is_empty()).await;
+            ctx.wait_condition(|s| !s.queue.is_empty()).await?;
             let cmd = ctx
                 .state_mut(|s| s.queue.pop_front())
                 .expect("queue checked non-empty");
@@ -814,7 +822,8 @@ impl EnvironmentWorkflow {
                 continue;
             }
 
-            ensure_workflow_environment(&mut environment_id, &cmd)?;
+            ensure_workflow_environment(&mut environment_id, &cmd)
+                .map_err(ApplicationFailure::from)?;
             // Whether this command's create already ran with its claim, and
             // its setup with it (#3684).
             let mut created = false;
@@ -823,7 +832,7 @@ impl EnvironmentWorkflow {
                 Some(generation) => generation,
                 None if cmd.action == "create" && ctx.patched(CLAIM_WITH_CREATE_PATCH) => {
                     let result = ctx
-                        .start_activity(
+                        .execute_activity(
                             EnvironmentActivities::claim_and_create,
                             EnvironmentClaimAndCreateInput {
                                 environment_id: cmd.environment_id.clone(),
@@ -841,7 +850,7 @@ impl EnvironmentWorkflow {
                 }
                 None => {
                     let generation = ctx
-                        .start_activity(
+                        .execute_activity(
                             EnvironmentActivities::claim_authority,
                             EnvironmentClaimInput {
                                 environment_id: cmd.environment_id.clone(),
@@ -854,12 +863,13 @@ impl EnvironmentWorkflow {
                     generation
                 }
             };
-            let activity_cmd = EnvironmentActivityCommand::from_signal(&cmd, generation)?;
+            let activity_cmd = EnvironmentActivityCommand::from_signal(&cmd, generation)
+                .map_err(ApplicationFailure::from)?;
 
             match cmd.action.as_str() {
                 "create" => {
                     if !created {
-                        ctx.start_activity(
+                        ctx.execute_activity(
                             EnvironmentActivities::create,
                             activity_cmd.clone(),
                             environment_activity_opts(),
@@ -867,7 +877,7 @@ impl EnvironmentWorkflow {
                         .await?;
                     }
                     if !setup_completed {
-                        ctx.start_activity(
+                        ctx.execute_activity(
                             EnvironmentActivities::setup,
                             activity_cmd,
                             environment_activity_opts(),
@@ -876,7 +886,7 @@ impl EnvironmentWorkflow {
                     }
                 }
                 "start" => {
-                    ctx.start_activity(
+                    ctx.execute_activity(
                         EnvironmentActivities::start,
                         activity_cmd,
                         environment_activity_opts(),
@@ -884,7 +894,7 @@ impl EnvironmentWorkflow {
                     .await?;
                 }
                 "stop" => {
-                    ctx.start_activity(
+                    ctx.execute_activity(
                         EnvironmentActivities::stop,
                         activity_cmd,
                         environment_activity_opts(),
@@ -892,7 +902,7 @@ impl EnvironmentWorkflow {
                     .await?;
                 }
                 "restart_sources" => {
-                    ctx.start_activity(
+                    ctx.execute_activity(
                         EnvironmentActivities::restart_sources,
                         activity_cmd,
                         environment_activity_opts(),
@@ -900,7 +910,7 @@ impl EnvironmentWorkflow {
                     .await?;
                 }
                 "destroy" => {
-                    ctx.start_activity(
+                    ctx.execute_activity(
                         EnvironmentActivities::destroy,
                         activity_cmd,
                         environment_activity_opts(),
@@ -909,7 +919,7 @@ impl EnvironmentWorkflow {
                     return Ok(());
                 }
                 "resize" => {
-                    ctx.start_activity(
+                    ctx.execute_activity(
                         EnvironmentActivities::resize,
                         activity_cmd,
                         environment_activity_opts(),
@@ -918,7 +928,7 @@ impl EnvironmentWorkflow {
                 }
                 "reconcile" => {
                     let outcome = ctx
-                        .start_activity(
+                        .execute_activity(
                             EnvironmentActivities::reconcile,
                             activity_cmd,
                             environment_activity_opts(),
@@ -1062,16 +1072,16 @@ fn snapshot_cleanup_activity_opts() -> ActivityOptions {
 
 /// One hosted snapshot's capture: raw, clear, keep. Any failure, retries
 /// exhausted included, ends in the abandonment that deletes what it made.
-#[workflow(name = "SnapshotCaptureWorkflow")]
+#[workflow]
 #[derive(Default)]
 pub struct SnapshotCaptureWorkflow {}
 
 #[workflow_methods]
 impl SnapshotCaptureWorkflow {
-    #[run]
+    #[run(name = "SnapshotCaptureWorkflow")]
     pub async fn run(ctx: &mut WorkflowContext<Self>, cmd: SnapshotCommand) -> WorkflowResult<()> {
         let raw = ctx
-            .start_activity(
+            .execute_activity(
                 SnapshotActivities::capture_raw,
                 cmd.clone(),
                 environment_activity_opts(),
@@ -1082,7 +1092,7 @@ impl SnapshotCaptureWorkflow {
             Err(_) => Some(crate::worker::snapshots::FAILURE_CAPTURE.to_owned()),
             Ok(None) => {
                 let cleared = ctx
-                    .start_activity(
+                    .execute_activity(
                         SnapshotActivities::clear,
                         cmd.clone(),
                         environment_activity_opts(),
@@ -1092,7 +1102,7 @@ impl SnapshotCaptureWorkflow {
                     Ok(Some(code)) => Some(code),
                     Err(_) => Some(crate::worker::snapshots::FAILURE_CAPTURE.to_owned()),
                     Ok(None) => ctx
-                        .start_activity(
+                        .execute_activity(
                             SnapshotActivities::keep,
                             cmd.clone(),
                             environment_activity_opts(),
@@ -1104,7 +1114,7 @@ impl SnapshotCaptureWorkflow {
             }
         };
         if let Some(failure_code) = failure {
-            ctx.start_activity(
+            ctx.execute_activity(
                 SnapshotActivities::abandon,
                 SnapshotAbandonment {
                     snapshot_id: cmd.snapshot_id,
@@ -1119,15 +1129,15 @@ impl SnapshotCaptureWorkflow {
 }
 
 /// One hosted snapshot's deletion: its objects, then its row.
-#[workflow(name = "SnapshotDeleteWorkflow")]
+#[workflow]
 #[derive(Default)]
 pub struct SnapshotDeleteWorkflow {}
 
 #[workflow_methods]
 impl SnapshotDeleteWorkflow {
-    #[run]
+    #[run(name = "SnapshotDeleteWorkflow")]
     pub async fn run(ctx: &mut WorkflowContext<Self>, cmd: SnapshotCommand) -> WorkflowResult<()> {
-        ctx.start_activity(
+        ctx.execute_activity(
             SnapshotActivities::delete,
             cmd,
             snapshot_cleanup_activity_opts(),
@@ -1167,7 +1177,7 @@ async fn run_organization_deletion_activity<T, F>(
 where
     F: std::future::Future<Output = Result<T, codewire_server_core::AppError>>,
 {
-    ctx.record_heartbeat(Vec::new());
+    record_heartbeat(&ctx).await;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tokio::pin!(future);
@@ -1175,7 +1185,7 @@ where
     loop {
         tokio::select! {
             _ = ctx.cancelled() => return Err(ActivityError::cancelled()),
-            _ = heartbeat.tick() => ctx.record_heartbeat(Vec::new()),
+            _ = heartbeat.tick() => record_heartbeat(&ctx).await,
             result = &mut future => return result.map_err(|error| {
                 ActivityError::from(anyhow::anyhow!(
                     "organization deletion activity failed: {error}"
@@ -1327,19 +1337,19 @@ fn organization_deletion_failure(
 
 /// Dark WI-5 workflow. It is started only from the durable outbox reconciler;
 /// the customer DELETE endpoint remains on its inherited path until WI-7.
-#[workflow(name = "OrganizationDeletionWorkflow")]
+#[workflow]
 #[derive(Default)]
 pub struct OrganizationDeletionWorkflow {}
 
 #[workflow_methods]
 impl OrganizationDeletionWorkflow {
-    #[run]
+    #[run(name = "OrganizationDeletionWorkflow")]
     pub async fn run(
         ctx: &mut WorkflowContext<Self>,
         input: OrganizationDeletionWorkflowInput,
     ) -> WorkflowResult<()> {
         if ctx
-            .start_activity(
+            .execute_activity(
                 OrganizationDeletionActivities::destroy_environments,
                 input.clone(),
                 organization_deletion_activity_opts(),
@@ -1347,7 +1357,7 @@ impl OrganizationDeletionWorkflow {
             .await
             .is_err()
         {
-            ctx.start_activity(
+            ctx.execute_activity(
                 OrganizationDeletionActivities::fail,
                 organization_deletion_failure(&input, "environment_cleanup_failed"),
                 organization_deletion_failure_opts(),
@@ -1357,7 +1367,7 @@ impl OrganizationDeletionWorkflow {
         }
 
         if ctx
-            .start_activity(
+            .execute_activity(
                 ExternalOrganizationBillingActivities::finalize_billing,
                 input.clone(),
                 organization_billing_activity_opts(),
@@ -1365,7 +1375,7 @@ impl OrganizationDeletionWorkflow {
             .await
             .is_err()
         {
-            ctx.start_activity(
+            ctx.execute_activity(
                 OrganizationDeletionActivities::fail,
                 organization_deletion_failure(&input, "billing_cleanup_failed"),
                 organization_deletion_failure_opts(),
@@ -1375,7 +1385,7 @@ impl OrganizationDeletionWorkflow {
         }
 
         if ctx
-            .start_activity(
+            .execute_activity(
                 OrganizationDeletionActivities::record_billing_finalized,
                 input.clone(),
                 organization_deletion_activity_opts(),
@@ -1383,7 +1393,7 @@ impl OrganizationDeletionWorkflow {
             .await
             .is_err()
         {
-            ctx.start_activity(
+            ctx.execute_activity(
                 OrganizationDeletionActivities::fail,
                 organization_deletion_failure(&input, "billing_reconciliation_failed"),
                 organization_deletion_failure_opts(),
@@ -1393,7 +1403,7 @@ impl OrganizationDeletionWorkflow {
         }
 
         if ctx
-            .start_activity(
+            .execute_activity(
                 OrganizationDeletionActivities::teardown_tenant_secrets,
                 input.clone(),
                 organization_deletion_activity_opts(),
@@ -1401,7 +1411,7 @@ impl OrganizationDeletionWorkflow {
             .await
             .is_err()
         {
-            ctx.start_activity(
+            ctx.execute_activity(
                 OrganizationDeletionActivities::fail,
                 organization_deletion_failure(&input, "tenant_secret_cleanup_failed"),
                 organization_deletion_failure_opts(),
@@ -1411,7 +1421,7 @@ impl OrganizationDeletionWorkflow {
         }
 
         if ctx
-            .start_activity(
+            .execute_activity(
                 OrganizationDeletionActivities::reconcile_control_plane,
                 input.clone(),
                 organization_deletion_activity_opts(),
@@ -1419,7 +1429,7 @@ impl OrganizationDeletionWorkflow {
             .await
             .is_err()
         {
-            ctx.start_activity(
+            ctx.execute_activity(
                 OrganizationDeletionActivities::fail,
                 organization_deletion_failure(&input, "control_plane_reconciliation_failed"),
                 organization_deletion_failure_opts(),
@@ -1429,7 +1439,7 @@ impl OrganizationDeletionWorkflow {
         }
 
         if ctx
-            .start_activity(
+            .execute_activity(
                 OrganizationDeletionActivities::finalize_database,
                 input.clone(),
                 organization_deletion_activity_opts(),
@@ -1437,7 +1447,7 @@ impl OrganizationDeletionWorkflow {
             .await
             .is_err()
         {
-            ctx.start_activity(
+            ctx.execute_activity(
                 OrganizationDeletionActivities::fail,
                 organization_deletion_failure(&input, "database_finalization_failed"),
                 organization_deletion_failure_opts(),
@@ -1553,36 +1563,36 @@ fn account_deletion_billing_activity_opts() -> ActivityOptions {
 /// Deletes an account after its request disabled it (#3679). Started only
 /// from the durable outbox reconciler; each activity resumes from the phase
 /// the operation records.
-#[workflow(name = "AccountDeletionWorkflow")]
+#[workflow]
 #[derive(Default)]
 pub struct AccountDeletionWorkflow {}
 
 #[workflow_methods]
 impl AccountDeletionWorkflow {
-    #[run]
+    #[run(name = "AccountDeletionWorkflow")]
     pub async fn run(
         ctx: &mut WorkflowContext<Self>,
         input: AccountDeletionWorkflowInput,
     ) -> WorkflowResult<()> {
-        ctx.start_activity(
+        ctx.execute_activity(
             AccountDeletionActivities::await_organizations,
             input.clone(),
             account_deletion_activity_opts(),
         )
         .await?;
-        ctx.start_activity(
+        ctx.execute_activity(
             ExternalAccountDeletionBillingActivities::delete_stripe_customers,
             input.clone(),
             account_deletion_billing_activity_opts(),
         )
         .await?;
-        ctx.start_activity(
+        ctx.execute_activity(
             AccountDeletionActivities::finalize_database,
             input.clone(),
             account_deletion_activity_opts(),
         )
         .await?;
-        ctx.start_activity(
+        ctx.execute_activity(
             ExternalAccountDeletionBillingActivities::send_deleted_mail,
             input,
             account_deletion_billing_activity_opts(),
@@ -1630,17 +1640,17 @@ impl PortDnsActivities {
 /// Single-shot workflow: one port-DNS action with Temporal's retry
 /// policy, then complete. Workflow ID convention:
 /// `port-dns/{action}/{port_id or environment_id}`.
-#[workflow(name = "PortDnsWorkflow")]
+#[workflow]
 #[derive(Default)]
 pub struct PortDnsWorkflow {}
 
 #[workflow_methods]
 impl PortDnsWorkflow {
-    #[run]
+    #[run(name = "PortDnsWorkflow")]
     pub async fn run(ctx: &mut WorkflowContext<Self>, cmd: PortDnsCommand) -> WorkflowResult<()> {
         match cmd.action.as_str() {
             "create" => {
-                ctx.start_activity(
+                ctx.execute_activity(
                     PortDnsActivities::create,
                     cmd.clone(),
                     short_activity_opts(),
@@ -1648,7 +1658,7 @@ impl PortDnsWorkflow {
                 .await?;
             }
             "delete" => {
-                ctx.start_activity(
+                ctx.execute_activity(
                     PortDnsActivities::delete,
                     cmd.clone(),
                     short_activity_opts(),
@@ -1716,7 +1726,7 @@ impl TemporalTrigger {
         )
     )]
     pub async fn trigger_environment(&self, env_id: &str, action: &str) -> anyhow::Result<()> {
-        use temporalio_client::{WorkflowStartOptions, WorkflowStartSignal};
+        use temporalio_client::WorkflowStartOptions;
         let workflow_id = environment_workflow_id(env_id);
         let cmd = EnvironmentCommand {
             action: action.to_string(),
@@ -1724,21 +1734,8 @@ impl TemporalTrigger {
             requested_by: String::new(),
             trace_context: TraceContext::current(),
         };
-        let signal_input = temporalio_common::data_converters::DataConverter::default()
-            .to_payloads(
-                &temporalio_common::data_converters::SerializationContextData::Workflow,
-                &cmd,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("serialize environment command: {e}"))?;
-        use temporalio_common::protos::coresdk::IntoPayloadsExt;
-        let options = WorkflowStartOptions::new(self.task_queue.as_str(), workflow_id.as_str())
-            .start_signal(
-                WorkflowStartSignal::new("environment.command".to_string())
-                    .input(signal_input.into_payloads().unwrap_or_default())
-                    .build(),
-            )
-            .build();
+        let options =
+            WorkflowStartOptions::new(self.task_queue.as_str(), workflow_id.as_str()).build();
         // The RPC runs span-free: Temporal's frontend closes connections at
         // their maximum age, and the SDK's channel reopens one lazily inside
         // the next call, through an executor that keeps the caller's span for
@@ -1747,9 +1744,11 @@ impl TemporalTrigger {
         let client = self.client.clone();
         codewire_server_core::span_free::detached(async move {
             client
-                .start_workflow(
+                .signal_with_start_workflow(
                     EnvironmentWorkflow::run,
                     EnvironmentCommand::default(),
+                    EnvironmentWorkflow::command,
+                    cmd,
                     options,
                 )
                 .await
@@ -1763,8 +1762,8 @@ impl TemporalTrigger {
     /// Start a snapshot's capture workflow. `UseExisting` makes a restart of a
     /// running capture change nothing.
     pub async fn trigger_snapshot_capture(&self, snapshot_id: &str) -> anyhow::Result<()> {
+        use temporalio_client::WorkflowIdConflictPolicy;
         use temporalio_client::WorkflowStartOptions;
-        use temporalio_common::protos::temporal::api::enums::v1::WorkflowIdConflictPolicy;
         let options = WorkflowStartOptions::new(
             self.task_queue.as_str(),
             snapshot_capture_workflow_id(snapshot_id),
@@ -1787,8 +1786,8 @@ impl TemporalTrigger {
 
     /// Start a snapshot's delete workflow, as above.
     pub async fn trigger_snapshot_delete(&self, snapshot_id: &str) -> anyhow::Result<()> {
+        use temporalio_client::WorkflowIdConflictPolicy;
         use temporalio_client::WorkflowStartOptions;
-        use temporalio_common::protos::temporal::api::enums::v1::WorkflowIdConflictPolicy;
         let options = WorkflowStartOptions::new(
             self.task_queue.as_str(),
             snapshot_delete_workflow_id(snapshot_id),
@@ -1842,8 +1841,8 @@ impl TemporalTrigger {
         &self,
         input: OrganizationDeletionWorkflowInput,
     ) -> anyhow::Result<()> {
+        use temporalio_client::WorkflowIdConflictPolicy;
         use temporalio_client::WorkflowStartOptions;
-        use temporalio_common::protos::temporal::api::enums::v1::WorkflowIdConflictPolicy;
 
         if input.operation_id.trim().is_empty()
             || input.organization_id.trim().is_empty()
@@ -1875,8 +1874,8 @@ impl TemporalTrigger {
         &self,
         input: AccountDeletionWorkflowInput,
     ) -> anyhow::Result<()> {
+        use temporalio_client::WorkflowIdConflictPolicy;
         use temporalio_client::WorkflowStartOptions;
-        use temporalio_common::protos::temporal::api::enums::v1::WorkflowIdConflictPolicy;
 
         if !input.operation_id.starts_with("account-deletion/") {
             anyhow::bail!("account deletion workflow identity is invalid");
@@ -1949,7 +1948,7 @@ pub async fn run_temporal_worker(
     let runtime_opts = RuntimeOptions::builder()
         .build()
         .map_err(|e| anyhow::anyhow!("temporal runtime options: {e}"))?;
-    let runtime = CoreRuntime::new_assume_tokio(runtime_opts)?;
+    let runtime = Runtime::from_current_tokio(runtime_opts)?;
 
     let target = if host_port.contains("://") {
         host_port.to_string()
@@ -2030,14 +2029,14 @@ mod tests {
         let opts = organization_billing_activity_opts();
         assert_eq!(opts.task_queue.as_deref(), Some(BILLING_TASK_QUEUE));
         assert_eq!(opts.heartbeat_timeout, None);
-        assert_eq!(opts.retry_policy.as_ref().unwrap().maximum_attempts, 3);
+        assert_eq!(opts.retry_policy.as_ref().unwrap().maximum_attempts(), 3);
     }
 
     #[test]
     fn organization_deletion_failure_write_retries_until_durable() {
         let opts = organization_deletion_failure_opts();
         assert_eq!(opts.heartbeat_timeout, Some(Duration::from_secs(15)));
-        assert_eq!(opts.retry_policy.as_ref().unwrap().maximum_attempts, 0);
+        assert_eq!(opts.retry_policy.as_ref().unwrap().maximum_attempts(), 0);
     }
 
     #[test]
@@ -2045,7 +2044,7 @@ mod tests {
         let local = account_deletion_activity_opts();
         let billing = account_deletion_billing_activity_opts();
         for opts in [&local, &billing] {
-            assert_eq!(opts.retry_policy.as_ref().unwrap().maximum_attempts, 0);
+            assert_eq!(opts.retry_policy.as_ref().unwrap().maximum_attempts(), 0);
         }
         assert_eq!(local.task_queue, None);
         assert_eq!(billing.task_queue.as_deref(), Some(BILLING_TASK_QUEUE));
@@ -2164,7 +2163,7 @@ mod tests {
             opts.cancellation_type,
             ActivityCancellationType::WaitCancellationCompleted
         );
-        assert_eq!(opts.retry_policy.as_ref().unwrap().maximum_attempts, 3);
+        assert_eq!(opts.retry_policy.as_ref().unwrap().maximum_attempts(), 3);
         assert!(known_environment_action("resize"));
         assert!(known_environment_action("restart_sources"));
     }
@@ -2184,7 +2183,10 @@ mod tests {
     /// trace export is off keeps its exact pre-tracing payload.
     #[tokio::test]
     async fn trace_context_rides_from_the_signal_into_activity_inputs() {
-        use temporalio_common::data_converters::{DataConverter, SerializationContextData};
+        use temporalio_common::data_converters::{
+            ActivitySerializationContext, DataConverter, SerializationContextData,
+            WorkflowSerializationContext,
+        };
 
         let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
         let converter = DataConverter::default();
@@ -2198,11 +2200,17 @@ mod tests {
             },
         };
         let payloads = converter
-            .to_payloads(&SerializationContextData::Workflow, &signal)
+            .to_payloads(
+                &SerializationContextData::Workflow(WorkflowSerializationContext::new()),
+                &signal,
+            )
             .await
             .unwrap();
         let received: EnvironmentCommand = converter
-            .from_payloads(&SerializationContextData::Workflow, payloads)
+            .from_payloads(
+                &SerializationContextData::Workflow(WorkflowSerializationContext::new()),
+                payloads,
+            )
             .await
             .unwrap();
         assert_eq!(received.trace_context, signal.trace_context);
@@ -2212,11 +2220,17 @@ mod tests {
             trace_context: received.trace_context.clone(),
         };
         let claim_payloads = converter
-            .to_payloads(&SerializationContextData::Activity, &claim)
+            .to_payloads(
+                &SerializationContextData::Activity(ActivitySerializationContext::new()),
+                &claim,
+            )
             .await
             .unwrap();
         let claim: EnvironmentClaimInput = converter
-            .from_payloads(&SerializationContextData::Activity, claim_payloads)
+            .from_payloads(
+                &SerializationContextData::Activity(ActivitySerializationContext::new()),
+                claim_payloads,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -2226,11 +2240,17 @@ mod tests {
 
         let activity = EnvironmentActivityCommand::from_signal(&received, 7).unwrap();
         let activity_payloads = converter
-            .to_payloads(&SerializationContextData::Activity, &activity)
+            .to_payloads(
+                &SerializationContextData::Activity(ActivitySerializationContext::new()),
+                &activity,
+            )
             .await
             .unwrap();
         let activity: EnvironmentActivityCommand = converter
-            .from_payloads(&SerializationContextData::Activity, activity_payloads)
+            .from_payloads(
+                &SerializationContextData::Activity(ActivitySerializationContext::new()),
+                activity_payloads,
+            )
             .await
             .unwrap();
         assert_eq!(activity.operation_generation, 7);
@@ -2289,15 +2309,23 @@ mod tests {
     /// round-trips.
     #[tokio::test]
     async fn a_recorded_bare_generation_still_runs_setup() {
-        use temporalio_common::data_converters::{DataConverter, SerializationContextData};
+        use temporalio_common::data_converters::{
+            ActivitySerializationContext, DataConverter, SerializationContextData,
+        };
 
         let converter = DataConverter::default();
         let recorded = converter
-            .to_payloads(&SerializationContextData::Activity, &7_i64)
+            .to_payloads(
+                &SerializationContextData::Activity(ActivitySerializationContext::new()),
+                &7_i64,
+            )
             .await
             .unwrap();
         let result: ClaimAndCreateResult = converter
-            .from_payloads(&SerializationContextData::Activity, recorded)
+            .from_payloads(
+                &SerializationContextData::Activity(ActivitySerializationContext::new()),
+                recorded,
+            )
             .await
             .unwrap();
         assert_eq!(result, ClaimAndCreateResult::Generation(7));
@@ -2312,11 +2340,17 @@ mod tests {
                 setup_completed,
             };
             let payloads = converter
-                .to_payloads(&SerializationContextData::Activity, &outcome)
+                .to_payloads(
+                    &SerializationContextData::Activity(ActivitySerializationContext::new()),
+                    &outcome,
+                )
                 .await
                 .unwrap();
             let decoded: ClaimAndCreateResult = converter
-                .from_payloads(&SerializationContextData::Activity, payloads)
+                .from_payloads(
+                    &SerializationContextData::Activity(ActivitySerializationContext::new()),
+                    payloads,
+                )
                 .await
                 .unwrap();
             assert_eq!(decoded, outcome);

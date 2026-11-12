@@ -23,25 +23,9 @@
     },
     {
       "kind": "osv",
-      "advisory_id": "RUSTSEC-2025-0012",
-      "package": "backoff",
-      "reason": "Informational unmaintained notice, not a vulnerability. Temporal owns this transitive dependency; migrate its retry path to backon when the SDK supports it.",
-      "owner": "noel",
-      "expires": "2027-02-08"
-    },
-    {
-      "kind": "osv",
       "advisory_id": "RUSTSEC-2026-0374",
       "package": "basic-toml",
       "reason": "Informational unmaintained notice, not a vulnerability. Replace basic-toml with the maintained toml crate when Askama offers a compatible upgrade.",
-      "owner": "noel",
-      "expires": "2027-02-08"
-    },
-    {
-      "kind": "osv",
-      "advisory_id": "RUSTSEC-2024-0384",
-      "package": "instant",
-      "reason": "Informational unmaintained notice, not a vulnerability. This is removed with the backoff/backon migration.",
       "owner": "noel",
       "expires": "2027-02-08"
     },

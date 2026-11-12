@@ -175,10 +175,10 @@ async fn assert_connect_create_drives_workflow(
         let history = loop {
             let history = handle
                 .fetch_history(WorkflowFetchHistoryOptions::default())
+                .into_events()
                 .await
                 .context("fetch Connect-created workflow history")?;
             let completed: HashSet<i64> = history
-                .events()
                 .iter()
                 .filter_map(|event| match event.attributes {
                     Some(Attributes::ActivityTaskCompletedEventAttributes(ref done)) => {
@@ -188,7 +188,6 @@ async fn assert_connect_create_drives_workflow(
                 })
                 .collect();
             let scheduled: Vec<(i64, String)> = history
-                .events()
                 .iter()
                 .filter_map(|event| match event.attributes {
                     Some(Attributes::ActivityTaskScheduledEventAttributes(ref scheduled)) => {
@@ -223,7 +222,6 @@ async fn assert_connect_create_drives_workflow(
             tokio::time::sleep(Duration::from_secs(1)).await;
         };
         let starts = history
-            .events()
             .iter()
             .filter(|event| {
                 matches!(
@@ -237,7 +235,6 @@ async fn assert_connect_create_drives_workflow(
             "Connect create produced {starts} workflow starts"
         );
         let run_id = history
-            .events()
             .iter()
             .find_map(|event| match event.attributes {
                 Some(Attributes::WorkflowExecutionStartedEventAttributes(ref started)) => {
@@ -247,7 +244,7 @@ async fn assert_connect_create_drives_workflow(
             })
             .filter(|run_id| !run_id.is_empty())
             .context("Connect-created workflow history omitted original run id")?;
-        let closed = history.events().iter().any(|event| {
+        let closed = history.iter().any(|event| {
             matches!(
                 event.attributes,
                 Some(Attributes::WorkflowExecutionCompletedEventAttributes(_))

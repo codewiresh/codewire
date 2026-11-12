@@ -25,8 +25,8 @@ use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions};
 use temporalio_common::protos::temporal::api::common::v1::RetryPolicy;
 use temporalio_macros::{activities, workflow, workflow_methods};
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
+use temporalio_sdk::runtime::{Runtime, RuntimeOptions};
 use temporalio_sdk::{ActivityOptions, Worker, WorkerOptions, WorkflowContext, WorkflowResult};
-use temporalio_sdk_core::{CoreRuntime, RuntimeOptions};
 
 use codewire_server_core::account_deletion::{
     self, AccountDeletionPhase, AccountDeletionWorkflowInput,
@@ -182,29 +182,32 @@ impl AccountDeletionBillingActivities {
 /// 30m, retry 2s initial, ×2 backoff, 30s max interval, 3 attempts.
 fn activity_opts() -> ActivityOptions {
     let mut opts = ActivityOptions::start_to_close_timeout(Duration::from_secs(30 * 60));
-    opts.retry_policy = Some(RetryPolicy {
-        initial_interval: Duration::from_secs(2).try_into().ok(),
-        backoff_coefficient: 2.0,
-        maximum_interval: Duration::from_secs(30).try_into().ok(),
-        maximum_attempts: 3,
-        ..Default::default()
-    });
+    opts.retry_policy = Some(
+        RetryPolicy {
+            initial_interval: Duration::from_secs(2).try_into().ok(),
+            backoff_coefficient: 2.0,
+            maximum_interval: Duration::from_secs(30).try_into().ok(),
+            maximum_attempts: 3,
+            ..Default::default()
+        }
+        .into(),
+    );
     opts
 }
 
 /// Single-shot workflow: cancel the org's subscription, then complete.
-#[workflow(name = "OrgTeardownWorkflow")]
+#[workflow]
 #[derive(Default)]
 pub struct OrgTeardownWorkflow {}
 
 #[workflow_methods]
 impl OrgTeardownWorkflow {
-    #[run]
+    #[run(name = "OrgTeardownWorkflow")]
     pub async fn run(
         ctx: &mut WorkflowContext<Self>,
         input: OrgTeardownInput,
     ) -> WorkflowResult<()> {
-        ctx.start_activity(
+        ctx.execute_activity(
             OrgTeardownActivities::cancel,
             input.clone(),
             activity_opts(),
@@ -269,7 +272,7 @@ pub async fn run_org_teardown_worker(
     let runtime_opts = RuntimeOptions::builder()
         .build()
         .map_err(|e| anyhow::anyhow!("temporal runtime options: {e}"))?;
-    let runtime = CoreRuntime::new_assume_tokio(runtime_opts)?;
+    let runtime = Runtime::from_current_tokio(runtime_opts)?;
 
     let target = if host_port.contains("://") {
         host_port.to_string()

@@ -52,6 +52,7 @@ ed25519-dalek-f595c2ba2a3f28df = { package = "ed25519-dalek", version = "2.2.0",
 ed25519-f595c2ba2a3f28df = { package = "ed25519", version = "2.2.3", default-features = false, features = ["alloc", "std"] }
 either = { version = "1.16.0", features = ["serde", "use_std"] }
 elliptic-curve = { version = "0.14.1", features = ["ecdh", "getrandom", "pem", "std"] }
+fastrand = { version = "2.4.1" }
 ff = { version = "0.14.0", default-features = false, features = ["alloc"] }
 flate2 = { version = "1.1.9", features = ["zlib-rs"] }
 foldhash = { version = "0.1.5", default-features = false, features = ["std"] }
@@ -70,7 +71,7 @@ getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2.17", defaul
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4.2", default-features = false, features = ["std", "sys_rng", "wasm_js"] }
 group = { version = "0.14.0", default-features = false, features = ["alloc"] }
 hashbrown-3575ec1268b04181 = { package = "hashbrown", version = "0.15.5", features = ["serde"] }
-hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17.1" }
+hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17.1", default-features = false, features = ["default-hasher", "inline-more"] }
 hmac = { version = "0.12.1", default-features = false, features = ["reset"] }
 hybrid-array = { version = "0.4.15", default-features = false, features = ["alloc", "ctutils", "extra-sizes", "subtle", "zeroize"] }
 hyper = { version = "1.10.1", features = ["full"] }
@@ -183,6 +184,7 @@ ed25519-dalek-f595c2ba2a3f28df = { package = "ed25519-dalek", version = "2.2.0",
 ed25519-f595c2ba2a3f28df = { package = "ed25519", version = "2.2.3", default-features = false, features = ["alloc", "std"] }
 either = { version = "1.16.0", features = ["serde", "use_std"] }
 elliptic-curve = { version = "0.14.1", features = ["ecdh", "getrandom", "pem", "std"] }
+fastrand = { version = "2.4.1" }
 ff = { version = "0.14.0", default-features = false, features = ["alloc"] }
 flate2 = { version = "1.1.9", features = ["zlib-rs"] }
 foldhash = { version = "0.1.5", default-features = false, features = ["std"] }
@@ -201,7 +203,7 @@ getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2.17", defaul
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4.2", default-features = false, features = ["std", "sys_rng", "wasm_js"] }
 group = { version = "0.14.0", default-features = false, features = ["alloc"] }
 hashbrown-3575ec1268b04181 = { package = "hashbrown", version = "0.15.5", features = ["serde"] }
-hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17.1" }
+hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17.1", default-features = false, features = ["default-hasher", "inline-more"] }
 hmac = { version = "0.12.1", default-features = false, features = ["reset"] }
 hybrid-array = { version = "0.4.15", default-features = false, features = ["alloc", "ctutils", "extra-sizes", "subtle", "zeroize"] }
 hyper = { version = "1.10.1", features = ["full"] }
@@ -257,7 +259,7 @@ sqlx-postgres = { version = "0.8.6", default-features = false, features = ["chro
 ssh-encoding = { version = "0.3.0", default-features = false, features = ["bigint", "bytes", "ctutils", "digest", "pem"] }
 ssh-key = { version = "0.7.0-rc.11", features = ["ed25519", "encryption", "p256", "p384", "p521", "ppk", "rsa", "sha1"] }
 subtle = { version = "2.6.1", features = ["const-generics"] }
-syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.4", features = ["full", "visit-mut"] }
+syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.10", features = ["extra-traits", "full", "visit-mut"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2.0.117", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 sync_wrapper = { version = "1.0.2", default-features = false, features = ["futures"] }
 thiserror = { version = "2.0.21" }
@@ -293,7 +295,7 @@ num = { version = "0.4.3" }
 proc-macro2 = { version = "1.0.106" }
 quote = { version = "1.0.45" }
 rustix = { version = "1.1.6", default-features = false, features = ["param", "system", "time"] }
-syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.4", features = ["extra-traits", "fold", "full", "visit-mut"] }
+syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.10", features = ["extra-traits", "fold", "full", "visit-mut"] }
 toml_datetime = { version = "1.1.1", features = ["serde"] }
 toml_parser = { version = "1.1.2" }
 tower = { version = "0.5.3", default-features = false, features = ["timeout"] }
@@ -312,7 +314,7 @@ linux-raw-sys = { version = "0.12.1", default-features = false, features = ["aux
 nix = { version = "0.31.3", features = ["ioctl", "mman", "socket", "time", "user"] }
 num = { version = "0.4.3" }
 rustix = { version = "1.1.6", default-features = false, features = ["param", "system", "time"] }
-syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.4", default-features = false, features = ["extra-traits", "fold"] }
+syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.10", default-features = false, features = ["fold"] }
 toml_datetime = { version = "1.1.1", features = ["serde"] }
 toml_parser = { version = "1.1.2" }
 tower = { version = "0.5.3", default-features = false, features = ["timeout"] }
