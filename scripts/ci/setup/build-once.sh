@@ -501,6 +501,40 @@ leg_archive() {
   local out="$1"
   phase 'test archive' env CARGO_TARGET_DIR="$work/targets/archive" \
     cargo nextest archive --locked --workspace --all-targets --archive-file "$out/archive.tar.zst"
+  lean_archive "$out/archive.tar.zst"
+}
+
+lean_archive() {
+  # lean_archive FILE: strip the debug information from the archive's ELF
+  # files and recompress it at zstd -9, after the build, so no fingerprint in
+  # the warm folder changes (infra#2471). A 2.4 GB archive outran the archive
+  # store under load; on the 502 MB cw test binary this is 47 MB against 88 MB.
+  # The tests are the same code; only backtraces lose their line numbers
+  # (panic locations still print). Any failure keeps the archive as built.
+  local file="$1" dir started=$SECONDS before after stripped=0 f
+  before="$(stat -c %s "$file")"
+  dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/lean-archive.XXXXXX")"
+  if ! { zstd -dcq "$file" | tar -x -p --no-same-owner -C "$dir"; }; then
+    echo "::warning::build-once: the test archive did not unpack for slimming; it is kept as built"
+    rm -rf -- "$dir"
+    return 0
+  fi
+  while IFS= read -r -d '' f; do
+    [ "$(head -c 4 "$f" | od -An -tx1 | tr -d ' ')" = 7f454c46 ] || continue
+    objcopy --strip-debug "$f" || { echo "::warning::build-once: objcopy failed on ${f#"$dir"/}; the archive is kept as built"; rm -rf -- "$dir"; return 0; }
+    stripped=$(( stripped + 1 ))
+  done < <(find "$dir" -type f -size +0 -print0)
+  # The same top-level entries nextest wrote, without a ./ prefix.
+  if ! (cd "$dir" && find . -mindepth 1 -maxdepth 1 -printf '%P\0' | sort -z |
+      tar -c --null -T - --owner=0 --group=0 --numeric-owner | zstd -9 -T0 -q -o "$file.lean"); then
+    echo "::warning::build-once: the slimmed test archive did not pack; it is kept as built"
+    rm -rf -- "$dir" "$file.lean"
+    return 0
+  fi
+  mv -- "$file.lean" "$file"
+  rm -rf -- "$dir"
+  after="$(stat -c %s "$file")"
+  echo "build-once: test archive slimmed: $stripped ELF files stripped of debug information, $before -> $after bytes in $(( SECONDS - started )) s"
 }
 
 # The feature-graph and local-vmm shards (run-product-verification.sh's
