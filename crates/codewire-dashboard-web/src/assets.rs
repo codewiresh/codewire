@@ -21,6 +21,7 @@ pub(crate) const DASHBOARD_STYLE_PATH: &str = "/assets/codewire/routes/dashboard
 pub(crate) const AUTH_STYLE_PATH: &str = "/assets/codewire/routes/auth-v2.css";
 pub(crate) const PUBLIC_STYLE_PATH: &str = "/assets/codewire/routes/public-v2.css";
 pub(crate) const DEVICE_SCRIPT_PATH: &str = "/assets/codewire/device-v1.js";
+pub(crate) const SIGNUP_SCRIPT_PATH: &str = "/assets/codewire/signup-v1.js";
 pub(crate) const SETTINGS_STYLE_PATH: &str = "/assets/codewire/routes/settings-v1.css";
 pub(crate) const ORGANIZATIONS_STYLE_PATH: &str = "/assets/codewire/routes/organizations-v1.css";
 pub(crate) const SECRET_MANAGEMENT_STYLE_PATH: &str =
@@ -70,6 +71,7 @@ const DASHBOARD_STYLES: &str =
 const AUTH_STYLES: &str = include_str!("../../../packages/codewire-design/routes/auth.css");
 const PUBLIC_STYLES: &str = include_str!("../../../packages/codewire-design/routes/public.css");
 const DEVICE_SCRIPT: &str = include_str!("../../../packages/codewire-design/device.js");
+const SIGNUP_SCRIPT: &str = include_str!("../../../packages/codewire-design/signup.js");
 const SETTINGS_STYLES: &str = include_str!("../../../packages/codewire-design/routes/settings.css");
 const ORGANIZATIONS_STYLES: &str =
     include_str!("../../../packages/codewire-design/routes/organizations.css");
@@ -143,6 +145,7 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
     (HTMX_PATH, JS, HTMX.as_bytes()),
     (STYLE_PATH, CSS, STYLES.as_bytes()),
     (DEVICE_SCRIPT_PATH, JS, DEVICE_SCRIPT.as_bytes()),
+    (SIGNUP_SCRIPT_PATH, JS, SIGNUP_SCRIPT.as_bytes()),
     (DASHBOARD_STYLE_PATH, CSS, DASHBOARD_STYLES.as_bytes()),
     (AUTH_STYLE_PATH, CSS, AUTH_STYLES.as_bytes()),
     (PUBLIC_STYLE_PATH, CSS, PUBLIC_STYLES.as_bytes()),
@@ -459,6 +462,9 @@ mod tests {
             "/assets/codewire/routes/environments-v2.css"
         );
         assert_eq!(DEVICE_SCRIPT_PATH, "/assets/codewire/device-v1.js");
+        assert_eq!(SIGNUP_SCRIPT_PATH, "/assets/codewire/signup-v1.js");
+        let signup = include_str!("../templates/auth-form.html");
+        assert!(signup.contains(SIGNUP_SCRIPT_PATH));
         assert_eq!(ICONS_PATH, "/assets/codewire/icons-v2.svg");
         let response = asset_response(&HeaderMap::new(), STYLE_PATH, None);
         assert_eq!(response.status(), StatusCode::OK);

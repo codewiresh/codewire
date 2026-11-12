@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="../../styles.css">
     <link rel="stylesheet" href="../../components.css">
     <link rel="stylesheet" href="../../routes/auth.css">
+    <script src="../../signup.js" defer></script>
   </head>
   <body class="cw-body cw-auth-body" data-route="auth">
     <main class="cw-auth-shell">
@@ -20,7 +21,9 @@
           <h1 id="auth-title" class="cw-page-title">Request Codewire access</h1>
           <p class="cw-auth-switch">Already have an account? <a href="/login">Sign in.</a></p>
         </header>
-        <form class="cw-form" method="post" action="/signup/_actions/sign-up">
+        <form class="cw-form" method="post" action="/signup/_actions/sign-up" data-signup>
+          <fieldset class="cw-signup-step" data-signup-step="1">
+          <legend class="cw-signup-legend">Your account <span class="cw-signup-count">Step 1 of 2</span></legend>
           <div class="cw-field">
             <label class="cw-label" for="name">Name</label>
             <input class="cw-input cw-input--large" id="name" name="name" autocomplete="name" required>
@@ -40,15 +43,22 @@
             <label class="cw-label" for="confirm-password">Confirm password</label>
             <input class="cw-input cw-input--large" id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" minlength="12" required>
           </div>
-          <div class="cw-field">
-            <label class="cw-label" for="reason">What do you want to build?</label>
-            <textarea class="cw-textarea cw-auth-reason" id="reason" name="reason" rows="4" maxlength="2000" required></textarea>
-          </div>
+          <button class="cw-button cw-button--pill cw-button--large cw-auth-submit" type="button" data-signup-next hidden>Continue</button>
+          </fieldset>
+          <fieldset class="cw-signup-step" data-signup-step="2">
+          <legend class="cw-signup-legend">Your request <span class="cw-signup-count">Step 2 of 2</span></legend>
           <div class="cw-field">
             <label class="cw-label" for="invite-code">Invite code <span class="cw-muted">(optional)</span></label>
             <input class="cw-input cw-input--mono cw-input--large" id="invite-code" name="invite_code" autocomplete="off">
           </div>
+          <div class="cw-field">
+            <label class="cw-label" for="reason">What would you like to build?</label>
+            <textarea class="cw-textarea cw-auth-reason" id="reason" name="reason" rows="4" maxlength="2000" required></textarea>
+            <p class="cw-help">This helps us review your request.</p>
+          </div>
+          </fieldset>
           <button class="cw-button cw-button--pill cw-button--large cw-auth-submit" type="submit">Request access</button>
+          <button class="cw-button cw-button--outline cw-button--pill cw-button--large cw-auth-submit" type="button" data-signup-back hidden>Back</button>
         </form>
         <div class="cw-auth-alternatives">
           <p class="cw-auth-divider">or</p>

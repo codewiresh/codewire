@@ -16,6 +16,9 @@
     {% if has_turnstile %}
     <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
     {% endif %}
+    {% if is_signup %}
+    <script src="/assets/codewire/signup-v1.js" defer></script>
+    {% endif %}
   </head>
   <body class="cw-body cw-auth-body" data-route="auth">
     <main class="cw-auth-shell">
@@ -48,13 +51,17 @@
         {% if !view.notice.is_empty() %}
         <div class="cw-alert cw-alert--info" role="status">{{ view.notice }}</div>
         {% endif %}
-        <form class="cw-form" method="post" action="{{ view.action }}">
+        <form class="cw-form" method="post" action="{{ view.action }}"{% if is_signup %} data-signup{% endif %}>
           <input type="hidden" name="_csrf" value="{{ view.csrf_token }}">
           {% if !view.auth_request_id.is_empty() %}
           <input type="hidden" name="authRequestID" value="{{ view.auth_request_id }}">
           {% endif %}
           {% if !view.return_to.is_empty() %}
           <input type="hidden" name="return_to" value="{{ view.return_to }}">
+          {% endif %}
+          {% if is_signup %}
+          <fieldset class="cw-signup-step" data-signup-step="1">
+          <legend class="cw-signup-legend">Your account <span class="cw-signup-count">Step 1 of 2</span></legend>
           {% endif %}
           {% if view.show_name %}
           <div class="cw-field">
@@ -84,6 +91,12 @@
             <input class="cw-input cw-input--large" id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" minlength="12" required>
           </div>
           {% endif %}
+          {% if is_signup %}
+          <button class="cw-button cw-button--pill cw-button--large cw-auth-submit" type="button" data-signup-next hidden>Continue</button>
+          </fieldset>
+          <fieldset class="cw-signup-step" data-signup-step="2">
+          <legend class="cw-signup-legend">Your request <span class="cw-signup-count">Step 2 of 2</span></legend>
+          {% endif %}
           {% if view.show_invite_code %}
           <div class="cw-field">
             <label class="cw-label" for="invite-code">Invite code <span class="cw-muted">(optional)</span></label>
@@ -108,7 +121,13 @@
             <input class="cw-input cw-input--mono cw-input--large cw-auth-code" id="code" name="code" autocomplete="one-time-code" pattern="[0-9A-Fa-f]{6,10}" maxlength="10" required autofocus>
           </div>
           {% endif %}
+          {% if is_signup %}
+          </fieldset>
+          {% endif %}
           <button class="cw-button cw-button--pill cw-button--large cw-auth-submit" type="submit">{{ view.submit_label }}</button>
+          {% if is_signup %}
+          <button class="cw-button cw-button--outline cw-button--pill cw-button--large cw-auth-submit" type="button" data-signup-back hidden>Back</button>
+          {% endif %}
         </form>
         {% if !view.oauth_providers.is_empty() %}
         <div class="cw-auth-alternatives">
