@@ -16,6 +16,13 @@ use tokio::sync::oneshot;
 use super::*;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(2);
+/// The setup deadline of tests that check admission, ordering or cancellation,
+/// not the deadline: a hang guard, never an expected duration. Their first
+/// poll is the first run of the request path; on a starved CI guest that took
+/// over 2 s, so a 2 s deadline expired inside it and the "still pending"
+/// assertion failed while nothing was wrong (#4251). The deadline tests use
+/// their own short deadlines.
+const SETUP_HANG: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
 struct GatedTransport {
@@ -244,7 +251,7 @@ async fn delegation_generated_setup_sends_open_then_ready_and_requires_exact_ech
             generated(transport, protocol),
             options(),
             open.clone(),
-            Instant::now() + TEST_TIMEOUT,
+            Instant::now() + SETUP_HANG,
         ));
         assert!(futures_util::poll!(setup.as_mut()).is_pending());
         let mut body = receive_open_and_ready(peer.request, &open, protocol).await;
@@ -315,7 +322,7 @@ async fn delegation_admission_compares_every_selection_coordinate() {
             generated(transport, Protocol::Connect),
             options(),
             open.clone(),
-            Instant::now() + TEST_TIMEOUT,
+            Instant::now() + SETUP_HANG,
         ));
         assert!(futures_util::poll!(setup.as_mut()).is_pending());
         let mut body = receive_open_and_ready(peer.request, &open, Protocol::Connect).await;
@@ -347,7 +354,7 @@ async fn delegation_rejects_eof_rpc_error_unknown_empty_and_operation_before_ack
             generated(transport, Protocol::Connect),
             options(),
             open.clone(),
-            Instant::now() + TEST_TIMEOUT,
+            Instant::now() + SETUP_HANG,
         ));
         assert!(futures_util::poll!(setup.as_mut()).is_pending());
         let mut body = receive_open_and_ready(peer.request, &open, Protocol::Connect).await;
@@ -412,7 +419,7 @@ async fn delegation_setup_cancel_aborts_pending_headers_and_closes_sole_input() 
         generated(transport, Protocol::Grpc),
         options(),
         open.clone(),
-        Instant::now() + TEST_TIMEOUT,
+        Instant::now() + SETUP_HANG,
     ));
     assert!(futures_util::poll!(setup.as_mut()).is_pending());
     let mut body = receive_open_and_ready(peer.request, &open, Protocol::Grpc).await;
