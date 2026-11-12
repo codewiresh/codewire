@@ -729,6 +729,14 @@ STEPS
 run_ci_script_tests() {
   (
   isolate_kind_fixture_environment
+  # Git 2.54 starts a detached `git maintenance run --auto` after each commit,
+  # which can write into a fixture repository while its test deletes it
+  # ("Directory not empty: 'objects'"). Environment config reaches every test's
+  # git, including those that set GIT_CONFIG_NOSYSTEM and GIT_CONFIG_GLOBAL.
+  local count="${GIT_CONFIG_COUNT:-0}"
+  export "GIT_CONFIG_KEY_$count=maintenance.auto" "GIT_CONFIG_VALUE_$count=false"
+  export "GIT_CONFIG_KEY_$((count + 1))=gc.auto" "GIT_CONFIG_VALUE_$((count + 1))=0"
+  export GIT_CONFIG_COUNT=$((count + 2))
   # The slowest tests come first, so the runner's bound never queues them
   # behind the quick ones.
   run_side_by_side <<'STEPS'
