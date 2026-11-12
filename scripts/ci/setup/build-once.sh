@@ -335,8 +335,15 @@ bound_targets() {
   #    wiped: disk 93% used"), which makes every leg cold, so live folders go
   #    before that.
   # 3. A folder this job is about to use never goes (pull request run 24177
-  #    removed the archive folder its build was about to use).
+  #    removed the archive folder its build was about to use), unless:
+  # 4. Past BUILD_ONCE_DISK_FULL_PERCENT (90) with only this job's own folders
+  #    left, this run's compile would fill the disk and fail the run (pull
+  #    request run 44254: its own folders at 91% of a 235 GB disk before the
+  #    build, then "No space left on device" in seven legs at once). This
+  #    job's largest folders go then, so those legs build cold, until the disk
+  #    is back at or under it. A cold leg costs minutes; a full disk, the run.
   local job="$1" limit="${BUILD_ONCE_DISK_PERCENT:-65}" ceiling="${BUILD_ONCE_DISK_LIVE_PERCENT:-80}"
+  local full="${BUILD_ONCE_DISK_FULL_PERCENT:-90}"
   local current="${GITHUB_RUN_ID:-}" previous used used_kib size_kib folder name run swept table warned=false
   local -a idle=() live=()
   local -A uses=()
@@ -441,6 +448,19 @@ bound_targets() {
     read -r used used_kib size_kib < <(disk_usage) || true
     [[ "$used" =~ ^[0-9]+$ && "$used_kib" =~ ^[0-9]+$ ]] || die "cannot read the build disk's use: ${used:-nothing}"
   done
+  # Rule 4: this job's own folders, largest first.
+  (( used > full )) || return 0
+  while read -r _ name; do
+    [ -n "$name" ] || continue
+    (( used > full )) || break
+    echo "::warning::build-once: disk ${used}% used, over ${full}%, with only this job's folders left; removing its largest, $name, which builds cold"
+    rm -rf -- "$work/targets/$name" "$work/targets/${name}_desktop"
+    read -r used used_kib size_kib < <(disk_usage) || true
+    [[ "$used" =~ ^[0-9]+$ && "$used_kib" =~ ^[0-9]+$ ]] || die "cannot read the build disk's use: ${used:-nothing}"
+  done < <(for name in "${!uses[@]}"; do
+      [ -d "$work/targets/$name" ] || continue
+      printf '%s %s\n' "$(du -skx "$work/targets/$name" 2>/dev/null | cut -f1)" "$name"
+    done | sort -k1,1nr -k2,2)
 }
 
 in_src() {

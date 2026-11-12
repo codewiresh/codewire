@@ -398,18 +398,32 @@ GITHUB_RUN_ID=601 PREPARE_JOB=checks FAKE_DF_PER_LEG=16 targets_prepare
 # shellcheck disable=SC2086 # Each check folder is one argument.
 kept $CHECK_FOLDERS
 [ "$(removals)" -eq 0 ] || fail 'the bound removed a folder this job is about to use'
+grep -q 'only this job.s folders left' "$work/prepare.log" && fail 'the bound removed one of this job folders at 90 %'
 grep -q 'disk 90% used with no target folder left that this job does not use' "$work/prepare.log" ||
   fail 'the bound did not say every folder left is in use'
+# Past 90 % with only this job's folders (pull request run 44254, 91 % before
+# its build, then "No space left on device"): its largest folder goes, and
+# only as many as bring the disk back to 90 %.
+rm -rf "$marker_root/targets"
+for folder in $CHECK_FOLDERS; do mark "$folder" 700 "$just_now"; done
+head -c 4096 /dev/zero > "$marker_root/targets/darwin/big.rlib"
+GITHUB_RUN_ID=701 PREPARE_JOB=checks FAKE_DF_PER_LEG=17 targets_prepare
+[ ! -e "$marker_root/targets/darwin" ] || fail "this job's largest folder was kept past 90 %: $(cat "$work/prepare.log")"
+grep -q '^::warning::build-once: disk 95% used, over 90%, with only this job.s folders left; removing its largest, darwin, which builds cold$' \
+  "$work/prepare.log" || fail "the full-disk removal gave no reason: $(cat "$work/prepare.log")"
+[ "$(grep -c 'only this job.s folders left' "$work/prepare.log")" -eq 1 ] || fail 'the bound removed more of this job folders than it needed'
+kept clippy clippy_features darwin_cw desktop
 # A main push's build runs the Rust checks beside its legs
 # (BUILD_ONCE_CHECKS): its prepare keeps their folders as its own, where a
 # build without them removes them first, as any live folder it does not use.
+# At 88 %: over the live limit, under the full-disk one.
 rm -rf "$marker_root/targets"
 for folder in $CHECK_FOLDERS archive; do mark "$folder" 690 '1 hour ago'; done
-GITHUB_RUN_ID=700 PREPARE_JOB=build BUILD_ONCE_CHECKS=true FAKE_DF_PER_LEG=16 targets_prepare
+GITHUB_RUN_ID=700 PREPARE_JOB=build BUILD_ONCE_CHECKS=true FAKE_DF_PER_LEG=13 targets_prepare
 # shellcheck disable=SC2086 # Each check folder is one argument.
 kept $CHECK_FOLDERS archive
 [ "$(removals)" -eq 0 ] || fail 'a build with the Rust checks removed their folders'
-GITHUB_RUN_ID=700 PREPARE_JOB=build FAKE_DF_PER_LEG=16 targets_prepare
+GITHUB_RUN_ID=700 PREPARE_JOB=build FAKE_DF_PER_LEG=13 targets_prepare
 [ "$(removals)" -gt 0 ] || fail 'a build without the Rust checks kept their folders over 80 %'
 kept archive
 
