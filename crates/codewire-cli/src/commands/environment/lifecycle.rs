@@ -164,6 +164,9 @@ pub(crate) async fn stop_cloud_environment<W: std::io::Write>(
 
 /// Reads the environment until it is `stopped`. A read that fails is tried
 /// again: the stop is already accepted, and the timeout says what was last seen.
+/// The deadline is checked after each read rather than cancelling one, so the
+/// timeout always reports a state or a read error (#4299); each read is bounded
+/// by the client's own unary timeout.
 async fn await_stopped(
     client: &EnvironmentClient,
     org_id: &str,
@@ -171,40 +174,36 @@ async fn await_stopped(
     name: &str,
     wait: StopWait,
 ) -> anyhow::Result<()> {
-    let mut last_seen = "no state read".to_owned();
-    let watched = tokio::time::timeout(wait.timeout, async {
-        loop {
-            let interval = match client
-                .get_environment_with_poll_interval(org_id, environment_id)
-                .await
-            {
-                Ok((environment, interval)) => {
-                    if stop_finished(&environment, name)? {
-                        return Ok(());
-                    }
-                    last_seen = format!("state: {}", environment.state);
-                    interval
+    let deadline = tokio::time::Instant::now() + wait.timeout;
+    loop {
+        let (last_seen, interval) = match client
+            .get_environment_with_poll_interval(org_id, environment_id)
+            .await
+        {
+            Ok((environment, interval)) => {
+                if stop_finished(&environment, name)? {
+                    return Ok(());
                 }
-                Err(error) if is_not_found(&error) => {
-                    anyhow::bail!("{name} was removed before it stopped")
-                }
-                Err(error) => {
-                    last_seen =
-                        format!("last read failed: {}", terminal_text(&format!("{error:#}")));
-                    None
-                }
-            };
-            tokio::time::sleep(interval.unwrap_or(wait.interval)).await;
+                (format!("state: {}", environment.state), interval)
+            }
+            Err(error) if is_not_found(&error) => {
+                anyhow::bail!("{name} was removed before it stopped")
+            }
+            Err(error) => (
+                format!("last read failed: {}", terminal_text(&format!("{error:#}"))),
+                None,
+            ),
+        };
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            anyhow::bail!(
+                "timed out after {} s waiting for {name} to stop ({last_seen}). The stop was requested and the platform carries on with it; check it with `{}`.",
+                wait.timeout.as_secs(),
+                environment_command(VmLocation::Cloud, "info", name)
+            );
         }
-    })
-    .await;
-    watched.unwrap_or_else(|_| {
-        anyhow::bail!(
-            "timed out after {} s waiting for {name} to stop ({last_seen}). The stop was requested and the platform carries on with it; check it with `{}`.",
-            wait.timeout.as_secs(),
-            environment_command(VmLocation::Cloud, "info", name)
-        )
-    })
+        tokio::time::sleep(interval.unwrap_or(wait.interval).min(deadline - now)).await;
+    }
 }
 
 /// Whether an accepted stop has finished, or the error when it never will.
@@ -914,13 +913,18 @@ mod tests {
         async fn a_stop_that_never_finishes_says_so_and_what_to_check() {
             let server = MockServer::start().await;
             accepting_stop().mount(&server).await;
+            // Each read outlasts the whole wait, as on a loaded host: the
+            // timeout still reports what that read saw (#4299).
             Mock::given(method("POST"))
                 .and(path(GET))
-                .respond_with(observed(
-                    codewire_client::EnvironmentState::Stopping,
-                    codewire_client::DesiredState::Stopped,
-                    None,
-                ))
+                .respond_with(
+                    observed(
+                        codewire_client::EnvironmentState::Stopping,
+                        codewire_client::DesiredState::Stopped,
+                        None,
+                    )
+                    .set_delay(Duration::from_millis(200)),
+                )
                 .mount(&server)
                 .await;
             let wait = StopWait {
