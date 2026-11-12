@@ -19,13 +19,12 @@ on:
   schedule:
     - cron: '*/5 * * * *'
 
-# Each run has its own group, so Forgejo queues no run behind another: before,
-# every scheduled run waited behind the running one only to find nothing. The
-# first job's release turn keeps deliveries one at a time instead
-# (release-turn.py; owner, 2026-11-12, #3013).
-concurrency:
-  group: deploy-prod-release-${{ github.run_id }}
-  cancel-in-progress: false
+# No concurrency group, so Forgejo queues no run behind another: before, every
+# scheduled run waited behind the running one only to find nothing. The first
+# job's release turn keeps deliveries one at a time instead (release-turn.py;
+# owner, 2026-11-12, #3013). A group cannot be per run: Forgejo evaluates it
+# before the run has an ID, so `github.run_id` is empty there and every run
+# shared one group.
 
 env:
   CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}

@@ -4,10 +4,11 @@
 The owner's plan (2026-11-12, recorded on #3013): a scheduled deploy-prod or
 cli-release run that finds another run of its workflow ahead of it ends at
 once without delivering; a dispatched run waits its turn and always delivers;
-a running publication is never cancelled. The workflow-level concurrency group
-is per run, so Forgejo queues nothing: before, every scheduled run waited in
-one group behind the running one, three at a time (ForgejoCiJobWaitingTooLong),
-only to find nothing to deliver.
+a running publication is never cancelled. The workflows have no concurrency
+group, so Forgejo queues nothing: before, every scheduled run waited in one
+group behind the running one, three at a time (ForgejoCiJobWaitingTooLong),
+only to find nothing to deliver. A per-run group did not help: Forgejo
+evaluates the group before the run has an ID, so every run shared it.
 
 The first job of each run ("Find the release to deliver") runs this before it
 names a release. Another unfinished run of the workflow on main is ahead when

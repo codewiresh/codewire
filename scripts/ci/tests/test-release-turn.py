@@ -129,6 +129,16 @@ class ScheduledTurn(unittest.TestCase):
         # Two runs looking at once: the lower ID goes first, the higher skips.
         self.assertEqual(scheduled("deploy-prod", {OWN: "looking", OWN + 5: "looking"})[0], turn.GO)
 
+    def test_of_two_runs_started_in_the_same_second_exactly_one_looks(self) -> None:
+        # Without a concurrency group two schedules can start together; each
+        # sees the other, still queued or looking, and only the lower ID goes.
+        for first, second in (("looking", "looking"), ("queued", "looking"), ("looking", "queued")):
+            with self.subTest(phases=(first, second)):
+                state = {OWN: first, OWN + 1: second}
+                verdicts = [turn.scheduled_turn(FakeForgejo("deploy-prod", [state]), "deploy-prod", run_id,
+                                                log=lambda _: None) for run_id in (OWN, OWN + 1)]
+                self.assertEqual(verdicts, [turn.GO, turn.SKIP])
+
     def test_a_delivering_run_still_verifying_makes_it_skip(self) -> None:
         for phase in ("selection-pending", "verifying", "publishing"):
             with self.subTest(phase=phase):
@@ -200,6 +210,7 @@ def dispatched(api: FakeForgejo, clock: Clock, **kwargs) -> tuple[str, list[str]
 
 class DispatchedTurn(unittest.TestCase):
     def test_it_waits_for_the_delivery_in_flight_then_delivers(self) -> None:
+        # The run delivering is a scheduled one (release_run's event).
         api = FakeForgejo("deploy-prod", [
             {OWN - 5: "verifying", OWN: "looking"},
             {OWN - 5: "publishing", OWN: "looking"},
@@ -279,14 +290,15 @@ class Main(unittest.TestCase):
 
 
 class Workflows(unittest.TestCase):
-    """Both release workflows take the turn before they look, in a group of their own."""
+    """Both release workflows take the turn before they look, in no concurrency group."""
 
     def test_each_workflow_takes_the_turn(self) -> None:
-        for workflow, group in (("deploy-prod", "deploy-prod-release"), ("cli-release", "cli-release")):
+        for workflow in ("deploy-prod", "cli-release"):
             with self.subTest(workflow=workflow):
                 text = (ROOT / f".gitea/workflows/{workflow}.yaml").read_text()
-                self.assertIn(f"concurrency:\n  group: {group}-${{{{ github.run_id }}}}\n  cancel-in-progress: false\n",
-                              text)
+                # Forgejo evaluates a group before the run has an ID, so even a
+                # per-run group put every run in one queue.
+                self.assertNotIn("concurrency:", text)
                 steps = text.split("      - name: Take this run's release turn\n", 1)
                 self.assertEqual(len(steps), 2)
                 self.assertTrue(steps[1].startswith(

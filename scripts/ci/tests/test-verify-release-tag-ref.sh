@@ -567,8 +567,10 @@ document = yaml.safe_load(text)
 on = document.get("on", document.get(True))
 if on.get("schedule") != [{"cron": cron}]:
     sys.exit(f"{workflow} is not scheduled at {cron}")
-if document.get("concurrency", {}).get("cancel-in-progress") is not False:
-    sys.exit(f"{workflow} can cancel a release in flight")
+# Forgejo evaluates a group before the run has an ID, so any group, even one
+# named by github.run_id, queues every release run behind the delivering one.
+if "concurrency" in document:
+    sys.exit(f"{workflow} has a concurrency group, so Forgejo queues its runs")
 jobs = document["jobs"]
 if list(jobs)[:2] != ["pending", "release-selection"]:
     sys.exit(f"{workflow} does not start with pending, then release selection")
@@ -627,7 +629,7 @@ PY
 assert_scheduled_pickup "$deploy_workflow" deploy-prod '*/5 * * * *'
 assert_scheduled_pickup "$cli_workflow" cli-release '2-59/5 * * * *'
 for mutation in "s|    - cron: '\*/5 \* \* \* \*'|    - cron: '0 * * * *'|" \
-    's|  cancel-in-progress: false|  cancel-in-progress: true|' \
+    's|^env:$|concurrency:\n  group: deploy-prod-release-${{ github.run_id }}\n  cancel-in-progress: false\n\nenv:|' \
     "/        if: \${{ steps.turn.outputs.turn == 'go' }}/d" \
     's|release-turn.py deploy-prod|release-turn.py cli-release|' \
     '/^  pending:/,/^  release-selection:/{s|CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT|CODEWIRE_CI_RUNNER_TRUSTED_LIGHT|g}' \
@@ -664,10 +666,6 @@ if assert_confirmed_checkouts "$unconfirmed_workflow" 9 2>/dev/null; then
   echo 'release workflow fixture accepted a tag checkout without confirmation' >&2
   exit 1
 fi
-grep -Fqx '  group: cli-release-${{ github.run_id }}' "$cli_workflow" || {
-  echo 'CLI release runs share a concurrency group, so Forgejo queues them' >&2
-  exit 1
-}
 for workflow in "$deploy_workflow" "$cli_workflow"; do
   sed -n '/- name: Select exact canonical release source/,/scripts\/ci\/release\/verify-release-tag-ref\.sh/p' \
     "$workflow" | grep -Fq '          GITEA_TOKEN: ${{ github.token }}' || {
