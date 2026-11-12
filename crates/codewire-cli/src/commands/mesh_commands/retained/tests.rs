@@ -1,5 +1,28 @@
 use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
+use std::sync::{Arc, mpsc};
+
+/// A refusal never waits: these paths open with `O_NONBLOCK` and retry
+/// nothing, so the only way one could be slow is to block on a FIFO, which
+/// would be forever. Past this guard the test fails instead of hanging; how
+/// long a loaded host takes below it is not the subject.
+const BLOCKED: Duration = Duration::from_secs(60);
+
+/// Runs `refuse` on its own thread, which a blocked open would never leave.
+fn without_blocking<T: Send + 'static>(refuse: impl FnOnce() -> T + Send + 'static) -> T {
+    let (done, finished) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let _ = done.send(refuse());
+    });
+    match finished.recv_timeout(BLOCKED) {
+        Ok(refused) => refused,
+        Err(mpsc::RecvTimeoutError::Timeout) => panic!("a refusal blocked"),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            std::panic::resume_unwind(thread.join().unwrap_err())
+        }
+    }
+}
+
 #[test]
 fn read_only_state_lookup_creates_neither_directory_nor_lock() {
     let root = tempfile::tempdir().unwrap();
@@ -21,9 +44,11 @@ fn read_only_state_lookup_creates_neither_directory_nor_lock() {
 #[test]
 fn state_symlink_hardlink_fifo_and_oversize_refuse_without_changing_sentinels() {
     let root = tempfile::tempdir().unwrap();
-    let directory = StateDir::open(&root.path().join("owned"), true)
-        .unwrap()
-        .unwrap();
+    let directory = Arc::new(
+        StateDir::open(&root.path().join("owned"), true)
+            .unwrap()
+            .unwrap(),
+    );
     let sentinel = root.path().join("sentinel");
     fs::write(&sentinel, b"preserve").unwrap();
     fs::set_permissions(&sentinel, fs::Permissions::from_mode(0o600)).unwrap();
@@ -42,19 +67,19 @@ fn state_symlink_hardlink_fifo_and_oversize_refuse_without_changing_sentinels() 
             }
             _ => unreachable!(),
         }
-        let start = Instant::now();
-        assert!(directory.read(LOCAL_MESH_RUNTIME_FILE).is_err(), "{kind}");
-        assert!(
-            directory
-                .write(LOCAL_MESH_RUNTIME_FILE, b"replacement")
-                .is_err(),
-            "{kind}"
-        );
-        assert!(
-            directory.remove(LOCAL_MESH_RUNTIME_FILE, None).is_err(),
-            "{kind}"
-        );
-        assert!(start.elapsed() < Duration::from_secs(1));
+        let refused = without_blocking({
+            let directory = directory.clone();
+            move || {
+                [
+                    directory.read(LOCAL_MESH_RUNTIME_FILE).is_err(),
+                    directory
+                        .write(LOCAL_MESH_RUNTIME_FILE, b"replacement")
+                        .is_err(),
+                    directory.remove(LOCAL_MESH_RUNTIME_FILE, None).is_err(),
+                ]
+            }
+        });
+        assert_eq!(refused, [true; 3], "{kind}");
         assert_eq!(fs::read(&sentinel).unwrap(), b"preserve");
         fs::remove_file(&record).unwrap();
     }
@@ -182,14 +207,15 @@ fn shared_mesh_configuration_refuses_hardlink_fifo_and_overbound_entries() {
             _ => unreachable!(),
         }
         let identity = stamp(&fs::symlink_metadata(&path).unwrap());
-        let start = Instant::now();
-        assert!(config::load_mesh_config(&directory.path).is_err(), "{kind}");
-        assert!(
-            config::save_mesh_connection(&directory.path, "http://127.0.0.1:18091", "cw_attempt")
-                .is_err(),
-            "{kind}"
-        );
-        assert!(start.elapsed() < Duration::from_secs(1));
+        let data_dir = directory.path.clone();
+        let refused = without_blocking(move || {
+            [
+                config::load_mesh_config(&data_dir).is_err(),
+                config::save_mesh_connection(&data_dir, "http://127.0.0.1:18091", "cw_attempt")
+                    .is_err(),
+            ]
+        });
+        assert_eq!(refused, [true; 2], "{kind}");
         assert!(identity == stamp(&fs::symlink_metadata(&path).unwrap()));
         assert_eq!(fs::read(&sentinel).unwrap(), original);
         fs::remove_file(&path).unwrap();
