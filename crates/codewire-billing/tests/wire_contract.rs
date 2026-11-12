@@ -22,6 +22,11 @@ use connectrpc::{CodecFormat, ErrorCode};
 use reqwest::header::COOKIE;
 use reqwest::{Client, StatusCode};
 
+/// How long these tests wait for the service under test: a hang guard, not a
+/// speed expectation (docs/dev/AGENT-WORKFLOW.md "Failure convergence"). The
+/// rejections they check are immediate server checks; on a loaded service lane
+/// a 10-15 s client deadline fired first (#4315).
+const SERVICE_HANG_GUARD: Duration = Duration::from_secs(120);
 const SESSION_COOKIE: &str = "codewire.session_token";
 const FIXTURE_ORG: &str = "org_contract_1";
 const FIXTURE_ORG_SLUG: &str = "contract-org";
@@ -47,7 +52,7 @@ impl Harness {
             user_token: required_env("BILLING_USER_SESSION_TOKEN"),
             skip_health: env::var("BILLING_SKIP_HEALTH").as_deref() == Ok("1"),
             http: Client::builder()
-                .timeout(Duration::from_secs(10))
+                .timeout(SERVICE_HANG_GUARD)
                 .build()
                 .expect("build billing contract HTTP client"),
         }
@@ -56,7 +61,7 @@ impl Harness {
     fn client_config(&self, token: Option<&str>, codec: CodecFormat) -> ClientConfig {
         let mut config = ClientConfig::new(self.base_url.parse().expect("Connect base URI"))
             .with_codec_format(codec)
-            .with_default_timeout(Duration::from_secs(10));
+            .with_default_timeout(SERVICE_HANG_GUARD);
         if let Some(token) = token {
             config = config.with_default_header(COOKIE, format!("{SESSION_COOKIE}={token}"));
         }

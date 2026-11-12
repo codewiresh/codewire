@@ -22,6 +22,11 @@ use reqwest::{Client, StatusCode};
 use sha2::Sha256;
 use uuid::Uuid;
 
+/// How long these tests wait for the service under test: a hang guard, not a
+/// speed expectation (docs/dev/AGENT-WORKFLOW.md "Failure convergence"). The
+/// rejections they check are immediate server checks; on a loaded service lane
+/// a 10-15 s client deadline fired first (#4315).
+const SERVICE_HANG_GUARD: Duration = Duration::from_secs(120);
 const ORG_ID: &str = "org_coordinator_contract";
 const RUNNING_ENV_ID: &str = "00000000-0000-4000-8000-000000000901";
 const STOPPED_ENV_ID: &str = "00000000-0000-4000-8000-000000000902";
@@ -47,7 +52,7 @@ impl Harness {
             session_token: required_env("COORDINATOR_USER_SESSION_TOKEN"),
             session_secret: required_env("COORDINATOR_SESSION_SECRET"),
             http: Client::builder()
-                .timeout(Duration::from_secs(10))
+                .timeout(SERVICE_HANG_GUARD)
                 .pool_max_idle_per_host(0)
                 .build()
                 .expect("build coordinator contract client"),
@@ -60,7 +65,7 @@ impl Harness {
         bearer: Option<&str>,
     ) -> CoordinatorServiceClient<HttpClient> {
         let mut config = ClientConfig::new(self.base_url.parse().expect("coordinator base URL"))
-            .with_default_timeout(Duration::from_secs(15));
+            .with_default_timeout(SERVICE_HANG_GUARD);
         if let Some(token) = cookie {
             config = config.with_default_header(COOKIE, format!("{SESSION_COOKIE}={token}"));
         }
@@ -341,13 +346,10 @@ type CoordinateStream = connectrpc::client::BidiStream<
 >;
 
 async fn next_message(stream: &mut CoordinateStream) -> Result<CoordinateResponse, ConnectError> {
-    let message = tokio::time::timeout(
-        Duration::from_secs(5),
-        stream.message::<CoordinateResponse>(),
-    )
-    .await
-    .expect("Coordinate response timed out")?
-    .expect("Coordinate response stream ended");
+    let message = tokio::time::timeout(SERVICE_HANG_GUARD, stream.message::<CoordinateResponse>())
+        .await
+        .expect("Coordinate response timed out")?
+        .expect("Coordinate response stream ended");
     Ok(message.to_owned_message())
 }
 
