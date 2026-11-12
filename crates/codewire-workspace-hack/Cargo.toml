@@ -86,7 +86,6 @@ libc = { version = "0.2.186", features = ["extra_traits"] }
 log = { version = "0.4.30", default-features = false, features = ["std"] }
 memchr = { version = "2.8.1" }
 num-bigint = { version = "0.4.6" }
-num-integer = { version = "0.1.46", features = ["i128"] }
 num-traits = { version = "0.2.19", features = ["i128"] }
 once_cell = { version = "1.21.4", features = ["critical-section"] }
 p256 = { version = "0.14.0", features = ["ecdh"] }
@@ -111,8 +110,8 @@ rustix = { version = "1.1.6", features = ["event", "fs", "net", "pipe", "process
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
 sec1 = { version = "0.8.1", features = ["ctutils", "pem", "std", "subtle"] }
-serde = { version = "1.0.228", features = ["alloc", "derive", "rc"] }
-serde_core = { version = "1.0.228", features = ["alloc", "rc"] }
+serde = { version = "1.0.229", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1.0.229", features = ["alloc", "rc"] }
 serde_json = { version = "1.0.150", features = ["alloc", "raw_value"] }
 sha1 = { version = "0.11.0" }
 sha2-93f6ce9d446188ac = { package = "sha2", version = "0.10.9" }
@@ -218,7 +217,6 @@ libc = { version = "0.2.186", features = ["extra_traits"] }
 log = { version = "0.4.30", default-features = false, features = ["std"] }
 memchr = { version = "2.8.1" }
 num-bigint = { version = "0.4.6" }
-num-integer = { version = "0.1.46", features = ["i128"] }
 num-traits = { version = "0.2.19", features = ["i128"] }
 once_cell = { version = "1.21.4", features = ["critical-section"] }
 p256 = { version = "0.14.0", features = ["ecdh"] }
@@ -245,8 +243,8 @@ rustix = { version = "1.1.6", features = ["event", "fs", "net", "pipe", "process
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
 sec1 = { version = "0.8.1", features = ["ctutils", "pem", "std", "subtle"] }
-serde = { version = "1.0.228", features = ["alloc", "derive", "rc"] }
-serde_core = { version = "1.0.228", features = ["alloc", "rc"] }
+serde = { version = "1.0.229", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1.0.229", features = ["alloc", "rc"] }
 serde_json = { version = "1.0.150", features = ["alloc", "raw_value"] }
 sha1 = { version = "0.11.0" }
 sha2-93f6ce9d446188ac = { package = "sha2", version = "0.10.9" }
