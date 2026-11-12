@@ -1173,7 +1173,15 @@ fn concurrent_bootstraps_serialize_and_only_one_absent_selection_wins() {
     barrier.wait();
     let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
     assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
-    assert!(results.contains(&Err(Code::StaleSelection)));
+    // The loser waits for the mutation lock at most LOCK_BUDGET. Usually the
+    // winner is done by then and the loser sees its selection: StaleSelection.
+    // When the winner's syncs are slow it still holds the lock, and the loser
+    // is refused with Deadline instead (#4260). Either way it changed nothing.
+    let refused = results.iter().find_map(|r| r.as_ref().err()).unwrap();
+    assert!(
+        matches!(refused, Code::StaleSelection | Code::Deadline),
+        "the losing bootstrap was refused with {refused:?}"
+    );
     assert_eq!(f.status().generation, 1);
     assert_eq!(f.status().retained_count, 1);
 }
