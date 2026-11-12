@@ -1,8 +1,6 @@
 #![cfg(target_os = "macos")]
 // A test reports failure by panicking, so it may unwrap.
 #![allow(clippy::unwrap_used)]
-// Predates this workspace lint; #4125 tracks removing the allow.
-#![allow(clippy::undocumented_unsafe_blocks)]
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -239,10 +237,8 @@ async fn packaged_supervisor_serves_private_metadata_and_reopens_after_exit() {
         // its socket, which the next supervisor replaces under its lock.
         codewire_local_vmm::darwin::process::observe_owned_child(&mut child.child).unwrap();
         // SAFETY: the validated owned child remains unreaped with this sole waiter.
-        assert_eq!(
-            unsafe { libc::kill(child.child.id() as libc::pid_t, libc::SIGKILL) },
-            0
-        );
+        let killed = unsafe { libc::kill(child.child.id() as libc::pid_t, libc::SIGKILL) };
+        assert_eq!(killed, 0);
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if child.child.try_wait().unwrap().is_some() {

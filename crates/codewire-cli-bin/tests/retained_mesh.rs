@@ -6,8 +6,6 @@
 
 // A test reports failure by panicking, so it may unwrap.
 #![allow(clippy::unwrap_used)]
-// Predates this workspace lint; #4125 tracks removing the allow.
-#![allow(clippy::undocumented_unsafe_blocks)]
 
 use std::fs;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -31,6 +29,8 @@ fn reap_until(deadline: Instant) -> bool {
         if Instant::now() >= deadline {
             return false;
         }
+        // SAFETY: a null status pointer is allowed, and WNOHANG returns at
+        // once. It reaps only this process's own children.
         let pid = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG | libc::__WALL) };
         if pid < 0 {
             match std::io::Error::last_os_error().raw_os_error() {
@@ -76,12 +76,15 @@ fn isolated_case(name: &str) -> bool {
         // change the parallel Cargo test parent's process-wide child custody.
         #[cfg(target_os = "linux")]
         {
-            assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
-            assert_eq!(
-                unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG | libc::__WALL) },
-                -1,
-                "no children before the isolated case launches"
-            );
+            // SAFETY: the option takes one integer and no pointer. It changes
+            // only this one-test process.
+            let subreaper = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
+            assert_eq!(subreaper, 0);
+            // SAFETY: a null status pointer is allowed, and WNOHANG returns at
+            // once.
+            let child =
+                unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG | libc::__WALL) };
+            assert_eq!(child, -1, "no children before the isolated case launches");
         }
         return true;
     }
@@ -355,6 +358,8 @@ fn owner_identity(runtime: &Value) -> codewire_local_vmm::ProcessIdentity {
 /// Whether `pid` still names a process. An observation only: the test reaps
 /// its inherited children first on Linux, where an exited one would linger.
 fn exists(pid: u32) -> bool {
+    // SAFETY: a null status pointer is allowed, and WNOHANG returns at once.
+    // It can reap only a child of this process.
     #[cfg(target_os = "linux")]
     unsafe {
         libc::waitpid(
@@ -363,6 +368,8 @@ fn exists(pid: u32) -> bool {
             libc::WNOHANG | libc::__WALL,
         );
     }
+    // SAFETY: signal 0 delivers nothing; the call only reports whether the
+    // process exists.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
@@ -489,10 +496,10 @@ async fn a_killed_owner_takes_its_derp_child_and_leaves_a_stale_record_that_is_n
     let derp_pid = runtime["derp"]["pid"].as_u64().unwrap() as u32;
     // A crash: the test kills the owner it just observed alive by its birth.
     assert!(codewire_local_vmm::process_peer::recorded_birth_alive(&owner).unwrap());
-    assert_eq!(
-        unsafe { libc::kill(owner.pid as libc::pid_t, libc::SIGKILL) },
-        0
-    );
+    // SAFETY: kill takes no pointer. The birth check above shows the PID still
+    // names the owner this test started.
+    let killed = unsafe { libc::kill(owner.pid as libc::pid_t, libc::SIGKILL) };
+    assert_eq!(killed, 0);
     eventually("the killed owner exits", || {
         !exists(owner.pid)
             || !codewire_local_vmm::process_peer::recorded_birth_alive(&owner).unwrap()

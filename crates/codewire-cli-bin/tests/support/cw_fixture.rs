@@ -51,6 +51,7 @@ impl Drop for StripChild {
 pub fn prepare(path: &Path) {
     let parent = fs::symlink_metadata(path.parent().unwrap()).unwrap();
     assert!(parent.is_dir() && !parent.file_type().is_symlink());
+    // SAFETY: geteuid takes no argument and cannot fail.
     assert_eq!(parent.uid(), unsafe { libc::geteuid() });
     assert_eq!(parent.mode() & 0o7777, 0o700);
 
@@ -118,6 +119,7 @@ fn strip_linux_copy(path: &Path) {
 
     let metadata = fs::symlink_metadata(path).unwrap();
     assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+    // SAFETY: geteuid takes no argument and cannot fail.
     assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
     assert_eq!(metadata.nlink(), 1);
     assert!((20..=MAX_EXECUTABLE_BYTES).contains(&metadata.len()));
@@ -136,6 +138,7 @@ fn strip_linux_copy(path: &Path) {
 fn check_macos_copy(path: &Path) {
     let metadata = fs::symlink_metadata(path).unwrap();
     assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+    // SAFETY: geteuid takes no argument and cannot fail.
     assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
     assert_eq!(metadata.nlink(), 1);
     let mut header = [0; 8];

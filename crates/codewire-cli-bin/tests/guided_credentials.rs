@@ -2,8 +2,6 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 // A test reports failure by panicking, so it may unwrap.
 #![allow(clippy::unwrap_used)]
-// Predates this workspace lint; #4125 tracks removing the allow.
-#![allow(clippy::undocumented_unsafe_blocks)]
 
 use std::fs::File;
 use std::io::{Read as _, Write as _};
@@ -141,27 +139,25 @@ impl Pty {
         let (mut master, mut slave) = (-1, -1);
         // SAFETY: both descriptor pointers are valid for this call; null
         // termios/window pointers ask the OS for its default terminal state.
-        assert_eq!(
-            unsafe {
-                libc::openpty(
-                    &mut master,
-                    &mut slave,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            },
-            0
-        );
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0);
         // SAFETY: successful openpty returned two distinct owned descriptors.
         let (master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
-        // SAFETY: the descriptor is live; F_SETFL changes only this test's PTY.
+        // SAFETY: the descriptor is live, and F_GETFL takes no pointer.
         let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
         assert_ne!(flags, -1);
-        assert_ne!(
-            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
-            -1
-        );
+        // SAFETY: the descriptor is live; F_SETFL changes only this test's PTY.
+        let set =
+            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        assert_ne!(set, -1);
         let before = terminal_state(&slave);
         let child = Command::new(env!("CARGO_BIN_EXE_cw"))
             .args(["--server", url])
@@ -259,12 +255,18 @@ impl Pty {
         assert_eq!(local_flags(self.before.c_lflag), local_flags(after.c_lflag));
         assert_eq!(self.before.c_cc, after.c_cc);
         // POSIX stores the baud rates separately on some hosts.
-        assert_eq!(unsafe { libc::cfgetispeed(&self.before) }, unsafe {
-            libc::cfgetispeed(&after)
-        });
-        assert_eq!(unsafe { libc::cfgetospeed(&self.before) }, unsafe {
-            libc::cfgetospeed(&after)
-        });
+        // SAFETY: each call reads one initialized termios value through a
+        // reference that outlives it.
+        let (input_before, input_after, output_before, output_after) = unsafe {
+            (
+                libc::cfgetispeed(&self.before),
+                libc::cfgetispeed(&after),
+                libc::cfgetospeed(&self.before),
+                libc::cfgetospeed(&after),
+            )
+        };
+        assert_eq!(input_before, input_after);
+        assert_eq!(output_before, output_after);
         let output = String::from_utf8_lossy(&self.output).into_owned();
         assert!(!output.contains("synthetic-x"));
         assert!(!output.contains("synthetic-value"));
@@ -286,10 +288,8 @@ impl Drop for Pty {
 fn terminal_state(file: &File) -> libc::termios {
     let mut state = std::mem::MaybeUninit::uninit();
     // SAFETY: state points to enough writable memory and the descriptor is live.
-    assert_eq!(
-        unsafe { libc::tcgetattr(file.as_raw_fd(), state.as_mut_ptr()) },
-        0
-    );
+    let read = unsafe { libc::tcgetattr(file.as_raw_fd(), state.as_mut_ptr()) };
+    assert_eq!(read, 0);
     // SAFETY: successful tcgetattr initialized the complete termios value.
     unsafe { state.assume_init() }
 }

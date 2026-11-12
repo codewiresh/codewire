@@ -26,12 +26,9 @@ ALLOWED_IN_TESTS = ("clippy::unwrap_used",)
 
 DEBT: dict[str, tuple[str, ...]] = {
     "clippy::undocumented_unsafe_blocks": (
-        "crates/codewire-cli-bin/tests/guided_credentials.rs",
         "crates/codewire-cli-bin/tests/host_member_control.rs",
         "crates/codewire-cli-bin/tests/native_network_confinement.rs",
         "crates/codewire-cli-bin/tests/native_network_worker_confinement.rs",
-        "crates/codewire-cli-bin/tests/native_supervisor.rs",
-        "crates/codewire-cli-bin/tests/retained_mesh.rs",
         "crates/codewire-cli/src/lib.rs",
         "crates/codewire-daemon/src/lib.rs",
         "crates/codewire-local-vmm/src/lib.rs",
