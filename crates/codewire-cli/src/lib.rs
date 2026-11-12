@@ -220,6 +220,7 @@ const HELP_SECTIONS: &[HelpSection] = &[
         "Mesh and host delegation",
         &["network", "mesh", "control", "member"],
     ),
+    HelpSection::full("Hosts that provide VMs", &["host", "hosts"]),
     HelpSection::full("CLI administration", &["install", "config", "completion"]),
 ];
 
@@ -368,6 +369,16 @@ enum Command {
     Whoami(WhoamiArgs),
     #[command(about = "Send feedback to the Codewire team", long_about = FEEDBACK_LONG_ABOUT)]
     Feedback(FeedbackArgs),
+    #[command(
+        about = "Let this computer provide VMs for your organization (a host)",
+        long_about = HOST_LONG_ABOUT
+    )]
+    Host {
+        #[command(subcommand)]
+        command: HostCommand,
+    },
+    #[command(about = "List your organization's hosts")]
+    Hosts(HostsArgs),
     #[command(
         about = "Select the current environment; without ENV, choose from a list",
         long_about = "Select the current environment, which commands use when no environment is named.\n\nWith ENV, select it by name or ID; --local or --cloud says where to look when a name exists in both. Without ENV, choose from a searchable list of local and cloud environments (--local or --cloud filters it): arrow keys move, typing filters, Enter selects, Escape cancels without changing the selection. Selecting a stopped environment does not start it. Outside an interactive terminal, ENV is required."
@@ -922,6 +933,8 @@ where
         Command::Logout => handle_logout_command(&globals).await,
         Command::Whoami(args) => handle_whoami_command(&globals, args).await,
         Command::Feedback(args) => handle_feedback_command(&globals, args).await,
+        Command::Host { command } => handle_host_command(&globals, command).await,
+        Command::Hosts(args) => handle_hosts_command(&globals, args).await,
         Command::Use(args) => handle_use_command(&globals, args).await,
         Command::Current(args) => handle_current_command(&globals, args).await,
         Command::Init(args) => handle_init_command(&globals, args).await,

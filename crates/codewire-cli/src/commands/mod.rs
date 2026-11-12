@@ -2790,6 +2790,7 @@ mod environment;
 mod export;
 mod feedback;
 pub(crate) mod flat;
+mod hosts;
 pub(crate) mod inventory;
 mod launch_setup;
 pub(crate) mod lifecycle_output;
@@ -2816,6 +2817,9 @@ pub(crate) use feedback::{FEEDBACK_LONG_ABOUT, FeedbackArgs, handle_feedback_com
 #[cfg(test)]
 pub(crate) use flat::env_operation;
 pub(crate) use flat::{HelpArgs, RetiredEnvArgs};
+pub(crate) use hosts::{
+    HOST_LONG_ABOUT, HostCommand, HostsArgs, handle_host_command, handle_hosts_command,
+};
 pub use mesh_commands::owner::LocalMeshOwner;
 pub(crate) use mesh_commands::retained::StateDir as MeshStateDir;
 pub(crate) use mesh_commands::*;

@@ -254,6 +254,12 @@ source = "content/reference/cli/environments.md"
 output = "reference/cli/environments/index.html"
 
 [[routes]]
+canonical = "/docs/reference/cli/hosts"
+redirect_from = "/docs/reference/cli/hosts/"
+source = "content/reference/cli/hosts.md"
+output = "reference/cli/hosts/index.html"
+
+[[routes]]
 canonical = "/docs/reference/cli/networking"
 redirect_from = "/docs/reference/cli/networking/"
 source = "content/reference/cli/networking.md"

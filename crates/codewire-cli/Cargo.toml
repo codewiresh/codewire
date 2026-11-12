@@ -21,6 +21,7 @@ path = "src/lib.rs"
 anyhow = { workspace = true }
 base64 = { workspace = true }
 buffa = { workspace = true }
+buffa-types = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
@@ -34,6 +35,8 @@ codewire-egress-policy = { workspace = true }
 codewire-project = { workspace = true }
 codewire-project-proto = { workspace = true }
 codewire-protected-store = { workspace = true }
+# Host keys (#3609).
+ed25519-dalek = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
 codewire-tls = { workspace = true }
 codewire-workload-secrets = { workspace = true }

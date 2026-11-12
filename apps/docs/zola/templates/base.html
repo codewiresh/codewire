@@ -147,7 +147,7 @@
             <details class="docs-nav-group" open data-docs-nav-group>
               <summary>{{ nav::item(path="/docs/reference", label="Reference", current=current_path) }}<svg class="docs-nav-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></summary>
               <div class="docs-nav-group-items">
-                <details class="docs-nav-group docs-nav-subgroup"{% if here in ["/docs/reference/cli", "/docs/reference/cli/conventions", "/docs/reference/cli/environments", "/docs/reference/cli/access", "/docs/reference/cli/agents", "/docs/reference/cli/secrets-and-credentials", "/docs/reference/cli/networking", "/docs/reference/cli/organizations", "/docs/reference/cli/cw", "/docs/reference/cli/configuration", "/docs/reference/cli/environment-variables"] %} open{% endif %} data-docs-nav-group>
+                <details class="docs-nav-group docs-nav-subgroup"{% if here in ["/docs/reference/cli", "/docs/reference/cli/conventions", "/docs/reference/cli/environments", "/docs/reference/cli/access", "/docs/reference/cli/agents", "/docs/reference/cli/secrets-and-credentials", "/docs/reference/cli/networking", "/docs/reference/cli/organizations", "/docs/reference/cli/cw", "/docs/reference/cli/configuration", "/docs/reference/cli/environment-variables", "/docs/reference/cli/hosts"] %} open{% endif %} data-docs-nav-group>
                   <summary>{{ nav::item(path="/docs/reference/cli", label="CLI", current=current_path) }}<svg class="docs-nav-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></summary>
                   <div class="docs-nav-group-items">
                     {{ nav::item(path="/docs/reference/cli/conventions", label="Conventions", current=current_path) }}
@@ -160,6 +160,7 @@
                     {{ nav::item(path="/docs/reference/cli/cw", label="cw itself", current=current_path) }}
                     {{ nav::item(path="/docs/reference/cli/configuration", label="Configuration", current=current_path) }}
                     {{ nav::item(path="/docs/reference/cli/environment-variables", label="Environment variables", current=current_path) }}
+                    {{ nav::item(path="/docs/reference/cli/hosts", label="Hosts", current=current_path) }}
                   </div>
                 </details>
                 {{ nav::item(path="/docs/reference/codewire-yaml", label="codewire.yaml keys", current=current_path) }}

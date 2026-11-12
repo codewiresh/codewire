@@ -15,6 +15,7 @@ mod error;
 mod feedback;
 #[cfg(feature = "tailnet-session")]
 pub mod hosted_shell;
+pub mod hosts;
 #[cfg(target_os = "linux")]
 pub mod member_tailnet;
 mod mesh;
