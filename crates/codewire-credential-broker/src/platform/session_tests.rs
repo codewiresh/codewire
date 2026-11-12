@@ -529,19 +529,25 @@ async fn lease_budget_bounds_concurrent_leases_and_queues_the_rest() {
 async fn a_queued_lease_waits_until_its_identity_expiry_and_no_longer() {
     let (log, _guard) = crate::timing::tests::TimingLog::install();
     let session = owner_local(true);
-    let expires_in = session.identity_expires_at_unix - unix_now().unwrap();
+    let expires_at = session.identity_expires_at_unix;
     let valid = description(&session);
     let mut fixture = ClosedDatabaseFixture::new(session, vec![valid]).await;
     let budget = LeaseBudget::new(1);
     let held = Arc::clone(&budget.permits).try_acquire_owned().unwrap();
     fixture.adapter.leases = Some(budget.clone());
     tokio::time::pause();
+    // The lease turns the identity expiry into a wait from the wall clock
+    // when it queues, which lies between these two reads: the wait is
+    // bounded by them however long fixture setup or a runner stall takes.
+    // tokio rounds a timer up to its next millisecond.
+    let at_most = expires_at - unix_now().unwrap();
     let started = tokio::time::Instant::now();
     let (leased, timings) = crate::timing::measure(lease_operation(&fixture.adapter)).await;
     let waited = started.elapsed();
+    let more_than = expires_at - unix_now().unwrap() - 1;
     assert!(matches!(leased, Err(BrokerLeaseError::Unavailable)));
-    assert!(waited > Duration::from_secs(expires_in.saturating_sub(2)));
-    assert!(waited <= Duration::from_secs(expires_in));
+    assert!(waited > Duration::from_secs(more_than));
+    assert!(waited <= Duration::from_secs(at_most) + Duration::from_millis(1));
     // Timing uses wall-clock time, which this paused test does not advance.
     assert_eq!(timings.lease_wait.count, 1);
     // It never started authority, database or KEK work.
