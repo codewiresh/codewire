@@ -292,7 +292,10 @@ for (const fixture of fixtures) {
 // label's capitals. The label is the first visible text in `label`, wherever
 // it sits. The baseline sits the font's ascent below the top of the text's own
 // box (a Range over the text, never the line box, so leading cannot hide in
-// it), and the capitals rise their measured height above it.
+// it), and the capitals rise their cap height above it. Both come from the
+// page's own layout of the label's font, at the page's own scale: a probe set
+// beside the page, never a canvas, whose metrics are rounded differently
+// (#4358: under DejaVu Sans at 2.75 a canvas put centred capitals 1.23 px off).
 async function capitalsOffset(control: Locator, label: Locator = control) {
   const middle = await control.evaluate((node) => node.getBoundingClientRect().top + node.clientTop + node.clientHeight / 2);
   const centre = await label.evaluate((node) => {
@@ -305,10 +308,23 @@ async function capitalsOffset(control: Locator, label: Locator = control) {
     const range = document.createRange();
     range.selectNodeContents(text);
     const style = getComputedStyle(text.parentElement!);
-    const context = document.createElement("canvas").getContext("2d")!;
-    context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-    const metrics = context.measureText("H");
-    return range.getClientRects()[0].top + metrics.fontBoundingBoxAscent - metrics.actualBoundingBoxAscent / 2;
+    // Its text box gives the ascent: an empty inline-block's bottom is the
+    // baseline. A second "H", trimmed to its capitals, gives the cap height.
+    const probe = document.createElement("div");
+    probe.style.cssText = "position:absolute;top:0;left:0;visibility:hidden;white-space:nowrap;line-height:normal";
+    for (const property of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "fontStretch"] as const) {
+      probe.style[property] = style[property];
+    }
+    probe.innerHTML = '<span>H<span style="display:inline-block;width:0;height:0"></span></span>'
+      + '<span style="display:inline-block;text-box:trim-both cap alphabetic">H</span>';
+    document.body.append(probe);
+    const [line, capitals] = probe.children as unknown as [HTMLElement, HTMLElement];
+    const lineText = document.createRange();
+    lineText.selectNodeContents(line.firstChild!);
+    const ascent = line.lastElementChild!.getBoundingClientRect().top - lineText.getClientRects()[0].top;
+    const capHeight = capitals.getBoundingClientRect().height;
+    probe.remove();
+    return range.getClientRects()[0].top + ascent - capHeight / 2;
   });
   return centre - middle;
 }
