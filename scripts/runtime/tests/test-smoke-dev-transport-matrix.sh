@@ -43,6 +43,13 @@ cat >"$FAKE_ROOT/scripts/runtime/dev/smoke-dev-candidate.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 state="${FAKE_STATE:?}"
+# A hang traps TERM before any setup, so the matrix's bound, which starts when
+# it launches this script, always finds the handler however slowly a loaded
+# guest runs what follows (#4309). candidate.started says it is in place.
+if [[ "${FAKE_SCENARIO:?}" == hang ]]; then
+  # Stand in for the smoke's own cleanup: report the stage, then exit.
+  trap 'printf term >"$state/candidate.term"; printf "[runtime-smoke] acceptance-failure stage=direct-udp class=signal\n" >&2; exit 143' TERM
+fi
 printf '%s\n' "$@" >"$state/candidate.args"
 printf 'transport=%s relay_matrix=%s derp=%s keep_env=%s cw_bin=%s skip_kube=%s name=%s\n' \
   "$EXPECTED_TAILNET_PATH_TRANSPORT" "$SMOKE_PEER_RELAY_MATRIX" "$SMOKE_DERP_FALLBACK" \
@@ -80,8 +87,6 @@ case "${FAKE_SCENARIO:?}" in
     ;;
   hang)
     printf '[runtime-smoke] kept failed-smoke evidence directory %s\n' "$evidence" >&2
-    # Stand in for the smoke's own cleanup: report the stage, then exit.
-    trap 'printf term >"$state/candidate.term"; printf "[runtime-smoke] acceptance-failure stage=direct-udp class=signal\n" >&2; exit 143' TERM
     : >"$state/candidate.started"
     sleep 60 &
     wait $!
@@ -344,12 +349,14 @@ run_matrix pass EXPECTED_NODE=node-a FAKE_UNCORDON_FAILS=node-b MATRIX_CLEANUP_A
 grep -Fq 'runtime node node-b is still cordoned' "$CASE/err" || fail "a failed uncordon did not name the node"
 
 # The bound: the smoke gets SIGTERM, the failure names the stage it was in,
-# and the nodes and environment are restored.
+# and the nodes and environment are restored. The fake traps TERM before its
+# setup, so only bash starting it can race the bound; 10 s leaves a loaded
+# guest room for that, where 2 s did not (#4309).
 new_case time-bound node-a=false node-b=false
-run_matrix hang EXPECTED_NODE=node-a MATRIX_TIMEOUT_SECONDS=2 MATRIX_KILL_AFTER_SECONDS=10 -- --current-dev --cleanup-on-failure
+run_matrix hang EXPECTED_NODE=node-a MATRIX_TIMEOUT_SECONDS=10 MATRIX_KILL_AFTER_SECONDS=10 -- --current-dev --cleanup-on-failure
 [[ "$(case_rc)" == 1 ]] || fail "a bounded run exited $(case_rc)"
 [[ -s "$CASE/state/candidate.term" ]] || fail "the bound did not signal the smoke"
-last_error | grep -Fq 'path=direct_udp stage=direct-udp class=signal after MATRIX_TIMEOUT_SECONDS=2' ||
+last_error | grep -Fq 'path=direct_udp stage=direct-udp class=signal after MATRIX_TIMEOUT_SECONDS=10' ||
   { show_err; fail "a bounded run did not name its path and the bound"; }
 [[ "$(node_state node-b)" == 'false:' ]] || fail "node-b stayed cordoned after the bound"
 [[ "$(cat "$CASE/state/cw-rm")" == env-0123 ]] || fail "the bounded run kept its environment"
