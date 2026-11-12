@@ -8,8 +8,6 @@
 
 // A test reports failure by panicking, so it may unwrap.
 #![allow(clippy::unwrap_used)]
-// Predates this workspace lint; #4125 tracks removing the allow.
-#![allow(clippy::undocumented_unsafe_blocks)]
 
 use std::io::{Read as _, Write as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
@@ -100,6 +98,8 @@ fn descriptors(pid: libc::pid_t) -> Vec<(RawFd, Descriptor)> {
         };
         1024
     ];
+    // SAFETY: the pointer and the byte length describe the whole of `table`,
+    // so the kernel writes only inside it.
     let bytes = unsafe {
         libc::proc_pidinfo(
             pid,
@@ -142,6 +142,8 @@ fn descriptors(pid: libc::pid_t) -> Vec<(RawFd, Descriptor)> {
 
 fn fd_info(pid: libc::pid_t, fd: RawFd, flavor: libc::c_int) -> Vec<u8> {
     let mut buffer = vec![0_u8; FD_INFO_BYTES];
+    // SAFETY: the pointer and the length describe the whole of `buffer`, so
+    // the kernel writes only inside it.
     let written = unsafe {
         libc::proc_pidfdinfo(
             pid,
@@ -162,15 +164,17 @@ fn fd_info(pid: libc::pid_t, fd: RawFd, flavor: libc::c_int) -> Vec<u8> {
 
 fn read_at<T: Copy>(bytes: &[u8], offset: usize) -> T {
     assert!(offset + std::mem::size_of::<T>() <= bytes.len());
+    // SAFETY: the assert keeps the read inside `bytes`, an unaligned read
+    // needs no alignment, and every `T` read here is a plain integer.
     unsafe { std::ptr::read_unaligned(bytes[offset..].as_ptr().cast::<T>()) }
 }
 
 fn dev_null_rdev() -> u32 {
+    // SAFETY: `stat` holds only integers, and all-zero is a valid value of each.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    assert_eq!(
-        unsafe { libc::stat(c"/dev/null".as_ptr(), &raw mut stat) },
-        0
-    );
+    // SAFETY: the path is a NUL-terminated literal and `stat` is writable.
+    let found = unsafe { libc::stat(c"/dev/null".as_ptr(), &raw mut stat) };
+    assert_eq!(found, 0);
     stat.st_rdev as u32
 }
 
@@ -187,7 +191,7 @@ fn check_layout() {
     let (unix, peer) = UnixStream::pair().unwrap();
     let tcp = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let null = std::fs::File::open("/dev/null").unwrap();
-    let pid = unsafe { libc::getpid() };
+    let pid = libc::pid_t::try_from(std::process::id()).unwrap();
     let (one, one_peer) = unix_socket(pid, unix.as_raw_fd());
     let (other, other_peer) = unix_socket(pid, peer.as_raw_fd());
     assert!(one != 0 && one != other && one_peer == other && other_peer == one);
@@ -363,8 +367,9 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
     let null = dev_null_rdev();
     // The worker's ends of the bootstrap and guest channels are the peers of
     // the ends this test holds.
-    let (_, bootstrap) = unix_socket(unsafe { libc::getpid() }, worker_parent.as_raw_fd());
-    let (_, guest_end) = unix_socket(unsafe { libc::getpid() }, guest.as_raw_fd());
+    let own_pid = libc::pid_t::try_from(std::process::id()).unwrap();
+    let (_, bootstrap) = unix_socket(own_pid, worker_parent.as_raw_fd());
+    let (_, guest_end) = unix_socket(own_pid, guest.as_raw_fd());
     let broker_ends: Vec<u64> = descriptors(broker.0.id() as libc::pid_t)
         .into_iter()
         .filter_map(|(_, kind)| match kind {
@@ -435,8 +440,12 @@ fn set_timeouts(stream: &UnixStream) {
 /// closed on exec too.
 /// A duplicate above every fixed target a role inherits, as the runner makes.
 fn above_targets(descriptor: &UnixStream) -> OwnedFd {
+    // SAFETY: `descriptor` is borrowed and open for the call; F_DUPFD_CLOEXEC
+    // takes an integer and returns a new descriptor or -1.
     let duplicated = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
     assert!(duplicated >= 64);
+    // SAFETY: `duplicated` is a descriptor this function just created, and
+    // nothing else owns it.
     unsafe { OwnedFd::from_raw_fd(duplicated) }
 }
 
@@ -521,23 +530,32 @@ fn send_descriptor(bootstrap: RawFd, descriptor: RawFd, descriptor_marker: u8) {
     let mut control = ControlBuffer {
         bytes: [0_u8; CONTROL_BYTES],
     };
+    // SAFETY: CMSG_SPACE only computes a size from its argument.
     let control_space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) };
     assert!(control_space as usize <= CONTROL_BYTES);
+    // SAFETY: `msghdr` holds integers and pointers, and all-zero is a valid
+    // value of each.
     let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
     message.msg_iov = &raw mut vector;
     message.msg_iovlen = 1;
+    // SAFETY: the union was initialized through `bytes`, and any bytes are a
+    // valid `[u8; N]`.
     message.msg_control = unsafe { control.bytes.as_mut_ptr().cast() };
     message.msg_controllen = control_space;
+    // SAFETY: `msg_control` points to `control`, which is at least
+    // `msg_controllen` bytes long, as the assert above shows.
     let header = unsafe { libc::CMSG_FIRSTHDR(&raw const message) };
     assert!(!header.is_null());
+    // SAFETY: `header` is non-null and points into `control`, which the union
+    // aligns for `cmsghdr` and which has room for one descriptor after it.
     unsafe {
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
         (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32);
         std::ptr::write(libc::CMSG_DATA(header).cast::<RawFd>(), descriptor);
     }
-    assert_eq!(
-        unsafe { libc::sendmsg(bootstrap, &raw const message, 0) },
-        marker.len() as isize
-    );
+    // SAFETY: `message`, its one vector and its control buffer stay live and
+    // unmoved for the call.
+    let sent = unsafe { libc::sendmsg(bootstrap, &raw const message, 0) };
+    assert_eq!(sent, marker.len() as isize);
 }

@@ -35,7 +35,7 @@ fn json_file(path: &Path, maximum: u64) -> Value {
     let before = file.metadata().unwrap();
     assert!(
         before.is_file()
-            && before.uid() == unsafe { libc::geteuid() }
+            && before.uid() == effective_uid()
             && before.nlink() == 1
             && before.mode() & 0o022 == 0
             && before.len() <= maximum
@@ -179,7 +179,7 @@ fn host_members_managed_two_real_endpoints_direct_and_tls_derp() {
         let metadata = fs::symlink_metadata(&artifact_parent).unwrap();
         assert!(
             metadata.is_dir()
-                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.uid() == effective_uid()
                 && metadata.mode() & 0o022 == 0
                 && !metadata.file_type().is_symlink()
         );
@@ -308,14 +308,12 @@ impl Actor {
             birth_and_parent(&self.proc).unwrap(),
             (self.birth, self.parent)
         );
-        assert_eq!(self.proc.metadata().unwrap().uid(), unsafe {
-            libc::geteuid()
-        });
+        assert_eq!(self.proc.metadata().unwrap().uid(), effective_uid());
         let expected = self.image.metadata().unwrap();
         assert!(
             expected.is_file()
                 && expected.nlink() == 1
-                && expected.uid() == unsafe { libc::geteuid() }
+                && expected.uid() == effective_uid()
                 && expected.mode() & 0o022 == 0
         );
         let image = fs::metadata(format!("/proc/{}/exe", self.pid)).unwrap();
@@ -1721,11 +1719,13 @@ fn managed_member_isolated_kernel_journey() {
         let metadata = fs::symlink_metadata(directory).unwrap();
         assert!(
             metadata.is_dir()
-                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.uid() == effective_uid()
                 && metadata.mode() & 0o7777 == 0o700
         );
         assert_eq!(fs::canonicalize(directory).unwrap(), *directory);
     }
+    // SAFETY: the option takes one integer and no pointer. It changes only
+    // this test process.
     assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
     assert!(subreaper(1));
     assert!(child_pids(std::process::id()).is_ok());
@@ -1866,6 +1866,7 @@ fn managed_fixture_private_file_refuses_fifo_link_mode_and_bounds() {
     assert!(std::panic::catch_unwind(|| json_file(&path, 64)).is_err());
     fs::remove_file(&path).unwrap();
     let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: `name` is a NUL-terminated path that lives past the call.
     assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
     assert!(std::panic::catch_unwind(|| json_file(&path, 64)).is_err());
     fs::remove_file(&path).unwrap();
@@ -2148,7 +2149,7 @@ fn managed_fixture_actual_actor_birth_path_and_terminal_refusals_do_not_signal()
         ("pid", u64::from(child.id())),
         ("birth", owned.birth),
         ("parent", u64::from(std::process::id())),
-        ("euid", u64::from(unsafe { libc::geteuid() })),
+        ("euid", u64::from(effective_uid())),
         ("expected_dev", expected_image.dev()),
         ("expected_ino", expected_image.ino()),
         ("expected_len", expected_image.len()),

@@ -18,8 +18,6 @@
 
 // A test reports failure by panicking, so it may unwrap.
 #![allow(clippy::unwrap_used)]
-// Predates this workspace lint; #4125 tracks removing the allow.
-#![allow(clippy::undocumented_unsafe_blocks)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read as _, Write as _};
@@ -148,8 +146,12 @@ fn spawn_role(
         0
     } {
         let (worker_end, broker_end) = UnixStream::pair().unwrap();
+        // SAFETY: `broker_end` is open for the call; F_DUPFD_CLOEXEC takes an
+        // integer and returns a new descriptor or -1.
         let duplicated = unsafe { libc::fcntl(broker_end.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
         assert!(duplicated >= 64);
+        // SAFETY: `duplicated` is a descriptor this loop just created, and
+        // nothing else owns it.
         inherited_sessions.push(unsafe { OwnedFd::from_raw_fd(duplicated) });
         sessions.push(worker_end);
     }
@@ -707,7 +709,9 @@ fn role_starts_able_to_empty_its_bounding_set() -> bool {
     const CAP_SETPCAP: u64 = 1 << 8;
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
     let set = |field| u64::from_str_radix(status_field(&status, field), 16).unwrap();
-    let kept = if unsafe { libc::geteuid() } == 0 {
+    // SAFETY: geteuid takes no argument and cannot fail.
+    let root = unsafe { libc::geteuid() } == 0;
+    let kept = if root {
         set("CapPrm") & (set("CapInh") | set("CapBnd"))
     } else {
         set("CapAmb")
@@ -747,8 +751,11 @@ fn socket_target_inode(target: &str) -> Option<u64> {
 }
 
 fn socket_inode(fd: RawFd) -> u64 {
+    // SAFETY: `stat` holds only integers, and all-zero is a valid value of each.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    assert_eq!(unsafe { libc::fstat(fd, &raw mut stat) }, 0);
+    // SAFETY: `stat` is writable; a bad descriptor only makes the call fail.
+    let found = unsafe { libc::fstat(fd, &raw mut stat) };
+    assert_eq!(found, 0);
     assert_eq!(stat.st_mode & libc::S_IFMT, libc::S_IFSOCK);
     stat.st_ino
 }
@@ -849,6 +856,7 @@ fn unix_socket_dump() -> Result<BTreeMap<u64, UnixSocket>, i32> {
     const HEADER: usize = 16;
     const MESSAGE: usize = 16;
 
+    // SAFETY: socket takes three integers and returns a new descriptor or -1.
     let socket = unsafe {
         libc::socket(
             libc::AF_NETLINK,
@@ -857,6 +865,9 @@ fn unix_socket_dump() -> Result<BTreeMap<u64, UnixSocket>, i32> {
         )
     };
     assert!(socket >= 0, "{}", std::io::Error::last_os_error());
+    // SAFETY: `socket` is a descriptor this function just created, and nothing
+    // else owns it. Dropping it closes it on every return path.
+    let socket = unsafe { OwnedFd::from_raw_fd(socket) };
     let mut request = Vec::with_capacity(HEADER + 24);
     request.extend_from_slice(&((HEADER + 24) as u32).to_ne_bytes());
     request.extend_from_slice(&SOCK_DIAG_BY_FAMILY.to_ne_bytes());
@@ -868,7 +879,15 @@ fn unix_socket_dump() -> Result<BTreeMap<u64, UnixSocket>, i32> {
     request.extend_from_slice(&0_u32.to_ne_bytes());
     request.extend_from_slice(&(UDIAG_SHOW_NAME | UDIAG_SHOW_PEER).to_ne_bytes());
     request.extend_from_slice(&[0xff; 8]);
-    let sent = unsafe { libc::send(socket, request.as_ptr().cast(), request.len(), 0) };
+    // SAFETY: the pointer and the length describe the whole of `request`.
+    let sent = unsafe {
+        libc::send(
+            socket.as_raw_fd(),
+            request.as_ptr().cast(),
+            request.len(),
+            0,
+        )
+    };
     assert_eq!(sent, request.len() as isize);
 
     let u16_at = |bytes: &[u8], at: usize| u16::from_ne_bytes([bytes[at], bytes[at + 1]]);
@@ -877,7 +896,16 @@ fn unix_socket_dump() -> Result<BTreeMap<u64, UnixSocket>, i32> {
     let mut sockets = BTreeMap::new();
     let mut buffer = vec![0_u8; 64 * 1024];
     'receive: loop {
-        let received = unsafe { libc::recv(socket, buffer.as_mut_ptr().cast(), buffer.len(), 0) };
+        // SAFETY: the pointer and the length describe the whole of `buffer`,
+        // so the kernel writes only inside it.
+        let received = unsafe {
+            libc::recv(
+                socket.as_raw_fd(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                0,
+            )
+        };
         assert!(received > 0, "{}", std::io::Error::last_os_error());
         let mut messages = &buffer[..received as usize];
         while messages.len() >= HEADER {
@@ -892,7 +920,6 @@ fn unix_socket_dump() -> Result<BTreeMap<u64, UnixSocket>, i32> {
                 // struct nlmsgerr begins with the negative errno.
                 assert!(body.len() >= 4);
                 let errno = -i32::from_ne_bytes(body[..4].try_into().unwrap());
-                unsafe { libc::close(socket) };
                 return Err(errno);
             }
             let mut socket = UnixSocket {
@@ -918,7 +945,6 @@ fn unix_socket_dump() -> Result<BTreeMap<u64, UnixSocket>, i32> {
             messages = &messages[aligned.min(messages.len())..];
         }
     }
-    unsafe { libc::close(socket) };
     Ok(sockets)
 }
 
@@ -937,25 +963,34 @@ fn send_descriptor(bootstrap: RawFd, descriptor: RawFd, descriptor_marker: u8) {
     let mut control = ControlBuffer {
         bytes: [0_u8; CONTROL_BYTES],
     };
+    // SAFETY: CMSG_SPACE only computes a size from its argument.
     let control_space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) };
     assert!(control_space as usize <= CONTROL_BYTES);
+    // SAFETY: `msghdr` holds integers and pointers, and all-zero is a valid
+    // value of each.
     let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
     message.msg_iov = &raw mut vector;
     message.msg_iovlen = 1;
+    // SAFETY: the union was initialized through `bytes`, and any bytes are a
+    // valid `[u8; N]`.
     message.msg_control = unsafe { control.bytes.as_mut_ptr().cast() };
     message.msg_controllen = control_space as _;
+    // SAFETY: `msg_control` points to `control`, which is at least
+    // `msg_controllen` bytes long, as the assert above shows.
     let header = unsafe { libc::CMSG_FIRSTHDR(&raw const message) };
     assert!(!header.is_null());
+    // SAFETY: `header` is non-null and points into `control`, which the union
+    // aligns for `cmsghdr` and which has room for one descriptor after it.
     unsafe {
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
         (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
         std::ptr::write(libc::CMSG_DATA(header).cast::<RawFd>(), descriptor);
     }
-    assert_eq!(
-        unsafe { libc::sendmsg(bootstrap, &raw const message, libc::MSG_NOSIGNAL) },
-        marker.len() as isize
-    );
+    // SAFETY: `message`, its one vector and its control buffer stay live and
+    // unmoved for the call.
+    let sent = unsafe { libc::sendmsg(bootstrap, &raw const message, libc::MSG_NOSIGNAL) };
+    assert_eq!(sent, marker.len() as isize);
 }
 
 /// The broker bootstrap the runner writes for the developer baseline policy.

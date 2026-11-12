@@ -5,8 +5,6 @@
 
 // A test reports failure by panicking, so it may unwrap.
 #![allow(clippy::unwrap_used)]
-// Predates this workspace lint; #4125 tracks removing the allow.
-#![allow(clippy::undocumented_unsafe_blocks)]
 
 use codewire_client::{ClientConfig, CodewireClient, StaticTokenProvider};
 use codewire_derp::{Relay, self_signed_tls_config, serve_stun, serve_tls};
@@ -41,7 +39,14 @@ const NODE: &str = "target-host-member-proof";
 const API_KEY: &str = "cw_synthetic-host-member-proof";
 const MAX_HELPER_DIAGNOSTIC: usize = 16 * 1024;
 
+fn effective_uid() -> u32 {
+    // SAFETY: geteuid takes no argument and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
 fn diagnostic_open_at(parent: &File, name: &std::ffi::CStr, flags: i32) -> std::io::Result<File> {
+    // SAFETY: the directory descriptor is open and the name is NUL-terminated
+    // for the call.
     let raw = unsafe {
         libc::openat(
             parent.as_raw_fd(),
@@ -52,6 +57,7 @@ fn diagnostic_open_at(parent: &File, name: &std::ffi::CStr, flags: i32) -> std::
     if raw < 0 {
         return Err(std::io::Error::last_os_error());
     }
+    // SAFETY: `raw` is a descriptor openat just returned, and nothing else owns it.
     Ok(unsafe { File::from_raw_fd(raw) })
 }
 
@@ -64,14 +70,12 @@ fn same_diagnostic_inode(a: &fs::Metadata, b: &fs::Metadata) -> bool {
 }
 
 fn private_diagnostic_directory(metadata: &fs::Metadata) -> bool {
-    metadata.is_dir()
-        && metadata.uid() == unsafe { libc::geteuid() }
-        && metadata.mode() & 0o7777 == 0o700
+    metadata.is_dir() && metadata.uid() == effective_uid() && metadata.mode() & 0o7777 == 0o700
 }
 
 fn sealed_diagnostic_file(metadata: &fs::Metadata) -> bool {
     metadata.is_file()
-        && metadata.uid() == unsafe { libc::geteuid() }
+        && metadata.uid() == effective_uid()
         && metadata.mode() & 0o7777 == 0o600
         && metadata.nlink() == 1
         && metadata.len() <= MAX_HELPER_DIAGNOSTIC as u64
@@ -239,8 +243,11 @@ fn private(path: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 fn pidfd(pid: u32) -> OwnedFd {
+    // SAFETY: pidfd_open takes two integers and returns a new descriptor or -1.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
     assert!(fd >= 0);
+    // SAFETY: `fd` is a descriptor pidfd_open just returned, and nothing else
+    // owns it.
     unsafe { OwnedFd::from_raw_fd(fd as i32) }
 }
 fn terminal(fd: &OwnedFd) -> bool {
@@ -249,6 +256,7 @@ fn terminal(fd: &OwnedFd) -> bool {
         events: libc::POLLIN,
         revents: 0,
     };
+    // SAFETY: `value` is one writable pollfd, and the count passed is one.
     assert!(unsafe { libc::poll(&mut value, 1, 0) } >= 0);
     value.revents & libc::POLLIN != 0
 }
@@ -262,6 +270,8 @@ struct OwnedChild {
 }
 fn proc_bytes(directory: &File, name: &str, limit: usize) -> std::io::Result<Vec<u8>> {
     let name = std::ffi::CString::new(name)?;
+    // SAFETY: the directory descriptor is open and the name is NUL-terminated
+    // for the call.
     let raw = unsafe {
         libc::openat(
             directory.as_raw_fd(),
@@ -273,6 +283,7 @@ fn proc_bytes(directory: &File, name: &str, limit: usize) -> std::io::Result<Vec
         return Err(std::io::Error::last_os_error());
     }
     let mut bytes = Vec::new();
+    // SAFETY: `raw` is a descriptor openat just returned, and nothing else owns it.
     unsafe { File::from_raw_fd(raw) }
         .take(limit as u64 + 1)
         .read_to_end(&mut bytes)?;
@@ -305,20 +316,22 @@ impl OwnedChild {
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(format!("/proc/{pid}"))?;
         let (birth, parent) = birth_and_parent(&proc)?;
-        if birth == 0
-            || parent != std::process::id()
-            || proc.metadata()?.uid() != unsafe { libc::geteuid() }
-        {
+        if birth == 0 || parent != std::process::id() || proc.metadata()?.uid() != effective_uid() {
             return Err(std::io::Error::other(
                 "process is not an owned fixture child",
             ));
         }
+        // SAFETY: pidfd_open takes two integers and returns a new descriptor or -1.
         let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
         if raw < 0 {
             return Err(std::io::Error::last_os_error());
         }
+        // SAFETY: `raw` is a descriptor pidfd_open just returned, and nothing else
+        // owns it.
         let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
         if let Some(image) = expected_image {
+            // SAFETY: the directory descriptor is open and the name is NUL-terminated
+            // for the call.
             let raw = unsafe {
                 libc::openat(
                     proc.as_raw_fd(),
@@ -329,6 +342,7 @@ impl OwnedChild {
             if raw < 0 {
                 return Err(std::io::Error::last_os_error());
             }
+            // SAFETY: `raw` is a descriptor openat just returned, and nothing else owns it.
             let actual = unsafe { File::from_raw_fd(raw) }.metadata()?;
             let expected = fs::symlink_metadata(image)?;
             if (actual.dev(), actual.ino(), actual.len())
@@ -338,7 +352,7 @@ impl OwnedChild {
                     "owned process image changed: pid={pid} birth={birth} parent={parent} euid={} \
                      expected_dev={} expected_ino={} expected_len={} \
                      actual_dev={} actual_ino={} actual_len={}",
-                    unsafe { libc::geteuid() },
+                    effective_uid(),
                     expected.dev(),
                     expected.ino(),
                     expected.len(),
@@ -367,7 +381,7 @@ impl OwnedChild {
         // Keep the original custody and both image files throughout this wait;
         // only the actual inherited parent image may be pending, never accepted.
         let parent = std::process::id();
-        let euid = unsafe { libc::geteuid() };
+        let euid = effective_uid();
         let expected_file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -395,9 +409,11 @@ impl OwnedChild {
                 ));
             }
             self.validate()?;
-            if parent != std::process::id() || euid != unsafe { libc::geteuid() } {
+            if parent != std::process::id() || euid != effective_uid() {
                 return Err(std::io::Error::other("owned launch observer changed"));
             }
+            // SAFETY: the directory descriptor is open and the name is NUL-terminated
+            // for the call.
             let raw = unsafe {
                 libc::openat(
                     self.proc.as_raw_fd(),
@@ -410,6 +426,7 @@ impl OwnedChild {
             }
             // Reopen each time: an exe file opened during the inherited phase
             // remains that old file even after the child completes exec.
+            // SAFETY: `raw` is a descriptor openat just returned, and nothing else owns it.
             let actual = unsafe { File::from_raw_fd(raw) }.metadata()?;
             let named = fs::symlink_metadata(image)?;
             if !named.is_file()
@@ -420,7 +437,7 @@ impl OwnedChild {
                 return Err(std::io::Error::other("owned launch image path changed"));
             }
             self.validate()?;
-            if parent != std::process::id() || euid != unsafe { libc::geteuid() } {
+            if parent != std::process::id() || euid != effective_uid() {
                 return Err(std::io::Error::other("owned launch observer changed"));
             }
             if terminal(&self.fd) {
@@ -462,7 +479,7 @@ impl OwnedChild {
         let (birth, parent) = birth_and_parent(&self.proc)?;
         if birth != self.birth
             || parent != std::process::id()
-            || self.proc.metadata()?.uid() != unsafe { libc::geteuid() }
+            || self.proc.metadata()?.uid() != effective_uid()
         {
             return Err(std::io::Error::other("owned process birth changed"));
         }
@@ -473,7 +490,9 @@ impl OwnedChild {
             return Ok(());
         }
         self.validate()?;
-        if unsafe {
+        // SAFETY: the pidfd is open, and a null siginfo asks the kernel to fill
+        // in the default one.
+        let sent = unsafe {
             libc::syscall(
                 libc::SYS_pidfd_send_signal,
                 self.fd.as_raw_fd(),
@@ -481,8 +500,8 @@ impl OwnedChild {
                 std::ptr::null::<libc::siginfo_t>(),
                 0,
             )
-        } < 0
-        {
+        };
+        if sent < 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
@@ -507,6 +526,8 @@ fn salvage_owned_family(deadline: Instant) -> std::io::Result<bool> {
     loop {
         // All clone-child exit signals participate in the closure proof.
         loop {
+            // SAFETY: a null status pointer is allowed, and WNOHANG returns at once.
+            // It reaps only this process's own children.
             let value =
                 unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG | libc::__WALL) };
             if value < 0 {
@@ -1763,14 +1784,16 @@ fn exchange_actions(stderr: &[u8]) -> std::collections::BTreeMap<String, u64> {
 
 fn subreaper(value: i32) -> bool {
     let mut observed = 0;
-    assert_eq!(
-        unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut observed) },
-        0
-    );
+    // SAFETY: the option writes one int through the pointer, and `observed`
+    // is a writable int.
+    let read = unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut observed) };
+    assert_eq!(read, 0);
     observed == value
 }
 fn reap_all_until(deadline: Instant) -> bool {
     loop {
+        // SAFETY: a null status pointer is allowed, and WNOHANG returns at once.
+        // It reaps only this process's own children.
         let result =
             unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG | libc::__WALL) };
         if result < 0 {
@@ -1830,7 +1853,7 @@ fn host_members_two_real_endpoints_direct_and_tls_derp() {
         }
         let metadata = fs::symlink_metadata(&artifact_parent).unwrap();
         assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
-        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(metadata.uid(), effective_uid());
         assert_eq!(metadata.mode() & 0o022, 0);
         let artifacts = tempfile::Builder::new()
             .prefix("host-member-binaries-")
@@ -1932,13 +1955,11 @@ fn host_member_isolated_kernel_journey() {
     let binaries = PathBuf::from(std::env::var_os("CW_MEMBER_CASE_BINARIES").unwrap());
     for directory in [&root, &binaries] {
         let meta = fs::symlink_metadata(directory).unwrap();
-        assert!(
-            meta.is_dir()
-                && meta.uid() == unsafe { libc::geteuid() }
-                && meta.mode() & 0o7777 == 0o700
-        );
+        assert!(meta.is_dir() && meta.uid() == effective_uid() && meta.mode() & 0o7777 == 0o700);
         assert_eq!(fs::canonicalize(directory).unwrap(), *directory);
     }
+    // SAFETY: the option takes one integer and no pointer. It changes only
+    // this test process.
     assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
     assert!(subreaper(1));
     assert!(
@@ -2130,6 +2151,7 @@ mod member_diagnostic_tests {
         assert!(AdmittedHelperDiagnostic::open(root.path()).is_err());
         fs::remove_file(&path).unwrap();
         let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `name` is a NUL-terminated path that lives past the call.
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         // NONBLOCK opens the FIFO without waiting for a writer; the regular
         // file admission then refuses it before attempting any read.
