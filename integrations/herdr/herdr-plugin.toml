@@ -1,0 +1,71 @@
+id = "codewire"
+name = "Codewire"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Open shells and coding agents in Codewire environments, local VMs or cloud sandboxes, as herdr tabs."
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "environments"
+title = "Codewire environments"
+description = "Choose an environment, then open a shell or an agent in it."
+placement = "overlay"
+command = ["sh", "bin/codewire.sh", "pane", "environments"]
+
+[[panes]]
+id = "new"
+title = "New Codewire environment"
+description = "Create an environment with cw's guided create."
+placement = "tab"
+command = ["sh", "bin/codewire.sh", "pane", "new"]
+
+[[panes]]
+id = "shell"
+title = "Codewire shell"
+placement = "tab"
+command = ["sh", "bin/codewire.sh", "pane", "shell"]
+
+[[panes]]
+id = "agent"
+title = "Codewire agent"
+placement = "tab"
+command = ["sh", "bin/codewire.sh", "pane", "agent"]
+
+[[panes]]
+id = "doctor"
+title = "Codewire doctor"
+placement = "split"
+command = ["sh", "bin/codewire.sh", "pane", "doctor"]
+
+[[actions]]
+id = "environments"
+title = "Codewire: environments"
+description = "List environments; open a shell or an agent in one."
+contexts = ["workspace"]
+command = ["sh", "bin/codewire.sh", "open", "environments"]
+
+[[actions]]
+id = "new"
+title = "Codewire: new environment"
+contexts = ["workspace"]
+command = ["sh", "bin/codewire.sh", "open", "new"]
+
+[[actions]]
+id = "shell"
+title = "Codewire: shell in the current environment"
+description = "A shell in the environment `cw use` selected."
+contexts = ["workspace"]
+command = ["sh", "bin/codewire.sh", "open", "shell"]
+
+[[actions]]
+id = "agent"
+title = "Codewire: Claude Code in the current environment"
+description = "Claude Code in the environment `cw use` selected."
+contexts = ["workspace"]
+command = ["sh", "bin/codewire.sh", "open", "agent"]
+
+[[actions]]
+id = "doctor"
+title = "Codewire: doctor"
+contexts = ["workspace"]
+command = ["sh", "bin/codewire.sh", "open", "doctor"]

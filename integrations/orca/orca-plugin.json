@@ -1,0 +1,21 @@
+{
+  "manifestVersion": 2,
+  "id": "codewire",
+  "publisher": "codewiresh",
+  "name": "Codewire",
+  "version": "0.1.0",
+  "execution": "declarative",
+  "description": "Run each Orca workspace in its own Codewire environment: a local VM on this computer or a cloud sandbox.",
+  "license": "MIT",
+  "repository": "https://github.com/codewiresh/codewire",
+  "engines": {
+    "orca": ">=1.4.245"
+  },
+  "contributes": {
+    "vmRecipes": [
+      { "path": "recipes/local.json" },
+      { "path": "recipes/cloud.json" }
+    ]
+  },
+  "capabilities": []
+}

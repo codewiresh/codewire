@@ -762,6 +762,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-load-fixture-images.sh
   scripts/ci/tests/test-build-runner-measure.sh
   scripts/ci/tests/test-bound-cargo-jobs.sh
+  scripts/ci/tests/test-integration-plugins.sh
   scripts/ci/tests/test-build-once.sh
   scripts/ci/tests/test-build-once-lean-archive.sh
   scripts/ci/tests/test-run-rust-checks.sh

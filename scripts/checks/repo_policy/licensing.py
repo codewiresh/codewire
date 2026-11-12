@@ -216,6 +216,29 @@ def check_license_map(_args: argparse.Namespace) -> int:
     for rel, expected in go_licenses.items():
         check_copy((Path(rel).parent / "LICENSE").as_posix(), expected)
 
+    # Editor and terminal plugins, each with its license text beside its manifest.
+    plugin_licenses = {
+        "integrations/herdr/herdr-plugin.toml": "MIT",
+        "integrations/orca/orca-plugin.json": "MIT",
+    }
+    actual_plugins = {
+        rel
+        for rel in git_source_files()
+        if rel.endswith(("/orca-plugin.json", "/herdr-plugin.toml"))
+    }
+    if actual_plugins != set(plugin_licenses):
+        failures.append(
+            "plugin inventory differs from the accepted license map: "
+            f"missing={sorted(set(plugin_licenses) - actual_plugins)}, "
+            f"unclassified={sorted(actual_plugins - set(plugin_licenses))}"
+        )
+    for rel, expected in plugin_licenses.items():
+        if rel.endswith(".json") and read_json(rel).get("license") != expected:
+            failures.append(
+                f"{rel}: license {read_json(rel).get('license')!r}, expected {expected!r}"
+            )
+        check_copy((Path(rel).parent / "LICENSE").as_posix(), expected)
+
     apache_copies = [
         "crates/codewire-admin-proto/LICENSE-APACHE",
         "crates/codewire-proto/LICENSE-APACHE",
@@ -256,6 +279,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         f"({len(cargo_declarations)} Cargo packages, "
         f"{len(npm_licenses)} npm packages, "
         f"{len(python_licenses)} Python packages, "
-        f"{len(go_licenses)} Go modules)"
+        f"{len(go_licenses)} Go modules, "
+        f"{len(plugin_licenses)} plugins)"
     )
     return 0

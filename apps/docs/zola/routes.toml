@@ -26,6 +26,18 @@ source = "content/access/git.md"
 output = "access/git/index.html"
 
 [[routes]]
+canonical = "/docs/access/herdr"
+redirect_from = "/docs/access/herdr/"
+source = "content/access/herdr.md"
+output = "access/herdr/index.html"
+
+[[routes]]
+canonical = "/docs/access/orca"
+redirect_from = "/docs/access/orca/"
+source = "content/access/orca.md"
+output = "access/orca/index.html"
+
+[[routes]]
 canonical = "/docs/access/ports"
 redirect_from = "/docs/access/ports/"
 source = "content/access/ports.md"

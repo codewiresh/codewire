@@ -18,5 +18,7 @@ are signed in; a local VM only from your own machine.
 | clone or push private repositories without a key in the environment | [Git repositories](@/access/git.md) |
 | move files in or out | [Files](@/access/files.md) |
 | open a server running inside, from a browser or another machine | [Ports and preview URLs](@/access/ports.md) |
+| run Orca workspaces in environments, or connect Orca to one | [Orca](@/access/orca.md) |
+| open shells and agents in environments from herdr | [herdr](@/access/herdr.md) |
 
 How the tunnel itself works is in [Networking](@/networking/_index.md).

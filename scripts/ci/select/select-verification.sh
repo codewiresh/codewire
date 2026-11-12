@@ -223,6 +223,7 @@ js_audit_scans() {
 ci_script_test_input() {
   case "$1" in
     scripts/ci/*|scripts/dev/*|scripts/checks/*|.gitea/*|.githooks/*|\
+    integrations/*|\
     Cargo.toml|crates/*/Cargo.toml|\
     scripts/runtime/dev/preflight-openbao-native-secrets.sh|\
     Makefile|package.json|rust-toolchain.toml|.dockerignore|docker-bake.hcl|.gitleaks.toml|\
@@ -1359,6 +1360,13 @@ if [ "$event_selected" = false ]; then
         # Dedicated Dev smoke tooling uses dashboard's pinned browser libraries,
         # but does not change product templates or require rebuilding Kind.
         select_token dev_smoke_script_tests
+        recognized=true
+        ;;
+      integrations/*)
+        # The Orca and herdr plugins: shell scripts that drive cw. The
+        # CI-script tests run their stub tests (test-integration-plugins.sh,
+        # through ci_script_test_input) and Policy runs ShellCheck. They build
+        # into nothing else.
         recognized=true
         ;;
       apps/docs/*)

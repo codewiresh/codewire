@@ -722,6 +722,12 @@ unmapped_workflow="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   KIND_E2E_OPT_IN=false "$SELECTOR" "$TMP/unmapped-workflow.paths" 2>/dev/null)"
 assert_contract_field unmapped_workflow "$unmapped_workflow" classification unclassified
 assert_contract_field unmapped_workflow "$unmapped_workflow" required_local_mode full
+# The Orca and herdr plugins select only Policy, whose CI-script tests run
+# their stub tests; they never select every family.
+run_paths_case integration_plugins pull_request refs/pull/4207/head false \
+  'policy' \
+  integrations/orca/src/common.sh integrations/orca/recipes/local.json \
+  integrations/herdr/bin/codewire.sh integrations/herdr/herdr-plugin.toml
 # Deleting the retired local merge gate (#3119 step 2.3) is classified, so its
 # removal does not select every family.
 run_paths_case retired_local_gate pull_request refs/pull/3119/head false \
