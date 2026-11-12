@@ -497,6 +497,10 @@ pub(crate) fn router() -> Router<AppState> {
             post(settings::regenerate_recovery_codes_action).layer(DefaultBodyLimit::max(2048)),
         )
         .route(
+            "/settings/_actions/send-verification",
+            post(settings::send_verification_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
             "/settings/_actions/sign-out",
             post(authentication::sign_out_action),
         )

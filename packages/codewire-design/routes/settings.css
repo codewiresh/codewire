@@ -43,9 +43,17 @@
 [data-dashboard-app] .cw-public-key code { overflow-wrap: anywhere; font-size: var(--text-code); }
 [data-dashboard-app] :is(.cw-credential-row, .cw-profile-row) > .cw-button { justify-self: start; }
 /* Session and security rows: what it is on the left, its actions on the right. */
-[data-dashboard-app] :is(.cw-account-session, .cw-security-row) { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-width: 0; }
+[data-dashboard-app] .cw-account-session { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-width: 0; }
+/* A security row: its title and status beside its actions, the explanation the full width under them. */
+[data-dashboard-app] .cw-security-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title actions" "text text"; align-items: center; gap: var(--space-1) var(--space-3); min-width: 0; }
+[data-dashboard-app] .cw-security-row > h3 { grid-area: title; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+[data-dashboard-app] .cw-security-row > p { grid-area: text; margin: 0; color: var(--fg-tertiary); font-size: var(--text-small); }
+[data-dashboard-app] .cw-security-row > .cw-security-actions { grid-area: actions; }
 [data-dashboard-app] .cw-security-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: end; gap: var(--space-2); }
-[data-dashboard-app] :is(.cw-account-session > header, .cw-security-row > div) p { margin: var(--space-1) 0 0; color: var(--fg-tertiary); font-size: var(--text-small); }
+[data-dashboard-app] .cw-account-session > header p { margin: var(--space-1) 0 0; color: var(--fg-tertiary); font-size: var(--text-small); }
+/* The email with its verification state and, until it is verified, a way to send a new link. */
+[data-dashboard-app] .cw-settings-email { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+[data-dashboard-app] .cw-settings-email form { display: contents; }
 [data-dashboard-app] .cw-account-session > header code { color: var(--fg-tertiary); font-size: var(--text-small); }
 [data-dashboard-app] .cw-session-pagination { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-block: var(--space-4); }
 [data-dashboard-app] .cw-credential-row > div:first-child { display: grid; gap: var(--space-1); }
@@ -116,7 +124,7 @@
 }
 
 @media (max-width: 48rem) {
-  [data-dashboard-app] .cw-security-row { grid-template-columns: minmax(0, 1fr); }
+  [data-dashboard-app] .cw-security-row { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title" "text" "actions"; }
   [data-dashboard-app] .cw-security-actions { justify-content: start; }
   [data-dashboard-app] .cw-settings-content { padding: var(--space-4) var(--space-4) var(--space-8); }
   [data-dashboard-app] .cw-settings-details div { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }

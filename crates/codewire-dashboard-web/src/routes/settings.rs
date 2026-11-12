@@ -97,6 +97,8 @@ pub(super) async fn settings(
     };
     page.settings.message = approved_message(&query.message).to_owned();
     page.settings.error = approved_error(&query.error).to_owned();
+    page.settings.account_message = approved_account_message(&query.message).to_owned();
+    page.settings.account_error = approved_account_error(&query.error).to_owned();
     page.settings.security_error = approved_security_error(&query.security).to_owned();
     page.settings.two_factor.active =
         approved_dialog(&query.dialog, page.settings.two_factor_enabled);
@@ -934,6 +936,85 @@ fn settings_redirect(code: &str, error: bool, headers: &HeaderMap) -> Response {
     )
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct SendVerificationForm {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendVerificationReply {
+    #[serde(default)]
+    sent: bool,
+    #[serde(default)]
+    already_verified: bool,
+}
+
+/// Sends the signed-in account a new email verification link, for an
+/// address that is not verified yet (a lost or expired first link).
+pub(super) async fn send_verification_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    form: Result<Form<SendVerificationForm>, axum::extract::rejection::FormRejection>,
+) -> Response {
+    let Ok(Form(form)) = form else {
+        return private(error_page(WebError::Forbidden));
+    };
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, SETTINGS_PATH).await {
+        Ok(cookie) => cookie,
+        Err(response) => return private(response),
+    };
+    let reply = crate::raw_auth::post_json::<_, SendVerificationReply>(
+        &state,
+        "/api/auth/send-verification-email",
+        Some(cookie),
+        &serde_json::json!({}),
+    )
+    .await;
+    private(match reply {
+        Ok(reply) if reply.status == StatusCode::UNAUTHORIZED => {
+            login_redirect(SETTINGS_PATH, &headers)
+        }
+        Ok(reply) if reply.status.is_success() => match reply.body {
+            Some(body) if body.already_verified => {
+                account_redirect("email-already-verified", false, &headers)
+            }
+            Some(body) if body.sent => account_redirect("verification-sent", false, &headers),
+            _ => account_redirect("verification-unavailable", true, &headers),
+        },
+        _ => account_redirect("verification-unavailable", true, &headers),
+    })
+}
+
+fn account_redirect(code: &str, error: bool, headers: &HeaderMap) -> Response {
+    let key = if error { "error" } else { "message" };
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair(key, code);
+    redirect(
+        format!("{SETTINGS_PATH}?{}#account-details", query.finish()),
+        headers,
+    )
+}
+
+fn approved_account_message(code: &str) -> &'static str {
+    match code {
+        "verification-sent" => {
+            "We emailed you a verification link. It works for 24 hours; a newer link replaces it."
+        }
+        "email-already-verified" => "Your email is already verified.",
+        _ => "",
+    }
+}
+
+fn approved_account_error(code: &str) -> &'static str {
+    match code {
+        "verification-unavailable" => {
+            "The verification email could not be sent. Try again in a moment."
+        }
+        _ => "",
+    }
+}
+
 fn approved_message(code: &str) -> &'static str {
     match code {
         "session-revoked" => {
@@ -1207,6 +1288,39 @@ mod tests {
         }
         .render()
         .unwrap()
+    }
+
+    #[test]
+    fn an_unverified_email_offers_a_new_verification_link() {
+        let mut settings = enrolled_settings();
+        settings.email_verified = false;
+        settings.csrf_token = "csrf".into();
+        let body = render(&settings);
+        assert!(body.contains(r#"<span class="cw-badge" data-tone="warning">Not verified</span><form method="post" action="/settings/_actions/send-verification"><input type="hidden" name="_csrf" value="csrf"><button class="cw-button cw-button--outline cw-button--small" type="submit">Send verification email</button></form>"#));
+
+        settings.email_verified = true;
+        let body = render(&settings);
+        assert!(body.contains(r#"<span class="cw-badge" data-tone="success">Verified</span>"#));
+        assert!(!body.contains("send-verification"));
+
+        // The outcome shows in Account details, not with the sessions.
+        settings.account_message = approved_account_message("verification-sent").to_owned();
+        let body = render(&settings);
+        let details = body.split_once("id=\"account-details\"").unwrap().1;
+        let details = details.split_once("id=\"security\"").unwrap().0;
+        assert!(details.contains("We emailed you a verification link."));
+        assert_eq!(
+            approved_account_error("verification-unavailable"),
+            "The verification email could not be sent. Try again in a moment."
+        );
+        assert_eq!(approved_account_message("unknown"), "");
+    }
+
+    #[test]
+    fn a_security_row_puts_its_status_with_the_title_and_the_text_under_it() {
+        let body = render(&enrolled_settings());
+        assert!(body.contains(r#"<li class="cw-security-row"><h3>Two-factor authentication <span class="cw-status cw-status--pill" data-tone="success">Enabled</span></h3><p>Sign-in asks for a code from your authenticator app. Recovery codes each work once.</p><div class="cw-security-actions"><form class="cw-dialog-launcher""#));
+        assert!(body.contains(r#"<li class="cw-security-row"><h3>Password</h3><p>Get a reset link by email.</p><div class="cw-security-actions"><a class="cw-button cw-button--outline cw-button--small" href="/forgot-password">Reset password</a></div></li>"#));
     }
 
     #[test]

@@ -361,6 +361,9 @@ pub(crate) struct SettingsPageView {
     pub(crate) csrf_token: String,
     pub(crate) message: String,
     pub(crate) error: String,
+    /// The outcome of sending a verification email, shown in Account details.
+    pub(crate) account_message: String,
+    pub(crate) account_error: String,
     /// An alert in the Security card that belongs to no dialog.
     pub(crate) security_error: String,
     /// A confirmed replacement revoked every listed session, including the one
