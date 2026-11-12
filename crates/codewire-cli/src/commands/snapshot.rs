@@ -290,7 +290,7 @@ fn default_snapshot_name(environment: &str, now: chrono::DateTime<chrono::Utc>) 
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
-fn gib(bytes: u64) -> String {
+pub(super) fn gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / GIB)
 }
 

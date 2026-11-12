@@ -1124,3 +1124,37 @@ message GetGenerationDaemonAccessRequest {
   string environment_id = 1;
   uint64 generation = 2;
 }
+
+// Retained images (protocol 21, #4262): after its last environment is
+// removed, the newest pulled image of each of at most two repositories stays
+// in the host's content store, so the next create of it pulls nothing.
+service LocalImageCacheService {
+  // Forget the retained images, and every failed create's download cache, and
+  // collect: whatever no environment, pending create or snapshot still uses
+  // is deleted. With dry_run, report only.
+  rpc PruneImages(PruneImagesRequest) returns (PruneImagesResponse);
+}
+
+message PruneImagesRequest {
+  bool dry_run = 1;
+}
+
+message PruneImagesResponse {
+  // The images retained before this request, most recently used first.
+  repeated RetainedImage images = 1;
+  // What deleting them frees: the bytes no environment, pending create or
+  // snapshot also uses.
+  uint64 reclaimable_bytes = 2;
+  // Without dry_run: the images are forgotten, but the collection that frees
+  // their disk did not finish now; the supervisor's collector runs it once
+  // the VM work in flight ends. Always false with dry_run.
+  bool collection_pending = 3;
+}
+
+message RetainedImage {
+  // The registry and repository path, without a tag or digest.
+  string repository = 1;
+  uint64 bytes = 2;
+  // The part of `bytes` nothing else uses.
+  uint64 reclaimable_bytes = 3;
+}

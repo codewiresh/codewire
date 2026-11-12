@@ -1,7 +1,7 @@
 ---
 title: Quickstart
 description: Install cw, run your project in a VM on your own machine, start Claude Code in it, open a dev server, then do the same on the platform.
-updated: 2026-11-08
+updated: 2026-11-12
 weight: 5
 aliases: ["/getting-started", "/getting-started/install", "/getting-started/local-vm", "/getting-started/hosted-sandbox"]
 ---
@@ -90,7 +90,7 @@ minute or two; one line names each stage as it runs:
   ✓ Checking the VM runtime  1.2s
   ✓ Checking credential access  0.0s
   ✓ Preparing the workspace disk  0.0s
-  ✓ Pulling the image  1m 27s
+  ✓ Preparing the image  1m 27s
   ✓ Starting the VM runner  0.2s
   ✓ Starting the VM  1m 16s
   ✓ Booting the workspace  1.8s

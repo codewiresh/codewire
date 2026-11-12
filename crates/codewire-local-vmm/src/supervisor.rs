@@ -6,8 +6,10 @@
 
 mod bootstrap;
 mod checkpoints;
+mod collection_roots;
 mod metadata;
 mod network_policies;
+mod retained_images;
 mod runtime;
 mod snapshots;
 mod sources;
@@ -501,6 +503,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         ],
     );
     let (store, state) = SupervisorStore::open(&root)?;
+    let retained_images = retained_images::load(&store, log.as_ref())?;
     let network_policies = Arc::new(
         crate::network_policy_store::NetworkPolicyStore::open(&root)
             .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?,
@@ -520,6 +523,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         runtime_operations: BTreeSet::new(),
         incompatible_runners: BTreeSet::new(),
         download_cache: BTreeMap::new(),
+        retained_images,
         content_writers: 0,
         collection_wanted: false,
         collecting: false,
@@ -774,6 +778,9 @@ struct SupervisorCore {
     // them once the name has no environment and no pending create, and a new
     // supervisor starts without them.
     download_cache: BTreeMap<String, BTreeMap<Sha256Digest, u64>>,
+    // The newest pulled image of each repository, kept after its last
+    // environment is removed (#4262; see `retained_images`).
+    retained_images: retained_images::RetainedImages,
     // Content and artifact writers in flight, and whether a collection is
     // wanted or running (#2978). A collection runs only with no writer in
     // flight, and a writer waits only while one runs.
@@ -1566,8 +1573,7 @@ impl Supervisor {
         let resolver = RegistryResolver::new(content)?;
         let resolved = resolver.resolve_anonymous(reference).await;
         self.core()
-            .cache_download(name, resolver.verified_blobs())?;
-        Ok(resolved?)
+            .record_pull(name, reference, resolver.verified_blobs(), resolved)
     }
 }
 
@@ -1577,28 +1583,6 @@ impl SupervisorCore {
     fn admit(&mut self, operation: &OperationRecord) {
         self.admitted_here
             .insert(operation.operation_id, self.selections);
-    }
-
-    /// Cache `name`'s newest pull. Besides it, only names that hold an
-    /// environment or await a create keep theirs: a failed create's layers
-    /// stay for its retry until another name pulls, so the cache never
-    /// outgrows the environments (#2978).
-    fn cache_download(
-        &mut self,
-        name: &str,
-        verified: BTreeMap<Sha256Digest, u64>,
-    ) -> Result<(), SupervisorError> {
-        let pending = self.store.pending_operations()?;
-        let environments = &self.state.environments;
-        self.download_cache.retain(|cached, _| {
-            environments.contains_key(cached)
-                || pending.iter().any(|operation| {
-                    operation.kind == OperationKind::Create
-                        && operation_name(operation) == Some(cached.as_str())
-                })
-        });
-        self.download_cache.insert(name.to_owned(), verified);
-        Ok(())
     }
 }
 
@@ -2430,30 +2414,6 @@ impl SupervisorCore {
             })
             .map(|prepared| prepared.map(|prepared| prepared.plan().clone()))
         }))
-    }
-
-    /// What a collection keeps, read from memory and the journal only; the
-    /// filesystem walk runs afterwards with no lock held (#2978).
-    fn collection_retained(&self) -> Result<CollectionRetained, SupervisorError> {
-        let mut content = referenced_content_blobs(&self.state)?;
-        #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
-        if let Some(image) = self.synthetic_workspace_image_pin()? {
-            retain_image_content(&mut content, &image)?;
-        }
-        for operation in self.store.pending_operations()? {
-            if operation.kind != OperationKind::Create {
-                continue;
-            }
-            let (_, workspace_plan) = create_request_from_operation(&operation)?;
-            retain_workspace_plan_content(&mut content, &workspace_plan)?;
-        }
-        for (digest, size) in self.download_cache.values().flatten() {
-            content.entry(digest.clone()).or_insert(*size);
-        }
-        let mut artifacts = referenced_artifact_generations(&self.state)?;
-        // Local disk snapshots are retention roots (#3046).
-        snapshots::retain(&self.config, &mut content, &mut artifacts)?;
-        Ok(CollectionRetained { content, artifacts })
     }
 }
 
@@ -11103,6 +11063,7 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
+            retained_images: retained_images::RetainedImages::default(),
             content_writers: 0,
             collection_wanted: false,
             collecting: false,
@@ -11882,6 +11843,7 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
+            retained_images: retained_images::RetainedImages::default(),
             content_writers: 0,
             collection_wanted: false,
             collecting: false,
@@ -15854,6 +15816,7 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
+            retained_images: retained_images::RetainedImages::default(),
             content_writers: 0,
             collection_wanted: false,
             collecting: false,
@@ -19492,6 +19455,7 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
+            retained_images: retained_images::RetainedImages::default(),
             content_writers: 0,
             collection_wanted: false,
             collecting: false,
@@ -19572,6 +19536,7 @@ mod tests {
             runtime_operations: BTreeSet::new(),
             incompatible_runners: BTreeSet::new(),
             download_cache: BTreeMap::new(),
+            retained_images: retained_images::RetainedImages::default(),
             content_writers: 0,
             collection_wanted: false,
             collecting: false,

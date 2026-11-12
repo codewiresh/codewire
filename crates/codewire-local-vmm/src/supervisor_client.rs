@@ -632,6 +632,27 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
+    /// Forget the retained images and collect, or with `dry_run` only report
+    /// them (#4262). Fails with `Unimplemented` before contacting a
+    /// supervisor older than protocol 21, which retains no images.
+    pub async fn prune_images(&self, dry_run: bool) -> Result<v1::PruneImagesResponse, Status> {
+        if !self.supports(SupervisorFeature::LocalImageCache) {
+            return Err(Status::unimplemented(
+                "your local VMs run on an older cw's supervisor, which keeps no images after their VMs are removed; `cw upgrade --vms` moves them to this cw once they are idle",
+            ));
+        }
+        // Every connection keeps the original socket-derived peer pin.
+        let channel = connect_supervisor_peer(self.peer_pin.clone())
+            .await
+            .map_err(|_| Status::failed_precondition("retained native supervisor changed"))?;
+        Ok(
+            v1::local_image_cache_service_client::LocalImageCacheServiceClient::new(channel)
+                .prune_images(v1::PruneImagesRequest { dry_run })
+                .await?
+                .into_inner(),
+        )
+    }
+
     /// Fails with `Unimplemented` before contacting a supervisor older than
     /// protocol 20, which has no VM checkpoints.
     pub fn require_local_checkpoints(&self) -> Result<(), Status> {

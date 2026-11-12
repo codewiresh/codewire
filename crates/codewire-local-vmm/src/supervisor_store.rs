@@ -40,6 +40,8 @@ use crate::workspace_generation::WorkspaceGenerationRecord;
 #[cfg(test)]
 use crate::workspace_plan::WorkspacePlan;
 
+mod retained_images;
+
 pub(crate) const DATABASE_FILE: &str = "supervisor.db";
 const DATABASE_WAL_FILE: &str = "supervisor.db-wal";
 const DATABASE_SHM_FILE: &str = "supervisor.db-shm";

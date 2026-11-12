@@ -205,7 +205,7 @@ fn stage_of(operation: &v1::Operation) -> Option<(&'static str, &'static str)> {
         | Stage::RequireEnvironmentAccess
         | Stage::ApplySourceAccessBinding => ("access", "Checking credential access"),
         Stage::ProvisionWorkspace => ("disk", "Preparing the workspace disk"),
-        Stage::StageWorkspaceGeneration => ("image", "Pulling the image"),
+        Stage::StageWorkspaceGeneration => ("image", "Preparing the image"),
         Stage::EnsureRunner => ("runner", "Starting the VM runner"),
         Stage::StartVm | Stage::RestartVm => match Runner::try_from(operation.runner_stage) {
             Ok(Runner::WaitingGuest | Runner::GuestInit | Runner::DaemonReady) => {

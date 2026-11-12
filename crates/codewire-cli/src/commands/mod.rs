@@ -39,6 +39,8 @@ pub(crate) use native::*;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credential_authority;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod local_images;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native_progress;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use credential_authority::*;

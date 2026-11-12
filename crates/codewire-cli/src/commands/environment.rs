@@ -289,6 +289,11 @@ pub(crate) async fn handle_env_command(
         }
         EnvCommand::Cp(args) => handle_unified_environment_cp(globals, placement, args).await,
         EnvCommand::Port(args) => handle_unified_environment_port(globals, placement, args).await,
+        // Locally, prune frees the images kept after their last VM (#4262).
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        EnvCommand::Prune(args) if placement == Some(EnvironmentPlacement::Local) => {
+            super::local_images::prune(args).await
+        }
         command => {
             // Cloud-only operations: an explicit --cloud is their placement;
             // --local is refused rather than ignored.

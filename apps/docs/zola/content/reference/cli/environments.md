@@ -275,7 +275,23 @@ cw prune [--state error,creating,pending] [--dry-run] [-y]
 cw nuke [-y]                               # delete every environment in the organization; asks you to type a phrase
 ```
 
-These accept `--cloud` and refuse `--local`.
+These accept `--cloud` and refuse `--local`, except `prune`, which with
+`--local` means the next section.
+
+## cw prune --local
+
+```sh
+cw prune --local [--dry-run] [-y]
+```
+
+Removing a local VM keeps the workspace image it was created from, so the
+next create downloads nothing: the newest pulled image of each of at most two
+image repositories stays on disk, most recently used first, and a newer image
+of a repository replaces its older one. `cw prune --local` lists those images
+and deletes them, freeing their disk except what another VM or a disk
+snapshot still uses; `--dry-run` only lists them and says what deleting would
+free. `--state` does not apply. The next create of a deleted image downloads
+it again.
 
 ## cw cp
 

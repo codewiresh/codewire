@@ -650,8 +650,8 @@ enum Command {
     )]
     CancelDelete(EnvTargetArgs),
     #[command(
-        about = "Delete stale cloud environments",
-        long_about = "Delete cloud environments stuck in error, creating, or pending states."
+        about = "Delete stale cloud environments, or with --local the images kept after local VMs",
+        long_about = "Delete cloud environments stuck in error, creating, or pending states. With --local, delete the workspace images local VMs keep after their last VM is removed (the newest of at most two repositories), except what a VM or snapshot still uses; --state does not apply."
     )]
     Prune(EnvPruneArgs),
     #[command(

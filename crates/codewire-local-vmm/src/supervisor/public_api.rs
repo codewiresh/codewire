@@ -98,6 +98,11 @@ pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
         "/codewire.local.v1.LocalCheckpointService/{*method}",
         v1::local_checkpoint_service_server::LocalCheckpointServiceServer::new(supervisor.clone()),
     );
+    // Retained images (#4262, protocol 21).
+    let router = router.route_service(
+        "/codewire.local.v1.LocalImageCacheService/{*method}",
+        v1::local_image_cache_service_server::LocalImageCacheServiceServer::new(supervisor.clone()),
+    );
     router
         .route_service(
             PRIVATE_SUPERVISOR_ROUTE,

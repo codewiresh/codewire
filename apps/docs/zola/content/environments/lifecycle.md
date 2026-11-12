@@ -1,7 +1,7 @@
 ---
 title: Lifecycle
 description: Stop, start, resize and remove environments; give hosted sandboxes a lifetime, extend it, and protect them from deletion.
-updated: 2026-11-11
+updated: 2026-11-12
 weight: 5
 aliases: ["/guides/lifecycle"]
 ---
@@ -81,6 +81,12 @@ cw rm app
 Removal deletes the VM and its disks at once. A local VM's project folder on
 your machine is never touched. Removing a trusted host environment asks
 first; `-y` skips the question.
+
+Removing a local VM keeps the workspace image it was created from, so the
+next local VM from it downloads nothing: Codewire keeps the newest image of
+each of at most two image repositories, such as the workspace image across a
+`cw` update. `cw prune --local` deletes them and gives the disk back; see the
+[CLI reference](@/reference/cli/environments.md#cw-prune-local).
 
 ## Hosted sandboxes: lifetime and protection
 
