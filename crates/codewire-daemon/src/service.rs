@@ -1199,6 +1199,12 @@ mod tests {
     /// before any attach control was tested). It is never the expected
     /// duration; what these tests time is the controls after it.
     const TRANSCRIPT_HANG: Duration = Duration::from_secs(300);
+    /// Bounds an attachment test's wait for a replay to finish, a reply slot
+    /// to fill, a control's effect or a release, so a hang fails instead of
+    /// stalling the run. The tests prove order and effects, never speed: the
+    /// replay reads a transcript that was synced to disk frame by frame, and
+    /// a starved CI guest took more than 10 s for 256 KiB (#4234).
+    const ATTACH_HANG: Duration = Duration::from_secs(300);
     use tonic::service::Interceptor;
     use tonic::service::interceptor::InterceptedService;
     use tonic::transport::Channel;
@@ -2484,7 +2490,7 @@ mod tests {
         let (temp, engine) = attach_engine();
         let session = engine.launch(v1::LaunchSessionRequest {
             command: vec!["sh".into(), "-c".into(),
-                 // The shell outlives TRANSCRIPT_HANG; the test stops it.
+                 // The shell outlives TRANSCRIPT_HANG and each ATTACH_HANG; the test stops it.
                 "stty -echo; printf ready > attach-ready; IFS= read -r line; printf '%s' \"$line\" > later-gap-input; exec sleep 600".into()],
             pty: true,
             term: "xterm-256color".into(),
@@ -2513,7 +2519,7 @@ mod tests {
             },
             output,
         ));
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(ATTACH_HANG, async {
             while capacity.capacity() != 0 {
                 sleep(Duration::from_millis(10)).await;
             }
@@ -2531,7 +2537,7 @@ mod tests {
             }))
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(ATTACH_HANG, async {
             while !std::fs::read_to_string(temp.path().join("home/later-gap-input"))
                 .as_deref()
                 .is_ok_and(|value| value == "produce")
@@ -2553,7 +2559,7 @@ mod tests {
         assert_eq!(record.output_end_offset, 262144 + 9437184);
         assert!(record.output_start_offset > 0);
         let end = record.output_end_offset;
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(ATTACH_HANG, async {
             let mut cursor = 0;
             let mut gap_seen = false;
             while cursor < end {
@@ -2584,7 +2590,7 @@ mod tests {
         .await
         .expect("gap-aware ordered replay finishes");
         drop(receiver);
-        tokio::time::timeout(Duration::from_secs(1), owner)
+        tokio::time::timeout(ATTACH_HANG, owner)
             .await
             .expect("closed reader releases attachment")
             .unwrap();
@@ -2617,7 +2623,7 @@ mod tests {
             },
             output,
         ));
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(ATTACH_HANG, async {
             let mut cursor = 0;
             let mut terminal_seen = false;
             while let Some(message) = receiver.recv().await {
