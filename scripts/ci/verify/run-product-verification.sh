@@ -700,6 +700,8 @@ run_repo_rules() {
   python3 scripts/checks/repo_checks.py workspace-image-pin
   python3 scripts/checks/repo_checks.py webpki-roots-floor --self-test
   python3 scripts/checks/repo_checks.py webpki-roots-floor
+  python3 scripts/checks/repo_checks.py cargo-lock-integrity --self-test
+  python3 scripts/checks/repo_checks.py cargo-lock-integrity
   python3 scripts/checks/repo_checks.py sqlx-sqlite-unused --self-test
   python3 scripts/checks/repo_checks.py sqlx-sqlite-unused
   python3 scripts/checks/repo_checks.py workspace-lints --self-test

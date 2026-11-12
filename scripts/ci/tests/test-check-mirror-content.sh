@@ -357,7 +357,56 @@ printf '%s\0' "$@" >"${MERGE_TEST_ARGS:?}"
 SH
 chmod 0755 "$work/merge-bin/fj"
 export MERGE_TEST_ARGS="$work/merge.args"
-PATH="$work/merge-bin:$PATH" bash "$ROOT/scripts/dev/merge-pr.sh" 42 'fix: safe title'
+
+# merge-pr.sh checks the merge itself, so it runs from a clone whose origin
+# carries main and the pull request refs. Main locks a second base64 and names
+# its version; pull request 43, from the older main, adds a bare "base64". Git
+# merges them cleanly, and Cargo would refuse the result (b34cf2bb).
+merge_lock() { # PACKAGES...: "name version dep,dep"
+  printf 'version = 4\n'
+  local entry name version deps dep
+  for entry in "$@"; do
+    read -r name version deps <<<"$entry"
+    printf '\n[[package]]\nname = "%s"\nversion = "%s"\n' "$name" "$version"
+    if [[ -n "$deps" ]]; then
+      printf 'dependencies = [\n'
+      IFS=, read -ra dep <<<"$deps"
+      printf ' "%s",\n' "${dep[@]}"
+      printf ']\n'
+    fi
+    # Room between entries, so each side's edit is its own hunk.
+    printf '\n# -\n# -\n# -\n'
+  done
+}
+merge_origin="$work/merge-origin.git"
+merge_repo="$work/merge-repo"
+git init -q --bare -b main "$merge_origin"
+git init -q -b main "$merge_repo"
+git -C "$merge_repo" config user.name 'Test Author'
+git -C "$merge_repo" config user.email 'test@example.invalid'
+mkdir -p "$merge_repo/scripts/dev" "$merge_repo/scripts/checks"
+cp "$ROOT/scripts/dev/merge-pr.sh" "$merge_repo/scripts/dev/"
+cp -R "$ROOT/scripts/checks/repo_checks.py" "$ROOT/scripts/checks/repo_policy" "$merge_repo/scripts/checks/"
+merge_lock 'app 0.1.0 base64' 'base64 0.22.1' 'middle 0.1.0' >"$merge_repo/Cargo.lock"
+git -C "$merge_repo" add -A
+git -C "$merge_repo" commit -q -m base
+git -C "$merge_repo" remote add origin "$merge_origin"
+git -C "$merge_repo" checkout -q -b clean
+printf 'clean\n' >"$merge_repo/README"
+git -C "$merge_repo" add README
+git -C "$merge_repo" commit -q -m clean
+git -C "$merge_repo" push -q origin HEAD:refs/pull/42/head
+git -C "$merge_repo" checkout -q -b bare-name main
+merge_lock 'app 0.1.0 base64' 'base64 0.22.1' 'middle 0.1.0' 'zz-access 0.1.0 base64' >"$merge_repo/Cargo.lock"
+git -C "$merge_repo" commit -q -am 'access depends on base64'
+git -C "$merge_repo" push -q origin HEAD:refs/pull/43/head
+git -C "$merge_repo" checkout -q main
+merge_lock 'app 0.1.0 base64 0.22.1' 'base64 0.22.1' 'base64 0.23.1' 'middle 0.1.0' >"$merge_repo/Cargo.lock"
+git -C "$merge_repo" commit -q -am 'a second base64'
+git -C "$merge_repo" push -q origin main
+merge_pr() { PATH="$work/merge-bin:$PATH" bash "$merge_repo/scripts/dev/merge-pr.sh" "$@"; }
+
+merge_pr 42 'fix: safe title'
 python3 - "$MERGE_TEST_ARGS" <<'PYTEST'
 import sys
 from pathlib import Path
@@ -365,23 +414,32 @@ args=Path(sys.argv[1]).read_bytes().split(b'\0')[:-1]
 assert args == [b'pr', b'-R', b'origin', b'merge', b'42', b'-M', b'squash',
                 b'-t', b'fix: safe title (#42)', b'-m', b'Reviewed-on: #42'], args
 PYTEST
-PATH="$work/merge-bin:$PATH" bash "$ROOT/scripts/dev/merge-pr.sh" 42 'fix: safe title (#42)'
+merge_pr 42 'fix: safe title (#42)'
 python3 - "$MERGE_TEST_ARGS" <<'PYTEST'
 import sys
 from pathlib import Path
 assert Path(sys.argv[1]).read_bytes().count(b'(#42)') == 1
 PYTEST
 rm "$MERGE_TEST_ARGS"
-PATH="$work/merge-bin:$PATH" bash "$ROOT/scripts/dev/merge-pr.sh" --help >/dev/null
+merge_pr --help >/dev/null
 [[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'merge help contacted the forge'
 for invalid in not-a-number 0; do
-  if PATH="$work/merge-bin:$PATH" bash "$ROOT/scripts/dev/merge-pr.sh" "$invalid" title >/dev/null 2>&1; then
+  if merge_pr "$invalid" title >/dev/null 2>&1; then
     fail 'invalid merge number was accepted'
   fi
 done
-if PATH="$work/merge-bin:$PATH" bash "$ROOT/scripts/dev/merge-pr.sh" 42 $'title\nbody' >/dev/null 2>&1; then
+if merge_pr 42 $'title\nbody' >/dev/null 2>&1; then
   fail 'multiline merge title was accepted'
 fi
+git -C "$merge_repo" fetch -q origin refs/pull/43/head
+git -C "$merge_repo" merge-tree --write-tree main FETCH_HEAD >/dev/null ||
+  fail 'the bare-name fixture does not merge cleanly, so it does not test the lock check'
+if merge_pr 43 'feat: access' >"$work/merge-43.out" 2>&1; then
+  fail 'a merge that leaves an ambiguous Cargo.lock was not refused'
+fi
+grep -qF "zz-access 0.1.0 depends on 'base64', which matches 2 locked packages" "$work/merge-43.out" ||
+  fail "the refused merge did not name the ambiguous dependency: $(cat "$work/merge-43.out")"
+[[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a refused merge contacted the forge'
 [[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'invalid merge arguments contacted the forge'
 python3 - "$ROOT/.gitea/default_merge_message/SQUASH_TEMPLATE.md" <<'PYTEST'
 import sys

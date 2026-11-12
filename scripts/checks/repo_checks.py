@@ -25,6 +25,7 @@ from repo_policy.private_hosts import check_private_host_literals
 from repo_policy.proto import check_proto_package_boundaries
 from repo_policy.workspace_identity import check_identity_free_workspace
 from repo_policy.webpki_roots_floor import check_webpki_roots_floor
+from repo_policy.cargo_lock_integrity import check_cargo_lock_integrity
 from repo_policy.sqlx_sqlite_unused import check_sqlx_sqlite_unused
 from repo_policy.image_patch_paths import check_image_patch_paths
 from repo_policy.workspace_image_pin import check_workspace_image_pin
@@ -102,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
     webpki_roots_parser = subparsers.add_parser("webpki-roots-floor")
     webpki_roots_parser.add_argument("--self-test", action="store_true")
     webpki_roots_parser.set_defaults(func=check_webpki_roots_floor)
+    cargo_lock_parser = subparsers.add_parser("cargo-lock-integrity")
+    cargo_lock_parser.add_argument("--self-test", action="store_true")
+    cargo_lock_parser.add_argument("--lock", help="check this lockfile, or - for standard input")
+    cargo_lock_parser.add_argument("--label", help="the name reported for --lock")
+    cargo_lock_parser.set_defaults(func=check_cargo_lock_integrity)
     sqlx_sqlite_parser = subparsers.add_parser("sqlx-sqlite-unused")
     sqlx_sqlite_parser.add_argument("--self-test", action="store_true")
     sqlx_sqlite_parser.set_defaults(func=check_sqlx_sqlite_unused)
