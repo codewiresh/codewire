@@ -322,16 +322,17 @@ done
 # The dispatch waits for promote-prod's verdict, so a green release run means
 # Production accepted the release (#2892). The delivering job holds one
 # protected runner while promote-prod runs on the same pool: deploy-prod's
-# concurrency group allows one such wait at a time, and the pool runs several
-# protected jobs at once.
+# release turn allows one such wait at a time (release-turn.py, tested in
+# test-release-turn.py), and the pool runs several protected jobs at once.
 # Each delivering job's deadline outlasts that 30-minute wait.
 for job_text in "$publish_job" "$finish_job"; do
   [[ "$(sed -n 's/^    timeout-minutes: //p' <<<"$job_text")" -gt 30 ]] ||
     fail "a delivering job has no deadline beyond its work and 30-minute wait"
 done
-grep -Fxq '  group: deploy-prod-release' "$WORKFLOW" ||
+grep -Fxq '        run: python3 -I -B scripts/ci/release/release-turn.py deploy-prod' "$WORKFLOW" &&
+  grep -Fxq "        if: \${{ steps.turn.outputs.turn == 'go' }}" "$WORKFLOW" ||
   fail "production dispatches can wait on deploy runs side by side"
-grep -A1 -Fx '  group: deploy-prod-release' "$WORKFLOW" | grep -Fxq '  cancel-in-progress: false' ||
+grep -A1 -Fx '  group: deploy-prod-release-${{ github.run_id }}' "$WORKFLOW" | grep -Fxq '  cancel-in-progress: false' ||
   fail "a new release can cancel a dispatch while promote-prod runs"
 # shellcheck disable=SC2016
 grep -Fq 'readonly wait_seconds="${DEPLOY_PROD_WAIT_SECONDS:-1800}"' \

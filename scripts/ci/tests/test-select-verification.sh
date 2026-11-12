@@ -930,6 +930,8 @@ run_paths_case release pull_request refs/pull/3/head false \
   scripts/ci/release/finish-prod-release.sh \
   scripts/ci/release/find-pending-release.sh \
   scripts/ci/tests/test-find-pending-release.sh \
+  scripts/ci/release/release-turn.py \
+  scripts/ci/tests/test-release-turn.py \
   scripts/ci/release/release-tags.sh \
   scripts/ci/release/require-current-release.sh \
   scripts/ci/release/confirm-release-checkout.sh \

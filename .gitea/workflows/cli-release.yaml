@@ -26,8 +26,12 @@ on:
   schedule:
     - cron: '2-59/5 * * * *'
 
+# Each run has its own group, so Forgejo queues no run behind another: before,
+# every scheduled run waited behind the running one only to find nothing. The
+# first job's release turn keeps deliveries one at a time instead
+# (release-turn.py; owner, 2026-11-12, #3013).
 concurrency:
-  group: cli-release
+  group: cli-release-${{ github.run_id }}
   cancel-in-progress: false
 
 env:
@@ -62,7 +66,8 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Find the release to deliver
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
-    timeout-minutes: 5
+    # A dispatch may wait for a release in flight (release-turn.py).
+    timeout-minutes: 190
     outputs:
       release_tag: ${{ steps.find.outputs.release_tag }}
       r2_publication: ${{ steps.find.outputs.r2_publication }}
@@ -70,7 +75,18 @@ jobs:
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
+      # One delivery at a time, with no queue of runs that find nothing: a
+      # scheduled run that finds another run looking or delivering ends here,
+      # and a dispatch waits its turn (release-turn.py; owner, 2026-11-12,
+      # #3013). Nothing running is ever cancelled.
+      - name: Take this run's release turn
+        id: turn
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/release/release-turn.py cli-release
+
       - name: Find the pending release
+        if: ${{ steps.turn.outputs.turn == 'go' }}
         id: find
         env:
           GITEA_TOKEN: ${{ github.token }}

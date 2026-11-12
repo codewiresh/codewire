@@ -576,11 +576,20 @@ pending = jobs["pending"]
 if pending.get("runs-on") != untrusted_light or pending.get("needs"):
     sys.exit("the pending job is not the first, unprivileged job")
 steps = pending["steps"]
-if len(steps) != 2 or "with" in steps[0] or not steps[0]["uses"].startswith("noel/actions-checkout@"):
-    sys.exit("the pending job does more than check out main and find the release")
-if steps[1].get("run") != f"scripts/ci/release/find-pending-release.sh {workflow}":
+if len(steps) != 3 or "with" in steps[0] or not steps[0]["uses"].startswith("noel/actions-checkout@"):
+    sys.exit("the pending job does more than check out main, take its release turn and find the release")
+# One delivery at a time without a queue (release-turn.py; owner, 2026-11-12):
+# the turn reads run state with the job token alone, and the finder runs only
+# on this run's turn.
+if (steps[1].get("id") != "turn"
+        or steps[1].get("run") != f"python3 -I -B scripts/ci/release/release-turn.py {workflow}"
+        or set(steps[1].get("env", {})) != {"GITEA_TOKEN"}):
+    sys.exit("the pending job does not take its release turn with the job token alone")
+if steps[2].get("run") != f"scripts/ci/release/find-pending-release.sh {workflow}":
     sys.exit("the pending job does not run the release finder")
-if set(steps[1].get("env", {})) - {"GITEA_TOKEN", "DISPATCHED_TAG", "DISPATCHED_R2_PUBLICATION",
+if steps[2].get("if") != "${{ steps.turn.outputs.turn == 'go' }}":
+    sys.exit("the release finder runs without this run's turn")
+if set(steps[2].get("env", {})) - {"GITEA_TOKEN", "DISPATCHED_TAG", "DISPATCHED_R2_PUBLICATION",
                                      "DISPATCHED_R2_PROMOTE_CHANNEL"}:
     sys.exit("the pending job receives more than the job token and the dispatch inputs")
 selection = jobs["release-selection"]
@@ -619,6 +628,8 @@ assert_scheduled_pickup "$deploy_workflow" deploy-prod '*/5 * * * *'
 assert_scheduled_pickup "$cli_workflow" cli-release '2-59/5 * * * *'
 for mutation in "s|    - cron: '\*/5 \* \* \* \*'|    - cron: '0 * * * *'|" \
     's|  cancel-in-progress: false|  cancel-in-progress: true|' \
+    "/        if: \${{ steps.turn.outputs.turn == 'go' }}/d" \
+    's|release-turn.py deploy-prod|release-turn.py cli-release|' \
     '/^  pending:/,/^  release-selection:/{s|CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT|CODEWIRE_CI_RUNNER_TRUSTED_LIGHT|g}' \
     "s|    if: \${{ needs.pending.outputs.release_tag != '' }}|    if: true|" \
     's|          source_sha="\$remote_peeled_sha"|          source_sha="$remote_peeled_sha"; scripts/ci/setup/fetch-openbao-harbor-credentials.sh --pull u p|' \
@@ -653,8 +664,8 @@ if assert_confirmed_checkouts "$unconfirmed_workflow" 9 2>/dev/null; then
   echo 'release workflow fixture accepted a tag checkout without confirmation' >&2
   exit 1
 fi
-grep -Fqx '  group: cli-release' "$cli_workflow" || {
-  echo 'CLI release has no single concurrency group' >&2
+grep -Fqx '  group: cli-release-${{ github.run_id }}' "$cli_workflow" || {
+  echo 'CLI release runs share a concurrency group, so Forgejo queues them' >&2
   exit 1
 }
 for workflow in "$deploy_workflow" "$cli_workflow"; do

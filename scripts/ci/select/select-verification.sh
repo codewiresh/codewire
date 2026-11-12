@@ -2437,6 +2437,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/verify-cw-release-signing-key.sh|scripts/ci/release/verify-release-tag-ref.sh|\
       scripts/ci/release/alias-release-images.sh|scripts/ci/release/finish-prod-release.sh|\
       scripts/ci/release/find-pending-release.sh|scripts/ci/tests/test-find-pending-release.sh|\
+      scripts/ci/release/release-turn.py|scripts/ci/tests/test-release-turn.py|\
       scripts/ci/release/release-tags.sh|scripts/ci/release/require-current-release.sh|\
       scripts/ci/tests/test-deploy-prod-helpers.sh|\
       scripts/ci/release/confirm-release-checkout.sh|\
