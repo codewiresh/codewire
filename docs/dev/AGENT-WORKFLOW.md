@@ -24,6 +24,11 @@ regardless of the repository's web merge template.
 scripts/dev/merge-pr.sh 456 "feat: do the thing"
 ```
 
+A Tier 2 or Tier 3 pull request's body has a line `Safe because:` naming the
+one fact that makes the change safe, and how far that fact was proven: ran
+(with the command), cited (with the line), or unproven (owner, 2026-11-12;
+cited on #3013).
+
 Read a failing component log before diagnosing. Bind a healthy run once and use
 `fj actions runs watch`; do not poll it.
 
@@ -50,6 +55,20 @@ Expensive end-to-end, destructive, or clean-room gates qualify a credible
 candidate; they are not the debugging loop. After failure, move inward. Do not
 rebuild unchanged inputs, rerun unchanged qualifications, or add taxonomy in
 place of evidence. An unknown result blocks only the affected mutation.
+
+Four rules for a failure that resists (owner, 2026-11-12; cited on #3013):
+
+- After two failed fixes that rest on the same assumption, write the
+  assumption down and test it directly before a third.
+- A failure in code the change never touched is checked against the base
+  before it is called a flake: see whether current `main` passes the same job
+  and whether the head has the commit that fixed it. A stale base is repaired
+  by bringing `main` in (#4355: a lock file `main` fixed 16 minutes after the
+  branch was cut).
+- A guard is a fix only when the state it handles is legitimate. A state that
+  should never exist is fixed where it was created.
+- After a diagnosis that took digging, propose the cheap, always-on signal
+  that would have shown the cause at first look.
 
 A deadline in a test is a hang guard, not a speed expectation: at least 30 s,
 or the product's own bound when longer. Only a test about a timeout uses a
@@ -86,6 +105,12 @@ workspace `Cargo.toml` manifests among them.
 trusted selection cannot yet omit always runs. Keep the guard list in that
 runner, not in another local checklist. Policy repairs need an old-fail/new-pass
 fixture.
+
+A new check of any kind (a test, a smoke, a proof script, a policy rule) and a
+changed assertion are shown failing once against a deliberately broken variant,
+and the pull request records that run. A check never seen failing proves
+nothing. Moving or renaming a test needs no such run (owner, 2026-11-12; cited
+on #3013).
 
 Use additional gates only for their failure class:
 

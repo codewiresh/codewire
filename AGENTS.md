@@ -89,6 +89,9 @@ CI are necessary evidence; they are never proof of behaviour.
   once for exactly that step. Until the journey has run, report the change as
   "not yet observed working". Report merged, on Dev and live in Production
   separately.
+- A bug fix records the symptom observed at the base commit and its absence
+  on the delivered source, on the same surface, or says which half is missing
+  (owner, 2026-11-12; cited on #3013).
 
 ## Plans and worktrees
 

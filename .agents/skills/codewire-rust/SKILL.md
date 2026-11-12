@@ -88,3 +88,8 @@ not restate a lint here. These are the rules a lint cannot see.
 
 Run `scripts/ci/verify/compile-all-targets.sh` and the affected crate's
 tests. A split-only commit shows the same test count before and after.
+
+A new test is checked two ways before it is kept: break the behaviour and it
+fails; change only the internals and it still passes. Its expected values come
+from the requirement, not from what the code returns today. Prefer no new test
+over one that fails either check (owner, 2026-11-12; cited on #3013).
