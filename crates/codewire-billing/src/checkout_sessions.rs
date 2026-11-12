@@ -57,7 +57,7 @@ impl FrontendOrigin {
         format!("{}/api/webhooks/stripe", self.0.ascii_serialization())
     }
 
-    fn validate_redirect(&self, field: &str, value: &str) -> Result<(), AppError> {
+    pub(crate) fn validate_redirect(&self, field: &str, value: &str) -> Result<(), AppError> {
         let url = Url::parse(value).map_err(|_| {
             AppError::BadRequest(
                 format!("{field} must be an absolute URL on the configured frontend origin").into(),
@@ -77,7 +77,7 @@ impl FrontendOrigin {
 }
 
 /// Steps 1–3 of the shared gate (see module docs).
-async fn require_billing_admin(
+pub(crate) async fn require_billing_admin(
     state: &BillingState,
     user: &AuthUser,
     org_id: &str,
@@ -109,7 +109,10 @@ pub(crate) async fn require_org_billing_admin(
 
 /// Org name + owner email for customer creation (checkout errors when
 /// either is missing, like the Go `QueryRow().Scan` error path).
-async fn org_identity(pool: &PgPool, org_id: &str) -> Result<(String, String), AppError> {
+pub(crate) async fn org_identity(
+    pool: &PgPool,
+    org_id: &str,
+) -> Result<(String, String), AppError> {
     let name: String = sqlx::query_scalar(r#"SELECT name FROM organizations WHERE id = $1"#)
         .bind(org_id)
         .fetch_one(pool)
@@ -292,7 +295,7 @@ async fn build_checkout(
     .await
 }
 
-fn billing_idempotency_key(kind: &str, parts: &[&str]) -> String {
+pub(crate) fn billing_idempotency_key(kind: &str, parts: &[&str]) -> String {
     let mut hasher = Sha256::new();
     for part in parts {
         hasher.update((part.len() as u64).to_be_bytes());

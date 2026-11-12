@@ -6,6 +6,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Response,
 };
+use codewire_proto::codewire::console::v1::{AddCreditOutcome, AddCreditRefusal};
 use connectrpc::ErrorCode;
 use serde::Deserialize;
 
@@ -17,7 +18,7 @@ use crate::{
         action_context, connect_page_error, get_context, get_context_without_rail,
         mutation_redirect,
     },
-    security::{csrf_cookie, page_csrf_token, with_csrf_cookie},
+    security::{csrf_cookie, new_csrf_token, page_csrf_token, with_csrf_cookie},
     state::AppState,
     templates::{BillingBannerTemplate, OrganizationBillingTemplate},
 };
@@ -31,6 +32,9 @@ pub(super) struct BillingQuery {
     message: String,
     #[serde(default)]
     error: String,
+    /// The credit a message is about, in cents.
+    #[serde(default)]
+    amount: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +52,35 @@ pub(super) struct AutoTopUpSubmission {
     enabled: Option<String>,
     /// Euros, at most two decimals.
     amount: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AddCreditSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    /// The page's attempt key, so a resubmitted form never charges twice.
+    request: String,
+    /// A chip's euros ("100"), or "custom".
+    #[serde(default)]
+    choice: String,
+    /// The custom amount in euros, used only when the choice is "custom".
+    #[serde(default)]
+    amount: String,
+}
+
+/// The amounts the chips offer, in euros (owner, 2026-11-11, #3381).
+const CREDIT_CHIPS: [i32; 4] = [50, 100, 250, 500];
+
+/// The chosen amount in cents: a chip, or a custom amount from EUR 5 to
+/// EUR 1,000 with at most two decimals.
+fn credit_cents(choice: &str, amount: &str) -> Option<i32> {
+    if choice == "custom" {
+        return billing_connect::top_up_cents(amount);
+    }
+    CREDIT_CHIPS
+        .iter()
+        .find(|euros| euros.to_string() == choice)
+        .map(|euros| euros * 100)
 }
 
 pub(super) async fn page(
@@ -69,7 +102,7 @@ pub(super) async fn page(
         &organization.id,
         organization.can_admin,
         token.clone(),
-        billing_message(&query.message).to_owned(),
+        billing_message(&query.message, &query.amount),
         billing_error(&query.error).to_owned(),
     )
     .await
@@ -104,6 +137,80 @@ pub(super) async fn setup(
     Form(submission): Form<BillingSubmission>,
 ) -> Response {
     billing_session(&state, &slug, &headers, &submission.csrf, false).await
+}
+
+/// Buys a one-time amount of credit (#3381): back to Billing once the card is
+/// charged, or on to Stripe where the bank wants the payment approved or
+/// there is no card yet.
+pub(super) async fn add_credit(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Form(submission): Form<AddCreditSubmission>,
+) -> Response {
+    let path = billing_path(&slug);
+    let (_, organization, cookie) =
+        match action_context(&state, &headers, &slug, &submission.csrf, path.clone()).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    if !organization.can_admin {
+        return mutation_redirect(&state, path, "", "not-authorized", &headers);
+    }
+    let Some(amount_cents) = credit_cents(&submission.choice, &submission.amount) else {
+        return mutation_redirect(&state, path, "", "invalid-credit", &headers);
+    };
+    let return_url = format!("{}{}", state.public_origin, organization.billing_url);
+    let result = billing_connect::add_credit(
+        &state,
+        cookie,
+        organization.id,
+        amount_cents,
+        submission.request,
+        &return_url,
+    )
+    .await;
+    let response = match result {
+        Ok(response) => response,
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            return login_redirect(&path, &headers);
+        }
+        Err(error) => return mutation_redirect(&state, path, "", mutation_error(&error), &headers),
+    };
+    match response.outcome.as_known() {
+        Some(AddCreditOutcome::Paid) => with_csrf_cookie(
+            redirect(
+                format!("{path}?message=credit-added&amount={amount_cents}"),
+                &headers,
+            ),
+            csrf_cookie(&state.public_origin, &new_csrf_token()),
+        ),
+        Some(AddCreditOutcome::ActionRequired) => {
+            let url = billing_connect::safe_stripe_url(response.payment_url);
+            if url.is_empty() {
+                mutation_redirect(&state, path, "", "invalid-redirect", &headers)
+            } else {
+                redirect(url, &headers)
+            }
+        }
+        Some(AddCreditOutcome::Refused) => {
+            let error = match response.refusal.as_known() {
+                Some(AddCreditRefusal::InProgress) => "credit-in-progress",
+                _ => credit_decline(&response.decline_code),
+            };
+            mutation_redirect(&state, path, "", error, &headers)
+        }
+        _ => mutation_redirect(&state, path, "", "unavailable", &headers),
+    }
+}
+
+/// The page's error code for a declined card.
+fn credit_decline(code: &str) -> &'static str {
+    match code {
+        "insufficient_funds" => "credit-insufficient-funds",
+        "expired_card" => "credit-expired-card",
+        _ => "credit-declined",
+    }
 }
 
 /// Turns automatic top-up on or off and sets its amount (#3381).
@@ -181,11 +288,24 @@ fn billing_path(slug: &str) -> String {
     format!("/{slug}/billing/")
 }
 
-fn billing_message(value: &str) -> &'static str {
-    match value {
-        "payment-updated" => "Payment details updated.",
-        "top-up-saved" => "Automatic top-up saved.",
-        _ => "",
+/// The page's confirmation for a message code. The credit messages name the
+/// amount, read as a number of cents and written as euros.
+fn billing_message(value: &str, amount: &str) -> String {
+    let euros = amount
+        .parse::<i32>()
+        .ok()
+        .filter(|cents| (500..=100_000).contains(cents))
+        .map(|cents| format!("€{}", billing_connect::top_up_euros(cents)));
+    match (value, euros) {
+        ("payment-updated", _) => "Payment details updated.".to_owned(),
+        ("top-up-saved", _) => "Automatic top-up saved.".to_owned(),
+        ("credit-added", Some(euros)) => format!("{euros} added to your credit."),
+        ("credit-added", None) => "Credit added.".to_owned(),
+        ("credit-paid", Some(euros)) => {
+            format!("Payment received. {euros} is added to your credit in a moment.")
+        }
+        ("credit-paid", None) => "Payment received. Your credit updates in a moment.".to_owned(),
+        _ => String::new(),
     }
 }
 
@@ -250,6 +370,22 @@ fn billing_error(value: &str) -> &'static str {
         "not-found" => "Billing details were not found for this organization.",
         "invalid-redirect" => "The billing provider returned an unsafe destination.",
         "invalid-top-up" => "Enter a top-up amount from €5 to €1,000, with at most two decimals.",
+        "invalid-credit" => {
+            "Choose an amount, or enter one from €5 to €1,000 with at most two decimals."
+        }
+        "credit-in-progress" => {
+            "A payment for this organization's credit is already being processed. Try again in a minute."
+        }
+        "credit-declined" => {
+            "Your card was declined, so no credit was added. Update your payment method in Stripe, or try again."
+        }
+        "credit-insufficient-funds" => {
+            "Your card was declined for insufficient funds, so no credit was added."
+        }
+        "credit-expired-card" => {
+            "Your card has expired, so no credit was added. Update your payment method in Stripe."
+        }
+        "credit-cancelled" => "Payment cancelled. No credit was added.",
         "unavailable" => "The billing service is temporarily unavailable.",
         _ => "",
     }
@@ -271,16 +407,89 @@ mod tests {
     #[test]
     fn billing_feedback_is_allowlisted() {
         assert_eq!(
-            billing_message("payment-updated"),
+            billing_message("payment-updated", ""),
             "Payment details updated."
         );
-        assert_eq!(billing_message("<script>"), "");
-        assert_eq!(billing_message("top-up-saved"), "Automatic top-up saved.");
+        assert_eq!(billing_message("<script>", "10000"), "");
+        assert_eq!(
+            billing_message("top-up-saved", ""),
+            "Automatic top-up saved."
+        );
         assert_eq!(
             billing_error("invalid-redirect"),
             "The billing provider returned an unsafe destination."
         );
         assert_eq!(billing_error("raw-upstream-detail"), "");
+    }
+
+    #[test]
+    fn credit_messages_name_the_amount_only_when_it_is_one() {
+        assert_eq!(
+            billing_message("credit-added", "10000"),
+            "€100 added to your credit."
+        );
+        assert_eq!(
+            billing_message("credit-added", "1250"),
+            "€12.50 added to your credit."
+        );
+        assert_eq!(
+            billing_message("credit-paid", "25000"),
+            "Payment received. €250 is added to your credit in a moment."
+        );
+        // A missing, malformed or out-of-range amount is never echoed.
+        for amount in ["", "<b>1</b>", "499", "100001", "-500", "1e4"] {
+            assert_eq!(billing_message("credit-added", amount), "Credit added.");
+            assert_eq!(
+                billing_message("credit-paid", amount),
+                "Payment received. Your credit updates in a moment."
+            );
+        }
+        assert_eq!(
+            billing_error("credit-cancelled"),
+            "Payment cancelled. No credit was added."
+        );
+    }
+
+    #[test]
+    fn a_credit_choice_is_a_chip_or_a_custom_amount() {
+        assert_eq!(credit_cents("50", ""), Some(5_000));
+        assert_eq!(credit_cents("100", "7"), Some(10_000));
+        assert_eq!(credit_cents("250", ""), Some(25_000));
+        assert_eq!(credit_cents("500", ""), Some(50_000));
+        assert_eq!(credit_cents("custom", "12.50"), Some(1_250));
+        assert_eq!(credit_cents("custom", "1000"), Some(100_000));
+        for (choice, amount) in [
+            ("", ""),
+            ("75", ""),
+            ("custom", ""),
+            ("custom", "4.99"),
+            ("custom", "1000.01"),
+            ("custom", "12.345"),
+            ("5000", ""),
+        ] {
+            assert_eq!(credit_cents(choice, amount), None, "{choice:?} {amount:?}");
+        }
+    }
+
+    #[test]
+    fn a_declined_card_gets_its_own_message() {
+        assert_eq!(
+            credit_decline("insufficient_funds"),
+            "credit-insufficient-funds"
+        );
+        assert_eq!(credit_decline("expired_card"), "credit-expired-card");
+        for code in ["card_declined", "authentication_required", "", "other"] {
+            assert_eq!(credit_decline(code), "credit-declined");
+        }
+        for code in [
+            "credit-insufficient-funds",
+            "credit-expired-card",
+            "credit-declined",
+            "credit-in-progress",
+            "invalid-credit",
+        ] {
+            assert!(!billing_error(code).is_empty(), "{code}");
+        }
     }
 }
 

@@ -2,9 +2,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::http::HeaderValue;
 use codewire_proto::codewire::console::v1::{
-    BillingServiceClient, CreatePortalSessionRequest, CreateSetupSessionRequest,
-    GetBillingOverviewRequest, GetEnvironmentUsageRequest, GetSignupCreditRequest,
-    ListBillingEventsRequest, ListInvoicesRequest, UpdateAutoTopUpRequest,
+    AddCreditRequest, AddCreditResponse, BillingServiceClient, CreatePortalSessionRequest,
+    CreateSetupSessionRequest, GetBillingOverviewRequest, GetEnvironmentUsageRequest,
+    GetSignupCreditRequest, ListBillingEventsRequest, ListInvoicesRequest, UpdateAutoTopUpRequest,
 };
 use connectrpc::{ConnectError, client::ClientConfig};
 
@@ -19,6 +19,9 @@ use crate::{
 };
 
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
+/// A purchase charges the card through several Stripe calls, which billing
+/// bounds at 30 seconds.
+const ADD_CREDIT_TIMEOUT: Duration = Duration::from_secs(40);
 
 /// How long the pricing page keeps the sign-up credit it read, and how long
 /// it waits for billing before saying nothing about one.
@@ -210,6 +213,9 @@ pub(crate) struct BillingPageView {
     pub(crate) auto_top_up_enabled: bool,
     /// The automatic top-up in euros, as the form shows it ("20").
     pub(crate) auto_top_up_euros: String,
+    /// The key of this page's Add credit attempt: a resubmitted form never
+    /// charges twice.
+    pub(crate) add_credit_request: String,
     pub(crate) credit_exhausted: bool,
     pub(crate) credit_exhausted_since: String,
     pub(crate) can_manage: bool,
@@ -471,6 +477,7 @@ pub(crate) async fn billing_page(
         disk_rate: euro_text(rates.disk_nano_eur_per_gib_hour),
         auto_top_up_enabled: overview.auto_top_up_enabled,
         auto_top_up_euros: top_up_euros(overview.auto_top_up_cents),
+        add_credit_request: crate::security::new_csrf_token(),
         credit_exhausted: exhausted_at.is_some(),
         credit_exhausted_since: exhausted_at.map(calendar_date).unwrap_or_default(),
         can_manage,
@@ -599,8 +606,39 @@ pub(crate) async fn update_auto_top_up(
     Ok(())
 }
 
+/// Buys a one-time amount of credit, in cents. `return_url` is the Billing
+/// page Stripe's payment page returns to, without its query.
+pub(crate) async fn add_credit(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: String,
+    amount_cents: i32,
+    request_id: String,
+    return_url: &str,
+) -> Result<AddCreditResponse, ConnectError> {
+    let client = BillingServiceClient::new(
+        BrowserTransport {
+            http: state.http.clone(),
+            cookie: Some(cookie),
+            origin: None,
+        },
+        ClientConfig::new(state.billing_origin.clone()).with_default_timeout(ADD_CREDIT_TIMEOUT),
+    );
+    Ok(client
+        .add_credit(AddCreditRequest {
+            org_id,
+            amount_cents,
+            request_id,
+            success_url: format!("{return_url}?message=credit-paid&amount={amount_cents}"),
+            cancel_url: format!("{return_url}?error=credit-cancelled"),
+            ..Default::default()
+        })
+        .await?
+        .into_owned())
+}
+
 /// A top-up amount in whole euros, or with cents when it has them.
-fn top_up_euros(cents: i32) -> String {
+pub(crate) fn top_up_euros(cents: i32) -> String {
     if cents % 100 == 0 {
         (cents / 100).to_string()
     } else {
@@ -855,7 +893,7 @@ mod tests {
         ));
         assert!(body.contains(r#"data-submit-on-change disabled>"#));
         assert!(body.contains("Add a payment method to turn on automatic top-up."));
-        assert!(!body.contains(r#"name="amount""#));
+        assert!(!body.contains(r#"id="top-up-amount""#));
         // No plan, seat or trial language is left.
         for retired in ["Plan", "trial", "Trial", "seat"] {
             assert!(!body.contains(retired), "{retired}");
@@ -877,6 +915,110 @@ mod tests {
         assert!(!body.contains("ran out of compute credit"));
         assert!(!body.contains("auto-top-up"));
         assert!(!body.contains("<dt>vCPU</dt>"));
+    }
+
+    fn credit_view(has_payment_method: bool) -> BillingPageView {
+        BillingPageView {
+            billing_enabled: true,
+            can_manage: true,
+            has_payment_method,
+            credit_balance: "€4.20".into(),
+            auto_top_up_enabled: true,
+            auto_top_up_euros: "20".into(),
+            add_credit_request: "add-credit-request-synthetic".into(),
+            csrf_token: "csrf".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn add_credit_offers_chips_a_custom_amount_and_one_button() {
+        let body = render(&credit_view(true));
+        // One form, before automatic top-up, posting the page's attempt key.
+        assert!(body.contains(
+            r#"<form class="cw-add-credit" method="post" action="/test/billing/_actions/add-credit" aria-labelledby="add-credit-title" aria-describedby="add-credit-terms" data-add-credit>"#
+        ));
+        let add = body.find("data-add-credit>").unwrap();
+        let top_up = body.find(r#"<form class="cw-top-up""#).unwrap();
+        assert!(add < top_up, "Add credit comes before automatic top-up");
+        assert!(body.contains(r#"<input type="hidden" name="_csrf" value="csrf">"#));
+        assert!(body.contains(
+            r#"<input type="hidden" name="request" value="add-credit-request-synthetic">"#
+        ));
+        assert!(body.contains(r#"<h3 id="add-credit-title">Add credit</h3>"#));
+        // The chips are one radio group, EUR 100 chosen to start with. They
+        // share one row with the button, so the group's name is for screen
+        // readers only.
+        assert!(body.contains(r#"<div class="cw-add-credit-row">"#));
+        assert!(body.contains(r#"<legend class="cw-sr-only">Amount</legend>"#));
+        for (value, label, checked) in [
+            ("50", "€50", ""),
+            ("100", "€100", " checked"),
+            ("250", "€250", ""),
+            ("500", "€500", ""),
+            ("custom", "Custom", ""),
+        ] {
+            assert!(
+                body.contains(&format!(
+                    r#"<label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="{value}"{checked}><span>{label}</span></label>"#
+                )),
+                "{label}"
+            );
+        }
+        assert_eq!(body.matches(r#"name="choice""#).count(), 5);
+        assert_eq!(
+            body.matches(r#"name="choice" value="100" checked"#).count(),
+            1
+        );
+        // Without script the custom field shows, not required, and the
+        // button says what it does without an amount.
+        assert!(body.contains(
+            r#"<input class="cw-input" id="add-credit-amount" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" aria-describedby="add-credit-amount-hint">"#
+        ));
+        assert!(body.contains(r#"<div class="cw-field" data-add-credit-custom>"#));
+        assert!(body.contains(
+            r#"<button class="cw-button" type="submit" data-add-credit-submit>Add credit</button>"#
+        ));
+        // With a card the charge is to it; without, Stripe takes the card.
+        assert!(body.contains(
+            "Charge my saved payment method once. If my bank asks me to approve the payment, I finish on Stripe."
+        ));
+        let no_card = render(&credit_view(false));
+        assert!(no_card.contains(
+            "Pay once on Stripe. The card is saved to this organization for later top-ups."
+        ));
+        assert!(no_card.contains("/test/billing/_actions/add-credit"));
+    }
+
+    #[test]
+    fn add_credit_is_only_for_those_who_manage_a_charged_organization() {
+        for (name, view) in [
+            (
+                "member",
+                BillingPageView {
+                    can_manage: false,
+                    ..credit_view(true)
+                },
+            ),
+            (
+                "unmetered",
+                BillingPageView {
+                    unmetered: true,
+                    ..credit_view(true)
+                },
+            ),
+            (
+                "billing off",
+                BillingPageView {
+                    billing_enabled: false,
+                    ..credit_view(true)
+                },
+            ),
+        ] {
+            let body = render(&view);
+            assert!(!body.contains("add-credit"), "{name}");
+            assert!(!body.contains("Add credit"), "{name}");
+        }
     }
 
     fn card(brand: &str, exp_month: i32, exp_year: i32) -> PaymentCardView {

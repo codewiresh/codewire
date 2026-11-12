@@ -75,10 +75,11 @@ test.describe.serial("server-rendered billing and administration", () => {
 
     const response = await page.goto(`/${slug}/billing/`);
     expect(response?.status()).toBe(200);
-    // "Add payment method" and "Manage in Stripe" POST here and are redirected
-    // to Stripe; Chromium applies this page's form-action to that redirect.
+    // "Add payment method", "Manage in Stripe" and "Add credit" POST here and
+    // may be redirected to Stripe; Chromium applies this page's form-action to
+    // that redirect.
     expect(response?.headers()["content-security-policy"]).toContain(
-      "form-action 'self' https://checkout.stripe.com https://billing.stripe.com;",
+      "form-action 'self' https://checkout.stripe.com https://billing.stripe.com https://invoice.stripe.com;",
     );
     await expect(page.locator(".cw-org-switcher-label").first()).toHaveText("SSR Billing");
     await expect(page.getByLabel("Organization navigation").getByRole("link", {

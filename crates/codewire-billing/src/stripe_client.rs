@@ -34,6 +34,7 @@ use stripe::{IdempotencyKey, RequestStrategy, StripeRequest};
 use stripe_billing::billing_portal_session::CreateBillingPortalSession;
 use stripe_billing::invoice::{
     CreateInvoice, CreateInvoicePendingInvoiceItemsBehavior, FinalizeInvoiceInvoice, PayInvoice,
+    RetrieveInvoice,
 };
 use stripe_billing::invoice_item::{CreateInvoiceItem, UpdateInvoiceItem};
 use stripe_billing::subscription::{CancelSubscription, ListSubscription, RetrieveSubscription};
@@ -41,9 +42,12 @@ use stripe_billing::subscription_item::{
     UpdateSubscriptionItem, UpdateSubscriptionItemProrationBehavior,
 };
 use stripe_checkout::checkout_session::{
-    CreateCheckoutSession, CreateCheckoutSessionLineItems,
-    CreateCheckoutSessionLineItemsAdjustableQuantity, CreateCheckoutSessionPaymentMethodTypes,
-    CreateCheckoutSessionSubscriptionData, ExpireCheckoutSession, ListCheckoutSession,
+    CreateCheckoutSession, CreateCheckoutSessionInvoiceCreation,
+    CreateCheckoutSessionInvoiceCreationInvoiceData, CreateCheckoutSessionLineItems,
+    CreateCheckoutSessionLineItemsAdjustableQuantity, CreateCheckoutSessionLineItemsPriceData,
+    CreateCheckoutSessionPaymentIntentData, CreateCheckoutSessionPaymentIntentDataSetupFutureUsage,
+    CreateCheckoutSessionPaymentMethodTypes, CreateCheckoutSessionSubscriptionData,
+    ExpireCheckoutSession, ListCheckoutSession, ProductData,
 };
 use stripe_client_core::{RequestBuilder, StripeMethod};
 use stripe_core::customer::{
@@ -108,6 +112,10 @@ const IDEMPOTENT_CALLS: &[(&str, IdempotencyKind)] = &[
     ("create_org_checkout_session", IdempotencyKind::Parameters),
     ("create_portal_session", IdempotencyKind::Parameters),
     ("create_setup_session", IdempotencyKind::Parameters),
+    (
+        "create_credit_checkout_session",
+        IdempotencyKind::Parameters,
+    ),
 ];
 
 /// The key of a parameter-keyed call: a hash of the request exactly as it is
@@ -587,7 +595,48 @@ impl StripeHandle {
             .map_err(stripe_err)?;
         Ok(session.url.unwrap_or_default())
     }
+
+    /// Opens a one-time credit payment for an organization with no saved
+    /// card: Stripe's page takes the card and the payment together and saves
+    /// the card for later top-ups. Parameter-keyed: see the module docs; the
+    /// top-up id in the request makes each attempt its own session.
+    pub async fn create_credit_checkout_session(
+        &self,
+        purchase: &CreditCheckout<'_>,
+    ) -> Result<String, AppError> {
+        let client = self.client()?;
+        let request = credit_checkout_request(purchase);
+        let idempotency_key = parameter_key("credit-checkout", &request)?;
+        let session = request
+            .customize()
+            .request_strategy(RequestStrategy::Idempotent(idempotency_key))
+            .send(client)
+            .await
+            .map_err(stripe_err)?;
+        session
+            .url
+            .filter(|url| !url.is_empty())
+            .ok_or_else(|| AppError::InternalMsg("stripe checkout session has no url".into()))
+    }
 }
+
+/// A one-time credit payment through Stripe Checkout.
+#[derive(Debug, Clone, Copy)]
+pub struct CreditCheckout<'a> {
+    pub customer_id: &'a str,
+    pub organization_id: &'a str,
+    pub top_up_id: &'a str,
+    pub amount_cents: i64,
+    pub success_url: &'a str,
+    pub cancel_url: &'a str,
+}
+
+/// The metadata `kind` of a credit purchase, on the Checkout session and the
+/// automatic top-up invoice alike.
+pub(crate) const CREDIT_TOP_UP_KIND: &str = "credit_top_up";
+/// The metadata `kind` of the receipt invoice a credit Checkout creates. It
+/// is not [`CREDIT_TOP_UP_KIND`]: the session, not the invoice, credits it.
+pub(crate) const CREDIT_CHECKOUT_INVOICE_KIND: &str = "credit_checkout";
 
 // ── Webhook endpoint self-check (#3263) ─────────────────────────────
 
@@ -691,6 +740,53 @@ fn org_checkout_request(
         .cancel_url(cancel_url)
         .allow_promotion_codes(true)
         .subscription_data(sub_data)
+}
+
+/// The payment-mode session `create_credit_checkout_session` sends.
+/// - One EUR line for the amount, so the page shows exactly what is charged.
+/// - Card only, saved for off-session use, so later automatic top-ups can
+///   charge it; the completion webhook makes it the default.
+/// - A receipt invoice, as an automatic top-up has.
+/// - The organization, top-up and amount in the metadata, which the
+///   completion webhook credits from.
+fn credit_checkout_request(purchase: &CreditCheckout<'_>) -> CreateCheckoutSession {
+    let metadata = std::collections::HashMap::from([
+        ("kind".to_owned(), CREDIT_TOP_UP_KIND.to_owned()),
+        ("org_id".to_owned(), purchase.organization_id.to_owned()),
+        ("top_up_id".to_owned(), purchase.top_up_id.to_owned()),
+        ("amount_cents".to_owned(), purchase.amount_cents.to_string()),
+    ]);
+    let mut price = CreateCheckoutSessionLineItemsPriceData::new(BILLING_CURRENCY);
+    price.unit_amount = Some(purchase.amount_cents);
+    price.product_data = Some(ProductData::new("Codewire compute credit"));
+    let mut payment_intent = CreateCheckoutSessionPaymentIntentData::new();
+    payment_intent.setup_future_usage =
+        Some(CreateCheckoutSessionPaymentIntentDataSetupFutureUsage::OffSession);
+    payment_intent.description = Some("Codewire compute credit".to_owned());
+    payment_intent.metadata = Some(metadata.clone());
+    let mut invoice_data = CreateCheckoutSessionInvoiceCreationInvoiceData::new();
+    invoice_data.description = Some("Codewire compute credit".to_owned());
+    invoice_data.metadata = Some(std::collections::HashMap::from([
+        ("kind".to_owned(), CREDIT_CHECKOUT_INVOICE_KIND.to_owned()),
+        ("org_id".to_owned(), purchase.organization_id.to_owned()),
+        ("top_up_id".to_owned(), purchase.top_up_id.to_owned()),
+    ]));
+    let mut invoice_creation = CreateCheckoutSessionInvoiceCreation::new(true);
+    invoice_creation.invoice_data = Some(invoice_data);
+    CreateCheckoutSession::new()
+        .customer(purchase.customer_id)
+        .mode(stripe_shared::CheckoutSessionMode::Payment)
+        .payment_method_types([CreateCheckoutSessionPaymentMethodTypes::Card])
+        .line_items(vec![CreateCheckoutSessionLineItems {
+            price_data: Some(price),
+            quantity: Some(1),
+            ..Default::default()
+        }])
+        .payment_intent_data(payment_intent)
+        .invoice_creation(invoice_creation)
+        .success_url(purchase.success_url)
+        .cancel_url(purchase.cancel_url)
+        .metadata(metadata)
 }
 
 /// The billing portal session `create_portal_session` sends.
@@ -1006,7 +1102,17 @@ pub enum TopUpCharge {
         invoice_id: Option<String>,
         code: String,
     },
+    /// The bank wants the customer to approve the charge (SCA), which an
+    /// off-session charge cannot do. The invoice stays open, and paying it on
+    /// its Stripe page sends `invoice.paid`.
+    ActionRequired {
+        invoice_id: String,
+        payment_url: String,
+    },
 }
+
+/// The code a charge that needs the customer is recorded with.
+pub const AUTHENTICATION_REQUIRED: &str = "authentication_required";
 
 /// A Stripe error code as a stored failure code: lower-case letters, digits
 /// and '_', at most 128 characters, or `card_declined` when there is none.
@@ -1022,6 +1128,28 @@ pub fn failure_code(code: Option<&str>) -> String {
         "card_declined".to_owned()
     } else {
         code
+    }
+}
+
+/// A charge the bank holds for the customer's approval: Stripe answers an
+/// off-session charge that needs authentication with 402
+/// `authentication_required`, and an invoice whose payment needs an action
+/// with `invoice_payment_intent_requires_action`.
+fn needs_customer(error: &stripe::StripeError) -> bool {
+    match error {
+        stripe::StripeError::Stripe(errors, 402) => [
+            errors.decline_code.as_deref(),
+            errors.code.as_ref().map(|code| code.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|code| {
+            matches!(
+                code,
+                AUTHENTICATION_REQUIRED | "invoice_payment_intent_requires_action"
+            )
+        }),
+        _ => false,
     }
 }
 
@@ -1052,7 +1180,7 @@ impl StripeHandle {
         let client = self.client()?;
         let key = |step: &str| IdempotencyKey::new(format!("cw-top-up-{step}-{top_up_id}"));
         let metadata = std::collections::HashMap::from([
-            ("kind".to_owned(), "credit_top_up".to_owned()),
+            ("kind".to_owned(), CREDIT_TOP_UP_KIND.to_owned()),
             ("org_id".to_owned(), organization_id.to_owned()),
             ("top_up_id".to_owned(), top_up_id.to_owned()),
         ]);
@@ -1088,7 +1216,7 @@ impl StripeHandle {
             .send(client)
             .await
             .map_err(stripe_err)?;
-        FinalizeInvoiceInvoice::new(invoice_id.as_str())
+        let finalized = FinalizeInvoiceInvoice::new(invoice_id.as_str())
             .customize()
             .request_strategy(RequestStrategy::Idempotent(
                 key("finalize").map_err(stripe_err)?,
@@ -1109,6 +1237,16 @@ impl StripeHandle {
             Ok(other) => Err(AppError::InternalMsg(
                 format!("stripe top-up invoice is {:?}, not paid", other.status).into(),
             )),
+            Err(error) if needs_customer(&error) => match finalized.hosted_invoice_url {
+                Some(payment_url) if !payment_url.is_empty() => Ok(TopUpCharge::ActionRequired {
+                    invoice_id,
+                    payment_url,
+                }),
+                _ => Ok(TopUpCharge::Declined {
+                    invoice_id: Some(invoice_id),
+                    code: AUTHENTICATION_REQUIRED.to_owned(),
+                }),
+            },
             Err(error) => match declined(&error) {
                 Some(code) => Ok(TopUpCharge::Declined {
                     invoice_id: Some(invoice_id),
@@ -1118,6 +1256,54 @@ impl StripeHandle {
             },
         }
     }
+
+    /// An invoice's state and its Stripe payment page, for a credit request
+    /// retried after its charge needed the customer.
+    pub(crate) async fn invoice_payment(
+        &self,
+        invoice_id: &str,
+    ) -> Result<InvoicePayment, AppError> {
+        let client = self.client()?;
+        let invoice = RetrieveInvoice::new(invoice_id)
+            .send(client)
+            .await
+            .map_err(stripe_err)?;
+        Ok(InvoicePayment {
+            paid: invoice.status == Some(stripe_shared::InvoiceStatus::Paid),
+            open: invoice.status == Some(stripe_shared::InvoiceStatus::Open),
+            payment_url: invoice.hosted_invoice_url.filter(|url| !url.is_empty()),
+        })
+    }
+
+    /// The payment method a payment intent was paid with.
+    pub(crate) async fn payment_intent_payment_method(
+        &self,
+        payment_intent_id: &str,
+    ) -> Result<Option<String>, AppError> {
+        #[derive(miniserde::Deserialize)]
+        struct PaymentIntent {
+            payment_method: Option<String>,
+        }
+        let client = self.client()?;
+        let id = payment_intent_id
+            .parse::<stripe_shared::PaymentIntentId>()
+            .map_err(stripe_err)?;
+        let intent: PaymentIntent =
+            RequestBuilder::new(StripeMethod::Get, format!("/payment_intents/{id}"))
+                .customize()
+                .send(client)
+                .await
+                .map_err(stripe_err)?;
+        Ok(intent.payment_method.filter(|id| !id.is_empty()))
+    }
+}
+
+/// Where an invoice's payment stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InvoicePayment {
+    pub paid: bool,
+    pub open: bool,
+    pub payment_url: Option<String>,
 }
 
 #[cfg(test)]
@@ -1315,8 +1501,9 @@ mod currency_tests {
 #[cfg(test)]
 mod idempotency_key_tests {
     use super::{
-        IDEMPOTENT_CALLS, IdempotencyKind, org_checkout_request, parameter_key,
-        portal_session_request, setup_session_request, setup_window,
+        CreditCheckout, IDEMPOTENT_CALLS, IdempotencyKind, credit_checkout_request,
+        org_checkout_request, parameter_key, portal_session_request, setup_session_request,
+        setup_window,
     };
 
     fn key(kind: &str, request: &impl serde::Serialize) -> String {
@@ -1379,6 +1566,53 @@ mod idempotency_key_tests {
         assert_eq!(session("11:00:00"), session("11:04:59"));
         assert_ne!(session("11:04:59"), session("11:05:00"));
         assert_ne!(session("11:00:00"), session("12:00:00"));
+    }
+
+    /// A double click on Add credit reuses one session; any other purchase,
+    /// amount or return page opens its own.
+    #[test]
+    fn a_credit_checkout_key_changes_with_every_parameter() {
+        let base = CreditCheckout {
+            customer_id: "cus_1",
+            organization_id: "org-1",
+            top_up_id: "credit-1",
+            amount_cents: 10_000,
+            success_url: "https://a/ok",
+            cancel_url: "https://a/no",
+        };
+        let k = |purchase: CreditCheckout<'_>| {
+            key("credit-checkout", &credit_checkout_request(&purchase))
+        };
+        all_distinct(
+            k(base),
+            k(base),
+            vec![
+                k(CreditCheckout {
+                    customer_id: "cus_2",
+                    ..base
+                }),
+                k(CreditCheckout {
+                    organization_id: "org-2",
+                    ..base
+                }),
+                k(CreditCheckout {
+                    top_up_id: "credit-2",
+                    ..base
+                }),
+                k(CreditCheckout {
+                    amount_cents: 25_000,
+                    ..base
+                }),
+                k(CreditCheckout {
+                    success_url: "https://a/ok2",
+                    ..base
+                }),
+                k(CreditCheckout {
+                    cancel_url: "https://a/no2",
+                    ..base
+                }),
+            ],
+        );
     }
 
     #[test]

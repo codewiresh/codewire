@@ -76,17 +76,18 @@ pub(crate) fn render_credential_settings_page(template: impl Template) -> Respon
     response
 }
 
-/// The billing page's forms POST to billing's setup and portal actions, which
-/// answer with a redirect to Stripe's hosted Checkout or billing portal.
+/// The billing page's forms POST to billing's setup, portal and add-credit
+/// actions, which answer with a redirect to Stripe's hosted Checkout, billing
+/// portal or, for a charge the bank wants approved, the invoice's payment page.
 /// Chromium applies this page's form-action to that cross-origin redirect too,
-/// so only these two Stripe hosts are added, and only here (#3381: "Add payment
-/// method" and "Manage in Stripe" did nothing).
+/// so only these three Stripe hosts are added, and only here (#3381: "Add
+/// payment method" and "Manage in Stripe" did nothing).
 pub(crate) fn render_billing_page(template: impl Template) -> Response {
     let mut response = render_page(template);
     if response.status() == StatusCode::OK {
         let policy = CONTENT_SECURITY_POLICY.replace(
             "form-action 'self'",
-            "form-action 'self' https://checkout.stripe.com https://billing.stripe.com",
+            "form-action 'self' https://checkout.stripe.com https://billing.stripe.com https://invoice.stripe.com",
         );
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
@@ -362,13 +363,13 @@ mod tests {
             .unwrap();
         assert!(
             policy.contains(
-                "form-action 'self' https://checkout.stripe.com https://billing.stripe.com;"
+                "form-action 'self' https://checkout.stripe.com https://billing.stripe.com https://invoice.stripe.com;"
             ),
             "{policy}"
         );
         assert_eq!(
             policy.replace(
-                "form-action 'self' https://checkout.stripe.com https://billing.stripe.com",
+                "form-action 'self' https://checkout.stripe.com https://billing.stripe.com https://invoice.stripe.com",
                 "form-action 'self'"
             ),
             CONTENT_SECURITY_POLICY

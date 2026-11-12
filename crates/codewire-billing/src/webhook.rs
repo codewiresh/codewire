@@ -235,6 +235,17 @@ async fn handle_checkout_completed(
         return Ok(());
     }
 
+    if session.mode == stripe_shared::CheckoutSessionMode::Payment
+        && session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("kind"))
+            .map(String::as_str)
+            == Some(crate::stripe_client::CREDIT_TOP_UP_KIND)
+    {
+        return handle_credit_checkout(state, session).await;
+    }
+
     let Some(sub_ref) = &session.subscription else {
         return Ok(());
     };
@@ -365,6 +376,115 @@ async fn handle_checkout_completed(
     .await;
     tracing::info!(org_id, plan = plan_name, sub_id = %sub.id, "billing: checkout completed");
     Ok(())
+}
+
+/// A one-time credit purchase paid on Stripe's page (#3381): credits what was
+/// paid, once, and makes the card it saved the organization's default, so
+/// automatic top-up can charge it. Only a paid EUR session of the customer
+/// the organization has is credited, for exactly the amount it was opened
+/// for; anything else is logged and left alone. An error fails the delivery,
+/// so Stripe retries it; crediting is idempotent.
+async fn handle_credit_checkout(
+    state: &BillingState,
+    session: &stripe_shared::CheckoutSession,
+) -> anyhow::Result<()> {
+    let pool = &state.pool;
+    let metadata = session.metadata.clone().unwrap_or_default();
+    let field = |key: &str| metadata.get(key).map(String::as_str).unwrap_or_default();
+    let (org_id, top_up_id) = (field("org_id"), field("top_up_id"));
+    let session_id = session.id.as_str();
+    if org_id.is_empty() || top_up_id.is_empty() {
+        tracing::warn!(
+            session_id,
+            "billing: credit checkout without its organization"
+        );
+        return Ok(());
+    }
+    if session.payment_status != stripe_shared::CheckoutSessionPaymentStatus::Paid {
+        tracing::info!(
+            session_id,
+            org_id,
+            "billing: credit checkout completed unpaid"
+        );
+        return Ok(());
+    }
+    let amount_cents = session
+        .amount_total
+        .and_then(|amount| i32::try_from(amount).ok())
+        .filter(|amount| crate::overview::AUTO_TOP_UP_CENTS.contains(amount));
+    let Some(amount_cents) = amount_cents.filter(|amount| {
+        field("amount_cents") == amount.to_string()
+            && session.currency == Some(crate::stripe_client::BILLING_CURRENCY)
+    }) else {
+        tracing::error!(
+            session_id,
+            org_id,
+            amount_total = ?session.amount_total,
+            "billing: credit checkout amount does not match its purchase; not credited"
+        );
+        return Ok(());
+    };
+    let Some(customer_id) = session.customer.as_ref().map(expandable_id) else {
+        tracing::error!(
+            session_id,
+            org_id,
+            "billing: credit checkout without a customer"
+        );
+        return Ok(());
+    };
+    let owns: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM organizations WHERE id = $1 AND stripe_customer_id = $2)",
+    )
+    .bind(org_id)
+    .bind(&customer_id)
+    .fetch_one(pool)
+    .await?;
+    if !owns {
+        tracing::error!(
+            session_id,
+            org_id,
+            "billing: credit checkout customer is not the organization's"
+        );
+        return Ok(());
+    }
+    let payment_intent = session.payment_intent.as_ref().map(expandable_id);
+    let credited = crate::credit::credit_checkout_purchase(
+        pool,
+        org_id,
+        top_up_id,
+        amount_cents,
+        payment_intent.as_deref().unwrap_or(session_id),
+    )
+    .await?;
+    tracing::info!(org_id, top_up_id, credited, "billing: credit checkout paid");
+
+    if let Some(payment_intent) = payment_intent
+        && let Some(payment_method_id) = state
+            .stripe
+            .payment_intent_payment_method(&payment_intent)
+            .await?
+    {
+        let idempotency_key = provider_idempotency_key(
+            "default-payment-method",
+            &[org_id, &customer_id, &payment_method_id],
+        );
+        if let Err(error) = run_organization_billing_mutation(pool, org_id, async {
+            state
+                .stripe
+                .set_default_payment_method(&customer_id, &payment_method_id, &idempotency_key)
+                .await
+                .map_err(OrganizationBillingMutationError::ambiguous)
+        })
+        .await
+        {
+            tracing::error!(
+                ?error,
+                org_id,
+                "billing: failed to save the credit checkout card"
+            );
+        }
+    }
+    settle_after_new_card(state, org_id).await
 }
 
 /// A new card tops up a balance that ran out (#3381), where this deployment

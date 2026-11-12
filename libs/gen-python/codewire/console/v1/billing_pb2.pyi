@@ -3,12 +3,33 @@ import datetime
 from google.protobuf import struct_pb2 as _struct_pb2
 from google.protobuf import timestamp_pb2 as _timestamp_pb2
 from google.protobuf.internal import containers as _containers
+from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
 from collections.abc import Iterable as _Iterable, Mapping as _Mapping
 from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
+
+class AddCreditOutcome(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    ADD_CREDIT_OUTCOME_UNSPECIFIED: _ClassVar[AddCreditOutcome]
+    ADD_CREDIT_OUTCOME_PAID: _ClassVar[AddCreditOutcome]
+    ADD_CREDIT_OUTCOME_ACTION_REQUIRED: _ClassVar[AddCreditOutcome]
+    ADD_CREDIT_OUTCOME_REFUSED: _ClassVar[AddCreditOutcome]
+
+class AddCreditRefusal(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    ADD_CREDIT_REFUSAL_UNSPECIFIED: _ClassVar[AddCreditRefusal]
+    ADD_CREDIT_REFUSAL_DECLINED: _ClassVar[AddCreditRefusal]
+    ADD_CREDIT_REFUSAL_IN_PROGRESS: _ClassVar[AddCreditRefusal]
+ADD_CREDIT_OUTCOME_UNSPECIFIED: AddCreditOutcome
+ADD_CREDIT_OUTCOME_PAID: AddCreditOutcome
+ADD_CREDIT_OUTCOME_ACTION_REQUIRED: AddCreditOutcome
+ADD_CREDIT_OUTCOME_REFUSED: AddCreditOutcome
+ADD_CREDIT_REFUSAL_UNSPECIFIED: AddCreditRefusal
+ADD_CREDIT_REFUSAL_DECLINED: AddCreditRefusal
+ADD_CREDIT_REFUSAL_IN_PROGRESS: AddCreditRefusal
 
 class ListOrgPlansRequest(_message.Message):
     __slots__ = ()
@@ -205,6 +226,34 @@ class UpdateAutoTopUpResponse(_message.Message):
     enabled: bool
     amount_cents: int
     def __init__(self, enabled: _Optional[bool] = ..., amount_cents: _Optional[int] = ...) -> None: ...
+
+class AddCreditRequest(_message.Message):
+    __slots__ = ("org_id", "amount_cents", "request_id", "success_url", "cancel_url")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    AMOUNT_CENTS_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    SUCCESS_URL_FIELD_NUMBER: _ClassVar[int]
+    CANCEL_URL_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    amount_cents: int
+    request_id: str
+    success_url: str
+    cancel_url: str
+    def __init__(self, org_id: _Optional[str] = ..., amount_cents: _Optional[int] = ..., request_id: _Optional[str] = ..., success_url: _Optional[str] = ..., cancel_url: _Optional[str] = ...) -> None: ...
+
+class AddCreditResponse(_message.Message):
+    __slots__ = ("outcome", "amount_cents", "payment_url", "refusal", "decline_code")
+    OUTCOME_FIELD_NUMBER: _ClassVar[int]
+    AMOUNT_CENTS_FIELD_NUMBER: _ClassVar[int]
+    PAYMENT_URL_FIELD_NUMBER: _ClassVar[int]
+    REFUSAL_FIELD_NUMBER: _ClassVar[int]
+    DECLINE_CODE_FIELD_NUMBER: _ClassVar[int]
+    outcome: AddCreditOutcome
+    amount_cents: int
+    payment_url: str
+    refusal: AddCreditRefusal
+    decline_code: str
+    def __init__(self, outcome: _Optional[_Union[AddCreditOutcome, str]] = ..., amount_cents: _Optional[int] = ..., payment_url: _Optional[str] = ..., refusal: _Optional[_Union[AddCreditRefusal, str]] = ..., decline_code: _Optional[str] = ...) -> None: ...
 
 class BillingLimitUsage(_message.Message):
     __slots__ = ("used", "max")

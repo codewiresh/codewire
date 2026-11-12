@@ -44,8 +44,18 @@ dl.cw-stat-grid { margin: 0; }
 .cw-plan-form { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: var(--space-3); }
 .cw-price-form { grid-template-columns: repeat(5, minmax(0, 1fr)); margin-top: var(--space-3); }
 .cw-form-action { display: flex; align-items: end; }
+/* Add credit and automatic top-up are two panels of one kind. Add credit: its title and terms, the amount chips, the custom amount while Custom is chosen, then the button that names what it adds. */
+.cw-top-up, .cw-add-credit { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-base); }
+.cw-add-credit h3 { margin: 0; font-size: var(--text-body); font-weight: var(--weight-semibold); }
+.cw-add-credit > p { margin: 0; }
+.cw-add-credit-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.cw-add-credit .cw-input { width: var(--control-width-sm); }
+/* One row: the amounts on the left, the button on the right; a custom amount opens under them. */
+.cw-add-credit-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3) var(--space-4); }
+.cw-add-credit-amounts { grid-column: 1; grid-row: 1; margin: 0; padding: 0; border: 0; min-width: 0; }
+.cw-add-credit-row > [data-add-credit-custom] { grid-column: 1 / -1; grid-row: 2; }
+.cw-add-credit-action { display: flex; grid-column: 2; grid-row: 1; }
 /* Automatic top-up: the title, its state and the switch on one line, the terms under it, then the amount. */
-.cw-top-up { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-base); }
 .cw-top-up-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
 .cw-top-up-head h3 { margin: 0; font-size: var(--text-body); font-weight: var(--weight-semibold); }
 .cw-top-up > p { margin: 0; }

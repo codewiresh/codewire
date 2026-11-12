@@ -1263,15 +1263,16 @@ fieldset.cw-field > legend {
 .cw-choice > :is(.cw-checkbox, .cw-radio) { margin-top: var(--space-0-5); }
 .cw-choice > :not(.cw-checkbox, .cw-radio) { grid-column: 2; }
 
-/* A checkbox presented as a selectable chip; the input stays focusable and
-   announced, the chip shows its state. */
+/* A checkbox or radio presented as a selectable chip; the input stays
+   focusable and announced, the chip shows its state. Checkbox chips choose
+   any number, radio chips one of a group. */
 .cw-toggle-chip {
   position: relative;
   display: inline-flex;
   cursor: pointer;
 }
 
-.cw-toggle-chip > .cw-checkbox {
+.cw-toggle-chip > :is(.cw-checkbox, .cw-radio) {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -1296,13 +1297,13 @@ fieldset.cw-field > legend {
 
 .cw-toggle-chip:hover > span { border-color: var(--border-hover); }
 
-.cw-toggle-chip > .cw-checkbox:checked + span {
+.cw-toggle-chip > :is(.cw-checkbox, .cw-radio):checked + span {
   border-color: var(--accent);
   background: var(--accent-muted);
   color: var(--accent-text);
 }
 
-.cw-toggle-chip > .cw-checkbox:focus-visible + span {
+.cw-toggle-chip > :is(.cw-checkbox, .cw-radio):focus-visible + span {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
 }

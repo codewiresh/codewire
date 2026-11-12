@@ -7,10 +7,12 @@ use std::sync::Arc;
 
 use buffa_types::Timestamp;
 use codewire_proto::codewire::console::v1::{
-    BillingEvent as ProtoBillingEvent, BillingLimitUsage as ProtoBillingLimitUsage,
-    BillingLimits as ProtoBillingLimits, BillingService, CreateCheckoutSessionRequest,
-    CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse,
-    CreateSetupSessionRequest, CreateSetupSessionResponse, CreditRates as ProtoCreditRates,
+    AddCreditOutcome as ProtoAddCreditOutcome, AddCreditRefusal, AddCreditRequest,
+    AddCreditResponse, BillingEvent as ProtoBillingEvent,
+    BillingLimitUsage as ProtoBillingLimitUsage, BillingLimits as ProtoBillingLimits,
+    BillingService, CreateCheckoutSessionRequest, CreateCheckoutSessionResponse,
+    CreatePortalSessionRequest, CreatePortalSessionResponse, CreateSetupSessionRequest,
+    CreateSetupSessionResponse, CreditRates as ProtoCreditRates,
     EnvironmentUsageEntry as ProtoEnvironmentUsageEntry,
     EnvironmentUsageHour as ProtoEnvironmentUsageHour,
     EnvironmentUsageMonth as ProtoEnvironmentUsageMonth, GetBillingOverviewRequest,
@@ -29,6 +31,7 @@ use crate::checkout_sessions::{
     CheckoutRequest, PortalRequest, SetupRequest, create_checkout_session, create_portal_session,
     create_setup_session,
 };
+use crate::credit_purchase::{AddCreditOutcome, add_credit};
 use crate::org_billing::{
     BillingEventResponse, InvoiceResponse, list_events_core, list_invoices_core,
 };
@@ -39,7 +42,7 @@ use crate::overview::{
 use crate::plans::{self, OrgPlan, ResourcePlan};
 use crate::routes::BillingState;
 
-/// Registers all ten BillingService RPCs on their generated Connect routes.
+/// Registers every BillingService RPC on its generated Connect route.
 pub fn router(state: BillingState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(BillingConnectService { state }))
 }
@@ -282,6 +285,54 @@ impl BillingService for BillingConnectService {
             ..Default::default()
         })
     }
+
+    async fn add_credit(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, AddCreditRequest>,
+    ) -> ServiceResult<AddCreditResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let amount_cents = request.amount_cents;
+        let outcome = add_credit(
+            &self.state,
+            &user,
+            request.org_id,
+            crate::credit_purchase::AddCreditRequest {
+                amount_cents,
+                request_id: request.request_id.to_owned(),
+                success_url: request.success_url.to_owned(),
+                cancel_url: request.cancel_url.to_owned(),
+            },
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto_add_credit(outcome, amount_cents))
+    }
+}
+
+fn proto_add_credit(outcome: AddCreditOutcome, amount_cents: i32) -> AddCreditResponse {
+    let mut response = AddCreditResponse {
+        amount_cents,
+        ..Default::default()
+    };
+    match outcome {
+        AddCreditOutcome::Paid => response.outcome = ProtoAddCreditOutcome::Paid.into(),
+        AddCreditOutcome::ActionRequired { payment_url } => {
+            response.outcome = ProtoAddCreditOutcome::ActionRequired.into();
+            response.payment_url = payment_url;
+        }
+        AddCreditOutcome::Declined { code } => {
+            response.outcome = ProtoAddCreditOutcome::Refused.into();
+            response.refusal = AddCreditRefusal::Declined.into();
+            response.decline_code = code;
+        }
+        AddCreditOutcome::InProgress => {
+            response.outcome = ProtoAddCreditOutcome::Refused.into();
+            response.refusal = AddCreditRefusal::InProgress.into();
+        }
+    }
+    response
 }
 
 fn proto_org_plan(plan: OrgPlan) -> ProtoOrgPlan {

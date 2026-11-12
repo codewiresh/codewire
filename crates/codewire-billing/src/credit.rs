@@ -269,7 +269,7 @@ pub async fn complete_top_up(
     )
     .bind(&organization_id)
     .bind(i64::from(amount_cents) * NANO_EUR_PER_CENT)
-    .bind(format!("top_up:{top_up_id}"))
+    .bind(top_up_ledger_key(top_up_id))
     .bind(invoice_id)
     .execute(&mut *transaction)
     .await?;
@@ -278,9 +278,11 @@ pub async fn complete_top_up(
     Ok(true)
 }
 
-/// Records a declined top-up, and that the organization has no credit and
-/// no way to get it, which starts the 24-hour clock on its running
-/// sandboxes.
+/// Records a declined top-up and, when the organization has no credit, that
+/// it has no way to get it, which starts the 24-hour clock on its running
+/// sandboxes. A refused one-time purchase leaves a funded organization as it
+/// was. A declined top-up whose invoice is paid later still credits once:
+/// [`complete_top_up`] completes a failed top-up too.
 pub async fn fail_top_up(
     pool: &PgPool,
     top_up_id: &str,
@@ -299,9 +301,55 @@ pub async fn fail_top_up(
     .fetch_optional(pool)
     .await?;
     if let Some(organization_id) = organization_id {
-        mark_exhausted(pool, &organization_id).await?;
+        sqlx::query(
+            r#"UPDATE organizations o
+               SET credit_exhausted_at = COALESCE(o.credit_exhausted_at, now())
+               WHERE o.id = $1 AND o.rate_card <> 'unlimited'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM billing_credit_balances b
+                     WHERE b.organization_id = o.id AND b.balance_nano_eur > 0)"#,
+        )
+        .bind(&organization_id)
+        .execute(pool)
+        .await?;
     }
     Ok(())
+}
+
+/// Credits a one-time purchase paid through Stripe Checkout, once per
+/// top-up id, whichever delivery of its completion gets here first. It has
+/// no `billing_top_ups` row: Stripe's session, not a resumable charge, makes
+/// it happen once.
+pub async fn credit_checkout_purchase(
+    pool: &PgPool,
+    organization_id: &str,
+    top_up_id: &str,
+    amount_cents: i32,
+    provider_object_id: &str,
+) -> anyhow::Result<bool> {
+    let mut transaction = pool.begin().await?;
+    let credited: Option<i64> = sqlx::query_scalar(
+        r#"INSERT INTO billing_credit_ledger
+               (organization_id, entry_kind, amount_nano_eur, idempotency_key, provider_object_id)
+           VALUES ($1, 'top_up', $2, $3, $4)
+           ON CONFLICT (organization_id, idempotency_key) DO NOTHING
+           RETURNING id"#,
+    )
+    .bind(organization_id)
+    .bind(i64::from(amount_cents) * NANO_EUR_PER_CENT)
+    .bind(top_up_ledger_key(top_up_id))
+    .bind(provider_object_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    clear_exhausted_if_funded(&mut transaction, organization_id).await?;
+    transaction.commit().await?;
+    Ok(credited.is_some())
+}
+
+/// The ledger key of a top-up's credit, the same for a charged top-up and a
+/// Checkout purchase.
+pub(crate) fn top_up_ledger_key(top_up_id: &str) -> String {
+    format!("top_up:{top_up_id}")
 }
 
 /// Where an organization's credit stands after settling.
@@ -437,6 +485,18 @@ pub async fn settle_organization(
         }
         Ok(crate::stripe_client::TopUpCharge::Declined { invoice_id, code }) => {
             fail_top_up(pool, &top_up_id, invoice_id.as_deref(), &code).await?;
+            Ok(Settlement::Exhausted)
+        }
+        // Nobody is there to approve it. Its open invoice still credits if
+        // it is paid later.
+        Ok(crate::stripe_client::TopUpCharge::ActionRequired { invoice_id, .. }) => {
+            fail_top_up(
+                pool,
+                &top_up_id,
+                Some(&invoice_id),
+                crate::stripe_client::AUTHENTICATION_REQUIRED,
+            )
+            .await?;
             Ok(Settlement::Exhausted)
         }
         Err(error) => {
@@ -1512,7 +1572,34 @@ mod tests {
             Settlement::Funded
         );
 
-        // A refused charge exhausts the organization.
+        // A refused charge leaves a funded organization as it was: a refused
+        // one-time purchase is not running out.
+        let refused: String = sqlx::query_scalar(
+            "INSERT INTO billing_top_ups (organization_id, amount_cents) VALUES ($1, 2000) \
+             RETURNING id",
+        )
+        .bind(&fixture.organization_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        fail_top_up(&pool, &refused, None, "card_declined")
+            .await
+            .unwrap();
+        assert!(balance(&pool, &fixture).await > 0);
+        assert!(!exhausted(&pool, &fixture).await);
+
+        // A refused charge exhausts an organization with no credit.
+        sqlx::query(
+            "INSERT INTO billing_credit_ledger \
+             (organization_id, entry_kind, amount_nano_eur, idempotency_key, actor_user_id, reason) \
+             VALUES ($1, 'adjustment', $2, 'spent', 'test', 'usage beyond the balance')",
+        )
+        .bind(&fixture.organization_id)
+        .bind(-20 * NANO_EUR_PER_EURO)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(balance(&pool, &fixture).await <= 0);
         let refused: String = sqlx::query_scalar(
             "INSERT INTO billing_top_ups (organization_id, amount_cents) VALUES ($1, 2000) \
              RETURNING id",

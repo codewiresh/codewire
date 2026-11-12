@@ -66,6 +66,9 @@ const (
 	// BillingServiceUpdateAutoTopUpProcedure is the fully-qualified name of the BillingService's
 	// UpdateAutoTopUp RPC.
 	BillingServiceUpdateAutoTopUpProcedure = "/codewire.console.v1.BillingService/UpdateAutoTopUp"
+	// BillingServiceAddCreditProcedure is the fully-qualified name of the BillingService's AddCredit
+	// RPC.
+	BillingServiceAddCreditProcedure = "/codewire.console.v1.BillingService/AddCredit"
 )
 
 // BillingServiceClient is a client for the codewire.console.v1.BillingService service.
@@ -96,6 +99,13 @@ type BillingServiceClient interface {
 	// UpdateAutoTopUp turns automatic top-up on or off and sets its amount.
 	// Organization owners and admins only; audited.
 	UpdateAutoTopUp(context.Context, *connect.Request[v1.UpdateAutoTopUpRequest]) (*connect.Response[v1.UpdateAutoTopUpResponse], error)
+	// AddCredit buys a one-time amount of compute credit. With a saved card it
+	// charges the card at once; when the bank asks the customer to approve the
+	// charge, or there is no card yet, it answers with the Stripe page where the
+	// customer approves or pays, and credit follows once Stripe reports the
+	// payment. Organization owners and admins only. A retry with the same
+	// request_id and amount never charges twice.
+	AddCredit(context.Context, *connect.Request[v1.AddCreditRequest]) (*connect.Response[v1.AddCreditResponse], error)
 }
 
 // NewBillingServiceClient constructs a client for the codewire.console.v1.BillingService service.
@@ -182,6 +192,12 @@ func NewBillingServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(billingServiceMethods.ByName("UpdateAutoTopUp")),
 			connect.WithClientOptions(opts...),
 		),
+		addCredit: connect.NewClient[v1.AddCreditRequest, v1.AddCreditResponse](
+			httpClient,
+			baseURL+BillingServiceAddCreditProcedure,
+			connect.WithSchema(billingServiceMethods.ByName("AddCredit")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -198,6 +214,7 @@ type billingServiceClient struct {
 	createPortalSession   *connect.Client[v1.CreatePortalSessionRequest, v1.CreatePortalSessionResponse]
 	createSetupSession    *connect.Client[v1.CreateSetupSessionRequest, v1.CreateSetupSessionResponse]
 	updateAutoTopUp       *connect.Client[v1.UpdateAutoTopUpRequest, v1.UpdateAutoTopUpResponse]
+	addCredit             *connect.Client[v1.AddCreditRequest, v1.AddCreditResponse]
 }
 
 // ListOrgPlans calls codewire.console.v1.BillingService.ListOrgPlans.
@@ -255,6 +272,11 @@ func (c *billingServiceClient) UpdateAutoTopUp(ctx context.Context, req *connect
 	return c.updateAutoTopUp.CallUnary(ctx, req)
 }
 
+// AddCredit calls codewire.console.v1.BillingService.AddCredit.
+func (c *billingServiceClient) AddCredit(ctx context.Context, req *connect.Request[v1.AddCreditRequest]) (*connect.Response[v1.AddCreditResponse], error) {
+	return c.addCredit.CallUnary(ctx, req)
+}
+
 // BillingServiceHandler is an implementation of the codewire.console.v1.BillingService service.
 type BillingServiceHandler interface {
 	// ListOrgPlans returns the active organization plans keyed by plan key.
@@ -283,6 +305,13 @@ type BillingServiceHandler interface {
 	// UpdateAutoTopUp turns automatic top-up on or off and sets its amount.
 	// Organization owners and admins only; audited.
 	UpdateAutoTopUp(context.Context, *connect.Request[v1.UpdateAutoTopUpRequest]) (*connect.Response[v1.UpdateAutoTopUpResponse], error)
+	// AddCredit buys a one-time amount of compute credit. With a saved card it
+	// charges the card at once; when the bank asks the customer to approve the
+	// charge, or there is no card yet, it answers with the Stripe page where the
+	// customer approves or pays, and credit follows once Stripe reports the
+	// payment. Organization owners and admins only. A retry with the same
+	// request_id and amount never charges twice.
+	AddCredit(context.Context, *connect.Request[v1.AddCreditRequest]) (*connect.Response[v1.AddCreditResponse], error)
 }
 
 // NewBillingServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -365,6 +394,12 @@ func NewBillingServiceHandler(svc BillingServiceHandler, opts ...connect.Handler
 		connect.WithSchema(billingServiceMethods.ByName("UpdateAutoTopUp")),
 		connect.WithHandlerOptions(opts...),
 	)
+	billingServiceAddCreditHandler := connect.NewUnaryHandler(
+		BillingServiceAddCreditProcedure,
+		svc.AddCredit,
+		connect.WithSchema(billingServiceMethods.ByName("AddCredit")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.console.v1.BillingService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case BillingServiceListOrgPlansProcedure:
@@ -389,6 +424,8 @@ func NewBillingServiceHandler(svc BillingServiceHandler, opts ...connect.Handler
 			billingServiceCreateSetupSessionHandler.ServeHTTP(w, r)
 		case BillingServiceUpdateAutoTopUpProcedure:
 			billingServiceUpdateAutoTopUpHandler.ServeHTTP(w, r)
+		case BillingServiceAddCreditProcedure:
+			billingServiceAddCreditHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -440,4 +477,8 @@ func (UnimplementedBillingServiceHandler) CreateSetupSession(context.Context, *c
 
 func (UnimplementedBillingServiceHandler) UpdateAutoTopUp(context.Context, *connect.Request[v1.UpdateAutoTopUpRequest]) (*connect.Response[v1.UpdateAutoTopUpResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.UpdateAutoTopUp is not implemented"))
+}
+
+func (UnimplementedBillingServiceHandler) AddCredit(context.Context, *connect.Request[v1.AddCreditRequest]) (*connect.Response[v1.AddCreditResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.AddCredit is not implemented"))
 }

@@ -47,6 +47,32 @@
               {% endif %}
               {% if billing.billing_enabled %}
               {% if billing.can_manage && !billing.unmetered %}
+              <form class="cw-add-credit" method="post" action="/{{ organization.slug }}/billing/_actions/add-credit" aria-labelledby="add-credit-title" aria-describedby="add-credit-terms" data-add-credit>
+                <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
+                <input type="hidden" name="request" value="{{ billing.add_credit_request }}">
+                <h3 id="add-credit-title">Add credit</h3>
+                <p class="cw-muted" id="add-credit-terms">{% if billing.has_payment_method %}Charge my saved payment method once. If my bank asks me to approve the payment, I finish on Stripe.{% else %}Pay once on Stripe. The card is saved to this organization for later top-ups.{% endif %}</p>
+                <div class="cw-add-credit-row">
+                <fieldset class="cw-add-credit-amounts">
+                  <legend class="cw-sr-only">Amount</legend>
+                  <div class="cw-add-credit-chips">
+                    <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="50"><span>€50</span></label>
+                    <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="100" checked><span>€100</span></label>
+                    <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="250"><span>€250</span></label>
+                    <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="500"><span>€500</span></label>
+                    <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="custom"><span>Custom</span></label>
+                  </div>
+                </fieldset>
+                <div class="cw-field" data-add-credit-custom>
+                  <label class="cw-label" for="add-credit-amount">Custom amount (EUR)</label>
+                  <input class="cw-input" id="add-credit-amount" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" aria-describedby="add-credit-amount-hint">
+                  <p class="cw-field-help" id="add-credit-amount-hint">From €5 to €1,000.</p>
+                </div>
+                <div class="cw-add-credit-action"><button class="cw-button" type="submit" data-add-credit-submit>Add credit</button></div>
+                </div>
+              </form>
+              {% endif %}
+              {% if billing.can_manage && !billing.unmetered %}
               <form class="cw-top-up" method="post" action="/{{ organization.slug }}/billing/_actions/auto-top-up" aria-labelledby="top-up-title">
                 <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
                 <div class="cw-top-up-head">

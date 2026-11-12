@@ -88,6 +88,10 @@ organization up.
 ## The Billing page
 
 Owners and admins open the organization's **Billing** page to see the credit
-balance and rates, add a payment method, and set automatic top-up. Invoices and
-their receipts are listed there, and the payment portal manages the card.
+balance and rates, add a payment method, add credit once, and set automatic
+top-up. **Add credit** charges €50, €100, €250, €500 or another amount from €5
+to €1,000 to the saved card at once. When the bank asks to approve the payment,
+or there is no card yet, Stripe's payment page finishes it, and a card entered
+there is saved for later top-ups. Invoices and their receipts are listed there,
+and the payment portal manages the card.
 `hello@codewire.sh` answers questions about credit and invoices.

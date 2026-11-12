@@ -78,6 +78,60 @@ const app = document.querySelector("[data-dashboard-app]");
     const control = event.target;
     if (control instanceof HTMLInputElement && control.matches("[data-submit-on-change]")) control.form?.requestSubmit();
   });
+  // Add credit: a chip chooses the amount, Custom shows its field, and the
+  // button names what it adds ("Add €100"). Without script every chip and
+  // the custom field show and the button reads "Add credit". The custom
+  // field is disabled while hidden, so a stale value there never blocks or
+  // joins the submission.
+  const creditEuros = (text) => {
+    const match = /^(\d{1,4})(?:\.(\d{1,2}))?$/.exec(text.trim());
+    if (!match) return null;
+    const cents = Number(match[1]) * 100 + Number((match[2] || "").padEnd(2, "0"));
+    if (cents < 500 || cents > 100000) return null;
+    return cents % 100 === 0 ? String(cents / 100) : (cents / 100).toFixed(2);
+  };
+  const syncAddCredit = (form) => {
+    const choice = form.querySelector('input[name="choice"]:checked');
+    const custom = form.querySelector("[data-add-credit-custom]");
+    const amount = form.querySelector('input[name="amount"]');
+    const submit = form.querySelector("[data-add-credit-submit]");
+    const isCustom = choice?.value === "custom";
+    if (custom instanceof HTMLElement) custom.hidden = !isCustom;
+    if (amount instanceof HTMLInputElement) {
+      amount.disabled = !isCustom;
+      amount.required = isCustom;
+    }
+    const euros = !choice ? null : isCustom ? creditEuros(amount?.value || "") : creditEuros(choice.value);
+    if (submit) submit.textContent = euros ? `Add €${euros}` : "Add credit";
+  };
+  const addCreditForms = () => document.querySelectorAll("form[data-add-credit]");
+  addCreditForms().forEach(syncAddCredit);
+  for (const type of ["change", "input"]) {
+    document.addEventListener(type, (event) => {
+      const form = event.target instanceof Element ? event.target.closest("form[data-add-credit]") : null;
+      if (form instanceof HTMLFormElement) syncAddCredit(form);
+    });
+  }
+  // One purchase per click: a second submit while the first is on its way is
+  // dropped (billing also never charges a resubmitted form twice). Coming
+  // back from Stripe restores the form.
+  document.addEventListener("submit", (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !form.matches("form[data-add-credit]")) return;
+    if (form.dataset.submitting === "true") {
+      event.preventDefault();
+      return;
+    }
+    form.dataset.submitting = "true";
+    form.setAttribute("aria-busy", "true");
+  });
+  window.addEventListener("pageshow", () => {
+    addCreditForms().forEach((form) => {
+      delete form.dataset.submitting;
+      form.removeAttribute("aria-busy");
+      syncAddCredit(form);
+    });
+  });
   document.addEventListener("pointerover", (event) => {
     if (event.pointerType !== "mouse" || !(event.target instanceof Element)) return;
     const trigger = event.target.closest("[data-field-help-trigger]");

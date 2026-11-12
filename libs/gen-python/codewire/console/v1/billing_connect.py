@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .billing_pb2 import CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse, CreateSetupSessionRequest, CreateSetupSessionResponse, GetBillingOverviewRequest, GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, GetSignupCreditRequest, GetSignupCreditResponse, ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse, ListResourcePlansRequest, ListResourcePlansResponse, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse
+from .billing_pb2 import AddCreditRequest, AddCreditResponse, CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse, CreateSetupSessionRequest, CreateSetupSessionResponse, GetBillingOverviewRequest, GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, GetSignupCreditRequest, GetSignupCreditResponse, ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse, ListResourcePlansRequest, ListResourcePlansResponse, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -66,6 +66,9 @@ class BillingService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def update_auto_top_up(self, request: UpdateAutoTopUpRequest, ctx: RequestContext[UpdateAutoTopUpRequest, UpdateAutoTopUpResponse]) -> UpdateAutoTopUpResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def add_credit(self, request: AddCreditRequest, ctx: RequestContext[AddCreditRequest, AddCreditResponse]) -> AddCreditResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -191,6 +194,16 @@ class BillingServiceASGIApplication(ConnectASGIApplication[BillingService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.update_auto_top_up,
+                ),
+                "/codewire.console.v1.BillingService/AddCredit": Endpoint.unary(
+                    method=MethodInfo(
+                        name="AddCredit",
+                        service_name="codewire.console.v1.BillingService",
+                        input=AddCreditRequest,
+                        output=AddCreditResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.add_credit,
                 ),
             },
             interceptors=interceptors,
@@ -464,6 +477,26 @@ class BillingServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def add_credit(
+        self,
+        request: AddCreditRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AddCreditResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="AddCredit",
+                service_name="codewire.console.v1.BillingService",
+                input=AddCreditRequest,
+                output=AddCreditResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class BillingServiceSync(Protocol):
     def list_org_plans(self, request: ListOrgPlansRequest, ctx: RequestContext[ListOrgPlansRequest, ListOrgPlansResponse]) -> ListOrgPlansResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -496,6 +529,9 @@ class BillingServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def update_auto_top_up(self, request: UpdateAutoTopUpRequest, ctx: RequestContext[UpdateAutoTopUpRequest, UpdateAutoTopUpResponse]) -> UpdateAutoTopUpResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def add_credit(self, request: AddCreditRequest, ctx: RequestContext[AddCreditRequest, AddCreditResponse]) -> AddCreditResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -619,6 +655,16 @@ class BillingServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.update_auto_top_up,
+                ),
+                "/codewire.console.v1.BillingService/AddCredit": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="AddCredit",
+                        service_name="codewire.console.v1.BillingService",
+                        input=AddCreditRequest,
+                        output=AddCreditResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.add_credit,
                 ),
             },
             interceptors=interceptors,
@@ -876,6 +922,25 @@ class BillingServiceClientSync(ConnectClientSync):
                 service_name="codewire.console.v1.BillingService",
                 input=UpdateAutoTopUpRequest,
                 output=UpdateAutoTopUpResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def add_credit(
+        self,
+        request: AddCreditRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AddCreditResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="AddCredit",
+                service_name="codewire.console.v1.BillingService",
+                input=AddCreditRequest,
+                output=AddCreditResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,
