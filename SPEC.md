@@ -525,7 +525,7 @@ local VMs.
 ### Terminal
 
 `cw shell ENV` opens a PTY session through the daemon; `cw attach` reattaches
-a durable session (`Ctrl-B`, then `D` detaches). The dashboard terminal is a
+a durable session (`Ctrl-B`, then `d` detaches). The dashboard terminal is a
 browser presentation of the same durable sessions, reached through
 orchestration's terminal proxy with a short-lived ticket derived from the
 browser session ([docs/dev/BROWSER-TERMINALS.md](docs/dev/BROWSER-TERMINALS.md)).

@@ -381,7 +381,7 @@ enum Command {
     Vscode(VscodeArgs),
     #[command(
         about = "Open a shell session in the selected or named environment",
-        long_about = "Open a login shell in a new session:\n  cw shell ENV\n  cw shell --in ENV\n  cw shell                         (in the selected environment)\n\nDetach with Ctrl-B, then D; the shell keeps running. Reconnect with `cw attach ENV --session SESSION`."
+        long_about = "Open a login shell in a new session:\n  cw shell ENV\n  cw shell --in ENV\n  cw shell                         (in the selected environment)\n\nWith --durable, detach with Ctrl-B, then d; the shell keeps running, and `cw attach ENV --session SESSION` reconnects."
     )]
     Shell(EnvironmentShellArgs),
     #[command(name = "ssh", hide = true, about = "OpenSSH integration helpers")]
@@ -391,7 +391,7 @@ enum Command {
     },
     #[command(
         about = "Open claude or codex in an environment, or run a command",
-        long_about = "Open an agent's own terminal UI in a new session:\n  cw run claude --in ENV [--name SESSION] [-- AGENT_ARGS]\n  cw run codex                     (in the selected environment)\n  cw run                           (asks which agent)\n\nRun a command in a new session:\n  cw run --in ENV [--env KEY=VALUE] -- npm test\n\nStart a managed conversation (queued messages and recorded results):\n  cw run --in ENV --agent claude --name review --detach [--prompt TEXT]\n\nAGENT is only claude or codex; an environment is named with --in, so one called claude is `--in claude`. --name names the new session and never reuses one. Detach with Ctrl-B, then D; reconnect with `cw attach ENV --session SESSION`."
+        long_about = "Open an agent's own terminal UI in a new session:\n  cw run claude --in ENV [--name SESSION] [-- AGENT_ARGS]\n  cw run codex                     (in the selected environment)\n  cw run                           (asks which agent)\n\nRun a command in a new session:\n  cw run --in ENV [--env KEY=VALUE] -- npm test\n\nStart a managed conversation (queued messages and recorded results):\n  cw run --in ENV --agent claude --name review --detach [--prompt TEXT]\n\nAGENT is only claude or codex; an environment is named with --in, so one called claude is `--in claude`. --name names the new session and never reuses one. Detach with Ctrl-B, then d; reconnect with `cw attach ENV --session SESSION`."
     )]
     Run(EnvironmentRunArgs),
     #[cfg(unix)]
@@ -566,7 +566,7 @@ enum Command {
     Ls(ListArgs),
     #[command(
         about = "Attach to a session in an environment",
-        long_about = "Attach to a running session's terminal:\n  cw attach ENV --session SESSION\n  cw attach --session SESSION      (in the selected environment)\n  cw attach ENV                    (its only session, or a choice; scripts name --session)\n\nDetach with Ctrl-B, then D; the session keeps running."
+        long_about = "Attach to a running session's terminal:\n  cw attach ENV --session SESSION\n  cw attach --session SESSION      (in the selected environment)\n  cw attach ENV                    (its only session, or a choice; scripts name --session)\n\nDetach with Ctrl-B, then d; the session keeps running."
     )]
     Attach(AttachArgs),
     #[command(

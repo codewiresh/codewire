@@ -35,6 +35,20 @@ fn attach_navigation_recognizes_every_session_action() {
     }
 }
 
+/// #3185: the hint says "Ctrl-B, then d" (`SessionPlace::detach_hint`), and
+/// that is the key that detaches: a lowercase d, like every prefix key. An
+/// uppercase D reaches the program, as any other unbound key does.
+#[test]
+fn ctrl_b_then_a_lowercase_d_detaches_and_an_uppercase_d_reaches_the_program() {
+    let mut decoder = AttachNavigationDecoder::default();
+    assert_eq!(
+        decoder.feed(b"\x02d"),
+        (Some(AttachExit::Detached), Vec::new())
+    );
+    let mut decoder = AttachNavigationDecoder::default();
+    assert_eq!(decoder.feed(b"\x02D"), (None, vec![0x02, b'D']));
+}
+
 #[test]
 fn saved_message_location_selects_its_own_placement() {
     let globals = Globals {

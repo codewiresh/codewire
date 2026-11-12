@@ -53,7 +53,7 @@ cw wait "$ENV" --session check --timeout 10m
 cw logs "$ENV" --session check
 cw run --in "$ENV" --name shell --tty --detach -- sh
 cw send "$ENV" --session shell 'pwd'
-cw attach "$ENV" --session shell   # Ctrl-B, then D detaches
+cw attach "$ENV" --session shell   # Ctrl-B, then d detaches
 ```
 
 `wait` succeeds only after a zero exit, confirmed cleanup and drained output.

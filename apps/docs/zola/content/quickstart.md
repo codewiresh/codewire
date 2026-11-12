@@ -144,14 +144,14 @@ cw run claude --in my-app
 
 ```text
 ✓ Started Claude Code in my-app/claude · local VM
-  Detach: Ctrl-B, then D · Reconnect: cw --local attach my-app --session claude
+  Detach: Ctrl-B, then d · Reconnect: cw --local attach my-app --session claude
 ```
 
 Claude Code opens in the VM, in your project folder. The first time, it asks
 you to pick a theme and sign in, as it does on your own machine. `cw run codex`
 starts Codex the same way.
 
-Press **Ctrl-B**, then **D**, to detach. Claude Code keeps working in the VM
+Press **Ctrl-B**, then **d**, to detach. Claude Code keeps working in the VM
 after you close the terminal. Come back to it with:
 
 ```sh
@@ -268,7 +268,7 @@ cw run claude --in my-app
 
 ```text
 ✓ Started Claude Code in my-app/claude · cloud
-  Detach: Ctrl-B, then D · Reconnect: cw --cloud attach my-app --session claude
+  Detach: Ctrl-B, then d · Reconnect: cw --cloud attach my-app --session claude
 ```
 
 A port becomes an HTTPS preview URL instead of a port on your machine:

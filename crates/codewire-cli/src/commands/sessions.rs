@@ -1897,11 +1897,13 @@ impl SessionPlace {
         )
     }
 
+    /// The key named here is the one [`AttachNavigationDecoder`] detaches
+    /// on: a lowercase `d`, like the other prefix keys (#3185).
     fn detach_hint(&self, session: &EnvironmentSessionView, style: crate::output::Style) -> String {
         style.paint(
             crate::output::Role::Dim,
             &format!(
-                "Detach: Ctrl-B, then D · Reconnect: {}",
+                "Detach: Ctrl-B, then d · Reconnect: {}",
                 self.reconnect(session)
             ),
         )
@@ -3471,7 +3473,7 @@ mod run_output_tests {
         let plain = crate::output::Style::new(false, crate::output::Charset::Unicode);
         assert_eq!(
             place.detach_hint(&coding, plain),
-            "Detach: Ctrl-B, then D · Reconnect: cw --local attach app --session coding"
+            "Detach: Ctrl-B, then d · Reconnect: cw --local attach app --session coding"
         );
         // An unnamed session is named by its ID.
         assert_eq!(

@@ -72,7 +72,7 @@ after it has exited and after the environment was stopped and started;
 cw attach app --session dev
 ```
 
-attaches your terminal to a running session. Press **Ctrl-B**, then **D**, to
+attaches your terminal to a running session. Press **Ctrl-B**, then **d**, to
 detach and leave it running.
 
 | Keys | Action |

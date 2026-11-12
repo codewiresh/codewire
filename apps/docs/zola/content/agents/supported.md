@@ -43,7 +43,7 @@ terminal sessions:
 
 ```sh
 cw run --in ENV --name gemini --tty --detach -- gemini
-cw attach ENV --session gemini        # Ctrl-B, then D detaches
+cw attach ENV --session gemini        # Ctrl-B, then d detaches
 ```
 
 They keep running when you disconnect, like every session, but Codewire does

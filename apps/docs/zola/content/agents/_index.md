@@ -18,7 +18,7 @@ cw run --in my-app -- cargo test                     # foreground: streams outpu
 cw run --in my-app --name dev --detach -- npm run dev # background, named
 cw run --in my-app --name shell --tty --detach -- sh  # an interactive shell you attach to later
 cw ls my-app                                         # cw ls alone covers every environment
-cw attach my-app --session dev                       # Ctrl-B, then D detaches
+cw attach my-app --session dev                       # Ctrl-B, then d detaches
 cw logs my-app --session dev --follow
 cw wait my-app --session tests --timeout 10m
 cw stop my-app --session dev

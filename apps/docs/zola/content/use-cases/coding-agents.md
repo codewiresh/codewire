@@ -21,7 +21,7 @@ cw run claude --in fix-login
 
 ```text
 ✓ Started Claude Code in fix-login/claude · local VM
-  Detach: Ctrl-B, then D · Reconnect: cw --local attach fix-login --session claude
+  Detach: Ctrl-B, then d · Reconnect: cw --local attach fix-login --session claude
 ```
 
 Claude Code opens in the VM, in your project folder, which is mounted live:

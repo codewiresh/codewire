@@ -28,7 +28,7 @@ cw run
 `cw run claude` and `cw run codex` open that agent's own terminal UI in a new
 session, with arguments after `--` passed to the agent (for example
 `-- --resume ID`). Before the agent takes the terminal, `cw` names the
-environment and session and the way back: detach with Ctrl-B, then D, and
+environment and session and the way back: detach with Ctrl-B, then d, and
 reconnect with `cw attach ENV --session SESSION`. The positional is only
 `claude` or `codex`; anything else is refused with the `--in` spelling, so an
 environment named `claude` is `cw run claude --in claude`. Bare `cw run` asks

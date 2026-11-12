@@ -25,7 +25,7 @@ Codewire platform where it stays up and is reachable from anywhere.
 curl -fsSL https://get.codewire.sh | sh     # install cw
 cw setup --local                            # install the local VM runtime
 cw create --local --name my-app --path .    # a VM with this folder mounted live
-cw run claude --in my-app                   # Claude Code in the VM; Ctrl-B, then D detaches
+cw run claude --in my-app                   # Claude Code in the VM; Ctrl-B, then d detaches
 ```
 
 The [Quickstart](@/quickstart.md) walks through it with the output of every

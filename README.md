@@ -49,7 +49,7 @@ A local VM needs no account:
 ```sh
 cw setup --local                            # install the pinned VM runtime
 cw create --local --name my-app --path .    # a VM with this folder mounted live
-cw run claude --in my-app                   # Claude Code in the VM; Ctrl-B, then D detaches
+cw run claude --in my-app                   # Claude Code in the VM; Ctrl-B, then d detaches
 ```
 
 The [Quickstart](https://codewire.sh/docs/quickstart) continues from there
