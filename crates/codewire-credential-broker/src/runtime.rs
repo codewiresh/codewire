@@ -30,6 +30,7 @@ use crate::anthropic::{
     AnthropicApiKeyAdapter, AnthropicClaudeSignInAdapter, AnthropicStreamingResponse,
     AnthropicSubscriptionTokenAdapter,
 };
+use crate::bridge::BridgeEntry;
 use crate::claude_oauth::{
     CLAUDE_LOGIN_MINIMUM_VALIDITY_SECONDS, CanonicalClaudeOAuthBundle, ClaudeOAuthCredential,
 };
@@ -42,6 +43,7 @@ use crate::github_app::{
     GitHubAppAuthorizationError, GitHubAppAuthorizationOwner, GitHubAppRefreshError,
     GitHubAppUserOAuthBundle, GitHubOAuthCredential,
 };
+use crate::network::RouteHost;
 use crate::openai::OpenAiChatGptOAuthAdapter;
 use crate::provider_oauth::{CODEX_OAUTH_CLIENT_ID, OPENAI_TOKEN_URL};
 use crate::refresh_failure::{ProviderRejection, RefreshFailure};
@@ -62,6 +64,7 @@ const GITHUB_REFRESH_PROVIDER: &str = "github";
 #[cfg(feature = "local-broker-synthetic-smoke")]
 const SYNTHETIC_CODEX_ACCOUNT_ID: &str = "account-native-broker";
 
+mod entry;
 #[cfg(test)]
 #[path = "runtime_http_tests.rs"]
 mod http_tests;
@@ -1824,18 +1827,12 @@ where
     /// The request carries no upstream URL, credential ID or owner authority.
     /// A selected capability whose credential needs Reconnect answers with a
     /// fixed, material-free explanation instead of contacting its provider.
+    /// The request is a loopback session's, so it names no intercepted host.
     pub async fn execute(
         &self,
         request: v1::CredentialBridgeRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
-        let request = ValidatedGuestRequest::parse(request)?;
-        let slot = request.slot.clone();
-        match self.execute_validated(request).await {
-            Err(BrokerRequestError::ReconnectRequired) => {
-                Ok(crate::reconnect::reconnect_required_response(&slot))
-            }
-            result => result,
-        }
+        self.execute_on(BridgeEntry::Loopback, request).await
     }
 
     async fn execute_validated(
@@ -2867,16 +2864,17 @@ struct ValidatedGuestRequest {
     query: Option<String>,
     headers: HeaderMap,
     body: Vec<u8>,
+    /// Set only on a front-door session, for its credential handling (#3999).
+    #[cfg_attr(not(test), expect(dead_code, reason = "nothing reads it yet"))]
+    intercepted_host: Option<RouteHost>,
 }
 
 impl ValidatedGuestRequest {
-    fn parse(request: v1::CredentialBridgeRequest) -> Result<Self, BrokerRequestError> {
-        // Only a front-door session names the host it intercepted, and no
-        // session served here is one: such a request is refused before any
-        // credential lease.
-        if !request.intercepted_host.is_empty() {
-            return Err(BrokerRequestError::InvalidRequest);
-        }
+    fn parse(
+        entry: BridgeEntry,
+        request: v1::CredentialBridgeRequest,
+    ) -> Result<Self, BrokerRequestError> {
+        let intercepted_host = entry::intercepted_host(entry, &request)?;
         if !matches!(
             (request.capability_slot.as_str(), request.route.as_str()),
             ("codex" | "openai", "openai-api")
@@ -2932,6 +2930,7 @@ impl ValidatedGuestRequest {
             query,
             headers,
             body: request.body,
+            intercepted_host,
         })
     }
 }
@@ -4583,7 +4582,7 @@ mod tests {
             .commit_return_gate
             .armed
             .store(true, Ordering::Release);
-        let guest_request = ValidatedGuestRequest::parse(request()).unwrap();
+        let guest_request = ValidatedGuestRequest::parse(BridgeEntry::Loopback, request()).unwrap();
         let provider_request = broker
             .api_key_adapter
             .validate_request(
@@ -5567,7 +5566,7 @@ mod tests {
             oauth_broker(StatusCode::OK, Vec::new(), "unused".into(), Duration::ZERO);
         let control = Arc::new(BlockingRefreshControl::default());
         Arc::get_mut(&mut broker.leases).unwrap().start_control = Some(Arc::clone(&control));
-        let guest = ValidatedGuestRequest::parse(request()).unwrap();
+        let guest = ValidatedGuestRequest::parse(BridgeEntry::Loopback, request()).unwrap();
         let provider_request = broker
             .api_key_adapter
             .validate_request(

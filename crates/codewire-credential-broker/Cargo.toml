@@ -29,6 +29,7 @@ bytes = { workspace = true }
 codewire-access = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-daemon-proto = { workspace = true }
+codewire-egress-policy = { workspace = true }
 codewire-local-credentials = { workspace = true, optional = true }
 codewire-platform-credentials = { workspace = true, optional = true }
 codewire-protected-store = { workspace = true, optional = true }

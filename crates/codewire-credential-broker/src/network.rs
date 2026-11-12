@@ -5,6 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use av_credential_proxy::tunnel_ip_allowed;
 use codewire_access::HttpProvider;
+use codewire_egress_policy::intercept::InterceptBinding;
 use futures::StreamExt as _;
 use http::{HeaderMap, Method};
 use reqwest::redirect::Policy;
@@ -232,6 +233,61 @@ fn provider_host(target: &url::Url) -> &'static str {
         Some(GITHUB_API_HOST) => GITHUB_API_HOST,
         Some(GITHUB_GIT_HOST) => GITHUB_GIT_HOST,
         _ => "other",
+    }
+}
+
+/// A provider host a credential route sends its requests to: the only hosts a
+/// front-door request may name as the one it was intercepted for. The hosts
+/// the broker calls only to refresh a token are no route's. `github.com` is
+/// both a route's host and where a GitHub App token is exchanged; the route
+/// admits only its Git paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RouteHost {
+    OpenAiApi,
+    ChatGpt,
+    AnthropicApi,
+    GitHubApi,
+    GitHub,
+}
+
+impl RouteHost {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiApi => OPENAI_HOST,
+            Self::ChatGpt => CHATGPT_HOST,
+            Self::AnthropicApi => ANTHROPIC_HOST,
+            Self::GitHubApi => GITHUB_API_HOST,
+            Self::GitHub => GITHUB_GIT_HOST,
+        }
+    }
+
+    /// The hosts of the adapters' base URLs for one slot's route, each of
+    /// which [`validate_target`] admits for that route's providers. Only the
+    /// codex slot may hold a ChatGPT sign-in; an API key goes to the API.
+    fn of_route(slot: &str, route: &str) -> &'static [Self] {
+        match (slot, route) {
+            ("codex", "openai-api") => &[Self::OpenAiApi, Self::ChatGpt],
+            ("openai", "openai-api") => &[Self::OpenAiApi],
+            ("anthropic", "anthropic-api") => &[Self::AnthropicApi],
+            ("github", "github-api") => &[Self::GitHubApi],
+            ("github", "github-https") => &[Self::GitHub],
+            _ => &[],
+        }
+    }
+
+    /// The host a front-door request on this slot and route names, taken as
+    /// it is: a name the egress policy could bind for interception on the
+    /// provider port (exact and canonical, so nothing to lowercase or strip;
+    /// no pattern, IP literal or protected name), and one of the route's own.
+    pub(crate) fn intercepted(slot: &str, route: &str, host: &str) -> Option<Self> {
+        let binding = InterceptBinding::new(host, OPENAI_PORT).ok()?;
+        if binding.hostname() != host {
+            return None;
+        }
+        Self::of_route(slot, route)
+            .iter()
+            .copied()
+            .find(|route_host| route_host.as_str() == host)
     }
 }
 

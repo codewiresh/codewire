@@ -45,6 +45,22 @@ pub enum BrokerBridgeError {
     Unavailable,
 }
 
+/// Where a bridge session comes from. A front-door session may later have
+/// its requests forwarded to the host they name, so an environment that could
+/// claim one would reach hosts its own egress policy denies. The entry is
+/// therefore set only by the runner the admitting host process calls, never
+/// derived from anything a peer sends: no request field, route, header or
+/// capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BridgeEntry {
+    /// A daemon inside the environment, which controls every field of every
+    /// request. Every session served in production today.
+    Loopback,
+    /// The host's TLS front door outside the environment. Each request names
+    /// the provider host it was intercepted for.
+    FrontDoor,
+}
+
 /// One transport whose first frame matched the protocol and exact environment
 /// coordinates supplied by its already-authenticated caller. The Ready frame
 /// is not identity proof; peer authentication belongs to the transport owner.
@@ -375,6 +391,8 @@ pub async fn admit_credential_bridge<B: CredentialBridgeTransport>(
 /// and a cancelled request remains counted until its broker operation finishes.
 /// The owner must await this runner after transport termination so started
 /// refresh operations drain; dropping this future is not graceful shutdown.
+/// The session is a loopback one (`BridgeEntry::Loopback`), whatever its peer
+/// sends.
 pub async fn run_admitted_credential_bridge<P, U, B>(
     broker: OpenAiBroker<P, U>,
     bridge: AdmittedCredentialBridge<B>,
@@ -386,6 +404,48 @@ where
 {
     let broker = Arc::new(broker);
     run_managed_bridge(broker, bridge.bridge).await
+}
+
+/// [`run_admitted_credential_bridge`] for a front-door session
+/// (`BridgeEntry::FrontDoor`). Only the host process that accepted this
+/// session from its own front door outside the environment may call it, never
+/// for a session a peer inside an environment opened. Each request must name
+/// a host its route sends to and is then served as on a loopback session; no
+/// other operation is served. Nothing in production calls this yet.
+pub async fn run_admitted_front_door_bridge<P, U, B>(
+    broker: OpenAiBroker<P, U>,
+    bridge: AdmittedCredentialBridge<B>,
+) -> Result<(), BrokerBridgeError>
+where
+    P: BrokerLeaseProvider + 'static,
+    U: BrokerUpstreamTransport + 'static,
+    B: CredentialBridgeTransport,
+{
+    let broker = Arc::new(FrontDoorExecutor(broker));
+    run_managed_bridge(broker, bridge.bridge).await
+}
+
+/// A front-door session's executor: its HTTP requests take the front-door
+/// validation. SSH, projections and logins keep the trait's denial, since
+/// only a daemon inside an environment asks for them.
+pub(crate) struct FrontDoorExecutor<P, U>(pub(crate) OpenAiBroker<P, U>);
+
+#[async_trait]
+impl<P, U> BrokerRequestExecutor for FrontDoorExecutor<P, U>
+where
+    P: BrokerLeaseProvider + 'static,
+    U: BrokerUpstreamTransport + 'static,
+{
+    async fn execute_request(
+        &self,
+        request: v1::CredentialBridgeRequest,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        self.0.execute_front_door(request).await
+    }
+
+    async fn wait_for_active_operations(&self) -> Result<(), BrokerRequestError> {
+        self.0.wait_for_active_operations().await
+    }
 }
 
 #[cfg(test)]
