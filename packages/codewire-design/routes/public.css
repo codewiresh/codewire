@@ -365,7 +365,8 @@ td.r, th.r { text-align: right; padding-right: 0; }
 .btn { display: inline-flex; justify-content: space-between; align-items: center; height: calc(var(--base) * 5); padding: 0 var(--space-l); background: var(--ink); color: var(--paper); text-decoration: none; font: 500 var(--fs-label)/var(--lh-none) var(--f-mono); letter-spacing: var(--track-label); text-transform: uppercase; }
 .btn:hover, .btn:focus-visible { background: var(--btn-hover); color: var(--btn-hover-fg); }
 .end .logo { margin-top: var(--end-logo); opacity: .1; }
-.end .legal { margin-top: calc(var(--base) * 2); display: flex; flex-wrap: wrap; gap: var(--space-s) var(--space-xl); justify-content: space-between; }
+.end .legal { margin-top: calc(var(--base) * 2); }
+.legal { display: flex; flex-wrap: wrap; gap: var(--space-s) var(--space-xl); justify-content: space-between; }
 
 .toast { position: fixed; left: 50%; bottom: var(--toast-bottom); transform: translateX(-50%); z-index: 20; background: var(--ink); color: var(--paper); padding: var(--pad-toast); font: 500 var(--fs-label)/var(--lh-none) var(--f-mono); letter-spacing: var(--track-label); text-transform: uppercase; opacity: 0; transition: opacity .2s; pointer-events: none; }
 .toast.on { opacity: 1; }
@@ -470,4 +471,31 @@ ul.body { margin: 0; padding: 0; list-style: none; row-gap: var(--gap); }
   .ptitle .lede, .plan, .calc-controls, .calc-sum, .faq dt, .faq dd { grid-column: 1 / -1; }
   .plan--wide .feats { columns: 1; }
   .calc .seg.sizes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ---------- privacy and terms: long-form text on the same sheet ---------- */
+/* Each part is a row like the pricing questions: its heading on the left, its text in the middle columns at a readable
+   measure. The footer's Privacy and Terms links are on every public page. */
+:root {
+  --measure: 38em;                      /* about 75 characters of body text */
+}
+.doc-intro p { grid-column: 4 / 10; max-width: var(--measure); margin: 0 0 var(--body-t); font-size: var(--fs-lead); line-height: calc(var(--base) * 3); }
+.clause { align-items: baseline; row-gap: var(--base); padding-block: calc(var(--base) * 2) calc(var(--base) * 5); box-shadow: var(--line-top); }
+.clause h2 { grid-column: 1 / 4; margin: 0; font: 500 var(--fs-lead)/var(--lh-body) var(--f-sans); line-height: calc(var(--base) * 3); }
+.clause-body { grid-column: 4 / 10; max-width: var(--measure); }
+.clause-body > * { margin: 0; }
+.clause-body > * + * { margin-top: calc(var(--base) * 2); }
+.clause-body ul { padding-left: var(--space-xl); }
+.clause-body li + li, .clause-body li > ul { margin-top: var(--base); }
+.clause-body code, .doc-intro code { font-family: var(--f-mono); font-size: var(--fs-small); white-space: nowrap; }
+.clause-body table { font-variant-numeric: normal; }   /* words, not figures: tabular commas and full stops would gap */
+.doc a, .legal a { text-decoration-thickness: 1px; text-underline-offset: var(--underline-offset); }
+.doc a:hover, .legal a:hover { color: var(--signal); }
+.doc a:focus-visible, .legal a:focus-visible { outline: 2px solid var(--signal); outline-offset: var(--focus-offset); }
+.legal ul { display: flex; gap: var(--space-xl); margin: 0; padding: 0; list-style: none; }
+.legal a[aria-current="page"] { color: var(--ink); }
+.doc-foot { padding-block: calc(var(--base) * 2) calc(var(--base) * 4); box-shadow: var(--line-top); }
+
+@media (max-width: 900px) {
+  .doc-intro p, .clause h2, .clause-body { grid-column: 1 / -1; }
 }

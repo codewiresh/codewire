@@ -11,6 +11,8 @@
 .cw-auth-switch a { color: var(--fg-primary); font-weight: var(--weight-semibold); }
 .cw-auth-secondary { margin: 0; color: var(--fg-secondary); text-align: center; font-size: var(--text-body); }
 .cw-auth-secondary a { color: var(--accent-text); }
+.cw-auth-legal { margin: 0; color: var(--fg-secondary); text-align: center; font-size: var(--text-small); line-height: var(--leading-body); }
+.cw-auth-legal a { color: var(--fg-primary); }
 .cw-field-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
 .cw-field-heading a { color: var(--fg-secondary); font-size: var(--text-small); }
 .cw-field-heading a:hover { color: var(--fg-primary); }

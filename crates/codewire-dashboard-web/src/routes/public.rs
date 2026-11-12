@@ -8,7 +8,9 @@ use serde::Deserialize;
 use crate::{
     response::{render_page, render_template},
     state::AppState,
-    templates::{AuthStatusTemplate, HomeTemplate, PricingTemplate},
+    templates::{
+        AuthStatusTemplate, HomeTemplate, PricingTemplate, PrivacyTemplate, TermsTemplate,
+    },
     view::AuthQuery,
 };
 
@@ -40,6 +42,16 @@ pub(super) async fn pricing(State(state): State<AppState>) -> Response {
     render_page(PricingTemplate {
         signup_credit: crate::billing_connect::signup_credit_text(credit),
     })
+}
+
+/// The privacy policy: public, the same signed in or out.
+pub(super) async fn privacy() -> Response {
+    render_page(PrivacyTemplate)
+}
+
+/// The terms of service: public, the same signed in or out.
+pub(super) async fn terms() -> Response {
+    render_page(TermsTemplate)
 }
 
 pub(super) async fn verify_email(
@@ -185,5 +197,84 @@ mod tests {
         let enabled = verified_view(false);
         assert_eq!(enabled.title, "Email verified");
         assert_eq!(enabled.primary_url, "/dashboard/");
+    }
+
+    /// `/privacy` and `/terms` are whole public pages, the same for a visitor
+    /// and for a browser with a session. Before these routes the organization
+    /// catch-all `/{slug}` sent both to sign-in. They read no upstream, so the
+    /// application runs here with its upstreams pointing nowhere.
+    #[tokio::test]
+    async fn privacy_and_terms_render_publicly_signed_in_and_out() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let nowhere = "http://upstream.invalid";
+        let app = crate::app(crate::Config {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            runtime_mode: crate::RuntimeMode::CurrentThread,
+            public_origin: "https://app.example.test".into(),
+            api_origin: nowhere.parse().unwrap(),
+            credential_origin: nowhere.parse().unwrap(),
+            identity_origin_string: nowhere.into(),
+            browser_api_origin: nowhere.into(),
+            billing_origin: nowhere.parse().unwrap(),
+            docs_root: Default::default(),
+            confidential_storage_enabled: false,
+            turnstile_site_key: String::new(),
+            github_app_slug: String::new(),
+            github_app_client_id: String::new(),
+        });
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        for (path, heading) in [
+            ("/privacy", "Privacy policy"),
+            ("/terms", "Terms of service"),
+        ] {
+            for session in [None, Some("codewire.session_token=synthetic")] {
+                let mut request = client.get(format!("{origin}{path}"));
+                if let Some(cookie) = session {
+                    request = request.header(header::COOKIE, cookie);
+                }
+                let response = request.send().await.unwrap();
+                let signed_in = session.is_some();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "{path}, signed in: {signed_in}"
+                );
+                assert!(response.headers().get(header::LOCATION).is_none());
+                assert!(
+                    response.headers()[header::CONTENT_TYPE]
+                        .to_str()
+                        .unwrap()
+                        .starts_with("text/html")
+                );
+                let body = response.text().await.unwrap();
+                let id = &path[1..];
+                assert!(body.contains(&format!("<h1 id=\"{id}-title\">{heading}</h1>")));
+                assert!(body.contains("Product Engineering BV"));
+                assert!(body.contains("mailto:hello@codewire.sh"));
+                assert!(!body.contains("[OWNER"));
+                // The footer links both pages and marks this one.
+                assert!(body.contains(&format!("<a href=\"{path}\" aria-current=\"page\">")));
+                assert!(body.contains("<nav aria-label=\"Legal\">"));
+            }
+        }
+
+        let _ = stop.send(());
+        server.await.unwrap();
     }
 }

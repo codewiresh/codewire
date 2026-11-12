@@ -29,6 +29,14 @@ pub(crate) struct PricingTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "privacy.html")]
+pub(crate) struct PrivacyTemplate;
+
+#[derive(Template)]
+#[template(path = "terms.html")]
+pub(crate) struct TermsTemplate;
+
+#[derive(Template)]
 #[template(path = "settings-secrets.html")]
 pub(crate) struct SettingsSecretsTemplate<'a> {
     pub(crate) view: &'a DashboardView,

@@ -1585,6 +1585,22 @@ mod tests {
     }
 
     #[test]
+    fn only_the_signup_form_links_the_terms_and_privacy_policy() {
+        let agreement = "By requesting access you agree to the <a href=\"/terms\">Terms</a> and the <a href=\"/privacy\">Privacy policy</a>.";
+        let signup = signup_view(AuthQuery::default(), String::new());
+        let body = AuthFormTemplate { view: &signup }
+            .render()
+            .expect("render signup form");
+        assert_eq!(body.matches(agreement).count(), 1);
+
+        let login = login_view(AuthQuery::default(), String::new());
+        let body = AuthFormTemplate { view: &login }
+            .render()
+            .expect("render login form");
+        assert!(!body.contains(agreement));
+    }
+
+    #[test]
     fn signup_request_uses_the_identity_turnstile_field_name() {
         let body = serde_json::to_value(SignUpRequest {
             email: "person@example.test",

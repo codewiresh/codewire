@@ -54,6 +54,8 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/healthz", get(healthz))
         .route("/", get(public::home))
         .route("/pricing", get(public::pricing))
+        .route("/privacy", get(public::privacy))
+        .route("/terms", get(public::terms))
         .route("/verify-email", get(public::verify_email))
         .route("/login", get(authentication::login))
         .route(

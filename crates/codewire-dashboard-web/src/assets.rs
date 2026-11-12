@@ -391,6 +391,14 @@ mod tests {
                 .render()
                 .unwrap(),
             ),
+            (
+                include_str!("../../../packages/codewire-design/reference/fixtures/privacy.html"),
+                crate::templates::PrivacyTemplate.render().unwrap(),
+            ),
+            (
+                include_str!("../../../packages/codewire-design/reference/fixtures/terms.html"),
+                crate::templates::TermsTemplate.render().unwrap(),
+            ),
         ] {
             let prefix = "../../";
             let mut normalized = fixture.to_owned();

@@ -22,12 +22,14 @@ pub const RESERVED_ORGANIZATION_SLUGS: &[&str] = &[
     "oauth",
     "organizations",
     "preview",
+    "privacy",
     "reset-password",
     "settings",
     "setup-2fa",
     "signup",
     "ssh-proxy",
     "terminal",
+    "terms",
     "two-factor",
     "verify-email",
 ];
@@ -70,13 +72,41 @@ mod tests {
             "dashboard",
             "docs",
             "organizations",
+            "privacy",
             "settings",
             "terminal",
+            "terms",
         ] {
             assert!(
                 !valid_organization_slug(slug),
                 "expected {slug:?} to be invalid"
             );
         }
+    }
+
+    /// The database's `organizations_route_slug_check`, as the newest
+    /// migration that replaces it writes it, reserves exactly this list. A
+    /// change to the list is a new migration and a new path here.
+    #[test]
+    fn the_database_check_reserves_the_same_slugs() {
+        let migration = include_str!("../migrations/0017_reserve_legal_page_slugs.sql");
+        let check = migration
+            .split("ADD CONSTRAINT organizations_route_slug_check")
+            .nth(1)
+            .expect("the migration adds the check");
+        let array = check
+            .split("ARRAY[")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("the check lists the reserved slugs");
+        let reserved: Vec<&str> = array
+            .split(", ")
+            .map(|item| {
+                item.strip_prefix('\'')
+                    .and_then(|item| item.strip_suffix("'::text"))
+                    .expect("a text literal")
+            })
+            .collect();
+        assert_eq!(reserved, RESERVED_ORGANIZATION_SLUGS);
     }
 }

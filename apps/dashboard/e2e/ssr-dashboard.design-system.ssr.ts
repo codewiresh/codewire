@@ -18,8 +18,8 @@ type Pending = Partial<Record<`${Viewport} ${Check}`, number>>;
 
 const pending: Record<string, Pending> = {};
 
-// The public site (home.html, pricing.html) uses public.css's own scale: it keeps an 11px text floor, not the console type and radius scale.
-const ownScale = new Set(["home.html", "pricing.html"]);
+// The public site (home.html, pricing.html, privacy.html, terms.html) uses public.css's own scale: it keeps an 11px text floor, not the console type and radius scale.
+const ownScale = new Set(["home.html", "pricing.html", "privacy.html", "terms.html"]);
 
 const fixtureDirectory = new URL("../../../packages/codewire-design/reference/fixtures/", import.meta.url);
 // Whole pages only. A fragment such as terminal-ports.html has no stylesheets of

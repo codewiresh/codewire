@@ -59,6 +59,7 @@ mod tests {
     mod organization_dedicated_cpu;
     mod owner_sources;
     mod preview_browser;
+    mod reserve_legal_page_slugs;
     mod runtime_dispatch_scope;
     mod session_mutation;
     mod signup_credit_setting;
@@ -75,9 +76,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced) and 0002 to 0016.
+    // (which equals the 41-migration history it replaced) and 0002 to 0017.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "21e65981d89535f667d089ad77b666874185595ca7ef6295fdbf45a51d962f4f";
+        "de777ca0e6a1147aafdeca923fe84720c53ba9b9634323d09f6dd51e5dd17340";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -122,6 +123,10 @@ mod tests {
 
     // SHA-384 of 0016_oauth_sign_in.sql (#4062).
     const APPLIED_OAUTH_SIGN_IN_CHECKSUM: &str = "869731a7fb4588c584032c5a239596e0182867bcea7d5af3fe3c361b50627390b06fe6ddb6b9ed3fc2fd43252fc70457";
+
+    // SHA-384 of 0017_reserve_legal_page_slugs.sql (the public /privacy and
+    // /terms pages).
+    const APPLIED_RESERVE_LEGAL_PAGE_SLUGS_CHECKSUM: &str = "cf4af5d327730d2435d300c0b7bea3c7d3b9c389d5b6552ecf266b01ef953795a8263b1aa08bca5fef9fd12e68f11bea";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1219,6 +1224,7 @@ mod tests {
             (14, APPLIED_USER_CLI_SIGN_IN_CHECKSUM),
             (15, APPLIED_HOSTS_CHECKSUM),
             (16, APPLIED_OAUTH_SIGN_IN_CHECKSUM),
+            (17, APPLIED_RESERVE_LEGAL_PAGE_SLUGS_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1249,11 +1255,11 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 16
+                first.len() == 17
                     && first
                         .iter()
                         .map(|migration| migration.0)
-                        .eq([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
+                        .eq([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
                     && first.iter().all(|migration| migration.2)
             );
             let fingerprint: String = sqlx::query_scalar(include_str!(

@@ -128,6 +128,7 @@
           {% if is_signup %}
           <button class="cw-button cw-button--outline cw-button--pill cw-button--large cw-auth-submit" type="button" data-signup-back hidden>Back</button>
           {% endif %}
+          {% if is_signup %}<p class="cw-auth-legal">By requesting access you agree to the <a href="/terms">Terms</a> and the <a href="/privacy">Privacy policy</a>.</p>{% endif %}
         </form>
         {% if !view.oauth_providers.is_empty() %}
         <div class="cw-auth-alternatives">
