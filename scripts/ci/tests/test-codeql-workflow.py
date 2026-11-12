@@ -10,6 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 WORKFLOW = ROOT / ".github/workflows/codeql.yml"
 ALLOWED_ACTIONS = {
     "actions/checkout",
+    "actions/setup-go",
     "github/codeql-action/analyze",
     "github/codeql-action/init",
 }
@@ -55,6 +56,7 @@ def main() -> None:
         fail(f"unexpected languages or build modes: {matrix}")
 
     analyze = None
+    setup_go = None
     for step in job["steps"]:
         if "run" in step:
             fail("the CodeQL job may contain only approved actions")
@@ -68,8 +70,16 @@ def main() -> None:
             fail("the checkout must not persist the workflow token")
         if name == "github/codeql-action/analyze":
             analyze = step
+        if name == "actions/setup-go":
+            setup_go = step
     if analyze is None:
         fail("the CodeQL analyze action is missing; OpenSSF Scorecard's SAST check looks for it")
+    # go.work requires a newer Go than the runner ships, and the Go
+    # autobuild uses the Go on PATH.
+    if setup_go is None or setup_go.get("if") != "matrix.language == 'go'":
+        fail("the Go analysis must install go.work's Go first, and only for Go")
+    if setup_go.get("with") != {"go-version-file": "go.work", "cache": False}:
+        fail("setup-go must read go.work's version and keep no cache")
     if "secrets." in text:
         fail("CodeQL must use the workflow token, not a PAT or another secret")
 

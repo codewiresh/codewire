@@ -45,6 +45,15 @@ jobs:
         with:
           persist-credentials: false
 
+      # The runner's preinstalled Go is older than go.work requires, and
+      # CodeQL's Go autobuild runs go list with whatever Go is on PATH.
+      - name: Install the Go version go.work requires
+        if: matrix.language == 'go'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.work
+          cache: false
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
