@@ -476,15 +476,21 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
     assert!(worker.0.try_wait().unwrap().is_none());
 
     drop(guest);
-    let worker_status = worker.wait_bounded();
-    assert_eq!(
-        worker_status.code(),
-        Some(NetworkWorkerStartupFailure::FrameIo.exit_code())
-    );
+    // The worker ends its host session when the guest goes, which closes its
+    // broker sessions and so ends the broker.
     let broker_status = broker.wait_bounded();
     assert_eq!(
         broker_status.code(),
         Some(EgressBrokerStartupFailure::Protocol.exit_code())
+    );
+    // Then the worker waits, for at most its handshake timeout, for the
+    // runner to close the control socket. A real stop closes it first; left
+    // open here, the worker would exit two seconds later (#4147).
+    drop(worker_parent);
+    let worker_status = worker.wait_bounded();
+    assert_eq!(
+        worker_status.code(),
+        Some(NetworkWorkerStartupFailure::FrameIo.exit_code())
     );
 }
 
