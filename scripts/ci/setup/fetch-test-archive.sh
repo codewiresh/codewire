@@ -25,6 +25,14 @@
 # digest is empty too, its outputs were lost and the job fails instead of
 # building the whole workspace. An archive whose bytes do not hash
 # to the digest always fails. A fetched and verified archive writes ready=true.
+#
+# A guest too small to compile in place is never asked to: building there ran
+# the guest out of memory and took its Docker daemon with it (infra#2471, a
+# 7.8 GiB medium pull request guest, after the store evicted the archive
+# under load). Below CODEWIRE_CI_BUILD_IN_PLACE_MIN_MIB of memory (16384 by
+# default; main's warm VM has 67 GiB) a miss fails at once, naming the head,
+# and the recovery is to rerun Build test archives. A single job rerun whose
+# archive the store evicted after its first fetch lands here too.
 set -euo pipefail
 
 die() {
@@ -47,8 +55,18 @@ ready() {
   [ -z "${GITHUB_OUTPUT:-}" ] || echo "ready=$1" >> "$GITHUB_OUTPUT"
 }
 
+# guest_mib: the guest's memory in MiB, or nothing when it cannot be read.
+guest_mib() {
+  awk '/^MemTotal:/ { print int($2 / 1024); exit }' "${CODEWIRE_CI_MEMINFO:-/proc/meminfo}" 2>/dev/null || true
+}
+
 miss() {
   [ "$or_build" = true ] || die "$*; rerun the build job"
+  local mib
+  mib="$(guest_mib)"
+  if [ -z "$mib" ] || [ "$mib" -lt "${CODEWIRE_CI_BUILD_IN_PLACE_MIN_MIB:-16384}" ]; then
+    die "test archive missing for ${GITHUB_SHA:-this head}: $*; this guest (${mib:-unknown} MiB) is too small to build its tests in place, so rerun Build test archives and the jobs that need it"
+  fi
   echo "::warning::fetch-test-archive: $*; this job builds its tests itself"
   ready false
   exit 0

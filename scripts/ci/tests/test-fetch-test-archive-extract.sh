@@ -2,8 +2,10 @@
 # fetch-test-archive.sh --extract (infra#1534): the download streams through
 # the hash into tar. Only bytes that hash to the digest leave a folder and
 # ready=true; a download that fails part way is fetched again to a file; a
-# store without the archive is a miss with --or-build; bytes that hash right
-# but do not unpack fail the job.
+# store without the archive is a miss with --or-build on a guest big enough to
+# build, and fails at once on a medium one; bytes that hash right but do not
+# unpack fail the job. The guest's memory comes from a fixture, never this
+# host's.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -26,6 +28,9 @@ tar -C "$work/src" -cf - target | zstd -q -o "$work/archive.tar.zst"
 good="$(sha256sum "$work/archive.tar.zst" | cut -d' ' -f1)"
 cp "$work/archive.tar.zst" "$store/$good"
 
+printf 'MemTotal:       70254592 kB\n' > "$work/meminfo-warm"
+printf 'MemTotal:        8170496 kB\n' > "$work/meminfo-medium"
+
 # Under a strict umask, so the archive's own modes must survive it, as
 # nextest's own extraction keeps them.
 fetch() {
@@ -33,6 +38,7 @@ fetch() {
   (
     umask 077
     GITHUB_OUTPUT="$work/out" ARCHIVE_STORE_URL="file://$work/store" RUNNER_TEMP="$work" \
+      CODEWIRE_CI_MEMINFO="${MEMINFO:-$work/meminfo-warm}" GITHUB_SHA=0123abcd \
       PATH="${FETCH_PATH:-$PATH}" "$FETCH" "$@" > "$work/fetch.log" 2>&1
   )
 }
@@ -73,6 +79,13 @@ absent="$(printf 'absent' | sha256sum | cut -d' ' -f1)"
 fetch --or-build --extract "$absent" "$work/x/absent" || fail 'an evicted archive failed instead of building'
 grep -qx 'ready=false' "$work/out" || fail 'an evicted archive was not a miss'
 [ ! -e "$work/x/absent" ] && [ ! -e "$work/x/absent.partial" ] || fail 'a miss left a folder behind'
+# On a medium guest the same miss fails at once, naming the head (infra#2471).
+if MEMINFO="$work/meminfo-medium" fetch --or-build --extract "$absent" "$work/x/absent-medium"; then
+  fail 'a medium guest built in place'
+fi
+grep -q 'test archive missing for 0123abcd: .*rerun Build test archives' "$work/fetch.log" ||
+  fail 'a medium guest gave no fail-fast reason'
+[ ! -e "$work/x/absent-medium" ] && [ ! -e "$work/x/absent-medium.partial" ] || fail 'a medium miss left a folder behind'
 
 # Bytes that do not hash to the digest leave nothing and fail, even unpacked.
 cp "$work/archive.tar.zst" "$store/$absent"

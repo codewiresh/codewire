@@ -4833,6 +4833,7 @@ selection_value "$(schedule_paths "$SELECTOR_KIND_OFF" docs/dev/AGENT-WORKFLOW.m
 check_job_work() {
 python3 -B - "$WORKFLOW" "$ROOT/scripts/ci/select/emit-verification-matrices.sh" \
     "$job_work_selections" "$DEFERRED_JOBS" <<'PY'
+import atexit
 import concurrent.futures
 import itertools
 import os
@@ -5097,6 +5098,12 @@ def tooling_parts(selection):
 
 
 scope_cache = {}
+# A fetch miss builds in place only on a guest big enough to (infra#2471); the
+# scope steps see main's warm VM memory from this fixture, never the host's.
+warm_meminfo = tempfile.NamedTemporaryFile("w", suffix=".meminfo", delete=False)
+warm_meminfo.write("MemTotal:       70254592 kB\n")
+warm_meminfo.close()
+atexit.register(os.unlink, warm_meminfo.name)
 
 
 def run_scope_step(step, context):
@@ -5105,7 +5112,8 @@ def run_scope_step(step, context):
     if key not in scope_cache:
         with tempfile.NamedTemporaryFile("r") as output:
             subprocess.run(["bash", "-c", step["run"]], check=True,
-                           env=dict(PATH=os.environ["PATH"], GITHUB_OUTPUT=output.name, **environment))
+                           env=dict(PATH=os.environ["PATH"], GITHUB_OUTPUT=output.name,
+                                    CODEWIRE_CI_MEMINFO=warm_meminfo.name, **environment))
             scope_cache[key] = dict(line.strip().split("=", 1) for line in open(output.name) if line.strip())
     return scope_cache[key]
 

@@ -129,17 +129,21 @@ done
 
 # A test job's fetch: verified bytes are ready; with --or-build, a missing
 # digest, store or archive is a miss the job builds through (ready=false, a
-# warning, success); without it a missing archive fails; a corrupt archive
-# always fails.
+# warning, success) on a guest big enough to build; without it a missing
+# archive fails; a corrupt archive always fails. The guest's memory comes from
+# a fixture, never this host's.
 FETCH="$ROOT/scripts/ci/setup/fetch-test-archive.sh"
 mkdir -p "$work/fetch-store/v1/archives"
 printf 'archive' > "$work/fetch-src"
 good="$(sha256sum "$work/fetch-src" | cut -d' ' -f1)"
 cp "$work/fetch-src" "$work/fetch-store/v1/archives/$good"
 absent="$(printf 'absent' | sha256sum | cut -d' ' -f1)"
+printf 'MemTotal:       70254592 kB\n' > "$work/meminfo-warm"
+printf 'MemTotal:        8170496 kB\n' > "$work/meminfo-medium"
 fetch() {
   : > "$work/fetch-out"
   GITHUB_OUTPUT="$work/fetch-out" ARCHIVE_STORE_URL="${STORE-file://$work/fetch-store}" \
+    CODEWIRE_CI_MEMINFO="${MEMINFO-$work/meminfo-warm}" GITHUB_SHA=0123abcd \
     "$FETCH" "$@" > "$work/fetch.log" 2>&1
 }
 fetch --or-build "$good" "$work/fetched/a.tar" || fail 'a stored archive did not fetch'
@@ -154,6 +158,26 @@ grep -qx 'ready=false' "$work/fetch-out" || fail 'a run with no archive was not 
 STORE='' fetch --or-build "$good" "$work/fetched/d.tar" || fail 'no store failed the job instead of building'
 grep -qx 'ready=false' "$work/fetch-out" || fail 'no store was not a miss'
 if fetch "$absent" "$work/fetched/e.tar"; then fail 'an evicted archive passed without --or-build'; fi
+# A medium guest (7.8 GiB) never builds in place (infra#2471): an evicted
+# archive, as in a single job rerun after its first fetch, or no store, fails
+# at once naming the head and the build job, leaves nothing and reports no
+# readiness. A stored archive still fetches there, and a guest whose memory
+# cannot be read fails the same way.
+for case in "medium $absent" "unreadable $absent" "medium-no-store $good"; do
+  read -r kind digest <<< "$case"
+  meminfo="$work/meminfo-medium" store="file://$work/fetch-store"
+  [ "$kind" = unreadable ] && meminfo="$work/no-meminfo"
+  [ "$kind" = medium-no-store ] && store=''
+  if MEMINFO="$meminfo" STORE="$store" fetch --or-build "$digest" "$work/fetched/g.tar"; then
+    fail "a $kind guest built in place"
+  fi
+  grep -q 'test archive missing for 0123abcd: .*too small to build its tests in place, so rerun Build test archives' \
+    "$work/fetch.log" || fail "a $kind guest gave no fail-fast reason"
+  grep -q 'ready=' "$work/fetch-out" && fail "a $kind guest reported readiness"
+  [ ! -e "$work/fetched/g.tar" ] && [ ! -e "$work/fetched/g.tar.partial" ] || fail "a $kind guest left a file behind"
+done
+MEMINFO="$work/meminfo-medium" fetch --or-build "$good" "$work/fetched/h.tar" || fail 'a medium guest did not fetch a stored archive'
+grep -qx 'ready=true' "$work/fetch-out" || fail 'a medium guest fetch is not ready'
 printf 'tampered' > "$work/fetch-store/v1/archives/$absent"
 if fetch --or-build "$absent" "$work/fetched/f.tar"; then fail 'a corrupt archive was accepted'; fi
 grep -q 'hashes to' "$work/fetch.log" || fail 'a corrupt archive gave no reason'
