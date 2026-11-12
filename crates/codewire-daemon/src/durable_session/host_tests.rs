@@ -800,6 +800,13 @@ fn witnessed(root: &Path) -> Vec<String> {
     noted.lines().map(str::to_owned).collect()
 }
 
+/// How many times a signal the witness did not note is tried again. On a
+/// starved host the witness's TERM handler may not run inside the 250 ms
+/// grace before KILL; it then notes nothing. That is no observation, so it is
+/// tried again and never taken as a pass (#4233).
+#[cfg(target_os = "linux")]
+const WITNESS_ATTEMPTS: usize = 5;
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn the_daemon_records_what_a_stop_means_before_it_signals_whatever_the_record_helper_does() {
@@ -815,8 +822,25 @@ async fn the_daemon_records_what_a_stop_means_before_it_signals_whatever_the_rec
     // An explicit stop. This test image is no cw-bearing host daemon, so the
     // record helper is refused and records nothing: the daemon's own stop
     // intent is on disk when the conversation is signalled all the same.
-    engine.stop(&driver).await.unwrap();
-    assert_eq!(witnessed(temp.path()), ["intent", "signalled"]);
+    let mut noted = Vec::new();
+    for attempt in 0..WITNESS_ATTEMPTS {
+        if attempt > 0 {
+            // Nothing noted: start the conversation again and stop it again.
+            acted_on(&driver).unwrap();
+            engine.restart(&driver).await.unwrap();
+            witness_ready(temp.path()).await;
+        }
+        engine.stop(&driver).await.unwrap();
+        noted = witnessed(temp.path());
+        if !noted.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        noted,
+        ["intent", "signalled"],
+        "noted in {WITNESS_ATTEMPTS} attempts"
+    );
     assert!(intended(&driver));
     // Only a host owner's managed conversation gets one.
     engine.stop(&ordinary.session_id).await.unwrap();
@@ -832,26 +856,64 @@ async fn the_daemon_records_what_a_stop_means_before_it_signals_whatever_the_rec
     // Restarting a conversation that is not running stops nothing and
     // records nothing: it is how a run resumes.
     acted_on(&driver).unwrap();
-    engine.restart(&driver).await.unwrap();
+    let mut generation = engine.restart(&driver).await.unwrap().launch_generation;
     witness_ready(temp.path()).await;
     assert!(!intended(&driver));
     assert!(witnessed(temp.path()).is_empty());
 
     // Restarting a running one stops that incarnation explicitly.
-    let restarted = engine.restart(&driver).await.unwrap();
-    assert_eq!(restarted.launch_generation, 3);
-    witness_ready(temp.path()).await;
-    assert_eq!(witnessed(temp.path()), ["intent", "signalled"]);
+    let mut noted = Vec::new();
+    for attempt in 0..WITNESS_ATTEMPTS {
+        if attempt > 0 {
+            // Nothing noted, and the restart is running: restart it again.
+            acted_on(&driver).unwrap();
+        }
+        let restarted = engine.restart(&driver).await.unwrap();
+        assert_eq!(restarted.launch_generation, generation + 1);
+        generation = restarted.launch_generation;
+        witness_ready(temp.path()).await;
+        noted = witnessed(temp.path());
+        if !noted.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        noted,
+        ["intent", "signalled"],
+        "noted in {WITNESS_ATTEMPTS} attempts"
+    );
     assert!(intended(&driver));
     acted_on(&driver).unwrap();
 
     // A shutdown takes the whole environment down: its marker is on disk
-    // when the conversation is signalled, and no stop intent is.
+    // when the conversation is signalled, and no stop intent is. A shutdown
+    // ends its engine, so an attempt the witness did not note starts over
+    // with a new engine and conversation.
     assert!(!crate::stop_evidence::takedown_marked(&state));
     engine.shutdown().await.unwrap();
-    assert_eq!(witnessed(temp.path()), ["marker", "signalled"]);
-    assert!(crate::stop_evidence::takedown_marked(&state));
-    assert!(!intended(&driver));
+    let mut noted = witnessed(temp.path());
+    let mut marked = crate::stop_evidence::takedown_marked(&state);
+    let mut still_intended = intended(&driver);
+    for _ in 1..WITNESS_ATTEMPTS {
+        if !noted.is_empty() {
+            break;
+        }
+        let again = tempfile::tempdir().unwrap();
+        let (engine, environment) = environment_engine(again.path());
+        let state = again.path().join("hosts").join(&environment);
+        let driver = witnessing_driver_session(&engine, again.path(), &environment).await;
+        engine.shutdown().await.unwrap();
+        noted = witnessed(again.path());
+        marked = crate::stop_evidence::takedown_marked(&state);
+        still_intended = crate::stop_evidence::stop_intended(&state, &driver);
+    }
+    assert_eq!(
+        noted,
+        ["marker", "signalled"],
+        "noted in {WITNESS_ATTEMPTS} attempts"
+    );
+    assert!(marked);
+    assert!(!still_intended);
 }
 
 #[cfg(target_os = "linux")]
