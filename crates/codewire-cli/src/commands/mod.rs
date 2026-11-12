@@ -979,6 +979,48 @@ pub(crate) struct EnvironmentRunArgs {
     pub(crate) command: Vec<String>,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct ExecArgs {
+    #[arg(
+        long = "in",
+        value_name = "ENV",
+        help = "Environment name or ID; defaults to the selected environment"
+    )]
+    pub(crate) environment: Option<String>,
+    #[arg(
+        long,
+        value_name = "ID_OR_SLUG",
+        help = "Organization for this command; overrides the saved default (`cw org set` changes that)"
+    )]
+    pub(crate) org: Option<String>,
+    #[arg(
+        short = 'w',
+        long = "workdir",
+        value_name = "DIR",
+        help = "Working directory inside the environment"
+    )]
+    pub(crate) workdir: Option<String>,
+    #[arg(
+        short = 'e',
+        long = "env",
+        value_name = "KEY=VALUE",
+        help = "Set a variable for this command; repeatable"
+    )]
+    pub(crate) env: Vec<String>,
+    #[arg(
+        short = 't',
+        long,
+        help = "Give the command a terminal, for programs that need one (htop, vim)"
+    )]
+    pub(crate) tty: bool,
+    #[arg(
+        last = true,
+        value_name = "COMMAND",
+        help = "The command to run and its arguments (a -- before it is optional)"
+    )]
+    pub(crate) command: Vec<String>,
+}
+
 /// One environment operation, built by the flat top-level commands
 /// (`commands/flat.rs`) and dispatched by `handle_env_command` with the
 /// global placement. Not a parser: the public grammar has no `env` namespace.

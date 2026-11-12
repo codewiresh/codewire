@@ -388,6 +388,53 @@ impl NativePublicDataClient {
             .map_err(|_| NativePublicClientError::ExecTimeout)?
     }
 
+    /// Start one command over public `ExecService.Run` and stream it, for
+    /// `cw exec`: stdin, resizes and an explicit close go in through
+    /// [`NativeRunStream::send`], and output and the exit status come out of
+    /// [`NativeRunStream::next_output`]. No session is recorded; dropping the
+    /// stream ends the command's process group.
+    pub async fn run(
+        &self,
+        mut start: RunStart,
+    ) -> Result<NativeRunStream, NativePublicClientError> {
+        start.org_id.clone_from(&self.org_id);
+        start.environment_id.clone_from(&self.environment_id);
+        let (mut requests, mut responses) = self.exec.run().await?.into_split();
+        requests
+            .send(RunRequest {
+                input: Some(run_request::Input::Start(Box::new(start))),
+                ..Default::default()
+            })
+            .await?;
+        let (input, mut queued) = tokio::sync::mpsc::channel::<RunRequest>(32);
+        let (events, output) = tokio::sync::mpsc::channel(32);
+        let sender = tokio::spawn(async move {
+            while let Some(request) = queued.recv().await {
+                if requests.send(request).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let receiver = tokio::spawn(async move {
+            loop {
+                let event = match responses.message::<RunResponse>().await {
+                    Ok(Some(response)) => Ok(response.to_owned_message()),
+                    Ok(None) => return,
+                    Err(error) => Err(NativePublicClientError::from(error)),
+                };
+                let failed = event.is_err();
+                if events.send(event).await.is_err() || failed {
+                    return;
+                }
+            }
+        });
+        Ok(NativeRunStream {
+            input,
+            output,
+            tasks: [sender, receiver],
+        })
+    }
+
     async fn run_to_exit(
         &self,
         start: RunStart,
@@ -656,6 +703,40 @@ fn host_key_line(
         return Err(NativePublicClientError::Protocol);
     }
     Ok(line.to_owned())
+}
+
+/// One streaming `ExecService.Run` from [`NativePublicDataClient::run`].
+pub struct NativeRunStream {
+    input: tokio::sync::mpsc::Sender<RunRequest>,
+    output: tokio::sync::mpsc::Receiver<Result<RunResponse, NativePublicClientError>>,
+    tasks: [tokio::task::JoinHandle<()>; 2],
+}
+
+impl NativeRunStream {
+    /// Queues stdin, a resize or the stdin close.
+    pub async fn send(&self, request: RunRequest) -> Result<(), NativePublicClientError> {
+        self.input
+            .send(request)
+            .await
+            .map_err(|_| NativePublicClientError::Protocol)
+    }
+
+    /// The next output or exit status; `None` once the stream has ended.
+    pub async fn next_output(&mut self) -> Result<Option<RunResponse>, NativePublicClientError> {
+        match self.output.recv().await {
+            Some(Ok(response)) => Ok(Some(response)),
+            Some(Err(error)) => Err(error),
+            None => Ok(None),
+        }
+    }
+}
+
+impl Drop for NativeRunStream {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -19,7 +19,7 @@ use std::ffi::OsString;
 use clap::CommandFactory as _;
 
 /// Subcommands whose first plain word starts the command.
-const RUNS: &[&str] = &["run"];
+const RUNS: &[&str] = &["run", "exec"];
 /// First words that are `cw run`'s agent positional, not a command.
 const AGENTS: &[&str] = &["claude", "codex"];
 /// cw's options that a program is unlikely to take: after a separated

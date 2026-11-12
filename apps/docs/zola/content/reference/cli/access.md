@@ -1,6 +1,6 @@
 ---
 title: Access
-description: run, ls, attach, logs, send, wait, stop and restart, and the attach key bindings.
+description: run, exec, ls, attach, logs, send, wait, stop and restart, and the attach key bindings.
 updated: 2026-11-11
 weight: 3
 aliases: ["/cli/sessions"]
@@ -96,6 +96,32 @@ session exited with code 3
 ```
 
 The second command exits 1 because the session failed.
+
+## cw exec
+
+```sh
+cw exec [--in ENV] [-w DIR] [-e KEY=VALUE]... [-t] COMMAND [ARG]...
+```
+
+Runs a command once and waits for it, as `ssh HOST COMMAND` does. No session
+is made, so nothing appears in `cw ls` and nothing is left behind. The
+command's output and errors stream here, stdin is passed through, and `cw`
+exits with the command's exit status. Ctrl-C, or losing the connection, ends
+the command. `-t` gives it a terminal, for programs that need one, such as
+`htop` or `vim`; then Ctrl-C goes to the program. Use `cw run` for anything
+that should keep running after you leave.
+
+Options go before the command and every word after it is the command's, as
+for `cw run`. In a local VM or a cloud environment the command runs through
+the environment daemon. On a trusted host it runs on that machine as you,
+in the environment's folder; a relative `-w` is inside it.
+
+| Flag | Meaning |
+| --- | --- |
+| `--in ENV` | Environment name or ID; defaults to the selected environment |
+| `-w, --workdir DIR` | Working directory inside the environment |
+| `-e, --env KEY=VALUE` | Set a variable for this command; repeatable |
+| `-t, --tty` | Give the command a terminal |
 
 ## cw ls
 

@@ -173,6 +173,24 @@ impl EnvironmentSsh {
         self.ssh.is_closed()
     }
 
+    /// End the connection and wait, up to `limit`, until the daemon has it:
+    /// the connection's stream closes only once the daemon acknowledged what
+    /// was sent. The daemon then ends every command on it at once. Without
+    /// this, a client that exits takes its user-space network with it, and
+    /// the daemon learns of the end only from its keepalive.
+    pub async fn close(&self, limit: Duration) {
+        let _ = self
+            .ssh
+            .disconnect(russh::Disconnect::ByApplication, "", "en")
+            .await;
+        let _ = tokio::time::timeout(limit, async {
+            while !self.ssh.is_closed() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+    }
+
     /// Attach to a durable session at `open.output_offset`. The attachment
     /// ends with a retryable error if the connection drops, and with the
     /// daemon's reason if it refuses.
@@ -226,6 +244,59 @@ impl EnvironmentSsh {
             input: ShellInput { write },
             output: ShellOutput { read },
         })
+    }
+
+    /// Run one command line, as `ssh HOST COMMAND` does: no session is
+    /// made, output and the exit status come back on the channel, and the
+    /// command ends with it (`cw exec`). With `tty`, `(term, columns, rows)`,
+    /// the command gets a terminal.
+    pub async fn exec(
+        &self,
+        line: &str,
+        tty: Option<(&str, u32, u32)>,
+    ) -> anyhow::Result<InteractiveShell> {
+        let channel = self
+            .ssh
+            .channel_open_session()
+            .await
+            .context("open an SSH session channel")?;
+        let (mut read, write) = channel.split();
+        if let Some((term, columns, rows)) = tty {
+            write
+                .request_pty(true, term, columns, rows, 0, 0, &[])
+                .await
+                .context("request a terminal")?;
+            wait_for_success(&mut read, "terminal").await?;
+        }
+        write
+            .exec(true, line.as_bytes().to_vec())
+            .await
+            .context("request the command")?;
+        wait_for_success(&mut read, "command").await?;
+        Ok(InteractiveShell {
+            input: ShellInput { write },
+            output: ShellOutput { read },
+        })
+    }
+}
+
+/// The server's answer to one channel request: success, or why not.
+async fn wait_for_success(read: &mut russh::ChannelReadHalf, request: &str) -> anyhow::Result<()> {
+    loop {
+        match read.wait().await {
+            Some(ChannelMsg::Success) => return Ok(()),
+            Some(ChannelMsg::Failure) => {
+                return Err(anyhow!("the environment refused the {request} request"));
+            }
+            Some(ChannelMsg::ExtendedData { data, ext: 1 }) => {
+                return Err(anyhow!(
+                    "the environment refused the {request} request: {}",
+                    String::from_utf8_lossy(&data).trim()
+                ));
+            }
+            Some(_) => {}
+            None => return Err(anyhow!("the SSH connection closed")),
+        }
     }
 }
 
@@ -359,6 +430,21 @@ impl EnvironmentTailnet {
         rows: u32,
     ) -> anyhow::Result<InteractiveShell> {
         self.ssh.open_shell(term, columns, rows).await
+    }
+
+    /// End the SSH connection to the daemon; see [`EnvironmentSsh::close`].
+    pub async fn close(&self, limit: Duration) {
+        self.ssh.close(limit).await;
+    }
+
+    /// Run one command line over this environment's tailnet; see
+    /// [`EnvironmentSsh::exec`].
+    pub async fn exec(
+        &self,
+        line: &str,
+        tty: Option<(&str, u32, u32)>,
+    ) -> anyhow::Result<InteractiveShell> {
+        self.ssh.exec(line, tty).await
     }
 
     /// Attach to a durable session over this environment's tailnet.

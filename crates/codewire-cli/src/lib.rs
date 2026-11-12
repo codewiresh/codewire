@@ -174,7 +174,9 @@ const HELP_SECTIONS: &[HelpSection] = &[
     ),
     HelpSection::everyday(
         "Work and return",
-        &["attach", "shell", "vscode", "logs", "msg", "inbox", "ports"],
+        &[
+            "exec", "attach", "shell", "vscode", "logs", "msg", "inbox", "ports",
+        ],
     ),
     HelpSection::everyday(
         "Configuration and transfer",
@@ -411,6 +413,11 @@ enum Command {
         long_about = "Run a command in a new session:\n  cw run npm run dev               (in the selected environment)\n  cw run --in ENV [--env KEY=VALUE] npm test\n  cw run --in ENV -- npm test --in x   (after --, every word is the command's)\n\nOpen an agent's own terminal UI in a new session:\n  cw run claude --in ENV [--name SESSION] [-- AGENT_ARGS]\n  cw run codex                     (in the selected environment)\n  cw run                           (asks which agent)\n\nStart a managed conversation (queued messages and recorded results):\n  cw run --in ENV --agent claude --name review --detach [--prompt TEXT]\n\ncw's options go before the command; everything after the command is the command's. An option of cw's written after the command, such as `cw run npm test --in app`, is refused with the line that means it. A first word of claude or codex opens that agent; `cw run -- claude` runs the claude command itself. --name names the new session and never reuses one. Detach with Ctrl-B, then d; reconnect with `cw attach ENV --session SESSION`."
     )]
     Run(EnvironmentRunArgs),
+    #[command(
+        about = "Run a command once in an environment: no session, its exit status is cw's",
+        long_about = "Run a command once and wait for it, as ssh HOST COMMAND does:\n  cw exec npm test                  (in the selected environment)\n  cw exec --in ENV [-w DIR] [-e KEY=VALUE] make build\n  cw exec -t --in ENV htop          (with a terminal)\n\nNothing is kept: no session is made and `cw ls` never shows it. Its output streams here, stdin is passed through, and cw exits with the command's exit status. Ctrl-C, or losing the connection, ends it. For something that keeps running when you leave, such as a server or an agent, use `cw run`.\n\ncw's options go before the command; everything after the command is the command's. An option of cw's written after the command is refused with the line that means it."
+    )]
+    Exec(ExecArgs),
     #[cfg(unix)]
     #[command(name = "_host-daemon", hide = true)]
     HostDaemon(HostDaemonArgs),
@@ -1031,6 +1038,10 @@ where
             let globals = globals.with_org(args.org.clone());
             handle_attach_command(&globals, args).await
         }
+        Command::Exec(args) => {
+            let globals = globals.with_org(args.org.clone());
+            handle_exec_command(&globals, args).await
+        }
         Command::Logs(args) => flat::handle_logs(&globals, args).await,
         Command::Update(args) => flat::handle_update(&globals, args).await,
         Command::Ports(args) => flat::handle_ports(&globals, args).await,
@@ -1127,6 +1138,7 @@ fn validate_placement_scope(
             | Command::Secrets(_)
             | Command::Env(_)
             | Command::Run(_)
+            | Command::Exec(_)
             | Command::Attach(_)
             | Command::Send(_)
             | Command::Wait(_)

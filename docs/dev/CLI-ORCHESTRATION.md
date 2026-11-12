@@ -1,7 +1,10 @@
 # CLI sessions and agent orchestration
 
 The CLI uses an environment as the execution placement and a durable session
-as the process identity. Session names are unique within an environment;
+as the process identity. `cw exec` is the one exception: it runs a command
+once over the daemon's `ExecService.Run` stream, makes no session, and exits
+with the command's status; when its client goes away, the bridge's relay
+drops the daemon stream and the daemon ends the command's process group. Session names are unique within an environment;
 commands resolve an exact ID before a name. `cw ls` (alias `cw list`)
 inventories every accessible environment with its location, state and session
 count, keeps stopped environments, and marks a running environment whose

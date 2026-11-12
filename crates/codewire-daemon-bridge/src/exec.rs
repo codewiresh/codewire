@@ -324,6 +324,11 @@ async fn relay_run<B: ExecBackend>(
     let mut requests_open = true;
     loop {
         tokio::select! {
+            // Nobody reads the output any more: the client went away, which a
+            // half-close of its requests cannot show. Dropping the daemon
+            // session without CloseStdin ends the command, as it would have
+            // the first time the command wrote anything.
+            () = tx.closed() => return,
             _ = async {
                 match deadline.as_mut() {
                     Some(deadline) => deadline.as_mut().await,
@@ -771,6 +776,70 @@ mod tests {
         assert_eq!(exit, 19);
 
         drop(responses);
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn run_ends_a_quiet_command_when_its_client_goes_away() {
+        let harness = DaemonHarness::spawn().await;
+        let bridge = ExecBridge::new(TestBackend {
+            daemon: harness.client().await,
+            deny_authorization: false,
+        });
+        let pid_file = harness.workspace_root().join("quiet.pid");
+        let requests = [proto::RunRequest {
+            input: Some(proto::run_request::Input::Start(Box::new(
+                proto::RunStart {
+                    org_id: "local".into(),
+                    environment_id: "environment".into(),
+                    command: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        "echo $$ > quiet.pid; exec sleep 300".into(),
+                    ],
+                    working_dir: harness.workspace_root().to_string_lossy().into_owned(),
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
+        }]
+        .map(|request| Ok(connectrpc::StreamMessage::from_message(&request)));
+        // The requests end at once, as a client's half-close would; the
+        // command writes nothing, so only the closed output can tell.
+        let response = proto::ExecService::run(
+            &bridge,
+            RequestContext::default(),
+            Box::pin(futures::stream::iter(requests)),
+        )
+        .await
+        .expect("open public run stream");
+        let pid = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&pid_file)
+                    && let Ok(pid) = pid.trim().parse::<u32>()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the command started");
+        let alive = |pid: u32| {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        assert!(alive(pid));
+        drop(response);
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while alive(pid) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the quiet command ended after its client went away");
         harness.shutdown().await;
     }
 }

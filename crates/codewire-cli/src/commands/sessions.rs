@@ -4,6 +4,8 @@ use base64::Engine as _;
 use codewire_client::hosted_shell::{InputNotice, InputStream};
 #[cfg(unix)]
 pub(crate) mod agents;
+mod exec;
+pub(crate) use exec::handle_exec_command;
 
 #[cfg(target_os = "linux")]
 pub(crate) async fn run_host_agent_control(

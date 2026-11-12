@@ -295,6 +295,7 @@ fn top_level_help_has_only_environment_session_commands() {
     let help = crate::cli_command_with(true).render_help().to_string();
     for retained in [
         "run ",
+        "exec ",
         "ls, list ",
         "attach ",
         "logs ",
@@ -315,7 +316,6 @@ fn top_level_help_has_only_environment_session_commands() {
     }
     for removed in [
         "local ",
-        "exec ",
         "node ",
         "tasks ",
         "request ",
