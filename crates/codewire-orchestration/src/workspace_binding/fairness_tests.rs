@@ -263,8 +263,10 @@ fn state(store: Arc<TwoPodStore>, reviews: Arc<AtomicUsize>) -> Arc<WorkspaceBin
 }
 
 /// Distinct Pod IPs on one node: Pod A's long-poll and Pod A's flood leave
-/// Pod B's bucket, slot and wait untouched, and B binds at once.
-#[tokio::test]
+/// Pod B's bucket, slot and wait untouched, and B binds at once. The clock
+/// is paused, so the peer buckets refill only when the test waits, never
+/// because a loaded runner is slow (#4323).
+#[tokio::test(start_paused = true)]
 async fn two_pods_on_one_node_do_not_starve_each_other() {
     let store = Arc::new(TwoPodStore::default());
     store.bind(&POD_B);

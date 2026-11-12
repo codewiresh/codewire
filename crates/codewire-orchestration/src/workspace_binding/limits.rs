@@ -10,9 +10,10 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::time::Instant;
 
 /// Sustained requests per second from one peer IP.
 pub const PEER_REQUESTS_PER_SECOND: f64 = 1.0;
