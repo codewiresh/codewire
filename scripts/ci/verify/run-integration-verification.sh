@@ -400,11 +400,51 @@ dump_logs() {
   done
 }
 
+# The signal that stops the orchestration daemon's recorded process. In its own
+# PID namespace that process is `unshare`, which ignores TERM while it waits;
+# KILL it, and `--kill-child` sends TERM to the namespace's supervisor, which
+# stops the daemon as the workspace's PID 1 does (#4237).
+orchestration_daemon_stop_signal() {
+  if [ "${ORCHESTRATION_DAEMON_PID_NAMESPACE:-host}" = own ]; then
+    echo KILL
+  else
+    echo TERM
+  fi
+}
+
+stop_orchestration_daemon() {
+  local pidfile="$RUN_DIR/orchestration-daemon.pid" pid _
+  [ -f "$pidfile" ] || return 0
+  pid="$(cat "$pidfile")"
+  kill -"$(orchestration_daemon_stop_signal)" "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -f "$pidfile"
+  # The supervisor stops the daemon after `unshare` is gone; the next start
+  # reuses the port, so wait for it to close, under the 30 s hang guard.
+  for _ in $(seq 1 300); do
+    if ! python3 - "$ORCHESTRATION_DAEMON_PORT" 2>/dev/null <<'PY'
+import socket
+import sys
+
+with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=1):
+    pass
+PY
+    then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "::error::orchestration-daemon still accepted connections 30 s after its stop"
+  return 1
+}
+
 cleanup() {
-  local pidfile
+  local pidfile signal
   for pidfile in "$RUN_DIR"/*.pid; do
     [ -f "$pidfile" ] || continue
-    kill "$(cat "$pidfile")" 2>/dev/null || true
+    signal=TERM
+    [ "$pidfile" = "$RUN_DIR/orchestration-daemon.pid" ] && signal="$(orchestration_daemon_stop_signal)"
+    kill -"$signal" "$(cat "$pidfile")" 2>/dev/null || true
   done
   docker rm -f "$NATS_CONTAINER" >/dev/null 2>&1 || true
   integration_postgres_cleanup
@@ -2035,14 +2075,28 @@ print((encoded + b"." + signature).decode())
 PY
   )"
 
-  log "starting orchestration-daemon"
+  # In production the daemon has its own PID namespace (the workspace
+  # container's), so a stop's member scan reads a few processes. Give it one
+  # here too, under the same PID-1 supervisor shape the workspace runs, when
+  # the runner allows an unprivileged one; otherwise its scans read this whole
+  # runner and the session contract's stop waits under a hang guard (#4237).
+  local -a pid_namespace=()
+  ORCHESTRATION_DAEMON_PID_NAMESPACE=host
+  if unshare --map-current-user --pid --kill-child=SIGTERM --mount-proc true >/dev/null 2>&1; then
+    # shellcheck disable=SC2016 # expanded by the namespace's PID-1 shell
+    pid_namespace=(unshare --map-current-user --pid --kill-child=SIGTERM --mount-proc
+      sh -c 'daemon_pid=; shutdown() { daemon_pid="${daemon_pid:-$!}"; kill -TERM "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true; }; trap "shutdown; exit 143" TERM; trap "shutdown; exit 130" INT; "$@" & daemon_pid=$!; wait "$daemon_pid"' sh)
+    ORCHESTRATION_DAEMON_PID_NAMESPACE=own
+  fi
+  export ORCHESTRATION_DAEMON_PID_NAMESPACE
+  log "starting orchestration-daemon (PID namespace: ${ORCHESTRATION_DAEMON_PID_NAMESPACE})"
   env \
     PATH="$workspace_root:$PATH" \
     CODEWIRE_WORKSPACE_SHIM_ADDR="127.0.0.1:${ORCHESTRATION_DAEMON_PORT}" \
     CODEWIRE_WORKSPACE_ROOT="$workspace_root" \
     CODEWIRE_HOME_ROOT="$home_root" \
     CODEWIRE_DAEMON_AUTH_TOKEN="$token" \
-    "$CARGO_CI_DIR/cw" __hosted-daemon \
+    "${pid_namespace[@]}" "$CARGO_CI_DIR/cw" __hosted-daemon \
     > "$RUN_DIR/orchestration-daemon.log" 2>&1 &
   echo $! > "$RUN_DIR/orchestration-daemon.pid"
   local _
@@ -2151,7 +2205,7 @@ run_orchestration() {
     "$CARGO_CI_DIR/log-stream-smoke"
 
   stop_proc orchestration
-  stop_proc orchestration-daemon
+  stop_orchestration_daemon
   start_orchestration_process unconfigured
   logfile="$RUN_DIR/orchestration-kube-unconfigured-contract.log"
   ORCHESTRATION_BASE_URL="http://127.0.0.1:${ORCHESTRATION_PORT}" \

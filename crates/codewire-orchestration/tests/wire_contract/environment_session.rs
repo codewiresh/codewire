@@ -299,7 +299,7 @@ async fn stop_session(
     client: &EnvironmentSessionServiceClient<HttpClient>,
     session_id: &str,
 ) -> EnvironmentSession {
-    let stopped = client
+    let stopped = match client
         .stop_session(StopSessionRequest {
             org_id: PRIMARY_ORG.into(),
             environment_id: BACKEND_ENV.into(),
@@ -307,11 +307,30 @@ async fn stop_session(
             ..Default::default()
         })
         .await
-        .expect("durable session StopSession round trip")
-        .into_owned()
-        .session
-        .into_option()
-        .expect("stop acknowledgement contains a session");
+    {
+        Ok(response) => response
+            .into_owned()
+            .session
+            .into_option()
+            .expect("stop acknowledgement contains a session"),
+        // A daemon in its own PID namespace, as in production, answers a stop
+        // inside its deadline. Where the runner cannot give it one, the
+        // daemon scans this runner's whole process table, which can outlast
+        // the 5 s stop deadline under load (#4237). The API's answer to an
+        // unknown outcome is to refresh, so the test refreshes, under the
+        // 30 s hang guard (docs/dev/AGENT-WORKFLOW.md).
+        Err(error)
+            if daemon_shares_the_runners_pids()
+                && error.code == ErrorCode::FailedPrecondition
+                && error
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("outcome is unknown")) =>
+        {
+            stopped_within_hang_guard(client, session_id).await
+        }
+        Err(error) => panic!("durable session StopSession round trip: {error:?}"),
+    };
     assert_public_session(harness, &stopped);
     assert_eq!(stopped.session_id, session_id);
     assert_eq!(
@@ -320,6 +339,43 @@ async fn stop_session(
     );
     assert!(stopped.finished_at.is_set());
     stopped
+}
+
+/// Whether the CI script could not give the daemon its own PID namespace
+/// (`ORCHESTRATION_DAEMON_PID_NAMESPACE`, set by
+/// `scripts/ci/verify/run-integration-verification.sh`).
+fn daemon_shares_the_runners_pids() -> bool {
+    std::env::var("ORCHESTRATION_DAEMON_PID_NAMESPACE").as_deref() != Ok("own")
+}
+
+/// The session once its stop has finished, refreshed until then.
+async fn stopped_within_hang_guard(
+    client: &EnvironmentSessionServiceClient<HttpClient>,
+    session_id: &str,
+) -> EnvironmentSession {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let session = client
+                .get_session(GetSessionRequest {
+                    org_id: PRIMARY_ORG.into(),
+                    environment_id: BACKEND_ENV.into(),
+                    session_id: session_id.into(),
+                    ..Default::default()
+                })
+                .await
+                .expect("durable session GetSession round trip")
+                .into_owned()
+                .session
+                .into_option()
+                .expect("get acknowledgement contains a session");
+            if session.state.as_known() != Some(EnvironmentSessionState::Running) {
+                return session;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("the stop finished within the 30 s hang guard")
 }
 
 fn assert_public_session(harness: &Harness, session: &EnvironmentSession) {
