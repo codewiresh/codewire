@@ -66,9 +66,10 @@ use prometheus::{IntCounterVec, IntGauge, IntGaugeVec, Opts};
 use prometheus::{register_int_counter_vec, register_int_gauge, register_int_gauge_vec};
 use serde_json::Value;
 
-use super::super::{DesiredPool, PoolPass, WantedPools};
+use super::super::{PoolPass, WantedPool, WantedPools};
 use crate::sandbox::client::sandbox_name_hash;
 use crate::sandbox::image_cache::IMAGE_CACHE_NAME;
+pub(crate) use crate::sandbox::warm_pool::DesiredPool;
 use crate::sandbox::warm_pool::{
     LAUNCH_TYPE_LABEL, LAUNCH_TYPE_WARM, MEMBER_POOL_LABEL, TEMPLATE_REF_HASH_LABEL,
     has_pool_labels, is_warm_pool_name, pod_template_images, pool_label_selector, shape_label,
@@ -84,8 +85,47 @@ pub use plan::{
 
 const WARM_UP_POLL: Duration = Duration::from_secs(2);
 
+/// The wanted pools as this driver renders them: SandboxTemplate and
+/// SandboxWarmPool pairs, and the share of the smallest runtime node they may
+/// reserve together.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RenderedPools {
+    pub pools: Vec<DesiredPool>,
+    pub max_node_percent: u8,
+    pub image_cache_enabled: bool,
+    pub draining: bool,
+}
+
+/// Render one wanted pool, exactly as configuration rendered it before
+/// #3628 PR 5c.
+pub(crate) fn render_pool(namespace: &str, wanted: &WantedPool) -> anyhow::Result<DesiredPool> {
+    Ok(DesiredPool {
+        objects: crate::sandbox::warm_pool::render_warm_pool(
+            namespace,
+            &wanted.rendering,
+            wanted.configured.members,
+            wanted.allow_unpinned_images,
+        )?,
+        configured: wanted.configured,
+    })
+}
+
+/// Render every wanted pool, in their order.
+pub(crate) fn render(namespace: &str, wanted: &WantedPools) -> anyhow::Result<RenderedPools> {
+    Ok(RenderedPools {
+        pools: wanted
+            .pools
+            .iter()
+            .map(|pool| render_pool(namespace, pool))
+            .collect::<anyhow::Result<_>>()?,
+        max_node_percent: wanted.max_host_percent,
+        image_cache_enabled: wanted.image_cache_enabled,
+        draining: wanted.draining,
+    })
+}
+
 /// Every image the pools run or mount.
-pub(crate) fn images(wanted: &WantedPools) -> Vec<&str> {
+pub(crate) fn images(wanted: &RenderedPools) -> Vec<&str> {
     let mut images: Vec<&str> = Vec::new();
     for pool in &wanted.pools {
         for image in pod_template_images(&pool.objects.template["spec"]["podTemplate"]["spec"]) {
@@ -100,7 +140,7 @@ pub(crate) fn images(wanted: &WantedPools) -> Vec<&str> {
 /// The RuntimeClasses the pools render, once each, in configuration order.
 /// They share this replica's runtime profile; a commodity pool's class is its
 /// memory tier's.
-pub(crate) fn runtime_classes(wanted: &WantedPools) -> Vec<&str> {
+pub(crate) fn runtime_classes(wanted: &RenderedPools) -> Vec<&str> {
     let mut classes: Vec<&str> = Vec::new();
     for pool in &wanted.pools {
         let class = pool
@@ -153,7 +193,7 @@ pub(crate) async fn read_runtime_classes(
 pub(super) async fn rotating_pools(
     client: &kube::Client,
     namespace: &str,
-    wanted: &WantedPools,
+    wanted: &RenderedPools,
 ) -> anyhow::Result<Vec<DesiredPool>> {
     let configured: Vec<&DesiredPool> = wanted
         .pools
@@ -318,7 +358,7 @@ pub(crate) fn selector_of(labels: &BTreeMap<String, String>) -> String {
 pub(super) async fn reconcile_once(
     client: &kube::Client,
     namespace: &str,
-    wanted: &WantedPools,
+    wanted: &RenderedPools,
     state: &mut LoopState,
 ) -> anyhow::Result<PoolPass> {
     let templates_api = dynamic(
@@ -589,7 +629,7 @@ pub(super) async fn reconcile_once(
 async fn image_cache_gate(
     client: &kube::Client,
     namespace: &str,
-    wanted: &WantedPools,
+    wanted: &RenderedPools,
 ) -> anyhow::Result<bool> {
     if !wanted.image_cache_enabled {
         return Ok(true);
@@ -762,7 +802,7 @@ fn pool_shape_label(pool: &str) -> String {
 /// one (the first pass after winning leadership records a baseline only).
 #[allow(clippy::too_many_arguments)]
 fn record_observation(
-    wanted: &WantedPools,
+    wanted: &RenderedPools,
     allowed: &[i32],
     decided: &Plan,
     cache_warm: bool,

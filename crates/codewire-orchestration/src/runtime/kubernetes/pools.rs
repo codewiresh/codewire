@@ -30,7 +30,9 @@ pub(super) async fn pool_state(
     if !members_current(&members, &objects.revision) {
         return Ok(PoolState::StaleMembers);
     }
-    Ok(PoolState::Claimable)
+    Ok(PoolState::Claimable {
+        pool: objects.name.clone(),
+    })
 }
 
 /// The pool and its template are Codewire's, not terminating, at this

@@ -11,10 +11,12 @@ use serde_json::{Value, json};
 use super::*;
 use crate::runtime::kubernetes::KubernetesDriver;
 use crate::runtime::kubernetes::pools::{live_pool_current, members_current};
+use crate::sandbox::template::render_sandbox_template;
 use crate::sandbox::template::{
     CredentialRuntimeTemplateConfig, DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_PROFILE_COMMODITY,
 };
 use crate::sandbox::warm_pool::POOL_REVISION_ANNOTATION;
+use crate::sandbox::warm_pool::WarmPoolObjects;
 use crate::worker::create::environment_template_opts;
 use codewire_project::ProjectSpec;
 
@@ -69,38 +71,44 @@ fn opts(cfg: &SandboxWorkerCfg, env: &EnvironmentRow, image: &str) -> TemplateOp
     environment_template_opts(cfg, image, "workspace", env, 7).unwrap()
 }
 
-fn candidate(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> Result<WarmPoolObjects, ColdReason> {
+fn candidate(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> Result<WantedPool, ColdReason> {
     pool_candidate(
         cfg,
         env,
         canonical_workspace_runtime_image(),
         &opts(cfg, env, canonical_workspace_runtime_image()),
-        NAMESPACE,
     )
+}
+
+/// The candidate pool as the driver renders it.
+fn objects(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> WarmPoolObjects {
+    crate::runtime::kubernetes::warm_pools::render_pool(NAMESPACE, &candidate(cfg, env).unwrap())
+        .unwrap()
+        .objects
 }
 
 #[test]
 fn only_an_exact_canonical_standard_binding_shape_is_a_pool_candidate() {
     let cfg = dev_cfg(SHAPES);
     let small = environment(1000, 4096, 10);
-    let objects = candidate(&cfg, &small).expect("the configured shape is a candidate");
+    let objects = objects(&cfg, &small);
     assert!(objects.name.starts_with("cw-pool-1000m-4096mi-10gi-"));
 
     for unconfigured in ["", "  ", "not-a-shape"] {
         assert_eq!(
-            candidate(&dev_cfg(unconfigured), &small),
-            Err(ColdReason::Unconfigured)
+            candidate(&dev_cfg(unconfigured), &small).err(),
+            Some(ColdReason::Unconfigured)
         );
     }
     // A configured shape with no members, and every other exact shape.
     assert_eq!(
-        candidate(&cfg, &environment(2000, 8192, 10)),
-        Err(ColdReason::Shape)
+        candidate(&cfg, &environment(2000, 8192, 10)).err(),
+        Some(ColdReason::Shape)
     );
     for (cpu, memory, disk) in [(1001, 4096, 10), (1000, 4095, 10), (1000, 4096, 11)] {
         assert_eq!(
-            candidate(&cfg, &environment(cpu, memory, disk)),
-            Err(ColdReason::Shape),
+            candidate(&cfg, &environment(cpu, memory, disk)).err(),
+            Some(ColdReason::Shape),
             "{cpu}/{memory}/{disk}"
         );
     }
@@ -122,10 +130,10 @@ fn only_an_exact_canonical_standard_binding_shape_is_a_pool_candidate() {
                 &cfg,
                 &other,
                 canonical_workspace_runtime_image(),
-                &opts(&cfg, &small, canonical_workspace_runtime_image()),
-                NAMESPACE
-            ),
-            Err(ColdReason::Tier),
+                &opts(&cfg, &small, canonical_workspace_runtime_image())
+            )
+            .err(),
+            Some(ColdReason::Tier),
             "{tier:?}"
         );
     }
@@ -153,21 +161,15 @@ fn only_an_exact_canonical_standard_binding_shape_is_a_pool_candidate() {
     ] {
         assert_ne!(image, canonical);
         assert_eq!(
-            pool_candidate(&cfg, &small, image, &opts(&cfg, &small, image), NAMESPACE),
-            Err(ColdReason::Image),
+            pool_candidate(&cfg, &small, image, &opts(&cfg, &small, image)).err(),
+            Some(ColdReason::Image),
             "{image:?}"
         );
         // Whatever its own opts, a non-canonical image is refused even when
         // paired with the canonical rendering.
         assert_eq!(
-            pool_candidate(
-                &cfg,
-                &small,
-                image,
-                &opts(&cfg, &small, canonical),
-                NAMESPACE
-            ),
-            Err(ColdReason::Image),
+            pool_candidate(&cfg, &small, image, &opts(&cfg, &small, canonical)).err(),
+            Some(ColdReason::Image),
             "{image:?}"
         );
     }
@@ -176,20 +178,9 @@ fn only_an_exact_canonical_standard_binding_shape_is_a_pool_candidate() {
     // pooled.
     let mut unbindable = cfg.clone();
     unbindable.pod_namespace.clear();
-    assert_eq!(candidate(&unbindable, &small), Err(ColdReason::Identity));
-    // An own rendering that differs from the pool's (here another storage
-    // class for this environment's rendering) is never pooled.
-    let mut other_class = opts(&cfg, &small, canonical_workspace_runtime_image());
-    other_class.workspace_storage_class = "local-path".into();
     assert_eq!(
-        pool_candidate(
-            &cfg,
-            &small,
-            canonical_workspace_runtime_image(),
-            &other_class,
-            NAMESPACE
-        ),
-        Err(ColdReason::Rendering)
+        candidate(&unbindable, &small).err(),
+        Some(ColdReason::Identity)
     );
 }
 
@@ -261,7 +252,7 @@ fn a_dedicated_organization_goes_cold_only_while_the_pools_share() {
 
 #[test]
 fn a_live_pool_routes_only_at_this_replicas_revision_with_members() {
-    let objects = candidate(&dev_cfg(SHAPES), &environment(1000, 4096, 10)).unwrap();
+    let objects = objects(&dev_cfg(SHAPES), &environment(1000, 4096, 10));
     let (pool, template) = live(&objects);
     assert!(live_pool_current(Some(&pool), Some(&template), &objects));
     assert!(!live_pool_current(None, Some(&template), &objects));
@@ -361,7 +352,7 @@ fn with_marker(mut member: Value, revision: &str) -> Value {
 /// the reconciler replaces it; a terminating one does not.
 #[test]
 fn only_members_of_this_revision_keep_a_pool_routable() {
-    let objects = candidate(&dev_cfg(SHAPES), &environment(1000, 4096, 10)).unwrap();
+    let objects = objects(&dev_cfg(SHAPES), &environment(1000, 4096, 10));
     let parse = |values: Vec<Value>| -> Vec<DynamicObject> {
         values
             .into_iter()
@@ -476,7 +467,7 @@ async fn routing_reads_nothing_without_configuration_and_claims_only_a_current_p
     assert!(requests.lock().unwrap().is_empty());
 
     let cfg = dev_cfg(SHAPES);
-    let objects = candidate(&cfg, &env).unwrap();
+    let objects = objects(&cfg, &env);
     let (client, requests) = api(Some(&objects), false);
     let decided = route(
         &cfg,
@@ -549,7 +540,7 @@ async fn routing_reads_nothing_without_configuration_and_claims_only_a_current_p
 fn a_pool_claim_carries_only_the_pool_reference_and_identity_labels() {
     let cfg = dev_cfg(SHAPES);
     let env = environment(1000, 4096, 10);
-    let objects = candidate(&cfg, &env).unwrap();
+    let objects = objects(&cfg, &env);
     let mut claim = crate::worker::create::environment_claim_opts(
         canonical_workspace_runtime_image(),
         "workspace",
@@ -590,7 +581,7 @@ async fn routing_needs_a_capable_controller_and_current_members() {
     let env = environment(1000, 4096, 10);
     let canonical = canonical_workspace_runtime_image();
     let cfg = dev_cfg(SHAPES);
-    let objects = candidate(&cfg, &env).unwrap();
+    let objects = objects(&cfg, &env);
     let decide = |client: Arc<dyn RuntimeDriver>| {
         let cfg = cfg.clone();
         let env = env.clone();
@@ -714,4 +705,98 @@ fn a_create_from_a_snapshot_never_takes_a_pool_member() {
         Some(ColdReason::SourceSnapshot)
     );
     assert_eq!(ColdReason::SourceSnapshot.as_str(), "cold_source_snapshot");
+}
+
+/// An environment whose own rendering differs from the pool's (here another
+/// storage class) is never pooled: the driver says so before reading
+/// anything (`cold_rendering`).
+#[tokio::test]
+async fn an_own_rendering_that_differs_from_the_pools_goes_cold() {
+    let cfg = dev_cfg(SHAPES);
+    let small = environment(1000, 4096, 10);
+    let pool = candidate(&cfg, &small).unwrap();
+    let mut other_class = opts(&cfg, &small, canonical_workspace_runtime_image());
+    other_class.workspace_storage_class = "local-path".into();
+    let (driver, requests) = api(None, false);
+    assert_eq!(
+        driver
+            .pool_state(&Placement::new(NAMESPACE), &pool, &other_class)
+            .await
+            .unwrap(),
+        PoolState::RenderingDiffers
+    );
+    assert!(requests.lock().unwrap().is_empty());
+    assert_eq!(ColdReason::Rendering.as_str(), "cold_rendering");
+}
+
+/// A pool that cannot render is a `cold_shape` route, answered without any
+/// API read.
+#[tokio::test]
+async fn an_unrenderable_pool_goes_cold_without_a_read() {
+    let cfg = dev_cfg(SHAPES);
+    let small = environment(1000, 4096, 10);
+    let mut pool = candidate(&cfg, &small).unwrap();
+    // A pool rendering never names an environment.
+    pool.rendering.environment_id = small.id.clone();
+    let (driver, requests) = api(None, false);
+    assert_eq!(
+        driver
+            .pool_state(
+                &Placement::new(NAMESPACE),
+                &pool,
+                &opts(&cfg, &small, canonical_workspace_runtime_image())
+            )
+            .await
+            .unwrap(),
+        PoolState::Unrenderable
+    );
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+/// #3628 PR 5c: each answer of the driver is the route it was before the
+/// driver gave it, under its own label.
+#[tokio::test]
+async fn each_pool_answer_routes_under_its_label() {
+    let cfg = dev_cfg(SHAPES);
+    let env = environment(1000, 4096, 10);
+    let canonical = canonical_workspace_runtime_image();
+    for (state, expected) in [
+        (
+            PoolState::Claimable {
+                pool: "cw-pool-a".into(),
+            },
+            Route::Pool {
+                name: "cw-pool-a".into(),
+            },
+        ),
+        (PoolState::NoPools, Route::Cold(ColdReason::Unconfigured)),
+        (PoolState::Unrenderable, Route::Cold(ColdReason::Shape)),
+        (
+            PoolState::RenderingDiffers,
+            Route::Cold(ColdReason::Rendering),
+        ),
+        (PoolState::NotCurrent, Route::Cold(ColdReason::Revision)),
+        (
+            PoolState::ControllerIncapable,
+            Route::Cold(ColdReason::Controller),
+        ),
+        (
+            PoolState::StaleMembers,
+            Route::Cold(ColdReason::StaleMembers),
+        ),
+    ] {
+        let driver = crate::runtime::fake::FakeRuntimeDriver::default();
+        *driver.pool_state.lock().unwrap() = Some(state.clone());
+        let decided = route(
+            &cfg,
+            &env,
+            canonical,
+            &opts(&cfg, &env, canonical),
+            &driver,
+            &Placement::new(NAMESPACE),
+            false,
+        )
+        .await;
+        assert_eq!(decided, expected, "{state:?}");
+    }
 }

@@ -31,8 +31,7 @@ use crate::sandbox::host_keys::HostKeyStore;
 pub use crate::sandbox::sidecar::PortForwardedStream as RuntimeStream;
 pub use crate::sandbox::snapshots::{ClearingOpts, VolumeMode};
 use crate::sandbox::template::TemplateOpts;
-pub use crate::sandbox::warm_pool::DesiredPool;
-use crate::sandbox::warm_pool::WarmPoolObjects;
+use crate::sandbox::warm_pool::{ConfiguredShape, shape_label};
 pub use observation::{
     ContainerFact, ControllerFact, EnvFact, MemberFacts, RuntimeFacts, RuntimeObservation,
     VerifiedChain, VolumeFact,
@@ -157,9 +156,17 @@ pub enum Pick {
 }
 
 /// Whether a shared pool can take a claim now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PoolState {
-    Claimable,
+    /// It can, as the pool of this name.
+    Claimable { pool: String },
+    /// This placement keeps no pools: every create is cold.
+    NoPools,
+    /// The pool could not be rendered from what was wanted.
+    Unrenderable,
+    /// The environment's own rendering is not the pool's, so a member would
+    /// not be what it asked for.
+    RenderingDiffers,
     /// It is missing, being removed, empty, or not at this rendering's
     /// revision and spec.
     NotCurrent,
@@ -170,14 +177,41 @@ pub enum PoolState {
     StaleMembers,
 }
 
+/// One pool orchestration wants: an exact shape, its unclaimed member count,
+/// and the identity-free options its members are rendered from. The driver
+/// renders it; orchestration never handles the rendering.
+#[derive(Clone)]
+pub struct WantedPool {
+    pub configured: ConfiguredShape,
+    pub rendering: TemplateOpts,
+    /// Diagnostic runtimes only: members' images need not be digest-pinned.
+    pub allow_unpinned_images: bool,
+}
+
+impl WantedPool {
+    pub fn label(&self) -> String {
+        shape_label(self.configured.shape)
+    }
+}
+
+impl std::fmt::Debug for WantedPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WantedPool")
+            .field("configured", &self.configured)
+            .field("allow_unpinned_images", &self.allow_unpinned_images)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The warm capacity orchestration wants at a placement.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct WantedPools {
-    /// In configuration order, which is the order the node cap clamps them in.
-    pub pools: Vec<DesiredPool>,
-    /// Validated percentage (1..=100) of the smallest runtime node that every
-    /// pool together may reserve.
-    pub max_node_percent: u8,
+    /// In configuration order, which is the order the cap clamps them in.
+    pub pools: Vec<WantedPool>,
+    /// Validated percentage (1..=100): the share of one shared runtime host
+    /// that every pool together may reserve. Drivers without shared hosts
+    /// bound pools by their own limits.
+    pub max_host_percent: u8,
     /// `false` when nothing is cached ahead of the pools, so nothing waits for
     /// a cache.
     pub image_cache_enabled: bool,
@@ -222,23 +256,36 @@ pub trait RuntimePools: Send + Sync {
         &self,
         placement: &Placement,
         wanted: &WantedPools,
-    ) -> anyhow::Result<Vec<DesiredPool>>;
+    ) -> anyhow::Result<Vec<WantedPool>>;
 
     /// Make each of `pools` with one member, unless it exists, then wait until
     /// each has a ready member. It waits without bound: the caller bounds it.
-    async fn warm_pools(&self, placement: &Placement, pools: &[DesiredPool]) -> anyhow::Result<()>;
+    async fn warm_pools(&self, placement: &Placement, pools: &[WantedPool]) -> anyhow::Result<()>;
 
-    /// Ask for the shared pools of old releases to go. `Ok(0)` means none are
-    /// left; any other count means they were asked to go and may still exist.
-    async fn retire_legacy_shared_pools(&self, placement: &Placement) -> anyhow::Result<usize>;
-
-    /// Whether the shared pool rendered as `pool` can take a claim now. Its
-    /// members are read only once everything else holds.
+    /// Whether the shared pool wanted as `pool` can take a claim for an
+    /// environment rendered from `rendering` now: only when the
+    /// environment's own rendering is the pool's. Its members are read only
+    /// once everything else holds. A placement without pools answers
+    /// [`PoolState::NoPools`].
     async fn pool_state(
         &self,
         placement: &Placement,
-        pool: &WarmPoolObjects,
+        pool: &WantedPool,
+        rendering: &TemplateOpts,
     ) -> anyhow::Result<PoolState>;
+
+    /// Whether the observed runtime was born of `pool` exactly as wanted: the
+    /// claim names the pool, the runtime is the pool's rendering, and the
+    /// incarnation booted from its revision. `Ok` only after a full
+    /// comparison finds no difference; anything unreadable, missing or
+    /// different is `Err` with where it differs. A placement without pools
+    /// can vouch for nothing and is always `Err`.
+    async fn pool_birth(
+        &self,
+        placement: &Placement,
+        pool: &WantedPool,
+        observation: &RuntimeObservation,
+    ) -> Result<(), String>;
 }
 
 /// An environment's claim on a runtime, from a shared pool or cold.

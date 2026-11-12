@@ -16,8 +16,8 @@
 //! release that changes the revision therefore adds a pool beside the old one
 //! instead of replacing its template, and the old pool keeps serving the
 //! outgoing replicas until the new one has members (#3572). The prefix is disjoint from the per-environment
-//! `shadow-pool-` objects and from the `sandbox-warmpool-` objects that
-//! `retire_legacy_shared_warm_pools` deletes.
+//! `shadow-pool-` objects and from old releases' `sandbox-warmpool-` objects
+//! (none remain on Dev or Production, #3628).
 //!
 //! `codewire.sh/pool-revision` is the SHA-256 of the rendered template spec.
 //! The spec names every image a member runs (workspace, DinD, and the support

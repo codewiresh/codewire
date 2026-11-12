@@ -20,13 +20,11 @@ use std::sync::OnceLock;
 
 use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 
-use super::{SandboxWorkerCfg, render_configured_warm_pool};
-use crate::runtime::{Placement, PoolState, RuntimeDriver};
+use super::{SandboxWorkerCfg, warm_pool_template_opts};
+use crate::runtime::{Placement, PoolState, RuntimeDriver, WantedPool};
 use crate::sandbox::canonical_workspace_runtime_image;
-use crate::sandbox::template::{CpuSharingRatio, TemplateOpts, render_sandbox_template};
-use crate::sandbox::warm_pool::{
-    WarmPoolObjects, WorkspaceShape, parse_warm_pool_shapes, pool_revision,
-};
+use crate::sandbox::template::{CpuSharingRatio, TemplateOpts};
+use crate::sandbox::warm_pool::{WorkspaceShape, parse_warm_pool_shapes};
 use crate::worker::env_data::EnvironmentRow;
 
 /// Where one create claims from.
@@ -100,8 +98,7 @@ pub(crate) fn pool_candidate(
     env: &EnvironmentRow,
     image_ref: &str,
     opts: &TemplateOpts,
-    namespace: &str,
-) -> Result<WarmPoolObjects, ColdReason> {
+) -> Result<WantedPool, ColdReason> {
     let configured = match parse_warm_pool_shapes(&cfg.warm_pool_shapes) {
         Ok(configured) if !configured.is_empty() => configured,
         _ => return Err(ColdReason::Unconfigured),
@@ -128,24 +125,28 @@ pub(crate) fn pool_candidate(
     else {
         return Err(ColdReason::Shape);
     };
-    let objects =
-        render_configured_warm_pool(cfg, shape, entry.members).map_err(|_| ColdReason::Shape)?;
-    if pool_revision(&render_sandbox_template(namespace, opts)["spec"]) != objects.revision {
-        return Err(ColdReason::Rendering);
-    }
-    Ok(objects)
+    // The driver renders the pool, and answers whether it renders at all
+    // (`cold_shape`) and whether this environment's rendering is the pool's
+    // (`cold_rendering`).
+    Ok(WantedPool {
+        configured: *entry,
+        rendering: warm_pool_template_opts(cfg, shape).map_err(|_| ColdReason::Shape)?,
+        allow_unpinned_images: cfg.allow_diagnostic_runtime,
+    })
 }
 
 /// The live half: what the driver says of the pool, as a route.
 async fn live_route(
     runtime: &dyn RuntimeDriver,
     placement: &Placement,
-    objects: &WarmPoolObjects,
+    pool: &WantedPool,
+    opts: &TemplateOpts,
 ) -> anyhow::Result<Route> {
-    Ok(match runtime.pool_state(placement, objects).await? {
-        PoolState::Claimable => Route::Pool {
-            name: objects.name.clone(),
-        },
+    Ok(match runtime.pool_state(placement, pool, opts).await? {
+        PoolState::Claimable { pool } => Route::Pool { name: pool },
+        PoolState::NoPools => Route::Cold(ColdReason::Unconfigured),
+        PoolState::Unrenderable => Route::Cold(ColdReason::Shape),
+        PoolState::RenderingDiffers => Route::Cold(ColdReason::Rendering),
         PoolState::NotCurrent => Route::Cold(ColdReason::Revision),
         PoolState::ControllerIncapable => Route::Cold(ColdReason::Controller),
         PoolState::StaleMembers => Route::Cold(ColdReason::StaleMembers),
@@ -165,9 +166,9 @@ pub(crate) async fn route(
     let route = if reclaimed {
         Route::Cold(ColdReason::Reclaimed)
     } else {
-        match pool_candidate(cfg, env, image_ref, opts, &placement.namespace) {
+        match pool_candidate(cfg, env, image_ref, opts) {
             Err(reason) => Route::Cold(reason),
-            Ok(objects) => match live_route(runtime, placement, &objects).await {
+            Ok(pool) => match live_route(runtime, placement, &pool, opts).await {
                 Ok(route) => route,
                 Err(error) => {
                     tracing::warn!(env = %env.id, error = %format!("{error:#}"), "warm pool unavailable; creating cold");

@@ -40,12 +40,14 @@ fn dev_cfg(shapes: &str) -> SandboxWorkerCfg {
     }
 }
 
+/// The pools this configuration wants, as the driver renders them.
+fn rendered(cfg: &SandboxWorkerCfg) -> super::super::RenderedPools {
+    let config = WarmPoolConfig::from_cfg(cfg, true).unwrap().unwrap();
+    super::super::render(NAMESPACE, &config.wanted).unwrap()
+}
+
 fn desired() -> Vec<DesiredPool> {
-    WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2"), true)
-        .unwrap()
-        .unwrap()
-        .wanted
-        .pools
+    rendered(&dev_cfg("1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2")).pools
 }
 
 fn object(value: Value) -> DynamicObject {
@@ -583,12 +585,7 @@ fn created(object: DynamicObject, second: i64) -> DynamicObject {
 fn another_revision_of_a_configured_shape_drains_only_behind_a_ready_own_pool() {
     let mut previous_cfg = dev_cfg("1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2");
     previous_cfg.daemon_image = "registry.example.invalid/codewire/daemon@sha256:4444444444444444444444444444444444444444444444444444444444444444".into();
-    let previous = WarmPoolConfig::from_cfg(&previous_cfg, true)
-        .unwrap()
-        .unwrap()
-        .wanted
-        .pools
-        .remove(0);
+    let previous = rendered(&previous_cfg).pools.remove(0);
     let mut fixture = Fixture::settled();
     let own = fixture.desired[0].clone();
     assert_eq!(previous.configured.shape, own.configured.shape);
@@ -674,12 +671,7 @@ fn another_revision_of_a_configured_shape_drains_only_behind_a_ready_own_pool() 
 fn a_configured_zero_drains_another_revision_of_its_shape() {
     let mut previous_cfg = dev_cfg("1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2");
     previous_cfg.daemon_image = "registry.example.invalid/codewire/daemon@sha256:4444444444444444444444444444444444444444444444444444444444444444".into();
-    let previous = WarmPoolConfig::from_cfg(&previous_cfg, true)
-        .unwrap()
-        .unwrap()
-        .wanted
-        .pools
-        .remove(0);
+    let previous = rendered(&previous_cfg).pools.remove(0);
     let mut fixture = Fixture::settled();
     fixture.desired[0].configured.members = 0;
     fixture.allowed[0] = 0;
@@ -913,7 +905,8 @@ fn the_image_cache_gate_needs_every_cacheable_image_held_and_rolled_out() {
     let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), true)
         .unwrap()
         .unwrap();
-    let images = super::super::images(&config.wanted);
+    let rendered = super::super::render(NAMESPACE, &config.wanted).unwrap();
+    let images = super::super::images(&rendered);
     assert_eq!(
         images.len(),
         3,
@@ -1111,11 +1104,7 @@ fn a_template_is_current_only_when_its_spec_is() {
 fn another_revisions_members_count_against_the_node_cap() {
     let mut previous_cfg = dev_cfg("1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2");
     previous_cfg.daemon_image = "registry.example.invalid/codewire/daemon@sha256:4444444444444444444444444444444444444444444444444444444444444444".into();
-    let previous = WarmPoolConfig::from_cfg(&previous_cfg, true)
-        .unwrap()
-        .unwrap()
-        .wanted
-        .pools;
+    let previous = rendered(&previous_cfg).pools;
     let fixture = Fixture::settled();
     let reservations = [
         Some(Reservation {

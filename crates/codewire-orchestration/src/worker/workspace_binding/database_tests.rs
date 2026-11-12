@@ -792,6 +792,19 @@ impl FakeKube {
     }
 }
 
+/// The pool a pool-born environment's member comes from, as the driver
+/// renders it.
+fn pool_rendering(
+    cfg: &SandboxWorkerCfg,
+    env: &EnvironmentRow,
+) -> Result<crate::sandbox::warm_pool::WarmPoolObjects> {
+    Ok(crate::runtime::kubernetes::warm_pools::render_pool(
+        NAMESPACE,
+        &pool_born_rendering(cfg, env)?,
+    )?
+    .objects)
+}
+
 fn observed(environment: &str, pod_uid: &str) -> crate::runtime::VerifiedChain {
     crate::runtime::VerifiedChain::for_test(
         &sandbox_uid(environment),
@@ -1957,22 +1970,17 @@ fn pool_born(
         },
     );
     fake.update(&pod_path(environment), |pod| {
-        pod["spec"]["containers"] = json!(
-            images
-                .iter()
-                .map(|(name, image)| {
-                    let env = if name == "workspace" {
-                        json!([{
-                            "name": crate::sandbox::warm_pool::POOL_REVISION_ENV,
-                            "value": objects.revision,
-                        }])
-                    } else {
-                        json!([])
-                    };
-                    json!({ "name": name, "image": image, "env": env })
-                })
-                .collect::<Vec<_>>()
-        );
+        // A member's Pod is its Sandbox's template as the controller stored
+        // it, plus the workspace claim it mounts: the rendering's containers,
+        // security contexts, volumes and revision marker, exactly.
+        let mut spec = crate::sandbox::warm_pool::tests::controller_copy(rendering)["spec"]
+            ["podTemplate"]["spec"]
+            .clone();
+        spec["volumes"].as_array_mut().unwrap().push(json!({
+            "name": "workspace",
+            "persistentVolumeClaim": { "claimName": format!("workspace-{name}") },
+        }));
+        pod["spec"] = spec;
         pod["status"]["containerStatuses"] = json!(
             images
                 .iter()
@@ -1983,12 +1991,6 @@ fn pool_born(
                 .collect::<Vec<_>>()
         );
         if !init_images.is_empty() {
-            pod["spec"]["initContainers"] = json!(
-                init_images
-                    .iter()
-                    .map(|(name, image)| json!({ "name": name, "image": image }))
-                    .collect::<Vec<_>>()
-            );
             pod["status"]["initContainerStatuses"] = json!(
                 init_images
                     .iter()
@@ -2044,7 +2046,7 @@ async fn db_a_pool_born_first_bind_refuses_anything_but_its_rendering() -> Resul
         pool_shape(&db.pool, ENV_A).await?;
         let cfg = pool_cfg();
         let env = load_environment(&db.pool, ENV_A).await?;
-        let rendering = pool_born_rendering(&cfg, &env, NAMESPACE)?;
+        let rendering = pool_rendering(&cfg, &env)?;
 
         let unverifiable = pool_born(ENV_A, POD_1, &rendering, true);
         let error = enforced_with(&db.pool, &unverifiable, None, ENV_A, POD_1, &["creating"])
@@ -2059,11 +2061,29 @@ async fn db_a_pool_born_first_bind_refuses_anything_but_its_rendering() -> Resul
             ("environment token", json!("synthetic")),
             ("stale Pod revision", json!("0".repeat(64))),
             ("other pool", json!("cw-pool-1000m-4096mi-10gi-0a1b2c3d")),
+            // Only the member's own Pod: the isolation check refuses it,
+            // whatever the pool verdict (#3628 PR 5c condition 3).
+            ("automounted token on the Pod", json!(true)),
         ] {
             let altered = pool_born(ENV_A, POD_1, &rendering, true);
             match label {
                 "stale Pod revision" => altered.update(&pod_path(ENV_A), |pod| {
-                    pod["spec"]["containers"][0]["env"][0]["value"] = change.clone();
+                    let workspace = pod["spec"]["containers"]
+                        .as_array_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .find(|container| container["name"] == "workspace")
+                        .unwrap();
+                    let marker = workspace["env"]
+                        .as_array_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .find(|entry| entry["name"] == crate::sandbox::warm_pool::POOL_REVISION_ENV)
+                        .unwrap();
+                    marker["value"] = change.clone();
+                }),
+                "automounted token on the Pod" => altered.update(&pod_path(ENV_A), |pod| {
+                    pod["spec"]["automountServiceAccountToken"] = change.clone();
                 }),
                 "other pool" => altered.update(
                     &format!("{CLAIMS_API}/{NAMESPACE}/sandboxclaims/sandbox-{ENV_A}"),
@@ -2128,7 +2148,7 @@ async fn db_a_pool_born_sandbox_binds_as_its_rendering_and_then_as_its_own() -> 
         pool_shape(&db.pool, ENV_A).await?;
         let cfg = pool_cfg();
         let env = load_environment(&db.pool, ENV_A).await?;
-        let rendering = pool_born_rendering(&cfg, &env, NAMESPACE)?;
+        let rendering = pool_rendering(&cfg, &env)?;
 
         let adopted = pool_born(ENV_A, POD_1, &rendering, true);
         let (outcome, path) =
@@ -2142,12 +2162,7 @@ async fn db_a_pool_born_sandbox_binds_as_its_rendering_and_then_as_its_own() -> 
         set_state(&db.pool, ENV_B, "creating").await?;
         pool_shape(&db.pool, ENV_B).await?;
         let env_b = load_environment(&db.pool, ENV_B).await?;
-        let cold = pool_born(
-            ENV_B,
-            POD_2,
-            &pool_born_rendering(&cfg, &env_b, NAMESPACE)?,
-            false,
-        );
+        let cold = pool_born(ENV_B, POD_2, &pool_rendering(&cfg, &env_b)?, false);
         let (outcome, path) =
             enforced_with(&db.pool, &cold, Some(&cfg), ENV_B, POD_2, &["creating"]).await?;
         ensure!(outcome == WriteOutcome::Recorded && path == StartPath::Cold);
@@ -2206,7 +2221,7 @@ async fn db_an_early_bind_reads_the_chain_once() -> Result<()> {
         pool_shape(&db.pool, ENV_A).await?;
         let cfg = pool_cfg();
         let env = load_environment(&db.pool, ENV_A).await?;
-        let rendering = pool_born_rendering(&cfg, &env, NAMESPACE)?;
+        let rendering = pool_rendering(&cfg, &env)?;
         let adopted = pool_born(ENV_A, POD_1, &rendering, true);
         let authority = ActivityAuthority::capture(&db.pool, ENV_A, GENERATION).await?;
         let early = tokio::time::timeout(
@@ -2334,7 +2349,7 @@ async fn db_a_fresh_warm_bind_is_confirmed_without_binding_or_applying_access_ag
         pool_shape(&db.pool, ENV_A).await?;
         let cfg = pool_cfg();
         let env = load_environment(&db.pool, ENV_A).await?;
-        let rendering = pool_born_rendering(&cfg, &env, NAMESPACE)?;
+        let rendering = pool_rendering(&cfg, &env)?;
         let adopted = pool_born(ENV_A, POD_1, &rendering, true);
         adopted.update(&pod_path(ENV_A), |pod| {
             pod["status"]["podIP"] = json!("10.0.0.5");
@@ -2747,4 +2762,150 @@ async fn every_link_of_the_chain_is_refused_where_it_was_before() {
             .unwrap()
             .bind_ready
     );
+}
+
+/// The pool a 1000m/4096Mi/10Gi pool-born member of [`pool_cfg`] is wanted as.
+fn wanted_pool() -> crate::runtime::WantedPool {
+    let shape = crate::sandbox::warm_pool::WorkspaceShape {
+        cpu_millicores: 1000,
+        memory_mib: 4096,
+        disk_gib: 10,
+    };
+    crate::runtime::WantedPool {
+        configured: crate::sandbox::warm_pool::ConfiguredShape { shape, members: 0 },
+        rendering: crate::worker::create::warm_pool_template_opts(&pool_cfg(), shape).unwrap(),
+        allow_unpinned_images: false,
+    }
+}
+
+/// #3628 PR 5c, cw-confidential's conditions 1 and 2: the driver's pool
+/// verdict compares a member with the pool's own rendering, the one the pool
+/// was made from. Untouched it is `Ok`; any single difference, or anything
+/// missing or unreadable, is `Err` naming where.
+#[tokio::test]
+async fn a_pool_birth_is_ok_only_for_the_pools_own_rendering() {
+    let wanted = wanted_pool();
+    let objects = crate::runtime::kubernetes::warm_pools::render_pool(NAMESPACE, &wanted)
+        .unwrap()
+        .objects;
+    // The same render function makes the pool the controller keeps.
+    assert_eq!(
+        objects,
+        crate::worker::create::render_configured_warm_pool(&pool_cfg(), wanted.configured.shape, 0)
+            .unwrap()
+    );
+    let placement = Placement::new(NAMESPACE);
+    let birth = |fake: FakeKube| {
+        let wanted = wanted.clone();
+        let placement = placement.clone();
+        async move {
+            let driver = fake.driver();
+            let observation = driver.observe(&bind_claim(ENV_A)).await.unwrap();
+            driver.pool_birth(&placement, &wanted, &observation).await
+        }
+    };
+    assert_eq!(birth(pool_born(ENV_A, POD_1, &objects, true)).await, Ok(()));
+
+    type Change = fn(&mut serde_json::Value);
+    let sandbox: [(&str, Change); 6] = [
+        ("/spec/podTemplate/spec/runtimeClassName", |o| {
+            o["spec"]["podTemplate"]["spec"]["runtimeClassName"] = json!("runc")
+        }),
+        ("/spec/podTemplate/spec/hostNetwork", |o| {
+            o["spec"]["podTemplate"]["spec"]["hostNetwork"] = json!(true)
+        }),
+        ("/spec/podTemplate/spec/automountServiceAccountToken", |o| {
+            o["spec"]["podTemplate"]["spec"]["automountServiceAccountToken"] = json!(true)
+        }),
+        (
+            "/spec/podTemplate/metadata/annotations/codewire.sh/extra",
+            |o| {
+                o["spec"]["podTemplate"]["metadata"]["annotations"]["codewire.sh/extra"] =
+                    json!("x")
+            },
+        ),
+        ("/spec/volumeClaimTemplates", |o| {
+            o["spec"]["volumeClaimTemplates"] = json!(null)
+        }),
+        ("/spec/podTemplate/spec", |o| {
+            o["spec"].as_object_mut().unwrap().remove("podTemplate");
+        }),
+    ];
+    for (path, change) in sandbox {
+        let fake = pool_born(ENV_A, POD_1, &objects, true);
+        fake.update(&runtime_path(ENV_A), change);
+        let refused = birth(fake).await.expect_err(path);
+        assert!(refused.starts_with(path), "{path}: {refused}");
+    }
+    let other_pool = pool_born(ENV_A, POD_1, &objects, true);
+    other_pool.update(&claim_path(ENV_A), |claim| {
+        claim["spec"]["warmPoolRef"]["name"] = json!("cw-pool-1000m-4096mi-10gi-0a1b2c3d")
+    });
+    assert_eq!(
+        birth(other_pool).await,
+        Err("/spec/warmPoolRef/name".to_owned())
+    );
+    // A Pod without the revision marker is not of this revision.
+    let unmarked = pool_born(ENV_A, POD_1, &objects, true);
+    unmarked.update(&pod_path(ENV_A), |pod| {
+        for container in pod["spec"]["containers"].as_array_mut().unwrap() {
+            if let Some(env) = container["env"].as_array_mut() {
+                env.retain(|entry| entry["name"] != crate::sandbox::warm_pool::POOL_REVISION_ENV);
+            }
+        }
+    });
+    assert_eq!(
+        birth(unmarked).await,
+        Err("pod /spec/containers/workspace/env".to_owned())
+    );
+    // A pool that cannot render vouches for nothing.
+    let mut unrenderable = wanted.clone();
+    unrenderable.rendering.environment_id = ENV_A.into();
+    let driver = pool_born(ENV_A, POD_1, &objects, true).driver();
+    let observation = driver.observe(&bind_claim(ENV_A)).await.unwrap();
+    let refused = driver
+        .pool_birth(&placement, &unrenderable, &observation)
+        .await
+        .unwrap_err();
+    assert!(refused.starts_with("pool rendering"), "{refused}");
+}
+
+/// #3628 PR 5c, cw-billing's condition 1: a driver without pools routes every
+/// create cold and vouches for no pool-born member, so its first bind is
+/// refused rather than waved through.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_placement_without_pools_refuses_a_pool_born_first_bind() -> Result<()> {
+    use crate::runtime::RuntimePools;
+
+    let no_pools = crate::runtime::fake::FakeRuntimeDriver::default();
+    let wanted = wanted_pool();
+    assert_eq!(
+        no_pools
+            .pool_state(&Placement::new(NAMESPACE), &wanted, &wanted.rendering)
+            .await?,
+        crate::runtime::PoolState::NoPools
+    );
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db).await?;
+        set_state(&db.pool, ENV_A, "creating").await?;
+        pool_shape(&db.pool, ENV_A).await?;
+        let cfg = pool_cfg();
+        let env = load_environment(&db.pool, ENV_A).await?;
+        let objects = pool_rendering(&cfg, &env)?;
+        // The chain and the Pod as a pool-born member's; only the pool verdict
+        // comes from a placement without pools.
+        let member = pool_born(ENV_A, POD_1, &objects, true);
+        let driver = member.driver();
+        let observation = driver.observe(&bind_claim(ENV_A)).await?;
+        let refused = no_pools
+            .pool_birth(&Placement::new(NAMESPACE), &wanted, &observation)
+            .await
+            .expect_err("a placement without pools vouched for a member");
+        ensure!(refused == "this placement has no pools", "{refused}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
 }

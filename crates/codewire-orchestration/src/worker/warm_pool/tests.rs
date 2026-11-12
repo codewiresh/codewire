@@ -2,7 +2,7 @@
 //! #3572).
 
 use super::*;
-use crate::runtime::kubernetes::warm_pools::runtime_classes;
+use crate::runtime::kubernetes::warm_pools::{render, runtime_classes};
 use crate::sandbox::template::{
     CredentialRuntimeTemplateConfig, DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_PROFILE_COMMODITY,
     RUNTIME_PROFILE_CONFIDENTIAL,
@@ -33,22 +33,24 @@ fn dev_cfg(shapes: &str) -> SandboxWorkerCfg {
 fn no_configured_shape_keeps_the_reconciler_inert() {
     for unset in ["", "   ", "\n"] {
         for cache in [true, false] {
-            assert_eq!(
-                WarmPoolConfig::from_cfg(&dev_cfg(unset), cache).unwrap(),
-                None,
+            assert!(
+                WarmPoolConfig::from_cfg(&dev_cfg(unset), cache)
+                    .unwrap()
+                    .is_none(),
                 "{unset:?} configures no pool"
             );
         }
     }
     // The default configuration carries no shape.
     assert!(SandboxWorkerCfg::default().warm_pool_shapes.is_empty());
-    assert_eq!(
-        WarmPoolConfig::from_cfg(&SandboxWorkerCfg::default(), true).unwrap(),
-        None
+    assert!(
+        WarmPoolConfig::from_cfg(&SandboxWorkerCfg::default(), true)
+            .unwrap()
+            .is_none()
     );
     let mut cfg = dev_cfg("");
     cfg.warm_pool_max_node_percent = "invalid".into();
-    assert_eq!(startup(&cfg, Ok(true)), Startup::Inert);
+    assert!(matches!(startup(&cfg, Ok(true)), Startup::Inert));
 }
 
 #[test]
@@ -58,7 +60,7 @@ fn the_node_reservation_percentage_defaults_and_refuses_invalid_configuration() 
         let mut cfg = dev_cfg("2000m/16384Mi/80Gi=1");
         cfg.warm_pool_max_node_percent = value.into();
         let config = WarmPoolConfig::from_cfg(&cfg, false).unwrap().unwrap();
-        assert_eq!(config.wanted.max_node_percent, expected);
+        assert_eq!(config.wanted.max_host_percent, expected);
     }
     for value in [
         "0", "101", "256", "-1", "+50", "50%", "0.5", " 50", "50 ", "bad",
@@ -84,15 +86,16 @@ fn configured_shapes_render_through_the_identity_free_pool_renderer() {
             .unwrap();
     assert_eq!(config.placement, Placement::new(NAMESPACE));
     assert_eq!(config.wanted.pools.len(), 2);
+    let rendered = render(NAMESPACE, &config.wanted).unwrap();
     assert!(
-        config.wanted.pools[0]
+        rendered.pools[0]
             .objects
             .name
             .starts_with("cw-pool-1000m-4096mi-10gi-")
     );
     assert_eq!(config.wanted.pools[1].configured.members, 1);
-    assert_eq!(config.wanted.pools[1].objects.pool["spec"]["replicas"], 1);
-    assert_eq!(runtime_classes(&config.wanted), ["commodity"]);
+    assert_eq!(rendered.pools[1].objects.pool["spec"]["replicas"], 1);
+    assert_eq!(runtime_classes(&rendered), ["commodity"]);
     // A 32 GiB pool renders its memory tier's class, listed once.
     let tiers = WarmPoolConfig::from_cfg(
         &dev_cfg("1000m/4096Mi/10Gi=1,8000m/32768Mi/10Gi=1,16000m/32768Mi/10Gi=1"),
@@ -101,7 +104,7 @@ fn configured_shapes_render_through_the_identity_free_pool_renderer() {
     .unwrap()
     .unwrap();
     assert_eq!(
-        runtime_classes(&tiers.wanted),
+        runtime_classes(&render(NAMESPACE, &tiers.wanted).unwrap()),
         ["commodity", "commodity-32g"]
     );
 
@@ -125,11 +128,11 @@ fn configured_shapes_render_through_the_identity_free_pool_renderer() {
 /// leaving them unmanaged; no configuration stays inert.
 #[test]
 fn an_invalid_configuration_drains_and_none_is_inert() {
-    assert_eq!(startup(&dev_cfg(""), Ok(true)), Startup::Inert);
-    assert_eq!(
+    assert!(matches!(startup(&dev_cfg(""), Ok(true)), Startup::Inert));
+    assert!(matches!(
         startup(&dev_cfg(" "), Err(anyhow::anyhow!("bad cache"))),
         Startup::Inert
-    );
+    ));
     for (shapes, cache) in [
         ("not-a-shape", Ok(true)),
         ("1000m/4096Mi/10Gi=2", Err(anyhow::anyhow!("bad cache"))),

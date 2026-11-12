@@ -23,21 +23,21 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, DynamicObject, LogParams};
 
 use super::{
-    CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, DesiredPool,
-    FailedLiveResize, KeptSnapshot, MemberFacts, MemberRef, MemberReplacement, Pick, Placement,
-    PoolBornClaim, PoolPass, PoolState, ProbeResult, ResizeState, RuntimeAccess,
-    RuntimeAttestation, RuntimeClaims, RuntimeDriver, RuntimeExec, RuntimeFacts, RuntimeLifecycle,
-    RuntimeMember, RuntimeObservation, RuntimeObservations, RuntimePools, RuntimeResize,
-    RuntimeSnapshots, RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime,
-    VerifiedChain, VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef, WantedPools,
-    WorkspaceVolume,
+    CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
+    KeptSnapshot, MemberFacts, MemberRef, MemberReplacement, Pick, Placement, PoolBornClaim,
+    PoolPass, PoolState, ProbeResult, ResizeState, RuntimeAccess, RuntimeAttestation,
+    RuntimeClaims, RuntimeDriver, RuntimeExec, RuntimeFacts, RuntimeLifecycle, RuntimeMember,
+    RuntimeObservation, RuntimeObservations, RuntimePools, RuntimeResize, RuntimeSnapshots,
+    RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime, VerifiedChain, VolumeGrowth,
+    VolumeIdentity, VolumeMode, VolumeRef, WantedPool, WantedPools, WorkspaceVolume,
 };
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::HostKeyStore;
 use crate::sandbox::sidecar::WORKSPACE_SSH_PORT;
 use crate::sandbox::snapshots::{clearing_volume_name, kept_snapshot_name, raw_snapshot_name};
+use crate::sandbox::template::render_sandbox_template;
 use crate::sandbox::template::{KATA_COCO_INIT_DATA_ANNOTATION_KEY, TemplateOpts};
-use crate::sandbox::warm_pool::WarmPoolObjects;
+use crate::sandbox::warm_pool::{pod_spec_pool_revision, pool_revision, sandbox_matches_rendering};
 use crate::sandbox::{ClaimOpts, shadow_warm_pool_name};
 
 const WORKSPACE_DAEMON_PORT: u16 = crate::sandbox::template::WORKSPACE_DAEMON_PORT as u16;
@@ -73,18 +73,40 @@ impl KubernetesDriver {
 
 #[async_trait]
 impl RuntimePools for KubernetesDriver {
-    async fn retire_legacy_shared_pools(&self, placement: &Placement) -> anyhow::Result<usize> {
-        self.sandbox_client(placement)
-            .retire_legacy_shared_warm_pools()
-            .await
-    }
-
     async fn pool_state(
         &self,
         placement: &Placement,
-        pool: &WarmPoolObjects,
+        pool: &WantedPool,
+        rendering: &TemplateOpts,
     ) -> anyhow::Result<PoolState> {
-        pools::pool_state(&self.sandbox_client(placement), pool).await
+        let Ok(desired) = warm_pools::render_pool(&placement.namespace, pool) else {
+            return Ok(PoolState::Unrenderable);
+        };
+        let own = pool_revision(&render_sandbox_template(&placement.namespace, rendering)["spec"]);
+        if own != desired.objects.revision {
+            return Ok(PoolState::RenderingDiffers);
+        }
+        pools::pool_state(&self.sandbox_client(placement), &desired.objects).await
+    }
+
+    async fn pool_birth(
+        &self,
+        placement: &Placement,
+        pool: &WantedPool,
+        observation: &RuntimeObservation,
+    ) -> Result<(), String> {
+        let expected = warm_pools::render_pool(&placement.namespace, pool)
+            .map_err(|error| format!("pool rendering: {error:#}"))?
+            .objects;
+        if observation.pool != expected.name {
+            return Err("/spec/warmPoolRef/name".to_owned());
+        }
+        sandbox_matches_rendering(&observation.runtime.json, &expected.template)?;
+        if pod_spec_pool_revision(&observation.member.spec_json) != Some(expected.revision.as_str())
+        {
+            return Err("pod /spec/containers/workspace/env".to_owned());
+        }
+        Ok(())
     }
 
     async fn keep_pools(
@@ -101,7 +123,12 @@ impl RuntimePools for KubernetesDriver {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(namespace)
             .unwrap_or_default();
-        let pass = warm_pools::reconcile_once(&self.client, namespace, wanted, &mut memory).await;
+        let pass = match warm_pools::render(namespace, wanted) {
+            Ok(rendered) => {
+                warm_pools::reconcile_once(&self.client, namespace, &rendered, &mut memory).await
+            }
+            Err(error) => Err(error),
+        };
         self.pool_memory
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -120,12 +147,29 @@ impl RuntimePools for KubernetesDriver {
         &self,
         placement: &Placement,
         wanted: &WantedPools,
-    ) -> anyhow::Result<Vec<DesiredPool>> {
-        warm_pools::rotating_pools(&self.client, &placement.namespace, wanted).await
+    ) -> anyhow::Result<Vec<WantedPool>> {
+        let rendered = warm_pools::render(&placement.namespace, wanted)?;
+        let rotating =
+            warm_pools::rotating_pools(&self.client, &placement.namespace, &rendered).await?;
+        Ok(rendered
+            .pools
+            .iter()
+            .zip(&wanted.pools)
+            .filter(|(desired, _)| {
+                rotating
+                    .iter()
+                    .any(|pool| pool.objects.name == desired.objects.name)
+            })
+            .map(|(_, pool)| pool.clone())
+            .collect())
     }
 
-    async fn warm_pools(&self, placement: &Placement, pools: &[DesiredPool]) -> anyhow::Result<()> {
-        warm_pools::warm_pools(&self.client, &placement.namespace, pools).await
+    async fn warm_pools(&self, placement: &Placement, pools: &[WantedPool]) -> anyhow::Result<()> {
+        let rendered = pools
+            .iter()
+            .map(|pool| warm_pools::render_pool(&placement.namespace, pool))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        warm_pools::warm_pools(&self.client, &placement.namespace, &rendered).await
     }
 }
 
@@ -2275,25 +2319,6 @@ mod tests {
                 "{requests:?}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn retiring_reads_the_placement_and_stops_when_no_pool_is_left() {
-        let (driver, requests) = driver_over_empty_cluster();
-
-        let retired = driver
-            .retire_legacy_shared_pools(&Placement::new("dev-sandboxes"))
-            .await
-            .unwrap();
-
-        assert_eq!(retired, 0);
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 1, "{requests:?}");
-        assert!(
-            requests[0].starts_with("GET ")
-                && requests[0].ends_with("/namespaces/dev-sandboxes/sandboxwarmpools"),
-            "{requests:?}"
-        );
     }
 
     /// An API server holding nothing, where creating a SandboxWarmPool fails

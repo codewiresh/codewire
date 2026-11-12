@@ -28,9 +28,9 @@ use prometheus::{register_int_counter_vec, register_int_gauge};
 use tokio::sync::watch;
 
 use super::WorkerContext;
-use super::create::{SandboxWorkerCfg, render_configured_warm_pool};
+use super::create::{SandboxWorkerCfg, render_configured_warm_pool, warm_pool_template_opts};
 use super::image_cache::ImageCacheConfig;
-use crate::runtime::{DesiredPool, Placement, PoolPass, RuntimeDriver, WantedPools};
+use crate::runtime::{Placement, PoolPass, RuntimeDriver, WantedPool, WantedPools};
 use crate::sandbox::warm_pool::parse_warm_pool_shapes;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
@@ -58,14 +58,14 @@ fn parse_max_node_percent(value: &str) -> anyhow::Result<u8> {
 }
 
 /// What this replica reconciles toward, and where.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct WarmPoolConfig {
     pub placement: Placement,
     pub wanted: WantedPools,
 }
 
 /// What the loop does at startup.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum Startup {
     /// No shape configured: no Kubernetes access at all.
     Inert,
@@ -95,7 +95,7 @@ pub fn startup(cfg: &SandboxWorkerCfg, image_cache_enabled: anyhow::Result<bool>
                 placement: Placement::new(namespace),
                 wanted: WantedPools {
                     pools: Vec::new(),
-                    max_node_percent: DEFAULT_MAX_NODE_PERCENT,
+                    max_host_percent: DEFAULT_MAX_NODE_PERCENT,
                     image_cache_enabled: false,
                     draining: true,
                 },
@@ -123,13 +123,13 @@ impl WarmPoolConfig {
         let pools = configured
             .into_iter()
             .map(|configured| {
-                Ok(DesiredPool {
-                    objects: render_configured_warm_pool(
-                        cfg,
-                        configured.shape,
-                        configured.members,
-                    )?,
+                // Rendered once here only to refuse a configuration that
+                // cannot render; the driver renders what it keeps.
+                render_configured_warm_pool(cfg, configured.shape, configured.members)?;
+                Ok(WantedPool {
                     configured,
+                    rendering: warm_pool_template_opts(cfg, configured.shape)?,
+                    allow_unpinned_images: cfg.allow_diagnostic_runtime,
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -137,7 +137,7 @@ impl WarmPoolConfig {
             placement: Placement::new(namespace),
             wanted: WantedPools {
                 pools,
-                max_node_percent,
+                max_host_percent: max_node_percent,
                 image_cache_enabled,
                 draining: false,
             },
@@ -168,7 +168,7 @@ pub async fn warm_pool_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBool>)
     tracing::info!(
         namespace = %config.placement.namespace,
         pools = config.wanted.pools.len(),
-        max_node_percent = config.wanted.max_node_percent,
+        max_node_percent = config.wanted.max_host_percent,
         image_cache = config.wanted.image_cache_enabled,
         draining = config.wanted.draining,
         "warm pools: reconciling configured shapes"
@@ -284,7 +284,7 @@ async fn hold_until_warm<R, D, W, F>(
 /// The pools a release is rotating, and where.
 struct Rotation {
     placement: Placement,
-    rotating: Vec<DesiredPool>,
+    rotating: Vec<WantedPool>,
 }
 
 /// `None` when there is nothing to warm.

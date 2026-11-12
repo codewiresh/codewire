@@ -11,12 +11,12 @@ use async_trait::async_trait;
 use tokio::sync::oneshot;
 
 use super::{
-    CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, DesiredPool,
-    FailedLiveResize, KeptSnapshot, MemberRef, MemberReplacement, Pick, Placement, PoolBornClaim,
-    PoolPass, PoolState, ProbeResult, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeExec,
+    CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
+    KeptSnapshot, MemberRef, MemberReplacement, Pick, Placement, PoolBornClaim, PoolPass,
+    PoolState, ProbeResult, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeExec,
     RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeResize, RuntimeSnapshots, RuntimeStorage,
     RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeMode,
-    VolumeRef, WantedPools,
+    VolumeRef, WantedPool, WantedPools,
 };
 use super::{
     MemberFacts, RuntimeAttestation, RuntimeFacts, RuntimeObservation, RuntimeObservations,
@@ -25,12 +25,9 @@ use super::{
 use crate::sandbox::ClaimOpts;
 use crate::sandbox::host_keys::HostKeyStore;
 use crate::sandbox::template::TemplateOpts;
-use crate::sandbox::warm_pool::WarmPoolObjects;
 
 #[derive(Default)]
 pub(crate) struct FakeRuntimeDriver {
-    /// Each retirement's answer, in order; an error is its message.
-    pub retirements: Mutex<VecDeque<Result<usize, String>>>,
     pub probe: ProbeResult,
     pub members: Mutex<Vec<RuntimeMember>>,
     /// When set, listing members fails with this message.
@@ -67,27 +64,31 @@ pub(crate) struct FakeRuntimeDriver {
 
 #[async_trait]
 impl RuntimePools for FakeRuntimeDriver {
-    async fn retire_legacy_shared_pools(&self, placement: &Placement) -> anyhow::Result<usize> {
-        self.placements.lock().unwrap().push(placement.clone());
-        self.retirements
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("the test scripts every retirement")
-            .map_err(anyhow::Error::msg)
-    }
-
     async fn pool_state(
         &self,
         placement: &Placement,
-        _pool: &WarmPoolObjects,
+        _pool: &WantedPool,
+        _rendering: &TemplateOpts,
     ) -> anyhow::Result<PoolState> {
         self.placements.lock().unwrap().push(placement.clone());
+        // Unscripted, it stands for a placement without pools: every create
+        // is cold (cw-billing's #3628 PR 5c condition 1).
         Ok(self
             .pool_state
             .lock()
             .unwrap()
-            .expect("the test scripts the pool's state"))
+            .clone()
+            .unwrap_or(PoolState::NoPools))
+    }
+
+    async fn pool_birth(
+        &self,
+        placement: &Placement,
+        _pool: &WantedPool,
+        _observation: &RuntimeObservation,
+    ) -> Result<(), String> {
+        self.placements.lock().unwrap().push(placement.clone());
+        Err("this placement has no pools".to_owned())
     }
 
     async fn keep_pools(
@@ -112,16 +113,12 @@ impl RuntimePools for FakeRuntimeDriver {
         &self,
         placement: &Placement,
         _wanted: &WantedPools,
-    ) -> anyhow::Result<Vec<DesiredPool>> {
+    ) -> anyhow::Result<Vec<WantedPool>> {
         self.placements.lock().unwrap().push(placement.clone());
         Ok(Vec::new())
     }
 
-    async fn warm_pools(
-        &self,
-        placement: &Placement,
-        _pools: &[DesiredPool],
-    ) -> anyhow::Result<()> {
+    async fn warm_pools(&self, placement: &Placement, _pools: &[WantedPool]) -> anyhow::Result<()> {
         self.placements.lock().unwrap().push(placement.clone());
         Ok(())
     }

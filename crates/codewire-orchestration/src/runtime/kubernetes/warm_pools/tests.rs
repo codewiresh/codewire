@@ -15,6 +15,11 @@ use crate::sandbox::template::{
 use crate::worker::create::SandboxWorkerCfg;
 use crate::worker::warm_pool::WarmPoolConfig;
 
+/// The configuration's wanted pools as this driver renders them.
+fn rendered(config: &WarmPoolConfig) -> RenderedPools {
+    render(NAMESPACE, &config.wanted).unwrap()
+}
+
 const NAMESPACE: &str = "dev-sandboxes";
 const API: &str = "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes";
 
@@ -157,7 +162,7 @@ async fn a_pass_creates_the_template_then_the_pool_under_the_node_cap() {
         .unwrap();
     let mut state = LoopState::default();
 
-    let result = reconcile_once(&client, NAMESPACE, &config.wanted, &mut state)
+    let result = reconcile_once(&client, NAMESPACE, &rendered(&config), &mut state)
         .await
         .unwrap();
     assert_eq!(result, PoolPass::Wrote);
@@ -169,7 +174,7 @@ async fn a_pass_creates_the_template_then_the_pool_under_the_node_cap() {
         assert_eq!(path, &format!("{API}/sandboxtemplates"));
         assert_eq!(
             body["spec"],
-            config.wanted.pools[0].objects.template["spec"]
+            rendered(&config).pools[0].objects.template["spec"]
         );
         let queries: Vec<&str> = cluster
             .requests
@@ -199,7 +204,7 @@ async fn a_pass_creates_the_template_then_the_pool_under_the_node_cap() {
 
     // The template is live: the pool follows at the configured count, which
     // fits a quarter of a 32-CPU node.
-    let result = reconcile_once(&client, NAMESPACE, &config.wanted, &mut state)
+    let result = reconcile_once(&client, NAMESPACE, &rendered(&config), &mut state)
         .await
         .unwrap();
     assert_eq!(result, PoolPass::Wrote);
@@ -227,7 +232,7 @@ async fn the_configured_percentage_controls_how_many_members_the_reconciler_crea
         let mut state = LoopState::default();
         for _ in 0..2 {
             assert_eq!(
-                reconcile_once(&client, NAMESPACE, &config.wanted, &mut state)
+                reconcile_once(&client, NAMESPACE, &rendered(&config), &mut state)
                     .await
                     .unwrap(),
                 PoolPass::Wrote
@@ -251,7 +256,7 @@ async fn an_enabled_image_cache_without_its_daemon_set_writes_nothing() {
         .unwrap()
         .unwrap();
     let mut state = LoopState::default();
-    let result = reconcile_once(&client, NAMESPACE, &config.wanted, &mut state)
+    let result = reconcile_once(&client, NAMESPACE, &rendered(&config), &mut state)
         .await
         .unwrap();
     assert_eq!(result, PoolPass::Unchanged);
@@ -276,7 +281,7 @@ async fn pools_are_held_until_the_controller_shows_claim_safety() {
     let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), false)
         .unwrap()
         .unwrap();
-    let mut empty_pool = config.wanted.pools[0].objects.pool.clone();
+    let mut empty_pool = rendered(&config).pools[0].objects.pool.clone();
     empty_pool["spec"]["replicas"] = json!(0);
     for pools in [vec![legacy_shadow], vec![empty_pool]] {
         let cluster = Arc::new(Mutex::new(Cluster {
@@ -288,7 +293,7 @@ async fn pools_are_held_until_the_controller_shows_claim_safety() {
             .unwrap()
             .unwrap();
         let mut state = LoopState::default();
-        let result = reconcile_once(&client, NAMESPACE, &config.wanted, &mut state)
+        let result = reconcile_once(&client, NAMESPACE, &rendered(&config), &mut state)
             .await
             .unwrap();
         assert_eq!(result, PoolPass::Held);
@@ -319,7 +324,7 @@ async fn a_held_cluster_without_pools_bootstraps_one_empty_pool() {
     let mut state = LoopState::default();
 
     for pass in 0..3 {
-        let result = reconcile_once(&client, NAMESPACE, &config.wanted, &mut state)
+        let result = reconcile_once(&client, NAMESPACE, &rendered(&config), &mut state)
             .await
             .unwrap();
         assert_eq!(result, PoolPass::Held, "pass {pass}");
@@ -334,12 +339,12 @@ async fn a_held_cluster_without_pools_bootstraps_one_empty_pool() {
     assert_eq!(writes[0].0, format!("{API}/sandboxtemplates"));
     assert_eq!(
         writes[0].1["spec"],
-        config.wanted.pools[0].objects.template["spec"]
+        rendered(&config).pools[0].objects.template["spec"]
     );
     assert_eq!(writes[1].0, format!("{API}/sandboxwarmpools"));
     assert_eq!(
         writes[1].1["metadata"]["name"],
-        config.wanted.pools[0].objects.name
+        rendered(&config).pools[0].objects.name
     );
     assert_eq!(writes[1].1["spec"]["replicas"], 0);
     // The third pass found the empty pool and only read the pool list.
@@ -361,7 +366,7 @@ async fn a_cold_image_cache_blocks_the_bootstrap() {
         .unwrap()
         .unwrap();
     let mut state = LoopState::default();
-    let result = reconcile_once(&client, NAMESPACE, &config.wanted, &mut state)
+    let result = reconcile_once(&client, NAMESPACE, &rendered(&config), &mut state)
         .await
         .unwrap();
     assert_eq!(result, PoolPass::Held);
@@ -382,18 +387,20 @@ async fn a_cold_image_cache_blocks_the_bootstrap() {
 #[test]
 fn only_a_rotating_shape_holds_readiness() {
     let shapes = "1000m/4096Mi/10Gi=2,2000m/8192Mi/10Gi=2";
-    let current = WarmPoolConfig::from_cfg(&dev_cfg(shapes), true)
-        .unwrap()
-        .unwrap()
-        .wanted
-        .pools;
+    let current = rendered(
+        &WarmPoolConfig::from_cfg(&dev_cfg(shapes), true)
+            .unwrap()
+            .unwrap(),
+    )
+    .pools;
     let mut previous_cfg = dev_cfg(shapes);
     previous_cfg.daemon_image = "registry.example.invalid/codewire/daemon@sha256:4444444444444444444444444444444444444444444444444444444444444444".into();
-    let previous = WarmPoolConfig::from_cfg(&previous_cfg, true)
-        .unwrap()
-        .unwrap()
-        .wanted
-        .pools;
+    let previous = rendered(
+        &WarmPoolConfig::from_cfg(&previous_cfg, true)
+            .unwrap()
+            .unwrap(),
+    )
+    .pools;
     let wanted: Vec<&DesiredPool> = current.iter().collect();
     let live = |pools: &[&DesiredPool]| -> BTreeMap<String, DynamicObject> {
         pools
@@ -530,11 +537,12 @@ async fn a_start_rotates_only_beside_a_capable_controller_and_never_while_draini
         .unwrap();
     let mut previous_cfg = dev_cfg(shapes);
     previous_cfg.daemon_image = "registry.example.invalid/codewire/daemon@sha256:4444444444444444444444444444444444444444444444444444444444444444".into();
-    let previous = WarmPoolConfig::from_cfg(&previous_cfg, false)
-        .unwrap()
-        .unwrap()
-        .wanted
-        .pools;
+    let previous = rendered(
+        &WarmPoolConfig::from_cfg(&previous_cfg, false)
+            .unwrap()
+            .unwrap(),
+    )
+    .pools;
     let live = |capable: bool| {
         let mut pools: Vec<Value> = previous
             .iter()
@@ -552,7 +560,7 @@ async fn a_start_rotates_only_beside_a_capable_controller_and_never_while_draini
 
     // Only the configured shape with members rotates.
     let (client, cluster) = live(true);
-    let rotating = rotating_pools(&client, NAMESPACE, &config.wanted)
+    let rotating = rotating_pools(&client, NAMESPACE, &rendered(&config))
         .await
         .unwrap();
     assert_eq!(
@@ -560,7 +568,7 @@ async fn a_start_rotates_only_beside_a_capable_controller_and_never_while_draini
             .iter()
             .map(|pool| pool.objects.name.as_str())
             .collect::<Vec<_>>(),
-        [config.wanted.pools[0].objects.name.as_str()]
+        [rendered(&config).pools[0].objects.name.as_str()]
     );
     assert!(
         cluster.lock().unwrap().writes.is_empty(),
@@ -570,7 +578,7 @@ async fn a_start_rotates_only_beside_a_capable_controller_and_never_while_draini
     // Beside a controller that shows no claim safety, nothing rotates.
     let (client, _) = live(false);
     assert!(
-        rotating_pools(&client, NAMESPACE, &config.wanted)
+        rotating_pools(&client, NAMESPACE, &rendered(&config))
             .await
             .unwrap()
             .is_empty()
@@ -578,9 +586,9 @@ async fn a_start_rotates_only_beside_a_capable_controller_and_never_while_draini
 
     // Draining wants nothing, and reads nothing to say so.
     let (client, cluster) = live(true);
-    let draining = WantedPools {
+    let draining = RenderedPools {
         draining: true,
-        ..config.wanted.clone()
+        ..rendered(&config)
     };
     assert!(
         rotating_pools(&client, NAMESPACE, &draining)

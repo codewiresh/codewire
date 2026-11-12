@@ -229,7 +229,7 @@ pub(super) fn dind_memory_limit_gib(memory_mib: i64) -> i64 {
     if memory_mib >= 8192 { 4 } else { 2 }
 }
 
-pub(super) fn dind_image(opts: &TemplateOpts) -> &str {
+pub(crate) fn dind_image(opts: &TemplateOpts) -> &str {
     let image = opts.dind_image.trim();
     if image.is_empty() {
         DEFAULT_DIND_IMAGE

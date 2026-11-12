@@ -40,13 +40,10 @@ use super::start_timing::{
     with_since_accepted,
 };
 use crate::runtime::{
-    ClaimRef, Placement, RuntimeDriver, RuntimeObservation, VerifiedChain, VolumeRef,
+    ClaimRef, Placement, RuntimeDriver, RuntimeObservation, VerifiedChain, VolumeRef, WantedPool,
 };
 use crate::sandbox::client::{WorkspacePodIdentity, WorkspacePvc};
-use crate::sandbox::warm_pool::{
-    LAUNCH_TYPE_LABEL, WarmPoolObjects, is_warm_pool_name, pod_spec_pool_revision,
-    sandbox_matches_rendering,
-};
+use crate::sandbox::warm_pool::{LAUNCH_TYPE_LABEL, is_warm_pool_name};
 use crate::start_metrics::{CreateMilestone, StartPath, StartProfile};
 
 /// Environments examined per pass.
@@ -752,11 +749,7 @@ pub(crate) async fn sandbox_bound_by_any(pool: &PgPool, sandbox_uid: &str) -> an
 /// identity-free pool of its exact shape on this replica, whose template
 /// carries the pool revision marker. Routing sends an environment to a pool
 /// only when its own rendering equals this one's, less the marker.
-fn pool_born_rendering(
-    cfg: &SandboxWorkerCfg,
-    env: &EnvironmentRow,
-    namespace: &str,
-) -> anyhow::Result<WarmPoolObjects> {
+fn pool_born_rendering(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> anyhow::Result<WantedPool> {
     anyhow::ensure!(
         env.isolation_tier == "standard",
         "only standard environments are pool-born"
@@ -766,8 +759,11 @@ fn pool_born_rendering(
         memory_mib: i64::from(env.memory_mb),
         disk_gib: i64::from(env.disk_gb),
     };
-    let opts = super::create::warm_pool_template_opts(cfg, shape)?;
-    crate::sandbox::warm_pool::render_warm_pool(namespace, &opts, 0, cfg.allow_diagnostic_runtime)
+    Ok(WantedPool {
+        configured: crate::sandbox::warm_pool::ConfiguredShape { shape, members: 0 },
+        rendering: super::create::warm_pool_template_opts(cfg, shape)?,
+        allow_unpinned_images: cfg.allow_diagnostic_runtime,
+    })
 }
 
 /// What one checked attempt would record, before the fenced write.
@@ -867,20 +863,21 @@ async fn check_bindable_runtime(
                 false,
             );
         };
-        let sandbox = &observation.runtime.json;
-        let pod_spec = &member.spec_json;
-        let matched = pool_born_rendering(cfg, env, &backend.namespace)
-            .map_err(|error| format!("{error:#}"))
-            .and_then(|expected| {
-                if observation.pool != expected.name {
-                    return Err("/spec/warmPoolRef/name".to_owned());
+        // The driver renders the pool, so only it can say whether this
+        // runtime was born of it; the decision stays here. The member's own
+        // isolation is checked here too, over its Pod spec, whatever the
+        // driver says (#3628 PR 5c, cw-confidential's condition 3).
+        let matched = match pool_born_rendering(cfg, env) {
+            Ok(wanted) => match pool_member_isolated(&member.spec_json, &wanted) {
+                Ok(()) => {
+                    runtime
+                        .pool_birth(&claim.placement, &wanted, observation)
+                        .await
                 }
-                sandbox_matches_rendering(sandbox, &expected.template)?;
-                if pod_spec_pool_revision(pod_spec) != Some(expected.revision.as_str()) {
-                    return Err("pod /spec/containers/workspace/env".to_owned());
-                }
-                Ok(())
-            });
+                Err(path) => Err(format!("isolation {path}")),
+            },
+            Err(error) => Err(format!("{error:#}")),
+        };
         if let Err(path) = matched {
             tracing::warn!(env = %env.id, %path, "pool-born Sandbox differs from the expected rendering");
             return refuse(BindRefused::Denied(DENIED_POOL_RENDERING), scope, true);
@@ -1981,10 +1978,10 @@ pub(crate) async fn workspace_binding_backfill_loop(
     }
 }
 
-mod checks;
+pub(crate) mod checks;
 pub(crate) use checks::{
     credential_scope, environment_scope_capture, images_match, member_still_observed,
-    volume_matches,
+    pool_member_isolated, volume_matches,
 };
 
 #[cfg(test)]

@@ -197,12 +197,10 @@ async fn reconciler_loop(
     let mut ticker = tokio::time::interval(RECONCILER_INTERVAL);
     ticker.tick().await; // align with Go's NewTicker (first fire after interval)
     let mut startup_recovery_observed = false;
-    let mut legacy_warm_pool_retirement_complete = false;
     loop {
         tokio::select! {
             _ = leader_notify.notified() => {
                 if is_leader.load(Ordering::SeqCst) {
-                    legacy_warm_pool_retirement_complete = retire_legacy_shared_warm_pools(ctx.runtime.as_deref(), &ctx.sandbox_cfg.sandbox_namespace).await;
                     recover_on_startup(&ctx).await;
                     startup_recovery_observed = true;
                 }
@@ -217,48 +215,11 @@ async fn reconciler_loop(
                         recover_on_startup(&ctx).await;
                         startup_recovery_observed = true;
                     }
-                    if !legacy_warm_pool_retirement_complete {
-                        legacy_warm_pool_retirement_complete = retire_legacy_shared_warm_pools(ctx.runtime.as_deref(), &ctx.sandbox_cfg.sandbox_namespace).await;
-                    }
                     run_reconciliation(&ctx).await;
                 } else {
                     startup_recovery_observed = false;
-                    legacy_warm_pool_retirement_complete = false;
                 }
             }
-        }
-    }
-}
-
-async fn retire_legacy_shared_warm_pools(
-    runtime: Option<&dyn RuntimeDriver>,
-    namespace: &str,
-) -> bool {
-    let Some(runtime) = runtime else {
-        tracing::warn!("reconciler: legacy shared warm-pool retirement requires Kubernetes access");
-        return false;
-    };
-    match runtime
-        .retire_legacy_shared_pools(&Placement::new(namespace))
-        .await
-    {
-        Ok(0) => {
-            tracing::info!("reconciler: legacy shared warm-pool retirement complete");
-            true
-        }
-        Ok(retired) => {
-            tracing::info!(
-                retired,
-                "reconciler: legacy shared warm-pool retirement requested"
-            );
-            false
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "reconciler: legacy shared warm-pool retirement remains pending"
-            );
-            false
         }
     }
 }
@@ -1260,30 +1221,6 @@ async fn mark_sandbox_env_error(pool: &PgPool, row: &LivenessRow, reason: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::fake::FakeRuntimeDriver;
-
-    #[tokio::test]
-    async fn legacy_pool_retirement_completes_only_when_the_runtime_reports_none_left() {
-        assert!(!retire_legacy_shared_warm_pools(None, "ns").await);
-
-        let runtime = FakeRuntimeDriver::default();
-        runtime
-            .retirements
-            .lock()
-            .unwrap()
-            .extend([Ok(2), Err("list refused".to_string()), Ok(0)]);
-        let answers = [false, false, true];
-        for complete in answers {
-            assert_eq!(
-                retire_legacy_shared_warm_pools(Some(&runtime), "ns").await,
-                complete
-            );
-        }
-        assert_eq!(
-            *runtime.placements.lock().unwrap(),
-            vec![Placement::new("ns"); answers.len()]
-        );
-    }
 
     #[test]
     fn incomplete_external_cleanup_recovery_includes_errored_destroy_intent() {

@@ -153,8 +153,8 @@ fn pool_shapes_and_placements_are_validated() {
     }
 }
 
-/// `retire_legacy_shared_warm_pools` deletes `sandbox-warmpool-workspace*`
-/// objects, and environment claims use `shadow-pool-*`. Neither family can
+/// Old releases named their shared pools `sandbox-warmpool-workspace*`, and
+/// environment claims use `shadow-pool-*`. Neither family can
 /// be a warm pool name, and no warm pool name is in either family.
 #[test]
 fn pool_names_are_disjoint_from_shadow_and_legacy_pools() {

@@ -31,7 +31,6 @@ pub use naming::{
 pub use network::{
     render_direct_udp_service, render_warm_member_bridge, render_workspace_daemon_network_policy,
 };
-pub(crate) use runtime_policy::docker_data_size_gib;
 pub use runtime_policy::{
     DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, DOCKER_MODE_NONE,
     DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_COMMODITY_32G,
@@ -40,6 +39,7 @@ pub use runtime_policy::{
     commodity_runtime_class, confidential_workspace_storage_class, is_commodity_runtime_class,
     required_workspace_storage_class, runtime_profile_spec, validate_managed_runtime_profile,
 };
+pub(crate) use runtime_policy::{dind_image, docker_data_size_gib};
 #[cfg(test)]
 use workspace::custom_workspace_supervisor_command;
 #[cfg(test)]

@@ -472,3 +472,326 @@ fn rendered_pool_templates_pass_the_admission_volume_rule() {
         }
     }
 }
+
+/// A pool member's Pod spec: its golden template as stored, plus the
+/// workspace claim the controller adds, and what it was wanted as.
+fn golden_member(subfolder: bool) -> (Value, crate::runtime::WantedPool) {
+    let cfg = SandboxWorkerCfg {
+        workspace_subfolder: subfolder,
+        ..dev_cfg()
+    };
+    let rendering = shape_template_opts(
+        &cfg,
+        SYNTHETIC_WORKSPACE_IMAGE,
+        &standard_runtime_profile_spec(&cfg),
+        shapes()[0],
+    );
+    let file = if subfolder {
+        "warm-pool-subfolder-sandboxtemplate.golden.json"
+    } else {
+        "warm-pool-sandboxtemplate.golden.json"
+    };
+    let path = format!(
+        "{}/tests/fixtures/sandbox/{file}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let template: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut spec = template["spec"]["podTemplate"]["spec"].clone();
+    spec["volumes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "name": "workspace",
+            "persistentVolumeClaim": { "claimName": "workspace-sandbox-a" },
+        }));
+    let wanted = crate::runtime::WantedPool {
+        configured: crate::sandbox::warm_pool::ConfiguredShape {
+            shape: shapes()[0],
+            members: 2,
+        },
+        rendering,
+        allow_unpinned_images: false,
+    };
+    (spec, wanted)
+}
+
+fn container_index(spec: &Value, field: &str, name: &str) -> usize {
+    spec[field]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|container| container["name"] == name)
+        .unwrap()
+}
+
+/// #3628 PR 5c, cw-confidential's condition 3: both golden pool members are
+/// isolated as rendered, and each property the check guards, broken alone,
+/// is refused with its path, whatever the driver's pool verdict.
+#[test]
+fn a_pool_member_is_isolated_exactly_as_its_rendering() {
+    use crate::worker::workspace_binding::checks::pool_member_isolated;
+    use serde_json::json;
+
+    for subfolder in [false, true] {
+        let (spec, wanted) = golden_member(subfolder);
+        assert_eq!(pool_member_isolated(&spec, &wanted), Ok(()), "{subfolder}");
+    }
+
+    let (golden, wanted) = golden_member(false);
+    let volumes = golden["volumes"].as_array().unwrap().len();
+    let token = golden["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|volume| volume["name"] == "workspace-binding-identity")
+        .unwrap();
+    let workspace = container_index(&golden, "containers", "workspace");
+    let dind = container_index(&golden, "containers", "dind");
+    let mount = container_index(&golden, "initContainers", "mount-workspace");
+    type Break = Box<dyn Fn(&mut Value)>;
+    let set = |path: &'static str, value: Value| -> Break {
+        Box::new(move |spec: &mut Value| *spec.pointer_mut(path).unwrap() = value.clone())
+    };
+    let insert = |key: &'static str, value: Value| -> Break {
+        Box::new(move |spec: &mut Value| spec[key] = value.clone())
+    };
+    let volume = |value: Value| -> Break {
+        Box::new(move |spec: &mut Value| {
+            spec["volumes"].as_array_mut().unwrap().push(value.clone())
+        })
+    };
+    let context = |field: &'static str, index: usize, key: &'static str, value: Value| -> Break {
+        Box::new(move |spec: &mut Value| {
+            spec[field][index]["securityContext"][key] = value.clone();
+        })
+    };
+    let cases: Vec<(&str, Break, String)> = vec![
+        (
+            "another runtime class",
+            set("/runtimeClassName", json!("runc")),
+            "/runtimeClassName".into(),
+        ),
+        (
+            "no runtime class",
+            Box::new(|spec: &mut Value| {
+                spec.as_object_mut().unwrap().remove("runtimeClassName");
+            }),
+            "/runtimeClassName".into(),
+        ),
+        (
+            "an automounted token",
+            set("/automountServiceAccountToken", json!(true)),
+            "/automountServiceAccountToken".into(),
+        ),
+        (
+            "service links",
+            set("/enableServiceLinks", json!(true)),
+            "/enableServiceLinks".into(),
+        ),
+        (
+            "host network",
+            insert("hostNetwork", json!(true)),
+            "/hostNetwork".into(),
+        ),
+        (
+            "host PID",
+            insert("hostPID", json!(true)),
+            "/hostPID".into(),
+        ),
+        (
+            "host IPC",
+            insert("hostIPC", json!(true)),
+            "/hostIPC".into(),
+        ),
+        (
+            "a shared process namespace",
+            insert("shareProcessNamespace", json!(true)),
+            "/shareProcessNamespace".into(),
+        ),
+        (
+            "an ephemeral container",
+            insert("ephemeralContainers", json!([{"name": "debug"}])),
+            "/ephemeralContainers".into(),
+        ),
+        (
+            "a root Pod",
+            set("/securityContext/runAsUser", json!(0)),
+            "/securityContext/runAsUser".into(),
+        ),
+        (
+            "a root file group",
+            set("/securityContext/fsGroup", json!(0)),
+            "/securityContext/fsGroup".into(),
+        ),
+        (
+            "a root supplemental group",
+            Box::new(|spec: &mut Value| {
+                spec["securityContext"]["supplementalGroups"] = json!([0]);
+            }),
+            "/securityContext/supplementalGroups".into(),
+        ),
+        (
+            "a sysctl",
+            Box::new(|spec: &mut Value| {
+                spec["securityContext"]["sysctls"] =
+                    json!([{"name": "kernel.msgmax", "value": "1"}]);
+            }),
+            "/securityContext/sysctls".into(),
+        ),
+        (
+            "a secret volume",
+            volume(json!({"name": "s", "secret": {"secretName": "x"}})),
+            format!("/volumes/{volumes}/secret"),
+        ),
+        (
+            "a host path",
+            volume(json!({"name": "h", "hostPath": {"path": "/"}})),
+            format!("/volumes/{volumes}/hostPath"),
+        ),
+        (
+            "an inline CSI volume",
+            volume(json!({"name": "c", "csi": {"driver": "x"}})),
+            format!("/volumes/{volumes}/csi"),
+        ),
+        (
+            "an ephemeral volume",
+            volume(json!({"name": "e", "ephemeral": {}})),
+            format!("/volumes/{volumes}/ephemeral"),
+        ),
+        (
+            "another image",
+            volume(
+                json!({"name": "i", "image": {"reference": "registry.example.invalid/other@sha256:9"}}),
+            ),
+            format!("/volumes/{volumes}/image"),
+        ),
+        (
+            "two sources",
+            volume(json!({"name": "t", "emptyDir": {}, "configMap": {"name": "x"}})),
+            format!("/volumes/{volumes}"),
+        ),
+        (
+            "another claim",
+            volume(json!({"name": "other", "persistentVolumeClaim": {"claimName": "x"}})),
+            format!("/volumes/{volumes}/persistentVolumeClaim"),
+        ),
+        (
+            "a projected secret",
+            Box::new(move |spec: &mut Value| {
+                spec["volumes"][token]["projected"]["sources"] = json!([{"secret": {"name": "x"}}]);
+            }),
+            format!("/volumes/{token}/projected/sources/0"),
+        ),
+        (
+            "a token of another audience",
+            Box::new(move |spec: &mut Value| {
+                spec["volumes"][token]["projected"]["sources"][0]["serviceAccountToken"]["audience"] =
+                    json!("https://kubernetes.default.svc");
+            }),
+            format!("/volumes/{token}/projected/sources/0"),
+        ),
+        (
+            "a privileged workspace",
+            context("containers", workspace, "privileged", json!(true)),
+            format!("/containers/{workspace}/securityContext"),
+        ),
+        (
+            "a root workspace",
+            context("containers", workspace, "runAsUser", json!(0)),
+            format!("/containers/{workspace}/securityContext"),
+        ),
+        (
+            "DinD renamed",
+            Box::new(move |spec: &mut Value| {
+                spec["containers"][dind]["name"] = json!("helper");
+            }),
+            format!("/containers/{dind}/securityContext"),
+        ),
+        (
+            "another image as DinD",
+            Box::new(move |spec: &mut Value| {
+                spec["containers"][dind]["image"] = json!(SYNTHETIC_WORKSPACE_IMAGE);
+            }),
+            format!("/containers/{dind}/securityContext"),
+        ),
+        (
+            "another image as mount-workspace",
+            Box::new(move |spec: &mut Value| {
+                spec["initContainers"][mount]["image"] = json!(SYNTHETIC_WORKSPACE_IMAGE);
+            }),
+            format!("/initContainers/{mount}/securityContext"),
+        ),
+        (
+            "an added capability",
+            context(
+                "containers",
+                workspace,
+                "capabilities",
+                json!({"add": ["NET_ADMIN"]}),
+            ),
+            format!("/containers/{workspace}/securityContext/capabilities/add"),
+        ),
+        (
+            "privilege escalation",
+            context(
+                "containers",
+                workspace,
+                "allowPrivilegeEscalation",
+                json!(true),
+            ),
+            format!("/containers/{workspace}/securityContext/allowPrivilegeEscalation"),
+        ),
+        (
+            "an unmasked proc",
+            context("containers", workspace, "procMount", json!("Unmasked")),
+            format!("/containers/{workspace}/securityContext/procMount"),
+        ),
+        (
+            "a host port",
+            Box::new(move |spec: &mut Value| {
+                spec["containers"][workspace]["ports"] =
+                    json!([{"containerPort": 2222, "hostPort": 2222}]);
+            }),
+            format!("/containers/{workspace}/ports/0/hostPort"),
+        ),
+        (
+            "a token mounted into DinD",
+            Box::new(move |spec: &mut Value| {
+                spec["containers"][dind]["volumeMounts"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"name": "workspace-binding-identity", "mountPath": "/t"}));
+            }),
+            format!(
+                "/containers/{dind}/volumeMounts/{}",
+                golden["containers"][dind]["volumeMounts"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            ),
+        ),
+    ];
+    for (label, change, path) in cases {
+        let mut spec = golden.clone();
+        change(&mut spec);
+        assert_eq!(pool_member_isolated(&spec, &wanted), Err(path), "{label}");
+    }
+
+    // A confidential pool is never one, whatever its member looks like.
+    // Its member carries the confidential class, so only the profile check
+    // can refuse it.
+    let mut confidential = wanted.clone();
+    confidential.rendering.runtime_profile =
+        crate::sandbox::template::RUNTIME_PROFILE_CONFIDENTIAL.into();
+    let mut member = golden.clone();
+    member["runtimeClassName"] = json!(
+        confidential
+            .rendering
+            .runtime_profile_spec()
+            .runtime_class_name
+    );
+    assert_eq!(
+        pool_member_isolated(&member, &confidential),
+        Err("/runtimeClassName".to_owned())
+    );
+}
