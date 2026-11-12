@@ -16,6 +16,11 @@ use super::run_attach_session;
 use super::tests::{attach_engine, authenticated_client, spawn_daemon};
 use crate::durable_session::SessionEngine;
 
+/// What every wait here allows before it calls the step hung: a hang guard,
+/// not a speed expectation (docs/dev/AGENT-WORKFLOW.md). A loaded runner
+/// took over 15 s to end a session (#4259).
+const HANG: Duration = Duration::from_secs(30);
+
 fn shell(end_after_detached_seconds: u32) -> v1::LaunchSessionRequest {
     v1::LaunchSessionRequest {
         command: vec!["sh".into(), "-c".into(), "exec sleep 60".into()],
@@ -51,7 +56,7 @@ impl Client {
         ));
         // The attachment counts itself before it sends anything, so its
         // first message proves it is counted.
-        timeout(Duration::from_secs(5), output.recv())
+        timeout(HANG, output.recv())
             .await
             .expect("the attachment answers")
             .expect("the attachment is open")
@@ -75,7 +80,7 @@ impl Client {
             }))
             .await
             .unwrap();
-        timeout(Duration::from_secs(5), self.owner)
+        timeout(HANG, self.owner)
             .await
             .expect("detach ends the attachment")
             .unwrap();
@@ -84,7 +89,7 @@ impl Client {
     /// The client's connection is lost without a word.
     async fn disconnect(self) {
         drop(self.input);
-        timeout(Duration::from_secs(5), self.owner)
+        timeout(HANG, self.owner)
             .await
             .expect("a lost client ends its attachment")
             .unwrap();
@@ -96,7 +101,7 @@ async fn state(engine: &SessionEngine, session_id: &str) -> v1::SessionLifecycle
 }
 
 async fn wait_ended(engine: &SessionEngine, session_id: &str) -> v1::SessionRecord {
-    timeout(Duration::from_secs(15), async {
+    timeout(HANG, async {
         loop {
             let record = engine.get(session_id).await.unwrap();
             if !super::is_attached_session_live(record.state) {
@@ -199,9 +204,7 @@ async fn expiry_racing_a_reattachment_never_ends_the_attached_session() {
     let client = Client::attach(&engine, &id).await;
     assert_eq!(engine.unattended_timer(&id), None, "attaching cancels it");
     release.send(()).unwrap();
-    timeout(Duration::from_secs(5), expiry)
-        .await
-        .expect("the expiry settles");
+    timeout(HANG, expiry).await.expect("the expiry settles");
     holder.await.unwrap();
     assert_eq!(
         state(&engine, &id).await,
@@ -313,7 +316,7 @@ async fn the_daemon_api_keeps_the_setting_and_its_attach_stream_counts_as_a_clie
         .await
         .unwrap()
         .into_inner();
-    timeout(Duration::from_secs(5), attached.message())
+    timeout(HANG, attached.message())
         .await
         .expect("the attachment answers")
         .unwrap()
@@ -342,7 +345,7 @@ async fn the_daemon_api_keeps_the_setting_and_its_attach_stream_counts_as_a_clie
 
     drop((input, attached));
     let closed = Instant::now();
-    let ended = timeout(Duration::from_secs(15), async {
+    let ended = timeout(HANG, async {
         loop {
             let record = get(&mut client).await;
             if !super::is_attached_session_live(record.state) {
