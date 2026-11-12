@@ -26,6 +26,7 @@ mod sandbox_resize;
 mod secrets_presets;
 mod settings;
 mod setup_progress;
+mod sign_in_methods;
 mod snapshots;
 mod terminal;
 mod terminal_readiness;
@@ -507,6 +508,14 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/settings/_actions/send-verification",
             post(settings::send_verification_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/sign-in-methods/connect",
+            post(sign_in_methods::connect_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/settings/_actions/sign-in-methods/disconnect",
+            post(sign_in_methods::disconnect_action).layer(DefaultBodyLimit::max(2048)),
         )
         .route(
             "/settings/_actions/sign-out",

@@ -12,7 +12,10 @@ use crate::{
     account_two_factor::{self, Failure},
     auth::{IdentityUser, authenticated_identity, enforce_two_factor},
     error::WebError,
-    response::{error_page, login_redirect, redirect, render_template, two_factor_redirect},
+    response::{
+        error_page, login_redirect, redirect, render_account_settings_page, render_template,
+        two_factor_redirect,
+    },
     security::{
         canonical_cookie, clear_scoped_cookie, csrf_cookie, page_csrf_token,
         request_has_same_origin, valid_csrf_token, with_csrf_cookie, with_response_cookie,
@@ -48,6 +51,11 @@ pub(super) struct SettingsQuery {
     dialog: String,
     #[serde(default)]
     security: String,
+    /// A Sign-in methods outcome, with the provider it names.
+    #[serde(default)]
+    sign_in_method: String,
+    #[serde(default)]
+    provider: String,
     cursor: Option<String>,
 }
 
@@ -102,6 +110,11 @@ pub(super) async fn settings(
     page.settings.security_error = approved_security_error(&query.security).to_owned();
     page.settings.two_factor.active =
         approved_dialog(&query.dialog, page.settings.two_factor_enabled);
+    super::sign_in_methods::apply_notice(
+        &mut page.settings.sign_in_methods,
+        &query.sign_in_method,
+        &query.provider,
+    );
     render_account(&state, &page, StatusCode::OK)
 }
 
@@ -138,7 +151,12 @@ async fn account_page(
     if cursor.is_some_and(|cursor| !account_sessions::valid_id(cursor)) {
         return Err(settings_redirect("invalid-session-page", true, headers));
     }
-    let inventory = match account_sessions::inventory(state, cookie, &identity.id, cursor).await {
+    // The two reads are independent; neither waits for the other.
+    let (sign_in_methods, inventory) = tokio::join!(
+        super::sign_in_methods::view(state, cookie.clone(), &identity.id),
+        account_sessions::inventory(state, cookie, &identity.id, cursor),
+    );
+    let inventory = match inventory {
         Ok(inventory) => Some(inventory),
         Err(account_sessions::Failure::Unauthorized) => {
             return Err(login_redirect(SETTINGS_PATH, headers));
@@ -154,6 +172,7 @@ async fn account_page(
         two_factor_enabled: identity.two_factor_enabled(),
         first_sessions_url: format!("{}#sessions", SETTINGS_PATH.to_owned()),
         csrf_token: page_csrf_token(headers),
+        sign_in_methods,
         ..Default::default()
     };
     if let Some(inventory) = inventory {
@@ -189,7 +208,7 @@ async fn account_page(
 
 fn render_account(state: &AppState, page: &AccountPage, status: StatusCode) -> Response {
     private(with_csrf_cookie(
-        render_template(
+        render_account_settings_page(
             status,
             SettingsTemplate {
                 view: &page.dashboard,
@@ -593,7 +612,7 @@ fn private(mut response: Response) -> Response {
     response
 }
 
-fn display_time(value: Option<&str>) -> String {
+pub(super) fn display_time(value: Option<&str>) -> String {
     value
         .filter(|time| account_sessions::valid_time(time))
         .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())

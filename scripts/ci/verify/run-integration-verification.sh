@@ -1709,7 +1709,7 @@ run_idp_oauth_sign_in() {
     echo "::error::idp OAuth sign-in DB tests skipped"
     return 1
   fi
-  assert_passed_count "idp OAuth sign-in" "$logfile" 18
+  assert_passed_count "idp OAuth sign-in" "$logfile" 25
 }
 
 run_idp() {

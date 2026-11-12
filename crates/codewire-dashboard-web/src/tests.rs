@@ -218,6 +218,12 @@ fn admin_accounts_template_escapes_access_request_fields() {
         reason: "</td><script>alert('reason')</script>".into(),
         has_reason: true,
         created_at: "2026-09-08T12:00:00".into(),
+        identities: vec![crate::view::LinkedIdentityView {
+            provider: "GitHub",
+            subject: "583231".into(),
+            account: "<script>alert('login')</script>".into(),
+            linked_at: "2026-11-12T09:30:00".into(),
+        }],
     }];
     let body = AdminAccountsTemplate {
         view: &view,
@@ -233,6 +239,10 @@ fn admin_accounts_template_escapes_access_request_fields() {
     assert!(!body.contains("<unsafe@example.test>"));
     assert!(!body.contains("</td><script>"));
     assert!(body.contains("&lt;script&gt;") || body.contains("&#60;script&#62;"));
+    // Admins see each linked identity: provider, login, subject and when.
+    assert!(body.contains("<th scope=\"col\">Sign-in providers</th>"));
+    assert!(body.contains("<li><strong>GitHub</strong><span class=\"cw-access-email\">"));
+    assert!(body.contains("<code>583231</code> · linked <time datetime=\"2026-11-12T09:30:00\">"));
 }
 
 #[test]

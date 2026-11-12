@@ -676,7 +676,7 @@ impl PendingSignupUnavailable {
     }
 }
 
-fn provider_label(provider: &str) -> Option<&'static str> {
+pub(super) fn provider_label(provider: &str) -> Option<&'static str> {
     match provider {
         "github" => Some("GitHub"),
         "google" => Some("Google"),

@@ -16,7 +16,7 @@
 
 </nav></aside>
   <div class="cw-settings-content cw-account-page">
-    <header class="cw-page-header"><div><h1 class="cw-page-title">Account</h1><p class="cw-page-description">Your account details, security and browser sessions.</p></div></header>
+    <header class="cw-page-header"><div><h1 class="cw-page-title">Account</h1><p class="cw-page-description">Your account details, security, sign-in methods and browser sessions.</p></div></header>
     <section id="account-details" class="cw-card cw-settings-card" aria-labelledby="account-title">
       <header class="cw-card-header"><h2 id="account-title" class="cw-card-title">Account details</h2><p class="cw-card-description">Your Codewire account identity. GitHub connections do not change it.</p></header>
       <div class="cw-card-content"><dl class="cw-settings-details"><div><dt>Name</dt><dd>Codewire Owner</dd></div><div><dt>Email</dt><dd class="cw-settings-email"><span>owner@example.test</span><span class="cw-badge" data-tone="success">Verified</span></dd></div><div><dt>Created</dt><dd>Sep 9, 2026, 17:00 UTC</dd></div></dl></div>
@@ -25,7 +25,16 @@
       <header class="cw-card-header"><h2 id="security-title" class="cw-card-title">Security</h2></header>
       <div class="cw-card-content"><ul class="cw-row-list">
         <li class="cw-security-row"><h3>Two-factor authentication <span class="cw-status cw-status--pill" data-tone="success">Enabled</span></h3><p>Sign-in asks for a code from your authenticator app. Recovery codes each work once.</p><div class="cw-security-actions"><form class="cw-dialog-launcher" method="get" action="settings-account.html#replace-authenticator"><input type="hidden" name="dialog" value="replace-authenticator"><button class="cw-button cw-button--outline cw-button--small" type="submit" data-dialog-open="replace-authenticator" aria-haspopup="dialog" aria-controls="replace-authenticator">Replace authenticator</button></form><form class="cw-dialog-launcher" method="get" action="settings-account.html#regenerate-recovery-codes"><input type="hidden" name="dialog" value="regenerate-recovery-codes"><button class="cw-button cw-button--outline cw-button--small" type="submit" data-dialog-open="regenerate-recovery-codes" aria-haspopup="dialog" aria-controls="regenerate-recovery-codes">Regenerate recovery codes</button></form></div></li>
-        <li class="cw-security-row"><h3>Password</h3><p>Get a reset link by email.</p><div class="cw-security-actions"><a class="cw-button cw-button--outline cw-button--small" href="/forgot-password">Reset password</a></div></li>
+      </ul></div>
+    </section>
+    <section id="sign-in-methods" class="cw-card cw-settings-card cw-sign-in-methods" aria-labelledby="sign-in-methods-title">
+      <header class="cw-card-header"><h2 id="sign-in-methods-title" class="cw-card-title">Sign-in methods</h2><p class="cw-card-description">The ways you can sign in to this account. Two-factor authentication applies to each.</p></header>
+      <div class="cw-card-content"><ul class="cw-row-list">
+        <li class="cw-security-row"><h3>Password <span class="cw-badge" data-tone="success">Set</span></h3><p>Sign in with your email and password. Get a reset link by email to change it.</p><div class="cw-security-actions"><a class="cw-button cw-button--outline cw-button--small" href="/forgot-password">Reset password</a></div></li>
+        <li class="cw-security-row" id="sign-in-method-github"><h3>GitHub <span class="cw-badge" data-tone="success">Connected</span></h3><p>Connected as <strong>octocat</strong> · Nov 12, 2026, 09:30 UTC</p>
+          <div class="cw-security-actions"><form method="post" action="/settings/_actions/sign-in-methods/disconnect"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account"><input type="hidden" name="provider" value="github"><button class="cw-button cw-button--outline cw-button--small" type="submit"><span>Disconnect</span><span class="cw-sr-only"> GitHub</span></button></form></div></li>
+        <li class="cw-security-row" id="sign-in-method-google"><h3>Google</h3><p>Not connected.</p>
+          <div class="cw-security-actions"><form method="post" action="/settings/_actions/sign-in-methods/connect"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="account_id" value="fixture-account"><input type="hidden" name="provider" value="google"><button class="cw-button cw-button--outline cw-button--small" type="submit"><span>Connect</span><span class="cw-sr-only"> Google</span></button></form></div></li>
       </ul></div>
     </section>
     <dialog class="cw-dialog cw-credential-dialog cw-two-factor-dialog" data-dialog id="replace-authenticator" aria-labelledby="replace-authenticator-title">

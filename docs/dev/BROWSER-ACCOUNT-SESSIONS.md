@@ -103,11 +103,62 @@ where the sign-in started), 404 for an expired, used or unknown link, 403 when
 the account is disabled, locked out or no longer has that address, and 409
 when the identity belongs to another account.
 
-Focused proof is `cargo test -p codewire-idp --lib oauth`, the eighteen
+### Sign-in methods in Settings
+
+The Account page's "Sign-in methods" card lists the password (set or not)
+and each provider the IdP has configured, connected as its GitHub login or
+Google email or not connected. Three cookie-only IdP routes serve it, with the
+session controls' boundary: exactly one session cookie and no bearer, the
+account the request names, an enabled account that is not locked out, and the
+dashboard's two-factor boundary (an enrolled factor, or setup skipped by this
+browser session). The two writes also need exactly one Origin equal to the
+public frontend origin, which the dashboard forwards after its own Origin and
+CSRF checks.
+
+- `GET /api/auth/oauth/identities?account_id=` returns `account_id`, the
+  configured `providers`, `password` and `identities` (`provider`, nullable
+  `account`, `linked_at`). No column holds the provider account; it is read
+  from the latest audit row that linked the identity, and an identity linked
+  before that was recorded shows as connected without a name.
+- `POST /api/auth/oauth/identities/link` (`account_id`, `provider`) writes a
+  single-use `link` row bound to the account (one per account and provider; a
+  new start replaces the old) and answers 200 with the provider's authorize
+  `location` and the `codewire_oauth_state` cookie. The dashboard's Connect
+  action, a CSRF-checked `POST`, forwards only that cookie and answers 303 to
+  that location, which must be on `https://github.com` or
+  `https://accounts.google.com`. Chromium applies a page's `form-action` to a
+  POST's redirects, so the Account page, and no other, adds exactly those two
+  origins to it. No `GET` starts a link, so another site cannot start one. It
+  answers 404 for a provider that is not configured and 409 when the account
+  already has one of that provider.
+- The provider returns to the same callback as a sign-in. For a `link` row it
+  links the identity only if this browser's session cookie still belongs to
+  the row's account and that account is still enabled, not locked out and past
+  the two-factor boundary, and only if the identity belongs to no one else.
+  It creates no session, audits `user.oauth.linked` (`confirmed_by:
+  "session"`), emails the account's address, and lands on
+  `/settings/?sign_in_method=<code>&provider=<github|google>#sign-in-methods`,
+  where the page shows a fixed message: `connected`, `cancelled`, `expired`,
+  `unverified_email`, `unavailable`, `taken` (connected to another Codewire
+  account), `already_connected`, `session_changed` or `failed`.
+- `POST /api/auth/oauth/identities/unlink` (`account_id`, `provider`) removes
+  the account's identity of that provider only when a password or an identity
+  of another configured provider remains (409 otherwise; the card disables
+  Disconnect and says "Add a password or connect another provider first."),
+  audits `user.oauth.unlinked`, and emails the account's address. It answers
+  404 when that provider is not connected. The account row stays locked to
+  the commit, so two disconnects cannot each leave the other as the last way
+  in.
+
+The Account Access admin page lists each account's linked identities:
+provider, account when known, subject and when it was linked.
+
+Focused proof is `cargo test -p codewire-idp --lib oauth`, the twenty-five
 PostgreSQL tests in `crates/codewire-idp/tests/oauth_sign_in.rs` against an
 in-process fake of both providers and a recording mailer (the `idp-sessions`
-service lane requires all eighteen), the dashboard's `oauth_sign_in_tests`,
-and the 0016 upgrade test in `codewire-server-core`'s `migrate::` suite.
+service lane requires all twenty-five), the dashboard's `oauth_sign_in_tests`
+and `sign_in_methods` tests, and the 0016 upgrade test in
+`codewire-server-core`'s `migrate::` suite.
 
 ## Authenticator replacement and recovery codes
 

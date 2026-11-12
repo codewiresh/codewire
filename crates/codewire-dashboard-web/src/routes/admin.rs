@@ -26,7 +26,7 @@ use crate::{
         AdminAccountsTemplate, AdminAuditTemplate, AdminBillingTemplate, AdminOrganizationTemplate,
         AdminOrganizationsTemplate, AdminOverviewTemplate,
     },
-    view::{AccountAccessView, DashboardView},
+    view::{AccountAccessView, DashboardView, LinkedIdentityView},
 };
 
 const ADMIN_PATH: &str = "/admin/";
@@ -67,6 +67,18 @@ struct AccountAccessResponse {
     enabled: bool,
     access_reason: Option<String>,
     created_at: String,
+    /// An IdP that does not list identities yet is read as none.
+    #[serde(default)]
+    linked_identities: Vec<LinkedIdentityResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkedIdentityResponse {
+    provider: String,
+    subject: String,
+    account: Option<String>,
+    linked_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1102,6 +1114,18 @@ fn account_access_view(account: &AccountAccessResponse) -> AccountAccessView {
         reason,
         has_reason: account.access_reason.is_some(),
         created_at: account.created_at.clone(),
+        identities: account
+            .linked_identities
+            .iter()
+            .filter_map(|identity| {
+                Some(LinkedIdentityView {
+                    provider: super::authentication::provider_label(&identity.provider)?,
+                    subject: identity.subject.clone(),
+                    account: identity.account.clone().unwrap_or_default(),
+                    linked_at: identity.linked_at.clone(),
+                })
+            })
+            .collect(),
     }
 }
 

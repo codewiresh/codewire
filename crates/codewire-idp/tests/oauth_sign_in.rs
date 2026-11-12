@@ -1686,3 +1686,611 @@ async fn provider_cancel_and_exchange_failures_land_on_login() {
         .await
         .assert_refused("failed");
 }
+
+// --- Sign-in methods in Settings: connect and disconnect ---
+
+/// A live browser session for `user`, past the two-factor boundary when
+/// `setup_skipped` (none of these accounts enrols a factor).
+async fn browser_session(pool: &PgPool, user: &str, setup_skipped: bool) -> String {
+    let token = format!("{user}-{}", hex_token());
+    sqlx::query(
+        "INSERT INTO sessions (id, user_id, token_hash, expires_at, two_factor_setup_skipped_at) \
+         VALUES ($1, $2, $3, NOW() + interval '1 hour', \
+                 CASE WHEN $4 THEN NOW()::timestamp END)",
+    )
+    .bind(format!("{user}-session-{}", &hex_token()[..8]))
+    .bind(user)
+    .bind(hash_session_token(&token))
+    .bind(setup_skipped)
+    .execute(pool)
+    .await
+    .unwrap();
+    token
+}
+
+fn hex_token() -> String {
+    rand::random::<[u8; 16]>()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn session_cookie(token: &str) -> String {
+    format!("codewire.session_token={token}")
+}
+
+impl Harness {
+    /// A same-origin JSON request as the dashboard sends it for a browser.
+    async fn account_request(&self, path: &str, session: &str, body: Value) -> Reply {
+        let request = Request::post(path)
+            .header(header::ORIGIN, ORIGIN)
+            .header(header::COOKIE, session_cookie(session))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        self.reply(request).await
+    }
+
+    async fn reply(&self, request: Request<Body>) -> Reply {
+        let response = self.app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let set_cookies = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap().to_owned())
+            .collect();
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .map(|value| value.to_str().unwrap().to_owned());
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        Reply {
+            status,
+            location,
+            set_cookies,
+            body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        }
+    }
+
+    async fn link_start_reply(&self, provider: &str, account: &str, session: &str) -> Reply {
+        self.account_request(
+            "/api/auth/oauth/identities/link",
+            session,
+            json!({ "account_id": account, "provider": provider }),
+        )
+        .await
+    }
+
+    /// Start a link from Settings and return the round trip it began.
+    async fn link_start(&self, provider: &str, account: &str, session: &str) -> Started {
+        let reply = self.link_start_reply(provider, account, session).await;
+        assert_eq!(reply.status, StatusCode::OK, "link start {}", reply.body);
+        let location = reqwest::Url::parse(reply.body["location"].as_str().unwrap()).unwrap();
+        let params: HashMap<String, String> = location.query_pairs().into_owned().collect();
+        let cookie = reply.cookie("codewire_oauth_state").expect("state cookie");
+        assert!(
+            cookie.contains("Path=/api/auth/oauth/")
+                && cookie.contains("HttpOnly")
+                && cookie.contains("SameSite=Lax")
+                && cookie.contains("Secure"),
+            "{cookie}"
+        );
+        let state = cookie_value(&cookie);
+        assert_eq!(params["state"], state);
+        assert_eq!(params["code_challenge_method"], "S256");
+        Started { state, params }
+    }
+
+    /// The provider's redirect back, in a browser holding `session`.
+    async fn link_callback(
+        &self,
+        provider: &str,
+        started: &Started,
+        code: &str,
+        session: Option<&str>,
+    ) -> Reply {
+        let mut cookies = format!("codewire_oauth_state={}", started.state);
+        if let Some(session) = session {
+            cookies.push_str("; ");
+            cookies.push_str(&session_cookie(session));
+        }
+        let request = Request::get(format!(
+            "/api/auth/oauth/{provider}/callback?code={code}&state={}",
+            started.state
+        ))
+        .header(header::COOKIE, cookies)
+        .body(Body::empty())
+        .unwrap();
+        self.reply(request).await
+    }
+
+    async fn methods(&self, account: &str, session: &str) -> Reply {
+        let request = Request::get(format!("/api/auth/oauth/identities?account_id={account}"))
+            .header(header::COOKIE, session_cookie(session))
+            .body(Body::empty())
+            .unwrap();
+        self.reply(request).await
+    }
+
+    async fn unlink(&self, provider: &str, account: &str, session: &str) -> Reply {
+        self.account_request(
+            "/api/auth/oauth/identities/unlink",
+            session,
+            json!({ "account_id": account, "provider": provider }),
+        )
+        .await
+    }
+}
+
+impl Reply {
+    /// Back on Settings with `code`, and never a new session.
+    fn assert_settings(&self, code: &str, provider: &str) {
+        assert_eq!(self.status, StatusCode::SEE_OTHER);
+        assert_eq!(
+            self.location.as_deref(),
+            Some(
+                format!("/settings/?sign_in_method={code}&provider={provider}#sign-in-methods")
+                    .as_str()
+            )
+        );
+        assert!(self.cookie("codewire.session_token").is_none());
+        assert!(self.cookie("codewire_2fa_challenge").is_none());
+        assert!(
+            self.set_cookies
+                .iter()
+                .any(|cookie| cookie.starts_with("codewire_oauth_state=;")
+                    && cookie.contains("Max-Age=0")),
+            "the state cookie is cleared"
+        );
+    }
+}
+
+#[tokio::test]
+async fn connect_links_to_the_sessions_account_and_creates_no_session() {
+    let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
+        return;
+    };
+    let email = "settings-connect@example.test";
+    let google_email = "settings-connect-google@example.test";
+    cleanup(&h.pool, &[email], &["9200001", "settings-google-1"]).await;
+    insert_user(&h.pool, "settings-connect", email, true, true).await;
+    let session = browser_session(&h.pool, "settings-connect", true).await;
+
+    let methods = h.methods("settings-connect", &session).await;
+    assert_eq!(methods.status, StatusCode::OK);
+    assert_eq!(
+        methods.body,
+        json!({ "account_id": "settings-connect", "providers": ["github", "google"],
+                "password": true, "identities": [] })
+    );
+
+    // GitHub: the emails need not match; the user proved both.
+    let started = h.link_start("github", "settings-connect", &session).await;
+    h.answer(
+        &started,
+        "connect-github",
+        github(9200001, "elsewhere@example.test", true),
+    );
+    h.link_callback("github", &started, "connect-github", Some(&session))
+        .await
+        .assert_settings("connected", "github");
+    // Google, with its nonce.
+    let started = h.link_start("google", "settings-connect", &session).await;
+    h.answer(
+        &started,
+        "connect-google",
+        Answer::Google {
+            claims: google(&started, "settings-google-1", google_email),
+        },
+    );
+    h.link_callback("google", &started, "connect-google", Some(&session))
+        .await
+        .assert_settings("connected", "google");
+
+    let owner: String = sqlx::query_scalar(
+        "SELECT user_id FROM accounts WHERE provider_id = 'github' AND account_id = '9200001'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(owner, "settings-connect");
+    assert_eq!(link_rows(&h.pool, "google", "settings-google-1").await, 1);
+    assert_eq!(
+        sessions(&h.pool, "settings-connect").await,
+        1,
+        "no new session"
+    );
+    assert_eq!(
+        audit_count(&h.pool, "settings-connect", "user.oauth.linked").await,
+        2
+    );
+    let audit: Value = sqlx::query_scalar(
+        "SELECT metadata FROM audit_logs WHERE user_id = 'settings-connect' \
+         AND action = 'user.oauth.linked' AND metadata->>'provider' = 'github'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit["provider_subject"], "9200001");
+    assert_eq!(audit["provider_email"], "elsewhere@example.test");
+    assert_eq!(audit["provider_account"], "user9200001");
+    assert_eq!(audit["confirmed_by"], "session");
+
+    // Settings names each identity as it was linked.
+    let methods = h.methods("settings-connect", &session).await;
+    let identities = methods.body["identities"].as_array().unwrap();
+    assert_eq!(identities.len(), 2);
+    assert_eq!(identities[0]["provider"], "github");
+    assert_eq!(identities[0]["account"], "user9200001");
+    assert_eq!(identities[1]["provider"], "google");
+    assert_eq!(identities[1]["account"], google_email);
+    assert!(identities[0]["linked_at"].as_str().unwrap().ends_with('Z'));
+
+    // A connected provider is not started again, and its state was single use.
+    let again = h
+        .link_start_reply("github", "settings-connect", &session)
+        .await;
+    assert_eq!(again.status, StatusCode::CONFLICT);
+    let replay = h
+        .link_callback("github", &started, "connect-google", Some(&session))
+        .await;
+    replay.assert_refused("expired");
+    cleanup(&h.pool, &[email], &["9200001", "settings-google-1"]).await;
+}
+
+#[tokio::test]
+async fn a_link_starts_only_inside_the_account_session_boundary() {
+    let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
+        return;
+    };
+    let email = "settings-boundary@example.test";
+    let other_email = "settings-boundary-other@example.test";
+    cleanup(&h.pool, &[email, other_email], &[]).await;
+    insert_user(&h.pool, "settings-boundary", email, true, true).await;
+    insert_user(&h.pool, "settings-boundary-other", other_email, true, true).await;
+    let session = browser_session(&h.pool, "settings-boundary", true).await;
+    let before_two_factor = browser_session(&h.pool, "settings-boundary", false).await;
+    let links = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM oauth_states WHERE intent = 'link' AND user_id = $1",
+        )
+        .bind("settings-boundary")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap()
+    };
+
+    // Before the two-factor boundary, for another account, or with no session.
+    let reply = h
+        .link_start_reply("github", "settings-boundary", &before_two_factor)
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    let reply = h
+        .link_start_reply("github", "settings-boundary-other", &session)
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    let reply = h
+        .link_start_reply("github", "settings-boundary", "not-a-session")
+        .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    // Another site's request carries its own Origin.
+    let request = Request::post("/api/auth/oauth/identities/link")
+        .header(header::ORIGIN, "https://elsewhere.example")
+        .header(header::COOKIE, session_cookie(&session))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({ "account_id": "settings-boundary", "provider": "github" }).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(h.reply(request).await.status, StatusCode::FORBIDDEN);
+    // No GET starts a link.
+    let request = Request::get("/api/auth/oauth/identities/link")
+        .header(header::COOKIE, session_cookie(&session))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        h.reply(request).await.status,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    assert_eq!(links().await, 0);
+
+    // A new start replaces the one in flight.
+    h.link_start("github", "settings-boundary", &session).await;
+    h.link_start("github", "settings-boundary", &session).await;
+    assert_eq!(links().await, 1);
+    cleanup(&h.pool, &[email, other_email], &[]).await;
+}
+
+#[tokio::test]
+async fn a_link_callback_whose_session_changed_links_nothing() {
+    let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
+        return;
+    };
+    let email = "settings-changed@example.test";
+    let other_email = "settings-changed-other@example.test";
+    cleanup(&h.pool, &[email, other_email], &["9200011"]).await;
+    insert_user(&h.pool, "settings-changed", email, true, true).await;
+    insert_user(&h.pool, "settings-changed-other", other_email, true, true).await;
+    let session = browser_session(&h.pool, "settings-changed", true).await;
+    let other = browser_session(&h.pool, "settings-changed-other", true).await;
+
+    // Signed out, signed in as someone else, or the session expired.
+    let expired = browser_session(&h.pool, "settings-changed", true).await;
+    for (case, callback_session) in [
+        ("signed out", None),
+        ("another account", Some(other.as_str())),
+        ("expired", Some(expired.as_str())),
+    ] {
+        let started = h.link_start("github", "settings-changed", &session).await;
+        let code = case.replace(' ', "-");
+        h.answer(&started, &code, github(9200011, email, true));
+        if case == "expired" {
+            sqlx::query(
+                "UPDATE sessions SET expires_at = NOW() - interval '1 minute' \
+                 WHERE token_hash = $1",
+            )
+            .bind(hash_session_token(&expired))
+            .execute(&h.pool)
+            .await
+            .unwrap();
+        }
+        h.link_callback("github", &started, &code, callback_session)
+            .await
+            .assert_settings("session_changed", "github");
+        assert_eq!(link_rows(&h.pool, "github", "9200011").await, 0, "{case}");
+    }
+    assert_eq!(
+        audit_count(&h.pool, "settings-changed", "user.oauth.linked").await,
+        0
+    );
+    assert_eq!(
+        audit_count(&h.pool, "settings-changed-other", "user.oauth.linked").await,
+        0
+    );
+    cleanup(&h.pool, &[email, other_email], &["9200011"]).await;
+}
+
+#[tokio::test]
+async fn a_disabled_or_locked_account_links_nothing() {
+    let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
+        return;
+    };
+    let email = "settings-refused@example.test";
+    cleanup(&h.pool, &[email], &["9200021"]).await;
+    insert_user(&h.pool, "settings-refused", email, true, true).await;
+    // Disabling an account ends its sessions; a lockout keeps them.
+    for (change, undo, refused) in [
+        (
+            "UPDATE users SET enabled = false WHERE id = 'settings-refused'",
+            "UPDATE users SET enabled = true WHERE id = 'settings-refused'",
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "UPDATE users SET locked_until = NOW() + interval '10 minutes' \
+             WHERE id = 'settings-refused'",
+            "UPDATE users SET locked_until = NULL WHERE id = 'settings-refused'",
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let session = browser_session(&h.pool, "settings-refused", true).await;
+        // Disabled or locked between the start and the callback.
+        let started = h.link_start("github", "settings-refused", &session).await;
+        h.answer(&started, "refused-code", github(9200021, email, true));
+        sqlx::query(change).execute(&h.pool).await.unwrap();
+        h.link_callback("github", &started, "refused-code", Some(&session))
+            .await
+            .assert_settings("session_changed", "github");
+        assert_eq!(link_rows(&h.pool, "github", "9200021").await, 0, "{change}");
+        // Nor does a new link start.
+        let reply = h
+            .link_start_reply("github", "settings-refused", &session)
+            .await;
+        assert_eq!(reply.status, refused, "{change}");
+        sqlx::query(undo).execute(&h.pool).await.unwrap();
+    }
+    assert_eq!(
+        audit_count(&h.pool, "settings-refused", "user.oauth.linked").await,
+        0
+    );
+    cleanup(&h.pool, &[email], &["9200021"]).await;
+}
+
+#[tokio::test]
+async fn an_identity_linked_to_another_account_is_refused() {
+    let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
+        return;
+    };
+    let email = "settings-taken@example.test";
+    let owner_email = "settings-taken-owner@example.test";
+    cleanup(&h.pool, &[email, owner_email], &["9200031"]).await;
+    insert_user(&h.pool, "settings-taken", email, true, true).await;
+    insert_user(&h.pool, "settings-taken-owner", owner_email, true, true).await;
+    link(&h.pool, "settings-taken-owner", "github", "9200031").await;
+    let session = browser_session(&h.pool, "settings-taken", true).await;
+
+    let started = h.link_start("github", "settings-taken", &session).await;
+    h.answer(&started, "taken-code", github(9200031, owner_email, true));
+    h.link_callback("github", &started, "taken-code", Some(&session))
+        .await
+        .assert_settings("taken", "github");
+    let owner: String = sqlx::query_scalar(
+        "SELECT user_id FROM accounts WHERE provider_id = 'github' AND account_id = '9200031'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(owner, "settings-taken-owner");
+    assert_eq!(
+        audit_count(&h.pool, "settings-taken", "user.oauth.linked").await,
+        0
+    );
+
+    // Cancelling at the provider lands on Settings too, and links nothing.
+    let started = h.link_start("github", "settings-taken", &session).await;
+    h.request(
+        "GET",
+        &format!(
+            "/api/auth/oauth/github/callback?error=access_denied&state={}",
+            started.state
+        ),
+        &[format!("codewire_oauth_state={}", started.state)],
+        None,
+    )
+    .await
+    .assert_settings("cancelled", "github");
+    cleanup(&h.pool, &[email, owner_email], &["9200031"]).await;
+}
+
+#[tokio::test]
+async fn disconnect_needs_another_way_to_sign_in() {
+    let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
+        return;
+    };
+    let email = "settings-unlink@example.test";
+    let only_email = "settings-unlink-only@example.test";
+    cleanup(
+        &h.pool,
+        &[email, only_email],
+        &["9200041", "9200042", "settings-google-2"],
+    )
+    .await;
+    insert_user(&h.pool, "settings-unlink", email, true, true).await;
+    link(&h.pool, "settings-unlink", "github", "9200041").await;
+    let session = browser_session(&h.pool, "settings-unlink", true).await;
+
+    // A password remains.
+    let reply = h.unlink("github", "settings-unlink", &session).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(link_rows(&h.pool, "github", "9200041").await, 0);
+    assert_eq!(
+        audit_count(&h.pool, "settings-unlink", "user.oauth.unlinked").await,
+        1
+    );
+    let reply = h.unlink("github", "settings-unlink", &session).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+
+    // A provider-only account keeps its last way in.
+    insert_user(&h.pool, "settings-unlink-only", only_email, true, true).await;
+    sqlx::query("DELETE FROM accounts WHERE user_id = 'settings-unlink-only'")
+        .execute(&h.pool)
+        .await
+        .unwrap();
+    link(&h.pool, "settings-unlink-only", "github", "9200042").await;
+    let only = browser_session(&h.pool, "settings-unlink-only", true).await;
+    let methods = h.methods("settings-unlink-only", &only).await;
+    assert_eq!(methods.body["password"], false);
+    let reply = h.unlink("github", "settings-unlink-only", &only).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert_eq!(reply.body["code"], "oauth_last_sign_in_method");
+    assert_eq!(link_rows(&h.pool, "github", "9200042").await, 1);
+
+    // With Google connected too, GitHub may go, and then Google may not.
+    link(
+        &h.pool,
+        "settings-unlink-only",
+        "google",
+        "settings-google-2",
+    )
+    .await;
+    let reply = h.unlink("github", "settings-unlink-only", &only).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let reply = h.unlink("google", "settings-unlink-only", &only).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert_eq!(link_rows(&h.pool, "google", "settings-google-2").await, 1);
+    assert_eq!(
+        audit_count(&h.pool, "settings-unlink-only", "user.oauth.unlinked").await,
+        1
+    );
+
+    // Another site cannot disconnect.
+    let request = Request::post("/api/auth/oauth/identities/unlink")
+        .header(header::ORIGIN, "https://elsewhere.example")
+        .header(header::COOKIE, session_cookie(&session))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({ "account_id": "settings-unlink", "provider": "github" }).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(h.reply(request).await.status, StatusCode::FORBIDDEN);
+    cleanup(
+        &h.pool,
+        &[email, only_email],
+        &["9200041", "9200042", "settings-google-2"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_admin_account_list_names_linked_identities() {
+    let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
+        return;
+    };
+    let email = "settings-admin-view@example.test";
+    let admin_email = "settings-admin@example.test";
+    cleanup(&h.pool, &[email, admin_email], &["9200051"]).await;
+    insert_user(&h.pool, "settings-admin-view", email, true, true).await;
+    insert_user(&h.pool, "settings-admin", admin_email, true, true).await;
+    sqlx::query("UPDATE users SET is_admin = true WHERE id = 'settings-admin'")
+        .execute(&h.pool)
+        .await
+        .unwrap();
+    let session = browser_session(&h.pool, "settings-admin-view", true).await;
+    let started = h
+        .link_start("github", "settings-admin-view", &session)
+        .await;
+    h.answer(&started, "admin-view", github(9200051, email, true));
+    h.link_callback("github", &started, "admin-view", Some(&session))
+        .await
+        .assert_settings("connected", "github");
+    // Awaiting review, so it leads the list.
+    sqlx::query(
+        "UPDATE users SET enabled = false, access_reason = 'Synthetic review' \
+         WHERE id = 'settings-admin-view'",
+    )
+    .execute(&h.pool)
+    .await
+    .unwrap();
+
+    let admin = codewire_idp::access_admin::router(
+        h.pool.clone(),
+        ORIGIN.into(),
+        codewire_email::EmailClient::disabled(),
+        codewire_server_core::auth::AuthState {
+            pool: h.pool.clone(),
+        },
+    );
+    let admin_session = browser_session(&h.pool, "settings-admin", true).await;
+    let response = admin
+        .oneshot(
+            Request::get("/api/admin/accounts")
+                .header(header::COOKIE, session_cookie(&admin_session))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1 << 22)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let account = body["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|account| account["id"] == "settings-admin-view")
+        .expect("the account is listed");
+    let identities = account["linkedIdentities"].as_array().unwrap();
+    assert_eq!(identities.len(), 1);
+    assert_eq!(identities[0]["provider"], "github");
+    assert_eq!(identities[0]["subject"], "9200051");
+    assert_eq!(identities[0]["account"], "user9200051");
+    assert!(identities[0]["linkedAt"].is_string());
+    assert!(identities[0].get("userId").is_none());
+    cleanup(&h.pool, &[email, admin_email], &["9200051"]).await;
+}

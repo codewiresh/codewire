@@ -76,6 +76,33 @@ pub(crate) fn render_credential_settings_page(template: impl Template) -> Respon
     response
 }
 
+/// The Account page's Connect button POSTs to its action, which answers with a
+/// redirect to GitHub's or Google's authorize page (#4062). Chromium applies
+/// this page's form-action to that cross-origin redirect too, so exactly those
+/// two origins are added, and only here and only on this page's own renders;
+/// error pages keep the default policy.
+pub(crate) fn render_account_settings_page(
+    status: StatusCode,
+    template: impl Template,
+) -> Response {
+    let mut response = render_template(status, template);
+    if response.status() == status {
+        let policy = CONTENT_SECURITY_POLICY.replace(
+            "form-action 'self'",
+            &format!(
+                "form-action 'self' {}",
+                crate::account_sign_in_methods::PROVIDER_AUTHORIZE_ORIGINS.join(" ")
+            ),
+        );
+        if let Ok(policy) = HeaderValue::from_str(&policy) {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_SECURITY_POLICY, policy);
+        }
+    }
+    response
+}
+
 /// The billing page's forms POST to billing's setup, portal and add-credit
 /// actions, which answer with a redirect to Stripe's hosted Checkout, billing
 /// portal or, for a charge the bank wants approved, the invoice's payment page.

@@ -126,6 +126,16 @@ trip; the configuration is in [../CONFIGURATION.md](../CONFIGURATION.md).
   password; `enabled` follows the invite policy.
 - Every refusal lands on `/login` with a fixed code the dashboard turns into a
   fixed message; provider error text is never shown.
+- A signed-in account links and unlinks a provider from Settings
+  ([BROWSER-ACCOUNT-SESSIONS.md](BROWSER-ACCOUNT-SESSIONS.md#sign-in-methods-in-settings)).
+  Only a session past the two-factor boundary starts a link, with a
+  CSRF-checked `POST` and never a `GET`; the callback links only while the
+  browser's session still belongs to that account, which must still be enabled
+  and not locked out, and only an identity that belongs to no one else. The
+  emails need not match, since the person proved both. An unlink needs a
+  password or another configured provider to remain. Both are audited
+  (`user.oauth.linked`, `user.oauth.unlinked`) and the account's address is
+  told.
 
 ## Accounts waiting for access
 

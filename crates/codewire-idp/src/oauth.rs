@@ -41,7 +41,10 @@
 //! Every failure of the round trip lands on `/login?oauth_error=<code>`; the
 //! dashboard maps each fixed code to its message. No provider token is kept.
 
+mod link_confirm;
 mod providers;
+mod sign_in_methods;
+mod sign_up;
 
 pub use providers::{
     OAuthProviders, OAuthUpstream, Provider, ReqwestUpstream, UpstreamError, UpstreamRequest,
@@ -55,32 +58,26 @@ use async_trait::async_trait;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::NaiveDateTime;
 use codewire_email::EmailClient;
 use codewire_server_core::auth::hash_session_token;
-use codewire_server_core::{AppError, ValidatedJson};
 use rand::RngCore as _;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
 
 use crate::auth_session::{
-    CreatedSession, MAX_ACCESS_REASON_CHARS, SessionAuthState, SessionResponse, SignupInvitePolicy,
-    TWO_FACTOR_TOKEN_TTL_SECS, UserAuthRow, UserResponse, configured_human_verification,
-    create_session, format_time, hex_id, hex_token, log_audit, log_audit_in, request_info,
-    session_cookie_string, validate_turnstile,
+    CreatedSession, SessionAuthState, SignupInvitePolicy, TWO_FACTOR_TOKEN_TTL_SECS, UserAuthRow,
+    configured_human_verification, create_session, hex_id, hex_token, log_audit, log_audit_in,
+    request_info, session_cookie_string,
 };
-use crate::email_password::{
-    send_access_request_received_email, send_provider_link_confirmation_email,
-    send_provider_linked_email,
-};
+use crate::email_password::{send_provider_link_confirmation_email, send_provider_linked_email};
 use providers::{IdentityError, ProviderIdentity};
+pub(crate) use sign_in_methods::LINKED_ACCOUNT_SQL;
 
 /// The browser's half of a round trip: the raw state.
 const STATE_COOKIE: &str = "codewire_oauth_state";
@@ -142,6 +139,22 @@ enum Refusal {
 }
 
 impl Refusal {
+    /// The same refusal on a link from Settings.
+    fn link_result(self) -> sign_in_methods::LinkResult {
+        use sign_in_methods::LinkResult;
+        match self {
+            Self::Cancelled => LinkResult::Cancelled,
+            Self::Expired => LinkResult::Expired,
+            Self::UnverifiedEmail => LinkResult::UnverifiedEmail,
+            Self::Unavailable => LinkResult::Unavailable,
+            Self::LinkRequired
+            | Self::Locked
+            | Self::Disabled
+            | Self::RateLimited
+            | Self::Failed => LinkResult::Failed,
+        }
+    }
+
     fn code(self) -> &'static str {
         match self {
             Self::Unavailable => "unavailable",
@@ -369,10 +382,9 @@ fn router_with_state(state: OAuthState) -> Router {
         .route("/api/auth/oauth/providers", get(providers_list))
         .route("/api/auth/oauth/{provider}/start", get(start))
         .route("/api/auth/oauth/{provider}/callback", get(callback))
-        .route("/api/auth/oauth/signup/pending", post(pending_signup))
-        .route("/api/auth/oauth/signup/complete", post(complete_signup))
-        .route("/api/auth/oauth/link/pending", post(pending_link))
-        .route("/api/auth/oauth/link/confirm", post(confirm_link))
+        .merge(sign_up::router())
+        .merge(link_confirm::router())
+        .merge(sign_in_methods::router())
         .with_state(state)
 }
 
@@ -634,6 +646,7 @@ struct CallbackQuery {
 struct ClaimedState {
     provider: String,
     intent: String,
+    user_id: Option<String>,
     pkce_verifier: Option<String>,
     nonce: Option<String>,
     return_auth_request_id: Option<String>,
@@ -649,6 +662,24 @@ enum Outcome {
     /// A link confirmation was emailed to the matching account; the browser
     /// keeps this requester secret to complete it.
     LinkSent(String),
+}
+
+/// What a claimed round trip was for: a sign-in returning to its target, or
+/// a signed-in account linking a provider from Settings.
+enum Intent {
+    SignIn(ReturnTarget),
+    Link(String),
+}
+
+impl Intent {
+    fn refuse(&self, refusal: Refusal, provider: Provider, cookies: Vec<HeaderValue>) -> Response {
+        match self {
+            Self::SignIn(target) => login_with_refusal(refusal, target, cookies),
+            Self::Link(_) => {
+                sign_in_methods::settings_landing(refusal.link_result(), provider, cookies)
+            }
+        }
+    }
 }
 
 async fn callback(
@@ -687,8 +718,13 @@ async fn callback(
         auth_request_id: claimed.return_auth_request_id.clone(),
         return_to: claimed.return_to.clone(),
     };
-    if !claimed.live || claimed.provider != provider.as_str() || claimed.intent != "sign_in" {
-        return login_with_refusal(Refusal::Expired, &target, cookies);
+    let intent = match (claimed.intent.as_str(), claimed.user_id) {
+        ("sign_in", None) => Intent::SignIn(target),
+        ("link", Some(account_id)) => Intent::Link(account_id),
+        _ => return login_with_refusal(Refusal::Expired, &target, cookies),
+    };
+    if !claimed.live || claimed.provider != provider.as_str() {
+        return intent.refuse(Refusal::Expired, provider, cookies);
     }
     if !query.error.is_empty() {
         let refusal = if query.error == "access_denied" {
@@ -696,13 +732,13 @@ async fn callback(
         } else {
             Refusal::Failed
         };
-        return login_with_refusal(refusal, &target, cookies);
+        return intent.refuse(refusal, provider, cookies);
     }
     let Some(verifier) = claimed.pkce_verifier.as_deref() else {
-        return login_with_refusal(Refusal::Expired, &target, cookies);
+        return intent.refuse(Refusal::Expired, provider, cookies);
     };
     if query.code.is_empty() || query.code.len() > MAX_CODE_BYTES {
-        return login_with_refusal(Refusal::Failed, &target, cookies);
+        return intent.refuse(Refusal::Failed, provider, cookies);
     }
 
     let identity = match state
@@ -728,7 +764,21 @@ async fn callback(
                 IdentityError::Unavailable => Refusal::Unavailable,
                 IdentityError::Upstream | IdentityError::Invalid => Refusal::Failed,
             };
-            return login_with_refusal(refusal, &target, cookies);
+            return intent.refuse(refusal, provider, cookies);
+        }
+    };
+    let target = match intent {
+        Intent::SignIn(target) => target,
+        Intent::Link(account_id) => {
+            return sign_in_methods::finish(
+                &state,
+                provider,
+                &account_id,
+                &identity,
+                &headers,
+                cookies,
+            )
+            .await;
         }
     };
 
@@ -786,7 +836,7 @@ async fn claim_state(pool: &PgPool, raw_state: &str) -> Result<Option<ClaimedSta
         r#"
         DELETE FROM oauth_states
          WHERE token_hash = $1
-        RETURNING provider, intent, pkce_verifier, nonce,
+        RETURNING provider, intent, user_id, pkce_verifier, nonce,
                   return_auth_request_id, return_to, expires_at > NOW() AS live
         "#,
     )
@@ -956,12 +1006,13 @@ async fn resolve(
                             &owner.id,
                             &ip,
                             &ua,
-                            json!({
-                                "provider": provider.as_str(),
-                                "provider_email": &identity.email,
-                                "automatic": true,
-                                "confirmed_by": "provider",
-                            }),
+                            {
+                                let mut metadata =
+                                    sign_in_methods::identity_audit(provider, identity);
+                                metadata["automatic"] = json!(true);
+                                metadata["confirmed_by"] = json!("provider");
+                                metadata
+                            },
                             "info",
                         )
                         .await
@@ -1111,6 +1162,7 @@ async fn pending_signup_row(
         "subject": &identity.subject,
         "email": &identity.email,
         "name": &identity.name,
+        "account": &identity.account,
     }))
     .bind(&target.auth_request_id)
     .bind(&target.return_to)
@@ -1164,655 +1216,9 @@ async fn link_confirmation_row(
     Ok((token, requester))
 }
 
-// --- POST /api/auth/oauth/link/{pending,confirm} ---
-
-#[derive(Deserialize, JsonSchema)]
-struct LinkTokenRequest {
-    token: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct ConfirmLinkRequest {
-    token: String,
-    /// The requester secret from the browser's `/login/link` cookie.
-    #[serde(default)]
-    requester: String,
-}
-
-#[derive(Serialize)]
-struct LinkBody {
-    provider: &'static str,
-    /// The provider account: GitHub login or Google email.
-    account: String,
-}
-
-#[derive(Deserialize)]
-struct LinkIdentity {
-    subject: String,
-    email: String,
-    #[serde(default)]
-    account: String,
-}
-
-impl LinkIdentity {
-    fn account(&self) -> String {
-        if self.account.is_empty() {
-            self.email.clone()
-        } else {
-            self.account.clone()
-        }
-    }
-}
-
-fn link_expired() -> AppError {
-    AppError::Coded {
-        status: StatusCode::NOT_FOUND,
-        code: "oauth_link_expired",
-        detail: "This link has expired or was already used.".into(),
-    }
-}
-
-fn link_refused() -> AppError {
-    AppError::Coded {
-        status: StatusCode::FORBIDDEN,
-        code: "oauth_link_refused",
-        detail: "This account can't be connected right now.".into(),
-    }
-}
-
-/// The confirmation was opened in a browser other than the one that started
-/// the sign-in. Nothing is used up.
-fn link_wrong_browser() -> AppError {
-    AppError::Coded {
-        status: StatusCode::PRECONDITION_FAILED,
-        code: "oauth_link_wrong_browser",
-        detail: "Open this link in the browser where you started signing in.".into(),
-    }
-}
-
-fn link_taken() -> AppError {
-    AppError::Coded {
-        status: StatusCode::CONFLICT,
-        code: "oauth_link_taken",
-        detail: "This provider account is connected to another Codewire account.".into(),
-    }
-}
-
-/// `POST /api/auth/oauth/link/pending`: which provider a live confirmation
-/// would connect, for the dashboard's confirmation page. It reads only, so a
-/// mail scanner that opens the emailed link uses nothing up.
-async fn pending_link(
-    State(state): State<OAuthState>,
-    ValidatedJson(request): ValidatedJson<LinkTokenRequest>,
-) -> Result<Response, AppError> {
-    if !valid_handle(&request.token) {
-        return Err(link_expired());
-    }
-    let (provider, identity): (String, serde_json::Value) = sqlx::query_as(
-        r#"
-        SELECT provider, provider_identity FROM oauth_states
-         WHERE token_hash = $1 AND intent = 'link_confirm' AND expires_at > NOW()
-        "#,
-    )
-    .bind(hash_session_token(&request.token))
-    .fetch_optional(&state.session.pool)
-    .await?
-    .ok_or_else(link_expired)?;
-    let provider = Provider::parse(&provider).ok_or_else(link_expired)?;
-    let identity: LinkIdentity = serde_json::from_value(identity).map_err(|_| link_expired())?;
-    Ok(Json(LinkBody {
-        provider: provider.as_str(),
-        account: identity.account(),
-    })
-    .into_response())
-}
-
-#[derive(sqlx::FromRow)]
-struct ClaimedLink {
-    id: String,
-    user_id: String,
-    provider: String,
-    provider_identity: serde_json::Value,
-    requester_hash: Option<String>,
-    live: bool,
-}
-
-#[derive(sqlx::FromRow)]
-struct LinkOwner {
-    email: String,
-    refused: bool,
-}
-
-/// `POST /api/auth/oauth/link/confirm`: the account's own address confirmed
-/// the link, from the browser that started the sign-in. The emailed token
-/// proves only that someone reads the account's mail; the requester secret,
-/// which only the starting browser holds, proves it is the person who signed
-/// in with the provider. Without it nothing changes and the token stays
-/// usable. With it the token is used up; the account must still be enabled,
-/// not locked out and own the address the identity proved, and the identity
-/// must not belong to anyone else. It links and audits, and creates no
-/// session: the person then signs in with the provider, through every gate
-/// including the second factor.
-async fn confirm_link(
-    State(state): State<OAuthState>,
-    headers: HeaderMap,
-    ValidatedJson(request): ValidatedJson<ConfirmLinkRequest>,
-) -> Result<Response, AppError> {
-    if !valid_handle(&request.token) {
-        return Err(link_expired());
-    }
-    let pool = &state.session.pool;
-    let mut tx = pool.begin().await?;
-    // The row lock makes the use single even when two confirmations race:
-    // the second waits, then finds the row gone.
-    let claimed = sqlx::query_as::<_, ClaimedLink>(
-        r#"
-        SELECT id, user_id, provider, provider_identity, requester_hash,
-               expires_at > NOW() AS live
-          FROM oauth_states
-         WHERE token_hash = $1 AND intent = 'link_confirm'
-           FOR UPDATE
-        "#,
-    )
-    .bind(hash_session_token(&request.token))
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some(claimed) = claimed.filter(|claimed| claimed.live) else {
-        tx.commit().await?;
-        return Err(link_expired());
-    };
-    let requester_matches = valid_handle(&request.requester)
-        && claimed.requester_hash.as_deref().is_some_and(|stored| {
-            same_secret(
-                stored.as_bytes(),
-                hash_session_token(&request.requester).as_bytes(),
-            )
-        });
-    if !requester_matches {
-        tx.commit().await?;
-        return Err(link_wrong_browser());
-    }
-    sqlx::query("DELETE FROM oauth_states WHERE id = $1")
-        .bind(&claimed.id)
-        .execute(&mut *tx)
-        .await?;
-    let provider = Provider::parse(&claimed.provider).ok_or_else(link_expired)?;
-    let identity: LinkIdentity =
-        serde_json::from_value(claimed.provider_identity).map_err(|_| link_expired())?;
-
-    // The account lock first, as disablement takes it.
-    let owner: Option<LinkOwner> = sqlx::query_as(
-        r#"
-        SELECT email,
-               (NOT enabled OR COALESCE(locked_until > NOW(), false)) AS refused
-          FROM users
-         WHERE id = $1
-           FOR UPDATE
-        "#,
-    )
-    .bind(&claimed.user_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some(owner) = owner else {
-        tx.commit().await?;
-        return Err(link_expired());
-    };
-    if owner.refused || owner.email.to_lowercase() != identity.email.to_lowercase() {
-        // Used up either way: a new sign-in asks again.
-        tx.commit().await?;
-        return Err(link_refused());
-    }
-    let existing: Option<String> = sqlx::query_scalar(
-        "SELECT user_id FROM accounts WHERE provider_id = $1 AND account_id = $2",
-    )
-    .bind(provider.as_str())
-    .bind(&identity.subject)
-    .fetch_optional(&mut *tx)
-    .await?;
-    match existing {
-        Some(user_id) if user_id == claimed.user_id => {
-            tx.commit().await?;
-            return Ok(Json(LinkBody {
-                provider: provider.as_str(),
-                account: identity.account(),
-            })
-            .into_response());
-        }
-        Some(_) => {
-            tx.commit().await?;
-            return Err(link_taken());
-        }
-        None => {}
-    }
-    sqlx::query(
-        r#"
-        INSERT INTO accounts (id, user_id, provider_id, account_id, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, NOW(), NOW())
-        "#,
-    )
-    .bind(hex_id())
-    .bind(&claimed.user_id)
-    .bind(provider.as_str())
-    .bind(&identity.subject)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| {
-        if error
-            .as_database_error()
-            .is_some_and(|error| error.is_unique_violation())
-        {
-            link_taken()
-        } else {
-            tracing::error!(%error, "failed to link OAuth identity");
-            AppError::InternalMsg("Failed to connect the account".into())
-        }
-    })?;
-    let (ip, ua) = request_info(&headers);
-    log_audit_in(
-        &mut tx,
-        "user.oauth.linked",
-        &claimed.user_id,
-        &ip,
-        &ua,
-        json!({
-            "provider": provider.as_str(),
-            "provider_email": &identity.email,
-            "automatic": false,
-            "confirmed_by": "email",
-        }),
-        "info",
-    )
-    .await?;
-    tx.commit().await?;
-
-    if state.session.email.is_configured() {
-        let settings_url = format!(
-            "{}/settings/",
-            state.session.frontend_url.trim_end_matches('/')
-        );
-        if let Err(error) = send_provider_linked_email(
-            &state.session.email,
-            &owner.email,
-            provider.label(),
-            &settings_url,
-        )
-        .await
-        {
-            tracing::error!(%error, user_id = %claimed.user_id, "failed to send provider link notice");
-        }
-    }
-    Ok(Json(LinkBody {
-        provider: provider.as_str(),
-        account: identity.account(),
-    })
-    .into_response())
-}
-
-// --- POST /api/auth/oauth/signup/{pending,complete} ---
-
-#[derive(Deserialize, JsonSchema)]
-struct PendingSignupRequest {
-    token: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct CompleteSignupRequest {
-    token: String,
-    #[serde(default)]
-    invite_code: String,
-    #[serde(default)]
-    reason: String,
-    #[serde(default, rename = "turnstile_token")]
-    turnstile_token: String,
-}
-
-#[derive(Deserialize)]
-struct PendingIdentity {
-    subject: String,
-    email: String,
-    #[serde(default)]
-    name: Option<String>,
-}
-
-#[derive(sqlx::FromRow)]
-struct PendingRow {
-    provider: String,
-    provider_identity: serde_json::Value,
-    return_auth_request_id: Option<String>,
-    return_to: Option<String>,
-}
-
-#[derive(Serialize)]
-struct PendingSignupBody {
-    provider: &'static str,
-    email: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    auth_request_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    return_to: Option<String>,
-}
-
-#[derive(Serialize)]
-struct CompleteSignupBody {
-    user: UserResponse,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session: Option<SessionResponse>,
-    #[serde(rename = "accessPending", skip_serializing_if = "std::ops::Not::not")]
-    access_pending: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    auth_request_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    return_to: Option<String>,
-}
-
-fn signup_expired() -> AppError {
-    AppError::Coded {
-        status: StatusCode::NOT_FOUND,
-        code: "oauth_signup_expired",
-        detail: "This sign-up has expired. Start again.".into(),
-    }
-}
-
-fn account_exists() -> AppError {
-    AppError::Conflict("An account with this email already exists".into())
-}
-
 fn valid_handle(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-async fn live_pending_row(pool: &PgPool, token: &str) -> Result<PendingRow, AppError> {
-    if !valid_handle(token) {
-        return Err(signup_expired());
-    }
-    sqlx::query_as::<_, PendingRow>(
-        r#"
-        SELECT provider, provider_identity, return_auth_request_id, return_to
-          FROM oauth_states
-         WHERE token_hash = $1 AND intent = 'sign_up' AND expires_at > NOW()
-        "#,
-    )
-    .bind(hash_session_token(token))
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(signup_expired)
-}
-
-fn pending_parts(row: &PendingRow) -> Result<(Provider, PendingIdentity), AppError> {
-    let provider = Provider::parse(&row.provider).ok_or_else(signup_expired)?;
-    let identity: PendingIdentity =
-        serde_json::from_value(row.provider_identity.clone()).map_err(|_| signup_expired())?;
-    Ok((provider, identity))
-}
-
-async fn pending_signup(
-    State(state): State<OAuthState>,
-    ValidatedJson(request): ValidatedJson<PendingSignupRequest>,
-) -> Result<Response, AppError> {
-    let row = live_pending_row(&state.session.pool, &request.token).await?;
-    let (provider, identity) = pending_parts(&row)?;
-    Ok(Json(PendingSignupBody {
-        provider: provider.as_str(),
-        email: identity.email,
-        auth_request_id: row.return_auth_request_id,
-        return_to: row.return_to,
-    })
-    .into_response())
-}
-
-async fn complete_signup(
-    State(state): State<OAuthState>,
-    headers: HeaderMap,
-    ValidatedJson(request): ValidatedJson<CompleteSignupRequest>,
-) -> Result<Response, AppError> {
-    let session = &state.session;
-    let row = live_pending_row(&session.pool, &request.token).await?;
-    let (provider, identity) = pending_parts(&row)?;
-
-    // The same checks as email sign-up, before the row is used up, so a
-    // failed challenge or a missing reason can be corrected on the page.
-    validate_turnstile(session, &identity.email, &request.turnstile_token).await?;
-    let enabled = session.signup_invite_policy.accepts(&request.invite_code);
-    let access_reason = request.reason.trim();
-    if !enabled
-        && (access_reason.is_empty() || access_reason.chars().count() > MAX_ACCESS_REASON_CHARS)
-    {
-        return Err(AppError::BadRequest(
-            "Tell us why you want to use Codewire".into(),
-        ));
-    }
-
-    let mut tx = session.pool.begin().await?;
-    let claimed: Option<String> = sqlx::query_scalar(
-        r#"
-        DELETE FROM oauth_states
-         WHERE token_hash = $1 AND intent = 'sign_up' AND expires_at > NOW()
-        RETURNING id
-        "#,
-    )
-    .bind(hash_session_token(&request.token))
-    .fetch_optional(&mut *tx)
-    .await?;
-    if claimed.is_none() {
-        tx.commit().await?;
-        return Err(signup_expired());
-    }
-
-    let taken: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (SELECT 1 FROM users WHERE lower(email) = lower($1))
-            OR EXISTS (SELECT 1 FROM accounts WHERE provider_id = $2 AND account_id = $3)
-        "#,
-    )
-    .bind(&identity.email)
-    .bind(provider.as_str())
-    .bind(&identity.subject)
-    .fetch_one(&mut *tx)
-    .await?;
-    if taken {
-        // The row stays used: the identity now signs in or links instead.
-        tx.commit().await?;
-        return Err(account_exists());
-    }
-
-    let user_id = hex_id();
-    let stored_access_reason = (!enabled).then_some(access_reason);
-    // The provider verified the email, so the account starts verified and
-    // has no password; `enabled` follows the invite policy.
-    let created_at: NaiveDateTime = sqlx::query_scalar(
-        r#"
-        INSERT INTO users
-            (id, email, email_verified, name, enabled, access_reason, created_at, updated_at)
-        VALUES ($1, $2, true, $3, $4, $5, NOW(), NOW())
-        RETURNING created_at
-        "#,
-    )
-    .bind(&user_id)
-    .bind(&identity.email)
-    .bind(&identity.name)
-    .bind(enabled)
-    .bind(stored_access_reason)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|error| conflict_or_internal(error, "failed to create OAuth user"))?;
-    sqlx::query(
-        r#"
-        INSERT INTO accounts (id, user_id, provider_id, account_id, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, NOW(), NOW())
-        "#,
-    )
-    .bind(hex_id())
-    .bind(&user_id)
-    .bind(provider.as_str())
-    .bind(&identity.subject)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| conflict_or_internal(error, "failed to link OAuth identity"))?;
-
-    let (ip, ua) = request_info(&headers);
-    log_audit_in(
-        &mut tx,
-        if enabled {
-            "user.signup"
-        } else {
-            "user.signup.access_requested"
-        },
-        &user_id,
-        &ip,
-        &ua,
-        json!({
-            "email": &identity.email,
-            "enabled": enabled,
-            "method": provider.as_str(),
-        }),
-        "info",
-    )
-    .await?;
-    tx.commit().await?;
-
-    let user = UserResponse {
-        id: user_id.clone(),
-        email: identity.email.clone(),
-        email_verified: true,
-        name: identity.name.clone(),
-        image: None,
-        is_admin: false,
-        two_factor_enabled: false,
-        cli_signed_in: false,
-        created_at: format_time(created_at),
-    };
-
-    if !enabled {
-        if session.email.is_configured()
-            && let Err(error) =
-                send_access_request_received_email(&session.email, &identity.email).await
-        {
-            tracing::error!(%error, user_id = %user_id, "failed to send access request receipt");
-        }
-        return Ok((
-            StatusCode::ACCEPTED,
-            Json(CompleteSignupBody {
-                user,
-                session: None,
-                access_pending: true,
-                auth_request_id: row.return_auth_request_id,
-                return_to: row.return_to,
-            }),
-        )
-            .into_response());
-    }
-
-    let created = create_session(&session.pool, &user_id, &ip, &ua)
-        .await
-        .map_err(|_| AppError::InternalMsg("Account created but session failed".into()))?;
-    let mut response = Json(CompleteSignupBody {
-        user,
-        session: Some(created.response),
-        access_pending: false,
-        auth_request_id: row.return_auth_request_id,
-        return_to: row.return_to,
-    })
-    .into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        HeaderValue::from_str(&session_cookie_string(&created.token, session.secure))
-            .expect("session cookies are ASCII"),
-    );
-    Ok(response)
-}
-
-/// A unique violation means another sign-up won the email or the identity.
-fn conflict_or_internal(error: sqlx::Error, context: &'static str) -> AppError {
-    if error
-        .as_database_error()
-        .is_some_and(|error| error.is_unique_violation())
-    {
-        return account_exists();
-    }
-    tracing::error!(%error, "{context}");
-    AppError::InternalMsg("Failed to create account".into())
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn return_targets_keep_only_same_origin_paths_and_bounded_request_ids() {
-        let target = ReturnTarget::sanitized("request-id", "/device?user_code=ABCD-EFGH");
-        assert_eq!(target.auth_request_id.as_deref(), Some("request-id"));
-        assert_eq!(target.completion(), "/api/oidc/callback?id=request-id");
-
-        let target = ReturnTarget::sanitized("", "/device?user_code=ABCD-EFGH");
-        assert_eq!(target.completion(), "/device?user_code=ABCD-EFGH");
-
-        for unsafe_path in [
-            "https://evil.example/",
-            "//evil.example/",
-            "/\\evil.example",
-            "/x\nLocation: https://evil.example",
-            "dashboard",
-        ] {
-            assert_eq!(safe_return_to(unsafe_path), None, "{unsafe_path:?}");
-        }
-        assert_eq!(clean_auth_request_id(&"a".repeat(257)), None);
-        assert_eq!(clean_auth_request_id("a\u{7}"), None);
-        assert_eq!(ReturnTarget::default().completion(), "/dashboard/");
-    }
-
-    #[test]
-    fn refusals_land_on_login_with_a_fixed_code_and_the_target() {
-        let target = ReturnTarget::sanitized("request-id", "");
-        let response = login_with_refusal(Refusal::LinkRequired, &target, Vec::new());
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            response.headers()[header::LOCATION],
-            "/login?oauth_error=link_required&authRequestID=request-id"
-        );
-    }
-
-    #[test]
-    fn pkce_challenges_are_s256_of_the_verifier() {
-        // RFC 7636 Appendix B.
-        assert_eq!(
-            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
-            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
-        );
-        let verifier = pkce_verifier();
-        assert_eq!(verifier.len(), 43);
-        assert!(
-            verifier
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        );
-    }
-
-    #[test]
-    fn oauth_cookies_are_http_only_lax_scoped_and_secure_on_https() {
-        let value = cookie(STATE_COOKIE, "abc", STATE_COOKIE_PATH, 600, true);
-        assert_eq!(
-            value,
-            "codewire_oauth_state=abc; Path=/api/auth/oauth/; HttpOnly; SameSite=Lax; Max-Age=600; Secure"
-        );
-        let cleared = clear_cookie(STATE_COOKIE, STATE_COOKIE_PATH, false);
-        assert_eq!(
-            cleared,
-            "codewire_oauth_state=; Path=/api/auth/oauth/; HttpOnly; SameSite=Lax; Max-Age=0"
-        );
-    }
-
-    #[test]
-    fn a_cookie_sent_twice_is_not_trusted() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::COOKIE,
-            HeaderValue::from_static("codewire_oauth_state=one; other=x"),
-        );
-        assert_eq!(unique_cookie(&headers, STATE_COOKIE), Some("one"));
-        headers.append(
-            header::COOKIE,
-            HeaderValue::from_static("codewire_oauth_state=two"),
-        );
-        assert_eq!(unique_cookie(&headers, STATE_COOKIE), None);
-    }
-}
+mod tests;

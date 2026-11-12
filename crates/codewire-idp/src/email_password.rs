@@ -288,6 +288,74 @@ pub(crate) async fn send_provider_linked_email(
         .await
 }
 
+/// The notice an account's address gets when its owner connects a provider
+/// from Settings. `provider` is a fixed label; `account` is the provider
+/// account (GitHub login or Google email), escaped here.
+pub(crate) async fn send_provider_connected_email(
+    email: &EmailClient,
+    to: &str,
+    provider: &'static str,
+    account: &str,
+    settings_url: &str,
+) -> anyhow::Result<()> {
+    let named = provider_account_phrase(provider, account);
+    let html = format!(
+        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+	<h2>{provider} was connected to your Codewire account</h2>
+	<p>{named} was connected from your account's Settings and can now be used to sign in to your account. Your two-factor authentication still applies.</p>
+	<p>If this wasn't you, disconnect it, change your password and review your account's sessions.</p>
+	<p><a href="{settings_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 999px;">Review sign-in methods</a></p>
+</div>"#
+    );
+    email
+        .send_html(
+            to,
+            &format!("{provider} was connected to your Codewire account"),
+            &html,
+        )
+        .await
+}
+
+/// The notice an account's address gets when a provider is disconnected
+/// from Settings.
+pub(crate) async fn send_provider_disconnected_email(
+    email: &EmailClient,
+    to: &str,
+    provider: &'static str,
+    account: &str,
+    settings_url: &str,
+) -> anyhow::Result<()> {
+    let named = provider_account_phrase(provider, account);
+    let html = format!(
+        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+	<h2>{provider} was disconnected from your Codewire account</h2>
+	<p>{named} was disconnected from your account's Settings and can no longer be used to sign in to your account.</p>
+	<p>If this wasn't you, change your password and review your account's sessions.</p>
+	<p><a href="{settings_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 999px;">Review sign-in methods</a></p>
+</div>"#
+    );
+    email
+        .send_html(
+            to,
+            &format!("{provider} was disconnected from your Codewire account"),
+            &html,
+        )
+        .await
+}
+
+/// "The GitHub account octocat", or "A GitHub account" when no account name
+/// is known. The name is escaped.
+fn provider_account_phrase(provider: &'static str, account: &str) -> String {
+    if account.is_empty() {
+        format!("A {provider} account")
+    } else {
+        format!(
+            "The {provider} account <strong>{}</strong>",
+            html_text(account)
+        )
+    }
+}
+
 /// Escape text for an HTML email body.
 fn html_text(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
@@ -666,6 +734,15 @@ pub fn router(pool: PgPool, frontend_url: String, email: EmailClient, auth: Auth
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connect_and_disconnect_notices_escape_the_provider_account() {
+        assert_eq!(
+            provider_account_phrase("GitHub", "<octo&cat>"),
+            "The GitHub account <strong>&lt;octo&amp;cat&gt;</strong>"
+        );
+        assert_eq!(provider_account_phrase("Google", ""), "A Google account");
+    }
 
     #[test]
     fn link_confirmation_names_and_escapes_the_provider_account() {

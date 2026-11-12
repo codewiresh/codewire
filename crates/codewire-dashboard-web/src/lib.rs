@@ -6,6 +6,7 @@
 
 mod account_home;
 mod account_sessions;
+mod account_sign_in_methods;
 mod account_two_factor;
 mod admin_connect;
 mod assets;

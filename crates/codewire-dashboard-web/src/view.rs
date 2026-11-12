@@ -146,6 +146,19 @@ pub(crate) struct AccountAccessView {
     pub(crate) reason: String,
     pub(crate) has_reason: bool,
     pub(crate) created_at: String,
+    pub(crate) identities: Vec<LinkedIdentityView>,
+}
+
+/// A GitHub or Google identity that signs in to an account, for admins.
+#[derive(Debug)]
+pub(crate) struct LinkedIdentityView {
+    /// "GitHub" or "Google".
+    pub(crate) provider: &'static str,
+    /// The provider's stable subject.
+    pub(crate) subject: String,
+    /// The provider account it was linked as, when known.
+    pub(crate) account: String,
+    pub(crate) linked_at: String,
 }
 
 impl fmt::Debug for AuthFormView {
@@ -373,6 +386,32 @@ pub(crate) struct SettingsPageView {
     /// the page was read with, so the list is withheld until the next load.
     pub(crate) sessions_replaced: bool,
     pub(crate) two_factor: TwoFactorDialogView,
+    pub(crate) sign_in_methods: SignInMethodsView,
+}
+
+/// The Account page's Sign-in methods card: the password and each configured
+/// provider.
+#[derive(Default)]
+pub(crate) struct SignInMethodsView {
+    /// The IdP answered; otherwise only a warning is shown.
+    pub(crate) available: bool,
+    pub(crate) password: bool,
+    pub(crate) providers: Vec<SignInProviderView>,
+    pub(crate) message: String,
+    pub(crate) error: String,
+}
+
+pub(crate) struct SignInProviderView {
+    /// `github` or `google`: the form value and the row's id.
+    pub(crate) provider: &'static str,
+    /// "GitHub" or "Google".
+    pub(crate) label: &'static str,
+    pub(crate) connected: bool,
+    /// The provider account it was connected as, when known.
+    pub(crate) account: String,
+    pub(crate) connected_at: String,
+    /// Another way to sign in remains without this provider.
+    pub(crate) can_disconnect: bool,
 }
 
 /// The open two-factor dialog and the one-time values it shows. The setup key,

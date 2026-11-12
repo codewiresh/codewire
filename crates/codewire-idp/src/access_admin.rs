@@ -17,6 +17,7 @@ use sqlx::PgPool;
 
 use crate::auth_session::{hex_id, request_info};
 use crate::email_password::send_access_enabled_email;
+use crate::oauth::LINKED_ACCOUNT_SQL;
 
 #[derive(Clone)]
 struct AccessAdminState {
@@ -35,6 +36,22 @@ struct AccountAccessRow {
     enabled: bool,
     access_reason: Option<String>,
     created_at: NaiveDateTime,
+    /// The GitHub and Google identities that sign in to this account.
+    #[sqlx(skip)]
+    linked_identities: Vec<LinkedIdentityRow>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+struct LinkedIdentityRow {
+    #[serde(skip)]
+    user_id: String,
+    provider: String,
+    /// The provider's stable subject: GitHub's numeric id, Google's `sub`.
+    subject: String,
+    /// The provider account it was linked as, when the audit log names it.
+    account: Option<String>,
+    linked_at: NaiveDateTime,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,7 +83,7 @@ async fn list_accounts(
     actor: AuthUser,
 ) -> Result<Json<AccountAccessList>, AppError> {
     actor.require_global_admin()?;
-    let accounts = sqlx::query_as::<_, AccountAccessRow>(
+    let mut accounts = sqlx::query_as::<_, AccountAccessRow>(
         r#"SELECT id,
                   email,
                   name,
@@ -88,6 +105,30 @@ async fn list_accounts(
         tracing::error!(%error, "failed to list account access state");
         AppError::InternalMsg("Failed to list accounts".into())
     })?;
+    let ids: Vec<&str> = accounts.iter().map(|account| account.id.as_str()).collect();
+    let identities = sqlx::query_as::<_, LinkedIdentityRow>(&format!(
+        "SELECT a.user_id, a.provider_id AS provider, a.account_id AS subject, \
+                {LINKED_ACCOUNT_SQL} AS account, \
+                COALESCE(a.created_at, NOW()::timestamp) AS linked_at \
+           FROM accounts a \
+          WHERE a.user_id = ANY($1) AND a.provider_id IN ('github', 'google') \
+          ORDER BY a.provider_id, a.created_at"
+    ))
+    .bind(&ids)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "failed to list linked identities");
+        AppError::InternalMsg("Failed to list accounts".into())
+    })?;
+    for identity in identities {
+        if let Some(account) = accounts
+            .iter_mut()
+            .find(|account| account.id == identity.user_id)
+        {
+            account.linked_identities.push(identity);
+        }
+    }
     Ok(Json(AccountAccessList { accounts }))
 }
 
