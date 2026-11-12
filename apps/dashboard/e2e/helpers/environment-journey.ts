@@ -169,7 +169,9 @@ export async function openConfiguredImageForm(page: Page, journey: EnvironmentJo
   await page.goto(`/${journey.slug}/new/`);
   await page.getByLabel("Workspace image").fill(workspaceRuntimeImage);
   await page.locator("[data-create-runtime] > summary").click();
-  await page.getByLabel("Install Command").fill("printf 'configured-explicitly\\n'");
+  // An organization with no Sandboxes also shows the start panel's "Install
+  // command" copy section (#4065), so name the form's textbox by role.
+  await page.getByRole("textbox", { name: "Install command" }).fill("printf 'configured-explicitly\\n'");
   await page.getByLabel("Startup Script").fill("printf 'started-explicitly\\n'");
   await page.getByLabel("Delete after").fill("3600s");
   await page.locator('input[name="agent"][value="codex"]').check();

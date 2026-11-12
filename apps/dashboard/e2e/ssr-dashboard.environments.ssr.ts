@@ -359,7 +359,10 @@ test.describe.serial("server-rendered environments", () => {
     const drawer = page.locator("[data-drawer]");
     await expect(drawer).toBeHidden();
     await expect(drawer.locator("#environment-create-card")).toHaveCount(1);
-    await page.locator(".cw-environment-toolbar").getByRole("link", { name: "Create Sandbox" }).click();
+    // An organization with no Sandboxes shows the start panel and hides the
+    // list toolbar (#4065); the sidebar's Create Sandbox opens the same sheet
+    // whether or not the organization has Sandboxes.
+    await page.locator(".cw-sidebar-slot .cw-console-create").click();
     await expect(page).toHaveURL(`${ssrUrl}/${slug}/new/`);
     await expect(drawer).toBeVisible();
     await expect(page.locator("#environment-name")).toBeFocused();
@@ -406,7 +409,7 @@ test.describe.serial("server-rendered environments", () => {
     await page.getByLabel("Internal port", { exact: true }).fill("3000");
     await page.getByLabel("Preview label", { exact: true }).fill("web");
     await page.locator("[data-create-runtime] > summary").click();
-    await page.getByLabel("Install Command").fill("bun install");
+    await page.getByRole("textbox", { name: "Install command" }).fill("bun install");
     await page.getByLabel("Startup Script").fill("bun run dev");
     await expect(page.locator('input[name="agent"][value="codex"]')).toBeChecked();
     await expect(page.getByLabel("Internal port", { exact: true })).toHaveValue("3000");
@@ -421,7 +424,7 @@ test.describe.serial("server-rendered environments", () => {
       'input[name^="agent_secret_"]',
       'input[name^="exposure"]',
     ].join(","))).toHaveCount(0);
-    await expect(page.getByLabel("Install Command")).toHaveValue("bun install");
+    await expect(page.getByRole("textbox", { name: "Install command" })).toHaveValue("bun install");
     await expect(page.getByLabel("Startup Script")).toHaveValue("bun run dev");
     await expect(page.locator("#environment-create-card").getByLabel("CPU", { exact: true })).toHaveValue("2000");
     await expect(page.locator("#environment-create-card").getByLabel("Memory", { exact: true })).toHaveValue("8192");

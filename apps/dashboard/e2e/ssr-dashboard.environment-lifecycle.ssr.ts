@@ -22,6 +22,7 @@ import {
   watchDisallowedBrowserCalls,
 } from "./helpers/environment-journey";
 import { terminalWebSocketUrl } from "./helpers/terminal-websocket";
+import { expectOnAnchorLines, sidebarLeftAnchors, sidebarRightAnchors } from "./helpers/anchor-lines";
 
 // The real Sandbox lifecycle through Kind: create, terminal, ports, resize,
 // Stop, Start and Delete. It is the longest browser journey, so it has its
@@ -214,47 +215,17 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     await expect(page.getByRole("region", { name: "Setup", exact: true })).toBeVisible();
     // The rest of this journey starts from the Sandboxes list.
     await page.goto(`${ssrUrl}/${slug}/`);
-    const sidebarAlignment = await page.evaluate(() => {
-      const bounds = (selector: string) => {
-        const rect = document.querySelector(selector)?.getBoundingClientRect();
-        return rect ? { left: rect.left, right: rect.right } : undefined;
-      };
-      return {
-        organization: bounds(".cw-sidebar-slot .cw-org-switcher > summary"),
-        create: bounds(".cw-sidebar-slot .cw-console-create"),
-        createIcon: bounds(".cw-sidebar-slot .cw-console-create .cw-icon"),
-        heading: bounds(".cw-sidebar-slot .cw-console-rail-heading"),
-        headingText: bounds(".cw-sidebar-slot .cw-console-rail-heading h2 > a"),
-        row: bounds(".cw-sidebar-slot .cw-rail-row"),
-        rowDot: bounds(".cw-sidebar-slot .cw-rail-dot"),
-        getStarted: bounds(".cw-sidebar-slot .cw-console-get-started .cw-nav-link"),
-        footer: bounds(".cw-sidebar-slot .cw-console-footer .cw-nav-link"),
-        footerIcon: bounds(".cw-sidebar-slot .cw-console-footer .cw-nav-link .cw-icon"),
-      };
-    });
-    expect(sidebarAlignment.create).toBeDefined();
-    const expectWithinPixel = (actual: number | undefined, expected: number | undefined) => {
-      expect(actual).toBeDefined();
-      expect(expected).toBeDefined();
-      expect(Math.abs((actual ?? 0) - (expected ?? 0))).toBeLessThanOrEqual(1);
-    };
-    for (const control of [
-      sidebarAlignment.organization,
-      sidebarAlignment.heading,
-      sidebarAlignment.row,
-      sidebarAlignment.getStarted,
-      sidebarAlignment.footer,
-    ]) {
-      expectWithinPixel(control?.left, sidebarAlignment.create?.left);
-      expectWithinPixel(control?.right, sidebarAlignment.create?.right);
-    }
-    for (const content of [
-      sidebarAlignment.headingText,
-      sidebarAlignment.rowDot,
-      sidebarAlignment.footerIcon,
-    ]) {
-      expectWithinPixel(content?.left, sidebarAlignment.createIcon?.left);
-    }
+    // The live sidebar, with this Sandbox in its rail, keeps its marks on the
+    // two anchor lines (#4033; helpers/anchor-lines.ts). This account is not
+    // an administrator, so it has no Admin rows.
+    await expect(page.locator(".cw-sidebar-slot .cw-rail-row", { hasText: environmentName })).toBeVisible();
+    await expectOnAnchorLines(
+      page,
+      "live sidebar",
+      ".cw-sidebar-slot .cw-console-sidebar",
+      "var(--cw-sidebar-anchor)",
+      [...sidebarLeftAnchors, ...sidebarRightAnchors],
+    );
 
     const [created] = await sql`
       SELECT id, cpu_millicores, memory_mb, disk_gb, ttl_seconds,

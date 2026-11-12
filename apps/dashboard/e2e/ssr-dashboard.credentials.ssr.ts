@@ -419,8 +419,8 @@ test.describe("managed provider credential browser journey", () => {
       await source.getByRole("textbox", { name: "Branch", exact: true }).fill("main");
       await page.getByLabel("Workspace image").fill(githubCheckoutImage);
       await page.locator("[data-create-runtime] > summary").click();
-      await page.getByLabel("Install Command").fill(githubCheckoutInstall);
-      await expect(page.getByLabel("Install Command")).toHaveValue(githubCheckoutInstall);
+      await page.getByRole("textbox", { name: "Install command" }).fill(githubCheckoutInstall);
+      await expect(page.getByRole("textbox", { name: "Install command" })).toHaveValue(githubCheckoutInstall);
       await page.getByLabel("Delete after").fill("3600s");
       const before = await githubGitCounters();
       expect(setupDispatches).toEqual([]);

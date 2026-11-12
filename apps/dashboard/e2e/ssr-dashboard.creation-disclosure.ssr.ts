@@ -906,7 +906,7 @@ test("Create recovery restores authored values only after current selections are
   await expect(page.getByLabel("Internal port")).toHaveValue("");
   await expect(page.getByLabel("Preview label")).toHaveValue("web");
   await page.locator("[data-create-runtime] summary").click();
-  await expect(page.getByLabel("Install Command")).toHaveValue("bun install");
+  await expect(page.getByRole("textbox", { name: "Install command" })).toHaveValue("bun install");
   await expect(page.getByLabel("Startup Script")).toHaveValue("bun run dev");
 });
 

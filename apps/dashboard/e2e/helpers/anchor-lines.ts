@@ -59,3 +59,31 @@ export async function anchorDistances(page: Page, container: string, line: strin
 export async function expectOnAnchorLines(page: Page, label: string, container: string, line: string, checks: AnchorCheck[]) {
   expect(await anchorDistances(page, container, line, checks), label).toEqual([]);
 }
+
+// The sidebar's grid (routes/dashboard.css) puts every mark on one of two
+// anchor lines: on the left the logo's c, the organization badge, the create
+// plus, the sort icon, the rail's dots, the footer icons and the account
+// badge, with the Admin label and links starting on it; on the right the
+// collapse icon, the chevrons, the view-all icon and the region labels. The
+// Admin rows render only for an administrator, so a check on a live page
+// leaves them out unless its account is one.
+export const sidebarLeftAnchors: AnchorCheck[] = [
+  { selector: ".cw-console-brand img", at: "start", plus: "var(--sidebar-logo-anchor)" },
+  { selector: ".cw-org-switcher > summary .cw-org-initial", at: "centre" },
+  { selector: ".cw-console-create > .cw-icon", at: "centre" },
+  { selector: "[data-rail-sort] .cw-icon", at: "centre" },
+  { selector: ".cw-rail-dot", at: "centre" },
+  { selector: ".cw-console-get-started .cw-nav-link > .cw-icon", at: "centre" },
+  { selector: ".cw-account-menu > summary .cw-org-initial", at: "centre" },
+];
+export const sidebarAdminAnchors: AnchorCheck[] = [
+  { selector: ".cw-console-admin .cw-section-label", at: "text" },
+  { selector: ".cw-console-admin .cw-nav-link", at: "text" },
+];
+export const sidebarRightAnchors: AnchorCheck[] = [
+  { selector: "[data-sidebar-close] .cw-icon", at: "centre", side: "right" },
+  { selector: ".cw-org-chevron", at: "centre", side: "right" },
+  { selector: "[aria-label='View all sandboxes'] .cw-icon", at: "centre", side: "right" },
+  { selector: ".cw-rail-state", at: "centre", side: "right" },
+  { selector: ".cw-account-chevrons", at: "centre", side: "right" },
+];

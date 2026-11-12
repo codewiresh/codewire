@@ -397,9 +397,11 @@ test.describe.serial("server-rendered identity flows", () => {
     const resetCookie = (await page.context().cookies()).find((cookie) => (
       cookie.name === "codewire_password_reset"
     ));
+    // Lax, not Strict: an emailed reset link is a cross-site navigation, and a
+    // Strict cookie would never reach the reset form (#3400).
     expect(resetCookie).toMatchObject({
       httpOnly: true,
-      sameSite: "Strict",
+      sameSite: "Lax",
       path: "/reset-password",
     });
 

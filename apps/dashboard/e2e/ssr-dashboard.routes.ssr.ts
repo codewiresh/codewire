@@ -180,7 +180,9 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await expect(page.getByRole("heading", { name: "Reset your password" })).toBeVisible();
     expect(await page.content()).not.toContain(token);
     const resetCookie = (await context.cookies()).find((cookie) => cookie.name === "codewire_password_reset");
-    expect(resetCookie).toMatchObject({ httpOnly: true, sameSite: "Strict", path: "/reset-password" });
+    // Lax, not Strict: an emailed reset link is a cross-site navigation, and a
+    // Strict cookie would never reach the reset form (#3400).
+    expect(resetCookie).toMatchObject({ httpOnly: true, sameSite: "Lax", path: "/reset-password" });
     await context.close();
   });
 
@@ -435,7 +437,9 @@ test.describe("server-rendered public, auth, and account routes", () => {
       await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(
         "Clean Routes Organization",
       );
-      await expect(page.locator(".cw-sidebar-slot").getByRole("link", { name: "Settings" }))
+      // Settings lives in the sidebar's account menu (#4033).
+      await page.locator(".cw-sidebar-slot .cw-account-menu > summary").click();
+      await expect(page.locator(".cw-sidebar-slot .cw-account-menu").getByRole("link", { name: "Settings", exact: true }))
         .toHaveAttribute("href", "/settings/");
       // Only the switcher's relative links name an organization.
       await expect(page.locator('a[href*="org="]:not([href^="?org="])')).toHaveCount(0);
