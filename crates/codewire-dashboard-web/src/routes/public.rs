@@ -267,6 +267,7 @@ mod tests {
                 assert!(body.contains(&format!("<h1 id=\"{id}-title\">{heading}</h1>")));
                 assert!(body.contains("Product Engineering BV"));
                 assert!(body.contains("mailto:hello@codewire.sh"));
+                assert!(body.contains("John M. Keynesplein 4, 1066 EP Amsterdam, the Netherlands"));
                 assert!(!body.contains("[OWNER"));
                 // The footer links both pages and marks this one.
                 assert!(body.contains(&format!("<a href=\"{path}\" aria-current=\"page\">")));
