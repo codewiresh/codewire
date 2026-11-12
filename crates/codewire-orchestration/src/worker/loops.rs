@@ -759,6 +759,9 @@ pub(super) struct LivenessRow {
     pub(super) bound_pod_uid: Option<String>,
     pub(super) setup_owner_generation: Option<i64>,
     pub(super) setup_owner_status: String,
+    /// A runtime mutation, such as a daemon repair, holds the environment: it
+    /// owns any replacement of its runtime (#3944, #4311).
+    pub(super) runtime_mutation_active: bool,
 }
 
 async fn sandbox_liveness_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBool>) {
@@ -778,7 +781,23 @@ async fn sandbox_liveness_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBoo
 }
 
 async fn reconcile_sandbox_liveness(ctx: &WorkerContext) {
-    let rows = match sqlx::query(
+    let rows = match sandbox_liveness_rows(&ctx.pool).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(error = %e, "sandbox liveness: query environments");
+            return;
+        }
+    };
+    let now = chrono::Utc::now();
+    for row in rows {
+        reconcile_single_sandbox_liveness(ctx, now, row).await;
+    }
+}
+
+/// The sandboxes liveness looks at, as it reads them.
+pub(super) async fn sandbox_liveness_rows(pool: &PgPool) -> sqlx::Result<Vec<LivenessRow>> {
+    let mut rows = Vec::new();
+    for row in sqlx::query(
         r#"SELECT e.id, e.state, e.desired_state, e.state_changed_at,
                   e.environment_operation_generation,
                   COALESCE(b.namespace, '') AS namespace,
@@ -786,25 +805,22 @@ async fn reconcile_sandbox_liveness(ctx: &WorkerContext) {
                   COALESCE(b.pod_ip, '') AS pod_ip,
                   b.pod_uid AS bound_pod_uid,
                   b.setup_owner_generation,
-                  COALESCE(b.setup_owner_status, '') AS setup_owner_status
+                  COALESCE(b.setup_owner_status, '') AS setup_owner_status,
+                  EXISTS (
+                      SELECT 1 FROM organization_mutation_leases l
+                       WHERE l.environment_id = e.id
+                         AND l.mutation_class = 'environment_runtime_dispatch'
+                         AND l.state = 'active'
+                  ) AS runtime_mutation_active
              FROM environments e
              JOIN sandbox_environment_backend b ON b.environment_id = e.id
             WHERE e.type = 'sandbox'
               AND e.desired_state = 'started'
               AND e.state IN ('running', 'creating', 'starting')"#,
     )
-    .fetch_all(&ctx.pool)
-    .await
+    .fetch_all(pool)
+    .await?
     {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::error!(error = %e, "sandbox liveness: query environments");
-            return;
-        }
-    };
-
-    let now = chrono::Utc::now();
-    for row in rows {
         // state_changed_at is timestamp WITHOUT time zone — read naive
         // and interpret as UTC like pgx does.
         let state_changed_at: chrono::NaiveDateTime = match row.try_get("state_changed_at") {
@@ -814,7 +830,7 @@ async fn reconcile_sandbox_liveness(ctx: &WorkerContext) {
                 continue;
             }
         };
-        let parsed = LivenessRow {
+        rows.push(LivenessRow {
             id: row.try_get("id").unwrap_or_default(),
             state: row.try_get("state").unwrap_or_default(),
             desired_state: row.try_get("desired_state").unwrap_or_default(),
@@ -828,9 +844,10 @@ async fn reconcile_sandbox_liveness(ctx: &WorkerContext) {
             bound_pod_uid: row.try_get("bound_pod_uid").unwrap_or(None),
             setup_owner_generation: row.try_get("setup_owner_generation").unwrap_or(None),
             setup_owner_status: row.try_get("setup_owner_status").unwrap_or_default(),
-        };
-        reconcile_single_sandbox_liveness(ctx, now, parsed).await;
+            runtime_mutation_active: row.try_get("runtime_mutation_active").unwrap_or(true),
+        });
     }
+    Ok(rows)
 }
 
 async fn reconcile_single_sandbox_liveness(
@@ -901,6 +918,13 @@ pub(super) async fn observe_sandbox_liveness(
     };
 
     if running_pod_is_leaving(now, row, &probe) {
+        // Nothing of ours is replacing it, so its runtime is going: say so
+        // now rather than after the grace (#4311). A repair keeps it running.
+        if !row.runtime_mutation_active
+            && mark_sandbox_replacing(pool, row, "workspace Pod is being deleted").await
+        {
+            return Some("workspace runtime is being replaced");
+        }
         tracing::info!(
             environment_id = row.id,
             pod_uid = probe.pod_uid,
@@ -911,6 +935,15 @@ pub(super) async fn observe_sandbox_liveness(
     }
 
     if running_runtime_recovery_required(row, &probe) {
+        // The bound Pod is gone or replaced, so no runtime serves it until the
+        // start brings the replacement up (#4311). A changed address on the
+        // same Pod loses nothing and stays running.
+        if running_pod_replaced(row, &probe)
+            && !row.runtime_mutation_active
+            && mark_sandbox_replacing(pool, row, "workspace Pod was replaced").await
+        {
+            return Some("workspace runtime is being replaced");
+        }
         return Some("workspace Pod runtime identity is not current");
     }
 
@@ -955,6 +988,17 @@ fn running_pod_is_leaving(
             now.timestamp() - deleting_at.as_second()
                 < SANDBOX_TRANSITIONAL_LIVENESS_GRACE.as_secs() as i64
         })
+}
+
+/// The bound Pod is gone, or another Pod has taken its place (#4311). Only
+/// what `running_runtime_recovery_required` already found worth a recovery.
+fn running_pod_replaced(row: &LivenessRow, probe: &RuntimeProbe) -> bool {
+    !probe.pod_exists
+        || probe.pod_uid.is_empty()
+        || row
+            .bound_pod_uid
+            .as_deref()
+            .is_some_and(|bound| bound != probe.pod_uid)
 }
 
 fn running_runtime_recovery_required(row: &LivenessRow, probe: &RuntimeProbe) -> bool {
@@ -1182,6 +1226,43 @@ async fn mark_sandbox_stopped(pool: &PgPool, row: &LivenessRow, reason: &str) ->
     }
 }
 
+/// The running sandbox's runtime is being replaced: it is `starting` with its
+/// notice until the start brings the replacement up (#4311). Returns whether
+/// this call marked it.
+async fn mark_sandbox_replacing(pool: &PgPool, row: &LivenessRow, reason: &str) -> bool {
+    let authority = match ActivityAuthority::capture_required(
+        pool,
+        &row.id,
+        &row.desired_state,
+        row.operation_generation,
+    )
+    .await
+    {
+        Ok(authority) => authority,
+        Err(error) if is_authority_lost(&error) => return false,
+        Err(error) => {
+            tracing::error!(environment_id = row.id, error = %error, "sandbox liveness: capture replacing authority failed");
+            return false;
+        }
+    };
+    let svc = Service::<PgLifecycleStore>::for_activity(pool.clone(), authority);
+    match svc.mark_sandbox_replacing(&row.id).await {
+        Err(e) => {
+            tracing::error!(environment_id = row.id, error = %e, "sandbox liveness: mark replacing failed");
+            false
+        }
+        Ok(true) => {
+            tracing::warn!(
+                environment_id = row.id,
+                reason,
+                "sandbox liveness: running sandbox's runtime is being replaced"
+            );
+            true
+        }
+        Ok(false) => false,
+    }
+}
+
 async fn mark_sandbox_env_error(pool: &PgPool, row: &LivenessRow, reason: &str) {
     let authority = match ActivityAuthority::capture_required(
         pool,
@@ -1243,6 +1324,7 @@ mod tests {
             bound_pod_uid: None,
             setup_owner_generation: None,
             setup_owner_status: String::new(),
+            runtime_mutation_active: false,
         }
     }
 

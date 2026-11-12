@@ -127,8 +127,9 @@ fn daemon_readiness_error(state: codewire_daemon_proto::daemon::v1::DaemonState)
     use codewire_daemon_proto::daemon::v1::DaemonState;
 
     match state {
+        // Transient: nothing has run, so clients wait it out (#4311).
         DaemonState::Starting => {
-            AppError::Precondition("environment daemon is still starting".into())
+            AppError::ServiceUnavailable("environment daemon is still starting".into())
         }
         DaemonState::Unsupported | DaemonState::UpgradeRequired => AppError::Precondition(
             "environment daemon upgrade is required; run `cw daemon repair`".into(),
@@ -188,10 +189,15 @@ mod tests {
     fn daemon_readiness_guidance_preserves_platform_semantics() {
         use codewire_daemon_proto::daemon::v1::DaemonState;
 
+        let starting = daemon_readiness_error(DaemonState::Starting);
         assert!(matches!(
-            daemon_readiness_error(DaemonState::Starting),
-            AppError::Precondition(message) if message == "environment daemon is still starting"
+            &starting,
+            AppError::ServiceUnavailable(message) if message == "environment daemon is still starting"
         ));
+        assert_eq!(
+            rendered_workspace_error(&starting, Some("request-1")).code,
+            ConnectCode::Unavailable
+        );
         assert!(matches!(
             daemon_readiness_error(DaemonState::UpgradeRequired),
             AppError::Precondition(message) if message.contains("daemon repair")

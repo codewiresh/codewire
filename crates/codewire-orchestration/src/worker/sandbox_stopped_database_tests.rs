@@ -7,13 +7,14 @@ use sqlx::PgPool;
 
 use crate::api::environments::OrgQuota;
 use crate::lifecycle::{
-    PgLifecycleStore, SANDBOX_RESTARTED_ERROR_CODE, SANDBOX_STOPPED_ERROR_CODE,
-    SANDBOX_STOPPED_MESSAGE, Service, StartQuota,
+    PgLifecycleStore, SANDBOX_REPLACING_ERROR_CODE, SANDBOX_REPLACING_MESSAGE,
+    SANDBOX_RESTARTED_ERROR_CODE, SANDBOX_STOPPED_ERROR_CODE, SANDBOX_STOPPED_MESSAGE, Service,
+    StartQuota,
 };
 use crate::runtime::RuntimeProbe;
 use crate::runtime::fake::FakeRuntimeDriver;
 use crate::test_database_support::TestDatabase;
-use crate::worker::loops::{LivenessRow, observe_sandbox_liveness};
+use crate::worker::loops::{LivenessRow, observe_sandbox_liveness, sandbox_liveness_rows};
 
 const CREATOR: &str = "stopped-creator";
 const ORGANIZATION: &str = "stopped-organization";
@@ -233,6 +234,7 @@ fn liveness_row(generation: i64, running_for: chrono::Duration) -> LivenessRow {
         bound_pod_uid: Some("pod-uid".into()),
         setup_owner_generation: None,
         setup_owner_status: String::new(),
+        runtime_mutation_active: false,
     }
 }
 
@@ -319,7 +321,7 @@ async fn db_a_sandbox_that_fails_soon_after_starting_waits_for_the_sweep() -> Re
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn db_a_healthy_or_replaced_runtime_marks_nothing() -> Result<()> {
+async fn db_a_healthy_runtime_marks_nothing_and_a_replaced_one_is_starting() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
         seed(&db, "running").await?;
@@ -330,12 +332,49 @@ async fn db_a_healthy_or_replaced_runtime_marks_nothing() -> Result<()> {
         let asked = observe_sandbox_liveness(&db.pool, &healthy, now, &row).await;
         ensure!(asked.is_none(), "{asked:?}");
 
-        // A Pod replaced under the same name still takes the identity reconcile.
+        let (state, code, _) = self::row(&db.pool).await?;
+        ensure!(state == "running" && code.is_none(), "{state} {code:?}");
+
+        // A Pod replaced under the same name lost the old one's processes,
+        // however soon it is Running (#4311).
         let mut replaced = runtime_reporting(true, "", "Running");
         replaced.probe.pod_uid = "new-pod-uid".into();
         let asked = observe_sandbox_liveness(&db.pool, &replaced, now, &row).await;
-        ensure!(asked.is_some(), "no reconcile asked for");
+        ensure!(asked.is_some(), "no start asked for");
+        replacing(&db.pool).await
+    }
+    .await;
+    db.finish(result).await
+}
 
+/// Marked `starting`, with what the user is told (#4311).
+async fn replacing(pool: &PgPool) -> Result<()> {
+    let (state, code, reason) = row(pool).await?;
+    ensure!(state == "starting", "{state}");
+    ensure!(
+        code.as_deref() == Some(SANDBOX_REPLACING_ERROR_CODE),
+        "{code:?}"
+    );
+    ensure!(
+        reason.as_deref() == Some(SANDBOX_REPLACING_MESSAGE),
+        "{reason:?}"
+    );
+    Ok(())
+}
+
+/// A changed address on the same bound Pod loses nothing: it takes the
+/// identity reconcile and stays running.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_moved_address_on_the_same_pod_stays_running() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        let mut moved = runtime_reporting(true, "", "Running");
+        moved.probe.pod_ip = "10.0.0.2".into();
+        let asked = observe_sandbox_liveness(&db.pool, &moved, chrono::Utc::now(), &row).await;
+        ensure!(asked.is_some(), "no reconcile asked for");
         let (state, code, _) = self::row(&db.pool).await?;
         ensure!(state == "running" && code.is_none(), "{state} {code:?}");
         Ok(())
@@ -353,11 +392,12 @@ fn deleting_at(at: chrono::DateTime<chrono::Utc>) -> k8s_openapi::jiff::Timestam
 /// the sandbox stayed in `error`.
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn db_a_pod_being_deleted_marks_nothing_however_it_exited() -> Result<()> {
+async fn db_a_pod_a_repair_is_deleting_marks_nothing_however_it_exited() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
         seed(&db, "running").await?;
-        let row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        let mut row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        row.runtime_mutation_active = true;
         let now = chrono::Utc::now();
 
         for (reason, phase) in [("PodSucceeded", "Succeeded"), ("PodFailed", "Failed")] {
@@ -378,10 +418,10 @@ async fn db_a_pod_being_deleted_marks_nothing_however_it_exited() -> Result<()> 
 }
 
 /// The old Pod is gone and the claim still reports how it ended, with no
-/// replacement yet: a reconcile, as for any missing runtime, and no error.
+/// replacement yet: a start, as for any missing runtime, and no error.
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn db_the_gap_before_a_replacement_asks_for_a_reconcile_and_marks_nothing() -> Result<()> {
+async fn db_the_gap_before_a_replacement_asks_for_a_start_and_marks_no_error() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
         seed(&db, "running").await?;
@@ -394,28 +434,27 @@ async fn db_the_gap_before_a_replacement_asks_for_a_reconcile_and_marks_nothing(
         gone.probe.pod_uid = String::new();
         gone.probe.pod_ip = String::new();
         let asked = observe_sandbox_liveness(&db.pool, &gone, now, &row).await;
-        ensure!(asked.is_some(), "no reconcile asked for");
+        ensure!(asked.is_some(), "no start asked for");
+        replacing(&db.pool).await?;
 
-        // The replacement exists under the same name and isn't ready.
+        // The replacement exists under the same name and isn't ready. A look
+        // from a row read before the mark still asks for the recovery.
         let mut pending = runtime_reporting(false, "SandboxNotReady", "Pending");
         pending.probe.pod_uid = "new-pod-uid".into();
         pending.probe.pod_ip = String::new();
         let asked = observe_sandbox_liveness(&db.pool, &pending, now, &row).await;
         ensure!(asked.is_some(), "no reconcile asked for");
-
-        let (state, code, _) = self::row(&db.pool).await?;
-        ensure!(state == "running" && code.is_none(), "{state} {code:?}");
-        Ok(())
+        replacing(&db.pool).await
     }
     .await;
     db.finish(result).await
 }
 
 /// A non-zero exit, with the replacement already up: the claim's `PodFailed` is
-/// about the old Pod, so it takes the identity reconcile and stops nothing.
+/// about the old Pod, so it is a replacement, not a failure.
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn db_a_claim_still_reporting_the_old_pods_failure_stops_nothing() -> Result<()> {
+async fn db_a_claim_still_reporting_the_old_pods_failure_is_a_replacement() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
         seed(&db, "running").await?;
@@ -423,15 +462,12 @@ async fn db_a_claim_still_reporting_the_old_pods_failure_stops_nothing() -> Resu
         let now = chrono::Utc::now();
 
         for phase in ["Pending", "Running"] {
+            set_state(&db.pool, "running").await?;
             let mut replaced = runtime_reporting(false, "PodFailed", phase);
             replaced.probe.pod_uid = "new-pod-uid".into();
             let asked = observe_sandbox_liveness(&db.pool, &replaced, now, &row).await;
-            ensure!(asked.is_some(), "{phase}: no reconcile asked for");
-            let (state, code, _) = self::row(&db.pool).await?;
-            ensure!(
-                state == "running" && code.is_none(),
-                "{phase}: {state} {code:?}"
-            );
+            ensure!(asked.is_some(), "{phase}: no start asked for");
+            replacing(&db.pool).await?;
         }
         Ok(())
     }
@@ -469,7 +505,8 @@ async fn db_a_pod_stuck_being_deleted_marks_an_error_after_the_grace() -> Result
     let db = TestDatabase::create().await?;
     let result = async {
         seed(&db, "running").await?;
-        let row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        let mut row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        row.runtime_mutation_active = true;
         let now = chrono::Utc::now();
         let mut stuck = runtime_reporting(false, "PodSucceeded", "Succeeded");
 
@@ -486,6 +523,238 @@ async fn db_a_pod_stuck_being_deleted_marks_an_error_after_the_grace() -> Result
             self::row(&db.pool).await?.0 == "error",
             "not marked after the grace"
         );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// #4311: a Pod deleted by anything but a repair takes its processes with it,
+/// so the sandbox says it is restarting at once, not after the grace.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_pod_deleted_from_outside_is_starting_at_once() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        let now = chrono::Utc::now();
+        let mut leaving = runtime_reporting(false, "PodSucceeded", "Succeeded");
+        leaving.probe.pod_deleting_at = Some(deleting_at(now));
+
+        let asked = observe_sandbox_liveness(&db.pool, &leaving, now, &row).await;
+        ensure!(asked.is_some(), "no start asked for");
+        replacing(&db.pool).await?;
+
+        // A second look, from a row read before the mark, changes nothing.
+        let asked = observe_sandbox_liveness(&db.pool, &leaving, now, &row).await;
+        ensure!(asked.is_none(), "{asked:?}");
+        replacing(&db.pool).await
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// A repair replaces the Pod itself and rebinds it while running (#3944).
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_pod_a_repair_replaced_stays_running() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let mut row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        row.runtime_mutation_active = true;
+        let mut replaced = runtime_reporting(false, "SandboxNotReady", "Pending");
+        replaced.probe.pod_uid = "new-pod-uid".into();
+
+        let asked = observe_sandbox_liveness(&db.pool, &replaced, chrono::Utc::now(), &row).await;
+        ensure!(asked.is_some(), "no reconcile asked for");
+        let (state, code, _) = self::row(&db.pool).await?;
+        ensure!(state == "running" && code.is_none(), "{state} {code:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// Setup owns its own Pod's readiness: liveness doesn't look.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_pod_replaced_under_setup_stays_running() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let mut row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        row.setup_owner_generation = Some(row.operation_generation);
+        row.setup_owner_status = "running".into();
+        let mut replaced = runtime_reporting(false, "SandboxNotReady", "Pending");
+        replaced.probe.pod_uid = "new-pod-uid".into();
+
+        let asked = observe_sandbox_liveness(&db.pool, &replaced, chrono::Utc::now(), &row).await;
+        ensure!(asked.is_none(), "{asked:?}");
+        let (state, code, _) = self::row(&db.pool).await?;
+        ensure!(state == "running" && code.is_none(), "{state} {code:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// Whether liveness reads the one sandbox as held by a runtime mutation.
+async fn held(pool: &PgPool) -> Result<bool> {
+    let rows = sandbox_liveness_rows(pool).await?;
+    ensure!(rows.len() == 1, "{} rows", rows.len());
+    Ok(rows[0].runtime_mutation_active)
+}
+
+/// Liveness sees a runtime mutation's lease only while it is active.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_liveness_reads_an_active_runtime_mutation() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let pool = &db.pool;
+        sqlx::query("INSERT INTO sandbox_environment_backend(environment_id,namespace) VALUES ($1,'stopped-sandboxes')")
+            .bind(ENVIRONMENT)
+            .execute(pool)
+            .await?;
+        ensure!(!held(pool).await?, "held with no lease");
+
+        for (id, class, environment) in [
+            ("other-class", "control_plane_database", None),
+            ("other-environment", "environment_runtime_dispatch", Some("another-environment")),
+        ] {
+            sqlx::query(
+                "INSERT INTO organization_mutation_leases(id,organization_id,mutation_class,deadline_at,environment_id) \
+                 VALUES ($1,$2,$3,NOW() + INTERVAL '5 minutes',$4)",
+            )
+            .bind(id)
+            .bind(ORGANIZATION)
+            .bind(class)
+            .bind(environment)
+            .execute(pool)
+            .await?;
+        }
+        ensure!(!held(pool).await?, "held by another class or environment");
+
+        sqlx::query(
+            "INSERT INTO organization_mutation_leases(id,organization_id,mutation_class,deadline_at,environment_id) \
+             VALUES ('repair',$1,'environment_runtime_dispatch',NOW() + INTERVAL '5 minutes',$2)",
+        )
+        .bind(ORGANIZATION)
+        .bind(ENVIRONMENT)
+        .execute(pool)
+        .await?;
+        ensure!(held(pool).await?, "not held by its own active lease");
+
+        sqlx::query(
+            "UPDATE organization_mutation_leases SET state = 'released', released_at = NOW() WHERE id = 'repair'",
+        )
+        .execute(pool)
+        .await?;
+        ensure!(!held(pool).await?, "held by a released lease");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// Back to running after a replacement: what happened, and not that it is
+/// failing (#4311).
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_replaced_sandbox_says_so_then_becomes_a_notice() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let pool = &db.pool;
+        let svc = Service::for_pool(pool.clone());
+
+        ensure!(svc.mark_sandbox_replacing(ENVIRONMENT).await?);
+        replacing(pool).await?;
+        // Already not running: nothing to say twice.
+        ensure!(!svc.mark_sandbox_replacing(ENVIRONMENT).await?);
+
+        set_state(pool, "running").await?;
+        svc.mark_started(ENVIRONMENT).await?;
+        let (_, code, reason) = row(pool).await?;
+        ensure!(
+            code.as_deref() == Some(SANDBOX_RESTARTED_ERROR_CODE),
+            "{code:?}"
+        );
+        let reason = reason.unwrap_or_default();
+        ensure!(
+            reason.starts_with("Restarted at ")
+                && reason
+                    .ends_with(" UTC after its runtime was replaced. Running processes were lost."),
+            "{reason}"
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// Only a running sandbox that should be is marked.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_only_a_running_sandbox_is_marked_replacing() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "creating").await?;
+        let pool = &db.pool;
+        let svc = Service::for_pool(pool.clone());
+        ensure!(!svc.mark_sandbox_replacing(ENVIRONMENT).await?);
+
+        set_state(pool, "running").await?;
+        sqlx::query("UPDATE environments SET desired_state = 'stopped' WHERE id = $1")
+            .bind(ENVIRONMENT)
+            .execute(pool)
+            .await?;
+        ensure!(!svc.mark_sandbox_replacing(ENVIRONMENT).await?);
+        let (state, code, _) = row(pool).await?;
+        ensure!(state == "running" && code.is_none(), "{state} {code:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// A stop or a start while it is being replaced ends the notice.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_the_replacing_notice_ends_at_a_stop_or_start() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let pool = &db.pool;
+        let svc = Service::for_pool(pool.clone());
+
+        ensure!(svc.mark_sandbox_replacing(ENVIRONMENT).await?);
+        set_state(pool, "stopped").await?;
+        svc.mark_stopped(ENVIRONMENT).await?;
+        let (_, code, reason) = row(pool).await?;
+        ensure!(code.is_none() && reason.is_none(), "{code:?} {reason:?}");
+
+        set_state(pool, "running").await?;
+        ensure!(svc.mark_sandbox_replacing(ENVIRONMENT).await?);
+        let quota = StartQuota {
+            quota: OrgQuota {
+                max_concurrent_environments: -1,
+                max_concurrent_sandbox: -1,
+                max_cpu_millicores: -1,
+                max_memory_mb: -1,
+            },
+            env_type: "sandbox",
+            cpu_millicores: 1000,
+            memory_mb: 1024,
+            credit_enforcement: Default::default(),
+        };
+        svc.admit_start(ENVIRONMENT, ORGANIZATION, "standard", quota)
+            .await?;
+        let (_, code, reason) = row(pool).await?;
+        ensure!(code.is_none() && reason.is_none(), "{code:?} {reason:?}");
         Ok(())
     }
     .await;

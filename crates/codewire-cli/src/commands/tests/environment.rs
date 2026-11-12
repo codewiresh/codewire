@@ -2645,6 +2645,25 @@ fn format_env_info_text_uses_go_style_labels() {
     assert!(text.contains("Protected:     yes\n"));
 }
 
+#[test]
+fn format_env_info_text_shows_a_replacement_or_restart_as_a_notice() {
+    let mut environment = test_environment(
+        "12345678-abcd-4000-9000-000000000001",
+        Some("builder"),
+        "starting",
+    );
+    environment.error_reason = Some("why".to_string());
+    for (code, label) in [
+        ("sandbox_replacing", "Notice:        why\n"),
+        ("sandbox_restarted", "Notice:        why\n"),
+        ("sandbox_stopped", "ErrorReason:   why\n"),
+    ] {
+        environment.error_code = Some(code.to_string());
+        let text = format_env_info_text(&environment);
+        assert!(text.contains(label), "{code}: {text}");
+    }
+}
+
 /// The cloud request for `args` with only the file `--file` names, as before
 /// creates searched for one.
 fn prepare_platform_env_create_request(

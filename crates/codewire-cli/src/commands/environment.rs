@@ -3975,8 +3975,12 @@ pub(crate) fn format_env_info_text(environment: &Environment) -> String {
         output.push_str(&format!("TTL:           {ttl_seconds}s\n"));
     }
     if let Some(error_reason) = environment.error_reason.as_deref().and_then(trimmed_str) {
-        // Once it's running again this is a notice, not a current fault.
-        let label = if environment.error_code.as_deref() == Some("sandbox_restarted") {
+        // A runtime being replaced, or running again after a failure, is a
+        // notice, not a current fault.
+        let label = if matches!(
+            environment.error_code.as_deref(),
+            Some("sandbox_replacing" | "sandbox_restarted")
+        ) {
             "Notice:        "
         } else {
             "ErrorReason:   "

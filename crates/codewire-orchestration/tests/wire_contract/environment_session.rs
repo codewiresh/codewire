@@ -14,6 +14,7 @@ use super::{Auth, Harness, PRIMARY_ORG, assert_rpc_bad_request, assert_rpc_error
 
 const BACKEND_ENV: &str = "env_exec_contract_backend";
 const STOPPED_ENV: &str = "env_environment_contract_start_binary";
+const STARTING_ENV: &str = "env_environment_contract_state_starting";
 const VIEWER_ENV: &str = "env_port_contract_viewer";
 const MISSING_ENV: &str = "env_exec_contract_missing";
 const MISSING_ORG: &str = "org_exec_contract_missing";
@@ -89,6 +90,15 @@ async fn assert_session_gates(harness: &Harness) {
                 STOPPED_ENV,
                 ErrorCode::FailedPrecondition,
                 "environment must be running",
+            ),
+            // Coming back, as after its runtime is replaced (#4311): clients
+            // wait out Unavailable and reattach.
+            (
+                Auth::Admin,
+                PRIMARY_ORG,
+                STARTING_ENV,
+                ErrorCode::Unavailable,
+                "environment is starting",
             ),
         ] {
             let before = session_inventory(harness, &inventory_client).await;

@@ -110,8 +110,8 @@ async fn resolve_running_sandbox_target_inner(
             _ => Err((StatusCode::FORBIDDEN, "access denied")),
         };
     }
-    if state_value != "running" || desired_state != "started" {
-        return Err((StatusCode::BAD_REQUEST, "environment must be running"));
+    if let Some(refusal) = session_state_refusal(&state_value, &desired_state) {
+        return Err(refusal);
     }
     if environment_type != "sandbox" {
         return Err((
@@ -206,9 +206,47 @@ pub(crate) fn huma_error(status: StatusCode, message: &'static str) -> AppError 
     }
 }
 
+/// Why a sandbox in this state takes no session now, if it doesn't. One coming
+/// back, such as one whose runtime is being replaced (#4311), is a wait the
+/// client retries, not a refusal.
+fn session_state_refusal(state: &str, desired_state: &str) -> Option<(StatusCode, &'static str)> {
+    match (state, desired_state) {
+        ("running", "started") => None,
+        ("starting", "started") => {
+            Some((StatusCode::SERVICE_UNAVAILABLE, "environment is starting"))
+        }
+        _ => Some((StatusCode::BAD_REQUEST, "environment must be running")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #4311: a sandbox coming back is a wait clients retry; any other state
+    /// that isn't running is a refusal, as before.
+    #[test]
+    fn only_a_starting_sandbox_is_a_wait() {
+        assert_eq!(session_state_refusal("running", "started"), None);
+        assert_eq!(
+            session_state_refusal("starting", "started"),
+            Some((StatusCode::SERVICE_UNAVAILABLE, "environment is starting"))
+        );
+        for (state, desired) in [
+            ("stopped", "stopped"),
+            ("starting", "stopped"),
+            ("error", "started"),
+            ("creating", "started"),
+            ("running", "stopped"),
+            ("destroying", "destroyed"),
+        ] {
+            assert_eq!(
+                session_state_refusal(state, desired),
+                Some((StatusCode::BAD_REQUEST, "environment must be running")),
+                "{state} {desired}"
+            );
+        }
+    }
 
     fn current_probe() -> RuntimeProbe {
         RuntimeProbe {

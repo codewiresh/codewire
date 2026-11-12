@@ -1279,7 +1279,8 @@ async fn require_ready_daemon(
         .into_inner();
     match v1::DaemonState::try_from(capabilities.state).unwrap_or(v1::DaemonState::Unspecified) {
         v1::DaemonState::Ready => Ok(()),
-        v1::DaemonState::Starting => Err(AppError::Precondition(
+        // Transient: clients wait it out rather than giving up (#4311).
+        v1::DaemonState::Starting => Err(AppError::ServiceUnavailable(
             "environment daemon is still starting".into(),
         )),
         v1::DaemonState::Unsupported | v1::DaemonState::UpgradeRequired => {

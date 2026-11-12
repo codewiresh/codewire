@@ -126,8 +126,9 @@ fn daemon_readiness_error(state: codewire_daemon_proto::daemon::v1::DaemonState)
     use codewire_daemon_proto::daemon::v1::DaemonState;
 
     match state {
+        // Transient: nothing has run, so clients wait it out (#4311).
         DaemonState::Starting => {
-            AppError::Precondition("environment daemon is still starting".into())
+            AppError::ServiceUnavailable("environment daemon is still starting".into())
         }
         DaemonState::Unsupported | DaemonState::UpgradeRequired => AppError::Precondition(
             "environment daemon upgrade is required; run `cw daemon repair`".into(),
