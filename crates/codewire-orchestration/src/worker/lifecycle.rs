@@ -647,6 +647,25 @@ pub async fn handle_environment_start(
             record_environment_error(&svc, authority, env_id, &format!("{error:#}")).await?;
             return Err(error);
         };
+        // #4281: starting activates the volume again; wait for a slot.
+        if let Err(error) = await_reconcile_or_cancel(
+            &activity_ctx,
+            super::confidential_slots::acquire(ctx, &ns, authority, START_MUTATION_STATES, env_id),
+        )
+        .await
+        {
+            if is_lifecycle_control_loss(&error) {
+                return Err(error);
+            }
+            record_environment_error(
+                &svc,
+                authority,
+                env_id,
+                &format!("confidential capacity: {error:#}"),
+            )
+            .await?;
+            return Err(error);
+        }
         match await_reconcile_or_cancel(
             &activity_ctx,
             authority.run_external_mutation(
@@ -840,6 +859,10 @@ pub async fn handle_environment_start(
         Some(&pod),
     )
     .await?;
+    // #4281: the started member is ready, so its activation is over.
+    if env.isolation_tier == "confidential" {
+        super::confidential_slots::release_after_ready(&ctx.pool, env_id).await;
+    }
 
     if let Err(e) = authority
         .execute_for_states(

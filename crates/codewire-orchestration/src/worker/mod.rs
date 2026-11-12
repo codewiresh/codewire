@@ -16,6 +16,7 @@ pub mod activity_authority;
 pub mod agents;
 pub mod billing_sessions;
 pub mod cloudflare;
+pub mod confidential_slots;
 pub mod create;
 pub mod credential_relay;
 pub mod credit_stop;

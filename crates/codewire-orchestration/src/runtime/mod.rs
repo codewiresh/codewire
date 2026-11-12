@@ -287,6 +287,12 @@ pub trait RuntimePools: Send + Sync {
         pool: &WantedPool,
         observation: &RuntimeObservation,
     ) -> Result<(), String>;
+
+    /// How many hosts at `placement` can run a confidential member now, or
+    /// `None` when that can't be known (#4281). Orchestration bounds how many
+    /// confidential activations run at once from it. A placement without
+    /// confidential hosts answers `Some(0)`.
+    async fn confidential_hosts(&self, placement: &Placement) -> Option<u32>;
 }
 
 /// An environment's claim on a runtime, from a shared pool or cold.

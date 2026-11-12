@@ -46,6 +46,7 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 mod tests {
     mod account_deletion;
     mod billing_rate_cards;
+    mod confidential_activation_slots;
     mod default_access_profile;
     mod environment_error_code;
     mod environment_mesh;
@@ -76,9 +77,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced) and 0002 to 0017.
+    // (which equals the 41-migration history it replaced) and 0002 to 0018.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "de777ca0e6a1147aafdeca923fe84720c53ba9b9634323d09f6dd51e5dd17340";
+        "4870c8102f939b14da23d5e1eeae410c991958a0502d589966d9ac75f4081f16";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -127,6 +128,9 @@ mod tests {
     // SHA-384 of 0017_reserve_legal_page_slugs.sql (the public /privacy and
     // /terms pages).
     const APPLIED_RESERVE_LEGAL_PAGE_SLUGS_CHECKSUM: &str = "cf4af5d327730d2435d300c0b7bea3c7d3b9c389d5b6552ecf266b01ef953795a8263b1aa08bca5fef9fd12e68f11bea";
+
+    // SHA-384 of 0018_confidential_activation_slots.sql (#4281).
+    const APPLIED_CONFIDENTIAL_ACTIVATION_SLOTS_CHECKSUM: &str = "ead3d33957e48430244fca9215827bc76899f840480b8df795cb1d3afbe6087021d977fe06204db25a5dd805a4d5a59e";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1225,6 +1229,7 @@ mod tests {
             (15, APPLIED_HOSTS_CHECKSUM),
             (16, APPLIED_OAUTH_SIGN_IN_CHECKSUM),
             (17, APPLIED_RESERVE_LEGAL_PAGE_SLUGS_CHECKSUM),
+            (18, APPLIED_CONFIDENTIAL_ACTIVATION_SLOTS_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1255,11 +1260,10 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 17
-                    && first
-                        .iter()
-                        .map(|migration| migration.0)
-                        .eq([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+                first.len() == 18
+                    && first.iter().map(|migration| migration.0).eq([
+                        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+                    ])
                     && first.iter().all(|migration| migration.2)
             );
             let fingerprint: String = sqlx::query_scalar(include_str!(

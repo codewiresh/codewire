@@ -1030,6 +1030,12 @@ database_lane_orchestration() {
       'worker::create::replacement_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "confidential activation slot matrix" confidential-activation-slots \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::confidential_slots::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "organization tenant secret teardown matrix" organization-tenant-secret-teardown \
     DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-orchestration --lib \

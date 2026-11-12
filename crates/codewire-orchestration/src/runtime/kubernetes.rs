@@ -3,6 +3,7 @@
 //! comes back into the driver's own types.
 
 mod attestation;
+mod confidential_hosts;
 mod evidence;
 pub(crate) mod members;
 pub(crate) mod observation;
@@ -109,6 +110,11 @@ impl RuntimePools for KubernetesDriver {
             return Err("pod /spec/containers/workspace/env".to_owned());
         }
         Ok(())
+    }
+
+    async fn confidential_hosts(&self, _placement: &Placement) -> Option<u32> {
+        // Nodes are cluster-wide: every placement shares them.
+        confidential_hosts::count(&self.client).await
     }
 
     async fn keep_pools(

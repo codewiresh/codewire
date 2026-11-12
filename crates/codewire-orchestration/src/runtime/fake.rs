@@ -56,6 +56,8 @@ pub(crate) struct FakeRuntimeDriver {
     pub keep_gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
     /// What a pool's state answers.
     pub pool_state: Mutex<Option<PoolState>>,
+    /// What `confidential_hosts` answers; unscripted, unknown.
+    pub confidential_hosts: Mutex<Option<u32>>,
     /// Each pool pass's answer, in order; an error is its message.
     pub pool_passes: Mutex<VecDeque<Result<PoolPass, String>>>,
     /// How many times pool memory was forgotten.
@@ -89,6 +91,11 @@ impl RuntimePools for FakeRuntimeDriver {
     ) -> Result<(), String> {
         self.placements.lock().unwrap().push(placement.clone());
         Err("this placement has no pools".to_owned())
+    }
+
+    async fn confidential_hosts(&self, placement: &Placement) -> Option<u32> {
+        self.placements.lock().unwrap().push(placement.clone());
+        *self.confidential_hosts.lock().unwrap()
     }
 
     async fn keep_pools(

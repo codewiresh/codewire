@@ -318,6 +318,9 @@ pub struct SandboxWorkerCfg {
     /// leaf at startup. Empty when unavailable, and then no confidential
     /// workspace renders.
     pub confidential_binding_roots_pem: String,
+    /// How many confidential activations may run at once on one host
+    /// ([`super::confidential_slots::ACTIVATIONS_PER_HOST_ENV`], #4281).
+    pub confidential_activations_per_host: u32,
 }
 
 /// The hosted Mesh origin handed to workspace daemons, without a trailing
@@ -522,6 +525,11 @@ impl SandboxWorkerCfg {
             // Loaded and verified by the process entrypoint, which holds the
             // internal TLS identity.
             confidential_binding_roots_pem: String::new(),
+            confidential_activations_per_host: super::confidential_slots::activations_per_host(
+                std::env::var(super::confidential_slots::ACTIVATIONS_PER_HOST_ENV)
+                    .ok()
+                    .as_deref(),
+            ),
         }
     }
 }
@@ -1615,6 +1623,39 @@ async fn run_environment_create(
                         .await?;
                         return Err(error);
                     };
+                    // #4281: at most a bounded number of confidential
+                    // activations run at once; this one waits for a slot.
+                    let namespace = backend
+                        .as_ref()
+                        .map(|b| b.namespace.as_str())
+                        .filter(|namespace| !namespace.is_empty())
+                        .unwrap_or(cfg.sandbox_namespace.as_str());
+                    if let Err(error) = super::confidential_slots::acquire(
+                        ctx,
+                        namespace,
+                        authority,
+                        CREATE_MUTATION_STATES,
+                        env_id,
+                    )
+                    .await
+                    {
+                        emit_create_log(
+                            authority,
+                            "create_claim",
+                            "failed",
+                            &format!("{error:#}"),
+                            duration_meta(started),
+                        )
+                        .await?;
+                        record_error(
+                            &svc,
+                            authority,
+                            env_id,
+                            &format!("confidential capacity: {error:#}"),
+                        )
+                        .await?;
+                        return Err(error);
+                    }
                     match authority
                         .run_external_mutation(
                             CREATE_MUTATION_STATES,
@@ -2018,6 +2059,10 @@ async fn run_environment_create(
             }
 
             CreateAction::MarkRunning => {
+                // #4281: the member is ready, so its activation is over.
+                if env.isolation_tier == "confidential" {
+                    super::confidential_slots::release_after_ready(&ctx.pool, env_id).await;
+                }
                 let entered_running = match svc.transition(env_id, &env.state, "running").await {
                     Ok(()) => true,
                     Err(e) => {
@@ -2569,6 +2614,15 @@ async fn replace_terminal_workspace_pod(
             .confidential_storage
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("confidential storage providers are not configured"))?;
+        // #4281: the replacement activates the volume again.
+        super::confidential_slots::acquire(
+            ctx,
+            &placement.namespace,
+            authority,
+            CREATE_MUTATION_STATES,
+            env_id,
+        )
+        .await?;
         authority
             .run_external_mutation(
                 CREATE_MUTATION_STATES,
@@ -2660,6 +2714,15 @@ async fn resume_suspended_workspace(
             let storage = ctx.confidential_storage.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("confidential storage providers are not configured")
             })?;
+            // #4281: resuming activates the volume again.
+            super::confidential_slots::acquire(
+                ctx,
+                &backend.namespace,
+                authority,
+                CREATE_MUTATION_STATES,
+                &env.id,
+            )
+            .await?;
             opts.confidential_storage_manifest_uri = authority
                 .run_external_mutation(
                     CREATE_MUTATION_STATES,
@@ -2781,6 +2844,9 @@ pub(super) async fn reconcile_or_refresh_runtime_identity(
             .confidential_storage
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("confidential storage providers are not configured"))?;
+        // #4281: the recovery activates the volume again.
+        super::confidential_slots::acquire(ctx, &backend.namespace, authority, states, &env.id)
+            .await?;
         opts.confidential_storage_manifest_uri = authority
             .run_external_mutation(states, storage.ensure_ready(&env.id, env.disk_gb))
             .await?;
@@ -2804,6 +2870,9 @@ pub(super) async fn reconcile_or_refresh_runtime_identity(
             }),
         )
         .await?;
+    if env.isolation_tier == "confidential" {
+        super::confidential_slots::release_after_ready(&ctx.pool, &env.id).await;
+    }
     // Verify the actual replacement tuple before publishing its address. The
     // strict second call intentionally cannot start another recovery.
     let expected = WorkspacePodIdentity {
