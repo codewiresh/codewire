@@ -10,6 +10,7 @@ mod catalog;
 mod grant;
 mod id;
 mod model;
+mod placeholder;
 mod projection;
 
 pub use catalog::{
@@ -29,6 +30,10 @@ pub use model::{
     AccessProfile, CapabilityPolicy, CredentialAuthKind, CredentialMetadata, CredentialStatus,
     EnvironmentAccessBinding, GrantPermission, HttpProvider, Owner, Placement, ProviderCatalog,
     ProviderDefinition, SshPublicKeyMetadata,
+};
+pub use placeholder::{
+    CREDENTIAL_PLACEHOLDER_LENGTH, CREDENTIAL_PLACEHOLDER_TAG, CredentialPlaceholder,
+    PLACEHOLDER_KEY_BYTES, PlaceholderKey,
 };
 pub use projection::{
     CODEX_CONFIG_FILE_NAME, CODEX_MANAGED_CONFIG_HEADER, CODEX_NATIVE_HOME, CODEX_PLATFORM_HOME,

@@ -13,11 +13,13 @@
 // Predates this workspace lint; #4125 tracks removing the allow.
 #![allow(clippy::unwrap_used)]
 
+mod admission;
 mod broker_channel;
 mod broker_log;
 mod broker_process;
 mod client;
 mod control;
+mod placeholder;
 mod platform;
 mod repository;
 mod service;
@@ -79,9 +81,10 @@ use codewire_access::{
     AccessError, AccessProfile, AccessProfileId, AccessProfileName, AccessProfileReference,
     AccessProfileScope, BrokerOperationId, BrokerRouteId,
     CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialAuthKind,
-    CredentialId, CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding,
-    EnvironmentId, GrantContext, GrantPermission, GrantPlacement, Owner, OwnerId, Placement,
-    ProviderCatalog, ProviderId, SshPublicKeyMetadata, derive_grants, validate_profile_entries,
+    CredentialId, CredentialMetadata, CredentialPlaceholder, CredentialStatus, DerivedGrant,
+    EnvironmentAccessBinding, EnvironmentId, GrantContext, GrantPermission, GrantPlacement, Owner,
+    OwnerId, Placement, ProviderCatalog, ProviderId, SshPublicKeyMetadata, derive_grants,
+    validate_profile_entries,
 };
 use codewire_protected_store::ProtectedStoreBackend;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -185,6 +188,7 @@ pub struct CredentialOperationLease {
     pub grant: DerivedGrant,
     pub permission: GrantPermission,
     material_generation: u64,
+    placeholder: Option<CredentialPlaceholder>,
     value: ProtectedValue,
 }
 
@@ -223,6 +227,7 @@ impl fmt::Debug for CredentialOperationLease {
             .field("grant", &self.grant)
             .field("permission", &self.permission)
             .field("material_generation", &self.material_generation)
+            .field("placeholder", &self.placeholder)
             .field("value", &"[REDACTED]")
             .finish()
     }
@@ -500,6 +505,7 @@ pub struct LocalCredentialAuthority<S: ProtectedStore> {
     catalog: ProviderCatalog,
     owner_id: OwnerId,
     active_refreshes: Mutex<BTreeMap<CredentialId, CredentialRefreshPermit>>,
+    placeholder_key: placeholder::PlaceholderKeySlot,
 }
 
 impl<S: ProtectedStore> fmt::Debug for LocalCredentialAuthority<S> {
@@ -649,6 +655,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             catalog,
             owner_id,
             active_refreshes: Mutex::new(BTreeMap::new()),
+            placeholder_key: Default::default(),
         };
         authority.reconcile()?;
         authority.reconcile_workload_secrets()?;
@@ -1597,7 +1604,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         &self,
         request: &CredentialOperationLeaseRequest,
     ) -> Result<CredentialOperationLease, LocalCredentialError> {
-        let admission = self.admit_environment_credential_operation(request)?;
+        let (admission, placeholder) = self.admit_environment_credential_lease(request)?;
         deny_generic_ssh_lease(&admission.credential.metadata)?;
         let entry_id = protected_entry_id(
             &admission.credential.metadata.id,
@@ -1612,6 +1619,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             grant: admission.grant,
             permission: admission.permission,
             material_generation: admission.material_generation,
+            placeholder,
             value,
         })
     }
@@ -1666,37 +1674,17 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         connection: &Connection,
         request: &CredentialOperationLeaseRequest,
     ) -> Result<CredentialOperationAdmission, LocalCredentialError> {
-        let binding = load_environment_access_binding(connection, &request.environment_id)?.binding;
-        let grant = derive_local_environment_grants(
-            connection,
-            &binding,
-            request.environment_generation,
-            &self.owner_id,
-            &self.catalog,
-        )?
-        .into_iter()
-        .find(|grant| grant.capability_slot == request.capability_slot)
-        .ok_or(LocalCredentialError::CredentialOperationLeaseDenied)?;
         let permission = GrantPermission {
             operation: request.operation.clone(),
             route: request.route.clone(),
         };
-        if !grant.permissions.contains(&permission) {
-            return Err(LocalCredentialError::CredentialOperationLeaseDenied);
-        }
-        let record =
-            load_internal_credential(connection, &grant.credential_id, Some(MaterialState::Ready))?;
-        if record.public.metadata.revocation_generation != grant.credential_revocation_generation {
-            return Err(LocalCredentialError::CredentialOperationLeaseDenied);
-        }
-        if record.public.metadata.status != CredentialStatus::Active {
-            return Err(LocalCredentialError::CredentialInactive);
-        }
-        if let Some(expires_at) = record.public.metadata.expires_at_unix
-            && expires_at <= unix_seconds()?
-        {
-            return Err(LocalCredentialError::CredentialInactive);
-        }
+        let (grant, record) = self.admit_environment_slot_at(
+            connection,
+            &request.environment_id,
+            request.environment_generation,
+            &request.capability_slot,
+            Some(&permission),
+        )?;
         Ok(CredentialOperationAdmission {
             credential: record.public,
             grant,

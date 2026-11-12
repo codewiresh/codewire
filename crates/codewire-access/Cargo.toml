@@ -8,8 +8,13 @@ authors.workspace = true
 description = "I/O-free credential, access-profile, and derived-grant policy core"
 
 [dependencies]
+base64 = { workspace = true }
+hmac = { workspace = true }
 serde = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
 thiserror = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -209,7 +209,21 @@ fn record_store(
     transaction.commit().map_err(database_error)
 }
 
+/// Every entry the metadata names: the values, and this root's placeholder
+/// key once the root has one, which moves even when there are no values.
+/// Its entry carries this root's ID, so another root's key in the same store
+/// never moves.
 fn referenced_entries(
+    connection: &Connection,
+) -> Result<BTreeSet<ProtectedEntryId>, LocalCredentialError> {
+    let mut entries = metadata_entries(connection)?;
+    entries.extend(crate::placeholder::recorded_placeholder_key_entry(
+        connection,
+    )?);
+    Ok(entries)
+}
+
+fn metadata_entries(
     connection: &Connection,
 ) -> Result<BTreeSet<ProtectedEntryId>, LocalCredentialError> {
     let mut statement = connection

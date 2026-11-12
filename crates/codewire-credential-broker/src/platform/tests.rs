@@ -1311,3 +1311,29 @@ async fn shared_shutdown_drains_platform_publication_after_guest_and_session_los
     .await;
     f.finish(result).await
 }
+
+/// Hosted minting is a later change (#3999): a platform lease names no
+/// placeholder.
+#[test]
+fn a_platform_lease_carries_no_placeholder() {
+    let fake = crate::http_test_support::Lease::new(
+        "openai",
+        CredentialAuthKind::ApiKey,
+        "openai",
+        "responses",
+        "openai-api",
+    );
+    let lease = PlatformCredentialLease {
+        record: CredentialRecord {
+            metadata: fake.metadata.clone(),
+            version: CredentialVersion {
+                revocation_generation: 7,
+                material_generation: 2,
+            },
+        },
+        grant: fake.grant.clone(),
+        permission: fake.permission.clone(),
+        material: ProtectedValue::from_slice(b"synthetic-platform-material").unwrap(),
+    };
+    assert!(BrokerCredentialLease::placeholder(&lease).is_none());
+}

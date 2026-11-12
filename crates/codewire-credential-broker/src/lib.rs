@@ -21,6 +21,8 @@ pub mod github_app;
 pub mod host_agent_smoke;
 #[cfg(test)]
 mod http_test_support;
+#[cfg(test)]
+mod lease_tests;
 mod network;
 mod openai;
 #[cfg(feature = "platform")]
@@ -66,7 +68,7 @@ pub use runtime::{
 #[cfg(feature = "local-broker-synthetic-smoke")]
 pub use runtime::{SyntheticOpenAiSmokeTransport, SyntheticProviderHost};
 
-use codewire_access::{CredentialMetadata, DerivedGrant, GrantPermission};
+use codewire_access::{CredentialMetadata, CredentialPlaceholder, DerivedGrant, GrantPermission};
 use thiserror::Error;
 
 /// One authority-admitted credential operation consumed inside a placement's
@@ -86,6 +88,13 @@ pub trait BrokerCredentialLease: Sized {
     fn material_generation(&self) -> u64;
     /// Consume the lease while the provider adapter prepares one request.
     fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T;
+    /// The admitting authority's placeholder for this lease's credential in
+    /// this environment generation, when it has one (#3999). Only the local
+    /// authority derives them yet, once it has loaded its placeholder key;
+    /// nothing reads it yet.
+    fn placeholder(&self) -> Option<&CredentialPlaceholder> {
+        None
+    }
 }
 
 #[cfg(any(test, feature = "local"))]
@@ -108,6 +117,10 @@ impl BrokerCredentialLease for codewire_local_credentials::CredentialOperationLe
 
     fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T {
         codewire_local_credentials::CredentialOperationLease::with_material(self, operation)
+    }
+
+    fn placeholder(&self) -> Option<&CredentialPlaceholder> {
+        codewire_local_credentials::CredentialOperationLease::placeholder(self)
     }
 }
 

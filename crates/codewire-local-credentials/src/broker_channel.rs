@@ -383,6 +383,7 @@ where
             .await
             .map_err(map_client_status)?
             .into_inner();
+        let placeholder = crate::placeholder::lease_response_placeholder(&response);
         let credential = response
             .credential
             .ok_or(BrokerLeaseChannelError::InvalidResponse)
@@ -437,6 +438,7 @@ where
             grant,
             permission,
             material_generation: response.material_generation,
+            placeholder,
             value,
         })
     }
@@ -1194,10 +1196,8 @@ where
         let authority = Arc::clone(&self.authority);
         let selected = self.local_profile.clone();
         let admission = match tokio::task::spawn_blocking(move || {
-            authority.admit_selected_environment_credential_operation(
-                &admission_request,
-                selected.as_ref(),
-            )
+            authority
+                .admit_selected_environment_credential_lease(&admission_request, selected.as_ref())
         })
         .await
         {
@@ -1225,8 +1225,8 @@ where
                 ));
             }
         };
-        let admission = match admission {
-            Ok(admission) => {
+        let (admission, placeholder) = match admission {
+            Ok((admission, placeholder)) => {
                 let login_refused = admission.permission
                     == codewire_access::codex_login_permission()
                     && !local_codex_login_admissible(
@@ -1285,7 +1285,7 @@ where
                         ),
                     })
                     .await;
-                admission
+                (admission, placeholder)
             }
             Err(error) => {
                 self.audit
@@ -1316,6 +1316,9 @@ where
                 route: admission.permission.route.to_string(),
             }),
             material_generation: admission.material_generation,
+            placeholder: placeholder
+                .map(|placeholder| placeholder.as_str().to_owned())
+                .unwrap_or_default(),
         }))
     }
 

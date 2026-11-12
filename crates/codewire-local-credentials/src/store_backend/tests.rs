@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use codewire_access::{CredentialAuthKind, ProviderId, builtin_provider_catalog};
+use codewire_access::{
+    AccessProfileId, AccessProfileName, CapabilitySlot, CredentialAuthKind, CredentialId,
+    CredentialPlaceholder, EnvironmentAccessBinding, EnvironmentId, ProviderId,
+    builtin_provider_catalog,
+};
 use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStoreBackend, ProtectedStoreError,
     ProtectedStorePersistence, ProtectedValue,
@@ -623,4 +627,201 @@ mod macos {
         assert_eq!(values(&files, &ids), expected);
         assert_eq!(values(&items, &ids), vec![None, None]);
     }
+}
+
+/// An environment bound to a profile that selects one new OpenAI credential
+/// of `authority` in the OpenAI slot, for its placeholders (#3999).
+struct PlaceholderEnvironment {
+    credential_id: CredentialId,
+    profile_id: AccessProfileId,
+    binding: EnvironmentAccessBinding,
+}
+
+impl PlaceholderEnvironment {
+    fn bind(authority: &LocalCredentialAuthority<Backend>) -> Self {
+        let credential_id = authority
+            .add_credential(
+                NewCredential {
+                    provider: ProviderId::parse("openai").unwrap(),
+                    authentication_kind: CredentialAuthKind::ApiKey,
+                    display_name: "placeholder-openai".into(),
+                    account_hint: None,
+                    expires_at_unix: None,
+                },
+                ProtectedValue::from_slice(b"sk-synthetic-placeholder").unwrap(),
+            )
+            .unwrap()
+            .metadata
+            .id;
+        let profile = authority
+            .create_profile(
+                AccessProfileName::parse("placeholder").unwrap(),
+                BTreeMap::from([(CapabilitySlot::openai(), credential_id.clone())]),
+            )
+            .unwrap()
+            .profile;
+        let binding = EnvironmentAccessBinding {
+            environment_id: EnvironmentId::parse("environment-switch").unwrap(),
+            profile_id: profile.id.clone(),
+            profile_revision: profile.revision,
+        };
+        authority
+            .create_environment_access_binding(binding.clone())
+            .unwrap();
+        Self {
+            credential_id,
+            profile_id: profile.id,
+            binding,
+        }
+    }
+
+    fn placeholder(&self, authority: &LocalCredentialAuthority<Backend>) -> CredentialPlaceholder {
+        authority
+            .environment_credential_placeholder(
+                &self.binding.environment_id,
+                3,
+                &CapabilitySlot::openai(),
+                &self.credential_id,
+                Some(&self.binding),
+            )
+            .unwrap()
+    }
+
+    /// Delete the binding, the profile and the credential, so the root keeps
+    /// no value but its placeholder key.
+    fn delete(self, authority: &LocalCredentialAuthority<Backend>) {
+        authority
+            .delete_environment_access_binding(
+                &self.binding.environment_id,
+                &self.profile_id,
+                self.binding.profile_revision,
+            )
+            .unwrap();
+        authority.delete_profile(&self.profile_id).unwrap();
+        authority.delete_credential(&self.credential_id).unwrap();
+    }
+}
+
+impl Fixture {
+    /// Another authority root on the same stores, as another HOME or
+    /// credential root of the same OS user has.
+    fn sharing_stores(&self) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path())
+            .unwrap()
+            .join("authority");
+        Self {
+            _directory: directory,
+            root,
+            stores: Arc::clone(&self.stores),
+            opened: Arc::default(),
+        }
+    }
+
+    /// This root's placeholder key entry, named by the ID its metadata
+    /// keeps.
+    fn placeholder_key_entry(&self) -> ProtectedEntryId {
+        let authority_id = self.metadata("authority_id").unwrap();
+        ProtectedEntryId::parse(format!("local/authority/{authority_id}/placeholder-key-v1"))
+            .unwrap()
+    }
+}
+
+impl Backend {
+    fn value(&self, id: &ProtectedEntryId) -> Option<Vec<u8>> {
+        self.with(|state| state.entries.get(id.expose_reference()).cloned())
+    }
+}
+
+/// The placeholder key moves with the values it keys placeholders for, so
+/// every placeholder is the same after a switch, and no copy stays behind
+/// (#3999).
+#[test]
+fn switching_moves_the_placeholder_key_with_the_values() {
+    let fixture = Fixture::new();
+    let target = other(LEGACY);
+    let authority = fixture.open(LEGACY).unwrap();
+    store_values(&authority);
+    let environment = PlaceholderEnvironment::bind(&authority);
+    let before = environment.placeholder(&authority);
+    drop(authority);
+    assert_eq!(fixture.backend(LEGACY).values().len(), 4);
+
+    let authority = fixture.open(target).unwrap();
+    assert!(fixture.backend(LEGACY).values().is_empty());
+    assert_eq!(fixture.backend(target).values().len(), 4);
+    assert!(environment.placeholder(&authority).ct_eq(&before));
+}
+
+/// Authority roots of one OS user share its protected store. Each keeps its
+/// own placeholder key there, through restarts, and a switch moves only its
+/// own, even when the root has no other value left (#3999).
+#[test]
+fn each_root_keeps_and_moves_only_its_own_placeholder_key() {
+    let first = Fixture::new();
+    let second = first.sharing_stores();
+    let target = other(LEGACY);
+    let legacy = first.backend(LEGACY);
+
+    let authority = first.open(LEGACY).unwrap();
+    store_values(&authority);
+    let first_environment = PlaceholderEnvironment::bind(&authority);
+    let first_placeholder = first_environment.placeholder(&authority);
+    drop(authority);
+    let authority = second.open(LEGACY).unwrap();
+    let second_environment = PlaceholderEnvironment::bind(&authority);
+    let second_placeholder = second_environment.placeholder(&authority);
+    drop(authority);
+
+    let first_key = first.placeholder_key_entry();
+    let second_key = second.placeholder_key_entry();
+    assert!(first_key != second_key, "two roots share a key entry");
+    let first_key_value = legacy.value(&first_key).unwrap();
+    let second_key_value = legacy.value(&second_key).unwrap();
+    assert!(first_key_value != second_key_value, "two roots share a key");
+
+    // A restart of each, in turn, keeps both roots' placeholders and keys.
+    for _ in 0..2 {
+        let authority = first.open(LEGACY).unwrap();
+        assert!(
+            first_environment
+                .placeholder(&authority)
+                .ct_eq(&first_placeholder)
+        );
+        drop(authority);
+        let authority = second.open(LEGACY).unwrap();
+        assert!(
+            second_environment
+                .placeholder(&authority)
+                .ct_eq(&second_placeholder)
+        );
+        drop(authority);
+    }
+    assert!(legacy.value(&first_key).as_ref() == Some(&first_key_value));
+    assert!(legacy.value(&second_key).as_ref() == Some(&second_key_value));
+
+    // The second root keeps only its key, then moves to another store: the
+    // key moves, and nothing of the first root does.
+    second_environment.delete(&second.open(LEGACY).unwrap());
+    let first_values = sorted(
+        legacy
+            .values()
+            .into_iter()
+            .filter(|value| *value != second_key_value)
+            .collect(),
+    );
+    assert_eq!(first_values.len(), 4);
+    drop(second.open(target).unwrap());
+    assert_eq!(legacy.value(&second_key), None);
+    let moved = second.backend(target);
+    assert_eq!(moved.values().len(), 1);
+    assert!(moved.value(&second_key).as_ref() == Some(&second_key_value));
+    assert_eq!(sorted(legacy.values()), first_values);
+
+    let authority = first.open(LEGACY).unwrap();
+    assert!(
+        first_environment
+            .placeholder(&authority)
+            .ct_eq(&first_placeholder)
+    );
 }

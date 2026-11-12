@@ -24,6 +24,7 @@ hyper = { workspace = true, features = ["server", "http1"] }
 libc = "0.2"
 hyper-util = { workspace = true }
 prost = { workspace = true }
+rand = { workspace = true }
 rusqlite = { workspace = true }
 rustix = { workspace = true }
 serde = { workspace = true }
