@@ -180,7 +180,7 @@ impl EnvironmentSessionAttachment for DaemonAttachment {
     async fn send_input(&self, message: v1::SessionAttachMessage) -> Result<(), ConnectError> {
         let sent = match message.payload {
             Some(v1::session_attach_message::Payload::Input(input)) => {
-                self.input.send_input(input.data).await
+                self.input.send_session_input(input).await
             }
             Some(v1::session_attach_message::Payload::Resize(resize)) => {
                 self.input.resize(resize.width, resize.height).await

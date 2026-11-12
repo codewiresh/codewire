@@ -1417,7 +1417,7 @@ impl BridgeAttachment for LocalSessionAttachment {
         let input = self.attachment.input_handle();
         match message.payload {
             Some(daemon_v1::session_attach_message::Payload::Input(input_message)) => input
-                .send_input(input_message.data)
+                .send_session_input(input_message)
                 .await
                 .map_err(local_session_error),
             Some(daemon_v1::session_attach_message::Payload::Resize(resize)) => input

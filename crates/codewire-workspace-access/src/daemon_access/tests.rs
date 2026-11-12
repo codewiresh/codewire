@@ -905,6 +905,21 @@ mod session_attach {
         session_id: &str,
         offset: u64,
     ) -> Attached {
+        attach_open(
+            daemon,
+            AttachSessionOpen {
+                org_id: "org-synthetic".into(),
+                environment_id: environment_id.into(),
+                session_id: session_id.into(),
+                output_offset: offset,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    async fn attach_open(daemon: &DaemonSsh, open: AttachSessionOpen) -> Attached {
+        let offset = open.output_offset;
         let client = connect(daemon.ssh).await;
         let channel = client.channel_open_session().await.unwrap();
         channel
@@ -912,15 +927,7 @@ mod session_attach {
             .await
             .unwrap();
         let open = AttachSessionRequest {
-            input: Some(attach_session_request::Input::Open(Box::new(
-                AttachSessionOpen {
-                    org_id: "org-synthetic".into(),
-                    environment_id: environment_id.into(),
-                    session_id: session_id.into(),
-                    output_offset: offset,
-                    ..Default::default()
-                },
-            ))),
+            input: Some(attach_session_request::Input::Open(Box::new(open))),
             ..Default::default()
         };
         channel
@@ -1062,6 +1069,45 @@ mod session_attach {
         assert!(
             !again.output.windows(5).any(|w| w == b"hello"),
             "a reattachment replays only what it missed"
+        );
+        let _ = daemon.shutdown.send(true);
+    }
+
+    // #3993: the environment's SSH server relays input with its offset in
+    // the client's input stream, so a resend after a drop is written once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn input_at_an_offset_is_written_once_when_it_is_resent() {
+        let daemon = spawn_daemon_ssh().await;
+        let session = launch_echo(&daemon).await;
+        let mut attached = attach_open(
+            &daemon,
+            AttachSessionOpen {
+                org_id: "org-synthetic".into(),
+                environment_id: ENVIRONMENT_ID.into(),
+                session_id: session.clone(),
+                input_stream: "laptop".into(),
+                input_offset: 0,
+                ..Default::default()
+            },
+        )
+        .await;
+        attached.read_until(b"hello").await;
+        let at = |data: &[u8], offset| {
+            attach_session_request::Input::StdinAt(Box::new(codewire_client::AttachSessionInput {
+                data: data.to_vec(),
+                offset,
+                ..Default::default()
+            }))
+        };
+        attached.send(at(b"one-", 0)).await;
+        attached.read_until(b"one-").await;
+        // A resend from the start of the stream, with what follows it.
+        attached.send(at(b"one-two", 0)).await;
+        attached.read_until(b"two").await;
+        assert_eq!(
+            String::from_utf8_lossy(&attached.output),
+            "helloone-two",
+            "the resent bytes were written again"
         );
         let _ = daemon.shutdown.send(true);
     }

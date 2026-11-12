@@ -1511,10 +1511,20 @@ impl SessionAttachment {
 
 impl SessionAttachmentInput {
     pub async fn send_input(&self, data: Vec<u8>) -> Result<(), SessionClientError> {
-        self.send(v1::session_attach_message::Payload::Input(
-            v1::SessionInput { data, offset: None },
-        ))
-        .await
+        self.send_session_input(v1::SessionInput { data, offset: None })
+            .await
+    }
+
+    /// Input as the client sent it, keeping its offset in the attachment's
+    /// input stream (#3993). A relay that drops the offset makes the session
+    /// write it as plain input, so the stream never advances and a reattach
+    /// reports the keys as lost instead of resending them.
+    pub async fn send_session_input(
+        &self,
+        input: v1::SessionInput,
+    ) -> Result<(), SessionClientError> {
+        self.send(v1::session_attach_message::Payload::Input(input))
+            .await
     }
 
     pub async fn resize(&self, width: i32, height: i32) -> Result<(), SessionClientError> {
