@@ -23,7 +23,10 @@ objcopy --add-section .debug_info="$work/payload" "$src/target/debug/deps/tests-
 cp "$(type -P false)" "$src/target/debug/deps/other-4567"
 chmod 0755 "$src/target/debug/deps/tests-0123" "$src/target/debug/deps/other-4567"
 chmod 0640 "$src/target/nextest/binaries-metadata.json"
-readelf -S "$src/target/debug/deps/tests-0123" | grep -q '\.debug_info' || fail 'the fixture has no debug section'
+# Each listing is read whole before grep -q looks at it: under pipefail, grep
+# leaving early kills the writer with SIGPIPE and fails the pipeline.
+sections="$(readelf -S "$src/target/debug/deps/tests-0123")"
+grep -q '\.debug_info' <<<"$sections" || fail 'the fixture has no debug section'
 (cd "$src" && tar -c target | zstd -q -o "$work/archive.tar.zst")
 
 RUNNER_TEMP="$work" lean_archive "$work/archive.tar.zst" > "$work/log"
@@ -31,13 +34,15 @@ grep -q '^build-once: test archive slimmed: 2 ELF files stripped of debug inform
   fail "no slimming line: $(cat "$work/log")"
 mkdir "$work/out"
 zstd -dcq "$work/archive.tar.zst" | tar -x -p -C "$work/out"
-readelf -S "$work/out/target/debug/deps/tests-0123" | grep -q '\.debug' && fail 'a debug section survived'
+sections="$(readelf -S "$work/out/target/debug/deps/tests-0123")"
+grep -q '\.debug' <<<"$sections" && fail 'a debug section survived'
 "$work/out/target/debug/deps/tests-0123" || fail 'the stripped binary no longer runs'
 cmp -s "$src/target/nextest/binaries-metadata.json" "$work/out/target/nextest/binaries-metadata.json" ||
   fail 'the nextest metadata changed'
 [ "$(cd "$src" && find target -printf '%P %m\n' | sort)" = "$(cd "$work/out" && find target -printf '%P %m\n' | sort)" ] ||
   fail 'the archive paths or modes changed'
-zstd -dcq "$work/archive.tar.zst" | tar -t | grep -q '^\./' && fail 'the archive gained a ./ prefix'
+listing="$(zstd -dcq "$work/archive.tar.zst" | tar -t)"
+grep -q '^\./' <<<"$listing" && fail 'the archive gained a ./ prefix'
 
 # An archive that does not unpack is kept as built, with a warning.
 printf 'not an archive' > "$work/bad.tar.zst"
