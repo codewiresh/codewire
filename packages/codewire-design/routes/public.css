@@ -78,6 +78,7 @@
   --hero-t-fluid: clamp(40px, 7vh, 88px); --hero-b-fluid: clamp(48px, 9vh, 120px); --meta-b-fluid: clamp(16px, 3vh, 36px);
   --sec-t-fluid: clamp(80px, 16vh, 200px); --sec-b-fluid: clamp(40px, 8vh, 96px); --body-t-fluid: clamp(32px, 6vh, 72px);
   --end-t-fluid: clamp(96px, 18vh, 216px); --end-logo-fluid: clamp(64px, 12vh, 136px);
+  --lede-fit: 0px;                      /* the homepage headline takes the spec list's offset: see .hero .foot */
   --hero-t: var(--hero-t-fluid); --hero-b: var(--hero-b-fluid); --meta-b: var(--meta-b-fluid); --sec-t: var(--sec-t-fluid);
   --sec-b: var(--sec-b-fluid); --body-t: var(--body-t-fluid); --end-t: var(--end-t-fluid); --end-logo: var(--end-logo-fluid);
   --line-top: inset 0 1px var(--ink); --line-under: inset 0 -1px var(--rule); --line-under-ink: inset 0 -1px var(--ink);
@@ -196,15 +197,16 @@ body.blurbox .panel .panel, body.blurbox .box.nobg { -webkit-backdrop-filter: no
 .getbox .install { margin: 0; }
 .logo { margin: 0; color: var(--ink); line-height: 0; }
 .logo svg { width: 100%; height: auto; display: block; }
-.hero .foot { position: relative; z-index: 1; margin-top: calc(var(--text-dy) + var(--hero-foot-drop));   /* measured from the wordmark, so it holds on any screen */ align-items: start; row-gap: calc(var(--base) * 3); }
-.hero .idx { grid-column: 1 / 4; margin: 0; }
-.lede { transform: translate(calc(var(--lede-c) * var(--pitch)), var(--lede-y)); grid-column: 4 / 10; margin: 0; font: 500 var(--fs-d1)/var(--lh-d1) var(--f-sans); line-height: var(--lh-d1-snap); letter-spacing: var(--track-d1); text-wrap: balance; }
+.hero .foot { position: relative; z-index: 1; margin-top: calc(var(--text-dy) + var(--hero-foot-drop));   /* measured from the wordmark, so it holds on any screen */ align-items: start; row-gap: calc(var(--base) * 3); --lede-fit: calc(var(--spec-y) - var(--lede-y)); }   /* the headline's and spec list's tops meet */
+.hero .idx { grid-column: 1 / 3; margin: 0; }   /* clear of the headline, which starts at the third column */
+.lede { transform: translate(calc(var(--lede-c) * var(--pitch)), calc(var(--lede-y) + var(--lede-fit))); grid-column: 3 / 9; margin: 0; font: 500 var(--fs-d1)/var(--lh-d1) var(--f-sans); line-height: var(--lh-d1-snap); letter-spacing: var(--track-d1); text-wrap: balance; }
 .lede span { color: var(--grey); }
+.hero .lede span { display: block; font-weight: 400; }   /* the homepage's second line, its own line and lighter than the first */
 .getrow { position: relative; z-index: 1; margin-top: var(--space-xl); }
-.getrow .getbox { grid-column: 4 / 10; }
+.getrow .getbox { grid-column: 4 / 10; }   /* centred under the headline, the same six columns a column to the right */
 /* the beta sticker: a silver holographic security label wrapped over the left edge of the page, as if the page were the box.
    Rendered per pixel so its rainbow follows the light. It sits low under the install box, out at the page's left edge. */
-.betarow { position: absolute; top: calc(100% + var(--base) * 12); left: var(--ml-neg); pointer-events: none; }
+.betarow { position: absolute; z-index: 1; left: 0; top: 100svh; transform: translateY(calc(-100% - 2 * var(--gap))); pointer-events: none; }   /* placed from the page's top: the bottom of the first screen, and it scrolls away */
 .betarow canvas { display: block; filter: drop-shadow(0 .5px .4px rgba(0, 0, 0, .5)) drop-shadow(0 1px 2.5px rgba(0, 0, 0, .14)); }
 /* boxes: the edge always sits on the grid; padding moves the text inward by one gutter and three baseline units */
 .box { position: relative; }
@@ -390,6 +392,7 @@ td.r, th.r { text-align: right; padding-right: 0; }
   .net { grid-column: 1 / -1; }
   .lede, .specwrap { transform: none; }
   .getrow .getbox, .endget .getbox { grid-column: 1 / -1; }
+  .betarow { top: auto; transform: none; margin-top: calc(var(--base) * 12); }   /* the first screen ends on the spec list: the label waits below the install box */
   .mlog li { grid-template-columns: 3.5em 8.5em minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }

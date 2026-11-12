@@ -254,8 +254,35 @@ void main() {
   };
   window.cwFitGrid = fitGrid;
   // grid: read the column lines that are drawn, use them for the drag step and to seat each registration target on a line
-  const colEls = $$('.cols i');
+  const colEls = $$('.cols i'), heroFoot = $('.hero .foot'), getRow = $('#getrow'), ledeEl = $('.hero .lede'), runsOn = $$('.hero .spec > div')[1];
+  const gap = () => parseFloat(getComputedStyle(root).getPropertyValue('--gap'));
+  // the headline's and spec list's tops meet (public.css). Given room, the headline comes down, at most until its first capitals
+  // sit level with the rule above "Runs on", while the install box still fits two gutters below it and two above the first
+  // screen's bottom. It glides with the window's height between the two.
+  const fitLede = () => {
+    if (!heroFoot || !ledeEl || !runsOn || !getRow) return;
+    heroFoot.style.removeProperty('--lede-fit');
+    const cs = getComputedStyle(ledeEl); if (cs.transform === 'none') return;   // stacked on a narrow screen
+    const g = document.createElement('canvas').getContext('2d'); g.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+    const m = g.measureText('A'), half = (parseFloat(cs.lineHeight) - m.fontBoundingBoxAscent - m.fontBoundingBoxDescent) / 2;
+    const box = ledeEl.getBoundingClientRect(), capTop = box.top + parseFloat(cs.paddingTop) + half + m.fontBoundingBoxAscent - m.actualBoundingBoxAscent;
+    const runs = runsOn.getBoundingClientRect().top - 1 - capTop, room = innerHeight - scrollY - 4 * gap() - getRow.offsetHeight - box.bottom;
+    const down = Math.round(Math.max(0, Math.min(runs, room)));
+    if (down) heroFoot.style.setProperty('--lede-fit', `calc(var(--spec-y) - var(--lede-y) + ${down}px)`);
+  };
+  // the install box ends two gutters above the first screen's bottom, level with the beta label, so the command is on screen;
+  // it never comes within two gutters of what is drawn above it in its own columns: the headline, not the spec list
+  const placeInstall = () => {
+    if (!heroFoot || !getRow) return;
+    const ib = (getRow.querySelector('.getbox') || getRow).getBoundingClientRect(), fr = heroFoot.getBoundingClientRect().bottom;
+    const above = [...heroFoot.children].map((c) => c.getBoundingClientRect()).filter((r) => r.width && r.right > ib.left && r.left < ib.right);
+    const fb = above.length ? Math.max(...above.map((r) => r.bottom)) : fr;   // the row may rise beside a taller spec list
+    const bu = LOOK.rhythm.base, gap2 = 2 * gap(), want = innerHeight - scrollY - gap2 - getRow.offsetHeight;
+    getRow.style.marginTop = Math.max(Math.ceil((fb + gap2 - fr) / bu) * bu, Math.round(want - fr)) + 'px';
+  };
   window.cwPlaceMarks = () => {
+    fitLede();
+    placeInstall();
     fitGrid();
     const cr = colEls.filter((c) => c.offsetWidth > 0).map((c) => c.getBoundingClientRect()), pitch = cr.length > 1 ? cr[1].left - cr[0].left : 100;
     root.style.setProperty('--pitch', pitch.toFixed(3) + 'px');
@@ -656,6 +683,8 @@ void main() {
       const drawGL = (t) => {
         const { c, U } = gl, prox = pX == null ? 0 : Math.exp(-((G.x - CS / 2) ** 2 + (G.y - HS / 2) ** 2) / (2 * 300 * 300));
         c.uniform1f(U.uT, t); c.uniform2f(U.uTilt, T.x, T.y); c.uniform3f(U.uPtr, G.x, G.y, prox); c.uniform1f(U.uAct, Math.min(1, Math.max(act, prox * 0.5))); c.clearColor(0, 0, 0, 0); c.clear(c.COLOR_BUFFER_BIT); c.drawArrays(c.TRIANGLES, 0, 3); };
+      // the shader compiles from the start, with the wire's, so any wait for it falls before the first frame rather than in the animation
+      const glReady = glSetup();
       const cpu = () => { const c2 = cv.cloneNode(); cv.replaceWith(c2); cv = c2; g = cv.getContext('2d'); img = g.createImageData(WS, HSP); px = img.data; };
       // T: the label's tilt (sprung), G: the torch (the pointer, in canvas units), act: how awake the hologram is, show: the one showcase pass
       let vis = false, raf = 0, pX = null, pY = null, act = 0, lastT = 0, show = -1, gyro = null; const T = { x: 0.2, y: -0.2, tx: 0.2, ty: -0.2, vx: 0, vy: 0 }, G = { x: CS * 0.7, y: -160 };
@@ -686,7 +715,7 @@ void main() {
       let started = false;
       const start = () => {
         if (started) return; started = true;
-        Promise.all([glSetup(), document.fonts && document.fonts.ready]).then(([c]) => {
+        Promise.all([glReady, document.fonts && document.fonts.ready]).then(([c]) => {
           gl = c; if (!gl) cpu();
           first();
           new IntersectionObserver((es) => es.forEach((en) => { vis = en.isIntersecting; if (vis && show === -1 && gl && !reduce) show = performance.now() / 1000; go(); })).observe(cv);
@@ -1199,7 +1228,7 @@ void main() {
   const resize = () => { canvas.width = Math.max(2, Math.floor(innerWidth * scale)); canvas.height = Math.max(2, Math.floor(innerHeight * scale)); gl.viewport(0, 0, canvas.width, canvas.height); };
   addEventListener('resize', resize); resize();
 
-  const secs = $$('[data-st]'), keys = secs.map((s) => s.id), logoEl = $('.hero .logo'), footEl = $('.hero .foot'), getrow = $('#getrow'); let getrowMT = -1;
+  const secs = $$('[data-st]'), keys = secs.map((s) => s.id), logoEl = $('.hero .logo');
   const lerp = (a, b, k) => a + (b - a) * k, ss = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
   const P = JSON.parse(JSON.stringify(ST.top));
   const rainCols = $$('.cols i'), pageEl = $('.page');
@@ -1236,7 +1265,7 @@ void main() {
     const n = Math.min(8, Math.floor(dd / 12)); for (let k = 1; k <= n; k++) add(trLast[0] + dx * k / n, trLast[1] + dy * k / n);
     trLast = [x, y, time];
   }, { passive: true });
-  let time = 0, rainT = 0, last = performance.now(), acc = 0, frames = 0;
+  let time = 0, rainT = 0, last = performance.now(), acc = 0, frames = 0, placed = false;
   function frame(now) {
     const dt = Math.min(0.05, (now - last) / 1000); last = now; if (!reduce) { time += dt; rainT += dt * LOOK.fx.rainSpeed; }   // speed changes the rate only, never jumps the pattern
     acc += dt; frames++;
@@ -1248,15 +1277,12 @@ void main() {
       // the wordmark sits on the wire: size the rope from the logo, its top edge a little above the logo's baseline
       const lr = logoEl.getBoundingClientRect(), H = innerHeight, th = Math.tan(ST.top.fov * Math.PI / 360);
       const R = H * 0.15 * LOOK.size, yc = lr.bottom + 5 + R + LOOK.layout.wire;   // rope 30% of the window tall; the wordmark rests on its top edge
-      // the install box sits centred just under the wire
-      // measure what is drawn (the headline and spec list may be dragged below their row), leave room for the marks
-      const fr = footEl.getBoundingClientRect().bottom, fb = Math.max(fr, ...[...footEl.children].map((c) => c.getBoundingClientRect().bottom));
-      const bu = LOOK.rhythm.base, mt = Math.ceil((Math.max(fb + 48, yc + R + 32) - fr) / bu) * bu;
-      if (mt !== getrowMT) { getrowMT = mt; getrow.style.marginTop = mt + 'px'; }
       const d = H / (2 * th * R), ty = (yc - H / 2) * (2 * th * d / H);
       ST.top.cam = [0, ty, d]; ST.top.tgt = [0, ty, 0];
     }
-    const A = ST[keys[i]], B = ST[keys[Math.min(keys.length - 1, i + 1)]], k = ss(0.55, 1, prog), f = reduce ? 1 : Math.min(1, dt * 2.4);
+    // the first frame puts the camera in place; after that it eases between sections as the page scrolls
+    const A = ST[keys[i]], B = ST[keys[Math.min(keys.length - 1, i + 1)]], k = ss(0.55, 1, prog), f = reduce || !placed ? 1 : Math.min(1, dt * 2.4);
+    placed = true;
     for (let j = 0; j < 3; j++) { P.cam[j] = lerp(P.cam[j], lerp(A.cam[j], B.cam[j], k), f); P.tgt[j] = lerp(P.tgt[j], lerp(A.tgt[j], B.tgt[j], k), f); }
     ['roll', 'spread', 'twist', 'fade', 'fov', 'ws'].forEach((n) => (P[n] = lerp(P[n], lerp(A[n], B[n], k), f)));
     const drift = reduce ? 0 : Math.sin(time * 0.3) * 0.04;
