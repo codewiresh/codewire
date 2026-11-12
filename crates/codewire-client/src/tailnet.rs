@@ -43,12 +43,12 @@ pub enum SshTransportMode {
 
 impl SshTransportMode {
     pub fn from_env() -> anyhow::Result<Self> {
-        match std::env::var("CW_SSH_TRANSPORT")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
+        Self::parse(&std::env::var("CW_SSH_TRANSPORT").unwrap_or_default())
+    }
+
+    /// Read a `CW_SSH_TRANSPORT` value; an unset variable is the empty string.
+    fn parse(value: &str) -> anyhow::Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
             "" | "auto" => Ok(Self::Auto),
             "tailnet" | "wg" | "wireguard" => Ok(Self::Tailnet),
             "websocket" | "ws" => Ok(Self::WebSocket),
@@ -377,7 +377,15 @@ async fn connect_tailnet_session(
 }
 
 fn suppress_peer_direct_udp_from_env(force_derp: bool) -> bool {
-    !force_derp && std::env::var_os("CW_TAILNET_SUPPRESS_PEER_DIRECT_UDP").is_some()
+    suppress_peer_direct_udp(
+        force_derp,
+        std::env::var_os("CW_TAILNET_SUPPRESS_PEER_DIRECT_UDP").is_some(),
+    )
+}
+
+/// `requested` is whether `CW_TAILNET_SUPPRESS_PEER_DIRECT_UDP` is set.
+fn suppress_peer_direct_udp(force_derp: bool, requested: bool) -> bool {
+    !force_derp && requested
 }
 
 fn tailnet_direct_udp_options(
@@ -961,7 +969,13 @@ fn stage_fail(
 }
 
 fn expected_transport_from_env() -> anyhow::Result<ExpectedTransport> {
-    ExpectedTransport::parse(&std::env::var("CW_TAILNET_EXPECTED_TRANSPORT").unwrap_or_default())
+    expected_transport_from(&std::env::var("CW_TAILNET_EXPECTED_TRANSPORT").unwrap_or_default())
+}
+
+/// Read a `CW_TAILNET_EXPECTED_TRANSPORT` value; an unset variable is the
+/// empty string.
+fn expected_transport_from(value: &str) -> anyhow::Result<ExpectedTransport> {
+    ExpectedTransport::parse(value)
         .map_err(|err| anyhow!("invalid CW_TAILNET_EXPECTED_TRANSPORT: {err}"))
 }
 
@@ -1776,71 +1790,29 @@ mod tests {
 
     #[test]
     fn ssh_transport_mode_env_matches_go_aliases() {
-        unsafe {
-            std::env::remove_var("CW_SSH_TRANSPORT");
-        }
-        assert_eq!(
-            SshTransportMode::from_env().unwrap(),
-            SshTransportMode::Auto
-        );
-        unsafe {
-            std::env::set_var("CW_SSH_TRANSPORT", "wireguard");
-        }
-        assert_eq!(
-            SshTransportMode::from_env().unwrap(),
-            SshTransportMode::Tailnet
-        );
-        unsafe {
-            std::env::set_var("CW_SSH_TRANSPORT", "ws");
-        }
-        assert_eq!(
-            SshTransportMode::from_env().unwrap(),
-            SshTransportMode::WebSocket
-        );
-        unsafe {
-            std::env::remove_var("CW_SSH_TRANSPORT");
+        for (value, mode) in [
+            ("", SshTransportMode::Auto),
+            ("wireguard", SshTransportMode::Tailnet),
+            ("ws", SshTransportMode::WebSocket),
+        ] {
+            assert_eq!(SshTransportMode::parse(value).unwrap(), mode, "{value:?}");
         }
     }
 
     #[test]
     fn expected_transport_env_accepts_transport_ladder_names() {
-        unsafe {
-            std::env::remove_var("CW_TAILNET_EXPECTED_TRANSPORT");
-        }
-        assert_eq!(
-            expected_transport_from_env().unwrap(),
-            ExpectedTransport::Any
-        );
-        unsafe {
-            std::env::set_var("CW_TAILNET_EXPECTED_TRANSPORT", "direct_udp");
-        }
-        assert_eq!(
-            expected_transport_from_env().unwrap(),
-            ExpectedTransport::DirectUdp
-        );
-        unsafe {
-            std::env::set_var("CW_TAILNET_EXPECTED_TRANSPORT", "udp_relay");
-        }
-        assert_eq!(
-            expected_transport_from_env().unwrap(),
-            ExpectedTransport::PeerRelay
-        );
-        unsafe {
-            std::env::set_var("CW_TAILNET_EXPECTED_TRANSPORT", "derp");
-        }
-        assert_eq!(
-            expected_transport_from_env().unwrap(),
-            ExpectedTransport::DerpRelay
-        );
-        unsafe {
-            std::env::set_var("CW_TAILNET_EXPECTED_TRANSPORT", "derp_relay");
-        }
-        assert_eq!(
-            expected_transport_from_env().unwrap(),
-            ExpectedTransport::DerpRelay
-        );
-        unsafe {
-            std::env::remove_var("CW_TAILNET_EXPECTED_TRANSPORT");
+        for (value, transport) in [
+            ("", ExpectedTransport::Any),
+            ("direct_udp", ExpectedTransport::DirectUdp),
+            ("udp_relay", ExpectedTransport::PeerRelay),
+            ("derp", ExpectedTransport::DerpRelay),
+            ("derp_relay", ExpectedTransport::DerpRelay),
+        ] {
+            assert_eq!(
+                expected_transport_from(value).unwrap(),
+                transport,
+                "{value:?}"
+            );
         }
     }
 
@@ -1946,10 +1918,7 @@ mod tests {
 
     #[test]
     fn suppress_peer_direct_udp_env_selects_relay_only_options() {
-        unsafe {
-            std::env::remove_var("CW_TAILNET_SUPPRESS_PEER_DIRECT_UDP");
-        }
-        assert!(!suppress_peer_direct_udp_from_env(false));
+        assert!(!suppress_peer_direct_udp(false, false));
         let enabled = tailnet_direct_udp_options(
             NodePublic::from_raw([2; 32]),
             DiscoPrivate::generate(&mut rand::rngs::OsRng),
@@ -1959,20 +1928,14 @@ mod tests {
         assert!(enabled.peer_direct_udp_enabled);
         assert!(enabled.public_peer_endpoints_only);
 
-        unsafe {
-            std::env::set_var("CW_TAILNET_SUPPRESS_PEER_DIRECT_UDP", "1");
-        }
-        assert!(suppress_peer_direct_udp_from_env(false));
+        assert!(suppress_peer_direct_udp(false, true));
+        assert!(!suppress_peer_direct_udp(true, true));
         let relay_only = tailnet_direct_udp_options(
             NodePublic::from_raw([3; 32]),
             DiscoPrivate::generate(&mut rand::rngs::OsRng),
             Vec::new(),
-            suppress_peer_direct_udp_from_env(false),
+            suppress_peer_direct_udp(false, true),
         );
         assert!(!relay_only.peer_direct_udp_enabled);
-
-        unsafe {
-            std::env::remove_var("CW_TAILNET_SUPPRESS_PEER_DIRECT_UDP");
-        }
     }
 }
