@@ -850,6 +850,38 @@ class StallEventClock:
         return self.base + artifact.CW_STALL_SECONDS + 1 + (time.monotonic() - self.jumped)
 
 
+class TrickleEventClock:
+    """The verifier's clock, moved by the fake Docker's trickled writes.
+
+    The fake Docker appends a line to the marker before each chunk it writes,
+    waits until the verifier has read that chunk, and appends "done" after the
+    last. Each chunk moves the clock 0.6 stall bounds and nothing else does,
+    so the gap between two progress checks stays inside the bound and the
+    whole copy outlasts it, however slowly a loaded host runs either side
+    (#4229). After "done", time runs again for cleanup.
+    """
+
+    STEP = 0.6
+
+    def __init__(self, marker):
+        self.marker = marker
+        self.base = time.monotonic()
+        self.chunks = 0
+        self.finished = None
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def monotonic(self):
+        if self.finished is None:
+            lines = self.marker.read_text().splitlines() if self.marker.exists() else []
+            self.chunks = lines.count("chunk")
+            if "done" in lines:
+                self.finished = time.monotonic()
+        elapsed = self.base + self.chunks * self.STEP * artifact.CW_STALL_SECONDS
+        return elapsed if self.finished is None else elapsed + time.monotonic() - self.finished
+
+
 class CwCopyTests(unittest.TestCase):
     def setUp(self):
         path = Path(__file__).with_name("cw_image_fixtures.py")
@@ -869,6 +901,7 @@ class CwCopyTests(unittest.TestCase):
         self.fixture.write(self.reference, self.fixture.release.canonical(self.original), 0o400)
         self.settings = self.base / "settings.json"
         self.stalled = self.base / "stalled"
+        self.trickled = self.base / "trickled"
         self.log = self.base / "docker.jsonl"
         self.fake = self.base / "docker"
         self.image = {"Id": IMAGE_ID, "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {
@@ -885,6 +918,7 @@ class CwCopyTests(unittest.TestCase):
             "PAYLOAD_PATH", repr(str(self.work / "build/assets/cw"))).replace(
             "REFERENCE_PATH", repr(str(self.reference))).replace(
             "STALL_MARKER_PATH", repr(str(self.stalled))).replace(
+            "TRICKLE_MARKER_PATH", repr(str(self.trickled))).replace(
             "STALLED_DOCKER_SECONDS", repr(STALLED_DOCKER_SECONDS)), encoding="utf-8")
         self.fake.chmod(0o700)
         environment = {"PATH": "/usr/bin:/bin", "HOME": str(self.base), "LC_ALL": "C", "TZ": "UTC",
@@ -1076,12 +1110,15 @@ class CwCopyTests(unittest.TestCase):
 
     def test_slow_but_progressing_copy_is_not_a_stall(self):
         # #2990: a fixed copy deadline failed finished builds under load. The
-        # copy now fails only when Docker stops making progress.
+        # copy now fails only when Docker stops making progress. The clock
+        # moves only with the fake's writes, so the copy spans several stall
+        # bounds without a gap reaching one (#4229).
         self.configure(mode="trickle")
-        started = time.monotonic()
-        with mock.patch.object(artifact, "CW_STALL_SECONDS", 2.0):
+        clock = TrickleEventClock(self.trickled)
+        with mock.patch.object(artifact, "time", clock):
             self.assertEqual(self.verify()["status"], "workspace-cw-verified")
-        self.assertGreater(time.monotonic() - started, 2.0)
+        self.assertIsNotNone(clock.finished)
+        self.assertGreater(clock.chunks * clock.STEP, 2)
         self.assert_closed()
 
     def test_slow_producer_admission_does_not_spend_the_copy_bound(self):
@@ -1213,10 +1250,20 @@ elif arguments[:1]==['run']:
         # The container is recorded; tell the test's clock the copy has stalled.
         Path(STALL_MARKER_PATH).write_text('stalled');time.sleep(STALLED_DOCKER_SECONDS)
     if mode=='trickle':
+        # Each chunk moves the test's clock (TrickleEventClock), and the next
+        # waits until the verifier has read it, so the clock never moves twice
+        # between two of the verifier's progress checks.
+        import array,fcntl,termios
+        def unread():
+            count=array.array('i',[0]);fcntl.ioctl(1,termios.FIONREAD,count,True);return count[0]
         step=len(data)//6+1
-        for offset in range(0,len(data),step):
-            if offset: time.sleep(0.5)
-            sys.stdout.buffer.write(data[offset:offset+step]);sys.stdout.buffer.flush()
+        with open(TRICKLE_MARKER_PATH,'a') as marker:
+            for offset in range(0,len(data),step):
+                marker.write('chunk\n');marker.flush()
+                sys.stdout.buffer.write(data[offset:offset+step]);sys.stdout.buffer.flush()
+                waited=time.monotonic()
+                while unread() and time.monotonic()-waited<STALLED_DOCKER_SECONDS: time.sleep(0.01)
+            marker.write('done\n');marker.flush()
         data=b''
     if mode=='detach':
         child=os.fork()
