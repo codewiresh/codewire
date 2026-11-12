@@ -10,18 +10,17 @@ use std::collections::BTreeMap;
 use axum::http::StatusCode;
 use codewire_server_core::AppResult;
 use codewire_server_core::auth::AuthUser;
-use k8s_openapi::api::core::v1::{Node, Pod};
-use kube::Api;
 use sqlx::Row;
 
 use crate::sandbox::template::{
-    DAEMON_INIT_CONTAINER, DAEMON_VOLUME, RUNTIME_CLASS_CONFIDENTIAL, RUNTIME_CLASS_RUNC,
-    RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_NONE,
-    RUNTIME_PROFILE_RUNC, is_commodity_runtime_class, runtime_profile_spec,
+    RUNTIME_CLASS_CONFIDENTIAL, RUNTIME_CLASS_RUNC, RUNTIME_PROFILE_COMMODITY,
+    RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC,
+    is_commodity_runtime_class, runtime_profile_spec,
 };
 
 use super::ApiState;
 use super::environments::{coded, require_environment_access, require_org_member};
+use crate::runtime::{MemberEvidence, Placement};
 
 const TRUST_LEVEL_DEV_PROOF: &str = "dev_proof";
 const TRUST_LEVEL_NOT_CONFIDENTIAL: &str = "not_confidential";
@@ -260,146 +259,39 @@ async fn observe_live_runtime(state: &ApiState, row: &TrustReportRow) -> LiveObs
         },
     };
 
-    let Some(client) = state.kube.as_ref().cloned() else {
+    let Some(runtime) = state.runtime.as_deref() else {
         return observation;
     };
     let Some(namespace) = row.namespace.as_deref().and_then(non_empty) else {
         return observation;
     };
 
-    if let Some(pod_name) = row.pod_name.as_deref().and_then(non_empty) {
-        let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
-        match pods.get(pod_name).await {
-            Ok(pod) => {
-                observe_workspace_pod(&pod, &mut observation);
-                if let Some(node_name) = observation
-                    .node
-                    .as_deref()
-                    .and_then(non_empty)
-                    .map(str::to_string)
-                {
-                    observe_node(client.clone(), &node_name, &mut observation).await;
-                }
-            }
-            Err(err) => {
-                tracing::debug!(%err, namespace, pod_name, "trust report live pod lookup failed");
-            }
-        }
+    if let Some(pod_name) = row.pod_name.as_deref().and_then(non_empty)
+        && let Some(evidence) = runtime
+            .member_evidence(&Placement::new(namespace), pod_name)
+            .await
+    {
+        apply_evidence(&mut observation, evidence);
     }
 
     observation
 }
 
-fn observe_workspace_pod(pod: &Pod, observation: &mut LiveObservation) {
-    if let Some(spec) = pod.spec.as_ref() {
-        observation.runtime_class = spec.runtime_class_name.clone();
-        observation.node = spec.node_name.clone();
-        observation.images.workspace_image = spec_container_image(pod, "workspace");
-        observation.images.dind_image = spec_container_image(pod, "dind");
-        observation.images.daemon_init_image =
-            spec_init_container_image(pod, DAEMON_INIT_CONTAINER)
-                .or_else(|| spec_daemon_volume_image(pod));
-    }
-
-    if let Some(status) = pod.status.as_ref() {
-        observation.pod_ip = status.pod_ip.clone();
-    }
-    observation.images.workspace_image_id = status_container_image_id(pod, "workspace");
-    observation.images.dind_image_id = status_container_image_id(pod, "dind");
-    // An image-volume daemon has no init status; its digest-pinned reference
-    // is the daemon image above.
-    observation.images.daemon_init_image_id =
-        status_init_container_image_id(pod, DAEMON_INIT_CONTAINER);
-}
-
-async fn observe_node(client: kube::Client, node_name: &str, observation: &mut LiveObservation) {
-    let nodes: Api<Node> = Api::all(client);
-    match nodes.get(node_name).await {
-        Ok(node) => {
-            let labels = node.metadata.labels.unwrap_or_default();
-            observation.zone = first_label(
-                &labels,
-                &[
-                    "topology.kubernetes.io/zone",
-                    "failure-domain.beta.kubernetes.io/zone",
-                ],
-            );
-            observation.region = first_label(
-                &labels,
-                &[
-                    "topology.kubernetes.io/region",
-                    "failure-domain.beta.kubernetes.io/region",
-                ],
-            );
-        }
-        Err(err) => {
-            tracing::debug!(%err, node_name, "trust report node lookup failed");
-        }
-    }
-}
-
-fn first_label(labels: &BTreeMap<String, String>, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| labels.get(*key).cloned())
-        .and_then(trimmed_optional)
-}
-
-fn spec_container_image(pod: &Pod, name: &str) -> Option<String> {
-    pod.spec
-        .as_ref()?
-        .containers
-        .iter()
-        .find(|container| container.name == name)
-        .and_then(|container| container.image.clone())
-        .and_then(trimmed_optional)
-}
-
-fn spec_init_container_image(pod: &Pod, name: &str) -> Option<String> {
-    pod.spec
-        .as_ref()?
-        .init_containers
-        .as_ref()?
-        .iter()
-        .find(|container| container.name == name)
-        .and_then(|container| container.image.clone())
-        .and_then(trimmed_optional)
-}
-
-/// The support image a commodity workspace mounts its daemon from.
-fn spec_daemon_volume_image(pod: &Pod) -> Option<String> {
-    pod.spec
-        .as_ref()?
-        .volumes
-        .as_ref()?
-        .iter()
-        .find(|volume| volume.name == DAEMON_VOLUME)?
-        .image
-        .as_ref()?
-        .reference
-        .clone()
-        .and_then(trimmed_optional)
-}
-
-fn status_container_image_id(pod: &Pod, name: &str) -> Option<String> {
-    pod.status
-        .as_ref()?
-        .container_statuses
-        .as_ref()?
-        .iter()
-        .find(|status| status.name == name)
-        .map(|status| status.image_id.clone())
-        .and_then(trimmed_optional)
-}
-
-fn status_init_container_image_id(pod: &Pod, name: &str) -> Option<String> {
-    pod.status
-        .as_ref()?
-        .init_container_statuses
-        .as_ref()?
-        .iter()
-        .find(|status| status.name == name)
-        .map(|status| status.image_id.clone())
-        .and_then(trimmed_optional)
+/// What the live member showed, each fact where the report kept it.
+fn apply_evidence(observation: &mut LiveObservation, evidence: MemberEvidence) {
+    observation.runtime_class = evidence.runtime;
+    observation.node = evidence.host;
+    observation.pod_ip = evidence.address;
+    observation.zone = evidence.zone;
+    observation.region = evidence.region;
+    observation.images = TrustReportImages {
+        workspace_image: evidence.workspace_image,
+        workspace_image_id: evidence.workspace_image_id,
+        dind_image: evidence.dind_image,
+        dind_image_id: evidence.dind_image_id,
+        daemon_init_image: evidence.daemon_init_image,
+        daemon_init_image_id: evidence.daemon_init_image_id,
+    };
 }
 
 fn runtime_from_class(runtime_class: &str) -> TrustReportRuntime {
@@ -546,6 +438,98 @@ fn trimmed_optional(value: String) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// #3628 PR 8a (cw-confidential): the one mapping both the live runtime
+    /// and the recorded fallback go through never calls an unknown, empty or
+    /// failed observation confidential. A failed read leaves no live runtime,
+    /// so the fallback's empty value is the "failed" case.
+    #[test]
+    fn only_the_confidential_class_is_ever_confidential() {
+        for observed in [
+            "",
+            "  ",
+            "kata-qemu",
+            "clh-kvm",
+            "vz",
+            "Confidential",
+            "confidential-ish",
+            "runc",
+        ] {
+            assert!(!runtime_from_class(observed).confidential, "{observed:?}");
+        }
+        assert!(runtime_from_class(RUNTIME_CLASS_CONFIDENTIAL).confidential);
+    }
+
+    /// #3628 PR 8a: every fact of the member's evidence lands where the
+    /// report read it before.
+    #[test]
+    fn each_evidence_fact_lands_where_the_report_kept_it() {
+        let evidence = MemberEvidence {
+            runtime: Some("commodity".into()),
+            host: Some("node-a".into()),
+            address: Some("10.0.0.9".into()),
+            zone: Some("zone-1".into()),
+            region: Some("region-1".into()),
+            workspace_image: Some("w".into()),
+            workspace_image_id: Some("wi".into()),
+            dind_image: Some("d".into()),
+            dind_image_id: Some("di".into()),
+            daemon_init_image: Some("s".into()),
+            daemon_init_image_id: Some("si".into()),
+        };
+        let mut observation = LiveObservation {
+            runtime_class: None,
+            node: None,
+            pod_ip: None,
+            zone: None,
+            region: None,
+            images: TrustReportImages {
+                workspace_image: None,
+                workspace_image_id: None,
+                dind_image: None,
+                dind_image_id: None,
+                daemon_init_image: None,
+                daemon_init_image_id: None,
+            },
+        };
+        apply_evidence(&mut observation, evidence);
+        let images = &observation.images;
+        assert_eq!(
+            (
+                observation.runtime_class.as_deref(),
+                observation.node.as_deref(),
+                observation.pod_ip.as_deref(),
+                observation.zone.as_deref(),
+                observation.region.as_deref(),
+            ),
+            (
+                Some("commodity"),
+                Some("node-a"),
+                Some("10.0.0.9"),
+                Some("zone-1"),
+                Some("region-1")
+            )
+        );
+        assert_eq!(
+            [
+                &images.workspace_image,
+                &images.workspace_image_id,
+                &images.dind_image,
+                &images.dind_image_id,
+                &images.daemon_init_image,
+                &images.daemon_init_image_id,
+            ]
+            .map(|value| value.as_deref()),
+            [
+                Some("w"),
+                Some("wi"),
+                Some("d"),
+                Some("di"),
+                Some("s"),
+                Some("si")
+            ]
+        );
+    }
+
     #[test]
     fn runtime_from_class_maps_shipped_profiles() {
         let confidential = runtime_from_class("confidential");
@@ -568,64 +552,6 @@ mod tests {
         let runc = runtime_from_class("runc");
         assert_eq!(runc.profile, "runc");
         assert_eq!(runc.handler, "runc");
-    }
-
-    #[test]
-    fn daemon_image_is_reported_from_either_delivery_route() {
-        let observe = |spec: serde_json::Value, status: serde_json::Value| {
-            let pod: Pod = serde_json::from_value(serde_json::json!({
-                "metadata": {"name": "workspace"},
-                "spec": spec,
-                "status": status,
-            }))
-            .unwrap();
-            let mut observation = LiveObservation {
-                runtime_class: None,
-                node: None,
-                pod_ip: None,
-                zone: None,
-                region: None,
-                images: TrustReportImages {
-                    workspace_image: None,
-                    workspace_image_id: None,
-                    dind_image: None,
-                    dind_image_id: None,
-                    daemon_init_image: None,
-                    daemon_init_image_id: None,
-                },
-            };
-            observe_workspace_pod(&pod, &mut observation);
-            (
-                observation.images.daemon_init_image,
-                observation.images.daemon_init_image_id,
-            )
-        };
-        let image = "registry.example/codewire/support@sha256:1111";
-        let workspace = serde_json::json!({"name": "workspace", "image": "workspace"});
-        assert_eq!(
-            observe(
-                serde_json::json!({
-                    "containers": [workspace],
-                    "volumes": [{"name": "codewire-bin", "image": {"reference": image}}],
-                }),
-                serde_json::json!({}),
-            ),
-            (Some(image.to_owned()), None)
-        );
-        assert_eq!(
-            observe(
-                serde_json::json!({
-                    "containers": [workspace],
-                    "initContainers": [{"name": "codewire-daemon-init", "image": image}],
-                    "volumes": [{"name": "codewire-bin", "emptyDir": {}}],
-                }),
-                serde_json::json!({"initContainerStatuses": [{
-                    "name": "codewire-daemon-init", "image": image, "imageID": "sha256:2222",
-                    "ready": false, "restartCount": 0,
-                }]}),
-            ),
-            (Some(image.to_owned()), Some("sha256:2222".to_owned()))
-        );
     }
 
     #[test]

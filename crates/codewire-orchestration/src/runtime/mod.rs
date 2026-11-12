@@ -584,6 +584,15 @@ pub trait RuntimeObservations: Send + Sync {
         placement: &Placement,
         member: &Incarnation,
     ) -> anyhow::Result<()>;
+
+    /// When the workspace volume `probe` found was created, for the start
+    /// marks; `None` when there is none, it is not bound yet, or the volume
+    /// bound to that name belongs to another incarnation of the claim.
+    async fn volume_created_at(
+        &self,
+        placement: &Placement,
+        probe: &RuntimeProbe,
+    ) -> anyhow::Result<Option<k8s_openapi::jiff::Timestamp>>;
 }
 
 /// How the workspace-binding service learns who is calling and what it is
@@ -800,9 +809,37 @@ pub trait RuntimeSnapshots: Send + Sync {
     ) -> anyhow::Result<()>;
 }
 
+/// What a member shows of where and how it runs, for the trust report. Each
+/// fact is the driver's own reading, absent when it is unknown; what the
+/// runtime means is decided by the report, never here.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemberEvidence {
+    /// The runtime it runs under, as the driver names it.
+    pub runtime: Option<String>,
+    /// The host it was placed on.
+    pub host: Option<String>,
+    pub address: Option<String>,
+    pub zone: Option<String>,
+    pub region: Option<String>,
+    pub workspace_image: Option<String>,
+    pub workspace_image_id: Option<String>,
+    pub dind_image: Option<String>,
+    pub dind_image_id: Option<String>,
+    pub daemon_init_image: Option<String>,
+    pub daemon_init_image_id: Option<String>,
+}
+
 /// How a client reaches a running environment.
 #[async_trait]
 pub trait RuntimeAccess: Send + Sync {
+    /// The member's evidence for the trust report; `None` when the member
+    /// can't be read. A host that can't be read leaves only its facts absent.
+    async fn member_evidence(
+        &self,
+        placement: &Placement,
+        member_name: &str,
+    ) -> Option<MemberEvidence>;
+
     /// The address of the environment's current member.
     async fn member_address(
         &self,

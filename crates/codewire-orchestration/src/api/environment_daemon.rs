@@ -571,7 +571,7 @@ pub(crate) async fn environment_daemon_bridge_client_core(
     org_id: &str,
     environment_id: &str,
 ) -> AppResult<DaemonClient> {
-    if state.kube.is_none() {
+    if state.runtime.is_none() {
         return Err(AppError::ServiceUnavailable(
             "sandbox client not configured".into(),
         ));
@@ -1017,7 +1017,7 @@ async fn resolve_target(
     org_id: &str,
     environment_id: &str,
 ) -> AppResult<super::proxy::SandboxTarget> {
-    if state.kube.is_none() {
+    if state.runtime.is_none() {
         return Err(AppError::ServiceUnavailable(
             "sandbox client not configured".into(),
         ));

@@ -12,8 +12,8 @@ use tokio::sync::oneshot;
 
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
-    Incarnation, KeptSnapshot, MemberReplacement, Pick, Placement, PoolBornClaim, PoolPass,
-    PoolState, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeExec, RuntimeLifecycle,
+    Incarnation, KeptSnapshot, MemberEvidence, MemberReplacement, Pick, Placement, PoolBornClaim,
+    PoolPass, PoolState, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeExec, RuntimeLifecycle,
     RuntimeMember, RuntimePools, RuntimeProbe, RuntimeResize, RuntimeSnapshots, RuntimeStorage,
     RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeMode,
     VolumeRef, WantedPool, WantedPools,
@@ -310,6 +310,15 @@ impl RuntimeObservations for FakeRuntimeDriver {
         _member: &Incarnation,
     ) -> anyhow::Result<()> {
         anyhow::bail!("not scripted")
+    }
+
+    async fn volume_created_at(
+        &self,
+        placement: &Placement,
+        _probe: &RuntimeProbe,
+    ) -> anyhow::Result<Option<k8s_openapi::jiff::Timestamp>> {
+        self.placements.lock().unwrap().push(placement.clone());
+        Ok(None)
     }
 }
 
@@ -719,6 +728,15 @@ impl RuntimeSnapshots for FakeRuntimeDriver {
 
 #[async_trait]
 impl RuntimeAccess for FakeRuntimeDriver {
+    async fn member_evidence(
+        &self,
+        placement: &Placement,
+        _member_name: &str,
+    ) -> Option<MemberEvidence> {
+        self.placements.lock().unwrap().push(placement.clone());
+        None
+    }
+
     async fn member_address(
         &self,
         _placement: &Placement,

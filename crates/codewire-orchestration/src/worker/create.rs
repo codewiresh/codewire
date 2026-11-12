@@ -24,9 +24,7 @@ use super::workspace_binding::{
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
 use crate::runtime::{ClaimRef, Pick, Placement, RuntimeDriver, RuntimeProbe, VerifiedChain};
-use crate::sandbox::client::{
-    NoCapacity, SandboxClient, WorkspacePodIdentity, WorkspaceSandboxIdentity,
-};
+use crate::sandbox::client::{NoCapacity, WorkspacePodIdentity, WorkspaceSandboxIdentity};
 use crate::sandbox::host_keys::RecordedHostKeys;
 use crate::sandbox::template::{
     CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DOCKER_MODE_LOCAL_DIND_DIRECT,
@@ -2046,13 +2044,13 @@ async fn run_environment_create(
                                 profile,
                             });
                         } else {
-                            let client = namespace
-                                .as_deref()
-                                .and_then(|namespace| require_client(ctx, namespace).ok());
+                            let volumes = namespace.as_deref().and_then(|namespace| {
+                                volume_reader(ctx.runtime.as_deref(), namespace)
+                            });
                             record_pod_start_marks(
                                 &ctx.pool,
                                 authority,
-                                client.as_ref(),
+                                volumes.as_ref(),
                                 &probe,
                                 start_path,
                                 profile,
@@ -2420,11 +2418,11 @@ struct DeferredPodMarks {
 
 impl DeferredPodMarks {
     async fn record_in(&self, ctx: &WorkerContext, authority: &ActivityAuthority) {
-        let client = self
+        let volumes = self
             .namespace
             .as_deref()
-            .and_then(|namespace| require_client(ctx, namespace).ok());
-        self.record(&ctx.pool, client.as_ref(), authority).await;
+            .and_then(|namespace| volume_reader(ctx.runtime.as_deref(), namespace));
+        self.record(&ctx.pool, volumes.as_ref(), authority).await;
     }
 
     /// Timing is observational: the environment is ready by now, so a failed
@@ -2432,13 +2430,13 @@ impl DeferredPodMarks {
     async fn record(
         &self,
         pool: &sqlx::PgPool,
-        client: Option<&SandboxClient>,
+        volumes: Option<&VolumeReader<'_>>,
         authority: &ActivityAuthority,
     ) {
         if let Err(error) = record_pod_start_marks(
             pool,
             authority,
-            client,
+            volumes,
             &self.probe,
             self.path,
             self.profile,
@@ -2457,11 +2455,11 @@ impl DeferredPodMarks {
 /// Rows carry the Pod UID and are written once per Pod, even when an error
 /// retry reaches `mark_running` again for the same Pod. They are not journal
 /// checkpoints. Only an unrecorded Pod reads its workspace volume's creation
-/// (`client`), so a Pod costs that read once.
+/// (`volumes`), so a Pod costs that read once.
 pub(super) async fn record_pod_start_marks(
     pool: &sqlx::PgPool,
     authority: &ActivityAuthority,
-    client: Option<&SandboxClient>,
+    volumes: Option<&VolumeReader<'_>>,
     probe: &RuntimeProbe,
     path: StartPath,
     profile: StartProfile,
@@ -2496,11 +2494,12 @@ pub(super) async fn record_pod_start_marks(
         }
     }
     let mut timeline = probe.pod_timeline.clone();
-    if let Some(client) = client
+    if let Some(volumes) = volumes
         && !probe.workspace_pvc_name.is_empty()
     {
-        match client
-            .workspace_volume_created_at(&probe.workspace_pvc_name)
+        match volumes
+            .runtime
+            .volume_created_at(&volumes.placement, probe)
             .await
         {
             Ok(created_at) => timeline.volume_created_at = created_at,
@@ -2536,11 +2535,21 @@ fn observe_create_stage(
     start_metrics::observe_stage(stage, path, profile, elapsed);
 }
 
-fn require_client(ctx: &WorkerContext, namespace: &str) -> anyhow::Result<SandboxClient> {
-    let Some(kube) = &ctx.kube else {
-        anyhow::bail!("sandbox backend is not configured");
-    };
-    Ok(SandboxClient::new(kube.clone(), namespace))
+/// What the start marks read the workspace volume's creation through.
+pub(super) struct VolumeReader<'a> {
+    runtime: &'a dyn RuntimeDriver,
+    placement: Placement,
+}
+
+/// The reader at `namespace`, or `None` without a sandbox backend.
+pub(super) fn volume_reader<'a>(
+    runtime: Option<&'a dyn RuntimeDriver>,
+    namespace: &str,
+) -> Option<VolumeReader<'a>> {
+    runtime.map(|runtime| VolumeReader {
+        runtime,
+        placement: Placement::new(namespace),
+    })
 }
 
 async fn replace_terminal_workspace_pod(
@@ -2830,7 +2839,7 @@ pub(super) async fn publish_backend_probe(
 /// The ready-action check for a [`FreshWarmBind`] (#3627): what its bind and
 /// `access_ready` wait did not already prove. The bind requires labels
 /// converged but not readiness, so this keeps the full reconcile's
-/// [`SandboxClient::wait_for_claim_runtime_identity`] on the bound
+/// [`RuntimeObservations::wait_runtime_identity`](crate::runtime::RuntimeObservations::wait_runtime_identity) on the bound
 /// observation: the same exact chain, nothing terminating, labels converged,
 /// Claim Ready, the Sandbox Ready at its current generation and the Pod
 /// Running and Ready. It then publishes the probe's Pod address under the
@@ -4600,6 +4609,16 @@ mod tests {
             shadow_warm_pool_name(&first_cleanup_template),
             second_claim.warm_pool_ref
         );
+    }
+
+    /// #3628 PR 8a: the start marks read the volume through the runtime at
+    /// the environment's namespace, and read nothing without a backend.
+    #[test]
+    fn the_marks_volume_reader_is_the_runtime_at_the_namespace() {
+        assert!(volume_reader(None, "dev-sandboxes").is_none());
+        let runtime = crate::runtime::fake::FakeRuntimeDriver::default();
+        let reader = volume_reader(Some(&runtime), "dev-sandboxes").expect("a backend reads");
+        assert_eq!(reader.placement, Placement::new("dev-sandboxes"));
     }
 
     #[test]

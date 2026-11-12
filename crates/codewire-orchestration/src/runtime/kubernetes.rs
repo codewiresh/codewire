@@ -3,6 +3,7 @@
 //! comes back into the driver's own types.
 
 mod attestation;
+mod evidence;
 pub(crate) mod members;
 pub(crate) mod observation;
 pub(crate) mod pools;
@@ -24,12 +25,13 @@ use kube::api::{Api, DynamicObject, LogParams};
 
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
-    Incarnation, KeptSnapshot, MemberFacts, MemberReplacement, Pick, Placement, PoolBornClaim,
-    PoolPass, PoolState, ResizeState, RuntimeAccess, RuntimeAttestation, RuntimeClaims,
-    RuntimeDriver, RuntimeExec, RuntimeFacts, RuntimeLifecycle, RuntimeMember, RuntimeObservation,
-    RuntimeObservations, RuntimePools, RuntimeProbe, RuntimeResize, RuntimeSnapshots,
-    RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime, VerifiedChain, VolumeGrowth,
-    VolumeIdentity, VolumeMode, VolumeRef, WantedPool, WantedPools, WorkspaceVolume,
+    Incarnation, KeptSnapshot, MemberEvidence, MemberFacts, MemberReplacement, Pick, Placement,
+    PoolBornClaim, PoolPass, PoolState, ResizeState, RuntimeAccess, RuntimeAttestation,
+    RuntimeClaims, RuntimeDriver, RuntimeExec, RuntimeFacts, RuntimeLifecycle, RuntimeMember,
+    RuntimeObservation, RuntimeObservations, RuntimePools, RuntimeProbe, RuntimeResize,
+    RuntimeSnapshots, RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime,
+    VerifiedChain, VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef, WantedPool, WantedPools,
+    WorkspaceVolume,
 };
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::HostKeyStore;
@@ -434,6 +436,16 @@ impl RuntimeObservations for KubernetesDriver {
     ) -> anyhow::Result<()> {
         self.sandbox_client(placement)
             .delete_workspace_pod_if_uid(&member.name, &member.uid)
+            .await
+    }
+
+    async fn volume_created_at(
+        &self,
+        placement: &Placement,
+        probe: &RuntimeProbe,
+    ) -> anyhow::Result<Option<k8s_openapi::jiff::Timestamp>> {
+        self.sandbox_client(placement)
+            .workspace_volume_created_at(&probe.workspace_pvc_name)
             .await
     }
 }
@@ -913,6 +925,14 @@ impl RuntimeSnapshots for KubernetesDriver {
 
 #[async_trait]
 impl RuntimeAccess for KubernetesDriver {
+    async fn member_evidence(
+        &self,
+        placement: &Placement,
+        member_name: &str,
+    ) -> Option<MemberEvidence> {
+        evidence::member(&self.client, &placement.namespace, member_name).await
+    }
+
     async fn member_address(
         &self,
         placement: &Placement,
@@ -1089,6 +1109,149 @@ mod tests {
         });
         let client = kube::Client::new(service, "the-default-namespace");
         (KubernetesDriver::shared(client), requests)
+    }
+
+    /// #3628 PR 8a: the start marks' volume read goes through the driver with
+    /// the client's own reads, so a volume that is absent costs one GET and
+    /// reads as `None`, and nothing is written.
+    #[tokio::test]
+    async fn the_marks_volume_read_is_the_clients_own() {
+        let (driver, requests) = driver_over_empty_cluster();
+        let probe = RuntimeProbe {
+            workspace_pvc_name: "workspace-sandbox-env-1".into(),
+            ..Default::default()
+        };
+        let created = driver
+            .volume_created_at(&Placement::new("dev-sandboxes"), &probe)
+            .await
+            .unwrap();
+        assert_eq!(created, None);
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            *requests,
+            ["GET /api/v1/namespaces/dev-sandboxes/persistentvolumeclaims/workspace-sandbox-env-1"]
+        );
+    }
+
+    /// #3628 PR 8a: a member that can't be read gives no evidence, after one
+    /// Pod read, so the trust report falls back to what it recorded.
+    #[tokio::test]
+    async fn an_unreadable_member_gives_no_evidence() {
+        let (driver, requests) = driver_over_empty_cluster();
+        let evidence = driver
+            .member_evidence(&Placement::new("dev-sandboxes"), "sandbox-env-1")
+            .await;
+        assert_eq!(evidence, None);
+        assert_eq!(
+            *requests.lock().unwrap(),
+            ["GET /api/v1/namespaces/dev-sandboxes/pods/sandbox-env-1"]
+        );
+    }
+
+    /// #3628 PR 8a: a member's evidence is its Pod, then its node's zone and
+    /// region labels, in two reads.
+    #[tokio::test]
+    async fn member_evidence_reads_the_pod_then_its_node() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let service = Router::new().fallback(move |request: Request<Body>| {
+            let seen = seen.clone();
+            async move {
+                let path = request.uri().path().to_string();
+                seen.lock()
+                    .unwrap()
+                    .push(format!("{} {path}", request.method()));
+                let body = if path.ends_with("/pods/sandbox-env-1") {
+                    json!({"apiVersion": "v1", "kind": "Pod",
+                        "metadata": {"name": "sandbox-env-1", "namespace": "dev-sandboxes"},
+                        "spec": {"runtimeClassName": "commodity", "nodeName": "node-a",
+                            "containers": [{"name": "workspace", "image": "w"}]},
+                        "status": {"podIP": "10.0.0.9"}})
+                } else {
+                    json!({"apiVersion": "v1", "kind": "Node",
+                        "metadata": {"name": "node-a", "labels": {
+                            "topology.kubernetes.io/zone": "zone-1",
+                            "failure-domain.beta.kubernetes.io/region": "region-1"}}})
+                };
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap()
+            }
+        });
+        let driver = KubernetesDriver::shared(kube::Client::new(service, "dev-sandboxes"));
+        let evidence = driver
+            .member_evidence(&Placement::new("dev-sandboxes"), "sandbox-env-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                evidence.runtime.as_deref(),
+                evidence.host.as_deref(),
+                evidence.address.as_deref(),
+                evidence.zone.as_deref(),
+                evidence.region.as_deref(),
+            ),
+            (
+                Some("commodity"),
+                Some("node-a"),
+                Some("10.0.0.9"),
+                Some("zone-1"),
+                Some("region-1")
+            )
+        );
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [
+                "GET /api/v1/namespaces/dev-sandboxes/pods/sandbox-env-1",
+                "GET /api/v1/nodes/node-a"
+            ]
+        );
+    }
+
+    /// #3628 PR 8a (cw-billing): the marks' volume time comes only from the
+    /// volume bound to this claim's own incarnation: a volume whose claimRef
+    /// names the same claim with another UID gives none.
+    #[tokio::test]
+    async fn the_marks_volume_time_is_only_this_claims_own() {
+        let driver_with_volume_claimed_by = |claim_uid: &'static str| {
+            let service = Router::new().fallback(move |request: Request<Body>| async move {
+                let body = if request.uri().path().ends_with("/persistentvolumeclaims/workspace-sb-1") {
+                    json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+                        "metadata": {"name": "workspace-sb-1", "namespace": "dev-sandboxes",
+                            "uid": "4d3c2b1a-0000-4000-8000-000000000001"},
+                        "spec": {"volumeName": "pvc-1"}})
+                } else {
+                    json!({"apiVersion": "v1", "kind": "PersistentVolumeList",
+                        "metadata": {"resourceVersion": "1"},
+                        "items": [{"metadata": {"name": "pvc-1", "creationTimestamp": "2026-09-29T10:00:02Z"},
+                            "spec": {"claimRef": {"namespace": "dev-sandboxes",
+                                "name": "workspace-sb-1", "uid": claim_uid}}}]})
+                };
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap()
+            });
+            KubernetesDriver::shared(kube::Client::new(service, "dev-sandboxes"))
+        };
+        let probe = RuntimeProbe {
+            workspace_pvc_name: "workspace-sb-1".into(),
+            ..Default::default()
+        };
+        let placement = Placement::new("dev-sandboxes");
+        let own = driver_with_volume_claimed_by("4d3c2b1a-0000-4000-8000-000000000001");
+        assert_eq!(
+            own.volume_created_at(&placement, &probe).await.unwrap(),
+            Some("2026-09-29T10:00:02Z".parse().unwrap())
+        );
+        let another = driver_with_volume_claimed_by("4d3c2b1a-0000-4000-8000-000000000002");
+        assert_eq!(
+            another.volume_created_at(&placement, &probe).await.unwrap(),
+            None
+        );
     }
 
     /// A driver over an API server that has this one claim.

@@ -33,7 +33,6 @@ use crate::runtime::RuntimeProbe;
 use crate::runtime::{
     ClaimRef, Incarnation, Placement, RuntimeTeardown, within_workspace_deadline,
 };
-use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::RecordedHostKeys;
 use crate::start_metrics::{self, StartPath, StartProfile, StartStage};
 
@@ -187,13 +186,6 @@ fn workspace_claim(
         name: backend.claim_name.clone(),
         uid: backend.claim_uid.clone(),
     }
-}
-
-fn sandbox_client(ctx: &WorkerContext, namespace: &str) -> anyhow::Result<SandboxClient> {
-    let Some(kube) = &ctx.kube else {
-        anyhow::bail!("sandbox backend is not configured");
-    };
-    Ok(SandboxClient::new(kube.clone(), namespace))
 }
 
 async fn ensure_access_stack_for_env(
@@ -646,7 +638,6 @@ pub async fn handle_environment_start(
         }
     };
     let ns = backend.namespace.clone();
-    let client = sandbox_client(ctx, &ns)?;
     let runtime = ctx.require_runtime()?;
     let placement = Placement::new(&ns);
 
@@ -895,7 +886,7 @@ pub async fn handle_environment_start(
             if let Err(error) = super::create::record_pod_start_marks(
                 &ctx.pool,
                 authority,
-                Some(&client),
+                super::create::volume_reader(ctx.runtime.as_deref(), &ns).as_ref(),
                 &probe,
                 StartPath::Resume,
                 profile,
