@@ -1158,8 +1158,12 @@ impl CodexLoginSource for std::sync::Arc<Script> {
     }
 }
 
+/// Waits for `condition`, checking every 10 ms. The deadline is a hang guard,
+/// not a speed expectation (docs/dev/AGENT-WORKFLOW.md "Failure convergence");
+/// a fixed 5 s ran out on a loaded runner (#4318).
 async fn eventually(condition: impl Fn() -> bool) {
-    for _ in 0..500 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         if condition() {
             return;
         }

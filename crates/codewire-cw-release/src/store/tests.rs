@@ -683,6 +683,11 @@ fn mkfifo(path: &Path) {
     assert_eq!(created, 0);
 }
 
+/// How quickly a FIFO or symlink must be refused: well inside the store's lock
+/// budget, so a refusal that waited on the lock fails. Half the budget proves
+/// that and leaves a loaded runner room; 1 s did not (#4318).
+const PROMPTLY: Duration = Duration::from_secs(DEFAULT_LOCK_TIMEOUT.as_secs() / 2);
+
 #[test]
 fn fifo_and_symlink_candidates_are_refused_without_mutation() {
     for special in ["fifo", "symlink"] {
@@ -703,7 +708,7 @@ fn fifo_and_symlink_candidates_are_refused_without_mutation() {
             store.publish_and_select(&candidate, None).is_err(),
             "{special}"
         );
-        assert!(started.elapsed() < Duration::from_secs(1), "{special}");
+        assert!(started.elapsed() < PROMPTLY, "{special}");
         assert_eq!(observed(&fixture), before);
         assert_eq!(stored_versions(&fixture), versions);
     }
@@ -733,7 +738,7 @@ fn fifo_state_version_and_lock_files_are_refused_promptly() {
             _ => store.status().map(|_| ()),
         };
         assert!(result.is_err(), "{selected}: {result:?}");
-        assert!(started.elapsed() < Duration::from_secs(1), "{selected}");
+        assert!(started.elapsed() < PROMPTLY, "{selected}");
         assert_eq!(
             FileType::from_raw_mode(
                 rfs::statat(rfs::CWD, &path, AtFlags::SYMLINK_NOFOLLOW)
