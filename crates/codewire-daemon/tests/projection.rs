@@ -42,7 +42,9 @@ const ENVIRONMENT_ID: &str = "CW_SYNTHETIC_PROJECTION_ENVIRONMENT_ID";
 const LAUNCH_SOCKET: &str = "CW_SYNTHETIC_PROJECTION_LAUNCH_SOCKET";
 const SELECTION: [u8; 32] = [9; 32];
 const GENERATION: u64 = 7;
-const BOUND: Duration = Duration::from_secs(15);
+/// What each step allows before it calls the step hung: a hang guard, not a
+/// speed expectation (`docs/dev/AGENT-WORKFLOW.md` "Failure convergence").
+const BOUND: Duration = Duration::from_secs(30);
 const FIRST: &str = "synthetic-projected-first";
 const SECOND: &str = "synthetic-projected-second";
 const REQUEST_ENV: [&str; 3] = [
@@ -770,19 +772,14 @@ async fn cancelled_launch_reaps_and_settles_without_a_late_launch(pty: bool) {
         width: 80,
         height: 24,
     };
-    // Match the former private unary deadline, not a sleep racing launch.
-    // The real bridge gate proves the request reached its exact launcher.
-    let client_deadline = Duration::from_secs(5);
-    let channel = Endpoint::from_shared(harness.endpoint.clone())
-        .unwrap()
-        .timeout(client_deadline)
-        .connect()
-        .await
-        .unwrap();
-    let mut deadline_client = DaemonServiceClient::new(channel);
+    // The client gives up once the real bridge gate proves the request reached
+    // its exact launcher. A client deadline (`Endpoint::timeout`, which sends
+    // no grpc-timeout) ends the call the same way, by resetting its stream; a
+    // fixed deadline instead raced the launch on a loaded host (#4267).
+    let mut cancelled_client = harness.client.clone();
     let pending_request = request.clone();
     let mut pending = tokio::spawn(async move {
-        deadline_client
+        cancelled_client
             .launch_session(authorized(pending_request))
             .await
     });
@@ -810,13 +807,9 @@ async fn cancelled_launch_reaps_and_settles_without_a_late_launch(pty: bool) {
         .trim()
         .parse()
         .unwrap();
-    // The client's own deadline ends this call; it extends the hang guard.
-    assert!(
-        bounded_beyond(client_deadline, pending)
-            .await
-            .unwrap()
-            .is_err()
-    );
+    // The client abandons the call, resetting its stream.
+    pending.abort();
+    assert!(bounded(pending).await.unwrap_err().is_cancelled());
     bounded(async {
         while Path::new(&format!("/proc/{pid}")).exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -953,7 +946,7 @@ async fn daemon_shutdown_reaps_a_launch_with_its_real_projection_still_pending()
     // termination. Closing the owned fixture pipe must cancel launch itself,
     // not rely on a host disconnect or the thirty-second authorization expiry.
     drop(harness.stdin.take());
-    let status = tokio::time::timeout(Duration::from_secs(15), harness.child.wait())
+    let status = tokio::time::timeout(BOUND, harness.child.wait())
         .await
         .expect("shutdown settles without releasing projection")
         .unwrap();
