@@ -160,7 +160,7 @@ fn authority(csrf: &str) -> HeaderMap {
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
         .build()
         .unwrap()
 }

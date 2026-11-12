@@ -1072,6 +1072,11 @@ mod tests {
         },
     }
 
+    /// A hang guard for the first response from the test's own coordinator on
+    /// 127.0.0.1, not a speed expectation (docs/dev/AGENT-WORKFLOW.md "Failure
+    /// convergence"). A starved CI guest failed a fixed 5 s (#4241, #4169).
+    const PRODUCTION_AUTH_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
+
     async fn production_auth_outcome(
         pool: sqlx::PgPool,
         protocol: Protocol,
@@ -1094,7 +1099,7 @@ mod tests {
             .unwrap();
         stream.close_send();
         let outcome = match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            PRODUCTION_AUTH_HANG_GUARD,
             stream.message::<CoordinateResponse>(),
         )
         .await

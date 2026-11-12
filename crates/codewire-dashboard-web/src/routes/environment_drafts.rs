@@ -453,7 +453,7 @@ mod tests {
         }
         let response = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
             .build()
             .unwrap()
             .post(format!(
@@ -507,7 +507,7 @@ mod tests {
         let (headers, csrf) = authority();
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
             .build()
             .unwrap();
         let response = client

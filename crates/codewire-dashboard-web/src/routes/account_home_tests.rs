@@ -278,7 +278,7 @@ async fn get(
     let dashboard = serve(crate::app(config(&upstream.origin))).await;
     let response = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(10))
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
         .build()
         .unwrap()
         .get(format!("{}{path}", dashboard.origin))

@@ -1,10 +1,7 @@
 //! The billing banner and Create Sandbox's credit refusal, against a
 //! synthetic upstream that records each call. No real account is used.
 
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::sync::{Arc, Mutex};
 
 use axum::{
     Json, Router,
@@ -187,7 +184,7 @@ fn session() -> HeaderMap {
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(10))
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
         .build()
         .unwrap()
 }

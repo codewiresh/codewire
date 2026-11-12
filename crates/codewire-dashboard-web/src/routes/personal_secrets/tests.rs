@@ -439,7 +439,7 @@ async fn registered_personal_and_legacy_routes_share_private_extractors_and_user
     });
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
         .build()
         .unwrap();
     let (headers, csrf) = browser_headers();
@@ -650,7 +650,7 @@ async fn draft_route_fixture() -> (
     });
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
         .build()
         .unwrap();
     (source, origin, client, web_server, authority_server)

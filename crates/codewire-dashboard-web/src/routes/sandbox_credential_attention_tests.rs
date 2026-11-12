@@ -231,7 +231,7 @@ fn session() -> HeaderMap {
 async fn render(mode: &'static str) -> [(String, Vec<String>); 2] {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
         .build()
         .unwrap();
     let mut rendered = Vec::new();

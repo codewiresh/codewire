@@ -32,6 +32,8 @@ mod security;
 mod server_timing;
 mod state;
 mod templates;
+#[cfg(test)]
+mod test_support;
 mod time_display;
 mod transport;
 mod view;

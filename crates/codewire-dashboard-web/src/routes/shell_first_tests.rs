@@ -120,7 +120,7 @@ async fn get(path: &str) -> (StatusCode, String, Vec<String>) {
     let dashboard = serve(crate::app(config(&upstream.origin))).await;
     let response = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(10))
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
         .build()
         .unwrap()
         .get(format!("{}{path}", dashboard.origin))
@@ -292,7 +292,7 @@ async fn the_credentials_page_waits_for_github_only_while_github_is_connected() 
         let started = std::time::Instant::now();
         let response = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(10))
+            .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
             .build()
             .unwrap()
             .get(format!("{}/settings/credentials/", dashboard.origin))
