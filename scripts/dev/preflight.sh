@@ -83,6 +83,14 @@ if [ "$PREFLIGHT_MODE" != explain ]; then
   # shellcheck source=scripts/dev/cpu-slice.sh
   . "$REPO_ROOT/scripts/dev/cpu-slice.sh"
   cpu_slice_enter preflight
+  # A full preflight is heavy throughout, so it waits its turn behind any
+  # other on this workstation; the push check takes the lock only for its
+  # compiling steps (preflight-push.sh, #4215).
+  # shellcheck source=scripts/dev/preflight-lock.sh
+  . "$REPO_ROOT/scripts/dev/preflight-lock.sh"
+  if [ "$PREFLIGHT_SCOPE" != push ]; then
+    preflight_lock_acquire "preflight ${PREFLIGHT_SCOPE:-$PREFLIGHT_MODE}" || exit 1
+  fi
 fi
 
 preflight_git_local_env_names="$(git rev-parse --local-env-vars)"

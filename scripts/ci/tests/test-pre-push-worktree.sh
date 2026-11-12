@@ -51,6 +51,7 @@ mkdir -p "$repo"/{.githooks,docs,scripts/dev,scripts/ci/select,scripts/ci/verify
   "$repo"/{scripts/ci/release,scripts/ci/images,crates/codewire-cli/src} "$TMP/bin"
 for path in .githooks/pre-push scripts/dev/pre-push.sh scripts/dev/preflight.sh \
     scripts/dev/preflight-push.sh scripts/dev/install-hooks.sh scripts/dev/cpu-slice.sh \
+    scripts/dev/preflight-lock.sh \
     scripts/ci/select/select-verification.sh scripts/ci/select/main-push-switch.sh \
     scripts/ci/verify/resolve-cargo-target-dir.sh scripts/ci/verify/shellcheck-baseline.sh; do
   install -m 755 "$ROOT/$path" "$repo/$path"
@@ -99,6 +100,9 @@ chmod +x "$TMP/bin/codewire-cpu"
 printf '0::/user.slice/user-1000.slice/session-2.scope\n' > "$TMP/cgroup-outside"
 printf '0::/cwvmtest.slice/codewire-vmtest-1-1.scope\n' > "$TMP/cgroup-inside"
 export CPU_SLICE_CGROUP_FILE="$TMP/cgroup-outside"
+# The workstation-wide preflight lock (#4215) lives here for the fixture, never
+# at the real ~/.cache path another session's push may hold.
+export PREFLIGHT_LOCK_FILE="$TMP/preflight.lock"
 printf 'base\n' > "$repo/docs/base.md"
 git -C "$repo" add -A && git -C "$repo" -c commit.gpgsign=false commit -q -m 'test: seed'
 git init -q --bare "$TMP/remote.git"
@@ -245,6 +249,38 @@ done
 output="$(cd "$repo" && CPU_STUB_EXIT=1 on_workstation scripts/dev/preflight.sh --all 2>&1)" ||
   fail "a failing CPU helper failed preflight: $output"
 assert_contains slice_failure "$output" 'preflight: codewire-cpu run failed; running outside cwvmtest.slice'
+
+# Heavy push checks queue behind another heavy preflight on the workstation
+# (#4215): a push with a Rust change says whom it waits for and gives up at
+# its bound; a light push and a CI run never wait; once the holder ends, the
+# push takes the lock and names itself.
+if command -v flock >/dev/null 2>&1; then
+  ( exec 9>>"$PREFLIGHT_LOCK_FILE"; flock 9; exec sleep 120 ) &
+  lock_holder=$!
+  for _ in $(seq 1 600); do flock -n "$PREFLIGHT_LOCK_FILE" true 2>/dev/null || break; sleep 0.1; done
+  printf 'push check rust-clippy in /elsewhere (pid %s, since 00:00:00Z)\n' "$lock_holder" > "$PREFLIGHT_LOCK_FILE.holder"
+  if output="$(PREFLIGHT_LOCK_WAIT_SECONDS=1 on_workstation git -C "$repo" push -q origin HEAD:refs/heads/locked 2>&1)"; then
+    fail 'a heavy push check ran while another held the lock'
+  fi
+  assert_contains lock_wait "$output" "is waiting for push check rust-clippy in /elsewhere (pid $lock_holder"
+  assert_contains lock_wait "$output" 'gave up after 1s waiting for'
+  output="$(cd "$repo" && CI=true PREFLIGHT_LOCK_WAIT_SECONDS=1 git push -q origin HEAD:refs/heads/locked-ci 2>&1)" ||
+    fail "a CI push waited for the workstation lock: $output"
+  git -C "$repo" checkout -q -b light-only origin/main
+  printf 'note\n' > "$repo/docs/light.md"
+  git -C "$repo" add docs/light.md && git -C "$repo" -c commit.gpgsign=false commit -qm 'docs: light'
+  output="$(PREFLIGHT_LOCK_WAIT_SECONDS=1 on_workstation git -C "$repo" push -q origin HEAD:refs/heads/light 2>&1)" ||
+    fail "a light push waited for the lock: $output"
+  assert_not_contains lock_light "$output" 'is waiting for'
+  git -C "$repo" checkout -q -
+  kill "$lock_holder" 2>/dev/null || true
+  wait "$lock_holder" 2>/dev/null || true
+  output="$(on_workstation git -C "$repo" push -q origin HEAD:refs/heads/unlocked 2>&1)" ||
+    fail "a heavy push failed once the lock was free: $output"
+  assert_contains lock_holder "$(cat "$PREFLIGHT_LOCK_FILE.holder")" 'push check rust-clippy in '
+else
+  printf '[test-pre-push-worktree] note: no flock here; workstation lock cases skipped\n'
+fi
 
 # The helper itself: its slice is workstation-cpu.sh's, it does nothing without
 # codewire-cpu, and builder containers join the slice only from inside it.

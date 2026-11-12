@@ -22,6 +22,10 @@ repo="$work/repo"
 mkdir -p "$repo/scripts/dev" "$repo/scripts/ci/verify" "$repo/crates/client/src" \
   "$repo/crates/codewire-desktop/src" "$repo/docs" "$work/bin"
 install -m 755 "$ROOT/scripts/dev/preflight-push.sh" "$repo/scripts/dev/preflight-push.sh"
+# preflight-push.sh sources the workstation lock (#4215); the fixture's lock is
+# its own, never the workstation's.
+install -m 644 "$ROOT/scripts/dev/preflight-lock.sh" "$repo/scripts/dev/preflight-lock.sh"
+export PREFLIGHT_LOCK_FILE="$work/preflight.lock"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/scripts/dev/preflight-environment.sh"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$CARGO_TARGET_DIR"\n' \
   >"$repo/scripts/ci/verify/resolve-cargo-target-dir.sh"

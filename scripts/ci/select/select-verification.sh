@@ -833,7 +833,7 @@ if [ "$event_selected" = false ]; then
       scripts/dev/linux-local-runtime.py|scripts/dev/test-linux-local-runtime.py|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
       scripts/dev/pre-push.sh|scripts/dev/preflight-push.sh|\
-      scripts/dev/preflight-environment.sh|scripts/dev/cpu-slice.sh|\
+      scripts/dev/preflight-environment.sh|scripts/dev/cpu-slice.sh|scripts/dev/preflight-lock.sh|\
       scripts/ci/select/emit-verification-matrices.sh|\
       scripts/ci/select/require-verification-results.sh|\
       scripts/ci/select/main-push-switch.sh|\

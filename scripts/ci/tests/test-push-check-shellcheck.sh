@@ -21,6 +21,10 @@ command -v jq >/dev/null || fail 'jq is required'
 repo="$work/repo"
 mkdir -p "$repo/scripts/dev" "$repo/scripts/ci/verify" "$repo/scripts/fixture"
 install -m 755 "$ROOT/scripts/dev/preflight-push.sh" "$repo/scripts/dev/preflight-push.sh"
+# preflight-push.sh sources the workstation lock (#4215); the fixture's lock is
+# its own, never the workstation's.
+install -m 644 "$ROOT/scripts/dev/preflight-lock.sh" "$repo/scripts/dev/preflight-lock.sh"
+export PREFLIGHT_LOCK_FILE="$work/preflight.lock"
 install -m 644 "$ROOT/scripts/ci/verify/shellcheck-baseline.sh" \
   "$repo/scripts/ci/verify/shellcheck-baseline.sh"
 install -m 755 "$ROOT/scripts/ci/verify/check-shell-scripts.sh" \

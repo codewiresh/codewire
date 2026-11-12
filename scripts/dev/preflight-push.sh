@@ -21,9 +21,18 @@ cd "$ROOT"
 
 log() { printf '[push-check] %s\n' "$*"; }
 ran() { printf '%s\n' "$1" >>"$RAN"; }
+# Compiles and test runs wait their turn behind any other heavy preflight on
+# this workstation, so concurrent pushes queue instead of starving each
+# other's timing tests (#4215). Light checks never wait.
+# shellcheck source=scripts/dev/preflight-lock.sh
+. "$ROOT/scripts/dev/preflight-lock.sh"
+
 step() {
   local name="$1" started=$SECONDS status=0
   shift
+  case "$name" in
+    rust-clippy*|rust-unit-tests-*|desktop-check) preflight_lock_acquire "push check $name" || exit 1 ;;
+  esac
   log "${name}: start"
   "$@" || status=$?
   if [ "$status" -ne 0 ]; then

@@ -353,7 +353,7 @@ for helper in [*policy_helpers, 'scripts/ci/verify/check-shell-scripts.sh',
         destination.chmod(0o755)
     else:
         shutil.copy(tool, destination)
-for helper in ('scripts/dev/preflight.sh', 'scripts/dev/cpu-slice.sh',
+for helper in ('scripts/dev/preflight.sh', 'scripts/dev/cpu-slice.sh', 'scripts/dev/preflight-lock.sh',
                'scripts/ci/select/select-verification.sh'):
     destination = fixture / helper
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -369,7 +369,8 @@ environment_check.chmod(0o755)
 slice_cgroup = temporary / 'rust-composition-cgroup'
 slice_cgroup.write_text('0::/cwvmtest.slice/composition-fixture.scope\n')
 git_env = dict(environment, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
-               CPU_SLICE_CGROUP_FILE=str(slice_cgroup))
+               CPU_SLICE_CGROUP_FILE=str(slice_cgroup),
+               PREFLIGHT_LOCK_FILE=str(temporary / 'preflight.lock'))
 
 def git(*args):
     return subprocess.run(['git', '-C', str(fixture), *args], env=git_env,
