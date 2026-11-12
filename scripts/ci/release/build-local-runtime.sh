@@ -49,7 +49,8 @@ names an existing Linux clone to build the kernel from instead of cloning.
 when all are, and 4 when one would be built.
 In a CI job container, LOCAL_RUNTIME_JOB_CONTAINER names that container so the
 container builds can reach its files (build-runtime-kernel.sh --job-container);
-TMPDIR and DIR must then be on its workspace. LOCAL_RUNTIME_JOBS (default 4)
+DIR must then be on its workspace. The build's scratch is a directory beside
+DIR, whose filesystem must allow executing files. LOCAL_RUNTIME_JOBS (default 4)
 bounds each kernel and cw build's parallel jobs. The linux side fetches every
 pinned download first, then builds the parts that do not depend on each other
 side by side: the two kernels, then the two targets' guest roots and cw
@@ -166,15 +167,29 @@ for name in parts.PARTS[sys.argv[2]]["outputs"]:
     shutil.copy2(f"{sys.argv[3]}/{name}", f"{sys.argv[4]}/{name}")' "$release_dir" "$part" "$from" "$dir"
 }
 
+# The parts' builds install and run tools under the scratch, so it sits beside
+# DIR rather than in TMPDIR, which may be mounted noexec (#4324). --check runs
+# nothing from it.
+if [ -n "$check" ]; then
+  work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-local-runtime.XXXXXX")"
+else
+  work="$(mktemp -d "$(dirname "$output")/.codewire-local-runtime.XXXXXX")"
+fi
+chmod 0700 "$work"
+trap 'chmod -R u+w "$work" 2>/dev/null || true; rm -rf "$work"' EXIT
+if [ -z "$check" ]; then
+  printf '#!/bin/sh\nexit 0\n' >"$work/exec-probe"
+  chmod 0700 "$work/exec-probe"
+  "$work/exec-probe" 2>/dev/null ||
+    die "$(dirname "$output") does not allow executing files (noexec mount); give --output on a filesystem that does"
+  rm -f "$work/exec-probe"
+fi
 if [ "$mode" = helper ]; then
   mkdir -m 0700 "$output"
 elif [ -z "$check" ]; then
   mkdir -m 0700 "$output" "$output/built"
   [ "$mode" != linux ] || mkdir -m 0700 "$output/linux-x86_64-built"
 fi
-work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-local-runtime.XXXXXX")"
-chmod 0700 "$work"
-trap 'chmod -R u+w "$work" 2>/dev/null || true; rm -rf "$work"' EXIT
 
 host_facts() {
   python3 -c 'import json, platform, subprocess, sys

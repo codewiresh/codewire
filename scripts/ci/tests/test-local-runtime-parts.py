@@ -9,11 +9,13 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -418,6 +420,28 @@ class BuildScriptTest(unittest.TestCase):
             self.assertIn(message, result.stderr)
         self.assertFalse(output.exists())
 
+    def test_a_noexec_output_parent_is_refused_before_anything_is_written(self):
+        # #4324: the parts' builds run tools from the scratch beside DIR.
+        noexec = next((Path(path) for path in ("/dev/shm", "/tmp")
+                       if Path(path).is_dir() and os.access(path, os.W_OK)
+                       and os.statvfs(path).f_flag & os.ST_NOEXEC), None)
+        if noexec is None:
+            self.skipTest("no writable noexec mount on this host")
+        base = Path(tempfile.mkdtemp(prefix="runtime-build-noexec.", dir=noexec))
+        self.addCleanup(shutil.rmtree, base)
+        head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+        # A script that let it through stops at its first lookup, not in a build.
+        closed = "http://127.0.0.1:9"
+        environment = {**os.environ, "LOCAL_RUNTIME_NO_BUILD": "1", "FETCH_PINNED_ATTEMPTS": "1",
+                       **{name: closed for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+                                                    "ALL_PROXY")}}
+        result = subprocess.run(["bash", str(ROOT / "scripts/ci/release/build-local-runtime.sh"), "linux",
+                                 "--source-sha", head, "--version", "v1.2.3", "--output", str(base / "out")],
+                                capture_output=True, text=True, check=False, env=environment, timeout=120)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"{base} does not allow executing files (noexec mount)", result.stderr)
+        self.assertEqual(list(base.iterdir()), [])
 
     def test_the_macos_side_packs_only_a_signed_helper(self):
         # #1905: the release's macOS side never builds or signs the helper. It
