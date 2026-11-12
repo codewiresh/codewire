@@ -4126,11 +4126,6 @@ fn mount_checked_out_repositories(
     mounts_supported: bool,
 ) -> anyhow::Result<NativeWorkspace> {
     let shown = display_host_path(source_path);
-    if !project.local_mounts.is_empty() {
-        anyhow::bail!(
-            "--path-mode mount with repositories mounts {shown} itself, so codewire.yaml cannot also declare mounts"
-        );
-    }
     if let Some(reason) = codewire_local_vmm::workspace_source_refusal(source_path) {
         anyhow::bail!("refusing to mount {shown}: {reason}");
     }
@@ -4140,6 +4135,32 @@ fn mount_checked_out_repositories(
         );
     }
     let destination = format!("/workspace/{}", workspace_directory_name(source_path));
+    // Declared mounts stay beside the folder's, such as a checkout that lives
+    // outside it (#4020), but none may share or nest with it.
+    if let Some(mount) = project.local_mounts.iter().find(|mount| {
+        let other = mount.destination.as_str();
+        other == destination
+            || other.starts_with(&format!("{destination}/"))
+            || destination.starts_with(&format!("{other}/"))
+    }) {
+        anyhow::bail!(
+            "--path-mode mount mounts {shown} at {destination}, so codewire.yaml cannot also mount {} there",
+            terminal_text(&mount.destination)
+        );
+    }
+    let live = project
+        .local_mounts
+        .iter()
+        .filter(|mount| mount.mode == v1::LocalMountMode::Direct as i32)
+        .count()
+        + 1;
+    if live > codewire_local_vmm::MAX_DIRECT_SHARES {
+        anyhow::bail!(
+            "--path-mode mount mounts {shown} live beside codewire.yaml's {} live mounts, {live} in all; a local VM serves at most {}",
+            live - 1,
+            codewire_local_vmm::MAX_DIRECT_SHARES
+        );
+    }
     let problems = project
         .spec
         .repositories
@@ -4183,9 +4204,14 @@ fn mount_checked_out_repositories(
         read_only: Some(false),
         vm_only,
     });
+    let beside = if project.local_mounts.len() > 1 {
+        ", and the mounts declared in codewire.yaml"
+    } else {
+        ""
+    };
     Ok(NativeWorkspace {
         description: format!(
-            "mount {shown} at {destination} (live, read-write), with its checkouts of {names}"
+            "mount {shown} at {destination} (live, read-write), with its checkouts of {names}{beside}"
         ),
         notice: unapplied.then(|| {
             "codewire.yaml names branches or revisions; a mount uses each checkout as it is, so they are not applied.".to_owned()
@@ -5500,6 +5526,78 @@ mod tests {
         );
     }
 
+    /// #4020: mount mode keeps declared mounts beside the folder's own, such
+    /// as a checkout that lives outside the folder; one at or inside the
+    /// folder's mount, or one live mount too many, is still refused.
+    #[test]
+    fn mount_mode_keeps_declared_mounts_beside_the_folder() {
+        let outside = tempfile::tempdir().unwrap();
+        let mounts = |destinations: &[&str]| {
+            let entries = destinations
+                .iter()
+                .map(|destination| {
+                    format!(
+                        "  - {{source: {}, destination: {destination}, mode: direct, read_only: false}}\n",
+                        outside.path().display()
+                    )
+                })
+                .collect::<String>();
+            format!("mounts:\n{entries}")
+        };
+
+        let (_temp, root) = folder_with_checkouts(&mounts(&["/workspace/infra"]));
+        let (project, workspace) = mount_plan(&root).unwrap();
+        let destinations = project
+            .local_mounts
+            .iter()
+            .map(|mount| mount.destination.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(destinations, ["/workspace/infra", "/workspace/root"]);
+        assert_eq!(
+            project.local_mounts[0].source_path,
+            outside.path().as_os_str().as_bytes()
+        );
+        assert!(
+            workspace
+                .description
+                .ends_with("and the mounts declared in codewire.yaml"),
+            "{}",
+            workspace.description
+        );
+
+        // At the folder's mount point the file itself is refused, since the
+        // mount would hold its repositories; inside it, mount mode refuses.
+        let (_temp, root) = folder_with_checkouts(&mounts(&["/workspace/root"]));
+        let error = format!("{:#}", mount_plan(&root).unwrap_err());
+        assert!(error.contains("overlaps"), "{error}");
+        let (_temp, root) = folder_with_checkouts(&mounts(&["/workspace/root/x"]));
+        let error = mount_plan(&root).unwrap_err().to_string();
+        assert!(
+            error.contains("cannot also mount /workspace/root/x there"),
+            "{error}"
+        );
+
+        let many = |count: usize| {
+            (0..count)
+                .map(|index| format!("/workspace/m{index}"))
+                .collect::<Vec<_>>()
+        };
+        let at_limit = many(codewire_local_vmm::MAX_DIRECT_SHARES - 1);
+        let (_temp, root) = folder_with_checkouts(&mounts(
+            &at_limit.iter().map(String::as_str).collect::<Vec<_>>(),
+        ));
+        assert_eq!(
+            mount_plan(&root).unwrap().0.local_mounts.len(),
+            codewire_local_vmm::MAX_DIRECT_SHARES
+        );
+        let over = many(codewire_local_vmm::MAX_DIRECT_SHARES);
+        let (_temp, root) = folder_with_checkouts(&mounts(
+            &over.iter().map(String::as_str).collect::<Vec<_>>(),
+        ));
+        let error = mount_plan(&root).unwrap_err().to_string();
+        assert!(error.contains("a local VM serves at most 16"), "{error}");
+    }
+
     #[test]
     fn mount_mode_with_repositories_mounts_the_folder_instead_of_cloning() {
         let (_temp, root) = folder_with_checkouts("");
@@ -5553,7 +5651,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_mode_needs_destinations_inside_the_folder_and_no_declared_mounts() {
+    fn mount_mode_needs_destinations_inside_the_folder() {
         let (_temp, root) = folder_with_checkouts("");
         let renamed = root.with_file_name("other");
         std::fs::rename(&root, &renamed).unwrap();
@@ -5563,11 +5661,12 @@ mod tests {
             "{error}"
         );
 
+        // A declared mount beside the folder is kept (#4020).
         let (_temp, root) = folder_with_checkouts(
             "mounts: [{source: a, destination: /workspace/extra, mode: copy}]\n",
         );
-        let error = mount_plan(&root).unwrap_err().to_string();
-        assert!(error.contains("cannot also declare mounts"), "{error}");
+        let (project, _) = mount_plan(&root).unwrap();
+        assert_eq!(project.local_mounts.len(), 2);
 
         let (_temp, root) = folder_with_checkouts("");
         let mut project = native_codewire_yaml(

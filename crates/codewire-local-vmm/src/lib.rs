@@ -247,6 +247,8 @@ mod vz;
 mod workspace_generation;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+/// How many live (direct) mounts one local VM serves.
+pub use codewire_vmm_guest_probe::MAX_DIRECT_SHARES;
 pub use direct_share::{DirectShareRequest, workspace_source_refusal};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use host::process::{LiveProcess, ProcessIdentity, RecoveryError};

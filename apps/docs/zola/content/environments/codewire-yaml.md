@@ -228,7 +228,25 @@ mount` in its `codewire.local.yaml`; `--path-mode clone` then clones them for
 one create. With the mount, nothing is cloned and the file's `branch` and
 `revision` are not applied: each checkout stays as it is, and the review says
 so. A missing checkout, a link, or a destination outside the folder fails
-before anything is created and is named. `mounts` cannot be combined with it.
+before anything is created and is named.
+
+`mounts` declared beside it are kept, for a folder you want in the VM that is
+not inside this one, such as a checkout elsewhere on your machine. Put them in
+`codewire.local.yaml`, since a cloud create refuses `mounts`:
+
+```yaml
+# ~/src/platform/codewire.local.yaml
+workspace:
+  path_mode: mount
+mounts:
+  - source: /srv/checkouts/infra
+    destination: /workspace/infra
+    mode: direct
+    read_only: false
+```
+
+A declared mount may not be the folder's own mount point or lie inside it, and
+a local VM serves at most 16 live mounts in all, the folder's included.
 
 The VM can change anything in the mounted folder, including Git hooks and
 settings that git on your machine later runs. For code you don't trust, use
