@@ -143,10 +143,12 @@ gate.
   `docs/ci/runners.md` and `private-docs: designs/ci-vm-model.md`.
 - **Dev** runs only commits whose `main` CI passed. One Dev delivery is in
   flight at a time and always finishes and publishes; at most one waits behind
-  it, the newest, a newer commit replaces the waiting one, and no delivery is
-  cancelled (owner, 2026-11-10, #4071). The mechanism is the "Dev delivery turn"
-  job in `.gitea/workflows/deploy-dev.yaml`, `docs/dev/CI-CONFIGURATION.md` and
-  codewire/deploy.
+  it, the newest, a newer commit replaces the waiting one, and no workflow
+  cancels a delivery (owner, 2026-11-10, #4071). By hand, under the `ci`
+  skill, the orchestrator cancels only a delivery still waiting at its turn,
+  never one in flight (owner, 2026-11-12; cited on #3013). The mechanism is
+  the "Dev delivery turn" job in `.gitea/workflows/deploy-dev.yaml`,
+  `docs/dev/CI-CONFIGURATION.md` and codewire/deploy.
 - **Release candidates.** A release tag's receipt needs green `main` CI, a
   green dry run and Dev acceptance of the exact candidate commit
   (`scripts/ci/receipts/verify-release-tag-receipt.sh`; what a push to `main`
