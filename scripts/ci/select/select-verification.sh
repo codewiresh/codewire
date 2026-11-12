@@ -818,6 +818,7 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/rust-cache-refresh.yaml|\
       .gitea/workflows/connect-apikey-smoke.yaml|\
       .gitea/workflows/source-approval.yml|\
+      .gitea/workflows/policy-drift.yml|\
       .gitea/workflows/dev-deployment-smoke-receipt.yaml|\
       .gitea/workflows/prod-readonly-smoke.yaml|\
       .gitea/workflows/runtime-dev-commodity-smoke.yaml|\
@@ -852,6 +853,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-ci-job-plan.py|\
       scripts/ci/tests/test-select-verification.sh|\
       scripts/ci/tests/test-source-approval-workflow.sh|\
+      scripts/ci/tests/test-policy-drift.sh|\
+      scripts/ci/verify/kyverno-pods-from-goldens.py|\
       scripts/ci/tests/test-resolve-published-support-pair.sh|\
       scripts/ci/tests/test-resolve-deployed-source.sh|\
       scripts/ci/tests/test-require-verification-results.sh|\

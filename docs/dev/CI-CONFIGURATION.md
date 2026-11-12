@@ -64,7 +64,7 @@ secrets; credentials come from OpenBao.
 | Variable | Value | Used by |
 |---|---|---|
 | `CODEWIRE_SOURCE_URL` | Canonical public clone URL of this repository, for example `https://forgejo.example.com/codewire/codewire.git` | image provenance (`vcs.source`), which deployment verifies; the release tag's canonical-server check. Never an internal URL |
-| `CODEWIRE_IMAGE_REGISTRY` | Image registry host, with no scheme, for example `registry.example.com` | image build, publish, sign and verify scripts; Kind's approved images; Production publication |
+| `CODEWIRE_IMAGE_REGISTRY` | Image registry host, with no scheme, for example `registry.example.com` | image build, publish, sign and verify scripts; Kind's approved images; Production publication; the policy drift check's Pods |
 | `CODEWIRE_R2_CACHE_ENDPOINT` | `https://` S3 endpoint of the CI compiler and layer cache buckets | sccache and workspace layer cache selection |
 | `CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED` | The one CI compiler and layer cache bucket. Main pushes read and write it; pull requests read it with a read-only token | the cache selectors and the protected image builds. With the endpoint set and this unset, they stop |
 | `CODEWIRE_R2_RELEASES_ENDPOINT` | `https://` S3 endpoint of the `cw` release bucket | `cw` release publication (`cli-release.yaml`) |
@@ -73,6 +73,7 @@ secrets; credentials come from OpenBao.
 | `CODEWIRE_FORGEJO_INTERNAL_URL` | Internal Forgejo URL that runners register against, if it differs from the public one | release tag and receipt checks |
 | `ARM64_BUILDKIT_HOST` | Host of the native arm64 BuildKit builder | arm64 image builds |
 | `CONFIDENTIAL_SNP_NODE` | Dev node that runs confidential (SNP) Sandboxes | confidential smoke |
+| `CODEWIRE_POLICY_DRIFT_INFRA_REPOSITORY` | `OWNER/NAME` of the infrastructure repository whose clusters' sandbox Kyverno policies the drift check reads, on this forge | `policy-drift.yml` |
 | `EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE` | Transport zone the Dev tailnet direct-UDP check expects | Dev transport smoke |
 | `MIRROR_PRIVATE_CONTENT_PATTERNS` | Newline-separated patterns the public-mirror content scan refuses | `source-approval.yml`, `mirror-github.yaml` |
 | `CODEWIRE_WARM_CACHE_EPOCH` | Optional; changing it starts a new warm Rust cache | warm cache selection |

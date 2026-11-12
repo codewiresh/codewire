@@ -292,6 +292,57 @@ def roles_in_scope(workflow, job):
     return [env for env in envs if any(ROLE_KEY.fullmatch(key) for key in env)]
 
 
+# The pre-merge policy drift check (#3821) is the one workflow a pull request
+# starts that holds OIDC, on the untrusted light runner: the owner approved its
+# read-only integration for that shape on 2026-11-11, and the orchestrator
+# narrowed it to this dedicated workflow the same day (option B). Its token
+# reaches only codewire-policy-drift-read, the one credential that admits
+# pull_request_target (infra's contract check pins that). The exception holds
+# only while the workflow keeps exactly this shape, so it cannot widen: one
+# job, pull_request_target alone, no OpenBao in scope, base tooling checked
+# out apart from the pull request's tree, and nothing of that tree run.
+POLICY_DRIFT = "policy-drift.yml"
+POLICY_DRIFT_PATHS = {"${{ steps.selection.outputs.base_sha }}": ".policy-drift-base",
+                      "${{ steps.selection.outputs.head_sha }}": "candidate"}
+
+
+def policy_drift_errors(workflow):
+    """Why policy-drift.yml is not the exact shape its OIDC exception admits."""
+    errors = []
+    triggers = workflow["on"] if isinstance(workflow["on"], dict) else {key: None for key in workflow["on"]}
+    if set(triggers) != {"pull_request_target"}:
+        errors.append(f"{POLICY_DRIFT} starts on {sorted(triggers)}, not pull_request_target alone")
+    jobs = workflow["jobs"]
+    if list(jobs) != ["policy-drift"]:
+        return errors + [f"{POLICY_DRIFT} has jobs {list(jobs)}, not the one policy-drift job"]
+    job = jobs["policy-drift"]
+    steps = job.get("steps") or []
+    if roles_in_scope(workflow, job) or any("fetch-openbao-" in str(step.get("run", "")) for step in steps):
+        errors.append(f"{POLICY_DRIFT} reaches OpenBao")
+    checkouts = {}
+    for step in steps:
+        if step.get("uses") == CHECKOUT:
+            with_ = step.get("with") or {}
+            checkouts[with_.get("ref")] = with_
+    if set(checkouts) != set(POLICY_DRIFT_PATHS):
+        errors.append(f"{POLICY_DRIFT} checks out {sorted(map(str, checkouts))}, not exactly base and candidate")
+    for ref, path in POLICY_DRIFT_PATHS.items():
+        with_ = checkouts.get(ref) or {}
+        if with_.get("path") != path or with_.get("persist-credentials") is not False:
+            errors.append(f"{POLICY_DRIFT} checks out {ref} at {with_.get('path')!r}, not apart at {path!r}")
+    for step in steps:
+        run = str(step.get("run", ""))
+        # The pull request's tree is data: it appears only as the checker's
+        # argument, and every script that runs is base's.
+        if re.search(r"candidate(?!\")", run.replace('"$PWD/candidate"', "")):
+            errors.append(f"{POLICY_DRIFT} step {step.get('name')!r} reads the candidate other than as data")
+        for line in run.splitlines():
+            command = line.strip().split(" ", 1)[0]
+            if re.search(r"\.(sh|py)\"?$", command) and not command.startswith('"$base/'):
+                errors.append(f"{POLICY_DRIFT} step {step.get('name')!r} runs {command}, not a base script")
+    return errors
+
+
 def workflow_errors(name, text):
     """The properties every workflow keeps, whatever it delivers."""
     errors = []
@@ -307,6 +358,11 @@ def workflow_errors(name, text):
     unsafe = sorted(set(triggers) - SAFE_TRIGGERS)
     if set(push.get("branches", [])) - {"main"}:
         unsafe.append(f"push to {sorted(push['branches'])}")
+    drift_exception = False
+    if name == POLICY_DRIFT:
+        drift = policy_drift_errors(workflow)
+        errors += drift
+        drift_exception = not drift
     for job_name, job in jobs.items():
         runner = job.get("runs-on")
         if not isinstance(runner, str) or not RUNNER_EXPRESSION.fullmatch(runner):
@@ -328,13 +384,13 @@ def workflow_errors(name, text):
         # it mints Forgejo integrations, and the publisher roles bind no job or
         # runner claim, so no job on the shared untrusted light runner holds
         # one (#3674, #3758). ci.yaml's metal jobs split by event instead.
-        if holds_oidc and runner == runners.UNTRUSTED_LIGHT:
+        if holds_oidc and runner == runners.UNTRUSTED_LIGHT and not drift_exception:
             errors.append(f"{name} {job_name} holds OIDC on the untrusted light runner")
         if holds_oidc and reads_openbao:
             if unsafe:
                 errors.append(f"{name} {job_name} can log in to OpenBao in a run started by {unsafe}")
     # Workflow-wide OIDC reaches every job: only runs no pull request starts.
-    if workflow.get("enable-openid-connect") and unsafe:
+    if workflow.get("enable-openid-connect") and unsafe and not drift_exception:
         errors.append(f"{name} grants every job OIDC in a run started by {unsafe}")
     return errors
 
@@ -509,6 +565,18 @@ WORKFLOW_MUTATIONS = {
         t, "propose-workspace-image-pin", f"runs-on: {runners.TRUSTED_LIGHT}", f"runs-on: {runners.UNTRUSTED_LIGHT}")),
     "a Dev build drops the selection it reads": ("deploy-dev.yaml", lambda t: in_job(
         t, "build-service-images", "    needs: [deploy-selection, dev-delivery-turn]\n", "")),
+    "the drift check also starts on push": ("policy-drift.yml", lambda t: t.replace(
+        "  pull_request_target:\n", "  push:\n    branches: [main]\n  pull_request_target:\n", 1)),
+    "the drift check gains a second job": ("policy-drift.yml", lambda t: t + (
+        "  second:\n    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}\n"
+        "    steps:\n      - run: true\n")),
+    "the drift check reads OpenBao": ("policy-drift.yml", lambda t: t.replace(
+        '          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN\n',
+        '          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN\n          "$base/scripts/ci/setup/fetch-openbao-harbor-credentials.sh"\n', 1)),
+    "the drift check runs the pull request's script": ("policy-drift.yml", lambda t: t.replace(
+        '"$base/scripts/ci/verify/check-policy-drift.sh"', '"$PWD/candidate/scripts/ci/verify/check-policy-drift.sh"', 1)),
+    "the drift check checks the pull request out as its working tree": ("policy-drift.yml", lambda t: t.replace(
+        "          path: candidate\n", "", 1)),
     "Dev selection holds OIDC on the untrusted runner": ("deploy-dev.yaml", lambda t: in_job(
         t, "deploy-selection", f"runs-on: {runners.TRUSTED_LIGHT}", f"runs-on: {runners.UNTRUSTED_LIGHT}")),
 }

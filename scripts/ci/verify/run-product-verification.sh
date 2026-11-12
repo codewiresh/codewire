@@ -790,6 +790,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-kind-runtime-images.sh
   scripts/ci/tests/test-kind-watch-github-app.sh
   scripts/ci/tests/test-source-approval-workflow.sh
+  scripts/ci/tests/test-policy-drift.sh
   scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh
   scripts/ci/tests/test-select-untrusted-rust-cache.sh
   scripts/ci/tests/test-fetch-openbao-sccache-r2-protected-credentials.sh

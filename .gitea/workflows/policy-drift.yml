@@ -1,0 +1,86 @@
+name: Policy drift
+
+# The pre-merge policy drift check (#3821): a pull request's tree against the
+# boundaries codewire/deploy and the infrastructure repository own, so a
+# change one of them would refuse fails here, not at the next Dev promotion or
+# Pod admission. CODEWIRE_POLICY_DRIFT_INFRA_REPOSITORY names that repository
+# and CODEWIRE_IMAGE_REGISTRY the hosted registry; both are repository Actions
+# variables (docs/dev/CI-CONFIGURATION.md).
+#
+# The workflow comes from protected base main. The candidate is checked out as
+# data only: the scripts that run are base's, deploy's guards come from deploy
+# main, and render.py refuses Kustomize inputs that are not local. OIDC is
+# enabled for this workflow alone, so the read-only codewire-policy-drift-read
+# integration (infra access/forgejo-codewire-policy-drift-authorized-
+# integration.json) is reachable only from this job. Its claims bind
+# pull_request_target and this file at refs/heads/main, which Forgejo sets
+# from the base branch for that event. The supply-chain scan, which parses
+# untrusted content, runs in another workflow without OIDC.
+on:
+  # zizmor: ignore[dangerous-triggers] The protected-base workflow runs only base scripts and deploy main's guards over candidate data.
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+enable-openid-connect: true
+
+jobs:
+  policy-drift: # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the integration is read-only on exactly two repositories.
+    name: Policy drift
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    timeout-minutes: 15
+    steps:
+      - name: Select the candidate and the protected base
+        id: selection
+        shell: bash
+        env:
+          EVENT_PATH: ${{ forgejo.event_path }}
+        run: |
+          set -euo pipefail
+          head_sha="$(jq -er '.pull_request.head.sha | strings | select(test("^[0-9a-f]{40}$"))' "$EVENT_PATH")"
+          base_sha="$(jq -er '.pull_request.base.sha | strings | select(test("^[0-9a-f]{40}$"))' "$EVENT_PATH")"
+          {
+            echo "head_sha=$head_sha"
+            echo "base_sha=$base_sha"
+          } >> "$FORGEJO_OUTPUT"
+
+      - name: Check out protected base
+        uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.selection.outputs.base_sha }}
+          path: .policy-drift-base
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          lfs: false
+          clean: true
+
+      - name: Check out the candidate as data
+        uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.selection.outputs.head_sha }}
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          lfs: false
+          clean: true
+
+      - name: Check the candidate against deploy's guards and the clusters' sandbox policy
+        shell: bash
+        env:
+          CODEWIRE_POLICY_DRIFT_INFRA_REPOSITORY: ${{ vars.CODEWIRE_POLICY_DRIFT_INFRA_REPOSITORY }}
+          CODEWIRE_IMAGE_REGISTRY: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}
+        run: |
+          set -euo pipefail
+          base="$PWD/.policy-drift-base"
+          work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/policy-drift.XXXXXX")"
+          mkdir "$work/sources" "$work/bin"
+          "$base/scripts/ci/release/fetch-pinned.sh" \
+            https://github.com/kyverno/kyverno/releases/download/v1.17.1/kyverno-cli_v1.17.1_linux_x86_64.tar.gz \
+            d0c0f52e8fc8d66a3663b63942b131e5f91b63f7644b3e446546f79142d1b7a3 "$work/kyverno.tar.gz"
+          tar -xzf "$work/kyverno.tar.gz" -C "$work/bin" kyverno
+          "$base/scripts/ci/setup/fetch-forgejo-policy-drift-token.sh" "$work/token"
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          "$base/scripts/ci/verify/clone-policy-drift-sources.sh" "$work/token" "$work/sources"
+          "$base/scripts/ci/verify/check-policy-drift.sh" \
+            "$PWD/candidate" "$work/sources/deploy" "$work/sources/infra" "$work/bin/kyverno"
