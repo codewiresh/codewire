@@ -60,6 +60,7 @@ mod tests {
     mod organization_dedicated_cpu;
     mod owner_sources;
     mod preview_browser;
+    mod resend_verification_purpose;
     mod reserve_legal_page_slugs;
     mod runtime_dispatch_scope;
     mod session_mutation;
@@ -77,9 +78,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced) and 0002 to 0018.
+    // (which equals the 41-migration history it replaced) and 0002 to 0019.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "4870c8102f939b14da23d5e1eeae410c991958a0502d589966d9ac75f4081f16";
+        "3725923cb302d4c179f84e886ee321fe0ca8d7f4ef7e296eac9ebb0bcc7c60b7";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -131,6 +132,9 @@ mod tests {
 
     // SHA-384 of 0018_confidential_activation_slots.sql (#4281).
     const APPLIED_CONFIDENTIAL_ACTIVATION_SLOTS_CHECKSUM: &str = "ead3d33957e48430244fca9215827bc76899f840480b8df795cb1d3afbe6087021d977fe06204db25a5dd805a4d5a59e";
+
+    // SHA-384 of 0019_resend_verification_purpose.sql (#4322).
+    const APPLIED_RESEND_VERIFICATION_PURPOSE_CHECKSUM: &str = "8bcd5d0e0f1739393232fb0dc2fa737f31c71edc753feb69aea40368e246cf7e29b2e2c3161fd3a4033fdff16f4e4711";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1230,6 +1234,7 @@ mod tests {
             (16, APPLIED_OAUTH_SIGN_IN_CHECKSUM),
             (17, APPLIED_RESERVE_LEGAL_PAGE_SLUGS_CHECKSUM),
             (18, APPLIED_CONFIDENTIAL_ACTIVATION_SLOTS_CHECKSUM),
+            (19, APPLIED_RESEND_VERIFICATION_PURPOSE_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1260,9 +1265,9 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 18
+                first.len() == 19
                     && first.iter().map(|migration| migration.0).eq([
-                        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+                        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
                     ])
                     && first.iter().all(|migration| migration.2)
             );

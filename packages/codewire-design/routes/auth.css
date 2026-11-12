@@ -6,6 +6,9 @@
 .cw-auth-brand { display: inline-flex; justify-self: center; overflow: hidden; border: 1px solid var(--border-hover); border-radius: var(--radius-lg); }
 .cw-auth-brand img { display: block; width: var(--control-height-lg); height: var(--control-height-lg); }
 .cw-auth-panel { display: grid; gap: var(--space-8); }
+/* The notice's resend action: a form that reads as a link in the sentence. */
+.cw-auth-resend { display: inline; margin: 0; }
+.cw-auth-resend-link { color: inherit; font-weight: var(--weight-semibold); text-decoration-color: currentColor; }
 .cw-auth-header { display: grid; justify-items: center; gap: var(--space-3); text-align: center; }
 .cw-auth-switch, .cw-auth-copy { max-width: var(--measure); margin: 0; color: var(--fg-secondary); font-size: var(--text-body); line-height: var(--leading-body); }
 .cw-auth-switch a { color: var(--fg-primary); font-weight: var(--weight-semibold); }

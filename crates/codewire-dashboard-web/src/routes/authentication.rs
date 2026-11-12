@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     auth::authenticated_identity,
     error::WebError,
-    raw_auth::{forward_session_cookies, oauth_providers, post_json, user_message},
+    raw_auth::{
+        IdentityErrorCode, forward_session_cookies, oauth_providers, post_json, user_message,
+    },
     response::{error_page, redirect, render_page, render_template, safe_auth_continuation},
     security::{
         OAUTH_LINK_COOKIE, OAUTH_LINK_PATH, OAUTH_LINK_REQUESTER_COOKIE, OAUTH_SIGNUP_COOKIE,
@@ -33,6 +35,16 @@ use crate::{
 
 const SECRET_TTL_SECONDS: u32 = 10 * 60;
 const LOGIN_ACTION: &str = "/login/_actions/sign-in";
+/// What a person who signs in before verifying their email sees, with a
+/// button that sends a new link, and what the button's answer says.
+const CHECK_EMAIL: &str = "Check your email to verify your address.";
+const VERIFICATION_SENT: &str = "Sent. Check your email; the link works for 24 hours.";
+/// What a person whose account is waiting for access sees on sign-in, and
+/// the title and text of the pages that end a sign-up waiting for access.
+pub(crate) const ON_THE_LIST: &str = "You're on the list. We'll email you as soon as we open up more capacity — no need to sign up again.";
+pub(crate) const ON_THE_LIST_TITLE: &str = "You're on the list";
+pub(crate) const ON_THE_LIST_DETAIL: &str =
+    "We'll email you as soon as we open up more capacity — no need to sign up again.";
 const SIGNUP_ACTION: &str = "/signup/_actions/sign-up";
 pub(crate) const SIGNUP_COMPLETE_ACTION: &str = "/signup/complete/_actions/complete";
 const LINK_CONFIRM_ACTION: &str = "/login/link/_actions/confirm";
@@ -114,6 +126,26 @@ impl fmt::Debug for OAuthSignupResponse {
 #[derive(Serialize)]
 struct EmailRequest<'a> {
     email: &'a str,
+}
+
+#[derive(Serialize)]
+struct ResendVerificationRequest<'a> {
+    token: &'a str,
+}
+
+#[derive(Deserialize)]
+pub(super) struct ResendVerificationSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    resend_token: String,
+}
+
+impl fmt::Debug for ResendVerificationSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResendVerificationSubmission")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Serialize)]
@@ -226,11 +258,17 @@ pub(super) async fn login(
     State(state): State<AppState>,
     Query(query): Query<AuthQuery>,
 ) -> Response {
-    let error = oauth_error_message(&query.oauth_error)
-        .unwrap_or_default()
-        .to_owned();
-    let notice = oauth_notice_message(&query.oauth_notice, &query.provider);
-    let mut view = login_view(query, error);
+    // A provider sign-in to an account still waiting for access is not an
+    // error: it gets the same notice as a password sign-in.
+    let (error, notice) = if query.oauth_error == "disabled" {
+        ("", Some(ON_THE_LIST))
+    } else {
+        (
+            oauth_error_message(&query.oauth_error).unwrap_or_default(),
+            oauth_notice_message(&query.oauth_notice, &query.provider),
+        )
+    };
+    let mut view = login_view(query, error.to_owned());
     view.notice = notice.unwrap_or_default();
     auth_entry_response(&state, StatusCode::OK, view).await
 }
@@ -269,9 +307,6 @@ fn oauth_error_message(code: &str) -> Option<&'static str> {
         "locked" => "Too many sign-in attempts. Wait a few minutes and try again.",
         "rate_limited" => {
             "Too many sign-in attempts from this network. Wait a few minutes and try again."
-        }
-        "disabled" => {
-            "This account's access isn't enabled. If you requested access, we'll email you when it's ready."
         }
         _ => {
             "Sign-in with that provider didn't finish. Try again, or sign in with your email and password."
@@ -351,6 +386,20 @@ pub(super) async fn login_action(
             .await;
         }
     };
+    // The IdP answers 403 only after the password matched, for an account
+    // that does not have access yet, so this reveals nothing to a stranger.
+    // One that never verified its email is told to; only a verified one is
+    // on the list.
+    if identity.status == StatusCode::FORBIDDEN {
+        let mut view = login_view(query, String::new());
+        if identity.error_code == Some(IdentityErrorCode::EmailUnverified) {
+            view.notice = CHECK_EMAIL;
+            view.resend_token = identity.resend_token.unwrap_or_default();
+        } else {
+            view.notice = ON_THE_LIST;
+        }
+        return auth_entry_response(&state, identity.status, view).await;
+    }
     if !identity.status.is_success() {
         return auth_entry_response(
             &state,
@@ -466,7 +515,7 @@ pub(super) async fn signup_action(
     {
         return render_page(AuthStatusTemplate {
             title: "Verify your email",
-            description: "We sent you a verification link. Once verified, your access request will be ready for review.",
+            description: "We sent you a verification link. Once you verify your email, you're on the list, and we'll email you as soon as we open up more capacity.",
             primary_label: "Back to sign in",
             primary_url: "/login",
         });
@@ -547,8 +596,8 @@ pub(super) async fn signup_complete_action(
     match (identity.status, identity.body.as_ref()) {
         (status, Some(body)) if status.is_success() && body.access_pending => with_response_cookie(
             render_page(AuthStatusTemplate {
-                title: "Access requested",
-                description: "Your email is verified and your access request is ready for review. We will email you when your account is enabled.",
+                title: ON_THE_LIST_TITLE,
+                description: ON_THE_LIST_DETAIL,
                 primary_label: "Back to Codewire",
                 primary_url: "/",
             }),
@@ -670,6 +719,44 @@ fn signup_complete_view(pending: &OAuthPendingSignup, error: String) -> AuthForm
 
 pub(super) async fn forgot_password(State(state): State<AppState>) -> Response {
     auth_form_response(&state, StatusCode::OK, forgot_password_view(String::new()))
+}
+
+/// The "Resend verification email" button on the sign-in notice. It posts
+/// the single-use token the IdP gave the sign-in, which proved the password,
+/// so only the account holder can ask.
+pub(super) async fn resend_verification_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ResendVerificationSubmission>,
+) -> Response {
+    if !valid_form_request(&state, &headers, &form.csrf) {
+        return error_page(WebError::CsrfRejected);
+    }
+    let status = match post_json::<_, SentResponse>(
+        &state,
+        "/api/auth/resend-verification",
+        None,
+        &ResendVerificationRequest {
+            token: &form.resend_token,
+        },
+    )
+    .await
+    {
+        Ok(response) => response.status,
+        Err(()) => StatusCode::BAD_GATEWAY,
+    };
+    let mut view = login_view(AuthQuery::default(), String::new());
+    match status {
+        status if status.is_success() => view.notice = VERIFICATION_SENT,
+        StatusCode::BAD_REQUEST => {
+            view.error =
+                "That request expired. Sign in again to resend the verification email.".to_owned();
+        }
+        _ => {
+            view.error = "We couldn't send the email. Sign in again shortly to retry.".to_owned();
+        }
+    }
+    auth_entry_response(&state, StatusCode::OK, view).await
 }
 
 pub(super) async fn forgot_password_action(
@@ -1342,6 +1429,7 @@ fn base_view(query: AuthQuery) -> AuthFormView {
         submit_label: "Continue",
         error: String::new(),
         notice: "",
+        resend_token: String::new(),
         csrf_token: String::new(),
         auth_request_id: clean_auth_request_id(&query.auth_request_id),
         return_to: safe_target(&query.return_to),

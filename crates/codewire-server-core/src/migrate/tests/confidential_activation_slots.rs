@@ -13,12 +13,23 @@ async fn fingerprint(pool: &PgPool) -> anyhow::Result<String> {
     .await?)
 }
 
+/// The schema through 0018, measured on disposable PostgreSQL when 0018 was
+/// the newest migration (#4295); later migrations don't change it.
+const SCHEMA_THROUGH_0018_FINGERPRINT: &str =
+    "4870c8102f939b14da23d5e1eeae410c991958a0502d589966d9ac75f4081f16";
+
 fn before_0018() -> sqlx::migrate::Migrator {
+    through(17)
+}
+
+/// The history up to and including `version`, so later migrations don't
+/// change what this test measures.
+fn through(version: i64) -> sqlx::migrate::Migrator {
     sqlx::migrate::Migrator {
         migrations: std::borrow::Cow::Owned(
             MIGRATOR
                 .iter()
-                .filter(|migration| migration.version < 18)
+                .filter(|migration| migration.version <= version)
                 .cloned()
                 .collect(),
         ),
@@ -78,10 +89,10 @@ async fn confidential_activation_slots_upgrade_holds_leases_and_rolls_back() -> 
                 .fetch_all(&pool)
                 .await?;
 
-        MIGRATOR.run(&pool).await?;
+        through(18).run(&pool).await?;
         anyhow::ensure!(
-            fingerprint(&pool).await? == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT,
-            "0018 builds the accepted schema"
+            fingerprint(&pool).await? == SCHEMA_THROUGH_0018_FINGERPRINT,
+            "0018 builds the schema accepted with it"
         );
         let slots: i64 = sqlx::query_scalar("SELECT count(*) FROM confidential_activation_slots")
             .fetch_one(&pool)

@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 const ORIGIN: &str = "https://dashboard.synthetic.invalid";
 const REQUESTER: &str = "a1a2a3a4a5a6a7a8a9a0b1b2b3b4b5b6b7b8b9b0c1c2c3c4c5c6c7c8c9c0d1d2";
+const RESEND_TOKEN: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
 const HANDLE: &str = "5f5e5d5c5b5a59585756555453525150f5e5d5c5b5a59585756555453525150f";
 
 type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
@@ -113,6 +114,28 @@ async fn identity(
                     )
                         .into_response(),
                 },
+                // The right password for an account still waiting for access.
+                "/api/auth/sign-in" if json["password"] == "right" => (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({ "code": "account_disabled" })),
+                )
+                    .into_response(),
+                // The right password for an account that never verified its email.
+                "/api/auth/sign-in" if json["password"] == "unverified" => (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "code": "email_unverified",
+                        "detail": "<script>upstream detail</script>",
+                        "resendToken": RESEND_TOKEN,
+                    })),
+                )
+                    .into_response(),
+                "/api/auth/sign-in" => StatusCode::UNAUTHORIZED.into_response(),
+                "/api/auth/resend-verification" if json["token"] == RESEND_TOKEN => {
+                    (StatusCode::ACCEPTED, Json(serde_json::json!({ "sent": true })))
+                        .into_response()
+                }
+                "/api/auth/resend-verification" => StatusCode::BAD_REQUEST.into_response(),
                 "/api/auth/oauth/link/pending" => {
                     if json["token"] == HANDLE {
                         Json(serde_json::json!({ "provider": "github", "account": "octocat" }))
@@ -261,7 +284,6 @@ async fn a_failed_provider_sign_in_shows_a_fixed_message() {
             "Sign in with your email and password, then link the provider from Settings.",
         ),
         ("locked", "Too many sign-in attempts."),
-        ("disabled", "access isn&#39;t enabled"),
         ("unavailable", "isn&#39;t available right now"),
         ("failed", "didn&#39;t finish"),
         ("%3Cscript%3Ealert(1)%3C%2Fscript%3E", "didn&#39;t finish"),
@@ -314,6 +336,103 @@ async fn the_completion_page_shows_the_provider_identity_and_the_access_request(
         assert!(body.contains("Sign-up expired"));
         assert!(body.contains("href=\"/signup\""));
     }
+}
+
+#[tokio::test]
+async fn an_account_waiting_for_access_is_told_it_is_on_the_list() {
+    let (idp, _) = identity(Some(&["github"]), StatusCode::OK).await;
+    let server = dashboard(&idp.origin, "").await;
+    let notice = "<div class=\"cw-alert cw-alert--info\" role=\"status\">You&#39;re on the list. We&#39;ll email you as soon as we open up more capacity — no need to sign up again.</div>";
+    let check_email = "Check your email to verify your address. <form class=\"cw-auth-resend\" method=\"post\" action=\"/login/_actions/resend-verification\">";
+    // With the right password, sign-in says so instead of a generic failure.
+    let csrf = crate::security::new_csrf_token();
+    for (password, waiting, unverified) in [
+        ("right", true, false),
+        ("unverified", false, true),
+        ("wrong", false, false),
+    ] {
+        let response = client()
+            .post(format!("{}/login/_actions/sign-in", server.origin))
+            .header(header::ORIGIN, ORIGIN)
+            .header(header::COOKIE, format!("codewire_ssr_csrf={csrf}"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(format!(
+                "_csrf={csrf}&email=waiting%40example.test&password={password}"
+            ))
+            .send()
+            .await
+            .unwrap();
+        let body = response.text().await.unwrap();
+        assert_eq!(body.contains(notice), waiting, "{password}: {body}");
+        assert_eq!(body.contains(check_email), unverified, "{password}: {body}");
+        // The button posts the token in its form, never a URL.
+        assert_eq!(
+            body.contains(&format!(
+                "<input type=\"hidden\" name=\"resend_token\" value=\"{RESEND_TOKEN}\">"
+            )),
+            unverified,
+            "{password}"
+        );
+        assert_eq!(body.matches(RESEND_TOKEN).count(), usize::from(unverified));
+        assert_eq!(
+            body.contains("<button class=\"cw-link-button cw-auth-resend-link\" type=\"submit\">Resend verification email</button></form></div>"),
+            unverified,
+            "{password}"
+        );
+        assert!(!body.contains("upstream detail"));
+        assert_eq!(
+            !body.contains("cw-alert--error"),
+            waiting || unverified,
+            "{password}"
+        );
+        assert!(!body.contains("Check the form and try again"));
+    }
+    // A provider sign-in to the same kind of account says the same.
+    let (status, _, body) = page(&server, "/login?oauth_error=disabled", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(notice), "{body}");
+    assert!(!body.contains("cw-alert--error"));
+}
+
+#[tokio::test]
+async fn one_click_sends_a_new_verification_link() {
+    let (idp, calls) = identity(Some(&["github"]), StatusCode::OK).await;
+    let server = dashboard(&idp.origin, "").await;
+    let csrf = crate::security::new_csrf_token();
+    for (token, expected) in [
+        (
+            RESEND_TOKEN,
+            "Sent. Check your email; the link works for 24 hours.",
+        ),
+        (
+            "used-or-expired",
+            "That request expired. Sign in again to resend the verification email.",
+        ),
+    ] {
+        let response = client()
+            .post(format!(
+                "{}/login/_actions/resend-verification",
+                server.origin
+            ))
+            .header(header::ORIGIN, ORIGIN)
+            .header(header::COOKIE, format!("codewire_ssr_csrf={csrf}"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(format!("_csrf={csrf}&resend_token={token}"))
+            .send()
+            .await
+            .unwrap();
+        let body = response.text().await.unwrap();
+        assert!(body.contains(expected), "{token}: {body}");
+        assert!(!body.contains("name=\"resend_token\""));
+    }
+    let sent: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(path, _)| path == "/api/auth/resend-verification")
+        .map(|(_, body)| body["token"].clone())
+        .collect();
+    assert_eq!(sent, [RESEND_TOKEN, "used-or-expired"]);
 }
 
 async fn submit(server: &TestServer, reason: &str) -> reqwest::Response {
@@ -384,8 +503,8 @@ async fn completing_a_provider_sign_up_signs_in_or_waits_for_review() {
     let response = submit(&server, "Build+agents").await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.text().await.unwrap();
-    assert!(body.contains("Access requested"));
-    assert!(body.contains("ready for review"));
+    assert!(body.contains("You&#39;re on the list"));
+    assert!(body.contains("as soon as we open up more capacity"));
 }
 
 #[tokio::test]

@@ -78,6 +78,10 @@ pub(crate) fn router() -> Router<AppState> {
             "/signup/complete/_actions/complete",
             post(authentication::signup_complete_action),
         )
+        .route(
+            "/login/_actions/resend-verification",
+            post(authentication::resend_verification_action),
+        )
         .route("/forgot-password", get(authentication::forgot_password))
         .route(
             "/forgot-password/_actions/request",

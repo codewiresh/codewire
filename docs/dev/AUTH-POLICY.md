@@ -127,6 +127,22 @@ trip; the configuration is in [../CONFIGURATION.md](../CONFIGURATION.md).
 - Every refusal lands on `/login` with a fixed code the dashboard turns into a
   fixed message; provider error text is never shown.
 
+## Accounts waiting for access
+
+An access request is a disabled account. Sign-in checks the password before
+access, so only the right password learns why it was refused: `403
+email_unverified` while the email is unverified, otherwise `403
+account_disabled`. The dashboard shows "You're on the list" for the second.
+
+With `email_unverified` the IdP returns `resendToken`, a 10-minute,
+single-use token bound to the user id and stored hashed as a
+`resend_verification` verification. The dashboard puts it only in the hidden
+field of a "Resend verification email" button on the sign-in notice, never in
+a URL. `POST /api/auth/resend-verification` claims the token and sends a new
+24-hour verification link, at most one per address every five minutes, and
+writes `user.verification.resent` to the audit log. Nobody can ask for a link
+by typing an email address.
+
 ## Account access revocation
 
 `users.enabled = false` is a security revocation boundary. The disabling

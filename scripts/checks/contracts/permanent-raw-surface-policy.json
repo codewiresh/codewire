@@ -16,6 +16,7 @@
     "/api/auth/oauth/signup/pending",
     "/api/auth/oauth/{provider}/callback",
     "/api/auth/oauth/{provider}/start",
+    "/api/auth/resend-verification",
     "/api/auth/reset-password",
     "/api/auth/send-verification-email",
     "/api/auth/sessions",

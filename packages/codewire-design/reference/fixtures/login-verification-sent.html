@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="../../theme.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign in · Codewire</title>
+    <link rel="icon" href="../../assets/brand-icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="../../styles.css">
+    <link rel="stylesheet" href="../../components.css">
+    <link rel="stylesheet" href="../../routes/auth.css">
+  </head>
+  <body class="cw-body cw-auth-body" data-route="auth">
+    <main class="cw-auth-shell">
+      <a class="cw-auth-brand" href="home.html" aria-label="Codewire home">
+        <img src="../../assets/brand-icon.svg" width="48" height="48" alt="Codewire">
+      </a>
+      <section class="cw-auth-panel" aria-labelledby="auth-title">
+        <header class="cw-auth-header">
+          <h1 id="auth-title" class="cw-page-title">Log in to Codewire</h1>
+          <p class="cw-auth-switch">Don't have an account? <a href="/signup">Sign up.</a></p>
+        </header>
+        <div class="cw-alert cw-alert--info" role="status">Sent. Check your email; the link works for 24 hours.</div>
+        <form class="cw-form" method="post" action="/login/_actions/sign-in">
+          <div class="cw-field">
+            <label class="cw-label" for="email">Email</label>
+            <input class="cw-input cw-input--large" id="email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required>
+          </div>
+          <div class="cw-field">
+            <div class="cw-field-heading">
+              <label class="cw-label" for="password">Password</label>
+              <a href="/forgot-password">Forgot password?</a>
+            </div>
+            <input class="cw-input cw-input--large" id="password" name="password" type="password" autocomplete="current-password" required>
+          </div>
+          <button class="cw-button cw-button--pill cw-button--large cw-auth-submit" type="submit">Sign in</button>
+        </form>
+        <div class="cw-auth-alternatives">
+          <p class="cw-auth-divider">or</p>
+          <ul class="cw-auth-providers">
+            <li><a class="cw-button cw-button--outline cw-button--pill cw-button--large" href="/api/auth/oauth/github/start"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-github"/></svg><span>Continue with GitHub</span></a></li>
+            <li><a class="cw-button cw-button--outline cw-button--pill cw-button--large" href="/api/auth/oauth/google/start"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-google"/></svg><span>Continue with Google</span></a></li>
+          </ul>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

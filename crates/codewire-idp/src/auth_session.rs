@@ -613,6 +613,46 @@ fn unauthorized(detail: &'static str) -> AppError {
     }
 }
 
+/// The answer to the right password for a disabled account that never
+/// verified its email, such as an access request whose link was lost. It
+/// carries a 10-minute, single-use token for `/api/auth/resend-verification`,
+/// stored hashed. It comes only after the password matched, so it tells a
+/// stranger nothing.
+async fn email_unverified(pool: &PgPool, user_id: &str) -> Result<Response, AppError> {
+    // One live token per account: a new sign-in replaces the last one, so
+    // repeated sign-ins don't pile up rows.
+    let failed = |error: sqlx::Error| {
+        tracing::error!(%error, "failed to issue a resend verification token");
+        AppError::InternalMsg("Failed to sign in".into())
+    };
+    let mut tx = pool.begin().await.map_err(failed)?;
+    sqlx::query("DELETE FROM verifications WHERE identifier = $1 AND purpose = $2")
+        .bind(user_id)
+        .bind(VerificationPurpose::ResendVerification.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(failed)?;
+    let resend_token = create_verification_in_transaction(
+        &mut tx,
+        user_id,
+        VerificationPurpose::ResendVerification,
+        Duration::minutes(10),
+    )
+    .await?;
+    tx.commit().await.map_err(failed)?;
+    Ok((
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "status": StatusCode::FORBIDDEN.as_u16(),
+            "title": "Forbidden",
+            "detail": "Verify your email address to continue",
+            "code": "email_unverified",
+            "resendToken": resend_token,
+        })),
+    )
+        .into_response())
+}
+
 pub(crate) fn account_disabled() -> AppError {
     AppError::Coded {
         status: StatusCode::FORBIDDEN,
@@ -1239,6 +1279,9 @@ async fn sign_in(
     }
 
     if !user.enabled {
+        if !user.email_verified.unwrap_or(false) {
+            return email_unverified(&state.pool, &user.id).await;
+        }
         return Err(account_disabled());
     }
 

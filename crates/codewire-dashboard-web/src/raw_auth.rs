@@ -3,7 +3,7 @@ use axum::{
     response::Response,
 };
 use codewire_server_core::auth::SESSION_COOKIE_NAME;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::state::AppState;
 
@@ -12,7 +12,36 @@ const MAX_IDENTITY_RESPONSE_BYTES: u64 = 64 * 1024;
 pub(crate) struct IdentityResponse<T> {
     pub(crate) status: StatusCode,
     pub(crate) body: Option<T>,
+    /// A failure's code, only when it is one the dashboard acts on.
+    pub(crate) error_code: Option<IdentityErrorCode>,
+    /// The single-use token that comes with [`IdentityErrorCode::EmailUnverified`].
+    pub(crate) resend_token: Option<String>,
     set_cookies: Vec<HeaderValue>,
+}
+
+/// The IdP error codes a page distinguishes. Any other code, and the rest of
+/// an error body, is discarded.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IdentityErrorCode {
+    /// The right password for an account that never verified its email.
+    EmailUnverified,
+}
+
+#[derive(Deserialize)]
+struct IdentityErrorBody {
+    code: Option<IdentityErrorCode>,
+    #[serde(default, rename = "resendToken")]
+    resend_token: Option<String>,
+}
+
+/// The IdP's tokens are 32 random bytes in lowercase hex.
+fn identity_token(token: String) -> Option<String> {
+    (token.len() == 64
+        && token
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
+    .then_some(token)
 }
 
 pub(crate) async fn get_json<O>(
@@ -126,17 +155,35 @@ where
     let status = response.status();
     let set_cookies = approved_session_cookies(response.headers());
     // Error bodies are deliberately discarded: they may contain internal
-    // details and are never reflected into browser HTML. Successful bodies
-    // are decoded directly into the route-owned contract type so this bridge
-    // does not need a dynamic JSON dependency or unbounded value tree.
-    let body = if status.is_success() {
-        Some(response.json::<O>().await.map_err(|_| ())?)
+    // details and are never reflected into browser HTML. The exceptions are a
+    // code from the fixed list above and, with `email_unverified`, its hex
+    // resend token, which the IdP issues for the browser's resend button. Successful bodies are decoded directly into the
+    // route-owned contract type so this bridge does not need a dynamic JSON
+    // dependency or unbounded value tree.
+    let (body, error_code, resend_token) = if status.is_success() {
+        (
+            Some(response.json::<O>().await.map_err(|_| ())?),
+            None,
+            None,
+        )
     } else {
-        None
+        match response.json::<IdentityErrorBody>().await {
+            Ok(IdentityErrorBody {
+                code: Some(IdentityErrorCode::EmailUnverified),
+                resend_token,
+            }) => (
+                None,
+                Some(IdentityErrorCode::EmailUnverified),
+                resend_token.and_then(identity_token),
+            ),
+            _ => (None, None, None),
+        }
     };
     Ok(IdentityResponse {
         status,
         body,
+        error_code,
+        resend_token,
         set_cookies,
     })
 }

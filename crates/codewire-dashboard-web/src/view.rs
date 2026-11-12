@@ -108,6 +108,9 @@ pub(crate) struct AuthFormView {
     pub(crate) error: String,
     /// A fixed, non-error message shown above the form.
     pub(crate) notice: &'static str,
+    /// The single-use token the notice's "Resend verification email" button
+    /// posts; empty for no button. It lives only in this form, never a URL.
+    pub(crate) resend_token: String,
     pub(crate) csrf_token: String,
     pub(crate) auth_request_id: String,
     pub(crate) return_to: String,

@@ -1,10 +1,10 @@
 //! Email verification and password-reset auth handlers.
 //!
 //! Owns `/api/auth/{verify-email,forget-password,reset-password,
-//! send-verification-email}`.
+//! send-verification-email,resend-verification}`.
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::middleware;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -14,10 +14,13 @@ use codewire_server_core::auth::{AuthState, AuthUser, require_session_auth};
 use codewire_server_core::{AppError, ValidatedJson};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 
-use crate::auth_session::{hash_password, hex_id, hex_lower, hex_token, validate_password};
+use crate::auth_session::{
+    hash_password, hex_id, hex_lower, hex_token, log_audit, request_info, validate_password,
+};
 
 #[derive(Clone)]
 pub struct EmailPasswordState {
@@ -30,6 +33,16 @@ pub struct EmailPasswordState {
 pub(crate) struct VerifyEmailQuery {
     #[serde(default)]
     token: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct ResendVerificationRequest {
+    token: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ResendVerificationResponse {
+    sent: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -79,13 +92,17 @@ struct VerificationRow {
 pub(crate) enum VerificationPurpose {
     EmailVerification,
     PasswordReset,
+    /// Lets an account that can't sign in until it verifies its email ask
+    /// for a new link. Its identifier is the user id, not the email.
+    ResendVerification,
 }
 
 impl VerificationPurpose {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::EmailVerification => "email_verification",
             Self::PasswordReset => "password_reset",
+            Self::ResendVerification => "resend_verification",
         }
     }
 }
@@ -483,6 +500,99 @@ async fn reset_password(
     Ok(Json(ResetPasswordResponse { reset: true }))
 }
 
+/// At most one verification link per address in this window, however often
+/// the account asks.
+const RESEND_VERIFICATION_INTERVAL_SECS: i64 = 5 * 60;
+
+/// `POST /api/auth/resend-verification` (public): a new 24-hour verification
+/// link for an account that can't sign in until it verifies its email. The
+/// token is the single-use one sign-in returned with `email_unverified`, after
+/// the password matched, so only the account holder can ask. A link sent in
+/// the last five minutes counts as this one.
+async fn resend_verification(
+    State(state): State<EmailPasswordState>,
+    headers: HeaderMap,
+    ValidatedJson(req): ValidatedJson<ResendVerificationRequest>,
+) -> Result<(StatusCode, Json<ResendVerificationResponse>), AppError> {
+    let failed = |error: sqlx::Error| {
+        tracing::error!(%error, "failed to resend a verification");
+        AppError::InternalMsg("Failed to send verification".into())
+    };
+    let mut tx = state.pool.begin().await.map_err(failed)?;
+    let claim = claim_verification(&mut tx, VerificationPurpose::ResendVerification, &req.token)
+        .await
+        .map_err(failed)?
+        .filter(|row| Utc::now().naive_utc() <= row.expires_at)
+        .ok_or_else(|| bad_request("Invalid or expired resend token"))?;
+    let user = sqlx::query_as::<_, (String, bool)>(
+        "SELECT email, COALESCE(email_verified, false) FROM users WHERE id = $1 FOR UPDATE",
+    )
+    .bind(&claim.identifier)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(failed)?;
+    let Some((email, false)) = user else {
+        // Deleted, or verified since: there is nothing to send.
+        tx.commit().await.map_err(failed)?;
+        return Ok((
+            StatusCode::OK,
+            Json(ResendVerificationResponse { sent: false }),
+        ));
+    };
+    let since = Utc::now().naive_utc() - Duration::seconds(RESEND_VERIFICATION_INTERVAL_SECS);
+    let recent: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM verifications WHERE identifier = $1 AND purpose = $2 AND created_at > $3)",
+    )
+    .bind(&email)
+    .bind(VerificationPurpose::EmailVerification.as_str())
+    .bind(since)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(failed)?;
+    if recent {
+        tx.commit().await.map_err(failed)?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(ResendVerificationResponse { sent: true }),
+        ));
+    }
+    let token = create_verification_in_transaction(
+        &mut tx,
+        &email,
+        VerificationPurpose::EmailVerification,
+        Duration::hours(24),
+    )
+    .await?;
+    tx.commit().await.map_err(failed)?;
+    let (ip, ua) = request_info(&headers);
+    log_audit(
+        &state.pool,
+        "user.verification.resent",
+        &claim.identifier,
+        &ip,
+        &ua,
+        json!({ "email": &email }),
+        "info",
+    )
+    .await;
+    let verify_url = format!(
+        "{}/verify-email?token={token}",
+        state.frontend_url.trim_end_matches('/')
+    );
+    if !state.email.is_configured() {
+        tracing::warn!(user_id = %claim.identifier, "transactional email delivery is not configured, skipping resent verification email");
+    } else if let Err(error) = send_verification_email(&state.email, &email, &verify_url).await {
+        tracing::error!(%error, user_id = %claim.identifier, "failed to send resent verification email");
+        return Err(AppError::ServiceUnavailable(
+            "Failed to send verification email".into(),
+        ));
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ResendVerificationResponse { sent: true }),
+    ))
+}
+
 async fn send_verification(
     State(state): State<EmailPasswordState>,
     user: AuthUser,
@@ -547,6 +657,7 @@ pub fn router(pool: PgPool, frontend_url: String, email: EmailClient, auth: Auth
     Router::new()
         .route("/api/auth/verify-email", get(verify_email))
         .route("/api/auth/forget-password", post(forget_password))
+        .route("/api/auth/resend-verification", post(resend_verification))
         .route("/api/auth/reset-password", post(reset_password))
         .merge(required)
         .with_state(state)

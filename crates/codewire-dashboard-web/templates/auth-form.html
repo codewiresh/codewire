@@ -49,7 +49,9 @@
         <div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>
         {% endif %}
         {% if !view.notice.is_empty() %}
-        <div class="cw-alert cw-alert--info" role="status">{{ view.notice }}</div>
+        <div class="cw-alert cw-alert--info" role="status">{{ view.notice }}
+          {%- if !view.resend_token.is_empty() %} <form class="cw-auth-resend" method="post" action="/login/_actions/resend-verification"><input type="hidden" name="_csrf" value="{{ view.csrf_token }}"><input type="hidden" name="resend_token" value="{{ view.resend_token }}"><button class="cw-link-button cw-auth-resend-link" type="submit">Resend verification email</button></form>
+          {%- endif %}</div>
         {% endif %}
         <form class="cw-form" method="post" action="{{ view.action }}"{% if is_signup %} data-signup{% endif %}>
           <input type="hidden" name="_csrf" value="{{ view.csrf_token }}">

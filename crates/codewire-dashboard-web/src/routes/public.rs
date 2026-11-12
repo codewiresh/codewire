@@ -86,8 +86,8 @@ pub(super) async fn verify_email(
 fn verified_view(access_pending: bool) -> AuthStatusTemplate<'static> {
     if access_pending {
         AuthStatusTemplate {
-            title: "Access request verified",
-            description: "Your email is verified and your access request is ready for review. We will email you when your account is enabled.",
+            title: super::authentication::ON_THE_LIST_TITLE,
+            description: super::authentication::ON_THE_LIST_DETAIL,
             primary_label: "Back to Codewire",
             primary_url: "/",
         }
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn pending_verification_waits_for_access_review() {
         let pending = verified_view(true);
-        assert_eq!(pending.title, "Access request verified");
+        assert_eq!(pending.title, "You're on the list");
         assert_eq!(pending.primary_url, "/");
 
         let enabled = verified_view(false);

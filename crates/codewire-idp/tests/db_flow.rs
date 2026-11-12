@@ -3006,6 +3006,11 @@ async fn session_auth_flow_against_postgres() {
             .execute(&p)
             .await
             .ok();
+        sqlx::query("DELETE FROM verifications WHERE identifier=$1 OR identifier IN (SELECT id FROM users WHERE email=$1)")
+            .bind(email)
+            .execute(&p)
+            .await
+            .ok();
         sqlx::query("DELETE FROM users WHERE email=$1")
             .bind(email)
             .execute(&p)
@@ -3144,20 +3149,106 @@ async fn session_auth_flow_against_postgres() {
         body.is_null(),
         "disabled account retained a browser session"
     );
-    let (st, body, cookie) = sess_req(
-        &app,
-        "POST",
-        "/api/auth/sign-in",
-        None,
-        &format!(r#"{{"email":"{email}","password":"{pw}"}}"#),
+    let sign_in = format!(r#"{{"email":"{email}","password":"{pw}"}}"#);
+    // It never verified its email, so sign-in says that, and only after the
+    // password matched, with a single-use token that asks for a new link.
+    sqlx::query("DELETE FROM verifications WHERE identifier=$1")
+        .bind(email)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let unverified_sign_in = || async {
+        let (st, body, cookie) = sess_req(&app, "POST", "/api/auth/sign-in", None, &sign_in).await;
+        assert_eq!(st, 403, "disabled account signed in: {body}");
+        assert_eq!(body["code"], "email_unverified");
+        assert!(
+            cookie.is_none(),
+            "disabled account received a session cookie"
+        );
+        let token = body["resendToken"].as_str().unwrap().to_owned();
+        assert_eq!(token.len(), 64);
+        token
+    };
+    let resend_token = unverified_sign_in().await;
+
+    let mail = codewire_idp::email_password::router(
+        pool.clone(),
+        "https://app.codewire.test".to_string(),
+        codewire_email::EmailClient::disabled(),
+        AuthState { pool: pool.clone() },
+    );
+    let resend = |token: String| {
+        let mail = mail.clone();
+        async move {
+            let (st, body, _) = sess_req(
+                &mail,
+                "POST",
+                "/api/auth/resend-verification",
+                None,
+                &format!(r#"{{"token":"{token}"}}"#),
+            )
+            .await;
+            (st, body)
+        }
+    };
+    let links = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM verifications WHERE identifier=$1 AND purpose='email_verification'",
+        )
+        .bind(email)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    // The token sends one new link, once.
+    assert_eq!(
+        resend(resend_token.clone()).await,
+        (202, serde_json::json!({ "sent": true }))
+    );
+    assert_eq!(links().await, 1);
+    let (st, _) = resend(resend_token).await;
+    assert_eq!(st, 400, "a resend token is single-use");
+    // A second sign-in's token within five minutes counts the link just sent.
+    assert_eq!(
+        resend(unverified_sign_in().await).await,
+        (202, serde_json::json!({ "sent": true }))
+    );
+    assert_eq!(links().await, 1);
+    let (st, _) = resend("0".repeat(64)).await;
+    assert_eq!(st, 400);
+    // A new sign-in replaces the account's unused token instead of adding one.
+    let replaced = unverified_sign_in().await;
+    let latest = unverified_sign_in().await;
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM verifications WHERE purpose='resend_verification' AND identifier=(SELECT id FROM users WHERE email=$1)",
     )
-    .await;
+    .bind(email)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(live, 1);
+    assert_eq!(resend(replaced).await.0, 400);
+    assert_eq!(resend(latest).await.0, 202);
+    let resent: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_logs WHERE action='user.verification.resent' AND user_id=(SELECT id FROM users WHERE email=$1)",
+    )
+    .bind(email)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(resent, 1);
+
+    // Once verified, a disabled account gets the plain refusal, with no token.
+    sqlx::query("UPDATE users SET email_verified=true WHERE email=$1")
+        .bind(email)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, body, cookie) = sess_req(&app, "POST", "/api/auth/sign-in", None, &sign_in).await;
     assert_eq!(st, 403, "disabled account signed in: {body}");
     assert_eq!(body["code"], "account_disabled");
-    assert!(
-        cookie.is_none(),
-        "disabled account received a session cookie"
-    );
+    assert!(body.get("resendToken").is_none());
+    assert!(cookie.is_none());
     sqlx::query("UPDATE users SET enabled=true WHERE email=$1")
         .bind(email)
         .execute(&pool)
