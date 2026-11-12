@@ -320,6 +320,16 @@ pub(crate) struct OrganizationEnvironmentsContentTemplate<'a> {
 }
 
 #[derive(Template)]
+#[template(path = "hosts.html")]
+pub(crate) struct HostsTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) organization: &'a OrganizationContext,
+    pub(crate) hosts: Vec<crate::hosts_connect::HostRow>,
+    /// Why the hosts could not be read; empty when they were.
+    pub(crate) error: String,
+}
+
+#[derive(Template)]
 #[template(path = "snapshots.html")]
 pub(crate) struct SnapshotsTemplate<'a> {
     pub(crate) view: &'a DashboardView,

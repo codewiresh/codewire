@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="/assets/codewire/theme-v1.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true},{"code":"...","swap":true}]}' >
+    <title>Hosts · {{ organization.name }} · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/dashboard-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/organizations-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/hosts-v1.css">
+    <script src="/assets/codewire/htmx-2.0.10.min.js" integrity="sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V" defer></script>
+    <script src="/assets/codewire/dashboard-v1.js" defer></script>
+  </head>
+  <body class="cw-body" data-route="hosts">
+    {% include "billing-banner-slot.html" %}
+    <div class="cw-app" data-dashboard-app data-mobile-open="false" data-sidebar-collapsed="{{ view.sidebar_collapsed }}">
+      <aside class="cw-sidebar-slot">{% include "sidebar.html" %}</aside>
+      <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button><a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span class="cw-sr-only">Codewire</span></a></header>
+      <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+      <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
+      <main class="cw-main">{% let crumb_scope = organization.slug.as_str() %}{% let crumb_page = "hosts" %}{% include "console-header.html" %}
+        <div class="cw-main-inner"><div class="cw-page cw-page--wide">
+          <header class="cw-page-header">
+            <div><h1 class="cw-page-title">Hosts</h1><p class="cw-page-description">Computers your organization's members enrolled to run Codewire VMs. A host is online while its agent is connected.</p></div>
+          </header>
+          {% if !error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ error }}</div>
+          {% else if hosts.is_empty() %}
+          <section class="cw-card cw-empty" aria-labelledby="hosts-empty-title">
+            <span class="cw-empty-icon" aria-hidden="true"><svg class="cw-icon"><use href="/assets/codewire/icons-v2.svg#icon-monitor"/></svg></span>
+            <h2 id="hosts-empty-title" class="cw-empty-title">No hosts yet</h2>
+            <p class="cw-empty-copy">On a Linux computer with KVM or a Mac with Apple silicon, run <code>cw host enroll</code>, then <code>cw host run</code>.</p>
+          </section>
+          {% else %}
+          <section class="cw-card" aria-labelledby="hosts-title">
+            <div class="cw-card-header"><h2 id="hosts-title" class="cw-card-title">Hosts ({{ hosts.len() }})</h2></div>
+            <ul class="cw-list cw-host-list">
+              {% for host in hosts %}
+              <li class="cw-list-row cw-host-row">
+                <div class="cw-host-copy"><strong>{{ host.name }}</strong><p class="cw-host-meta">{{ host.platform }} · Owned by {{ host.owner }}</p><p class="cw-host-meta">{{ host.provides }}</p></div>
+                <div class="cw-host-status">{% if host.tone.is_empty() %}<span class="cw-badge">{{ host.state }}</span>{% else %}<span class="cw-badge" data-tone="{{ host.tone }}">{{ host.state }}</span>{% endif %}<span>Last seen {{ host.last_seen }}</span></div>
+              </li>
+              {% endfor %}
+            </ul>
+          </section>
+          {% endif %}
+        </div></div>
+      </main>
+    </div>
+  </body>
+</html>

@@ -364,7 +364,7 @@ fn unix_now() -> i64 {
         .unwrap_or_default()
 }
 
-fn past_time(seconds: i64) -> String {
+pub(crate) fn past_time(seconds: i64) -> String {
     let elapsed = unix_now().saturating_sub(seconds);
     if elapsed < 60 {
         "just now".to_owned()

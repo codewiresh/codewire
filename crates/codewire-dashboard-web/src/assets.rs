@@ -24,6 +24,7 @@ pub(crate) const DEVICE_SCRIPT_PATH: &str = "/assets/codewire/device-v1.js";
 pub(crate) const SIGNUP_SCRIPT_PATH: &str = "/assets/codewire/signup-v1.js";
 pub(crate) const SETTINGS_STYLE_PATH: &str = "/assets/codewire/routes/settings-v1.css";
 pub(crate) const ORGANIZATIONS_STYLE_PATH: &str = "/assets/codewire/routes/organizations-v1.css";
+pub(crate) const HOSTS_STYLE_PATH: &str = "/assets/codewire/routes/hosts-v1.css";
 pub(crate) const SECRET_MANAGEMENT_STYLE_PATH: &str =
     "/assets/codewire/routes/secret-management-v1.css";
 pub(crate) const ENVIRONMENTS_STYLE_PATH: &str = "/assets/codewire/routes/environments-v2.css";
@@ -75,6 +76,7 @@ const SIGNUP_SCRIPT: &str = include_str!("../../../packages/codewire-design/sign
 const SETTINGS_STYLES: &str = include_str!("../../../packages/codewire-design/routes/settings.css");
 const ORGANIZATIONS_STYLES: &str =
     include_str!("../../../packages/codewire-design/routes/organizations.css");
+const HOSTS_STYLES: &str = include_str!("../../../packages/codewire-design/routes/hosts.css");
 const SECRET_MANAGEMENT_STYLES: &str =
     include_str!("../../../packages/codewire-design/routes/secret-management.css");
 const ENVIRONMENTS_STYLES: &str =
@@ -155,6 +157,7 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         CSS,
         ORGANIZATIONS_STYLES.as_bytes(),
     ),
+    (HOSTS_STYLE_PATH, CSS, HOSTS_STYLES.as_bytes()),
     (
         SECRET_MANAGEMENT_STYLE_PATH,
         CSS,

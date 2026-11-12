@@ -14,6 +14,7 @@ mod device;
 mod environment_drafts;
 mod environments;
 mod github_repositories;
+mod hosts;
 mod invitations;
 mod organization_context;
 mod organization_governance;
@@ -323,6 +324,8 @@ pub(crate) fn router() -> Router<AppState> {
             "/{slug}/presets/_actions/delete",
             post(secrets_presets::delete_preset),
         )
+        .route("/{slug}/hosts", get(slash_redirect))
+        .route("/{slug}/hosts/", get(hosts::page))
         .route("/{slug}/snapshots", get(slash_redirect))
         .route("/{slug}/snapshots/", get(snapshots::page))
         .route(

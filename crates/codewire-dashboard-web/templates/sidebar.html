@@ -71,6 +71,7 @@
   {% endif %}
 
   <ul class="cw-console-get-started">
+    {% if !view.selected_organization_slug.is_empty() %}<li><a class="cw-nav-link" href="/{{ view.selected_organization_slug }}/hosts/"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-monitor"/></svg>Hosts</a></li>{% endif %}
     <li><a class="cw-nav-link" href="/docs/quickstart"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-play-circle"/></svg>Get Started</a></li>
     <li><a class="cw-nav-link" href="/docs"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-book"/></svg>Documentation</a></li>
   </ul>

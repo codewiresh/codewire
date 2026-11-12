@@ -1,0 +1,14 @@
+/* Hosts (#3609): the organization's computers that provide VMs. Rows reuse
+   the organization list primitives; this only lays out a host's row. */
+
+.cw-host-list { margin: 0; padding: 0; list-style: none; }
+.cw-host-row { align-items: flex-start; }
+.cw-host-copy { display: grid; min-width: 0; gap: var(--space-1); }
+.cw-host-copy strong { overflow: hidden; font-size: var(--text-secondary); font-weight: var(--weight-medium); text-overflow: ellipsis; white-space: nowrap; }
+.cw-host-meta { margin: 0; color: var(--fg-tertiary); font-size: var(--text-small); }
+.cw-host-status { display: grid; flex: none; justify-items: end; gap: var(--space-1); color: var(--fg-tertiary); font-size: var(--text-small); }
+
+@media (max-width: 48rem) {
+  .cw-host-row { flex-direction: column; }
+  .cw-host-status { justify-items: start; }
+}
