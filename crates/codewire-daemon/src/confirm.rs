@@ -75,6 +75,24 @@ pub(crate) async fn check_spending<T>(
     }
 }
 
+/// [`check_spending`] for an event that is itself awaited, such as a check
+/// run off the async workers.
+pub(crate) async fn check_spending_async<T, F, Fut>(budget: &CheckBudget, mut event: F) -> Option<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Option<T>>,
+{
+    loop {
+        if let Some(outcome) = event().await {
+            return Some(outcome);
+        }
+        if !budget.spend() {
+            return None;
+        }
+        tokio::time::sleep(CHECK_INTERVAL).await;
+    }
+}
+
 /// Awaits `future` for at most the budget's remaining checks of
 /// [`CHECK_INTERVAL`] each, counted as [`check_within`] counts them: a stall
 /// uses up one check, and a future that never completes is refused once the
@@ -173,6 +191,33 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 6);
 
         let already_there = check_spending(&budget, || Some(3)).await;
+        assert_eq!(already_there, Some(3));
+    }
+
+    /// An awaited check spends the same shared budget, and may run off the
+    /// async workers, as a scan of every process on the host does (#4237).
+    #[tokio::test]
+    async fn an_awaited_check_spends_the_shared_budget_off_the_async_workers() {
+        let budget = CheckBudget::new(Duration::from_millis(200));
+        let caller = std::thread::current().id();
+        let calls = Arc::new(AtomicU32::new(0));
+        let first = check_spending_async(&budget, || {
+            let counted = Arc::clone(&calls);
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    assert_ne!(std::thread::current().id(), caller);
+                    (counted.fetch_add(1, Ordering::SeqCst) == 14).then_some(())
+                })
+                .await
+                .unwrap()
+            }
+        })
+        .await;
+        assert_eq!(first, Some(()));
+        assert_eq!(calls.load(Ordering::SeqCst), 15);
+        let second = check_spending_async::<(), _, _>(&budget, || async { None }).await;
+        assert!(second.is_none());
+        let already_there = check_spending_async(&budget, || async { Some(3) }).await;
         assert_eq!(already_there, Some(3));
     }
 

@@ -44,28 +44,7 @@ impl OwnedProcessGroup {
     }
 
     fn exit_status(&self) -> io::Result<Option<i32>> {
-        // SAFETY: waitid initializes siginfo for this child only. WNOWAIT keeps
-        // its PID reserved, including after exit, until the owner calls wait.
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                self.pid as libc::id_t,
-                &mut info,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            )
-        };
-        if result == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        if unsafe { info.si_pid() } == 0 {
-            return Ok(None);
-        }
-        Ok(Some(if info.si_code == libc::CLD_EXITED {
-            unsafe { info.si_status() }
-        } else {
-            1
-        }))
+        leader_exit_status(self.pid)
     }
 
     /// The checks every step of this group's cleanup spends.
@@ -111,7 +90,11 @@ impl OwnedProcessGroup {
 
     pub(crate) async fn terminate(&mut self) -> io::Result<()> {
         let term = self.signal(libc::SIGTERM);
-        let term = term.and(self.signal_session_members(libc::SIGTERM).map(|_| ()));
+        let term = term.and(
+            scan_session_members(self.pid, libc::SIGTERM)
+                .await
+                .map(|_| ()),
+        );
         tokio::time::sleep(TERM_GRACE).await;
         // Always send KILL before reaping, even if TERM already ended the
         // leader: shell children may still hold stdin/stdout or ignore TERM.
@@ -123,8 +106,9 @@ impl OwnedProcessGroup {
     /// PTY job control can create additional process groups without escaping the
     /// owned session. Linux pidfds signal those exact processes, never bare PIDs.
     async fn terminate_session_members(&self) -> io::Result<()> {
-        crate::confirm::check_spending(&self.cleanup, || {
-            match self.signal_session_members(libc::SIGKILL) {
+        let leader = self.pid;
+        crate::confirm::check_spending_async(&self.cleanup, || async move {
+            match scan_session_members(leader, libc::SIGKILL).await {
                 Ok(0) => Some(Ok(())),
                 Ok(_) => None,
                 Err(error) => Some(Err(error)),
@@ -133,106 +117,149 @@ impl OwnedProcessGroup {
         .await
         .unwrap_or_else(|| Err(io::Error::other("host session descendants did not settle")))
     }
+}
 
-    /// macOS has no pidfd. Each member is rechecked with getsid immediately
-    /// before its signal, and the unreaped leader keeps the session ID from
-    /// being reused, so a recycled PID can match only a process that joined
-    /// this session itself. The remaining window between that check and the
-    /// signal is a PID reuse in microseconds, by a process of this same user.
-    #[cfg(target_os = "macos")]
-    fn signal_session_members(&self, signal: libc::c_int) -> io::Result<usize> {
-        self.exited()?; // The exact leader continues reserving the session ID.
-        let mut live = 0;
-        for pid in listed_pids(PROC_ALL_PIDS, 0)? {
-            // Darwin's getsid fails with ESRCH for a zombie, so this also
-            // skips members that have exited but are not yet reaped.
-            if pid <= 0 || pid == self.pid || unsafe { libc::getsid(pid) } != self.pid {
-                continue;
-            }
-            live += 1;
-            // SAFETY: plain kill of a just-rechecked member of the owned session.
-            if unsafe { libc::kill(pid, signal) } == -1 {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error);
-                }
-            }
-        }
-        Ok(live)
+/// The exit status of the owned group leader `pid`, without reaping it.
+fn leader_exit_status(pid: libc::pid_t) -> io::Result<Option<i32>> {
+    // SAFETY: waitid initializes siginfo for this child only. WNOWAIT keeps
+    // its PID reserved, including after exit, until the owner calls wait.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
     }
+    if unsafe { info.si_pid() } == 0 {
+        return Ok(None);
+    }
+    Ok(Some(if info.si_code == libc::CLD_EXITED {
+        unsafe { info.si_status() }
+    } else {
+        1
+    }))
+}
 
-    #[cfg(target_os = "linux")]
-    fn signal_session_members(&self, signal: libc::c_int) -> io::Result<usize> {
-        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-        fn member(stat: &str, session_id: i32) -> bool {
-            let Some((_, fields)) = stat.rsplit_once(") ") else {
-                return false;
-            };
-            let mut fields = fields.split_whitespace();
-            let state = fields.next();
-            fields.next();
-            fields.next();
-            let session = fields.next().and_then(|value| value.parse::<i32>().ok());
-            session == Some(session_id) && !matches!(state, Some("Z" | "X"))
+/// Signals every member of the session `leader` leads, off the async
+/// workers. A stop scans twice, for TERM and then for KILL, and each scan
+/// reads every process in the daemon's PID namespace (#4237):
+/// - in a hosted sandbox or a local VM, the namespace holds that
+///   environment's own few processes, so a scan is cheap;
+/// - on a user's own Linux host it holds the whole host: at about 1,600
+///   processes a scan measured 100–200 ms, and a starved host stretches it
+///   to seconds.
+///
+/// The group's owner keeps the leader unreaped while this runs, so the
+/// session ID stays reserved.
+async fn scan_session_members(leader: libc::pid_t, signal: libc::c_int) -> io::Result<usize> {
+    tokio::task::spawn_blocking(move || signal_session_members(leader, signal))
+        .await
+        .map_err(|_| io::Error::other("host session member scan did not finish"))?
+}
+
+/// macOS has no pidfd. Each member is rechecked with getsid immediately
+/// before its signal, and the unreaped leader keeps the session ID from
+/// being reused, so a recycled PID can match only a process that joined
+/// this session itself. The remaining window between that check and the
+/// signal is a PID reuse in microseconds, by a process of this same user.
+#[cfg(target_os = "macos")]
+fn signal_session_members(leader: libc::pid_t, signal: libc::c_int) -> io::Result<usize> {
+    leader_exit_status(leader)?; // The exact leader continues reserving the session ID.
+    let mut live = 0;
+    for pid in listed_pids(PROC_ALL_PIDS, 0)? {
+        // Darwin's getsid fails with ESRCH for a zombie, so this also
+        // skips members that have exited but are not yet reaped.
+        if pid <= 0 || pid == leader || unsafe { libc::getsid(pid) } != leader {
+            continue;
         }
-        self.exited()?; // The exact leader continues reserving the session ID.
-        let mut live = 0;
-        for entry in std::fs::read_dir("/proc")? {
-            let entry = entry?;
-            let Some(pid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|value| value.parse::<u32>().ok())
-            else {
-                continue;
-            };
-            if pid == self.pid as u32 {
-                continue;
-            }
-            let path = entry.path().join("stat");
-            let Ok(stat) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            if !member(&stat, self.pid) {
-                continue;
-            }
-            // Open identity and RECHECK current /proc membership. If the numeric
-            // PID was reused, the fd is dead or refers to the inspected process.
-            // Signals through this fd can never hit a later unrelated process.
-            let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-            if raw == -1 {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() == Some(libc::ESRCH) {
-                    continue;
-                }
+        live += 1;
+        // SAFETY: plain kill of a just-rechecked member of the owned session.
+        if unsafe { libc::kill(pid, signal) } == -1 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
                 return Err(error);
             }
-            let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
-            let Ok(stat) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            if !member(&stat, self.pid) {
+        }
+    }
+    Ok(live)
+}
+
+#[cfg(target_os = "linux")]
+fn signal_session_members(leader: libc::pid_t, signal: libc::c_int) -> io::Result<usize> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    fn member(stat: &str, session_id: i32) -> bool {
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            return false;
+        };
+        let mut fields = fields.split_whitespace();
+        let state = fields.next();
+        fields.next();
+        fields.next();
+        let session = fields.next().and_then(|value| value.parse::<i32>().ok());
+        session == Some(session_id) && !matches!(state, Some("Z" | "X"))
+    }
+    leader_exit_status(leader)?; // The exact leader continues reserving the session ID.
+    let mut live = 0;
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == leader as u32 {
+            continue;
+        }
+        let path = entry.path().join("stat");
+        let Ok(stat) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !member(&stat, leader) {
+            continue;
+        }
+        // Open identity and RECHECK current /proc membership. If the numeric
+        // PID was reused, the fd is dead or refers to the inspected process.
+        // Signals through this fd can never hit a later unrelated process.
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if raw == -1 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
                 continue;
             }
-            live += 1;
-            let result = unsafe {
-                libc::syscall(
-                    libc::SYS_pidfd_send_signal,
-                    fd.as_raw_fd(),
-                    signal,
-                    std::ptr::null::<libc::siginfo_t>(),
-                    0,
-                )
-            };
-            if result == -1 {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error);
-                }
+            return Err(error);
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
+        let Ok(stat) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !member(&stat, leader) {
+            continue;
+        }
+        live += 1;
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                fd.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if result == -1 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
             }
         }
-        Ok(live)
     }
+    Ok(live)
 }
 
 // <libproc.h> selectors; the libc crate does not export them.
