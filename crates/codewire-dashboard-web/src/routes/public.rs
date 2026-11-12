@@ -1,6 +1,6 @@
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     response::Response,
 };
 use serde::Deserialize;
@@ -18,8 +18,21 @@ struct VerifyEmailResponse {
     access_pending: bool,
 }
 
+/// The homepage is the same for every visitor: browsers check back on each
+/// view, and a shared cache (the CDN) may serve one copy for five minutes.
+/// `security::keep_cookie_responses_private` takes this back whenever the
+/// response sets a cookie.
+pub(crate) const HOME_CACHE_CONTROL: &str = "public, max-age=0, s-maxage=300";
+
 pub(super) async fn home() -> Response {
-    render_page(HomeTemplate)
+    let mut response = render_page(HomeTemplate);
+    if response.status() == StatusCode::OK {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(HOME_CACHE_CONTROL),
+        );
+    }
+    response
 }
 
 pub(super) async fn pricing(State(state): State<AppState>) -> Response {
@@ -102,7 +115,66 @@ fn invalid_verification() -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::verified_view;
+    use axum::http::{StatusCode, header};
+    use codewire_server_core::auth::SESSION_COOKIE_NAME;
+
+    use super::{HOME_CACHE_CONTROL, verified_view};
+
+    fn config() -> crate::Config {
+        let unused = "http://127.0.0.1:9";
+        crate::Config {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            runtime_mode: crate::RuntimeMode::CurrentThread,
+            public_origin: "https://codewire.test".into(),
+            api_origin: unused.parse().unwrap(),
+            credential_origin: unused.parse().unwrap(),
+            identity_origin_string: unused.into(),
+            browser_api_origin: "https://codewire.test".into(),
+            billing_origin: unused.parse().unwrap(),
+            docs_root: std::path::PathBuf::new(),
+            confidential_storage_enabled: false,
+            turnstile_site_key: String::new(),
+            github_app_slug: String::new(),
+            github_app_client_id: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_anonymous_homepage_may_be_kept_by_a_shared_cache() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server =
+            tokio::spawn(async move { axum::serve(listener, crate::app(config())).await.unwrap() });
+        let client = reqwest::Client::new();
+
+        let anonymous = client.get(format!("{origin}/")).send().await.unwrap();
+        assert_eq!(anonymous.status(), StatusCode::OK);
+        assert_eq!(
+            anonymous.headers()[header::CACHE_CONTROL],
+            HOME_CACHE_CONTROL
+        );
+        assert!(!anonymous.headers().contains_key(header::SET_COOKIE));
+
+        // A signed-in visitor without a CSRF cookie is handed one with the
+        // page, so that page must never be shared.
+        let signed_in = client
+            .get(format!("{origin}/"))
+            .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}=synthetic"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(signed_in.status(), StatusCode::OK);
+        assert!(signed_in.headers().contains_key(header::SET_COOKIE));
+        assert_eq!(
+            signed_in.headers()[header::CACHE_CONTROL],
+            "private, no-store"
+        );
+
+        // Other pages stay private.
+        let login = client.get(format!("{origin}/login")).send().await.unwrap();
+        assert_ne!(login.headers()[header::CACHE_CONTROL], HOME_CACHE_CONTROL);
+        server.abort();
+    }
 
     #[test]
     fn pending_verification_waits_for_access_review() {

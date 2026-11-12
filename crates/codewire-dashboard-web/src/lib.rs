@@ -57,6 +57,9 @@ pub fn app(config: Config) -> Router {
                 .layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     routes::remember_organization,
+                ))
+                .layer(axum::middleware::map_response(
+                    security::keep_cookie_responses_private,
                 )),
         )
         .merge(assets::router())

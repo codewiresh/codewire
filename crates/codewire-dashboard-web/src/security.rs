@@ -455,6 +455,28 @@ pub(crate) async fn ensure_page_csrf_cookie(
     with_csrf_cookie(response, csrf_cookie(&state.public_origin, &token))
 }
 
+/// A response that sets a cookie belongs to one visitor: no shared cache may
+/// keep it, whatever the handler chose (the homepage is otherwise public).
+/// Responses that already forbid shared caching keep their own policy.
+pub(crate) async fn keep_cookie_responses_private(mut response: Response) -> Response {
+    let already_private = response
+        .headers()
+        .get(header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|directive| matches!(directive.trim(), "no-store" | "private"))
+        });
+    if response.headers().contains_key(header::SET_COOKIE) && !already_private {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-store"),
+        );
+    }
+    response
+}
+
 pub(crate) fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     let raw = headers.get(header::COOKIE)?.to_str().ok()?;
     raw.split(';').find_map(|pair| {
