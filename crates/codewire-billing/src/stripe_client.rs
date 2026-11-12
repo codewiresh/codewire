@@ -354,31 +354,113 @@ impl StripeHandle {
     /// (no client, no customer, Stripe error, deleted customer) —
     /// the overview endpoint must not 500 because Stripe hiccuped.
     pub async fn org_has_payment_method(&self, pool: &PgPool, org_id: &str) -> bool {
-        let Some(client) = &self.client else {
-            return false;
-        };
+        self.org_payment_method(pool, org_id, false).await.is_some()
+    }
+
+    /// The organization's default payment method, read with the same one
+    /// Customers retrieve as [`Self::org_has_payment_method`], which also
+    /// expands it to show the card. `None` on any failure, as there.
+    pub async fn org_default_payment_method(
+        &self,
+        pool: &PgPool,
+        org_id: &str,
+    ) -> Option<DefaultPaymentMethod> {
+        self.org_payment_method(pool, org_id, true).await
+    }
+
+    async fn org_payment_method(
+        &self,
+        pool: &PgPool,
+        org_id: &str,
+        expand: bool,
+    ) -> Option<DefaultPaymentMethod> {
+        if !self.is_configured() {
+            return None;
+        }
+        let customer_id = Self::org_customer_id(pool, org_id).await?;
+        self.default_payment_method(&customer_id, expand).await
+    }
+
+    /// The organization's Stripe customer ID, if it has one.
+    async fn org_customer_id(pool: &PgPool, org_id: &str) -> Option<String> {
         let customer_id: Option<Option<String>> =
             sqlx::query_scalar(r#"SELECT stripe_customer_id FROM organizations WHERE id = $1"#)
                 .bind(org_id)
                 .fetch_optional(pool)
                 .await
                 .unwrap_or(None);
-        let Some(Some(customer_id)) = customer_id else {
-            return false;
+        customer_id.flatten().filter(|id| !id.is_empty())
+    }
+
+    /// The customer's `invoice_settings.default_payment_method`, expanded
+    /// when `expand` is set. Nothing is logged: the expanded object carries
+    /// the card's fingerprint, which only [`CardSummary::from_stripe`] reads
+    /// past, keeping brand, last four digits and expiry.
+    pub(crate) async fn default_payment_method(
+        &self,
+        customer_id: &str,
+        expand: bool,
+    ) -> Option<DefaultPaymentMethod> {
+        let client = self.client.as_deref()?;
+        let mut request = RetrieveCustomer::new(customer_id);
+        if expand {
+            request = request.expand(["invoice_settings.default_payment_method".to_string()]);
+        }
+        let Ok(stripe_core::customer::RetrieveCustomerReturned::Customer(customer)) =
+            request.send(client).await
+        else {
+            return None;
         };
-        if customer_id.is_empty() {
-            return false;
-        }
-        match RetrieveCustomer::new(customer_id)
-            .send(client.as_ref())
-            .await
-        {
-            Ok(stripe_core::customer::RetrieveCustomerReturned::Customer(c)) => c
-                .invoice_settings
-                .map(|s| s.default_payment_method.is_some())
-                .unwrap_or(false),
-            _ => false,
-        }
+        let method = customer.invoice_settings?.default_payment_method?;
+        Some(DefaultPaymentMethod {
+            card: match &method {
+                stripe_types::Expandable::Object(method) => {
+                    method.card.as_ref().and_then(CardSummary::from_stripe)
+                }
+                stripe_types::Expandable::Id(_) => None,
+            },
+        })
+    }
+}
+
+/// An organization's default payment method, as the billing overview shows
+/// it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DefaultPaymentMethod {
+    /// Set when the method is a card and Stripe expanded it.
+    pub card: Option<CardSummary>,
+}
+
+/// What a receipt shows of a card. Never the number or the fingerprint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CardSummary {
+    /// Stripe's brand code, such as `visa` or `amex`.
+    pub brand: String,
+    pub last4: String,
+    pub exp_month: i32,
+    pub exp_year: i32,
+}
+
+impl CardSummary {
+    /// `None` when Stripe's values are out of range, so a malformed card
+    /// shows as a payment method without details rather than as nonsense.
+    fn from_stripe(card: &stripe_shared::PaymentMethodCard) -> Option<Self> {
+        let last4_ok = card.last4.len() == 4 && card.last4.bytes().all(|b| b.is_ascii_digit());
+        let brand_ok = !card.brand.is_empty()
+            && card.brand.len() <= 32
+            && card
+                .brand
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'_');
+        let exp_month = i32::try_from(card.exp_month).ok()?;
+        let exp_year = i32::try_from(card.exp_year).ok()?;
+        (last4_ok && brand_ok && (1..=12).contains(&exp_month) && (1000..=9999).contains(&exp_year))
+            .then(|| Self {
+                brand: card.brand.clone(),
+                last4: card.last4.clone(),
+                exp_month,
+                exp_year,
+            })
     }
 }
 
@@ -1454,6 +1536,154 @@ mod idempotency_key_tests {
             assert!(
                 found.iter().any(|name| name == call),
                 "{call} is listed but not found"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod default_payment_method_tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::{Router, extract::RawQuery, routing::get};
+
+    use super::{CardSummary, DefaultPaymentMethod, StripeHandle};
+
+    /// A synthetic Visa test card in Stripe's customer shape, with the
+    /// default payment method expanded. Its fingerprint must never come out.
+    const VISA: &str = r#"{"id":"cus_synthetic","object":"customer","created":1,"livemode":false,
+      "invoice_settings":{"custom_fields":null,"footer":null,"rendering_options":null,
+        "default_payment_method":{"id":"pm_synthetic_visa","object":"payment_method","created":1,
+          "livemode":false,"type":"card","customer":"cus_synthetic","metadata":{},
+          "allow_redisplay":"always",
+          "billing_details":{"address":null,"email":null,"name":null,"phone":null,"tax_id":null},
+          "card":{"brand":"visa","checks":null,"country":"US","display_brand":"visa",
+            "exp_month":11,"exp_year":2026,"fingerprint":"fp_synthetic_secret","funding":"credit",
+            "generated_from":null,"last4":"4242","networks":null,"regulated_status":"unregulated",
+            "three_d_secure_usage":{"supported":true},"wallet":null}}}}"#;
+
+    /// Serves `body` for the synthetic customer and records each query.
+    async fn fake_stripe(body: &'static str) -> (StripeHandle, Arc<Mutex<Vec<String>>>) {
+        let queries = Arc::new(Mutex::new(Vec::new()));
+        let seen = queries.clone();
+        let app = Router::new().route(
+            "/v1/customers/cus_synthetic",
+            get(move |RawQuery(query): RawQuery| {
+                seen.lock().unwrap().push(query.unwrap_or_default());
+                async move { ([("content-type", "application/json")], body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (
+            StripeHandle::for_test(&format!("http://{address}")),
+            queries,
+        )
+    }
+
+    #[tokio::test]
+    async fn one_retrieve_expands_the_card_and_keeps_only_what_a_receipt_shows() {
+        let (stripe, queries) = fake_stripe(VISA).await;
+        let method = stripe.default_payment_method("cus_synthetic", true).await;
+        assert_eq!(
+            method,
+            Some(DefaultPaymentMethod {
+                card: Some(CardSummary {
+                    brand: "visa".into(),
+                    last4: "4242".into(),
+                    exp_month: 11,
+                    exp_year: 2026,
+                }),
+            })
+        );
+        assert!(!format!("{method:?}").contains("fp_synthetic"));
+        assert_eq!(
+            *queries.lock().unwrap(),
+            ["expand[0]=invoice_settings.default_payment_method"]
+        );
+
+        // The credit check only asks whether there is one: no expansion.
+        assert!(
+            stripe
+                .default_payment_method("cus_synthetic", false)
+                .await
+                .is_some()
+        );
+        assert_eq!(queries.lock().unwrap()[1], "");
+    }
+
+    #[tokio::test]
+    async fn a_method_without_card_details_is_still_a_payment_method() {
+        let (stripe, _) = fake_stripe(
+            r#"{"id":"cus_synthetic","object":"customer","created":1,"livemode":false,
+              "invoice_settings":{"default_payment_method":"pm_synthetic"}}"#,
+        )
+        .await;
+        assert_eq!(
+            stripe.default_payment_method("cus_synthetic", true).await,
+            Some(DefaultPaymentMethod { card: None })
+        );
+    }
+
+    #[tokio::test]
+    async fn no_default_a_deleted_customer_or_no_stripe_is_none() {
+        for body in [
+            r#"{"id":"cus_synthetic","object":"customer","created":1,"livemode":false,
+              "invoice_settings":{"default_payment_method":null}}"#,
+            r#"{"id":"cus_synthetic","object":"customer","deleted":true}"#,
+            r#"{"error":{"type":"invalid_request_error","message":"No such customer"}}"#,
+        ] {
+            let (stripe, _) = fake_stripe(body).await;
+            assert_eq!(
+                stripe.default_payment_method("cus_synthetic", true).await,
+                None,
+                "{body}"
+            );
+        }
+        let unreachable = StripeHandle::for_test("http://127.0.0.1:1");
+        assert_eq!(
+            unreachable
+                .default_payment_method("cus_synthetic", true)
+                .await,
+            None
+        );
+        assert_eq!(
+            StripeHandle::default()
+                .default_payment_method("cus_synthetic", true)
+                .await,
+            None
+        );
+    }
+
+    #[test]
+    fn out_of_range_card_values_show_no_details() {
+        let card = |brand: &str, last4: &str, exp_month: i64, exp_year: i64| {
+            let mut card: stripe_shared::PaymentMethodCard = miniserde::json::from_str(
+                r#"{"brand":"visa","exp_month":1,"exp_year":2030,"funding":"credit","last4":"4242"}"#,
+            )
+            .unwrap();
+            card.brand = brand.into();
+            card.last4 = last4.into();
+            card.exp_month = exp_month;
+            card.exp_year = exp_year;
+            CardSummary::from_stripe(&card)
+        };
+        assert!(card("amex", "0005", 12, 2030).is_some());
+        assert!(card("cartes_bancaires", "0005", 1, 2030).is_some());
+        for (brand, last4, month, year) in [
+            ("", "4242", 1, 2030),
+            ("<b>visa</b>", "4242", 1, 2030),
+            ("visa", "424", 1, 2030),
+            ("visa", "42a2", 1, 2030),
+            ("visa", "4242", 0, 2030),
+            ("visa", "4242", 13, 2030),
+            ("visa", "4242", 1, 30),
+        ] {
+            assert_eq!(
+                card(brand, last4, month, year),
+                None,
+                "{brand} {last4} {month} {year}"
             );
         }
     }

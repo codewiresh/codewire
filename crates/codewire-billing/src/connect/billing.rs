@@ -18,8 +18,8 @@ use codewire_proto::codewire::console::v1::{
     GetSignupCreditRequest, GetSignupCreditResponse, Invoice as ProtoInvoice,
     ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse,
     ListOrgPlansRequest, ListOrgPlansResponse, ListResourcePlansRequest, ListResourcePlansResponse,
-    OrgPlan as ProtoOrgPlan, ResourcePlan as ProtoResourcePlan, UpdateAutoTopUpRequest,
-    UpdateAutoTopUpResponse, UsageSummary as ProtoUsageSummary,
+    OrgPlan as ProtoOrgPlan, PaymentCard as ProtoPaymentCard, ResourcePlan as ProtoResourcePlan,
+    UpdateAutoTopUpRequest, UpdateAutoTopUpResponse, UsageSummary as ProtoUsageSummary,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult};
@@ -376,6 +376,16 @@ fn proto_billing_overview(value: BillingOverviewResponse) -> AppResult<GetBillin
         auto_top_up_cents: value.credit.auto_top_up_cents,
         credit_exhausted_at: optional_timestamp(value.credit.exhausted_at.as_deref())?.into(),
         month_usage_nano_eur: value.credit.month_usage_nano_eur,
+        default_card: value
+            .default_card
+            .map(|card| ProtoPaymentCard {
+                brand: card.brand,
+                last4: card.last4,
+                exp_month: card.exp_month,
+                exp_year: card.exp_year,
+                ..Default::default()
+            })
+            .into(),
         ..Default::default()
     })
 }

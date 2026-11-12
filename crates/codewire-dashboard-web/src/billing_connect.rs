@@ -144,10 +144,61 @@ pub(crate) struct BillingUsageBar {
     pub(crate) label: String,
 }
 
+/// The default card as its row on the Billing page shows it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PaymentCardView {
+    /// The brand as people name it, such as "American Express".
+    pub(crate) brand: &'static str,
+    pub(crate) last4: String,
+    /// Month and year, such as "11/2026".
+    pub(crate) expiry: String,
+    /// The card's expiry month has ended.
+    pub(crate) expired: bool,
+}
+
+impl PaymentCardView {
+    /// A card is valid through the last day of its expiry month, so it is
+    /// expired only once a later month has started (UTC).
+    pub(crate) fn new(
+        card: &codewire_proto::codewire::console::v1::PaymentCard,
+        today: chrono::NaiveDate,
+    ) -> Self {
+        use chrono::Datelike as _;
+        let now = (today.year(), today.month() as i32);
+        Self {
+            brand: card_brand_name(&card.brand),
+            last4: card.last4.clone(),
+            expiry: format!("{:02}/{}", card.exp_month, card.exp_year),
+            expired: (card.exp_year, card.exp_month) < now,
+        }
+    }
+}
+
+/// Stripe's card brand codes as people name them; any other is "Card".
+pub(crate) fn card_brand_name(code: &str) -> &'static str {
+    match code {
+        "amex" => "American Express",
+        "cartes_bancaires" => "Cartes Bancaires",
+        "diners" => "Diners Club",
+        "discover" => "Discover",
+        "eftpos_au" => "eftpos Australia",
+        "interac" => "Interac",
+        "jcb" => "JCB",
+        "link" => "Link",
+        "mastercard" => "Mastercard",
+        "unionpay" => "UnionPay",
+        "visa" => "Visa",
+        _ => "Card",
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct BillingPageView {
     pub(crate) billing_enabled: bool,
     pub(crate) has_payment_method: bool,
+    /// The default card. `None` without a payment method, or when it is not
+    /// a card or Stripe gave no details; the page then names it generically.
+    pub(crate) card: Option<PaymentCardView>,
     /// Prepaid compute credit (#3381), in euros.
     pub(crate) credit_balance: String,
     pub(crate) credit_negative: bool,
@@ -407,6 +458,11 @@ pub(crate) async fn billing_page(
     Ok(BillingPageView {
         billing_enabled: overview.billing_enabled,
         has_payment_method: overview.has_payment_method,
+        card: overview
+            .default_card
+            .as_option()
+            .filter(|_| overview.has_payment_method)
+            .map(|card| PaymentCardView::new(card, chrono::Utc::now().date_naive())),
         credit_balance: euro_text(overview.credit_balance_nano_eur),
         credit_negative: overview.credit_balance_nano_eur < 0,
         unmetered: overview.unmetered,
@@ -821,6 +877,135 @@ mod tests {
         assert!(!body.contains("ran out of compute credit"));
         assert!(!body.contains("auto-top-up"));
         assert!(!body.contains("<dt>vCPU</dt>"));
+    }
+
+    fn card(brand: &str, exp_month: i32, exp_year: i32) -> PaymentCardView {
+        PaymentCardView::new(
+            &codewire_proto::codewire::console::v1::PaymentCard {
+                brand: brand.into(),
+                last4: "4242".into(),
+                exp_month,
+                exp_year,
+                ..Default::default()
+            },
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 11).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_card_reads_by_brand_and_expires_after_its_month() {
+        assert_eq!(
+            card("visa", 11, 2026),
+            PaymentCardView {
+                brand: "Visa",
+                last4: "4242".into(),
+                expiry: "11/2026".into(),
+                expired: false,
+            }
+        );
+        assert!(card("visa", 10, 2026).expired);
+        assert!(card("visa", 12, 2025).expired);
+        assert!(!card("visa", 1, 2027).expired);
+        assert_eq!(card("mastercard", 3, 2030).expiry, "03/2030");
+        for (code, name) in [
+            ("amex", "American Express"),
+            ("mastercard", "Mastercard"),
+            ("diners", "Diners Club"),
+            ("unionpay", "UnionPay"),
+            ("unknown", "Card"),
+            ("", "Card"),
+            ("<visa>", "Card"),
+        ] {
+            assert_eq!(card_brand_name(code), name, "{code}");
+        }
+    }
+
+    #[test]
+    fn payment_methods_show_the_default_card_and_who_can_change_it() {
+        let section = |billing: BillingPageView| {
+            let body = render(&BillingPageView {
+                billing_enabled: true,
+                csrf_token: "csrf".into(),
+                ..billing
+            });
+            let start = body
+                .find(r#"<section class="cw-card" aria-labelledby="payment-methods-heading">"#)
+                .expect("payment methods section");
+            let end = start + body[start..].find("</section>").unwrap();
+            body[start..end].to_owned()
+        };
+
+        // No card: the add action for a manager, a pointer for anyone else.
+        let none = section(BillingPageView {
+            can_manage: true,
+            ..Default::default()
+        });
+        assert!(none.contains(r#"<h2 id="payment-methods-heading">Payment methods</h2>"#));
+        assert!(none.contains("<p class=\"cw-muted\">No payment method yet.</p>"));
+        assert!(none.contains(r#"action="/test/billing/_actions/setup""#));
+        assert!(none.contains(r#"type="submit">Add payment method</button>"#));
+        assert!(!none.contains("_actions/portal"));
+        let none = section(BillingPageView::default());
+        assert!(none.contains("No payment method yet. An owner or admin can add one."));
+        assert!(!none.contains("<form"));
+
+        // A card: brand, last four, Default and its expiry, managed in Stripe.
+        let visa = section(BillingPageView {
+            can_manage: true,
+            has_payment_method: true,
+            card: Some(card("visa", 11, 2026)),
+            ..Default::default()
+        });
+        assert!(visa.contains(
+            r#"<p class="cw-badge-row"><strong>Visa</strong> <span class="cw-mono"><span aria-hidden="true">•••• </span><span class="cw-sr-only">ending in </span>4242</span><span class="cw-badge">Default</span></p>"#
+        ));
+        assert!(visa.contains(r#"<p class="cw-muted">Expires 11/2026</p>"#));
+        assert!(visa.contains(r#"action="/test/billing/_actions/portal""#));
+        assert!(visa.contains(r#"type="submit">Manage in Stripe ↗</button>"#));
+        assert!(!visa.contains("_actions/setup"));
+        assert!(!visa.contains("Expired"));
+
+        // An expired card says so in a warning pill, in place of its expiry.
+        let expired = section(BillingPageView {
+            can_manage: true,
+            has_payment_method: true,
+            card: Some(card("amex", 10, 2026)),
+            ..Default::default()
+        });
+        assert!(expired.contains("<strong>American Express</strong>"));
+        assert!(expired.contains(
+            r#"<span class="cw-badge">Default</span><span class="cw-badge" data-tone="warning">Expired 10/2026</span>"#
+        ));
+        assert!(!expired.contains("Expires"));
+
+        // A member who can't manage billing sees the card and no action.
+        let member = section(BillingPageView {
+            has_payment_method: true,
+            card: Some(card("visa", 11, 2026)),
+            ..Default::default()
+        });
+        assert!(member.contains("4242</span><span class=\"cw-badge\">Default</span>"));
+        assert!(!member.contains("<form"));
+        assert!(!member.contains("<button"));
+
+        // A default that is not a card, or without details, is still shown.
+        let other = section(BillingPageView {
+            can_manage: true,
+            has_payment_method: true,
+            ..Default::default()
+        });
+        assert!(other.contains(
+            r#"<p class="cw-badge-row"><strong>Payment method</strong><span class="cw-badge">Default</span></p>"#
+        ));
+        assert!(other.contains("_actions/portal"));
+
+        // Without billing there is no section.
+        let body = render(&BillingPageView {
+            has_payment_method: true,
+            card: Some(card("visa", 11, 2026)),
+            ..Default::default()
+        });
+        assert!(!body.contains("Payment methods"));
     }
 
     #[test]

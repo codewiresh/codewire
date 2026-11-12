@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><script src="../../theme.js"></script><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Organization billing fixture</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/organizations.css"><link rel="stylesheet" href="../../routes/billing-admin.css">
+</head>
+<body class="cw-body" data-route="organization" data-dashboard-app>
+  <main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>example-org</span><span>/</span><strong>billing</strong></div><div class="cw-console-account"><a class="cw-button cw-button--outline cw-button--small" href="#docs" target="_blank" rel="noopener"><span>Support</span><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-external"/></svg></a></div></header><div class="cw-page cw-org-management-page"><div class="cw-org-management-layout"><aside class="cw-context-nav"><header class="cw-context-nav-heading"><h2>Settings</h2></header>
+<nav class="cw-context-nav-links" aria-label="Organization navigation">
+  <h3 id="settings-personal-title" class="cw-section-label">Personal</h3>
+  <ul aria-labelledby="settings-personal-title"><li><a class="cw-nav-link" href="settings-account.html">Account</a></li><li><a class="cw-nav-link" href="settings-credentials.html">Credentials</a></li><li><a class="cw-nav-link" href="settings-secrets.html">Secrets</a></li><li><a class="cw-nav-link" href="settings-api-keys.html">API keys</a></li></ul>
+<h3 id="settings-organization-title" class="cw-section-label">Organization · Example organization</h3>
+<ul aria-labelledby="settings-organization-title"><li><a class="cw-nav-link" href="sandboxes.html">Sandboxes</a></li><li><a class="cw-nav-link" href="/example-org/snapshots/">Snapshots <span class="cw-badge">Soon</span></a></li><li><a class="cw-nav-link" href="/example-org/presets/">Presets</a></li><li><a class="cw-nav-link" href="application-secrets.html">Secrets</a></li><li><a class="cw-nav-link" href="/example-org/api-keys/">API keys</a></li><li><a class="cw-nav-link" href="/example-org/members/">Members</a></li><li><a class="cw-nav-link" href="organization-billing.html" aria-current="page">Billing</a></li></ul>
+<h3 id="settings-admin-title" class="cw-section-label">Admin</h3><ul aria-labelledby="settings-admin-title"><li><a class="cw-nav-link" href="/admin/">Overview</a></li><li><a class="cw-nav-link" href="/admin/billing/">Billing catalog</a></li><li><a class="cw-nav-link" href="/admin/audit/">Audit log</a></li></ul>
+</nav></aside><div class="cw-context-main">
+    <header class="cw-context-page-header"><a href="index.html">Back to fixtures</a><h1>Billing</h1><p>Compute credit, usage, invoices, and recent billing activity.</p></header>
+    <div class="cw-billing-stack">
+      <section class="cw-card" aria-labelledby="credit-heading">
+        <header class="cw-card-header"><div><h2 id="credit-heading">Compute credit</h2><p>Running Sandboxes draw prepaid credit each second at this organization's rates. A stopped Sandbox costs nothing.</p></div></header>
+        <div class="cw-card-body cw-admin-section">
+          <dl class="cw-stat-grid">
+            <div class="cw-stat"><dt>Balance</dt><dd>€42.50</dd></div>
+            <div class="cw-stat"><dt>vCPU</dt><dd>€0.0438 <small>per hour</small></dd></div>
+            <div class="cw-stat"><dt>Memory</dt><dd>€0.0141 <small>per GiB-hour</small></dd></div>
+            <div class="cw-stat"><dt>Disk</dt><dd>€0.000087 <small>per GiB-hour</small></dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="cw-card" aria-labelledby="payment-methods-heading">
+        <header class="cw-card-header"><div><h2 id="payment-methods-heading">Payment methods</h2><p>Top-ups charge the default card. Stripe holds the card; Codewire never sees its number.</p></div></header>
+        <div class="cw-card-body">
+          <ul class="cw-row-list">
+            <li class="cw-payment-method">
+              <div>
+                <p class="cw-badge-row"><strong>Visa</strong> <span class="cw-mono"><span aria-hidden="true">•••• </span><span class="cw-sr-only">ending in </span>4242</span><span class="cw-badge">Default</span></p>
+                <p class="cw-muted">Expires 11/2026</p>
+              </div>
+              <form method="post" action="#portal">
+                <input type="hidden" name="_csrf" value="design-fixture-only">
+                <button class="cw-button cw-button--outline cw-button--small" type="submit">Manage in Stripe ↗</button>
+              </form>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="cw-card" aria-labelledby="payment-methods-expired-heading">
+        <header class="cw-card-header"><div><h2 id="payment-methods-expired-heading">Payment methods, expired card</h2><p>The same section when the default card's expiry month has passed.</p></div></header>
+        <div class="cw-card-body">
+          <ul class="cw-row-list">
+            <li class="cw-payment-method">
+              <div>
+                <p class="cw-badge-row"><strong>American Express</strong> <span class="cw-mono"><span aria-hidden="true">•••• </span><span class="cw-sr-only">ending in </span>0005</span><span class="cw-badge">Default</span><span class="cw-badge" data-tone="warning">Expired 10/2026</span></p>
+              </div>
+              <form method="post" action="#portal">
+                <input type="hidden" name="_csrf" value="design-fixture-only">
+                <button class="cw-button cw-button--outline cw-button--small" type="submit">Manage in Stripe ↗</button>
+              </form>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="cw-card" aria-labelledby="payment-methods-none-heading">
+        <header class="cw-card-header"><div><h2 id="payment-methods-none-heading">Payment methods, none yet</h2><p>The same section before a card is added.</p></div></header>
+        <div class="cw-card-body">
+          <div class="cw-payment-method">
+            <p class="cw-muted">No payment method yet.</p>
+            <form method="post" action="#setup">
+              <input type="hidden" name="_csrf" value="design-fixture-only">
+              <button class="cw-button cw-button--small" type="submit">Add payment method</button>
+            </form>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div></div></div></main>
+</body>
+</html>

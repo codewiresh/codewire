@@ -117,7 +117,7 @@ class GetBillingOverviewRequest(_message.Message):
     def __init__(self, org_id: _Optional[str] = ...) -> None: ...
 
 class GetBillingOverviewResponse(_message.Message):
-    __slots__ = ("billing_enabled", "has_payment_method", "plan", "plan_display_name", "status", "trial_end", "trial_days", "seat_count", "included_devs", "extra_seat_price_cents", "limits", "current_period_end", "active_subscriptions", "total_monthly_cost_cents", "current_month_usage", "credit_balance_nano_eur", "rates", "unmetered", "auto_top_up_enabled", "auto_top_up_cents", "credit_exhausted_at", "month_usage_nano_eur")
+    __slots__ = ("billing_enabled", "has_payment_method", "plan", "plan_display_name", "status", "trial_end", "trial_days", "seat_count", "included_devs", "extra_seat_price_cents", "limits", "current_period_end", "active_subscriptions", "total_monthly_cost_cents", "current_month_usage", "credit_balance_nano_eur", "rates", "unmetered", "auto_top_up_enabled", "auto_top_up_cents", "credit_exhausted_at", "month_usage_nano_eur", "default_card")
     BILLING_ENABLED_FIELD_NUMBER: _ClassVar[int]
     HAS_PAYMENT_METHOD_FIELD_NUMBER: _ClassVar[int]
     PLAN_FIELD_NUMBER: _ClassVar[int]
@@ -140,6 +140,7 @@ class GetBillingOverviewResponse(_message.Message):
     AUTO_TOP_UP_CENTS_FIELD_NUMBER: _ClassVar[int]
     CREDIT_EXHAUSTED_AT_FIELD_NUMBER: _ClassVar[int]
     MONTH_USAGE_NANO_EUR_FIELD_NUMBER: _ClassVar[int]
+    DEFAULT_CARD_FIELD_NUMBER: _ClassVar[int]
     billing_enabled: bool
     has_payment_method: bool
     plan: str
@@ -162,7 +163,20 @@ class GetBillingOverviewResponse(_message.Message):
     auto_top_up_cents: int
     credit_exhausted_at: _timestamp_pb2.Timestamp
     month_usage_nano_eur: int
-    def __init__(self, billing_enabled: _Optional[bool] = ..., has_payment_method: _Optional[bool] = ..., plan: _Optional[str] = ..., plan_display_name: _Optional[str] = ..., status: _Optional[str] = ..., trial_end: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., trial_days: _Optional[int] = ..., seat_count: _Optional[int] = ..., included_devs: _Optional[int] = ..., extra_seat_price_cents: _Optional[int] = ..., limits: _Optional[_Union[BillingLimits, _Mapping]] = ..., current_period_end: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., active_subscriptions: _Optional[int] = ..., total_monthly_cost_cents: _Optional[int] = ..., current_month_usage: _Optional[_Union[UsageSummary, _Mapping]] = ..., credit_balance_nano_eur: _Optional[int] = ..., rates: _Optional[_Union[CreditRates, _Mapping]] = ..., unmetered: _Optional[bool] = ..., auto_top_up_enabled: _Optional[bool] = ..., auto_top_up_cents: _Optional[int] = ..., credit_exhausted_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., month_usage_nano_eur: _Optional[int] = ...) -> None: ...
+    default_card: PaymentCard
+    def __init__(self, billing_enabled: _Optional[bool] = ..., has_payment_method: _Optional[bool] = ..., plan: _Optional[str] = ..., plan_display_name: _Optional[str] = ..., status: _Optional[str] = ..., trial_end: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., trial_days: _Optional[int] = ..., seat_count: _Optional[int] = ..., included_devs: _Optional[int] = ..., extra_seat_price_cents: _Optional[int] = ..., limits: _Optional[_Union[BillingLimits, _Mapping]] = ..., current_period_end: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., active_subscriptions: _Optional[int] = ..., total_monthly_cost_cents: _Optional[int] = ..., current_month_usage: _Optional[_Union[UsageSummary, _Mapping]] = ..., credit_balance_nano_eur: _Optional[int] = ..., rates: _Optional[_Union[CreditRates, _Mapping]] = ..., unmetered: _Optional[bool] = ..., auto_top_up_enabled: _Optional[bool] = ..., auto_top_up_cents: _Optional[int] = ..., credit_exhausted_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., month_usage_nano_eur: _Optional[int] = ..., default_card: _Optional[_Union[PaymentCard, _Mapping]] = ...) -> None: ...
+
+class PaymentCard(_message.Message):
+    __slots__ = ("brand", "last4", "exp_month", "exp_year")
+    BRAND_FIELD_NUMBER: _ClassVar[int]
+    LAST4_FIELD_NUMBER: _ClassVar[int]
+    EXP_MONTH_FIELD_NUMBER: _ClassVar[int]
+    EXP_YEAR_FIELD_NUMBER: _ClassVar[int]
+    brand: str
+    last4: str
+    exp_month: int
+    exp_year: int
+    def __init__(self, brand: _Optional[str] = ..., last4: _Optional[str] = ..., exp_month: _Optional[int] = ..., exp_year: _Optional[int] = ...) -> None: ...
 
 class CreditRates(_message.Message):
     __slots__ = ("cpu_nano_eur_per_vcpu_hour", "memory_nano_eur_per_gib_hour", "disk_nano_eur_per_gib_hour")

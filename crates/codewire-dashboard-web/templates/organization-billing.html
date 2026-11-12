@@ -46,15 +46,6 @@
               </dl>
               {% endif %}
               {% if billing.billing_enabled %}
-              <div class="cw-credit-row">
-                <p class="cw-muted">{% if billing.has_payment_method %}A payment method is on file.{% else %}No payment method yet.{% endif %}</p>
-                {% if billing.can_manage %}
-                <form method="post" action="{% if billing.has_payment_method %}/{{ organization.slug }}/billing/_actions/portal{% else %}/{{ organization.slug }}/billing/_actions/setup{% endif %}">
-                  <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
-                  <button class="cw-button{% if billing.has_payment_method %} cw-button--outline{% endif %}" type="submit">{% if billing.has_payment_method %}Manage in Stripe ↗{% else %}Add payment method{% endif %}</button>
-                </form>
-                {% endif %}
-              </div>
               {% if billing.can_manage && !billing.unmetered %}
               <form class="cw-top-up" method="post" action="/{{ organization.slug }}/billing/_actions/auto-top-up" aria-labelledby="top-up-title">
                 <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
@@ -75,6 +66,36 @@
               {% endif %}
             </div>
           </section>
+
+          {% if billing.billing_enabled %}<section class="cw-card" aria-labelledby="payment-methods-heading">
+            <header class="cw-card-header"><div><h2 id="payment-methods-heading">Payment methods</h2><p>Top-ups charge the default card. Stripe holds the card; Codewire never sees its number.</p></div></header>
+            <div class="cw-card-body">
+              {% if billing.has_payment_method %}
+              <ul class="cw-row-list">
+                <li class="cw-payment-method">
+                  <div>{% if let Some(card) = billing.card %}
+                    <p class="cw-badge-row"><strong>{{ card.brand }}</strong> <span class="cw-mono"><span aria-hidden="true">•••• </span><span class="cw-sr-only">ending in </span>{{ card.last4 }}</span><span class="cw-badge">Default</span>{% if card.expired %}<span class="cw-badge" data-tone="warning">Expired {{ card.expiry }}</span>{% endif %}</p>
+                    {% if !card.expired %}<p class="cw-muted">Expires {{ card.expiry }}</p>{% endif %}{% else %}
+                    <p class="cw-badge-row"><strong>Payment method</strong><span class="cw-badge">Default</span></p>
+                    <p class="cw-muted">Its details are in Stripe.</p>{% endif %}
+                  </div>
+                  {% if billing.can_manage %}<form method="post" action="/{{ organization.slug }}/billing/_actions/portal">
+                    <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
+                    <button class="cw-button cw-button--outline cw-button--small" type="submit">Manage in Stripe ↗</button>
+                  </form>{% endif %}
+                </li>
+              </ul>
+              {% else %}
+              <div class="cw-payment-method">
+                <p class="cw-muted">No payment method yet.{% if !billing.can_manage %} An owner or admin can add one.{% endif %}</p>
+                {% if billing.can_manage %}<form method="post" action="/{{ organization.slug }}/billing/_actions/setup">
+                  <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
+                  <button class="cw-button cw-button--small" type="submit">Add payment method</button>
+                </form>{% endif %}
+              </div>
+              {% endif %}
+            </div>
+          </section>{% endif %}
 
           <section class="cw-card">
             <header class="cw-card-header"><div><h2>Sandbox Usage</h2><p>Credit drawn this month, per second of running Sandboxes.</p></div></header>

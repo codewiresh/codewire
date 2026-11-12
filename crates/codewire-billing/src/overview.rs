@@ -7,9 +7,10 @@
 //! directly. Lookups do not filter `archived_at`; only the public listing does.
 //!
 //! Stripe `has_payment_method` is a read-only Customers retrieve
-//! checking `invoice_settings.default_payment_method`. With no
-//! `STRIPE_SECRET_KEY` configured the service reports
-//! `billing_enabled:false, has_payment_method:false`.
+//! checking `invoice_settings.default_payment_method`. The same retrieve
+//! expands that payment method, so `default_card` costs no second Stripe
+//! call; Codewire stores none of it. With no `STRIPE_SECRET_KEY` configured
+//! the service reports `billing_enabled:false, has_payment_method:false`.
 
 use chrono::{DateTime, Datelike, Duration, NaiveDateTime, TimeZone, Utc};
 use codewire_server_core::auth::AuthUser;
@@ -18,6 +19,7 @@ use codewire_server_core::{AppError, AppResult};
 use sqlx::PgPool;
 
 use crate::routes::BillingState;
+use crate::stripe_client::CardSummary;
 
 // ── Response shapes ─────────────────────────────────────────────────
 
@@ -77,6 +79,8 @@ pub struct BillingOverviewResponse {
     pub credit: CreditOverview,
     pub billing_enabled: bool,
     pub has_payment_method: bool,
+    /// The default payment method when it is a card.
+    pub default_card: Option<CardSummary>,
     pub plan: String,
     pub plan_display_name: String,
     pub status: String,
@@ -417,7 +421,7 @@ pub async fn billing_overview(
             .await?;
 
     let billing_enabled = state.stripe.is_configured();
-    let has_payment_method = state.stripe.org_has_payment_method(pool, org_id).await;
+    let payment_method = state.stripe.org_default_payment_method(pool, org_id).await;
 
     let org_plan = lookup_org_plan(pool, &effective.plan)
         .await?
@@ -448,7 +452,8 @@ pub async fn billing_overview(
     Ok(BillingOverviewResponse {
         credit,
         billing_enabled,
-        has_payment_method,
+        has_payment_method: payment_method.is_some(),
+        default_card: payment_method.and_then(|method| method.card),
         plan_display_name: coalesce_plan_display_name(&[
             &effective.plan_display_name,
             &org_plan.display_name,

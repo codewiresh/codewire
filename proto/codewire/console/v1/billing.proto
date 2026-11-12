@@ -154,6 +154,22 @@ message GetBillingOverviewResponse {
   reserved "card_credit_granted";
   // Usage drawn from credit since the start of this month, in nano-euros.
   int64 month_usage_nano_eur = 23;
+  // The default payment method when it is a card, read from Stripe with
+  // has_payment_method. Unset when there is no default, it is not a card, or
+  // Stripe could not be read.
+  PaymentCard default_card = 24;
+}
+
+// What a receipt shows of a card: never its number or fingerprint.
+message PaymentCard {
+  // Stripe's brand code, such as "visa", "mastercard" or "amex".
+  string brand = 1;
+  // The last four digits of the card number.
+  string last4 = 2;
+  // The expiry month, 1 to 12.
+  int32 exp_month = 3;
+  // The four-digit expiry year.
+  int32 exp_year = 4;
 }
 
 message CreditRates {
