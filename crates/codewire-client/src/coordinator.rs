@@ -1543,7 +1543,11 @@ mod tests {
     use std::future::Future;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    const TEST_WALL_BOUND: Duration = Duration::from_secs(10);
+    /// How long a step may take before the test calls it hung: a hang
+    /// guard, not a speed expectation (`docs/dev/AGENT-WORKFLOW.md`
+    /// "Failure convergence"). A loaded guest took over 10 s for the
+    /// loopback HTTP/2 exchange alone.
+    const TEST_WALL_BOUND: Duration = Duration::from_secs(60);
 
     async fn test_bounded<F>(label: &str, future: F) -> F::Output
     where
