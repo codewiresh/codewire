@@ -842,9 +842,11 @@ grep -q 'workspace cache cleanup: phase=credential-erasure status=45 elapsed_sec
 MOCK_EXEC=true MOCK_COMPILER=r2 MOCK_LAYERS=r2 MOCK_CREDENTIALS="$work/r2.aws" MOCK_REUSE=disabled \
   run_mock_verifier hanging-contract valid docker hang-contract >"$work/hanging-contract.out" 2>&1 &
 verifier_pid=$!
-# A readiness wait only (up to 60 s on a loaded host): the state asserted
-# next is the same whenever the contract starts.
-for ((attempt=0; attempt<1200; attempt++)); do
+# A readiness wait only, a hang guard of 300 s: the state asserted next is the
+# same whenever the contract starts. 60 s was not enough on a loaded medium
+# guest (pull request runs 44128 and 44450, 2026-11-12: "contract did not
+# start after daemon cleanup").
+for ((attempt=0; attempt<6000; attempt++)); do
   [[ ! -s "$work/contract-child" ]] || break
   sleep 0.05
 done
