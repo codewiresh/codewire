@@ -24,10 +24,10 @@ use kube::api::{Api, DynamicObject, LogParams};
 
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
-    KeptSnapshot, MemberFacts, MemberRef, MemberReplacement, Pick, Placement, PoolBornClaim,
-    PoolPass, PoolState, ProbeResult, ResizeState, RuntimeAccess, RuntimeAttestation,
-    RuntimeClaims, RuntimeDriver, RuntimeExec, RuntimeFacts, RuntimeLifecycle, RuntimeMember,
-    RuntimeObservation, RuntimeObservations, RuntimePools, RuntimeResize, RuntimeSnapshots,
+    Incarnation, KeptSnapshot, MemberFacts, MemberReplacement, Pick, Placement, PoolBornClaim,
+    PoolPass, PoolState, ResizeState, RuntimeAccess, RuntimeAttestation, RuntimeClaims,
+    RuntimeDriver, RuntimeExec, RuntimeFacts, RuntimeLifecycle, RuntimeMember, RuntimeObservation,
+    RuntimeObservations, RuntimePools, RuntimeProbe, RuntimeResize, RuntimeSnapshots,
     RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime, VerifiedChain, VolumeGrowth,
     VolumeIdentity, VolumeMode, VolumeRef, WantedPool, WantedPools, WorkspaceVolume,
 };
@@ -430,7 +430,7 @@ impl RuntimeObservations for KubernetesDriver {
     async fn delete_refused_member(
         &self,
         placement: &Placement,
-        member: &MemberRef,
+        member: &Incarnation,
     ) -> anyhow::Result<()> {
         self.sandbox_client(placement)
             .delete_workspace_pod_if_uid(&member.name, &member.uid)
@@ -444,7 +444,7 @@ impl RuntimeLifecycle for KubernetesDriver {
         &self,
         placement: &Placement,
         environment_id: &str,
-    ) -> anyhow::Result<ProbeResult> {
+    ) -> anyhow::Result<RuntimeProbe> {
         self.sandbox_client(placement)
             .probe_environment(environment_id)
             .await
@@ -460,7 +460,7 @@ impl RuntimeLifecycle for KubernetesDriver {
         placement: &Placement,
         environment_id: &str,
         known_member: &str,
-    ) -> anyhow::Result<Vec<MemberRef>> {
+    ) -> anyhow::Result<Vec<Incarnation>> {
         suspension::source_restart_pods(
             &self.sandbox_client(placement),
             environment_id,
@@ -479,7 +479,7 @@ impl RuntimeLifecycle for KubernetesDriver {
         &self,
         claim: &ClaimRef,
         known_member: &str,
-        previous: &[MemberRef],
+        previous: &[Incarnation],
         timeout: Duration,
     ) -> anyhow::Result<SuspendedRuntime> {
         suspension::wait_for_workspace_suspension(
@@ -556,7 +556,7 @@ impl RuntimeLifecycle for KubernetesDriver {
         &self,
         placement: &Placement,
         environment_id: &str,
-    ) -> anyhow::Result<Option<MemberRef>> {
+    ) -> anyhow::Result<Option<Incarnation>> {
         self.sandbox_client(placement)
             .get_workspace_pod_identity(environment_id)
             .await
@@ -576,7 +576,7 @@ impl RuntimeLifecycle for KubernetesDriver {
         &self,
         placement: &Placement,
         member_name: &str,
-    ) -> anyhow::Result<Option<MemberRef>> {
+    ) -> anyhow::Result<Option<Incarnation>> {
         self.sandbox_client(placement)
             .get_workspace_pod_identity_by_name(member_name)
             .await
@@ -608,7 +608,7 @@ impl RuntimeLifecycle for KubernetesDriver {
         &self,
         placement: &Placement,
         environment_id: &str,
-        member: &MemberRef,
+        member: &Incarnation,
         support_image: &str,
     ) -> anyhow::Result<MemberReplacement> {
         self.sandbox_client(placement)
@@ -619,9 +619,9 @@ impl RuntimeLifecycle for KubernetesDriver {
     async fn wait_replacement(
         &self,
         placement: &Placement,
-        previous: &MemberRef,
+        previous: &Incarnation,
         timeout: Duration,
-    ) -> anyhow::Result<MemberRef> {
+    ) -> anyhow::Result<Incarnation> {
         self.sandbox_client(placement)
             .wait_for_replacement_workspace_pod(&previous.name, &previous.uid, timeout)
             .await
@@ -631,7 +631,7 @@ impl RuntimeLifecycle for KubernetesDriver {
         &self,
         placement: &Placement,
         environment_id: &str,
-    ) -> anyhow::Result<Option<MemberRef>> {
+    ) -> anyhow::Result<Option<Incarnation>> {
         self.sandbox_client(placement)
             .workspace_pod_replacement_candidate(environment_id)
             .await
@@ -652,7 +652,7 @@ impl RuntimeLifecycle for KubernetesDriver {
     async fn wait_measured_runtime(
         &self,
         placement: &Placement,
-        member: &MemberRef,
+        member: &Incarnation,
         measured: &str,
         timeout: Duration,
     ) -> anyhow::Result<()> {
@@ -1302,7 +1302,7 @@ mod tests {
     #[tokio::test]
     async fn replacing_an_incarnation_that_is_already_gone_writes_nothing() {
         let (driver, requests) = driver_over_addressless_pod(CONTROLLING_SANDBOX);
-        let gone = MemberRef {
+        let gone = Incarnation {
             name: "workspace-a".into(),
             uid: "an-earlier-incarnation".into(),
         };
@@ -1326,7 +1326,7 @@ mod tests {
     #[tokio::test]
     async fn replacing_the_current_incarnation_deletes_it_in_the_placement() {
         let (driver, requests) = driver_over_addressless_pod(CONTROLLING_SANDBOX);
-        let current = MemberRef {
+        let current = Incarnation {
             name: "workspace-a".into(),
             uid: STUB_POD_UID.into(),
         };
@@ -1354,7 +1354,7 @@ mod tests {
     async fn a_replacement_is_a_ready_member_with_another_uid() {
         let (driver, _) = driver_over_addressless_pod(CONTROLLING_SANDBOX);
         let placement = Placement::new("dev-sandboxes");
-        let member = |uid: &str| MemberRef {
+        let member = |uid: &str| Incarnation {
             name: "workspace-a".into(),
             uid: uid.into(),
         };
@@ -2555,7 +2555,7 @@ mod tests {
         });
         let driver = KubernetesDriver::shared(kube::Client::new(service, "the-default-namespace"));
         let placement = Placement::new("dev-sandboxes");
-        let member = MemberRef {
+        let member = Incarnation {
             name: "sandbox-a".into(),
             uid: "pod-uid".into(),
         };
@@ -2564,7 +2564,7 @@ mod tests {
             .await
             .unwrap();
         // Another incarnation under the name is never taken for this one.
-        let replaced = MemberRef {
+        let replaced = Incarnation {
             name: "sandbox-a".into(),
             uid: "another-uid".into(),
         };

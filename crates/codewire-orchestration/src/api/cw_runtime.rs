@@ -30,7 +30,7 @@ use uuid::Uuid;
 use super::ApiState;
 use super::proxy::{SandboxTarget, huma_error, resolve_running_sandbox_target};
 use crate::confidential_storage::require_confidential_access;
-use crate::runtime::{Placement, ProbeResult};
+use crate::runtime::{Placement, RuntimeProbe};
 use crate::worker::environment_auth::{WorkspaceCredentialScope, daemon_credential_for};
 use crate::worker::workspace_binding::{CwRuntimeLiveBinding, live_cw_runtime_binding};
 
@@ -152,7 +152,7 @@ trait CaptureBackend: Sync {
 
     async fn authorize(&self, org: &str, env: &str) -> AppResult<SandboxTarget>;
     async fn binding(&self, org: &str, env: &str) -> AppResult<Option<CwRuntimeLiveBinding>>;
-    async fn probe(&self, namespace: &str, env: &str) -> AppResult<ProbeResult>;
+    async fn probe(&self, namespace: &str, env: &str) -> AppResult<RuntimeProbe>;
     async fn confidential_access(&self, org: &str, isolation_tier: &str) -> AppResult<()>;
     fn endpoint(&self, namespace: &str, env: &str) -> String;
     async fn connect(&self, endpoint: String, credential: String) -> AppResult<Self::Client>;
@@ -181,7 +181,7 @@ impl CaptureBackend for PlatformBackend<'_> {
             .map_err(|_| binding_unavailable())
     }
 
-    async fn probe(&self, namespace: &str, env: &str) -> AppResult<ProbeResult> {
+    async fn probe(&self, namespace: &str, env: &str) -> AppResult<RuntimeProbe> {
         let runtime = self
             .state
             .runtime
@@ -331,7 +331,7 @@ async fn admit_row<B: CaptureBackend>(
     Ok(())
 }
 
-fn admit_probe(row: &CwRuntimeLiveBinding, probe: &ProbeResult) -> AppResult<()> {
+fn admit_probe(row: &CwRuntimeLiveBinding, probe: &RuntimeProbe) -> AppResult<()> {
     if !probe.claim_exists
         || !probe.claim_ready
         || !probe.pod_exists

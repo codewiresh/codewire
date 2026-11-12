@@ -31,8 +31,7 @@ use super::start_timing::{record_create_milestone, start_profile};
 use super::workspace_binding::{BindRefused, bind_replacement_runtime};
 use super::{JobPayload, WorkerContext};
 use crate::repository_mount::{canonical_repository_mount, validate_repository_mounts};
-use crate::runtime::{MemberRef, Placement, RuntimeDriver};
-use crate::sandbox::client::ProbeResult;
+use crate::runtime::{Incarnation, Placement, RuntimeDriver, RuntimeProbe};
 use crate::sandbox::exec::{StderrTap, WorkspaceExecResult};
 use crate::sandbox::host_keys::RecordedHostKeys;
 use crate::start_metrics::{CreateMilestone, StartPath};
@@ -882,7 +881,7 @@ fn clone_plan(
 fn replacement_runtime_is_current(
     expected_pod_name: &str,
     old_pod_uid: &str,
-    probe: &ProbeResult,
+    probe: &RuntimeProbe,
 ) -> bool {
     probe.claim_exists
         && probe.claim_ready
@@ -1064,7 +1063,7 @@ impl WorkerSetupOps<'_> {
         &self,
         input: &Inputs,
         old_uid: &str,
-    ) -> anyhow::Result<ProbeResult> {
+    ) -> anyhow::Result<RuntimeProbe> {
         let runtime = self.runtime()?;
         let placement = Placement::new(&input.namespace);
         let pod_name = if input.pod_name.trim().is_empty() {
@@ -1085,7 +1084,7 @@ impl WorkerSetupOps<'_> {
             // Pending/not-Ready observations within the one recovery bound.
             let probe = runtime.probe(&placement, &input.environment_id).await?;
             if replacement_runtime_is_current(&pod_name, old_uid, &probe) {
-                let replacement = MemberRef {
+                let replacement = Incarnation {
                     name: probe.pod_name.clone(),
                     uid: probe.pod_uid.clone(),
                 };
@@ -2643,7 +2642,7 @@ fn final_reconcile_needed(
     after_create: Option<&ReconciledRuntime>,
     environment: &EnvironmentRow,
     backend: &BackendRow,
-    probe: Option<&ProbeResult>,
+    probe: Option<&RuntimeProbe>,
 ) -> bool {
     match (after_create, probe) {
         (Some(confirmed), Some(probe)) => !confirmed.unchanged(environment, backend, probe),
@@ -2655,7 +2654,7 @@ async fn probe_after_setup(
     ctx: &WorkerContext,
     namespace: &str,
     env_id: &str,
-) -> Option<ProbeResult> {
+) -> Option<RuntimeProbe> {
     let runtime = ctx.runtime.as_deref()?;
     match runtime.probe(&Placement::new(namespace), env_id).await {
         Ok(probe) => Some(probe),
@@ -2678,7 +2677,7 @@ async fn probe_after_setup(
 fn record_setup_complete(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
-    probe: Option<&ProbeResult>,
+    probe: Option<&RuntimeProbe>,
     since_accepted: Duration,
 ) {
     // Timing is observational; the row still carries the time.
@@ -3349,8 +3348,8 @@ mod tests {
         );
     }
 
-    fn member(name: &str, uid: &str) -> MemberRef {
-        MemberRef {
+    fn member(name: &str, uid: &str) -> Incarnation {
+        Incarnation {
             name: name.into(),
             uid: uid.into(),
         }
@@ -3878,8 +3877,8 @@ mod tests {
         }
     }
 
-    fn current_replacement_probe() -> ProbeResult {
-        ProbeResult {
+    fn current_replacement_probe() -> RuntimeProbe {
+        RuntimeProbe {
             claim_exists: true,
             claim_ready: true,
             replicas: 1,
@@ -3977,7 +3976,7 @@ mod tests {
             pod_uid: Some("pod-1".into()),
             ..Default::default()
         };
-        let probe = ProbeResult {
+        let probe = RuntimeProbe {
             pod_name: "cw-pool-member".into(),
             pod_uid: "pod-1".into(),
             pod_ip: "10.0.0.1".into(),
@@ -4043,11 +4042,11 @@ mod tests {
             );
         }
 
-        let replaced = ProbeResult {
+        let replaced = RuntimeProbe {
             pod_uid: "pod-2".into(),
             ..probe.clone()
         };
-        let readdressed = ProbeResult {
+        let readdressed = RuntimeProbe {
             pod_ip: "10.0.0.2".into(),
             ..probe.clone()
         };

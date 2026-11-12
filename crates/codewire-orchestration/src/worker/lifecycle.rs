@@ -29,8 +29,11 @@ use super::start_timing::{duration_ms, start_profile};
 use super::workspace_binding::release_workspace_binding;
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{Action, PgLifecycleStore, RuntimeAbsenceProof, Service, Snapshot};
-use crate::runtime::{ClaimRef, MemberRef, Placement, RuntimeTeardown, within_workspace_deadline};
-use crate::sandbox::client::{ProbeResult, SandboxClient};
+use crate::runtime::RuntimeProbe;
+use crate::runtime::{
+    ClaimRef, Incarnation, Placement, RuntimeTeardown, within_workspace_deadline,
+};
+use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::RecordedHostKeys;
 use crate::start_metrics::{self, StartPath, StartProfile, StartStage};
 
@@ -105,7 +108,7 @@ fn snapshot(id: &str, state: &str, desired: &str, external_cleanup_complete: boo
     }
 }
 
-pub(super) fn start_runtime_is_ready(probe: &ProbeResult) -> bool {
+pub(super) fn start_runtime_is_ready(probe: &RuntimeProbe) -> bool {
     probe.claim_exists
         && probe.claim_ready
         && probe.pod_exists
@@ -808,7 +811,7 @@ pub async fn handle_environment_start(
                     Ok(probe) if start_runtime_is_ready(&probe) => {
                         break Ok((
                             probe.pod_ip,
-                            MemberRef {
+                            Incarnation {
                                 name: probe.pod_name,
                                 uid: probe.pod_uid,
                             },
@@ -1433,8 +1436,8 @@ mod tests {
         Ok(())
     }
 
-    fn ready_start_runtime() -> ProbeResult {
-        ProbeResult {
+    fn ready_start_runtime() -> RuntimeProbe {
+        RuntimeProbe {
             claim_exists: true,
             claim_ready: true,
             pod_exists: true,

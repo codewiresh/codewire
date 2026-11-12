@@ -64,7 +64,7 @@ fn timeline() -> PodStartTimeline {
 fn marks(pod_uid: &str) -> DeferredPodMarks {
     DeferredPodMarks {
         namespace: None,
-        probe: ProbeResult {
+        probe: RuntimeProbe {
             pod_uid: pod_uid.to_owned(),
             pod_timeline: timeline(),
             ..Default::default()

@@ -18,7 +18,7 @@ use tokio::sync::Notify;
 
 use super::WorkerContext;
 use crate::lifecycle::{PgLifecycleStore, Service};
-use crate::runtime::{Placement, ProbeResult, RuntimeDriver};
+use crate::runtime::{Placement, RuntimeDriver, RuntimeProbe};
 use crate::worker::activity_authority::{ActivityAuthority, is_authority_lost};
 
 /// The orchestration worker's leadership domain (see module docs).
@@ -947,7 +947,7 @@ fn crash_recovery_due(now: chrono::DateTime<chrono::Utc>, row: &LivenessRow) -> 
 fn running_pod_is_leaving(
     now: chrono::DateTime<chrono::Utc>,
     row: &LivenessRow,
-    probe: &ProbeResult,
+    probe: &RuntimeProbe,
 ) -> bool {
     row.state == "running"
         && matches!(probe.pod_phase.as_str(), "Failed" | "Succeeded")
@@ -957,7 +957,7 @@ fn running_pod_is_leaving(
         })
 }
 
-fn running_runtime_recovery_required(row: &LivenessRow, probe: &ProbeResult) -> bool {
+fn running_runtime_recovery_required(row: &LivenessRow, probe: &RuntimeProbe) -> bool {
     if row.state != "running"
         || row.desired_state != "started"
         || !probe.claim_exists
@@ -986,7 +986,7 @@ fn running_runtime_recovery_required(row: &LivenessRow, probe: &ProbeResult) -> 
 
 /// A terminal phase is final for a Pod, so a live Pod isn't the one a claim's
 /// `PodFailed` describes: the claim hasn't caught up with its replacement (#3944).
-fn claim_failure_is_of_an_earlier_pod(probe: &ProbeResult) -> bool {
+fn claim_failure_is_of_an_earlier_pod(probe: &RuntimeProbe) -> bool {
     probe.claim_reason == "PodFailed"
         && probe.pod_exists
         && !matches!(probe.pod_phase.as_str(), "" | "Failed" | "Succeeded")
@@ -1031,7 +1031,7 @@ fn is_terminal_claim_reason(reason: &str) -> bool {
 fn sandbox_liveness_reason(
     now: chrono::DateTime<chrono::Utc>,
     row: &LivenessRow,
-    probe: &ProbeResult,
+    probe: &RuntimeProbe,
 ) -> Option<String> {
     if row.desired_state != "started" {
         return None;
@@ -1096,13 +1096,13 @@ fn sandbox_liveness_reason(
 
 /// A running sandbox's Pod failed while its node stayed, which leaves its volume
 /// and its way back. Whatever killed it isn't known here (#3772).
-fn sandbox_pod_failed_on_its_node(row: &LivenessRow, probe: &ProbeResult) -> bool {
+fn sandbox_pod_failed_on_its_node(row: &LivenessRow, probe: &RuntimeProbe) -> bool {
     row.state == "running"
         && !matches!(probe.claim_reason.as_str(), "NodeLost" | "NodeDeleted")
         && (probe.pod_phase == "Failed" || probe.claim_reason == "PodFailed")
 }
 
-async fn sync_sandbox_backend_pod_info(pool: &PgPool, row: &LivenessRow, probe: &ProbeResult) {
+async fn sync_sandbox_backend_pod_info(pool: &PgPool, row: &LivenessRow, probe: &RuntimeProbe) {
     if probe.pod_name == row.pod_name && probe.pod_ip == row.pod_ip {
         return;
     }
@@ -1279,8 +1279,8 @@ mod tests {
         pod: bool,
         phase: &str,
         ip: &str,
-    ) -> ProbeResult {
-        ProbeResult {
+    ) -> RuntimeProbe {
+        RuntimeProbe {
             claim_exists: exists,
             claim_ready: ready,
             claim_reason: reason.into(),

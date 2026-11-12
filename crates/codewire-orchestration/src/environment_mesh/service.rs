@@ -13,7 +13,7 @@ use codewire_server_core::internal_hmac::derive_internal_hmac_secret;
 use connectrpc::{ConnectError, RequestContext, ServiceRequest, ServiceResult};
 use sqlx::PgPool;
 
-use super::store::{self, MemberRef, MemberStatus};
+use super::store::{self, Incarnation, MemberStatus};
 use super::{
     MAX_CHECKED_MEMBERS, enrollment_code_sha256, valid_network_id, well_formed_enrollment_code,
 };
@@ -124,7 +124,7 @@ impl EnvironmentMeshService for EnvironmentMeshConnectService {
                         "a checked member needs its environment, organization and network",
                     ));
                 }
-                Ok(MemberRef {
+                Ok(Incarnation {
                     environment_id: member.environment_id,
                     org_id: member.org_id,
                     network_id: member.network_id,

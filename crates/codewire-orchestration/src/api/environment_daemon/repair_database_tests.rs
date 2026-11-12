@@ -56,7 +56,7 @@ async fn admitted_repair(fixture: &LeaseFixture, kube: kube::Client) -> DaemonRe
         namespace: NAMESPACE.into(),
         environment_id: fixture.id.clone(),
         authority,
-        current: MemberRef {
+        current: Incarnation {
             name: "workspace-old".into(),
             uid: "uid-old".into(),
         },

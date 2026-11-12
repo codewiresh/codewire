@@ -30,7 +30,7 @@ pub(crate) struct Member {
 /// A member Mesh holds. An empty `pod_uid` names a registered node with no
 /// open stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct MemberRef {
+pub(crate) struct Incarnation {
     pub environment_id: String,
     pub org_id: String,
     pub network_id: String,
@@ -252,12 +252,12 @@ pub(crate) async fn redeem_enrollment(
 /// The status of each member, in order.
 pub(crate) async fn check_members(
     pool: &PgPool,
-    members: &[MemberRef],
+    members: &[Incarnation],
 ) -> Result<Vec<MemberStatus>, sqlx::Error> {
     if members.is_empty() {
         return Ok(Vec::new());
     }
-    let column = |field: fn(&MemberRef) -> &str| -> Vec<String> {
+    let column = |field: fn(&Incarnation) -> &str| -> Vec<String> {
         members
             .iter()
             .map(|member| field(member).to_owned())

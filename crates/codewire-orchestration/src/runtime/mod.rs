@@ -21,10 +21,11 @@ use async_trait::async_trait;
 use crate::sandbox::ClaimOpts;
 pub use crate::sandbox::client::{
     ClearingProgress, FailedLiveResize, KeptSnapshot, PodResizeInfeasible, PoolBornClaim,
-    ProbeResult, WorkspacePodIdentity as MemberRef, WorkspacePodReplacement as MemberReplacement,
-    WorkspacePodResizeState as ResizeState, WorkspacePvc as WorkspaceVolume,
-    WorkspacePvcAnchor as VolumeRef, WorkspaceSandboxIdentity as SuspendedRuntime,
-    WorkspaceStorage as VolumeIdentity, WorkspaceStorageResizeOutcome as VolumeGrowth,
+    ProbeResult as RuntimeProbe, WorkspacePodIdentity as Incarnation,
+    WorkspacePodReplacement as MemberReplacement, WorkspacePodResizeState as ResizeState,
+    WorkspacePvc as WorkspaceVolume, WorkspacePvcAnchor as VolumeRef,
+    WorkspaceSandboxIdentity as SuspendedRuntime, WorkspaceStorage as VolumeIdentity,
+    WorkspaceStorageResizeOutcome as VolumeGrowth,
 };
 pub use crate::sandbox::exec::WorkspaceExecHandle as RuntimeExec;
 use crate::sandbox::host_keys::HostKeyStore;
@@ -353,7 +354,7 @@ pub trait RuntimeLifecycle: Send + Sync {
         &self,
         placement: &Placement,
         environment_id: &str,
-    ) -> anyhow::Result<ProbeResult>;
+    ) -> anyhow::Result<RuntimeProbe>;
 
     /// Every runtime at a placement, as it stands now.
     async fn list_members(&self, placement: &Placement) -> anyhow::Result<Vec<RuntimeMember>>;
@@ -365,7 +366,7 @@ pub trait RuntimeLifecycle: Send + Sync {
         placement: &Placement,
         environment_id: &str,
         known_member: &str,
-    ) -> anyhow::Result<Vec<MemberRef>>;
+    ) -> anyhow::Result<Vec<Incarnation>>;
 
     /// Ask for the claim's runtime to suspend. This is not evidence it has.
     async fn suspend(&self, claim: &ClaimRef) -> anyhow::Result<()>;
@@ -376,7 +377,7 @@ pub trait RuntimeLifecycle: Send + Sync {
         &self,
         claim: &ClaimRef,
         known_member: &str,
-        previous: &[MemberRef],
+        previous: &[Incarnation],
         timeout: Duration,
     ) -> anyhow::Result<SuspendedRuntime>;
 
@@ -416,7 +417,7 @@ pub trait RuntimeLifecycle: Send + Sync {
         &self,
         placement: &Placement,
         environment_id: &str,
-    ) -> anyhow::Result<Option<MemberRef>>;
+    ) -> anyhow::Result<Option<Incarnation>>;
 
     /// The name the environment's current runtime has or will have. One read
     /// fewer than [`current_member`](Self::current_member), and it doesn't
@@ -432,7 +433,7 @@ pub trait RuntimeLifecycle: Send + Sync {
         &self,
         placement: &Placement,
         member_name: &str,
-    ) -> anyhow::Result<Option<MemberRef>>;
+    ) -> anyhow::Result<Option<Incarnation>>;
 
     /// Ask for the environment's runtime to suspend, for a caller that holds
     /// no claim: the runtime is the one its claim's status names now, so unlike
@@ -460,7 +461,7 @@ pub trait RuntimeLifecycle: Send + Sync {
         &self,
         placement: &Placement,
         environment_id: &str,
-        member: &MemberRef,
+        member: &Incarnation,
         support_image: &str,
     ) -> anyhow::Result<MemberReplacement>;
 
@@ -468,9 +469,9 @@ pub trait RuntimeLifecycle: Send + Sync {
     async fn wait_replacement(
         &self,
         placement: &Placement,
-        previous: &MemberRef,
+        previous: &Incarnation,
         timeout: Duration,
-    ) -> anyhow::Result<MemberRef>;
+    ) -> anyhow::Result<Incarnation>;
 
     /// The environment's incarnation that has ended and that a retry must
     /// replace. A healthy or still-starting one is never returned.
@@ -478,7 +479,7 @@ pub trait RuntimeLifecycle: Send + Sync {
         &self,
         placement: &Placement,
         environment_id: &str,
-    ) -> anyhow::Result<Option<MemberRef>>;
+    ) -> anyhow::Result<Option<Incarnation>>;
 
     /// Publish the measured confidential runtime `rendering` describes, so
     /// that the incarnation replacing `member_name` runs it. Returns what
@@ -496,7 +497,7 @@ pub trait RuntimeLifecycle: Send + Sync {
     async fn wait_measured_runtime(
         &self,
         placement: &Placement,
-        member: &MemberRef,
+        member: &Incarnation,
         measured: &str,
         timeout: Duration,
     ) -> anyhow::Result<()>;
@@ -581,7 +582,7 @@ pub trait RuntimeObservations: Send + Sync {
     async fn delete_refused_member(
         &self,
         placement: &Placement,
-        member: &MemberRef,
+        member: &Incarnation,
     ) -> anyhow::Result<()>;
 }
 
@@ -833,7 +834,7 @@ pub trait RuntimeAccess: Send + Sync {
 
     /// [`wait_access_ready`](Self::wait_access_ready), then in the same
     /// connection a login and an SFTP exchange, retried until it all succeeds.
-    /// Returns the incarnation it proved, as [`MemberRef::uid`].
+    /// Returns the incarnation it proved, as [`Incarnation::uid`].
     async fn prove_access(
         &self,
         placement: &Placement,

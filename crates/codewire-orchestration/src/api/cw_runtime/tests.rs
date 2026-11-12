@@ -56,8 +56,8 @@ fn row() -> CwRuntimeLiveBinding {
     }
 }
 
-fn ready_probe(row: &CwRuntimeLiveBinding) -> ProbeResult {
-    ProbeResult {
+fn ready_probe(row: &CwRuntimeLiveBinding) -> RuntimeProbe {
+    RuntimeProbe {
         claim_exists: true,
         claim_ready: true,
         replicas: 1,
@@ -72,7 +72,7 @@ fn ready_probe(row: &CwRuntimeLiveBinding) -> ProbeResult {
 
 struct FixtureState {
     rows: VecDeque<Option<CwRuntimeLiveBinding>>,
-    probe: ProbeResult,
+    probe: RuntimeProbe,
     target: (String, String, String),
     forbidden: bool,
     confidential_allowed: bool,
@@ -153,7 +153,7 @@ impl CaptureBackend for FixtureBackend {
             .expect("fixture must provide every read"))
     }
 
-    async fn probe(&self, namespace: &str, env: &str) -> AppResult<ProbeResult> {
+    async fn probe(&self, namespace: &str, env: &str) -> AppResult<RuntimeProbe> {
         let mut state = self.0.lock().unwrap();
         state.events.push("probe");
         assert_eq!(namespace, NAMESPACE);
@@ -469,7 +469,7 @@ async fn legacy_environment_scope_and_unknown_scope_have_no_token_fallback() {
 #[tokio::test]
 async fn probe_requires_exact_running_original_pod_even_if_name_or_ip_is_reused() {
     let original = row();
-    let changes: [fn(&mut ProbeResult); 7] = [
+    let changes: [fn(&mut RuntimeProbe); 7] = [
         |p| p.claim_exists = false,
         |p| p.claim_ready = false,
         |p| p.pod_exists = false,

@@ -32,7 +32,7 @@ use super::ApiState;
 use super::proxy::{
     huma_error, resolve_running_sandbox_target, resolve_running_sandbox_target_for_repair,
 };
-use crate::runtime::{MemberRef, Placement, RuntimeDriver};
+use crate::runtime::{Incarnation, Placement, RuntimeDriver};
 use crate::sandbox::template::{WORKSPACE_DAEMON_PORT, workspace_daemon_service_name};
 use crate::worker::activity_authority::{
     ActivityAuthority, await_external_mutation, is_authority_lost,
@@ -732,7 +732,7 @@ struct DaemonRepair {
     namespace: String,
     environment_id: String,
     authority: ActivityAuthority,
-    current: MemberRef,
+    current: Incarnation,
     /// The support image the replacement's daemon is re-pinned to.
     support_image: String,
     /// How long the replacement may take to come up and bind.
@@ -969,7 +969,7 @@ async fn delete_workspace_pod_while_setup_idle(
     runtime: &dyn RuntimeDriver,
     placement: &Placement,
     environment_id: &str,
-    member: &MemberRef,
+    member: &Incarnation,
     support_image: &str,
 ) -> anyhow::Result<()> {
     let mut guard = authority.begin_external_mutation(&["running"]).await?;

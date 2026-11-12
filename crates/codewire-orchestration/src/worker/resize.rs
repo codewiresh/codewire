@@ -14,7 +14,7 @@ use crate::api::environment_resize::{
 };
 use crate::resize_metrics;
 use crate::runtime::{
-    FailedLiveResize, MemberRef, Placement, PodResizeInfeasible, RuntimeDriver, VolumeGrowth,
+    FailedLiveResize, Incarnation, Placement, PodResizeInfeasible, RuntimeDriver, VolumeGrowth,
 };
 use codewire_daemon_proto::daemon::v1::SessionLifecycleState;
 
@@ -485,7 +485,7 @@ pub async fn handle_environment_resize(
             runtime.replace_member(
                 &placement,
                 environment_id,
-                &MemberRef {
+                &Incarnation {
                     name: backend.pod_name.clone(),
                     uid: previous_pod_uid.clone(),
                 },
@@ -498,7 +498,7 @@ pub async fn handle_environment_resize(
             RESIZE_MUTATION_STATES,
             runtime.wait_replacement(
                 &placement,
-                &MemberRef {
+                &Incarnation {
                     name: backend.pod_name.clone(),
                     uid: previous_pod_uid.clone(),
                 },

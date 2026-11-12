@@ -23,9 +23,9 @@ use super::workspace_binding::{
 };
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
-use crate::runtime::{ClaimRef, Pick, Placement, RuntimeDriver, VerifiedChain};
+use crate::runtime::{ClaimRef, Pick, Placement, RuntimeDriver, RuntimeProbe, VerifiedChain};
 use crate::sandbox::client::{
-    NoCapacity, ProbeResult, SandboxClient, WorkspacePodIdentity, WorkspaceSandboxIdentity,
+    NoCapacity, SandboxClient, WorkspacePodIdentity, WorkspaceSandboxIdentity,
 };
 use crate::sandbox::host_keys::RecordedHostKeys;
 use crate::sandbox::template::{
@@ -105,7 +105,7 @@ pub fn next_create_action(
     state: &str,
     backend: Option<&BackendRow>,
     setup_complete: bool,
-    probe: &ProbeResult,
+    probe: &RuntimeProbe,
 ) -> CreateAction {
     let Some(backend) = backend else {
         return CreateAction::EnsureNamespace;
@@ -156,7 +156,7 @@ fn create_retry_recovery_required(state: &str) -> bool {
 /// A Claim never reports Ready while its bound Sandbox stays suspended, for
 /// example after setup's no-Pod fence lost its `started` intent (#2328).
 /// Waiting for readiness alone would never converge.
-fn suspended_workspace_blocks_readiness(probe: &ProbeResult) -> bool {
+fn suspended_workspace_blocks_readiness(probe: &RuntimeProbe) -> bool {
     probe.claim_exists && !probe.claim_ready && probe.sandbox_suspended
 }
 
@@ -1321,7 +1321,7 @@ async fn run_environment_create(
         // No backend row yet is fine — first iteration.
         let backend = load_backend_row(&ctx.pool, env_id).await.ok();
 
-        let mut probe = ProbeResult::default();
+        let mut probe = RuntimeProbe::default();
         if let Some(b) = &backend
             && !b.namespace.is_empty()
         {
@@ -2177,7 +2177,7 @@ impl ReconciledRuntime {
     pub(super) fn observe(
         environment: &EnvironmentRow,
         backend: &BackendRow,
-        probe: &ProbeResult,
+        probe: &RuntimeProbe,
     ) -> Self {
         Self {
             environment: environment.clone(),
@@ -2202,7 +2202,7 @@ impl ReconciledRuntime {
         &self,
         environment: &EnvironmentRow,
         backend: &BackendRow,
-        probe: &ProbeResult,
+        probe: &RuntimeProbe,
     ) -> bool {
         *self == Self::observe(environment, backend, probe)
             && backend.pod_uid.as_deref() == Some(probe.pod_uid.as_str())
@@ -2413,7 +2413,7 @@ fn defers_pod_start_marks(path: StartPath) -> bool {
 #[derive(Debug, Clone)]
 struct DeferredPodMarks {
     namespace: Option<String>,
-    probe: ProbeResult,
+    probe: RuntimeProbe,
     path: StartPath,
     profile: StartProfile,
 }
@@ -2462,7 +2462,7 @@ pub(super) async fn record_pod_start_marks(
     pool: &sqlx::PgPool,
     authority: &ActivityAuthority,
     client: Option<&SandboxClient>,
-    probe: &ProbeResult,
+    probe: &RuntimeProbe,
     path: StartPath,
     profile: StartProfile,
 ) -> anyhow::Result<()> {
@@ -2748,7 +2748,7 @@ pub(super) async fn reconcile_or_refresh_runtime_identity(
     backend: &BackendRow,
     authority: &ActivityAuthority,
     states: &[&str],
-    probe: &ProbeResult,
+    probe: &RuntimeProbe,
     allow_recovery: bool,
 ) -> anyhow::Result<bool> {
     let expected = WorkspacePodIdentity {
@@ -2810,7 +2810,7 @@ pub(super) async fn reconcile_or_refresh_runtime_identity(
 pub(super) async fn publish_backend_probe(
     authority: &ActivityAuthority,
     states: &[&str],
-    probe: &ProbeResult,
+    probe: &RuntimeProbe,
 ) -> anyhow::Result<()> {
     authority
         .execute_for_states(
@@ -2844,7 +2844,7 @@ async fn confirm_fresh_warm_bind(
     backend: &BackendRow,
     authority: &ActivityAuthority,
     states: &[&str],
-    probe: &ProbeResult,
+    probe: &RuntimeProbe,
     fresh: &FreshWarmBind,
 ) -> anyhow::Result<()> {
     confirm_fresh_warm_bind_with(
@@ -2865,7 +2865,7 @@ pub(super) async fn confirm_fresh_warm_bind_with(
     backend: &BackendRow,
     authority: &ActivityAuthority,
     states: &[&str],
-    probe: &ProbeResult,
+    probe: &RuntimeProbe,
     fresh: &FreshWarmBind,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -3635,8 +3635,8 @@ mod tests {
         }
     }
 
-    fn probe(exists: bool, ready: bool) -> ProbeResult {
-        ProbeResult {
+    fn probe(exists: bool, ready: bool) -> RuntimeProbe {
+        RuntimeProbe {
             claim_exists: exists,
             claim_ready: ready,
             pod_exists: ready,
@@ -3880,7 +3880,7 @@ mod tests {
             ReconciledRuntime::observe(&running, &stored, &ready)
         );
 
-        let probed = |change: fn(&mut ProbeResult)| {
+        let probed = |change: fn(&mut RuntimeProbe)| {
             let mut probe = ready.clone();
             change(&mut probe);
             ReconciledRuntime::observe(&running, &stored, &probe)
@@ -3976,7 +3976,7 @@ mod tests {
         /// The Claim reports Ready only after one `wait_for_ready` pass.
         claim_ready_late: bool,
         /// What changed between the bind and the first ready action.
-        after_bind: fn(&mut EnvironmentRow, &mut ProbeResult, &mut BackendRow),
+        after_bind: fn(&mut EnvironmentRow, &mut RuntimeProbe, &mut BackendRow),
         /// The first full reconcile finds a stale bootstrap and recovers by
         /// replacing the Pod, as `reconcile_or_refresh_runtime_identity` does.
         stale_bootstrap: bool,
@@ -4177,7 +4177,7 @@ mod tests {
     #[test]
     fn anything_but_the_freshly_bound_warm_runtime_still_reconciles() {
         use CreateAction::*;
-        type Change = fn(&mut EnvironmentRow, &mut ProbeResult, &mut BackendRow);
+        type Change = fn(&mut EnvironmentRow, &mut RuntimeProbe, &mut BackendRow);
         let cases: [(&str, Option<StartPath>, Change); 9] = [
             ("cold bind", Some(StartPath::Cold), |_, _, _| {}),
             ("no bind in this attempt", None, |_, _, _| {}),
@@ -4379,7 +4379,7 @@ mod tests {
     #[test]
     fn pending_retry_resumes_a_suspended_sandbox_instead_of_waiting_for_readiness() {
         let b = backend("ns", "sandbox-env", "10.0.0.5", false);
-        let suspended = ProbeResult {
+        let suspended = RuntimeProbe {
             claim_exists: true,
             claim_reason: "SandboxSuspended".into(),
             sandbox_suspended: true,
@@ -4403,7 +4403,7 @@ mod tests {
             );
         }
         // An unbound Claim reads zero replicas without being suspended.
-        let unbound = ProbeResult {
+        let unbound = RuntimeProbe {
             sandbox_suspended: false,
             claim_reason: String::new(),
             ..suspended.clone()
@@ -4413,7 +4413,7 @@ mod tests {
             CreateAction::WaitForReady
         );
         // A Ready Claim proceeds through runtime identity, never a resume.
-        let ready = ProbeResult {
+        let ready = RuntimeProbe {
             sandbox_suspended: true,
             ..probe(true, true)
         };

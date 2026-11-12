@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use super::MemberRef;
+use super::Incarnation;
 use crate::sandbox::client::RuntimeIdentityObservation;
 
 /// The Claim → runtime → incarnation chain, each link's controller reference
@@ -55,7 +55,7 @@ impl VerifiedChain {
         self.observation.sandbox_uid()
     }
 
-    pub fn member(&self) -> &MemberRef {
+    pub fn member(&self) -> &Incarnation {
         self.observation.pod()
     }
 

@@ -9,7 +9,7 @@ use sqlx::Row;
 use super::ApiState;
 use super::environments::require_environment_access;
 use crate::confidential_storage::{confidential_refusal_reason, require_confidential_access};
-use crate::runtime::{Placement, ProbeResult};
+use crate::runtime::{Placement, RuntimeProbe};
 
 /// Mirrors `sandboxTarget`.
 pub(crate) struct SandboxTarget {
@@ -172,7 +172,7 @@ async fn resolve_running_sandbox_target_inner(
     })
 }
 
-fn runtime_is_current(backend_pod_name: &str, backend_pod_ip: &str, probe: &ProbeResult) -> bool {
+fn runtime_is_current(backend_pod_name: &str, backend_pod_ip: &str, probe: &RuntimeProbe) -> bool {
     probe.claim_exists
         && probe.claim_ready
         && probe.pod_exists
@@ -210,8 +210,8 @@ pub(crate) fn huma_error(status: StatusCode, message: &'static str) -> AppError 
 mod tests {
     use super::*;
 
-    fn current_probe() -> ProbeResult {
-        ProbeResult {
+    fn current_probe() -> RuntimeProbe {
+        RuntimeProbe {
             claim_exists: true,
             claim_ready: true,
             pod_exists: true,

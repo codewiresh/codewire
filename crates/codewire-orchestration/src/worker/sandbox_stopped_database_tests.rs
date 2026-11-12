@@ -10,7 +10,7 @@ use crate::lifecycle::{
     PgLifecycleStore, SANDBOX_RESTARTED_ERROR_CODE, SANDBOX_STOPPED_ERROR_CODE,
     SANDBOX_STOPPED_MESSAGE, Service, StartQuota,
 };
-use crate::runtime::ProbeResult;
+use crate::runtime::RuntimeProbe;
 use crate::runtime::fake::FakeRuntimeDriver;
 use crate::test_database_support::TestDatabase;
 use crate::worker::loops::{LivenessRow, observe_sandbox_liveness};
@@ -238,7 +238,7 @@ fn liveness_row(generation: i64, running_for: chrono::Duration) -> LivenessRow {
 
 fn runtime_reporting(claim_ready: bool, reason: &str, phase: &str) -> FakeRuntimeDriver {
     FakeRuntimeDriver {
-        probe: ProbeResult {
+        probe: RuntimeProbe {
             claim_exists: true,
             claim_ready,
             claim_reason: reason.into(),

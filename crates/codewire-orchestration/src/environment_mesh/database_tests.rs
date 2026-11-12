@@ -6,7 +6,7 @@
 
 use anyhow::{Result, ensure};
 
-use super::store::{self, AttachmentReport, IssueOutcome, MemberRef, MemberStatus};
+use super::store::{self, AttachmentReport, Incarnation, IssueOutcome, MemberStatus};
 use super::*;
 use crate::test_database_support::TestDatabase;
 
@@ -141,8 +141,8 @@ async fn redeem(db: &TestDatabase, code: &str) -> Result<Option<store::Member>> 
     .await?)
 }
 
-fn member(pod: &str, generation: i64) -> MemberRef {
-    MemberRef {
+fn member(pod: &str, generation: i64) -> Incarnation {
+    Incarnation {
         environment_id: ENV.into(),
         org_id: ORGANIZATION.into(),
         network_id: NETWORK.into(),
@@ -267,11 +267,11 @@ async fn db_the_recheck_tells_live_stale_and_gone_members_apart() -> Result<()> 
     let result = async {
         seed(&db, 3).await?;
         bind(&db, POD, 3).await?;
-        let other_network = MemberRef {
+        let other_network = Incarnation {
             network_id: "other".into(),
             ..member(POD, 3)
         };
-        let unknown = MemberRef {
+        let unknown = Incarnation {
             environment_id: "00000000-0000-4000-8000-000000000000".into(),
             ..member(POD, 3)
         };

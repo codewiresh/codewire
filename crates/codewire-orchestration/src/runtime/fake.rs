@@ -12,9 +12,9 @@ use tokio::sync::oneshot;
 
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
-    KeptSnapshot, MemberRef, MemberReplacement, Pick, Placement, PoolBornClaim, PoolPass,
-    PoolState, ProbeResult, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeExec,
-    RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeResize, RuntimeSnapshots, RuntimeStorage,
+    Incarnation, KeptSnapshot, MemberReplacement, Pick, Placement, PoolBornClaim, PoolPass,
+    PoolState, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeExec, RuntimeLifecycle,
+    RuntimeMember, RuntimePools, RuntimeProbe, RuntimeResize, RuntimeSnapshots, RuntimeStorage,
     RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeMode,
     VolumeRef, WantedPool, WantedPools,
 };
@@ -28,18 +28,18 @@ use crate::sandbox::template::TemplateOpts;
 
 #[derive(Default)]
 pub(crate) struct FakeRuntimeDriver {
-    pub probe: ProbeResult,
+    pub probe: RuntimeProbe,
     pub members: Mutex<Vec<RuntimeMember>>,
     /// When set, listing members fails with this message.
     pub members_error: Mutex<Option<String>>,
     /// Each read of an environment's members, in order; the last one repeats.
-    pub member_reads: Mutex<VecDeque<Vec<MemberRef>>>,
+    pub member_reads: Mutex<VecDeque<Vec<Incarnation>>>,
     /// What replacing a member answers.
     pub replacement: Mutex<Option<MemberReplacement>>,
     /// Each replacement and replacement wait asked for, in order.
     pub replacement_calls: Mutex<Vec<String>>,
     /// What waiting for a replacement answers; unscripted, it fails.
-    pub replaced: Mutex<Option<MemberRef>>,
+    pub replaced: Mutex<Option<Incarnation>>,
     /// What publishing a measured runtime returns; unscripted, it fails. The
     /// publish and its wait are recorded with the replacement calls, in order.
     pub measured_runtime: Mutex<Option<String>>,
@@ -307,7 +307,7 @@ impl RuntimeObservations for FakeRuntimeDriver {
     async fn delete_refused_member(
         &self,
         _placement: &Placement,
-        _member: &MemberRef,
+        _member: &Incarnation,
     ) -> anyhow::Result<()> {
         anyhow::bail!("not scripted")
     }
@@ -319,7 +319,7 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         &self,
         placement: &Placement,
         _environment_id: &str,
-    ) -> anyhow::Result<ProbeResult> {
+    ) -> anyhow::Result<RuntimeProbe> {
         self.placements.lock().unwrap().push(placement.clone());
         Ok(self.probe.clone())
     }
@@ -337,7 +337,7 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         _placement: &Placement,
         _environment_id: &str,
         _known_member: &str,
-    ) -> anyhow::Result<Vec<MemberRef>> {
+    ) -> anyhow::Result<Vec<Incarnation>> {
         let mut reads = self.member_reads.lock().unwrap();
         if reads.len() > 1 {
             return Ok(reads.pop_front().expect("more than one read"));
@@ -356,7 +356,7 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         &self,
         _claim: &ClaimRef,
         _known_member: &str,
-        _previous: &[MemberRef],
+        _previous: &[Incarnation],
         _timeout: Duration,
     ) -> anyhow::Result<SuspendedRuntime> {
         anyhow::bail!("not scripted")
@@ -400,7 +400,7 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         &self,
         _placement: &Placement,
         _environment_id: &str,
-    ) -> anyhow::Result<Option<MemberRef>> {
+    ) -> anyhow::Result<Option<Incarnation>> {
         anyhow::bail!("not scripted")
     }
 
@@ -416,7 +416,7 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         &self,
         _placement: &Placement,
         _member_name: &str,
-    ) -> anyhow::Result<Option<MemberRef>> {
+    ) -> anyhow::Result<Option<Incarnation>> {
         anyhow::bail!("not scripted")
     }
 
@@ -441,7 +441,7 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         &self,
         _placement: &Placement,
         environment_id: &str,
-        member: &MemberRef,
+        member: &Incarnation,
         support_image: &str,
     ) -> anyhow::Result<MemberReplacement> {
         self.replacement_calls.lock().unwrap().push(format!(
@@ -454,9 +454,9 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
     async fn wait_replacement(
         &self,
         _placement: &Placement,
-        previous: &MemberRef,
+        previous: &Incarnation,
         _timeout: Duration,
-    ) -> anyhow::Result<MemberRef> {
+    ) -> anyhow::Result<Incarnation> {
         self.replacement_calls
             .lock()
             .unwrap()
@@ -472,7 +472,7 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         &self,
         placement: &Placement,
         _environment_id: &str,
-    ) -> anyhow::Result<Option<MemberRef>> {
+    ) -> anyhow::Result<Option<Incarnation>> {
         self.placements.lock().unwrap().push(placement.clone());
         Ok(None)
     }
@@ -498,7 +498,7 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
     async fn wait_measured_runtime(
         &self,
         _placement: &Placement,
-        member: &MemberRef,
+        member: &Incarnation,
         measured: &str,
         _timeout: Duration,
     ) -> anyhow::Result<()> {
