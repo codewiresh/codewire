@@ -107,7 +107,7 @@ REGISTRY ?= git.example.com
 BUF ?= $(shell command -v buf 2>/dev/null || echo "$(HOME)/go/bin/buf")
 GO_BIN ?= $(shell go env GOPATH 2>/dev/null)/bin
 SUPPLYCHAIN ?= supplychain
-override SUPPLYCHAIN_REQUIRED_REVISION := cf19845
+override SUPPLYCHAIN_REQUIRED_REVISION := 83fffe1
 # protoc is pinned because buf.gen.codewire.yaml uses protoc's built-in
 # python/pyi generators, whose output is protoc-version-dependent and
 # checked in (libs/gen-python). Keep version + checksum in lockstep with

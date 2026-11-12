@@ -204,7 +204,7 @@ jobs:
         env:
           BASE_SHA: ${{ steps.selection.outputs.base_sha }}
           EVENT_NAME: ${{ forgejo.event_name }}
-          EXPECTED_SUPPLYCHAIN: cf1984547d9af47807e4f27766baa2cc7f84579d
+          EXPECTED_SUPPLYCHAIN: 83fffe1ee4a44bb7ef2b5bdc8d6269775e6534a4
           HEAD_SHA: ${{ steps.selection.outputs.head_sha }}
           SUPPLYCHAIN_DATA_DIR: ${{ steps.advisories.outputs.data_dir }}
         run: |
