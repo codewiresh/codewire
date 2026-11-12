@@ -2240,10 +2240,35 @@ pub(crate) fn tailnet_path_line(
     }
 }
 
+/// Carry the terminal into `session` until it is detached or ends. Inside a
+/// Rex pane the attachment is reported to Rex as it goes ([`RexStatus`]);
+/// an ended session stays reported with how it ended.
 async fn attach_environment_session(
+    globals: &Globals,
+    target: EnvironmentSessionTarget,
+    session: EnvironmentSessionView,
+) -> anyhow::Result<Option<EnvironmentSessionView>> {
+    let mut rex = RexStatus::new(
+        &SessionPlace::of(&target).environment,
+        &session_reference(&session),
+    );
+    let ended = attach_session_until_detached(globals, target, session, &mut rex).await?;
+    if let Some(session) = &ended {
+        let (state, message) = match (session.state.as_str(), session.exit_code) {
+            ("Exited", Some(0)) => (RexState::Done, "exited".to_owned()),
+            (_, Some(code)) => (RexState::Failed, format!("exited with status {code}")),
+            (state, None) => (RexState::Failed, state.to_lowercase()),
+        };
+        rex.finish(state, &message);
+    }
+    Ok(ended)
+}
+
+async fn attach_session_until_detached(
     globals: &Globals,
     mut target: EnvironmentSessionTarget,
     mut session: EnvironmentSessionView,
+    rex: &mut RexStatus,
 ) -> anyhow::Result<Option<EnvironmentSessionView>> {
     let mut output_offset = 0;
     let mut reconnect_budget = AttachmentReconnectBudget::default();
@@ -2258,6 +2283,11 @@ async fn attach_environment_session(
     // This shell's input stream, kept across its reattachments (#3993).
     let mut input_stream = InputStream::default();
     loop {
+        // Every attachment, including one to the next session, says which
+        // session the pane shows and where it runs.
+        let place = SessionPlace::of(&target);
+        rex.retitle(&place.environment, &session_reference(&session));
+        rex.report(RexState::Attached, place.location);
         let exit = match &target {
             #[cfg(unix)]
             EnvironmentSessionTarget::Host { environment, .. } => {
@@ -2389,6 +2419,10 @@ async fn attach_environment_session(
                     session = refreshed;
                 }
                 if interrupted || unreachable {
+                    rex.report(
+                        RexState::Reconnecting,
+                        &format!("reconnecting to {}", SessionPlace::of(&target).environment),
+                    );
                     let delay = if matches!(target, EnvironmentSessionTarget::Platform { .. }) {
                         pacing.lost(next_offset).ok_or_else(|| {
                             anyhow::anyhow!(

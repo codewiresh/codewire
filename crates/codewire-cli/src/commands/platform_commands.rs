@@ -345,8 +345,10 @@ pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> 
 }
 
 pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> anyhow::Result<()> {
-    if let Some(SetupCommand::Ssh(ssh)) = args.command {
-        return handle_config_ssh_command(ssh);
+    match args.command {
+        Some(SetupCommand::Ssh(ssh)) => return handle_config_ssh_command(ssh),
+        Some(SetupCommand::Rex(rex)) => return handle_setup_rex_command(rex),
+        None => {}
     }
     validate_setup_placement(&args, globals.placement)?;
     if globals.placement == Some(EnvironmentPlacement::Local) {

@@ -27,15 +27,13 @@ pub(crate) async fn handle_use_command(
     }
     let options = InventoryOptions {
         credentials: true,
-        // The picker never offers trusted host execution; a host is
-        // selected by name or ID.
-        hosts: target.is_some(),
+        hosts: true,
         ..InventoryOptions::default()
     };
     let inventory = inventory::environment_inventory(globals, placement, &options).await?;
     let entry = match target {
         Some(target) => inventory::find_direct(&inventory, target, placement)?.clone(),
-        None => choose(&inventory, placement, &caps).await?,
+        None => choose(globals, &inventory, placement, &caps).await?,
     };
     selection::save(&paths.mesh_data_dir, &entry.selection())
         .context("save the current environment")?;
@@ -60,10 +58,13 @@ fn picker_unavailable(placement: Option<EnvironmentPlacement>) -> String {
     )
 }
 
-/// The picker over every local and cloud environment the placement admits.
-/// Locations that could not be listed are reported above it, not shown as
-/// empty; with nothing to choose from it explains why instead of opening.
+/// The picker over every environment the placement admits: local VMs,
+/// cloud environments and trusted hosts. Locations that could not be listed
+/// are reported above it, not shown as empty. With nothing to choose from
+/// it offers to create an environment, which becomes the selection; when a
+/// location could not be listed it explains that instead.
 async fn choose(
+    globals: &Globals,
     inventory: &EnvironmentInventory,
     placement: Option<EnvironmentPlacement>,
     caps: &Capabilities,
@@ -72,7 +73,15 @@ async fn choose(
     let (header, indices, rows) = inventory::picker_rows(inventory, style);
     let unavailable = inventory.unavailable();
     if rows.is_empty() {
-        anyhow::bail!(nothing_to_choose(inventory, placement));
+        if !unavailable.is_empty() {
+            anyhow::bail!(nothing_to_choose(inventory, placement));
+        }
+        eprintln!(
+            "{} {}",
+            style.status(Status::Attention),
+            capitalized(&nothing_to_choose(inventory, placement))
+        );
+        return create_to_use(globals, placement).await;
     }
     for (location, reason) in &unavailable {
         eprintln!(
@@ -92,6 +101,26 @@ async fn choose(
         PickerOutcome::Canceled => anyhow::bail!(CANCELED),
         PickerOutcome::Unavailable => anyhow::bail!(picker_unavailable(placement)),
     }
+}
+
+/// The guided choice `cw run` offers when nothing is selected: create a
+/// local or cloud environment, reviewed before it is made. What it creates
+/// is listed again so the selection keeps its canonical identity.
+async fn create_to_use(
+    globals: &Globals,
+    placement: Option<EnvironmentPlacement>,
+) -> anyhow::Result<InventoryEntry> {
+    let Command::Run(run) = Cli::try_parse_from(["cw", "run"])?.command else {
+        anyhow::bail!("`cw run` parsed as another command");
+    };
+    let (target, _) = super::launch_setup::choose_run_environment(globals, &run).await?;
+    let options = InventoryOptions {
+        credentials: true,
+        hosts: true,
+        ..InventoryOptions::default()
+    };
+    let inventory = inventory::environment_inventory(globals, placement, &options).await?;
+    Ok(inventory::find_direct(&inventory, &target.target_ref, placement)?.clone())
 }
 
 /// Why the picker has no rows, with the useful next step.
@@ -128,7 +157,7 @@ fn nothing_to_choose(
         }
     }
     format!(
-        "{message}; start one with `{} run claude`",
+        "{message}; create one with `{} create`",
         inventory::placement_prefix(placement)
     )
 }
@@ -612,11 +641,11 @@ mod tests {
         let empty = EnvironmentInventory::default();
         assert_eq!(
             nothing_to_choose(&empty, None),
-            "no environments to choose from yet; start one with `cw run claude`"
+            "no environments to choose from yet; create one with `cw create`"
         );
         assert_eq!(
             nothing_to_choose(&empty, Some(EnvironmentPlacement::Platform)),
-            "no cloud environments to choose from yet; start one with `cw --cloud run claude`"
+            "no cloud environments to choose from yet; create one with `cw --cloud create`"
         );
         let logged_out = EnvironmentInventory {
             entries: Vec::new(),
@@ -636,7 +665,7 @@ mod tests {
         };
         assert_eq!(
             nothing_to_choose(&logged_out, None),
-            "no environments to choose from yet (cloud environments were not searched: not logged in (`cw login`)); start one with `cw run claude`"
+            "no environments to choose from yet (cloud environments were not searched: not logged in (`cw login`)); create one with `cw create`"
         );
         let down = EnvironmentInventory {
             entries: Vec::new(),

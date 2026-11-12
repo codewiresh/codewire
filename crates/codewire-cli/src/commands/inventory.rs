@@ -712,11 +712,13 @@ pub(crate) fn picker_rows(
     let mut indices = Vec::new();
     let mut rows = Vec::new();
     for (index, entry) in inventory.entries.iter().enumerate() {
-        if entry.location == Location::Host {
-            continue;
-        }
         let [cpu, memory, disk] = entry.allocation.cells();
-        let credentials = entry.credentials.text();
+        // A trusted host runs as you with your own sign-ins: no profile.
+        let credentials = if entry.location == Location::Host {
+            dash.to_owned()
+        } else {
+            entry.credentials.text()
+        };
         let cells = vec![
             entry.name().to_owned(),
             entry.location.label().to_owned(),
@@ -1607,7 +1609,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_rows_show_size_and_profile_and_leave_out_hosts() {
+    fn picker_rows_show_size_and_profile_and_hosts_without_a_profile() {
         let mut app = entry("app", Location::Local, "running");
         app.allocation = Allocation::local(2, 4096, 40 << 30);
         app.credentials = SourceRef::Named {
@@ -1625,9 +1627,14 @@ mod tests {
             header.join(" "),
             "NAME LOCATION STATE vCPU RAM DISK CREDENTIALS"
         );
-        assert_eq!(indices, [0, 1]);
+        assert_eq!(indices.len(), 3);
         assert_eq!(inventory.entries[indices[0]].location, Location::Local);
         let picker = crate::output::Picker::new("Choose an environment", header, rows);
+        let host = &picker.render(PLAIN, 100, 10)[6];
+        assert!(
+            host.contains("box") && host.contains("host") && !host.contains("none"),
+            "{host}"
+        );
         assert_eq!(
             picker.render(PLAIN, 100, 10)[3..6],
             [

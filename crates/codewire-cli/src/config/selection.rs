@@ -36,7 +36,7 @@ pub enum SelectionLocation {
     Local,
     /// A cloud environment.
     Cloud,
-    /// A trusted host environment (never offered by the picker).
+    /// A trusted host environment.
     Host,
 }
 

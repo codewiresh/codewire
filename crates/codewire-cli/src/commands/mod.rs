@@ -68,6 +68,8 @@ mod platform_profiles;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod provider_login;
 pub(crate) use credential_input::*;
+mod rex;
+pub(crate) use rex::{RexState, RexStatus, handle_setup_rex_command, refresh_rex_selection};
 
 #[derive(Debug, Args)]
 pub(crate) struct CompletionArgs {
@@ -234,6 +236,27 @@ pub(crate) enum SetupCommand {
         long_about = "Adds or updates the managed Codewire section in your SSH config so OpenSSH, scp, sftp, rsync, and Remote-SSH can use `cw shell --stdio` as ProxyCommand. `cw setup ssh remove` takes it out again.\n\nThe section passes the host name to ProxyCommand (`%n`) for every `cw-*` host, so it needs OpenSSH 9.6 or later, or a distribution build that includes the CVE-2023-51385 fix. Without that fix, a host name from an untrusted source, such as a git submodule URL, can run commands."
     )]
     Ssh(SshSetupArgs),
+    #[command(
+        about = "Add Codewire to Rex's command palette",
+        long_about = "Writes a Lua plugin beside Rex's config (REX_CONFIG, else rex/init.lua in your configuration directory) and a managed Codewire section in that config that loads it, checks the config with `rex config check`, and reloads it. Rex's command palette then offers Codewire actions: run a command, open a shell, attach to a session, choose an environment, and message the session in the focused pane. Each opens beside the pane you are in.\n\nA session attached in a Rex pane, by `cw attach` or `cw run`, is reported to Rex, which shows it with the pane: attached, reconnecting, or how it ended.\n\n`cw setup rex remove` takes the section and the plugin out again."
+    )]
+    Rex(RexSetupArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+pub(crate) struct RexSetupArgs {
+    #[command(subcommand)]
+    pub(crate) command: Option<RexSetupCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RexSetupCommand {
+    #[command(
+        about = "Remove Codewire from Rex's command palette",
+        long_about = "Removes only the managed Codewire section of Rex's config and the plugin it loads. The rest of your config is kept."
+    )]
+    Remove,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

@@ -1,7 +1,7 @@
 ---
 title: Configuration
 description: Where cw keeps its files and which environment variables it reads.
-updated: 2026-11-07
+updated: 2026-11-11
 weight: 9
 aliases: ["/cli/configuration"]
 ---
@@ -20,6 +20,7 @@ aliases: ["/cli/configuration"]
 | `~/.cache/codewire/local-vmm-v1/` | The pinned local VM runtime |
 | `~/.local/share/codewire/cli/` | The managed `cw` version store; `~/.local/bin/cw` links into it |
 | `~/.ssh/config` | The managed `# ---- START CODEWIRE ----` block written by `cw setup ssh` |
+| `~/.config/rex/init.lua`, `~/.config/rex/plugins/codewire/` | The managed `-- >>> codewire >>>` block and the plugin it loads, written by `cw setup rex` (`REX_CONFIG` moves both) |
 
 Session records and output live inside each environment; there is no
 host-side session database.

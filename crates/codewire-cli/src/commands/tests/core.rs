@@ -1465,6 +1465,34 @@ fn setup_ssh_replaces_config_ssh_and_takes_no_placement() {
 }
 
 #[test]
+fn setup_rex_installs_or_removes_and_takes_no_placement() {
+    let cli = Cli::try_parse_from(["cw", "setup", "rex"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Setup(SetupArgs {
+            command: Some(SetupCommand::Rex(RexSetupArgs { command: None })),
+            ..
+        })
+    ));
+    let cli = Cli::try_parse_from(["cw", "setup", "rex", "remove"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Setup(SetupArgs {
+            command: Some(SetupCommand::Rex(RexSetupArgs {
+                command: Some(RexSetupCommand::Remove)
+            })),
+            ..
+        })
+    ));
+    assert!(Cli::try_parse_from(["cw", "setup", "rex", "--org", "codewire"]).is_err());
+    let cli = Cli::try_parse_from(["cw", "--cloud", "setup", "rex"]).unwrap();
+    let error =
+        crate::validate_placement_scope(&cli.command, "setup", cli.placement().unwrap(), false)
+            .unwrap_err();
+    assert_eq!(error.to_string(), "--cloud does not apply to `cw setup rex`");
+}
+
+#[test]
 fn removed_platform_github_commands_and_setup_flags_are_rejected() {
     for command in [
         vec!["cw", "github", "status"],

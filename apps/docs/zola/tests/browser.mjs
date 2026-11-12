@@ -45,7 +45,7 @@ try {
   desktop.on("pageerror", (error) => browserErrors.push(error.message));
   await desktop.goto(baseUrl.href, { waitUntil: "networkidle" });
   ensure(await desktop.title() === "What is Codewire? · Codewire", "desktop title mismatch");
-  ensure(await desktop.locator(".docs-nav-link").count() === 63, "desktop navigation is not the 63-route manifest");
+  ensure(await desktop.locator(".docs-nav-link").count() === 64, "desktop navigation is not the 64-route manifest");
   ensure(await desktop.locator(".docs-nav-link[aria-current='page']").count() === 1, "desktop navigation has no unique active route");
   ensure(await desktop.locator("body").evaluate((body) => getComputedStyle(body).backgroundColor) === "rgb(10, 10, 10)", "The design-system background token is not active");
 

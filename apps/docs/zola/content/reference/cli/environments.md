@@ -1,6 +1,6 @@
 ---
 title: Environments
-description: ls, info, create, start, stop, restart, rm, update, ports, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh and preset.
+description: ls, info, create, start, stop, restart, rm, update, ports, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh, setup rex and preset.
 updated: 2026-11-11
 weight: 2
 aliases: ["/cli/environments"]
@@ -326,12 +326,13 @@ and settles a name that exists in both; a name found in one place while the
 other could not be listed is refused rather than guessed.
 
 Without `ENV`, in an interactive terminal, `use` opens a list of your local
-VMs and cloud environments with their location, state, vCPU, RAM, disk and
-credential profile. Type to filter, move with the arrow keys, Enter selects
-and Escape or Ctrl-C cancels without changing anything; `--local` or
-`--cloud` limits the list. Trusted hosts are selected by name only. Outside
-an interactive terminal `ENV` is required. Selecting a stopped environment
-does not start it.
+VMs, cloud environments and trusted hosts with their location, state, vCPU,
+RAM, disk and credential profile (a trusted host has none). Type to filter,
+move with the arrow keys, Enter selects and Escape or Ctrl-C cancels without
+changing anything; `--local` or `--cloud` limits the list. With no
+environments at all, it offers to create a local VM or a cloud environment,
+reviewed before it is made, and selects it. Outside an interactive terminal
+`ENV` is required. Selecting a stopped environment does not start it.
 
 The selection keeps the environment's identity, not just its name: a local
 VM that was removed and created again under the same name is not current
@@ -414,6 +415,29 @@ managed block without writing it; the rest of the file is not printed.
 line. It reports nothing to remove when there is no block or no file, and
 creates nothing. It refuses, changing nothing, when one of the two marker
 lines is missing or the file is not writable.
+
+## cw setup rex
+
+```sh
+cw setup rex
+cw setup rex remove
+```
+
+Adds Codewire to the command palette of [Rex](https://superlogical.com), the
+terminal multiplexer: it writes a Lua plugin to `plugins/codewire/init.lua`
+beside Rex's config and a managed block between `-- >>> codewire >>>` and
+`-- <<< codewire <<<` in the config that loads it with this `cw`. The config is
+`REX_CONFIG`, else `rex/init.lua` in your configuration directory
+(`~/.config/rex/init.lua`). The block also names the environment `cw use`
+selected; `cw use` and `cw rm` rewrite that line and reload Rex's config, so
+the palette follows the selection. It checks the result with `rex config
+check`, puts the config back as it was if Rex refuses it, and asks a running
+Rex server to reload it. A config Rex already refuses is left unchanged. See
+[Rex](@/access/rex.md) for the actions.
+
+`cw setup rex remove` deletes only the managed block and the plugin, keeping
+the rest of the config. Both refuse, changing nothing, when one of the two
+marker lines is missing. `--local` and `--cloud` do not apply.
 
 ## cw preset (cloud)
 

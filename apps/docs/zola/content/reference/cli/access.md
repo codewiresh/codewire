@@ -1,7 +1,7 @@
 ---
 title: Access
 description: run, ls, attach, logs, send, wait, stop and restart, and the attach key bindings.
-updated: 2026-11-10
+updated: 2026-11-11
 weight: 3
 aliases: ["/cli/sessions"]
 ---
@@ -19,11 +19,15 @@ interactive `run` say how to choose one: `cw use ENV`, or `--in ENV`.
 ## cw run
 
 ```sh
-cw run claude|codex [--in ENV] [--name NAME] [--env KEY=VALUE]... [-- AGENT_ARG...]
 cw run [--in ENV] [OPTIONS] -- COMMAND [ARG]...
+cw run claude|codex [--in ENV] [--name NAME] [--env KEY=VALUE]... [-- AGENT_ARG...]
 cw run --in ENV --agent codex|claude [--prompt TEXT] [--name NAME] [--parent SESSION] [--model M] [--effort E] --detach
 cw run
 ```
+
+`cw run -- COMMAND` runs any command in a new session in the environment: a
+dev server, a test suite, a build or a shell script. The session keeps running
+when you detach, and `cw attach` reconnects to it.
 
 `cw run claude` and `cw run codex` open that agent's own terminal UI in a new
 session, with arguments after `--` passed to the agent (for example

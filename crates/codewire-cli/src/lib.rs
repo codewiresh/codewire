@@ -390,8 +390,8 @@ enum Command {
         command: SshCommand,
     },
     #[command(
-        about = "Open claude or codex in an environment, or run a command",
-        long_about = "Open an agent's own terminal UI in a new session:\n  cw run claude --in ENV [--name SESSION] [-- AGENT_ARGS]\n  cw run codex                     (in the selected environment)\n  cw run                           (asks which agent)\n\nRun a command in a new session:\n  cw run --in ENV [--env KEY=VALUE] -- npm test\n\nStart a managed conversation (queued messages and recorded results):\n  cw run --in ENV --agent claude --name review --detach [--prompt TEXT]\n\nAGENT is only claude or codex; an environment is named with --in, so one called claude is `--in claude`. --name names the new session and never reuses one. Detach with Ctrl-B, then d; reconnect with `cw attach ENV --session SESSION`."
+        about = "Run a command in an environment, such as a server, tests or an agent",
+        long_about = "Run a command in a new session:\n  cw run --in ENV [--env KEY=VALUE] -- npm test\n  cw run -- npm run dev            (in the selected environment)\n\nOpen an agent's own terminal UI in a new session:\n  cw run claude --in ENV [--name SESSION] [-- AGENT_ARGS]\n  cw run codex                     (in the selected environment)\n  cw run                           (asks which agent)\n\nStart a managed conversation (queued messages and recorded results):\n  cw run --in ENV --agent claude --name review --detach [--prompt TEXT]\n\nAGENT is only claude or codex; an environment is named with --in, so one called claude is `--in claude`. --name names the new session and never reuses one. Detach with Ctrl-B, then d; reconnect with `cw attach ENV --session SESSION`."
     )]
     Run(EnvironmentRunArgs),
     #[cfg(unix)]
@@ -898,6 +898,8 @@ where
         org: None,
     };
     let json = requested_json_output(&matches);
+    // Rex's palette names the selected environment; these can change it.
+    let selection_changes = matches!(cli.command, Command::Use(_) | Command::Rm(_));
     let result = match cli.command {
         Command::Config {
             command: ConfigCommand::Inspect { output },
@@ -1036,6 +1038,9 @@ where
         }
         Command::Help(args) => flat::handle_help(args),
     };
+    if selection_changes && result.is_ok() {
+        refresh_rex_selection();
+    }
     credit_refusal::report(result, json)
 }
 
@@ -1073,11 +1078,15 @@ fn validate_placement_scope(
         "{flag} cannot be combined with --member, which names its pinned host target"
     );
     if let Command::Setup(SetupArgs {
-        command: Some(SetupCommand::Ssh(_)),
+        command: Some(setup),
         ..
     }) = command
     {
-        anyhow::bail!("{flag} does not apply to `cw setup ssh`");
+        let name = match setup {
+            SetupCommand::Ssh(_) => "ssh",
+            SetupCommand::Rex(_) => "rex",
+        };
+        anyhow::bail!("{flag} does not apply to `cw setup {name}`");
     }
     let reads = matches!(
         command,

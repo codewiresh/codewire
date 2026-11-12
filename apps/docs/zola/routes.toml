@@ -32,6 +32,12 @@ source = "content/access/ports.md"
 output = "access/ports/index.html"
 
 [[routes]]
+canonical = "/docs/access/rex"
+redirect_from = "/docs/access/rex/"
+source = "content/access/rex.md"
+output = "access/rex/index.html"
+
+[[routes]]
 canonical = "/docs/access/sessions"
 redirect_from = "/docs/access/sessions/"
 source = "content/access/sessions.md"
