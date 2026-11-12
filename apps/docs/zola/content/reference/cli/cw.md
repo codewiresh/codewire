@@ -1,10 +1,21 @@
 ---
 title: cw itself
-description: install, upgrade, doctor, feedback, config and completion.
+description: version, install, upgrade, doctor, feedback, config and completion.
 updated: 2026-11-11
 weight: 8
 aliases: ["/cli/cw"]
 ---
+
+## cw version
+
+```sh
+cw version
+cw --version
+cw -V
+```
+
+Each prints the running `cw`'s version, such as `cw v0.4.14`. Bare `cw`, like
+`cw --help`, heads its help with it: `Codewire CLI v0.4.14`.
 
 ## cw install
 

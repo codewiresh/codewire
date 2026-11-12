@@ -187,7 +187,10 @@ const HELP_SECTIONS: &[HelpSection] = &[
             "policy",
         ],
     ),
-    HelpSection::everyday("Codewire", &["upgrade", "doctor", "feedback", "help"]),
+    HelpSection::everyday(
+        "Codewire",
+        &["upgrade", "doctor", "feedback", "version", "help"],
+    ),
     HelpSection::full(
         "Account and organization",
         &["logout", "whoami", "org", "api-keys", "cost"],
@@ -251,7 +254,8 @@ fn cli_command() -> clap::Command {
 }
 
 fn cli_command_with(all: bool) -> clap::Command {
-    let command = Cli::command();
+    // The version heads the help, so bare `cw` says which cw this is.
+    let command = Cli::command().about(format!("Codewire CLI {CLI_VERSION}"));
     let visible: Vec<(String, String, String)> = command
         .get_subcommands()
         .filter(|subcommand| !subcommand.is_hide_set())
@@ -650,6 +654,8 @@ enum Command {
     RefreshSkills(EnvTargetArgs),
     #[command(about = "Show help for cw or one of its commands; --all lists every command")]
     Help(HelpArgs),
+    #[command(about = "Show this cw's version, as `cw --version` and `cw -V` do")]
+    Version,
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -1037,6 +1043,10 @@ where
             flat::operation(&globals, operation).await
         }
         Command::Help(args) => flat::handle_help(args),
+        Command::Version => {
+            print!("{}", Cli::command().render_version());
+            Ok(())
+        }
     };
     if selection_changes && result.is_ok() {
         refresh_rex_selection();

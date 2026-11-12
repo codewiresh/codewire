@@ -2302,3 +2302,32 @@ async fn logout_without_a_saved_sign_in_only_removes_the_configuration() {
     assert_signed_out_locally(config.path());
     logout_result(outcome).unwrap();
 }
+
+#[test]
+fn every_way_of_asking_names_the_version() {
+    use clap::CommandFactory as _;
+    let version = crate::Cli::command().render_version();
+    assert_eq!(version, format!("cw {}\n", crate::CLI_VERSION));
+    for flag in ["-V", "--version"] {
+        let error = Cli::try_parse_from(["cw", flag]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert_eq!(error.to_string(), version);
+    }
+    let cli = Cli::try_parse_from(["cw", "version"]).unwrap();
+    assert!(matches!(cli.command, Command::Version));
+    let error = Cli::try_parse_from(["cw", "--cloud", "version"])
+        .map(|cli| {
+            crate::validate_placement_scope(&cli.command, "version", cli.placement().unwrap(), false)
+        })
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.to_string(), "--cloud does not apply to `cw version`");
+    // Bare `cw` prints this help, so it heads with the version too.
+    for all in [false, true] {
+        let help = crate::cli_command_with(all).render_help().to_string();
+        assert!(
+            help.starts_with(&format!("Codewire CLI {}\n", crate::CLI_VERSION)),
+            "{help}"
+        );
+    }
+}
