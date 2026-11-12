@@ -18,10 +18,11 @@
 # full checkout of the dispatched commit, before anything else is checked out.
 #
 # dispatch-source.sh --main-history drops the workflow-file rule, for a
-# workflow whose steps never run the source's own scripts: support-images.yaml
-# plans with main's planner and, for an earlier commit, only tags a published
-# pair. Every run in this mode must be of main, with or without a source,
-# because it publishes for the commit it names.
+# workflow that drives the source with main's own scripts: support-images.yaml
+# plans with main's planner and, for an earlier commit, tags a published pair
+# or builds the source's images from its own checkout, as deploy-prod.yaml
+# builds a release's pair. Every run in this mode must be of main, with or
+# without a source, because it publishes for the commit it names.
 set -euo pipefail
 
 fail() {

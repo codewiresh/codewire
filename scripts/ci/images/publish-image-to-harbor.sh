@@ -16,6 +16,7 @@ readonly PUBLIC_MIRROR='ghcr.io/codewiresh'
 usage() {
   echo "Usage: $0 HARBOR_DIGEST_REF HARBOR_REPOSITORY TAG [TAG...]" >&2
   echo "       $0 --support-pair BASE_DIGEST_REF WORKSPACE_DIGEST_REF SOURCE_SHA" >&2
+  echo "       $0 --earlier-support-pair BASE_DIGEST_REF WORKSPACE_DIGEST_REF SOURCE_SHA" >&2
   echo "       $0 --runtime-bundle IMAGE_BUNDLE" >&2
   echo "       $0 --keep HARBOR_DIGEST_REF [HARBOR_DIGEST_REF...]" >&2
   echo "       $0 --pinned-defaults" >&2
@@ -78,7 +79,7 @@ case "${1:-}" in
       add_copy "$runtime_source_ref" "$runtime_source_sha"
     done
     ;;
-  --support-pair)
+  --support-pair|--earlier-support-pair)
     [ "$#" -eq 4 ] || usage
     mode=support
     [[ "$4" =~ ^[0-9a-f]{40}$ ]] || {
@@ -93,8 +94,12 @@ case "${1:-}" in
       echo "Support workspace must be an exact Harbor workspace digest reference" >&2
       exit 1
     }
-    add_copy "$2" "$4" latest
-    add_copy "$3" "$4" latest
+    # Main's own commit moves latest, which the next push plans against. An
+    # earlier main commit's pair, built for a release, gets only its own tag.
+    pair_tags=("$4" latest)
+    [ "$1" = --support-pair ] || pair_tags=("$4")
+    add_copy "$2" "${pair_tags[@]}"
+    add_copy "$3" "${pair_tags[@]}"
     ;;
   --keep)
     [ "$#" -ge 2 ] || usage

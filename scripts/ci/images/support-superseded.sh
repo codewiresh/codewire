@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Whether this support-images.yaml run's commit is still main's tip. Writes
-# superseded=false or superseded=true to $GITHUB_OUTPUT, and fails closed when
-# canonical main cannot be read.
+# Whether this support-images.yaml push run's commit is still main's tip.
+# Writes superseded=false or superseded=true to $GITHUB_OUTPUT, and fails
+# closed when canonical main cannot be read.
 #
 # The selection job asks first, and each build job asks again as its first
 # step, before it reads a credential or starts a build: a build job can wait
@@ -9,15 +9,25 @@
 # has moved past publishes nothing; the newer commit's run is queued behind
 # this one and plans against the published pair, so it publishes the
 # cumulative change. A build that has started is never stopped (owner,
-# 2026-10-21), and a release never needs this pair: deploy-prod.yaml reuses
-# the pair main published for the release commit or builds it
-# (release-support-pair-state.sh).
+# 2026-10-21). A release that needs the skipped commit's pair dispatches
+# support-images.yaml for it.
 #
-# Usage: support-superseded.sh (reads GITHUB_SHA and GITHUB_OUTPUT)
+# A dispatch names the commit it publishes for (dispatch-source.sh
+# --main-history), usually an earlier one a release needs, so it is never
+# superseded: it builds that commit's pair when its inputs need one (owner,
+# 2026-11-12, #4243).
+#
+# Usage: support-superseded.sh (reads GITHUB_EVENT_NAME, GITHUB_SHA and
+# GITHUB_OUTPUT)
 set -euo pipefail
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
+if [[ "${GITHUB_EVENT_NAME:-}" == workflow_dispatch ]]; then
+  echo 'superseded=false' >> "$GITHUB_OUTPUT"
+  echo 'a dispatch publishes for the commit it names, wherever main is now'
+  exit 0
+fi
 canonical_main_sha="$(
   git ls-remote origin refs/heads/main |
     awk '$2 == "refs/heads/main" { print $1 }'

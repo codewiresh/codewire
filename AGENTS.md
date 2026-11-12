@@ -156,6 +156,9 @@ gate.
   cw-release-dry-run.yaml main -I source_sha=<candidate>`) so `main` never
   stops for a cut. Never build arm64 under emulation when the native builder
   exists; a tag never points at a commit without its published support images.
+  When the candidate's pair is missing, dispatch `support-images.yaml` on
+  `main` the same way (`-I source_sha=<candidate>`): it aliases or builds that
+  commit's pair, and nothing waits on a merge hold (owner, 2026-11-12, #4243).
 - Every CI change follows the `ci` skill. Prefer the faster build or CI option
   and measure afterwards (owner, 2026-10-15). A failing guard fails its run;
   repair the classifier and its fixtures when a narrow path selects an

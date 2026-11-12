@@ -141,6 +141,19 @@ grep -qxF "$harbor/base@$digest $harbor/base $source_sha latest" "$FAKE_COPY_LOG
 grep -qxF "$harbor/workspace@$digest $harbor/workspace $source_sha latest" "$FAKE_COPY_LOG" ||
   fail 'support workspace did not receive its source tag and latest alias'
 
+# An earlier main commit's pair, built for a release, gets only its own tag.
+reset_logs
+"$PUBLISH" --earlier-support-pair "$harbor/base@$digest" "$harbor/workspace@$digest" "$source_sha" \
+  >"$work/earlier-support.out" 2>&1 ||
+  { cat "$work/earlier-support.out" >&2; fail 'earlier support pair publication failed'; }
+[[ "$(<"$FAKE_COPY_LOG")" == "$harbor/base@$digest $harbor/base $source_sha
+$harbor/workspace@$digest $harbor/workspace $source_sha" ]] ||
+  fail 'an earlier commit'"'"'s support pair did not get exactly its source tags'
+if "$PUBLISH" --earlier-support-pair "$harbor/workspace@$digest" "$harbor/base@$digest" "$source_sha" \
+    >"$work/earlier-swapped.out" 2>&1; then
+  fail 'an earlier support pair with its images swapped was accepted'
+fi
+
 reset_logs
 "$PUBLISH" --keep "$harbor/workspace@$digest" "$harbor/daemon@$digest" >"$work/keep.out" 2>&1 ||
   { cat "$work/keep.out" >&2; fail 'keep publication failed'; }

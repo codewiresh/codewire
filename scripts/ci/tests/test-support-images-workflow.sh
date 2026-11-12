@@ -70,7 +70,7 @@ grep -Fq -- '--trusted-policy "$SOURCE_SHA"' <<<"$selection_job" ||
   fail 'support planner policy is not the exact chosen source'
 grep -Fq -- '--head "$SOURCE_SHA"' <<<"$selection_job" ||
   fail 'support adapter head is not the exact chosen source'
-if grep -Fq '"$GITHUB_SHA' <<<"$(sed -n '/name: Plan atomic support build/,/name: Refuse a build/p' <<<"$selection_job")"; then
+if grep -Fq '"$GITHUB_SHA' <<<"$(sed -n '/name: Plan atomic support build/,/name: Remove untrusted registry candidate/p' <<<"$selection_job")"; then
   fail 'support planning still names the dispatched head instead of the chosen source'
 fi
 # The chosen source comes only from dispatch-source.sh, before anything reads
@@ -78,17 +78,34 @@ fi
 source_step=$'      - name: Choose the commit this run publishes for\n        id: source\n        env:\n          DISPATCH_SOURCE_SHA: ${{ github.event.inputs.source_sha }}\n        run: scripts/ci/select/dispatch-source.sh --main-history'
 grep -Fq "$source_step" <<<"$selection_job" ||
   fail 'support selection does not choose its source with dispatch-source.sh --main-history'
-[[ "$(grep -Fc 'SOURCE_SHA: ${{ steps.source.outputs.source_sha }}' <<<"$selection_job")" -eq 3 ]] ||
-  fail 'support resolution, planning and refusal do not all read the chosen source'
+[[ "$(grep -Fc 'SOURCE_SHA: ${{ steps.source.outputs.source_sha }}' <<<"$selection_job")" -eq 2 ]] ||
+  fail 'support resolution and planning do not both read the chosen source'
 grep -Fq '      source_sha: ${{ steps.source.outputs.source_sha }}' <<<"$selection_job" ||
   fail 'support selection does not expose the chosen source'
 grep -Fq 'scripts/ci/images/resolve-published-support-pair.sh "$candidate" "$SOURCE_SHA"' <<<"$selection_job" ||
   fail 'a dispatch does not plan against its source'"'"'s newest published ancestor pair'
-# An earlier commit that needs a build fails the run instead of skipping it.
-grep -Fq "        if: \${{ steps.source.outputs.source_sha != github.sha && steps.select.outputs.build_support_images == 'true' }}" \
-  <<<"$selection_job" || fail 'a dispatch for an earlier commit that needs a build is not refused'
-[[ "$(grep -Fc "needs.support-selection.outputs.source_sha == github.sha }}" "$WORKFLOW")" -eq 3 ]] ||
-  fail 'a build or the probe can run for an earlier commit with main'"'"'s scripts and tags'
+# An earlier commit that needs a build builds its pair from its own checkout
+# with main's scripts, as deploy-prod.yaml builds a release's pair (owner,
+# 2026-11-12, #4243). Only the confidential probe and the pin proposal stay
+# with main's own commit.
+if grep -Fq 'name: Refuse a build' <<<"$selection_job"; then
+  fail 'a dispatch for an earlier commit that needs a build is still refused'
+fi
+[[ "$(grep -Fc "needs.support-selection.outputs.source_sha == github.sha }}" "$WORKFLOW")" -eq 2 ]] ||
+  fail 'the probe or the pin proposal can run for an earlier commit'
+source_checkout=$'      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          ref: ${{ needs.support-selection.outputs.source_sha }}\n          path: .support-source'
+gated_source_checkout=$'      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        if: ${{ steps.canonical.outputs.superseded == \'false\' }}\n        with:\n          ref: ${{ needs.support-selection.outputs.source_sha }}\n          path: .support-source'
+for source_job in build-support-amd64 build-support-arm64 publish-support-images; do
+  source_job_text="$(sed -n "/^  $source_job:/,/^  [a-z][a-z0-9-]*:\$/p" "$WORKFLOW" | sed '$d')"
+  grep -qxF '      CODEWIRE_SOURCE_SHA: ${{ needs.support-selection.outputs.source_sha }}' <<<"$source_job_text" &&
+    grep -qxF '      CODEWIRE_SOURCE_DIR: .support-source' <<<"$source_job_text" ||
+    fail "$source_job does not build for the selected source"
+  [[ "$source_job_text" == *"$source_checkout"* || "$source_job_text" == *"$gated_source_checkout"* ]] ||
+    fail "$source_job does not check out the selected source"
+  if grep -Fq 'github.sha' <<<"$(grep '^    if: ' <<<"$source_job_text")"; then
+    fail "$source_job runs only for main's own commit"
+  fi
+done
 grep -Fq 'scripts/ci/plan/apply-support-plan.py' <<<"$selection_job" ||
   fail 'support event adapter does not consume planner facts'
 grep -Fq 'rm -f -- "$RUNNER_TEMP/codewire-published-support-candidate.json"' \
@@ -100,12 +117,12 @@ fi
 if grep -Fq 'secrets.' <<<"$selection_job"; then
   fail 'support selection receives a credential despite anonymous registry access'
 fi
-grep -qF 'scripts/ci/images/build-push-image.sh base images/base/Dockerfile images/base' \
+grep -qF 'scripts/ci/images/build-push-image.sh base .support-source/images/base/Dockerfile .support-source/images/base' \
   "$WORKFLOW" || fail 'base is not built by the canonical Gitea helper'
 # shellcheck disable=SC2016
 grep -qF '"CODEWIRE_BASE_IMAGE_REF=$REGISTRY_HOST/codewire/base@$base_digest"' \
   "$PLATFORM_BUILDER" || fail 'a platform workspace does not consume that platform'"'"'s exact base'
-grep -qF 'scripts/ci/images/build-push-image.sh workspace images/workspace/Dockerfile .' \
+grep -qF 'scripts/ci/images/build-push-image.sh workspace .support-source/images/workspace/Dockerfile .support-source' \
   "$WORKFLOW" || fail 'workspace is not built by the canonical Gitea helper'
 grep -qF 'scripts/ci/images/build-push-image.sh confidential-probe images/confidential-probe/Dockerfile images/confidential-probe' \
   "$WORKFLOW" || fail 'confidential probe is not built by the canonical Gitea helper'
@@ -124,10 +141,16 @@ if grep -Fq 'GHCR_PUBLISH_USERNAME:' "$WORKFLOW"; then
 fi
 grep -Fq -- '--support-pair' <<<"$publish_job" ||
   fail 'support publisher does not require pair preflight and ordering'
+# Only main's own commit moves latest; an earlier commit's pair gets its own
+# tag alone (#4243).
+# shellcheck disable=SC2016
+[[ "$(grep -Fxc "          PAIR_MODE: \${{ needs.support-selection.outputs.source_sha == github.sha && '--support-pair' || '--earlier-support-pair' }}" <<<"$publish_job")" -eq 2 \
+  && "$(grep -Fxc '            "$PAIR_MODE" \' <<<"$publish_job")" -eq 2 ]] ||
+  fail 'the support publisher can move latest to an earlier commit'"'"'s pair'
 # shellcheck disable=SC2016
 [[ "$(grep -Fc 'steps.' <<<"$publish_job" | tr -d '[:space:]')" -gt 0 ]] ||
   fail 'support publisher does not consume same-job step outputs'
-[[ "$(grep -Fc 'outputs.source_sha }}" == "$GITHUB_SHA"' <<<"$publish_job")" -eq 2 ]] ||
+[[ "$(grep -Fc 'outputs.source_sha }}" == "$CODEWIRE_SOURCE_SHA"' <<<"$publish_job")" -eq 2 ]] ||
   fail 'support-pair publisher does not verify both exact build sources'
 [[ "$(grep -Fc 'outputs.source_sha }}" == "$GITHUB_SHA"' <<<"$probe_job")" -eq 1 ]] ||
   fail 'confidential-probe publisher does not verify its exact build source'
@@ -474,8 +497,10 @@ grep -Fq '        id: mirror' <<<"$publish_job" || fail 'the GHCR mirror step ha
 pin_job_violation() {
   local job="$1"
   [[ -n "$job" ]] || { echo 'the published workspace image is never proposed as the pin'; return; }
-  grep -Fq "if: \${{ needs.publish-support-images.outputs.workspace_mirrored == 'true' }}" <<<"$job" ||
+  grep -Fq "needs.publish-support-images.outputs.workspace_mirrored == 'true'" <<<"$(grep '^    if: ' <<<"$job")" ||
     { echo 'the pin proposal can name an image the public mirror lacks'; return; }
+  grep -Fqx "    if: \${{ needs.publish-support-images.outputs.workspace_mirrored == 'true' && needs.support-selection.outputs.source_sha == github.sha }}" <<<"$job" ||
+    { echo 'the pin proposal can name an earlier commit'"'"'s workspace'; return; }
   grep -Fq '          persist-credentials: false' <<<"$job" ||
     { echo 'the pin checkout keeps the job token, which git would send beside the bot token'; return; }
   if grep -Eq 'github\.token|GITEA_TOKEN|GITHUB_TOKEN|OPENBAO_|secrets\.' <<<"$job"; then
@@ -512,6 +537,7 @@ pin_mutations=(
   'a second document::/fetch-openbao-workspace-pin-bot-token.sh/a\          scripts/ci/setup/fetch-openbao-harbor-credentials.sh "$bot_work/harbor"'
   'token outlives the step::/trap /d'
   'no mirror gate::/workspace_mirrored == .true./d'
+  'earlier commit pinned::s/ \&\& needs.support-selection.outputs.source_sha == github.sha//'
 )
 for mutation in "${pin_mutations[@]}"; do
   label="${mutation%%::*}"
@@ -655,9 +681,9 @@ printf '%s\trefs/heads/main\n' "$FAKE_MAIN_SHA"
 GIT
 chmod +x "$superseded_bin/git"
 superseded_case() {
-  local main="$1" output
+  local main="$1" event="${2:-push}" output
   output="$(mktemp)"
-  if env PATH="$superseded_bin:$PATH" FAKE_MAIN_SHA="$main" \
+  if env PATH="$superseded_bin:$PATH" FAKE_MAIN_SHA="$main" GITHUB_EVENT_NAME="$event" \
       GITHUB_SHA=1111111111111111111111111111111111111111 GITHUB_OUTPUT="$output" \
       "$SUPERSEDED_RULE" >/dev/null 2>&1; then
     cat "$output"
@@ -674,6 +700,10 @@ superseded_case() {
   fail 'an unreadable canonical main did not fail closed'
 [[ "$(superseded_case not-a-commit)" == failed ]] ||
   fail 'a malformed canonical main did not fail closed'
+# A dispatch names its commit, usually an earlier one a release needs, and
+# builds it wherever main is now (#4243).
+[[ "$(superseded_case 2222222222222222222222222222222222222222 workflow_dispatch)" == superseded=false ]] ||
+  fail 'a dispatch was skipped because main moved on'
 
 # Each platform of the pair builds in its own protected job with its own time
 # budget below the runner's ceiling, pushes only by digest and publishes
@@ -699,7 +729,7 @@ for platform in amd64 arm64; do
   [[ -n "$budget" && -n "$timeout_minutes" && "$budget" -lt "$timeout_minutes" ]] ||
     fail "linux/$platform support build budget does not fail before the runner ceiling"
   if [[ "$platform" == amd64 ]]; then
-    grep -qxF "      CODEWIRE_IN_JOB_BUILD: \${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}" <<<"$platform_job" ||
+    grep -qxF "      CODEWIRE_IN_JOB_BUILD: \${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == needs.support-selection.outputs.source_sha && '1' || '0' }}" <<<"$platform_job" ||
       fail "linux/amd64 support build lacks the owner's exact-commit recovery switch"
   fi
   if grep -Eq 'publish-image-to-|OPENBAO_GHCR|secrets\.|--support-pair' <<<"$platform_job"; then
@@ -732,8 +762,8 @@ expected = {
     "id": "contract",
     "env": {"WORKSPACE_DIGEST": "${{ steps.build.outputs.workspace_digest }}"},
     "run": "scripts/ci/images/run-workspace-contract-on-image.sh \\\n"
-           '  "$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$WORKSPACE_DIGEST" "$GITHUB_SHA" \\\n'
-           "  scripts/ci/verify/workspace-agent-contract.sh\n",
+           '  "$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$WORKSPACE_DIGEST" "$CODEWIRE_SOURCE_SHA" \\\n'
+           "  .support-source/scripts/ci/verify/workspace-agent-contract.sh\n",
 }
 if steps[contract[0]] != expected:
     sys.exit("the workspace contract step differs from the reviewed exact-image step")
@@ -779,7 +809,9 @@ contract_mutations=(
   "skippable contract::/        id: contract/a\\        if: \${{ always() }}"
   'needs. input::/          WORKSPACE_DIGEST: /a\          SOURCE_SHA: ${{ needs.support-selection.outputs.head_sha }}'
   'needs. digest::s/WORKSPACE_DIGEST: ${{ steps.build.outputs.workspace_digest }}/WORKSPACE_DIGEST: ${{ needs.support-selection.outputs.baseline_sha }}/'
-  'artifact contract::s|            scripts/ci/verify/workspace-agent-contract.sh|            "$RUNNER_TEMP/artifact/workspace-agent-contract.sh"|'
+  'artifact contract::s|            .support-source/scripts/ci/verify/workspace-agent-contract.sh|            "$RUNNER_TEMP/artifact/workspace-agent-contract.sh"|'
+  'main'"'"'s contract::s|            .support-source/scripts/ci/verify/workspace-agent-contract.sh|            scripts/ci/verify/workspace-agent-contract.sh|'
+  'main'"'"'s revision::s|@$WORKSPACE_DIGEST" "$CODEWIRE_SOURCE_SHA"|@$WORKSPACE_DIGEST" "$GITHUB_SHA"|'
   "artifact step::$amd64_range{/      - name: Run the workspace contract on the exact image/i\\      - uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
 }"
   'tagged image::s|"$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$WORKSPACE_DIGEST"|"$CODEWIRE_IMAGE_REGISTRY/codewire/workspace:$GITHUB_SHA"|'

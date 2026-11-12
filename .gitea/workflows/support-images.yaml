@@ -5,9 +5,11 @@ name: Build support images
 # (verify-release-support-pair.sh): a commit whose base and workspace inputs
 # changed builds it, and any other commit publishes its tags as aliases of the
 # published pair with the same inputs ("Alias the published support pair").
-# A dispatch of main with source_sha runs the same selection for an earlier
-# first-parent main commit, to backfill one: it aliases, or refuses when that
-# commit's inputs need a build (dispatch-source.sh --main-history).
+# A dispatch of main with source_sha does the same for an earlier first-parent
+# main commit a release needs (dispatch-source.sh --main-history): it aliases
+# the pair, or builds it from that commit's own source with main's scripts, as
+# deploy-prod.yaml builds a release's pair (owner, 2026-11-12, #4243). Only a
+# run for main's own commit moves latest.
 on:
   push:
     branches: [main]
@@ -82,11 +84,12 @@ jobs:
           DISPATCH_SOURCE_SHA: ${{ github.event.inputs.source_sha }}
         run: scripts/ci/select/dispatch-source.sh --main-history
 
-      # A run that starts after main moved on publishes nothing: the newer
-      # commit's run is queued behind this one and plans against the
+      # A push run that starts after main moved on publishes nothing: the
+      # newer commit's run is queued behind this one and plans against the
       # published pair, so it publishes the cumulative change. Each build job
       # asks again when it starts (support-superseded.sh). The run already
-      # building when main moves on still finishes.
+      # building when main moves on still finishes. A dispatch is never
+      # superseded.
       - name: Skip a superseded commit
         id: canonical
         run: scripts/ci/images/support-superseded.sh
@@ -129,19 +132,6 @@ jobs:
             --head "$SOURCE_SHA" \
             --head-tree "$(git rev-parse "$SOURCE_SHA^{tree}")"
 
-      # The build jobs build only the dispatched commit itself (an earlier
-      # commit's confidential probe is not part of the release pair). An
-      # earlier commit whose pair inputs differ from its newest published
-      # ancestor pair is refused here, not silently skipped: a release builds
-      # that pair natively (deploy-prod.yaml).
-      - name: Refuse a build for an earlier commit
-        if: ${{ steps.source.outputs.source_sha != github.sha && steps.select.outputs.build_support_images == 'true' }}
-        env:
-          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
-        run: |
-          echo "::error::the support inputs of $SOURCE_SHA differ from its newest published ancestor pair, so it needs a build, which this dispatch of $GITHUB_SHA does not run"
-          exit 1
-
       - name: Remove untrusted registry candidate
         if: ${{ always() }}
         run: rm -f -- "$RUNNER_TEMP/codewire-published-support-candidate.json"
@@ -160,7 +150,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 120
     needs: [support-selection]
-    if: ${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' && needs.support-selection.outputs.source_sha == github.sha }}
+    if: ${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' }}
     outputs:
       superseded: ${{ steps.canonical.outputs.superseded }}
       base_digest: ${{ steps.build.outputs.base_digest }}
@@ -169,23 +159,33 @@ jobs:
     env:
       OPENBAO_ROLE: codewire-source-support-publisher
       OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher
+      # The pair builds from the selected commit's own checkout with this
+      # commit's scripts, as deploy-prod.yaml builds a release's pair.
+      CODEWIRE_SOURCE_SHA: ${{ needs.support-selection.outputs.source_sha }}
+      CODEWIRE_SOURCE_DIR: .support-source
       # In-cluster cache of the dated apt snapshots, passed to BuildKit as a
       # secret. The arm64 leg reads the same cache over the Tailnet.
       CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
       # The trusted builder fails fast when unreachable; only the owner's
       # recovery variable naming this exact commit, then a rerun of all jobs,
       # builds in this job.
-      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
+      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == needs.support-selection.outputs.source_sha && '1' || '0' }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       # A build job can wait minutes for a protected runner after selection.
-      # When main moved on meanwhile, it builds nothing: six pairs on
+      # When main moved on meanwhile, a push run builds nothing: six pairs on
       # 2026-10-23 and 2026-10-24 started both platforms after their commit
       # was superseded (infra#1534). A build that has started still finishes.
       - name: Skip a superseded commit
         id: canonical
         run: scripts/ci/images/support-superseded.sh
+
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: ${{ steps.canonical.outputs.superseded == 'false' }}
+        with:
+          ref: ${{ needs.support-selection.outputs.source_sha }}
+          path: .support-source
 
       # The one Codewire CI cache, written only by main-only builders
       # (infra#1544). It is best effort: without the credential the selector
@@ -217,7 +217,8 @@ jobs:
 
       # The agent contract runs on the exact image the build pushed, before
       # anything publishes it, with no compiler credential left on disk. The
-      # pull robot's Docker configuration is gone before the image runs.
+      # pull robot's Docker configuration is gone before the image runs. It is
+      # the selected commit's own contract, version-locked to its agent pins.
       - name: Run the workspace contract on the exact image
         if: ${{ steps.canonical.outputs.superseded == 'false' }}
         id: contract
@@ -225,8 +226,8 @@ jobs:
           WORKSPACE_DIGEST: ${{ steps.build.outputs.workspace_digest }}
         run: |
           scripts/ci/images/run-workspace-contract-on-image.sh \
-            "$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$WORKSPACE_DIGEST" "$GITHUB_SHA" \
-            scripts/ci/verify/workspace-agent-contract.sh
+            "$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$WORKSPACE_DIGEST" "$CODEWIRE_SOURCE_SHA" \
+            .support-source/scripts/ci/verify/workspace-agent-contract.sh
 
   build-support-arm64:
     # zizmor: ignore[excessive-permissions] This exact protected job receives the scoped publisher identity for its platform of the pair.
@@ -236,7 +237,7 @@ jobs:
     enable-openid-connect: true
     timeout-minutes: 120
     needs: [support-selection]
-    if: ${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' && needs.support-selection.outputs.source_sha == github.sha }}
+    if: ${{ needs.support-selection.outputs.build_support_images == 'true' && needs.support-selection.outputs.superseded == 'false' }}
     outputs:
       superseded: ${{ steps.canonical.outputs.superseded }}
       base_digest: ${{ steps.build.outputs.base_digest }}
@@ -244,6 +245,9 @@ jobs:
     env:
       OPENBAO_ROLE: codewire-source-support-publisher
       OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher
+      # As in the amd64 leg: the selected commit's own checkout.
+      CODEWIRE_SOURCE_SHA: ${{ needs.support-selection.outputs.source_sha }}
+      CODEWIRE_SOURCE_DIR: .support-source
       # The same apt snapshot cache as the amd64 leg, passed to BuildKit as a
       # secret. The remote ci-arm64-builder node is outside the cluster, so it
       # reaches the cache on the Tailnet front door, the one address and port
@@ -260,6 +264,12 @@ jobs:
       - name: Skip a superseded commit
         id: canonical
         run: scripts/ci/images/support-superseded.sh
+
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: ${{ steps.canonical.outputs.superseded == 'false' }}
+        with:
+          ref: ${{ needs.support-selection.outputs.source_sha }}
+          path: .support-source
 
       # The same protected R2 compiler cache as the amd64 leg. The credential
       # reaches the remote arm64 BuildKit node only as a BuildKit secret over
@@ -300,7 +310,7 @@ jobs:
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     timeout-minutes: 30
-    needs: [build-support-amd64, build-support-arm64]
+    needs: [support-selection, build-support-amd64, build-support-arm64]
     # Only a pair both of whose platforms built joins: a platform job that
     # found its commit superseded built nothing.
     if: ${{ needs.build-support-amd64.outputs.superseded == 'false' && needs.build-support-arm64.outputs.superseded == 'false' }}
@@ -312,43 +322,56 @@ jobs:
       OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher
       OPENBAO_GHCR_ROLE: codewire-source-support-publisher
       OPENBAO_GHCR_AUDIENCE: openbao-codewire-source-support-publisher
+      CODEWIRE_SOURCE_SHA: ${{ needs.support-selection.outputs.source_sha }}
+      CODEWIRE_SOURCE_DIR: .support-source
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.support-selection.outputs.source_sha }}
+          path: .support-source
 
       - name: Join and verify the canonical base index
         id: base
         env:
           CODEWIRE_IMAGE_JOIN: ${{ needs.build-support-amd64.outputs.base_digest }} ${{ needs.build-support-arm64.outputs.base_digest }}
-        run: scripts/ci/images/build-push-image.sh base images/base/Dockerfile images/base
+        run: scripts/ci/images/build-push-image.sh base .support-source/images/base/Dockerfile .support-source/images/base
 
       - name: Join and verify the workspace index
         id: workspace
         env:
           CODEWIRE_IMAGE_JOIN: ${{ needs.build-support-amd64.outputs.workspace_digest }} ${{ needs.build-support-arm64.outputs.workspace_digest }}
-        run: scripts/ci/images/build-push-image.sh workspace images/workspace/Dockerfile .
+        run: scripts/ci/images/build-push-image.sh workspace .support-source/images/workspace/Dockerfile .support-source
 
+      # Main's own commit moves latest, which the next push plans against. An
+      # earlier commit's pair gets only its own tag.
       - name: Publish the verified support pair to Harbor without rebuilding
+        env:
+          PAIR_MODE: ${{ needs.support-selection.outputs.source_sha == github.sha && '--support-pair' || '--earlier-support-pair' }}
         run: |
           set -euo pipefail
-          [[ "${{ steps.base.outputs.source_sha }}" == "$GITHUB_SHA" ]]
-          [[ "${{ steps.workspace.outputs.source_sha }}" == "$GITHUB_SHA" ]]
+          [[ "${{ steps.base.outputs.source_sha }}" == "$CODEWIRE_SOURCE_SHA" ]]
+          [[ "${{ steps.workspace.outputs.source_sha }}" == "$CODEWIRE_SOURCE_SHA" ]]
           scripts/ci/images/publish-image-to-harbor.sh \
-            --support-pair \
+            "$PAIR_MODE" \
             "${{ steps.base.outputs.candidate_ref }}" \
             "${{ steps.workspace.outputs.candidate_ref }}" \
-            "$GITHUB_SHA"
+            "$CODEWIRE_SOURCE_SHA"
 
       # Harbor serves every consumer; the public GHCR copy never gates it.
       - name: Mirror the support pair to GHCR without gating delivery
         id: mirror
         continue-on-error: true
+        env:
+          PAIR_MODE: ${{ needs.support-selection.outputs.source_sha == github.sha && '--support-pair' || '--earlier-support-pair' }}
         run: |
           set -euo pipefail
           scripts/ci/images/publish-image-to-ghcr.sh \
-            --support-pair \
+            "$PAIR_MODE" \
             "${{ steps.base.outputs.candidate_ref }}" \
             "${{ steps.workspace.outputs.candidate_ref }}" \
-            "$GITHUB_SHA"
+            "$CODEWIRE_SOURCE_SHA"
 
   publish-confidential-probe:
     # zizmor: ignore[excessive-permissions] This independent protected job receives the same scoped publisher identity only for the probe.
@@ -410,8 +433,9 @@ jobs:
     name: Propose the published workspace image pin
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
-    needs: [publish-support-images]
-    if: ${{ needs.publish-support-images.outputs.workspace_mirrored == 'true' }}
+    needs: [support-selection, publish-support-images]
+    # An earlier commit's pair is never proposed as the pin.
+    if: ${{ needs.publish-support-images.outputs.workspace_mirrored == 'true' && needs.support-selection.outputs.source_sha == github.sha }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

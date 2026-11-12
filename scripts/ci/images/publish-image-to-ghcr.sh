@@ -11,11 +11,13 @@ readonly source_pattern="^${HARBOR_HOST//./\\.}/codewire/(dashboard|derp|daemon|
 usage() {
   echo "Usage: $0 SOURCE_DIGEST_REF GHCR_REPOSITORY TAG [TAG...]" >&2
   echo "       $0 --support-pair BASE_DIGEST_REF WORKSPACE_DIGEST_REF SOURCE_SHA" >&2
+  echo "       $0 --earlier-support-pair BASE_DIGEST_REF WORKSPACE_DIGEST_REF SOURCE_SHA" >&2
   echo "       $0 --runtime-bundle IMAGE_BUNDLE" >&2
   exit 2
 }
 
 support_pair=false
+move_latest=false
 runtime_bundle=false
 runtime_entries=()
 if [ "${1:-}" = --runtime-bundle ]; then
@@ -48,9 +50,12 @@ if [ "${1:-}" = --runtime-bundle ]; then
       exit 1
     fi
   done
-elif [ "${1:-}" = --support-pair ]; then
+elif [ "${1:-}" = --support-pair ] || [ "${1:-}" = --earlier-support-pair ]; then
   [ "$#" -eq 4 ] || usage
   support_pair=true
+  # Main's own commit moves latest; an earlier main commit's pair, built for
+  # a release, gets only its own tag.
+  [ "$1" = --earlier-support-pair ] || move_latest=true
   base_source_ref="$2"
   workspace_source_ref="$3"
   source_sha="$4"
@@ -196,16 +201,20 @@ if [ "$support_pair" = true ]; then
   copy_image "$workspace_source_ref" "$workspace_repository" "$source_sha"
   verify_anonymous_digest "$workspace_public_ref" "$workspace_digest"
 
-  copy_image "$base_source_ref" "$base_repository" latest
-  copy_image "$workspace_source_ref" "$workspace_repository" latest
+  if [ "$move_latest" = true ]; then
+    copy_image "$base_source_ref" "$base_repository" latest
+    copy_image "$workspace_source_ref" "$workspace_repository" latest
+  fi
 
   for token_file in "$harbor_username_file" "$harbor_password_file" \
       "$ghcr_username_file" "$ghcr_token_file"; do
     shred -u "$token_file" 2>/dev/null || rm -f "$token_file"
   done
 
-  verify_anonymous_digest "$base_repository:latest" "$base_digest"
-  verify_anonymous_digest "$workspace_repository:latest" "$workspace_digest"
+  if [ "$move_latest" = true ]; then
+    verify_anonymous_digest "$base_repository:latest" "$base_digest"
+    verify_anonymous_digest "$workspace_repository:latest" "$workspace_digest"
+  fi
 
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     {

@@ -300,6 +300,21 @@ grep -qxF "base_ghcr_public_ref=$base_repository@$base_digest" "$GITHUB_OUTPUT" 
 grep -qxF "workspace_ghcr_public_ref=$workspace_repository@$workspace_digest" \
   "$GITHUB_OUTPUT" || fail 'support workspace immutable receipt is absent'
 
+# An earlier main commit's pair, built for a release, gets only its own tags
+# and never moves latest.
+: >"$FAKE_GHCR_FETCH_CALLS"
+: >"$FAKE_COPY_CALLS"
+: >"$FAKE_COPY_COUNTER"
+: >"$FAKE_SKOPEO_CALLS"
+: >"$GITHUB_OUTPUT"
+"$PUBLISH_IMAGE" --earlier-support-pair "$base_source_ref" "$workspace_source_ref" \
+  "$source_sha"
+[[ "$(<"$FAKE_COPY_CALLS")" == "$base_source_ref $base_repository $source_sha
+$workspace_source_ref $workspace_repository $source_sha" ]] ||
+  fail 'an earlier commit'"'"'s support pair did not get exactly its immutable tags'
+grep -qxF "workspace_ghcr_public_ref=$workspace_repository@$workspace_digest" \
+  "$GITHUB_OUTPUT" || fail 'earlier support workspace immutable receipt is absent'
+
 for unavailable_repository in "$base_repository" "$workspace_repository"; do
   : >"$FAKE_GHCR_FETCH_CALLS"
   : >"$FAKE_COPY_CALLS"
