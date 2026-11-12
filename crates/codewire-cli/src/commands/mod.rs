@@ -972,7 +972,7 @@ pub(crate) struct EnvironmentRunArgs {
     #[arg(
         last = true,
         value_name = "ARGS",
-        help = "After --: the command to run, or the agent's own arguments with AGENT"
+        help = "The command to run (a -- before it is optional), or after -- the agent's own arguments with AGENT"
     )]
     pub(crate) command: Vec<String>,
 }

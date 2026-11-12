@@ -2,6 +2,7 @@
 #![allow(clippy::undocumented_unsafe_blocks, clippy::unwrap_used)]
 
 mod build_record;
+mod command_line;
 pub mod config;
 mod console_client;
 mod credit_refusal;
@@ -395,7 +396,7 @@ enum Command {
     },
     #[command(
         about = "Run a command in an environment, such as a server, tests or an agent",
-        long_about = "Run a command in a new session:\n  cw run --in ENV [--env KEY=VALUE] -- npm test\n  cw run -- npm run dev            (in the selected environment)\n\nOpen an agent's own terminal UI in a new session:\n  cw run claude --in ENV [--name SESSION] [-- AGENT_ARGS]\n  cw run codex                     (in the selected environment)\n  cw run                           (asks which agent)\n\nStart a managed conversation (queued messages and recorded results):\n  cw run --in ENV --agent claude --name review --detach [--prompt TEXT]\n\nAGENT is only claude or codex; an environment is named with --in, so one called claude is `--in claude`. --name names the new session and never reuses one. Detach with Ctrl-B, then d; reconnect with `cw attach ENV --session SESSION`."
+        long_about = "Run a command in a new session:\n  cw run npm run dev               (in the selected environment)\n  cw run --in ENV [--env KEY=VALUE] npm test\n  cw run --in ENV -- npm test --in x   (after --, every word is the command's)\n\nOpen an agent's own terminal UI in a new session:\n  cw run claude --in ENV [--name SESSION] [-- AGENT_ARGS]\n  cw run codex                     (in the selected environment)\n  cw run                           (asks which agent)\n\nStart a managed conversation (queued messages and recorded results):\n  cw run --in ENV --agent claude --name review --detach [--prompt TEXT]\n\ncw's options go before the command; everything after the command is the command's. An option of cw's written after the command, such as `cw run npm test --in app`, is refused with the line that means it. A first word of claude or codex opens that agent; `cw run -- claude` runs the claude command itself. --name names the new session and never reuses one. Detach with Ctrl-B, then d; reconnect with `cw attach ENV --session SESSION`."
     )]
     Run(EnvironmentRunArgs),
     #[cfg(unix)]
@@ -859,6 +860,8 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     let args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+    // `cw run npm test` is `cw run -- npm test`.
+    let args = command_line::separate_command(args)?;
     let mut command = cli_command();
     let matches = command.clone().get_matches_from(args.iter().cloned());
     let cli =

@@ -19,23 +19,30 @@ interactive `run` say how to choose one: `cw use ENV`, or `--in ENV`.
 ## cw run
 
 ```sh
+cw run [--in ENV] [OPTIONS] COMMAND [ARG]...
 cw run [--in ENV] [OPTIONS] -- COMMAND [ARG]...
 cw run claude|codex [--in ENV] [--name NAME] [--env KEY=VALUE]... [-- AGENT_ARG...]
 cw run --in ENV --agent codex|claude [--prompt TEXT] [--name NAME] [--parent SESSION] [--model M] [--effort E] --detach
 cw run
 ```
 
-`cw run -- COMMAND` runs any command in a new session in the environment: a
+`cw run COMMAND` runs any command in a new session in the environment: a
 dev server, a test suite, a build or a shell script. The session keeps running
-when you detach, and `cw attach` reconnects to it.
+when you detach, and `cw attach` reconnects to it. `cw`'s options go before
+the command, and every word after the command is the command's, so `--` before
+it is optional: `cw run --in app npm test` and `cw run --in app -- npm test`
+are the same. An option of `cw`'s written after the command, such as
+`cw run npm test --in app`, is refused before anything starts, with the line
+that means it; `cw run -- npm test --in app` passes `--in app` to `npm`. A
+first word of `claude` or `codex` opens that agent, as below; `cw run -- claude`
+runs the `claude` command itself.
 
 `cw run claude` and `cw run codex` open that agent's own terminal UI in a new
 session, with arguments after `--` passed to the agent (for example
 `-- --resume ID`). Before the agent takes the terminal, `cw` names the
 environment and session and the way back: detach with Ctrl-B, then d, and
-reconnect with `cw attach ENV --session SESSION`. The positional is only
-`claude` or `codex`; anything else is refused with the `--in` spelling, so an
-environment named `claude` is `cw run claude --in claude`. Bare `cw run` asks
+reconnect with `cw attach ENV --session SESSION`. An environment is always
+named with `--in`, so one named `claude` is `cw run claude --in claude`. Bare `cw run` asks
 which agent to open on a terminal and is refused in a script or with JSON
 output. If no environment is selected, the terminal flow offers an existing
 sandbox or explicit local/cloud creation, constrained by placement flags. A

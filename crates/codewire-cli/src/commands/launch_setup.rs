@@ -650,7 +650,7 @@ mod tests {
             let error = sessions::check_run_request(&args, sessions::run_can_ask(&args, &caps))
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("needs an agent or a command"), "{error}");
+            assert!(error.contains("needs a command or an agent"), "{error}");
         }
         for argv in [
             vec!["cw", "run", "--in", "pr-42", "-y", "--", "npm", "test"],

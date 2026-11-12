@@ -472,7 +472,7 @@ async fn session_commands_refuse_missing_contradictory_or_retired_selectors_befo
         ),
         (
             vec!["cw", "run"],
-            "`cw run` needs an agent or a command: `cw run claude --in ENV`, `cw run codex --in ENV`, or `cw run --in ENV -- COMMAND`",
+            "`cw run` needs a command or an agent: `cw run --in ENV COMMAND`, `cw run claude --in ENV` or `cw run codex --in ENV`",
         ),
         (
             vec!["cw", "run", "claude", "--in", "app", "--name", "a/b"],

@@ -1837,7 +1837,7 @@ pub(crate) fn check_run_request(args: &EnvironmentRunArgs, can_ask: bool) -> any
     let bare = args.native_agent.is_none() && args.agent.is_none() && args.command.is_empty();
     anyhow::ensure!(
         !bare || can_ask,
-        "`cw run` needs an agent or a command: `cw run claude --in ENV`, `cw run codex --in ENV`, or `cw run --in ENV -- COMMAND`"
+        "`cw run` needs a command or an agent: `cw run --in ENV COMMAND`, `cw run claude --in ENV` or `cw run codex --in ENV`"
     );
     if let Some(name) = &args.name {
         anyhow::ensure!(
@@ -2001,7 +2001,7 @@ async fn choose_native_agent(
         PickerOutcome::Chosen(index) => Ok(NativeAgent::ALL[index]),
         PickerOutcome::Canceled => anyhow::bail!("canceled; nothing started"),
         PickerOutcome::Unavailable => anyhow::bail!(
-            "`cw run` needs an agent or a command: `cw run claude --in ENV`, `cw run codex --in ENV`, or `cw run --in ENV -- COMMAND`"
+            "`cw run` needs a command or an agent: `cw run --in ENV COMMAND`, `cw run claude --in ENV` or `cw run codex --in ENV`"
         ),
     }
 }

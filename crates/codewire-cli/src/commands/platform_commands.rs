@@ -2855,7 +2855,7 @@ fn visible_config_line(line: &str) -> String {
 }
 
 /// `text` as one word of a shell command, quoted only when it needs it.
-fn shell_word(text: &str) -> String {
+pub(crate) fn shell_word(text: &str) -> String {
     let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"/._-+@%,:=~".contains(&byte);
     if !text.is_empty() && text.bytes().all(plain) {
         text.to_owned()
