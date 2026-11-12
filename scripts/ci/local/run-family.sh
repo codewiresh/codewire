@@ -43,7 +43,6 @@ TOOL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(git -C "$TOOL_DIR" rev-parse --show-toplevel)"
 readonly TOOL_DIR REPO
 readonly RUNNER_FILES=(dispatcher.py ephemeral-ci.yaml vm-main.yaml)
-readonly RUNNER_DIR=clusters/system-hz-eu-1/infrastructure/forgejo-runners
 readonly NOFILE=1048576 # Forgejo Runner's job containers; Docker's default 1024 fails Policy.
 
 usage() {
@@ -109,8 +108,18 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 git -C "$REPO" show "$commit:.gitea/workflows/ci.yaml" >"$work/ci.yaml"
+# The one cluster that runs the Forgejo runners; this tree does not name it.
+mapfile -t runner_dirs < <(git -C "$infra" ls-tree -d --name-only "$infra_commit" clusters/ |
+  while IFS= read -r cluster; do
+    git -C "$infra" cat-file -e "$infra_commit:$cluster/infrastructure/forgejo-runners" 2>/dev/null &&
+      printf '%s/infrastructure/forgejo-runners\n' "$cluster"
+  done)
+[ "${#runner_dirs[@]}" -eq 1 ] || {
+  printf '[run-family] ERROR: the infrastructure commit has %d forgejo-runners directories; expected one\n' "${#runner_dirs[@]}" >&2
+  exit 2
+}
 for file in "${RUNNER_FILES[@]}"; do
-  git -C "$infra" show "$infra_commit:$RUNNER_DIR/$file" >"$work/infra/forgejo-runners/$file"
+  git -C "$infra" show "$infra_commit:${runner_dirs[0]}/$file" >"$work/infra/forgejo-runners/$file"
 done
 # Variables only. `fj actions variables list` cannot print a secret.
 (cd "$REPO" && fj actions variables list -R origin) </dev/null >"$work/variables"

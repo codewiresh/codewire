@@ -36,7 +36,7 @@ import json,os,sys
 from pathlib import Path
 args=sys.argv[1:]
 with open(os.environ['PROBE_TEST_LOG'],'a') as f:f.write(json.dumps(args)+'\n')
-assert args[:4]==['--context','cw-dev-hz-eu-1','-n','dev-sandboxes'],args
+assert args[:4]==['--context','example-dev','-n','dev-sandboxes'],args
 args=args[4:]
 case=os.environ.get('PROBE_CASE')
 if args[0]=='create':
@@ -76,6 +76,8 @@ export PATH="$TEST_TMP/bin:$PATH"
 SUPPORT="registry.example.invalid/daemon@sha256:$(printf 'a%.0s' {1..64})"
 readonly SUPPORT
 fail() { printf 'dind-storage probe tests: %s\n' "$*" >&2; exit 1; }
+# The scripts take the cluster names from their environment; these are not real.
+export CODEWIRE_DEV_CLUSTER=example-dev CODEWIRE_PROD_CLUSTER=example-prod
 run_case() {
   local name="$1" expected="$2" rc=0
   shift 2
@@ -88,7 +90,7 @@ run_case() {
     local bundle="$TEST_TMP/offline/fixture.json" hash
     [[ "$name" != qualify ]] || bundle="$TEST_TMP/modern/fixture.json"
     hash="$(shasum -a 256 "$bundle" | cut -d ' ' -f 1)"
-    PROBE_CASE="$name" KUBE_CONTEXT=cw-dev-hz-eu-1 INFRA_TRANSIENT_KUBE_AUTH=1 KUBECONFIG=/not-read-by-fixture \
+    PROBE_CASE="$name" KUBE_CONTEXT=example-dev INFRA_TRANSIENT_KUBE_AUTH=1 KUBECONFIG=/not-read-by-fixture \
       bash "$ROOT/scripts/runtime/dev/smoke-dev-dind-storage.sh" --support-image "$SUPPORT" \
       --storage-class example-workspace --rendered-fixture "$bundle" --fixture-sha256 "$hash" \
       --evidence-dir "$TEST_TMP/$name" "$@" >"$TEST_TMP/out" 2>"$TEST_TMP/err" || rc=$?
@@ -180,7 +182,7 @@ json.dump(bundle,open(sys.argv[2],'w'))
 MUTATE
   : >"$PROBE_TEST_LOG"
   rc=0
-  PROBE_CASE=reject KUBE_CONTEXT=cw-dev-hz-eu-1 INFRA_TRANSIENT_KUBE_AUTH=1 KUBECONFIG=/not-read-by-fixture \
+  PROBE_CASE=reject KUBE_CONTEXT=example-dev INFRA_TRANSIENT_KUBE_AUTH=1 KUBECONFIG=/not-read-by-fixture \
     bash "$ROOT/scripts/runtime/dev/smoke-dev-dind-storage.sh" --support-image "$SUPPORT" --storage-class example-workspace --baseline \
     --rendered-fixture "$bundle" --fixture-sha256 "$(shasum -a 256 "$bundle" | cut -d ' ' -f 1)" \
     --evidence-dir "$TEST_TMP/reject-$mutation-evidence" >"$TEST_TMP/out" 2>"$TEST_TMP/err" || rc=$?
@@ -189,12 +191,23 @@ done
 printf 'dind-storage test: source/name/unsafe shape/bootstrap/policy rejected before API (14 cases)\n'
 : >"$PROBE_TEST_LOG"
 rc=0
-KUBE_CONTEXT=cw-dev-hz-eu-1 INFRA_TRANSIENT_KUBE_AUTH=1 KUBECONFIG=/not-read-by-fixture \
+KUBE_CONTEXT=example-dev INFRA_TRANSIENT_KUBE_AUTH=1 KUBECONFIG=/not-read-by-fixture \
   bash "$ROOT/scripts/runtime/dev/smoke-dev-dind-storage.sh" --support-image "$SUPPORT" --storage-class example-workspace --baseline \
   --rendered-fixture "$TEST_TMP/offline/fixture.json" --fixture-sha256 "$(printf '0%.0s' {1..64})" \
   --evidence-dir "$TEST_TMP/bad-hash" >"$TEST_TMP/out" 2>"$TEST_TMP/err" || rc=$?
 [[ "$rc" == 1 && ! -s "$PROBE_TEST_LOG" ]] || fail 'tampered custody hash reached Kubernetes'
 printf 'dind-storage test: out-of-band custody hash required\n'
+: >"$PROBE_TEST_LOG"
+rc=0
+# Without the Dev cluster's name nothing is asked of Kubernetes: an empty name
+# never matches an empty context.
+env -u CODEWIRE_DEV_CLUSTER KUBE_CONTEXT= INFRA_TRANSIENT_KUBE_AUTH=1 KUBECONFIG=/not-read-by-fixture \
+  bash "$ROOT/scripts/runtime/dev/smoke-dev-dind-storage.sh" --support-image "$SUPPORT" --storage-class example-workspace --baseline \
+  --rendered-fixture "$TEST_TMP/offline/fixture.json" --fixture-sha256 "$(shasum -a 256 "$TEST_TMP/offline/fixture.json" | cut -d ' ' -f 1)" \
+  --evidence-dir "$TEST_TMP/no-cluster" >"$TEST_TMP/out" 2>"$TEST_TMP/err" || rc=$?
+[[ "$rc" != 0 && ! -s "$PROBE_TEST_LOG" ]] || fail 'a run without the Dev cluster name reached Kubernetes'
+grep -q 'CODEWIRE_DEV_CLUSTER is required' "$TEST_TMP/err" || fail "a missing Dev cluster name is not named: $(cat "$TEST_TMP/err")"
+printf 'dind-storage test: a missing Dev cluster name is refused before API\n'
 # Homebrew's prefixed tool works without changing global PATH or stty.
 PROBE_REAL_TIMEOUT="$(builtin command -v timeout || builtin command -v gtimeout)"
 export PROBE_REAL_TIMEOUT

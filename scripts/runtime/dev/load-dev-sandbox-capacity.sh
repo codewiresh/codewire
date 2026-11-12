@@ -7,8 +7,8 @@
 # holds. It then deletes everything the run created and proves it is gone.
 #
 # It runs against Dev by default, and against Production only with
-# --confirm-production cw-prod-hz-eu-1 under Infra's kube-access for that
-# cluster (owner, 2026-10-28, on #3583: "Ramp both nodes to refusal"). Either
+# --confirm-production <the Production cluster> under Infra's kube-access for
+# that cluster (owner, 2026-10-28, on #3583: "Ramp both nodes to refusal"). Either
 # way it uses only that environment's dedicated smoke identity in its smoke
 # organization (owner, 2026-10-28, on #3583: "Reuse smoke org, no new key"),
 # and only touches environments it named itself. Kubernetes access is
@@ -65,8 +65,10 @@ MAX_THIN_POOL_PCT=""
 MODE=run
 # The cluster named by --confirm-production; empty for Dev.
 PRODUCTION=""
-readonly PRODUCTION_CLUSTER="cw-prod-hz-eu-1"
-readonly DEV_CLUSTER="cw-dev-hz-eu-1"
+# The cluster names are deployment configuration, never written in this tree.
+# An unset name refuses the mode that needs it.
+readonly PRODUCTION_CLUSTER="${CODEWIRE_PROD_CLUSTER:-}"
+readonly DEV_CLUSTER="${CODEWIRE_DEV_CLUSTER:-}"
 
 # Every environment this tool creates is named NAME_PREFIX<run>-<n>; nothing
 # else is ever deleted.
@@ -92,10 +94,10 @@ Usage:
     scripts/runtime/dev/load-dev-sandbox-capacity.sh [options]
 
   Production, from the canonical Infra checkout, in an approved window:
-  scripts/kube-access cw-prod-hz-eu-1 -- \
+  scripts/kube-access "$CODEWIRE_PROD_CLUSTER" -- \
     CODEWIRE/scripts/runtime/prod/with-prod-smoke-auth.sh -- \
     CODEWIRE/scripts/runtime/dev/load-dev-sandbox-capacity.sh \
-    --confirm-production cw-prod-hz-eu-1 [options]
+    --confirm-production "$CODEWIRE_PROD_CLUSTER" [options]
 
 Ramps sandboxes of one shape onto the Kata runtime nodes, step by step, each
 running a bounded CPU and memory workload, and records per step and node: CPU,
@@ -152,16 +154,18 @@ Options:
   --max-psi-memory-pct N, --max-psi-cpu-pct N,
   --max-thin-pool-pct N  stop thresholds, per node (defaults 90, 90, 10, 50, 80;
                          in Production 85, 80, 5, 30, 70)
-  --confirm-production C Production mode; C must be cw-prod-hz-eu-1, the server
-                         https://codewire.sh, and the kube context the one
-                         scripts/kube-access cw-prod-hz-eu-1 sets
+  --confirm-production C Production mode; C must be CODEWIRE_PROD_CLUSTER, the
+                         server https://codewire.sh, and the kube context the
+                         one scripts/kube-access sets for that cluster
   --cw-bin PATH          prebuilt cw binary (default: build one)
   -h, --help             show this help
 
 Environment:
   CODEWIRE_DEV_SMOKE_API_KEY   Dev: required (set by with-dev-smoke-auth.sh)
   CODEWIRE_PROD_SMOKE_API_KEY  Production: required (set by with-prod-smoke-auth.sh)
-  KUBECONFIG                   Dev: the one kube-access renders for cw-dev-hz-eu-1,
+  CODEWIRE_DEV_CLUSTER         required: the Dev cluster's name
+  CODEWIRE_PROD_CLUSTER        Production: required, the Production cluster's name
+  KUBECONFIG                   Dev: the one kube-access renders for the Dev cluster,
                                or by default ~/src/infra/kubeconfig-oidc.yaml;
                                Production: the one kube-access renders
   PROM_URL                     required: the System Prometheus that scrapes the cluster
@@ -266,13 +270,16 @@ while (($# > 0)); do
 done
 
 case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
+[[ -z "$DEV_CLUSTER" || "$DEV_CLUSTER" != "$PRODUCTION_CLUSTER" ]] ||
+  die "CODEWIRE_DEV_CLUSTER and CODEWIRE_PROD_CLUSTER name the same cluster"
 if [[ -z "$PRODUCTION" ]]; then
+  [[ -n "$DEV_CLUSTER" ]] || die "CODEWIRE_DEV_CLUSTER is required: the Dev cluster's name"
   : "${CODEWIRE_SERVER_URL:=https://codewire-dev.sh}" "${KUBE_CONTEXT:=codewire-dev}"
   : "${SANDBOX_NAMESPACE:=dev-sandboxes}" "${ORCHESTRATION_NAMESPACE:=dev}" "${PROM_CLUSTER:=$DEV_CLUSTER}"
   : "${MAX_NODE_MEMORY_PCT:=90}" "${MAX_NODE_CPU_PCT:=90}" "${MAX_PSI_MEMORY_PCT:=10}"
   : "${MAX_PSI_CPU_PCT:=50}" "${MAX_THIN_POOL_PCT:=80}" "${LOAD_TMP_PARENT:=$ROOT/.tmp/sandbox-capacity}"
   [[ "$CODEWIRE_SERVER_URL" == "https://codewire-dev.sh" ]] ||
-    die "this load runs only against Dev unless --confirm-production $PRODUCTION_CLUSTER"
+    die "this load runs only against Dev unless --confirm-production names the Production cluster"
   # kube-access exports the context with a temporary kubeconfig and marks it.
   [[ "$KUBE_CONTEXT" == "codewire-dev" ||
     ("$KUBE_CONTEXT" == "$DEV_CLUSTER" && -n "${KUBECONFIG:-}" && "${INFRA_TRANSIENT_KUBE_AUTH:-}" == 1) ]] ||
@@ -281,6 +288,7 @@ if [[ -z "$PRODUCTION" ]]; then
     die "CODEWIRE_DEV_SMOKE_API_KEY is required; run through scripts/runtime/dev/with-dev-smoke-auth.sh"
   SMOKE_API_KEY="$CODEWIRE_DEV_SMOKE_API_KEY"
 else
+  [[ -n "$PRODUCTION_CLUSTER" ]] || die "CODEWIRE_PROD_CLUSTER is required: the Production cluster's name"
   [[ "$PRODUCTION" == "$PRODUCTION_CLUSTER" ]] || die "--confirm-production must be $PRODUCTION_CLUSTER"
   : "${CODEWIRE_SERVER_URL:=https://codewire.sh}"
   : "${SANDBOX_NAMESPACE:=prod-sandboxes}" "${ORCHESTRATION_NAMESPACE:=prod}" "${PROM_CLUSTER:=$PRODUCTION_CLUSTER}"

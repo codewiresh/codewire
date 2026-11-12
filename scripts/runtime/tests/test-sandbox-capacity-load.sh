@@ -14,6 +14,9 @@ LOAD="$ROOT/scripts/runtime/dev/load-dev-sandbox-capacity.sh"
 
 fail() { printf 'sandbox capacity load tests: %s\n' "$*" >&2; exit 1; }
 
+# The load takes the cluster names from its environment; these are not real.
+export CODEWIRE_DEV_CLUSTER=example-dev CODEWIRE_PROD_CLUSTER=example-prod
+
 refuses() {
   local expected="$1"
   shift
@@ -51,32 +54,40 @@ refuses 'unknown argument' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --keep
 
 # Dev mode never takes the Prod key or kube-access's Prod context.
 refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' env CODEWIRE_PROD_SMOKE_API_KEY=x "$LOAD"
-refuses 'only against the codewire-dev context' env KUBE_CONTEXT=cw-prod-hz-eu-1 CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
+refuses 'only against the codewire-dev context' env KUBE_CONTEXT=example-prod CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
 # Dev's own cluster context counts only as kube-access exports it: past the
 # context check, the next refusal is the missing key. Prod's marked context
 # stays refused in Dev mode.
-refuses 'only against the codewire-dev context' env KUBE_CONTEXT=cw-dev-hz-eu-1 CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
-refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' env KUBE_CONTEXT=cw-dev-hz-eu-1 KUBECONFIG=/nonexistent/kubeconfig \
+refuses 'only against the codewire-dev context' env KUBE_CONTEXT=example-dev CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
+refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' env KUBE_CONTEXT=example-dev KUBECONFIG=/nonexistent/kubeconfig \
   INFRA_TRANSIENT_KUBE_AUTH=1 "$LOAD"
-refuses 'only against the codewire-dev context' env KUBE_CONTEXT=cw-prod-hz-eu-1 KUBECONFIG=/nonexistent/kubeconfig \
+refuses 'only against the codewire-dev context' env KUBE_CONTEXT=example-prod KUBECONFIG=/nonexistent/kubeconfig \
   INFRA_TRANSIENT_KUBE_AUTH=1 CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
+# A missing cluster name refuses the mode that needs it; an empty name never
+# matches an empty context. One name for both environments is refused.
+refuses 'CODEWIRE_DEV_CLUSTER is required' env -u CODEWIRE_DEV_CLUSTER CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
+refuses 'CODEWIRE_DEV_CLUSTER is required' env CODEWIRE_DEV_CLUSTER= KUBE_CONTEXT= KUBECONFIG=/nonexistent/kubeconfig \
+  INFRA_TRANSIENT_KUBE_AUTH=1 CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
+refuses 'CODEWIRE_PROD_CLUSTER is required' env -u CODEWIRE_PROD_CLUSTER KUBE_CONTEXT=example-prod KUBECONFIG=/nonexistent/kubeconfig \
+  INFRA_TRANSIENT_KUBE_AUTH=1 CODEWIRE_PROD_SMOKE_API_KEY=x "$LOAD" --confirm-production example-prod
+refuses 'name the same cluster' env CODEWIRE_DEV_CLUSTER=example-prod CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
 # Production mode needs the exact confirmation, server, kube-access context
 # and Prod smoke key, each checked before any network or build step.
-prod_access=(KUBE_CONTEXT=cw-prod-hz-eu-1 KUBECONFIG=/nonexistent/kubeconfig INFRA_TRANSIENT_KUBE_AUTH=1)
-refuses '--confirm-production must be cw-prod-hz-eu-1' env "${prod_access[@]}" CODEWIRE_PROD_SMOKE_API_KEY=x \
+prod_access=(KUBE_CONTEXT=example-prod KUBECONFIG=/nonexistent/kubeconfig INFRA_TRANSIENT_KUBE_AUTH=1)
+refuses '--confirm-production must be example-prod' env "${prod_access[@]}" CODEWIRE_PROD_SMOKE_API_KEY=x \
   "$LOAD" --confirm-production codewire-prod
 refuses 'Production mode runs only against https://codewire.sh' env "${prod_access[@]}" CODEWIRE_PROD_SMOKE_API_KEY=x \
-  CODEWIRE_SERVER_URL=https://codewire-dev.sh "$LOAD" --confirm-production cw-prod-hz-eu-1
-refuses 'Production mode runs only through scripts/kube-access' env KUBE_CONTEXT=cw-prod-hz-eu-1 \
-  CODEWIRE_PROD_SMOKE_API_KEY=x "$LOAD" --confirm-production cw-prod-hz-eu-1
+  CODEWIRE_SERVER_URL=https://codewire-dev.sh "$LOAD" --confirm-production example-prod
+refuses 'Production mode runs only through scripts/kube-access' env KUBE_CONTEXT=example-prod \
+  CODEWIRE_PROD_SMOKE_API_KEY=x "$LOAD" --confirm-production example-prod
 refuses 'Production mode runs only through scripts/kube-access' env KUBE_CONTEXT=codewire-dev \
   KUBECONFIG=/nonexistent/kubeconfig INFRA_TRANSIENT_KUBE_AUTH=1 CODEWIRE_PROD_SMOKE_API_KEY=x \
-  "$LOAD" --confirm-production cw-prod-hz-eu-1
+  "$LOAD" --confirm-production example-prod
 refuses 'CODEWIRE_PROD_SMOKE_API_KEY is required' env "${prod_access[@]}" CODEWIRE_DEV_SMOKE_API_KEY=x \
-  "$LOAD" --confirm-production cw-prod-hz-eu-1
+  "$LOAD" --confirm-production example-prod
 # With every Production guard met, option validation is next.
 refuses '--max-sandboxes must be 1-500' env "${prod_access[@]}" CODEWIRE_PROD_SMOKE_API_KEY=x \
-  "$LOAD" --confirm-production cw-prod-hz-eu-1 --max-sandboxes 501
+  "$LOAD" --confirm-production example-prod --max-sandboxes 501
 # Production's stop thresholds are stricter than Dev's.
 grep -qF ': "${MAX_NODE_MEMORY_PCT:=85}" "${MAX_NODE_CPU_PCT:=80}" "${MAX_PSI_MEMORY_PCT:=5}"' "$LOAD" ||
   fail 'Production stop thresholds are not the conservative defaults'

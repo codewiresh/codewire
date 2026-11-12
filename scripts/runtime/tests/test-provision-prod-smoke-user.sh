@@ -16,6 +16,8 @@ readonly EMAIL="codewire-prod-smoke@codewire.sh"
 cleanup() { rm -rf -- "$TEST_TMP"; }
 trap cleanup EXIT
 fail() { printf 'prod smoke provisioning tests: %s\n' "$*" >&2; exit 1; }
+# The scripts take the cluster names from their environment; these are not real.
+export CODEWIRE_DEV_CLUSTER=example-dev CODEWIRE_PROD_CLUSTER=example-prod
 
 assert_redacted() {
   local file="$1" marker
@@ -37,7 +39,7 @@ set -euo pipefail
 [[ "${INFRA_KUBECONFIG_DIR:-}" == "$MOCK_STATE/kube" ]]
 [[ "${KUBECONFIG:-}" == "$MOCK_STATE/kube/scoped.yaml" ]]
 if [[ "$*" == 'config current-context' ]]; then
-  if [[ "$MOCK_MODE" == wrong_cluster ]]; then printf 'cw-dev-hz-eu-1\n'; else printf 'cw-prod-hz-eu-1\n'; fi
+  if [[ "$MOCK_MODE" == wrong_cluster ]]; then printf 'example-dev\n'; else printf 'example-prod\n'; fi
   exit 0
 fi
 if [[ "$1 $2 $3 $4" == '-n prod get pods' ]]; then
@@ -173,8 +175,8 @@ FAKE_CW
 
 run_case() {
   local mode="$1" expected="$2" expected_events="$3" expected_error="${4:-}"
-  local dir="$TEST_TMP/$mode" rc confirm=cw-prod-hz-eu-1
-  [[ "$mode" != unconfirmed ]] || confirm=cw-dev-hz-eu-1
+  local dir="$TEST_TMP/$mode" rc confirm=example-prod
+  [[ "$mode" != unconfirmed ]] || confirm=example-dev
   mkdir -p "$dir/bin" "$dir/state/kube" "$dir/tmp"
   chmod 0700 "$dir/state" "$dir/state/kube" "$dir/tmp"
   : >"$dir/state/kube/scoped.yaml"
@@ -232,8 +234,8 @@ success_events="$pre"$'\ndb-stage\nbao-put\nbao-get\nprobe\nbao-get\ndb-finalize
 run_case success success "$success_events"
 run_case interrupted success "$success_events"
 run_case first_run success "$success_events"
-run_case unconfirmed failure '' 'Production provisioning requires --confirm-production cw-prod-hz-eu-1'
-run_case wrong_cluster failure '' 'scoped kube-access does not target cw-prod-hz-eu-1'
+run_case unconfirmed failure '' 'Production provisioning requires --confirm-production example-prod'
+run_case wrong_cluster failure '' 'scoped kube-access does not target example-prod'
 run_case two_primaries failure 'primary-lookup' 'Production database does not have exactly one running primary'
 run_case missing_plan failure "$pre" 'the smoke plan is not an active admin-only sandbox plan'
 run_case foreign_slug failure "$pre"$'\ndb-stage' \
@@ -294,4 +296,12 @@ grep -F 'WHERE organizations.created_by = EXCLUDED.created_by' "$sql" >/dev/null
 if grep -E -i 'CREATE EXTENSION|INSERT INTO billing_catalog_plans|confidential_sandbox' "$sql" >/dev/null; then
   fail 'Production provisioning writes an extension or billing catalog row'
 fi
+# Without the Production cluster's name nothing runs: an empty name never
+# matches an empty confirmation.
+for confirm in example-prod ''; do
+  if output="$(env -u CODEWIRE_PROD_CLUSTER "$PROVISIONER" --confirm-production "$confirm" 2>&1)"; then
+    fail 'provisioning ran without CODEWIRE_PROD_CLUSTER'
+  fi
+  [[ "$output" == *'CODEWIRE_PROD_CLUSTER is required'* ]] || fail "a missing Production cluster name is not named: $output"
+done
 printf 'prod smoke OpenBao provisioning tests: OK\n'

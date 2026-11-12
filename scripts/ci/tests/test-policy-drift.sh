@@ -105,7 +105,7 @@ mkdir -p "$work/source" "$work/deploy/scripts" "$work/infra/clusters"
 git -C "$work/source" init --quiet
 mkdir -p "$work/source/crates/codewire-orchestration/tests/fixtures"
 cp -R "$GOLDENS" "$work/source/crates/codewire-orchestration/tests/fixtures/sandbox"
-for cluster in cw-dev-hz-eu-1 cw-prod-hz-eu-1; do
+for cluster in example-dev example-prod; do
   mkdir -p "$work/infra/clusters/$cluster/infrastructure/kyverno-policies"
   cp "$work/policy.yaml" "$work/infra/clusters/$cluster/infrastructure/kyverno-policies/sandbox-runtime-security.yaml"
 done
@@ -140,7 +140,7 @@ run_check() {
 }
 
 run_check || { cat "$work/out" >&2; fail 'a tree every policy admits failed'; }
-grep -q 'passed: deploy guards and both clusters admit this tree' "$work/out" || fail 'no pass line'
+grep -q 'passed: deploy guards and all 2 clusters admit this tree' "$work/out" || fail 'no pass line'
 FAKE_REGISTRY='' run_check && fail 'a check with no registry passed'
 grep -q 'CODEWIRE_IMAGE_REGISTRY is not set' "$work/out" || fail 'the missing registry is not named'
 
@@ -156,7 +156,7 @@ FAKE_GUARD_REFUSES=1 run_check && fail 'a deploy guard refusal passed'
 grep -q 'REFUSED by codewire/deploy' "$work/out" || fail 'the deploy refusal does not name deploy'
 
 FAKE_FLIP=pass-confidential-sandboxtemplate run_check && fail 'an inadmissible Pod passed'
-grep -q 'REFUSED by infrastructure clusters/cw-dev-hz-eu-1/' "$work/out" || fail 'the infra refusal does not name the policy'
+grep -q 'REFUSED by infrastructure clusters/example-dev/' "$work/out" || fail 'the infra refusal does not name the policy'
 grep -q 'land the infra pull request' "$work/out" || fail 'the infra refusal gives no next step'
 
 FAKE_FLIP=deny-mount-script run_check && fail 'an admitted control case passed'
@@ -164,6 +164,13 @@ grep -q 'admitted the control case deny-mount-script' "$work/out" || fail 'the c
 
 FAKE_ERROR=pass-warm-pool-sandboxtemplate run_check && fail 'a kyverno error passed'
 grep -q 'kyverno errored' "$work/out" || fail 'the kyverno error is not named'
+
+# The clusters come from the infrastructure checkout. One policy is not Dev and
+# Production, so the check refuses to pass on it.
+mv "$work/infra/clusters/example-prod" "$work/example-prod"
+run_check && fail 'a checkout with one sandbox policy passed'
+grep -q 'has a sandbox policy for 1 clusters' "$work/out" || fail 'the missing cluster policy is not named'
+mv "$work/example-prod" "$work/infra/clusters/example-prod"
 
 # --- the token helper refuses until the integration has an audience ---
 grep -q "^readonly audience=''$" "$TOKEN" && {

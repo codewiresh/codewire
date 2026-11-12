@@ -145,7 +145,7 @@ binds the recorded evidence; it does not attest code execution in the rendering
 sandbox. Never copy an admin kubeconfig into that sandbox.
 
 Live runs use the infrastructure repository's existing
-`scripts/kube-access cw-dev-hz-eu-1 --` wrapper and the current admitted,
+`scripts/kube-access <dev-cluster> --` wrapper and the current admitted,
 digest-pinned daemon support image and workspace StorageClass, supplied with
 `--support-image` and `--storage-class`. Review the exact bundle before applying
 it. The same `--baseline` choice must be supplied at both steps.

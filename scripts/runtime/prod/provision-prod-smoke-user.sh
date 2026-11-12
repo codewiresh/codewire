@@ -2,7 +2,8 @@
 # Create or rotate the Production smoke identity: one synthetic user, its own
 # organization and one API key, published to canonical OpenBao. The Production
 # counterpart of scripts/runtime/dev/provision-dev-smoke-user.sh. Run only
-# through Infra's scoped kube-access wrapper for cw-prod-hz-eu-1 and a current
+# through Infra's scoped kube-access wrapper for the Production cluster, which
+# CODEWIRE_PROD_CLUSTER names, and a current
 # human OpenBao OIDC session, with the owner's approval for this credential.
 set -euo pipefail
 
@@ -11,7 +12,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 readonly OPENBAO_PATH="apps/codewire/prod/ci-smoke"
 readonly CODEWIRE_SERVER_URL="https://codewire.sh"
-readonly KUBE_CLUSTER="cw-prod-hz-eu-1"
+# The cluster name is deployment configuration, never written in this tree.
+readonly KUBE_CLUSTER="${CODEWIRE_PROD_CLUSTER:-}"
 readonly KUBE_NAMESPACE="prod"
 readonly POSTGRES_CLUSTER="codewire-db"
 readonly POSTGRES_CONTAINER="postgres"
@@ -35,7 +37,7 @@ DOCUMENT_STATE=""
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/runtime/prod/provision-prod-smoke-user.sh --confirm-production cw-prod-hz-eu-1 [options]
+  scripts/runtime/prod/provision-prod-smoke-user.sh --confirm-production "$CODEWIRE_PROD_CLUSTER" [options]
 
 Creates or repairs the dedicated Production smoke user and organization,
 creates one API key, check-and-set publishes it to the canonical OpenBao
@@ -47,7 +49,7 @@ The organization uses the existing admin-only sandbox plan and is billing
 exempt. The script writes no billing catalog row, extension or schema object.
 
 Options:
-  --confirm-production NAME Required; must be cw-prod-hz-eu-1
+  --confirm-production NAME Required; must be the cluster CODEWIRE_PROD_CLUSTER names
   --email EMAIL             Smoke user email
   --name NAME               Smoke user display name
   --org-name NAME           Smoke organization name
@@ -58,7 +60,7 @@ Options:
 
 Safety:
   - creating this credential needs the owner's explicit approval
-  - run through Infra scripts/kube-access cw-prod-hz-eu-1 (human mode, exec)
+  - run through Infra scripts/kube-access for the Production cluster (human mode, exec)
   - establish the normal OpenBao human OIDC session before invoking it
   - never run with shell tracing or pipe output through tee
   - a failed publication or probe keeps the previously active key usable
@@ -108,6 +110,7 @@ while (($# > 0)); do
 done
 
 case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
+[[ -n "$KUBE_CLUSTER" ]] || die "CODEWIRE_PROD_CLUSTER is required: the Production cluster's name"
 [[ "$CONFIRMED_CLUSTER" == "$KUBE_CLUSTER" ]] ||
   die "Production provisioning requires --confirm-production $KUBE_CLUSTER"
 [[ "$SMOKE_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] ||

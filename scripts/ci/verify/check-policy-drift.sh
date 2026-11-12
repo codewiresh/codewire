@@ -3,8 +3,10 @@
 # boundaries other repositories own, before it merges, so a change one of them
 # would refuse fails here and not at the next promotion or admission:
 #   1. deploy main's hosted guards (render.py check-source-policy);
-#   2. both clusters' sandbox Kyverno policy, over the Pods the tree's sandbox
-#      goldens render (kyverno-pods-from-goldens.py, beside this script).
+#   2. the sandbox Kyverno policy of every cluster the infrastructure
+#      repository gives one, over the Pods the tree's sandbox goldens render
+#      (kyverno-pods-from-goldens.py, beside this script). There must be at
+#      least two, Dev and Production; this tree does not name them.
 #
 # SOURCE is a clean git checkout of the tree under test and is only read: the
 # Pod builder is this script's sibling, never the tree's copy, and render.py
@@ -30,7 +32,6 @@ readonly registry="${CODEWIRE_IMAGE_REGISTRY:-}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly here
 readonly goldens="$source_tree/crates/codewire-orchestration/tests/fixtures/sandbox"
-readonly -a clusters=(cw-dev-hz-eu-1 cw-prod-hz-eu-1)
 
 [[ -d "$source_tree/.git" || -f "$source_tree/.git" ]] || fail 'SOURCE must be a git checkout'
 [[ -f "$deploy/scripts/render.py" ]] || fail 'DEPLOY must be a codewire/deploy checkout'
@@ -67,9 +68,17 @@ if ! python3 -I -B "$deploy/scripts/render.py" check-source-policy \
   failed=1
 fi
 
+clusters=()
+for policy in "$infra"/clusters/*/infrastructure/kyverno-policies/sandbox-runtime-security.yaml; do
+  [[ -f "$policy" ]] || continue
+  cluster="${policy#"$infra"/clusters/}"
+  clusters+=("${cluster%%/*}")
+done
+[[ "${#clusters[@]}" -ge 2 ]] ||
+  fail "the infrastructure repository has a sandbox policy for ${#clusters[@]} clusters; Dev and Production each need one"
+
 for cluster in "${clusters[@]}"; do
   policy="$infra/clusters/$cluster/infrastructure/kyverno-policies/sandbox-runtime-security.yaml"
-  [[ -f "$policy" ]] || fail "the infrastructure repository has no sandbox policy for $cluster"
   printf '[check-policy-drift] %s sandbox Kyverno policy (infrastructure main)\n' "$cluster"
   pods="$work/$cluster"
   python3 -I -B "$here/kyverno-pods-from-goldens.py" "$goldens" "$policy" "$registry" "$pods" >/dev/null ||
@@ -101,4 +110,4 @@ for cluster in "${clusters[@]}"; do
 done
 
 [[ "$failed" -eq 0 ]] || exit 1
-printf '[check-policy-drift] passed: deploy guards and both clusters admit this tree\n'
+printf '[check-policy-drift] passed: deploy guards and all %d clusters admit this tree\n' "${#clusters[@]}"
