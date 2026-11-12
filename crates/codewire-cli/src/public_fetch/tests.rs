@@ -779,12 +779,26 @@ async fn signed_public_selection_and_rollback_leave_a_running_owned_elf_untouche
         )
         .unwrap();
     let mut command = Command::new(store.version_executable(&published.sha256));
+    // It runs until this test kills it, however long a loaded guest takes;
+    // a fixed `sleep 30` exited mid-test on one that took 56 s (#4300). If
+    // the test process dies first, the kernel kills it too.
     command
         .env_clear()
-        .arg("30")
+        .arg("infinity")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    let parent = std::process::id();
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) < 0
+                || libc::getppid() != parent as libc::pid_t
+            {
+                return Err(std::io::Error::other("owned ELF parent changed"));
+            }
+            Ok(())
+        });
+    }
     let child = spawn_written(|| command.spawn()).unwrap();
     struct Owned(Child);
     impl Drop for Owned {
@@ -797,7 +811,9 @@ async fn signed_public_selection_and_rollback_leave_a_running_owned_elf_untouche
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, owned.0.id(), 0) as i32 };
     assert!(fd >= 0);
     let pidfd = unsafe { File::from_raw_fd(fd) };
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // A hang guard for the exec to land, not a speed expectation
+    // (docs/dev/AGENT-WORKFLOW.md "Failure convergence").
+    let deadline = Instant::now() + Duration::from_secs(60);
     let expected_path = store.version_executable(&published.sha256);
     while fs::read_link(format!("/proc/{}/exe", owned.0.id()))
         .is_ok_and(|path| path != expected_path)
