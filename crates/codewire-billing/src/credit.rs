@@ -580,6 +580,9 @@ pub const LOW_BALANCE_NANO_EUR: i64 = 5 * NANO_EUR_PER_EURO;
 
 const LOW_NOTICE: &str = "credit_low_notice";
 const EXHAUSTED_NOTICE: &str = "credit_exhausted_notice";
+/// A send that failed, with the notice's kind in `metadata.kind`. Billing's
+/// own retry state, so the Billing page leaves it out (#4087).
+pub(crate) const NOTICE_FAILED: &str = "credit_notice_failed";
 
 /// An email an organization's owner is due.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -597,6 +600,10 @@ pub enum CreditNotice {
 /// `credit_exhausted_at`, and running low once since credit last came in. An
 /// organization with automatic top-up and a Stripe customer needs no low
 /// notice: if the charge fails, it hears that it ran out.
+///
+/// After the nth failed send in a spell, the notice waits 2^(n-1) minutes,
+/// at most a day, so an address the mail service always rejects costs about
+/// a dozen attempts a day, not one a minute (#4087).
 pub async fn credit_notices_due(pool: &PgPool) -> anyhow::Result<Vec<CreditNotice>> {
     let exhausted: Vec<String> = sqlx::query_scalar(
         r#"SELECT o.id FROM organizations o
@@ -605,9 +612,17 @@ pub async fn credit_notices_due(pool: &PgPool) -> anyhow::Result<Vec<CreditNotic
                  SELECT 1 FROM billing_events e
                  WHERE e.org_id = o.id AND e.event_type = $1
                    AND e.created_at >= o.credit_exhausted_at)
+             AND NOT EXISTS (
+                 SELECT 1 FROM billing_events f
+                 WHERE f.org_id = o.id AND f.event_type = $2 AND f.metadata->>'kind' = $1
+                   AND f.created_at >= o.credit_exhausted_at
+                 HAVING max(f.created_at) + LEAST(
+                     power(2, LEAST(count(*) - 1, 11)) * interval '1 minute',
+                     interval '1 day') > now())
            ORDER BY o.id"#,
     )
     .bind(EXHAUSTED_NOTICE)
+    .bind(NOTICE_FAILED)
     .fetch_all(pool)
     .await?;
     let low: Vec<(String, i64)> = sqlx::query_as(
@@ -623,10 +638,21 @@ pub async fn credit_notices_due(pool: &PgPool) -> anyhow::Result<Vec<CreditNotic
                        (SELECT max(l.created_at) FROM billing_credit_ledger l
                         WHERE l.organization_id = o.id AND l.amount_nano_eur > 0),
                        '-infinity'::timestamptz))
+             AND NOT EXISTS (
+                 SELECT 1 FROM billing_events f
+                 WHERE f.org_id = o.id AND f.event_type = $3 AND f.metadata->>'kind' = $2
+                   AND f.created_at > COALESCE(
+                       (SELECT max(l.created_at) FROM billing_credit_ledger l
+                        WHERE l.organization_id = o.id AND l.amount_nano_eur > 0),
+                       '-infinity'::timestamptz)
+                 HAVING max(f.created_at) + LEAST(
+                     power(2, LEAST(count(*) - 1, 11)) * interval '1 minute',
+                     interval '1 day') > now())
            ORDER BY o.id"#,
     )
     .bind(LOW_BALANCE_NANO_EUR)
     .bind(LOW_NOTICE)
+    .bind(NOTICE_FAILED)
     .fetch_all(pool)
     .await?;
     Ok(exhausted
@@ -651,8 +677,26 @@ async fn record_notice(pool: &PgPool, organization_id: &str, kind: &str) -> anyh
     Ok(())
 }
 
+async fn record_notice_failure(
+    pool: &PgPool,
+    organization_id: &str,
+    kind: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO billing_events (event_type, org_id, currency, metadata) \
+         VALUES ($1, $2, 'eur', jsonb_build_object('kind', $3::text))",
+    )
+    .bind(NOTICE_FAILED)
+    .bind(organization_id)
+    .bind(kind)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Emails each due notice to the organization's owner, where this deployment
-/// enforces credit. A failed send is logged and is due again on the next run.
+/// enforces credit. A failed send is logged and recorded, and is due again
+/// after its backoff (`credit_notices_due`).
 pub async fn send_credit_notices(
     pool: &PgPool,
     email: &crate::email::EmailClient,
@@ -693,6 +737,7 @@ pub async fn send_credit_notices(
             }
             Err(error) => {
                 tracing::error!(organization_id, kind, %error, "credit notice: send failed");
+                record_notice_failure(pool, organization_id, kind).await?;
             }
         }
     }
@@ -1315,6 +1360,103 @@ mod tests {
             .await
             .unwrap();
         assert!(due().await.is_empty());
+        sqlx::query("DELETE FROM billing_events WHERE org_id = $1")
+            .bind(&organization_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, fixture).await;
+    }
+
+    #[tokio::test]
+    async fn db_a_failed_notice_waits_longer_after_each_failure_and_a_day_at_most() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let fixture = seed(&pool, "regular").await;
+        let organization_id = fixture.organization_id.clone();
+        let due = || async {
+            credit_notices_due(&pool)
+                .await
+                .unwrap()
+                .into_iter()
+                .any(|notice| {
+                    notice
+                        == CreditNotice::Exhausted {
+                            organization_id: organization_id.clone(),
+                        }
+                })
+        };
+        // Moves every recorded failure back by `ago`.
+        let age = |ago: &'static str| {
+            let (pool, organization_id) = (pool.clone(), organization_id.clone());
+            async move {
+                sqlx::query(
+                    "UPDATE billing_events SET created_at = created_at - $2::interval \
+                     WHERE org_id = $1 AND event_type = $3",
+                )
+                .bind(&organization_id)
+                .bind(ago)
+                .bind(NOTICE_FAILED)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+        mark_exhausted(&pool, &organization_id).await.unwrap();
+        // The spell starts before the failures that age into it.
+        sqlx::query(
+            "UPDATE organizations SET credit_exhausted_at = now() - interval '3 days' \
+             WHERE id = $1",
+        )
+        .bind(&organization_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(due().await);
+
+        // The first failure waits a minute.
+        record_notice_failure(&pool, &organization_id, EXHAUSTED_NOTICE)
+            .await
+            .unwrap();
+        assert!(!due().await);
+        age("61 seconds").await;
+        assert!(due().await);
+
+        // The second waits two.
+        record_notice_failure(&pool, &organization_id, EXHAUSTED_NOTICE)
+            .await
+            .unwrap();
+        age("61 seconds").await;
+        assert!(!due().await);
+        age("60 seconds").await;
+        assert!(due().await);
+
+        // A failed low notice is another kind and doesn't count.
+        record_notice_failure(&pool, &organization_id, LOW_NOTICE)
+            .await
+            .unwrap();
+        assert!(due().await);
+
+        // However many failures, the wait is at most a day.
+        for _ in 0..20 {
+            record_notice_failure(&pool, &organization_id, EXHAUSTED_NOTICE)
+                .await
+                .unwrap();
+        }
+        age("23 hours").await;
+        assert!(!due().await);
+        age("61 minutes").await;
+        assert!(due().await);
+
+        // A new spell starts again at once.
+        sqlx::query("UPDATE organizations SET credit_exhausted_at = now() WHERE id = $1")
+            .bind(&organization_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(due().await);
+
         sqlx::query("DELETE FROM billing_events WHERE org_id = $1")
             .bind(&organization_id)
             .execute(&pool)

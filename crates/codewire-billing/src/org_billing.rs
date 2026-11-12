@@ -146,12 +146,13 @@ pub async fn list_events_core(
         SELECT id, event_type, org_id, amount_cents, currency, stripe_item_id,
                metadata, created_at
         FROM billing_events
-        WHERE org_id = $1
+        WHERE org_id = $1 AND event_type <> $2
         ORDER BY created_at DESC
         LIMIT 100
         "#,
     )
     .bind(org_id)
+    .bind(crate::credit::NOTICE_FAILED)
     .fetch_all(pool)
     .await?;
 
