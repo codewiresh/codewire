@@ -37,7 +37,6 @@ DEBT: dict[str, tuple[str, ...]] = {
         "crates/codewire-daemon/src/lib.rs",
         "crates/codewire-local-vmm/src/lib.rs",
         "crates/codewire-local-vmm/tests/network_worker_process.rs",
-        "crates/codewire-server-core/src/lib.rs",
         "crates/codewire-vmm-guest-probe/src/lib.rs",
         "crates/codewire-vmm-guest-probe/tests/cw-runtime-live.rs",
     ),
