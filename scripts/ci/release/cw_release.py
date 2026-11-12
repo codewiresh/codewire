@@ -72,6 +72,7 @@ PRODUCTION_FINGERPRINT = "A38FF6BC6623FCA611A7A32B5EFBF0F4A5870815"
 SOURCE_PATHSPEC = ("*.rs", "*.toml", "*.lock", "*.proto",
                    "apps/cli/GPG_PUBLIC_KEY.asc",
                    "crates/codewire-credential-broker/src/ssh_agent/askpass.sh",
+                   "crates/codewire-cli/src/commands/rex/codewire.lua",
                    "crates/codewire-egress-policy/policies", "crates/codewire-mesh/migrations",
                    "crates/codewire-proto/codewire_descriptor.bin",
                    "crates/codewire-server-core/migrations", "scripts/ci/release/cw_release.py",

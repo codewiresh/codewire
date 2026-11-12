@@ -6,11 +6,13 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
 import sys
 import time
+import tomllib
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -732,6 +734,84 @@ class SourceDigestTest(unittest.TestCase):
             release.check_build_inputs(source, self.depinfo(base, [probe, other]), (base / "target",))
 
 
+
+
+class EmbeddedSourceTest(unittest.TestCase):
+    """Every file cw's crates embed is in the source capsule the producer compiles.
+
+    The producer compiles cw from only the files SOURCE_PATHSPEC selects. On
+    2026-11-12 `cw setup rex` embedded src/commands/rex/codewire.lua, which no
+    pattern selected: pull-request CI compiled the whole tree and passed, and
+    every producer build after it failed (deploy-dev 44141 and 44184).
+    """
+
+    # Embedded only by test code, which no cw build compiles: each from an
+    # inline #[cfg(test)] module, or a test function, of the file named.
+    TEST_ONLY = {
+        # codewire-server-core src/migrate.rs
+        "crates/codewire-server-core/tests/data/application_schema_fingerprint.sql",
+        # codewire-vmm-guest-probe src/network.rs
+        "testdata/local-vm-network/protocol-v1.json",
+        # codewire-local-vmm src/bin/codewire-local-codex-bridge-smoke.rs
+        "scripts/ci/verify/stock-ssh-workload.sh",
+        # codewire-local-vmm src/supervisor_store.rs
+        "crates/codewire-local-vmm/src/supervisor_store/testdata/schema-11-environment.sql",
+        "crates/codewire-local-vmm/src/supervisor_store/testdata/schema-11-operation.sql",
+        "crates/codewire-local-vmm/src/supervisor_store/testdata/schema-11-source.json",
+        "crates/codewire-local-vmm/src/supervisor_store/testdata/schema-11.sql",
+        # codewire-tailnet src/golden_tests.rs, a #[cfg(test)] module
+        "tests/fixtures/tailnet/tailscale_golden.json",
+    }
+    INCLUDE = re.compile(r'include_(?:str|bytes)!\(\s*"([^"]+)"')
+
+    @staticmethod
+    def closure():
+        """cw's local crates: path dependencies that are not dev-only, from the manifests."""
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["dependencies"]
+        seen, queue = set(), [ROOT / "crates/codewire-cli-bin"]
+        while queue:
+            crate = queue.pop()
+            if crate in seen:
+                continue
+            seen.add(crate)
+            manifest = tomllib.loads((crate / "Cargo.toml").read_text())
+            tables = [manifest.get("dependencies", {}), manifest.get("build-dependencies", {})]
+            for target in manifest.get("target", {}).values():
+                tables += [target.get("dependencies", {}), target.get("build-dependencies", {})]
+            for table in tables:
+                for name, spec in table.items():
+                    if not isinstance(spec, dict):
+                        continue
+                    if spec.get("workspace"):
+                        spec = workspace.get(name, {})
+                        base = ROOT
+                    else:
+                        base = crate
+                    if isinstance(spec, dict) and "path" in spec:
+                        queue.append((base / spec["path"]).resolve())
+        return seen
+
+    def embedded(self):
+        found = set()
+        for crate in self.closure():
+            for source in crate.rglob("*.rs"):
+                parts = source.relative_to(crate).parts
+                if "tests" in parts or source.name in {"tests.rs", "test.rs"} or parts[0] in {"benches", "examples"}:
+                    continue
+                for literal in self.INCLUDE.findall(source.read_text(errors="replace")):
+                    found.add((source.parent / literal).resolve().relative_to(ROOT).as_posix())
+        return found
+
+    def test_every_embedded_file_is_in_the_source_capsule(self):
+        selected = set(subprocess.run(["git", "ls-files", "-z", "--", *release.SOURCE_PATHSPEC], cwd=ROOT,
+                                      check=True, capture_output=True).stdout.decode().split("\0"))
+        embedded = self.embedded()
+        # The scan sees what it guards: a regression in it would pass vacuously.
+        self.assertIn("crates/codewire-cli/src/commands/rex/codewire.lua", embedded)
+        self.assertIn("apps/cli/GPG_PUBLIC_KEY.asc", embedded)
+        self.assertEqual(self.TEST_ONLY - embedded, set(), "a listed test-only embed is no longer embedded")
+        self.assertEqual(sorted(embedded - self.TEST_ONLY - selected), [],
+                         "add these to SOURCE_PATHSPEC (scripts/ci/release/cw_release.py)")
 
 
 class LocalRuntimeTest(unittest.TestCase):
