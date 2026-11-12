@@ -1,5 +1,6 @@
 use super::*;
 use crate::terminal_attach::{RawModeGuard, SessionScreen};
+use base64::Engine as _;
 use codewire_client::hosted_shell::{InputNotice, InputStream};
 #[cfg(unix)]
 pub(crate) mod agents;
@@ -1512,6 +1513,8 @@ pub(crate) fn environment_run_allocates_tty_for_streams(
 fn session_command_label(session: &EnvironmentSessionView) -> String {
     if managed_session(session) {
         "managed agent".into()
+    } else if is_login_shell(&session.command) {
+        "login shell".into()
     } else {
         session.command.join(" ")
     }
@@ -2064,7 +2067,10 @@ pub(crate) async fn handle_environment_shell_command(
             effort: None,
             prompt: None,
             workdir: None,
-            env: Vec::new(),
+            env: login_shell_env()
+                .into_iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect(),
             tty: true,
             no_tty: false,
             detach: false,
@@ -2085,8 +2091,61 @@ pub(crate) fn login_shell_command() -> Vec<String> {
     vec![
         "/bin/sh".to_string(),
         "-c".to_string(),
-        "exec \"${SHELL:-/bin/sh}\" -l".to_string(),
+        LOGIN_SHELL.to_string(),
     ]
+}
+
+/// The client's terminal works in the shell as it would over `ssh`: TERM
+/// stays as the client sent it where the environment knows it. Where it
+/// does not, the client's own entry from `TERMINFO_ENV` is compiled into
+/// ~/.terminfo, as kitty's ssh kitten does, and failing that TERM falls
+/// back to xterm-256color with a notice. Without `infocmp` it cannot tell,
+/// and TERM is left alone.
+///
+/// In the workspace image, Claude Code fills the terminal, as the image's
+/// own `CLAUDE_CODE_NO_FLICKER=1` makes it do (#4332), for an environment
+/// whose image predates that and unless the user's Claude settings choose a
+/// `"tui"`. A trusted host's shell is the user's own and is left alone.
+const LOGIN_SHELL: &str = r#"t=${CW_TERMINFO-}; unset CW_TERMINFO
+if [ -n "${TERM-}" ] && command -v infocmp >/dev/null 2>&1 && ! infocmp "$TERM" >/dev/null 2>&1; then
+  if [ -n "$t" ] && printf %s "$t" | base64 -d 2>/dev/null | tic -x -o "$HOME/.terminfo" - >/dev/null 2>&1 && infocmp "$TERM" >/dev/null 2>&1; then :
+  else echo "[cw] this environment has no terminfo for $TERM; using xterm-256color" >&2; export TERM=xterm-256color; fi
+fi
+if [ -z "${CLAUDE_CODE_NO_FLICKER+x}" ] && [ -d /opt/codewire/agents ] && ! grep -qs '"tui"' "$HOME/.claude/settings.json"; then export CLAUDE_CODE_NO_FLICKER=1; fi
+exec "${SHELL:-/bin/sh}" -l"#;
+
+/// Carries the client terminal's terminfo entry to `LOGIN_SHELL`.
+const TERMINFO_ENV: &str = "CW_TERMINFO";
+
+/// Shells launched by released versions of cw, shown as one in `cw ls`.
+const EARLIER_LOGIN_SHELL: &str = "exec \"${SHELL:-/bin/sh}\" -l";
+
+/// The login shell's environment: the client terminal's own terminfo entry
+/// (`infocmp -x $TERM`, in base64), for an environment that lacks it. Empty
+/// when this machine has no entry to send.
+pub(crate) fn login_shell_env() -> BTreeMap<String, String> {
+    let term = env::var("TERM").unwrap_or_default();
+    if term.is_empty() || term == "dumb" {
+        return BTreeMap::new();
+    }
+    match std::process::Command::new("infocmp")
+        .args(["-x", &term])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        Ok(entry) if entry.status.success() && !entry.stdout.is_empty() => BTreeMap::from([(
+            TERMINFO_ENV.to_owned(),
+            base64::engine::general_purpose::STANDARD.encode(entry.stdout),
+        )]),
+        _ => BTreeMap::new(),
+    }
+}
+
+/// Whether a session runs the login shell, from this cw or an earlier one.
+fn is_login_shell(command: &[String]) -> bool {
+    matches!(command, [sh, c, script] if sh == "/bin/sh" && c == "-c"
+        && (script == LOGIN_SHELL || script == EARLIER_LOGIN_SHELL))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2746,7 +2805,7 @@ async fn select_or_create_environment_session(
                 .launch(
                     login_shell_command(),
                     target.default_working_dir(),
-                    BTreeMap::new(),
+                    login_shell_env(),
                     true,
                     // Only an environment without sessions gets here.
                     "shell".to_owned(),
@@ -3321,6 +3380,99 @@ async fn follow_session_output(
             }
             _ => unreachable!("non-interactive attachment produced navigation"),
         }
+    }
+}
+
+#[cfg(test)]
+mod login_shell_tests {
+    use super::*;
+
+    /// Runs `LOGIN_SHELL` with TERM and the sent entry, in a home whose
+    /// `.profile` reports what the login shell got. Returns that and stderr.
+    #[cfg(unix)]
+    fn login_shell(term: &str, entry: Option<&str>) -> (String, String) {
+        let home = tempfile::tempdir().expect("home");
+        std::fs::write(
+            home.path().join(".profile"),
+            "printf 'TERM=%s sent=%s ' \"$TERM\" \"${CW_TERMINFO-unset}\"\n\
+             infocmp \"$TERM\" >/dev/null 2>&1 && echo known || echo unknown\n",
+        )
+        .expect("profile");
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args(["-c", LOGIN_SHELL])
+            .env_clear()
+            .env("PATH", env::var("PATH").unwrap_or_default())
+            .env("HOME", home.path())
+            .env("SHELL", "/bin/sh")
+            .env("TERM", term)
+            .stdin(std::process::Stdio::null());
+        if let Some(entry) = entry {
+            command.env(
+                TERMINFO_ENV,
+                base64::engine::general_purpose::STANDARD.encode(entry),
+            );
+        }
+        let output = command.output().expect("run the login shell");
+        (
+            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_known_terminal_is_left_as_the_client_sent_it() {
+        let (shell, notice) = login_shell("xterm-256color", Some("unused"));
+        assert_eq!(shell, "TERM=xterm-256color sent=unset known");
+        assert_eq!(notice, "");
+    }
+
+    #[test]
+    fn claude_fills_the_terminal_only_in_the_workspace_image_by_default() {
+        let set = "export CLAUDE_CODE_NO_FLICKER=1";
+        let condition = LOGIN_SHELL
+            .lines()
+            .find(|line| line.contains(set))
+            .expect("the login shell sets Claude's renderer");
+        assert!(condition.contains(r#"[ -z "${CLAUDE_CODE_NO_FLICKER+x}" ]"#));
+        assert!(condition.contains("[ -d /opt/codewire/agents ]"));
+        assert!(condition.contains(r#"! grep -qs '"tui"' "$HOME/.claude/settings.json""#));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unknown_terminal_gets_the_clients_own_entry() {
+        let entry = "cw-synthetic-term|a terminal no system ships,\n\
+                     \tcols#80, lines#24, clear=\\E[H\\E[2J,\n";
+        let (shell, notice) = login_shell("cw-synthetic-term", Some(entry));
+        assert_eq!(shell, "TERM=cw-synthetic-term sent=unset known");
+        assert_eq!(notice, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unknown_terminal_without_an_entry_falls_back_with_a_notice() {
+        let (shell, notice) = login_shell("cw-synthetic-term", None);
+        assert_eq!(shell, "TERM=xterm-256color sent=unset known");
+        assert_eq!(
+            notice,
+            "[cw] this environment has no terminfo for cw-synthetic-term; using xterm-256color\n"
+        );
+    }
+
+    #[test]
+    fn the_login_shell_reads_the_entry_it_is_sent_and_lists_as_one() {
+        assert!(LOGIN_SHELL.contains(&format!("${{{TERMINFO_ENV}-}}")));
+        assert!(LOGIN_SHELL.contains(&format!("unset {TERMINFO_ENV}")));
+        assert!(is_login_shell(&login_shell_command()));
+        let earlier = ["/bin/sh", "-c", EARLIER_LOGIN_SHELL].map(String::from);
+        assert!(is_login_shell(&earlier));
+        assert!(!is_login_shell(&[
+            "/bin/sh".into(),
+            "-c".into(),
+            "npm test".into()
+        ]));
     }
 }
 

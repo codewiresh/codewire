@@ -251,3 +251,9 @@ check_version psql psql --version
 check_version protoc protoc --version
 # Codex's Linux sandbox runs commands through the system bubblewrap on PATH.
 check_version bwrap bwrap --version
+# `cw shell` from these terminals finds their terminfo, as ssh would (#4332).
+for terminal in xterm-kitty alacritty wezterm foot tmux-256color xterm-256color; do
+  infocmp "$terminal" >/dev/null
+done
+# Claude Code fills the terminal by default, as the image sets (#4332).
+test "${CLAUDE_CODE_NO_FLICKER-}" = 1

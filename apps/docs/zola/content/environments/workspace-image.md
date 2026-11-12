@@ -1,7 +1,7 @@
 ---
 title: The workspace image
 description: "What the Codewire workspace image holds: Ubuntu, language toolchains, Docker, Git, GitHub CLI and the coding agents, and how to add more."
-updated: 2026-10-26
+updated: 2026-11-12
 weight: 3
 ---
 
@@ -47,7 +47,7 @@ aider | aider 0.86.2
 
 | | |
 | --- | --- |
-| System | Ubuntu 24.04, `build-essential`, `curl`, `jq`, `tmux`, `vim`, `rsync`, `strace`, `gdb`, the PostgreSQL client |
+| System | Ubuntu 24.04, `build-essential`, `curl`, `jq`, `tmux`, `vim`, `rsync`, `strace`, `gdb`, the PostgreSQL client, terminfo for kitty, alacritty, wezterm, foot and most other terminals (`ncurses-term`, `kitty-terminfo`) |
 | Python | Python 3.12 with `venv` and `pip`, `pipx`, `uv`, `poetry` |
 | JavaScript | Node.js 22, `npm`, `pnpm`, `yarn`, `bun` |
 | Go | Go 1.27 |
@@ -77,3 +77,8 @@ the same package versions.
 Codewire manages Claude Code and Codex conversations (`cw run --agent`); the
 other agents run as ordinary terminal sessions. See
 [Supported agents](@/agents/supported.md).
+
+Claude Code opens full screen, with its input box on the bottom rows, as with
+its `"tui": "fullscreen"` setting: the image sets `CLAUDE_CODE_NO_FLICKER=1`.
+The variable outranks Claude's own `"tui"` setting, so for its inline renderer
+add `unset CLAUDE_CODE_NO_FLICKER` to your shell's rc file.

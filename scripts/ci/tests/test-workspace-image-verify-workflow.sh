@@ -169,7 +169,8 @@ for agent in codex claude gemini kimi pi aider; do
   grep -qF "$agent" "$AGENT_CONTRACT" || fail "verification omits $agent"
 done
 for tool in cw docker dockerd docker-compose gh git go gopls hcloud kubectl atmos node npm bun pnpm yarn \
-  python3 pipx poetry uv cargo rustc rustfmt psql protoc bwrap; do
+  python3 pipx poetry uv cargo rustc rustfmt psql protoc bwrap xterm-kitty alacritty wezterm \
+  CLAUDE_CODE_NO_FLICKER; do
   grep -qF "$tool" "$AGENT_CONTRACT" || fail "verification omits $tool"
 done
 grep -qF 'dynamic_bun_runner="bun""x"' "$AGENT_CONTRACT" ||

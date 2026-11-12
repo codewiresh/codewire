@@ -138,7 +138,7 @@ for agent in codex claude gemini kimi pi aider; do
   ln -s agent "$work/bin/$agent"
 done
 for tool in cw docker dockerd docker-compose gh git go gopls hcloud kubectl atmos \
-  node bun bun""x pnpm yarn python3 pipx poetry uv cargo rustc rustfmt psql protoc bwrap; do
+  node bun bun""x pnpm yarn python3 pipx poetry uv cargo rustc rustfmt psql protoc bwrap infocmp; do
   ln -s agent "$work/bin/$tool"
 done
 
@@ -169,6 +169,7 @@ run_contract() {
     FAKE_SSH_ROOT="$work/ssh" \
     FAIL_SSH_LOADER="${FAIL_SSH_LOADER:-false}" \
     FAIL_SSH_FIND="${FAIL_SSH_FIND:-false}" \
+    CLAUDE_CODE_NO_FLICKER="${FAKE_NO_FLICKER-1}" \
     bash "$CONTRACT" "$@"
 }
 
@@ -179,6 +180,12 @@ run_contract >"$work/success.out" 2>"$work/success.err"
 [[ ! -s "$work/success.err" ]] || fail 'successful contract emitted failure evidence'
 grep -Fxq 'codex-cli 0.160.0' "$work/success.out" || fail 'agent checks did not run'
 grep -Fxq 'npm dry-run OK' "$work/success.out" || fail 'Codex install-plan check did not run'
+if FAIL_AGENT=infocmp run_contract >"$work/terminfo.out" 2>"$work/terminfo.err"; then
+  fail 'an image without the terminals'"'"' terminfo passed the contract'
+fi
+if FAKE_NO_FLICKER='' run_contract >"$work/flicker.out" 2>"$work/flicker.err"; then
+  fail 'an image without CLAUDE_CODE_NO_FLICKER=1 passed the contract'
+fi
 for tool in kubectl atmos; do
   grep -Fxq "$tool test-version" "$work/success.out" || fail "$tool was not checked"
   status=0

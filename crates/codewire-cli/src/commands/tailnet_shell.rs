@@ -24,7 +24,7 @@ use codewire_client::{ClientError, CodewireClient, ErrorCode};
 use tokio::io::AsyncWriteExt as _;
 
 use super::platform_commands::display_client_error;
-use super::sessions::{login_shell_command, via_line};
+use super::sessions::{login_shell_command, login_shell_env, via_line};
 use crate::terminal_attach::{
     RawModeGuard, TerminalInput, WindowSizeWatch, terminal_input, terminal_size,
 };
@@ -106,6 +106,7 @@ pub(crate) async fn run(
         .unwrap_or_else(|| "xterm-256color".into());
     let launch = ShellLaunch {
         command: login_shell_command(),
+        env: login_shell_env(),
         term,
         columns,
         rows,

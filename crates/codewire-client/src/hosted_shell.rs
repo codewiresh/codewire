@@ -118,9 +118,10 @@ pub trait TerminalOutput {
     fn write(&mut self, data: &[u8]) -> impl Future<Output = std::io::Result<()>>;
 }
 
-/// The shell to launch: its command and terminal.
+/// The shell to launch: its command, environment and terminal.
 pub struct ShellLaunch {
     pub command: Vec<String>,
+    pub env: std::collections::BTreeMap<String, String>,
     pub term: String,
     pub columns: u16,
     pub rows: u16,
@@ -139,6 +140,7 @@ pub async fn run(
             org_id: org_id.into(),
             environment_id: environment_id.into(),
             command: launch.command,
+            env: launch.env.into_iter().collect(),
             pty: true,
             term: launch.term,
             columns: launch.columns.into(),

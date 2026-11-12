@@ -246,6 +246,7 @@ fn spawn_shell(
         .spawn(move || {
             let launch = ShellLaunch {
                 command: LOGIN_SHELL.map(String::from).to_vec(),
+                env: Default::default(),
                 term: target.term.clone(),
                 columns: target.columns,
                 rows: target.rows,

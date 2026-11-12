@@ -230,10 +230,14 @@ ENV GOPATH="/home/codewire/go"
 
 # Codex's Linux sandbox runs commands through the system bubblewrap on PATH;
 # without it Codex warns at startup and falls back to its bundled copy.
+# ncurses-term and kitty-terminfo are the terminfo entries of the terminals
+# people connect from (alacritty, foot, wezterm, kitty and many more), so
+# `clear`, vim and full-screen programs work over `cw shell` as over ssh;
+# ncurses-base alone knows little beyond xterm, screen and tmux.
 RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
     apt-get-with-retry update && apt-get-with-retry install -y --no-install-recommends \
       bubblewrap=0.9.0-1ubuntu0.3 \
-      file gdb pipx pkg-config python3-full python3-venv strace && \
+      file gdb kitty-terminfo ncurses-term pipx pkg-config python3-full python3-venv strace && \
     rm -rf /var/lib/apt/lists/*
 
 # The protoc CI pins, for the image's own platform. Ubuntu's protobuf-compiler
@@ -333,6 +337,13 @@ RUN --mount=type=bind,source=images/workspace/agents,target=/tmp/codewire-agents
     for agent in claude codex gemini kimi pi; do \
       ln -s "../lib/node_modules/.bin/$agent" "/opt/codewire/agents/npm/bin/$agent"; \
     done
+
+# Claude Code fills the terminal, its input box on the bottom rows, as with
+# `"tui": "fullscreen"` (#4332); its default draws inline below the output.
+# The home is a persistent mount, so this lives in the image. The variable
+# outranks Claude's own "tui" setting; `unset CLAUDE_CODE_NO_FLICKER` in a
+# shell's rc file restores the inline renderer.
+ENV CLAUDE_CODE_NO_FLICKER=1
 
 USER root
 # The home is a persistent mount, so interactive shell settings live in the image.

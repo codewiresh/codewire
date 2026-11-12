@@ -424,6 +424,11 @@ cw shell --stdio ENV     # for OpenSSH ProxyCommand (cw-local-NAME, cw-cloud-NAM
 
 Opens a login shell as a new session in the selected or named environment.
 
+The shell gets your terminal's `TERM`. If the environment has no terminfo
+entry for it, `cw shell` sends your machine's own entry (`infocmp -x`) and the
+shell installs it in `~/.terminfo`, as kitty's ssh kitten does. When there is
+no entry to send, the shell uses `xterm-256color` and says so.
+
 ## cw vscode
 
 ```sh
