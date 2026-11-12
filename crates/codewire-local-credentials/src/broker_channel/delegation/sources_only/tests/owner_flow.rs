@@ -92,6 +92,12 @@ impl LocalBrokerProcessSpawner for BrokerPeer {
     }
 }
 
+/// A hang guard for the broker's lease, not a speed expectation
+/// (docs/dev/AGENT-WORKFLOW.md "Failure convergence"). The lease arrives well
+/// under a second here; a starved CI guest must not turn that into a failure
+/// (#4232, #4169).
+const LEASE_HANG_GUARD: Duration = Duration::from_secs(60);
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owner_client_requires_exact_local_profile_and_delivers_both_application_sources() {
     let temp = tempfile::tempdir().unwrap();
@@ -122,7 +128,8 @@ async fn owner_client_requires_exact_local_profile_and_delivers_both_application
         observation: Arc::clone(&observation),
     });
     let (shutdown, stopped) = oneshot::channel();
-    let server = tokio::spawn(crate::service::serve_until_with_process_spawners(
+    let (listening, listened) = oneshot::channel();
+    let mut server = tokio::spawn(crate::service::serve_until_with_process_spawners(
         config.clone(),
         EphemeralProtectedStore::default(),
         builtin_provider_catalog(),
@@ -132,19 +139,17 @@ async fn owner_client_requires_exact_local_profile_and_delivers_both_application
         crate::service::AuthorityRuntimeAdapters {
             broker_spawner: Some(spawner.clone()),
             platform_connector: Some(connector),
+            listening: Some(listening),
             ..Default::default()
         },
     ));
-    let mut owner = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if let Ok(client) = LocalCredentialClient::connect(&config).await {
-                break client;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    // The authority says when its socket listens, so one connect either
+    // succeeds or reports why; no clock guesses its startup (#4232).
+    tokio::select! {
+        listened = listened => listened.expect("the authority ended before listening"),
+        ended = &mut server => panic!("the authority ended before listening: {ended:?}"),
+    }
+    let mut owner = LocalCredentialClient::connect(&config).await.unwrap();
     let credential = owner
         .add_credential(
             NewCredential {
@@ -251,7 +256,7 @@ async fn owner_client_requires_exact_local_profile_and_delivers_both_application
             .unwrap()
             .running
     );
-    let (leased_id, sealed) = tokio::time::timeout(Duration::from_secs(3), received.recv())
+    let (leased_id, sealed) = tokio::time::timeout(LEASE_HANG_GUARD, received.recv())
         .await
         .unwrap()
         .unwrap();
