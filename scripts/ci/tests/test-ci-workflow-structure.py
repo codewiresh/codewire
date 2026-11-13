@@ -304,6 +304,11 @@ def roles_in_scope(workflow, job):
 POLICY_DRIFT = "policy-drift.yml"
 POLICY_DRIFT_PATHS = {"${{ steps.selection.outputs.base_sha }}": ".policy-drift-base",
                       "${{ steps.selection.outputs.head_sha }}": "candidate"}
+# The runner image's sealed Kyverno CLI (#3821): the check verifies these
+# exact bytes before it mints its token, and never passes without running.
+POLICY_DRIFT_KYVERNO_CHECK = ("printf '%s  %s\\n' 31388ab9b889429cfb48923d00e46159a9cecd30cdc906edbef725a60a7e587e "
+                              '"$kyverno" |')
+POLICY_DRIFT_TOKEN = '"$base/scripts/ci/setup/fetch-forgejo-policy-drift-token.sh"'
 
 
 def policy_drift_errors(workflow):
@@ -330,6 +335,20 @@ def policy_drift_errors(workflow):
         with_ = checkouts.get(ref) or {}
         if with_.get("path") != path or with_.get("persist-credentials") is not False:
             errors.append(f"{POLICY_DRIFT} checks out {ref} at {with_.get('path')!r}, not apart at {path!r}")
+    checks = [str(step.get("run", "")) for step in steps if POLICY_DRIFT_TOKEN in str(step.get("run", ""))]
+    if len(checks) != 1:
+        errors.append(f"{POLICY_DRIFT} mints its token in {len(checks)} steps, not one")
+    else:
+        run = checks[0]
+        verified = run.find(POLICY_DRIFT_KYVERNO_CHECK)
+        if verified < 0 or verified > run.find(POLICY_DRIFT_TOKEN):
+            errors.append(f"{POLICY_DRIFT} does not verify the sealed Kyverno CLI's sha256 before minting its token")
+        if re.search(r"^\s*exit 0\b", run, re.M):
+            errors.append(f"{POLICY_DRIFT} can pass without running the check")
+        if not run.startswith("set -euo pipefail\n"):
+            errors.append(f"{POLICY_DRIFT} does not stop at its first failed command")
+        if re.search(r"\|\|\s*(true|:)\s*$", run, re.M):
+            errors.append(f"{POLICY_DRIFT} ignores a failed command")
     for step in steps:
         run = str(step.get("run", ""))
         # The pull request's tree is data: it appears only as the checker's
@@ -577,6 +596,25 @@ WORKFLOW_MUTATIONS = {
         '"$base/scripts/ci/verify/check-policy-drift.sh"', '"$PWD/candidate/scripts/ci/verify/check-policy-drift.sh"', 1)),
     "the drift check checks the pull request out as its working tree": ("policy-drift.yml", lambda t: t.replace(
         "          path: candidate\n", "", 1)),
+    "the drift check mints its token before verifying Kyverno": ("policy-drift.yml", lambda t: t.replace(
+        '          kyverno=/usr/local/libexec/kyverno-1.17.1\n',
+        '          "$base/scripts/ci/setup/fetch-forgejo-policy-drift-token.sh" "$work/token"\n'
+        '          kyverno=/usr/local/libexec/kyverno-1.17.1\n', 1).replace(
+        '            sha256sum --check --strict --quiet -\n'
+        '          "$base/scripts/ci/setup/fetch-forgejo-policy-drift-token.sh" "$work/token"\n',
+        '            sha256sum --check --strict --quiet -\n', 1)),
+    "the drift check drops the Kyverno hash": ("policy-drift.yml", lambda t: t.replace(
+        "31388ab9b889429cfb48923d00e46159a9cecd30cdc906edbef725a60a7e587e", "", 1)),
+    "the drift check pins another Kyverno": ("policy-drift.yml", lambda t: t.replace(
+        "31388ab9b889429cfb48923d00e46159a9cecd30cdc906edbef725a60a7e587e", "0" * 64, 1)),
+    "the drift check passes where Kyverno is missing": ("policy-drift.yml", lambda t: t.replace(
+        "            exit 1\n          fi\n", "            exit 0\n          fi\n", 1)),
+    "the drift check keeps going after a failed command": ("policy-drift.yml", lambda t: t.replace(
+        '          set -euo pipefail\n          base="$PWD/.policy-drift-base"\n',
+        '          base="$PWD/.policy-drift-base"\n', 1)),
+    "the drift check ignores a Kyverno hash mismatch": ("policy-drift.yml", lambda t: t.replace(
+        "            sha256sum --check --strict --quiet -\n",
+        "            sha256sum --check --strict --quiet - || true\n", 1)),
     "Dev selection holds OIDC on the untrusted runner": ("deploy-dev.yaml", lambda t: in_job(
         t, "deploy-selection", f"runs-on: {runners.TRUSTED_LIGHT}", f"runs-on: {runners.UNTRUSTED_LIGHT}")),
 }

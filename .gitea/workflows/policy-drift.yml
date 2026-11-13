@@ -78,14 +78,9 @@ jobs:
           # The runner image seals the official Kyverno CLI 1.17.1 off PATH;
           # this runner's egress has no GitHub to fetch it from (#3821).
           kyverno=/usr/local/libexec/kyverno-1.17.1
-          if [[ ! -e "$kyverno" ]]; then
-            # Until this label's runners carry the image that seals it, the
-            # check can't run; it says so rather than failing every pull
-            # request, and mints no token. Remove this before it is required.
-            echo "::warning::Policy drift did not run: this runner image has no sealed Kyverno CLI at $kyverno (#3821)"
-            printf '### Policy drift did not run\n\nThis runner image has no sealed Kyverno CLI yet (#3821).\n' \
-              >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
-            exit 0
+          if [[ ! -f "$kyverno" || ! -x "$kyverno" ]]; then
+            echo "::error::the runner image has no sealed Kyverno CLI at $kyverno (runner image v10 seals it)"
+            exit 1
           fi
           printf '%s  %s\n' 31388ab9b889429cfb48923d00e46159a9cecd30cdc906edbef725a60a7e587e "$kyverno" |
             sha256sum --check --strict --quiet -
