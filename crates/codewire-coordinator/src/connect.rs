@@ -1513,12 +1513,13 @@ mod tests {
         let nats_url =
             std::env::var("NATS_URL").expect("set NATS_URL to a JetStream-enabled NATS server");
         let sidecar_plane =
-            CoordinationPlane::setup(async_nats::connect(nats_url.clone()).await.unwrap())
+            CoordinationPlane::setup(async_nats::connect(nats_url.clone()).await.unwrap(), 1)
                 .await
                 .unwrap();
-        let client_plane = CoordinationPlane::setup(async_nats::connect(nats_url).await.unwrap())
-            .await
-            .unwrap();
+        let client_plane =
+            CoordinationPlane::setup(async_nats::connect(nats_url).await.unwrap(), 1)
+                .await
+                .unwrap();
 
         let environment_id = Uuid::new_v4();
         let (mut sidecar_state, _) = lazy_state();

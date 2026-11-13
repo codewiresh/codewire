@@ -11,6 +11,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_nats::HeaderMap;
+use async_nats::jetstream::stream::LastRawMessageErrorKind;
 use bytes::Bytes;
 use codewire_proto::codewire::internal::v1::{
     CheckNodeKeyRequest, CheckNodeKeyResponse, DerpAdmissionService,
@@ -87,6 +89,17 @@ pub(crate) fn key_hex(key: &NodePublic) -> String {
     out
 }
 
+/// Whether a bucket's last message for a key holds a value: a put carries no
+/// operation or `PUT`; a delete, purge or expiry marker says otherwise.
+fn is_live_value(headers: &HeaderMap) -> bool {
+    headers
+        .get(async_nats::header::NATS_MARKER_REASON)
+        .is_none()
+        && headers
+            .get("KV-Operation")
+            .is_none_or(|operation| operation.as_str() == "PUT")
+}
+
 impl CoordinationPlane {
     /// Records `key` for the session `owner`.
     pub(crate) async fn put_node_key(&self, key: &NodePublic, owner: Uuid) -> anyhow::Result<()> {
@@ -118,8 +131,25 @@ impl CoordinationPlane {
         Ok(())
     }
 
+    /// A replicated bucket answers reads from any replica, and a follower can
+    /// trail a fresh write by milliseconds (#3542). So a key no replica has
+    /// is asked of the stream's leader before DERP is told it is unknown.
     pub(crate) async fn node_key_registered(&self, key: &NodePublic) -> anyhow::Result<bool> {
-        Ok(self.node_keys.get(key_hex(key)).await?.is_some())
+        let name = key_hex(key);
+        if self.node_keys.get(&name).await?.is_some() {
+            return Ok(true);
+        }
+        let subject = format!("{}{name}", self.node_keys.prefix);
+        match self
+            .node_keys
+            .stream
+            .get_last_raw_message_by_subject(&subject)
+            .await
+        {
+            Ok(message) => Ok(is_live_value(&message.headers)),
+            Err(error) if error.kind() == LastRawMessageErrorKind::NoMessageFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -206,5 +236,42 @@ mod tests {
     #[test]
     fn key_hex_is_lowercase_hex() {
         assert_eq!(key_hex(&NodePublic::from_raw([0x0f; 32])), "0f".repeat(32));
+    }
+
+    #[test]
+    fn only_a_put_is_a_live_value() {
+        let with = |name: &str, value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, value);
+            headers
+        };
+        assert!(is_live_value(&HeaderMap::new()));
+        assert!(is_live_value(&with("KV-Operation", "PUT")));
+        assert!(!is_live_value(&with("KV-Operation", "DEL")));
+        assert!(!is_live_value(&with("KV-Operation", "PURGE")));
+        assert!(!is_live_value(&with("Nats-Marker-Reason", "MaxAge")));
+    }
+
+    /// An unknown key and a removed one both miss on the direct read and are
+    /// answered by the leader: no message, and a delete marker.
+    #[tokio::test]
+    #[ignore = "requires NATS_URL pointing at a JetStream-enabled NATS server"]
+    async fn a_registered_key_is_found_and_an_unknown_or_removed_one_is_not() {
+        let nats_url =
+            std::env::var("NATS_URL").expect("set NATS_URL to a JetStream-enabled NATS server");
+        let replicas = std::env::var("NATS_KV_REPLICAS").map_or(1, |raw| raw.parse().unwrap());
+        let client = async_nats::connect(nats_url).await.unwrap();
+        let plane = CoordinationPlane::setup(client, replicas).await.unwrap();
+        let mut raw = [0_u8; 32];
+        raw[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+        raw[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+        let key = NodePublic::from_raw(raw);
+        let owner = Uuid::new_v4();
+
+        assert!(!plane.node_key_registered(&key).await.unwrap());
+        plane.put_node_key(&key, owner).await.unwrap();
+        assert!(plane.node_key_registered(&key).await.unwrap());
+        plane.delete_node_key(&key, owner).await.unwrap();
+        assert!(!plane.node_key_registered(&key).await.unwrap());
     }
 }

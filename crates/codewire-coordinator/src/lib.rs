@@ -60,9 +60,14 @@ impl CoordinatorState {
         }
     }
 
-    /// Attach the optional cross-replica NATS/JetStream plane.
-    pub async fn with_nats_client(mut self, client: async_nats::Client) -> anyhow::Result<Self> {
-        self.coordination = Some(CoordinationPlane::setup(client).await?);
+    /// Attach the optional cross-replica NATS/JetStream plane, its KV
+    /// buckets kept at `kv_replicas` (`NATS_KV_REPLICAS`, #3542).
+    pub async fn with_nats_client(
+        mut self,
+        client: async_nats::Client,
+        kv_replicas: usize,
+    ) -> anyhow::Result<Self> {
+        self.coordination = Some(CoordinationPlane::setup(client, kv_replicas).await?);
         Ok(self)
     }
 }
@@ -76,20 +81,31 @@ struct CoordinationPlane {
 }
 
 impl CoordinationPlane {
-    async fn setup(client: async_nats::Client) -> anyhow::Result<Arc<Self>> {
+    async fn setup(client: async_nats::Client, kv_replicas: usize) -> anyhow::Result<Arc<Self>> {
         let js = jetstream::new(client.clone());
-        let kv = key_value_bucket(
+        let bucket = |bucket: &str, description: &str, max_age| jetstream::kv::Config {
+            bucket: bucket.to_string(),
+            description: description.to_string(),
+            max_age,
+            num_replicas: kv_replicas,
+            ..Default::default()
+        };
+        let kv = codewire_server_core::nats::kv_bucket(
             &js,
-            COORDINATOR_BUCKET,
-            "Latest sidecar WireGuard node per environment (cross-replica coordinator)",
-            COORDINATOR_BUCKET_TTL,
+            bucket(
+                COORDINATOR_BUCKET,
+                "Latest sidecar WireGuard node per environment (cross-replica coordinator)",
+                COORDINATOR_BUCKET_TTL,
+            ),
         )
         .await?;
-        let node_keys = key_value_bucket(
+        let node_keys = codewire_server_core::nats::kv_bucket(
             &js,
-            node_keys::NODE_KEY_BUCKET,
-            "Node keys of live coordinator sessions, for DERP client admission",
-            node_keys::NODE_KEY_TTL,
+            bucket(
+                node_keys::NODE_KEY_BUCKET,
+                "Node keys of live coordinator sessions, for DERP client admission",
+                node_keys::NODE_KEY_TTL,
+            ),
         )
         .await?;
         Ok(Arc::new(Self {
@@ -177,33 +193,6 @@ impl CoordinationPlane {
             self.kv.delete(sidecar_key(env_id)).await?;
         }
         Ok(())
-    }
-}
-
-async fn key_value_bucket(
-    js: &jetstream::Context,
-    bucket: &str,
-    description: &str,
-    max_age: Duration,
-) -> anyhow::Result<jetstream::kv::Store> {
-    match js.get_key_value(bucket).await {
-        Ok(kv) => Ok(kv),
-        Err(get_err) => match js
-            .create_key_value(jetstream::kv::Config {
-                bucket: bucket.to_string(),
-                description: description.to_string(),
-                max_age,
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(kv) => Ok(kv),
-            Err(create_err) => js.get_key_value(bucket).await.map_err(|retry_err| {
-                anyhow::anyhow!(
-                    "setup coordinator KV {bucket} failed: get={get_err}; create={create_err}; retry={retry_err}"
-                )
-            }),
-        },
     }
 }
 
@@ -1128,7 +1117,7 @@ mod tests {
         let nats_url =
             std::env::var("NATS_URL").expect("set NATS_URL to a JetStream-enabled NATS server");
         let client = async_nats::connect(nats_url).await.unwrap();
-        let plane = CoordinationPlane::setup(client).await.unwrap();
+        let plane = CoordinationPlane::setup(client, 1).await.unwrap();
 
         let env_id = Uuid::new_v4();
         let sidecar_node = sample_node(env_id, 11);

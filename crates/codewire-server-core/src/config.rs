@@ -9,6 +9,7 @@
 //! | `DB_PASSWORD` | required when `DATABASE_URL` is unset | — |
 //! | `NATS_URL` | no | unset → service runs without NATS |
 //! | `NATS_TOKEN` | no | unset → unauthenticated NATS |
+//! | `NATS_KV_REPLICAS` | no | `1`; 1, 3 or 5 replicas of every KV bucket |
 //! | `SESSION_SECRET` | yes | — |
 //! | `<SERVICE>_PORT` (e.g. `BILLING_PORT`) | no | derived per service |
 //! | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | unset → no trace export (read only by services that call `obs::init_with_traces`) |
@@ -51,6 +52,8 @@ pub struct ServiceConfig {
     pub nats_url: Option<String>,
     /// NATS bearer token; `None` means unauthenticated NATS.
     pub nats_token: Option<String>,
+    /// Replicas of every JetStream KV bucket the service keeps (#3542).
+    pub nats_kv_replicas: usize,
     /// Shared platform-internal secret: HMAC sidecar/gateway tokens and
     /// the idp's 2FA secret encryption. Never used for user bearer-token
     /// validation, which is a direct database lookup (see
@@ -78,6 +81,16 @@ impl ServiceConfig {
         let session_secret = require(lookup, "SESSION_SECRET")?;
         let nats_url = optional(lookup, "NATS_URL");
         let nats_token = optional(lookup, "NATS_TOKEN");
+        let nats_kv_replicas = optional(lookup, "NATS_KV_REPLICAS")
+            .map(|value| {
+                crate::nats::parse_kv_replicas(&value).map_err(|source| ConfigError::Parse {
+                    var: "NATS_KV_REPLICAS",
+                    value,
+                    source,
+                })
+            })
+            .transpose()?
+            .unwrap_or(crate::nats::DEFAULT_KV_REPLICAS);
         let otlp_endpoint = optional(lookup, "OTEL_EXPORTER_OTLP_ENDPOINT");
 
         let port_var: &'static str = match service {
@@ -107,6 +120,7 @@ impl ServiceConfig {
             database_url,
             nats_url,
             nats_token,
+            nats_kv_replicas,
             session_secret,
             otlp_endpoint,
         })
@@ -279,5 +293,31 @@ mod tests {
         assert_eq!(cfg.bind_addr.port(), 9001);
         assert_eq!(cfg.nats_url.as_deref(), Some("nats://localhost:4222"));
         assert_eq!(cfg.nats_token.as_deref(), Some("token"));
+        assert_eq!(cfg.nats_kv_replicas, 1, "unset is one replica");
+    }
+
+    #[test]
+    fn kv_replicas_come_from_the_environment_and_are_checked() {
+        let with = |replicas: &str| {
+            ServiceConfig::from_lookup("coordinator", &|var: &str| match var {
+                "DATABASE_URL" => Some("postgres://x".into()),
+                "SESSION_SECRET" => Some("y".into()),
+                "NATS_KV_REPLICAS" => Some(replicas.into()),
+                _ => None,
+            })
+        };
+        assert_eq!(with("3").unwrap().nats_kv_replicas, 3);
+        assert_eq!(with("").unwrap().nats_kv_replicas, 1, "empty is unset");
+        let error = with("2").unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ConfigError::Parse {
+                    var: "NATS_KV_REPLICAS",
+                    ..
+                }
+            ),
+            "{error}"
+        );
     }
 }
