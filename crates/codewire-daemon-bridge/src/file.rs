@@ -194,7 +194,9 @@ where
             request_id,
             tx,
         ));
-        connectrpc::Response::stream_ok(receiver_stream(rx))
+        // File bytes are often incompressible. Gzip made each chunk larger and
+        // cost the server and the client a pass over it, so send them as is.
+        Ok(connectrpc::Response::stream(receiver_stream(rx)).compress(false))
     }
 
     async fn upload_file(
@@ -800,6 +802,7 @@ fn receiver_stream<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     mod cancellation;
+    mod download;
 
     use std::time::{Duration, Instant};
 
