@@ -32,6 +32,9 @@ pub(crate) struct FakeRuntimeDriver {
     pub members: Mutex<Vec<RuntimeMember>>,
     /// When set, listing members fails with this message.
     pub members_error: Mutex<Option<String>>,
+    /// When set, `ensure_placement` refuses with this message, as a Sandbox
+    /// namespace without its labels does.
+    pub placement_error: Mutex<Option<String>>,
     /// Each read of an environment's members, in order; the last one repeats.
     pub member_reads: Mutex<VecDeque<Vec<Incarnation>>>,
     /// What replacing a member answers.
@@ -134,6 +137,9 @@ impl RuntimePools for FakeRuntimeDriver {
 #[async_trait]
 impl RuntimeClaims for FakeRuntimeDriver {
     async fn ensure_placement(&self, placement: &Placement) -> anyhow::Result<()> {
+        if let Some(error) = self.placement_error.lock().unwrap().clone() {
+            anyhow::bail!(error);
+        }
         self.placements.lock().unwrap().push(placement.clone());
         Ok(())
     }

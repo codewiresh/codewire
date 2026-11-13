@@ -38,6 +38,9 @@ TEMPORAL_PORT=$((PORT_BASE + 5))
 NATS_CLIENT_PORT=$((PORT_BASE + 6))
 NATS_MONITOR_PORT=$((PORT_BASE + 7))
 ORCHESTRATION_KUBE_STUB_PORT=$((PORT_BASE + 8))
+# The shared Sandbox namespace orchestration checks at startup; the kube stub
+# serves it with the labels the cluster's Sandbox policies select.
+ORCHESTRATION_SANDBOX_NAMESPACE=dev-sandboxes
 ORCHESTRATION_DAEMON_PORT=$((PORT_BASE + 9))
 ORCHESTRATION_UNAVAILABLE_DAEMON_PORT=$((PORT_BASE + 10))
 TEMPORAL_HOST_PORT="127.0.0.1:${TEMPORAL_PORT}"
@@ -1858,6 +1861,7 @@ import sys
 import time
 
 port = int(sys.argv[1])
+sandbox_namespace = sys.argv[2]
 
 runtimes = {
     "env_exec_contract_backend": {
@@ -2029,6 +2033,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == "/healthz":
             self.empty_response(200)
             return
+        if self.path.split("?", 1)[0] == "/api/v1/namespaces/" + sandbox_namespace:
+            self.json_response({
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {
+                    "name": sandbox_namespace,
+                    "labels": {
+                        "codewire.sh/resource-type": "sandbox",
+                        "codewire.sh/runtime-scope": "shared",
+                    },
+                },
+            })
+            return
         if self.runtime_response():
             return
         if (
@@ -2052,7 +2069,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
-' "$ORCHESTRATION_KUBE_STUB_PORT"
+' "$ORCHESTRATION_KUBE_STUB_PORT" "$ORCHESTRATION_SANDBOX_NAMESPACE"
 }
 
 start_orchestration_daemon_fixture() {
@@ -2172,6 +2189,7 @@ start_orchestration_process() {
     KUBECONFIG="$kubeconfig" \
     KUBERNETES_SERVICE_HOST= KUBERNETES_SERVICE_PORT= \
     POD_NAMESPACE=codewire-integration \
+    SANDBOX_NAMESPACE="$ORCHESTRATION_SANDBOX_NAMESPACE" \
     CODEWIRE_API_URL="http://127.0.0.1:${ORCHESTRATION_PORT}" \
     DATABASE_URL="$DATABASE_URL_RUST" SESSION_SECRET="$SESSION_SECRET" \
     CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER=true \

@@ -521,6 +521,18 @@ async fn main() -> anyhow::Result<()> {
     {
         panic!("{error}");
     }
+    // The cluster's Sandbox network and admission policies select the Sandbox
+    // namespace by its labels. Refuse to start against one without them, so
+    // no Sandbox or pool member is ever placed outside those policies.
+    if let Some(kube) = kube.as_ref() {
+        codewire_orchestration::sandbox::client::SandboxClient::new(
+            kube.clone(),
+            &sandbox_cfg.sandbox_namespace,
+        )
+        .ensure_namespace()
+        .await
+        .context("check the Sandbox namespace")?;
+    }
     if let Some(files) = &internal_tls {
         verify_internal_tls_roots(
             kube.as_ref(),

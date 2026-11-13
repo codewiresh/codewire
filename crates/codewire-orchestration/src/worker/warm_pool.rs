@@ -196,6 +196,13 @@ async fn tick(
         runtime.forget_pool_memory();
         return None;
     }
+    // The cluster's Sandbox network and admission policies select the
+    // namespace by its labels; a pool member in a namespace without them would
+    // run outside both, so nothing is written there.
+    if let Err(error) = runtime.ensure_placement(&config.placement).await {
+        tracing::warn!(error = %format!("{error:#}"), "warm pools: the Sandbox namespace is not ready; nothing written");
+        return Some(PassResult::Error);
+    }
     Some(
         match runtime.keep_pools(&config.placement, &config.wanted).await {
             Ok(pass) => PassResult::from(pass),
@@ -229,7 +236,7 @@ pub async fn warm_own_pools(ctx: Arc<WorkerContext>, ready: watch::Sender<bool>)
     hold_until_warm(
         &ready,
         rotation(&ctx),
-        |rotation| warm(&ctx, rotation),
+        |rotation| async { warm(ctx.require_runtime()?, rotation).await },
         ROTATION_CHECK_BOUND,
         WARM_UP_BOUND,
     )
@@ -311,10 +318,11 @@ async fn rotation(ctx: &WorkerContext) -> anyhow::Result<Option<Rotation>> {
 
 /// Create each rotating shape's template and one-member pool, then wait until
 /// every one has a ready member.
-async fn warm(ctx: &WorkerContext, rotation: Rotation) -> anyhow::Result<()> {
-    ctx.runtime
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("sandbox backend is not configured"))?
+async fn warm(runtime: &dyn RuntimeDriver, rotation: Rotation) -> anyhow::Result<()> {
+    // As `tick`: never a pool member in a namespace the cluster's Sandbox
+    // policies don't select.
+    runtime.ensure_placement(&rotation.placement).await?;
+    runtime
         .warm_pools(&rotation.placement, &rotation.rotating)
         .await
 }

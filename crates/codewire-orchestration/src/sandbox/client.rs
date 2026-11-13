@@ -6161,6 +6161,64 @@ mod tests {
         assert!(super::sandbox_namespace_ready("dev-sandboxes", Some(&wrong)).is_err());
         assert!(super::sandbox_namespace_ready("dev-sandboxes", None).is_err());
     }
+
+    fn namespace_client(namespace: Option<Value>) -> SandboxClient {
+        let service = Router::new().fallback(move |request: Request<Body>| {
+            let namespace = namespace.clone();
+            async move {
+                assert_eq!(request.method(), Method::GET, "the check never mutates");
+                assert_eq!(request.uri().path(), "/api/v1/namespaces/dev-sandboxes");
+                let (status, body) = match namespace {
+                    Some(namespace) => (StatusCode::OK, namespace),
+                    None => (StatusCode::NOT_FOUND, kubernetes_status("NotFound", 404)),
+                };
+                Response::builder()
+                    .status(status)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap()
+            }
+        });
+        SandboxClient::new(Client::new(service, "default"), "dev-sandboxes")
+    }
+
+    #[tokio::test]
+    async fn the_startup_check_refuses_an_unlabelled_or_missing_sandbox_namespace() {
+        let namespace = |labels: Value| {
+            json!({
+                "apiVersion": "v1", "kind": "Namespace",
+                "metadata": {"name": "dev-sandboxes", "labels": labels}
+            })
+        };
+        namespace_client(Some(namespace(json!({
+            "codewire.sh/resource-type": "sandbox",
+            "codewire.sh/runtime-scope": "shared"
+        }))))
+        .ensure_namespace()
+        .await
+        .expect("a labelled namespace passes");
+
+        let error = namespace_client(Some(namespace(json!({}))))
+            .ensure_namespace()
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("codewire.sh/resource-type=sandbox"),
+            "{error}"
+        );
+        assert!(
+            error.contains("codewire.sh/runtime-scope=shared"),
+            "{error}"
+        );
+
+        let error = namespace_client(None)
+            .ensure_namespace()
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not exist"), "{error}");
+    }
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Method, Request, Response, StatusCode, header};

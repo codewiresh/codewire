@@ -328,9 +328,41 @@ async fn only_the_leader_keeps_pools_and_every_other_tick_forgets() {
         Some(PassResult::Conflict)
     );
     assert_eq!(*runtime.pool_memory_forgotten.lock().unwrap(), 3);
+    // Each pass checks the namespace, then keeps the pools there.
     assert_eq!(
         *runtime.placements.lock().unwrap(),
-        vec![Placement::new(NAMESPACE); 3]
+        vec![Placement::new(NAMESPACE); 6]
+    );
+}
+
+/// A Sandbox namespace the cluster's Sandbox policies don't select (missing
+/// its labels) gets no pool member: the pass ends as an error and writes
+/// nothing.
+#[tokio::test]
+async fn no_pool_member_is_kept_in_a_namespace_the_sandbox_policies_dont_select() {
+    use crate::runtime::fake::FakeRuntimeDriver;
+
+    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), false)
+        .unwrap()
+        .unwrap();
+    let runtime = FakeRuntimeDriver::default();
+    *runtime.placement_error.lock().unwrap() =
+        Some("sandbox namespace lacks codewire.sh/resource-type=sandbox".into());
+    runtime
+        .pool_passes
+        .lock()
+        .unwrap()
+        .push_back(Ok(PoolPass::Wrote));
+
+    assert_eq!(tick(&runtime, &config, true).await, Some(PassResult::Error));
+    assert!(
+        runtime.placements.lock().unwrap().is_empty(),
+        "a pool was kept"
+    );
+    assert_eq!(
+        runtime.pool_passes.lock().unwrap().len(),
+        1,
+        "keep_pools ran"
     );
 }
 
@@ -354,5 +386,49 @@ fn the_loops_metric_names_and_labels_are_unchanged() {
     assert_eq!(
         named(config_valid_metric()),
         ("codewire_warm_pool_config_valid".to_string(), vec![])
+    );
+}
+
+/// A release's rotation writes no pool either into a namespace the Sandbox
+/// policies don't select: `warm` refuses before `warm_pools`.
+#[tokio::test]
+async fn a_rotation_warms_no_pool_in_a_namespace_the_sandbox_policies_dont_select() {
+    use crate::runtime::fake::FakeRuntimeDriver;
+
+    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), false)
+        .unwrap()
+        .unwrap();
+    let runtime = FakeRuntimeDriver::default();
+    *runtime.placement_error.lock().unwrap() =
+        Some("sandbox namespace lacks codewire.sh/resource-type=sandbox".into());
+    let rotation = Rotation {
+        placement: config.placement.clone(),
+        rotating: config.wanted.pools.clone(),
+    };
+
+    let error = warm(&runtime, rotation)
+        .await
+        .expect_err("a refused namespace is warmed");
+    assert!(
+        error.to_string().contains("codewire.sh/resource-type"),
+        "{error}"
+    );
+    assert!(
+        runtime.placements.lock().unwrap().is_empty(),
+        "a pool was warmed"
+    );
+
+    // With the namespace ready, the same rotation warms its pools there.
+    *runtime.placement_error.lock().unwrap() = None;
+    let rotation = Rotation {
+        placement: config.placement.clone(),
+        rotating: config.wanted.pools.clone(),
+    };
+    warm(&runtime, rotation)
+        .await
+        .expect("a ready namespace is warmed");
+    assert_eq!(
+        *runtime.placements.lock().unwrap(),
+        vec![Placement::new(NAMESPACE); 2]
     );
 }
