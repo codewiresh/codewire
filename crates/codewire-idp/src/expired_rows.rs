@@ -5,7 +5,8 @@
 //! ones; the tables then hold about one lifetime's worth of rows at any
 //! rate. Rows another writer is removing are skipped, not waited for. Tokens
 //! are minted only for a signed-in user, so issuing one removes that user's
-//! expired tokens through the per-user index.
+//! expired tokens through the per-user index, and storing a refresh token
+//! also removes a batch of expired records of consumed ones.
 
 use sqlx::PgPool;
 
@@ -63,4 +64,22 @@ pub(crate) async fn refresh_tokens(pool: &PgPool, user_id: &str) -> Result<(), s
         .execute(pool)
         .await
         .map(|_| ())
+}
+
+pub(crate) async fn consumed_refresh_tokens(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        DELETE FROM oidc_consumed_refresh_tokens
+        WHERE ctid IN (
+            SELECT ctid FROM oidc_consumed_refresh_tokens
+            WHERE expires_at <= NOW()
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED
+        )
+        "#,
+    )
+    .bind(BATCH)
+    .execute(pool)
+    .await
+    .map(|_| ())
 }

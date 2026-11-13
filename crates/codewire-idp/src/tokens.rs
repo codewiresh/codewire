@@ -7,7 +7,10 @@
 //!   returned once; only its digest is stored, and `consume_code` is an atomic
 //!   `DELETE … RETURNING` by digest.
 //! - **refresh tokens** live in `oidc_refresh_tokens`; `consume_refresh`
-//!   rotates via `DELETE … RETURNING`, `get_refresh` reads non-destructively.
+//!   rotates via `DELETE … RETURNING` and records the digest in
+//!   `oidc_consumed_refresh_tokens`, so a rotated token presented again
+//!   revokes that user's tokens for the client. `get_refresh` reads
+//!   non-destructively.
 //! - **access tokens** are the source of truth in `oidc_access_tokens`
 //!   (carrying scopes + client for userinfo/introspection). Product API
 //!   auth resolves flavor-2 bearers against the same table
@@ -29,16 +32,31 @@ use codewire_server_core::auth::hash_oauth_token;
 use rand::RngCore;
 use sqlx::PgPool;
 
+/// How long a consumed refresh token that never expires is remembered: the
+/// native clients' refresh lifetime.
+const CONSUMED_WITHOUT_EXPIRY: &str = "2160 hours";
+
 /// `TokenStore` backed by Postgres.
 #[derive(Clone)]
 pub struct PgTokenStore {
     pool: PgPool,
+    revoke_reused: bool,
 }
 
 impl PgTokenStore {
     /// Wrap a connection pool.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            revoke_reused: false,
+        }
+    }
+
+    /// Whether a rotated refresh token presented again revokes the user's
+    /// tokens for its client, rather than only being refused and logged.
+    pub fn with_reuse_revocation(mut self, revoke: bool) -> Self {
+        self.revoke_reused = revoke;
+        self
     }
 }
 
@@ -204,6 +222,9 @@ impl TokenStore for PgTokenStore {
         crate::expired_rows::refresh_tokens(&self.pool, &grant.subject.0)
             .await
             .map_err(StoreError::new)?;
+        crate::expired_rows::consumed_refresh_tokens(&self.pool)
+            .await
+            .map_err(StoreError::new)?;
         sqlx::query(
             r#"
             INSERT INTO oidc_refresh_tokens
@@ -225,8 +246,10 @@ impl TokenStore for PgTokenStore {
     }
 
     async fn consume_refresh(&self, token: &str) -> StoreResult<Option<RefreshGrant>> {
+        let token_hash = hash_oauth_token(token);
+        let mut tx = self.pool.begin().await.map_err(StoreError::new)?;
         // Rotation: atomic single-use delete-and-return of a still-valid token.
-        let row: Option<(String, String, Vec<String>)> = sqlx::query_as(
+        let row: Option<(String, String, Vec<String>, Option<DateTime<Utc>>)> = sqlx::query_as(
             r#"
             DELETE FROM oidc_refresh_tokens AS token
             USING users AS user_account
@@ -234,18 +257,76 @@ impl TokenStore for PgTokenStore {
               AND (token.expires_at IS NULL OR token.expires_at > NOW())
               AND token.user_id = user_account.id
               AND user_account.enabled
-            RETURNING token.client_id, token.user_id, token.scopes
+            RETURNING token.client_id, token.user_id, token.scopes, token.expires_at
             "#,
         )
-        .bind(hash_oauth_token(token))
-        .fetch_optional(&self.pool)
+        .bind(&token_hash)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(StoreError::new)?;
-        Ok(row.map(|(client_id, user_id, scopes)| RefreshGrant {
-            subject: Subject(user_id),
-            client_id,
-            scopes: Scopes(scopes),
-        }))
+        if let Some((client_id, user_id, scopes, expires_at)) = row {
+            // Remembered until the token would have expired; one with no
+            // expiry, as long as the native clients' refresh lifetime.
+            sqlx::query(
+                r#"
+                INSERT INTO oidc_consumed_refresh_tokens
+                    (token_hash, client_id, user_id, expires_at)
+                VALUES ($1, $2, $3, COALESCE($4, NOW() + $5::interval))
+                ON CONFLICT (token_hash) DO NOTHING
+                "#,
+            )
+            .bind(&token_hash)
+            .bind(&client_id)
+            .bind(&user_id)
+            .bind(expires_at)
+            .bind(CONSUMED_WITHOUT_EXPIRY)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::new)?;
+            tx.commit().await.map_err(StoreError::new)?;
+            return Ok(Some(RefreshGrant {
+                subject: Subject(user_id),
+                client_id,
+                scopes: Scopes(scopes),
+            }));
+        }
+        // Not a live token. If it was rotated before, this is a copy of it.
+        // It is refused either way; with revocation on, every token the user
+        // holds for that client goes too (RFC 9700 section 4.14.2), since the
+        // legitimate holder can't be told apart.
+        let rotated: Option<(String, String, i64)> = sqlx::query_as(
+            "SELECT client_id, user_id, EXTRACT(EPOCH FROM NOW() - consumed_at)::bigint \
+             FROM oidc_consumed_refresh_tokens \
+             WHERE token_hash = $1 AND expires_at > NOW()",
+        )
+        .bind(&token_hash)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::new)?;
+        if let Some((client_id, user_id, rotated_secs_ago)) = rotated {
+            if self.revoke_reused {
+                for statement in [
+                    "DELETE FROM oidc_refresh_tokens WHERE user_id = $1 AND client_id = $2",
+                    "DELETE FROM oidc_access_tokens WHERE user_id = $1 AND client_id = $2",
+                ] {
+                    sqlx::query(statement)
+                        .bind(&user_id)
+                        .bind(&client_id)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(StoreError::new)?;
+                }
+            }
+            tracing::warn!(
+                %user_id,
+                %client_id,
+                rotated_secs_ago,
+                revoked = self.revoke_reused,
+                "a rotated refresh token was presented again"
+            );
+        }
+        tx.commit().await.map_err(StoreError::new)?;
+        Ok(None)
     }
 
     async fn get_refresh(&self, token: &str) -> StoreResult<Option<RefreshGrant>> {

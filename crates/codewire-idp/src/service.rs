@@ -46,6 +46,11 @@ pub struct IdpConfig {
     pub signup_invite_policy: SignupInvitePolicy,
     /// Scopes advertised in discovery.
     pub scopes_supported: Vec<String>,
+    /// Whether a rotated refresh token presented again revokes the user's
+    /// tokens for its client. Off by default: such a replay is always refused
+    /// and logged, and revocation is turned on once clients coordinate
+    /// refreshes across processes (`IDP_REFRESH_REUSE_REVOKES=true`).
+    pub revoke_reused_refresh_tokens: bool,
 }
 
 impl fmt::Debug for IdpConfig {
@@ -64,6 +69,10 @@ impl fmt::Debug for IdpConfig {
             )
             .field("signup_invite_policy", &self.signup_invite_policy)
             .field("scopes_supported", &self.scopes_supported)
+            .field(
+                "revoke_reused_refresh_tokens",
+                &self.revoke_reused_refresh_tokens,
+            )
             .finish()
     }
 }
@@ -108,12 +117,19 @@ impl IdpConfig {
         let signup_invite_policy = SignupInvitePolicy::from_sha256_hashes(
             value("IDP_SIGNUP_INVITE_CODE_HASHES").as_deref(),
         )?;
+        let revoke_reused_refresh_tokens =
+            match pick(&["IDP_REFRESH_REUSE_REVOKES"], &mut value).as_deref() {
+                None | Some("false") => false,
+                Some("true") => true,
+                Some(_) => anyhow::bail!("IDP_REFRESH_REUSE_REVOKES must be true or false"),
+            };
         Ok(Self {
             issuer,
             frontend_url,
             turnstile_secret_key,
             turnstile_bypass_email,
             signup_invite_policy,
+            revoke_reused_refresh_tokens,
             scopes_supported: vec![
                 "openid".into(),
                 "profile".into(),
@@ -157,7 +173,9 @@ pub async fn build_provider(
         scopes_supported: cfg.scopes_supported.clone(),
     })
     .auth_requests(Arc::new(PgAuthorizationStore::new(pool.clone())))
-    .tokens(Arc::new(PgTokenStore::new(pool.clone())))
+    .tokens(Arc::new(
+        PgTokenStore::new(pool.clone()).with_reuse_revocation(cfg.revoke_reused_refresh_tokens),
+    ))
     .clients(Arc::new(PgClientStore::new(pool.clone())))
     .keys(Arc::new(keys))
     .device_store(Arc::new(device_store))
@@ -275,6 +293,7 @@ mod tests {
             turnstile_bypass_email: "e2e@example.test".into(),
             signup_invite_policy: SignupInvitePolicy::open(),
             scopes_supported: vec!["openid".into()],
+            revoke_reused_refresh_tokens: false,
         };
 
         let diagnostic = format!("{cfg:?}");
@@ -374,6 +393,21 @@ mod tests {
             error.to_string().contains("must be an https URL"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn refresh_reuse_revocation_is_off_unless_set_true() {
+        let config = |setting: Option<&str>| {
+            IdpConfig::from_values(|key| match key {
+                "PUBLIC_OIDC_ISSUER_URL" => Some("https://idp.example".into()),
+                "IDP_REFRESH_REUSE_REVOKES" => setting.map(str::to_string),
+                _ => None,
+            })
+        };
+        assert!(!config(None).unwrap().revoke_reused_refresh_tokens);
+        assert!(!config(Some("false")).unwrap().revoke_reused_refresh_tokens);
+        assert!(config(Some("true")).unwrap().revoke_reused_refresh_tokens);
+        assert!(config(Some("yes")).is_err());
     }
 
     #[test]

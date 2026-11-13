@@ -334,6 +334,7 @@ async fn native_clients_full_flow_against_postgres() {
         turnstile_secret_key: String::new(),
         turnstile_bypass_email: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
+        revoke_reused_refresh_tokens: false,
         scopes_supported: vec![
             "openid".into(),
             "profile".into(),
@@ -773,6 +774,7 @@ async fn oidc_access_token_authenticates_product_api_against_postgres() {
         turnstile_secret_key: String::new(),
         turnstile_bypass_email: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
+        revoke_reused_refresh_tokens: false,
         scopes_supported: vec![
             "openid".into(),
             "profile".into(),
@@ -1107,6 +1109,7 @@ async fn provider_startup_publishes_jwks_before_token_issuance() {
             turnstile_secret_key: String::new(),
             turnstile_bypass_email: String::new(),
             signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
+            revoke_reused_refresh_tokens: false,
             scopes_supported: vec!["openid".into()],
         };
 
@@ -1719,6 +1722,7 @@ async fn jwk_final_schema_uses_only_envelopes_and_fails_closed() {
             turnstile_secret_key: String::new(),
             turnstile_bypass_email: String::new(),
             signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
+            revoke_reused_refresh_tokens: false,
             scopes_supported: vec!["openid".into()],
         };
         let error = build_provider(
@@ -1912,6 +1916,7 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
         turnstile_secret_key: String::new(),
         turnstile_bypass_email: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
+        revoke_reused_refresh_tokens: false,
         scopes_supported: vec![
             "openid".into(),
             "profile".into(),
@@ -4831,23 +4836,33 @@ async fn expired_oidc_rows_are_removed_as_new_ones_are_written() {
         eprintln!("DATABASE_URL unset — skipping expired OIDC rows test");
         return;
     };
-    let admin = PgPool::connect(&url).await.expect("connect admin");
+    in_own_database(&url, "cw_idp_expired_rows", expired_oidc_rows).await;
+}
+
+/// Runs `test` against a freshly migrated database of its own, then drops
+/// the database, whether the test passes or panics.
+async fn in_own_database<F, T>(url: &str, prefix: &str, test: F)
+where
+    F: FnOnce(PgPool) -> T,
+    T: std::future::Future<Output = ()> + Send + 'static,
+{
+    let admin = PgPool::connect(url).await.expect("connect admin");
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let db_name = format!("cw_idp_expired_rows_{}_{nanos}", std::process::id());
+    let db_name = format!("{prefix}_{}_{nanos}", std::process::id());
     sqlx::query(&format!(r#"CREATE DATABASE "{db_name}""#))
         .execute(&admin)
         .await
-        .expect("create expired rows database");
-    let mut test_url = url::Url::parse(&url).expect("parse DATABASE_URL");
+        .expect("create the test database");
+    let mut test_url = url::Url::parse(url).expect("parse DATABASE_URL");
     test_url.set_path(&db_name);
     codewire_server_core::migrate::ensure_schema(test_url.as_str())
         .await
-        .expect("migrate expired rows database");
+        .expect("migrate the test database");
     let pool = PgPool::connect(test_url.as_str()).await.expect("connect");
-    let outcome = tokio::spawn(expired_oidc_rows(pool.clone())).await;
+    let outcome = tokio::spawn(test(pool.clone())).await;
     pool.close().await;
     let _ = sqlx::query(&format!(
         r#"DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)"#
@@ -5069,4 +5084,210 @@ async fn expired_oidc_rows(pool: PgPool) {
                 .unwrap();
         }
     }
+}
+
+/// A rotated refresh token presented again is refused. With revocation on,
+/// it also revokes every token that user holds for that client, and only for
+/// that client; an expired token is refused without revoking anything.
+#[tokio::test]
+async fn reused_refresh_token_revokes_the_users_tokens_for_its_client() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping refresh reuse test");
+        return;
+    };
+    in_own_database(&url, "cw_idp_refresh_reuse", refresh_reuse).await;
+}
+
+async fn refresh_reuse(pool: PgPool) {
+    seed(&pool).await;
+    codewire_idp::provisioning::ensure_ios_client(&pool)
+        .await
+        .expect("provision iOS public client");
+    let refresh = |client: &str| RefreshGrant {
+        subject: Subject(USER.into()),
+        client_id: client.into(),
+        scopes: Scopes(vec!["openid".into()]),
+    };
+    let access = |client: &str| AccessGrant {
+        subject: Subject(USER.into()),
+        client_id: client.into(),
+        scopes: Scopes(vec!["openid".into()]),
+    };
+    // With revocation off (the default), a replay is refused and nothing else
+    // changes.
+    let detecting = PgTokenStore::new(pool.clone());
+    detecting
+        .store_refresh("reuse-detect-1", refresh(CLIENT), 3600)
+        .await
+        .unwrap();
+    detecting
+        .store_access("reuse-detect-access", access(CLIENT), 3600)
+        .await
+        .unwrap();
+    assert!(
+        detecting
+            .consume_refresh("reuse-detect-1")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    detecting
+        .store_refresh("reuse-detect-2", refresh(CLIENT), 3600)
+        .await
+        .unwrap();
+    assert!(
+        detecting
+            .consume_refresh("reuse-detect-1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        detecting
+            .get_refresh("reuse-detect-2")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        detecting
+            .get_access("reuse-detect-access")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    for table in ["oidc_access_tokens", "oidc_refresh_tokens"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE user_id = $1"))
+            .bind(USER)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let tokens = PgTokenStore::new(pool.clone()).with_reuse_revocation(true);
+    tokens
+        .store_refresh("reuse-desktop-1", refresh(CLIENT), 3600)
+        .await
+        .unwrap();
+    tokens
+        .store_access("reuse-desktop-access-1", access(CLIENT), 3600)
+        .await
+        .unwrap();
+    tokens
+        .store_refresh("reuse-ios", refresh(IOS_CLIENT), 3600)
+        .await
+        .unwrap();
+    tokens
+        .store_access("reuse-ios-access", access(IOS_CLIENT), 3600)
+        .await
+        .unwrap();
+
+    // Ordinary rotation: the token is exchanged once, and its successor works.
+    let grant = tokens.consume_refresh("reuse-desktop-1").await.unwrap();
+    assert_eq!(grant.map(|grant| grant.client_id).as_deref(), Some(CLIENT));
+    tokens
+        .store_refresh("reuse-desktop-2", refresh(CLIENT), 3600)
+        .await
+        .unwrap();
+    tokens
+        .store_access("reuse-desktop-access-2", access(CLIENT), 3600)
+        .await
+        .unwrap();
+    assert!(
+        tokens
+            .get_refresh("reuse-desktop-2")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // The rotated token again: refused, and the desktop client's tokens go.
+    assert!(
+        tokens
+            .consume_refresh("reuse-desktop-1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for token in ["reuse-desktop-2"] {
+        assert!(
+            tokens.get_refresh(token).await.unwrap().is_none(),
+            "{token} survived"
+        );
+    }
+    for token in ["reuse-desktop-access-1", "reuse-desktop-access-2"] {
+        assert!(
+            tokens.get_access(token).await.unwrap().is_none(),
+            "{token} survived"
+        );
+    }
+    // The same user's tokens for another client stay.
+    assert!(tokens.get_refresh("reuse-ios").await.unwrap().is_some());
+    assert!(
+        tokens
+            .get_access("reuse-ios-access")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // An expired token is refused, and revokes nothing.
+    tokens
+        .store_refresh("reuse-desktop-3", refresh(CLIENT), 3600)
+        .await
+        .unwrap();
+    tokens
+        .store_access("reuse-desktop-access-3", access(CLIENT), 3600)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE oidc_refresh_tokens SET expires_at = NOW() - interval '1 minute' WHERE token_hash = $1")
+        .bind(hash_oauth_token("reuse-desktop-3"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        tokens
+            .consume_refresh("reuse-desktop-3")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        tokens
+            .get_access("reuse-desktop-access-3")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // A token that never expires is remembered for the native refresh lifetime.
+    sqlx::query(
+        "INSERT INTO oidc_refresh_tokens (id, token_hash, client_id, user_id, scopes, auth_time, expires_at) \
+         VALUES ('reuse-forever', $1, $2, $3, ARRAY['openid'], NOW(), NULL)",
+    )
+    .bind(hash_oauth_token("reuse-forever"))
+    .bind(CLIENT)
+    .bind(USER)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        tokens
+            .consume_refresh("reuse-forever")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let remembered: bool = sqlx::query_scalar(
+        "SELECT expires_at BETWEEN NOW() + interval '2159 hours' AND NOW() + interval '2161 hours' \
+         FROM oidc_consumed_refresh_tokens WHERE token_hash = $1",
+    )
+    .bind(hash_oauth_token("reuse-forever"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        remembered,
+        "a never-expiring token's record has no bounded lifetime"
+    );
 }
