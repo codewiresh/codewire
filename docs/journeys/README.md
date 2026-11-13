@@ -11,6 +11,7 @@ runs the same commands and holds the result to the same standard.
 | [launch.md](launch.md) | The public-launch walk (#4370): a new account goes from sign-up to a snapshot and a fork |
 | [local-vm-mac.md](local-vm-mac.md) | Local VMs on a Mac (#4370 step 11): install, create, shell, run, stop and start on macOS 27 and 26 |
 | [invitations.md](invitations.md) | Invite a teammate by email, who accepts, is listed and can be removed, within the invitation limits |
+| [node-reboot.md](node-reboot.md) | Production keeps serving through one node's drain or reboot (#3542, #4461) |
 
 ## What a journey file holds
 
