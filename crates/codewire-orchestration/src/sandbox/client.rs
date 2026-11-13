@@ -6195,6 +6195,12 @@ mod tests {
         );
     }
 
+    /// How long one call against the in-process Kubernetes service may take
+    /// before the test calls it hung: a hang guard, not a speed expectation
+    /// (`docs/dev/AGENT-WORKFLOW.md` "Failure convergence"). Four operating-mode
+    /// tests ran out of a 2 s bound on a loaded guest (run 44455).
+    const MODE_HANG: Duration = Duration::from_secs(30);
+
     /// #2328: create recovery resumes only an observed suspended Sandbox. An
     /// unbound Claim also reads zero replicas and must not look suspended.
     #[tokio::test]
@@ -6236,11 +6242,10 @@ mod tests {
                 0,
             ),
         ] {
-            let probe =
-                tokio::time::timeout(Duration::from_secs(2), client.probe_environment("env-test"))
-                    .await
-                    .unwrap()
-                    .unwrap();
+            let probe = tokio::time::timeout(MODE_HANG, client.probe_environment("env-test"))
+                .await
+                .unwrap()
+                .unwrap();
             assert!(probe.claim_exists && !probe.claim_ready, "{label}");
             assert_eq!(probe.sandbox_suspended, suspended, "{label}");
             assert_eq!(probe.replicas, replicas, "{label}");
@@ -6253,7 +6258,7 @@ mod tests {
         for (replicas, expected) in [(1, "Running"), (0, "Suspended")] {
             let (client, state) = mode_client(mode_sandbox(), ModeInterleave::ControllerUpdate);
             tokio::time::timeout(
-                Duration::from_secs(2),
+                MODE_HANG,
                 client.set_replicas("env-test", replicas, SUPPORT_IMAGE),
             )
             .await
@@ -6292,13 +6297,10 @@ mod tests {
         ] {
             let (client, state) = mode_client(mode_sandbox(), interleave);
             assert!(
-                tokio::time::timeout(
-                    Duration::from_secs(2),
-                    client.set_replicas("env-test", 1, SUPPORT_IMAGE)
-                )
-                .await
-                .unwrap()
-                .is_err()
+                tokio::time::timeout(MODE_HANG, client.set_replicas("env-test", 1, SUPPORT_IMAGE))
+                    .await
+                    .unwrap()
+                    .is_err()
             );
             let state = state.lock().unwrap();
             assert_eq!(
@@ -6330,13 +6332,10 @@ mod tests {
             }
             let (client, state) = mode_client(sandbox, ModeInterleave::ControllerUpdate);
             assert!(
-                tokio::time::timeout(
-                    Duration::from_secs(2),
-                    client.set_replicas("env-test", 1, SUPPORT_IMAGE)
-                )
-                .await
-                .unwrap()
-                .is_err(),
+                tokio::time::timeout(MODE_HANG, client.set_replicas("env-test", 1, SUPPORT_IMAGE))
+                    .await
+                    .unwrap()
+                    .is_err(),
                 "case {invalid}"
             );
             assert!(
@@ -6352,13 +6351,10 @@ mod tests {
             let (client, state) =
                 mode_client(mode_sandbox(), ModeInterleave::InvalidReply(invalid));
             assert!(
-                tokio::time::timeout(
-                    Duration::from_secs(2),
-                    client.set_replicas("env-test", 1, SUPPORT_IMAGE)
-                )
-                .await
-                .unwrap()
-                .is_err(),
+                tokio::time::timeout(MODE_HANG, client.set_replicas("env-test", 1, SUPPORT_IMAGE))
+                    .await
+                    .unwrap()
+                    .is_err(),
                 "case {invalid} must not report a current live target"
             );
             let state = state.lock().unwrap();
@@ -6377,13 +6373,10 @@ mod tests {
             .unwrap()
             .remove("operatingMode");
         let (client, state) = mode_client(sandbox, ModeInterleave::ControllerUpdate);
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            client.set_replicas("env-test", 1, SUPPORT_IMAGE),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        tokio::time::timeout(MODE_HANG, client.set_replicas("env-test", 1, SUPPORT_IMAGE))
+            .await
+            .unwrap()
+            .unwrap();
         let state = state.lock().unwrap();
         assert_eq!(state.writes.len(), 1);
         assert_eq!(state.object["spec"]["operatingMode"], "Running");
