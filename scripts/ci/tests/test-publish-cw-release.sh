@@ -37,6 +37,7 @@ set -euo pipefail
 output=''
 url=''
 method=GET
+data=''
 [ -z "${FIXTURE_CURL_ARG_LOG:-}" ] || printf '%q ' "$@" >>"$FIXTURE_CURL_ARG_LOG"
 [ -z "${FIXTURE_CURL_ARG_LOG:-}" ] || printf '\n' >>"$FIXTURE_CURL_ARG_LOG"
 while [ "$#" -gt 0 ]; do
@@ -58,7 +59,11 @@ while [ "$#" -gt 0 ]; do
       method="$2"
       shift 2
       ;;
-    -H|-F|--data-binary)
+    --data-binary)
+      data="$2"
+      shift 2
+      ;;
+    -H|-F)
       shift 2
       ;;
     -*)
@@ -98,6 +103,19 @@ case "$url" in
     else
       body='{"id":1}'
     fi
+    ;;
+  */api/v1/repos/codewire/codewire/releases)
+    # A new release: its request is kept for the body checks.
+    [ "$method" = POST ]
+    cp "${data#@}" "${FIXTURE_CREATED:?}/gitea.json"
+    status=201
+    body='{"id":1}'
+    ;;
+  https://api.github.com/repos/codewiresh/codewire/releases)
+    [ "$method" = POST ]
+    cp "${data#@}" "${FIXTURE_CREATED:?}/github.json"
+    status=201
+    body='{"id":2}'
     ;;
   */api/v1/repos/codewire/codewire/releases/1/assets)
     body="$(listing "${FIXTURE_GITEA_PUBLISHED:-}" https://git.example.invalid/attachments/)"
@@ -373,6 +391,60 @@ for name in check-none check-same check-changed check-changed-github check-parti
 done
 grep -q '^GET https://api.github.com/repos/codewiresh/codewire/releases/tags/v9.9.9$' "$TMP/check-same.curl" ||
   { echo 'publish release test failed: check did not read the public GitHub release' >&2; exit 1; }
+
+# --- a new release's body is its tag's message after the first line --------
+git init -q "$TMP/source"
+git -C "$TMP/source" -c user.name=fixture -c user.email=fixture@example.invalid \
+  commit -q --allow-empty -m source
+source_commit="$(git -C "$TMP/source" rev-parse HEAD)"
+note='**`cw rm` now asks before removing an environment, and a script must pass `--yes`.**
+Scripts that call `cw rm` without `--yes` must add it.'
+fake_signature='-----BEGIN PGP SIGNATURE-----
+
+iQIzBAABCgAdFiEEfixture
+-----END PGP SIGNATURE-----'
+tag_object() { # MESSAGE: an annotated tag object for v9.9.9 in the fixture source
+  printf 'object %s\ntype commit\ntag v9.9.9\ntagger fixture <fixture@example.invalid> 1794600000 +0000\n\n%s\n' \
+    "$source_commit" "$1" | git -C "$TMP/source" mktag
+}
+noted_object="$(tag_object "v9.9.9
+
+$note
+
+$fake_signature")"
+bare_object="$(tag_object "v9.9.9
+$fake_signature")"
+created_body() { # NAME HOST: the body the NAME case sent when it created the HOST release
+  python3 -c 'import json, sys; sys.stdout.write(json.load(open(sys.argv[1]))["body"])' \
+    "$TMP/$1.created/$2.json"
+}
+new_release_case() { # NAME OBJECT: publish to no release yet, from the fixture source
+  mkdir "$TMP/$1.created"
+  (cd "$TMP/source" && publish_case "$1" FIXTURE_NO_RELEASE=1 FIXTURE_NO_GITHUB_RELEASE=1 \
+    FIXTURE_CREATED="$TMP/$1.created" CW_RELEASE_TAG_OBJECT_SHA="$2" FIXTURE_REF_SHA="$2" \
+    -- v9.9.9 "$TMP/assets")
+}
+new_release_case noted "$noted_object" ||
+  { echo "publish release test failed: a noted release was refused: $(cat "$TMP/noted.out")" >&2; exit 1; }
+for host in gitea github; do
+  [ "$(created_body noted "$host")" = "$note" ] ||
+    { echo "publish release test failed: the $host body is not the tag's note: $(created_body noted "$host")" >&2; exit 1; }
+done
+new_release_case bare "$bare_object" ||
+  { echo "publish release test failed: a release without notes was refused: $(cat "$TMP/bare.out")" >&2; exit 1; }
+for host in gitea github; do
+  [ "$(created_body bare "$host")" = "Rust cw release v9.9.9, built by Gitea from $expected_target." ] ||
+    { echo "publish release test failed: the $host body without notes is $(created_body bare "$host")" >&2; exit 1; }
+done
+# A tag object the checkout lacks stops the run before any release is created.
+if new_release_case unreadable cccccccccccccccccccccccccccccccccccccccc; then
+  echo 'publish release test failed: an unreadable tag object published a release' >&2
+  exit 1
+fi
+grep -Fq 'cannot read release tag object cccccccccccccccccccccccccccccccccccccccc for v9.9.9' "$TMP/unreadable.out" ||
+  { echo "publish release test failed: the unreadable tag was not named: $(cat "$TMP/unreadable.out")" >&2; exit 1; }
+! grep -qE '^POST ' "$TMP/unreadable.curl" ||
+  { echo "publish release test failed: an unreadable tag object wrote: $(cat "$TMP/unreadable.curl")" >&2; exit 1; }
 
 expect_failure flattened-tag 'is not an annotated tag object' \
   commit "$expected_target" commit "$expected_target"

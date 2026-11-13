@@ -16,6 +16,13 @@ GITEA_TOKEN and the public GitHub mirror release with no token, and fails
 when any asset on either differs, so a run can stop before it publishes
 anywhere (#4444).
 
+A new release's body is the release tag's message after its first line, so
+notes written into the tag at the cut appear on both releases. A tag whose
+message is only its first line gets "Rust cw release <tag>, built by Gitea
+from <source>.". Run it from the release checkout, which holds the tag
+object CW_RELEASE_TAG_OBJECT_SHA names. An existing release's body is left
+as it is.
+
 Required:
   GITEA_TOKEN
   GITHUB_SERVER_URL
@@ -71,6 +78,27 @@ PY
 # different bytes.
 changed_asset() {
   die "$2 is already published on the $1 release $tag with different bytes; a published release's assets never change, so cut the next patch release instead"
+}
+
+# release_body TAG TARGET: the release tag's message after its first line,
+# without its signature, or the fixed line when the tag has no more.
+release_body() {
+  local object="${CW_RELEASE_TAG_OBJECT_SHA:-}"
+  local message
+  message="$(git cat-file tag "$object" 2>/dev/null)" \
+    || die "cannot read release tag object $object for $1; run from the release checkout"
+  python3 -c '
+import sys
+
+tag, target, raw = sys.argv[1:]
+lines = raw.partition("\n\n")[2].split("\n")
+for i, line in enumerate(lines):
+    if line.startswith("-----BEGIN ") and line.endswith(" SIGNATURE-----"):
+        del lines[i:]
+        break
+body = "\n".join(lines[1:]).strip()
+print(body or f"Rust cw release {tag}, built by Gitea from {target}.")
+' "$1" "$2" "$message"
 }
 
 json_body() {
@@ -207,7 +235,7 @@ ensure_gitea_release() {
   local api="${GITHUB_SERVER_URL%/}/api/v1"
   local repo="$GITHUB_REPOSITORY"
   local target="${CW_RELEASE_SOURCE_SHA:-${GITHUB_SHA:-$tag}}"
-  local body="Rust cw release ${tag}, built by Gitea from ${target}."
+  local body
   local tmp
   tmp="$(mktemp -d)"
   local release_json="$tmp/gitea-release.json"
@@ -223,6 +251,7 @@ ensure_gitea_release() {
         rm -rf "$tmp"
         return 0
       fi
+      body="$(release_body "$tag" "$target")"
       json_body "$tag" "$target" "$body" > "$tmp/create.json"
       status="$(api_status POST "$api/repos/$repo/releases" "$GITEA_TOKEN" "$release_json" \
         -H "Content-Type: application/json" \
@@ -349,7 +378,7 @@ ensure_github_release() {
   local repo="${GITHUB_MIRROR_REPOSITORY:-codewiresh/codewire}"
   local target="${CW_RELEASE_SOURCE_SHA:-${GITHUB_SHA:-$tag}}"
   local tag_object="$CW_RELEASE_TAG_OBJECT_SHA"
-  local body="Rust cw release ${tag}, built by Gitea from ${target}."
+  local body
   local tmp
   tmp="$(mktemp -d)"
   local release_json="$tmp/github-release.json"
@@ -362,6 +391,7 @@ ensure_github_release() {
     200)
       ;;
     404)
+      body="$(release_body "$tag" "$target")"
       json_body "$tag" "$target" "$body" > "$tmp/create.json"
       status="$(github_status POST "https://api.github.com/repos/$repo/releases" "$release_json" \
         -H "Content-Type: application/json" \
