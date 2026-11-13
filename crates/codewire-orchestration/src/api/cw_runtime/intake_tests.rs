@@ -122,6 +122,20 @@ async fn cancelled_stream_removes_only_its_own_partial_candidate() {
     assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 1);
 }
 
+#[tokio::test]
+async fn an_upload_arriving_at_the_drain_deadline_ends_retryably_and_removes_its_candidate() {
+    let parent = owned_parent();
+    let (identity, _) = fixture::payload(b"restarted");
+    let mut chunks = stream::iter([Ok(vec![0; 64])]).chain(stream::pending());
+    let deadline = Box::pin(tokio::time::sleep(Duration::from_millis(15)));
+    match receive_before(parent.path(), identity, &mut chunks, deadline).await {
+        Err(AppError::ServiceUnavailable(detail)) => assert!(detail.contains("send it again")),
+        Err(other) => panic!("expected a retryable restart, got {other:?}"),
+        Ok(_) => panic!("an upload still arriving at the deadline must end"),
+    }
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
 #[test]
 fn writable_symlink_parent_and_changed_ancestry_refuse() {
     let parent = owned_parent();

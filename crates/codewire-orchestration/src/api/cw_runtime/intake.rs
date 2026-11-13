@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use codewire_cw_release::build_record;
 use codewire_cw_release::identity::{Arch, CwPayloadIdentity, Os, Platform};
-use codewire_server_core::AppResult;
+use codewire_daemon_bridge::drain::RestartSignal;
+use codewire_server_core::{AppError, AppResult};
 use futures_util::{Stream, StreamExt as _};
 use rustix::fs::{self as rfs, AtFlags, Mode, OFlags};
 use sha2::{Digest as _, Sha256};
@@ -19,6 +20,8 @@ use super::wire::{MAX_CHUNK, validate_identity};
 
 pub(super) const UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_CHUNKS: usize = 8192;
+const RESTARTED: &str =
+    "Codewire restarted the server receiving this cw runtime before it finished; send it again";
 // This separate server executable owns the trusted compile-time marker. The
 // shared scanner never embeds one, and clients cannot select/override it.
 pub(super) const BUILD_MARKER: &[u8] = b"\0codewire-cw-build-record-v1\0";
@@ -321,11 +324,37 @@ impl Drop for Candidate {
     }
 }
 
-pub(super) async fn receive<S>(identity: CwPayloadIdentity, mut stream: S) -> AppResult<Candidate>
+pub(super) async fn receive<S>(
+    identity: CwPayloadIdentity,
+    mut stream: S,
+    restart: RestartSignal,
+) -> AppResult<Candidate>
 where
     S: Stream<Item = AppResult<Vec<u8>>> + Unpin,
 {
-    receive_in(&std::env::temp_dir(), identity, &mut stream).await
+    receive_before(&std::env::temp_dir(), identity, &mut stream, restart).await
+}
+
+/// Ends an upload still arriving at this replica's drain deadline with a
+/// retryable error, where the kill would reset it (#4460). The candidate is in
+/// this replica's own temporary directory, so it goes with the upload, and the
+/// client sends the whole runtime again to the next replica. Nothing is
+/// admitted or issued before this returns, and nothing stops the update after:
+/// a stop there would leave its journal entry uncertain.
+async fn receive_before<S>(
+    parent: &Path,
+    identity: CwPayloadIdentity,
+    stream: &mut S,
+    restart: RestartSignal,
+) -> AppResult<Candidate>
+where
+    S: Stream<Item = AppResult<Vec<u8>>> + Unpin,
+{
+    tokio::select! {
+        biased;
+        () = restart => Err(AppError::ServiceUnavailable(RESTARTED.into())),
+        candidate = receive_in(parent, identity, stream) => candidate,
+    }
 }
 
 async fn receive_in<S>(

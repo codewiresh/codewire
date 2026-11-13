@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use buffa::Message as _;
 use codewire_cw_release::identity::canonical_json;
+use codewire_daemon_bridge::drain::Restart;
 use codewire_proto::codewire::v1 as proto;
-use codewire_server_core::AppResult;
 use codewire_server_core::auth::AuthUser;
+use codewire_server_core::{AppError, AppResult};
 use futures_util::{Stream, StreamExt as _};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -24,6 +25,8 @@ use crate::api::ApiState;
 use crate::worker::workspace_binding::live_cw_runtime_binding;
 
 const HEADER_TIMEOUT: Duration = Duration::from_secs(15);
+const DRAINING: &str =
+    "Codewire is restarting the server that took this cw runtime request; send it again";
 
 pub(super) struct Intent {
     incarnation: PlatformCwRuntimeIncarnation,
@@ -163,7 +166,12 @@ where
     let chunks = requests.map(|request| request.and_then(chunk));
     // No journal admission, daemon command or bootstrap until exact EOF and
     // full static-musl/record/identity admission through the same held file.
-    let candidate = intake::receive(intent.mutation.target_identity.clone(), chunks).await?;
+    let candidate = intake::receive(
+        intent.mutation.target_identity.clone(),
+        chunks,
+        state.drain.signal(Restart::Deadline),
+    )
+    .await?;
     let request = mutation(state, user, intent, captured, Some(candidate)).await?;
     Ok(proto::UpdateEnvironmentCwRuntimeResponse {
         operation: Some(wire::proto_operation(&request)?).into(),
@@ -241,6 +249,7 @@ async fn mutation(
     let (supported, bootstrap, selection) =
         execute::status(&captured.daemon(), &correlation).await?;
     admit_observation(&intent, supported, bootstrap.as_ref(), &selection)?;
+    admitting(&state.drain)?;
     let journal = RuntimeJournal::new(state.pool.clone(), state.confidential_storage_flags);
     let (sender, receiver) = tokio::sync::oneshot::channel();
     // Detach BEFORE journal admission. Losing the HTTP waiter during its COMMIT
@@ -268,6 +277,17 @@ async fn mutation(
         let _ = sender.send(result);
     });
     receiver.await.map_err(|_| unavailable())?
+}
+
+/// Admits nothing once this replica's drain has begun (#4460). An owner
+/// admitted then could still be running when the rollout kills the replica,
+/// which leaves its request unresolved (#4518). Nothing is admitted, so the
+/// client sends the request again, to the next replica.
+fn admitting(drain: &crate::drain::Drain) -> AppResult<()> {
+    if drain.begun().is_cancelled() {
+        return Err(AppError::ServiceUnavailable(DRAINING.into()));
+    }
+    Ok(())
 }
 
 pub async fn info(

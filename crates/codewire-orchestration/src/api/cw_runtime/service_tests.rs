@@ -122,3 +122,14 @@ fn stale_and_inconsistent_selection_and_wrong_retained_rollback_identity_refuse(
     intent.mutation.target_identity.source_revision = "f".repeat(40);
     assert!(admit_observation(&intent, true, None, &selection).is_err());
 }
+
+#[tokio::test]
+async fn nothing_is_admitted_once_the_drain_has_begun() {
+    let drain = crate::drain::Drain::default();
+    assert!(admitting(&drain).is_ok());
+    drain.begin(crate::drain::DRAIN_WINDOW);
+    match admitting(&drain) {
+        Err(AppError::ServiceUnavailable(detail)) => assert!(detail.contains("send it again")),
+        other => panic!("expected a retryable refusal, got {other:?}"),
+    }
+}

@@ -24,8 +24,11 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::client::{DaemonClient, DaemonClientError, v1};
-use crate::drain::Restart;
+use crate::drain::{Restart, RestartSignal};
 use crate::session::FieldViolation;
+
+mod staged;
+use staged::StagedWrites;
 
 const STREAM_BUFFER: usize = 8;
 const DOWNLOAD_RESTARTED: &str =
@@ -34,7 +37,12 @@ const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 // One daemon read is one round trip to the sandbox, which may be in another
 // site, so each read carries many public chunks.
 const DOWNLOAD_READ_BYTES: i64 = 1024 * 1024;
+#[cfg(test)]
 const UPLOAD_CHUNK_BYTES: usize = 64 * 1024;
+const UPLOAD_RESTARTED: &str =
+    "Codewire restarted the server receiving this file before it finished; copy it again";
+const PART_RESTARTED: &str =
+    "Codewire restarted the server receiving this upload; it resumes from what was received";
 const UPLOAD_MODE: u32 = 0o644;
 // Bound individual private unary operations, not the whole file transfer.
 const UPLOAD_MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -444,13 +452,19 @@ async fn upload_to_daemon<B: FileBackend>(
     .await
     .map_err(|error| backend.daemon_error(error, request_id.as_deref()))?;
     let mut staging = UploadStaging::new(daemon, staging_path);
-    let mut offset = 0_i64;
+    let mut staged = StagedWrites::new(staging.path().to_string(), 0);
+    let mut restart = restart_deadline(&backend);
 
     while let Some(message) = tokio::select! {
         biased;
         _ = response.closed() => {
             staging.abort().await;
             return Err(upload_canceled());
+        }
+        // A whole-file upload cannot resume, so it leaves nothing behind.
+        () = &mut restart => {
+            staging.abort().await;
+            return Err(connectrpc::ConnectError::unavailable(UPLOAD_RESTARTED));
         }
         message = requests.next() => message,
     } {
@@ -484,54 +498,20 @@ async fn upload_to_daemon<B: FileBackend>(
                 ));
             }
         };
-        for private_chunk in chunk.chunks(UPLOAD_CHUNK_BYTES) {
-            if response.is_closed() {
-                staging.abort().await;
-                return Err(upload_canceled());
-            }
-            let expected = match i64::try_from(private_chunk.len()) {
-                Ok(expected) => expected,
-                Err(_) => {
-                    staging.abort().await;
-                    return Err(backend.daemon_error(
-                        DaemonClientError::InvalidFrame("file write length"),
-                        request_id.as_deref(),
-                    ));
-                }
-            };
-            let written = match upload_mutation(staging.client.write_file(v1::WriteRequest {
-                path: staging.path().to_string(),
-                offset,
-                data: private_chunk.to_vec(),
-            }))
-            .await
-            {
-                Ok(written) => written,
-                Err(error) => {
-                    staging.abort().await;
-                    return Err(backend.daemon_error(error, request_id.as_deref()));
-                }
-            };
-            if written != expected {
-                staging.abort().await;
-                return Err(backend.daemon_error(
-                    DaemonClientError::InvalidFrame("file write"),
-                    request_id.as_deref(),
-                ));
-            }
-            offset = match offset.checked_add(written) {
-                Some(offset) => offset,
-                None => {
-                    staging.abort().await;
-                    return Err(backend.daemon_error(
-                        DaemonClientError::InvalidFrame("file write offset"),
-                        request_id.as_deref(),
-                    ));
-                }
-            };
+        if response.is_closed() {
+            staging.abort().await;
+            return Err(upload_canceled());
+        }
+        if let Err(error) = staged.push(&staging.client, &chunk).await {
+            staging.abort().await;
+            return Err(backend.daemon_error(error, request_id.as_deref()));
         }
     }
 
+    if let Err(error) = staged.flush(&staging.client).await {
+        staging.abort().await;
+        return Err(backend.daemon_error(error, request_id.as_deref()));
+    }
     if response.is_closed() {
         staging.abort().await;
         return Err(upload_canceled());
@@ -562,7 +542,7 @@ async fn upload_to_daemon<B: FileBackend>(
     staging.commit();
     connectrpc::Response::ok(proto::UploadFileResponse {
         path: destination,
-        size: offset,
+        size: staged.written(),
         ..Default::default()
     })
 }
@@ -599,12 +579,16 @@ async fn upload_part_to_daemon<B: FileBackend>(
         Err(error) => return Err(daemon_error(error)),
     };
     remove_expired_parts(&daemon, &part.staging_path).await;
-    let mut offset = held.unwrap_or(0);
+    let mut staged = StagedWrites::new(part.staging_path.clone(), held.unwrap_or(0));
     let mut started = false;
+    let mut restart = restart_deadline(&backend);
 
     while let Some(message) = tokio::select! {
         biased;
         _ = response.closed() => return Err(upload_canceled()),
+        // The part keeps what it wrote, and the client's next part resumes
+        // from it on the next replica.
+        () = &mut restart => return Err(connectrpc::ConnectError::unavailable(PART_RESTARTED)),
         message = requests.next() => message,
     } {
         let chunk = match message?.to_owned_message().payload {
@@ -629,8 +613,8 @@ async fn upload_part_to_daemon<B: FileBackend>(
             }
         };
         if !started {
-            if part.offset != offset {
-                return Err(part_offset_mismatch(offset));
+            if part.offset != staged.written() {
+                return Err(part_offset_mismatch(staged.written()));
             }
             if held.is_none() {
                 create_part_staging(&daemon, &part.staging_path)
@@ -640,28 +624,16 @@ async fn upload_part_to_daemon<B: FileBackend>(
             }
             started = true;
         }
-        for private_chunk in chunk.chunks(UPLOAD_CHUNK_BYTES) {
-            if response.is_closed() {
-                return Err(upload_canceled());
-            }
-            let expected = i64::try_from(private_chunk.len())
-                .map_err(|_| daemon_error(DaemonClientError::InvalidFrame("file write length")))?;
-            let written = upload_mutation(daemon.write_file(v1::WriteRequest {
-                path: part.staging_path.clone(),
-                offset,
-                data: private_chunk.to_vec(),
-            }))
-            .await
-            .map_err(daemon_error)?;
-            if written != expected {
-                return Err(daemon_error(DaemonClientError::InvalidFrame("file write")));
-            }
-            offset = offset.checked_add(written).ok_or_else(|| {
-                daemon_error(DaemonClientError::InvalidFrame("file write offset"))
-            })?;
+        if response.is_closed() {
+            return Err(upload_canceled());
         }
+        staged.push(&daemon, &chunk).await.map_err(daemon_error)?;
     }
 
+    // Everything received is on disk before the part reports its size or
+    // the upload is published.
+    staged.flush(&daemon).await.map_err(daemon_error)?;
+    let offset = staged.written();
     if !part.finish {
         return connectrpc::Response::ok(proto::UploadFilePartResponse {
             path: part.destination,
@@ -790,6 +762,14 @@ async fn upload_mutation_until<T>(
                 "upload operation deadline exceeded",
             ))
         })?
+}
+
+/// The drain's deadline (#4426), or a moment that never comes on a server
+/// that does not drain.
+fn restart_deadline<B: FileBackend>(backend: &B) -> RestartSignal {
+    backend
+        .server_restart(Restart::Deadline)
+        .unwrap_or_else(|| Box::pin(std::future::pending()))
 }
 
 fn upload_canceled() -> connectrpc::ConnectError {
@@ -1179,6 +1159,7 @@ mod tests {
     mod download;
     mod drain;
     mod parts;
+    mod upload;
 
     use std::time::{Duration, Instant};
 

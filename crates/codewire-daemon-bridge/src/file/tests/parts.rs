@@ -149,12 +149,15 @@ async fn parts_resume_where_the_held_bytes_end_and_publish_once() {
 }
 
 #[tokio::test]
-async fn a_canceled_part_keeps_its_bytes_for_the_next() {
+async fn a_canceled_part_keeps_its_written_bytes_for_the_next() {
     let harness = DaemonHarness::spawn().await;
     let bridge = bridge(harness.client().await);
     let destination = harness.workspace_root().join("resumed.bin");
     let path = destination.to_string_lossy().into_owned();
-    let data = payload(2 * UPLOAD_CHUNK_BYTES);
+    // One full write batch, then a tail that is still buffered when the part
+    // is canceled.
+    let batch = staged::UPLOAD_WRITE_BYTES;
+    let data = payload(2 * batch);
 
     let (messages, receiver) = mpsc::channel(4);
     let task = {
@@ -170,7 +173,8 @@ async fn a_canceled_part_keeps_its_bytes_for_the_next() {
     };
     for request in [
         part_header(&path, UPLOAD_ID, 0, false),
-        part_chunk(&data[..UPLOAD_CHUNK_BYTES]),
+        part_chunk(&data[..batch]),
+        part_chunk(&data[batch..batch + UPLOAD_CHUNK_BYTES]),
     ] {
         messages
             .send(Ok(connectrpc::StreamMessage::from_message(&request)))
@@ -183,30 +187,25 @@ async fn a_canceled_part_keeps_its_bytes_for_the_next() {
             .first()
             .and_then(|staging| std::fs::metadata(staging).ok())
             .map_or(0, |metadata| metadata.len());
-        if written == UPLOAD_CHUNK_BYTES as u64 {
+        if written == batch as u64 {
             break;
         }
-        assert!(Instant::now() < deadline, "the first chunk was not staged");
+        assert!(Instant::now() < deadline, "the first batch was not written");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     task.abort();
     let _ = task.await;
     drop(messages);
 
+    // Only written bytes are held: the buffered tail was never reported.
     let held = send_part(&bridge, &path, 0, false, &[]).await.unwrap().body;
     assert_eq!(
-        held.size, UPLOAD_CHUNK_BYTES as i64,
-        "the canceled part's bytes are held"
+        held.size, batch as i64,
+        "the canceled part's written bytes are held"
     );
-    send_part(
-        &bridge,
-        &path,
-        UPLOAD_CHUNK_BYTES,
-        true,
-        &data[UPLOAD_CHUNK_BYTES..],
-    )
-    .await
-    .expect("resumed part");
+    send_part(&bridge, &path, batch, true, &data[batch..])
+        .await
+        .expect("resumed part");
     assert_eq!(std::fs::read(&destination).unwrap(), data);
     assert!(staging_files(harness.workspace_root()).is_empty());
     harness.shutdown().await;
@@ -291,5 +290,112 @@ async fn a_part_removes_abandoned_uploads_beside_it() {
     send_part(&bridge, &path, 0, false, &[]).await.unwrap();
     assert!(!abandoned.exists(), "an abandoned upload is removed");
     assert!(recent.exists(), "a recent upload is kept");
+    harness.shutdown().await;
+}
+
+fn staged_len(workspace: &Path) -> u64 {
+    staging_files(workspace)
+        .first()
+        .and_then(|staging| std::fs::metadata(staging).ok())
+        .map_or(0, |metadata| metadata.len())
+}
+
+#[tokio::test]
+async fn parts_spanning_write_batches_arrive_whole_and_report_written_sizes() {
+    let harness = DaemonHarness::spawn().await;
+    let bridge = bridge(harness.client().await);
+    let destination = harness.workspace_root().join("batched.bin");
+    let path = destination.to_string_lossy().into_owned();
+    let batch = staged::UPLOAD_WRITE_BYTES;
+    let data = payload(3 * batch + 17);
+    let split = batch + UPLOAD_CHUNK_BYTES + 5;
+
+    let first = send_part(&bridge, &path, 0, false, &data[..split])
+        .await
+        .expect("first part")
+        .body;
+    assert_eq!(first.size, i64::try_from(split).unwrap());
+    assert_eq!(
+        staged_len(harness.workspace_root()),
+        split as u64,
+        "a part's reported size is on disk"
+    );
+    let last = send_part(&bridge, &path, split, true, &data[split..])
+        .await
+        .expect("last part")
+        .body;
+    assert!(last.finished);
+    assert_eq!(last.size, i64::try_from(data.len()).unwrap());
+    assert_eq!(std::fs::read(&destination).unwrap(), data);
+    assert!(staging_files(harness.workspace_root()).is_empty());
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_part_open_at_the_drain_deadline_keeps_its_written_bytes_for_the_next() {
+    let harness = DaemonHarness::spawn().await;
+    let (deadline, restart_deadline) = tokio::sync::watch::channel(false);
+    let draining = FileBridge::new(TestBackend {
+        daemon: harness.client().await,
+        deny_authorization: false,
+        restart_deadline: Some(restart_deadline),
+    });
+    let destination = harness.workspace_root().join("drained.bin");
+    let path = destination.to_string_lossy().into_owned();
+    let batch = staged::UPLOAD_WRITE_BYTES;
+    let data = payload(2 * batch);
+
+    let (messages, receiver) = mpsc::channel(4);
+    let task = {
+        let draining = draining.clone();
+        tokio::spawn(async move {
+            proto::FileService::upload_file_part(
+                &draining,
+                RequestContext::default(),
+                Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver)),
+            )
+            .await
+        })
+    };
+    for request in [
+        part_header(&path, UPLOAD_ID, 0, false),
+        part_chunk(&data[..batch]),
+        part_chunk(&data[batch..batch + UPLOAD_CHUNK_BYTES]),
+    ] {
+        messages
+            .send(Ok(connectrpc::StreamMessage::from_message(&request)))
+            .await
+            .unwrap();
+    }
+    let wait = Instant::now() + Duration::from_secs(5);
+    while staged_len(harness.workspace_root()) != batch as u64 {
+        assert!(Instant::now() < wait, "the first batch was not written");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    deadline.send_replace(true);
+    let error = match task.await.expect("part task") {
+        Ok(_) => panic!("a part open at the drain deadline must end"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, connectrpc::ErrorCode::Unavailable);
+    assert!(
+        error
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("resumes")),
+        "{error:?}"
+    );
+    drop(messages);
+
+    // The next replica finds the written bytes and the upload resumes there.
+    let next = bridge(harness.client().await);
+    let held = send_part(&next, &path, 0, false, &[]).await.unwrap().body;
+    assert_eq!(held.size, batch as i64, "the written bytes are held");
+    send_part(&next, &path, batch, true, &data[batch..])
+        .await
+        .expect("resumed part");
+    assert_eq!(std::fs::read(&destination).unwrap(), data);
+    assert!(staging_files(harness.workspace_root()).is_empty());
     harness.shutdown().await;
 }

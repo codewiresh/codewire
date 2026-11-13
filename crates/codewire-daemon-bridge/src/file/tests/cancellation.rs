@@ -144,10 +144,12 @@ async fn canceled_pending_write_settles_before_staging_cleanup() {
     let harness = DaemonHarness::spawn_with_file_gate(Arc::clone(&gate)).await;
     let destination = destination(&harness);
     let mut upload = UploadTask::start(&harness, &destination).await;
+    // A whole write batch, so its Write is issued while the upload is open.
     upload
-        .send(proto::upload_file_request::Payload::Chunk(
-            b"partial-upload".to_vec(),
-        ))
+        .send(proto::upload_file_request::Payload::Chunk(vec![
+            7;
+            staged::UPLOAD_WRITE_BYTES
+        ]))
         .await;
     gate.wait().await;
     assert!(has_staging_file(harness.workspace_root()));
