@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.20
 # The two Linux cw release compilations on the trusted BuildKit builder
 # (#3119). build-cw-linux.sh submits one export target per job through
 # cw-release-linux.hcl and verifies what comes back.

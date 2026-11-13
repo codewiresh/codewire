@@ -151,8 +151,10 @@ verify_services_dockerfile_contract() {
     fail 'promotable services image can enable test-only orchestration features'
   grep -qF 'CODEWIRE_ORCHESTRATION_FEATURES = "kind-e2e"' "$ROOT/docker-bake.hcl" ||
     fail 'non-promotable Kind services image lacks its test-only feature'
-  [[ "$(head -n 1 "$SERVICES_DOCKERFILE")" == '# syntax=docker/dockerfile:1.20' ]] ||
-    fail 'services checksum ADD requires an active Dockerfile frontend directive'
+  # The builder's built-in frontend runs the checksum ADD; an external
+  # frontend container can miss BuildKit's 10 s start on a slow disk (#4495).
+  ! grep -qiE '^#[[:space:]]*syntax[[:space:]]*=' "$SERVICES_DOCKERFILE" ||
+    fail 'services Dockerfile must use the builder built-in frontend'
   # Provider logins are native OAuth: the services image ships no provider CLI.
   ! grep -qE 'registry\.npmjs\.org/@openai/codex|github\.com/cli/cli/releases' "$SERVICES_DOCKERFILE" ||
     fail 'services image must not download a provider CLI'

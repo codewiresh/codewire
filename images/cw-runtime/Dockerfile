@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 # Standalone amd64 CW compiler. ARM product callers retain their native route.
 # The fixed empty stage makes an omitted named context fail locally rather
 # than interpreting its name as a remotely fetched image.

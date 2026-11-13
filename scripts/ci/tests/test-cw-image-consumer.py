@@ -130,11 +130,21 @@ class Consumer(unittest.TestCase):
         with self.assertRaises(consumer.asset.Refused):
             consumer.canonical_plan(prefix + ["--set", "*.context=.", "kind"], self.source, foreign, "runtime")
 
-    def test_selected_frontend_directives_precede_ordinary_comments(self):
-        for recipe, directive in (("deployments/docker/daemon.Dockerfile", "# syntax=docker/dockerfile:1.20"),
-                                  ("images/workspace/Dockerfile", "# syntax=docker/dockerfile:1.7")):
+    def test_no_dockerfile_selects_an_external_frontend(self):
+        # A `# syntax=` image runs the Dockerfile frontend in its own container,
+        # and BuildKit's bridge to it gives that container a fixed 10 s to start.
+        # On a slow builder disk it does not, and the build fails with "frontend
+        # grpc server closed unexpectedly" (#4495). The builder's built-in
+        # frontend has no such start; bumping BuildKit is how it is updated.
+        listed = subprocess.run(["git", "ls-files", "-z", "--", "*Dockerfile*"], cwd=ROOT,
+                                check=True, capture_output=True).stdout.decode().split("\0")
+        recipes = [name for name in listed if name]
+        self.assertIn("deployments/docker/services.Dockerfile", recipes)
+        for recipe in recipes:
             with self.subTest(recipe=recipe):
-                self.assertEqual((ROOT / recipe).read_text().splitlines()[0], directive)
+                directives = [line for line in (ROOT / recipe).read_text().splitlines()
+                              if line.replace(" ", "").lower().startswith("#syntax=")]
+                self.assertEqual(directives, [])
 
     def test_effective_profiles_refuse_conflicts_and_keep_unrelated_ci_targets(self):
         for extra in (["--build-arg", "CODEWIRE_RUST_PROFILE=release"],

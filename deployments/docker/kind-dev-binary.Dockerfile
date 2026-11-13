@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Local Kind development only (`make kind-deploy`): compile one product binary
 # incrementally in the same pinned Rust/Bookworm toolchain as the services
 # image and export just that file. Never promotable; nothing here is published.

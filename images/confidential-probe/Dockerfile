@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 # The image registry host, which scripts/ci/images/build-push-image.sh passes.
 ARG CODEWIRE_IMAGE_REGISTRY
 FROM ${CODEWIRE_IMAGE_REGISTRY}/oci-approved/e2e-test-images/busybox@sha256:caec39cad3b12c26600baf6e67ba811ac15d28a9288d0ccdfffb4b318992c3bb

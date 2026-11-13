@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.20
 # codewire Rust services — one image, many entrypoints.
 #
 # Builds every Rust server binary once (shared deps compiled a single time)

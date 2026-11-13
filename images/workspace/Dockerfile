@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 # Codewire developer workspace. The production workflow and local verifier must
 # supply the exact base image built from the same source tree.
 ARG BASE_IMAGE_REF

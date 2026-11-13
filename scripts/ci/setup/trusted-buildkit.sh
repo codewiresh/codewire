@@ -16,9 +16,11 @@ readonly TRUSTED_BUILDKIT_ENDPOINT="tcp://$TRUSTED_BUILDKIT_HOST:1234"
 # steps at once (infra's ci-buildkit/builder.yaml: max-parallelism 2,
 # infra#1534), sized for two Linux release compiles of 8 jobs each (8.47 GiB
 # together). At 14 jobs a step, buildkitd's cgroup sat at 93-94.5% of 16 GiB
-# with 10,837 socket-memory throttles, and the Dockerfile frontend's gRPC
-# dropped under two concurrent steps (Dev deliveries 45596, 45607, 46581;
-# infra#1534, 2026-11-13). More jobs need more guest memory, not this value.
+# with 10,837 socket-memory throttles (infra#1534, 2026-11-13). More jobs need
+# more guest memory, not this value. The "frontend grpc server closed
+# unexpectedly" drops seen then were not memory: a `# syntax=` frontend's
+# container outlasted BuildKit's fixed 10 s start on a slow disk, so the
+# Dockerfiles use the builder's built-in frontend instead (#4495).
 readonly TRUSTED_BUILDKIT_CARGO_BUILD_JOBS=8
 # The static CW producer sizes its own Cargo jobs from the machine it runs on
 # (finalize-cw-runtime-source.py, 3 GiB per job), and the job that verifies its

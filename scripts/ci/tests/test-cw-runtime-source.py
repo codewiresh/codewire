@@ -122,8 +122,7 @@ class CachedTarget(unittest.TestCase):
 
     def test_the_producer_pins_the_builders_sized_cargo_jobs_and_mounts_the_cache(self):
         # The trusted builder's 16 GiB guest runs two steps at once, sized for 8
-        # Cargo jobs each (infra ci-buildkit/builder.yaml, infra#1534); at 14 its
-        # Dockerfile frontend dropped under memory pressure (2026-11-13).
+        # Cargo jobs each (infra ci-buildkit/builder.yaml, infra#1534).
         trusted = (ROOT / "scripts/ci/setup/trusted-buildkit.sh").read_text()
         self.assertIn("readonly TRUSTED_BUILDKIT_CARGO_BUILD_JOBS=8\n", trusted)
         self.assertIn("readonly TRUSTED_BUILDKIT_CW_PRODUCER_JOBS=8\n", trusted)

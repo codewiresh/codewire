@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.20
 # The workspace support image: it ships only `cw`, the workspace daemon that
 # every sandbox Pod runs (from an image volume or an init-container copy).
 
