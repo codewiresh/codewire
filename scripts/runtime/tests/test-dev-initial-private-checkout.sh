@@ -11,7 +11,7 @@ trap 'rm -rf -- "$TEST_ROOT"' EXIT
 CHECKOUT_ROOT="$TEST_ROOT"
 mkdir -p "$CHECKOUT_ROOT/scripts/runtime/dev/testdata"
 ADMISSION="$CHECKOUT_ROOT/scripts/runtime/dev/testdata/acceptance-identity.json"
-EXPECTED_CODEWIRE_ADMIN_EMAIL=hello@codewire.sh
+EXPECTED_CODEWIRE_ADMIN_EMAIL=e2e@codewire.sh
 EXPECTED_CODEWIRE_ADMIN_USER_ID=11111111111111111111111111111111
 EXPECTED_CODEWIRE_ORGANIZATION_ID=22222222222222222222222222222222
 PROFILE_ID=33333333-3333-4333-8333-333333333333
@@ -24,7 +24,7 @@ expect_failure() {
 }
 enroll() {
   jq -n --arg user "$EXPECTED_CODEWIRE_ADMIN_USER_ID" --arg org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" \
-    '{version:1,status:"enrolled",email:"hello@codewire.sh",userId:$user,organizationId:$org}' >"$ADMISSION"
+    '{version:1,status:"enrolled",email:"e2e@codewire.sh",userId:$user,organizationId:$org}' >"$ADMISSION"
 }
 enroll; checkout_admission; COUNT=$((COUNT + 1))
 preauth_rejection() {

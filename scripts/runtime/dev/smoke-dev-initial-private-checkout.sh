@@ -25,7 +25,7 @@ checkout_fixture_validate() {
   TMPDIR="$SMOKE_TMP_PARENT" timeout 60 python3 "$CHECKOUT_ROOT/scripts/runtime/dev/hosted-checkout-fixture.py" \
     preflight --context "$KUBE_CONTEXT" --namespace "$SANDBOX_NAMESPACE" \
     --image "$DEV_CHECKOUT_WORKSPACE_IMAGE" --principal-user-id "$EXPECTED_CODEWIRE_ADMIN_USER_ID" \
-    --principal-email hello@codewire.sh --organization-id "$EXPECTED_CODEWIRE_ORGANIZATION_ID" \
+    --principal-email e2e@codewire.sh --organization-id "$EXPECTED_CODEWIRE_ORGANIZATION_ID" \
     >/dev/null 2>/dev/null || die 'hosted fixture Dev topology preflight failed; no login or mutation started'
 }
 
@@ -43,7 +43,7 @@ checkout_fixture_start() {
   checkout_fixture_command start --state-dir "$CHECKOUT_STATE" --context "$KUBE_CONTEXT" \
     --namespace "$SANDBOX_NAMESPACE" --image "$DEV_CHECKOUT_WORKSPACE_IMAGE" \
     --public-key-file "$TMPDIR_SMOKE/checkout-selected.pub" \
-    --principal-user-id "$EXPECTED_CODEWIRE_ADMIN_USER_ID" --principal-email hello@codewire.sh \
+    --principal-user-id "$EXPECTED_CODEWIRE_ADMIN_USER_ID" --principal-email e2e@codewire.sh \
     --organization-id "$EXPECTED_CODEWIRE_ORGANIZATION_ID" || die 'hosted fixture startup failed; output suppressed'
   local ready="$CHECKOUT_STATE/ready.json"
   checkout_validate_ready "$ready" || die 'hosted fixture ready metadata is invalid'
@@ -108,7 +108,7 @@ checkout_admission() {
   jq -e --arg user "$EXPECTED_CODEWIRE_ADMIN_USER_ID" --arg org "$EXPECTED_CODEWIRE_ORGANIZATION_ID" \
     --arg email "$EXPECTED_CODEWIRE_ADMIN_EMAIL" '
     keys == ["email","organizationId","status","userId","version"] and
-    .version == 1 and .status == "enrolled" and .email == "hello@codewire.sh" and
+    .version == 1 and .status == "enrolled" and .email == "e2e@codewire.sh" and
     .email == $email and .userId == $user and .organizationId == $org and
     ([.userId,.organizationId] | all(.[]; type == "string" and
       test("^[0-9a-f]{32}$") and . != "00000000000000000000000000000000"))

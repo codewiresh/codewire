@@ -8,12 +8,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT="$ROOT/scripts/runtime/dev/make-dev-acceptance-unlimited.sh"
 mkdir -p "$ROOT/.tmp"
-TEST_TMP="$(mktemp -d "$ROOT/.tmp/codewire-dev-acceptance-unlimited-tests.XXXXXX")"
+TEST_TMP="$(mktemp -d "$ROOT/.tmp/codewire-dev-e2e-unlimited-tests.XXXXXX")"
 cleanup() { rm -rf -- "$TEST_TMP"; }
 trap cleanup EXIT
 fail() { printf 'dev acceptance unlimited tests: %s\n' "$*" >&2; exit 1; }
 
-readonly ORG_ID="cf4bc133bbc34f65a88b6f7d23bfc6cc"
+readonly ORG_ID="94e5c3245f5546fba77baa6eca13ca6c"
 
 mkdir -p "$TEST_TMP/bin" "$TEST_TMP/kube"
 cat >"$TEST_TMP/bin/kubectl" <<'FAKE_KUBECTL'
@@ -73,9 +73,9 @@ for needle in "BEGIN;" "COMMIT;" "FOR UPDATE OF o" "lower(u.email) = lower(:'own
 done
 grep -F -- "billing_exempt::text" <<<"$sql" >/dev/null ||
   fail 'changed: the read-back must cast the boolean to text explicitly'
-grep -F -- "org_slug=codewire-dev-acceptance" "$TEST_TMP/changed/calls" >/dev/null ||
+grep -F -- "org_slug=codewire-dev-e2e" "$TEST_TMP/changed/calls" >/dev/null ||
   fail 'changed: the default slug was not passed'
-grep -F -- "owner_email=hello@codewire.sh" "$TEST_TMP/changed/calls" >/dev/null ||
+grep -F -- "owner_email=e2e@codewire.sh" "$TEST_TMP/changed/calls" >/dev/null ||
   fail 'changed: the default owner was not passed'
 
 # Repeating it changes and records nothing.

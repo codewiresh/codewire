@@ -121,11 +121,11 @@ class FixtureTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="cw-hosted-checkout-tests-")
         self.parent = Path(self.temporary.name)
         self.identity = self.parent / "identity.json"
-        self.identity.write_text(json.dumps({"version": 1, "status": "enrolled", "email": "hello@codewire.sh", "userId": USER, "organizationId": ORGANIZATION}))
+        self.identity.write_text(json.dumps({"version": 1, "status": "enrolled", "email": "e2e@codewire.sh", "userId": USER, "organizationId": ORGANIZATION}))
         self.key = self.parent / "selected.pub"
         self.key.write_text(KEY + "\n")
         self.args = argparse.Namespace(state_dir=self.parent / "fixture", context=FIXTURE.DEV_CONTEXT, namespace=FIXTURE.DEV_NAMESPACE,
-            organization_id=ORGANIZATION, principal_user_id=USER, principal_email="hello@codewire.sh", image=IMAGE, public_key_file=self.key)
+            organization_id=ORGANIZATION, principal_user_id=USER, principal_email="e2e@codewire.sh", image=IMAGE, public_key_file=self.key)
         self.kube = FakeKube()
         self.admission_patch = patch.object(FIXTURE, "IDENTITY", self.identity)
         self.kube_patch = patch.object(FIXTURE, "Kube", return_value=self.kube)
@@ -230,7 +230,7 @@ class FixtureTests(unittest.TestCase):
     def test_unenrolled_and_owner_inputs_rejected_before_kubernetes(self):
         for field, value in (("status", "not-enrolled"), ("userId", None), ("organizationId", "0" * 32), ("email", "noel@codewire.sh")):
             with self.subTest(field=field):
-                document = {"version": 1, "status": "enrolled", "email": "hello@codewire.sh", "userId": USER, "organizationId": ORGANIZATION}
+                document = {"version": 1, "status": "enrolled", "email": "e2e@codewire.sh", "userId": USER, "organizationId": ORGANIZATION}
                 document[field] = value
                 self.identity.write_text(json.dumps(document))
                 with self.assertRaises(FIXTURE.Failure):

@@ -8,8 +8,8 @@
 # unlimited is left unchanged and records nothing.
 set -euo pipefail
 
-ORG_SLUG="${ORG_SLUG:-codewire-dev-acceptance}"
-OWNER_EMAIL="${OWNER_EMAIL:-hello@codewire.sh}"
+ORG_SLUG="${ORG_SLUG:-codewire-dev-e2e}"
+OWNER_EMAIL="${OWNER_EMAIL:-e2e@codewire.sh}"
 KUBE_NAMESPACE="${KUBE_NAMESPACE:-dev}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-}"
 POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-postgres}"
@@ -27,8 +27,8 @@ named by its slug and must be owned by the expected account; anything else
 changes nothing.
 
 Options:
-  --org-slug SLUG       Acceptance organization (default: codewire-dev-acceptance)
-  --owner-email EMAIL   Its expected owner (default: hello@codewire.sh)
+  --org-slug SLUG       Acceptance organization (default: codewire-dev-e2e)
+  --owner-email EMAIL   Its expected owner (default: e2e@codewire.sh)
   --context NAME        Optional Kubernetes context inside scoped kube-access
   --namespace NAME      Kubernetes namespace (default: dev)
   -h, --help            Show this help

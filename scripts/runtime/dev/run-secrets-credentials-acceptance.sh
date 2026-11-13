@@ -243,7 +243,7 @@ dev_checkout_identity_ready() {
       length == 1 and (.[0] |
         keys == ["email","organizationId","status","userId","version"] and
         .version == 1 and .status == "enrolled" and
-        .email == "hello@codewire.sh" and .email == $email and
+        .email == "e2e@codewire.sh" and .email == $email and
         .userId == $user and .organizationId == $org and
         ([.userId,.organizationId] | all(type == "string" and
           test("^[0-9a-f]{32}$") and . != "00000000000000000000000000000000")))

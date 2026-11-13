@@ -112,7 +112,7 @@ def admission(user, email, organization):
         raise Failure("acceptance identity is not enrolled") from None
     require(isinstance(value, dict) and set(value) == {"version", "status", "email", "userId", "organizationId"}
             and type(value["version"]) is int and value["version"] == 1 and value["status"] == "enrolled"
-            and value["email"] == "hello@codewire.sh", "acceptance identity is not enrolled")
+            and value["email"] == "e2e@codewire.sh", "acceptance identity is not enrolled")
     require(all(isinstance(value[key], str) and re.fullmatch(r"[0-9a-f]{32}", value[key])
                 for key in ("userId", "organizationId")), "invalid enrolled identity")
     identifier(value["userId"])
@@ -357,7 +357,7 @@ def load_state(directory):
     identifier(value["organization"])
     identifier(value["user"])
     require(all(re.fullmatch(r"[0-9a-f]{32}", value[key]) for key in ("organization", "user")), "invalid fixture state")
-    require(value["email"] == "hello@codewire.sh" and isinstance(value["deadline"], (int, float)), "invalid fixture state")
+    require(value["email"] == "e2e@codewire.sh" and isinstance(value["deadline"], (int, float)), "invalid fixture state")
     allowed = [("ConfigMap", ""), ("NetworkPolicy", "-source"), ("NetworkPolicy", "-target"), ("Service", ""), ("Pod", "")]
     require(isinstance(value["resources"], list) and len(value["resources"]) <= 5, "invalid fixture state")
     for resource, (kind, suffix) in zip(value["resources"], allowed):

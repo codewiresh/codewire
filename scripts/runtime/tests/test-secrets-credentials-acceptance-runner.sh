@@ -116,7 +116,7 @@ case "$label" in
   dev-initial-private-checkout)
     [[ "$*" == "--cw-bin $fixtures/normal-cw" &&
        "$DEV_CHECKOUT_WORKSPACE_IMAGE" == registry.example/workspace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa &&
-       "$EXPECTED_CODEWIRE_ADMIN_EMAIL" == hello@codewire.sh &&
+       "$EXPECTED_CODEWIRE_ADMIN_EMAIL" == e2e@codewire.sh &&
        "$EXPECTED_CODEWIRE_ADMIN_USER_ID" == aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa &&
        "$EXPECTED_CODEWIRE_ORGANIZATION_ID" == bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb &&
        -n "$DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE" &&
@@ -467,7 +467,7 @@ export DEV_SMOKE_BROWSER_AUTH_CREDENTIAL_FILE="$FAKE_ROOT/fixtures/browser-input
 export DEV_SMOKE_BROWSER_AUTH_BUN_BIN="$FAKE_ROOT/fixtures/synthetic-bun"
 export DEV_SMOKE_BROWSER_AUTH_CHROMIUM_BIN="$FAKE_ROOT/fixtures/synthetic-chromium"
 export DEV_CHECKOUT_WORKSPACE_IMAGE=registry.example/workspace@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-export EXPECTED_CODEWIRE_ADMIN_EMAIL=hello@codewire.sh
+export EXPECTED_CODEWIRE_ADMIN_EMAIL=e2e@codewire.sh
 expect_status 1 "$TEST_ROOT/hosted-unadmitted.out" "$RUNNER" --only dev-initial-private-checkout
 [[ ! -s "$CALLS" ]] || fail 'unadmitted hosted identity reached a child'
 grep -Fq 'dedicated Dev checkout identity is not source-admitted' "$TEST_ROOT/hosted-unadmitted.out" ||

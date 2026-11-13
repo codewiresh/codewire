@@ -320,7 +320,7 @@ run_refusal smoke_regular 'the Dev smoke identity stays unlimited' --rate-card r
 run_refusal rehearsal_unlimited 'the billing-rehearsal identity is never unlimited' \
   "${REHEARSAL_ARGS[@]}" --rate-card unlimited
 run_refusal acceptance_account 'the browser acceptance account is never provisioned' \
-  "${REHEARSAL_ARGS[@]}" --email hello@codewire.sh
+  "${REHEARSAL_ARGS[@]}" --email e2e@codewire.sh
 bad_path_index=0
 for bad_path in apps/codewire/prod/ci-smoke apps/codewire/dev/ apps/codewire/dev/Ci-smoke \
   apps/codewire/dev/ci_smoke apps/codewire/dev/ci-smoke/extra apps/codewire/dev/-ci \
