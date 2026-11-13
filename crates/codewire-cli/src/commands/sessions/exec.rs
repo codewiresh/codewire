@@ -29,9 +29,13 @@ pub(crate) async fn handle_exec_command(globals: &Globals, args: ExecArgs) -> an
             exec_on_host(&environment.path, &args, env).await?
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        EnvironmentSessionTarget::NativeLocal { environment_id, .. } => {
+        EnvironmentSessionTarget::NativeLocal {
+            environment_id,
+            working_dir,
+            ..
+        } => {
             let client = super::native_environment_data_client(&environment_id).await?;
-            let stream = client.run(run_start(&args, env)?).await?;
+            let stream = client.run(run_start(&args, env, &working_dir)?).await?;
             drive(LocalStream(stream), args.tty).await?
         }
         EnvironmentSessionTarget::Platform {
@@ -51,11 +55,17 @@ pub(crate) async fn handle_exec_command(globals: &Globals, args: ExecArgs) -> an
                 .wait_for_direct(codewire_client::hosted_shell::TAILNET_DIRECT_WAIT)
                 .await
                 .ok();
-            let start = run_start(&args, Default::default())?;
+            let start = run_start(&args, Default::default(), "")?;
             let tty = args
                 .tty
                 .then_some((start.term.as_str(), start.columns, start.rows));
-            let channel = tailnet.exec(&ssh_line(&args, &env), tty).await?;
+            let default_dir = match args.workdir {
+                Some(_) => String::new(),
+                None => declared_working_dir(&client, &org_id, &environment_id).await,
+            };
+            let channel = tailnet
+                .exec(&ssh_line(&args, &env, &default_dir), tty)
+                .await?;
             let code = drive(
                 SshStream {
                     channel,
@@ -84,13 +94,19 @@ fn exit_with(code: i32) -> anyhow::Result<()> {
     std::process::exit(code)
 }
 
+/// Without `-w` the command starts where `cw run` starts a session there:
+/// `default_dir`, the environment's project folder in a local VM (#4437).
 fn run_start(
     args: &ExecArgs,
     env: std::collections::BTreeMap<String, String>,
+    default_dir: &str,
 ) -> anyhow::Result<RunStart> {
     let mut start = RunStart {
         command: args.command.clone(),
-        working_dir: args.workdir.clone().unwrap_or_default(),
+        working_dir: args
+            .workdir
+            .clone()
+            .unwrap_or_else(|| default_dir.to_owned()),
         env: env.into_iter().collect(),
         allocate_tty: args.tty,
         ..Default::default()
@@ -110,18 +126,51 @@ trait RunStream {
     async fn next_output(&mut self) -> anyhow::Result<Option<RunResponse>>;
 }
 
+/// Where a cloud environment's daemon starts a session launched without a
+/// working directory, as `cw run` does: the environment's declared directory,
+/// or the workspace root when it declares none or it can't be read (#4437).
+async fn declared_working_dir(
+    client: &codewire_client::CodewireClient,
+    org_id: &str,
+    environment_id: &str,
+) -> String {
+    let declared = client
+        .get_environment_project_spec(codewire_client::GetEnvironmentProjectSpecRequest {
+            org_id: org_id.to_owned(),
+            environment_id: environment_id.to_owned(),
+            ..Default::default()
+        })
+        .await
+        .ok()
+        .and_then(|response| response.project_spec.into_option())
+        .map(|spec| spec.working_directory)
+        .filter(|directory| directory.starts_with('/'));
+    declared.unwrap_or_else(|| WORKSPACE_ROOT.to_owned())
+}
+
+/// A cloud environment's workspace root, where its daemon starts a session
+/// whose declared directory doesn't exist.
+const WORKSPACE_ROOT: &str = "/workspace";
+
 /// The command line for a cloud environment's SSH exec. `sh -c` changes to
 /// the working directory and runs the command with its variables; every
 /// word is quoted, so the daemon's `SHELL -c LINE` and its word-split form
-/// read it the same way.
-fn ssh_line(args: &ExecArgs, env: &std::collections::BTreeMap<String, String>) -> String {
-    const SCRIPT: &str = r#"d=$1; shift; if [ -n "$d" ]; then cd "$d" || exit 126; fi; exec "$@""#;
+/// read it the same way. Without `-w` it starts in `default_dir`, or the
+/// workspace root while that doesn't exist, as the daemon starts a session.
+fn ssh_line(
+    args: &ExecArgs,
+    env: &std::collections::BTreeMap<String, String>,
+    default_dir: &str,
+) -> String {
+    const SCRIPT: &str = r#"d=$1; f=$2; r=$3; shift 3; if [ -n "$d" ]; then cd "$d" || exit 126; elif [ -n "$f" ]; then cd "$f" 2>/dev/null || cd "$r" 2>/dev/null; fi; exec "$@""#;
     let mut words = vec![
         "sh".to_owned(),
         "-c".to_owned(),
         SCRIPT.to_owned(),
         "cw".to_owned(),
         args.workdir.clone().unwrap_or_default(),
+        default_dir.to_owned(),
+        WORKSPACE_ROOT.to_owned(),
     ];
     if !env.is_empty() {
         words.push("env".to_owned());
@@ -327,16 +376,27 @@ mod tests {
     }
 
     #[test]
+    fn without_w_a_run_starts_where_cw_run_starts_a_session() {
+        let start = run_start(
+            &exec_args(&line("cw exec pwd")),
+            Default::default(),
+            "/workspace/app",
+        )
+        .unwrap();
+        assert_eq!(start.working_dir, "/workspace/app");
+    }
+
+    #[test]
     fn a_run_start_carries_the_command_and_a_terminal_only_with_tty() {
         let args = exec_args(&line("cw exec -w src -e A=1 env"));
         let env = parse_env_overrides(&args.env).unwrap();
-        let start = run_start(&args, env).unwrap();
+        let start = run_start(&args, env, "/workspace/app").unwrap();
         assert_eq!(start.command, ["env"]);
         assert_eq!(start.working_dir, "src");
         assert_eq!(start.env.get("A").map(String::as_str), Some("1"));
         assert!(!start.allocate_tty);
         assert_eq!((start.columns, start.rows), (0, 0));
-        let tty = run_start(&exec_args(&line("cw exec -t htop")), Default::default()).unwrap();
+        let tty = run_start(&exec_args(&line("cw exec -t htop")), Default::default(), "").unwrap();
         assert!(tty.allocate_tty);
         assert!(tty.columns > 0 && tty.rows > 0);
     }
@@ -361,7 +421,7 @@ mod tests {
             "a b",
         ]);
         let env = parse_env_overrides(&args.env).unwrap();
-        let line = ssh_line(&args, &env);
+        let line = ssh_line(&args, &env, "/nonexistent-default");
         assert!(line.starts_with("'sh' '-c' "), "{line}");
         let output = std::process::Command::new("sh")
             .arg("-c")
@@ -375,6 +435,33 @@ mod tests {
                 folder.path().canonicalize().unwrap().display()
             )
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn without_w_an_ssh_exec_starts_where_a_session_would() {
+        let run = |default_dir: &str| {
+            let args = exec_args(&["cw", "exec", "pwd"]);
+            let line = ssh_line(&args, &Default::default(), default_dir);
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&line)
+                .output()
+                .unwrap();
+            (
+                output.status.code(),
+                String::from_utf8(output.stdout).unwrap(),
+            )
+        };
+        let folder = tempfile::tempdir().unwrap();
+        let declared = folder.path().canonicalize().unwrap();
+        assert_eq!(
+            run(&declared.to_string_lossy()),
+            (Some(0), format!("{}\n", declared.display()))
+        );
+        // A declared directory that doesn't exist yet, as after a failed
+        // clone, doesn't stop the command.
+        assert_eq!(run(&declared.join("missing").to_string_lossy()).0, Some(0));
     }
 
     #[cfg(unix)]
