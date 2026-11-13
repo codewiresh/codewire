@@ -1288,6 +1288,7 @@ async fn attach_host_environment_session(
     raw_output: bool,
     ansi: &mut LogsAnsiFilter,
     screen: &mut SessionScreen,
+    lost_output: &mut u64,
 ) -> anyhow::Result<AttachExit> {
     use codewire_daemon_proto::daemon::v1::session_attach_message::Payload;
     let client = host_session_client(environment).await?;
@@ -1331,6 +1332,7 @@ async fn attach_host_environment_session(
                     }
                     Some(Payload::HistoryGap(gap))=>{
                         eprintln!("[cw] older output unavailable; showing retained output");
+                        *lost_output += gap.retained_start_offset.saturating_sub(cursor);
                         cursor=gap.retained_start_offset;
                         *ansi=LogsAnsiFilter::default();
                     }
@@ -1815,10 +1817,25 @@ async fn launch_run(
     if interactive {
         eprintln!("  {}", place.detach_hint(&session, style));
     }
-    if let Some(session) = attach_environment_session(globals, target, session).await? {
+    let mut lost_output = 0;
+    let ended = attach_environment_session(globals, target, session, &mut lost_output).await?;
+    // Without a terminal the output is data, piped or saved: a gap in it
+    // must not pass for the whole (#4427).
+    if !interactive && lost_output > 0 {
+        anyhow::bail!(lost_output_error(lost_output));
+    }
+    if let Some(session) = ended {
         ensure_environment_session_succeeded(&session)?;
     }
     Ok(())
+}
+
+/// A run's output read more slowly than the command wrote it outran what
+/// its session keeps, so `lost` bytes of it never reached this client.
+fn lost_output_error(lost: u64) -> String {
+    format!(
+        "{lost} bytes of the command's output were lost: its session keeps only its most recent output, and this connection read it more slowly than the command wrote it. For a command's complete output, use `cw exec`."
+    )
 }
 
 /// Prompt only when the requested output mode and process terminals allow
@@ -2106,7 +2123,9 @@ async fn plain_shell(
     };
     let place = SessionPlace::of(&target);
     let mut rex = RexStatus::new(&place.environment, &session_reference(&session));
-    let ended = attach_session_until_detached(globals, target, session, &mut rex, true).await?;
+    // A terminal's lost history is a repaint, not lost data.
+    let ended =
+        attach_session_until_detached(globals, target, session, &mut rex, true, &mut 0).await?;
     Ok(Some(match ended {
         Some(session) => session.exit_code.unwrap_or(1),
         None => 0,
@@ -2390,12 +2409,15 @@ async fn attach_environment_session(
     globals: &Globals,
     target: EnvironmentSessionTarget,
     session: EnvironmentSessionView,
+    lost_output: &mut u64,
 ) -> anyhow::Result<Option<EnvironmentSessionView>> {
     let mut rex = RexStatus::new(
         &SessionPlace::of(&target).environment,
         &session_reference(&session),
     );
-    let ended = attach_session_until_detached(globals, target, session, &mut rex, false).await?;
+    let ended =
+        attach_session_until_detached(globals, target, session, &mut rex, false, lost_output)
+            .await?;
     if let Some(session) = &ended {
         let (state, message) = match (session.state.as_str(), session.exit_code) {
             ("Exited", Some(0)) => (RexState::Done, "exited".to_owned()),
@@ -2415,6 +2437,7 @@ async fn attach_session_until_detached(
     mut session: EnvironmentSessionView,
     rex: &mut RexStatus,
     plain: bool,
+    lost_output: &mut u64,
 ) -> anyhow::Result<Option<EnvironmentSessionView>> {
     let mut output_offset = 0;
     let mut reconnect_budget = AttachmentReconnectBudget::default();
@@ -2428,6 +2451,8 @@ async fn attach_session_until_detached(
     let mut retry_after = codewire_client::hosted_shell::TAILNET_RETRY_FIRST;
     // This shell's input stream, kept across its reattachments (#3993).
     let mut input_stream = InputStream::default();
+    // Attachments in a row that brought no output.
+    let mut stalled = 0_u8;
     loop {
         // Every attachment, including one to the next session, says which
         // session the pane shows and where it runs.
@@ -2446,6 +2471,7 @@ async fn attach_session_until_detached(
                     true,
                     &mut LogsAnsiFilter::default(),
                     &mut screen,
+                    lost_output,
                 )
                 .await?
             }
@@ -2462,6 +2488,7 @@ async fn attach_session_until_detached(
                     true,
                     &mut screen,
                     std::future::pending(),
+                    lost_output,
                 )
                 .await?
             }
@@ -2515,6 +2542,7 @@ async fn attach_session_until_detached(
                             true,
                             &mut screen,
                             back,
+                            lost_output,
                         )
                         .await?
                     }
@@ -2558,12 +2586,24 @@ async fn attach_session_until_detached(
                 output_offset: next_offset,
             } => {
                 let interrupted = matches!(exit, AttachExit::StreamInterrupted { .. });
+                stalled = if next_offset > output_offset {
+                    0
+                } else {
+                    stalled.saturating_add(1)
+                };
                 output_offset = next_offset;
                 let refreshed = target.get_unless_unreachable(&session.session_id).await?;
                 let unreachable = refreshed.is_none();
                 if let Some(refreshed) = refreshed {
                     if session_is_terminal(&refreshed) {
-                        return Ok(Some(refreshed));
+                        // An ended session's output past this offset is
+                        // still retained: attach again to read it, unless
+                        // two attachments in a row brought nothing (#4427).
+                        if output_offset >= refreshed.output_end_offset || stalled >= 2 {
+                            *lost_output +=
+                                refreshed.output_end_offset.saturating_sub(output_offset);
+                            return Ok(Some(refreshed));
+                        }
                     }
                     session = refreshed;
                 }
@@ -2669,6 +2709,7 @@ async fn attach_platform_environment_session(
     raw_output: bool,
     screen: &mut SessionScreen,
     tailnet_back: impl std::future::Future<Output = ()>,
+    lost_output: &mut u64,
 ) -> anyhow::Result<AttachExit> {
     tokio::pin!(tailnet_back);
     let input = attachment.input_handle();
@@ -2740,6 +2781,7 @@ async fn attach_platform_environment_session(
                 match event.event {
                     Some(codewire_client::attach_session_response::Event::HistoryGap(gap)) => {
                         eprintln!("\r\n[cw] older output unavailable; replaying recent history");
+                        *lost_output += gap.retained_start_offset.saturating_sub(output_offset);
                         output_offset = gap.retained_start_offset;
                     }
                     Some(codewire_client::attach_session_response::Event::Output(output)) => {
@@ -3137,7 +3179,7 @@ pub(crate) async fn handle_attach_command(
     if session.pty && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         eprintln!("  {}", place.detach_hint(&session, style));
     }
-    let _ = attach_environment_session(globals, target, session).await?;
+    let _ = attach_environment_session(globals, target, session, &mut 0).await?;
     Ok(())
 }
 
@@ -3371,6 +3413,7 @@ async fn follow_session_output(
     let mut reconnect_budget = AttachmentReconnectBudget::default();
     let mut pacing = super::tailnet_shell::ReconnectPacing::default();
     let mut input_stream = InputStream::default();
+    let mut lost_output = 0;
     loop {
         let exit = match target {
             #[cfg(unix)]
@@ -3384,6 +3427,7 @@ async fn follow_session_output(
                     raw_output,
                     &mut ansi,
                     &mut SessionScreen::new(false),
+                    &mut lost_output,
                 )
                 .await?
             }
@@ -3399,6 +3443,7 @@ async fn follow_session_output(
                     raw_output,
                     &mut SessionScreen::new(false),
                     std::future::pending(),
+                    &mut lost_output,
                 )
                 .await?
             }
@@ -3433,6 +3478,7 @@ async fn follow_session_output(
                             raw_output,
                             &mut SessionScreen::new(false),
                             std::future::pending(),
+                            &mut lost_output,
                         )
                         .await?
                     }
@@ -3665,9 +3711,62 @@ mod attach_offset_tests {
             false,
             &mut SessionScreen::new(false),
             tailnet_back,
+            &mut 0,
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn output_a_history_gap_skips_is_counted_as_lost() {
+        // A run read more slowly than its command wrote: the session no
+        // longer keeps offsets 100..5000, so they never reach this client
+        // (#4427).
+        let (sender, outputs) = tokio::sync::mpsc::channel(4);
+        sender.send(output(100)).await.unwrap();
+        sender
+            .send(Ok(codewire_client::AttachSessionResponse {
+                event: Some(codewire_client::attach_session_response::Event::HistoryGap(
+                    Box::new(codewire_proto::codewire::v1::EnvironmentSessionOutputGap {
+                        requested_offset: 100,
+                        retained_start_offset: 5000,
+                        ..Default::default()
+                    }),
+                )),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        sender.send(output(5100)).await.unwrap();
+        drop(sender);
+        let mut lost = 0;
+        let exit = attach_platform_environment_session(
+            codewire_client::EnvironmentSessionAttachment::from_output(outputs),
+            0,
+            &mut InputStream::default(),
+            false,
+            false,
+            false,
+            &mut SessionScreen::new(false),
+            std::future::pending(),
+            &mut lost,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            exit,
+            AttachExit::StreamEnded {
+                output_offset: 5100
+            }
+        );
+        assert_eq!(lost, 4900);
+    }
+
+    #[test]
+    fn a_run_that_lost_output_says_how_much_and_what_keeps_it_whole() {
+        let message = lost_output_error(4900);
+        assert!(message.starts_with("4900 bytes of the command's output were lost"));
+        assert!(message.contains("`cw exec`"));
     }
 
     #[tokio::test]
