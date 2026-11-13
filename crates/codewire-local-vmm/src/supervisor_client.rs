@@ -521,6 +521,69 @@ impl NativeSupervisorClient {
         result
     }
 
+    /// The operation journaled for the lifecycle request `request_id`, or
+    /// `None` when this supervisor has none: whether a request was already
+    /// sent, however long ago (#3609). Fails with `Unimplemented` before
+    /// contacting a supervisor older than protocol 22.
+    pub async fn operation_for_request(
+        &mut self,
+        request_id: Uuid,
+    ) -> Result<Option<v1::Operation>, Status> {
+        if !self.supports(SupervisorFeature::OperationByRequest) {
+            return Err(Status::unimplemented(
+                "your local VMs run on an older cw's supervisor, which cannot look an operation up by its request; `cw upgrade --vms` moves them to this cw once they are idle",
+            ));
+        }
+        match self
+            .inner
+            .get_operation(v1::GetOperationRequest {
+                operation_id: String::new(),
+                request_id: request_id.to_string(),
+            })
+            .await
+        {
+            Ok(response) => Ok(Some(response.into_inner())),
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+            Err(status) => Err(status),
+        }
+    }
+
+    /// Waits for `operation` to finish: its terminal state, or the failure
+    /// it ended with.
+    pub async fn follow(&mut self, operation: v1::Operation) -> Result<v1::Operation, Status> {
+        self.follow_operation(operation, &mut |_| {}).await
+    }
+
+    /// Starts the environment `selector` names, as the request it carries,
+    /// and waits for the operation. Unlike [`Self::start`], the caller
+    /// chooses the request ID and the environment ID precondition, so the
+    /// same request sent again is the same operation.
+    pub async fn start_selected(
+        &mut self,
+        selector: v1::EnvironmentSelector,
+    ) -> Result<v1::Operation, Status> {
+        let operation = self.inner.start_environment(selector).await?.into_inner();
+        self.follow(operation).await
+    }
+
+    /// [`Self::start_selected`], for stop.
+    pub async fn stop_selected(
+        &mut self,
+        selector: v1::EnvironmentSelector,
+    ) -> Result<v1::Operation, Status> {
+        let operation = self.inner.stop_environment(selector).await?.into_inner();
+        self.follow(operation).await
+    }
+
+    /// [`Self::start_selected`], for delete.
+    pub async fn delete_selected(
+        &mut self,
+        selector: v1::EnvironmentSelector,
+    ) -> Result<v1::Operation, Status> {
+        let operation = self.inner.delete_environment(selector).await?.into_inner();
+        self.follow(operation).await
+    }
+
     pub async fn daemon_access(&mut self, name: &str) -> Result<v1::DaemonAccess, Status> {
         Ok(self
             .inner

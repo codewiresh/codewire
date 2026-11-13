@@ -900,6 +900,14 @@ impl SupervisorOperationReader {
         operation_for_id(&self.connection, operation_id)
     }
 
+    pub(crate) fn operation_by_request(
+        &self,
+        request_id: Uuid,
+    ) -> Result<Option<OperationRecord>, SupervisorStoreError> {
+        validate_non_nil(request_id)?;
+        operation_for_request(&self.connection, request_id)
+    }
+
     pub(crate) fn recent_environment_operations(
         &self,
         environment_id: Uuid,

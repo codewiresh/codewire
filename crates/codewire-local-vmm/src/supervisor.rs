@@ -6074,6 +6074,16 @@ impl SupervisorRpc {
             .map_err(Status::from)?
             .ok_or_else(|| Status::not_found("local lifecycle operation was not found"))
     }
+
+    async fn operation_for_request(&self, request_id: Uuid) -> Result<OperationRecord, Status> {
+        self.operation_reader
+            .lock()
+            .await
+            .operation_by_request(request_id)
+            .map_err(SupervisorError::from)
+            .map_err(Status::from)?
+            .ok_or_else(|| Status::not_found("local lifecycle operation was not found"))
+    }
 }
 
 #[tonic::async_trait]
@@ -6952,8 +6962,27 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         request: Request<v1::GetOperationRequest>,
     ) -> Result<Response<v1::Operation>, Status> {
-        let operation_id = parse_operation_id(&request.into_inner().operation_id)?;
-        let operation = self.operation(operation_id).await?;
+        let request = request.into_inner();
+        let operation = match (
+            request.operation_id.is_empty(),
+            request.request_id.is_empty(),
+        ) {
+            (false, true) => {
+                self.operation(parse_operation_id(&request.operation_id)?)
+                    .await?
+            }
+            (true, false) => {
+                self.operation_for_request(
+                    parse_request_id(&request.request_id).map_err(Status::from)?,
+                )
+                .await?
+            }
+            _ => {
+                return Err(Status::invalid_argument(
+                    "name the operation by exactly one of its ID or its request ID",
+                ));
+            }
+        };
         operation_proto(&operation).map(Response::new)
     }
 
@@ -10448,6 +10477,10 @@ mod runner_exit_tests;
 
 #[cfg(test)]
 mod retire_tests;
+
+/// `GetOperation` by request ID (#3609, protocol 22).
+#[cfg(test)]
+mod operation_lookup_tests;
 
 #[cfg(test)]
 mod platform_github_tests;

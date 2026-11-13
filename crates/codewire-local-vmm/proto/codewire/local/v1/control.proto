@@ -626,8 +626,11 @@ message EnvironmentOperationResult {
   uint64 generation = 4;
 }
 
+// Names exactly one operation: by its own ID, or (protocol 22) by the
+// lifecycle request ID it was journaled for. An unknown one is NOT_FOUND.
 message GetOperationRequest {
   string operation_id = 1;
+  string request_id = 2;
 }
 
 message WatchOperationRequest {
