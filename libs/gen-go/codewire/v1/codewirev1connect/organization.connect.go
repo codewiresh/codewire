@@ -69,6 +69,9 @@ const (
 	// OrganizationServiceRevokeInvitationProcedure is the fully-qualified name of the
 	// OrganizationService's RevokeInvitation RPC.
 	OrganizationServiceRevokeInvitationProcedure = "/codewire.v1.OrganizationService/RevokeInvitation"
+	// OrganizationServiceListMyInvitationsProcedure is the fully-qualified name of the
+	// OrganizationService's ListMyInvitations RPC.
+	OrganizationServiceListMyInvitationsProcedure = "/codewire.v1.OrganizationService/ListMyInvitations"
 	// OrganizationServiceAcceptInvitationProcedure is the fully-qualified name of the
 	// OrganizationService's AcceptInvitation RPC.
 	OrganizationServiceAcceptInvitationProcedure = "/codewire.v1.OrganizationService/AcceptInvitation"
@@ -91,6 +94,15 @@ type OrganizationServiceClient interface {
 	ListInvitations(context.Context, *connect.Request[v1.ListInvitationsRequest]) (*connect.Response[v1.ListInvitationsResponse], error)
 	CreateInvitation(context.Context, *connect.Request[v1.CreateInvitationRequest]) (*connect.Response[v1.CreateInvitationResponse], error)
 	RevokeInvitation(context.Context, *connect.Request[v1.RevokeInvitationRequest]) (*connect.Response[v1.RevokeInvitationResponse], error)
+	// ListMyInvitations lists the pending, unexpired invitations addressed to
+	// the caller's own email address. It lists none while that address is
+	// unverified.
+	ListMyInvitations(context.Context, *connect.Request[v1.ListMyInvitationsRequest]) (*connect.Response[v1.ListMyInvitationsResponse], error)
+	// AcceptInvitation joins the caller to the invitation's organization. In
+	// either form the caller's email address must be verified and must equal
+	// the invitation's, compared case-insensitively; an unverified caller gets
+	// failed_precondition. To a caller at another address the invitation is
+	// not_found in every state, as an unknown token or id is.
 	AcceptInvitation(context.Context, *connect.Request[v1.AcceptInvitationRequest]) (*connect.Response[v1.AcceptInvitationResponse], error)
 	// GetInvitationByToken resolves an opaque invitation token without a
 	// credential. Unknown and incorrect tokens both return not_found.
@@ -185,6 +197,13 @@ func NewOrganizationServiceClient(httpClient connect.HTTPClient, baseURL string,
 			connect.WithSchema(organizationServiceMethods.ByName("RevokeInvitation")),
 			connect.WithClientOptions(opts...),
 		),
+		listMyInvitations: connect.NewClient[v1.ListMyInvitationsRequest, v1.ListMyInvitationsResponse](
+			httpClient,
+			baseURL+OrganizationServiceListMyInvitationsProcedure,
+			connect.WithSchema(organizationServiceMethods.ByName("ListMyInvitations")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
 		acceptInvitation: connect.NewClient[v1.AcceptInvitationRequest, v1.AcceptInvitationResponse](
 			httpClient,
 			baseURL+OrganizationServiceAcceptInvitationProcedure,
@@ -215,6 +234,7 @@ type organizationServiceClient struct {
 	listInvitations         *connect.Client[v1.ListInvitationsRequest, v1.ListInvitationsResponse]
 	createInvitation        *connect.Client[v1.CreateInvitationRequest, v1.CreateInvitationResponse]
 	revokeInvitation        *connect.Client[v1.RevokeInvitationRequest, v1.RevokeInvitationResponse]
+	listMyInvitations       *connect.Client[v1.ListMyInvitationsRequest, v1.ListMyInvitationsResponse]
 	acceptInvitation        *connect.Client[v1.AcceptInvitationRequest, v1.AcceptInvitationResponse]
 	getInvitationByToken    *connect.Client[v1.GetInvitationByTokenRequest, v1.GetInvitationByTokenResponse]
 }
@@ -279,6 +299,11 @@ func (c *organizationServiceClient) RevokeInvitation(ctx context.Context, req *c
 	return c.revokeInvitation.CallUnary(ctx, req)
 }
 
+// ListMyInvitations calls codewire.v1.OrganizationService.ListMyInvitations.
+func (c *organizationServiceClient) ListMyInvitations(ctx context.Context, req *connect.Request[v1.ListMyInvitationsRequest]) (*connect.Response[v1.ListMyInvitationsResponse], error) {
+	return c.listMyInvitations.CallUnary(ctx, req)
+}
+
 // AcceptInvitation calls codewire.v1.OrganizationService.AcceptInvitation.
 func (c *organizationServiceClient) AcceptInvitation(ctx context.Context, req *connect.Request[v1.AcceptInvitationRequest]) (*connect.Response[v1.AcceptInvitationResponse], error) {
 	return c.acceptInvitation.CallUnary(ctx, req)
@@ -303,6 +328,15 @@ type OrganizationServiceHandler interface {
 	ListInvitations(context.Context, *connect.Request[v1.ListInvitationsRequest]) (*connect.Response[v1.ListInvitationsResponse], error)
 	CreateInvitation(context.Context, *connect.Request[v1.CreateInvitationRequest]) (*connect.Response[v1.CreateInvitationResponse], error)
 	RevokeInvitation(context.Context, *connect.Request[v1.RevokeInvitationRequest]) (*connect.Response[v1.RevokeInvitationResponse], error)
+	// ListMyInvitations lists the pending, unexpired invitations addressed to
+	// the caller's own email address. It lists none while that address is
+	// unverified.
+	ListMyInvitations(context.Context, *connect.Request[v1.ListMyInvitationsRequest]) (*connect.Response[v1.ListMyInvitationsResponse], error)
+	// AcceptInvitation joins the caller to the invitation's organization. In
+	// either form the caller's email address must be verified and must equal
+	// the invitation's, compared case-insensitively; an unverified caller gets
+	// failed_precondition. To a caller at another address the invitation is
+	// not_found in every state, as an unknown token or id is.
 	AcceptInvitation(context.Context, *connect.Request[v1.AcceptInvitationRequest]) (*connect.Response[v1.AcceptInvitationResponse], error)
 	// GetInvitationByToken resolves an opaque invitation token without a
 	// credential. Unknown and incorrect tokens both return not_found.
@@ -393,6 +427,13 @@ func NewOrganizationServiceHandler(svc OrganizationServiceHandler, opts ...conne
 		connect.WithSchema(organizationServiceMethods.ByName("RevokeInvitation")),
 		connect.WithHandlerOptions(opts...),
 	)
+	organizationServiceListMyInvitationsHandler := connect.NewUnaryHandler(
+		OrganizationServiceListMyInvitationsProcedure,
+		svc.ListMyInvitations,
+		connect.WithSchema(organizationServiceMethods.ByName("ListMyInvitations")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
 	organizationServiceAcceptInvitationHandler := connect.NewUnaryHandler(
 		OrganizationServiceAcceptInvitationProcedure,
 		svc.AcceptInvitation,
@@ -432,6 +473,8 @@ func NewOrganizationServiceHandler(svc OrganizationServiceHandler, opts ...conne
 			organizationServiceCreateInvitationHandler.ServeHTTP(w, r)
 		case OrganizationServiceRevokeInvitationProcedure:
 			organizationServiceRevokeInvitationHandler.ServeHTTP(w, r)
+		case OrganizationServiceListMyInvitationsProcedure:
+			organizationServiceListMyInvitationsHandler.ServeHTTP(w, r)
 		case OrganizationServiceAcceptInvitationProcedure:
 			organizationServiceAcceptInvitationHandler.ServeHTTP(w, r)
 		case OrganizationServiceGetInvitationByTokenProcedure:
@@ -491,6 +534,10 @@ func (UnimplementedOrganizationServiceHandler) CreateInvitation(context.Context,
 
 func (UnimplementedOrganizationServiceHandler) RevokeInvitation(context.Context, *connect.Request[v1.RevokeInvitationRequest]) (*connect.Response[v1.RevokeInvitationResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.OrganizationService.RevokeInvitation is not implemented"))
+}
+
+func (UnimplementedOrganizationServiceHandler) ListMyInvitations(context.Context, *connect.Request[v1.ListMyInvitationsRequest]) (*connect.Response[v1.ListMyInvitationsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.OrganizationService.ListMyInvitations is not implemented"))
 }
 
 func (UnimplementedOrganizationServiceHandler) AcceptInvitation(context.Context, *connect.Request[v1.AcceptInvitationRequest]) (*connect.Response[v1.AcceptInvitationResponse], error) {

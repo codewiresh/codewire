@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .organization_pb2 import AcceptInvitationRequest, AcceptInvitationResponse, CreateInvitationRequest, CreateInvitationResponse, CreateOrganizationRequest, CreateOrganizationResponse, DeleteOrganizationRequest, DeleteOrganizationResponse, GetInvitationByTokenRequest, GetInvitationByTokenResponse, GetMemberAssignmentsRequest, GetMemberAssignmentsResponse, GetOrganizationRequest, GetOrganizationResponse, ListInvitationsRequest, ListInvitationsResponse, ListMembersRequest, ListMembersResponse, ListOrganizationsRequest, ListOrganizationsResponse, RemoveMemberRequest, RemoveMemberResponse, RevokeInvitationRequest, RevokeInvitationResponse, UpdateMemberAssignmentsRequest, UpdateMemberAssignmentsResponse, UpdateMemberRoleRequest, UpdateMemberRoleResponse
+from .organization_pb2 import AcceptInvitationRequest, AcceptInvitationResponse, CreateInvitationRequest, CreateInvitationResponse, CreateOrganizationRequest, CreateOrganizationResponse, DeleteOrganizationRequest, DeleteOrganizationResponse, GetInvitationByTokenRequest, GetInvitationByTokenResponse, GetMemberAssignmentsRequest, GetMemberAssignmentsResponse, GetOrganizationRequest, GetOrganizationResponse, ListInvitationsRequest, ListInvitationsResponse, ListMembersRequest, ListMembersResponse, ListMyInvitationsRequest, ListMyInvitationsResponse, ListOrganizationsRequest, ListOrganizationsResponse, RemoveMemberRequest, RemoveMemberResponse, RevokeInvitationRequest, RevokeInvitationResponse, UpdateMemberAssignmentsRequest, UpdateMemberAssignmentsResponse, UpdateMemberRoleRequest, UpdateMemberRoleResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -69,6 +69,9 @@ class OrganizationService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def revoke_invitation(self, request: RevokeInvitationRequest, ctx: RequestContext[RevokeInvitationRequest, RevokeInvitationResponse]) -> RevokeInvitationResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def list_my_invitations(self, request: ListMyInvitationsRequest, ctx: RequestContext[ListMyInvitationsRequest, ListMyInvitationsResponse]) -> ListMyInvitationsResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def accept_invitation(self, request: AcceptInvitationRequest, ctx: RequestContext[AcceptInvitationRequest, AcceptInvitationResponse]) -> AcceptInvitationResponse:
@@ -210,6 +213,16 @@ class OrganizationServiceASGIApplication(ConnectASGIApplication[OrganizationServ
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.revoke_invitation,
+                ),
+                "/codewire.v1.OrganizationService/ListMyInvitations": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ListMyInvitations",
+                        service_name="codewire.v1.OrganizationService",
+                        input=ListMyInvitationsRequest,
+                        output=ListMyInvitationsResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.list_my_invitations,
                 ),
                 "/codewire.v1.OrganizationService/AcceptInvitation": Endpoint.unary(
                     method=MethodInfo(
@@ -519,6 +532,28 @@ class OrganizationServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def list_my_invitations(
+        self,
+        request: ListMyInvitationsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListMyInvitationsResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListMyInvitations",
+                service_name="codewire.v1.OrganizationService",
+                input=ListMyInvitationsRequest,
+                output=ListMyInvitationsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
     async def accept_invitation(
         self,
         request: AcceptInvitationRequest,
@@ -596,6 +631,9 @@ class OrganizationServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def revoke_invitation(self, request: RevokeInvitationRequest, ctx: RequestContext[RevokeInvitationRequest, RevokeInvitationResponse]) -> RevokeInvitationResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def list_my_invitations(self, request: ListMyInvitationsRequest, ctx: RequestContext[ListMyInvitationsRequest, ListMyInvitationsResponse]) -> ListMyInvitationsResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def accept_invitation(self, request: AcceptInvitationRequest, ctx: RequestContext[AcceptInvitationRequest, AcceptInvitationResponse]) -> AcceptInvitationResponse:
@@ -735,6 +773,16 @@ class OrganizationServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.revoke_invitation,
+                ),
+                "/codewire.v1.OrganizationService/ListMyInvitations": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ListMyInvitations",
+                        service_name="codewire.v1.OrganizationService",
+                        input=ListMyInvitationsRequest,
+                        output=ListMyInvitationsResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.list_my_invitations,
                 ),
                 "/codewire.v1.OrganizationService/AcceptInvitation": EndpointSync.unary(
                     method=MethodInfo(
@@ -1031,6 +1079,27 @@ class OrganizationServiceClientSync(ConnectClientSync):
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+        )
+    def list_my_invitations(
+        self,
+        request: ListMyInvitationsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListMyInvitationsResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListMyInvitations",
+                service_name="codewire.v1.OrganizationService",
+                input=ListMyInvitationsRequest,
+                output=ListMyInvitationsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
         )
     def accept_invitation(
         self,

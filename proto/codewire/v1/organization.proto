@@ -6,7 +6,9 @@ import "google/protobuf/timestamp.proto";
 
 // OrganizationService manages organizations, membership, assignments, and
 // invitations. GetInvitationByToken needs no credential; every other method
-// requires an authenticated product credential.
+// requires an authenticated product credential. ListMyInvitations and
+// AcceptInvitation by invitation_id act for the caller's own account, so an
+// organization API key cannot call them.
 service OrganizationService {
   rpc ListOrganizations(ListOrganizationsRequest) returns (ListOrganizationsResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -32,6 +34,17 @@ service OrganizationService {
   }
   rpc CreateInvitation(CreateInvitationRequest) returns (CreateInvitationResponse);
   rpc RevokeInvitation(RevokeInvitationRequest) returns (RevokeInvitationResponse);
+  // ListMyInvitations lists the pending, unexpired invitations addressed to
+  // the caller's own email address. It lists none while that address is
+  // unverified.
+  rpc ListMyInvitations(ListMyInvitationsRequest) returns (ListMyInvitationsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  // AcceptInvitation joins the caller to the invitation's organization. In
+  // either form the caller's email address must be verified and must equal
+  // the invitation's, compared case-insensitively; an unverified caller gets
+  // failed_precondition. To a caller at another address the invitation is
+  // not_found in every state, as an unknown token or id is.
   rpc AcceptInvitation(AcceptInvitationRequest) returns (AcceptInvitationResponse);
   // GetInvitationByToken resolves an opaque invitation token without a
   // credential. Unknown and incorrect tokens both return not_found.
@@ -115,6 +128,11 @@ message OrgInvitation {
   google.protobuf.Timestamp expires_at = 10;
   google.protobuf.Timestamp created_at = 11;
   optional google.protobuf.Timestamp accepted_at = 12;
+  // Set by ListInvitations and ListMyInvitations; empty elsewhere.
+  string org_slug = 13;
+  // Assignments the invitee receives on acceptance. Set by ListInvitations
+  // and ListMyInvitations; empty elsewhere.
+  repeated string assignments = 14;
 }
 
 message ListOrganizationsRequest {
@@ -231,9 +249,26 @@ message RevokeInvitationRequest {
 
 message RevokeInvitationResponse {}
 
+message ListMyInvitationsRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListMyInvitationsResponse {
+  // Only pending invitations whose expiry is still ahead.
+  repeated OrgInvitation invitations = 1;
+  string next_page_token = 2;
+}
+
+// Exactly one of token and invitation_id is set; neither or both is
+// invalid_argument.
 message AcceptInvitationRequest {
-  // One-time bearer capability presented by the invitee.
+  // One-time bearer capability presented by the invitee, as in the emailed
+  // link.
   string token = 1 [debug_redact = true];
+  // An invitation from ListMyInvitations. The caller's verified email address
+  // stands in for the token.
+  string invitation_id = 2;
 }
 
 message AcceptInvitationResponse {

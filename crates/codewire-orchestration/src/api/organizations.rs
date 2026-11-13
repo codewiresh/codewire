@@ -410,6 +410,10 @@ pub struct OrgInvitation {
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_at: Option<String>,
+    /// Set only by the authenticated listings; empty elsewhere.
+    pub org_slug: String,
+    /// Set only by the authenticated listings; empty elsewhere.
+    pub assignments: Vec<String>,
 }
 
 /// A newly created invitation plus the one-time bearer capability returned to
@@ -475,6 +479,21 @@ fn invitation_row(r: &sqlx::postgres::PgRow) -> Result<OrgInvitation, AppError> 
         expires_at: format_time(expires_at),
         created_at: format_time(created_at),
         accepted_at: accepted_at.map(format_time),
+        org_slug: String::new(),
+        assignments: Vec::new(),
+    })
+}
+
+/// An invitation row from an authenticated listing, which also selects the
+/// organization's slug and the invitation's assignments.
+fn listed_invitation_row(r: &sqlx::postgres::PgRow) -> Result<OrgInvitation, AppError> {
+    Ok(OrgInvitation {
+        org_slug: r
+            .try_get::<Option<String>, _>("org_slug")
+            .map_err(AppError::from)?
+            .unwrap_or_default(),
+        assignments: r.try_get("assignments").map_err(AppError::from)?,
+        ..invitation_row(r)?
     })
 }
 
@@ -517,8 +536,9 @@ pub(crate) async fn list_invitations_core(
     .await?;
 
     let rows = sqlx::query(
-        r#"SELECT i.id, i.org_id, o.name AS org_name, i.email, i.role, i.invited_by,
-                  u.name AS inviter_name, i.status, i.expires_at, i.created_at, i.accepted_at
+        r#"SELECT i.id, i.org_id, o.name AS org_name, o.slug AS org_slug, i.email, i.role,
+                  i.invited_by, u.name AS inviter_name, i.status, i.expires_at, i.created_at,
+                  i.accepted_at, i.assignments
            FROM org_invitations i
            LEFT JOIN users u ON u.id = i.invited_by
            LEFT JOIN organizations o ON o.id = i.org_id
@@ -533,11 +553,48 @@ pub(crate) async fn list_invitations_core(
         AppError::InternalMsg("failed to list invitations".into())
     })?;
 
-    let mut invitations = Vec::with_capacity(rows.len());
-    for r in &rows {
-        invitations.push(invitation_row(r)?);
-    }
-    Ok(invitations)
+    rows.iter().map(listed_invitation_row).collect()
+}
+
+pub(crate) async fn list_my_invitations_core(
+    state: ApiState,
+    user: AuthUser,
+) -> AppResult<Vec<OrgInvitation>> {
+    list_my_invitations(&state.pool, &user).await
+}
+
+/// The pending, unexpired invitations addressed to the caller's own email
+/// address, compared with SQL `lower()` on both sides as accepting compares
+/// it (`caller_address`), and none while that address is
+/// unverified: an unverified address proves nothing about who reads its mail.
+/// It acts for the account, so an organization API key may not call it.
+async fn list_my_invitations(
+    pool: &sqlx::PgPool,
+    user: &AuthUser,
+) -> AppResult<Vec<OrgInvitation>> {
+    user.require_account_credential()?;
+    let rows = sqlx::query(
+        r#"SELECT i.id, i.org_id, o.name AS org_name, o.slug AS org_slug, i.email, i.role,
+                  i.invited_by, u.name AS inviter_name, i.status, i.expires_at, i.created_at,
+                  i.accepted_at, i.assignments
+           FROM users me
+           INNER JOIN org_invitations i ON lower(i.email) = lower(me.email)
+           INNER JOIN organizations o ON o.id = i.org_id
+           LEFT JOIN users u ON u.id = i.invited_by
+           WHERE me.id = $1
+             AND COALESCE(me.email_verified, false)
+             AND i.status = 'pending'
+             AND i.expires_at > NOW()
+           ORDER BY i.created_at DESC, i.id"#,
+    )
+    .bind(&user.user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "organizations: list my invitations failed");
+        AppError::InternalMsg("failed to list invitations".into())
+    })?;
+    rows.iter().map(listed_invitation_row).collect()
 }
 
 pub(crate) async fn create_invitation_core(
@@ -680,6 +737,8 @@ pub(crate) async fn create_invitation_core(
             expires_at: format_time(expires_at),
             created_at: format_time(now),
             accepted_at: None,
+            org_slug: String::new(),
+            assignments: Vec::new(),
         },
         token,
     })
@@ -730,44 +789,94 @@ pub struct AcceptInvitationResult {
     pub org_id: String,
 }
 
+/// How an AcceptInvitation names its invitation: the one-time token from the
+/// emailed link, or an id from ListMyInvitations.
+pub(crate) enum AcceptInvitationBy {
+    Token(String),
+    Id(String),
+}
+
+impl AcceptInvitationBy {
+    /// Exactly one of the request's `token` and `invitation_id` is set.
+    pub(crate) fn from_request(token: String, invitation_id: String) -> AppResult<Self> {
+        match (token.is_empty(), invitation_id.is_empty()) {
+            (false, true) => Ok(Self::Token(token)),
+            (true, false) => Ok(Self::Id(invitation_id)),
+            _ => Err(AppError::BadRequest(
+                "set exactly one of token and invitation_id".into(),
+            )),
+        }
+    }
+}
+
+/// The column and value that select one invitation row. Only the token's
+/// digest is ever stored or compared.
+enum InvitationKey {
+    TokenHash(String),
+    Id(String),
+}
+
+impl InvitationKey {
+    fn column(&self) -> &'static str {
+        match self {
+            Self::TokenHash(_) => "token_hash",
+            Self::Id(_) => "id",
+        }
+    }
+
+    fn value(&self) -> &str {
+        match self {
+            Self::TokenHash(value) | Self::Id(value) => value,
+        }
+    }
+}
+
 pub(crate) async fn accept_invitation_core(
     state: ApiState,
     user: AuthUser,
-    token: String,
+    by: AcceptInvitationBy,
 ) -> AppResult<AcceptInvitationResult> {
-    let token_hash = hash_oauth_token(&token);
-    let caller_email: String = sqlx::query_scalar(r#"SELECT email FROM users WHERE id = $1"#)
-        .bind(&user.user_id)
-        .fetch_one(&state.pool)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "organizations: load caller email failed");
-            AppError::InternalMsg("failed to load user".into())
-        })?;
+    accept_invitation(&state.pool, &user, by).await
+}
+
+/// Accepts an invitation for the caller, who must use an account credential,
+/// not an organization API key. In both forms the caller's email address must
+/// equal the invitation's and must be verified; the transaction checks both
+/// after its claim, so a refusal leaves the invitation pending. To a caller
+/// at another address an invitation is not found, in every state, exactly as
+/// an unknown id or token is.
+async fn accept_invitation(
+    pool: &sqlx::PgPool,
+    user: &AuthUser,
+    by: AcceptInvitationBy,
+) -> AppResult<AcceptInvitationResult> {
+    // Joining an organization acts for the account, in either form, so an
+    // organization API key cannot accept (docs/dev/AUTH-POLICY.md).
+    user.require_account_credential()?;
+    let key = match by {
+        AcceptInvitationBy::Token(token) => InvitationKey::TokenHash(hash_oauth_token(&token)),
+        AcceptInvitationBy::Id(id) => InvitationKey::Id(id),
+    };
 
     // Resolve the organization only to enter its mutation barrier. The row is
     // claimed again, atomically, inside the database transaction below.
-    let org_id: String =
-        sqlx::query_scalar(r#"SELECT org_id FROM org_invitations WHERE token_hash = $1"#)
-            .bind(&token_hash)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "organizations: load invitation failed");
-                AppError::InternalMsg("failed to get invitation".into())
-            })?
-            .ok_or_else(|| AppError::NotFound("invitation not found".into()))?;
+    let org_id: String = sqlx::query_scalar(&format!(
+        "SELECT org_id FROM org_invitations WHERE {} = $1",
+        key.column()
+    ))
+    .bind(key.value())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "organizations: load invitation failed");
+        AppError::InternalMsg("failed to get invitation".into())
+    })?
+    .ok_or_else(invitation_not_found)?;
 
     run_organization_database_mutation(
-        &state.pool,
+        pool,
         &org_id,
-        accept_invitation_transaction(
-            &state.pool,
-            &org_id,
-            &token_hash,
-            &caller_email,
-            &user.user_id,
-        ),
+        accept_invitation_transaction(pool, &org_id, &key, &user.user_id),
     )
     .await
 }
@@ -775,8 +884,7 @@ pub(crate) async fn accept_invitation_core(
 async fn accept_invitation_transaction(
     pool: &sqlx::PgPool,
     org_id: &str,
-    token_hash: &str,
-    caller_email: &str,
+    key: &InvitationKey,
     user_id: &str,
 ) -> AppResult<AcceptInvitationResult> {
     let mut tx = pool.begin().await.map_err(|e| {
@@ -787,15 +895,16 @@ async fn accept_invitation_transaction(
     // This update is the single-use claim. Membership and assignment writes
     // commit in this same transaction, so any later failure rolls the
     // invitation back to pending.
-    let claimed = sqlx::query(
+    let claimed = sqlx::query(&format!(
         r#"UPDATE org_invitations
            SET status = 'accepted', accepted_at = NOW()
-           WHERE token_hash = $1
+           WHERE {} = $1
              AND status = 'pending'
              AND expires_at > NOW()
            RETURNING org_id, email, role, assignments"#,
-    )
-    .bind(token_hash)
+        key.column()
+    ))
+    .bind(key.value())
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| {
@@ -804,41 +913,44 @@ async fn accept_invitation_transaction(
     })?;
 
     let Some(claimed) = claimed else {
-        let state_row: Option<(String, chrono::NaiveDateTime)> = sqlx::query_as(
-            r#"SELECT status, expires_at
-               FROM org_invitations
-               WHERE token_hash = $1
-               FOR UPDATE"#,
-        )
-        .bind(token_hash)
+        let state_row: Option<(String, chrono::NaiveDateTime, String)> = sqlx::query_as(&format!(
+            r#"SELECT status, expires_at, email
+                   FROM org_invitations
+                   WHERE {} = $1
+                   FOR UPDATE"#,
+            key.column()
+        ))
+        .bind(key.value())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "organizations: inspect unclaimable invitation failed");
             AppError::InternalMsg("failed to accept invitation".into())
         })?;
-        match state_row {
-            Some((status, expires_at))
-                if status == "pending" && chrono::Utc::now().naive_utc() > expires_at =>
-            {
-                sqlx::query(
-                    r#"UPDATE org_invitations
-                       SET status = 'expired'
-                       WHERE token_hash = $1 AND status = 'pending'"#,
-                )
-                .bind(token_hash)
-                .execute(&mut *tx)
-                .await?;
-                tx.commit().await?;
-                return Err(AppError::BadRequest("invitation has expired".into()));
-            }
-            Some((status, _)) => {
-                return Err(AppError::BadRequest(
-                    format!("invitation is {status}").into(),
-                ));
-            }
-            None => return Err(AppError::NotFound("invitation not found".into())),
+        let Some((status, expires_at, email)) = state_row else {
+            return Err(invitation_not_found());
+        };
+        // Only the invitee learns an invitation's state, and only the invitee's
+        // attempt marks a lapsed one expired.
+        if !caller_address(&mut tx, user_id, &email).await?.matches {
+            return Err(invitation_not_found());
         }
+        if status == "pending" && chrono::Utc::now().naive_utc() > expires_at {
+            sqlx::query(&format!(
+                r#"UPDATE org_invitations
+                   SET status = 'expired'
+                   WHERE {} = $1 AND status = 'pending'"#,
+                key.column()
+            ))
+            .bind(key.value())
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Err(AppError::BadRequest("invitation has expired".into()));
+        }
+        return Err(AppError::BadRequest(
+            format!("invitation is {status}").into(),
+        ));
     };
 
     let claimed_org_id: String = claimed.try_get("org_id").map_err(AppError::from)?;
@@ -850,9 +962,17 @@ async fn accept_invitation_transaction(
             "invitation organization changed during acceptance".into(),
         ));
     }
-    if !caller_email.eq_ignore_ascii_case(&email) {
-        return Err(forbidden(
-            "invitation was sent to a different email address",
+    // To anyone but the invitee the invitation does not exist; returning here
+    // drops the transaction, which rolls the claim back.
+    let caller = caller_address(&mut tx, user_id, &email).await?;
+    if !caller.matches {
+        return Err(invitation_not_found());
+    }
+    // Anyone holding the link could otherwise register the invitee's address
+    // without owning its mailbox and join with the invitation's role.
+    if !caller.verified {
+        return Err(AppError::Precondition(
+            "verify your email address, then accept the invitation again".into(),
         ));
     }
 
@@ -907,6 +1027,47 @@ async fn accept_invitation_transaction(
         status: "accepted".to_string(),
         org_id: claimed_org_id,
     })
+}
+
+/// What a caller who is not the invitee sees, whatever the invitation's
+/// state: the same answer as for an id or token that names nothing.
+fn invitation_not_found() -> AppError {
+    AppError::NotFound("invitation not found".into())
+}
+
+/// Whether the caller's address is the invitation's, and whether it is
+/// verified.
+struct CallerAddress {
+    matches: bool,
+    verified: bool,
+}
+
+/// Reads the caller's address against an invitation's inside `tx` and holds
+/// the caller's row until it ends, so neither the address nor its
+/// verification can change before the membership it admits commits. The
+/// address is compared with SQL `lower()` on both sides, the rule
+/// ListMyInvitations uses, so the two always agree on which invitations are
+/// the caller's.
+async fn caller_address(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: &str,
+    invitation_email: &str,
+) -> AppResult<CallerAddress> {
+    let (matches, verified): (bool, bool) = sqlx::query_as(
+        r#"SELECT lower(email) = lower($2), COALESCE(email_verified, false)
+           FROM users
+           WHERE id = $1
+           FOR SHARE"#,
+    )
+    .bind(user_id)
+    .bind(invitation_email)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "organizations: load caller email failed");
+        AppError::InternalMsg("failed to load user".into())
+    })?;
+    Ok(CallerAddress { matches, verified })
 }
 
 // ── Org list / create (#38) ──────────────────────────────────────────────
@@ -1157,6 +1318,8 @@ async fn grant_signup_credit(
 }
 
 #[cfg(test)]
+mod invitation_database_tests;
+#[cfg(test)]
 mod membership_database_tests;
 #[cfg(test)]
 mod signup_credit_database_tests;
@@ -1231,6 +1394,8 @@ mod tests {
                 expires_at: "2026-09-06T00:00:00Z".into(),
                 created_at: "2026-09-05T00:00:00Z".into(),
                 accepted_at: None,
+                org_slug: String::new(),
+                assignments: Vec::new(),
             },
             token: "invitation-capability-marker".into(),
         };
@@ -1238,119 +1403,5 @@ mod tests {
         let diagnostic = format!("{created:?}");
         assert!(!diagnostic.contains("invitation-capability-marker"));
         assert!(diagnostic.contains("[REDACTED]"));
-    }
-
-    #[tokio::test]
-    async fn invitation_claim_is_digest_only_atomic_and_single_use() {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            eprintln!("DATABASE_URL unset — skipping invitation capability DB test");
-            return;
-        };
-        let pool = sqlx::PgPool::connect(&url).await.expect("connect");
-        let suffix = std::process::id();
-        let owner = format!("invitation_owner_{suffix}");
-        let invitee = format!("invitation_invitee_{suffix}");
-        let org = format!("invitation_org_{suffix}");
-        let invitation = format!("invitation_{suffix}");
-        let raw_token = format!("synthetic-invitation-capability-{suffix}");
-        let token_hash = hash_oauth_token(&raw_token);
-        let invitee_email = format!("invitation-invitee-{suffix}@example.test");
-
-        let cleanup = |pool: sqlx::PgPool| {
-            let owner = owner.clone();
-            let invitee = invitee.clone();
-            let org = org.clone();
-            async move {
-                let _ = sqlx::query("DELETE FROM organizations WHERE id = $1")
-                    .bind(&org)
-                    .execute(&pool)
-                    .await;
-                let _ = sqlx::query("DELETE FROM users WHERE id IN ($1, $2)")
-                    .bind(&owner)
-                    .bind(&invitee)
-                    .execute(&pool)
-                    .await;
-            }
-        };
-        cleanup(pool.clone()).await;
-
-        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2), ($3, $4)")
-            .bind(&owner)
-            .bind(format!("invitation-owner-{suffix}@example.test"))
-            .bind(&invitee)
-            .bind(&invitee_email)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $2, $3, $4)",
-        )
-        .bind(&org)
-        .bind("Invitation Test")
-        .bind(format!("invitation-test-{suffix}"))
-        .bind(&owner)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO org_invitations \
-             (id, org_id, email, role, invited_by, token_hash, expires_at, assignments) \
-             VALUES ($1, $2, $3, 'member', $4, $5, NOW() + INTERVAL '1 hour', \
-                     ARRAY['viewer'])",
-        )
-        .bind(&invitation)
-        .bind(&org)
-        .bind(&invitee_email)
-        .bind(&owner)
-        .bind(&token_hash)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let persisted: String =
-            sqlx::query_scalar("SELECT token_hash FROM org_invitations WHERE id = $1")
-                .bind(&invitation)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(persisted, token_hash);
-        assert_ne!(persisted, raw_token);
-
-        let first =
-            accept_invitation_transaction(&pool, &org, &token_hash, &invitee_email, &invitee);
-        let second =
-            accept_invitation_transaction(&pool, &org, &token_hash, &invitee_email, &invitee);
-        let (first, second) = tokio::join!(first, second);
-        assert_eq!(
-            usize::from(first.is_ok()) + usize::from(second.is_ok()),
-            1,
-            "exactly one concurrent invitation claimant succeeds"
-        );
-
-        let (status, member_count, assignment_count): (String, i64, i64) = sqlx::query_as(
-            "SELECT i.status, \
-                    (SELECT COUNT(*) FROM org_members m \
-                     WHERE m.org_id = i.org_id AND m.user_id = $2), \
-                    (SELECT COUNT(*) FROM org_member_assignments a \
-                     JOIN org_members m ON m.id = a.org_member_id \
-                     WHERE m.org_id = i.org_id AND m.user_id = $2) \
-             FROM org_invitations i WHERE i.id = $1",
-        )
-        .bind(&invitation)
-        .bind(&invitee)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(status, "accepted");
-        assert_eq!(member_count, 1);
-        assert_eq!(assignment_count, 1);
-        assert!(
-            accept_invitation_transaction(&pool, &org, &token_hash, &invitee_email, &invitee,)
-                .await
-                .is_err(),
-            "accepted invitation capability must reject replay"
-        );
-
-        cleanup(pool.clone()).await;
     }
 }

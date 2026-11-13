@@ -16,13 +16,13 @@ use codewire_proto::codewire::v1::{
     DeleteOrganizationRequest, DeleteOrganizationResponse, GetInvitationByTokenRequest,
     GetInvitationByTokenResponse, GetMemberAssignmentsRequest, GetMemberAssignmentsResponse,
     GetOrganizationRequest, GetOrganizationResponse, InvitationStatus, ListInvitationsRequest,
-    ListInvitationsResponse, ListMembersRequest, ListMembersResponse, ListOrganizationsRequest,
-    ListOrganizationsResponse, OrgInvitation as ProtoOrgInvitation, OrgMember as ProtoOrgMember,
-    OrgRole, Organization as ProtoOrganization,
-    OrganizationDeletionState as ProtoOrganizationDeletionState, OrganizationMembership,
-    OrganizationService, RemoveMemberRequest, RemoveMemberResponse, RevokeInvitationRequest,
-    RevokeInvitationResponse, UpdateMemberAssignmentsRequest, UpdateMemberAssignmentsResponse,
-    UpdateMemberRoleRequest, UpdateMemberRoleResponse,
+    ListInvitationsResponse, ListMembersRequest, ListMembersResponse, ListMyInvitationsRequest,
+    ListMyInvitationsResponse, ListOrganizationsRequest, ListOrganizationsResponse,
+    OrgInvitation as ProtoOrgInvitation, OrgMember as ProtoOrgMember, OrgRole,
+    Organization as ProtoOrganization, OrganizationDeletionState as ProtoOrganizationDeletionState,
+    OrganizationMembership, OrganizationService, RemoveMemberRequest, RemoveMemberResponse,
+    RevokeInvitationRequest, RevokeInvitationResponse, UpdateMemberAssignmentsRequest,
+    UpdateMemberAssignmentsResponse, UpdateMemberRoleRequest, UpdateMemberRoleResponse,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
@@ -33,14 +33,15 @@ use crate::api::assignments::{
     UpdateMemberAssignmentsBody, get_member_assignments_core, update_member_assignments_core,
 };
 use crate::api::organizations::{
-    CreateOrgBody, InviteMemberBody, OrgInvitation, OrgMember, OrgWithMembers, OrgWithRole,
-    Organization, OrganizationDeletionState, UpdateRoleBody, accept_invitation_core,
+    AcceptInvitationBy, CreateOrgBody, InviteMemberBody, OrgInvitation, OrgMember, OrgWithMembers,
+    OrgWithRole, Organization, OrganizationDeletionState, UpdateRoleBody, accept_invitation_core,
     create_invitation_core, create_organization_core, delete_organization_core,
     get_invitation_by_token_core, get_organization_core, list_invitations_core, list_members_core,
-    list_organizations_core, remove_member_core, revoke_invitation_core, update_member_role_core,
+    list_my_invitations_core, list_organizations_core, remove_member_core, revoke_invitation_core,
+    update_member_role_core,
 };
 
-/// Registers all fourteen OrganizationService RPCs on their generated routes.
+/// Registers all fifteen OrganizationService RPCs on their generated routes.
 pub fn router(state: ApiState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(OrganizationConnectService { state }))
 }
@@ -257,6 +258,28 @@ impl OrganizationService for OrganizationConnectService {
         })
     }
 
+    async fn list_my_invitations(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, ListMyInvitationsRequest>,
+    ) -> ServiceResult<ListMyInvitationsResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.to_owned_message();
+        validate_pagination(&request.page_token).map_err(|error| rpc_app_error(&error, &ctx))?;
+        let invitations = list_my_invitations_core(self.state.clone(), user)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?
+            .into_iter()
+            .map(proto_invitation)
+            .collect::<AppResult<Vec<_>>>()
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(ListMyInvitationsResponse {
+            invitations,
+            next_page_token: String::new(),
+            ..Default::default()
+        })
+    }
+
     async fn create_invitation(
         &self,
         ctx: RequestContext,
@@ -313,7 +336,9 @@ impl OrganizationService for OrganizationConnectService {
     ) -> ServiceResult<AcceptInvitationResponse> {
         let user = auth_user(&ctx)?.clone();
         let request = request.to_owned_message();
-        let accepted = accept_invitation_core(self.state.clone(), user, request.token)
+        let by = AcceptInvitationBy::from_request(request.token, request.invitation_id)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let accepted = accept_invitation_core(self.state.clone(), user, by)
             .await
             .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(AcceptInvitationResponse {
@@ -535,6 +560,8 @@ fn proto_invitation(invitation: OrgInvitation) -> AppResult<ProtoOrgInvitation> 
         expires_at: Some(proto_timestamp(&invitation.expires_at)?).into(),
         created_at: Some(proto_timestamp(&invitation.created_at)?).into(),
         accepted_at: accepted_at.into(),
+        org_slug: invitation.org_slug,
+        assignments: invitation.assignments,
         ..Default::default()
     })
 }
@@ -642,12 +669,40 @@ mod tests {
             expires_at: "2026-07-27T00:00:00Z".into(),
             created_at: "2026-07-20T00:00:00Z".into(),
             accepted_at: None,
+            org_slug: "test".into(),
+            assignments: vec!["viewer".into()],
         })
         .unwrap();
         let json = serde_json::to_value(invitation).unwrap();
         assert_eq!(json["role"], "ORG_ROLE_MEMBER");
         assert_eq!(json["status"], "INVITATION_STATUS_PENDING");
+        assert_eq!(json["orgSlug"], "test");
+        assert_eq!(json["assignments"][0], "viewer");
         assert!(json.get("inviterName").is_none());
         assert!(json.get("acceptedAt").is_none());
+    }
+
+    /// An acceptance names its invitation by token or by id, never both and
+    /// never neither.
+    #[test]
+    fn acceptance_takes_exactly_one_of_token_and_invitation_id() {
+        assert!(matches!(
+            AcceptInvitationBy::from_request("token".into(), String::new()),
+            Ok(AcceptInvitationBy::Token(token)) if token == "token"
+        ));
+        assert!(matches!(
+            AcceptInvitationBy::from_request(String::new(), "invitation".into()),
+            Ok(AcceptInvitationBy::Id(id)) if id == "invitation"
+        ));
+        for (token, invitation_id) in [("", ""), ("token", "invitation")] {
+            let Err(error) = AcceptInvitationBy::from_request(token.into(), invitation_id.into())
+            else {
+                panic!("token {token:?} and id {invitation_id:?} must be refused");
+            };
+            assert_eq!(
+                ConnectError::from_app_error(&error, None).code,
+                ConnectCode::InvalidArgument
+            );
+        }
     }
 }
