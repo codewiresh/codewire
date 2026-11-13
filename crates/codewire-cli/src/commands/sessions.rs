@@ -2429,6 +2429,18 @@ async fn attach_environment_session(
     Ok(ended)
 }
 
+/// The count of attachments in a row that opened, ended and brought no
+/// output, after one more. Output starts it over. An interrupted attachment,
+/// or one that failed to open (a reattach that waited out a restart, #4342),
+/// leaves it as it is: the time to keep trying bounds those.
+fn drain_stall(stalled: u8, progressed: bool, interrupted: bool) -> u8 {
+    match (progressed, interrupted) {
+        (true, _) => 0,
+        (false, true) => stalled,
+        (false, false) => stalled.saturating_add(1),
+    }
+}
+
 /// `plain` is a `cw shell`'s attachment: every key goes to the session, so
 /// it can neither detach nor move to another session, and it ends with it.
 async fn attach_session_until_detached(
@@ -2451,7 +2463,7 @@ async fn attach_session_until_detached(
     let mut retry_after = codewire_client::hosted_shell::TAILNET_RETRY_FIRST;
     // This shell's input stream, kept across its reattachments (#3993).
     let mut input_stream = InputStream::default();
-    // Attachments in a row that brought no output.
+    // Attachments in a row that opened, ended and brought no output.
     let mut stalled = 0_u8;
     loop {
         // Every attachment, including one to the next session, says which
@@ -2586,11 +2598,7 @@ async fn attach_session_until_detached(
                 output_offset: next_offset,
             } => {
                 let interrupted = matches!(exit, AttachExit::StreamInterrupted { .. });
-                stalled = if next_offset > output_offset {
-                    0
-                } else {
-                    stalled.saturating_add(1)
-                };
+                stalled = drain_stall(stalled, next_offset > output_offset, interrupted);
                 output_offset = next_offset;
                 let refreshed = target.get_unless_unreachable(&session.session_id).await?;
                 let unreachable = refreshed.is_none();
@@ -3760,6 +3768,17 @@ mod attach_offset_tests {
             }
         );
         assert_eq!(lost, 4900);
+    }
+
+    #[test]
+    fn only_attachments_that_open_and_end_with_nothing_count_as_stalled() {
+        assert_eq!(drain_stall(1, true, false), 0, "output starts it over");
+        assert_eq!(drain_stall(1, true, true), 0);
+        assert_eq!(drain_stall(1, false, false), 2);
+        // A failed or interrupted reattach, such as one after a restart,
+        // leaves an ended session's unread output to the pacing budget.
+        assert_eq!(drain_stall(1, false, true), 1);
+        assert_eq!(drain_stall(u8::MAX, false, false), u8::MAX);
     }
 
     #[test]
