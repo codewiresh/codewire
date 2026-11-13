@@ -19,9 +19,10 @@ use sqlx::{FromRow, PgPool};
 
 use super::ApiState;
 use super::environments::{
-    check_credit_in, check_rate_limit, coded, fetch_env_summary, require_environment_access,
-    require_org_member,
+    check_credit_in, coded, fetch_env_summary, require_environment_access, require_org_member,
+    take_user_rate_limit,
 };
+use codewire_server_core::rate_limit;
 
 const MAX_NAME_CHARS: usize = 128;
 /// Captures running at once in one organization. Each is a Kata VM and a restored
@@ -32,8 +33,6 @@ const MAX_CAPTURING_PER_ORG: i64 = 4;
 /// so this goes with the billing meter (H4). Production runs without H4 under this
 /// bound (owner, 2026-11-12, #4370).
 const MAX_SNAPSHOTS_PER_ORG: i64 = 32;
-/// Snapshot creates per user per minute, as environment creates are limited.
-const CREATES_PER_MINUTE: i32 = 10;
 const COLUMNS: &str = "id, org_id, source_environment_id, name, state, failure_code, size_bytes, \
                        created_at, last_used_at";
 
@@ -195,26 +194,13 @@ pub async fn create_snapshot_core(
              digits, dots, underscores and hyphens",
         ));
     }
-    // Fails open on a database error, as environment creates do: the per-org
-    // bounds below still hold.
-    match check_rate_limit(
+    take_user_rate_limit(
         &state.pool,
-        &format!("snapshot_create:{}", user.user_id),
-        60,
-        CREATES_PER_MINUTE,
+        &rate_limit::SNAPSHOT_CREATE,
+        &user.user_id,
+        "snapshot creates",
     )
-    .await
-    {
-        Err(error) => tracing::warn!(%error, "snapshot rate limit check failed, allowing"),
-        Ok(false) => {
-            return Err(coded(
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate_limited",
-                "too many snapshot creates",
-            ));
-        }
-        Ok(true) => {}
-    }
+    .await?;
     let env = fetch_env_summary(&state.pool, org_id, environment_id).await?;
     if env.isolation_tier == "confidential" {
         return Err(coded(

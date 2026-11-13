@@ -8,6 +8,7 @@
 //!   `AppError::Coded` (org_not_found / env_not_found / access_denied
 //!   / internal_error with their CLI hints).
 
+use codewire_server_core::rate_limit;
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1045,77 +1046,37 @@ pub(crate) async fn check_quota_in(
     evaluate_quota(quota, usage, env_type, cpu, mem)
 }
 
-/// Mirrors `auth.checkRateLimit` over the shared rate_limit table: at most
-/// `max` requests in a fixed window keyed by `key`, which starts at the first
-/// request and resets once it has passed. Any read error means "no record yet"
-/// and resets the window, exactly like Go.
-pub(crate) async fn check_rate_limit(
+/// Counts one request by `user_id` against `limit` (#3297) and refuses past
+/// the count in force, with a message that names it and when it resets. A
+/// database error refuses too, never lets the request through (#3256).
+pub(crate) async fn take_user_rate_limit(
     pool: &PgPool,
-    key: &str,
-    window_secs: i64,
-    max: i32,
-) -> Result<bool, sqlx::Error> {
-    rate_limit_at(
-        pool,
-        key,
-        window_secs,
-        max,
-        chrono::Utc::now().timestamp_millis(),
-    )
+    limit: &rate_limit::Limit,
+    user_id: &str,
+    what: &str,
+) -> AppResult<()> {
+    let decision = async {
+        let mut connection = pool.acquire().await?;
+        rate_limit::take_for_user(&mut connection, limit, user_id).await
+    }
     .await
-}
-
-/// `last_request` holds when the window started; a request inside the window
-/// must not move it, or a steady caller's window never ends (#3923).
-async fn rate_limit_at(
-    pool: &PgPool,
-    key: &str,
-    window_secs: i64,
-    max: i32,
-    now: i64,
-) -> Result<bool, sqlx::Error> {
-    let window_start = now - window_secs * 1000;
-
-    let existing: Option<(i32, i64)> =
-        sqlx::query_as("SELECT count, last_request FROM rate_limit WHERE key = $1")
-            .bind(key)
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
-
-    let Some((count, last_request)) = existing else {
-        let id = uuid::Uuid::new_v4().simple().to_string();
-        sqlx::query(
-            r#"INSERT INTO rate_limit (id, key, count, last_request)
-               VALUES ($1, $2, 1, $3)
-               ON CONFLICT (key) DO UPDATE SET count = 1, last_request = $3"#,
+    .map_err(|error| {
+        tracing::error!(%error, limit = limit.name, "rate limit unavailable");
+        coded(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "rate_limit_unavailable",
+            "request limits are temporarily unavailable; try again shortly",
         )
-        .bind(&id)
-        .bind(key)
-        .bind(now)
-        .execute(pool)
-        .await?;
-        return Ok(true);
-    };
-
-    if last_request < window_start {
-        sqlx::query("UPDATE rate_limit SET count = 1, last_request = $1 WHERE key = $2")
-            .bind(now)
-            .bind(key)
-            .execute(pool)
-            .await?;
-        return Ok(true);
+    })?;
+    if decision.allowed {
+        Ok(())
+    } else {
+        Err(coded_owned(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            decision.refusal(what, limit),
+        ))
     }
-
-    if count >= max {
-        return Ok(false);
-    }
-
-    sqlx::query("UPDATE rate_limit SET count = count + 1 WHERE key = $1")
-        .bind(key)
-        .execute(pool)
-        .await?;
-    Ok(true)
 }
 
 pub(crate) async fn delete_environment_core(
@@ -1357,20 +1318,13 @@ pub(crate) async fn start_environment_core(
                 }
             }
 
-            // Rate limit (fail open on errors, like Go).
-            match check_rate_limit(&state.pool, &format!("env_start:{}", user.user_id), 60, 10)
-                .await
-            {
-                Err(e) => tracing::warn!(error = %e, "env rate limit check failed, allowing"),
-                Ok(false) => {
-                    return Err(coded(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        "rate_limited",
-                        "too many environment start requests",
-                    ));
-                }
-                Ok(true) => {}
-            }
+            take_user_rate_limit(
+                &state.pool,
+                &rate_limit::SANDBOX_START,
+                &user.user_id,
+                "sandbox starts",
+            )
+            .await?;
 
             // Starting resumes compute allocation: the quota is checked and
             // the start intent recorded under the organization row lock.

@@ -320,7 +320,7 @@ create_env() { # CPU -> environment id
       --no-network --no-wait --yes --output json >"$out" 2>"$out.err"; then
       break
     fi
-    if ((attempt < 3)) && grep -q 'too many environment creates' "$out.err"; then
+    if ((attempt < 3)) && grep -q -E 'too many environment creates|sandbox creates a minute' "$out.err"; then
       log "create rate limited; waiting 65 s"
       sleep 65
       continue

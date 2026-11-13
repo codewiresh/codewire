@@ -1010,9 +1010,10 @@ create_env() { # N -> environment id on stdout
       --no-network --no-wait --yes --output json >"$out" 2>"$out.err"; then
       break
     fi
-    # Ten creates per user per 60 s (check_rate_limit); the window closes 60 s
-    # after the last accepted create.
-    if ((attempt < 5)) && grep -q 'too many environment creates' "$out.err"; then
+    # Ten creates per user per 60 s (the shared sandbox_create limit, #3297);
+    # the window closes 60 s after its first create. Older servers say "too
+    # many environment creates".
+    if ((attempt < 5)) && grep -q -E 'too many environment creates|sandbox creates a minute' "$out.err"; then
       log "create rate limited; waiting 61 s"
       pause 61
       continue

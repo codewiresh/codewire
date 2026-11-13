@@ -19,10 +19,11 @@ use sqlx::{PgPool, Row};
 use super::ApiState;
 use super::environments::{
     ENV_SELECT_COLS, ENV_SELECT_JOINS, Environment, OrgQuota, admission_quota, check_quota_in,
-    check_rate_limit, coded, require_org_member, scan_environment, trigger_environment,
+    coded, require_org_member, scan_environment, take_user_rate_limit, trigger_environment,
 };
 use crate::confidential_storage::require_confidential_access;
 use crate::repository_mount::validate_repository_mounts;
+use codewire_server_core::rate_limit;
 
 /// Confidential volumes keep their own, smaller limit: the guest-encrypted
 /// raw-block profile is sized at create and never expands (#3554 leaves it
@@ -1134,18 +1135,13 @@ pub(crate) async fn create_environment_core(
         body.project_spec.image = normalize_image_ref(&body.project_spec.image);
     }
 
-    // Rate limit environment creation per user (fail open on errors).
-    match check_rate_limit(pool, &format!("env_create:{}", user.user_id), 60, 10).await {
-        Err(e) => tracing::warn!(error = %e, "env rate limit check failed, allowing"),
-        Ok(false) => {
-            return Err(coded(
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate_limited",
-                "too many environment creates",
-            ));
-        }
-        Ok(true) => {}
-    }
+    take_user_rate_limit(
+        pool,
+        &rate_limit::SANDBOX_CREATE,
+        &user.user_id,
+        "sandbox creates",
+    )
+    .await?;
 
     ensure_current_platform_runtime_support(&body)?;
     validate_environment_repository_mounts(&body.project_spec.repositories)?;
