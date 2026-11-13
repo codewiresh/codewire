@@ -25,6 +25,14 @@ class InvitationStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     INVITATION_STATUS_REVOKED: _ClassVar[InvitationStatus]
     INVITATION_STATUS_EXPIRED: _ClassVar[InvitationStatus]
 
+class InvitationEmailStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    INVITATION_EMAIL_STATUS_UNSPECIFIED: _ClassVar[InvitationEmailStatus]
+    INVITATION_EMAIL_STATUS_PENDING: _ClassVar[InvitationEmailStatus]
+    INVITATION_EMAIL_STATUS_SENT: _ClassVar[InvitationEmailStatus]
+    INVITATION_EMAIL_STATUS_FAILED: _ClassVar[InvitationEmailStatus]
+    INVITATION_EMAIL_STATUS_SKIPPED: _ClassVar[InvitationEmailStatus]
+
 class OrganizationDeletionState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     ORGANIZATION_DELETION_STATE_UNSPECIFIED: _ClassVar[OrganizationDeletionState]
@@ -40,6 +48,11 @@ INVITATION_STATUS_PENDING: InvitationStatus
 INVITATION_STATUS_ACCEPTED: InvitationStatus
 INVITATION_STATUS_REVOKED: InvitationStatus
 INVITATION_STATUS_EXPIRED: InvitationStatus
+INVITATION_EMAIL_STATUS_UNSPECIFIED: InvitationEmailStatus
+INVITATION_EMAIL_STATUS_PENDING: InvitationEmailStatus
+INVITATION_EMAIL_STATUS_SENT: InvitationEmailStatus
+INVITATION_EMAIL_STATUS_FAILED: InvitationEmailStatus
+INVITATION_EMAIL_STATUS_SKIPPED: InvitationEmailStatus
 ORGANIZATION_DELETION_STATE_UNSPECIFIED: OrganizationDeletionState
 ORGANIZATION_DELETION_STATE_ACTIVE: OrganizationDeletionState
 ORGANIZATION_DELETION_STATE_DELETING: OrganizationDeletionState
@@ -106,7 +119,7 @@ class OrgMember(_message.Message):
     def __init__(self, id: _Optional[str] = ..., org_id: _Optional[str] = ..., user_id: _Optional[str] = ..., role: _Optional[_Union[OrgRole, str]] = ..., email: _Optional[str] = ..., name: _Optional[str] = ..., image: _Optional[str] = ..., assignments: _Optional[_Iterable[str]] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class OrgInvitation(_message.Message):
-    __slots__ = ("id", "org_id", "org_name", "email", "role", "invited_by", "inviter_name", "status", "expires_at", "created_at", "accepted_at", "org_slug", "assignments")
+    __slots__ = ("id", "org_id", "org_name", "email", "role", "invited_by", "inviter_name", "status", "expires_at", "created_at", "accepted_at", "org_slug", "assignments", "email_status", "email_error")
     ID_FIELD_NUMBER: _ClassVar[int]
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     ORG_NAME_FIELD_NUMBER: _ClassVar[int]
@@ -120,6 +133,8 @@ class OrgInvitation(_message.Message):
     ACCEPTED_AT_FIELD_NUMBER: _ClassVar[int]
     ORG_SLUG_FIELD_NUMBER: _ClassVar[int]
     ASSIGNMENTS_FIELD_NUMBER: _ClassVar[int]
+    EMAIL_STATUS_FIELD_NUMBER: _ClassVar[int]
+    EMAIL_ERROR_FIELD_NUMBER: _ClassVar[int]
     id: str
     org_id: str
     org_name: str
@@ -133,7 +148,9 @@ class OrgInvitation(_message.Message):
     accepted_at: _timestamp_pb2.Timestamp
     org_slug: str
     assignments: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, id: _Optional[str] = ..., org_id: _Optional[str] = ..., org_name: _Optional[str] = ..., email: _Optional[str] = ..., role: _Optional[_Union[OrgRole, str]] = ..., invited_by: _Optional[str] = ..., inviter_name: _Optional[str] = ..., status: _Optional[_Union[InvitationStatus, str]] = ..., expires_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., accepted_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., org_slug: _Optional[str] = ..., assignments: _Optional[_Iterable[str]] = ...) -> None: ...
+    email_status: InvitationEmailStatus
+    email_error: str
+    def __init__(self, id: _Optional[str] = ..., org_id: _Optional[str] = ..., org_name: _Optional[str] = ..., email: _Optional[str] = ..., role: _Optional[_Union[OrgRole, str]] = ..., invited_by: _Optional[str] = ..., inviter_name: _Optional[str] = ..., status: _Optional[_Union[InvitationStatus, str]] = ..., expires_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., accepted_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., org_slug: _Optional[str] = ..., assignments: _Optional[_Iterable[str]] = ..., email_status: _Optional[_Union[InvitationEmailStatus, str]] = ..., email_error: _Optional[str] = ...) -> None: ...
 
 class ListOrganizationsRequest(_message.Message):
     __slots__ = ("page_size", "page_token")

@@ -1,7 +1,7 @@
 ---
 title: Organizations
 description: setup, login, logout, whoami, org, api-keys and cost.
-updated: 2026-11-11
+updated: 2026-11-13
 weight: 7
 aliases: ["/cli/account"]
 ---
@@ -60,8 +60,41 @@ cw org list [--output json]            # alias: ls
 cw org current
 cw org set [ID_OR_SLUG]                # also: cw org, with one organization
 cw org create [NAME] [--slug SLUG]
-cw org invite [EMAIL] [--role owner|admin|member] [--org ID_OR_SLUG]   # prints the invitation link once
+cw org invite [EMAIL] [--role owner|admin|member] [--org ID_OR_SLUG]   # emails the invitee; prints the link once
+cw org invitations [--output json]     # your pending invitations
+cw org accept ORG                      # ORG: the slug, name or ID that invitations lists
+cw org members [--org ID_OR_SLUG] [--output json]
+cw org member rm USER [--org ID_OR_SLUG] [--yes]   # USER: user ID or email; alias: remove
 cw org delete ID_OR_SLUG [--yes]       # owner only; asks you to type the name
+```
+
+`invite` creates the invitation, prints its one-time link on standard output,
+then waits a few seconds for the invitation email and says what became of
+it: sent, not sent with the reason, or not sent yet. Share the link yourself
+when the email does not arrive; it is not shown again.
+
+`invitations` lists the pending invitations addressed to your email address,
+and only once that address is verified. `accept` joins the organization you
+name from that list; it needs no link or token, only that you are signed in
+with the invited, verified address. Unverified, it asks you to verify your
+address and run it again.
+
+`members` lists the current organization's members, or those of `--org`.
+`member rm` asks before removing someone; `--yes` skips the question. Owners
+and admins remove members, and anyone can remove themselves to leave. An
+owner cannot be removed, and an admin cannot remove another admin.
+
+Example:
+
+```sh
+cw org invitations
+cw org accept acme
+```
+
+```text
+ORGANIZATION             SLUG                     ROLE     EXPIRES
+Acme Labs                acme                     member   2026-11-20T09:14:02Z
+Joined Acme Labs (acme) as member.
 ```
 
 ## cw api-keys

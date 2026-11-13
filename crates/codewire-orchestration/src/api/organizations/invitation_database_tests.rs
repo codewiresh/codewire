@@ -4,6 +4,9 @@
 //! at another address an invitation is not found, whatever its state.
 //! ListMyInvitations shows a verified address its pending, unexpired
 //! invitations and nothing else, matching addresses by the same rule (#3840).
+//! CreateInvitation queues the invitation's tokenless email in its own
+//! transaction, and ListInvitations shows the owners and admins its outcome
+//! (#3847).
 
 use codewire_server_core::connect_error::{ConnectCode, ConnectError};
 
@@ -515,6 +518,282 @@ async fn db_my_invitations_are_the_pending_unexpired_ones_of_a_verified_address(
 
     let key = list_my_invitations(t.pool(), &api_key_caller(&invitee, &fixture.id)).await;
     assert_eq!(code(key), ConnectCode::PermissionDenied);
+
+    t.cleanup().await;
+    fixture.cleanup().await;
+}
+
+/// Creates an invitation as the fixture's owner.
+async fn create(t: &Invitations<'_>, email: &str, role: &str) -> AppResult<CreatedInvitation> {
+    create_invitation(
+        t.pool(),
+        &caller(&t.fixture.id),
+        &t.fixture.id,
+        "owner",
+        InviteMemberBody {
+            email: email.to_owned(),
+            role: role.to_owned(),
+            assignments: Vec::new(),
+        },
+    )
+    .await
+}
+
+/// One queued invitation email, as the outbox holds it.
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+struct QueuedEmail {
+    recipient: String,
+    org_id: String,
+    org_name: String,
+    org_slug: String,
+    inviter: String,
+    role: String,
+    status: String,
+    attempts: i32,
+}
+
+/// The invitation's outbox rows.
+async fn emails(t: &Invitations<'_>, invitation: &str) -> Vec<QueuedEmail> {
+    sqlx::query_as(
+        "SELECT recipient, org_id, org_name, org_slug, inviter, role, status, attempts \
+         FROM org_invitation_emails WHERE invitation_id = $1",
+    )
+    .bind(invitation)
+    .fetch_all(t.pool())
+    .await
+    .unwrap()
+}
+
+/// How many invitations and queued emails one address has here.
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+struct Addressed {
+    invitations: i64,
+    emails: i64,
+}
+
+async fn invitations_to(t: &Invitations<'_>, email: &str) -> Addressed {
+    sqlx::query_as(
+        "SELECT (SELECT count(*) FROM org_invitations WHERE org_id = $1 AND email = $2) \
+                    AS invitations, \
+                (SELECT count(*) FROM org_invitation_emails WHERE org_id = $1 AND recipient = $2) \
+                    AS emails",
+    )
+    .bind(&t.fixture.id)
+    .bind(email)
+    .fetch_one(t.pool())
+    .await
+    .unwrap()
+}
+
+const NOTHING: Addressed = Addressed {
+    invitations: 0,
+    emails: 0,
+};
+
+/// CreateInvitation queues exactly one email for its invitation, naming the
+/// organization, its slug, the inviter (by address when the account has no
+/// name) and the role, and holding no token or token digest. A refused
+/// second invitation to the same address queues nothing more (#3847).
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_create_invitation_queues_one_tokenless_email() {
+    let fixture = LeaseFixture::seed("synthetic-invitation-email").await;
+    let t = Invitations::new(&fixture);
+    let email = t.email("invitee");
+
+    let created = create(&t, &email.to_uppercase(), "admin").await.unwrap();
+    assert_eq!(
+        created.invitation.email_status,
+        Some(InvitationEmailState::Pending)
+    );
+    assert_eq!(
+        emails(&t, &created.invitation.id).await,
+        [QueuedEmail {
+            recipient: email.clone(),
+            org_id: fixture.id.clone(),
+            org_name: "Runtime lease owner test".to_owned(),
+            org_slug: fixture.id.clone(),
+            inviter: "Runtime lease owner test".to_owned(),
+            role: "admin".to_owned(),
+            status: "pending".to_owned(),
+            attempts: 0,
+        }]
+    );
+    let row: String = sqlx::query_scalar(
+        "SELECT row_to_json(e)::text FROM org_invitation_emails e WHERE invitation_id = $1",
+    )
+    .bind(&created.invitation.id)
+    .fetch_one(t.pool())
+    .await
+    .unwrap();
+    assert!(!created.token.is_empty());
+    assert!(!row.contains(&created.token), "{row}");
+    assert!(!row.contains(&hash_oauth_token(&created.token)), "{row}");
+
+    let refused = create(&t, &email, "member").await;
+    assert_eq!(code(refused), ConnectCode::AlreadyExists);
+    assert_eq!(
+        invitations_to(&t, &email).await,
+        Addressed {
+            invitations: 1,
+            emails: 1
+        }
+    );
+
+    // An inviter without a display name is named by address.
+    sqlx::query("UPDATE users SET name = '  ' WHERE id = $1")
+        .bind(&fixture.id)
+        .execute(t.pool())
+        .await
+        .unwrap();
+    let unnamed = create(&t, &t.email("second"), "member").await.unwrap();
+    let queued = emails(&t, &unnamed.invitation.id).await;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].inviter, format!("{}@example.test", fixture.id));
+
+    t.cleanup().await;
+    fixture.cleanup().await;
+}
+
+/// The invitation and its email commit together: when queueing the email
+/// fails, the invitation is not created either, and when the invitation
+/// insert fails, no email is queued.
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_an_invitation_and_its_email_commit_together() {
+    let fixture = LeaseFixture::seed("synthetic-invitation-email-atomic").await;
+    let t = Invitations::new(&fixture);
+    let (outbox_refused, invitation_refused) = (t.email("outbox"), t.email("invitation"));
+    let refuse = format!("{}_refuse", fixture.id);
+    sqlx::raw_sql(&format!(
+        r#"CREATE FUNCTION "{refuse}"() RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN
+             -- Each table's row has only its own columns, so test the table
+             -- before reading one.
+             IF TG_TABLE_NAME = 'org_invitation_emails' THEN
+               IF NEW.recipient = '{outbox_refused}' THEN
+                 RAISE EXCEPTION 'synthetic outbox refusal';
+               END IF;
+             ELSIF NEW.email = '{invitation_refused}' THEN
+               RAISE EXCEPTION 'synthetic invitation refusal';
+             END IF;
+             RETURN NEW;
+           END $$;
+           CREATE TRIGGER "{refuse}" BEFORE INSERT ON org_invitation_emails
+             FOR EACH ROW EXECUTE FUNCTION "{refuse}"();
+           CREATE TRIGGER "{refuse}" BEFORE INSERT ON org_invitations
+             FOR EACH ROW EXECUTE FUNCTION "{refuse}"();"#
+    ))
+    .execute(t.pool())
+    .await
+    .unwrap();
+
+    let outbox = create(&t, &outbox_refused, "member").await;
+    let invitation = create(&t, &invitation_refused, "member").await;
+    let left = (
+        invitations_to(&t, &outbox_refused).await,
+        invitations_to(&t, &invitation_refused).await,
+    );
+    let created = create(&t, &t.email("unrefused"), "member").await;
+
+    sqlx::raw_sql(&format!(
+        r#"DROP TRIGGER "{refuse}" ON org_invitation_emails;
+           DROP TRIGGER "{refuse}" ON org_invitations;
+           DROP FUNCTION "{refuse}"();"#
+    ))
+    .execute(t.pool())
+    .await
+    .unwrap();
+    assert_eq!(code(outbox), ConnectCode::Internal);
+    assert_eq!(code(invitation), ConnectCode::Internal);
+    assert_eq!(
+        left,
+        (NOTHING, NOTHING),
+        "nothing of a failed creation remains"
+    );
+    let created = created.unwrap();
+    assert_eq!(emails(&t, &created.invitation.id).await.len(), 1);
+
+    t.cleanup().await;
+    fixture.cleanup().await;
+}
+
+/// ListInvitations, the owners' and admins' view, shows each invitation's
+/// email outcome and reason, and nothing for an invitation without an email
+/// row; the invitee's own listing never carries it.
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_the_admin_listing_shows_the_email_outcome() {
+    let fixture = LeaseFixture::seed("synthetic-invitation-email-status").await;
+    let mut t = Invitations::new(&fixture);
+    let invitee_email = t.email("sent");
+    let invitee = t.user("invitee", &invitee_email, true).await;
+    let mut expected = Vec::new();
+    for (name, status, error) in [
+        ("sent", Some(InvitationEmailState::Sent), None),
+        (
+            "pending",
+            Some(InvitationEmailState::Pending),
+            Some("SES email request failed with HTTP 503 (Throttling)"),
+        ),
+        (
+            "failed",
+            Some(InvitationEmailState::Failed),
+            Some("email delivery is not configured on this server"),
+        ),
+        (
+            "skipped",
+            Some(InvitationEmailState::Skipped),
+            Some("the invitation was revoked before its email was sent"),
+        ),
+        ("none", None, None),
+    ] {
+        let email = t.email(name);
+        let (id, _) = t.invite(name, &email, "pending", "1 hour").await;
+        if let Some(status) = status {
+            let status = match status {
+                InvitationEmailState::Pending => "pending",
+                InvitationEmailState::Sent => "sent",
+                InvitationEmailState::Failed => "failed",
+                InvitationEmailState::Skipped => "skipped",
+            };
+            sqlx::query(
+                "INSERT INTO org_invitation_emails \
+                 (invitation_id, recipient, org_id, org_name, org_slug, inviter, role, status, \
+                  attempts, last_error, sent_at) \
+                 VALUES ($1, $2, $3, 'Org', $3, 'Inviter', 'admin', $4, 1, $5, \
+                         CASE WHEN $4 = 'sent' THEN now() END)",
+            )
+            .bind(&id)
+            .bind(&email)
+            .bind(&fixture.id)
+            .bind(status)
+            .bind(error)
+            .execute(t.pool())
+            .await
+            .unwrap();
+        }
+        expected.push((id, status, error.map(str::to_owned)));
+    }
+
+    let mut listed: Vec<_> = list_invitations(t.pool(), &fixture.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| (i.id, i.email_status, i.email_error))
+        .collect();
+    listed.sort_by(|a, b| a.0.cmp(&b.0));
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(listed, expected);
+
+    let mine = list_my_invitations(t.pool(), &caller(&invitee))
+        .await
+        .unwrap();
+    assert_eq!(mine.len(), 1);
+    assert_eq!(
+        (&mine[0].email_status, &mine[0].email_error),
+        (&None, &None)
+    );
 
     t.cleanup().await;
     fixture.cleanup().await;

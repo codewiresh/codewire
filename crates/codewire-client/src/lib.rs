@@ -62,6 +62,12 @@ pub use codewire_proto::codewire::console::v1::{
     UsageSummary,
 };
 pub use codewire_proto::codewire::v1::{
+    AcceptInvitationRequest, AcceptInvitationResponse, InvitationEmailStatus,
+    ListInvitationsRequest, ListInvitationsResponse, ListMembersRequest, ListMembersResponse,
+    ListMyInvitationsRequest, ListMyInvitationsResponse, OrgMember, RemoveMemberRequest,
+    RemoveMemberResponse,
+};
+pub use codewire_proto::codewire::v1::{
     AccessGrant, AccessPermission, ApiKey, ApplicationPort, AttachSessionInput, AttachSessionOpen,
     AttachSessionRequest, AttachSessionResize, AttachSessionResponse, AttachSessionResponseView,
     AttachSessionStatus, CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse,
@@ -612,6 +618,61 @@ impl CodewireClient {
     ) -> Result<CreateInvitationResponse, ClientError> {
         self.organizations
             .create_invitation_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn list_invitations(
+        &self,
+        request: ListInvitationsRequest,
+    ) -> Result<ListInvitationsResponse, ClientError> {
+        self.organizations
+            .list_invitations_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn list_my_invitations(
+        &self,
+        request: ListMyInvitationsRequest,
+    ) -> Result<ListMyInvitationsResponse, ClientError> {
+        self.organizations
+            .list_my_invitations_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn accept_invitation(
+        &self,
+        request: AcceptInvitationRequest,
+    ) -> Result<AcceptInvitationResponse, ClientError> {
+        self.organizations
+            .accept_invitation_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn list_members(
+        &self,
+        request: ListMembersRequest,
+    ) -> Result<ListMembersResponse, ClientError> {
+        self.organizations
+            .list_members_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn remove_member(
+        &self,
+        request: RemoveMemberRequest,
+    ) -> Result<RemoveMemberResponse, ClientError> {
+        self.organizations
+            .remove_member_with_options(request, self.auth_options().await?)
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)
@@ -1903,6 +1964,11 @@ mod tests {
     const GET_ORGANIZATION_PATH: &str = "/codewire.v1.OrganizationService/GetOrganization";
     const DELETE_ORGANIZATION_PATH: &str = "/codewire.v1.OrganizationService/DeleteOrganization";
     const CREATE_INVITATION_PATH: &str = "/codewire.v1.OrganizationService/CreateInvitation";
+    const LIST_INVITATIONS_PATH: &str = "/codewire.v1.OrganizationService/ListInvitations";
+    const LIST_MY_INVITATIONS_PATH: &str = "/codewire.v1.OrganizationService/ListMyInvitations";
+    const ACCEPT_INVITATION_PATH: &str = "/codewire.v1.OrganizationService/AcceptInvitation";
+    const LIST_MEMBERS_PATH: &str = "/codewire.v1.OrganizationService/ListMembers";
+    const REMOVE_MEMBER_PATH: &str = "/codewire.v1.OrganizationService/RemoveMember";
     const LIST_PRESETS_PATH: &str = "/codewire.v1.PresetService/ListPresets";
     const CREATE_PRESET_PATH: &str = "/codewire.v1.PresetService/CreatePreset";
     const DELETE_PRESET_PATH: &str = "/codewire.v1.PresetService/DeletePreset";
@@ -2590,6 +2656,149 @@ mod tests {
             created.invitation.into_option().expect("invitation").id,
             "invite_123"
         );
+    }
+
+    /// The membership and invitation RPCs the CLI's `cw org` commands use
+    /// carry the provider's credential and the client's identity, and send
+    /// each request's identifying fields.
+    #[tokio::test]
+    async fn organization_membership_and_invitation_rpcs_use_the_provider() {
+        let server = MockServer::start().await;
+        let invitation = OrgInvitation {
+            id: "invite_123".into(),
+            org_id: "org_123".into(),
+            org_slug: "acme".into(),
+            email: "member@example.com".into(),
+            role: OrgRole::Member.into(),
+            status: InvitationStatus::Pending.into(),
+            email_status: InvitationEmailStatus::Sent.into(),
+            ..Default::default()
+        };
+        let member = OrgMember {
+            id: "member_123".into(),
+            org_id: "org_123".into(),
+            user_id: "user_123".into(),
+            email: "member@example.com".into(),
+            role: OrgRole::Member.into(),
+            ..Default::default()
+        };
+        let calls = [
+            (
+                LIST_INVITATIONS_PATH,
+                ListInvitationsRequest {
+                    org_id: "org_123".into(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+                ListInvitationsResponse {
+                    invitations: vec![invitation.clone()],
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            ),
+            (
+                LIST_MY_INVITATIONS_PATH,
+                ListMyInvitationsRequest::default().encode_to_vec(),
+                ListMyInvitationsResponse {
+                    invitations: vec![invitation],
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            ),
+            (
+                ACCEPT_INVITATION_PATH,
+                AcceptInvitationRequest {
+                    invitation_id: "invite_123".into(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+                AcceptInvitationResponse {
+                    org_id: "org_123".into(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            ),
+            (
+                LIST_MEMBERS_PATH,
+                ListMembersRequest {
+                    org_id: "org_123".into(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+                ListMembersResponse {
+                    members: vec![member],
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            ),
+            (
+                REMOVE_MEMBER_PATH,
+                RemoveMemberRequest {
+                    org_id: "org_123".into(),
+                    user_id: "user_123".into(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+                RemoveMemberResponse::default().encode_to_vec(),
+            ),
+        ];
+        for (rpc_path, request, response) in calls {
+            Mock::given(method("POST"))
+                .and(path(rpc_path))
+                .and(header("authorization", "Bearer test-token"))
+                .and(header("user-agent", "codewire-client-test/1"))
+                .and(body_bytes(request))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "application/proto")
+                        .set_body_bytes(response),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let client = test_client(&server).await;
+        let listed = client
+            .list_invitations(ListInvitationsRequest {
+                org_id: "org_123".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("list invitations");
+        assert_eq!(
+            listed.invitations[0].email_status.as_known(),
+            Some(InvitationEmailStatus::Sent)
+        );
+        let mine = client
+            .list_my_invitations(ListMyInvitationsRequest::default())
+            .await
+            .expect("list my invitations");
+        assert_eq!(mine.invitations[0].org_slug, "acme");
+        let accepted = client
+            .accept_invitation(AcceptInvitationRequest {
+                invitation_id: "invite_123".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("accept invitation");
+        assert_eq!(accepted.org_id, "org_123");
+        let members = client
+            .list_members(ListMembersRequest {
+                org_id: "org_123".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("list members");
+        assert_eq!(members.members[0].user_id, "user_123");
+        client
+            .remove_member(RemoveMemberRequest {
+                org_id: "org_123".into(),
+                user_id: "user_123".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("remove member");
     }
 
     #[tokio::test]

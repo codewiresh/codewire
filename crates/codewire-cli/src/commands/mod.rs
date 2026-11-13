@@ -1929,66 +1929,6 @@ pub(crate) struct CostArgs {
 }
 
 #[derive(Debug, Subcommand)]
-pub(crate) enum OrgCommand {
-    #[command(visible_alias = "ls", about = "List organizations")]
-    List(OrgListArgs),
-    #[command(about = "Show the current organization")]
-    Current,
-    #[command(about = "Set the current organization")]
-    Set(OrgSetArgs),
-    #[command(about = "Create a new organization")]
-    Create(OrgCreateArgs),
-    #[command(about = "Delete an organization")]
-    Delete(OrgDeleteArgs),
-    #[command(about = "Invite a member to an organization")]
-    Invite(OrgInviteArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct OrgListArgs {
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
-    output: OutputFormat,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct OrgSetArgs {
-    #[arg(value_name = "ID_OR_SLUG")]
-    id_or_slug: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct OrgCreateArgs {
-    #[arg(
-        value_name = "NAME",
-        help = "Organization name; omit for an interactive walkthrough"
-    )]
-    name: Option<String>,
-    #[arg(long, help = "URL-safe slug (default: auto-generated from name)")]
-    slug: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct OrgDeleteArgs {
-    #[arg(value_name = "ID_OR_SLUG")]
-    id_or_slug: String,
-    #[arg(long, help = "Skip confirmation prompt")]
-    yes: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct OrgInviteArgs {
-    #[arg(
-        value_name = "EMAIL",
-        help = "Invitation recipient; omit for an interactive walkthrough"
-    )]
-    email: Option<String>,
-    #[arg(long, help = "Role to assign (owner, admin, member; default: member)")]
-    role: Option<String>,
-    #[arg(long, value_name = "ID_OR_SLUG", help = "Organization ID or slug")]
-    org: Option<String>,
-}
-
-#[derive(Debug, Subcommand)]
 pub(crate) enum ApiKeyCommand {
     #[command(about = "Create an API key")]
     Create(ApiKeyCreateArgs),
@@ -2839,6 +2779,7 @@ pub(crate) mod inventory;
 mod launch_setup;
 pub(crate) mod lifecycle_output;
 pub(crate) mod mesh_commands;
+mod organizations;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod placement_choice;
 mod platform_commands;
@@ -2867,6 +2808,7 @@ pub(crate) use hosts::{
 pub use mesh_commands::owner::LocalMeshOwner;
 pub(crate) use mesh_commands::retained::StateDir as MeshStateDir;
 pub(crate) use mesh_commands::*;
+pub(crate) use organizations::*;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use placement_choice::{
     LocalAnswer, PlacementChoice, choose_placement, report_cloud_answered,

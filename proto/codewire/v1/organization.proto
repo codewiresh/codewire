@@ -68,6 +68,21 @@ enum InvitationStatus {
   INVITATION_STATUS_EXPIRED = 4;
 }
 
+// InvitationEmailStatus is the outcome of the email that tells the invitee
+// about an invitation. UNSPECIFIED means no email is recorded: the invitation
+// predates invitation email, or the response does not carry the status.
+enum InvitationEmailStatus {
+  INVITATION_EMAIL_STATUS_UNSPECIFIED = 0;
+  // Not sent yet; a failed attempt that will be retried stays pending and
+  // sets email_error.
+  INVITATION_EMAIL_STATUS_PENDING = 1;
+  INVITATION_EMAIL_STATUS_SENT = 2;
+  // Every attempt failed; email_error says why.
+  INVITATION_EMAIL_STATUS_FAILED = 3;
+  // Not sent because the invitation was no longer pending.
+  INVITATION_EMAIL_STATUS_SKIPPED = 4;
+}
+
 // OrganizationDeletionState describes the retained organization row while a
 // durable deletion operation is running or awaiting an owner retry. Successful
 // deletion is represented by the organization becoming not_found.
@@ -133,6 +148,13 @@ message OrgInvitation {
   // Assignments the invitee receives on acceptance. Set by ListInvitations
   // and ListMyInvitations; empty elsewhere.
   repeated string assignments = 14;
+  // The invitation email's outcome, for the organization's owners and
+  // admins. CreateInvitation sets PENDING, as it queues the email;
+  // ListInvitations sets the current outcome. UNSPECIFIED elsewhere.
+  InvitationEmailStatus email_status = 15;
+  // Why the email failed, or why its last attempt did while it is retried.
+  // Set by ListInvitations; empty elsewhere.
+  string email_error = 16;
 }
 
 message ListOrganizationsRequest {

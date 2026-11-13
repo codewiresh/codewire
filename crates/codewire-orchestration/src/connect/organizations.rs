@@ -15,14 +15,15 @@ use codewire_proto::codewire::v1::{
     CreateInvitationResponse, CreateOrganizationRequest, CreateOrganizationResponse,
     DeleteOrganizationRequest, DeleteOrganizationResponse, GetInvitationByTokenRequest,
     GetInvitationByTokenResponse, GetMemberAssignmentsRequest, GetMemberAssignmentsResponse,
-    GetOrganizationRequest, GetOrganizationResponse, InvitationStatus, ListInvitationsRequest,
-    ListInvitationsResponse, ListMembersRequest, ListMembersResponse, ListMyInvitationsRequest,
-    ListMyInvitationsResponse, ListOrganizationsRequest, ListOrganizationsResponse,
-    OrgInvitation as ProtoOrgInvitation, OrgMember as ProtoOrgMember, OrgRole,
-    Organization as ProtoOrganization, OrganizationDeletionState as ProtoOrganizationDeletionState,
-    OrganizationMembership, OrganizationService, RemoveMemberRequest, RemoveMemberResponse,
-    RevokeInvitationRequest, RevokeInvitationResponse, UpdateMemberAssignmentsRequest,
-    UpdateMemberAssignmentsResponse, UpdateMemberRoleRequest, UpdateMemberRoleResponse,
+    GetOrganizationRequest, GetOrganizationResponse, InvitationEmailStatus, InvitationStatus,
+    ListInvitationsRequest, ListInvitationsResponse, ListMembersRequest, ListMembersResponse,
+    ListMyInvitationsRequest, ListMyInvitationsResponse, ListOrganizationsRequest,
+    ListOrganizationsResponse, OrgInvitation as ProtoOrgInvitation, OrgMember as ProtoOrgMember,
+    OrgRole, Organization as ProtoOrganization,
+    OrganizationDeletionState as ProtoOrganizationDeletionState, OrganizationMembership,
+    OrganizationService, RemoveMemberRequest, RemoveMemberResponse, RevokeInvitationRequest,
+    RevokeInvitationResponse, UpdateMemberAssignmentsRequest, UpdateMemberAssignmentsResponse,
+    UpdateMemberRoleRequest, UpdateMemberRoleResponse,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
@@ -33,12 +34,12 @@ use crate::api::assignments::{
     UpdateMemberAssignmentsBody, get_member_assignments_core, update_member_assignments_core,
 };
 use crate::api::organizations::{
-    AcceptInvitationBy, CreateOrgBody, InviteMemberBody, OrgInvitation, OrgMember, OrgWithMembers,
-    OrgWithRole, Organization, OrganizationDeletionState, UpdateRoleBody, accept_invitation_core,
-    create_invitation_core, create_organization_core, delete_organization_core,
-    get_invitation_by_token_core, get_organization_core, list_invitations_core, list_members_core,
-    list_my_invitations_core, list_organizations_core, remove_member_core, revoke_invitation_core,
-    update_member_role_core,
+    AcceptInvitationBy, CreateOrgBody, InvitationEmailState, InviteMemberBody, OrgInvitation,
+    OrgMember, OrgWithMembers, OrgWithRole, Organization, OrganizationDeletionState,
+    UpdateRoleBody, accept_invitation_core, create_invitation_core, create_organization_core,
+    delete_organization_core, get_invitation_by_token_core, get_organization_core,
+    list_invitations_core, list_members_core, list_my_invitations_core, list_organizations_core,
+    remove_member_core, revoke_invitation_core, update_member_role_core,
 };
 
 /// Registers all fifteen OrganizationService RPCs on their generated routes.
@@ -562,8 +563,25 @@ fn proto_invitation(invitation: OrgInvitation) -> AppResult<ProtoOrgInvitation> 
         accepted_at: accepted_at.into(),
         org_slug: invitation.org_slug,
         assignments: invitation.assignments,
+        email_status: invitation
+            .email_status
+            .map_or(
+                InvitationEmailStatus::Unspecified,
+                proto_invitation_email_status,
+            )
+            .into(),
+        email_error: invitation.email_error.unwrap_or_default(),
         ..Default::default()
     })
+}
+
+fn proto_invitation_email_status(state: InvitationEmailState) -> InvitationEmailStatus {
+    match state {
+        InvitationEmailState::Pending => InvitationEmailStatus::Pending,
+        InvitationEmailState::Sent => InvitationEmailStatus::Sent,
+        InvitationEmailState::Failed => InvitationEmailStatus::Failed,
+        InvitationEmailState::Skipped => InvitationEmailStatus::Skipped,
+    }
 }
 
 #[cfg(test)]
@@ -671,6 +689,8 @@ mod tests {
             accepted_at: None,
             org_slug: "test".into(),
             assignments: vec!["viewer".into()],
+            email_status: None,
+            email_error: None,
         })
         .unwrap();
         let json = serde_json::to_value(invitation).unwrap();
@@ -680,6 +700,54 @@ mod tests {
         assert_eq!(json["assignments"][0], "viewer");
         assert!(json.get("inviterName").is_none());
         assert!(json.get("acceptedAt").is_none());
+        assert!(json.get("emailStatus").is_none());
+        assert!(json.get("emailError").is_none());
+    }
+
+    /// The admin listing's email outcome maps to its wire enum and reason.
+    #[test]
+    fn invitation_email_status_maps_each_outbox_status() {
+        let listed = |status: InvitationEmailState, error: Option<&str>| OrgInvitation {
+            id: "invite_test".into(),
+            org_id: "org_test".into(),
+            org_name: "Test".into(),
+            email: "invitee@example.com".into(),
+            role: "member".into(),
+            invited_by: "user_test".into(),
+            inviter_name: None,
+            status: "pending".into(),
+            expires_at: "2026-07-27T00:00:00Z".into(),
+            created_at: "2026-07-20T00:00:00Z".into(),
+            accepted_at: None,
+            org_slug: "test".into(),
+            assignments: vec!["viewer".into()],
+            email_status: Some(status),
+            email_error: error.map(Into::into),
+        };
+        for (state, wire) in [
+            (
+                InvitationEmailState::Pending,
+                InvitationEmailStatus::Pending,
+            ),
+            (InvitationEmailState::Sent, InvitationEmailStatus::Sent),
+            (InvitationEmailState::Failed, InvitationEmailStatus::Failed),
+            (
+                InvitationEmailState::Skipped,
+                InvitationEmailStatus::Skipped,
+            ),
+        ] {
+            let mapped = proto_invitation(listed(state, None)).unwrap();
+            assert_eq!(mapped.email_status.as_known(), Some(wire));
+            assert_eq!(mapped.email_error, "");
+        }
+        let failed = proto_invitation(listed(
+            InvitationEmailState::Failed,
+            Some("SES rejected the message"),
+        ))
+        .unwrap();
+        let json = serde_json::to_value(failed).unwrap();
+        assert_eq!(json["emailStatus"], "INVITATION_EMAIL_STATUS_FAILED");
+        assert_eq!(json["emailError"], "SES rejected the message");
     }
 
     /// An acceptance names its invitation by token or by id, never both and

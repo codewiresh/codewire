@@ -84,7 +84,8 @@ resolves.
 
 ## Transactional email
 
-The IdP and billing send verification, access and receipt email. SES is
+The IdP and billing send verification, access, organization invitation and
+receipt email. SES is
 selected only by its workload-specific `CODEWIRE_SES_ENABLED=true` marker,
 delivered with the SES credential projection. Without that marker, a
 `RESEND_API_KEY` in the workload's environment selects the Resend sender.
@@ -98,6 +99,17 @@ With neither, the workload starts with email delivery disabled.
 
 The Kind overlays provide neither credential, so local email delivery stays
 disabled and needs no sender.
+
+Organization invitation email goes through an outbox: CreateInvitation, in
+orchestration, queues a row in `org_invitation_emails` in the invitation's
+transaction, and every IdP replica sends due rows every 2 seconds, each row
+once (`FOR UPDATE SKIP LOCKED` and a 60-second claim). A failed send is retried
+after 1 and then 5 minutes and failed after the third attempt. With email
+delivery disabled, the IdP marks each invitation email failed with "email
+delivery is not configured on this server", which the inviter sees. The email
+holds no invitation token: it tells the invitee to sign in at `FRONTEND_URL`
+`/login` with the invited address and run `cw org accept <slug>`. No setting
+controls it.
 
 ## Sign in with GitHub or Google
 

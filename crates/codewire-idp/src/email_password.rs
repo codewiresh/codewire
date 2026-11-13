@@ -357,7 +357,7 @@ fn provider_account_phrase(provider: &'static str, account: &str) -> String {
 }
 
 /// Escape text for an HTML email body.
-fn html_text(value: &str) -> String {
+pub(crate) fn html_text(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         match character {

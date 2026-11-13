@@ -9,6 +9,10 @@ use crate::CLI_VERSION;
 use crate::config::{ResolvedPlatformConfig, normalize_server_url};
 use crate::environment_client::display_client_error;
 
+mod membership;
+
+pub use membership::{Acceptance, InvitationEmail, Member, PendingInvitation};
+
 const ORGANIZATION_DELETION_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const ORGANIZATION_DELETION_POLL_WINDOW: Duration = Duration::from_secs(300);
 
@@ -195,10 +199,18 @@ impl OrganizationClient {
         let invitation = response
             .invitation
             .into_option()
-            .map(legacy_invitation)
             .ok_or_else(|| anyhow::anyhow!("CreateInvitation returned no invitation"))?;
+        // A server that emails invitations reports the new one's email as
+        // pending; an older one reports nothing.
+        let email_queued =
+            invitation.email_status.as_known() == Some(rpc::InvitationEmailStatus::Pending);
+        let invitation = legacy_invitation(invitation);
         let url = invitation_url(&self.public_origin, &response.token)?;
-        Ok(CreatedInvitation { invitation, url })
+        Ok(CreatedInvitation {
+            invitation,
+            url,
+            email_queued,
+        })
     }
 
     pub async fn list_presets(&self, org_id: &str) -> anyhow::Result<Vec<Preset>> {
@@ -351,6 +363,8 @@ pub struct OrgInvitation {
 pub struct CreatedInvitation {
     pub invitation: OrgInvitation,
     pub url: String,
+    /// The server queued an email to the invitee.
+    pub email_queued: bool,
 }
 
 impl std::fmt::Debug for CreatedInvitation {
@@ -359,6 +373,7 @@ impl std::fmt::Debug for CreatedInvitation {
             .debug_struct("CreatedInvitation")
             .field("invitation", &self.invitation)
             .field("url", &"[REDACTED]")
+            .field("email_queued", &self.email_queued)
             .finish()
     }
 }
@@ -561,6 +576,7 @@ mod tests {
                 ..Default::default()
             },
             url,
+            email_queued: true,
         };
         let diagnostic = format!("{created:?}");
         assert!(diagnostic.contains("member@example.test"));

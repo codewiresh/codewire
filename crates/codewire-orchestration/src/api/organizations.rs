@@ -414,6 +414,42 @@ pub struct OrgInvitation {
     pub org_slug: String,
     /// Set only by the authenticated listings; empty elsewhere.
     pub assignments: Vec<String>,
+    /// The invitation email's outcome, for the organization's owners and
+    /// admins: set by CreateInvitation (pending) and by ListInvitations when
+    /// the invitation has an email row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email_status: Option<InvitationEmailState>,
+    /// Why the email failed or its last attempt did. Set only by
+    /// ListInvitations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email_error: Option<String>,
+}
+
+/// The state of an invitation's email in the outbox idp sends from (#3847).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvitationEmailState {
+    /// Not sent yet, including after a failed attempt that will be retried.
+    Pending,
+    Sent,
+    /// Every attempt failed.
+    Failed,
+    /// Not sent: the invitation was no longer pending.
+    Skipped,
+}
+
+impl InvitationEmailState {
+    fn from_database(value: &str) -> AppResult<Self> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "sent" => Ok(Self::Sent),
+            "failed" => Ok(Self::Failed),
+            "skipped" => Ok(Self::Skipped),
+            other => Err(AppError::Internal(anyhow::anyhow!(
+                "invitation email has unknown status {other}"
+            ))),
+        }
+    }
 }
 
 /// A newly created invitation plus the one-time bearer capability returned to
@@ -481,6 +517,8 @@ fn invitation_row(r: &sqlx::postgres::PgRow) -> Result<OrgInvitation, AppError> 
         accepted_at: accepted_at.map(format_time),
         org_slug: String::new(),
         assignments: Vec::new(),
+        email_status: None,
+        email_error: None,
     })
 }
 
@@ -535,25 +573,47 @@ pub(crate) async fn list_invitations_core(
     )
     .await?;
 
+    list_invitations(&state.pool, &org_id).await
+}
+
+/// An organization's invitations with their email outcome (#3847), which
+/// only this admin listing shows: the inviter needs it to know whether to
+/// share the link by hand.
+async fn list_invitations(pool: &sqlx::PgPool, org_id: &str) -> AppResult<Vec<OrgInvitation>> {
     let rows = sqlx::query(
         r#"SELECT i.id, i.org_id, o.name AS org_name, o.slug AS org_slug, i.email, i.role,
                   i.invited_by, u.name AS inviter_name, i.status, i.expires_at, i.created_at,
-                  i.accepted_at, i.assignments
+                  i.accepted_at, i.assignments, e.status AS email_status,
+                  e.last_error AS email_error
            FROM org_invitations i
            LEFT JOIN users u ON u.id = i.invited_by
            LEFT JOIN organizations o ON o.id = i.org_id
+           LEFT JOIN org_invitation_emails e ON e.invitation_id = i.id
            WHERE i.org_id = $1
            ORDER BY i.created_at DESC"#,
     )
-    .bind(&org_id)
-    .fetch_all(&state.pool)
+    .bind(org_id)
+    .fetch_all(pool)
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "organizations: list invitations failed");
         AppError::InternalMsg("failed to list invitations".into())
     })?;
 
-    rows.iter().map(listed_invitation_row).collect()
+    rows.iter()
+        .map(|r| {
+            Ok(OrgInvitation {
+                email_status: r
+                    .try_get::<Option<String>, _>("email_status")
+                    .map_err(AppError::from)?
+                    .as_deref()
+                    .map(InvitationEmailState::from_database)
+                    .transpose()?,
+                email_error: r.try_get("email_error").map_err(AppError::from)?,
+                ..listed_invitation_row(r)?
+            })
+        })
+        .collect()
 }
 
 pub(crate) async fn list_my_invitations_core(
@@ -610,7 +670,57 @@ pub(crate) async fn create_invitation_core(
         "only owner or admin can invite members",
     )
     .await?;
+    let created = run_organization_database_mutation(
+        &state.pool,
+        &org_id,
+        create_invitation(&state.pool, &user, &org_id, &caller_role, body),
+    )
+    .await?;
+    log_audit(
+        &state,
+        "member.invited",
+        &user.user_id,
+        serde_json::json!({
+            "org_id": org_id,
+            "email": created.invitation.email,
+            "role": created.invitation.role,
+        }),
+        "info",
+    )
+    .await;
+    Ok(created)
+}
 
+/// The inviting account, as its invitation email names it.
+#[derive(sqlx::FromRow)]
+struct Inviter {
+    name: Option<String>,
+    email: String,
+}
+
+impl Inviter {
+    /// The display name, or the address when the account has none.
+    fn display(&self) -> &str {
+        self.name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&self.email)
+    }
+}
+
+/// Creates an invitation and, in the same transaction, the outbox row idp
+/// sends its email from (#3847), so an invitation never lacks its email and
+/// an email never names an invitation that was not created. The row holds
+/// what the email shows and no token: the email links to signing in, and
+/// the invitee accepts by invitation id with a verified address.
+async fn create_invitation(
+    pool: &sqlx::PgPool,
+    user: &AuthUser,
+    org_id: &str,
+    caller_role: &str,
+    body: InviteMemberBody,
+) -> AppResult<CreatedInvitation> {
     let email = body.email.to_lowercase();
     let email = email.trim();
     if email.is_empty() {
@@ -630,43 +740,6 @@ pub(crate) async fn create_invitation_core(
         return Err(forbidden("admins cannot invite as owner"));
     }
 
-    run_organization_database_mutation(&state.pool, &org_id, async {
-    let existing: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM org_members m INNER JOIN users u ON u.id = m.user_id
-           WHERE m.org_id = $1 AND u.email = $2"#,
-    )
-    .bind(&org_id)
-    .bind(email)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "organizations: check membership failed");
-        AppError::InternalMsg("failed to check existing membership".into())
-    })?;
-    if existing > 0 {
-        return Err(AppError::Conflict(
-            "user is already a member of this organization".into(),
-        ));
-    }
-
-    let pending: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM org_invitations
-           WHERE org_id = $1 AND email = $2 AND status = 'pending' AND expires_at > NOW()"#,
-    )
-    .bind(&org_id)
-    .bind(email)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "organizations: check invitations failed");
-        AppError::InternalMsg("failed to check existing invitations".into())
-    })?;
-    if pending > 0 {
-        return Err(AppError::Conflict(
-            "a pending invitation already exists for this email".into(),
-        ));
-    }
-
     let mut assignments = body.assignments;
     for a in &assignments {
         if !super::assignments::is_valid_assignment(a) {
@@ -677,6 +750,53 @@ pub(crate) async fn create_invitation_core(
     }
     if !assignments.iter().any(|a| a == "viewer") {
         assignments.insert(0, "viewer".to_string());
+    }
+
+    let failed = |action: &'static str, message: &'static str| {
+        move |e: sqlx::Error| {
+            tracing::error!(error = %e, "organizations: {action} failed");
+            AppError::InternalMsg(message.into())
+        }
+    };
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(failed("begin invitation", "failed to create invitation"))?;
+
+    let existing: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM org_members m INNER JOIN users u ON u.id = m.user_id
+           WHERE m.org_id = $1 AND u.email = $2"#,
+    )
+    .bind(org_id)
+    .bind(email)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(failed(
+        "check membership",
+        "failed to check existing membership",
+    ))?;
+    if existing > 0 {
+        return Err(AppError::Conflict(
+            "user is already a member of this organization".into(),
+        ));
+    }
+
+    let pending: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM org_invitations
+           WHERE org_id = $1 AND email = $2 AND status = 'pending' AND expires_at > NOW()"#,
+    )
+    .bind(org_id)
+    .bind(email)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(failed(
+        "check invitations",
+        "failed to check existing invitations",
+    ))?;
+    if pending > 0 {
+        return Err(AppError::Conflict(
+            "a pending invitation already exists for this email".into(),
+        ));
     }
 
     let inv_id = uuid::Uuid::new_v4().simple().to_string();
@@ -691,7 +811,7 @@ pub(crate) async fn create_invitation_core(
            VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $9)"#,
     )
     .bind(&inv_id)
-    .bind(&org_id)
+    .bind(org_id)
     .bind(email)
     .bind(role)
     .bind(&user.user_id)
@@ -699,35 +819,47 @@ pub(crate) async fn create_invitation_core(
     .bind(expires_at)
     .bind(now)
     .bind(&assignments)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "organizations: create invitation failed");
-        AppError::InternalMsg("failed to create invitation".into())
-    })?;
+    .map_err(failed("create invitation", "failed to create invitation"))?;
 
-    let inviter_name: Option<String> =
-        sqlx::query_scalar(r#"SELECT name FROM users WHERE id = $1"#)
-            .bind(&user.user_id)
-            .fetch_optional(&state.pool)
-            .await
-            .ok()
-            .flatten()
-            .flatten();
-
-    log_audit(
-        &state,
-        "member.invited",
-        &user.user_id,
-        serde_json::json!({"org_id": org_id, "email": email, "role": role}),
-        "info",
+    let inviter: Inviter = sqlx::query_as(r#"SELECT name, email FROM users WHERE id = $1"#)
+        .bind(&user.user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(failed("load inviter", "failed to create invitation"))?;
+    let inviter_name = inviter.name.clone();
+    let queued = sqlx::query(
+        r#"INSERT INTO org_invitation_emails
+               (invitation_id, recipient, org_id, org_name, org_slug, inviter, role)
+           SELECT $1, $2, o.id, o.name, o.slug, $3, $4
+             FROM organizations o
+            WHERE o.id = $5"#,
     )
-    .await;
+    .bind(&inv_id)
+    .bind(email)
+    .bind(inviter.display())
+    .bind(role)
+    .bind(org_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(failed(
+        "queue invitation email",
+        "failed to create invitation",
+    ))?;
+    // The invitation's foreign key already proved the organization exists.
+    if queued.rows_affected() != 1 {
+        return Err(AppError::InternalMsg("failed to create invitation".into()));
+    }
+
+    tx.commit()
+        .await
+        .map_err(failed("commit invitation", "failed to create invitation"))?;
 
     Ok(CreatedInvitation {
         invitation: OrgInvitation {
             id: inv_id,
-            org_id: org_id.clone(),
+            org_id: org_id.to_owned(),
             org_name: String::new(),
             email: email.to_string(),
             role: role.to_string(),
@@ -739,11 +871,11 @@ pub(crate) async fn create_invitation_core(
             accepted_at: None,
             org_slug: String::new(),
             assignments: Vec::new(),
+            email_status: Some(InvitationEmailState::Pending),
+            email_error: None,
         },
         token,
     })
-    })
-    .await
 }
 
 pub(crate) async fn revoke_invitation_core(
@@ -1396,6 +1528,8 @@ mod tests {
                 accepted_at: None,
                 org_slug: String::new(),
                 assignments: Vec::new(),
+                email_status: None,
+                email_error: None,
             },
             token: "invitation-capability-marker".into(),
         };

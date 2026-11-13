@@ -159,6 +159,14 @@ async fn serve() -> anyhow::Result<()> {
     );
     // Fresh-proof authenticator replacement and recovery-code regeneration:
     // cookie-only, exact-Origin account controls.
+    // Organization invitation emails that orchestration queued (#3847).
+    codewire_idp::invitation_email::spawn(
+        pool.clone(),
+        std::sync::Arc::new(codewire_idp::invitation_email::EmailInvitationMailer(
+            email.clone(),
+        )),
+        &idp_cfg.frontend_url,
+    );
     let two_factor_replacement = codewire_idp::two_factor::replacement_router(
         pool.clone(),
         cfg.session_secret.clone(),

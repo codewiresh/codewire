@@ -54,8 +54,9 @@ use console_client::{BillingOverview, ConsoleClient};
 use environment_client::{CreateEnvironmentPortRequest, EnvironmentClient, EnvironmentPort};
 use mesh::{MeshClient, Node, RedeemedNodeEnrollment};
 use organization_client::{
-    CreateInvitationRequest, CreateOrgRequest, CreatePresetRequest, OrgWithRole,
-    OrganizationClient, OrganizationDeletionOutcome, OrganizationDeletionStart, Preset,
+    Acceptance, CreateInvitationRequest, CreateOrgRequest, CreatePresetRequest, CreatedInvitation,
+    InvitationEmail, Member, OrgWithRole, OrganizationClient, OrganizationDeletionOutcome,
+    OrganizationDeletionStart, PendingInvitation, Preset,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use presentation::EnvironmentDaemonRepair;

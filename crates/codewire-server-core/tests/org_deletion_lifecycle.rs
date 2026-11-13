@@ -1943,6 +1943,12 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "sandbox_workspace_bindings:cascade",
         ]
     );
+    // An invitation's queued email goes with it, so deleting an org's
+    // invitations removes their emails (#3847).
+    assert_eq!(
+        referencing_tables(&pool, "org_invitations").await,
+        vec!["org_invitation_emails:cascade"]
+    );
     // A Mesh attachment's enrollment codes go with it, so deleting an org's
     // environments removes both.
     assert_eq!(

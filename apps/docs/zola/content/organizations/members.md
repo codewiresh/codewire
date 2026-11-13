@@ -1,7 +1,7 @@
 ---
 title: Members and sharing
 description: Invite people to an organization, change roles, remove members, and share one environment with a specific user.
-updated: 2026-10-26
+updated: 2026-11-13
 weight: 2
 aliases: ["/guides/members"]
 ---
@@ -9,24 +9,47 @@ aliases: ["/guides/members"]
 ## Invite someone
 
 Owners and admins invite from the organization's **Settings → Members** page:
-enter the email address and choose **Member** or **Admin**. Codewire shows an
-invitation link once; share it yourself. From the CLI:
+enter the email address and choose **Member** or **Admin**. From the CLI:
 
 ```sh
 cw org invite someone@example.com --role member --org my-org
 ```
 
-The link is valid for 7 days, only one invitation per email can be pending,
-and the invitee must accept it while signed in with that same email address.
-Someone without an account signs up first, then opens the link again. Revoke a
-pending invitation from the same page; the link stops working at once.
+Codewire emails the invitee, naming you, the organization and the role. The
+email holds no link to the invitation itself: it asks the invitee to sign in
+with that address and accept. Codewire also shows an invitation link once;
+share it yourself if the email does not arrive.
+
+The invitation is valid for 7 days, only one invitation per email can be
+pending, and the invitee must accept it while signed in with that same email
+address, verified. Someone without an account signs up with that address and
+verifies it first. Revoke a pending invitation from the same page; it can no
+longer be accepted, and an email not yet sent is not sent.
+
+## Accept an invitation
+
+Sign in with the invited address, then list your invitations and accept one
+by its organization's slug or name:
+
+```sh
+cw org invitations
+cw org accept my-org
+```
+
+The shared invitation link works too: open it while signed in with the
+invited address.
 
 Roles are described in [Organizations](@/organizations/_index.md).
 
 ## Change a role or remove a member
 
 Owners and admins change roles and remove members from **Settings →
-Members**:
+Members**. From the CLI:
+
+```sh
+cw org members --org my-org
+cw org member rm someone@example.com --org my-org
+```
 
 - an admin cannot promote anyone to owner or change another admin or owner;
 - an owner cannot be removed, and the last owner cannot be demoted;
@@ -51,6 +74,7 @@ or a user with an `owner` grant.
 
 ## Leave or delete an organization
 
-Removing yourself is an API operation; ask an owner or admin to remove you.
+To leave an organization, remove yourself with
+`cw org member rm YOUR_EMAIL --org SLUG`; an owner cannot leave this way.
 Only an owner can delete the organization, with `cw org delete SLUG`, which
 asks you to type its name.

@@ -57,6 +57,7 @@ mod tests {
     mod hosts;
     mod oauth_sign_in;
     mod oidc_consumed_refresh_tokens;
+    mod org_invitation_emails;
     mod organization_confidential_environments;
     mod organization_dedicated_cpu;
     mod owner_sources;
@@ -79,9 +80,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced) and 0002 to 0020.
+    // (which equals the 41-migration history it replaced) and 0002 to 0021.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "10a0825d281093bcc6f013a106a98d76f40344bafa033d0fd17929ab309847d6";
+        "3e8d2214a78e70bfd7d252f47189db10bf6b66ae588545fcaee4fba918d491ff";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -139,6 +140,9 @@ mod tests {
 
     // SHA-384 of 0020_oidc_consumed_refresh_tokens.sql.
     const APPLIED_OIDC_CONSUMED_REFRESH_TOKENS_CHECKSUM: &str = "40ba4f98317550bcd65b8f1cc1bfc710457652f1eaab2e388de08d49d26091f4e138848b2a75e5907e98dff70975bafa";
+
+    // SHA-384 of 0021_org_invitation_emails.sql (#3847).
+    const APPLIED_ORG_INVITATION_EMAILS_CHECKSUM: &str = "049767700a5a4f914d6031c532423842a720d2b1b90cf20a95250db3810d954eb0fe25dcda61878c626af7f493cd3485";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1240,6 +1244,7 @@ mod tests {
             (18, APPLIED_CONFIDENTIAL_ACTIVATION_SLOTS_CHECKSUM),
             (19, APPLIED_RESEND_VERIFICATION_PURPOSE_CHECKSUM),
             (20, APPLIED_OIDC_CONSUMED_REFRESH_TOKENS_CHECKSUM),
+            (21, APPLIED_ORG_INVITATION_EMAILS_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1270,9 +1275,9 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 20
+                first.len() == 21
                     && first.iter().map(|migration| migration.0).eq([
-                        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+                        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21
                     ])
                     && first.iter().all(|migration| migration.2)
             );

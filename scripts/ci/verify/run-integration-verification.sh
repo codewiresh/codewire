@@ -1606,7 +1606,7 @@ service_build_idp() {
   if selected service_idp; then
     cargo_ci test --locked --profile ci -p codewire-idp --test db_flow \
       --test session_inventory --test two_factor_replacement --test rewrap_cli \
-      --test oauth_sign_in --no-run
+      --test oauth_sign_in --test invitation_email --no-run
   fi
 }
 service_build_coordinator() {
@@ -1727,12 +1727,26 @@ run_idp_oauth_sign_in() {
   assert_passed_count "idp OAuth sign-in" "$logfile" 25
 }
 
+# The organization invitation email sender (#3847), with a recording mailer.
+run_idp_invitation_email() {
+  local logfile="$RUN_DIR/idp-invitation-email.log"
+  DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo_ci test --profile ci -p codewire-idp --test invitation_email -- --nocapture \
+    | tee "$logfile"
+  if grep -q 'DATABASE_URL unset' "$logfile"; then
+    echo "::error::idp invitation email DB tests skipped"
+    return 1
+  fi
+  assert_passed_count "idp invitation email" "$logfile" 7
+}
+
 run_idp() {
   run_idp_flow
   run_idp_session_inventory
   run_idp_two_factor
   run_idp_rewrap_cli
   run_idp_oauth_sign_in
+  run_idp_invitation_email
 }
 
 run_coordinator() {
@@ -2359,13 +2373,14 @@ run_nats() {
 # (idp, coordinator, billing and Temporal), so no lane shares a schema, a
 # row or a listener with another. The idp suites split three ways: the JWKS
 # check and db_flow (38 s), two_factor_replacement (37 s), and session
-# inventory with the rewrap CLI (8 s) and OAuth sign-in (under 1 s locally).
+# inventory with the rewrap CLI (8 s), OAuth sign-in (under 1 s locally) and
+# the invitation email sender (2 s locally).
 # The first lane runs against the job's own database, and every other lane
 # against a PostgreSQL of its own.
 readonly SERVICE_CONTROL_LANES=(
   idp-two-factor # idp two-factor replacement
   idp-flow       # idp JWKS readiness and db_flow
-  idp-sessions   # idp session inventory, the signing-key rewrap CLI and OAuth sign-in
+  idp-sessions   # idp session inventory, the signing-key rewrap CLI, OAuth sign-in, invitation email
   connect-auth   # the Connect auth matrix
   billing        # the billing wire contract, then its Temporal workflow
   coordinator    # the coordinator protocol auth matrix and wire contract
@@ -2379,6 +2394,7 @@ run_service_lane() {
       run_idp_session_inventory
       run_idp_rewrap_cli
       run_idp_oauth_sign_in
+      run_idp_invitation_email
       ;;
     connect-auth) run_connect_auth_matrix ;;
     billing)
