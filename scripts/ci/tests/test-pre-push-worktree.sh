@@ -251,19 +251,26 @@ output="$(cd "$repo" && CPU_STUB_EXIT=1 on_workstation scripts/dev/preflight.sh 
 assert_contains slice_failure "$output" 'preflight: codewire-cpu run failed; running outside cwvmtest.slice'
 
 # Heavy push checks queue behind another heavy preflight on the workstation
-# (#4215): a push with a Rust change says whom it waits for and gives up at
-# its bound; a light push and a CI run never wait; once the holder ends, the
-# push takes the lock and names itself.
+# (#4215): a push with a Rust change says whom it waits for, repeats it with
+# the time waited, and at its bound runs without the lock instead of failing;
+# a light push and a CI run never wait; once the holder ends, the push takes
+# the lock and names itself.
 if command -v flock >/dev/null 2>&1; then
   ( exec 9>>"$PREFLIGHT_LOCK_FILE"; flock 9; exec sleep 120 ) &
   lock_holder=$!
   for _ in $(seq 1 600); do flock -n "$PREFLIGHT_LOCK_FILE" true 2>/dev/null || break; sleep 0.1; done
   printf 'push check rust-clippy in /elsewhere (pid %s, since 00:00:00Z)\n' "$lock_holder" > "$PREFLIGHT_LOCK_FILE.holder"
-  if output="$(PREFLIGHT_LOCK_WAIT_SECONDS=1 on_workstation git -C "$repo" push -q origin HEAD:refs/heads/locked 2>&1)"; then
-    fail 'a heavy push check ran while another held the lock'
-  fi
+  output="$(PREFLIGHT_LOCK_WAIT_SECONDS=2 PREFLIGHT_LOCK_REPORT_SECONDS=1 \
+    on_workstation git -C "$repo" push -q origin HEAD:refs/heads/locked 2>&1)" ||
+    fail "a heavy push failed when its wait for the lock ran out: $output"
   assert_contains lock_wait "$output" "is waiting for push check rust-clippy in /elsewhere (pid $lock_holder"
-  assert_contains lock_wait "$output" 'gave up after 1s waiting for'
+  assert_contains lock_wait "$output" "still waiting after 1s for push check rust-clippy in /elsewhere (pid $lock_holder"
+  assert_contains lock_wait "$output" "waited 2s for push check rust-clippy in /elsewhere (pid $lock_holder"
+  assert_contains lock_wait "$output" 'running without the lock'
+  # One wait per push: later heavy steps run without waiting again.
+  [[ "$(grep -c 'is waiting for' <<<"$output")" -eq 1 ]] ||
+    fail "a push waited for the lock again after its wait ran out: $output"
+  assert_contains lock_wait_holder "$(cat "$PREFLIGHT_LOCK_FILE.holder")" "(pid $lock_holder,"
   output="$(cd "$repo" && CI=true PREFLIGHT_LOCK_WAIT_SECONDS=1 git push -q origin HEAD:refs/heads/locked-ci 2>&1)" ||
     fail "a CI push waited for the workstation lock: $output"
   git -C "$repo" checkout -q -b light-only origin/main
