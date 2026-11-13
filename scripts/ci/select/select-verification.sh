@@ -1970,6 +1970,8 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/dev/provider-anthropic-output.py|\
       scripts/runtime/dev/provider-openai-smoke.sh|\
       scripts/runtime/dev/provider-openai-workload.py|\
+      scripts/runtime/dev/provider-github-smoke.sh|\
+      scripts/runtime/dev/provider-github-workload.py|\
       scripts/runtime/dev/private-checkout-smoke.sh|\
       scripts/runtime/dev/smoke-dev-initial-private-checkout.sh|\
       scripts/runtime/dev/hosted-checkout-fixture.py|\
@@ -1992,6 +1994,8 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/tests/test-provider-anthropic-workload.py|\
       scripts/runtime/tests/test-provider-openai-smoke.sh|\
       scripts/runtime/tests/test-provider-openai-workload.py|\
+      scripts/runtime/tests/test-provider-github-smoke.sh|\
+      scripts/runtime/tests/test-provider-github-workload.py|\
       scripts/runtime/tests/test-private-checkout-smoke.sh|\
       scripts/runtime/tests/test-dev-initial-private-checkout.sh|\
       scripts/runtime/tests/test-hosted-checkout-fixture.py|\

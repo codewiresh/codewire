@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -67,7 +68,13 @@ def capture(args: list[str], environment: dict[str, str], scratch: Path,
                 os.killpg(child.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            child.wait()
+            # Reap gh directly, never with child.wait(): the signal handler
+            # raises wherever it lands, and landing just after Popen's wait
+            # took its internal lock leaves that lock held, so a second wait
+            # would block on it forever (#4362).
+            if child.returncode is None:
+                with contextlib.suppress(ChildProcessError):
+                    os.waitpid(child.pid, 0)
             raise
     for path in (output, error):
         private_file(path, 0o600)

@@ -9,6 +9,7 @@ import socket
 import subprocess
 import signal
 import tempfile
+import textwrap
 import time
 import unittest
 
@@ -186,7 +187,9 @@ esac
             try:
                 stdout, stderr = child.communicate(timeout=60)
             except subprocess.TimeoutExpired:
-                # Run 45210 saw this once, with no cause yet: name the state.
+                # Run 45210 hung here once: SIGTERM landed just after Popen's
+                # wait took its lock (#4362, proven by the test below). Name
+                # the state if any other cause ever does the same.
                 self.fail("the wrapper outlived SIGTERM by 60 s:\n" + process_report(child.pid))
             self.assertEqual((child.returncode, stdout, stderr), (1, b"", b"CW_LIVE_GITHUB_ERROR:request\n"))
             self.assertEqual(list(self.scratch.iterdir()), [])
@@ -196,6 +199,61 @@ esac
             if child.poll() is None:
                 child.kill()
                 child.wait()
+
+    def test_signal_just_after_wait_takes_its_lock_still_drains(self):
+        # The handler raises wherever the signal lands. Landing just after
+        # Popen's wait took its internal lock, before the code that releases
+        # it, leaves the lock held; cleanup that waits through Popen again then
+        # blocks on it forever (run 45210, #4362). The real wrapper runs with
+        # its real 110 s timeout; the request's wait lock makes SIGTERM pending
+        # at exactly that instant, so the race is the same every time.
+        script = textwrap.dedent(f"""
+            import importlib.util, signal, subprocess, sys, threading
+            spec = importlib.util.spec_from_file_location("w", {str(self.wrapper)!r})
+            w = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(w)
+
+            class SignalOnAcquire:
+                def __init__(self, lock):
+                    self.lock, self.fired = lock, False
+                def acquire(self, blocking=True, timeout=-1):
+                    taken = self.lock.acquire(blocking, timeout)
+                    if taken and not blocking and not self.fired:
+                        self.fired = True
+                        signal.pthread_kill(threading.main_thread().ident, signal.SIGTERM)
+                    return taken
+                def release(self):
+                    self.lock.release()
+                def __enter__(self):
+                    self.lock.acquire()
+                    return self
+                def __exit__(self, *_):
+                    self.lock.release()
+
+            class Popen(subprocess.Popen):
+                def __init__(self, args, *rest, **options):
+                    super().__init__(args, *rest, **options)
+                    if "api" in args:
+                        # The signal lands before gh can write its own pid.
+                        with open({str(self.root / "gh-pid")!r}, "w") as record:
+                            record.write(str(self.pid))
+                        self._waitpid_lock = SignalOnAcquire(self._waitpid_lock)
+
+            w.subprocess.Popen = Popen
+            raise SystemExit(w.main(["workload"]))
+        """)
+        (self.root / "kind").write_text("timeout")
+        source = self.wrapper.read_text()
+        self.assertEqual(source.count('scratch, "account", 1)'), 1)
+        self.wrapper.write_text(source.replace('scratch, "account", 1)', 'scratch, "account", 110)'))
+        # A hang guard, not an expected duration: the fixed wrapper ends at once.
+        completed = subprocess.run(["/usr/bin/python3", "-c", script],
+                                   capture_output=True, timeout=60)
+        self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
+                         (1, b"", b"CW_LIVE_GITHUB_ERROR:request\n"))
+        self.assertEqual(list(self.scratch.iterdir()), [])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int((self.root / "gh-pid").read_text()), 0)
 
     def test_capture_cleanup_failure_cannot_emit_success(self):
         # Exercise the real main fence with an exception from its cleanup owner,
