@@ -486,7 +486,11 @@ mkdir -p "$legs_src/scripts/ci/verify" "$work/legs-bin" "$work/legs-out"
 cat > "$legs_src/scripts/ci/verify/run-product-verification.sh" <<'FEATURES'
 #!/bin/sh
 # The feature-graph leg's stage: records its time and the jobserver it sees.
-echo "features-start $(date +%s%N)" >> "$LEGS_STATE/times"; sleep 1
+# It ends only once the archive leg beside it has started (60 s hang guard),
+# so a slow spawn on a loaded host cannot make two legs that run at once look
+# one after another.
+echo "features-start $(date +%s%N)" >> "$LEGS_STATE/times"
+n=0; until grep -q '^archive-start ' "$LEGS_STATE/times" || [ "$n" -ge 6000 ]; do n=$((n + 1)); sleep 0.01; done
 echo "features-end $(date +%s%N)" >> "$LEGS_STATE/times"
 echo "features-makeflags ${CARGO_MAKEFLAGS:-none}" >> "$LEGS_STATE/times"
 FEATURES
@@ -503,7 +507,13 @@ if [ -e "$CARGO_TARGET_DIR/debug/deps/libbroken.rlib" ]; then
     missing) echo "error[E0463]: can't find crate for \`sqlx\`"; exit 101 ;;
   esac
 fi
-echo "archive-start $(date +%s%N)" >> "$LEGS_STATE/times"; sleep 1
+echo "archive-start $(date +%s%N)" >> "$LEGS_STATE/times"
+# With LEGS_BESIDE, it ends only once that leg has started (60 s hang guard).
+if [ -n "${LEGS_BESIDE:-}" ]; then
+  n=0; until grep -q "^$LEGS_BESIDE-start " "$LEGS_STATE/times" || [ "$n" -ge 6000 ]; do n=$((n + 1)); sleep 0.01; done
+else
+  sleep 1
+fi
 echo "archive-end $(date +%s%N)" >> "$LEGS_STATE/times"
 echo "archive-makeflags ${CARGO_MAKEFLAGS:-none}" >> "$LEGS_STATE/times"
 while [ "$#" -gt 0 ]; do [ "$1" = --archive-file ] && { shift; printf 'archive' > "$1"; }; shift; done
@@ -518,7 +528,7 @@ legs_build() {
     VERIFICATION_SELECTION="${LEGS_SELECTION:-}" BUILD_ONCE_JOBSERVER_TOKENS=6 \
     "$SCRIPT" build "$work/legs-out" > "$work/legs.log" 2>&1
 }
-LEGS_SELECTION='|rust|' legs_build ok || fail "a cold build failed: $(cat "$work/legs.log")"
+LEGS_SELECTION='|rust|' LEGS_BESIDE=features legs_build ok || fail "a cold build failed: $(cat "$work/legs.log")"
 # Every leg runs at once, the archive and the feature graphs here, and both
 # take their compilers from the one jobserver.
 at() { sed -n "s/^$1 //p" "$work/legs-state/times"; }
@@ -576,7 +586,11 @@ if legs_build compile; then fail 'a compile error passed'; fi
 mkdir -p "$legs_src/scripts/ci/verify"
 cat > "$legs_src/scripts/ci/verify/run-rust-checks.sh" <<'CHECKS'
 #!/bin/sh
-echo "checks-start $(date +%s%N)" >> "$LEGS_STATE/times"; sleep "${CHECKS_SLEEP:-0}"
+echo "checks-start $(date +%s%N)" >> "$LEGS_STATE/times"
+# With CHECKS_BESIDE, they end only once that leg has started (60 s hang guard).
+if [ -n "${CHECKS_BESIDE:-}" ]; then
+  n=0; until grep -q "^$CHECKS_BESIDE-start " "$LEGS_STATE/times" || [ "$n" -ge 6000 ]; do n=$((n + 1)); sleep 0.01; done
+fi
 echo "checks-end $(date +%s%N)" >> "$LEGS_STATE/times"
 echo "checks $PWD $CARGO_TARGET_DIR $RUST_CHECKS_FEATURES_TARGET_DIR $RUST_CHECKS_DARWIN_TARGET_DIR $RUST_CHECKS_CW_DARWIN_TARGET_DIR $CODEWIRE_DESKTOP_CHECK_TARGET_DIR" >> "$LEGS_STATE/checks"
 echo "jobs ${CARGO_BUILD_JOBS:-} ${CARGO_MAKEFLAGS:-none}" >> "$LEGS_STATE/jobserver"
@@ -648,7 +662,7 @@ legs_checks_build() {
   [ "$1" != lint ] || : > "$checks_root/clippy/broken"
   PATH="$work/legs-bin:$PATH" BUILD_ONCE_ROOT="$work/legs-root" BUILD_ONCE_SRC="$legs_src" \
     LEGS_STATE="$work/legs-state" LEGS_CARGO_MODE=ok RUNNER_TEMP="$work/legs-state" VERIFICATION_SELECTION='' \
-    BUILD_ONCE_JOBSERVER_TOKENS=6 BUILD_ONCE_CHECKS=true CHECKS_MODE="$1" CHECKS_SLEEP=1 GITHUB_RUN_ID=78 \
+    BUILD_ONCE_JOBSERVER_TOKENS=6 BUILD_ONCE_CHECKS=true CHECKS_MODE="$1" CHECKS_BESIDE=archive LEGS_BESIDE=checks GITHUB_RUN_ID=78 \
     "$SCRIPT" build "$work/legs-out" > "$work/legs-checks.log" 2>&1
 }
 legs_checks_build ok || fail "the build with the Rust checks failed: $(cat "$work/legs-checks.log")"
