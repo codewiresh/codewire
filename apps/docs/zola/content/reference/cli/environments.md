@@ -419,10 +419,19 @@ flag-based path. See [`codewire.yaml`](@/environments/codewire-yaml.md).
 
 ```sh
 cw shell [ENV]
+cw shell --durable [ENV]
 cw shell --stdio ENV     # for OpenSSH ProxyCommand (cw-local-NAME, cw-cloud-NAME)
 ```
 
-Opens a login shell as a new session in the selected or named environment.
+Opens a login shell as a new session in the selected or named environment, on
+every placement: cloud, local VM and trusted host. The shell ends when you
+leave it, as `ssh` does, and `cw shell` exits with the shell's status. Every
+key goes to the shell, Ctrl-B included. If the connection drops, the shell
+waits 10 minutes for `cw attach ENV --session SESSION` before it ends.
+
+With `--durable`, the shell is a named session that keeps running after you
+detach with Ctrl-B, then d. An environment whose daemon predates the 10-minute
+shell gets the durable one, and `cw shell` says so.
 
 The shell gets your terminal's `TERM`. If the environment has no terminfo
 entry for it, `cw shell` sends your machine's own entry (`infocmp -x`) and the

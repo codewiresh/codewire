@@ -750,6 +750,7 @@ mod tests {
     #[test]
     fn the_plugin_defines_its_actions_and_reads_the_status_record() {
         for action in [
+            "codewire_exec",
             "codewire_run",
             "codewire_shell",
             "codewire_attach",

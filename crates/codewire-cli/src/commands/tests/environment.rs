@@ -1890,7 +1890,7 @@ fn env_create_text_is_the_lifecycle_summary() {
             "  Secrets:     none\n",
             "  Network:     not attached\n",
             "\n",
-            "→ cw --cloud run claude --in builder\n",
+            "→ cw --cloud shell builder\n",
         )
     );
     // Without --wait, readiness is not observed: the result is pending.

@@ -178,7 +178,7 @@ fn capitalized(text: &str) -> String {
 ///   2 vCPU · 4 GiB RAM · 40 GiB disk
 ///   Credentials: platform:work
 ///
-/// → cw --local run claude --in app
+/// → cw --local shell app
 /// ```
 fn format_selected(entry: &InventoryEntry, style: Style) -> String {
     let dim = |text: &str| style.paint(Role::Dim, text);
@@ -208,7 +208,7 @@ fn format_selected(entry: &InventoryEntry, style: Style) -> String {
         ));
     }
     out.push_str(&format!(
-        "\n{} {} run claude --in {name}\n",
+        "\n{} {} shell {name}\n",
         style.status(Status::Next),
         entry.location.command_prefix()
     ));
@@ -539,7 +539,7 @@ mod tests {
                 "  2 vCPU · 4 GiB RAM · 40 GiB disk\n",
                 "  Credentials: platform:work\n",
                 "\n",
-                "→ cw --local run claude --in app\n",
+                "→ cw --local shell app\n",
             )
         );
         let mut cloud = entry(Location::Cloud, "running");
@@ -552,7 +552,7 @@ mod tests {
                 "  cloud VM - running\n",
                 "  Credentials: none\n",
                 "\n",
-                "-> cw --cloud run claude --in app\n",
+                "-> cw --cloud shell app\n",
             )
         );
     }

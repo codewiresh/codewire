@@ -400,7 +400,7 @@ enum Command {
     Vscode(VscodeArgs),
     #[command(
         about = "Open a shell session in the selected or named environment",
-        long_about = "Open a login shell in a new session:\n  cw shell ENV\n  cw shell --in ENV\n  cw shell                         (in the selected environment)\n\nWith --durable, detach with Ctrl-B, then d; the shell keeps running, and `cw attach ENV --session SESSION` reconnects."
+        long_about = "Open a login shell in a new session:\n  cw shell ENV\n  cw shell --in ENV\n  cw shell                         (in the selected environment)\n\nThe shell ends when you leave it, as `ssh` does, and cw exits with its status; every key goes to it, Ctrl-B included. A shell whose connection drops waits 10 minutes for `cw attach ENV --session SESSION` before it ends.\n\nWith --durable, the shell is a named session that keeps running: detach with Ctrl-B, then d, and `cw attach ENV --session SESSION` reconnects."
     )]
     Shell(EnvironmentShellArgs),
     #[command(name = "ssh", hide = true, about = "OpenSSH integration helpers")]

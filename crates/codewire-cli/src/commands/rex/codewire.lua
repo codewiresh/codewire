@@ -62,6 +62,31 @@ fi
 exec "$@"
 ]==]
 
+-- `cw exec`: asks for an environment when `choose` is 1 and for a command
+-- when none was given, runs it once with a terminal, and keeps the pane
+-- open with how it ended. Arguments: cw, environment (or empty), command
+-- (or empty), choose, where.
+local ONCE = [==[
+cw=$1 env=$2 line=$3 choose=$4 where=$5
+if [ "$choose" = 1 ]; then
+  if ! "$cw" use; then printf '\nPress enter to close.'; read -r _; exit 1; fi
+  where=
+  echo
+fi
+if [ -z "$line" ]; then
+  printf 'Run once in %s\n' "${where:-the selected environment}"
+  printf 'Command: '
+  IFS= read -r line || exit 0
+fi
+case $line in *[![:space:]]*) ;; *) exit 0 ;; esac
+set -- "$cw" exec
+if [ -n "$env" ]; then set -- "$@" --in "$env"; fi
+"$@" -t -- sh -c "$line"
+status=$?
+printf '\n[exited with status %s] Press enter to close.' "$status"
+read -r _
+]==]
+
 -- Chooses an environment with `cw use`, then becomes the rest of the
 -- arguments: a cw command for the environment just chosen.
 local CHOOSE_THEN = [==[
@@ -200,11 +225,30 @@ function M.setup(opts)
   -- With no environment selected these choose one first.
 
   rex.action{
-    name = "codewire_run",
-    title = selected and ("Codewire: Run Command in " .. name .. "…") or "Codewire: Run Command…",
+    name = "codewire_exec",
+    title = selected and ("Codewire: Run Once in " .. name .. "…") or "Codewire: Run Once…",
     description = (selected and ("In " .. where .. ". ") or "Choose an environment, then ")
-      .. "run a command in a new session in a pane beside you."
-      .. " claude or codex opens that agent's own terminal UI.",
+      .. "run a command once in a pane beside you, as `cw exec`: no session is left,"
+      .. " and the pane shows how it ended.",
+    category = "Codewire",
+    keywords = "codewire cw exec once run command test build script",
+    args = { command = "string?", env = "string?" },
+    run = function(ctx, args)
+      local_only(ctx)
+      local env = env_arg(args)
+      local command = args.command or ""
+      local choose = (env == "" and selected == nil) and "1" or "0"
+      local label = command:match("^%s*(%S+)") or "once"
+      open_pane(ctx, label, sh(ONCE, cw, env, command, choose, env ~= "" and env or where))
+    end,
+  }
+
+  rex.action{
+    name = "codewire_run",
+    title = selected and ("Codewire: Start in " .. name .. "…") or "Codewire: Start…",
+    description = (selected and ("In " .. where .. ". ") or "Choose an environment, then ")
+      .. "start something that keeps running, such as a server or an agent, as a"
+      .. " session in a pane beside you. claude or codex opens that agent's own terminal UI.",
     category = "Codewire",
     keywords = "codewire cw run command session agent claude codex server test",
     args = { command = "string?", env = "string?" },

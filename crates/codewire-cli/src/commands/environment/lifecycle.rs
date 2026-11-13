@@ -5,7 +5,7 @@
 use super::*;
 use crate::commands::lifecycle_output::{
     InterruptNotice, ResultBlock, bounded, credential_profile_name, credential_ref,
-    environment_command, exact_reference_id, location_label, next_run_command, secret_refs,
+    environment_command, exact_reference_id, location_label, next_shell_command, secret_refs,
     unless_interrupted,
 };
 use crate::commands::progress::terminal_text;
@@ -56,7 +56,7 @@ pub(crate) fn cloud_summary(
     );
     let next = match outcome {
         Outcome::Creating => environment_command(VmLocation::Cloud, "info", &name),
-        _ => next_run_command(VmLocation::Cloud, &name),
+        _ => next_shell_command(VmLocation::Cloud, &name),
     };
     LifecycleSummary {
         outcome,
@@ -442,7 +442,7 @@ mod tests {
         };
         assert_eq!(
             cloud_summary(&environment(), Outcome::Started, &names).render(PLAIN),
-            "✓ Environment app started · cloud VM\n  2 vCPU · 4 GiB RAM · 40 GiB disk\n\n  Credentials: platform:work\n  Secrets:     platform:app-dev, organization secrets (platform)\n  Network:     not attached\n\n→ cw --cloud run claude --in app\n"
+            "✓ Environment app started · cloud VM\n  2 vCPU · 4 GiB RAM · 40 GiB disk\n\n  Credentials: platform:work\n  Secrets:     platform:app-dev, organization secrets (platform)\n  Network:     not attached\n\n→ cw --cloud shell app\n"
         );
     }
 

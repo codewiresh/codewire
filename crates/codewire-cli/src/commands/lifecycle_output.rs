@@ -39,9 +39,10 @@ pub(crate) fn placement_flag(location: VmLocation) -> &'static str {
     }
 }
 
-/// The next step after an environment is ready: open Claude in it.
-pub(crate) fn next_run_command(location: VmLocation, name: &str) -> String {
-    format!("cw {} run claude --in {name}", placement_flag(location))
+/// The next step after an environment is ready: a shell in it, a real
+/// command to type as it stands.
+pub(crate) fn next_shell_command(location: VmLocation, name: &str) -> String {
+    format!("cw {} shell {name}", placement_flag(location))
 }
 
 /// A command that names the environment, such as `cw --local start app`.
@@ -385,14 +386,14 @@ mod tests {
     const PLAIN: Style = Style::new(false, Charset::Unicode);
 
     #[test]
-    fn next_command_names_placement_agent_and_environment() {
+    fn next_command_names_placement_and_environment() {
         assert_eq!(
-            next_run_command(VmLocation::Local, "app"),
-            "cw --local run claude --in app"
+            next_shell_command(VmLocation::Local, "app"),
+            "cw --local shell app"
         );
         assert_eq!(
-            next_run_command(VmLocation::Cloud, "review"),
-            "cw --cloud run claude --in review"
+            next_shell_command(VmLocation::Cloud, "review"),
+            "cw --cloud shell review"
         );
         assert_eq!(
             environment_command(VmLocation::Local, "start", "app"),
@@ -401,22 +402,17 @@ mod tests {
     }
 
     #[test]
-    fn the_next_command_parses_as_a_claude_launch_in_the_environment() {
+    fn the_next_command_parses_as_a_shell_in_the_environment() {
         use clap::Parser as _;
         for location in [VmLocation::Local, VmLocation::Cloud] {
-            let next = next_run_command(location, "app");
+            let next = next_shell_command(location, "app");
             let cli = crate::Cli::try_parse_from(next.split_whitespace())
                 .unwrap_or_else(|error| panic!("`{next}` does not parse: {error}"));
             assert_eq!(cli.local, location == VmLocation::Local, "{next}");
             assert_eq!(cli.cloud, location == VmLocation::Cloud, "{next}");
-            let crate::Command::Run(args) = cli.command else {
-                panic!("`{next}` is not `cw run`");
+            let crate::Command::Shell(args) = cli.command else {
+                panic!("`{next}` is not `cw shell`");
             };
-            assert_eq!(
-                args.native_agent,
-                Some(crate::commands::NativeAgent::Claude),
-                "{next}"
-            );
             assert_eq!(args.environment.as_deref(), Some("app"), "{next}");
         }
     }

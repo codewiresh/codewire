@@ -7,7 +7,7 @@ use codewire_project::{ProjectSpec, StoragePlacement};
 use super::*;
 use crate::commands::lifecycle_output::{
     InterruptNotice, ResultBlock, bounded, credential_ref, environment_command, exact_reference_id,
-    location_label, next_run_command, print_context, print_summary, secret_refs,
+    location_label, next_shell_command, print_context, print_summary, secret_refs,
 };
 use crate::output::{
     Allocation, Capabilities, LifecycleSummary, MeshPlacement, NetworkRef, Outcome, SourceRef,
@@ -91,7 +91,7 @@ pub(super) fn local_summary(
         credentials: environment_credentials(environment, spec.as_ref()),
         secrets,
         network: network_ref(environment.mesh.as_ref()),
-        next: Some(next_run_command(VmLocation::Local, &environment.name)),
+        next: Some(next_shell_command(VmLocation::Local, &environment.name)),
     }
 }
 
@@ -613,7 +613,7 @@ impl CreateContext {
             credentials: self.credentials.clone(),
             secrets: self.secrets.clone(),
             network: self.network.clone(),
-            next: Some(next_run_command(VmLocation::Local, name)),
+            next: Some(next_shell_command(VmLocation::Local, name)),
         }
     }
 }
@@ -701,7 +701,7 @@ mod tests {
         );
         assert_eq!(
             summary.render(PLAIN),
-            "✓ Environment app started · local VM\n  2 vCPU · 4 GiB RAM · 40 GiB disk\n\n  Credentials: local:work\n  Secrets:     local:id:x\n  Network:     cloud:work\n\n→ cw --local run claude --in app\n"
+            "✓ Environment app started · local VM\n  2 vCPU · 4 GiB RAM · 40 GiB disk\n\n  Credentials: local:work\n  Secrets:     local:id:x\n  Network:     cloud:work\n\n→ cw --local shell app\n"
         );
     }
 

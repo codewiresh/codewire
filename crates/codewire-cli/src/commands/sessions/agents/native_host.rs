@@ -545,6 +545,7 @@ pub(super) async fn run(
             false,
             config.name,
             parent.map(|parent| parent.session_id).unwrap_or_default(),
+            0,
         )
         .await?;
     if let Some(id) = &initial_message_id {

@@ -265,6 +265,7 @@ impl EnvironmentSessionTarget {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn launch(
         &self,
         command: Vec<String>,
@@ -273,6 +274,7 @@ impl EnvironmentSessionTarget {
         pty: bool,
         name: String,
         parent_session_id: String,
+        end_after_detached_seconds: u32,
     ) -> anyhow::Result<EnvironmentSessionView> {
         let (columns, rows) = session_terminal_size(pty);
         let term = env::var("TERM").unwrap_or_default();
@@ -292,7 +294,7 @@ impl EnvironmentSessionTarget {
                         name,
                         parent_session_id: (!parent_session_id.is_empty())
                             .then_some(parent_session_id),
-                        end_after_detached_seconds: 0,
+                        end_after_detached_seconds,
                     })
                     .await?;
                 Ok(host_environment_session_view(session))
@@ -312,6 +314,7 @@ impl EnvironmentSessionTarget {
                         name,
                         parent_session_id: (!parent_session_id.is_empty())
                             .then_some(parent_session_id),
+                        end_after_detached_seconds,
                         ..Default::default()
                     })
                     .await?;
@@ -337,6 +340,7 @@ impl EnvironmentSessionTarget {
                         name,
                         parent_session_id: (!parent_session_id.is_empty())
                             .then_some(parent_session_id),
+                        end_after_detached_seconds,
                         ..Default::default()
                     })
                     .await
@@ -1274,11 +1278,13 @@ pub(crate) async fn handle_wait_command(globals: &Globals, args: WaitArgs) -> an
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 async fn attach_host_environment_session(
     environment: &HostEnvironment,
     session: &EnvironmentSessionView,
     offset: u64,
     interactive: bool,
+    plain: bool,
     raw_output: bool,
     ansi: &mut LogsAnsiFilter,
     screen: &mut SessionScreen,
@@ -1293,7 +1299,7 @@ async fn attach_host_environment_session(
         anyhow::bail!("use cw msg or cw steer for managed agents; cw logs reads their output");
     }
     let _raw = interactive.then(RawModeGuard::enable).transpose()?;
-    let mut decoder = AttachNavigationDecoder::default();
+    let mut decoder = AttachNavigationDecoder::new(plain);
     let mut stdin = crate::terminal_attach::terminal_input().await;
     let mut buf = [0u8; 4096];
     let mut cursor = offset;
@@ -1784,6 +1790,7 @@ async fn launch_run(
             pty,
             name,
             parent_session_id,
+            0,
         )
         .await?;
     if matches!(args.output, OutputFormat::Json) {
@@ -2037,24 +2044,87 @@ pub(crate) async fn handle_environment_shell_command(
         super::core::init_tailnet_debug_log();
     }
     if !args.durable {
-        // A hosted environment gets a normal shell over its tailnet; local
-        // VMs and trusted hosts keep their own direct paths below.
+        // A plain shell everywhere: a hosted environment's over its tailnet,
+        // a local VM's or trusted host's on its own path, each a session
+        // that ends with the shell or 10 minutes after the last client left.
         let target = resolve_environment_session_target(globals, environment.as_deref()).await?;
-        if let EnvironmentSessionTarget::Platform {
+        let status = if let EnvironmentSessionTarget::Platform {
             org_id,
             environment_id,
             client,
             ..
         } = &target
         {
-            let status = super::tailnet_shell::run(client, org_id, environment_id).await?;
-            if status != 0 {
-                // As `ssh` does: the shell's own status, no message.
-                std::process::exit(status);
+            super::tailnet_shell::run(client, org_id, environment_id).await?
+        } else {
+            match plain_shell(globals, target).await? {
+                Some(status) => status,
+                None => return launch_durable_shell(globals, environment).await,
             }
-            return Ok(());
+        };
+        if status != 0 {
+            // As `ssh` does: the shell's own status, no message.
+            std::process::exit(status);
         }
+        return Ok(());
     }
+    launch_durable_shell(globals, environment).await
+}
+
+/// A plain `cw shell` in a local VM or on a trusted host, as on a hosted
+/// environment (`tailnet_shell`): an unnamed login shell that the daemon
+/// ends once no client has been attached for 10 minutes, attached with every
+/// key going to it, Ctrl-B included. Returns the shell's exit status, or
+/// `None` when the environment's daemon cannot end a detached session, so
+/// the caller opens the `--durable` shell instead.
+async fn plain_shell(
+    globals: &Globals,
+    target: EnvironmentSessionTarget,
+) -> anyhow::Result<Option<i32>> {
+    target.ensure_ready_for_run()?;
+    let grace = codewire_client::hosted_shell::SHELL_GRACE.as_secs() as u32;
+    let launched = target
+        .launch(
+            login_shell_command(),
+            target.default_working_dir(),
+            login_shell_env(),
+            true,
+            String::new(),
+            String::new(),
+            grace,
+        )
+        .await;
+    let session = match launched {
+        Ok(session) => session,
+        Err(error) if lacks_shell_grace(&error) => {
+            eprintln!(
+                "[cw] this environment's daemon keeps a shell until it exits; detach with Ctrl-B, then d"
+            );
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let place = SessionPlace::of(&target);
+    let mut rex = RexStatus::new(&place.environment, &session_reference(&session));
+    let ended = attach_session_until_detached(globals, target, session, &mut rex, true).await?;
+    Ok(Some(match ended {
+        Some(session) => session.exit_code.unwrap_or(1),
+        None => 0,
+    }))
+}
+
+/// Whether a launch failed only because the daemon cannot end a session
+/// after its clients leave, as an older environment image's cannot.
+fn lacks_shell_grace(error: &anyhow::Error) -> bool {
+    format!("{error:#}")
+        .contains(codewire_daemon_proto::DAEMON_CAPABILITY_SESSION_END_AFTER_DETACHED)
+}
+
+/// `cw shell --durable`: a named session that outlives the client.
+async fn launch_durable_shell(
+    globals: &Globals,
+    environment: Option<String>,
+) -> anyhow::Result<()> {
     launch_run(
         globals,
         EnvironmentRunArgs {
@@ -2201,10 +2271,22 @@ impl AttachmentReconnectBudget {
 #[derive(Default)]
 pub(crate) struct AttachNavigationDecoder {
     pending_prefix: bool,
+    /// Every key goes to the session, Ctrl-B included: a plain `cw shell`.
+    plain: bool,
 }
 
 impl AttachNavigationDecoder {
+    pub(crate) fn new(plain: bool) -> Self {
+        Self {
+            plain,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn feed(&mut self, input: &[u8]) -> (Option<AttachExit>, Vec<u8>) {
+        if self.plain {
+            return (None, input.to_vec());
+        }
         let mut forward = Vec::with_capacity(input.len());
         for byte in input {
             if self.pending_prefix {
@@ -2313,7 +2395,7 @@ async fn attach_environment_session(
         &SessionPlace::of(&target).environment,
         &session_reference(&session),
     );
-    let ended = attach_session_until_detached(globals, target, session, &mut rex).await?;
+    let ended = attach_session_until_detached(globals, target, session, &mut rex, false).await?;
     if let Some(session) = &ended {
         let (state, message) = match (session.state.as_str(), session.exit_code) {
             ("Exited", Some(0)) => (RexState::Done, "exited".to_owned()),
@@ -2325,11 +2407,14 @@ async fn attach_environment_session(
     Ok(ended)
 }
 
+/// `plain` is a `cw shell`'s attachment: every key goes to the session, so
+/// it can neither detach nor move to another session, and it ends with it.
 async fn attach_session_until_detached(
     globals: &Globals,
     mut target: EnvironmentSessionTarget,
     mut session: EnvironmentSessionView,
     rex: &mut RexStatus,
+    plain: bool,
 ) -> anyhow::Result<Option<EnvironmentSessionView>> {
     let mut output_offset = 0;
     let mut reconnect_budget = AttachmentReconnectBudget::default();
@@ -2357,6 +2442,7 @@ async fn attach_session_until_detached(
                     &session,
                     output_offset,
                     session.pty,
+                    plain,
                     true,
                     &mut LogsAnsiFilter::default(),
                     &mut screen,
@@ -2372,6 +2458,7 @@ async fn attach_session_until_detached(
                     output_offset,
                     &mut input_stream,
                     session.pty,
+                    plain,
                     true,
                     &mut screen,
                     std::future::pending(),
@@ -2424,6 +2511,7 @@ async fn attach_session_until_detached(
                             output_offset,
                             &mut input_stream,
                             session.pty,
+                            plain,
                             true,
                             &mut screen,
                             back,
@@ -2571,11 +2659,13 @@ async fn send_stream_status(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn attach_platform_environment_session(
     mut attachment: codewire_client::EnvironmentSessionAttachment,
     start_offset: u64,
     input_stream: &mut InputStream,
     interactive: bool,
+    plain: bool,
     raw_output: bool,
     screen: &mut SessionScreen,
     tailnet_back: impl std::future::Future<Output = ()>,
@@ -2591,7 +2681,7 @@ async fn attach_platform_environment_session(
         .then(RawModeGuard::enable)
         .transpose()
         .context("enabling raw mode")?;
-    let mut decoder = AttachNavigationDecoder::default();
+    let mut decoder = AttachNavigationDecoder::new(plain);
     let mut output_offset = start_offset;
     let mut stdin_closed = !interactive;
     let mut output_open = true;
@@ -2812,13 +2902,14 @@ async fn select_or_create_environment_session(
                     // Only an environment without sessions gets here.
                     "shell".to_owned(),
                     String::new(),
+                    0,
                 )
                 .await
         }
         SessionSelection::Create => {
             let environment = &target.current_target().name;
             anyhow::bail!(
-                "{environment} has no sessions; start one with `cw shell {environment}`, `cw run claude --in {environment}` or `cw run --in {environment} -- COMMAND`"
+                "{environment} has no sessions; start one with `cw shell {environment}` or `cw run --in {environment} -- COMMAND`"
             )
         }
     }
@@ -3287,6 +3378,7 @@ async fn follow_session_output(
                     session,
                     output_offset,
                     false,
+                    false,
                     raw_output,
                     &mut ansi,
                     &mut SessionScreen::new(false),
@@ -3300,6 +3392,7 @@ async fn follow_session_output(
                     client.attach(&session.session_id, output_offset).await?,
                     output_offset,
                     &mut input_stream,
+                    false,
                     false,
                     raw_output,
                     &mut SessionScreen::new(false),
@@ -3333,6 +3426,7 @@ async fn follow_session_output(
                             attachment,
                             output_offset,
                             &mut input_stream,
+                            false,
                             false,
                             raw_output,
                             &mut SessionScreen::new(false),
@@ -3564,6 +3658,7 @@ mod attach_offset_tests {
             codewire_client::EnvironmentSessionAttachment::from_output(outputs),
             start_offset,
             &mut InputStream::default(),
+            false,
             false,
             false,
             &mut SessionScreen::new(false),

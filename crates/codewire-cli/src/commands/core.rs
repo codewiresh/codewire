@@ -190,7 +190,7 @@ pub(crate) async fn handle_init_command(
     }
     eprintln!("Next:");
     eprintln!("  cw create --local --name <environment>");
-    eprintln!("  cw run claude --in <environment>");
+    eprintln!("  cw shell <environment>");
     eprintln!("  cw create");
     Ok(())
 }

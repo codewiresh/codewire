@@ -1,7 +1,7 @@
 ---
 title: Rex
 description: Run commands, open shells and attach to sessions from Rex's command palette, and see each session's state with its pane.
-updated: 2026-11-11
+updated: 2026-11-12
 weight: 6
 ---
 
@@ -25,8 +25,9 @@ as the selection changes. Each opens beside the pane you are in.
 
 | Action | Shown | Does |
 | --- | --- | --- |
-| Codewire: Run Command in ENV… | Always | Asks for a command and runs it in a new session, as `cw run -- sh -c COMMAND`. `claude` or `codex`, with or without arguments, opens that agent's own terminal UI instead. With nothing selected it opens `cw use` first |
-| Codewire: Open Shell in ENV | Always | `cw shell`; with nothing selected, `cw use` first |
+| Codewire: Run Once in ENV… | Always | Asks for a command and runs it once with `cw exec`, in a pane that stays open to show how it ended. No session is left. With nothing selected it opens `cw use` first |
+| Codewire: Start in ENV… | Always | Asks for something that keeps running, such as a server or an agent, and starts it as a session with `cw run -- sh -c COMMAND`. `claude` or `codex`, with or without arguments, opens that agent's own terminal UI instead. With nothing selected it opens `cw use` first |
+| Codewire: Open Shell in ENV | Always | `cw shell`: a login shell that ends when you leave it, as `ssh` does, or 10 minutes after a lost connection; with nothing selected, `cw use` first |
 | Codewire: Choose Environment… | Always | `cw use` in a floating panel: every environment, or an offer to create one when there are none |
 | Codewire: List Environments | Always | `cw ls` in a floating panel |
 | Codewire: Attach to a Session in ENV… | An environment is selected | `cw attach`: its only session, a choice among them, or a new shell |
@@ -38,6 +39,7 @@ Rex can also run them by name with arguments, for example from a key binding
 in your own `init.lua` or from a script:
 
 ```sh
+rex do codewire_exec 'command=npm test' env=my-app
 rex do codewire_run 'command=npm run dev' env=my-app
 rex do codewire_attach env=my-app session=lead
 ```
