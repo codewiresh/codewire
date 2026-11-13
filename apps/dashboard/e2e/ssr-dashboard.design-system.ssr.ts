@@ -138,6 +138,12 @@ const tabLimit = 400;
 const tabBatch = 20;
 
 async function focusGaps(page: Page, walked?: string[]): Promise<{ gaps: string[]; order: string[] }> {
+  // Let the page's own first-frame work run before walking: an open drawer
+  // moves focus to its first field on the next animation frame, and a frame
+  // asked for now runs after it. Walking earlier, on a loaded host, starts on
+  // a page link outside the drawer; the drawer then takes focus and keeps Tab
+  // inside, so the walk never comes back to where it began (#4389).
+  await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => done())));
   await page.evaluate(() => {
     // Measure every control unfocused: an autofocused field would otherwise
     // record its focus ring as its resting look.
