@@ -8,7 +8,8 @@ use codewire_proto::codewire::{
     },
     v1::{
         AcceptInvitationRequest, CreateOrganizationRequest, GetInvitationByTokenRequest,
-        ListOrganizationsRequest, OrganizationServiceClient,
+        ListMyInvitationsRequest, ListOrganizationsRequest, OrgInvitation,
+        OrganizationServiceClient,
     },
 };
 use connectrpc::{ConnectError, client::ClientConfig};
@@ -129,6 +130,58 @@ pub(crate) async fn accept_invitation(
     Ok(())
 }
 
+/// Pages of ListMyInvitations read before the list stops. An account has
+/// few pending invitations; the bound only keeps a misbehaving page token from
+/// looping.
+const MY_INVITATION_PAGES: usize = 10;
+
+/// The caller's pending, unexpired invitations. The platform returns none
+/// while the caller's email address is unverified.
+pub(crate) async fn my_invitations(
+    state: &AppState,
+    cookie: HeaderValue,
+) -> Result<Vec<OrgInvitation>, ConnectError> {
+    let client =
+        OrganizationServiceClient::new(transport(state, Some(cookie)), client_config(state));
+    let mut invitations = Vec::new();
+    let mut page_token = String::new();
+    for _ in 0..MY_INVITATION_PAGES {
+        let response = client
+            .list_my_invitations(ListMyInvitationsRequest {
+                page_token,
+                ..Default::default()
+            })
+            .await?
+            .into_owned();
+        invitations.extend(response.invitations);
+        if response.next_page_token.is_empty() {
+            break;
+        }
+        page_token = response.next_page_token;
+    }
+    Ok(invitations)
+}
+
+/// Accept one of the caller's own invitations by its id, with no token: the
+/// platform matches the caller's verified email address to the invitation's.
+/// Returns the organization joined.
+pub(crate) async fn accept_invitation_by_id(
+    state: &AppState,
+    cookie: HeaderValue,
+    invitation_id: String,
+) -> Result<String, ConnectError> {
+    let client =
+        OrganizationServiceClient::new(transport(state, Some(cookie)), client_config(state));
+    let response = client
+        .accept_invitation(AcceptInvitationRequest {
+            invitation_id,
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    Ok(response.org_id)
+}
+
 pub(crate) async fn settings_data(
     state: &AppState,
     cookie: HeaderValue,
@@ -198,7 +251,7 @@ pub(crate) async fn delete_account(
     Ok(())
 }
 
-fn role_name(value: i32) -> &'static str {
+pub(crate) fn role_name(value: i32) -> &'static str {
     match value {
         1 => "Owner",
         2 => "Admin",

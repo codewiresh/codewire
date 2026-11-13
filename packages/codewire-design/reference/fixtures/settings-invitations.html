@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><script src="../../theme.js"></script><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Invitations fixture</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/settings.css">
+  <script src="../../dashboard.js" defer></script>
+</head>
+<body class="cw-body" data-dashboard-app>
+<main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>settings</span><span>/</span><strong>invitations</strong></div><div class="cw-console-account"><a class="cw-button cw-button--outline cw-button--small" href="#docs" target="_blank" rel="noopener"><span>Support</span><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-external"/></svg></a></div></header><div class="cw-page cw-settings-page"><div class="cw-settings-layout">
+  <aside class="cw-context-nav"><header class="cw-context-nav-heading"><h2>Settings</h2></header>
+<nav class="cw-context-nav-links" aria-label="Settings">
+  <h3 id="settings-personal-title" class="cw-section-label">Personal</h3>
+  <ul aria-labelledby="settings-personal-title"><li><a class="cw-nav-link" href="settings-account.html">Account</a></li><li><a class="cw-nav-link" href="settings-credentials.html">Credentials</a></li><li><a class="cw-nav-link" href="settings-secrets.html">Secrets</a></li><li><a class="cw-nav-link" href="settings-api-keys.html">API keys</a></li><li><a class="cw-nav-link" href="settings-invitations.html" aria-current="page">Invitations</a></li></ul>
+
+</nav></aside>
+  <div class="cw-settings-content">
+    <header class="cw-page-header"><div><h1 class="cw-page-title">Invitations</h1><p class="cw-page-description">Organizations that invited owner@example.test.</p></div></header>
+    <section class="cw-card cw-settings-card" aria-labelledby="invitations-title">
+      <header class="cw-card-header"><h2 id="invitations-title" class="cw-card-title">Pending invitations</h2><p class="cw-card-description">Accepting one makes you a member of that organization with the role it names.</p></header>
+      <div class="cw-card-content">
+        <ul class="cw-row-list">
+          <li class="cw-security-row"><h3>Acme Platform <span class="cw-badge">Admin</span> <span class="cw-badge" data-tone="info">Developer</span></h3><p>Invited by Ada Owner · Expires in 6 days</p><div class="cw-security-actions"><form method="post" action="/settings/invitations/_actions/accept"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="invitation_id" value="fixture-invitation-1"><button class="cw-button cw-button--small" type="submit"><span>Accept</span><span class="cw-sr-only"> invitation to Acme Platform</span></button></form></div></li>
+          <li class="cw-security-row"><h3>Design Guild <span class="cw-badge">Member</span></h3><p>Invited by a team administrator · Expires in less than a day</p><div class="cw-security-actions"><form method="post" action="/settings/invitations/_actions/accept"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="invitation_id" value="fixture-invitation-2"><button class="cw-button cw-button--small" type="submit"><span>Accept</span><span class="cw-sr-only"> invitation to Design Guild</span></button></form></div></li>
+        </ul>
+      </div>
+    </section>
+  </div>
+</div></div></main>
+</body>
+</html>

@@ -377,7 +377,7 @@ pub(crate) fn past_time(seconds: i64) -> String {
     }
 }
 
-fn future_time(seconds: i64) -> String {
+pub(crate) fn future_time(seconds: i64) -> String {
     let remaining = seconds.saturating_sub(unix_now());
     if remaining <= 0 {
         "now".to_owned()

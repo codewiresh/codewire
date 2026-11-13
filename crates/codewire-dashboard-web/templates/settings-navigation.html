@@ -7,6 +7,7 @@
     <li><a class="cw-nav-link" href="/settings/credentials/"{% if settings_personal && settings_section == "credentials" %} aria-current="page"{% endif %}>Credentials</a></li>
     <li><a class="cw-nav-link" href="/settings/secrets/"{% if settings_personal && settings_section == "secrets" %} aria-current="page"{% endif %}>Secrets</a></li>
     <li><a class="cw-nav-link" href="/settings/api-keys/"{% if settings_personal && settings_section == "api-keys" %} aria-current="page"{% endif %}>API keys</a></li>
+    <li><a class="cw-nav-link" href="/settings/invitations/"{% if settings_personal && settings_section == "invitations" %} aria-current="page"{% endif %}>Invitations</a></li>
   </ul>
   {% if view.has_selected_organization %}
   <h3 id="settings-organization-title" class="cw-section-label">Organization · {{ view.selected_organization_name }}</h3>

@@ -356,7 +356,7 @@ async fn the_account_home_renders_its_shell_before_reading_any_organization() {
 }
 
 /// An account without an organization keeps the page that offers to create
-/// one; there is nothing to load.
+/// one, or to accept an invitation; there is nothing to load.
 #[tokio::test]
 async fn an_account_without_organizations_is_offered_one() {
     let scenario = Scenario {
@@ -368,6 +368,8 @@ async fn an_account_without_organizations_is_offered_one() {
     assert_eq!(status, StatusCode::OK, "{calls:?}");
     assert!(html.contains("No organizations yet"));
     assert!(html.contains(r#"href="/organizations/new/">Create Organization</a>"#));
+    // Someone invited to an organization finds the invitation from here (#3840).
+    assert!(html.contains(r#"href="/settings/invitations/">View invitations</a>"#));
     assert!(!html.contains("data-account-overview"));
 }
 

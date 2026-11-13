@@ -55,7 +55,10 @@ pub(super) async fn invitation_page(
         error: String::new(),
     };
     with_csrf_cookie(
-        render_page(InvitationTemplate { view: &view }),
+        render_page(InvitationTemplate {
+            view: &view,
+            verify_email: false,
+        }),
         csrf_cookie(&state.public_origin, &csrf),
     )
 }
@@ -96,7 +99,7 @@ pub(super) async fn accept(
             &state,
             invitation_view,
             form.token,
-            "Sign in with the email address that received this invitation.",
+            Refusal::EmailMismatch,
         );
     }
     let cookie = match canonical_cookie(&headers) {
@@ -115,12 +118,32 @@ pub(super) async fn accept(
             redirect(auth_continuation("/login", &continuation), &headers)
         }
         Err(error) if error.code == ErrorCode::NotFound => invalid_invitation(),
-        Err(_) => render_invitation_error(
-            &state,
-            invitation_view,
-            token,
-            "The invitation could not be accepted. Try again.",
-        ),
+        // The platform accepts only for a verified email address (#3840).
+        Err(error) if error.code == ErrorCode::FailedPrecondition => {
+            render_invitation_error(&state, invitation_view, token, Refusal::EmailUnverified)
+        }
+        Err(_) => render_invitation_error(&state, invitation_view, token, Refusal::Failed),
+    }
+}
+
+/// Why an invitation the signed-in invitee asked to accept was not accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    /// The signed-in account's email is not the invited one.
+    EmailMismatch,
+    /// The invited email address is not verified yet.
+    EmailUnverified,
+    /// Anything else; trying again may work.
+    Failed,
+}
+
+impl Refusal {
+    fn message(self) -> &'static str {
+        match self {
+            Self::EmailMismatch => "Sign in with the email address that received this invitation.",
+            Self::EmailUnverified => "Verify your email address, then accept the invitation again.",
+            Self::Failed => "The invitation could not be accepted. Try again.",
+        }
     }
 }
 
@@ -128,7 +151,7 @@ fn render_invitation_error(
     state: &AppState,
     invitation: crate::view::InvitationView,
     token: String,
-    error: &'static str,
+    refusal: Refusal,
 ) -> Response {
     let csrf = new_csrf_token();
     let continuation = invite_continuation(&token);
@@ -140,12 +163,15 @@ fn render_invitation_error(
         email_matches: true,
         login_url: auth_continuation("/login", &continuation),
         signup_url: auth_continuation("/signup", &continuation),
-        error: error.to_owned(),
+        error: refusal.message().to_owned(),
     };
     with_csrf_cookie(
         render_template(
             StatusCode::UNPROCESSABLE_ENTITY,
-            InvitationTemplate { view: &view },
+            InvitationTemplate {
+                view: &view,
+                verify_email: refusal == Refusal::EmailUnverified,
+            },
         ),
         csrf_cookie(&state.public_origin, &csrf),
     )

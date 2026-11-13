@@ -27,11 +27,11 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("Settings uses one subtitle-free heading and personal destinations independent of organization navigation", { tag: "@mobile" }, async ({ page }) => {
-  for (const [path, active] of [["settings-account", "Account"], ["settings-credentials", "Credentials"], ["settings-secrets", "Secrets"]]) {
+  for (const [path, active] of [["settings-account", "Account"], ["settings-credentials", "Credentials"], ["settings-secrets", "Secrets"], ["settings-invitations", "Invitations"]]) {
     await page.goto(fixture(path));
     const aside = page.locator(".cw-context-nav");
     await expect(aside.locator("header")).toHaveText("Settings");
-    await expect(aside.getByRole("list", { name: "Personal", exact: true }).getByRole("link")).toHaveText(["Account", "Credentials", "Secrets", "API keys"]);
+    await expect(aside.getByRole("list", { name: "Personal", exact: true }).getByRole("link")).toHaveText(["Account", "Credentials", "Secrets", "API keys", "Invitations"]);
     await expect(aside.locator('[aria-current="page"]')).toHaveText(active);
     await expect(aside.getByRole("list", { name: "Personal", exact: true }).getByRole("link", { name: "API keys", exact: true })).toHaveAttribute("href", "settings-api-keys.html");
     await expect(aside.getByRole("heading", { name: /Organization/ })).toHaveCount(0);

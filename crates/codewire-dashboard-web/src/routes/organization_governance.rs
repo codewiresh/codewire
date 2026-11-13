@@ -735,15 +735,32 @@ fn apply_invite_error(form: &mut InviteFormView, error: &ConnectError) {
         }
     }
     if form.email_error.is_empty() && form.role_error.is_empty() {
+        let reason = crate::view::connect_error_reason(error);
         form.form_error = if matches!(error.code, ErrorCode::AlreadyExists | ErrorCode::Aborted) {
-            "That person is already a member or has a pending invitation."
+            "That person is already a member or has a pending invitation.".to_owned()
         } else if error.code == ErrorCode::PermissionDenied {
-            "You do not have permission to invite that role."
+            "You do not have permission to invite that role.".to_owned()
+        } else if reason.as_deref() == Some("EMAIL_NOT_VERIFIED") {
+            "Verify your email address before inviting members.".to_owned()
+        } else if error.code == ErrorCode::ResourceExhausted
+            && reason.as_deref() == Some("INVITATION_LIMIT_REACHED")
+        {
+            // The platform's own refusal names the limit and when to try
+            // again (#4457); any other text stays out of the page.
+            invitation_limit_sentence(error.message.as_deref().unwrap_or_default())
         } else {
-            "The invitation could not be sent. Please try again."
-        }
-        .to_owned();
+            "The invitation could not be sent. Please try again.".to_owned()
+        };
     }
+}
+
+/// "invitation limit reached: …" as a sentence.
+fn invitation_limit_sentence(message: &str) -> String {
+    let mut characters = message.trim().chars();
+    let Some(first) = characters.next() else {
+        return "The invitation limit has been reached.".to_owned();
+    };
+    format!("{}{}.", first.to_uppercase(), characters.as_str())
 }
 
 fn apply_api_key_error(form: &mut ApiKeyFormView, error: &ConnectError) {
@@ -921,6 +938,63 @@ fn api_keys_error(value: &str) -> &'static str {
 mod tests {
     use super::*;
     use codewire_proto::google::rpc::BadRequest;
+
+    /// #4457: the platform's invitation limit is shown as it names it, an
+    /// unverified inviter is asked to verify, and any other exhausted
+    /// resource keeps its text out of the page.
+    #[test]
+    fn invitation_limits_and_unverified_inviters_read_plainly() {
+        let refused = |code, reason: &str, message: &str| {
+            let mut error = ConnectError::new(code, message);
+            if !reason.is_empty() {
+                error.details.push(connectrpc::ErrorDetail::from_message(
+                    "google.rpc.ErrorInfo",
+                    &codewire_proto::google::rpc::ErrorInfo {
+                        domain: "codewire.sh".into(),
+                        reason: reason.into(),
+                        ..Default::default()
+                    },
+                ));
+            }
+            let mut form = InviteFormView::default();
+            apply_invite_error(&mut form, &error);
+            form.form_error
+        };
+        assert_eq!(
+            refused(
+                ErrorCode::ResourceExhausted,
+                "INVITATION_LIMIT_REACHED",
+                "invitation limit reached: one account can send at most 30 invitations an hour; \
+                 try again after Nov 13 14:05 UTC",
+            ),
+            "Invitation limit reached: one account can send at most 30 invitations an hour; \
+             try again after Nov 13 14:05 UTC."
+        );
+        assert_eq!(
+            refused(
+                ErrorCode::FailedPrecondition,
+                "EMAIL_NOT_VERIFIED",
+                "verify your email address before inviting members",
+            ),
+            "Verify your email address before inviting members."
+        );
+        assert_eq!(
+            refused(
+                ErrorCode::FailedPrecondition,
+                "ORGANIZATION_WRITE_BLOCKED",
+                "synthetic-upstream-private-marker",
+            ),
+            "The invitation could not be sent. Please try again."
+        );
+        assert_eq!(
+            refused(
+                ErrorCode::ResourceExhausted,
+                "",
+                "synthetic-upstream-private-marker"
+            ),
+            "The invitation could not be sent. Please try again."
+        );
+    }
 
     #[test]
     fn query_feedback_is_allowlisted() {

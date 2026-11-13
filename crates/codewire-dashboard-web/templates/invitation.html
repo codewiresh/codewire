@@ -17,7 +17,8 @@
           <p class="cw-auth-copy">{{ view.invitation.inviter_name }} invited you to join as {{ view.invitation.role }}.</p>
         </header>
         <dl class="cw-invite-details"><div><dt>Team</dt><dd>{{ view.invitation.organization_name }}</dd></div><div><dt>Invited email</dt><dd>{{ view.invitation.email }}</dd></div><div><dt>Role</dt><dd>{{ view.invitation.role }}</dd></div></dl>
-        {% if !view.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>{% endif %}
+        {% if verify_email %}<div class="cw-alert cw-alert--warning" role="alert">{{ view.error }} <form class="cw-auth-resend" method="post" action="/settings/_actions/send-verification"><input type="hidden" name="_csrf" value="{{ view.csrf_token }}"><button class="cw-link-button cw-auth-resend-link" type="submit">Send a verification email</button></form></div>
+        {% else if !view.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>{% endif %}
         {% if !view.authenticated %}
         <p class="cw-auth-copy">Sign in or create an account with the invited email address. The invitation will remain attached to the continuation.</p>
         <div class="cw-auth-actions"><a class="cw-button cw-button--pill cw-button--large" href="{{ view.login_url }}">Sign in</a><a class="cw-button cw-button--outline cw-button--pill cw-button--large" href="{{ view.signup_url }}">Create account</a></div>

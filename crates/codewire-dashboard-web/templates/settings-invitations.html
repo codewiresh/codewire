@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="/assets/codewire/theme-v1.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Invitations · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/dashboard-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/settings-v1.css">
+    <script src="/assets/codewire/dashboard-v1.js" defer></script>
+  </head>
+  <body class="cw-body" data-route="dashboard-settings-invitations">
+    <div class="cw-app" data-dashboard-app data-mobile-open="false" data-sidebar-collapsed="{{ view.sidebar_collapsed }}">
+      <aside class="cw-sidebar-slot">{% include "sidebar.html" %}</aside>
+      <header class="cw-mobile-bar">
+        <button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button>
+        <a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span class="cw-sr-only">Codewire</span></a>
+      </header>
+      <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+      <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
+      <main class="cw-main">{% let crumb_scope = "settings" %}{% let crumb_page = "invitations" %}{% include "console-header.html" %}<div class="cw-page cw-settings-page">
+        <div class="cw-settings-layout">
+          {% let settings_section = "invitations" %}{% include "settings-nav.html" %}
+          <div class="cw-settings-content">
+        <header class="cw-page-header"><div><h1 class="cw-page-title">Invitations</h1><p class="cw-page-description">Organizations that invited {{ page.email }}.</p></div></header>
+        {% if !page.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.error }}</p>{% endif %}
+        <section class="cw-card cw-settings-card" aria-labelledby="invitations-title">
+          <header class="cw-card-header"><h2 id="invitations-title" class="cw-card-title">Pending invitations</h2><p class="cw-card-description">Accepting one makes you a member of that organization with the role it names.</p></header>
+          <div class="cw-card-content">
+          {% if !page.email_verified %}
+            <p class="cw-alert cw-alert--warning" role="status">Verify your email address to see the invitations sent to it.</p>
+            <form method="post" action="/settings/_actions/send-verification"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><button class="cw-button cw-button--outline cw-button--small" type="submit">Send verification email</button></form>
+          {% else if let Some(invitations) = page.invitations %}
+            {% if invitations.is_empty() %}
+            <p class="cw-settings-muted">No pending invitations. When an organization invites {{ page.email }}, it appears here.</p>
+            {% else %}
+            <ul class="cw-row-list">
+              {% for invitation in invitations %}
+              <li class="cw-security-row"><h3>{{ invitation.organization_name }} <span class="cw-badge">{{ invitation.role }}</span>{% for assignment in invitation.assignments %} <span class="cw-badge" data-tone="{{ assignment.tone }}">{{ assignment.label }}</span>{% endfor %}</h3><p>Invited by {{ invitation.inviter_name }} · Expires {{ invitation.expires }}</p><div class="cw-security-actions"><form method="post" action="/settings/invitations/_actions/accept"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="invitation_id" value="{{ invitation.id }}"><button class="cw-button cw-button--small" type="submit"><span>Accept</span><span class="cw-sr-only"> invitation to {{ invitation.organization_name }}</span></button></form></div></li>
+              {% endfor %}
+            </ul>
+            {% endif %}
+          {% else %}
+            <p class="cw-alert cw-alert--warning" role="status">Your invitations are unavailable right now. Reload to try again.</p>
+          {% endif %}
+          </div>
+        </section>
+          </div>
+        </div>
+      </div></main>
+    </div>
+  </body>
+</html>

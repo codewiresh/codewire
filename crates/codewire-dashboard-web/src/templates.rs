@@ -157,6 +157,9 @@ pub(crate) struct DeviceTemplate<'a> {
 #[template(path = "invitation.html")]
 pub(crate) struct InvitationTemplate<'a> {
     pub(crate) view: &'a InvitationPageView,
+    /// Accepting was refused because the invited address is not verified:
+    /// the page offers a new verification email.
+    pub(crate) verify_email: bool,
 }
 
 #[derive(Template)]

@@ -16,6 +16,7 @@ mod environments;
 mod github_repositories;
 mod hosts;
 mod invitations;
+mod my_invitations;
 mod organization_context;
 mod organization_governance;
 mod organizations;
@@ -410,6 +411,12 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/settings/", get(settings::settings))
         .route("/settings/credentials", get(slash_redirect))
         .route("/settings/credentials/", get(credentials::page))
+        .route("/settings/invitations", get(slash_redirect))
+        .route(my_invitations::PATH, get(my_invitations::page))
+        .route(
+            my_invitations::ACCEPT_PATH,
+            post(my_invitations::accept).layer(DefaultBodyLimit::max(2048)),
+        )
         .route("/settings/secrets", get(slash_redirect))
         .route("/settings/secrets/", get(personal_secrets::page))
         .route(
