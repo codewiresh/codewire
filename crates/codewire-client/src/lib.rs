@@ -174,7 +174,7 @@ pub use codewire_proto::codewire::v1::{
 };
 pub use config::{
     CODEWIRE_API_URL_ENV, CODEWIRE_URL_ENV, ClientConfig, DEFAULT_CODEWIRE_URL,
-    DEFAULT_UNARY_TIMEOUT,
+    DEFAULT_UNARY_TIMEOUT, DeploymentCa, DeploymentCaError,
 };
 pub use connectrpc::ErrorCode;
 pub use coordinator::{
@@ -1778,13 +1778,13 @@ async fn report_run_stream_error(
 struct ReqwestConnectTransport(reqwest::Client);
 
 fn default_http_client(config: &ClientConfig) -> Result<reqwest::Client, ClientError> {
+    // Connect bidi needs HTTP/2: cleartext direct endpoints use h2c prior
+    // knowledge, and TLS endpoints negotiate it with ALPN.
+    let builder = config.http_client_builder()?;
     let builder = if config.server_url().scheme() == "http" {
-        // Connect bidi needs HTTP/2 for interleaved input/output. Cleartext
-        // direct endpoints therefore use h2c prior knowledge; TLS endpoints
-        // negotiate HTTP/2 with ALPN through the ordinary client.
-        reqwest::Client::builder().http2_prior_knowledge()
+        builder.http2_prior_knowledge()
     } else {
-        reqwest::Client::builder()
+        builder
     };
     builder.build().map_err(|error| {
         ClientError::new(

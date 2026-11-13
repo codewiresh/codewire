@@ -1,11 +1,16 @@
+mod deployment_ca;
+
 use std::env;
 use std::time::Duration;
 
 use connectrpc::{ErrorCode, Protocol};
 use http::{HeaderMap, HeaderValue, header};
-use url::Url;
+use rustls::pki_types::ServerName;
+use url::{Host, Url};
 
 use crate::ClientError;
+use deployment_ca::DeploymentTrust;
+pub use deployment_ca::{DeploymentCa, DeploymentCaError};
 
 pub const CODEWIRE_API_URL_ENV: &str = "CODEWIRE_API_URL";
 pub const CODEWIRE_URL_ENV: &str = "CODEWIRE_URL";
@@ -19,6 +24,7 @@ pub struct ClientConfig {
     mesh_url: Option<Url>,
     unary_timeout: Duration,
     user_agent: Option<HeaderValue>,
+    deployment_trust: Option<DeploymentTrust>,
 }
 
 impl ClientConfig {
@@ -55,6 +61,7 @@ impl ClientConfig {
             mesh_url: None,
             unary_timeout: DEFAULT_UNARY_TIMEOUT,
             user_agent: None,
+            deployment_trust: None,
         })
     }
 
@@ -88,6 +95,42 @@ impl ClientConfig {
     pub fn with_mesh_url(mut self, mesh_url: impl AsRef<str>) -> Result<Self, ClientError> {
         self.mesh_url = Some(parse_server_url(mesh_url.as_ref(), "Mesh")?);
         Ok(self)
+    }
+
+    /// Trust `ca`, and only `ca`, for the server URL's exact host (#4121).
+    /// The URL must use HTTPS. Every other host, the Mesh origin included,
+    /// keeps the public WebPKI roots.
+    pub fn with_deployment_ca(mut self, ca: DeploymentCa) -> Result<Self, ClientError> {
+        if self.server_url.scheme() != "https" {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                "a deployment CA needs an https server URL",
+            ));
+        }
+        let host = server_name(&self.server_url)?;
+        self.deployment_trust = Some(DeploymentTrust::new(ca, host));
+        Ok(self)
+    }
+
+    pub fn deployment_ca(&self) -> Option<&DeploymentCa> {
+        self.deployment_trust.as_ref().map(DeploymentTrust::ca)
+    }
+
+    /// The HTTP client builder every client of this deployment starts from.
+    /// Without a deployment CA it is reqwest's own, whose roots are the
+    /// bundled WebPKI set; with one, its TLS trusts that CA alone for the
+    /// pinned host and WebPKI elsewhere. Neither reads `SSL_CERT_FILE`,
+    /// `SSL_CERT_DIR` or a native store. Callers add their own timeouts,
+    /// proxy and redirect rules.
+    pub fn http_client_builder(&self) -> Result<reqwest::ClientBuilder, ClientError> {
+        let builder = reqwest::Client::builder();
+        let Some(trust) = &self.deployment_trust else {
+            return Ok(builder);
+        };
+        let tls = trust
+            .tls_config()
+            .map_err(|error| ClientError::new(ErrorCode::InvalidArgument, error.to_string()))?;
+        Ok(builder.use_preconfigured_tls(tls))
     }
 
     pub fn server_url(&self) -> &Url {
@@ -179,6 +222,19 @@ impl ClientConfig {
             .or_else(|| codewire_url.filter(|value| !value.trim().is_empty()))
             .unwrap_or_else(|| DEFAULT_CODEWIRE_URL.to_owned());
         Self::new(server_url)
+    }
+}
+
+/// The TLS server name of a URL's host, as a client connecting to it sends.
+fn server_name(url: &Url) -> Result<ServerName<'static>, ClientError> {
+    let invalid = || ClientError::new(ErrorCode::InvalidArgument, "invalid Codewire server host");
+    match url.host() {
+        Some(Host::Domain(domain)) => {
+            ServerName::try_from(domain.to_owned()).map_err(|_| invalid())
+        }
+        Some(Host::Ipv4(address)) => Ok(ServerName::from(std::net::IpAddr::from(address))),
+        Some(Host::Ipv6(address)) => Ok(ServerName::from(std::net::IpAddr::from(address))),
+        None => Err(invalid()),
     }
 }
 

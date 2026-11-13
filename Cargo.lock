@@ -1508,6 +1508,7 @@ dependencies = [
  "keyring",
  "open",
  "rand 0.8.6",
+ "rcgen",
  "reqwest",
  "russh",
  "rustix",
@@ -1528,6 +1529,7 @@ dependencies = [
  "uuid",
  "webpki-roots 1.0.10",
  "wiremock",
+ "x509-parser",
 ]
 
 [[package]]
