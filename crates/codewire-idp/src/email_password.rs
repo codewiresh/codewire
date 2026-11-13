@@ -21,6 +21,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use crate::auth_session::{
     hash_password, hex_id, hex_lower, hex_token, log_audit, request_info, validate_password,
 };
+use crate::oauth::Provider;
 
 #[derive(Clone)]
 pub struct EmailPasswordState {
@@ -228,6 +229,28 @@ async fn send_password_reset_email(
     );
     email
         .send_html(to, "Reset your Codewire password", &html)
+        .await
+}
+
+/// What "Forgot password" sends an account that has no password (#4528): how it
+/// signs in, and no link that could set one.
+async fn send_provider_sign_in_email(
+    email: &EmailClient,
+    to: &str,
+    providers: &[&'static str],
+    login_url: &str,
+) -> anyhow::Result<()> {
+    let providers = providers.join(" or ");
+    let html = format!(
+        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+	<h2>Your Codewire account has no password</h2>
+	<p>Someone asked to reset the password for the Codewire account with this address. This account doesn't use a password: you sign in with {providers}.</p>
+	<p><a href="{login_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;">Go to sign in</a></p>
+	<p style="color: #666; font-size: 14px;">If this wasn't you, you can ignore this email. Nothing has changed.</p>
+</div>"#
+    );
+    email
+        .send_html(to, "How you sign in to Codewire", &html)
         .await
 }
 
@@ -482,19 +505,50 @@ async fn forget_password(
     State(state): State<EmailPasswordState>,
     ValidatedJson(req): ValidatedJson<ForgetPasswordRequest>,
 ) -> Result<Json<ForgetPasswordResponse>, AppError> {
-    let exists: Option<String> = match sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
-        .bind(&req.email)
-        .fetch_optional(&state.pool)
-        .await
+    // An account with no password signs in with GitHub or Google only. Its
+    // reset link would set nothing (#4528), so it is told how it signs in
+    // instead. The answer is the same either way, so it says nothing about
+    // the address.
+    // Logs name the account by id, never by address.
+    let account: Option<(String, bool, Vec<String>)> = match sqlx::query_as(
+        r#"SELECT u.id,
+                  EXISTS (SELECT 1 FROM accounts a WHERE a.user_id = u.id AND a.provider_id = 'credential'),
+                  ARRAY(SELECT a.provider_id FROM accounts a
+                         WHERE a.user_id = u.id AND a.provider_id IN ('github', 'google')
+                         ORDER BY a.provider_id)
+             FROM users u WHERE u.email = $1"#,
+    )
+    .bind(&req.email)
+    .fetch_optional(&state.pool)
+    .await
     {
-        Ok(user) => user,
+        Ok(account) => account,
         Err(e) => {
             tracing::error!(error = %e, "failed to lookup password reset user");
             None
         }
     };
+    if let Some((user_id, false, providers)) = &account {
+        let labels: Vec<&'static str> = providers
+            .iter()
+            .filter_map(|provider| Provider::parse(provider))
+            .map(Provider::label)
+            .collect();
+        if labels.is_empty() {
+            tracing::warn!(%user_id, "password reset requested for an account with no sign-in method");
+        } else if !state.email.is_configured() {
+            tracing::warn!(%user_id, "transactional email delivery is not configured, skipping provider sign-in email");
+        } else {
+            let login_url = format!("{}/login", state.frontend_url.trim_end_matches('/'));
+            if let Err(e) =
+                send_provider_sign_in_email(&state.email, &req.email, &labels, &login_url).await
+            {
+                tracing::error!(%user_id, error = %e, "failed to send provider sign-in email");
+            }
+        }
+    }
 
-    if exists.is_some() {
+    if let Some((user_id, true, _)) = &account {
         match create_verification(
             &state.pool,
             &req.email,
@@ -506,15 +560,15 @@ async fn forget_password(
             Ok(token) => {
                 let reset_url = format!("{}/reset-password?token={}", state.frontend_url, token);
                 if !state.email.is_configured() {
-                    tracing::warn!(email = %req.email, "transactional email delivery is not configured, skipping password reset email");
+                    tracing::warn!(%user_id, "transactional email delivery is not configured, skipping password reset email");
                 } else if let Err(e) =
                     send_password_reset_email(&state.email, &req.email, &reset_url).await
                 {
-                    tracing::error!(email = %req.email, error = %e, "failed to send password reset email");
+                    tracing::error!(%user_id, error = %e, "failed to send password reset email");
                 }
             }
             Err(e) => {
-                tracing::error!(email = %req.email, error = %e, "failed to create password reset verification");
+                tracing::error!(%user_id, error = %e, "failed to create password reset verification");
             }
         }
     }
@@ -601,7 +655,12 @@ async fn reset_password(
         tracing::error!(error = %e, "failed to commit password reset");
         AppError::InternalMsg("Failed to reset password".into())
     })?;
-    if let Some(user_id) = &user_id {
+    // No password to replace: the account signs in with GitHub or Google
+    // only, and a reset sets nothing (#4528). The token is spent either way.
+    let Some(user_id) = &user_id else {
+        return Err(bad_request("Invalid or expired reset token"));
+    };
+    {
         let (ip, ua) = request_info(&headers);
         log_audit(
             &state.pool,
@@ -746,9 +805,9 @@ async fn send_verification(
     .await?;
     let verify_url = format!("{}/verify-email?token={}", state.frontend_url, token);
     if !state.email.is_configured() {
-        tracing::warn!(email = %row.email, "transactional email delivery is not configured, skipping verification email");
+        tracing::warn!(user_id = %user.user_id, "transactional email delivery is not configured, skipping verification email");
     } else if let Err(e) = send_verification_email(&state.email, &row.email, &verify_url).await {
-        tracing::error!(email = %row.email, error = %e, "failed to send verification email");
+        tracing::error!(user_id = %user.user_id, error = %e, "failed to send verification email");
         return Err(AppError::InternalMsg(
             "Failed to send verification email".into(),
         ));

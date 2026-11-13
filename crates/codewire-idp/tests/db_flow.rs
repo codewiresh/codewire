@@ -4030,6 +4030,159 @@ async fn email_password_flow_against_postgres() {
         .unwrap();
     assert_eq!(sessions, 0);
 
+    // 11. An account that signs in only with GitHub has no password: "Forgot
+    // password" tells it how it signs in and sends no link, and a reset that
+    // finds no password answers an error, not success (#4528).
+    let provider_user = "u_email_password_provider_only";
+    let provider_email = "provider-only-e2e@example.com";
+    for statement in [
+        "DELETE FROM verifications WHERE identifier = $2",
+        "DELETE FROM accounts WHERE user_id = $1",
+        "DELETE FROM users WHERE id = $1",
+    ] {
+        sqlx::query(statement)
+            .bind(provider_user)
+            .bind(provider_email)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO users (id, email, name, email_verified, is_admin, two_factor_enabled) VALUES ($1,$2,'Provider Only',true,false,false)")
+        .bind(provider_user)
+        .bind(provider_email)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO accounts (id, user_id, provider_id, account_id) VALUES ($1,$2,'github','provider-only-subject')")
+        .bind("acct_email_password_provider_only")
+        .bind(provider_user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (mail, outbox) = codewire_email::EmailClient::recording();
+    let provider_app = codewire_idp::email_password::router(
+        pool.clone(),
+        "https://app.codewire.test".to_string(),
+        mail,
+        AuthState { pool: pool.clone() },
+    );
+    let (st, body, _) = sess_req(
+        &provider_app,
+        "POST",
+        "/api/auth/forget-password",
+        None,
+        &format!(r#"{{"email":"{provider_email}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "forget provider-only: {body}");
+    assert_eq!(
+        body["sent"], true,
+        "the same answer as for a password account"
+    );
+    let sent = outbox.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].subject, "How you sign in to Codewire");
+    assert!(
+        sent[0].html.contains("you sign in with GitHub"),
+        "{}",
+        sent[0].html
+    );
+    assert!(!sent[0].html.contains("reset-password"), "no reset link");
+    let reset_tokens: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM verifications WHERE identifier = $1 AND purpose = 'password_reset'",
+    )
+    .bind(provider_email)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reset_tokens, 0);
+    // A reset token for the address, as one minted before this change.
+    sqlx::query(
+        "INSERT INTO verifications (id, identifier, purpose, token_hash, expires_at) \
+         VALUES ($1,$2,'password_reset',$3,NOW() + interval '1 hour')",
+    )
+    .bind("ver_email_password_provider_only")
+    .bind(provider_email)
+    .bind(verification_token_hash(
+        "password_reset",
+        "provider-only-reset-capability",
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (st, body, _) = sess_req(
+        &provider_app,
+        "POST",
+        "/api/auth/reset-password",
+        None,
+        &format!(r#"{{"token":"provider-only-reset-capability","newPassword":"{new_pw}"}}"#),
+    )
+    .await;
+    assert_eq!(
+        st, 400,
+        "a reset that sets nothing is not a success: {body}"
+    );
+    let credentials: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM accounts WHERE user_id = $1 AND provider_id = 'credential'",
+    )
+    .bind(provider_user)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(credentials, 0, "no password was set");
+
+    // Its logs name the account, never the address: with no mail configured
+    // both branches log that they skipped the email.
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+    let unmailed_app = codewire_idp::email_password::router(
+        pool.clone(),
+        "https://app.codewire.test".to_string(),
+        codewire_email::EmailClient::disabled(),
+        AuthState { pool: pool.clone() },
+    );
+    {
+        let _logging = tracing::subscriber::set_default(subscriber);
+        for address in [provider_email, email] {
+            let (st, _, _) = sess_req(
+                &unmailed_app,
+                "POST",
+                "/api/auth/forget-password",
+                None,
+                &format!(r#"{{"email":"{address}"}}"#),
+            )
+            .await;
+            assert_eq!(st, 200);
+        }
+    }
+    let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("skipping provider sign-in email"), "{logs}");
+    assert!(logs.contains("skipping password reset email"), "{logs}");
+    assert!(
+        !logs.contains(provider_email) && !logs.contains(email),
+        "an address was logged: {logs}"
+    );
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(provider_user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
     cleanup(pool.clone()).await;
 }
 
