@@ -69,6 +69,9 @@ mod entry;
 #[path = "runtime_http_tests.rs"]
 mod http_tests;
 
+#[cfg(test)]
+mod streamed_body_tests;
+
 #[cfg(all(test, feature = "local-broker-synthetic-smoke"))]
 #[path = "runtime/synthetic_smoke_tests.rs"]
 mod synthetic_smoke_tests;
@@ -610,7 +613,15 @@ pub struct BrokerUpstreamRequest {
     target: Url,
     headers: HeaderMap,
     body: Vec<u8>,
+    /// A streamed GitHub Git request body; `body` is then empty.
+    body_stream: Option<BrokerRequestBodyStream>,
 }
+
+/// A guest's streamed request body (#4280), fed from its bridge frames under
+/// credit. It ends with an error, never early, when the guest's body did not
+/// complete, so a truncated body never reaches the provider as a whole one.
+pub type BrokerRequestBodyStream =
+    Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static>>;
 
 impl BrokerUpstreamRequest {
     pub(crate) fn new(method: Method, target: Url, headers: HeaderMap, body: Vec<u8>) -> Self {
@@ -619,7 +630,15 @@ impl BrokerUpstreamRequest {
             target,
             headers,
             body,
+            body_stream: None,
         }
+    }
+
+    /// Take the streamed body, if the request has one. A transport that sends
+    /// a request must take it first: [`Self::into_parts`] has only the whole
+    /// body, which is empty for a streamed request.
+    pub fn take_body_stream(&mut self) -> Option<BrokerRequestBodyStream> {
+        self.body_stream.take()
     }
 
     /// The request's fixed destination: method and URL only, never its
@@ -1832,7 +1851,18 @@ where
         &self,
         request: v1::CredentialBridgeRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
-        self.execute_on(BridgeEntry::Loopback, request).await
+        self.execute_on(BridgeEntry::Loopback, request, None).await
+    }
+
+    /// Execute a request whose body streams: only a GitHub Git POST, and only
+    /// on a loopback session.
+    pub(crate) async fn execute_streamed(
+        &self,
+        request: v1::CredentialBridgeRequest,
+        body: BrokerRequestBodyStream,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        self.execute_on(BridgeEntry::Loopback, request, Some(body))
+            .await
     }
 
     async fn execute_validated(
@@ -1841,7 +1871,7 @@ where
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         match request.slot.as_str() {
             "anthropic" => return self.execute_anthropic(request).await,
-            "github" => return self.execute_github(request).await,
+            "github" => return self.execute_github(request, None).await,
             _ => {}
         }
         let operation = BrokerOperationId::parse(OPENAI_OPERATION)
@@ -2027,6 +2057,7 @@ where
                 target,
                 headers,
                 body,
+                body_stream: None,
             }),
         )
         .await
@@ -2047,16 +2078,27 @@ where
         ))
     }
 
+    /// A GitHub request. With `body_stream`, a Git POST whose body streams:
+    /// it is sent once, so a 401 is returned rather than replayed after a
+    /// refresh; the expiry refresh before sending still applies.
     async fn execute_github(
         &self,
         request: ValidatedGuestRequest,
+        mut body_stream: Option<BrokerRequestBodyStream>,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         let request_id = request.request_id;
         let slot = request.slot;
         let route = request.route;
-        let validated = self
-            .github_adapter
-            .validate_request(
+        let validated = if body_stream.is_some() {
+            self.github_adapter.validate_streamed_request(
+                route.as_str(),
+                &request.method,
+                &request.path,
+                request.query.as_deref(),
+                request.headers,
+            )
+        } else {
+            self.github_adapter.validate_request(
                 route.as_str(),
                 &request.method,
                 &request.path,
@@ -2064,7 +2106,8 @@ where
                 request.headers,
                 request.body,
             )
-            .map_err(map_adapter_error)?;
+        }
+        .map_err(map_adapter_error)?;
         let operation = BrokerOperationId::parse(validated.operation().operation_name())
             .map_err(|_| BrokerRequestError::InvalidRequest)?;
         let lease = self
@@ -2111,10 +2154,14 @@ where
         // replay the same request under a third authorization generation.
         let refreshed_before_request = prepared.generation != original_generation;
         let rejected_generation = prepared.generation.clone();
-        let (mut response, mut policy) = self.execute_prepared_github(prepared.request).await?;
+        let replayable = body_stream.is_none();
+        let (mut response, mut policy) = self
+            .execute_prepared_github(prepared.request, body_stream.take())
+            .await?;
         if response.status == StatusCode::UNAUTHORIZED
             && github_app_retry
             && !refreshed_before_request
+            && replayable
         {
             drop(response);
             let retry = self
@@ -2128,7 +2175,7 @@ where
                     admitted_grant: &admitted_grant,
                 })
                 .await?;
-            (response, policy) = self.execute_prepared_github(retry.request).await?;
+            (response, policy) = self.execute_prepared_github(retry.request, None).await?;
         }
         let (status, headers, body) = response.into_parts();
         if status.is_informational() {
@@ -2149,6 +2196,7 @@ where
     async fn execute_prepared_github(
         &self,
         prepared: crate::github::PreparedGitHubRequest,
+        body_stream: Option<BrokerRequestBodyStream>,
     ) -> Result<
         (
             BrokerUpstreamResponse,
@@ -2164,6 +2212,7 @@ where
                 target,
                 headers,
                 body,
+                body_stream,
             }),
         )
         .await
@@ -2183,6 +2232,7 @@ where
                 target,
                 headers,
                 body,
+                body_stream: None,
             }),
         )
         .await
@@ -2741,6 +2791,7 @@ where
             target,
             headers,
             body: std::mem::take(&mut *body),
+            body_stream: None,
         })
         .await
         .map_err(|error| {
@@ -2870,10 +2921,21 @@ struct ValidatedGuestRequest {
 }
 
 impl ValidatedGuestRequest {
+    /// `body_stream` says whether the bridge handed over a streamed body; the
+    /// request must agree, and only a GitHub Git request streams.
     fn parse(
         entry: BridgeEntry,
         request: v1::CredentialBridgeRequest,
+        body_stream: bool,
     ) -> Result<Self, BrokerRequestError> {
+        if request.streamed_body != body_stream
+            || (request.streamed_body
+                && (request.capability_slot != "github"
+                    || request.route != "github-https"
+                    || !request.body.is_empty()))
+        {
+            return Err(BrokerRequestError::InvalidRequest);
+        }
         let intercepted_host = entry::intercepted_host(entry, &request)?;
         if !matches!(
             (request.capability_slot.as_str(), request.route.as_str()),
@@ -4168,6 +4230,7 @@ mod tests {
             }],
             body: br#"{"input":"hello"}"#.to_vec(),
             intercepted_host: String::new(),
+            streamed_body: false,
         }
     }
 
@@ -4188,6 +4251,7 @@ mod tests {
                 target: Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap(),
                 headers,
                 body: br#"{"input":"hello"}"#.to_vec(),
+                body_stream: None,
             }
         }
 
@@ -4582,7 +4646,8 @@ mod tests {
             .commit_return_gate
             .armed
             .store(true, Ordering::Release);
-        let guest_request = ValidatedGuestRequest::parse(BridgeEntry::Loopback, request()).unwrap();
+        let guest_request =
+            ValidatedGuestRequest::parse(BridgeEntry::Loopback, request(), false).unwrap();
         let provider_request = broker
             .api_key_adapter
             .validate_request(
@@ -5566,7 +5631,7 @@ mod tests {
             oauth_broker(StatusCode::OK, Vec::new(), "unused".into(), Duration::ZERO);
         let control = Arc::new(BlockingRefreshControl::default());
         Arc::get_mut(&mut broker.leases).unwrap().start_control = Some(Arc::clone(&control));
-        let guest = ValidatedGuestRequest::parse(BridgeEntry::Loopback, request()).unwrap();
+        let guest = ValidatedGuestRequest::parse(BridgeEntry::Loopback, request(), false).unwrap();
         let provider_request = broker
             .api_key_adapter
             .validate_request(

@@ -124,6 +124,7 @@ impl Case {
             capability_slot: self.slot.into(),
             route: self.route.into(),
             intercepted_host: intercepted_host.into(),
+            streamed_body: false,
         }
     }
 }
@@ -315,13 +316,15 @@ async fn a_front_door_request_naming_a_host_of_its_route_is_served_as_on_loopbac
             assert_eq!(recorded.leases(), 2);
 
             let validated =
-                ValidatedGuestRequest::parse(BridgeEntry::FrontDoor, case.request(host)).unwrap();
+                ValidatedGuestRequest::parse(BridgeEntry::FrontDoor, case.request(host), false)
+                    .unwrap();
             assert_eq!(
                 validated.intercepted_host.map(RouteHost::as_str),
                 Some(*host)
             );
             let validated =
-                ValidatedGuestRequest::parse(BridgeEntry::Loopback, case.request("")).unwrap();
+                ValidatedGuestRequest::parse(BridgeEntry::Loopback, case.request(""), false)
+                    .unwrap();
             assert_eq!(validated.intercepted_host, None);
         }
     }

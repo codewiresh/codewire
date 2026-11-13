@@ -482,6 +482,7 @@ async fn shared_frame_validation_and_server_message_ceiling_remain_active() {
                     headers: vec![],
                     body: vec![],
                     intercepted_host: String::new(),
+                    streamed_body: false,
                 },
             )),
         })
@@ -505,6 +506,7 @@ async fn shared_frame_validation_and_server_message_ceiling_remain_active() {
                     headers: vec![],
                     body: vec![b'x'; CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES + 1],
                     intercepted_host: String::new(),
+                    streamed_body: false,
                 },
             )),
         })
@@ -846,6 +848,7 @@ fn leased_request() -> v1::CredentialBridgeGuestMessage {
                 }],
                 body: vec![],
                 intercepted_host: String::new(),
+                streamed_body: false,
             },
         )),
     }
@@ -997,7 +1000,10 @@ async fn admitted_streams_list_codex_login_and_answer_it_under_the_lease_budget(
             .iter()
             .map(|value| value.to_str().unwrap().to_owned())
             .collect();
-        assert_eq!(capabilities, ["codex-login", "claude-login"]);
+        assert_eq!(
+            capabilities,
+            ["codex-login", "claude-login", "request-body-stream"]
+        );
         let mut output = response.into_inner();
         authority_calls_reach(&fixture, 2).await;
         input.send(codex_login_request()).await.unwrap();

@@ -10,14 +10,16 @@
 //! field-level policy. REST routes below exclude admin, Actions, secrets, apps,
 //! and release assets. Smart HTTP supports fetch/push only: no dumb HTTP, LFS,
 //! redirects, arbitrary hosts, or credential-helper token disclosure.
-//! Requests are capped at 4 MiB and responses at 256 MiB; larger Git transfers
-//! fail closed. AV redacts its finite raw/JSON/percent/base64 patterns, including
+//! A whole request body is capped at 4 MiB and its response at 256 MiB. A Git
+//! POST whose body streams from the bridge (#4280) has no request or response
+//! size limit; the bridge bounds it by time and credit instead. AV redacts its finite raw/JSON/percent/base64 patterns, including
 //! the complete injected Bearer/Basic value. It does not inspect compressed Git
 //! pack objects or guarantee arbitrary-transformation redaction. The ordinary
 //! Git wire payload is binary; changing a matching pattern can invalidate it.
 //! Stock Git gzip fetch requests are forwarded unchanged to the fixed GitHub
-//! upload-pack endpoint. The 4 MiB request cap counts compressed wire bytes;
-//! the broker neither decompresses nor claims an expanded-body size bound.
+//! upload-pack endpoint. The 4 MiB whole-body cap counts compressed wire
+//! bytes; the broker neither decompresses nor claims an expanded-body size
+//! bound.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -139,8 +141,40 @@ impl GitHubOAuthAdapter {
         headers: HeaderMap,
         body: Vec<u8>,
     ) -> Result<ValidatedGitHubRequest, CredentialBrokerError> {
+        self.validate(route, method, path, query, headers, Some(body))
+    }
+
+    /// A Git POST whose body streams separately: the same checks as
+    /// [`Self::validate_request`] for a non-empty Git body, with no size limit
+    /// on the request or its response.
+    pub fn validate_streamed_request(
+        &self,
+        route: &str,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        headers: HeaderMap,
+    ) -> Result<ValidatedGitHubRequest, CredentialBrokerError> {
+        self.validate(route, method, path, query, headers, None)
+    }
+
+    /// `body` is the whole body, or `None` for one that streams separately.
+    fn validate(
+        &self,
+        route: &str,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        headers: HeaderMap,
+        body: Option<Vec<u8>>,
+    ) -> Result<ValidatedGitHubRequest, CredentialBrokerError> {
         let denied = CredentialBrokerError::RequestDenied;
+        let streamed = body.is_none();
+        let body = body.unwrap_or_default();
         let operation = classify_request(route, method, path, query)?;
+        if streamed && (!operation.is_git() || method != Method::POST) {
+            return Err(denied);
+        }
         if body.len() > MAX_REQUEST_BYTES
             || !bounded_headers(&headers)
             || is_websocket_attempt(&headers)
@@ -165,7 +199,7 @@ impl GitHubOAuthAdapter {
         {
             return Err(denied);
         }
-        if !body.is_empty() {
+        if !body.is_empty() || streamed {
             let expected = if operation.is_git() {
                 if operation == GitHubOperation::GitFetch {
                     "application/x-git-upload-pack-request"
@@ -205,7 +239,9 @@ impl GitHubOAuthAdapter {
         let policy = policy(operation, path);
         validate_proxy_route(operation.route_name(), &policy, false, false)
             .map_err(|_| CredentialBrokerError::InvalidProviderPolicy)?;
-        let request = validate_proxy_request(&policy, path, query, method, &headers, body.len())
+        // A streamed body is checked as a non-empty one of unknown length.
+        let body_len = if streamed { 1 } else { body.len() };
+        let request = validate_proxy_request(&policy, path, query, method, &headers, body_len)
             .map_err(|_| denied)?;
         Ok(ValidatedGitHubRequest {
             operation,
@@ -214,6 +250,7 @@ impl GitHubOAuthAdapter {
             method: method.clone(),
             headers,
             body,
+            streamed,
         })
     }
 
@@ -279,9 +316,13 @@ impl GitHubOAuthAdapter {
             );
         }
         let (body, redaction) = prepared.into_body_and_redaction();
+        let mut inner = PreparedOpenAiResponse::from_route_redaction(&request.policy, redaction)?;
+        if request.streamed {
+            inner = inner.without_body_limit();
+        }
         let response = PreparedGitHubResponse {
             operation: request.operation,
-            inner: PreparedOpenAiResponse::from_route_redaction(&request.policy, redaction)?,
+            inner,
         };
         Ok(PreparedGitHubRequest {
             method: request.method,
@@ -301,6 +342,8 @@ pub struct ValidatedGitHubRequest {
     method: Method,
     headers: HeaderMap,
     body: Vec<u8>,
+    /// The body streams separately; its response has no size limit.
+    streamed: bool,
 }
 impl ValidatedGitHubRequest {
     pub fn operation(&self) -> GitHubOperation {

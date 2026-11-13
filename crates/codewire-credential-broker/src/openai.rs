@@ -280,6 +280,13 @@ impl PreparedOpenAiResponse {
         })
     }
 
+    /// The same policy with no response size limit: a streamed GitHub Git
+    /// request's response (#4280), bounded by time instead.
+    pub(crate) fn without_body_limit(mut self) -> Self {
+        self.max_body_bytes = usize::MAX;
+        self
+    }
+
     /// Filter and redact the upstream headers, then consume this policy into a
     /// bounded streaming body redactor.
     pub fn begin(

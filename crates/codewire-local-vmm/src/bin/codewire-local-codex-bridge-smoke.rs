@@ -2065,6 +2065,9 @@ function generalEgress(){
                 match message.payload {
                     Some(Payload::Request(_)) => stage("unexpected-second-request"),
                     Some(Payload::Cancel(_)) => stage("unexpected-request-cancel"),
+                    Some(Payload::RequestBody(_) | Payload::RequestEnd(_)) => {
+                        stage("unexpected-request-body")
+                    }
                     Some(Payload::Ready(_)) => stage("unexpected-second-ready"),
                     Some(Payload::EnvironmentProjection(_)) => stage("unexpected-environment-projection"),
                     Some(Payload::Ssh(_)) => stage("unexpected-ssh-request"),

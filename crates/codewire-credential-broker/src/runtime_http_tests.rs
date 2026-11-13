@@ -10,7 +10,7 @@ use bytes::Bytes;
 use codewire_access::{CredentialMetadata, GrantPermission};
 use zeroize::Zeroizing;
 
-struct Authority {
+pub(super) struct Authority {
     slot: &'static str,
     wrong_slot: bool,
     /// The selected slot's credential needs Reconnect: admission withholds it.
@@ -85,6 +85,19 @@ impl BrokerLeaseProvider for Authority {
     }
     async fn wait_for_active_operations(&self) -> Result<(), BrokerRefreshError> {
         Ok(())
+    }
+}
+
+impl Authority {
+    /// A GitHub OAuth identity that serves every GitHub operation.
+    pub(super) fn github() -> Self {
+        Self {
+            slot: "github",
+            wrong_slot: false,
+            reconnect_required: false,
+            calls: Arc::new(Mutex::new(Vec::new())),
+            reads: Arc::new(AtomicUsize::new(0)),
+        }
     }
 }
 
@@ -196,6 +209,7 @@ fn request(
         headers,
         body: body.to_vec(),
         intercepted_host: String::new(),
+        streamed_body: false,
     }
 }
 
@@ -451,6 +465,7 @@ async fn application_only_none_transport_never_dials_a_provider() {
         target: Url::parse("https://api.openai.com/v1/responses").unwrap(),
         headers: HeaderMap::new(),
         body: vec![],
+        body_stream: None,
     };
     assert_eq!(
         transport.execute(request).await.err(),
@@ -521,11 +536,12 @@ impl BrokerLeaseProvider for AppRefreshAuthority {
         operation: BrokerOperationId,
         route: BrokerRouteId,
     ) -> Result<Self::Lease, BrokerLeaseError> {
-        if slot.as_str() != "github"
-            || operation.as_str() != "rest"
-            || route.as_str() != "github-api"
-            || self.failures.load(Ordering::SeqCst) > 0
-        {
+        let (operation, route) = match (operation.as_str(), route.as_str()) {
+            ("rest", "github-api") => ("rest", "github-api"),
+            ("git-push", "github-https") => ("git-push", "github-https"),
+            _ => return Err(BrokerLeaseError::Denied),
+        };
+        if slot.as_str() != "github" || self.failures.load(Ordering::SeqCst) > 0 {
             return Err(BrokerLeaseError::Denied);
         }
         let state = self
@@ -536,8 +552,8 @@ impl BrokerLeaseProvider for AppRefreshAuthority {
             "github",
             CredentialAuthKind::OAuth,
             "github",
-            "rest",
-            "github-api",
+            operation,
+            route,
         );
         lease.metadata.revocation_generation = state.revocation_generation;
         lease.grant.credential_revocation_generation = state.revocation_generation;
@@ -759,19 +775,45 @@ impl BrokerUpstreamTransport for GitAppUpstream {
         &self,
         request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        let mut request = request;
+        let streamed = request.take_body_stream();
         let (method, target, headers, body) = request.into_parts();
-        if method != Method::GET
-            || target.host_str() != Some("api.github.com")
-            || target.path() != "/user"
-            || !body.is_empty()
-        {
+        let user = method == Method::GET
+            && target.host_str() == Some("api.github.com")
+            && target.path() == "/user"
+            && body.is_empty();
+        // A streamed push is read whole, as a provider would before it answers.
+        let push = method == Method::POST
+            && target.host_str() == Some("github.com")
+            && target.path() == "/owner/repo.git/git-receive-pack";
+        if !(user || push && streamed.is_some()) {
             return Err(BrokerUpstreamError::Protocol);
         }
-        let authorization = headers
+        if let Some(mut streamed) = streamed {
+            while let Some(chunk) = streamed.next().await {
+                chunk.map_err(|_| BrokerUpstreamError::Protocol)?;
+            }
+        }
+        let mut authorization = headers
             .get(http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .ok_or(BrokerUpstreamError::Protocol)?
             .to_owned();
+        // Git authenticates with Basic x-access-token; record it as its token.
+        if push {
+            use base64::Engine as _;
+            let token = authorization
+                .strip_prefix("Basic ")
+                .and_then(|encoded| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(encoded)
+                        .ok()
+                })
+                .and_then(|decoded| String::from_utf8(decoded).ok())
+                .and_then(|decoded| decoded.strip_prefix("x-access-token:").map(str::to_owned))
+                .ok_or(BrokerUpstreamError::Protocol)?;
+            authorization = format!("Bearer {token}");
+        }
         self.authorizations
             .lock()
             .map_err(|_| BrokerUpstreamError::Protocol)?
@@ -1013,6 +1055,67 @@ async fn github_app_early_refresh_does_not_rotate_again_after_a_successor_401() 
     assert_eq!(begins.load(Ordering::SeqCst), 1);
     assert_eq!(starts.load(Ordering::SeqCst), 1);
     assert_eq!(commits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_streamed_github_app_push_answered_401_is_returned_without_a_replay() {
+    // A streamed body is consumed by the first attempt, so a 401 cannot be
+    // retried after a refresh; the client sees it and pushes again (#4280).
+    let authorization_upstream = Arc::new(AppAuthorizationUpstream::new(28_800));
+    let owner = Arc::new(GitHubAppAuthorizationOwner::new(
+        app_authorization_config(),
+        authorization_upstream.clone(),
+    ));
+    let mut import = owner
+        .complete(Zeroizing::new(b"synthetic-code-123".to_vec()))
+        .await
+        .expect("initial App authorization");
+    let (material, _) = import.take_import().expect("protected App import");
+    let begins = Arc::new(AtomicUsize::new(0));
+    let authorizations = Arc::new(Mutex::new(Vec::new()));
+    let broker = OpenAiBroker::new(
+        AppRefreshAuthority {
+            state: Arc::new(Mutex::new(AppRefreshState {
+                material,
+                revocation_generation: 7,
+                material_generation: 2,
+            })),
+            begins: begins.clone(),
+            starts: Arc::new(AtomicUsize::new(0)),
+            commits: Arc::new(AtomicUsize::new(0)),
+            failures: Arc::new(AtomicUsize::new(0)),
+            refuse_commit: false,
+        },
+        GitAppUpstream {
+            authorizations: authorizations.clone(),
+            refreshed_status: StatusCode::OK,
+        },
+    )
+    .expect("broker")
+    .with_github_app_authorization_owner(owner);
+    let mut push = request(
+        "github",
+        "github-https",
+        "POST",
+        "/owner/repo.git/git-receive-pack",
+        b"",
+        "application/x-git-receive-pack-request",
+    );
+    push.streamed_body = true;
+    let body: crate::BrokerRequestBodyStream =
+        Box::pin(futures::stream::iter([Ok(Bytes::from_static(b"0000"))]));
+
+    let response = broker
+        .execute_streamed(push, body)
+        .await
+        .expect("the 401 is returned");
+    assert_eq!(response.into_parts().0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        *authorizations.lock().unwrap(),
+        vec![format!("Bearer {APP_INITIAL_ACCESS_TOKEN}")]
+    );
+    assert_eq!(begins.load(Ordering::SeqCst), 0);
+    assert_eq!(authorization_upstream.refreshes.load(Ordering::SeqCst), 0);
 }
 
 /// A GitHub App broker whose access token is due for renewal, so its first

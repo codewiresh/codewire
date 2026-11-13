@@ -164,6 +164,7 @@ fn http_request(request_id: String) -> v1::CredentialBridgeRequest {
         headers: Vec::new(),
         body: b"{}".to_vec(),
         intercepted_host: String::new(),
+        streamed_body: false,
     }
 }
 
@@ -252,7 +253,7 @@ async fn ssh_http_and_projection_share_ids_and_one_in_flight_budget() {
     let http_id = Uuid::new_v4().to_string();
     let request = http_request(http_id.clone());
     let shared = harness.bridge.clone();
-    let http = tokio::spawn(async move { shared.submit(request).await });
+    let http = tokio::spawn(async move { shared.submit(request, None).await });
     assert!(matches!(
         bounded(harness.output.next())
             .await
@@ -305,7 +306,7 @@ async fn ssh_http_and_projection_share_ids_and_one_in_flight_budget() {
     assert!(
         harness
             .bridge
-            .submit(http_request(first_id.clone()))
+            .submit(http_request(first_id.clone()), None)
             .await
             .is_err()
     );
@@ -339,7 +340,7 @@ async fn ssh_http_and_projection_share_ids_and_one_in_flight_budget() {
     assert!(
         harness
             .bridge
-            .submit(http_request(Uuid::new_v4().to_string()))
+            .submit(http_request(Uuid::new_v4().to_string()), None)
             .await
             .is_err()
     );

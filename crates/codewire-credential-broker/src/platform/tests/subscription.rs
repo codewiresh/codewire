@@ -143,6 +143,7 @@ fn claude_code_request() -> CredentialBridgeRequest {
         ],
         body: br#"{"model":"synthetic","max_tokens":1,"messages":[]}"#.to_vec(),
         intercepted_host: String::new(),
+        streamed_body: false,
     }
 }
 

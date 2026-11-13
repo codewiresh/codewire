@@ -562,9 +562,10 @@ the clone is
 anonymous, which works only for public repositories; its failure says that
 no SSH key or GitHub connection is selected. Private keys/tokens and global Git
 configuration are not written into the workspace. This supports smart Git
-fetch, including bounded gzip negotiation requests; existing limits remain
-4 MiB request bytes and 256 MiB response bytes, with no redirect or LFS support.
-These limits are not a claim that arbitrary-size repositories are supported.
+fetch, including bounded gzip negotiation requests, with no redirect or LFS
+support. The size limits are those of the managed Git route below: none when
+the host streams request bodies, otherwise 4 MiB request bytes and 256 MiB
+response bytes.
 
 A local VM's create applies the same SSH-first rule on the host (#2723). With
 an SSH key in the profile, an SSH source is fetched by the credential
@@ -605,11 +606,37 @@ saved origin, keeps the URL as written, and other hosts are never rewritten.
 On the managed route the broker adds the owner's GitHub login outside the
 workspace and refreshes it when due; over SSH the key stays behind the signer
 socket. No token, credential helper or file is written. `git fetch`, `pull`
-and `push` work within the GitHub App's permissions and the same limits: a
-push whose compressed pack exceeds 4 MiB fails closed. Public repositories
+and `push` work within the GitHub App's permissions. Public repositories
 also go through the owner's login (or the key); when the connection is revoked
 or inactive, GitHub remotes on the managed route fail closed until it is
 reconnected.
+
+Git bodies on the managed route stream (#4280). A Git POST (`git-upload-pack`,
+`git-receive-pack`) sends its body in `CredentialBridgeRequestBody` frames of
+at most 64 KiB, ended by `CredentialBridgeRequestEnd`, when the epoch's host
+lists the `request-body-stream` capability in its Open. The host grants credit
+in frames (`CredentialBridgeRequestCredit`): 16 when the request starts and one
+for each frame it hands to GitHub, so neither side holds more than 1 MiB of a
+body. Such a request has no request or response size limit; time bounds it
+instead. Either side fails it after 60 seconds with no body bytes in either
+direction; the host also fails it when GitHub takes no body frame for 60
+seconds, so a connection that stops reading mid-push, or a push the guest
+cancelled, is not held open. GitHub may take up to 10 minutes to start its response after the
+body is complete (it can be silent while it indexes a large pack), and the
+whole-request 15-minute provider timeout does not apply. Connect timeouts do.
+The local broker and the platform broker list the capability; a
+platform-delegated local broker does not yet, so its guest sends whole bodies.
+Against a host that does not list it, and from a guest that predates it, every
+request carries its whole body: a push whose body exceeds 4 MiB is refused with
+413 and the text "request body exceeds the credential bridge's 4 MiB limit",
+and a response stops at 256 MiB. A streamed push is sent to GitHub once: a 401
+is returned rather than replayed after a GitHub App refresh, though the refresh
+due before sending still runs. A body frame or end the host is not expecting
+(for a whole-body request, an unknown request, after the end, or past the
+credit) ends the epoch as a protocol error; frames for a streamed request that
+already finished or was cancelled are dropped, because they race that answer
+or cancel. The Anthropic and OpenAI routes never stream and
+keep their 4 MiB request limit.
 
 While the SSH key is selected, no connection to github.com trusts a host key
 on first use. Before the workspace starts, `~/.ssh/known_hosts` in the

@@ -4,8 +4,8 @@
 use codewire_daemon_proto::codewire::bridge::v1;
 
 use super::{
-    BrokerHttpResponse, BrokerLeaseProvider, BrokerRequestError, BrokerUpstreamTransport,
-    OpenAiBroker, ValidatedGuestRequest,
+    BrokerHttpResponse, BrokerLeaseProvider, BrokerRequestBodyStream, BrokerRequestError,
+    BrokerUpstreamTransport, OpenAiBroker, ValidatedGuestRequest,
 };
 use crate::bridge::BridgeEntry;
 use crate::network::RouteHost;
@@ -24,17 +24,22 @@ where
         &self,
         request: v1::CredentialBridgeRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
-        self.execute_on(BridgeEntry::FrontDoor, request).await
+        self.execute_on(BridgeEntry::FrontDoor, request, None).await
     }
 
     pub(super) async fn execute_on(
         &self,
         entry: BridgeEntry,
         request: v1::CredentialBridgeRequest,
+        body: Option<BrokerRequestBodyStream>,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
-        let request = ValidatedGuestRequest::parse(entry, request)?;
+        let request = ValidatedGuestRequest::parse(entry, request, body.is_some())?;
         let slot = request.slot.clone();
-        match self.execute_validated(request).await {
+        let result = match body {
+            None => self.execute_validated(request).await,
+            Some(body) => self.execute_github(request, Some(body)).await,
+        };
+        match result {
             Err(BrokerRequestError::ReconnectRequired) => {
                 Ok(crate::reconnect::reconnect_required_response(&slot))
             }

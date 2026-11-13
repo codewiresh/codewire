@@ -62,8 +62,8 @@ pub use openai::{
 pub use runtime::{
     BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest, BrokerHttpResponse,
     BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
-    BrokerRequestError, BrokerResponseBody, BrokerUpstreamError, BrokerUpstreamRequest,
-    BrokerUpstreamResponse, BrokerUpstreamTransport, OpenAiBroker,
+    BrokerRequestBodyStream, BrokerRequestError, BrokerResponseBody, BrokerUpstreamError,
+    BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport, OpenAiBroker,
 };
 #[cfg(feature = "local-broker-synthetic-smoke")]
 pub use runtime::{SyntheticOpenAiSmokeTransport, SyntheticProviderHost};

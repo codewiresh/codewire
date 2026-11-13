@@ -272,14 +272,22 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     // epoch; only the local broker's authority fault ends its epoch, because
     // a refresh owner it holds is released only when its lease channel
     // closes.
+    //
+    // Only this broker's own runner serves streamed Git request bodies
+    // (#4280). A platform-delegated broker relays frames to an authority that
+    // may be older, so it leaves them out and its guest sends whole bodies.
+    let mut capabilities = vec![
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
+    ];
+    if !args.platform_delegated {
+        capabilities.push(codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM);
+    }
     let bridge = daemon
         .open_credential_bridge_with_capabilities(
             environment_uuid,
             args.environment_generation,
-            &[
-                codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
-                codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
-            ],
+            &capabilities,
         )
         .await
         .context("open guest credential bridge")?;

@@ -46,6 +46,7 @@ fn anthropic_request() -> BrokerUpstreamRequest {
         target: Url::parse("https://api.anthropic.com/v1/messages").unwrap(),
         headers: anthropic_headers(),
         body: anthropic_body(true),
+        body_stream: None,
     }
 }
 
@@ -114,6 +115,7 @@ async fn anthropic_exact_routes_filter_real_injection_and_complete_stream_or_cou
                     target,
                     headers,
                     body,
+                    body_stream: None,
                 })
                 .await
                 .unwrap();
@@ -326,6 +328,7 @@ async fn openai_api_retains_real_redaction_with_a_distinct_marker() {
             target,
             headers,
             body,
+            body_stream: None,
         })
         .await
         .unwrap();
@@ -374,6 +377,7 @@ async fn openai_and_chatgpt_route_and_account_negatives_remain_closed() {
                 .unwrap(),
             )]),
             body: br#"{"input":"hello"}"#.to_vec(),
+            body_stream: None,
         };
         if codex {
             request.headers.insert(
@@ -511,6 +515,7 @@ fn exact_api_request(family: &str) -> BrokerUpstreamRequest {
                 (http::header::AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {OPENAI_KEY}")).unwrap()),
             ]),
             body: br#"{"model":"codewire-synthetic","input":"Return the synthetic smoke marker.","stream":true}"#.to_vec(),
+            body_stream: None,
         },
         "anthropic" => anthropic_request(),
         _ => panic!("unknown test family"),
@@ -954,6 +959,7 @@ fn transparent_openai_request(method: Method, target: &str) -> BrokerUpstreamReq
         target: Url::parse(target).unwrap(),
         headers,
         body: Vec::new(),
+        body_stream: None,
     }
 }
 

@@ -127,6 +127,9 @@ message CredentialBridgeHostMessage {
     CredentialBridgeStreamCredit stream_credit = 12;
     CredentialBridgeStreamClose stream_close = 13;
     CredentialBridgeInterceptionHint interception_hint = 14;
+    // Credit for a streamed request body; sent only on an epoch whose Open
+    // lists "request-body-stream".
+    CredentialBridgeRequestCredit request_credit = 15;
   }
 }
 
@@ -151,6 +154,34 @@ message CredentialBridgeRequest {
   // session, which refuses a request that sets it before any credential
   // lease. Nothing sets it yet.
   string intercepted_host = 9;
+  // The body follows as CredentialBridgeRequestBody frames ended by one
+  // CredentialBridgeRequestEnd, and `body` is empty. A guest sets this only
+  // for a GitHub Git POST on an epoch whose Open lists "request-body-stream";
+  // every other request carries its whole body here, at most 4 MiB.
+  bool streamed_body = 10;
+}
+
+// One chunk of a streamed request body, 1 byte to 64 KiB. The guest sends one
+// only while it holds credit: each chunk spends one frame of credit.
+message CredentialBridgeRequestBody {
+  string request_id = 1;
+  bytes data = 2;
+}
+
+// The streamed request body is complete.
+message CredentialBridgeRequestEnd {
+  string request_id = 1;
+}
+
+// Grants the guest this many more CredentialBridgeRequestBody frames for a
+// streamed request. The host grants at most 16 frames (1 MiB) before any is
+// consumed and one more for each it hands upstream, so neither side holds
+// more than 1 MiB of one request's body. Credit counts frames, not bytes, so a
+// client that writes tiny chunks cannot make the host queue many frames. A
+// credit for a request the guest has already finished is ignored.
+message CredentialBridgeRequestCredit {
+  string request_id = 1;
+  uint32 frames = 2;
 }
 
 // A front-door request to upgrade to a WebSocket: the request fields of
@@ -186,6 +217,10 @@ message CredentialBridgeGuestMessage {
     CredentialBridgeStreamData stream_data = 9;
     CredentialBridgeStreamCredit stream_credit = 10;
     CredentialBridgeStreamClose stream_close = 11;
+    // A streamed request's body; sent only on an epoch whose Open lists
+    // "request-body-stream".
+    CredentialBridgeRequestBody request_body = 12;
+    CredentialBridgeRequestEnd request_end = 13;
   }
 }
 

@@ -71,6 +71,7 @@ pub const PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES: usize = 64;
 pub const PLATFORM_CREDENTIAL_BRIDGE_CAPABILITIES: &[&str] = &[
     codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
     codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
+    codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
 ];
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_BUFFER: usize = 32;

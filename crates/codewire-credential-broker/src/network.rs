@@ -30,6 +30,8 @@ const OPENAI_PORT: u16 = 443;
 const OPENAI_BASE_PATH: &str = "/v1/";
 const CHATGPT_CODEX_BASE_PATH: &str = "/backend-api/codex/";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The whole-request bound for a request with a whole body. A streamed GitHub
+/// Git request has none: its bridge bounds it by idle time instead (#4280).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const REFRESH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESOLVED_ADDRESSES: usize = 16;
@@ -157,7 +159,6 @@ fn client_builder(reuse: ConnectionReuse) -> reqwest::ClientBuilder {
         .redirect(Policy::none())
         .referer(false)
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
         .http2_max_header_list_size(MAX_RESPONSE_HEADER_BYTES as u32);
     match reuse {
         ConnectionReuse::PerRequest => builder.pool_max_idle_per_host(0),
@@ -175,22 +176,24 @@ fn client_builder(reuse: ConnectionReuse) -> reqwest::ClientBuilder {
 impl BrokerUpstreamTransport for ProviderHttpsTransport {
     async fn execute(
         &self,
-        request: BrokerUpstreamRequest,
+        mut request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        let body_stream = request.take_body_stream();
         let (method, target, headers, body) = request.into_parts();
         validate_target(&target, &method, &self.selected)?;
         let is_refresh = (target.host_str() == Some(OPENAI_AUTH_HOST)
             && target.path() == OPENAI_TOKEN_PATH)
             || (target.host_str() == Some(CLAUDE_TOKEN_HOST) && target.path() == CLAUDE_TOKEN_PATH);
         let provider_host = provider_host(&target);
-        let mut request = self
+        let request = self
             .client
             .request(method.clone(), target.as_str())
-            .headers(headers)
-            .body(body);
-        if is_refresh {
-            request = request.timeout(REFRESH_REQUEST_TIMEOUT);
-        }
+            .headers(headers);
+        let request = match body_stream {
+            Some(stream) => request.body(reqwest::Body::wrap_stream(stream)),
+            None if is_refresh => request.body(body).timeout(REFRESH_REQUEST_TIMEOUT),
+            None => request.body(body).timeout(REQUEST_TIMEOUT),
+        };
         let response = request.send().await.map_err(|error| {
             // Only fixed classes and an io::ErrorKind name are logged; reqwest
             // and OS error text can carry URLs or peer details.

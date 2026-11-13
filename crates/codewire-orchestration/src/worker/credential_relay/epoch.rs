@@ -1070,6 +1070,8 @@ async fn forward_host(
         Some(Payload::ResponseBody(value)) => sender.send_response_body(value).await,
         Some(Payload::ResponseEnd(value)) => sender.send_response_end(value).await,
         Some(Payload::ResponseFailure(value)) => sender.send_response_failure(value).await,
+        // Listed on the epoch only when the broker serves streamed bodies.
+        Some(Payload::RequestCredit(value)) => sender.send_request_credit(value).await,
         Some(Payload::Ssh(value)) => sender.send_ssh(value).await,
         Some(Payload::EnvironmentProjection(value)) => {
             sender.send_environment_projection(value).await

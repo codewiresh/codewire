@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -23,11 +23,12 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    BrokerHttpResponse, BrokerLeaseProvider, BrokerRequestError, BrokerUpstreamTransport,
-    OpenAiBroker, timing,
+    BrokerHttpResponse, BrokerLeaseProvider, BrokerRequestBodyStream, BrokerRequestError,
+    BrokerUpstreamTransport, OpenAiBroker, timing,
 };
 
 mod relay;
+mod request_body;
 mod ssh;
 
 pub use relay::{
@@ -82,6 +83,43 @@ struct ActiveRequest {
     ssh_cancellation: Option<CancellationToken>,
     /// A sealed login; an epoch runs at most one of each kind at a time.
     login: Option<LoginKind>,
+    /// Where the request's streamed body stands, if it streams.
+    body: BodyLedger,
+}
+
+/// A request's body as the guest's frames see it. Frames are a protocol error
+/// unless the body is still arriving, except for a body the guest cancelled:
+/// frames it sent before the cancel can still be in flight.
+enum BodyLedger {
+    /// The body came whole in the request, or the request is not HTTP.
+    Whole,
+    /// Streamed and still arriving.
+    Flowing(request_body::BodyFeed),
+    /// Streamed and complete.
+    Ended,
+    /// Streamed and cancelled by the guest before its end.
+    Cancelled,
+}
+
+/// Streamed requests that finished recently. Their late frames race the
+/// answer or the cancel, at most a window each, and are dropped quietly; a
+/// frame for any other request this epoch is not serving is a protocol error.
+#[derive(Default)]
+struct FinishedBodies(VecDeque<String>);
+
+impl FinishedBodies {
+    const RETAINED: usize = 2 * CREDENTIAL_BRIDGE_MAX_IN_FLIGHT;
+
+    fn insert(&mut self, request_id: String) {
+        if self.0.len() == Self::RETAINED {
+            self.0.pop_front();
+        }
+        self.0.push_back(request_id);
+    }
+
+    fn contains(&self, request_id: &str) -> bool {
+        self.0.iter().any(|finished| finished == request_id)
+    }
 }
 
 /// Which sealed login a request asks for.
@@ -198,6 +236,16 @@ pub(crate) trait BrokerRequestExecutor: Send + Sync {
         request: v1::CredentialBridgeRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError>;
 
+    /// A request whose body streams (#4280). Only an executor that serves
+    /// streamed GitHub Git bodies overrides this.
+    async fn execute_streamed_request(
+        &self,
+        _request: v1::CredentialBridgeRequest,
+        _body: BrokerRequestBodyStream,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        Err(BrokerRequestError::Denied)
+    }
+
     async fn wait_for_active_operations(&self) -> Result<(), BrokerRequestError> {
         Ok(())
     }
@@ -250,6 +298,14 @@ where
         request: v1::CredentialBridgeRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         self.execute(request).await
+    }
+
+    async fn execute_streamed_request(
+        &self,
+        request: v1::CredentialBridgeRequest,
+        body: BrokerRequestBodyStream,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        self.execute_streamed(request, body).await
     }
 
     async fn wait_for_active_operations(&self) -> Result<(), BrokerRequestError> {
@@ -338,6 +394,9 @@ impl CredentialBridgeResponseSink for CredentialBridgeResponseSender {
             }
             v1::credential_bridge_host_message::Payload::ResponseFailure(response) => {
                 self.send_response_failure(response).await
+            }
+            v1::credential_bridge_host_message::Payload::RequestCredit(credit) => {
+                self.send_request_credit(credit).await
             }
             // No session this sink serves is a front door's.
             v1::credential_bridge_host_message::Payload::Open(_)
@@ -520,6 +579,7 @@ where
     let sender = bridge.response_sink();
     let mut tasks = JoinSet::<(String, u64, Result<(), ()>)>::new();
     let mut active = HashMap::<String, ActiveRequest>::new();
+    let mut finished = FinishedBodies::default();
     let mut next_incarnation = 0_u64;
     loop {
         tokio::select! {
@@ -529,7 +589,9 @@ where
                 };
                 match completed {
                     Ok((request_id, incarnation, Ok(()))) => {
-                        remove_completed_request(&mut active, &request_id, incarnation);
+                        if remove_completed_request(&mut active, &request_id, incarnation) {
+                            finished.insert(request_id);
+                        }
                     }
                     Ok((request_id, incarnation, Err(()))) => {
                         remove_completed_request(&mut active, &request_id, incarnation);
@@ -586,6 +648,7 @@ where
                             incarnation,
                             ssh_cancellation: Some(cancellation),
                             login: None,
+                            body: BodyLedger::Whole,
                         });
                     }
                     Some(v1::credential_bridge_guest_message::Payload::EnvironmentProjection(request)) => {
@@ -622,7 +685,7 @@ where
                             };
                             (completed_id, incarnation, result)
                         });
-                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, login: None });
+                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, login: None, body: BodyLedger::Whole });
                     }
                     Some(
                         payload @ (v1::credential_bridge_guest_message::Payload::CodexLogin(_)
@@ -672,7 +735,7 @@ where
                             let result = send_login_response(&sender, kind, completed_id.clone(), response).await;
                             (completed_id, incarnation, result)
                         });
-                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, login: Some(kind) });
+                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, login: Some(kind), body: BodyLedger::Whole });
                     }
                     Some(v1::credential_bridge_guest_message::Payload::Request(request)) => {
                         let request_id = request.request_id.clone();
@@ -707,11 +770,17 @@ where
                         let sender = sender.clone();
                         let completed_id = request_id.clone();
                         let response_id = request_id.clone();
+                        let (body, frames) = if request.streamed_body {
+                            let (feed, frames) = request_body::BodyFeed::new();
+                            (BodyLedger::Flowing(feed), Some(frames))
+                        } else {
+                            (BodyLedger::Whole, None)
+                        };
                         let _request_task = tasks.spawn(async move {
-                            let result = serve_request(&*broker, &sender, &response_id, request).await;
+                            let result = serve_request(&*broker, &sender, &response_id, request, frames).await;
                             (completed_id, incarnation, result)
                         });
-                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, login: None });
+                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, login: None, body });
                     }
                     Some(v1::credential_bridge_guest_message::Payload::Cancel(cancel)) => {
                         if !Uuid::parse_str(&cancel.request_id).is_ok_and(|id| {
@@ -720,16 +789,61 @@ where
                             tasks.shutdown().await;
                             return Err(BrokerBridgeError::InvalidProtocol);
                         }
-                        if let Some(cancellation) = active.get(&cancel.request_id)
-                            .and_then(|request| request.ssh_cancellation.as_ref())
-                        {
-                            cancellation.cancel();
+                        if let Some(request) = active.get_mut(&cancel.request_id) {
+                            if let Some(cancellation) = &request.ssh_cancellation {
+                                cancellation.cancel();
+                            }
+                            // A body that stops without its end fails upstream.
+                            if matches!(request.body, BodyLedger::Flowing(_)) {
+                                request.body = BodyLedger::Cancelled;
+                            }
                         }
                         // The caller has already cancelled the guest-facing HTTP
                         // request and deliberately drains late host frames. Keep
                         // this operation and its bounded in-flight slot alive so
                         // cancellation cannot strand an OAuth refresh reservation
                         // or interrupt protected-store staging after rotation.
+                    }
+                    // A streamed body's frames. Those for a body the guest
+                    // cancelled, or for a streamed request that already
+                    // finished, race that cancel or answer and are dropped.
+                    // Any other stray frame is a protocol error, like a frame
+                    // past the credit.
+                    Some(v1::credential_bridge_guest_message::Payload::RequestBody(chunk)) => {
+                        let accepted = match active.get(&chunk.request_id).map(|request| &request.body) {
+                            Some(BodyLedger::Flowing(feed)) => feed.push(chunk.data).is_ok(),
+                            Some(BodyLedger::Cancelled) => true,
+                            Some(BodyLedger::Whole | BodyLedger::Ended) => false,
+                            None => finished.contains(&chunk.request_id),
+                        };
+                        if !accepted {
+                            tasks.shutdown().await;
+                            return Err(BrokerBridgeError::InvalidProtocol);
+                        }
+                    }
+                    Some(v1::credential_bridge_guest_message::Payload::RequestEnd(end)) => {
+                        let accepted = match active.get_mut(&end.request_id) {
+                            Some(request) => match std::mem::replace(&mut request.body, BodyLedger::Ended) {
+                                BodyLedger::Flowing(feed) => {
+                                    feed.end();
+                                    true
+                                }
+                                BodyLedger::Cancelled => {
+                                    request.body = BodyLedger::Cancelled;
+                                    true
+                                }
+                                BodyLedger::Whole => {
+                                    request.body = BodyLedger::Whole;
+                                    false
+                                }
+                                BodyLedger::Ended => false,
+                            },
+                            None => finished.contains(&end.request_id),
+                        };
+                        if !accepted {
+                            tasks.shutdown().await;
+                            return Err(BrokerBridgeError::InvalidProtocol);
+                        }
                     }
                     // A front-door session's frames are unknown frames on
                     // every session this runner serves today.
@@ -883,24 +997,31 @@ async fn send_composition_response<S: CredentialBridgeResponseSink>(
     }
 }
 
+/// Remove a completed request; true when it was a streamed one.
 fn remove_completed_request(
     active: &mut HashMap<String, ActiveRequest>,
     request_id: &str,
     incarnation: u64,
-) {
+) -> bool {
     if active
         .get(request_id)
         .is_some_and(|active| active.incarnation == incarnation)
     {
-        active.remove(request_id);
+        return active
+            .remove(request_id)
+            .is_some_and(|request| !matches!(request.body, BodyLedger::Whole));
     }
+    false
 }
 
+/// Answer one HTTP request. With `frames`, its body streams and the response
+/// is bounded by idle time rather than size.
 async fn serve_request<E, S>(
     broker: &E,
     sender: &S,
     request_id: &str,
     request: v1::CredentialBridgeRequest,
+    frames: Option<request_body::BodyFrames>,
 ) -> Result<(), ()>
 where
     E: BrokerRequestExecutor,
@@ -908,7 +1029,16 @@ where
 {
     let slot = timing::slot_label(&request.capability_slot);
     let route = timing::route_label(&request.route);
-    let (response, timings) = timing::measure(broker.execute_request(request)).await;
+    let idle = request_body::response_idle(frames.is_some());
+    let execute = async {
+        match frames {
+            None => broker.execute_request(request).await,
+            Some(frames) => {
+                request_body::execute(broker, sender, request_id, request, frames).await
+            }
+        }
+    };
+    let (response, timings) = timing::measure(execute).await;
     timing::proxied_request(request_id, slot, route, &response, &timings);
     let response = match response {
         Ok(response) => response,
@@ -929,10 +1059,17 @@ where
         ))
         .await
         .map_err(|_| ())?;
-    while let Some(chunk) = body.next().await {
-        let chunk = match chunk {
-            Ok(chunk) => chunk,
-            Err(error) => {
+    loop {
+        let next = match idle {
+            None => body.next().await,
+            Some(idle) => tokio::time::timeout(idle, body.next())
+                .await
+                .unwrap_or(Some(Err(BrokerRequestError::UpstreamFailed))),
+        };
+        let chunk = match next {
+            None => break,
+            Some(Ok(chunk)) => chunk,
+            Some(Err(error)) => {
                 return finish_with_failure(sender, request_id.to_owned(), error).await;
             }
         };
@@ -1195,6 +1332,7 @@ pub(crate) mod tests {
                     headers: Vec::new(),
                     body: Vec::new(),
                     intercepted_host: String::new(),
+                    streamed_body: false,
                 },
             )),
         }
@@ -1605,6 +1743,7 @@ pub(crate) mod tests {
                 incarnation: 2,
                 ssh_cancellation: None,
                 login: None,
+                body: BodyLedger::Whole,
             },
         )]);
         remove_completed_request(&mut active, "request", 1);

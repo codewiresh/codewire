@@ -1832,6 +1832,7 @@ mod tests {
                 headers,
                 body: serde_json::to_vec(&body).unwrap(),
                 intercepted_host: String::new(),
+                streamed_body: false,
             }
         }
 

@@ -4,6 +4,7 @@ mod budgets;
 mod front_door;
 mod relay;
 mod ssh_deadlines;
+mod streamed_push;
 
 use super::*;
 use crate::worker::credential_relay::budget::Limits;
@@ -616,6 +617,82 @@ async fn broker_capabilities_reach_the_open_and_login_frames_relay_opaquely() {
         drop((input, output, daemon));
         fixture.stop().await;
     }
+}
+
+/// A streamed request body (#4280): the broker's listing reaches the Open, the
+/// guest's body and end frames reach the broker, and its credit reaches the
+/// daemon, all unchanged.
+#[tokio::test]
+async fn streamed_request_body_frames_and_credit_relay_unchanged() {
+    let mut fixture = Fixture::new().await;
+    *fixture.broker_capabilities.lock().unwrap() = vec!["request-body-stream"];
+    let (cancel, task) = fixture.epoch();
+    let mut daemon = bounded(fixture.daemon_calls.recv()).await.unwrap();
+    let BrokerCall {
+        mut input,
+        output,
+        accept,
+        ..
+    } = bounded(fixture.broker_calls.recv()).await.unwrap();
+    accept.send(Ok(())).unwrap();
+    let Some(v1::credential_bridge_host_message::Payload::Open(open)) =
+        bounded(daemon.input.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .payload
+    else {
+        panic!("Open must follow broker admission");
+    };
+    assert_eq!(open.capabilities, ["request-body-stream"]);
+    let request_id = Uuid::new_v4().to_string();
+    for payload in [
+        v1::credential_bridge_guest_message::Payload::RequestBody(
+            v1::CredentialBridgeRequestBody {
+                request_id: request_id.clone(),
+                data: vec![7; 64 * 1024],
+            },
+        ),
+        v1::credential_bridge_guest_message::Payload::RequestEnd(v1::CredentialBridgeRequestEnd {
+            request_id: request_id.clone(),
+        }),
+    ] {
+        daemon
+            .output
+            .send(Ok(v1::CredentialBridgeGuestMessage {
+                payload: Some(payload.clone()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            bounded(input.message()).await.unwrap().unwrap().payload,
+            Some(payload)
+        );
+    }
+    let credit = v1::credential_bridge_host_message::Payload::RequestCredit(
+        v1::CredentialBridgeRequestCredit {
+            request_id,
+            frames: 16,
+        },
+    );
+    output
+        .send(Ok(v1::CredentialBridgeHostMessage {
+            payload: Some(credit.clone()),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        bounded(daemon.input.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .payload,
+        Some(credit)
+    );
+    cancel.cancel();
+    bounded(task).await.unwrap().unwrap();
+    drop((input, output, daemon));
+    fixture.stop().await;
 }
 
 #[test]

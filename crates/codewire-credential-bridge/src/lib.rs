@@ -48,7 +48,9 @@ pub use login::{LOGIN_REQUEST_LIFETIME, LoginFailure};
 use login::{LoginCapabilities, PendingLogin, fail_logins, take_logins};
 mod projection;
 pub use projection::RelayedEnvironmentProjection;
+mod request_body;
 use projection::{PendingProjection, fail_projections, take_projections};
+use request_body::{RequestCredit, StartFailure};
 mod ssh;
 use ssh::{PendingSsh, fail_ssh, take_ssh};
 mod ssh_ingress;
@@ -214,12 +216,19 @@ struct ActiveHost {
     cancel: oneshot::Sender<()>,
     /// The logins the host's Open listed for this epoch.
     logins: LoginCapabilities,
+    /// Whether the host's Open listed streamed request bodies.
+    streams_request_body: bool,
 }
 
 struct PendingResponse {
     epoch: u64,
     phase: ResponsePhase,
     received_bytes: usize,
+    /// The cumulative response bytes accepted: unlimited for a request whose
+    /// body streamed, whose host serves any size.
+    response_limit: usize,
+    /// The host's request body credit, for a request whose body streams.
+    credit: Option<RequestCredit>,
     start: Option<oneshot::Sender<Result<ResponseStart, BridgeFailure>>>,
     body: mpsc::Sender<ResponseBodyItem>,
     completed: Arc<AtomicBool>,
@@ -243,6 +252,10 @@ enum BridgeFailure {
     Unavailable,
     Upstream,
     TooLarge,
+    /// A streamed body did not reach the host whole.
+    Upload(request_body::UploadFailure),
+    /// A streamed request's response did not start in time.
+    TimedOut,
 }
 
 /// Inactive connection. Creating or dropping this value never replaces the
@@ -280,6 +293,18 @@ struct BridgeBodyStream {
     cancellation: PendingCancellation,
     completed: Arc<AtomicBool>,
     failure_emitted: bool,
+    /// The rest of a streamed request body whose response started first.
+    _upload: Option<UploadTask>,
+}
+
+/// A streamed body still being sent after its response started. A reader
+/// that leaves stops it: the host no longer needs the body.
+struct UploadTask(tokio::task::JoinHandle<()>);
+
+impl Drop for UploadTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 struct PendingCancellation {
@@ -381,9 +406,13 @@ impl CredentialBridge {
     /// Authentication, endpoint authority validation and removal of identity
     /// headers belong to the ingress adapter, before this method. The broker
     /// remains the final operation, policy and credential-lease authority.
+    ///
+    /// A GitHub Git POST streams its body when the active epoch's host lists
+    /// streamed request bodies; otherwise its whole body, at most 4 MiB, goes
+    /// in the request frame and a larger one is refused with 413.
     pub async fn respond(&self, request: Request<Body>) -> Response<Body> {
-        match prepare_guest_request(request).await {
-            Ok(request) => match self.submit(request).await {
+        match self.prepare_guest_request(request).await {
+            Ok((request, body)) => match self.submit(request, body).await {
                 Ok(response) => {
                     let mut built = Response::builder().status(response.start.status);
                     if let Some(headers) = built.headers_mut() {
@@ -395,7 +424,8 @@ impl CredentialBridge {
                 }
                 Err(error) => fixed_response(error.status()),
             },
-            Err(status) => fixed_response(status),
+            Err(BodyRefusal::Status(status)) => fixed_response(status),
+            Err(BodyRefusal::TooLarge) => too_large_response(),
         }
     }
 
@@ -444,6 +474,7 @@ impl CredentialBridge {
                 }
                 Ok(())
             }
+            Some(Payload::RequestCredit(credit)) => self.apply_request_credit(epoch, credit).await,
             Some(Payload::ResponseBody(response)) => {
                 if response.data.is_empty()
                     || response.data.len() > CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES
@@ -463,7 +494,7 @@ impl CredentialBridge {
                     pending.received_bytes = pending
                         .received_bytes
                         .checked_add(response.data.len())
-                        .filter(|bytes| *bytes <= CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES)
+                        .filter(|bytes| *bytes <= pending.response_limit)
                         .ok_or_else(|| {
                             Status::resource_exhausted(
                                 "credential bridge response exceeded its byte limit",
@@ -574,17 +605,27 @@ impl CredentialBridge {
         lost.fail();
     }
 
+    /// Send one request. With `body`, the request streams it and must be on
+    /// an epoch whose host lists streamed request bodies.
     async fn submit(
         &self,
-        request: v1::CredentialBridgeRequest,
+        mut request: v1::CredentialBridgeRequest,
+        body: Option<Body>,
     ) -> Result<BridgeHttpResponse, BridgeFailure> {
         let request_id = request.request_id.clone();
         let (start_tx, start_rx) = oneshot::channel();
         let (body_tx, body_rx) = mpsc::channel(RESPONSE_BODY_BUFFER);
         let completed = Arc::new(AtomicBool::new(false));
+        let streamed = body.is_some();
+        let credit = streamed.then(RequestCredit::new);
+        request.streamed_body = streamed;
         let (epoch, output) = {
             let mut state = self.inner.lock().await;
             let active = state.active.as_ref().ok_or(BridgeFailure::Unavailable)?;
+            // The epoch was replaced by one whose host cannot take the body.
+            if body.is_some() && !active.streams_request_body {
+                return Err(BridgeFailure::Unavailable);
+            }
             if state.in_flight() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
                 return Err(BridgeFailure::Unavailable);
             }
@@ -599,6 +640,12 @@ impl CredentialBridge {
                     epoch,
                     phase: ResponsePhase::AwaitingStart,
                     received_bytes: 0,
+                    response_limit: if streamed {
+                        usize::MAX
+                    } else {
+                        CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES
+                    },
+                    credit: credit.clone(),
                     start: Some(start_tx),
                     body: body_tx,
                     completed: Arc::clone(&completed),
@@ -620,15 +667,46 @@ impl CredentialBridge {
             return Err(BridgeFailure::Unavailable);
         }
 
-        let start = match tokio::time::timeout(FIRST_RESPONSE_TIMEOUT, start_rx).await {
-            Ok(Ok(Ok(start))) => start,
-            Ok(Ok(Err(error))) => return Err(error),
-            Ok(Err(_)) | Err(_) => {
+        let started = match (body, credit) {
+            (Some(body), Some(credit)) => {
+                let upload = Box::pin(request_body::upload(
+                    body,
+                    output,
+                    credit,
+                    request_id.clone(),
+                ));
+                request_body::await_start(upload, start_rx).await
+            }
+            _ => tokio::time::timeout(FIRST_RESPONSE_TIMEOUT, start_rx)
+                .await
+                .map(|started| (started, None))
+                .map_err(|_| StartFailure::TimedOut),
+        };
+        let (start, rest) = match started {
+            Ok((Ok(Ok(start)), rest)) => (start, rest),
+            Ok((Ok(Err(error)), _)) => return Err(error),
+            Ok((Err(_), _)) | Err(_) => {
                 self.cancel(&request_id, epoch).await;
                 cancellation.disarm();
-                return Err(BridgeFailure::Unavailable);
+                return Err(match started {
+                    Err(StartFailure::Upload(failure)) => BridgeFailure::Upload(failure),
+                    Err(StartFailure::TimedOut) if streamed => BridgeFailure::TimedOut,
+                    _ => BridgeFailure::Unavailable,
+                });
             }
         };
+        // The host answered before the body was complete: its provider is
+        // still reading, so the rest of the body keeps flowing while the
+        // response streams. A body that fails now fails the response.
+        let upload = rest.map(|rest| {
+            let bridge = self.clone();
+            let request_id = request_id.clone();
+            UploadTask(tokio::spawn(async move {
+                if rest.await.is_err() {
+                    bridge.abandon(&request_id, epoch).await;
+                }
+            }))
+        });
         Ok(BridgeHttpResponse {
             start,
             body: BridgeBodyStream {
@@ -636,8 +714,72 @@ impl CredentialBridge {
                 cancellation,
                 completed,
                 failure_emitted: false,
+                _upload: upload,
             },
         })
+    }
+
+    /// Whether the active epoch's host takes streamed request bodies.
+    async fn streams_request_body(&self) -> bool {
+        self.inner
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .is_some_and(|active| active.streams_request_body)
+    }
+
+    /// Credit for a streamed request body. A credit for a request this side
+    /// already finished is ignored: the host grants as it consumes, which can
+    /// cross the request's end.
+    async fn apply_request_credit(
+        &self,
+        epoch: u64,
+        credit: v1::CredentialBridgeRequestCredit,
+    ) -> Result<(), Status> {
+        let state = self.inner.lock().await;
+        require_live_epoch(&state, epoch)?;
+        let Some(pending) = state.pending.get(&credit.request_id) else {
+            return Ok(());
+        };
+        match &pending.credit {
+            Some(granted) if pending.epoch == epoch => granted
+                .grant(credit.frames)
+                .map_err(|()| invalid_host_frame()),
+            _ => Err(invalid_host_frame()),
+        }
+    }
+
+    /// The request frame and, when it streams, the body to stream. Only the
+    /// headers are read here; a whole body is collected up to 4 MiB.
+    async fn prepare_guest_request(
+        &self,
+        request: Request<Body>,
+    ) -> Result<(v1::CredentialBridgeRequest, Option<Body>), BodyRefusal> {
+        let classified = classify_http_request(request.method(), request.uri(), request.headers())?;
+        let streams = request_body::streamable(classified.route, request.method())
+            && self.streams_request_body().await;
+        let mut frame = v1::CredentialBridgeRequest {
+            capability_slot: classified.capability_slot.to_owned(),
+            route: classified.route.to_owned(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            method: request.method().as_str().to_owned(),
+            path: classified.path.to_owned(),
+            query: classified.query.unwrap_or_default().to_owned(),
+            headers: headers_to_proto(request.headers()).map_err(|_| StatusCode::BAD_REQUEST)?,
+            body: Vec::new(),
+            // Only a front-door session names the host it intercepted.
+            intercepted_host: String::new(),
+            streamed_body: false,
+        };
+        if streams {
+            return Ok((frame, Some(request.into_body())));
+        }
+        frame.body = to_bytes(request.into_body(), CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES)
+            .await
+            .map_err(|_| BodyRefusal::TooLarge)?
+            .to_vec();
+        Ok((frame, None))
     }
 
     /// Stop one streaming response whose reader stopped accepting or left.
@@ -755,6 +897,7 @@ impl PreparedBridgeConnection {
             return Err(invalid_host_frame());
         }
         let logins = LoginCapabilities::from_open(capabilities);
+        let streams_request_body = request_body::listed(capabilities);
         let (cancel, cancelled) = oneshot::channel();
         let mut draining = None;
         let (epoch, closed, lost) = {
@@ -779,6 +922,7 @@ impl PreparedBridgeConnection {
                 output: self.output.clone(),
                 cancel,
                 logins,
+                streams_request_body,
             });
             match (replacement, replaced) {
                 (EpochReplacement::Drain, Some(replaced)) => {
@@ -914,33 +1058,6 @@ impl Stream for CredentialBridgeOutput {
     }
 }
 
-async fn prepare_guest_request(
-    request: Request<Body>,
-) -> Result<v1::CredentialBridgeRequest, StatusCode> {
-    let classified = classify_http_request(request.method(), request.uri(), request.headers())?;
-    let capability_slot = classified.capability_slot.to_owned();
-    let route = classified.route.to_owned();
-    let path = classified.path.to_owned();
-    let query = classified.query.unwrap_or_default().to_owned();
-    let method = request.method().as_str().to_owned();
-    let headers = headers_to_proto(request.headers()).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let body = to_bytes(request.into_body(), CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES)
-        .await
-        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
-    Ok(v1::CredentialBridgeRequest {
-        capability_slot,
-        route,
-        request_id: uuid::Uuid::new_v4().to_string(),
-        method,
-        path,
-        query,
-        headers,
-        body: body.to_vec(),
-        // Only a front-door session names the host it intercepted.
-        intercepted_host: String::new(),
-    })
-}
-
 fn headers_to_proto(headers: &HeaderMap) -> Result<Vec<v1::CredentialHttpHeader>, ()> {
     if headers.len() > CREDENTIAL_BRIDGE_MAX_HEADERS {
         return Err(());
@@ -1014,6 +1131,30 @@ fn fixed_response(status: StatusCode) -> Response<Body> {
         .status(status)
         .header("content-type", "text/plain; charset=utf-8")
         .body(Body::from("credential route unavailable\n"))
+        .expect("fixed credential response is valid")
+}
+
+/// Why a request was answered before it reached the host.
+enum BodyRefusal {
+    Status(StatusCode),
+    /// A whole body over 4 MiB, on an epoch whose host cannot stream it.
+    TooLarge,
+}
+
+impl From<StatusCode> for BodyRefusal {
+    fn from(status: StatusCode) -> Self {
+        Self::Status(status)
+    }
+}
+
+/// 413 that says why: Git prints this text with the status.
+fn too_large_response() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::PAYLOAD_TOO_LARGE)
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(Body::from(
+            "request body exceeds the credential bridge's 4 MiB limit: this host does not stream request bodies\n",
+        ))
         .expect("fixed credential response is valid")
 }
 
@@ -1113,6 +1254,8 @@ impl BridgeFailure {
             Self::Denied => StatusCode::FORBIDDEN,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Upstream | Self::TooLarge => StatusCode::BAD_GATEWAY,
+            Self::Upload(failure) => failure.status(),
+            Self::TimedOut => StatusCode::GATEWAY_TIMEOUT,
         }
     }
 }

@@ -1416,6 +1416,16 @@ impl CredentialBridgeResponseSender {
             .await
     }
 
+    /// Credit for a streamed request body; sent only on an epoch whose Open
+    /// lists streamed request bodies.
+    pub async fn send_request_credit(
+        &self,
+        credit: bridge_v1::CredentialBridgeRequestCredit,
+    ) -> Result<(), SessionClientError> {
+        self.send(bridge_v1::credential_bridge_host_message::Payload::RequestCredit(credit))
+            .await
+    }
+
     /// Forward a response already correlated and validated by the shared
     /// credential bridge. This transport repeats bounded shape validation;
     /// only the shared bridge owns the pending request's operation and may

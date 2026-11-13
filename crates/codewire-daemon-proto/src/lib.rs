@@ -224,8 +224,24 @@ pub fn platform_listeners(daemon_port: Option<u16>) -> PlatformListeners {
         .chain(daemon_port.map(|port| (port, "the workspace daemon")))
         .collect()
 }
+/// The whole body a request carries in one `CredentialBridgeRequest`. A
+/// streamed request body (see [`CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM`])
+/// has no size limit; it is bounded by time and by credit instead.
 pub const CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+/// The cumulative response body a guest accepts for a request whose body was
+/// not streamed. A streamed request's response has no size limit.
 pub const CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
+/// The request body frames a host lets a guest send ahead of its consumer:
+/// with [`CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES`] per frame, at most 1 MiB.
+pub const CREDENTIAL_BRIDGE_REQUEST_BODY_WINDOW_FRAMES: u32 = 16;
+/// While a streamed request's body, or its response body, flows, either side
+/// fails the request after this long with no bytes.
+pub const CREDENTIAL_BRIDGE_BODY_IDLE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+/// After a streamed request's body is complete, how long the host waits for the
+/// first response byte. GitHub can be silent while it indexes a large pack.
+pub const CREDENTIAL_BRIDGE_STREAMED_FIRST_RESPONSE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
 pub const CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES: usize = 64 * 1024;
 pub const CREDENTIAL_BRIDGE_MAX_HEADERS: usize = 64;
 pub const CREDENTIAL_BRIDGE_MAX_HEADER_NAME_BYTES: usize = 128;
@@ -247,11 +263,18 @@ pub const CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER: &str = "x-codewire-credential-bri
 pub const CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN: &str = "codex-login";
 /// The broker serves `ClaudeLoginRequest` on this epoch, under the same rule.
 pub const CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN: &str = "claude-login";
+/// The host accepts a GitHub Git request whose body streams in
+/// `CredentialBridgeRequestBody` frames under `CredentialBridgeRequestCredit`,
+/// with no request or response size limit. Without it a guest sends the whole
+/// body in one request, at most [`CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES`], and
+/// accepts at most [`CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES`] back.
+pub const CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM: &str = "request-body-stream";
 /// Every optional operation a current host may list. Unknown values are
 /// ignored by the relay; an Open is bounded to this many entries.
 pub const CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES: &[&str] = &[
     CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
     CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
+    CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
 ];
 /// The session is a front door's: a TLS front door outside the environment
 /// speaking the guest side of the bridge, whose requests carry their
@@ -549,6 +572,7 @@ mod tests {
         for capability in [
             CREDENTIAL_BRIDGE_CAPABILITY_CODEX_LOGIN,
             CREDENTIAL_BRIDGE_CAPABILITY_CLAUDE_LOGIN,
+            CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
         ] {
             assert!(valid_credential_bridge_capability(capability));
             assert!(CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES.contains(&capability));
@@ -557,6 +581,12 @@ mod tests {
             assert!(valid_credential_bridge_capability(known));
         }
         assert!(CREDENTIAL_BRIDGE_KNOWN_CAPABILITIES.len() <= CREDENTIAL_BRIDGE_MAX_CAPABILITIES);
+        // A full window of the largest chunks is the 1 MiB in-flight bound.
+        assert_eq!(
+            CREDENTIAL_BRIDGE_REQUEST_BODY_WINDOW_FRAMES as usize
+                * CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES,
+            1024 * 1024
+        );
         let too_long = "a".repeat(CREDENTIAL_BRIDGE_MAX_CAPABILITY_BYTES + 1);
         for invalid in [
             "",
@@ -821,6 +851,7 @@ mod tests {
             capability_slot: "codex".to_owned(),
             route: "openai-api".to_owned(),
             intercepted_host: String::new(),
+            streamed_body: false,
         };
         let previous_request = previous::Request {
             request_id: request.request_id.clone(),
