@@ -2,6 +2,7 @@
 """Credential-free execution of the real isolated stock-gh workload boundary."""
 
 from pathlib import Path
+import contextlib
 import os
 import re
 import socket
@@ -17,6 +18,27 @@ SOURCE = (ROOT / "dev/provider-github-workload.py").read_text()
 PUBLIC_ERROR = re.compile(
     rb"\ACW_LIVE_GITHUB_ERROR:(?:preflight|binary|socket|account-hint|tmpfs|version|request|response)\n\Z"
 )
+
+
+def process_report(pid):
+    """The state, signal masks and wait channel of a process and its children,
+    for a failure that would otherwise say only that it outlived its bound."""
+    lines = []
+    for each in [pid, *sorted(int(child) for child in
+                              (Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
+                               if Path(f"/proc/{pid}").exists() else []))]:
+        try:
+            status = Path(f"/proc/{each}/status").read_text()
+            wchan = Path(f"/proc/{each}/wchan").read_text()
+            command = Path(f"/proc/{each}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError as error:
+            lines.append(f"{each}: {error}")
+            continue
+        fields = dict(line.split(":\t", 1) for line in status.splitlines() if ":\t" in line)
+        lines.append(f"{each} {command.strip()}: " + ", ".join(
+            f"{key}={fields.get(key, '?').strip()}" for key in
+            ("State", "PPid", "SigPnd", "ShdPnd", "SigBlk", "SigIgn", "SigCgt")) + f", wchan={wchan}")
+    return "\n".join(lines)
 
 
 class WorkloadTests(unittest.TestCase):
@@ -134,14 +156,25 @@ esac
         self.assert_public_failure(self.execute(args=("unsupported",)))
 
     def test_signal_drains_and_removes_private_capture(self):
+        # The wrapper keeps its real 110 s account timeout here, so the signal
+        # is the only thing that can end it. With the fixture's 1 s timeout a
+        # loaded host let that timeout end the wrapper first, and the signal
+        # then met Python's default handler at exit (rc -15).
+        wrapper = self.root / "workload-signal.py"
+        source = self.wrapper.read_text()
+        self.assertEqual(source.count('scratch, "account", 1)'), 1)
+        wrapper.write_text(source.replace('scratch, "account", 1)', 'scratch, "account", 110)'))
         (self.root / "kind").write_text("timeout")
-        child = subprocess.Popen(["/usr/bin/python3", str(self.wrapper)],
+        child = subprocess.Popen(["/usr/bin/python3", str(wrapper)],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
+            # gh creates the file before it writes its pid, so wait for the line.
             deadline = time.monotonic() + 60
-            while not (self.root / "pid").exists() and time.monotonic() < deadline:
+            while time.monotonic() < deadline:
+                with contextlib.suppress(FileNotFoundError):
+                    if (self.root / "pid").read_text().endswith("\n"):
+                        break
                 time.sleep(0.01)
-            self.assertTrue((self.root / "pid").exists())
             pid = int((self.root / "pid").read_text())
             # A wrapper can be reaped while gh is left as an orphan/zombie
             # under a container PID 1. Require direct ownership before cancel.
@@ -150,8 +183,12 @@ esac
             self.assertIsNotNone(parent)
             self.assertEqual(int(parent.group(1)), child.pid)
             child.send_signal(signal.SIGTERM)
-            stdout, stderr = child.communicate(timeout=60)
-            self.assert_public_failure((child.returncode, stdout, stderr))
+            try:
+                stdout, stderr = child.communicate(timeout=60)
+            except subprocess.TimeoutExpired:
+                # Run 45210 saw this once, with no cause yet: name the state.
+                self.fail("the wrapper outlived SIGTERM by 60 s:\n" + process_report(child.pid))
+            self.assertEqual((child.returncode, stdout, stderr), (1, b"", b"CW_LIVE_GITHUB_ERROR:request\n"))
             self.assertEqual(list(self.scratch.iterdir()), [])
             with self.assertRaises(ProcessLookupError):
                 os.kill(int((self.root / "pid").read_text()), 0)
