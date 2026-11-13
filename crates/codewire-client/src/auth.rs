@@ -461,6 +461,13 @@ pub trait CredentialStore: Send + Sync {
     fn load(&self) -> Result<Option<OAuthCredentials>, ClientError>;
     fn save(&self, credentials: &OAuthCredentials) -> Result<(), ClientError>;
     fn delete(&self) -> Result<(), ClientError>;
+
+    /// A file other processes sharing this store lock while they refresh, so
+    /// only one of them exchanges a refresh token and the others adopt the
+    /// pair it saves. A store only one process uses needs none.
+    fn refresh_lock_path(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// File-backed native OAuth credential store. Writes are staged in the target
@@ -539,6 +546,12 @@ impl CredentialStore for FileCredentialStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(_) => Err(credential_error("delete OAuth credentials")),
         }
+    }
+
+    fn refresh_lock_path(&self) -> Option<PathBuf> {
+        let mut name = self.path.file_name()?.to_owned();
+        name.push(".lock");
+        Some(self.path.with_file_name(name))
     }
 }
 
@@ -1026,7 +1039,14 @@ pub struct RefreshingTokenProvider<S = FileCredentialStore> {
     client: OAuthClient,
     store: S,
     credentials: Mutex<OAuthCredentials>,
+    lock_wait: Duration,
 }
+
+/// How long a refresh waits for another process's refresh to finish before
+/// going ahead without the lock: a stuck or suspended process must not stop
+/// every other one from refreshing.
+const REFRESH_LOCK_WAIT: Duration = Duration::from_secs(30);
+const REFRESH_LOCK_POLL: Duration = Duration::from_millis(100);
 
 impl<S: CredentialStore> RefreshingTokenProvider<S> {
     pub fn from_store(client: OAuthClient, store: S) -> Result<Self, ClientError> {
@@ -1043,6 +1063,7 @@ impl<S: CredentialStore> RefreshingTokenProvider<S> {
             client,
             store,
             credentials: Mutex::new(credentials),
+            lock_wait: REFRESH_LOCK_WAIT,
         })
     }
 
@@ -1061,6 +1082,7 @@ impl<S: CredentialStore> RefreshingTokenProvider<S> {
             client,
             store,
             credentials: Mutex::new(credentials),
+            lock_wait: REFRESH_LOCK_WAIT,
         })
     }
 }
@@ -1072,6 +1094,23 @@ impl<S: CredentialStore> TokenProvider for RefreshingTokenProvider<S> {
         if credentials.is_fresh() {
             return credentials.bearer_token();
         }
+        // A refresh token is single-use, and presenting a rotated one is
+        // refused. Another process sharing the store may have refreshed since
+        // this one loaded it: under the store's lock, adopt the pair it saved
+        // and refresh only if that is stale too.
+        let _lock = match self.store.refresh_lock_path() {
+            Some(path) => lock_refresh(&path, self.lock_wait).await?,
+            None => None,
+        };
+        if let Some(stored) = self.store.load()?
+            && stored.issuer == credentials.issuer
+            && stored.refresh_token() != credentials.refresh_token()
+        {
+            *credentials = stored;
+            if credentials.is_fresh() {
+                return credentials.bearer_token();
+            }
+        }
         let refreshed = self
             .client
             .refresh(&credentials)
@@ -1080,6 +1119,32 @@ impl<S: CredentialStore> TokenProvider for RefreshingTokenProvider<S> {
         self.store.save(&refreshed)?;
         *credentials = refreshed;
         credentials.bearer_token()
+    }
+}
+
+/// An exclusive lock on `path`, held until the returned file is dropped, or
+/// `None` once `wait` passes with another process still holding it: the
+/// caller then refreshes without it, as before this lock existed.
+async fn lock_refresh(path: &Path, wait: Duration) -> Result<Option<fs::File>, ClientError> {
+    let file = credential_lock_file(path)?;
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(REFRESH_LOCK_POLL).await;
+            }
+            Err(fs::TryLockError::WouldBlock) => {
+                tracing::warn!(
+                    wait_secs = wait.as_secs(),
+                    "another process kept the OAuth credentials locked; refreshing without the lock"
+                );
+                return Ok(None);
+            }
+            Err(fs::TryLockError::Error(_)) => {
+                return Err(credential_error("lock OAuth credentials for refresh"));
+            }
+        }
     }
 }
 
@@ -1137,6 +1202,8 @@ pub enum AuthClientError {
     Response { message: String },
     #[error("OAuth {code}{description}")]
     OAuth { code: String, description: String },
+    #[error("the OAuth endpoint is busy; try again shortly")]
+    RateLimited,
 }
 
 impl AuthClientError {
@@ -1147,6 +1214,12 @@ impl AuthClientError {
             Self::OAuth { code, .. } => Some(code),
             _ => None,
         }
+    }
+
+    /// The edge refused the request for its rate (HTTP 429 without an OAuth
+    /// error). A poller backs off as it does for `slow_down`.
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(self, Self::RateLimited)
     }
 
     fn into_client_error(self) -> ClientError {
@@ -1168,6 +1241,10 @@ impl AuthClientError {
                 )
             }
             Self::Request(_) => ClientError::new(ErrorCode::Unavailable, "OAuth request failed"),
+            Self::RateLimited => ClientError::new(
+                ErrorCode::Unavailable,
+                "the OAuth endpoint is busy; try again shortly",
+            ),
             Self::Response { .. } | Self::OAuth { .. } => {
                 ClientError::new(ErrorCode::Internal, "OAuth response was invalid")
             }
@@ -1340,6 +1417,9 @@ async fn check_oauth_response(
             code: error.error,
             description,
         });
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(AuthClientError::RateLimited);
     }
     Err(AuthClientError::Response {
         message: format!("OAuth endpoint returned HTTP {status}"),
@@ -1520,6 +1600,27 @@ fn credential_temp_file(path: &Path) -> Result<fs::File, ClientError> {
     options
         .open(path)
         .map_err(|_| credential_error("create temporary OAuth credentials"))
+}
+
+/// Opens (creating if needed) the refresh lock file, private like the
+/// credentials beside it. Its contents are never written.
+fn credential_lock_file(path: &Path) -> Result<fs::File, ClientError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| credential_error("resolve OAuth credential directory"))?;
+    fs::create_dir_all(parent)
+        .map_err(|_| credential_error("create OAuth credential directory"))?;
+    harden_credential_dir(parent)?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .map_err(|_| credential_error("open the OAuth refresh lock"))
 }
 
 #[cfg(unix)]
@@ -1912,6 +2013,124 @@ mod tests {
                     .to_string_lossy()
                     .ends_with(".tmp"))
         );
+    }
+
+    /// Mounts a token endpoint that rotates `old-refresh` exactly once.
+    async fn rotate_once(server: &MockServer) {
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/api/oauth/token"))
+            .and(matchers::body_string_contains("grant_type=refresh_token"))
+            .and(matchers::body_string_contains("refresh_token=old-refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "new-access",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "new-refresh",
+                "scope": CODEWIRE_CLI_OAUTH_SCOPES
+            })))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    /// Two providers over one store, as two `cw` processes, both holding the
+    /// same expired pair in memory.
+    fn two_providers(
+        server: &MockServer,
+        directory: &Path,
+    ) -> (
+        RefreshingTokenProvider<FileCredentialStore>,
+        RefreshingTokenProvider<FileCredentialStore>,
+    ) {
+        let store = FileCredentialStore::new(directory);
+        let credentials = OAuthCredentials::new(
+            server.uri(),
+            CODEWIRE_CLI_OAUTH_CLIENT_ID,
+            "old-access",
+            "old-refresh",
+            0,
+            CODEWIRE_CLI_OAUTH_SCOPES,
+        )
+        .expect("expired credentials");
+        store.save(&credentials).expect("save credentials");
+        let provider = || {
+            RefreshingTokenProvider::from_store(
+                OAuthClient::for_server_url(server.uri()).expect("oauth client"),
+                store.clone(),
+            )
+            .expect("refresh provider")
+        };
+        (provider(), provider())
+    }
+
+    #[tokio::test]
+    async fn a_provider_adopts_the_pair_another_process_refreshed() {
+        let server = MockServer::start().await;
+        rotate_once(&server).await;
+        let directory = tempfile::tempdir().expect("credential directory");
+        let (first, second) = two_providers(&server, directory.path());
+
+        let token = first.token().await.expect("first refresh");
+        assert_eq!(token.expose_secret(), "new-access");
+        // The second still holds the rotated refresh token in memory; it
+        // takes the saved pair instead of presenting that token.
+        let token = second.token().await.expect("adopted pair");
+        assert_eq!(token.expose_secret(), "new-access");
+    }
+
+    #[tokio::test]
+    async fn concurrent_providers_on_one_store_refresh_once() {
+        let server = MockServer::start().await;
+        rotate_once(&server).await;
+        let directory = tempfile::tempdir().expect("credential directory");
+        let (first, second) = two_providers(&server, directory.path());
+
+        let (one, two) = tokio::join!(first.token(), second.token());
+        assert_eq!(one.expect("first token").expose_secret(), "new-access");
+        assert_eq!(two.expect("second token").expose_secret(), "new-access");
+    }
+
+    #[tokio::test]
+    async fn a_held_lock_delays_a_refresh_only_until_its_bounded_wait() {
+        let server = MockServer::start().await;
+        rotate_once(&server).await;
+        let directory = tempfile::tempdir().expect("credential directory");
+        let (mut provider, _) = two_providers(&server, directory.path());
+        provider.lock_wait = Duration::from_millis(300);
+        // A stuck process holds the lock and never releases it.
+        let held = credential_lock_file(
+            &FileCredentialStore::new(directory.path())
+                .refresh_lock_path()
+                .expect("lock path"),
+        )
+        .expect("lock file");
+        held.lock().expect("hold the lock");
+
+        let started = std::time::Instant::now();
+        let token = provider.token().await.expect("refresh without the lock");
+        assert_eq!(token.expose_secret(), "new-access");
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "it did not wait"
+        );
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn an_edge_rate_limit_is_recognised_without_an_oauth_body() {
+        let server = MockServer::start().await;
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/api/oauth/token"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("local_rate_limited"))
+            .mount(&server)
+            .await;
+        let client = OAuthClient::for_server_url(server.uri()).expect("oauth client");
+        let error = client
+            .exchange_device_code("synthetic-device-code")
+            .await
+            .expect_err("rate limited");
+        assert!(error.is_rate_limited(), "{error}");
+        assert_eq!(error.oauth_code(), None);
     }
 
     #[cfg(feature = "desktop-keyring")]

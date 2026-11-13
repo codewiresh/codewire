@@ -610,8 +610,13 @@ pub(crate) async fn login_with_device(
             // Each HTTP poll has its own bounded request budget; this loop's
             // device-code expiry remains the overall authorization deadline.
             Err(error) if error.oauth_code() == Some("authorization_pending") => continue,
-            Err(error) if error.oauth_code() == Some("slow_down") => {
-                interval = interval.saturating_add(Duration::from_secs(5));
+            // The edge's rate limit answers 429 without an OAuth body; back
+            // off as the token endpoint asks with `slow_down`, to at most a
+            // minute between polls.
+            Err(error) if error.oauth_code() == Some("slow_down") || error.is_rate_limited() => {
+                interval = interval
+                    .saturating_add(Duration::from_secs(5))
+                    .min(Duration::from_secs(60));
                 continue;
             }
             Err(error) if error.oauth_code() == Some("access_denied") => {
