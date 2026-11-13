@@ -1,7 +1,7 @@
 ---
 title: codewire.yaml keys
 description: Every key codewire.yaml accepts, with its type and limits.
-updated: 2026-11-11
+updated: 2026-11-12
 weight: 2
 ---
 
@@ -30,6 +30,20 @@ in every file merged with repeated `--file`; see
 | `mounts` | list | local VMs only: `source`, `destination`, `mode: copy|direct`, `read_only` (required for `direct`); a `direct` mount may be `/workspace` itself when it is the only workspace source |
 | `workspace.vm_only` | list | local VMs only: folders kept on the VM disk under a live mount; default `node_modules`, `target`, `.venv` |
 | `workspace.path_mode` | string | local VMs only: `mount`, `copy`, `clone` or `empty`, the default for `--path-mode`, which overrides it; with repositories, `mount` or `clone` |
+
+## How values are read
+
+Codewire reads the file as YAML 1.2. Only `true` and `false` are booleans, so
+`yes`, `no`, `on` and `off` are the words written. In a string, such as an
+`environment` value, numbers stay the text written: `0755`, `1:30` and `8080`.
+
+An `environment` variable needs a value. `~`, `null` or nothing after the colon
+is refused with the variable's name and line; write `"~"` in quotes for a
+literal tilde, or `""` for an empty value. In an override file, `null` still
+removes a key.
+
+Merge keys (`<<`), a key written twice, and tags such as `!include` are
+refused.
 
 Keep secret values, key file paths and store references out of this file:
 `secrets` and `credentials` select sources by name only.

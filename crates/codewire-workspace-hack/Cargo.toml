@@ -18,6 +18,7 @@ publish = false
 ### BEGIN HAKARI SECTION
 [dependencies]
 aead = { version = "0.5.2", features = ["alloc", "getrandom"] }
+anstyle = { version = "1.0.14" }
 axum = { version = "0.8.9", features = ["http2", "macros", "ws"] }
 axum-core = { version = "0.5.6", default-features = false, features = ["tracing"] }
 base16ct = { version = "1.0.0", default-features = false, features = ["alloc"] }
@@ -147,6 +148,7 @@ zeroize = { version = "1.9.0", features = ["aarch64", "serde", "zeroize_derive"]
 
 [build-dependencies]
 aead = { version = "0.5.2", features = ["alloc", "getrandom"] }
+anstyle = { version = "1.0.14" }
 axum = { version = "0.8.9", features = ["http2", "macros", "ws"] }
 axum-core = { version = "0.5.6", default-features = false, features = ["tracing"] }
 base16ct = { version = "1.0.0", default-features = false, features = ["alloc"] }
@@ -295,6 +297,7 @@ num = { version = "0.4.3" }
 proc-macro2 = { version = "1.0.106" }
 quote = { version = "1.0.45" }
 rustix = { version = "1.1.6", default-features = false, features = ["param", "system", "time"] }
+simdutf8 = { version = "0.1.5", default-features = false, features = ["aarch64_neon", "public_imp", "std"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.10", features = ["extra-traits", "fold", "full", "visit-mut"] }
 toml_datetime = { version = "1.1.1", features = ["serde"] }
 toml_parser = { version = "1.1.2" }
@@ -314,6 +317,7 @@ linux-raw-sys = { version = "0.12.1", default-features = false, features = ["aux
 nix = { version = "0.31.3", features = ["ioctl", "mman", "socket", "time", "user"] }
 num = { version = "0.4.3" }
 rustix = { version = "1.1.6", default-features = false, features = ["param", "system", "time"] }
+simdutf8 = { version = "0.1.5", default-features = false, features = ["aarch64_neon", "public_imp", "std"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.10", default-features = false, features = ["fold"] }
 toml_datetime = { version = "1.1.1", features = ["serde"] }
 toml_parser = { version = "1.1.2" }
@@ -329,6 +333,7 @@ hyper-util = { version = "0.1.20", default-features = false, features = ["client
 ipnet = { version = "2.12.0", features = ["serde"] }
 nix = { version = "0.31.3", features = ["mman", "time", "user"] }
 rustix = { version = "1.1.6", default-features = false, features = ["param", "system"] }
+simdutf8 = { version = "0.1.5", default-features = false, features = ["aarch64_neon", "public_imp", "std"] }
 tower = { version = "0.5.3", default-features = false, features = ["timeout"] }
 tower-http = { version = "0.6.11", default-features = false, features = ["follow-redirect"] }
 
@@ -339,6 +344,7 @@ hyper-util = { version = "0.1.20", default-features = false, features = ["client
 ipnet = { version = "2.12.0", features = ["serde"] }
 nix = { version = "0.31.3", features = ["mman", "time", "user"] }
 rustix = { version = "1.1.6", default-features = false, features = ["param", "system"] }
+simdutf8 = { version = "0.1.5", default-features = false, features = ["aarch64_neon", "public_imp", "std"] }
 tower = { version = "0.5.3", default-features = false, features = ["timeout"] }
 tower-http = { version = "0.6.11", default-features = false, features = ["follow-redirect"] }
 

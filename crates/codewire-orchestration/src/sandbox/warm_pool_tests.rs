@@ -584,18 +584,14 @@ fn the_admission_policy_pins_the_renderer() {
     }
     // The policy runs mount-workspace only as its rendered script
     // (codewire#3718): the two must stay byte-for-byte equal.
-    let script = serde_yaml::Deserializer::from_str(&policy)
-        .map(|document| <serde_yaml::Value as serde::Deserialize>::deserialize(document).unwrap())
+    let script = serde_saphyr::from_multiple::<serde_json::Value>(&policy)
+        .unwrap()
+        .into_iter()
         .filter(|document| {
             document["kind"] == "ValidatingAdmissionPolicy"
                 && document["metadata"]["name"] == "codewire-orchestration-warm-pool-template"
         })
-        .flat_map(|document| {
-            document["spec"]["variables"]
-                .as_sequence()
-                .cloned()
-                .unwrap()
-        })
+        .flat_map(|document| document["spec"]["variables"].as_array().cloned().unwrap())
         .find(|variable| variable["name"] == "mountWorkspaceScript")
         .and_then(|variable| variable["expression"].as_str().map(str::to_owned))
         .expect("the policy names mount-workspace's script");

@@ -810,13 +810,13 @@ fn declared_orchestration_origins_match_dashboard_without_overriding_kind() {
     ));
     assert!(main.contains(".unwrap_or_else(|_| \"http://127.0.0.1:5173\".into())"));
     assert!(dashboard_config.contains(".unwrap_or_else(|_| \"http://127.0.0.1:5173\".to_owned())"));
-    fn yaml(text: &str) -> serde_yaml::Value {
+    fn yaml(text: &str) -> serde_json::Value {
         // The first document: a Kind dashboard manifest also holds its Service.
-        serde_yaml::from_str(text.split("\n---\n").next().unwrap()).unwrap()
+        serde_saphyr::from_str(text.split("\n---\n").next().unwrap()).unwrap()
     }
-    fn env(document: &serde_yaml::Value, name: &str) -> String {
+    fn env(document: &serde_json::Value, name: &str) -> String {
         document["spec"]["template"]["spec"]["containers"][0]["env"]
-            .as_sequence()
+            .as_array()
             .unwrap()
             .iter()
             .find(|entry| entry["name"].as_str() == Some(name))

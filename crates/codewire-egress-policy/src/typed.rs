@@ -588,7 +588,12 @@ mod tests {
             .unwrap()
         }))
         .unwrap();
-        assert!(serde_yaml::to_string(&widest.to_document()).unwrap().len() < 256 * 1024);
+        assert!(
+            serde_saphyr::to_string(&widest.to_document())
+                .unwrap()
+                .len()
+                < 256 * 1024
+        );
         widest.compile();
     }
 
@@ -676,7 +681,7 @@ mod tests {
         let typed = sample();
         let document = typed.to_document();
         assert_eq!(TypedPolicy::from_document(&document).unwrap(), typed);
-        let yaml = serde_yaml::to_string(&document).unwrap();
+        let yaml = serde_saphyr::to_string(&document).unwrap();
         let reparsed = PolicyDocument::parse_yaml(yaml.as_bytes()).unwrap();
         assert_eq!(
             TypedPolicy::from_document(reparsed.canonical_document()).unwrap(),

@@ -13,7 +13,9 @@ const COMMENTED_HEADER: &str =
     "# A Codewire environment.\n#\n# Resources suit a full build.\nversion: 1\nimage: workspace\n";
 
 /// A document error's whole printed text and its line and column. The text is
-/// not also the error's source, so printing the chain shows it once.
+/// not also the error's source, so printing the chain shows it once. Since
+/// #4278 the text is serde-saphyr's, with the key path in front: a value error
+/// points at its key's line and column, "at line L, column C".
 fn document_error(yaml: &str) -> (String, usize, usize) {
     let error = parse_project_yaml(yaml).unwrap_err();
     let ProjectError::Yaml(parser) = &error else {
@@ -23,33 +25,33 @@ fn document_error(yaml: &str) -> (String, usize, usize) {
         std::error::Error::source(&error).is_none(),
         "printing the chain would repeat {error}"
     );
-    let location = parser.location().expect("the parser reports a position");
-    (error.to_string(), location.line(), location.column())
+    let (line, column) = parser.position().expect("the parser reports a position");
+    (error.to_string(), line as usize, column as usize)
 }
 
 #[test]
 fn a_bare_number_quantity_names_its_key_position_and_quoted_form() {
-    for (field, value, example, column) in [
-        ("cpu", "8", "\"8\"", 6),
-        ("memory", "16", "\"16Gi\"", 9),
-        ("disk", "100", "\"100Gi\"", 7),
+    for (field, value, example) in [
+        ("cpu", "8", "\"8\""),
+        ("memory", "16", "\"16Gi\""),
+        ("disk", "100", "\"100Gi\""),
     ] {
         let yaml = format!("{COMMENTED_HEADER}{field}: {value}\n");
         assert_eq!(
             document_error(&yaml),
             (
                 format!(
-                    "{field}: invalid type: integer `{value}`, expected a quoted quantity such as {example} at line 6 column {column}"
+                    "{field}: invalid type: integer `{value}`, expected a quoted quantity such as {example} at line 6, column 1"
                 ),
                 6,
-                column
+                1
             )
         );
     }
     let (message, ..) = document_error("cpu: 0.5\n");
     assert_eq!(
         message,
-        "cpu: invalid type: floating point `0.5`, expected a quoted quantity such as \"8\" at line 1 column 6"
+        "cpu: invalid type: floating point `0.5`, expected a quoted quantity such as \"8\" at line 1, column 1"
     );
 }
 
@@ -69,11 +71,11 @@ fn quoted_and_null_quantities_still_parse() {
 fn an_unknown_key_is_named_at_its_own_position() {
     let (message, line, column) = document_error(&format!("{COMMENTED_HEADER}gpu: \"1\"\n"));
     assert!(
-        message.starts_with("unknown field `gpu`, expected one of `version`, `preset`"),
+        message.starts_with("gpu: unknown field `gpu`, expected one of version, preset"),
         "{message}"
     );
     assert!(
-        message.ends_with("`workspace` at line 6 column 1"),
+        message.ends_with("workspace at line 6, column 1"),
         "{message}"
     );
     assert_eq!((line, column), (6, 1));
@@ -83,7 +85,7 @@ fn an_unknown_key_is_named_at_its_own_position() {
             "{COMMENTED_HEADER}agents:\n  tools: [codex]\n  toolz: [codex]\n"
         )),
         (
-            "agents: unknown field `toolz`, expected `install` or `tools` at line 8 column 3"
+            "agents.toolz: unknown field `toolz`, expected one of install, tools at line 8, column 3"
                 .to_owned(),
             8,
             3
@@ -98,7 +100,7 @@ fn a_wrong_type_inside_a_list_names_the_item_path() {
             "{COMMENTED_HEADER}agents:\n  tools:\n    - claude-code\n    - {{name: codex}}\n"
         )),
         (
-            "agents.tools[1]: invalid type: map, expected a string at line 9 column 7".to_owned(),
+            "agents.tools[1]: expected string scalar at line 9, column 7".to_owned(),
             9,
             7
         )
@@ -108,7 +110,7 @@ fn a_wrong_type_inside_a_list_names_the_item_path() {
             "{COMMENTED_HEADER}skills:\n  - source: repository\n    path: a\n  - source: repo\n    path: b\n"
         )),
         (
-            "skills[1].source: unknown variant `repo`, expected `repository` or `user` at line 9 column 13"
+            "skills[1].source: unknown variant `repo`, expected one of repository, user at line 9, column 13"
                 .to_owned(),
             9,
             13
@@ -121,18 +123,19 @@ fn an_environment_type_error_names_the_key_not_the_value() {
     let (message, ..) = document_error("environment:\n  TOKEN: [synthetic-secret-value]\n");
     assert_eq!(
         message,
-        "environment.TOKEN: invalid type: sequence, expected a string at line 2 column 10"
+        "environment.TOKEN: expected string scalar at line 2, column 10"
     );
 }
 
 #[test]
 fn invalid_yaml_syntax_is_reported_once_with_its_position() {
     assert_eq!(
-        document_error(&format!("{COMMENTED_HEADER}memory \"16Gi\"\ndisk: \"100Gi\"\n")),
+        document_error(&format!(
+            "{COMMENTED_HEADER}memory \"16Gi\"\ndisk: \"100Gi\"\n"
+        )),
         (
-            "could not find expected ':' at line 7 column 1, while scanning a simple key at line 6 column 1"
-                .to_owned(),
-            7,
+            "simple key expected ':' at line 6, column 1".to_owned(),
+            6,
             1
         )
     );
@@ -961,4 +964,54 @@ fn a_live_mount_may_be_the_whole_workspace_and_nothing_else() {
     .unwrap_err()
     .to_string();
     assert!(repository.contains("overlaps"), "{repository}");
+}
+
+/// How codewire.yaml is read (#4278), pinned from the differential against
+/// serde_yaml: an environment value is the text written, and a form a YAML 1.1
+/// reader would take differently is kept a string or refused.
+#[test]
+fn environment_values_are_the_text_written_and_yaml_1_1_forms_fail_closed() {
+    let document = parse_project_yaml(
+        "environment:\n  FEATURE: yes\n  DEBUG: off\n  MODE: 0755\n  TIME: 1:30\n  PORT: 8080\n  \
+         RATIO: 1.0\n  TILDE: \"~\"\n  EMPTY: \"\"\n",
+    )
+    .unwrap();
+    let environment = &document.spec.environment;
+    for (key, value) in [
+        ("FEATURE", "yes"),
+        ("DEBUG", "off"),
+        ("MODE", "0755"),
+        ("TIME", "1:30"),
+        ("PORT", "8080"),
+        ("RATIO", "1.0"),
+        ("TILDE", "~"),
+        ("EMPTY", ""),
+    ] {
+        assert_eq!(environment[key], value, "{key}");
+    }
+
+    // serde_yaml read a null as its literal text; it is not a value now, and
+    // the error names the key, its line and how to write a literal tilde.
+    for null in ["~", "null", ""] {
+        let error = parse_project_yaml(&format!("version: 1\nenvironment:\n  EMPTY: {null}\n"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "invalid environment: EMPTY at line 3 has no value; write \"~\" in quotes for a \
+             literal tilde, or \"\" for an empty value",
+            "{null:?}"
+        );
+    }
+
+    for refused in [
+        "image: a\nimage: b\n",
+        "base: &b {A: x}\nenvironment:\n  <<: *b\n",
+        "image: !include other.yaml\n",
+    ] {
+        assert!(
+            matches!(parse_project_yaml(refused), Err(ProjectError::Yaml(_))),
+            "{refused:?} was not refused"
+        );
+    }
 }

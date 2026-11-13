@@ -45,7 +45,7 @@ pub enum PolicyError {
     #[error("egress policy document is {actual} bytes; maximum is {maximum}")]
     DocumentTooLarge { actual: usize, maximum: usize },
     #[error("parse egress policy document: {0}")]
-    Yaml(#[from] serde_yaml::Error),
+    Yaml(#[from] serde_saphyr::Error),
     #[error("unsupported egress policy schema version {0}")]
     UnsupportedSchema(u32),
     #[error("egress policy default action must be deny")]
@@ -128,9 +128,26 @@ impl PolicyDocument {
                 maximum: MAX_POLICY_DOCUMENT_BYTES,
             });
         }
-        let document = serde_yaml::from_slice(bytes)?;
+        let document = serde_saphyr::from_slice_with_options(bytes, yaml_options())?;
         CompiledPolicy::compile(document)
     }
+}
+
+/// How a policy document is read (#4278). It comes from users and is enforced,
+/// so a value a YAML 1.1 reader would take differently is refused or kept a
+/// string: only `true`/`false` are booleans; numbers with a leading zero or an
+/// underscore stay strings; merge keys, duplicate keys and tags other than
+/// YAML's own are refused. `codewire-project` reads codewire.yaml the same way.
+fn yaml_options() -> serde_saphyr::Options {
+    let mut options = serde_saphyr::Options::default();
+    options.strict_booleans = true;
+    options.leading_zero_numbers_as_strings = true;
+    options.underscored_numbers_as_strings = true;
+    options.merge_keys = serde_saphyr::MergeKeyPolicy::Error;
+    options.duplicate_keys = serde_saphyr::DuplicateKeyPolicy::Error;
+    options.reject_unsupported_tags = true;
+    options.with_snippet = false;
+    options
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

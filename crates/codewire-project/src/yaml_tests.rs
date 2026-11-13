@@ -99,7 +99,7 @@ fn keys_follow_the_schema_order_and_omit_empty_values() {
             "workspace",
         ]
     );
-    assert!(yaml.contains("cpu: '2'\n"), "{yaml}");
+    assert!(yaml.contains("cpu: \"2\"\n"), "{yaml}");
     assert!(yaml.contains("memory: 4Gi\n"), "{yaml}");
     assert!(
         yaml.contains("- host_port: 18080\n  guest_port: 8080\n"),
@@ -115,13 +115,19 @@ fn keys_follow_the_schema_order_and_omit_empty_values() {
 
 #[test]
 fn resources_render_in_the_units_people_write() {
-    for (cpu, memory) in [("'2'", "4Gi"), ("1500m", "1536Mi"), ("100m", "128Mi")] {
+    // A whole number of CPUs is written quoted, so it reads back as a
+    // quantity; serde-saphyr quotes with double quotes (#4278).
+    for (cpu, written, memory) in [
+        ("'2'", "\"2\"", "4Gi"),
+        ("1500m", "1500m", "1536Mi"),
+        ("100m", "100m", "128Mi"),
+    ] {
         let yaml = format!("cpu: {cpu}\nmemory: {memory}\ndisk: 1Gi\n");
         let document = parse_project_yaml(&yaml).unwrap();
         let (rendered, parsed) = reparse(&document);
         assert_eq!(parsed.spec.resources, document.spec.resources);
         assert!(
-            rendered.contains(&format!("cpu: {cpu}\nmemory: {memory}\ndisk: 1Gi\n")),
+            rendered.contains(&format!("cpu: {written}\nmemory: {memory}\ndisk: 1Gi\n")),
             "{rendered}"
         );
     }
@@ -190,4 +196,25 @@ fn an_invalid_spec_is_refused_rather_than_written() {
         matches!(error, ProjectError::UnsupportedSchema(_)),
         "{error}"
     );
+}
+
+/// Values that a YAML reader could take for another type are written so they
+/// read back as the same text (#4278).
+#[test]
+fn environment_values_that_look_like_other_types_round_trip() {
+    let mut spec = ProjectSpec::default();
+    for (key, value) in [
+        ("FEATURE", "yes"),
+        ("MODE", "0755"),
+        ("TILDE", "~"),
+        ("TIME", "1:30"),
+        ("FLAG", "true"),
+        ("PORT", "8080"),
+        ("EMPTY", ""),
+    ] {
+        spec.environment.insert(key.to_owned(), value.to_owned());
+    }
+    let document = ProjectDocument::new(spec, LocalProjectIntent::default(), true);
+    let (yaml, parsed) = reparse(&document);
+    assert_eq!(parsed.spec.environment, document.spec.environment, "{yaml}");
 }

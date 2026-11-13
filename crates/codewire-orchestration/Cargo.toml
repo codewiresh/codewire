@@ -77,7 +77,6 @@ async-trait = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
 kube = { workspace = true, features = ["jsonpatch"] }
 futures = { workspace = true }
 hyper-util = { workspace = true }
@@ -130,6 +129,7 @@ zeroize = { workspace = true }
 tokio-tungstenite = { version = "=0.28.0", default-features = false, features = ["connect", "handshake"], optional = true }
 
 [dev-dependencies]
+serde-saphyr = { workspace = true }
 # The real guest bridge behind a synthetic daemon, for the relay's streamed-body proof.
 codewire-credential-bridge = { workspace = true }
 codewire-tls = { workspace = true, features = ["test-support"] }

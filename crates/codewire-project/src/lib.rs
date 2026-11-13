@@ -5,6 +5,7 @@
 //! placement-specific resolution in their own adapters.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -94,7 +95,7 @@ pub enum ProjectError {
     /// It is not also the error's source, so a caller that prints the error
     /// chain (`{:#}`) prints it once.
     #[error("{0}")]
-    Yaml(serde_yaml::Error),
+    Yaml(YamlError),
     #[error("unsupported codewire project schema version {0}")]
     UnsupportedSchema(u32),
     #[error("{field} exceeds the maximum of {maximum} entries")]
@@ -438,7 +439,7 @@ struct RawProject {
     #[serde(default)]
     startup_script: String,
     #[serde(default)]
-    environment: BTreeMap<String, String>,
+    environment: BTreeMap<String, Option<String>>,
     #[serde(default)]
     agents: Option<RawAgentsBlock>,
     #[serde(default)]
@@ -601,6 +602,88 @@ struct RawMountBlock {
     read_only: Option<bool>,
 }
 
+/// A codewire.yaml that is not YAML or not this schema: the whole message,
+/// with the key path, what was expected and the position, and the position on
+/// its own when the text gave one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct YamlError {
+    message: String,
+    position: Option<(u64, u64)>,
+}
+
+impl YamlError {
+    /// The line and column the error points at, both from 1.
+    pub fn position(&self) -> Option<(u64, u64)> {
+        self.position
+    }
+}
+
+impl fmt::Display for YamlError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl From<serde_path_to_error::Error<serde_json::Error>> for YamlError {
+    fn from(error: serde_path_to_error::Error<serde_json::Error>) -> Self {
+        Self {
+            message: error.to_string(),
+            position: None,
+        }
+    }
+}
+
+/// How codewire.yaml is read (#4278). It comes from users, so a value a YAML
+/// 1.1 reader would take differently is refused or kept a string: only
+/// `true`/`false` are booleans; numbers with a leading zero or an underscore
+/// stay strings; merge keys, duplicate keys and tags other than YAML's own are
+/// refused. `codewire-egress-policy` reads policy documents the same way.
+pub(crate) fn yaml_options() -> serde_saphyr::Options {
+    let mut options = serde_saphyr::Options::default();
+    options.strict_booleans = true;
+    options.leading_zero_numbers_as_strings = true;
+    options.underscored_numbers_as_strings = true;
+    options.merge_keys = serde_saphyr::MergeKeyPolicy::Error;
+    options.duplicate_keys = serde_saphyr::DuplicateKeyPolicy::Error;
+    options.reject_unsupported_tags = true;
+    options.with_snippet = false;
+    options
+}
+
+/// `content` read as `T`, with an error naming the key path and position.
+pub(crate) fn read_yaml<T: serde::de::DeserializeOwned>(content: &str) -> Result<T, YamlError> {
+    // A value error stops the read part-way, and the reader then reports the
+    // unread rest as a second document; the value error is the real one.
+    let mut value_error = None;
+    let read = serde_saphyr::with_deserializer_from_str_with_options(
+        content,
+        yaml_options(),
+        |deserializer| match serde_path_to_error::deserialize::<_, T>(deserializer) {
+            Ok(value) => Ok(Some(value)),
+            Err(error) => {
+                value_error = Some(error);
+                Ok(None)
+            }
+        },
+    );
+    let error = match (value_error, read) {
+        (None, Ok(Some(value))) => return Ok(value),
+        (Some(error), _) => {
+            let position = error.inner().location().map(|at| (at.line(), at.column()));
+            (error.to_string(), position)
+        }
+        (None, Err(error)) => {
+            let position = error.location().map(|at| (at.line(), at.column()));
+            (error.to_string(), position)
+        }
+        (None, Ok(None)) => unreachable!("no value is read only with an error"),
+    };
+    Err(YamlError {
+        message: error.0,
+        position: error.1,
+    })
+}
+
 pub fn parse_project_yaml(content: &str) -> Result<ProjectDocument, ProjectError> {
     if content.len() > MAX_PROJECT_DOCUMENT_BYTES {
         return Err(ProjectError::DocumentTooLarge {
@@ -608,8 +691,38 @@ pub fn parse_project_yaml(content: &str) -> Result<ProjectDocument, ProjectError
             maximum: MAX_PROJECT_DOCUMENT_BYTES,
         });
     }
-    let raw: RawProject = serde_yaml::from_str(content).map_err(ProjectError::Yaml)?;
+    let raw: RawProject = read_yaml(content).map_err(ProjectError::Yaml)?;
+    if let Some(key) = raw
+        .environment
+        .iter()
+        .find_map(|(key, value)| value.is_none().then_some(key))
+    {
+        return Err(null_environment_value(content, key));
+    }
     normalize::normalize_raw_project(raw)
+}
+
+/// Where each environment value is written, read only to place an error.
+#[derive(Deserialize)]
+struct EnvironmentPositions {
+    #[serde(default)]
+    environment: BTreeMap<String, serde_saphyr::Spanned<Option<String>>>,
+}
+
+/// A null environment value (`~`, `null` or nothing after the colon) in a
+/// codewire.yaml, named with its line. serde_yaml used to read it as the
+/// literal text, so the error says how to write that on purpose (#4278).
+fn null_environment_value(content: &str, key: &str) -> ProjectError {
+    let line = read_yaml::<EnvironmentPositions>(content)
+        .ok()
+        .and_then(|positions| {
+            positions
+                .environment
+                .get(key)
+                .map(|value| value.referenced.line())
+        })
+        .filter(|line| *line > 0);
+    normalize::null_environment_value(key, line)
 }
 
 pub use normalize::{

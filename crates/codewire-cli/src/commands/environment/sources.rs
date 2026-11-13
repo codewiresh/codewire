@@ -596,7 +596,7 @@ mod tests {
         assert_eq!(
             format!("{error:#}"),
             format!(
-                "parse {}: cpu: invalid type: integer `8`, expected a quoted quantity such as \"8\" at line 3 column 6",
+                "parse {}: cpu: invalid type: integer `8`, expected a quoted quantity such as \"8\" at line 3, column 1",
                 path.display()
             )
         );

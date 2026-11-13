@@ -126,7 +126,16 @@ impl ProjectDocument {
                 }
             }),
         };
-        serde_yaml::to_string(&document).map_err(ProjectError::Yaml)
+        // Long one-line values, such as a pinned image or a known_hosts
+        // line, stay on one line; text with newlines is a literal block.
+        let mut options = serde_saphyr::SerializerOptions::default();
+        options.folded_wrap_chars = usize::MAX;
+        serde_saphyr::to_string_with_options(&document, options).map_err(|error| {
+            ProjectError::Yaml(crate::YamlError {
+                message: error.to_string(),
+                position: None,
+            })
+        })
     }
 }
 

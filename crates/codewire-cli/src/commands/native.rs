@@ -5474,7 +5474,7 @@ mod tests {
         let error = native_codewire_yaml(&root, &source.config).unwrap_err();
         assert!(
             format!("{error:#}").starts_with(&format!(
-                "parse {}: unknown field `cpus`",
+                "parse {}: cpus: unknown field `cpus`",
                 root.join("config/gpu.yaml").display()
             )),
             "{error:#}"

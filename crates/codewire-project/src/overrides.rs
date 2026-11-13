@@ -10,12 +10,11 @@
 
 use std::path::Path;
 
-use serde::Deserialize as _;
-use serde_yaml::{Mapping, Value};
+use serde_json::{Map, Value};
 
 use crate::{
     MAX_PROJECT_DOCUMENT_BYTES, PROJECT_SCHEMA_VERSION, ProjectDocument, ProjectError, RawProject,
-    normalize,
+    YamlError, normalize, read_yaml,
 };
 
 /// One file of a merged configuration, checked on its own.
@@ -30,17 +29,17 @@ impl ProjectYamlFile {
                 maximum: MAX_PROJECT_DOCUMENT_BYTES,
             });
         }
-        let value: Value = serde_yaml::from_str(content).map_err(ProjectError::Yaml)?;
+        let value: Value = read_yaml(content).map_err(ProjectError::Yaml)?;
         // Checked without its nulls, which only remove keys, so `FOO: null`
         // under `environment` is not a wrong value type. A real error is
         // reported from the text, with its line and column in this file.
-        let mut checked = Value::Mapping(Mapping::new());
+        let mut checked = Value::Object(Map::new());
         merge_value(&mut checked, value.clone());
-        let raw = RawProject::deserialize(checked).map_err(|error| {
+        let raw: RawProject = serde_path_to_error::deserialize(checked).map_err(|error| {
             ProjectError::Yaml(
-                serde_yaml::from_str::<RawProject>(content)
+                read_yaml::<RawProject>(content)
                     .err()
-                    .unwrap_or(error),
+                    .unwrap_or_else(|| YamlError::from(error)),
             )
         })?;
         if let Some(version) = raw.version
@@ -55,7 +54,7 @@ impl ProjectYamlFile {
     /// the file that declares it, so a mount means the same folder whichever
     /// file it came from.
     pub fn resolve_mount_sources(&mut self, directory: &Path) -> Result<(), ProjectError> {
-        let Some(Value::Sequence(mounts)) = self.0.get_mut("mounts") else {
+        let Some(Value::Array(mounts)) = self.0.get_mut("mounts") else {
             return Ok(());
         };
         for source in mounts
@@ -85,12 +84,17 @@ impl ProjectYamlFile {
 pub fn merge_project_files(
     files: impl IntoIterator<Item = ProjectYamlFile>,
 ) -> Result<ProjectDocument, ProjectError> {
-    let mut merged = Value::Mapping(Mapping::new());
+    let mut merged = Value::Object(Map::new());
     for ProjectYamlFile(value) in files {
         merge_value(&mut merged, value);
     }
-    let size = serde_yaml::to_string(&merged)
-        .map_err(ProjectError::Yaml)?
+    let size = serde_saphyr::to_string(&merged)
+        .map_err(|error| {
+            ProjectError::Yaml(YamlError {
+                message: error.to_string(),
+                position: None,
+            })
+        })?
         .len();
     if size > MAX_PROJECT_DOCUMENT_BYTES {
         return Err(ProjectError::DocumentTooLarge {
@@ -98,13 +102,14 @@ pub fn merge_project_files(
             maximum: MAX_PROJECT_DOCUMENT_BYTES,
         });
     }
-    let raw = RawProject::deserialize(merged).map_err(ProjectError::Yaml)?;
+    let raw: RawProject = serde_path_to_error::deserialize(merged)
+        .map_err(|error| ProjectError::Yaml(YamlError::from(error)))?;
     normalize::normalize_raw_project(raw)
 }
 
 fn merge_value(base: &mut Value, later: Value) {
     match (base, later) {
-        (Value::Mapping(base), Value::Mapping(later)) => {
+        (Value::Object(base), Value::Object(later)) => {
             for (key, value) in later {
                 if value.is_null() {
                     base.remove(&key);
@@ -114,7 +119,7 @@ fn merge_value(base: &mut Value, later: Value) {
                     // A new mapping is merged into an empty one, so the nulls
                     // inside it remove keys rather than becoming values.
                     let mut fresh = match value {
-                        Value::Mapping(_) => Value::Mapping(Mapping::new()),
+                        Value::Object(_) => Value::Object(Map::new()),
                         _ => Value::Null,
                     };
                     merge_value(&mut fresh, value);

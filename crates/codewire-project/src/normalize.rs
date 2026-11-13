@@ -36,7 +36,7 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
     let secrets = normalize_secrets(raw.secrets)?;
     let credentials = raw.credentials;
     validate_workspace_input_destinations(&repositories, &mounts)?;
-    let environment = normalize_environment("environment", raw.environment)?;
+    let environment = normalize_environment("environment", present_values(raw.environment)?)?;
 
     let document = ProjectDocument {
         spec: ProjectSpec {
@@ -844,6 +844,35 @@ pub fn validate_repository_destinations<'a>(
             .map(|repository| repository.destination)
             .collect()
     })
+}
+
+/// The environment as written, each value a string. A null is not a value;
+/// `parse_project_yaml` reports one with its line before this, and an override
+/// file's nulls remove keys before the merged document gets here.
+fn present_values(
+    environment: BTreeMap<String, Option<String>>,
+) -> Result<BTreeMap<String, String>, ProjectError> {
+    environment
+        .into_iter()
+        .map(|(key, value)| match value {
+            Some(text) => Ok((key, text)),
+            None => Err(null_environment_value(&key, None)),
+        })
+        .collect()
+}
+
+/// `key` has a null value, at `line` when known.
+pub(super) fn null_environment_value(key: &str, line: Option<u64>) -> ProjectError {
+    let at = line
+        .map(|line| format!(" at line {line}"))
+        .unwrap_or_default();
+    ProjectError::InvalidField {
+        field: "environment",
+        detail: format!(
+            "{key}{at} has no value; write \"~\" in quotes for a literal tilde, \
+             or \"\" for an empty value"
+        ),
+    }
 }
 
 fn normalize_environment(

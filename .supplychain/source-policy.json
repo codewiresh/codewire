@@ -41,7 +41,7 @@
       "kind": "osv",
       "advisory_id": "RUSTSEC-2024-0449",
       "package": "unsafe-libyaml",
-      "reason": "Informational unmaintained notice, not a vulnerability. Replace the deprecated serde_yaml integration with a maintained YAML implementation.",
+      "reason": "Informational unmaintained notice, not a vulnerability. Codewire reads YAML with serde-saphyr (#4278); serde_yaml, and unsafe-libyaml through it, remain only through kube-client 3.1's __non_core feature, which kube's client feature enables. Removed with the kube 5.x migration (#4287).",
       "owner": "noel",
       "expires": "2027-02-08"
     },

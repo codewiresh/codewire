@@ -1,6 +1,5 @@
 use super::*;
 use codewire_daemon_proto::CREDENTIAL_RELAY_SERVICE_ACCOUNT;
-use serde::Deserialize;
 
 fn target(environment: u128, pod_uid: &str, generation: u64) -> Target {
     Target {
@@ -168,15 +167,16 @@ fn the_deployment_mounts_the_relay_identity_and_broker_trust() {
         "/../../deployments/k8s/orchestration/deployment.yaml"
     ))
     .expect("orchestration Deployment");
-    let deployment: serde_yaml::Value = serde_yaml::Deserializer::from_str(&manifest)
-        .map(|document| serde_yaml::Value::deserialize(document).unwrap())
+    let deployment: serde_json::Value = serde_saphyr::from_multiple::<serde_json::Value>(&manifest)
+        .unwrap()
+        .into_iter()
         .find(|document| document["kind"] == "Deployment")
         .expect("one Deployment");
     let spec = &deployment["spec"]["template"]["spec"];
     assert_eq!(spec["serviceAccountName"], CREDENTIAL_RELAY_SERVICE_ACCOUNT);
     let volume = |name: &str| {
         spec["volumes"]
-            .as_sequence()
+            .as_array()
             .unwrap()
             .iter()
             .find(|volume| volume["name"] == name)
@@ -185,7 +185,7 @@ fn the_deployment_mounts_the_relay_identity_and_broker_trust() {
     };
     let mount = |name: &str| {
         spec["containers"][0]["volumeMounts"]
-            .as_sequence()
+            .as_array()
             .unwrap()
             .iter()
             .find(|mount| mount["name"] == name)
@@ -193,7 +193,7 @@ fn the_deployment_mounts_the_relay_identity_and_broker_trust() {
             .clone()
     };
     let identity = volume("credential-relay-identity");
-    let sources = identity["projected"]["sources"].as_sequence().unwrap();
+    let sources = identity["projected"]["sources"].as_array().unwrap();
     assert_eq!(sources.len(), 1);
     let token = &sources[0]["serviceAccountToken"];
     assert_eq!(token["audience"], CREDENTIAL_RELAY_TOKEN_AUDIENCE);

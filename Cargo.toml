@@ -270,7 +270,8 @@ tracing-opentelemetry = { version = "=0.34.0", default-features = false }
 jsonwebtoken = "9"
 
 # Config & misc
-serde_yaml = "0.9"
+serde-saphyr = { version = "=2.1.1", default-features = false, features = ["serialize", "deserialize"] }
+serde_path_to_error = "0.1"
 toml = "1"
 askama = "=0.14.0"
 qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }

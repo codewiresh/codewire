@@ -540,3 +540,59 @@ fn protected_overlap_finds_any_shared_address() {
         );
     }
 }
+
+/// How a policy's YAML is read (#4278), pinned from the differential against
+/// serde_yaml so a reader change cannot quietly change what a policy allows.
+#[test]
+fn policy_yaml_keeps_yaml_1_2_meanings_and_refuses_yaml_1_1_forms() {
+    const BASE: &str = include_str!("../policies/developer-v1.yaml");
+    let edited = |from: &str, to: &str| {
+        assert!(BASE.contains(from), "{from}");
+        BASE.replacen(from, to, 1)
+    };
+    let document = |yaml: &str| {
+        serde_saphyr::from_str_with_options::<PolicyDocument>(yaml, super::yaml_options())
+    };
+    let base = document(BASE).unwrap();
+
+    // Each has one meaning, so it reads as the plain form (cw-orchestrator,
+    // 2026-11-12).
+    for (from, to) in [
+        ("version: 1", "version: '1'"),
+        ("version: 1", "version: !!int '1'"),
+        ("ports: [22, 80, 443]", "ports: [22, 80, 4_43]"),
+    ] {
+        assert_eq!(document(&edited(from, to)).unwrap(), base, "{to}");
+    }
+
+    // Words a YAML 1.1 reader takes for booleans stay the strings written.
+    let words = document(&edited("id: developer-public-dns", "id: yes")).unwrap();
+    assert_eq!(words.rules[0].id, "yes");
+    let words = document(&edited("destinations: [\"*\"]", "destinations: [on]")).unwrap();
+    assert_eq!(words.rules[0].destinations, ["on"]);
+
+    // Anything a YAML 1.1 reader would take differently, or that YAML 1.2
+    // leaves to the application, is refused rather than guessed.
+    for (from, to) in [
+        ("destinations: [\"*\"]", "destinations: [~]"),
+        ("default: deny", "default: deny\ndefault: allow"),
+        (
+            "rules:\n  - id: developer-public-dns\n    action: allow",
+            "base: &base {action: allow}\nrules:\n  - id: developer-public-dns\n    <<: *base",
+        ),
+        ("version: 1", "version: !include other.yaml"),
+        ("destinations: [\"*\"]", "destinations: [!custom x]"),
+        ("version: 1", "version: 01"),
+        ("ports: [53]", "ports: [065]"),
+    ] {
+        let yaml = edited(from, to);
+        assert!(document(&yaml).is_err(), "{to} was accepted");
+        assert!(
+            matches!(
+                PolicyDocument::parse_yaml(yaml.as_bytes()),
+                Err(PolicyError::Yaml(_))
+            ),
+            "{to} was not refused as YAML"
+        );
+    }
+}
