@@ -901,6 +901,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-build-runner-measure.sh|\
       scripts/ci/tests/test-service-ssh-image-verifier.sh|\
       scripts/dev/free-block-probe.sh|scripts/ci/tests/test-free-block-probe.sh|\
+      scripts/dev/selfhost-vm.sh|scripts/ci/tests/test-selfhost-vm.sh|\
       scripts/ci/verify/run-product-verification.sh|\
       scripts/ci/tests/test-retired-local-sdk-contract.sh|\
       scripts/checks/security/audit-rust-only-runtime.sh|\

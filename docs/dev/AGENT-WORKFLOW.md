@@ -131,6 +131,16 @@ virtualenv installed from `scripts/dev/requirements-cli-guided-launch.txt`.
 `--evidence-dir` retains the observations in a new
 chosen directory; otherwise it prints its temporary evidence directory.
 
+For a clean Linux machine, such as the box a self-hosted install goes on or a
+host to enroll, `scripts/dev/selfhost-vm.sh create STATE_DIR` boots a
+disposable Debian 12 VM with Docker Engine and the Compose plugin, under QEMU
+with KVM, in the CPU slice. It forwards the guest's SSH and HTTPS ports to
+`127.0.0.1` and changes nothing on the workstation's network. `ssh STATE_DIR`
+reaches it, and `destroy STATE_DIR` stops only its own QEMU and removes the
+directory. Keep `STATE_DIR` under `~/.cache`, never `/tmp`. The guest's
+traffic leaves as the QEMU process's own, so an application firewall must allow
+that process the guest's package hosts.
+
 For a DinD bootstrap candidate, use the maintained storage fixture before
 changing the normal runtime. `scripts/runtime/dev/smoke-dev-dind-storage.sh`
 renders the clean candidate through the product's public template renderer,

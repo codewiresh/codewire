@@ -801,6 +801,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-run-host-rust-build.sh
   scripts/ci/tests/test-check-workspace-hack.sh
   scripts/ci/tests/test-free-block-probe.sh
+  scripts/ci/tests/test-selfhost-vm.sh
   scripts/ci/tests/test-orchestrator-scripts.sh
   python3 -B scripts/ci/tests/test-integration-lane.py
   scripts/ci/tests/test-ci-tests-wired.sh
