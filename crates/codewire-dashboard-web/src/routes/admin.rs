@@ -105,6 +105,21 @@ pub(super) struct AccountAccessSubmission {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct AccountVerificationSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    user_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EmptyRequest {}
+
+#[derive(Debug, Deserialize)]
+struct ResendVerificationResponse {
+    sent: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct QuotaSubmission {
     #[serde(rename = "_csrf")]
     csrf: String,
@@ -371,6 +386,58 @@ pub(super) async fn set_account_enabled(
         StatusCode::BAD_REQUEST => account_redirect(&state, "", "invalid", &headers),
         StatusCode::SERVICE_UNAVAILABLE => {
             account_redirect(&state, "", "email-unavailable", &headers)
+        }
+        _ => account_redirect(&state, "", "unavailable", &headers),
+    }
+}
+
+/// The "Resend verification email" button on an unverified account.
+pub(super) async fn resend_account_verification(
+    State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
+    headers: HeaderMap,
+    Form(submission): Form<AccountVerificationSubmission>,
+) -> Response {
+    let cookie = match admin_action_page_context_for(
+        &state,
+        &headers,
+        &submission.csrf,
+        &query.org,
+        ACCOUNTS_PATH,
+    )
+    .await
+    {
+        Ok((_, cookie)) => cookie,
+        Err(response) => return response,
+    };
+    if !valid_identifier(&submission.user_id) {
+        return account_redirect(&state, "", "not-found", &headers);
+    }
+    let path = format!(
+        "/api/admin/accounts/{}/resend-verification",
+        submission.user_id
+    );
+    let identity = match post_json::<_, ResendVerificationResponse>(
+        &state,
+        &path,
+        Some(cookie),
+        &EmptyRequest {},
+    )
+    .await
+    {
+        Ok(identity) => identity,
+        Err(()) => return account_redirect(&state, "", "unavailable", &headers),
+    };
+    match identity.status {
+        status if status.is_success() && identity.body.as_ref().is_some_and(|body| body.sent) => {
+            account_redirect(&state, "verification-sent", "", &headers)
+        }
+        StatusCode::UNAUTHORIZED => login_redirect(ACCOUNTS_PATH, &headers),
+        StatusCode::FORBIDDEN => error_page(WebError::Forbidden),
+        StatusCode::NOT_FOUND => account_redirect(&state, "", "not-found", &headers),
+        StatusCode::CONFLICT => account_redirect(&state, "", "already-verified", &headers),
+        StatusCode::SERVICE_UNAVAILABLE => {
+            account_redirect(&state, "", "verification-unavailable", &headers)
         }
         _ => account_redirect(&state, "", "unavailable", &headers),
     }
@@ -1359,6 +1426,7 @@ fn account_message(value: &str) -> &'static str {
     match value {
         "account-enabled" => "Account enabled and access email sent.",
         "account-disabled" => "Account disabled.",
+        "verification-sent" => "Verification email sent. The link works for 24 hours.",
         _ => "",
     }
 }
@@ -1369,6 +1437,10 @@ fn account_error(value: &str) -> &'static str {
         "not-found" => "The account no longer exists.",
         "email-unavailable" => {
             "Access was updated, but the ready email was not sent. Select Enable again to retry."
+        }
+        "already-verified" => "That account's email is already verified.",
+        "verification-unavailable" => {
+            "The verification email could not be sent. Try again shortly."
         }
         "unavailable" => "Account access is temporarily unavailable.",
         _ => "",

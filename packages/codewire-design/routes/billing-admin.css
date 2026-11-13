@@ -81,6 +81,7 @@ dl.cw-stat-grid { margin: 0; }
 .cw-access-email { color: var(--fg-tertiary); font-size: var(--text-small); }
 .cw-access-reason { max-width: var(--prose-narrow); margin: 0; overflow-wrap: anywhere; }
 .cw-access-action { margin: 0; }
+.cw-access-resend { margin: var(--space-2) 0 0; }
 /* The GitHub and Google identities that sign in to an account (#4062). */
 .cw-access-identities { display: grid; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
 

@@ -125,6 +125,10 @@ pub(crate) fn router() -> Router<AppState> {
             "/admin/accounts/_actions/enabled",
             post(admin::set_account_enabled),
         )
+        .route(
+            "/admin/accounts/_actions/resend-verification",
+            post(admin::resend_account_verification),
+        )
         .route("/admin/organizations", get(slash_redirect))
         .route("/admin/organizations/", get(admin::organizations))
         .route(

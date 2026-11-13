@@ -7,6 +7,7 @@
     "/.well-known/openid-configuration",
     "/api/admin/accounts",
     "/api/admin/accounts/{user_id}/enabled",
+    "/api/admin/accounts/{user_id}/resend-verification",
     "/api/auth/forget-password",
     "/api/auth/get-session",
     "/api/auth/oauth/identities",

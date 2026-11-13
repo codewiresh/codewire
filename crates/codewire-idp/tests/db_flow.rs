@@ -4668,3 +4668,152 @@ async fn sess_req_bearer(
     };
     (status, json, set_cookie)
 }
+
+#[tokio::test]
+async fn admin_resends_verification_only_for_an_unverified_account_against_postgres() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping admin verification resend e2e");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+    // (id, email, email_verified, is_admin, enabled)
+    let users = [
+        (
+            "u_admin_resend",
+            "admin-resend@example.com",
+            true,
+            true,
+            true,
+        ),
+        (
+            "u_member_resend",
+            "member-resend@example.com",
+            true,
+            false,
+            true,
+        ),
+        (
+            "u_waiting_resend",
+            "waiting-resend@example.com",
+            false,
+            false,
+            false,
+        ),
+        (
+            "u_verified_resend",
+            "verified-resend@example.com",
+            true,
+            false,
+            false,
+        ),
+    ];
+    let cleanup = |p: PgPool| async move {
+        for (id, email, ..) in users {
+            for statement in [
+                "DELETE FROM verifications WHERE identifier=$2",
+                "DELETE FROM audit_logs WHERE user_id=$1 OR target_user_id=$1",
+                "DELETE FROM sessions WHERE user_id=$1",
+                "DELETE FROM users WHERE id=$1",
+            ] {
+                sqlx::query(statement)
+                    .bind(id)
+                    .bind(email)
+                    .execute(&p)
+                    .await
+                    .ok();
+            }
+        }
+    };
+    cleanup(pool.clone()).await;
+    for (id, email, verified, admin, enabled) in users {
+        sqlx::query("INSERT INTO users (id, email, name, email_verified, is_admin, enabled) VALUES ($1,$2,$1,$3,$4,$5)")
+            .bind(id)
+            .bind(email)
+            .bind(verified)
+            .bind(admin)
+            .bind(enabled)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for (user, session) in [
+        ("u_admin_resend", "sess_admin_resend_token"),
+        ("u_member_resend", "sess_member_resend_token"),
+    ] {
+        sqlx::query("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES ($1,$2,$3,NOW() + interval '1 hour')")
+            .bind(format!("s_{user}"))
+            .bind(user)
+            .bind(hash_session_token(session))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let app = codewire_idp::access_admin::router(
+        pool.clone(),
+        "https://app.codewire.test".to_string(),
+        codewire_email::EmailClient::disabled(),
+        AuthState { pool: pool.clone() },
+    );
+    let resend = |session: &'static str, user: &'static str| {
+        let app = app.clone();
+        async move {
+            sess_req(
+                &app,
+                "POST",
+                &format!("/api/admin/accounts/{user}/resend-verification"),
+                Some(session),
+                "{}",
+            )
+            .await
+            .0
+        }
+    };
+    // Only a global administrator may ask.
+    assert_eq!(
+        resend("sess_member_resend_token", "u_waiting_resend").await,
+        403
+    );
+    assert_eq!(
+        resend("sess_admin_resend_token", "u_no_such_account").await,
+        404
+    );
+    assert_eq!(
+        resend("sess_admin_resend_token", "u_verified_resend").await,
+        409
+    );
+    // Without email delivery nothing is issued or audited.
+    assert_eq!(
+        resend("sess_admin_resend_token", "u_waiting_resend").await,
+        503
+    );
+    let issued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM verifications WHERE identifier='waiting-resend@example.com'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_logs WHERE action='admin.account.verification_resent'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((issued, audited), (0, 0));
+    // A link sent within five minutes counts as this one: 202, nothing new.
+    sqlx::query("INSERT INTO verifications (id, identifier, purpose, token_hash, expires_at) VALUES ('v_admin_resend_recent', 'waiting-resend@example.com', 'email_verification', repeat('b', 64), NOW() + interval '1 day')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        resend("sess_admin_resend_token", "u_waiting_resend").await,
+        202
+    );
+    let issued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM verifications WHERE identifier='waiting-resend@example.com'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(issued, 1);
+    cleanup(pool.clone()).await;
+}

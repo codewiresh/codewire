@@ -246,6 +246,69 @@ fn admin_accounts_template_escapes_access_request_fields() {
 }
 
 #[test]
+fn only_an_unverified_account_offers_to_resend_its_verification_email() {
+    let view = DashboardView {
+        account_id: "synthetic-account".to_owned(),
+        user_name: "Admin".into(),
+        csrf_token: Default::default(),
+        is_admin: true,
+        organizations: Vec::new(),
+        has_organizations: false,
+        organization_navigation_unavailable: false,
+        new_organization_url: "/organizations/new/".into(),
+        settings_url: "/settings/".into(),
+        has_selected_organization: false,
+        selected_organization_name: String::new(),
+        selected_organization_slug: String::new(),
+        selected_organization_url: String::new(),
+        sandboxes: Vec::new(),
+        recent_sandboxes: Vec::new(),
+        sandbox_rail_available: false,
+        sandbox_rail_loading: false,
+        sandbox_total: 0,
+        sandbox_running: 0,
+        sandbox_stopped: 0,
+        sandbox_attention: 0,
+        provisioned_cpu_millicores: 0,
+        provisioned_memory_mb: 0,
+        provisioned_disk_gb: 0,
+        sidebar_collapsed: false,
+    };
+    let account = |id: &str, email_verified: bool| AccountAccessView {
+        id: id.into(),
+        email: format!("{id}@example.test"),
+        name: id.into(),
+        email_verified,
+        enabled: false,
+        reason: "Build agents".into(),
+        has_reason: true,
+        created_at: "2026-11-12T12:00:00".into(),
+        identities: Vec::new(),
+    };
+    let accounts = vec![
+        account("user-waiting", false),
+        account("user-verified", true),
+    ];
+    let body = AdminAccountsTemplate {
+        view: &view,
+        accounts: &accounts,
+        csrf_token: "csrf-marker",
+        message: "",
+        error: "",
+    }
+    .render()
+    .expect("render admin account access page");
+    assert_eq!(
+        body.matches("action=\"/admin/accounts/_actions/resend-verification\"")
+            .count(),
+        1
+    );
+    assert!(body.contains(
+        "<span class=\"cw-badge\" data-tone=\"warning\">Unverified</span><form class=\"cw-access-resend\" method=\"post\" action=\"/admin/accounts/_actions/resend-verification\"><input type=\"hidden\" name=\"_csrf\" value=\"csrf-marker\"><input type=\"hidden\" name=\"user_id\" value=\"user-waiting\"><button class=\"cw-button cw-button--outline cw-button--pill cw-button--small\" type=\"submit\">Resend verification email</button></form>"
+    ));
+}
+
+#[test]
 fn organization_template_escapes_upstream_data() {
     let organizations = vec![OrganizationRow {
         id: "org-safe".into(),

@@ -5,7 +5,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::middleware;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::NaiveDateTime;
+use chrono::{Duration, NaiveDateTime, Utc};
 use codewire_email::EmailClient;
 use codewire_server_core::account_deletion::DELETED_USER_ID;
 use codewire_server_core::auth::{AuthState, AuthUser, require_session_auth};
@@ -16,7 +16,10 @@ use serde_json::json;
 use sqlx::PgPool;
 
 use crate::auth_session::{hex_id, request_info};
-use crate::email_password::send_access_enabled_email;
+use crate::email_password::{
+    VerificationPurpose, create_verification_in_transaction, send_access_enabled_email,
+    send_verification_email,
+};
 use crate::oauth::LINKED_ACCOUNT_SQL;
 
 #[derive(Clone)]
@@ -68,6 +71,11 @@ struct SetAccountEnabledRequest {
 #[derive(Debug, Serialize)]
 struct SetAccountEnabledResponse {
     enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ResendVerificationResponse {
+    sent: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -267,12 +275,134 @@ async fn set_account_enabled(
     }))
 }
 
+/// At most one verification link per address in this window, however often an
+/// administrator asks; the same window as a sign-in's resend.
+const RESEND_VERIFICATION_INTERVAL_SECS: i64 = 5 * 60;
+
+fn account_not_found() -> AppError {
+    AppError::Coded {
+        status: StatusCode::NOT_FOUND,
+        code: "not_found",
+        detail: "Account not found".into(),
+    }
+}
+
+/// Sends a fresh 24-hour verification link to an account that hasn't
+/// verified its email, for an administrator helping someone whose link was
+/// lost. Audited with the administrator as the actor.
+async fn resend_account_verification(
+    State(state): State<AccessAdminState>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+    actor: AuthUser,
+) -> Result<(StatusCode, Json<ResendVerificationResponse>), AppError> {
+    actor.require_global_admin()?;
+    if user_id == DELETED_USER_ID {
+        return Err(account_not_found());
+    }
+    let failed = |error: sqlx::Error| {
+        tracing::error!(%error, "failed to resend account verification");
+        AppError::InternalMsg("Failed to resend verification".into())
+    };
+    let (ip, user_agent) = request_info(&headers);
+    let mut tx = state.pool.begin().await.map_err(failed)?;
+    let (email, email_verified) = sqlx::query_as::<_, (String, bool)>(
+        "SELECT email, COALESCE(email_verified, false) FROM users WHERE id = $1 FOR UPDATE",
+    )
+    .bind(&user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(failed)?
+    .ok_or_else(account_not_found)?;
+    if email_verified {
+        return Err(AppError::Conflict(
+            "This account's email is already verified".into(),
+        ));
+    }
+    // A link sent in the last few minutes counts as this one, so repeated
+    // clicks don't flood the inbox or pile up rows. `created_at` is a
+    // timestamp without time zone that create_verification writes from
+    // Utc::now(), so it compares exactly with this UTC value; a row written
+    // with the column's DEFAULT now() would match only in a UTC session.
+    let since = Utc::now().naive_utc() - Duration::seconds(RESEND_VERIFICATION_INTERVAL_SECS);
+    let recent: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM verifications WHERE identifier = $1 AND purpose = $2 AND created_at > $3)",
+    )
+    .bind(&email)
+    .bind(VerificationPurpose::EmailVerification.as_str())
+    .bind(since)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(failed)?;
+    if recent {
+        tx.commit().await.map_err(failed)?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(ResendVerificationResponse { sent: true }),
+        ));
+    }
+    if !state.email.is_configured() {
+        return Err(AppError::ServiceUnavailable(
+            "Account email is temporarily unavailable".into(),
+        ));
+    }
+    let token = create_verification_in_transaction(
+        &mut tx,
+        &email,
+        VerificationPurpose::EmailVerification,
+        Duration::hours(24),
+    )
+    .await?;
+    tx.commit().await.map_err(failed)?;
+
+    let verify_url = format!(
+        "{}/verify-email?token={token}",
+        state.frontend_url.trim_end_matches('/')
+    );
+    let delivered = match send_verification_email(&state.email, &email, &verify_url).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::error!(%error, target_user_id = %user_id, "failed to send account verification email");
+            false
+        }
+    };
+    // Audited after the send, so the entry says whether the email went out.
+    sqlx::query(
+        r#"INSERT INTO audit_logs
+               (id, timestamp, action, user_id, target_user_id, ip_address,
+                user_agent, metadata, severity)
+           VALUES ($1, NOW(), 'admin.account.verification_resent', $2, $3, $4, $5, $6, 'info')"#,
+    )
+    .bind(hex_id())
+    .bind(&actor.user_id)
+    .bind(&user_id)
+    .bind(&ip)
+    .bind(&user_agent)
+    .bind(json!({ "email": &email, "delivered": delivered }))
+    .execute(&state.pool)
+    .await
+    .map_err(failed)?;
+    if !delivered {
+        return Err(AppError::ServiceUnavailable(
+            "The verification email could not be sent. Try again shortly.".into(),
+        ));
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ResendVerificationResponse { sent: true }),
+    ))
+}
+
 pub fn router(pool: PgPool, frontend_url: String, email: EmailClient, auth: AuthState) -> Router {
     Router::new()
         .route("/api/admin/accounts", get(list_accounts))
         .route(
             "/api/admin/accounts/{user_id}/enabled",
             post(set_account_enabled),
+        )
+        .route(
+            "/api/admin/accounts/{user_id}/resend-verification",
+            post(resend_account_verification),
         )
         .route_layer(middleware::from_fn_with_state(auth, require_session_auth))
         .with_state(AccessAdminState {
