@@ -26,6 +26,13 @@ const CHILD_TEST: &str = "hosted_binding::tests::nothing_listens::unbound_daemon
 /// the bridge's loopback.
 const BOUND_PORTS: [u16; 4] = [7777, 2222, 31000, 38081];
 
+/// How long the parent waits, from spawn, for the daemon to be ready and to
+/// make its attempts before it calls the daemon hung: a hang guard, not a
+/// speed expectation (`docs/dev/AGENT-WORKFLOW.md` "Failure convergence").
+/// The child is this test binary started again, and on a loaded workstation
+/// it made three attempts in the former 20 s (#4385).
+const SETTLE_HANG: Duration = Duration::from_secs(120);
+
 /// Fast pacing, so the parent sees many attempts within a second. A hung
 /// call times out after the margin.
 fn child_timing() -> BindTiming {
@@ -231,7 +238,7 @@ async fn assert_nothing_listens_while_unbound(then: Vec<Answer>) {
             _ => {}
         }
         assert!(
-            started.elapsed() < Duration::from_secs(20),
+            started.elapsed() < SETTLE_HANG,
             "daemon never settled into waiting: ready {ready}, {attempts} attempts, \
              {samples} samples"
         );
