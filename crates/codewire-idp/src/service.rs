@@ -99,6 +99,7 @@ impl IdpConfig {
                 "one of PUBLIC_OIDC_ISSUER_URL / OIDC_ISSUER_URL / CODEWIRE_API_URL / FRONTEND_URL is required"
             )
         })?;
+        require_secure_issuer(&issuer)?;
         let frontend_url = pick(&["FRONTEND_URL", "CODEWIRE_API_URL"], &mut value)
             .unwrap_or_else(|| issuer.clone());
         let turnstile_secret_key = pick(&["TURNSTILE_SECRET_KEY"], &mut value).unwrap_or_default();
@@ -239,9 +240,31 @@ fn found(location: &str) -> Response {
     }
 }
 
+/// The issuer is in every token and in discovery, so it must be `https`.
+/// Plain `http` is accepted only for a loopback host, which is how local
+/// development and the integration stacks run the provider.
+fn require_secure_issuer(issuer: &str) -> anyhow::Result<()> {
+    let url = url::Url::parse(issuer)
+        .map_err(|error| anyhow::anyhow!("the OIDC issuer {issuer:?} is not a URL: {error}"))?;
+    let loopback = match url.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
+    match url.scheme() {
+        "https" if url.host().is_some() => Ok(()),
+        "http" if loopback => Ok(()),
+        _ => anyhow::bail!(
+            "the OIDC issuer {issuer:?} must be an https URL; http is allowed only for a loopback \
+             host (set PUBLIC_OIDC_ISSUER_URL)"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{IdpConfig, SignupInvitePolicy};
+    use super::{IdpConfig, SignupInvitePolicy, require_secure_issuer};
 
     #[test]
     fn config_debug_redacts_turnstile_secret() {
@@ -294,7 +317,7 @@ mod tests {
     fn issuer_falls_back_to_codewire_api_url() {
         let values = [
             ("PUBLIC_OIDC_ISSUER_URL", " "),
-            ("CODEWIRE_API_URL", " http://codewire-server:8080 "),
+            ("CODEWIRE_API_URL", " https://api.example "),
         ];
 
         let cfg = IdpConfig::from_values(|key| {
@@ -305,11 +328,52 @@ mod tests {
         })
         .expect("config resolves");
 
-        assert_eq!(cfg.issuer, "http://codewire-server:8080");
-        assert_eq!(cfg.frontend_url, "http://codewire-server:8080");
+        assert_eq!(cfg.issuer, "https://api.example");
+        assert_eq!(cfg.frontend_url, "https://api.example");
         assert_eq!(cfg.turnstile_secret_key, "");
         assert_eq!(cfg.turnstile_bypass_email, "");
         assert!(!cfg.signup_invite_policy.is_configured());
+    }
+
+    #[test]
+    fn issuer_must_be_https_except_on_loopback() {
+        for issuer in [
+            "https://codewire.sh",
+            "https://idp.example:8443",
+            "http://127.0.0.1:8090",
+            "http://localhost:8080",
+            "http://[::1]:8080",
+        ] {
+            assert!(require_secure_issuer(issuer).is_ok(), "{issuer} is refused");
+        }
+        for issuer in [
+            "http://codewire-server:8080",
+            "http://codewire.sh",
+            "http://10.0.0.1:8080",
+            "http://127.0.0.1.evil.example",
+            "http://localhost.attacker",
+            "http://127.0.0.1@evil.example",
+            "ftp://codewire.sh",
+            "codewire.sh",
+            "",
+        ] {
+            assert!(
+                require_secure_issuer(issuer).is_err(),
+                "{issuer} is accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn config_refuses_an_internal_http_issuer() {
+        let error = IdpConfig::from_values(|key| {
+            (key == "CODEWIRE_API_URL").then(|| "http://codewire-server:8080".to_string())
+        })
+        .expect_err("an internal http issuer is refused");
+        assert!(
+            error.to_string().contains("must be an https URL"),
+            "{error}"
+        );
     }
 
     #[test]
