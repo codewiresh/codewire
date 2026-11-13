@@ -432,7 +432,10 @@ async fn delegation_setup_cancel_aborts_pending_headers_and_closes_sole_input() 
     assert_input_closed(&mut body).await;
 }
 
-#[tokio::test]
+// The deadline is the subject here, so it runs on a paused clock: it cannot
+// expire inside the first polls however long a starved guest takes to run
+// them (#4251), and the wait below advances straight to it.
+#[tokio::test(start_paused = true)]
 async fn delegation_setup_timeout_aborts_pending_headers_without_restarting_budget() {
     let (transport, mut peer) = transport();
     let open = opening();
