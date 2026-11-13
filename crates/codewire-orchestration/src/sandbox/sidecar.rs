@@ -321,6 +321,7 @@ impl SandboxClient {
                 AccessProof::LoginAndSftp,
             ) => proven,
             refusal = Box::pin(self.refused_for_no_capacity(env_id)) => Err(refusal.into()),
+            failure = Box::pin(self.refused_for_start_failure(env_id)) => Err(failure.into()),
         }
     }
 

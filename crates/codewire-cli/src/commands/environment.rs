@@ -2406,7 +2406,7 @@ async fn wait_for_platform_environment_daemon_ready(
         lifecycle_timeout = lifecycle_timeout.max(platform_lifecycle_ready_timeout(
             &environment.isolation_tier,
         ));
-        if let Some(failure) = progress::no_capacity_failure(&environment) {
+        if let Some(failure) = progress::platform_ended_failure(&environment) {
             return Err(failure);
         }
 

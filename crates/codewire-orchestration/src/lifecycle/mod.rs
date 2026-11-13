@@ -137,6 +137,12 @@ pub trait LifecycleStore {
         refusal: NoCapacityRefusal,
         states: &[&str],
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+    fn fail_create_for_container_start(
+        &self,
+        env_id: &str,
+        message: &str,
+        states: &[&str],
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
     fn protect(
         &self,
         env_id: &str,
@@ -460,6 +466,22 @@ impl<S: LifecycleStore> Service<S> {
             .map_err(|e| anyhow::anyhow!("refuse for no capacity from {states:?}: {e:#}"))
     }
 
+    /// Ends a create whose workspace container cannot start, with its code and
+    /// the kubelet's reason, and states the next step: the next reconcile
+    /// destroys it, which releases its claim and its slot. Nothing retries it,
+    /// since the same Pod would fail the same way (#4431).
+    pub async fn fail_create_for_container_start(
+        &self,
+        env_id: &str,
+        message: &str,
+        states: &[&str],
+    ) -> anyhow::Result<bool> {
+        self.store
+            .fail_create_for_container_start(env_id, message, states)
+            .await
+            .map_err(|e| anyhow::anyhow!("fail create for container start from {states:?}: {e:#}"))
+    }
+
     /// Mirrors `Protect`: Ok(true) → a live row was protected.
     pub async fn protect(&self, env_id: &str) -> anyhow::Result<bool> {
         self.store
@@ -596,6 +618,11 @@ pub const SANDBOX_RESTARTED_ERROR_CODE: &str = "sandbox_restarted";
 
 /// `environments.error_code` of a create or start the cluster had no room for.
 pub const NO_CAPACITY_ERROR_CODE: &str = "no_capacity";
+
+/// `environments.error_code` of a create whose workspace container could not
+/// start. Its `error_reason` carries the container, the kubelet's reason and
+/// its message, which say whether the image or the node is at fault.
+pub const CONTAINER_START_FAILED_ERROR_CODE: &str = "container_start_failed";
 
 /// How a create or a start ends when the cluster has no room for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1220,6 +1247,42 @@ impl LifecycleStore for PgLifecycleStore {
         Ok(rows > 0)
     }
 
+    async fn fail_create_for_container_start(
+        &self,
+        env_id: &str,
+        message: &str,
+        states: &[&str],
+    ) -> anyhow::Result<bool> {
+        let states_vec: Vec<String> = states.iter().map(|s| s.to_string()).collect();
+        let rows = self
+            .exec_logged(
+                env_id,
+                sqlx::query(
+                    r#"UPDATE environments
+                       SET state = 'error', desired_state = 'destroyed', error_code = $1,
+                           error_reason = $2, state_changed_at = NOW()
+                       WHERE id = $3 AND state = ANY($4) AND desired_state = 'started'"#,
+                )
+                .bind(CONTAINER_START_FAILED_ERROR_CODE)
+                .bind(message)
+                .bind(env_id)
+                .bind(states_vec.clone()),
+                LogEntry {
+                    phase: "lifecycle_container_start_failed",
+                    status: "failed",
+                    message: message.to_string(),
+                    metadata: serde_json::json!({
+                        "kind": CONTAINER_START_FAILED_ERROR_CODE,
+                        "from": states_vec,
+                        "state": "error",
+                        "desired_state": "destroyed",
+                    }),
+                },
+            )
+            .await?;
+        Ok(rows > 0)
+    }
+
     async fn mark_sandbox_stopped(&self, env_id: &str) -> anyhow::Result<bool> {
         let rows = self
             .exec_logged(
@@ -1465,6 +1528,14 @@ mod tests {
             &self,
             _: &str,
             _: NoCapacityRefusal,
+            _: &[&str],
+        ) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn fail_create_for_container_start(
+            &self,
+            _: &str,
+            _: &str,
             _: &[&str],
         ) -> anyhow::Result<bool> {
             Ok(true)

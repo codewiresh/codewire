@@ -312,6 +312,46 @@ impl std::fmt::Display for NoCapacity {
 
 impl std::error::Error for NoCapacity {}
 
+/// How long a container may stay unable to pull its image before the wait
+/// calls its start failed (#4431). The kubelet retries a pull, and a registry
+/// can be briefly unreachable, so this is as long as [`NO_CAPACITY_GRACE`].
+pub const IMAGE_PULL_FAILURE_GRACE: Duration = Duration::from_secs(60);
+
+/// How long a container may stay failed to create, run or start before the
+/// wait calls its start failed. Nothing is retried usefully here; the grace
+/// only rides out a status the kubelet has not finished writing.
+pub const CONTAINER_START_FAILURE_GRACE: Duration = Duration::from_secs(15);
+
+/// How often [`SandboxClient::refused_for_start_failure`] reads the Pod.
+const START_FAILURE_POLL: Duration = Duration::from_secs(2);
+
+/// A container of the workspace Pod could not start, and stayed that way for
+/// its grace. More waiting cannot make the claim Ready. `reason` and `message`
+/// are the kubelet's own, so they say whether the image or the node is at
+/// fault.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContainerStartFailed {
+    pub container: String,
+    pub reason: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for ContainerStartFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "container {} could not start: {}",
+            self.container, self.reason
+        )?;
+        if !self.message.is_empty() {
+            write!(f, ": {}", self.message)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ContainerStartFailed {}
+
 impl std::fmt::Display for PodResizeInfeasible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -4553,11 +4593,10 @@ impl SandboxClient {
             .collect())
     }
 
-    /// Mirrors `WaitForReady`: the claim's Ready condition ends the wait; a
-    /// terminal container failure on the backing pod (ImagePullBackOff & co —
-    /// which the claim watcher never surfaces) fails it early with the
-    /// same `pod <name>: <reason>: <message>` error the Go poller
-    /// produces, so permanent-failure detection matches.
+    /// The claim's Ready condition ends the wait. A container of the backing
+    /// Pod that cannot start (ImagePullBackOff, a failed start and the like,
+    /// which the claim never shows) ends it early with
+    /// [`ContainerStartFailed`], and a scheduler refusal with [`NoCapacity`].
     ///
     /// Create and start block on this wait, so it wakes on the claim's next
     /// change rather than a fixed poll. Every wake re-reads the claim, and a
@@ -4567,6 +4606,35 @@ impl SandboxClient {
         tokio::select! {
             result = self.wait_for_ready_with_fallback(env_id, timeout, CLAIM_READY_FALLBACK_POLL) => result,
             refusal = Box::pin(self.refused_for_no_capacity(env_id)) => Err(refusal.into()),
+            failure = Box::pin(self.refused_for_start_failure(env_id)) => Err(failure.into()),
+        }
+    }
+
+    /// Ends once a container of the environment's workspace Pod has been
+    /// unable to start for its grace without a break, and never otherwise, so
+    /// each wait for a new Pod races it (#4431). A Pod that cannot be read, or
+    /// a failure of the other kind, breaks the run. A container that is still
+    /// being created or initialized is not a failure, however long it takes.
+    pub(super) async fn refused_for_start_failure(&self, env_id: &str) -> ContainerStartFailed {
+        let name = claim_name(env_id);
+        let mut failing_since: Option<(StartFailureKind, tokio::time::Instant)> = None;
+        loop {
+            let pod = self.claim_workspace_pod(&name).await;
+            match pod.as_ref().and_then(container_start_failure) {
+                Some((kind, failure)) => {
+                    let since = match failing_since {
+                        Some((seen, since)) if seen == kind => since,
+                        _ => tokio::time::Instant::now(),
+                    };
+                    failing_since = Some((kind, since));
+                    if since.elapsed() >= kind.grace() {
+                        tracing::warn!(claim = name, error = %failure, "container start failure detected");
+                        return failure;
+                    }
+                }
+                None => failing_since = None,
+            }
+            tokio::time::sleep(START_FAILURE_POLL).await;
         }
     }
 
@@ -4610,16 +4678,6 @@ impl SandboxClient {
             if let (true, _) = claim_ready_status(&claim) {
                 return Ok(());
             }
-            // Pod failure check after the same 10s scheduling grace
-            // period Go's pollPodFailures uses.
-            if started.elapsed() >= Duration::from_secs(10)
-                && let Some(pod) = self.claim_workspace_pod(&name).await
-                && let Some((reason, message)) = terminal_pod_failure_reason(&pod)
-            {
-                let err = anyhow::anyhow!("pod {name}: {reason}: {message}");
-                tracing::warn!(claim = name, error = %err, "pod terminal failure detected");
-                return Err(err);
-            }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 anyhow::bail!("timeout waiting for SandboxClaim {name} to become Ready");
@@ -4645,8 +4703,8 @@ impl SandboxClient {
         }
     }
 
-    /// Mirrors `pollPodFailures`' per-tick check: resolve the pod
-    /// behind the claim, then look for terminal waiting reasons.
+    /// The Pod behind the claim, for the checks that read its scheduling and
+    /// its containers.
     async fn claim_workspace_pod(&self, claim: &str) -> Option<Pod> {
         // No Claim-name fallback: an unbound Claim has no Pod to inspect yet.
         let sandbox_name = match self.claims.get(claim).await {
@@ -5179,6 +5237,116 @@ fn terminal_pod_failure_reason(pod: &Pod) -> Option<(String, String)> {
                 )
             })
         })
+}
+
+/// Which grace a container start failure gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartFailureKind {
+    /// The image cannot be pulled; the kubelet keeps retrying.
+    ImagePull,
+    /// The container cannot be created, run or started, or the Pod is over.
+    Start,
+}
+
+impl StartFailureKind {
+    fn grace(self) -> Duration {
+        match self {
+            Self::ImagePull => IMAGE_PULL_FAILURE_GRACE,
+            Self::Start => CONTAINER_START_FAILURE_GRACE,
+        }
+    }
+}
+
+/// The first container of `pod` that cannot start, and how (#4431). It reads
+/// only the container statuses the kubelet writes:
+///
+/// - a Pod that is over (`Failed` or `Succeeded`) before its claim was Ready;
+/// - a waiting reason of [`TERMINAL_WAITING_REASONS`], where the two image
+///   pull reasons get the longer grace;
+/// - `CrashLoopBackOff`, with the last termination as its message;
+/// - a container that terminated with a non-zero exit, such as `StartError`,
+///   which a Pod that is still `Running` shows when another container runs.
+///
+/// A container that is waiting to be created or initialized
+/// (`ContainerCreating`, `PodInitializing`) is healthy, and so is one that
+/// exited zero.
+fn container_start_failure(pod: &Pod) -> Option<(StartFailureKind, ContainerStartFailed)> {
+    if let Some((reason, message)) = terminal_pod_failure_reason(pod)
+        && pod
+            .status
+            .as_ref()
+            .and_then(|status| status.phase.as_deref())
+            .is_some_and(|phase| matches!(phase, "Failed" | "Succeeded"))
+    {
+        return Some((
+            StartFailureKind::Start,
+            ContainerStartFailed {
+                container: "workspace Pod".to_string(),
+                reason,
+                message,
+            },
+        ));
+    }
+    let status = pod.status.as_ref()?;
+    status
+        .init_container_statuses
+        .as_deref()
+        .into_iter()
+        .flatten()
+        .chain(status.container_statuses.as_deref().into_iter().flatten())
+        .find_map(|container| {
+            let state = container.state.as_ref()?;
+            let failed = |reason: &str, message: String| ContainerStartFailed {
+                container: container.name.clone(),
+                reason: reason.to_string(),
+                message,
+            };
+            if let Some(waiting) = state.waiting.as_ref() {
+                let reason = waiting.reason.as_deref().unwrap_or_default();
+                let message = waiting.message.clone().unwrap_or_default();
+                if matches!(reason, "ImagePullBackOff" | "ErrImagePull") {
+                    return Some((StartFailureKind::ImagePull, failed(reason, message)));
+                }
+                if TERMINAL_WAITING_REASONS.contains(&reason) {
+                    return Some((StartFailureKind::Start, failed(reason, message)));
+                }
+                if reason == "CrashLoopBackOff" {
+                    let last = container
+                        .last_state
+                        .as_ref()
+                        .and_then(|last| last.terminated.as_ref())
+                        .map(termination_detail)
+                        .unwrap_or(message);
+                    return Some((StartFailureKind::Start, failed(reason, last)));
+                }
+                return None;
+            }
+            let terminated = state.terminated.as_ref().filter(|t| t.exit_code != 0)?;
+            let reason = terminated
+                .reason
+                .as_deref()
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or("Error");
+            Some((
+                StartFailureKind::Start,
+                failed(reason, termination_detail(terminated)),
+            ))
+        })
+}
+
+/// How a container ended: its exit code, then the runtime's message when it
+/// left one (for a failed start, the reason the container could not be made).
+fn termination_detail(terminated: &k8s_openapi::api::core::v1::ContainerStateTerminated) -> String {
+    let exit = format!("exit code {}", terminated.exit_code);
+    match terminated
+        .message
+        .as_deref()
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+    {
+        Some(message) => format!("{exit}: {message}"),
+        None => exit,
+    }
 }
 
 /// Each init and regular container that terminated, as
@@ -6432,6 +6600,146 @@ mod tests {
                 "phase={phase} waiting_reason={waiting_reason:?}"
             );
         }
+    }
+
+    /// A Pod whose `workspace` container, regular or init, has `status`.
+    fn pod_with_container(phase: &str, init: bool, status: serde_json::Value) -> Pod {
+        let mut container = json!({
+            "name": "workspace", "image": "workspace:test", "imageID": "",
+            "ready": false, "restartCount": 0,
+        });
+        for (key, value) in status.as_object().unwrap() {
+            container[key] = value.clone();
+        }
+        let field = if init {
+            "initContainerStatuses"
+        } else {
+            "containerStatuses"
+        };
+        serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": "workspace", "uid": "uid-1"},
+            "spec": {"containers": [{"name": "workspace", "image": "workspace:test"}]},
+            "status": {"phase": phase, field: [container]},
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_container_start_failure_names_its_kind_reason_and_message() {
+        let failure =
+            |pod: &Pod| container_start_failure(pod).map(|(kind, f)| (kind, f.reason, f.message));
+        let waiting =
+            |reason: &str| json!({"state": {"waiting": {"reason": reason, "message": "why"}}});
+
+        // The kubelet retries a pull, so both pull reasons get the long grace.
+        for reason in ["ErrImagePull", "ImagePullBackOff"] {
+            assert_eq!(
+                failure(&pod_with_container("Pending", false, waiting(reason))),
+                Some((StartFailureKind::ImagePull, reason.into(), "why".into()))
+            );
+        }
+        for reason in [
+            "InvalidImageName",
+            "CreateContainerConfigError",
+            "CreateContainerError",
+            "RunContainerError",
+        ] {
+            assert_eq!(
+                failure(&pod_with_container("Pending", false, waiting(reason))),
+                Some((StartFailureKind::Start, reason.into(), "why".into()))
+            );
+        }
+
+        // Dev, #4431: the Pod is Running because another container runs.
+        let start_error = json!({"state": {"terminated": {
+            "exitCode": 128, "reason": "StartError", "message": " exec: not found \n",
+        }}});
+        assert_eq!(
+            failure(&pod_with_container("Running", false, start_error.clone())),
+            Some((
+                StartFailureKind::Start,
+                "StartError".into(),
+                "exit code 128: exec: not found".into()
+            ))
+        );
+        // An init container that exits non-zero fails the same way, with or
+        // without a reason from the runtime.
+        assert_eq!(
+            failure(&pod_with_container(
+                "Pending",
+                true,
+                json!({"state": {"terminated": {"exitCode": 3}}})
+            )),
+            Some((
+                StartFailureKind::Start,
+                "Error".into(),
+                "exit code 3".into()
+            ))
+        );
+        // Between restarts the kubelet shows the back-off; the last
+        // termination says why.
+        let crash_loop = json!({
+            "state": {"waiting": {"reason": "CrashLoopBackOff", "message": "back-off 10s"}},
+            "lastState": start_error["state"].clone(),
+        });
+        assert_eq!(
+            failure(&pod_with_container("Running", false, crash_loop)),
+            Some((
+                StartFailureKind::Start,
+                "CrashLoopBackOff".into(),
+                "exit code 128: exec: not found".into()
+            ))
+        );
+        // A Pod that is over before its claim was Ready.
+        let over = failure(&pod_with_container(
+            "Failed",
+            false,
+            json!({"state": {"terminated": {"exitCode": 1}}}),
+        ));
+        assert_eq!(
+            over.as_ref()
+                .map(|(kind, reason, _)| (*kind, reason.as_str())),
+            Some((StartFailureKind::Start, "PodFailed"))
+        );
+
+        // Healthy: still being created or initialized, running, or done.
+        for healthy in [
+            waiting("PodInitializing"),
+            waiting("ContainerCreating"),
+            json!({"state": {"running": {}}}),
+            json!({"state": {"terminated": {"exitCode": 0, "reason": "Completed"}}}),
+        ] {
+            for init in [false, true] {
+                assert_eq!(
+                    failure(&pod_with_container("Pending", init, healthy.clone())),
+                    None,
+                    "{healthy}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_container_start_failure_reads_whether_the_image_or_the_node_failed() {
+        let failed = ContainerStartFailed {
+            container: "workspace".into(),
+            reason: "StartError".into(),
+            message: "exit code 128: no space left on device".into(),
+        };
+        assert_eq!(
+            failed.to_string(),
+            "container workspace could not start: StartError: exit code 128: no space left on device"
+        );
+        let bare = ContainerStartFailed {
+            message: String::new(),
+            ..failed
+        };
+        assert_eq!(
+            bare.to_string(),
+            "container workspace could not start: StartError"
+        );
     }
 
     #[test]

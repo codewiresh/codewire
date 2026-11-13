@@ -24,7 +24,9 @@ use super::workspace_binding::{
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
 use crate::runtime::{ClaimRef, Pick, Placement, RuntimeDriver, RuntimeProbe, VerifiedChain};
-use crate::sandbox::client::{NoCapacity, WorkspacePodIdentity, WorkspaceSandboxIdentity};
+use crate::sandbox::client::{
+    ContainerStartFailed, NoCapacity, WorkspacePodIdentity, WorkspaceSandboxIdentity,
+};
 use crate::sandbox::host_keys::RecordedHostKeys;
 use crate::sandbox::template::{
     CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DOCKER_MODE_LOCAL_DIND_DIRECT,
@@ -1552,6 +1554,13 @@ async fn run_environment_create(
                         reclaimed_cold = true;
                         continue;
                     }
+                    if env.never_ran
+                        && let Some(failure) = container_start_failure(&e)
+                    {
+                        fail_create_for_container_start(ctx, &svc, authority, env_id, failure)
+                            .await?;
+                        return Ok(None);
+                    }
                     record_error(
                         &svc,
                         authority,
@@ -2001,6 +2010,13 @@ async fn run_environment_create(
                         if reclaim_cold(ctx, &env, authority, &e).await {
                             reclaimed_cold = true;
                             continue;
+                        }
+                        if env.never_ran
+                            && let Some(failure) = container_start_failure(&e)
+                        {
+                            fail_create_for_container_start(ctx, &svc, authority, env_id, failure)
+                                .await?;
+                            return Ok(None);
                         }
                         record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}"))
                             .await?;
@@ -3233,6 +3249,61 @@ pub(super) fn no_capacity_refusal(error: &anyhow::Error) -> Option<&NoCapacity> 
     })
 }
 
+/// The container that could not start, when a readiness wait ended for that.
+pub(super) fn container_start_failure(error: &anyhow::Error) -> Option<&ContainerStartFailed> {
+    error.downcast_ref::<ContainerStartFailed>().or_else(|| {
+        error
+            .downcast_ref::<ReadinessWaitFailed>()
+            .and_then(|failed| failed.0.downcast_ref::<ContainerStartFailed>())
+    })
+}
+
+/// What the user reads when their create ends because a container could not
+/// start. It carries the kubelet's reason and message, which say whether the
+/// image is at fault (a pull that fails, a command that does not exist) or the
+/// node (no space, a runtime error), bounded so one long runtime message
+/// cannot fill the column.
+pub(super) fn container_start_failure_message(failure: &ContainerStartFailed) -> String {
+    const MAX_CHARS: usize = 600;
+    let text = format!("The sandbox could not start: {failure}.");
+    if text.chars().count() <= MAX_CHARS {
+        return text;
+    }
+    let mut bounded: String = text.chars().take(MAX_CHARS - 1).collect();
+    bounded.push('…');
+    bounded
+}
+
+/// End a create whose workspace container cannot start, in place of an error
+/// that would retry into the same failed Pod: this activity finishes, and the
+/// reconcile it queues does the normal destroy, which releases the claim and
+/// the slot (#4431).
+pub(super) async fn fail_create_for_container_start(
+    ctx: &WorkerContext,
+    svc: &Service<PgLifecycleStore>,
+    authority: &ActivityAuthority,
+    env_id: &str,
+    failure: &ContainerStartFailed,
+) -> anyhow::Result<()> {
+    authority.ensure().await?;
+    let message = container_start_failure_message(failure);
+    if !svc
+        .fail_create_for_container_start(env_id, &message, CREATE_MUTATION_STATES)
+        .await?
+    {
+        return Ok(());
+    }
+    tracing::warn!(
+        environment_id = env_id,
+        container = %failure.container,
+        reason = %failure.reason,
+        "create ended: a workspace container could not start"
+    );
+    ctx.temporal_trigger
+        .trigger_environment(env_id, "reconcile")
+        .await
+}
+
 /// A failed wait's line in the environment's log, which its user reads. The
 /// scheduler's words describe the cluster's nodes, so a refusal says what the
 /// user can do; [`refuse_for_no_capacity`] keeps them in the worker's log.
@@ -3240,8 +3311,11 @@ pub(super) fn wait_failure_log(
     error: &anyhow::Error,
     outcome: crate::lifecycle::NoCapacityRefusal,
 ) -> String {
-    match no_capacity_refusal(error) {
-        Some(_) => outcome.message.to_owned(),
+    if no_capacity_refusal(error).is_some() {
+        return outcome.message.to_owned();
+    }
+    match container_start_failure(error) {
+        Some(failure) => container_start_failure_message(failure),
         None => format!("{error:#}"),
     }
 }
@@ -3418,6 +3492,42 @@ mod tests {
             wait_failure_log(&other, outcome),
             "pod sandbox: ImagePullBackOff"
         );
+    }
+
+    #[test]
+    fn a_container_start_failure_is_found_and_told_in_the_kubelets_words() {
+        let failed = || ContainerStartFailed {
+            container: "workspace".into(),
+            reason: "ImagePullBackOff".into(),
+            message: "Back-off pulling image \"example/missing:tag\"".into(),
+        };
+        let told = "The sandbox could not start: container workspace could not start: \
+                    ImagePullBackOff: Back-off pulling image \"example/missing:tag\".";
+        for error in [
+            anyhow::Error::from(failed()),
+            ReadinessWaitFailed(failed().into()).into(),
+        ] {
+            assert_eq!(container_start_failure(&error), Some(&failed()));
+            // The environment's log line is the user's message, as its
+            // `error_reason` is.
+            assert_eq!(
+                wait_failure_log(&error, crate::lifecycle::NoCapacityRefusal::CREATE),
+                told
+            );
+        }
+        assert_eq!(container_start_failure_message(&failed()), told);
+        assert!(container_start_failure(&anyhow::anyhow!("timeout waiting")).is_none());
+        // A refusal for lack of room is not a container failure.
+        assert!(container_start_failure(&NoCapacity("full".into()).into()).is_none());
+
+        // One long runtime message cannot fill the column.
+        let long = ContainerStartFailed {
+            message: "é".repeat(2_000),
+            ..failed()
+        };
+        let bounded = container_start_failure_message(&long);
+        assert_eq!(bounded.chars().count(), 600);
+        assert!(bounded.ends_with('…'));
     }
 
     fn identity_mode_env() -> EnvironmentRow {

@@ -1275,9 +1275,35 @@ fn setup_failure_reports_states_that_cannot_finish_setup() {
             "No capacity right now. Try again shortly.",
             "{state}"
         );
-        assert!(no_capacity_failure(&refused).is_some(), "{state}");
+        assert!(platform_ended_failure(&refused).is_some(), "{state}");
     }
-    assert!(no_capacity_failure(&environment("error")).is_none());
+    assert!(platform_ended_failure(&environment("error")).is_none());
+    // A container that could not start says so in the kubelet's words, on the
+    // way out too, and plainly when no reason was recorded.
+    for state in ["error", "destroying", "destroyed"] {
+        let failed = Environment {
+            error_code: Some("container_start_failed".to_owned()),
+            error_reason: Some(
+                "The sandbox could not start: container workspace could not start: ErrImagePull."
+                    .to_owned(),
+            ),
+            ..environment(state)
+        };
+        assert_eq!(
+            setup_failure(&failed).unwrap().to_string(),
+            "The sandbox could not start: container workspace could not start: ErrImagePull.",
+            "{state}"
+        );
+    }
+    assert_eq!(
+        setup_failure(&Environment {
+            error_code: Some("container_start_failed".to_owned()),
+            ..environment("destroyed")
+        })
+        .unwrap()
+        .to_string(),
+        "The sandbox could not start."
+    );
     assert_eq!(
         setup_failure(&Environment {
             error_reason: Some("claim: quota exceeded\n".to_owned()),

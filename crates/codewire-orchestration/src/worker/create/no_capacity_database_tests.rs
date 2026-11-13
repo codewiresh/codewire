@@ -304,3 +304,112 @@ async fn db_the_next_start_clears_only_the_no_capacity_message() -> Result<()> {
     .await;
     db.finish(result).await
 }
+
+/// How a create whose workspace container cannot start ends (#4431): once,
+/// with its code and the kubelet's words, on the way to the normal destroy.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_container_start_failure_ends_a_create_once() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed_parents(&db).await?;
+        let pool = &db.pool;
+        let svc = Service::for_pool(pool.clone());
+        let failure = crate::sandbox::client::ContainerStartFailed {
+            container: "workspace".into(),
+            reason: "StartError".into(),
+            message: "exit code 128: no space left on device".into(),
+        };
+        let message = container_start_failure_message(&failure);
+
+        for (index, state) in ["pending", "creating"].iter().enumerate() {
+            let id = format!("5b2d9c41-7f36-4a1e-8d53-6c9f0a1b2e{index:02}");
+            seed(
+                pool,
+                &id,
+                &Seed {
+                    state,
+                    ..FIRST_ATTEMPT
+                },
+            )
+            .await?;
+            ensure!(
+                svc.fail_create_for_container_start(&id, &message, CREATE_MUTATION_STATES)
+                    .await?,
+                "{state}: not ended"
+            );
+            let (now, desired, code, reason) = outcome(pool, &id).await?;
+            ensure!(
+                (now.as_str(), desired.as_str()) == ("error", "destroyed"),
+                "{state}: {now} {desired}"
+            );
+            ensure!(
+                code == crate::lifecycle::CONTAINER_START_FAILED_ERROR_CODE,
+                "{state}: {code}"
+            );
+            ensure!(
+                reason
+                    == "The sandbox could not start: container workspace could not start: \
+                        StartError: exit code 128: no space left on device.",
+                "{state}: {reason}"
+            );
+            let logged: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM environment_logs \
+                 WHERE environment_id = $1 AND phase = 'lifecycle_container_start_failed'",
+            )
+            .bind(&id)
+            .fetch_one(pool)
+            .await?;
+            ensure!(logged == 1, "{state}: logged {logged} times");
+
+            // The queued reconcile destroys it, which releases its claim and
+            // its slot; nothing retries the create.
+            let action = svc
+                .reconcile(&Snapshot {
+                    id: id.clone(),
+                    state: now,
+                    desired_state: desired,
+                    external_cleanup_complete: false,
+                })
+                .await?;
+            ensure!(action == Action::Destroy, "{state}: {action:?}");
+            ensure!(
+                !svc.fail_create_for_container_start(&id, &message, CREATE_MUTATION_STATES)
+                    .await?,
+                "{state}: ended twice"
+            );
+        }
+
+        // A newer intent wins: a create its user already destroyed, and a
+        // sandbox that is running, are left as they are.
+        for (index, (state, desired)) in [("creating", "destroyed"), ("running", "started")]
+            .iter()
+            .enumerate()
+        {
+            let id = format!("5b2d9c41-7f36-4a1e-8d53-6c9f0a1b2f{index:02}");
+            seed(
+                pool,
+                &id,
+                &Seed {
+                    state,
+                    desired_state: desired,
+                    ..FIRST_ATTEMPT
+                },
+            )
+            .await?;
+            ensure!(
+                !svc.fail_create_for_container_start(&id, &message, CREATE_MUTATION_STATES)
+                    .await?,
+                "{state}/{desired}: ended"
+            );
+            let (now, still, code, _) = outcome(pool, &id).await?;
+            ensure!(
+                (now.as_str(), still.as_str(), code.as_str()) == (*state, *desired, ""),
+                "{state}/{desired}: {now} {still} {code}"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

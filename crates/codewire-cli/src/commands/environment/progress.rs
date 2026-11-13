@@ -930,7 +930,7 @@ pub(crate) async fn watch_start_failure(
 /// A start is accepted while the environment is still `stopped`, with
 /// `started` desired, so only a change of intent ends it there.
 pub(crate) fn start_failure(environment: &Environment) -> Option<anyhow::Error> {
-    if let Some(failure) = no_capacity_failure(environment) {
+    if let Some(failure) = platform_ended_failure(environment) {
         return Some(failure);
     }
     let left = match environment.state.as_str() {
@@ -955,23 +955,27 @@ pub(crate) fn start_failure(environment: &Environment) -> Option<anyhow::Error> 
     ))
 }
 
-/// The message when the cluster had no room for this environment. It is written
-/// for the user, whatever state the environment has reached on the way out.
-pub(crate) fn no_capacity_failure(environment: &Environment) -> Option<anyhow::Error> {
-    if environment.error_code.as_deref() != Some("no_capacity") {
-        return None;
-    }
+/// The message when the platform ended this environment's create or start and
+/// said why: the cluster had no room, or a container of its sandbox could not
+/// start. It is written for the user, whatever state the environment has
+/// reached on the way out.
+pub(crate) fn platform_ended_failure(environment: &Environment) -> Option<anyhow::Error> {
+    let fallback = match environment.error_code.as_deref() {
+        Some("no_capacity") => "No capacity right now. Try again shortly.",
+        Some("container_start_failed") => "The sandbox could not start.",
+        _ => return None,
+    };
     let message = environment
         .error_reason
         .as_deref()
         .map(terminal_text)
         .filter(|reason| !reason.is_empty())
-        .unwrap_or_else(|| "No capacity right now. Try again shortly.".to_owned());
+        .unwrap_or_else(|| fallback.to_owned());
     Some(anyhow::anyhow!(message))
 }
 
 pub(crate) fn setup_failure(environment: &Environment) -> Option<anyhow::Error> {
-    if let Some(failure) = no_capacity_failure(environment) {
+    if let Some(failure) = platform_ended_failure(environment) {
         return Some(failure);
     }
     let id = &environment.id;

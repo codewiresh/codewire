@@ -274,6 +274,215 @@ async fn a_refusal_that_is_not_for_a_resource_waits_for_the_deadline() {
     assert!(started.elapsed() >= timeout);
 }
 
+/// A Kubernetes API on the paused clock, like [`scheduling_client`], whose
+/// workspace Pod is scheduled and reports `status` at each moment since the
+/// wait began.
+fn container_client(
+    ready_at: Option<Duration>,
+    status: impl Fn(Duration) -> Value + Clone + Send + Sync + 'static,
+) -> SandboxClient {
+    let started = tokio::time::Instant::now();
+    let service = Router::new().fallback(move |request: Request<Body>| {
+        let status = status.clone();
+        async move {
+            let now = started.elapsed();
+            let path = request.uri().path_and_query().unwrap().as_str().to_owned();
+            let body = if path.contains("watch=true") {
+                String::new()
+            } else if path.contains("/sandboxclaims/") {
+                let ready = ready_at.is_some_and(|at| now >= at);
+                let mut object = claim("20", ready);
+                object["status"]["sandbox"] = json!({"name": "workspace-sandbox"});
+                object.to_string()
+            } else if path.contains("/sandboxes/") {
+                json!({
+                    "apiVersion": "agents.x-k8s.io/v1alpha1",
+                    "kind": "Sandbox",
+                    "metadata": {"name": "workspace-sandbox", "namespace": NS},
+                })
+                .to_string()
+            } else {
+                json!({
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {"name": "workspace-sandbox", "namespace": NS},
+                    "status": status(now),
+                })
+                .to_string()
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        }
+    });
+    SandboxClient::new(Client::new(service, "default"), NS)
+}
+
+/// A Pod status whose `workspace` container is in `state`, beside a running
+/// `dind`, as Dev showed for a broken image (#4431).
+fn workspace_container(phase: &str, state: Value) -> Value {
+    let container = |name: &str, state: Value| {
+        json!({
+            "name": name, "image": "example:test", "imageID": "", "ready": false,
+            "restartCount": 0, "state": state,
+        })
+    };
+    json!({
+        "phase": phase,
+        "containerStatuses": [
+            container("dind", json!({"running": {}})),
+            container("workspace", state),
+        ],
+    })
+}
+
+fn waiting(reason: &str) -> Value {
+    json!({"waiting": {"reason": reason, "message": format!("{reason} for example:test")}})
+}
+
+/// The kubelet alternates the two pull reasons while it backs off.
+fn unpullable(now: Duration) -> Value {
+    let reason = if (now.as_secs() / 10).is_multiple_of(2) {
+        "ErrImagePull"
+    } else {
+        "ImagePullBackOff"
+    };
+    workspace_container("Pending", waiting(reason))
+}
+
+fn start_error() -> Value {
+    workspace_container(
+        "Running",
+        json!({"terminated": {
+            "exitCode": 128, "reason": "StartError",
+            "message": "failed to create containerd task: no space left on device",
+        }}),
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_image_that_cannot_be_pulled_ends_the_wait_after_its_grace() {
+    let client = container_client(None, unpullable);
+    let started = tokio::time::Instant::now();
+    let error = client.wait_for_ready(ENV, LONG_WAIT).await.unwrap_err();
+    let failure = error.downcast_ref::<ContainerStartFailed>().unwrap();
+    assert_eq!(failure.container, "workspace");
+    assert!(
+        matches!(failure.reason.as_str(), "ErrImagePull" | "ImagePullBackOff"),
+        "{failure}"
+    );
+    let waited = started.elapsed();
+    assert!(
+        (IMAGE_PULL_FAILURE_GRACE..IMAGE_PULL_FAILURE_GRACE + Duration::from_secs(5))
+            .contains(&waited),
+        "{waited:?}"
+    );
+}
+
+/// A cold create waits here, where nothing looked at the containers before.
+#[tokio::test(start_paused = true)]
+async fn an_image_that_cannot_be_pulled_ends_the_access_wait_too() {
+    let client = container_client(None, unpullable);
+    let started = tokio::time::Instant::now();
+    let error = client
+        .prove_workspace_access(ENV, LONG_WAIT, &NoHostKey)
+        .await
+        .unwrap_err();
+    assert!(
+        error.downcast_ref::<ContainerStartFailed>().is_some(),
+        "{error:#}"
+    );
+    assert!(started.elapsed() < IMAGE_PULL_FAILURE_GRACE + Duration::from_secs(5));
+}
+
+/// The Pod is `Running` because `dind` runs; only the container says so.
+#[tokio::test(start_paused = true)]
+async fn a_container_that_cannot_start_ends_both_waits_within_seconds() {
+    let client = container_client(None, |_| start_error());
+    let started = tokio::time::Instant::now();
+    let error = client.wait_for_ready(ENV, LONG_WAIT).await.unwrap_err();
+    let failure = error.downcast_ref::<ContainerStartFailed>().unwrap();
+    assert_eq!(
+        failure.to_string(),
+        "container workspace could not start: StartError: exit code 128: \
+         failed to create containerd task: no space left on device"
+    );
+    let waited = started.elapsed();
+    assert!(
+        (CONTAINER_START_FAILURE_GRACE..CONTAINER_START_FAILURE_GRACE + Duration::from_secs(5))
+            .contains(&waited),
+        "{waited:?}"
+    );
+
+    let client = container_client(None, |_| start_error());
+    let started = tokio::time::Instant::now();
+    let error = client
+        .prove_workspace_access(ENV, LONG_WAIT, &NoHostKey)
+        .await
+        .unwrap_err();
+    assert!(
+        error.downcast_ref::<ContainerStartFailed>().is_some(),
+        "{error:#}"
+    );
+    assert!(started.elapsed() < CONTAINER_START_FAILURE_GRACE + Duration::from_secs(5));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pull_that_succeeds_during_the_grace_restarts_it() {
+    let client = container_client(None, |now| {
+        let pulled = (Duration::from_secs(40)..Duration::from_secs(50)).contains(&now);
+        if pulled {
+            workspace_container("Pending", waiting("ContainerCreating"))
+        } else {
+            unpullable(now)
+        }
+    });
+    let started = tokio::time::Instant::now();
+    let error = client.wait_for_ready(ENV, LONG_WAIT).await.unwrap_err();
+    assert!(
+        error.downcast_ref::<ContainerStartFailed>().is_some(),
+        "{error:#}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(50) + IMAGE_PULL_FAILURE_GRACE,
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pull_that_recovers_is_ready() {
+    let client = container_client(Some(Duration::from_secs(45)), |now| {
+        if now < Duration::from_secs(30) {
+            unpullable(now)
+        } else {
+            workspace_container("Running", json!({"running": {}}))
+        }
+    });
+    client.wait_for_ready(ENV, LONG_WAIT).await.unwrap();
+}
+
+/// A confidential guest unpacks its image for minutes in this state.
+#[tokio::test(start_paused = true)]
+async fn a_container_still_initializing_waits_for_the_deadline() {
+    for reason in ["PodInitializing", "ContainerCreating"] {
+        let client = container_client(None, move |_| {
+            workspace_container("Pending", waiting(reason))
+        });
+        let started = tokio::time::Instant::now();
+        let timeout = IMAGE_PULL_FAILURE_GRACE * 5;
+        let error = client.wait_for_ready(ENV, timeout).await.unwrap_err();
+        assert!(
+            error.downcast_ref::<ContainerStartFailed>().is_none(),
+            "{reason}: {error:#}"
+        );
+        assert!(error.to_string().contains("timeout waiting"), "{error:#}");
+        assert!(started.elapsed() >= timeout);
+    }
+}
+
 fn workspace_pod(uid: &str, resource_version: &str) -> Value {
     json!({
         "apiVersion": "v1",
