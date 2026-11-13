@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use codewire_client::{self as rpc, ClientConfig, ClientError, CodewireClient, ErrorCode};
+use codewire_client::{self as rpc, ClientError, CodewireClient, ErrorCode};
 use serde::{Deserialize, Serialize};
 
 use crate::CLI_VERSION;
@@ -1193,7 +1193,8 @@ fn validate_created_environment(
 }
 
 pub(crate) fn connect_client(config: &ResolvedPlatformConfig) -> anyhow::Result<CodewireClient> {
-    let client_config = ClientConfig::new(&config.server_url)?
+    let client_config = config
+        .client_config()?
         .with_user_agent(format!("codewire-cli/{CLI_VERSION}"))?;
     CodewireClient::with_token_provider(client_config, config.token_provider()?).map_err(Into::into)
 }
@@ -1962,7 +1963,7 @@ mod tests {
     fn test_client(server: &MockServer) -> EnvironmentClient {
         EnvironmentClient {
             inner: CodewireClient::with_http(
-                ClientConfig::new(server.uri()).unwrap(),
+                rpc::ClientConfig::new(server.uri()).unwrap(),
                 rpc::StaticTokenProvider::new("synthetic-source-test-token").unwrap(),
                 reqwest::Client::new(),
             )

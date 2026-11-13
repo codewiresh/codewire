@@ -205,12 +205,9 @@ async fn platform_metadata(
         !token.expose_secret().starts_with("cw_"),
         "native platform-source delegation requires a personal `cw login`; organization API keys cannot select personal authority"
     );
-    let user = OAuthClient::for_server_url(&platform.server_url)?
-        .userinfo(&token)
-        .await
-        .context(
-            "verify the current platform account for native source delegation; use `cw login`",
-        )?;
+    let user = platform.oauth_client()?.userinfo(&token).await.context(
+        "verify the current platform account for native source delegation; use `cw login`",
+    )?;
     validate_identity_component(&user.sub)?;
     let orgs = organization_client(&platform)?
         .list_orgs()

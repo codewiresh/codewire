@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use codewire_client::{self as rpc, ClientConfig, CodewireClient};
+use codewire_client::{self as rpc, CodewireClient};
 use codewire_workload_secrets::{
     MAX_WORKLOAD_SECRETS, ResolvedWorkloadSecretMetadata, WorkloadSecretSource,
     validate_workload_secret_key,
@@ -57,7 +57,8 @@ pub struct SecretClient {
 
 impl SecretClient {
     pub fn new(config: &ResolvedPlatformConfig) -> anyhow::Result<Self> {
-        let client_config = ClientConfig::new(&config.server_url)?
+        let client_config = config
+            .client_config()?
             .with_user_agent(format!("codewire-cli/{CLI_VERSION}"))?;
         Ok(Self {
             inner: CodewireClient::with_token_provider(client_config, config.token_provider()?)?,

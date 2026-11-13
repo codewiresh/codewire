@@ -172,6 +172,14 @@ enum Sender {
 }
 
 impl Sender {
+    /// A signed-in sender's server carries its pinned CA, if any.
+    fn client_config(&self) -> Result<ClientConfig, codewire_client::ClientError> {
+        match self {
+            Self::SignedIn { platform, .. } => platform.client_config(),
+            Self::Anonymous { server_url, .. } => ClientConfig::new(server_url),
+        }
+    }
+
     fn server_url(&self) -> &str {
         match self {
             Self::SignedIn { platform, .. } => &platform.server_url,
@@ -271,7 +279,8 @@ async fn resolve_sender(
             .token()
             .await
             .map_err(sign_in_unconfirmed)?;
-        codewire_client::OAuthClient::for_server_url(&platform.server_url)?
+        platform
+            .oauth_client()?
             .userinfo(&token)
             .await
             .ok()
@@ -386,7 +395,8 @@ pub(crate) async fn handle_feedback_command(
         anyhow::ensure!(confirmed, "canceled; no feedback sent");
     }
 
-    let config = ClientConfig::new(sender.server_url())?
+    let config = sender
+        .client_config()?
         .with_user_agent(format!("codewire-cli/{CLI_VERSION}"))?;
     let client = match &sender {
         Sender::SignedIn { platform, .. } => {

@@ -93,6 +93,29 @@ impl DeploymentCa {
     pub fn certificates(&self) -> &[CertificateDer<'static>] {
         &self.certificates
     }
+
+    /// Whether `error`, or an error under it, is the TLS verifier refusing a
+    /// server's certificate: what a server signed by a CA the client does not
+    /// trust for it looks like. An `io::Error` reports its wrapped error's
+    /// source rather than the wrapped error, so the walk steps into it.
+    pub fn refused_certificate(error: &(dyn std::error::Error + 'static)) -> bool {
+        let mut source = Some(error);
+        while let Some(current) = source {
+            if let Some(rustls::Error::InvalidCertificate(_)) =
+                current.downcast_ref::<rustls::Error>()
+            {
+                return true;
+            }
+            source = match current
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::get_ref)
+            {
+                Some(inner) => Some(inner),
+                None => current.source(),
+            };
+        }
+        false
+    }
 }
 
 fn pem_certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, DeploymentCaError> {
@@ -278,6 +301,8 @@ impl ServerCertVerifier for PinnedHostsVerifier {
         )
     }
 
+    // The handshake signature checks below do not depend on the roots, and
+    // both verifiers share one crypto provider, so the public one answers.
     fn verify_tls12_signature(
         &self,
         message: &[u8],

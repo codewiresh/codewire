@@ -277,7 +277,8 @@ pub(super) fn platform_client(globals: &Globals) -> anyhow::Result<CodewireClien
     let paths = ResolvePaths::from_env(&OsEnv)?;
     let platform = resolve_platform(globals, &paths, &OsEnv)?;
     Ok(CodewireClient::with_token_provider(
-        rpc::ClientConfig::new(&platform.server_url)?
+        platform
+            .client_config()?
             .with_user_agent(format!("codewire-cli/{CLI_VERSION}"))?,
         platform.token_provider()?,
     )?)

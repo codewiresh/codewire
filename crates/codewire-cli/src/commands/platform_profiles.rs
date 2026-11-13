@@ -19,7 +19,8 @@ pub(super) async fn handle_platform_credentials(
     let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
     let client = CodewireClient::with_token_provider(
-        rpc::ClientConfig::new(&platform.server_url)?
+        platform
+            .client_config()?
             .with_user_agent(format!("codewire-cli/{CLI_VERSION}"))?,
         platform.token_provider()?,
     )?;

@@ -523,6 +523,7 @@ pub(crate) async fn resolve_guided_platform(
                 globals,
                 LoginArgs {
                     org: globals.org.clone(),
+                    ca_file: None,
                 },
             )
             .await?;

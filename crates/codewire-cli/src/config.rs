@@ -6,12 +6,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use codewire_client::{
-    FileCredentialStore, OAuthClient, RefreshingTokenProvider, StaticTokenProvider, TokenProvider,
+    ClientConfig, ClientError, DeploymentCa, FileCredentialStore, OAuthClient,
+    RefreshingTokenProvider, StaticTokenProvider, TokenProvider,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
+
+mod deployment_ca;
+
+pub use deployment_ca::{
+    DEPLOYMENT_CA_FILE, DeploymentCaFileError, PinnedCa, copy_deployment_ca, delete_deployment_ca,
+    host_client_config, load_deployment_ca, pin_for_host, read_ca_file, save_deployment_ca,
+};
 
 pub mod selection;
 
@@ -133,6 +141,9 @@ pub struct PlatformConfig {
     pub server_url: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub default_org: String,
+    /// The CA `cw login --ca-file` pinned for this server (#4121).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_ca: Option<PinnedCa>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -150,6 +161,7 @@ pub struct ResolvedPlatformConfig {
     pub used_config_token: bool,
     pub oauth_credentials_path: Option<PathBuf>,
     pub default_org: Option<String>,
+    deployment_ca: Option<DeploymentCa>,
     token_provider_cache: Arc<std::sync::OnceLock<Result<Arc<dyn TokenProvider>, String>>>,
 }
 
@@ -167,8 +179,45 @@ impl ResolvedPlatformConfig {
             used_config_token,
             oauth_credentials_path,
             default_org,
+            deployment_ca: None,
             token_provider_cache: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Trust `ca` alone for this server's host (#4121): the CA `cw login
+    /// --ca-file` pinned for it, or the one a login is being made with.
+    pub fn with_deployment_ca(mut self, ca: Option<DeploymentCa>) -> Self {
+        self.deployment_ca = ca;
+        self
+    }
+
+    pub fn deployment_ca(&self) -> Option<&DeploymentCa> {
+        self.deployment_ca.as_ref()
+    }
+
+    /// The connection settings every client of this server starts from,
+    /// with its pinned CA when it has one.
+    pub fn client_config(&self) -> Result<ClientConfig, ClientError> {
+        let config = ClientConfig::new(&self.server_url)?;
+        match &self.deployment_ca {
+            Some(ca) => config.with_deployment_ca(ca.clone()),
+            None => Ok(config),
+        }
+    }
+
+    /// The OAuth endpoints of this server, reached through its pinned CA.
+    pub fn oauth_client(&self) -> Result<OAuthClient, ClientError> {
+        let http = self
+            .client_config()?
+            .http_client_builder()?
+            .build()
+            .map_err(|error| {
+                ClientError::new(
+                    codewire_client::ErrorCode::Internal,
+                    format!("build Codewire HTTP client: {error}"),
+                )
+            })?;
+        OAuthClient::for_server_url_with_http(&self.server_url, http)
     }
 
     pub fn static_token(
@@ -207,8 +256,7 @@ impl ResolvedPlatformConfig {
         self.token_provider_cache
             .get_or_init(|| {
                 if let Some(path) = &self.oauth_credentials_path {
-                    let client = OAuthClient::for_server_url(&self.server_url)
-                        .map_err(|error| error.to_string())?;
+                    let client = self.oauth_client().map_err(|error| error.to_string())?;
                     let provider =
                         RefreshingTokenProvider::from_store(client, FileCredentialStore::at(path))
                             .map_err(|error| error.to_string())?;
@@ -326,6 +374,15 @@ pub fn resolve_platform(
         }
     };
 
+    let deployment_ca = match &config_result {
+        Ok(config) if same_server_url(&config.server_url, &server_url) => config
+            .deployment_ca
+            .as_ref()
+            .map(|pinned| load_deployment_ca(&paths.platform_config_dir, pinned))
+            .transpose()?,
+        _ => None,
+    };
+
     let default_org = trim_opt(opts.org)
         .or_else(|| trim_opt(env.var(CODEWIRE_ORG_ENV)))
         .or_else(|| {
@@ -340,7 +397,8 @@ pub fn resolve_platform(
         used_config_token,
         oauth_credential_file,
         default_org,
-    ))
+    )
+    .with_deployment_ca(deployment_ca))
 }
 
 /// The selected platform server without requiring a sign-in: `--server`,
@@ -1364,6 +1422,8 @@ pub enum ConfigError {
     InvalidCurrentTarget,
     #[error("incomplete platform config {path}: missing server_url")]
     IncompletePlatformConfig { path: PathBuf },
+    #[error(transparent)]
+    DeploymentCa(#[from] DeploymentCaFileError),
     // `cause` is printed at most once, here; as a `source` the error chain
     // would print it again.
     #[error("no server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login'){}", config_note(cause.as_deref()))]
@@ -1411,6 +1471,7 @@ mod tests {
             &PlatformConfig {
                 server_url: "https://offline.invalid".to_owned(),
                 default_org: "org-1".to_owned(),
+                deployment_ca: None,
             },
         )
         .unwrap();
@@ -1510,6 +1571,7 @@ mod tests {
                 &PlatformConfig {
                     server_url: "https://offline.invalid".to_owned(),
                     default_org,
+                    deployment_ca: None,
                 },
             )
             .unwrap();
@@ -1573,6 +1635,7 @@ mod tests {
             &PlatformConfig {
                 server_url: "https://offline.invalid".to_owned(),
                 default_org: String::new(),
+                deployment_ca: None,
             },
         )
         .unwrap();
@@ -1846,6 +1909,7 @@ mod tests {
             &PlatformConfig {
                 server_url: "https://codewire.sh".to_string(),
                 default_org: "org_123".to_string(),
+                deployment_ca: None,
             },
         )
         .unwrap();

@@ -65,7 +65,12 @@ pub(crate) fn print_platform_user(
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(user)?),
         OutputFormat::Text => print!(
             "{}",
-            format_whoami_text(user, &platform.server_url, platform.default_org.as_deref())
+            format_whoami_text(
+                user,
+                &platform.server_url,
+                platform.default_org.as_deref(),
+                platform.deployment_ca(),
+            )
         ),
     }
     Ok(())
@@ -75,11 +80,19 @@ pub(crate) fn format_whoami_text(
     user: &PlatformUser,
     server_url: &str,
     default_org: Option<&str>,
+    deployment_ca: Option<&codewire_client::DeploymentCa>,
 ) -> String {
     let mut output = format!(
         "{:<10} {} ({})\n{:<10} {}\n",
         "User:", user.name, user.email, "Server:", server_url
     );
+    // The CA `cw login --ca-file` pinned: the only CA trusted for this server.
+    if let Some(ca) = deployment_ca {
+        for (position, fingerprint) in ca.fingerprints().iter().enumerate() {
+            let label = if position == 0 { "CA:" } else { "" };
+            output.push_str(&format!("{label:<10} SHA-256 {fingerprint}\n"));
+        }
+    }
     if let Some(default_org) = default_org.and_then(trimmed_str) {
         output.push_str(&format!("{:<10} {}\n", "Org:", default_org));
     }

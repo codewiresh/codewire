@@ -80,6 +80,8 @@ codewire-workspace-access = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 codewire-tls = { workspace = true, features = ["test-support"] }
+# The pinned CA tests make an expired CA.
+rcgen = "0.13"
 buffa = { workspace = true }
 connectrpc = { workspace = true, features = ["axum", "client"] }
 tempfile = { workspace = true }

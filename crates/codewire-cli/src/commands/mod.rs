@@ -188,12 +188,6 @@ pub(crate) struct DoctorTailnetArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct LoginArgs {
-    #[arg(long, value_name = "ID_OR_SLUG", help = "Default organization to save")]
-    org: Option<String>,
-}
-
-#[derive(Debug, Args)]
 #[command(args_conflicts_with_subcommands = true)]
 pub(crate) struct SetupArgs {
     #[command(subcommand)]
@@ -2778,6 +2772,7 @@ mod hosts;
 pub(crate) mod inventory;
 mod launch_setup;
 pub(crate) mod lifecycle_output;
+mod login;
 pub(crate) mod mesh_commands;
 mod organizations;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2805,6 +2800,7 @@ pub(crate) use flat::{HelpArgs, RetiredEnvArgs};
 pub(crate) use hosts::{
     HOST_LONG_ABOUT, HostCommand, HostsArgs, handle_host_command, handle_hosts_command,
 };
+pub(crate) use login::{LoginArgs, handle_login_command};
 pub use mesh_commands::owner::LocalMeshOwner;
 pub(crate) use mesh_commands::retained::StateDir as MeshStateDir;
 pub(crate) use mesh_commands::*;

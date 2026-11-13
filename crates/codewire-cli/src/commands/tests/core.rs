@@ -1126,6 +1126,7 @@ fn save_login_platform_config_persists_only_reconciled_default_org() {
         &config::PlatformConfig {
             server_url: "https://old.codewire.sh".to_string(),
             default_org: "org_123".to_string(),
+            deployment_ca: None,
         },
     )
     .unwrap();
@@ -1152,6 +1153,7 @@ fn save_login_platform_config_persists_only_reconciled_default_org() {
         "https://new.codewire.sh",
         &credentials,
         Some("org_new"),
+        None,
     )
     .unwrap();
 
@@ -1174,7 +1176,7 @@ fn save_login_platform_config_persists_only_reconciled_default_org() {
         doctor_check("org", DoctorStatus::Ok, "New Org")
     );
 
-    save_login_platform_config(&paths, "https://new.codewire.sh", &credentials, None).unwrap();
+    save_login_platform_config(&paths, "https://new.codewire.sh", &credentials, None, None).unwrap();
     let saved = config::load_platform_config(&paths.platform_config_dir).unwrap();
     assert!(saved.default_org.is_empty());
 }
@@ -1203,9 +1205,9 @@ fn a_login_replaces_the_account_record_and_a_failed_one_leaves_none() {
     };
     let recorded_user = || config::local_account(None, &paths, &env).map(|account| account.user_id);
 
-    save_login(&paths, server, &credentials, Some("org-a"), &user("user-a")).unwrap();
+    save_login(&paths, server, &credentials, Some("org-a"), &user("user-a"), None).unwrap();
     assert_eq!(recorded_user().as_deref(), Some("user-a"));
-    save_login(&paths, server, &credentials, Some("org-a"), &user("user-b")).unwrap();
+    save_login(&paths, server, &credentials, Some("org-a"), &user("user-b"), None).unwrap();
     assert_eq!(recorded_user().as_deref(), Some("user-b"));
     // Only the record is left in the directory: no temporary file.
     let mut names = std::fs::read_dir(&paths.platform_config_dir)
@@ -1220,7 +1222,7 @@ fn a_login_replaces_the_account_record_and_a_failed_one_leaves_none() {
     let config_file = paths.platform_config_dir.join("config.json");
     std::fs::remove_file(&config_file).unwrap();
     std::fs::create_dir(&config_file).unwrap();
-    assert!(save_login(&paths, server, &credentials, Some("org-a"), &user("user-c")).is_err());
+    assert!(save_login(&paths, server, &credentials, Some("org-a"), &user("user-c"), None).is_err());
     assert!(!paths.platform_config_dir.join("account.json").exists());
     assert_eq!(recorded_user(), None);
 }
@@ -1246,6 +1248,7 @@ fn platform_login_saves_the_owner_organization_and_no_mesh_projection() {
         "https://api.codewire-dev.sh",
         &credentials,
         Some("org-alpha"),
+        None,
     )
     .unwrap();
 
@@ -1659,7 +1662,7 @@ fn format_whoami_text_matches_go_layout() {
     };
 
     assert_eq!(
-        format_whoami_text(&user, "https://codewire.sh", Some("noel")),
+        format_whoami_text(&user, "https://codewire.sh", Some("noel"), None),
         concat!(
             "User:      Example Owner (n@example.com)\n",
             "Server:    https://codewire.sh\n",
@@ -1676,7 +1679,7 @@ fn format_whoami_text_omits_empty_default_org() {
     };
 
     assert_eq!(
-        format_whoami_text(&user, "https://codewire.sh", Some("  ")),
+        format_whoami_text(&user, "https://codewire.sh", Some("  "), None),
         concat!(
             "User:       (n@example.com)\n",
             "Server:    https://codewire.sh\n",
@@ -1740,7 +1743,8 @@ async fn an_api_key_is_the_user_it_acts_as_without_admin_authority() {
     identity_endpoint(&server, "/api/oauth/userinfo", SYNTHETIC_API_KEY, serde_json::json!({}), 0)
         .await;
 
-    let user = current_platform_user(&identity_client(&server, SYNTHETIC_API_KEY), &server.uri())
+    let oauth = codewire_client::OAuthClient::for_server_url(server.uri()).unwrap();
+    let user = current_platform_user(&identity_client(&server, SYNTHETIC_API_KEY), &oauth)
         .await
         .unwrap();
     assert_eq!(user.id, "user-smoke");
@@ -1762,7 +1766,8 @@ async fn a_revoked_api_key_is_named_plainly() {
     )
     .await;
 
-    let error = current_platform_user(&identity_client(&server, SYNTHETIC_API_KEY), &server.uri())
+    let oauth = codewire_client::OAuthClient::for_server_url(server.uri()).unwrap();
+    let error = current_platform_user(&identity_client(&server, SYNTHETIC_API_KEY), &oauth)
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), "the API key is invalid, expired or disabled");
@@ -1788,7 +1793,8 @@ async fn an_oauth_login_is_the_userinfo_subject() {
     identity_endpoint(&server, "/api/auth/get-session", "synthetic-access", serde_json::json!({}), 0)
         .await;
 
-    let user = current_platform_user(&identity_client(&server, "synthetic-access"), &server.uri())
+    let oauth = codewire_client::OAuthClient::for_server_url(server.uri()).unwrap();
+    let user = current_platform_user(&identity_client(&server, "synthetic-access"), &oauth)
         .await
         .unwrap();
     assert_eq!(user.id, "user-owner");
@@ -2233,7 +2239,7 @@ async fn logout_reports_logged_out_only_when_the_server_revoked_both_tokens() {
     revocation(&server, "refresh_token", 200, 1).await;
     revocation(&server, "access_token", 200, 1).await;
     let config = saved_sign_in(&server.uri());
-    let outcome = log_out(config.path(), Some(&server.uri())).await.unwrap();
+    let outcome = log_out(config.path(), Some(&server.uri()), None).await.unwrap();
     assert_eq!(outcome, LogoutOutcome::Revoked);
     assert_signed_out_locally(config.path());
     logout_result(outcome).unwrap();
@@ -2248,7 +2254,7 @@ async fn logout_that_the_server_did_not_confirm_removes_the_sign_in_and_fails() 
         revocation(&server, "refresh_token", refresh, 1).await;
         revocation(&server, "access_token", access, access_calls).await;
         let config = saved_sign_in(&server.uri());
-        let outcome = log_out(config.path(), Some(&server.uri())).await.unwrap();
+        let outcome = log_out(config.path(), Some(&server.uri()), None).await.unwrap();
         let LogoutOutcome::NotConfirmed { reason, access_token_expires_at_unix } = &outcome else {
             panic!("an error response was reported as {outcome:?}");
         };
@@ -2267,7 +2273,7 @@ async fn logout_with_an_unreachable_server_removes_the_sign_in_and_says_so() {
     // so the connection is refused.
     let server_url = "http://127.0.0.1:1".to_owned();
     let config = saved_sign_in(&server_url);
-    let outcome = log_out(config.path(), Some(&server_url)).await.unwrap();
+    let outcome = log_out(config.path(), Some(&server_url), None).await.unwrap();
     assert_eq!(
         outcome,
         LogoutOutcome::NotConfirmed {
@@ -2285,7 +2291,7 @@ async fn logout_never_sends_a_sign_in_to_another_server() {
     revocation(&server, "refresh_token", 200, 0).await;
     revocation(&server, "access_token", 200, 0).await;
     let config = saved_sign_in("https://other.example.test");
-    let outcome = log_out(config.path(), Some(&server.uri())).await.unwrap();
+    let outcome = log_out(config.path(), Some(&server.uri()), None).await.unwrap();
     let LogoutOutcome::NotConfirmed { reason, .. } = &outcome else {
         panic!("an issuer mismatch was reported as {outcome:?}");
     };
@@ -2297,7 +2303,7 @@ async fn logout_never_sends_a_sign_in_to_another_server() {
 async fn logout_without_a_saved_sign_in_only_removes_the_configuration() {
     let config = private_mesh_data_fixture();
     std::fs::write(config.path().join("config.json"), b"{}").unwrap();
-    let outcome = log_out(config.path(), None).await.unwrap();
+    let outcome = log_out(config.path(), None, None).await.unwrap();
     assert_eq!(outcome, LogoutOutcome::NoSignIn);
     assert_signed_out_locally(config.path());
     logout_result(outcome).unwrap();

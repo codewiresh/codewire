@@ -289,61 +289,6 @@ pub(crate) fn short_env_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
-pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> anyhow::Result<()> {
-    let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env)?;
-    let server_url = resolve_login_server_url(globals, &paths, &env);
-    let configured_org = saved_login_default_org(&paths, &server_url);
-    let client = OAuthClient::discover(&server_url)
-        .await
-        .context("discover OAuth device flow")?;
-
-    let (credentials, user) = login_with_device(&client).await?;
-    let bearer = credentials
-        .bearer_token()
-        .context("validate OAuth access token")?;
-    let login_platform = config::ResolvedPlatformConfig::static_token(
-        server_url.clone(),
-        bearer.expose_secret(),
-        false,
-        None,
-    );
-    let orgs = organization_client(&login_platform)?
-        .list_orgs()
-        .await
-        .context("list organizations after login")?;
-    let org_resolution = resolve_login_org(&orgs, configured_org.as_deref(), args.org.as_deref())?;
-    let org_resolution = match org_resolution {
-        LoginOrgResolution::SelectionRequired if stdin_is_interactive() => {
-            LoginOrgResolution::Selected(prompt_select_org(&orgs)?.clone())
-        }
-        resolution => resolution,
-    };
-    let default_org = match &org_resolution {
-        LoginOrgResolution::Selected(org) => Some(org.id.as_str()),
-        LoginOrgResolution::NoOrganizations | LoginOrgResolution::SelectionRequired => None,
-    };
-
-    save_login(&paths, &server_url, &credentials, default_org, &user)?;
-    eprintln!("Logged in as {}.", oauth_user_display_name(&user));
-    match org_resolution {
-        LoginOrgResolution::Selected(org) => {
-            eprintln!("Default org: {} ({}).", org.name, org.slug);
-            Ok(())
-        }
-        LoginOrgResolution::NoOrganizations => {
-            anyhow::bail!(
-                "logged in, but no organizations found; run 'cw org create <name>' or join an organization"
-            )
-        }
-        LoginOrgResolution::SelectionRequired => {
-            anyhow::bail!(
-                "logged in, but no default organization is selected; run 'cw org set <id-or-slug>' or rerun 'cw login --org <id-or-slug>'"
-            )
-        }
-    }
-}
-
 pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> anyhow::Result<()> {
     match args.command {
         Some(SetupCommand::Ssh(ssh)) => return handle_config_ssh_command(ssh),
@@ -370,7 +315,7 @@ pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> 
     let (credentials, user) = login_with_device(&login_client).await?;
     eprintln!("Logged in as {}.", oauth_user_display_name(&user));
 
-    save_login(&paths, &server_url, &credentials, None, &user)?;
+    save_login(&paths, &server_url, &credentials, None, &user, None)?;
 
     let authed_platform = config::ResolvedPlatformConfig::oauth_credentials(
         server_url.clone(),
@@ -388,6 +333,7 @@ pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> 
                 .as_ref()
                 .map(|org| org.id.clone())
                 .unwrap_or_default(),
+            deployment_ca: None,
         },
     )
     .context("save config")?;
@@ -647,10 +593,11 @@ pub(crate) fn save_login(
     credentials: &OAuthCredentials,
     default_org: Option<&str>,
     user: &OAuthUserInfo,
+    deployment_ca: Option<&config::PinnedCa>,
 ) -> anyhow::Result<()> {
     config::delete_account(&paths.platform_config_dir)
         .context("remove the previous account record")?;
-    save_login_platform_config(paths, server_url, credentials, default_org)?;
+    save_login_platform_config(paths, server_url, credentials, default_org, deployment_ca)?;
     save_login_account(paths, server_url, user)
 }
 
@@ -676,12 +623,14 @@ pub(crate) fn save_login_platform_config(
     server_url: &str,
     credentials: &OAuthCredentials,
     default_org: Option<&str>,
+    deployment_ca: Option<&config::PinnedCa>,
 ) -> anyhow::Result<()> {
     config::save_platform_config(
         &paths.platform_config_dir,
         &config::PlatformConfig {
             server_url: server_url.to_string(),
             default_org: default_org.unwrap_or_default().to_string(),
+            deployment_ca: deployment_ca.cloned(),
         },
     )
     .context("save config")?;
@@ -720,7 +669,7 @@ pub(crate) fn platform_user_display_name(user: &PlatformUser) -> String {
 /// key never carries that user's admin authority.
 pub(crate) async fn current_platform_user(
     client: &CodewireClient,
-    server_url: &str,
+    oauth: &OAuthClient,
 ) -> anyhow::Result<PlatformUser> {
     let token = client
         .bearer_token()
@@ -738,7 +687,7 @@ pub(crate) async fn current_platform_user(
         user.is_admin = false;
         return Ok(user);
     }
-    let response = OAuthClient::for_server_url(server_url)?
+    let response = oauth
         .userinfo(&token)
         .await
         .context("OAuth user info failed")?;
@@ -1966,7 +1915,11 @@ pub(crate) async fn doctor_platform_check(
         Ok(client) => client,
         Err(err) => return doctor_check("platform", DoctorStatus::Fail, err.to_string()),
     };
-    match current_platform_user(&client, &platform.server_url).await {
+    let oauth = match platform.oauth_client() {
+        Ok(oauth) => oauth,
+        Err(err) => return doctor_check("platform", DoctorStatus::Fail, err.to_string()),
+    };
+    match current_platform_user(&client, &oauth).await {
         Ok(user) => doctor_check(
             "platform",
             DoctorStatus::Ok,
@@ -2044,12 +1997,13 @@ pub(crate) fn doctor_completion_check() -> DoctorCheck {
 pub(crate) fn doctor_platform_client(
     platform: &config::ResolvedPlatformConfig,
 ) -> anyhow::Result<CodewireClient> {
-    let http = reqwest::Client::builder()
+    let config = platform.client_config()?;
+    let http = config
+        .http_client_builder()?
         .timeout(Duration::from_secs(5))
         .build()
         .context("build doctor HTTP client")?;
-    let config = codewire_client::ClientConfig::new(&platform.server_url)?
-        .with_user_agent(format!("codewire-cli/{CLI_VERSION}"))?;
+    let config = config.with_user_agent(format!("codewire-cli/{CLI_VERSION}"))?;
     CodewireClient::with_http_token_provider(config, platform.token_provider()?, http)
         .map_err(Into::into)
 }

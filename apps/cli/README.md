@@ -86,6 +86,22 @@ cw rm my-app
 `cw init` writes `codewire.yaml`, which can be used for either placement.
 Environment AI-tool selection is `--coding-agent`.
 
+A self-hosted server whose HTTPS certificate comes from its own certificate
+authority needs that CA once, when you log in:
+
+```bash
+cw login --server https://codewire.internal --ca-file root-ca.pem
+```
+
+`cw` copies the CA into its configuration directory, readable only by you, and
+trusts it for that server's host alone: never the public CAs as well, and never
+for another host. The file holds CA certificates only; a private key is
+refused.
+
+- `cw whoami` shows the pinned CA's SHA-256 fingerprint.
+- `cw host enroll` gives the host agent its own copy.
+- Logging in again without `--ca-file` removes the pin, and so does `cw logout`.
+
 ## Durable sessions
 
 ```bash

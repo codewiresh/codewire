@@ -366,6 +366,27 @@ async fn another_host_signed_by_the_ca_is_refused() {
         .await
         .unwrap_err();
     assert_eq!(refused_as(&error), CertificateError::UnknownIssuer);
+    assert!(DeploymentCa::refused_certificate(&error));
+}
+
+#[tokio::test]
+async fn a_connection_failure_is_not_a_refused_certificate() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind");
+    let closed = listener.local_addr().expect("address");
+    drop(listener);
+    let client = pinned_client(
+        PINNED,
+        closed.port(),
+        &ca_of(&[&authority("unused")]),
+        &[(PINNED, closed)],
+    );
+    let error = get(&client, format!("https://{PINNED}:{}/", closed.port()))
+        .await
+        .unwrap_err();
+    assert!(certificate_error(&error).is_none(), "{error:?}");
+    assert!(!DeploymentCa::refused_certificate(&error));
 }
 
 #[tokio::test]

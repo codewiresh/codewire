@@ -14,6 +14,7 @@ from repo_policy.turnstile_security import check_turnstile_access_projection
 from repo_policy.licensing import check_license_map
 from repo_policy.material_cache import check_epoch_material_cache_owner
 from repo_policy.database_pools import check_database_pools
+from repo_policy.deployment_http_clients import check_deployment_http_clients
 from repo_policy.mcp_settings import check_mcp_settings
 from repo_policy.mesh import check_mesh_surface_freeze
 from repo_policy.orchestration_security import check_orchestration_authz
@@ -67,6 +68,9 @@ def main(argv: list[str] | None = None) -> int:
     database_pools_parser = subparsers.add_parser("database-pools")
     database_pools_parser.add_argument("--self-test", action="store_true")
     database_pools_parser.set_defaults(func=check_database_pools)
+    deployment_http_clients_parser = subparsers.add_parser("deployment-http-clients")
+    deployment_http_clients_parser.add_argument("--self-test", action="store_true")
+    deployment_http_clients_parser.set_defaults(func=check_deployment_http_clients)
     mcp_parser = subparsers.add_parser("mcp-settings")
     mcp_parser.add_argument("--self-test", action="store_true")
     mcp_parser.set_defaults(func=check_mcp_settings)

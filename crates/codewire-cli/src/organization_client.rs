@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use chrono::{DateTime, SecondsFormat, Utc};
-use codewire_client::{self as rpc, ClientConfig, CodewireClient, ErrorCode};
+use codewire_client::{self as rpc, CodewireClient, ErrorCode};
 use serde::{Deserialize, Serialize};
 
 use crate::CLI_VERSION;
@@ -29,7 +29,8 @@ pub struct OrganizationClient {
 
 impl OrganizationClient {
     pub fn new(config: &ResolvedPlatformConfig) -> anyhow::Result<Self> {
-        let client_config = ClientConfig::new(&config.server_url)?
+        let client_config = config
+            .client_config()?
             .with_user_agent(format!("codewire-cli/{CLI_VERSION}"))?;
         Ok(Self {
             inner: CodewireClient::with_token_provider(client_config, config.token_provider()?)?,

@@ -7,10 +7,17 @@ use super::*;
 pub(crate) async fn handle_logout_command(globals: &Globals) -> anyhow::Result<()> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
-    let server_url = resolve_platform(globals, &paths, &env)
-        .ok()
-        .map(|platform| platform.server_url);
-    let outcome = log_out(&paths.platform_config_dir, server_url.as_deref()).await?;
+    let platform = resolve_platform(globals, &paths, &env).ok();
+    let outcome = log_out(
+        &paths.platform_config_dir,
+        platform
+            .as_ref()
+            .map(|platform| platform.server_url.as_str()),
+        platform
+            .as_ref()
+            .and_then(config::ResolvedPlatformConfig::deployment_ca),
+    )
+    .await?;
     if config::Env::var(&env, config::CODEWIRE_API_KEY_ENV)
         .is_some_and(|key| !key.trim().is_empty())
     {
@@ -41,18 +48,21 @@ pub(crate) enum LogoutOutcome {
 pub(crate) async fn log_out(
     config_dir: &Path,
     server_url: Option<&str>,
+    deployment_ca: Option<&codewire_client::DeploymentCa>,
 ) -> anyhow::Result<LogoutOutcome> {
     let store =
         codewire_client::FileCredentialStore::at(config::oauth_credentials_path(config_dir));
     let outcome = match codewire_client::CredentialStore::load(&store) {
         Ok(None) => LogoutOutcome::NoSignIn,
-        Ok(Some(credentials)) => match revoke_saved_sign_in(&credentials, server_url).await {
-            Ok(()) => LogoutOutcome::Revoked,
-            Err(reason) => LogoutOutcome::NotConfirmed {
-                reason,
-                access_token_expires_at_unix: Some(credentials.expires_at_unix()),
-            },
-        },
+        Ok(Some(credentials)) => {
+            match revoke_saved_sign_in(&credentials, server_url, deployment_ca).await {
+                Ok(()) => LogoutOutcome::Revoked,
+                Err(reason) => LogoutOutcome::NotConfirmed {
+                    reason,
+                    access_token_expires_at_unix: Some(credentials.expires_at_unix()),
+                },
+            }
+        }
         Err(_) => LogoutOutcome::NotConfirmed {
             reason: "the saved sign-in could not be read".to_owned(),
             access_token_expires_at_unix: None,
@@ -60,6 +70,7 @@ pub(crate) async fn log_out(
     };
     codewire_client::CredentialStore::delete(&store).context("remove the saved sign-in")?;
     config::delete_platform_config(config_dir).context("remove the saved configuration")?;
+    config::delete_deployment_ca(config_dir).context("remove the pinned CA")?;
     config::delete_account(config_dir).context("remove the saved account")?;
     Ok(outcome)
 }
@@ -67,9 +78,12 @@ pub(crate) async fn log_out(
 async fn revoke_saved_sign_in(
     credentials: &codewire_client::OAuthCredentials,
     server_url: Option<&str>,
+    deployment_ca: Option<&codewire_client::DeploymentCa>,
 ) -> Result<(), String> {
     let server_url = server_url.ok_or("no Codewire server is configured")?;
-    let client = codewire_client::OAuthClient::for_server_url(server_url)
+    let client = config::ResolvedPlatformConfig::static_token(server_url, "", false, None)
+        .with_deployment_ca(deployment_ca.cloned())
+        .oauth_client()
         .map_err(|error| format!("the server address is invalid ({error})"))?;
     client
         .revoke_credentials(credentials)
@@ -120,7 +134,8 @@ pub(crate) async fn handle_whoami_command(
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
     let platform = resolve_platform(globals, &paths, &env)?;
-    let user = current_platform_user(&codewire_client(&platform)?, &platform.server_url).await?;
+    let user =
+        current_platform_user(&codewire_client(&platform)?, &platform.oauth_client()?).await?;
     print_platform_user(&user, &platform, args.output)
 }
 

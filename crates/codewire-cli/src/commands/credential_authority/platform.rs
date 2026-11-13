@@ -245,7 +245,12 @@ fn confined_http(
     server: &str,
     connect_timeout: Option<Duration>,
 ) -> Result<reqwest::Client, Status> {
-    let builder = reqwest::Client::builder()
+    // The binding records no pinned CA yet (#4121), so this trusts what an
+    // unpinned ClientConfig trusts.
+    let builder = ClientConfig::new(server)
+        .map_err(|_| denied())?
+        .http_client_builder()
+        .map_err(|_| unavailable())?
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none());
     let builder = match connect_timeout {

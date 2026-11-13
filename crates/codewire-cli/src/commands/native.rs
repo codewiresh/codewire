@@ -168,7 +168,9 @@ impl codewire_local_vmm::mesh_enrollment::MeshEnrollmentCredentialResolver
                     {
                         return Err(());
                     }
-                    let http = reqwest::Client::builder()
+                    let http = codewire_client::ClientConfig::new(&platform.server_url)
+                        .and_then(|config| config.http_client_builder())
+                        .map_err(|_| ())?
                         .redirect(reqwest::redirect::Policy::none())
                         .no_proxy()
                         .build()
@@ -4939,6 +4941,7 @@ mod tests {
             &config::PlatformConfig {
                 server_url: "https://api.codewire-dev.sh".to_owned(),
                 default_org: "org-hosted".to_owned(),
+                deployment_ca: None,
             },
         )
         .unwrap();
@@ -5165,6 +5168,7 @@ mod tests {
             &config::PlatformConfig {
                 server_url: "https://api.codewire-dev.sh".to_owned(),
                 default_org: "org-hosted".to_owned(),
+                deployment_ca: None,
             },
         )
         .unwrap();

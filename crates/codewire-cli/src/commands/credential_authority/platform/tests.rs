@@ -76,6 +76,7 @@ fn saved(directory: &Path, server: &str, token: &str, fresh: bool) {
             server_url: server.into(),
             // This unrelated current CLI default must not retarget the saved VM.
             default_org: "another-current-default".into(),
+            deployment_ca: None,
         },
     )
     .unwrap();
@@ -146,6 +147,7 @@ async fn explicit_saved_oauth_rejects_missing_malformed_api_key_and_origin_misma
                 &config::PlatformConfig {
                     server_url: "https://different.invalid".into(),
                     default_org: String::new(),
+                    deployment_ca: None,
                 },
             )
             .unwrap(),
@@ -717,6 +719,7 @@ async fn github_connection_state_is_read_as_the_creator_from_metadata_only() {
                 &config::PlatformConfig {
                     server_url: "https://different.invalid".into(),
                     default_org: String::new(),
+                    deployment_ca: None,
                 },
             )
             .unwrap(),
