@@ -85,6 +85,7 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Verify canonical release tag
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    timeout-minutes: 25
     needs: [pending]
     if: ${{ needs.pending.outputs.release_tag != '' }}
     outputs:

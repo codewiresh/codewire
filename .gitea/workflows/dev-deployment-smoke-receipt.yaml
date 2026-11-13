@@ -30,6 +30,7 @@ jobs:
     # zizmor: ignore[excessive-permissions] This validation job has no OIDC, checkout, network access, or write-capable integration.
     name: Record deploy-owned dev smoke result
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    timeout-minutes: 25
     steps:
       - name: Validate immutable receipt
         env:

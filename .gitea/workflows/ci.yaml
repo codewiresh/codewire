@@ -94,6 +94,7 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job receives no write-capable integration.
     name: Verification selection
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    timeout-minutes: 25
     # A closed pull request verifies nothing; every other job needs this one.
     if: ${{ github.event.action != 'closed' }}
     outputs:
@@ -2146,6 +2147,7 @@ jobs:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this aggregator receives no write-capable integration.
     name: Required verification
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    timeout-minutes: 25
     if: ${{ always() && github.event.action != 'closed' }}
     needs:
       - verification-selection
