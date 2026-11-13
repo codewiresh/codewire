@@ -12,6 +12,7 @@ runs the same commands and holds the result to the same standard.
 | [local-vm-mac.md](local-vm-mac.md) | Local VMs on a Mac (#4370 step 11): install, create, shell, run, stop and start on macOS 27 and 26 |
 | [invitations.md](invitations.md) | Invite a teammate by email, who accepts, is listed and can be removed, within the invitation limits |
 | [node-reboot.md](node-reboot.md) | Production keeps serving through one node's drain or reboot (#3542, #4461) |
+| [billing-and-credits.md](billing-and-credits.md) | Compute credit (#3381): add a card, top up, add credit, the receipt, costs in credits and the empty-balance refusal |
 
 ## What a journey file holds
 
