@@ -1,4 +1,4 @@
-import { expect, test } from "./helpers/fixture-test";
+import { artifactScreenshot, expect, test } from "./helpers/fixture-test";
 
 // Focused rendered-fixture proof using the existing Playwright runner and
 // checked-in `make design-system` topology. The real sandbox lifecycle test
@@ -17,7 +17,7 @@ test("ports load in place and late dismissed responses cannot redirect or replac
   await expect(dialog.getByText("Internal port 3000 · Sandbox creator", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("link", { name: "Open preview" })).toHaveAttribute("href", "https://web-5d1db-example.preview.example.test");
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: test.info().outputPath("ports-dialog.png") });
+  await artifactScreenshot(page, "ports-dialog.png");
   await dialog.getByRole("button", { name: "Done", exact: true }).click();
   let releaseStale: (() => void) | undefined;
   let requests = 0;

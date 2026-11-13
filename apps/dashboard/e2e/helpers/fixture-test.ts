@@ -1,4 +1,4 @@
-import { test as base, type Page } from "@playwright/test";
+import { test as base, type Locator, type Page } from "@playwright/test";
 
 export * from "@playwright/test";
 
@@ -25,6 +25,19 @@ export const test = base.extend({
     await use(context);
   },
 });
+
+// Screenshots in these specs are artifacts for review, never compared, so they
+// are taken in CSS pixels. At a device scale factor above 1 (the mobile
+// project's Pixel 5, 2.75) Chromium resizes the view to device pixels for each
+// capture and retries the copy at once rather than waiting for a frame at that
+// size; on a loaded host every attempt misses and the capture fails with
+// "Unable to capture screenshot" (#4452). Returns the file's path.
+export async function artifactScreenshot(target: Page | Locator, name: string, options: { fullPage?: boolean } = {}) {
+  const path = test.info().outputPath(name);
+  if ("goto" in target) await target.screenshot({ path, scale: "css", ...options });
+  else await target.screenshot({ path, scale: "css" });
+  return path;
+}
 
 // Pause a page's installed clock a second ahead of where that clock is now.
 // The target is read from the page's own clock, and read again if the page

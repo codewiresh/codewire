@@ -39,6 +39,12 @@ test("every fixture spec fails at once when its page loses a script (#3043)", ()
   }
 });
 
+test("fixture specs take screenshots only in CSS pixels, through artifactScreenshot (#4452)", () => {
+  for (const name of designFixtureSpecs) {
+    assert.doesNotMatch(source(name), /\.screenshot\(/, `${name} takes a screenshot without artifactScreenshot`);
+  }
+});
+
 test("the verification selector keeps exactly the fixture specs out of Kind", () => {
   const selector = readFileSync(new URL("../../../../scripts/ci/select/select-verification.sh", import.meta.url), "utf8");
   const named = [...selector.matchAll(/apps\/dashboard\/e2e\/(ssr-dashboard\.[\w.-]+\.ssr\.ts)/g)].map((match) => match[1]);

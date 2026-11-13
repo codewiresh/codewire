@@ -1,4 +1,4 @@
-import { expect, test } from "./helpers/fixture-test";
+import { artifactScreenshot, expect, test } from "./helpers/fixture-test";
 
 // The Create sheet slides in; with motion a help trigger can move out from under
 // the pointer, hover-hide its popover, and let Escape close the sheet instead.
@@ -32,7 +32,7 @@ test("Create resource help stays readable without editing or closing the form", 
   expect(bounds!.x).toBeGreaterThanOrEqual(0);
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
-  await page.screenshot({ path: test.info().outputPath("create-resource-help.png") });
+  await artifactScreenshot(page, "create-resource-help.png");
 
   await page.keyboard.press("Escape");
   await expect(help).not.toBeVisible();
@@ -78,7 +78,7 @@ for (const fixture of ["create-sandbox.html", "edit-sandbox-sources.html"]) {
     await expect(page.getByRole("link", { name: "Manage organization secrets" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Manage secret projects" })).toBeVisible();
     await page.keyboard.press("Escape");
-    await page.locator(".cw-create-panel").filter({ has: page.getByRole("heading", { name: "Application secrets", exact: true }) }).screenshot({ path: test.info().outputPath(`${fixture}-secret-panel.png`) });
+    await artifactScreenshot(page.locator(".cw-create-panel").filter({ has: page.getByRole("heading", { name: "Application secrets", exact: true }) }), `${fixture}-secret-panel.png`);
   });
 }
 
@@ -113,7 +113,7 @@ test("workspace image choices open as a listbox, filter, and pick by keyboard or
   await expect(choices.getByRole("option")).toHaveCount(3);
   await expect(choices.getByRole("option").first()).toContainText("Codewire workspace");
   await expect(choices.getByRole("option").first()).toContainText("Official");
-  await page.screenshot({ path: test.info().outputPath("image-combobox.png") });
+  await artifactScreenshot(page, "image-combobox.png");
 
   // Clearing or typing an exact choice leaves nothing to suggest.
   await image.fill("");

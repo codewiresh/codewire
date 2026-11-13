@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "./helpers/fixture-test";
+import { artifactScreenshot, expect, test, type Locator, type Page } from "./helpers/fixture-test";
 
 // Synthetic private-controller proof, not managed auth/daemon qualification.
 test.use({ storageState: { cookies: [], origins: [] }, screenshot: "off", trace: "off" });
@@ -117,8 +117,7 @@ test("reviews consequences and resolves only a matching operation observation", 
   const apply = (await dialog.getByRole("button", { name: "Apply resize", exact: true }).boundingBox())!;
   expect(apply.y).toBeGreaterThanOrEqual(0);
   expect(apply.y + apply.height).toBeLessThanOrEqual(page.viewportSize()!.height);
-  const reviewImage = test.info().outputPath("resize-resource-review.png");
-  await dialog.screenshot({ path: reviewImage });
+  const reviewImage = await artifactScreenshot(dialog, "resize-resource-review.png");
   await test.info().attach("Resize resource review", { path: reviewImage, contentType: "image/png" });
   expect(state.applies).toBe(0);
   await dialog.getByRole("button", { name: "Apply resize", exact: true }).click();

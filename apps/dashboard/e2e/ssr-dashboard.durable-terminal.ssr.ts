@@ -1,4 +1,4 @@
-import { expect, pauseClock, test, type Locator, type Page, type WebSocketRoute } from "./helpers/fixture-test";
+import { artifactScreenshot, expect, pauseClock, test, type Locator, type Page, type WebSocketRoute } from "./helpers/fixture-test";
 import { expectOnAnchorLines, type AnchorCheck } from "./helpers/anchor-lines";
 
 // Browser controller proof on the checked-in design server. These explicitly
@@ -378,7 +378,7 @@ test("the header keeps its actions on one line and the selected tab carries the 
     await expect(page.getByRole("tab", { name: "Terminal 1", exact: true })).toBeInViewport({ ratio: 1 });
   }
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.screenshot({ path: test.info().outputPath("workspace-1440.png") });
+  await artifactScreenshot(page, "workspace-1440.png");
 });
 
 test("the status bar follows the selected terminal's connection", async ({ page }) => {
@@ -1074,7 +1074,7 @@ test("genuine encoded bytes are bounded before the frame cap is reached", async 
   expect(state.stops).toBe(0);
 });
 
-test("terminal tabs after the first launch explicitly, retain separate displays and bound the visible tab set", { tag: "@mobile" }, async ({ page }, testInfo) => {
+test("terminal tabs after the first launch explicitly, retain separate displays and bound the visible tab set", { tag: "@mobile" }, async ({ page }) => {
   const state = await transport(page);
   await openFixture(page);
   await automaticTerminal(page, state);
@@ -1146,7 +1146,7 @@ test("terminal tabs after the first launch explicitly, retain separate displays 
   expect(JSON.stringify(stored)).not.toContain("terminal-output");
   expect(JSON.stringify(stored)).not.toContain("csrf");
   await page.getByRole("tab", { name: "Build", exact: true }).click();
-  await page.screenshot({ path: testInfo.outputPath("durable-terminal-tabs.png"), fullPage: true });
+  await artifactScreenshot(page, "durable-terminal-tabs.png", { fullPage: true });
   expect(state.stops).toBe(0);
 });
 

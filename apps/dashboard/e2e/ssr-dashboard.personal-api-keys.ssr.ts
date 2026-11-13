@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "./helpers/fixture-test";
+import { artifactScreenshot, expect, test, type Locator, type Page } from "./helpers/fixture-test";
 
 // Editable synthetic fixtures exercise the production controllers. Actor,
 // membership, bounded aggregation and service acknowledgements belong to BFF tests.
@@ -73,7 +73,7 @@ test("one inventory lists every key with its organization, status and permitted 
   await expect(row(page, "Delta")).toHaveCount(0);
   await expect(page.getByRole("navigation", { name: "Organization pages" }).getByRole("link", { name: "Next page" })).toHaveAttribute("href", "settings-api-keys.html?cursor=fixture-next");
   await fits(page);
-  await page.screenshot({ path: test.info().outputPath("personal-api-keys.png"), fullPage: true });
+  await artifactScreenshot(page, "personal-api-keys.png", { fullPage: true });
   if ((page.viewportSize()?.width || 0) < 640) {
     for (const section of ["security", "sessions"]) {
       await page.goto(`${process.env.CODEWIRE_DESIGN_ORIGIN}/reference/fixtures/settings-account.html#${section}`);
@@ -117,7 +117,7 @@ test("Create requires an explicit organization, one footer and preserves dirty d
   await expect(owner.getByLabel("Name", { exact: true })).toHaveValue("Native test key");
   const submit = action(owner, "Create key");
   expect(await submit.evaluate((node: HTMLButtonElement) => node.form?.id)).toBe("create-personal-api-key-form");
-  await page.screenshot({ path: test.info().outputPath("create-personal-api-key.png") });
+  await artifactScreenshot(page, "create-personal-api-key.png");
   await submit.click();
   await expect.poll(() => posts.length).toBe(1);
   expect(posts[0]).toEqual(submitted("create", { org_id: "fixture-org-beta", name: "Native test key", expiration: "30" }));

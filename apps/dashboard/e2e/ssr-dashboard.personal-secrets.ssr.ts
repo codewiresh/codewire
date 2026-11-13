@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "./helpers/fixture-test";
+import { artifactScreenshot, expect, test, type Locator, type Page } from "./helpers/fixture-test";
 
 // Production dialog controller against editable synthetic fixtures only.
 // Authenticated ownership, BFF keyset paging and 422 rendering belong to BFF tests.
@@ -37,7 +37,7 @@ test("Settings uses one subtitle-free heading and personal destinations independ
     await expect(aside.getByRole("heading", { name: /Organization/ })).toHaveCount(0);
     await fits(page);
   }
-  await page.screenshot({ path: test.info().outputPath("personal-secrets-list.png") });
+  await artifactScreenshot(page, "personal-secrets-list.png");
   await page.goto(fixture("application-secrets"));
   const org = page.getByRole("navigation", { name: "Organization navigation", exact: true });
   await expect(page.locator(".cw-context-nav > header")).toHaveText("Settings");
@@ -53,7 +53,7 @@ test("Settings uses one subtitle-free heading and personal destinations independ
     }
   }
   await fits(page);
-  await page.screenshot({ path: test.info().outputPath("scoped-settings-navigation.png") });
+  await artifactScreenshot(page, "scoped-settings-navigation.png");
 });
 
 test("Add secret keeps drafts only in the active DOM and never submits on dismissal", { tag: "@mobile" }, async ({ page }) => {
@@ -71,7 +71,7 @@ test("Add secret keeps drafts only in the active DOM and never submits on dismis
   expect(await owner.locator("form").evaluate((form: HTMLFormElement) => form.checkValidity())).toBe(false);
   await owner.getByLabel("Key", { exact: true }).fill("VALID_KEY");
   await owner.locator('[name="_csrf"]').evaluate((node: HTMLInputElement) => { node.value = "fresh-hidden-csrf"; });
-  await page.screenshot({ path: test.info().outputPath("add-secret-dialog.png") });
+  await artifactScreenshot(page, "add-secret-dialog.png");
   await fits(page, owner);
   await action(owner, "Cancel").click();
   await expect(action(dialog(page, "Discard changes?"), "Keep editing")).toBeFocused();
@@ -147,7 +147,7 @@ test("Delete requires its own confirmation, Cancel is default and no value is se
   await expect(remove).toBeFocused();
   expect(posts).toEqual([]);
   await remove.click();
-  await page.screenshot({ path: test.info().outputPath("delete-secret-dialog.png") });
+  await artifactScreenshot(page, "delete-secret-dialog.png");
   await fits(page, owner);
   await action(owner, "Delete secret").click();
   await expect.poll(() => posts.length).toBe(1);
@@ -171,7 +171,7 @@ test("empty and unavailable states remain distinct and pagination never implies 
   await expect(sidebar.getByRole("link", { name: "Example organization" })).toHaveAttribute("href", "sandboxes.html");
   if (mobile) await action(sidebar, "Collapse navigation").click();
   await fits(page);
-  await page.screenshot({ path: test.info().outputPath("personal-secrets-no-selected-org.png") });
+  await artifactScreenshot(page, "personal-secrets-no-selected-org.png");
   await page.goto(fixture("settings-secrets-unavailable"));
   await expect(page.getByRole("status").filter({ hasText: "Organization navigation" })).toContainText("Personal settings still work");
   await expect(page.getByRole("status").filter({ hasText: "Personal secrets are temporarily unavailable" })).toBeVisible();
@@ -183,7 +183,7 @@ test("empty and unavailable states remain distinct and pagination never implies 
     expect(await page.locator(".cw-context-nav").evaluate((node) => node.getBoundingClientRect().height)).toBeLessThan(200);
   }
   await fits(page);
-  await page.screenshot({ path: test.info().outputPath("personal-secrets-unavailable.png") });
+  await artifactScreenshot(page, "personal-secrets-unavailable.png");
 });
 
 test.describe("Personal Secrets without JavaScript", () => {
@@ -248,7 +248,7 @@ test.describe("Personal Secrets without JavaScript", () => {
     expect(posts).toHaveLength(3);
     await removeDetails.locator("summary").click();
     await fits(page, removeDetails);
-    await page.screenshot({ path: test.info().outputPath("personal-secrets-no-js-delete.png") });
+    await artifactScreenshot(page, "personal-secrets-no-js-delete.png");
     await action(removeDetails, "Delete secret").click();
     await expect.poll(() => posts.length).toBe(4);
     expect(posts[3]).toEqual({ path: "/settings/secrets/_actions/delete", cursor: "AAA_PREVIOUS", fields: {

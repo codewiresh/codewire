@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "./helpers/fixture-test";
+import { artifactScreenshot, expect, test, type Locator, type Page } from "./helpers/fixture-test";
 
 // Editable fixture + production scripts. Provider authorization/publication and
 // authenticated error rendering remain separate managed browser proof.
@@ -64,7 +64,7 @@ test("six full-row choices open focused provider editors with Back and one foote
   await expect(chooser.locator(".cw-credential-types > li")).toHaveCount(6);
   await footer(chooser);
   await fits(page, chooser);
-  await page.screenshot({ path: test.info().outputPath("credential-chooser.png") });
+  await artifactScreenshot(page, "credential-chooser.png");
   for (const [name, title, primary, provider] of [
     // The fixture account already has its one GitHub connection, so the
     // connect dialog routes to Reconnect and offers no second authorization.
@@ -95,7 +95,7 @@ test("six full-row choices open focused provider editors with Back and one foote
       await expect(action(editor, "Reconnect")).toBeVisible();
       await expect(action(editor, "Disconnect")).toBeVisible();
       await expect(editor.getByRole("heading", { level: 3 })).toHaveCount(0);
-      await page.screenshot({ path: test.info().outputPath("github-saved-connections.png") });
+      await artifactScreenshot(page, "github-saved-connections.png");
     }
     if (name.includes("API key")) {
       await expect(editor.getByRole("combobox")).toHaveCount(0);
@@ -111,7 +111,7 @@ test("six full-row choices open focused provider editors with Back and one foote
       await expect(editor).toContainText("Run claude setup-token, then paste the token here.");
       await expect(editor).toContainText("Requires a Claude Pro, Max, Team or Enterprise plan.");
       await expect(editor).toContainText("never delivered to a Sandbox");
-      await page.screenshot({ path: test.info().outputPath("claude-subscription-token-dialog.png") });
+      await artifactScreenshot(page, "claude-subscription-token-dialog.png");
     }
     await fits(page, editor);
     await action(editor, "Back").click();
@@ -157,7 +157,7 @@ test("SSH chooses Generate or Import and Back clears private values only after d
   await expect(page.locator("dialog[open]")).toHaveCount(1);
   await imported.getByLabel("OpenSSH private key", { exact: true }).fill("synthetic-write-only-private-key");
   await imported.getByLabel("Passphrase (optional)", { exact: true }).fill("synthetic-passphrase");
-  await page.screenshot({ path: test.info().outputPath("ssh-import-dialog.png") });
+  await artifactScreenshot(page, "ssh-import-dialog.png");
   await fits(page, imported);
   await action(imported, "Back").click();
   await action(prompt(page), "Keep editing").click();
@@ -204,7 +204,7 @@ test("rows keep status and expiry visible and open focused editors straight from
   await page.keyboard.press("Escape");
   await expect(menu).not.toHaveAttribute("open", "");
   await expect(trigger).toBeFocused();
-  await page.screenshot({ path: test.info().outputPath("credentials-list.png") });
+  await artifactScreenshot(page, "credentials-list.png");
   // Credential labels may be 256 characters with no whitespace. The row and
   // its dialog titles must stay bounded at the mobile viewport too.
   await row.locator(".cw-credential-identity strong").evaluate((node) => { node.textContent = "a".repeat(256); });
@@ -246,7 +246,7 @@ test("a Claude subscription token reads its expiry and is replaced by paste from
   await action(prompt(page), "Keep editing").click();
   await expect(token).toHaveValue("synthetic-subscription-token-canary");
   await fits(page, replace);
-  await page.screenshot({ path: test.info().outputPath("claude-subscription-token-replace.png") });
+  await artifactScreenshot(page, "claude-subscription-token-replace.png");
   expect(posts).toEqual([]);
   await action(replace, "Replace token").click();
   await expect.poll(() => posts.length).toBe(1);
@@ -271,7 +271,7 @@ test("a credential whose refresh failed says Reconnect needed and reconnects fro
   // Active rows keep their actions in the menu alone.
   await expect(page.locator(".cw-credential-reconnect")).toHaveCount(1);
   await fits(page, row);
-  await page.screenshot({ path: test.info().outputPath("credential-reconnect-needed.png") });
+  await artifactScreenshot(page, "credential-reconnect-needed.png");
   await reconnect.click();
   const editor = dialog(page, "Reconnect Work Codex");
   await expect(editor).toBeVisible();
@@ -304,7 +304,7 @@ test("profile rows open exact-revision editors from their menu with native valid
   await expect(editor).toBeVisible();
   expect(await editor.locator("form:not(.cw-dialog-launcher)").evaluate((form: HTMLFormElement) => form.checkValidity())).toBe(false);
   await fits(page, editor);
-  await page.screenshot({ path: test.info().outputPath("create-profile-dialog.png") });
+  await artifactScreenshot(page, "create-profile-dialog.png");
   await action(editor, "Cancel").click();
   await discard(page);
   await expect(create).toBeFocused();
@@ -369,7 +369,7 @@ test("profile Rename edits one name at the observed revision and posts only the 
   await expect(field).toHaveValue("work");
   await field.fill("personal");
   await fits(page, rename);
-  await page.screenshot({ path: test.info().outputPath("profile-rename-dialog.png") });
+  await artifactScreenshot(page, "profile-rename-dialog.png");
   await action(rename, "Save name").click();
   await expect.poll(() => posts.length).toBe(1);
   expect(posts[0]).toEqual({ path: "/settings/credentials/_actions/profiles/rename", fields: {
@@ -387,7 +387,7 @@ test("Keep editing, Escape and backdrop retain private DOM and fresh hidden auth
   await api.locator('[name="_csrf"]').evaluate((node: HTMLInputElement) => { node.value = "fresh-csrf-fence"; });
   await page.keyboard.press("Escape");
   await expect(action(prompt(page), "Keep editing")).toBeFocused();
-  await page.screenshot({ path: test.info().outputPath("discard-changes-dialog.png") });
+  await artifactScreenshot(page, "discard-changes-dialog.png");
   await page.keyboard.press("Escape");
   await expect(key).toBeFocused();
   await expect(key).toHaveValue("synthetic-kept-private-value");
@@ -460,7 +460,7 @@ test("reconnect consent and destructive confirms preserve exact authority and ne
   await footer(removal, "Disconnect GitHub");
   await expect(action(removal, "Cancel")).toBeFocused();
   await expect(removal).toContainText("Profiles show GitHub as missing until you connect again");
-  await page.screenshot({ path: test.info().outputPath("github-delete-confirmation.png") });
+  await artifactScreenshot(page, "github-delete-confirmation.png");
   await fits(page, removal);
   expect(posts).toEqual([]);
   await action(removal, "Disconnect GitHub").click();

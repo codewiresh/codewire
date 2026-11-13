@@ -1,4 +1,4 @@
-import { expect, test } from "./helpers/fixture-test";
+import { artifactScreenshot, expect, test } from "./helpers/fixture-test";
 
 // Editable Account fixture with production dialog behavior. Synthetic POSTs
 // are intercepted externally; no instrumentation enters the product assets.
@@ -33,7 +33,7 @@ test("Account sections share a page and exact-session confirmation cancels safel
   await expect(button).toBeFocused();
   expect(requests).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await page.screenshot({ path: test.info().outputPath("account-sections.png"), fullPage: true });
+  await artifactScreenshot(page, "account-sections.png", { fullPage: true });
   await button.click();
   await dialog.getByRole("button", { name: "Sign out session", exact: true }).click();
   await expect(page.getByText("Synthetic session signed out", { exact: true })).toBeVisible();
@@ -115,7 +115,7 @@ test("the new-authenticator state shows its one-time key and code field", { tag:
   await expect(confirm.getByRole("button", { name: "Replace authenticator", exact: true })).toBeVisible();
   expect(await confirm.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await page.screenshot({ path: test.info().outputPath("account-new-authenticator.png") });
+  await artifactScreenshot(page, "account-new-authenticator.png");
 });
 
 test("the replaced state shows ten new codes and withholds revoked sessions", { tag: "@mobile" }, async ({ page }) => {
@@ -128,7 +128,7 @@ test("the replaced state shows ten new codes and withholds revoked sessions", { 
   await expect(done.getByRole("link", { name: "Done", exact: true })).toHaveAttribute("href", "settings-account.html#security");
   await expect(page.getByText("session-other")).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await page.screenshot({ path: test.info().outputPath("account-authenticator-replaced.png") });
+  await artifactScreenshot(page, "account-authenticator-replaced.png");
 });
 
 test.describe("without JavaScript", () => {

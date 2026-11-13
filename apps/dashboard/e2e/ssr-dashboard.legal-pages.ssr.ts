@@ -1,4 +1,4 @@
-import { expect, test } from "./helpers/fixture-test";
+import { artifactScreenshot, expect, test } from "./helpers/fixture-test";
 
 test.use({ storageState: { cookies: [], origins: [] }, contextOptions: { reducedMotion: "reduce" } });
 
@@ -58,10 +58,7 @@ test("the legal pages read at a measure with no sideways scroll", { tag: "@mobil
       await expect(legal.getByRole("link", { name: "Privacy" })).toHaveAttribute("href", "/privacy");
       await expect(legal.getByRole("link", { name: "Terms" })).toHaveAttribute("href", "/terms");
       await expect(legal.getByRole("link", { name: current })).toHaveAttribute("aria-current", "page");
-      await page.screenshot({
-        path: test.info().outputPath(`${fixture.replace(".html", "")}-${width}-${colorScheme}.png`),
-        fullPage: true,
-      });
+      await artifactScreenshot(page, `${fixture.replace(".html", "")}-${width}-${colorScheme}.png`, { fullPage: true });
     }
   }
 });
