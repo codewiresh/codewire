@@ -823,6 +823,8 @@ async fn run_attach_session<S>(
         status
     };
     let mut cursor = attach.output_offset;
+    // The session's capture waits for this attachment's reading (#4436).
+    let reader = engine.reader(&session_id, cursor);
     let mut last_status = None;
     let mut record: Option<v1::SessionRecord> = None;
     let mut chunks: VecDeque<v1::SessionOutputChunk> = VecDeque::new();
@@ -973,6 +975,9 @@ async fn run_attach_session<S>(
                 let Ok(permit) = permit else { return };
                 if let Some(gap) = pending_gap.take() {
                     cursor = gap.retained_start_offset;
+                    if let Some(reader) = &reader {
+                        reader.moved(cursor);
+                    }
                     permit.send(Ok(v1::SessionAttachMessage {
                         payload: Some(v1::session_attach_message::Payload::HistoryGap(gap)),
                     }));
@@ -982,6 +987,9 @@ async fn run_attach_session<S>(
                         payload: Some(v1::session_attach_message::Payload::Output(chunk)),
                     }));
                     cursor = next_offset;
+                    if let Some(reader) = &reader {
+                        reader.moved(cursor);
+                    }
                 } else if terminal_ready {
                     permit.send(Ok(v1::SessionAttachMessage {
                         payload: Some(v1::session_attach_message::Payload::Status(

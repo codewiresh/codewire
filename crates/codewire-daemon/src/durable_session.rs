@@ -213,6 +213,11 @@ struct SessionHandle {
     /// How much of each attached client's input stream the session has
     /// written to its terminal (#3993).
     input_streams: input_streams::InputStreams,
+    /// The attachments reading the output, which capture waits for (#4436);
+    /// see [`readers`].
+    readers: Mutex<readers::Readers>,
+    /// Woken when a reader moves or leaves.
+    reader_moved: tokio::sync::Notify,
 }
 
 impl SessionHandle {
@@ -232,6 +237,8 @@ impl SessionHandle {
             presence: Mutex::new(unattended::Presence::default()),
             end_after_detached,
             input_streams: input_streams::InputStreams::default(),
+            readers: Mutex::new(readers::Readers::default()),
+            reader_moved: tokio::sync::Notify::new(),
         })
     }
 }
@@ -4573,6 +4580,7 @@ async fn append_output(
             "session capture frame exceeds its buffer".into(),
         ));
     }
+    readers::wait_for_readers(handle, data.len() as u64).await;
     let mut metadata = handle.metadata.lock().await;
     let path = session_directory(root, &metadata.session_id)?.join(OUTPUT_FILE);
     let offset = metadata.output_end_offset;
@@ -5947,6 +5955,8 @@ mod tests {
             presence: Mutex::new(unattended::Presence::default()),
             end_after_detached: None,
             input_streams: input_streams::InputStreams::default(),
+            readers: Mutex::new(readers::Readers::default()),
+            reader_moved: tokio::sync::Notify::new(),
         }
     }
 
@@ -6385,6 +6395,137 @@ mod tests {
         assert!(!tail.history_gap);
     }
 
+    /// `count` frames of `OUTPUT_BUFFER_SIZE` bytes, frame `n` filled with
+    /// `n % 251`, so a reader can check every byte it got.
+    fn backpressure_frame(number: usize) -> Vec<u8> {
+        vec![(number % 251) as u8; OUTPUT_BUFFER_SIZE]
+    }
+
+    #[tokio::test]
+    async fn a_slow_reader_gets_the_whole_output_and_holds_the_command_back() {
+        // A command writing 8 MiB, twice what a session keeps, to a reader
+        // that reads slowly: nothing is lost, and the writer never got more
+        // than what the session keeps ahead of the reader (#4436).
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_owned();
+        let handle = Arc::new(retained_fixture(&root, 0, 1).await);
+        let reader = readers::Reader::on(handle.clone(), 0);
+        let frames = (2 * RETAINED_OUTPUT_BYTES / OUTPUT_BUFFER_SIZE as u64) as usize;
+        let writer = tokio::spawn({
+            let (root, handle) = (root.clone(), handle.clone());
+            async move {
+                for number in 0..frames {
+                    append_output(
+                        &root,
+                        &handle,
+                        v1::SessionOutputStream::Pty,
+                        &backpressure_frame(number),
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        });
+        let total = (frames * OUTPUT_BUFFER_SIZE) as u64;
+        let (mut cursor, mut most_ahead) = (0_u64, 0_u64);
+        while cursor < total {
+            let output = read_output(&root, &handle, cursor, 256 * 1024)
+                .await
+                .unwrap();
+            assert!(!output.history_gap, "a gap at {cursor}");
+            for chunk in &output.chunks {
+                let number = (chunk.offset / OUTPUT_BUFFER_SIZE as u64) as usize;
+                assert!(chunk.data.iter().all(|byte| *byte == (number % 251) as u8));
+            }
+            cursor = output.next_offset;
+            reader.moved(cursor);
+            most_ahead = most_ahead.max(*handle.output_end.borrow() - cursor);
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        writer.await.unwrap();
+        assert_eq!(cursor, total);
+        assert!(
+            most_ahead <= RETAINED_OUTPUT_BYTES + OUTPUT_BUFFER_SIZE as u64,
+            "the writer got {most_ahead} bytes ahead"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dead_reader_holds_the_command_back_for_at_most_its_stall_once() {
+        // A client whose connection dropped without an end never moves. The
+        // command waits for it for READER_STALL, then never again.
+        let temp = tempfile::tempdir().unwrap();
+        let handle = Arc::new(retained_fixture(temp.path(), 0, 1).await);
+        let _dead = readers::Reader::on(handle.clone(), 0);
+        let held_back = (RETAINED_OUTPUT_BYTES / OUTPUT_BUFFER_SIZE as u64) as usize;
+        let started = tokio::time::Instant::now();
+        for number in 0..held_back {
+            append_output(
+                temp.path(),
+                &handle,
+                v1::SessionOutputStream::Pty,
+                &backpressure_frame(number),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "within 4 MiB, no wait"
+        );
+        append_output(
+            temp.path(),
+            &handle,
+            v1::SessionOutputStream::Pty,
+            &backpressure_frame(held_back),
+        )
+        .await
+        .unwrap();
+        let waited = started.elapsed();
+        assert!(
+            waited >= readers::READER_STALL
+                && waited < readers::READER_STALL + Duration::from_secs(1),
+            "waited {waited:?}"
+        );
+        for number in held_back + 1..held_back * 2 {
+            append_output(
+                temp.path(),
+                &handle,
+                v1::SessionOutputStream::Pty,
+                &backpressure_frame(number),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(
+            started.elapsed() < waited + Duration::from_secs(1),
+            "released for good"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn with_no_reader_output_is_recorded_at_once_and_kept_as_scrollback() {
+        let temp = tempfile::tempdir().unwrap();
+        let handle = Arc::new(retained_fixture(temp.path(), 0, 1).await);
+        let frames = (3 * RETAINED_OUTPUT_BYTES / OUTPUT_BUFFER_SIZE as u64) as usize;
+        let started = tokio::time::Instant::now();
+        for number in 0..frames {
+            append_output(
+                temp.path(),
+                &handle,
+                v1::SessionOutputStream::Pty,
+                &backpressure_frame(number),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let metadata = handle.metadata.lock().await;
+        assert!(
+            metadata.output_end_offset - metadata.output_start_offset <= 2 * RETAINED_OUTPUT_BYTES
+        );
+    }
+
     #[tokio::test]
     async fn retention_bounds_index_for_tiny_writes_and_pins_existing_reader_inode() {
         let temp = tempfile::tempdir().unwrap();
@@ -6531,6 +6672,9 @@ mod host_tests;
 
 #[path = "durable_session/unattended.rs"]
 mod unattended;
+
+#[path = "durable_session/readers.rs"]
+mod readers;
 
 #[path = "durable_session/input_streams.rs"]
 mod input_streams;
