@@ -523,6 +523,7 @@ async fn forget_password(
 
 async fn reset_password(
     State(state): State<EmailPasswordState>,
+    headers: HeaderMap,
     ValidatedJson(req): ValidatedJson<ResetPasswordRequest>,
 ) -> Result<Json<ResetPasswordResponse>, AppError> {
     if let Err(msg) = validate_password(&req.new_password) {
@@ -548,23 +549,65 @@ async fn reset_password(
 
     let hash = hash_password(&req.new_password)
         .map_err(|_| AppError::InternalMsg("Failed to reset password".into()))?;
-    sqlx::query(
+    let failed = |e: sqlx::Error| {
+        tracing::error!(error = %e, "failed to reset password");
+        AppError::InternalMsg("Failed to reset password".into())
+    };
+    let user_id: Option<String> = sqlx::query_scalar(
         r#"UPDATE accounts SET password = $1, updated_at = NOW()
-           WHERE user_id = (SELECT id FROM users WHERE email = $2) AND provider_id = 'credential'"#,
+           WHERE user_id = (SELECT id FROM users WHERE email = $2) AND provider_id = 'credential'
+           RETURNING user_id"#,
     )
     .bind(&hash)
     .bind(&row.identifier)
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "failed to reset password");
-        AppError::InternalMsg("Failed to reset password".into())
-    })?;
+    .map_err(failed)?;
+    // Whoever reads the address's mail now holds the account, and may be its
+    // owner taking it back from whoever chose the old password (#4481). What
+    // signing in with the old password minted ends with it: browser sessions,
+    // second-factor challenges, and the CLI's and apps' OAuth grants and
+    // tokens. API keys are the organization's automation and stay.
+    let mut signed_out_sessions = 0;
+    if let Some(user_id) = &user_id {
+        for statement in [
+            "DELETE FROM two_factor_tokens WHERE user_id = $1",
+            "DELETE FROM oidc_auth_requests WHERE user_id = $1",
+            "DELETE FROM oidc_access_tokens WHERE user_id = $1",
+            "DELETE FROM oidc_refresh_tokens WHERE user_id = $1",
+            "DELETE FROM oidc_device_authorizations WHERE user_id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(failed)?;
+        }
+        signed_out_sessions = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(failed)?
+            .rows_affected();
+    }
 
     tx.commit().await.map_err(|e| {
         tracing::error!(error = %e, "failed to commit password reset");
         AppError::InternalMsg("Failed to reset password".into())
     })?;
+    if let Some(user_id) = &user_id {
+        let (ip, ua) = request_info(&headers);
+        log_audit(
+            &state.pool,
+            "user.password.reset",
+            user_id,
+            &ip,
+            &ua,
+            json!({ "signed_out_sessions": signed_out_sessions }),
+            "info",
+        )
+        .await;
+    }
     Ok(Json(ResetPasswordResponse { reset: true }))
 }
 

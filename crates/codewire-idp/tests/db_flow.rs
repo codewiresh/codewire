@@ -38,6 +38,7 @@ const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
 const USER: &str = "u_idp_e2e";
 const CLIENT: &str = "codewire-desktop";
+const EMAIL_PASSWORD_CLIENT: &str = "email-password-e2e";
 const REDIRECT: &str = "http://localhost:9876/callback";
 const IOS_CLIENT: &str = "codewire-ios";
 const IOS_REDIRECT: &str = "sh.codewire.ios:/oauth/callback";
@@ -3468,8 +3469,20 @@ async fn email_password_flow_against_postgres() {
             .execute(&p)
             .await
             .ok();
+        for table in ["oidc_access_tokens", "oidc_refresh_tokens"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE user_id=$1"))
+                .bind(user)
+                .execute(&p)
+                .await
+                .ok();
+        }
         sqlx::query("DELETE FROM users WHERE id=$1")
             .bind(user)
+            .execute(&p)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM oidc_clients WHERE id=$1")
+            .bind(EMAIL_PASSWORD_CLIENT)
             .execute(&p)
             .await
             .ok();
@@ -3751,7 +3764,59 @@ async fn email_password_flow_against_postgres() {
     assert_eq!(st, 200, "wrong-purpose attempt must not consume capability");
 
     // 9. Concurrent successful resets have exactly one claimant. The winner
-    // writes a credential hash which Rust sign-in can verify.
+    // writes a credential hash which Rust sign-in can verify, and ends the
+    // session and the second-factor challenge the old password started.
+    sqlx::query(
+        "INSERT INTO two_factor_tokens (id, user_id, token_hash, expires_at) \
+         VALUES ($1,$2,$3,NOW() + interval '5 minutes')",
+    )
+    .bind("tf_email_password_e2e")
+    .bind(user)
+    .bind(hash_session_token("tf_email_password_e2e_token"))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO oidc_clients
+            (id, name, application_type, auth_method, redirect_uris,
+             grant_types, response_types, scopes, skip_consent,
+             access_token_lifetime, refresh_token_lifetime, id_token_lifetime)
+           VALUES ($1,'Email Password E2E','native','none',ARRAY['http://127.0.0.1/callback'],
+             ARRAY['authorization_code','refresh_token'],ARRAY['code'],
+             ARRAY['openid'],false,
+             interval '1 hour', interval '720 hours', interval '1 hour')
+           ON CONFLICT (id) DO NOTHING"#,
+    )
+    .bind(EMAIL_PASSWORD_CLIENT)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO oidc_access_tokens (token_hash, client_id, user_id, scopes, expires_at) \
+         VALUES ($1,$2,$3,ARRAY['openid'],NOW() + interval '1 hour')",
+    )
+    .bind(hash_session_token("email_password_e2e_access"))
+    .bind(EMAIL_PASSWORD_CLIENT)
+    .bind(user)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO oidc_refresh_tokens (id, token_hash, client_id, user_id, scopes, auth_time, expires_at) \
+         VALUES ($1,$2,$3,$4,ARRAY['openid'],NOW(),NOW() + interval '720 hours')",
+    )
+    .bind("rt_email_password_e2e")
+    .bind(hash_session_token("email_password_e2e_refresh"))
+    .bind(EMAIL_PASSWORD_CLIENT)
+    .bind(user)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM audit_logs WHERE user_id=$1 AND action='user.password.reset'")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
     let reset_body = format!(r#"{{"token":"{reset_token}","newPassword":"{new_pw}"}}"#);
     let (first, second) = tokio::join!(
         sess_req(&app, "POST", "/api/auth/reset-password", None, &reset_body),
@@ -3771,6 +3836,37 @@ async fn email_password_flow_against_postgres() {
             .await
             .unwrap();
     assert_eq!(reset_remaining, 0);
+    // The reset ended what the old password's sign-ins minted: the browser
+    // session, the second-factor challenge and the client's tokens (#4481).
+    let left: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM sessions WHERE user_id=$1), \
+                (SELECT count(*) FROM two_factor_tokens WHERE user_id=$1), \
+                (SELECT count(*) FROM oidc_access_tokens WHERE user_id=$1), \
+                (SELECT count(*) FROM oidc_refresh_tokens WHERE user_id=$1)",
+    )
+    .bind(user)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, (0, 0, 0, 0));
+    let (st, _, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/send-verification-email",
+        Some(session),
+        "",
+    )
+    .await;
+    assert_eq!(st, 401, "the old session no longer authenticates");
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_logs WHERE user_id=$1 AND action='user.password.reset' \
+         AND (metadata->>'signed_out_sessions')::bigint = 1",
+    )
+    .bind(user)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1);
 
     let session_app = codewire_idp::auth_session::router(
         pool.clone(),

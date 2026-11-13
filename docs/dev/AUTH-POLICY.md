@@ -171,6 +171,13 @@ those prior bearer capabilities. An older service binary cannot start against
 the version-24 SQLx ledger; its supported rollback boundary is the disposable
 application-schema rebuild documented in `DATABASE-MIGRATIONS.md`.
 
+A password reset proves only that someone reads the account's mail, and may be
+the address's owner taking the account back from whoever chose the old password
+(#4481). The transaction that replaces the password also deletes what signing
+in with the old one minted: browser sessions, pending 2FA challenges, and OAuth
+authorization requests, access and refresh tokens and device authorizations.
+API keys stay; they are an organization's automation, not a sign-in.
+
 The boundary does not erase account identity factors or user-owned
 configuration. A pending device request with no user bound to it has no subject
 to revoke; it can only be approved after a newly authenticated enabled account
