@@ -61,3 +61,5 @@ directory each.
   dashboard contracts.
 - [dev/AGENT-WORKFLOW.md](dev/AGENT-WORKFLOW.md): the maintainers' command
   reference for the repository rules in `AGENTS.md`.
+- [journeys/README.md](journeys/README.md): acceptance journeys, one file
+  per feature: what to run, what must be seen, and when it was last seen.
