@@ -16,14 +16,14 @@ Updated 2026-11-13. No step is observed working on Production.
 | Step | ID | Dev | Production |
 | --- | --- | --- | --- |
 | 1 | `launch-signup` | not yet observed | not yet observed |
-| 2 | `launch-agent-push` | not yet observed | not yet observed |
+| 2 | `launch-agent-push` | not yet observed; the fix (#4303) passed on Kind 2026-11-12 and is released in `v0.4.17` | not yet observed |
 | 3 | `launch-preview` | not yet observed | not yet observed |
-| 4 | `launch-cp` | failure observed 2026-11-08 (#3968) | not yet observed |
+| 4 | `launch-cp` | observed 2026-11-12 with a build of the fix (#4393), since released in `v0.4.17`; not yet observed with a released `cw` | not yet observed |
 | 5 | `launch-invite` | not yet observed | not yet observed |
-| 6 | `launch-buy-credit` | card, charge and invoice observed 2026-11-11 (#3381); receipt email not observed | not yet observed |
-| 7 | `launch-idle-wake` | not yet observed | not yet observed |
+| 6 | `launch-buy-credit` | card, charge, invoice and refusal observed 2026-11-11 (#3381); Add credit and receipt email not observed | not yet observed |
+| 7 | `launch-idle-wake` | not yet observed; work paused | not yet observed |
 | 8 | `launch-password-reset` | not yet observed | not yet observed |
-| 9 | `launch-node-reboot` | not yet observed | not yet observed |
+| 9 | `launch-node-reboot` | restart notice observed 2026-11-13 after a Pod delete (#4376); a node reboot not observed | not yet observed |
 | 10 | `launch-snapshot-fork` | snapshot create observed 2026-11-12 (#4387); fork not observed | not yet observed |
 
 ## Before the walk
@@ -73,14 +73,16 @@ Issues: #4062 (sign in with GitHub or Google), #3297 (abuse resistance),
 - **Proof:** `cw whoami` names the same account after the second sign-in,
   and `Balance` equals the sign-up credit the platform is set to give.
 - **Gotchas:**
-  - The sign-up credit is a platform setting that starts at 0. Until the
-    amount is chosen for Production, a balance of 0 is the correct result
-    and proves nothing about the grant.
+  - The sign-up credit is a platform setting, `signup_credit_cents`, that
+    starts at 0. A new organization gets it once, when it is created, and
+    sees it as the balance on its Billing page. Until the amount is chosen
+    for Production, a balance of 0 is the correct result and proves nothing
+    about the grant.
   - Only a real GitHub or Google account proves this step.
 - **Observed:** not yet observed. The provider flow is merged (#4160) and
   #4062 lists sign-up, repeat sign-in, linking and `cw login` through a
-  provider as not yet walked. The sign-up credit setting is on Dev (#3989)
-  and set to 0, so no grant has been seen.
+  provider as not yet walked. The sign-up credit was 0 on Dev and on
+  Production when read on 2026-11-12, so no grant has been seen.
 
 ## 2. `launch-agent-push`: a sandbox, an agent, and a Git push over 4 MiB
 
@@ -126,9 +128,19 @@ Issue: #4280 (the credential bridge buffers Git bodies).
     nothing here.
   - Random data is used because it does not compress; a large text file can
     pack to under 4 MiB.
+  - No token or credential helper is needed: the sandbox's Git
+    configuration sends `github.com` through the managed connection.
   - Delete both branches afterwards.
-- **Observed:** not yet observed. Until #4280 lands, a push over 4 MiB
-  through the managed connection fails.
+- **Observed:**
+  - Dev and Production: not yet observed.
+  - The failure on `main` is known from tests, not from a run: the bridge
+    limits a request body to 4 MiB and its unit tests assert the 413 for a
+    larger one (#4280).
+  - Kind, 2026-11-12, the fix's branch at `337fc1054` (#4303, merged since
+    and released in `v0.4.17`),
+    stock `git` against a synthetic GitHub fixture: a 264 MiB clone and a
+    20,978,383-byte push both succeeded. That is not a real GitHub
+    repository and not a hosted cluster.
 
 ## 3. `launch-preview`: a preview of a dev server, including one on localhost
 
@@ -158,13 +170,26 @@ same for `cw ports` on a local VM).
   answer of 502 "preview backend unreachable" is the failure.
 - **Gotchas:** the public docs' example binds `0.0.0.0`, which passes today
   and hides the loopback case. Run both.
-- **Observed:** not yet observed. #4357 reports that a loopback-only server
-  answers 502 on a hosted sandbox today. The Ports dialog itself is covered on
-  Kind by `apps/dashboard/e2e/ssr-dashboard.preview-ports.ssr.ts`.
+- **Observed:**
+  - Not yet observed working on any surface.
+  - That a loopback-only server answers 502 on a hosted sandbox comes from
+    reading the code (#4357). Nobody has run it.
+  - Local VM, 2026-11-12, `cw` v0.4.15: `curl` against a loopback-only
+    server published with `cw ports` got an empty reply (#4347).
+  - Local VM on Linux, 2026-11-13, `cw` and runtime built from #4415 at
+    `73d18becc` (merged since, in no release yet): a loopback-only server
+    published with `cw ports --publish` and `--host-port` answered 200, as
+    did a server on `0.0.0.0`. macOS: not yet observed. This is the local
+    half (#4347); the hosted preview (#4357) is unchanged. Per #4415, a
+    local VM started by an older runtime keeps the old path until it is
+    stopped and started.
+  - The Ports dialog itself is covered on Kind by
+    `apps/dashboard/e2e/ssr-dashboard.preview-ports.ssr.ts`.
 
 ## 4. `launch-cp`: copy a file over 4 MiB in and out
 
-Issue: #3968 (`cw cp` sends a whole file as one message).
+Issues: #3968 (`cw cp` sends a whole file as one message; its fix is
+#4393), #4373 (a cloud upload over about 100 MB; its fix is #4416).
 
 - **Entry points:** `cw cp`. `scp`, `sftp` and `rsync` through `cw setup ssh`
   are a different path and do not count for this step.
@@ -182,13 +207,26 @@ Issue: #3968 (`cw cp` sends a whole file as one message).
   ```
 
 - **Proof:** the three checksums are equal.
-- **Gotchas:** on a slow link a large copy takes minutes. Record the time,
-  and do not read a slow transfer as a failure.
+- **Gotchas:**
+  - On a slow link a large copy takes minutes. Record the time, and do not
+    read a slow transfer as a failure.
+  - A cloud upload over about 100 MB is refused with HTTP 413 before it
+    reaches Codewire (#4373). The fix, uploads in resumable parts (#4416),
+    is on `main` and in no release yet, and is not yet observed. The 64 MiB
+    file above is under that limit on purpose.
 - **Observed:**
   - Dev, 2026-11-08, `cw` v0.4.9: a 27 MB upload failed with `upload:
     message size 27124797 exceeds limit 4194304` (#3968). This is the
-    failure the step exists to catch.
-  - Working: not yet observed.
+    failure the step exists to catch. Released `cw`, up to v0.4.16, still
+    fails this way.
+  - Dev, 2026-11-12, `cw` built from #4393's branch (merged since and
+    released in `v0.4.17`): a 90 MiB upload took 32 s and a 1 GiB download
+    372 s, with equal SHA-256 checksums both ways. A download interrupted
+    with Ctrl-C left the destination unchanged and no partial file.
+  - Local VM, 2026-11-12, the same build: a 1 GiB upload took 28 s and a
+    1 GiB download 286 s, checksums equal. An interrupted upload left no
+    file.
+  - With a released `cw`, `v0.4.17` or later: not yet observed.
 
 ## 5. `launch-invite`: invite a teammate, who accepts and can be removed
 
@@ -219,9 +257,12 @@ Issues: #3840 (accept an invitation and remove a member from `cw`), #3847
 - **Gotchas:**
   - The link is shown once and is valid for 7 days.
   - Handing the link over by hand skips the email, which is half the step.
-- **Observed:** not yet observed. On Dev on 2026-11-01, `cw org invite`
-  created the invitation and sent no email (#3847). The dashboard's
-  invitation pages are covered on Kind by
+- **Observed:** not yet observed on any surface. On Dev on 2026-11-01,
+  `cw org invite` created the invitation and sent no email (#3847). On
+  `main` on 2026-11-13 that is still so, and `cw` still cannot accept an
+  invitation or remove a member. The server side of listing and accepting
+  your own invitations is merged (#4384) and released in `v0.4.17`; the `cw`
+  commands are not. The dashboard's invitation pages are covered on Kind by
   `apps/dashboard/e2e/ssr-dashboard.governance.ssr.ts`.
 
 ## 6. `launch-buy-credit`: buy credit, get a receipt, see correct costs
@@ -237,12 +278,18 @@ delivery on Production).
     the Billing page;
   - a card that is charged;
   - a card that is declined;
+  - a one-off purchase with **Add credit**, with a saved card and without
+    one;
   - credit running out while a sandbox runs.
 - **Driving it:**
   1. Run `cw cost` and note `Balance`.
-  2. On the Billing page add a card and buy credit.
-  3. Run `cw cost` again, and `cw create` to see that creates work.
-  4. Compare the page's costs with `This month` from `cw cost`.
+  2. On the Billing page add a card. With an empty balance this charges
+     the first automatic top-up at once.
+  3. Choose **Add credit** and an amount. A saved card is charged
+     directly; with no card, or when the bank asks for confirmation, the
+     payment finishes on the payment provider's page.
+  4. Run `cw cost` again, and `cw create` to see that creates work.
+  5. Compare the page's costs with `This month` from `cw cost`.
 - **Proof:** `Balance` rises by the amount paid; the Billing page lists a
   paid invoice for that amount; a receipt with the same invoice number
   arrives in the buyer's mailbox; the page's costs equal the CLI's.
@@ -255,10 +302,19 @@ delivery on Production).
   - Dev, 2026-11-11, release candidate `b30889111`, synthetic billing
     identity (#3381): with no card, `cw create` was refused; adding a test
     card gave a balance of €20.00, one paid €20.00 invoice and an
-    `invoice_paid` event; `cw create` then succeeded.
-  - Declined card: not yet observed. Receipt email: not yet observed (it
-    could not be checked on that walk). Costs in credits on the page
-    (#3954): not yet observed.
+    `invoice_paid` event; `cw create` then succeeded. The €20.00 was the
+    first automatic top-up, not a grant.
+  - Dev, 2026-11-11 (#4167): with a balance of −€7.14, one €20.00 top-up
+    left +€12.86.
+  - Dev, 2026-11-11 (#4096): the refusal at zero credit printed the
+    wording in step 2.
+  - **Add credit** (#4288): merged and released in `v0.4.17`, not yet observed.
+  - Receipt email: not yet observed on any surface. Dev delivers mail only
+    to the project's own address, so this waits for #2053.
+  - Declined card: not yet observed. Costs in credits on the page (#3954):
+    not yet observed.
+  - Production: nothing observed. Credit is not enforced there yet
+    (#3381).
 
 ## 7. `launch-idle-wake`: an idle sandbox stops, keeps its disk and wakes
 
@@ -284,15 +340,16 @@ Issue: #3384 (stop idle hosted sandboxes automatically).
   and by opening the preview from step 3, each from a stopped sandbox.
 
   No command yet: the idle timeout and its setting do not exist. #3384's
-  agreed design is a 30-minute default that can be set for a sandbox or an
-  organization, or turned off.
+  agreed design is a 30-minute timeout that is off by default and turned
+  on for a sandbox or an organization, so the walk has to turn it on
+  first.
 - **Proof:** the marker file is intact after each wake; the organization's
   usage stops growing while the sandbox is stopped; the preview from step 3
   answers again after a wake.
 - **Gotchas:** a woken sandbox has a new SSH host key. The wake has to
   connect without a host-key error.
-- **Observed:** not yet observed. The design was agreed on 2026-11-12 and no
-  code has landed.
+- **Observed:** not yet observed. The design was agreed on 2026-11-12, no
+  code has landed, and the work was paused on 2026-11-13.
 
 ## 8. `launch-password-reset`: a reset email arrives and works
 
@@ -302,15 +359,17 @@ Issue: #2053 (mail delivery on Production).
   Account → Security → Reset password**.
 - **States to exercise:** a link used twice, and a link opened after its
   hour has passed.
-- **Driving it:** request a reset for the walker's address, open the link
-  from the email, and set a new password. This applies to an account that
-  has a password; record what an account created through GitHub or Google
-  is offered.
+- **Driving it:** on the login page choose **Forgot password?**, enter the
+  walker's address and choose **Send reset link**; the page answers "Check
+  your email". Open the link from the email and set a new password. This
+  applies to an account that has a password; record what an account
+  created through GitHub or Google is offered.
 - **Proof:** the email arrives in a mailbox outside Codewire's own domain;
   the old password is refused and the new one signs in.
 - **Gotchas:** the Kind spec binds a synthetic reset token. It proves the
   page flow, not that mail is delivered.
-- **Observed:** not yet observed. Related, and not this step: on Production
+- **Observed:** not yet observed on Dev or Production; no delivered reset
+  email can be cited (#2053). Related, and not this step: on Production
   on 2026-10-29 the sign-up access email reached an outside mailbox with
   DKIM, SPF and DMARC passing (#2053). The page flow is covered on Kind by
   `apps/dashboard/e2e/ssr-dashboard.auth.ssr.ts`.
@@ -335,6 +394,11 @@ sandbox restarted).
   cw info launch-walk
   ```
 
+  While the sandbox comes back, `cw info` shows `State: starting` and a
+  `Notice:` that its runtime is being replaced, that its files are safe
+  and that running processes were lost. Once it is back it shows `State:
+  running` and `Notice: Restarted at HH:MM UTC after its runtime was
+  replaced.`
 - **Proof:**
   - sandboxes on other nodes keep their sessions and stay reachable
     throughout, which is what shows Mesh and NATS kept serving;
@@ -350,10 +414,26 @@ sandbox restarted).
     Dev proof. It kills one sandbox's VM and proves recovery by a new guest
     boot ID and Pod UID. The node stays up, so it says nothing about Mesh,
     NATS or other sandboxes.
-- **Observed:** not yet observed. On Kind on 2026-10-31 a sandbox's
-  container was stopped by hand and the CLI's wording was read through
-  recovery (#3772, #3786); that is neither a node reboot nor a real kill.
-  The dashboard does not show the reason yet (#3772).
+- **Observed:**
+  - A node reboot: not yet observed on any surface. No node has been
+    drained or rebooted for #3542; its acceptance is a drain of each
+    Production worker, once Production runs #4374, which is merged and
+    released in `v0.4.17`.
+  - Kind, 2026-10-31: a sandbox's container was stopped by hand and the
+    CLI's wording for an unexpected stop was read through recovery (#3772,
+    #3786). That is neither a node reboot nor a real kill.
+  - Dev, 2026-11-12, at `37fad5f88`: a sandbox whose Pod was deleted while
+    it ran stayed `running` and showed no notice. #4376 fixed that.
+  - Dev, 2026-11-13, at `1c99c3a6b` (#4340 and #4376): the Pod of a
+    running standard sandbox was deleted, which stands in for a node going
+    away. `cw info --output json` reported `starting` with code
+    `sandbox_replacing` after 5.9 s, and `running` with code
+    `sandbox_restarted` and the reason "Restarted at 09:02 UTC after its
+    runtime was replaced. Running processes were lost." after 14.1 s. The
+    walk read the JSON fields; the printed `Notice:` lines are not yet
+    observed with a released `cw`. The open session ended with "the
+    session attachment ended unexpectedly" (#4342).
+  - The dashboard does not show the reason yet (#3772).
 
 ## 10. `launch-snapshot-fork`: take a snapshot and create a fork from it
 
