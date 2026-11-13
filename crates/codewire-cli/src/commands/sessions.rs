@@ -2753,7 +2753,9 @@ async fn attach_platform_environment_session(
                         if status.session.as_option().is_some_and(platform_session_is_terminal) => {
                         send_stream_status(&input, input_stream, &status).await;
                         terminal = true;
-                        if !interactive {
+                        // A plain `cw shell` ends with its shell, as `ssh`
+                        // does; only a durable session offers a restart.
+                        if !interactive || plain {
                             return Ok(AttachExit::Terminal);
                         }
                         screen.release();
