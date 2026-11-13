@@ -63,7 +63,11 @@ untag() {
 # signature Forgejo did not verify), FIXTURE_RENAMED (an answer for another
 # tag name) and FIXTURE_REOBJECTED (an answer for another tag object) change
 # one more fact of the named tag's answer. The commit's statuses are
-# FIXTURE_STATUS_PAGES pages of CI statuses, then FIXTURE_MARKER if set.
+# FIXTURE_STATUS_PAGES pages of CI statuses, then the pickup markers:
+# FIXTURE_MARKERS (a JSON array) or one FIXTURE_MARKER context, pending and
+# naming run 4070 unless FIXTURE_MARKER_STATE or FIXTURE_MARKER_DESCRIPTION
+# say otherwise. A run's jobs are FIXTURE_RUN_JOBS ("ID:status,status;..."),
+# answered with FIXTURE_JOBS_STATUS.
 cat >"$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -112,11 +116,22 @@ case "$method $path" in
     pages="${FIXTURE_STATUS_PAGES:-0}"
     if [ "$page" -le "$pages" ]; then
       jq -n --argjson page "$page" '[range(50) | {context: "CI / job \($page)-\(.)", state: "success"}]' >"$output"
+    elif [ "$page" -eq "$((pages + 1))" ] && [ -n "${FIXTURE_MARKERS:-}" ]; then
+      printf '%s' "$FIXTURE_MARKERS" >"$output"
     elif [ "$page" -eq "$((pages + 1))" ] && [ -n "${FIXTURE_MARKER:-}" ]; then
-      jq -n --arg context "$FIXTURE_MARKER" '[{context: $context, state: "pending"}]' >"$output"
+      jq -n --arg context "$FIXTURE_MARKER" --arg state "${FIXTURE_MARKER_STATE:-pending}" \
+        --arg description "${FIXTURE_MARKER_DESCRIPTION:-picked up by run 70 (id 4070)}" \
+        '[{id: 9001, context: $context, state: $state, description: $description}]' >"$output"
     else
       printf '[]' >"$output"
     fi
+    ;;
+  GET\ actions/runs/*/jobs\?page=1\&limit=100)
+    run="${path#actions/runs/}" run="${run%%/*}"
+    [ "${FIXTURE_JOBS_STATUS:-200}" = 200 ] || { printf '%s' "$FIXTURE_JOBS_STATUS"; exit 0; }
+    statuses="$(tr ';' '\n' <<<"${FIXTURE_RUN_JOBS:-}" | awk -F: -v run="$run" '$1 == run { print $2 }')"
+    jq -n --arg statuses "$statuses" '($statuses | split(",") | map(select(. != ""))) as $s |
+      {total_count: ($s | length), jobs: [$s | to_entries[] | {id: .key, status: .value}]}' >"$output"
     ;;
   POST\ statuses/*)
     printf '%s %s\n' "${path#statuses/}" "$body" >>"$FIXTURE_DIR/marks.log"
@@ -134,7 +149,7 @@ chmod +x "$TMP/bin/curl"
 fixture="$TMP/fixture"
 run_env() {
   env PATH="$TMP/bin:$PATH" GITHUB_SERVER_URL=https://git.example.invalid/ GITEA_TOKEN="$TOKEN" \
-    CODEWIRE_RELEASE_TAGGER=release-tagger GITHUB_RUN_NUMBER=77 RUNNER_TEMP="$TMP" \
+    CODEWIRE_RELEASE_TAGGER=release-tagger GITHUB_RUN_NUMBER=77 GITHUB_RUN_ID=4077 RUNNER_TEMP="$TMP" \
     FIXTURE_TOKEN="$TOKEN" FIXTURE_DIR="$fixture" FIXTURE_ORIGIN="$TMP/origin.git" "$@"
 }
 # find_release NAME WORKFLOW EVENT: run the finder in the checkout; its output
@@ -161,9 +176,12 @@ marked() { # NAME STATE CONTEXT
 unmarked() { [ ! -e "$fixture/marks.log" ] || fail "$1 marked a tag: $(cat "$fixture/marks.log")"; }
 
 # --- dispatch ----------------------------------------------------------------
+# A dispatch delivers its tag whether or not it can record itself: here the
+# tag is not on origin yet, so nothing is marked.
 DISPATCHED_TAG=v0.4.0 find_release dispatch deploy-prod workflow_dispatch || fail "dispatch: $(cat "$fixture/dispatch.out")"
 output_is dispatch release_tag=v0.4.0
-[ ! -e "$fixture/curl-argv.log" ] || fail 'a dispatch read the API'
+unmarked dispatch
+grep -Fq 'notice: this dispatch was not recorded' "$fixture/dispatch.out" || fail "an unrecorded dispatch was silent: $(cat "$fixture/dispatch.out")"
 DISPATCHED_TAG=v0.4.0 DISPATCHED_R2_PUBLICATION=immutable DISPATCHED_R2_PROMOTE_CHANNEL=none \
   find_release dispatch-cli cli-release workflow_dispatch || fail "cli dispatch: $(cat "$fixture/dispatch-cli.out")"
 output_is dispatch-cli release_tag=v0.4.0 r2_publication=immutable r2_promote_channel=none
@@ -190,6 +208,7 @@ tag v0.4.1 600
 find_release pick deploy-prod schedule || fail "pick: $(cat "$fixture/pick.out")"
 output_is pick release_tag=v0.4.1
 marked pick pending 'release/deploy-prod v0.4.1'
+grep -Fq '"description":"picked up by run 77 (id 4077)"' "$fixture/marks.log" || fail "the pickup did not name its run: $(cat "$fixture/marks.log")"
 grep -Fq "\"target_url\":\"https://git.example.invalid/codewire/codewire/actions/runs/77\"" "$fixture/marks.log" ||
   fail 'the pickup does not link its run'
 # Once marked, it is not picked up again, wherever the marker is listed.
@@ -197,6 +216,50 @@ FIXTURE_MARKER='release/deploy-prod v0.4.1' FIXTURE_STATUS_PAGES=3 find_release 
   fail "picked: $(cat "$fixture/picked.out")"
 output_is picked release_tag=
 unmarked picked
+# The newest marker's run decides: still delivering or delivered is quiet;
+# cancelled or failed fails the run loudly, naming the recovery dispatch.
+for case in 'running 0 success,running,blocked' 'delivered 0 success,skipped,success' \
+    'cancelled 1 success,cancelled,cancelled' 'failed 1 success,failure,skipped'; do
+  read -r name code jobs <<<"$case"
+  rc=0
+  FIXTURE_MARKER='release/deploy-prod v0.4.1' FIXTURE_RUN_JOBS="4070:$jobs" find_release "run-$name" deploy-prod schedule || rc=$?
+  [ "$rc" = "$code" ] || fail "run $name exited $rc, not $code: $(cat "$fixture/run-$name.out")"
+  output_is "run-$name" release_tag=
+  unmarked "run-$name"
+done
+grep -Fxq '::error::v0.4.1 was picked up by deploy-prod, whose run ended without delivering it (picked up by run 70 (id 4070)); recover it with a dispatch of deploy-prod.yaml on main with release_tag=v0.4.1' \
+  "$fixture/run-failed.out" || fail "a stopped delivery did not name its recovery: $(cat "$fixture/run-failed.out")"
+# A run whose jobs cannot be read, a marker from before markers named their
+# run, and a refusal are quiet; the next tick looks again.
+FIXTURE_MARKER='release/deploy-prod v0.4.1' FIXTURE_JOBS_STATUS=500 find_release run-unreadable deploy-prod schedule ||
+  fail "unreadable run: $(cat "$fixture/run-unreadable.out")"
+output_is run-unreadable release_tag=
+FIXTURE_MARKER='release/deploy-prod v0.4.1' FIXTURE_MARKER_DESCRIPTION='picked up by run 70' FIXTURE_RUN_JOBS='4070:cancelled' \
+  find_release run-legacy deploy-prod schedule || fail "legacy marker: $(cat "$fixture/run-legacy.out")"
+output_is run-legacy release_tag=
+FIXTURE_MARKER='release/deploy-prod v0.4.1' FIXTURE_MARKER_STATE=failure FIXTURE_RUN_JOBS='4070:failure' \
+  find_release run-refused deploy-prod schedule || fail "refused marker: $(cat "$fixture/run-refused.out")"
+output_is run-refused release_tag=
+# A newer marker (a recovery dispatch) supersedes the run it recovers, in
+# whatever order Forgejo lists them.
+markers='[{"id": 9002, "context": "release/deploy-prod v0.4.1", "state": "pending", "description": "delivered by dispatch run 80 (id 4080)"},
+  {"id": 9001, "context": "release/deploy-prod v0.4.1", "state": "pending", "description": "picked up by run 70 (id 4070)"}]'
+for case in 'recovering 0 4080:running' 'recovered 0 4080:success' 'recovery-failed 1 4080:failure'; do
+  read -r name code jobs <<<"$case"
+  rc=0
+  FIXTURE_MARKERS="$markers" FIXTURE_RUN_JOBS="4070:cancelled;$jobs" find_release "$name" deploy-prod schedule || rc=$?
+  [ "$rc" = "$code" ] || fail "$name exited $rc, not $code: $(cat "$fixture/$name.out")"
+done
+grep -Fq '(delivered by dispatch run 80 (id 4080))' "$fixture/recovery-failed.out" || fail 'a failed recovery was not the run reported'
+# A dispatch of a tag on origin records itself, naming its run; a dispatch
+# whose record cannot be written still delivers.
+DISPATCHED_TAG=v0.4.1 find_release dispatch-marks deploy-prod workflow_dispatch || fail "dispatch marks: $(cat "$fixture/dispatch-marks.out")"
+output_is dispatch-marks release_tag=v0.4.1
+marked dispatch-marks pending 'release/deploy-prod v0.4.1'
+grep -Fq '"description":"delivered by dispatch run 77 (id 4077)"' "$fixture/marks.log" || fail "the dispatch did not name its run: $(cat "$fixture/marks.log")"
+FIXTURE_MARK_STATUS=403 DISPATCHED_TAG=v0.4.1 find_release dispatch-unmarked deploy-prod workflow_dispatch ||
+  fail "a dispatch failed on its record: $(cat "$fixture/dispatch-unmarked.out")"
+output_is dispatch-unmarked release_tag=v0.4.1
 # Another workflow's marker does not count.
 FIXTURE_MARKER='release/cli-release v0.4.1' find_release other-marker deploy-prod schedule ||
   fail "other marker: $(cat "$fixture/other-marker.out")"
