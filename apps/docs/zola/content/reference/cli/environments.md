@@ -522,3 +522,18 @@ source and snapshot name and review before creating the snapshot. Workload
 files are retained; Codewire-delivered sign-ins are removed. Local disk
 snapshots currently require Linux; other hosts offer cloud snapshots.
 Noninteractive and JSON calls must name the source environment explicitly.
+
+## Cloud snapshots
+
+`cw --cloud snapshot create ENV [--name NAME]` saves a stopped cloud
+environment's workspace disk. The snapshot is private to you, and
+Codewire-delivered sign-ins are cleared from it. `cw --cloud create --snapshot
+NAME [--count N]` starts new environments from it, each with fresh identity;
+`cw --cloud snapshot ls`, `inspect` and `rm` manage it.
+
+A cloud snapshot is kept on the storage node that holds the environment's disk
+and is not backed up: if that node is lost, so is the snapshot. New
+environments made from it start on that node too, so while the node is
+unavailable a create from the snapshot waits for it and can time out. Keep
+anything you cannot recreate somewhere else as well, such as in a repository. An
+organization holds at most 32 snapshots, and captures four at a time.

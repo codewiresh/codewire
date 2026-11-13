@@ -85,6 +85,18 @@ fn list_text(snapshots: &[Snapshot]) -> String {
     lines.join("\n")
 }
 
+/// A hosted snapshot is a storage-node snapshot of the environment's disk, with
+/// no copy elsewhere until the R2 copy ships (#3046 H4; owner, 2026-11-12, #4370).
+const NODE_LOCAL_NOTE: &str = "It is kept on the storage node that holds this environment's \
+     disk and is not backed up: if that node is lost, so is the snapshot.";
+
+fn created_text(snapshot: &Snapshot) -> String {
+    format!(
+        "Created snapshot {}.\n{NODE_LOCAL_NOTE}",
+        terminal_text(&snapshot.name)
+    )
+}
+
 fn inspect_text(snapshot: &Snapshot) -> String {
     let mut lines = vec![
         format!("Snapshot {}", terminal_text(&snapshot.name)),
@@ -287,7 +299,7 @@ pub(super) async fn handle_platform_snapshot_command(
             match args.output {
                 OutputFormat::Json => super::print_json(&PlatformSnapshotView::from(&snapshot)),
                 OutputFormat::Text => {
-                    println!("Created snapshot {}.", terminal_text(&snapshot.name));
+                    println!("{}", created_text(&snapshot));
                     Ok(())
                 }
             }
@@ -440,6 +452,17 @@ mod tests {
         assert!(text.contains("ready"), "{text}");
         assert!(text.contains("80.0"), "{text}");
         assert!(list_text(&[]).contains("cw --cloud snapshot create"));
+    }
+
+    #[test]
+    fn a_created_snapshot_says_it_lives_on_one_node_and_is_not_backed_up() {
+        let text = created_text(&snapshot(SnapshotState::Ready));
+        assert!(
+            text.starts_with("Created snapshot good-toolchain."),
+            "{text}"
+        );
+        assert!(text.contains("storage node"), "{text}");
+        assert!(text.contains("not backed up"), "{text}");
     }
 
     #[test]
