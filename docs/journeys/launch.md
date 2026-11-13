@@ -60,14 +60,15 @@ rate limits), #3381 (compute credit; the sign-up credit is #3989).
 The launch asks for sign-up with GitHub, with Google, and with an email and
 password, with no access review, and a verified email. The new organization
 is on the Regular rate card with whatever sign-up credit the platform is set
-to give. #4062 plans a journey file for sign-up; until it exists the detail
-stays here.
+to give. The email and password steps, from sign-up through verification, are
+[signup-and-verification.md](signup-and-verification.md).
 
 - **Entry points:** the sign-up and login pages in a browser; the browser
   page `cw login` opens.
 - **States to exercise:**
   - a new GitHub identity, a new Google identity, and a new email and
-    password;
+    password ([signup-and-verification.md](signup-and-verification.md),
+    `signup-email-invite`);
   - a second sign-in with the same identity reaches the same account;
   - cancelling at the provider returns to the login page with "Sign-in was
     cancelled. Choose how you'd like to sign in.";
