@@ -917,14 +917,21 @@ pub(super) async fn observe_sandbox_liveness(
         }
     };
 
+    // A workspace Pod being deleted takes its processes with it, whatever its
+    // phase: a Pod still Running while it terminates is replaced under the
+    // same name before liveness sees its new UID (#4311). Say so now. Only a
+    // daemon repair deletes a running sandbox's Pod on purpose, and it holds
+    // the runtime-mutation lease; resize replaces it only while `resizing`,
+    // and create and start never while `running`.
+    if row.state == "running"
+        && probe.pod_deleting_at.is_some()
+        && !row.runtime_mutation_active
+        && mark_sandbox_replacing(pool, row, "workspace Pod is being deleted").await
+    {
+        return Some("workspace runtime is being replaced");
+    }
+
     if running_pod_is_leaving(now, row, &probe) {
-        // Nothing of ours is replacing it, so its runtime is going: say so
-        // now rather than after the grace (#4311). A repair keeps it running.
-        if !row.runtime_mutation_active
-            && mark_sandbox_replacing(pool, row, "workspace Pod is being deleted").await
-        {
-            return Some("workspace runtime is being replaced");
-        }
         tracing::info!(
             environment_id = row.id,
             pod_uid = probe.pod_uid,

@@ -760,3 +760,48 @@ async fn db_the_replacing_notice_ends_at_a_stop_or_start() -> Result<()> {
     .await;
     db.finish(result).await
 }
+
+/// #4311 on Dev: a Pod deleted while still Running is going too. Its
+/// replacement takes its name before liveness would see a new UID, so the
+/// deletion mark is what says so.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_running_pod_being_deleted_is_starting_at_once() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        let now = chrono::Utc::now();
+        let mut terminating = runtime_reporting(true, "", "Running");
+        terminating.probe.pod_deleting_at = Some(deleting_at(now));
+
+        let asked = observe_sandbox_liveness(&db.pool, &terminating, now, &row).await;
+        ensure!(asked.is_some(), "no start asked for");
+        replacing(&db.pool).await
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// The same deletion by a daemon repair, which holds the runtime-mutation
+/// lease, leaves the sandbox running (#3944).
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_running_pod_a_repair_is_deleting_stays_running() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let mut row = liveness_row(generation(&db.pool).await?, chrono::Duration::minutes(10));
+        row.runtime_mutation_active = true;
+        let now = chrono::Utc::now();
+        let mut terminating = runtime_reporting(true, "", "Running");
+        terminating.probe.pod_deleting_at = Some(deleting_at(now));
+
+        observe_sandbox_liveness(&db.pool, &terminating, now, &row).await;
+        let (state, code, _) = self::row(&db.pool).await?;
+        ensure!(state == "running" && code.is_none(), "{state} {code:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
