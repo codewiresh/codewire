@@ -118,14 +118,21 @@ greet() { printf '%s\n' "$greeting"; }
 grep -Fxq hello <<<"$(run_side_by_side <<<greet)" || fail 'a calling-shell function did not run'
 pass
 
-# No more than the limit run at once, and more than one does.
+# No more than the limit run at once, and more than one does. Each probe
+# counts only once a peer is running beside it, or once a pair has already
+# met (60 s hang guard), so slow spawns on a loaded host cannot make probes
+# that run at once look one after another (#4611); a runner that never runs
+# two at once still never meets.
 mkdir "$work/running"
 probe() {
-  local mine count
+  local mine count n=0
   mine="$(mktemp "$work/running/probe.XXXXXX")"
+  until [ "$(find "$work/running" -type f | wc -l)" -ge 2 ] || [ -e "$work/met" ] || [ "$n" -ge 600 ]; do
+    n=$((n + 1)); sleep 0.1
+  done
   count="$(find "$work/running" -type f | wc -l)"
+  [ "$count" -lt 2 ] || : >"$work/met"
   printf '%s\n' "$count" >>"$work/counts"
-  sleep 0.3
   rm -f -- "$mine"
 }
 printf 'probe\n%.0s' 1 2 3 4 5 6 | VERIFICATION_TEST_JOBS=2 run_side_by_side >/dev/null ||
@@ -137,6 +144,7 @@ pass
 # Without a limit, a guest's CPU share bounds how many run at once, never the
 # host's CPU count a metal guest sees (61).
 : >"$work/counts"
+rm -f -- "$work/met"
 printf 'probe\n%.0s' 1 2 3 4 5 6 | env -u VERIFICATION_TEST_JOBS CODEWIRE_CI_CPU_SHARE=2 \
   bash -c 'source "$1"; eval "$2"; run_side_by_side' share-probe \
   "$ROOT/scripts/ci/verify/side-by-side.sh" "work=$(printf '%q' "$work"); $(declare -f probe)" >/dev/null ||
