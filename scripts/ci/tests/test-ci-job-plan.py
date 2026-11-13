@@ -295,8 +295,26 @@ with tempfile.TemporaryDirectory(prefix="ci-job-plan.") as tmp:
                                             "-v", "/ci-warm", "-v", "/ci-handoff"],
               f"host binds become empty volumes, got {runner['docker_options']}")
         check(runner["timeout_minutes"] == 30, "the job's timeout comes from ci.yaml")
+        check(runner["ci_timeout_minutes"] == 30, "CI's own timeout is reported beside the local one")
         check(runner["origin_url"] == "https://forge.example.test/codewire/codewire",
               "the checkout's origin is the forge URL and the repository")
+    # A warm Cargo home and a longer local cap are opt-in, and both are named in
+    # the notes, so the run says where it differs from CI.
+    warm = run_planner(root, "runner", "main", "--cargo-cache", "cw-cargo-home", "--timeout-scale", "2")
+    check(warm.returncode == 0, f"runner planning with a Cargo cache failed: {warm.stderr}")
+    if warm.returncode == 0:
+        runner = json.loads(warm.stdout)
+        check(runner["docker_options"][-2:] == ["-v", "cw-cargo-home:/root/.cargo"],
+              f"the named volume is the job's Cargo home, got {runner['docker_options']}")
+        check(runner["timeout_minutes"] == 60 and runner["ci_timeout_minutes"] == 30,
+              f"the scale multiplies CI's timeout, got {runner['timeout_minutes']}")
+        check(any("persistent Cargo home" in n for n in runner["notes"])
+              and any("timeout scaled 2x" in n for n in runner["notes"]),
+              f"both differences from CI are noted, got {runner['notes']}")
+    for bad in (["--cargo-cache", "../escape"], ["--cargo-cache", "-v"], ["--timeout-scale", "0"],
+                ["--timeout-scale", "100"], ["--timeout-scale", "1.5"]):
+        result = run_planner(root, "runner", "main", *bad)
+        check(result.returncode != 0, f"runner planning accepted {bad}")
     pr = run_planner(root, "runner", "pr")
     check(pr.returncode == 0, f"pr runner planning failed: {pr.stderr}")
     if pr.returncode == 0:

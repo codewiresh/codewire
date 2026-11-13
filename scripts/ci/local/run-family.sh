@@ -30,10 +30,16 @@
 #   --infra-ref REF       infra revision to read (default origin/main)
 #   --no-fetch            do not fetch origin in either repository first
 #   --explain             print the runner and job environment; run nothing
+#   --cargo-cache VOLUME  keep the job's Cargo home (/root/.cargo) in the named
+#                         Docker volume across runs, so Cargo's registry and Git
+#                         sources are fetched once, not every run
+#   --timeout-scale N     run with N times the job's timeout-minutes (1 to 99),
+#                         for a machine slower or busier than CI's runner
 #
 # Known differences from a CI job, by design: no job token (steps that need
 # GITHUB_TOKEN or a secret cannot pass here), empty caches where the runner
-# binds a host cache, this machine's CPUs and network, and no Docker socket.
+# binds a host cache (and, with --cargo-cache, a warm Cargo home where CI's is
+# empty), this machine's CPUs and network, and no Docker socket.
 #
 # Prints each step as `[run-family] step STEP: passed|failed in Ns`, then the job's wall
 # time; exits with 1 when a step failed, 2 on a usage or planning error.
@@ -55,10 +61,12 @@ die() {
 }
 
 job='' placement=pr selection='' base='' commit=HEAD explain=false fetch=true
-infra="${CODEWIRE_INFRA_DIR:-}" infra_ref=origin/main
+infra="${CODEWIRE_INFRA_DIR:-}" infra_ref=origin/main cargo_cache='' timeout_scale=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --placement) placement="${2:?}"; shift 2 ;;
+    --cargo-cache) cargo_cache="${2:?}"; shift 2 ;;
+    --timeout-scale) timeout_scale="${2:?}"; shift 2 ;;
     --selection) selection="${2:?}"; shift 2 ;;
     --base) base="${2:?}"; shift 2 ;;
     --infra) infra="${2:?}"; shift 2 ;;
@@ -137,7 +145,8 @@ done
 
 plan_args=(--workflow "$work/ci.yaml" --job "$job" --placement "$placement"
   --variables "$work/variables" --infra "$work/infra" --commit "$commit" --base "$base" --branch "$branch")
-runner="$(python3 -I -B "$TOOL_DIR/ci-job-plan.py" runner "${plan_args[@]}")" || exit 2
+runner="$(python3 -I -B "$TOOL_DIR/ci-job-plan.py" runner "${plan_args[@]}" \
+  --cargo-cache "$cargo_cache" --timeout-scale "$timeout_scale")" || exit 2
 field() { python3 -I -c 'import json,sys; v=json.loads(sys.argv[1])[sys.argv[2]]; print("\n".join(v) if isinstance(v, list) else v)' "$runner" "$1"; }
 image="$(field image)"
 label="$(field label)"
@@ -186,6 +195,13 @@ if ! $explain; then
   docker image inspect "$image" >/dev/null 2>&1 || docker pull -q "$image" >/dev/null
   volume="run-family-$$"
   docker volume create "$volume" >/dev/null
+  if [ -n "$cargo_cache" ]; then
+    # The planner mounts the cache at /root/.cargo: only a root image keeps its
+    # Cargo home there.
+    user="$(docker image inspect --format '{{.Config.User}}' "$image")"
+    case "$user" in ''|root|0|0:0) ;; *) die "--cargo-cache needs an image that runs as root; $image runs as $user" ;; esac
+    docker volume create "$cargo_cache" >/dev/null
+  fi
 fi
 
 [ -z "$selection" ] || printf '%s\n' "$selection" >"$plan/selection"

@@ -473,10 +473,29 @@ def command_runner(args: argparse.Namespace) -> None:
     github = github_context(args, variables, workflow)
     runner["origin_url"] = f"{github['server_url']}/{github['repository']}"
     options, notes = docker_options(runner["options"])
+    if args.cargo_cache:
+        # The runner image runs as root without CARGO_HOME, so Cargo's registry
+        # and Git sources live in /root/.cargo. CI fetches them into an empty
+        # one each job; a named volume keeps them across local runs.
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.cargo_cache):
+            fail(f"--cargo-cache {args.cargo_cache!r} is not a Docker volume name")
+        options += ["-v", f"{args.cargo_cache}:/root/.cargo"]
+        notes.append(f"{args.cargo_cache}: persistent Cargo home at /root/.cargo (CI starts with an empty one)")
     runner["docker_options"] = options
     runner["notes"] = notes
-    runner["timeout_minutes"] = int(job.get("timeout-minutes") or 360)
+    ci_minutes = int(job.get("timeout-minutes") or 360)
+    runner["ci_timeout_minutes"] = ci_minutes
+    runner["timeout_minutes"] = ci_minutes * args.timeout_scale
+    if args.timeout_scale != 1:
+        notes.append(f"timeout scaled {args.timeout_scale}x: {runner['timeout_minutes']} minutes here, "
+                     f"{ci_minutes} in CI")
     print(json.dumps(runner))
+
+
+def timeout_scale(value: str) -> int:
+    if not re.fullmatch(r"[1-9][0-9]?", value):
+        raise argparse.ArgumentTypeError("a whole number from 1 to 99")
+    return int(value)
 
 
 def shell_exports(env: dict[str, str]) -> str:
@@ -590,6 +609,10 @@ def main() -> None:
         p.add_argument("--commit", default="")
         p.add_argument("--base", default="")
         p.add_argument("--branch", default="")
+        if command == "runner":
+            p.add_argument("--cargo-cache", default="", help="a Docker volume kept as the job's Cargo home")
+            p.add_argument("--timeout-scale", type=timeout_scale, default=1,
+                           help="multiply the job's timeout-minutes, for a loaded machine")
         if command == "job":
             p.add_argument("--selection", required=True)
             p.add_argument("--dispatch", default="", help="emit-verification-matrices.sh's outputs")
