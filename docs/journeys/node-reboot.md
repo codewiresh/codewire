@@ -64,8 +64,8 @@ Updated 2026-11-13.
   - A stream at one replica goes offline with its server. Both streams were
     moved to three replicas in place first (#4374, deploy#243).
 - **Observed:**
-  - Production, 2026-11-13, v0.4.17: drains of the small nbg1 worker and of
-    the other nbg1 worker. Every sample had a leader for both streams at R3;
+  - Production, 2026-11-13, v0.4.17: drains of a small worker and of a
+    second worker. Every sample had a leader for both streams at R3;
     the leader handed over at the cordon, before the eviction; three of three
     again 30 s and 70 s after uncordon. Evidence: #3542, "Acceptance drains".
   - A reboot: not yet observed.
