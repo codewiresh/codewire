@@ -236,7 +236,7 @@ async fn upstream(scenario: Scenario) -> (TestServer, Calls) {
                         .iter()
                         .map(|(back, cents)| {
                             let mut hour = EnvironmentUsageHour {
-                                cost_cents: *cents,
+                                cost_nano_eur: i64::from(*cents) * 10_000_000,
                                 ..Default::default()
                             };
                             hour.hour.get_or_insert_default().seconds = current - back * 3_600;
@@ -664,7 +664,7 @@ fn the_design_fixtures_are_what_the_home_renders() {
             .enumerate()
             .map(|(hour, cents)| HourCost {
                 hour: midnight + hour as i64 * 3_600,
-                cost_cents: *cents,
+                cost_nano_eur: i64::from(*cents) * 10_000_000,
             })
             .collect::<Vec<_>>()
     };

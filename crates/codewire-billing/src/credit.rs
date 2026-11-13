@@ -209,7 +209,7 @@ pub async fn draw_organization(pool: &PgPool, organization_id: &str) -> anyhow::
 }
 
 const NANO_EUR_PER_EURO: i64 = 1_000_000_000;
-const NANO_EUR_PER_CENT: i64 = 10_000_000;
+pub(crate) const NANO_EUR_PER_CENT: i64 = 10_000_000;
 
 async fn clear_exhausted_if_funded(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,

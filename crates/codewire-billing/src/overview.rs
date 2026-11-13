@@ -293,17 +293,7 @@ async fn credit_overview(
     org_id: &str,
     month_start: DateTime<Utc>,
 ) -> AppResult<CreditOverview> {
-    type Row = (
-        String,
-        i64,
-        i64,
-        i64,
-        i64,
-        bool,
-        i32,
-        Option<DateTime<Utc>>,
-        i64,
-    );
+    type Row = (String, i64, i64, i64, i64, bool, i32, Option<DateTime<Utc>>);
     let row: Row = sqlx::query_as(
         r#"SELECT
                o.rate_card, r.cpu_nano_eur_per_vcpu_hour,
@@ -312,20 +302,17 @@ async fn credit_overview(
                          WHERE organization_id = o.id), 0),
                o.auto_top_up_enabled,
                o.auto_top_up_cents,
-               o.credit_exhausted_at,
-               COALESCE((SELECT -SUM(amount_nano_eur) FROM billing_credit_ledger
-                         WHERE organization_id = o.id AND entry_kind = 'usage'
-                           AND usage_ended_at >= $2), 0)::int8
+               o.credit_exhausted_at
            FROM organizations o
            JOIN billing_rate_cards r ON r.rate_card = o.rate_card
            WHERE o.id = $1"#,
     )
     .bind(org_id)
-    .bind(month_start)
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound("organization not found".into()))?;
-    let (rate_card, cpu, memory, disk, balance, enabled, cents, exhausted_at, month) = row;
+    let (rate_card, cpu, memory, disk, balance, enabled, cents, exhausted_at) = row;
+    let month = crate::usage_cost::month_usage_nano_eur(pool, org_id, month_start).await?;
     Ok(CreditOverview {
         balance_nano_eur: balance,
         rates: CreditRates {
@@ -583,7 +570,8 @@ pub struct EnvironmentUsageMonth {
     pub cpu_hours: f64,
     pub mem_gb_hours: f64,
     pub disk_gb_hours: f64,
-    pub cost_cents: i32,
+    /// What usage drew from credit this month.
+    pub cost_nano_eur: i64,
     pub included_cpu_hours: i32,
     pub included_mem_gb_hours: i32,
 }
@@ -593,7 +581,7 @@ pub struct EnvironmentUsageHour {
     pub hour: String,
     pub cpu_hours: f64,
     pub mem_gb_hours: f64,
-    pub cost_cents: i32,
+    pub cost_nano_eur: i64,
 }
 
 #[derive(Debug)]
@@ -601,10 +589,10 @@ pub struct EnvironmentUsageEntry {
     pub id: String,
     pub name: String,
     pub running_seconds: i32,
-    pub cost_cents: i32,
+    pub cost_nano_eur: i64,
     pub cpu_millicores: i32,
     pub memory_mb: i32,
-    pub hourly_cents: i32,
+    pub hourly_nano_eur: i64,
 }
 
 #[derive(Debug)]
@@ -639,29 +627,48 @@ pub async fn environment_usage(
             None => (0, 0),
         };
 
-    // Hourly breakdown, last 72h. Same rounding as Go:
-    // int((cpu*5.04 + mem*1.62) + 0.5) — truncation after +0.5.
-    let hourly_rows = hourly_usage(pool, org_id, now - Duration::hours(72), now).await?;
-    let hourly: Vec<EnvironmentUsageHour> = hourly_rows
-        .into_iter()
-        .map(|(hour, usage)| EnvironmentUsageHour {
-            hour: hour.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            cpu_hours: usage.cpu_hours,
-            mem_gb_hours: usage.mem_gb_hours,
-            cost_cents: ((usage.cpu_hours * 5.04 + usage.mem_gb_hours * 1.62) + 0.5) as i32,
-        })
-        .collect();
-
-    let per_env = per_environment_usage(pool, org_id, month_start).await?;
-
-    let total_cost_cents: i32 = per_env.iter().map(|e| e.cost_cents).sum();
+    // The last 72 hours, and each sandbox this month (#3954).
+    let since = now - Duration::hours(72);
+    let (hourly, per_env) = if session_ledger_canonical() {
+        let rates = crate::usage_cost::charged_rates(pool, org_id).await?;
+        let hourly = crate::usage_cost::hourly_costs(pool, org_id, rates, since, now)
+            .await?
+            .into_iter()
+            .map(|hour| EnvironmentUsageHour {
+                hour: hour.hour.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                cpu_hours: hour.cpu_hours,
+                mem_gb_hours: hour.mem_gb_hours,
+                cost_nano_eur: hour.cost_nano_eur,
+            })
+            .collect();
+        let per_env = crate::usage_cost::sandbox_costs(pool, org_id, rates, month_start, now)
+            .await?
+            .into_iter()
+            .map(|sandbox| EnvironmentUsageEntry {
+                id: sandbox.id,
+                name: sandbox.name,
+                running_seconds: sandbox.running_seconds,
+                cost_nano_eur: sandbox.cost_nano_eur,
+                cpu_millicores: sandbox.cpu_millicores,
+                memory_mb: sandbox.memory_mib,
+                hourly_nano_eur: sandbox.hourly_nano_eur,
+            })
+            .collect();
+        (hourly, per_env)
+    } else {
+        (
+            legacy_hourly_usage(pool, org_id, since).await?,
+            legacy_per_environment_usage(pool, org_id).await?,
+        )
+    };
+    let month_cost = crate::usage_cost::month_usage_nano_eur(pool, org_id, month_start).await?;
 
     Ok(EnvironmentUsageResponse {
         current_month: EnvironmentUsageMonth {
             cpu_hours: usage.cpu_hours,
             mem_gb_hours: usage.mem_gb_hours,
             disk_gb_hours: usage.disk_gb_hours,
-            cost_cents: total_cost_cents,
+            cost_nano_eur: month_cost,
             included_cpu_hours: included_cpu,
             included_mem_gb_hours: included_mem,
         },
@@ -678,23 +685,15 @@ pub async fn environment_usage(
     })
 }
 
-async fn hourly_usage(
-    pool: &PgPool,
-    org_id: &str,
-    since: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> AppResult<Vec<(DateTime<Utc>, UsageSums)>> {
-    if session_ledger_canonical() {
-        return session_hourly_usage(pool, org_id, since, now).await;
-    }
-    legacy_event_hourly_usage(pool, org_id, since).await
-}
+// The legacy event path (`BILLING_SESSION_LEDGER_CANONICAL` off) keeps its
+// old estimate, at the previous overage rates; every deployment runs the
+// session path.
 
-async fn legacy_event_hourly_usage(
+async fn legacy_hourly_usage(
     pool: &PgPool,
     org_id: &str,
     since: DateTime<Utc>,
-) -> AppResult<Vec<(DateTime<Utc>, UsageSums)>> {
+) -> AppResult<Vec<EnvironmentUsageHour>> {
     let rows: Vec<(DateTime<Utc>, f64, f64)> = sqlx::query_as(
         r#"
         SELECT date_trunc('hour', created_at) AS hour,
@@ -712,83 +711,15 @@ async fn legacy_event_hourly_usage(
     Ok(rows
         .into_iter()
         .map(|(hour, cpu_hours, mem_gb_hours)| {
-            (
-                hour,
-                UsageSums {
-                    cpu_hours,
-                    mem_gb_hours,
-                    disk_gb_hours: 0.0,
-                },
-            )
+            let cents = ((cpu_hours * 5.04 + mem_gb_hours * 1.62) + 0.5) as i64;
+            EnvironmentUsageHour {
+                hour: hour.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                cpu_hours,
+                mem_gb_hours,
+                cost_nano_eur: cents * crate::credit::NANO_EUR_PER_CENT,
+            }
         })
         .collect())
-}
-
-async fn session_hourly_usage(
-    pool: &PgPool,
-    org_id: &str,
-    since: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> AppResult<Vec<(DateTime<Utc>, UsageSums)>> {
-    let rows: Vec<(DateTime<Utc>, f64, f64)> = sqlx::query_as(
-        r#"WITH bounds AS (
-               SELECT date_trunc('hour', $1::timestamptz) AS start_at,
-                      date_trunc('hour', $2::timestamptz) AS end_at
-           ),
-           hours AS (
-               SELECT generate_series(start_at, end_at, interval '1 hour') AS hour
-               FROM bounds
-           ),
-           bounded AS (
-               SELECT h.hour,
-                      s.cpu_millicores,
-                      s.memory_mib,
-                      GREATEST(s.started_at, h.hour) AS bill_start,
-                      LEAST(COALESCE(s.ended_at, $2), h.hour + interval '1 hour') AS bill_end
-               FROM hours h
-               JOIN sandbox_running_sessions s
-                 ON s.organization_id = $3
-                AND s.started_at < h.hour + interval '1 hour'
-                AND COALESCE(s.ended_at, $2) > h.hour
-           )
-           SELECT
-              hour,
-              COALESCE(SUM(EXTRACT(EPOCH FROM (bill_end - bill_start)) / 3600.0 * cpu_millicores / 1000.0), 0)::float8,
-              COALESCE(SUM(EXTRACT(EPOCH FROM (bill_end - bill_start)) / 3600.0 * memory_mib / 1024.0), 0)::float8
-           FROM bounded
-           WHERE bill_end > bill_start
-           GROUP BY hour
-           ORDER BY hour"#,
-    )
-    .bind(since)
-    .bind(now)
-    .bind(org_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(hour, cpu_hours, mem_gb_hours)| {
-            (
-                hour,
-                UsageSums {
-                    cpu_hours,
-                    mem_gb_hours,
-                    disk_gb_hours: 0.0,
-                },
-            )
-        })
-        .collect())
-}
-
-async fn per_environment_usage(
-    pool: &PgPool,
-    org_id: &str,
-    month_start: DateTime<Utc>,
-) -> AppResult<Vec<EnvironmentUsageEntry>> {
-    if session_ledger_canonical() {
-        return session_per_environment_usage(pool, org_id, month_start).await;
-    }
-    legacy_per_environment_usage(pool, org_id).await
 }
 
 async fn legacy_per_environment_usage(
@@ -809,92 +740,19 @@ async fn legacy_per_environment_usage(
     Ok(rows
         .into_iter()
         .map(|(id, name, running_seconds, cpu, mem)| {
-            environment_usage_entry(id, name, running_seconds, cpu, mem)
+            let rate = f64::from(cpu) / 1000.0 * 0.000014 + f64::from(mem) / 1024.0 * 0.0000045;
+            let cents = |seconds: f64| (seconds * rate * 100.0) as i64;
+            EnvironmentUsageEntry {
+                id,
+                name,
+                running_seconds,
+                cost_nano_eur: cents(f64::from(running_seconds)) * crate::credit::NANO_EUR_PER_CENT,
+                cpu_millicores: cpu,
+                memory_mb: mem,
+                hourly_nano_eur: cents(3600.0) * crate::credit::NANO_EUR_PER_CENT,
+            }
         })
         .collect())
-}
-
-async fn session_per_environment_usage(
-    pool: &PgPool,
-    org_id: &str,
-    month_start: DateTime<Utc>,
-) -> AppResult<Vec<EnvironmentUsageEntry>> {
-    let rows: Vec<(String, String, i32, i32, i32, i32, i32)> = sqlx::query_as(
-        r#"WITH period AS (
-               SELECT $1::timestamptz AS start_at,
-                      ($1::timestamptz + interval '1 month') AS end_at
-           ),
-           bounded AS (
-               SELECT s.environment_id,
-                      COALESCE(e.name, s.runtime_name, s.environment_id) AS name,
-                      s.cpu_millicores,
-                      s.memory_mib,
-                      GREATEST(s.started_at, p.start_at) AS bill_start,
-                      LEAST(COALESCE(s.ended_at, NOW()), p.end_at) AS bill_end
-               FROM sandbox_running_sessions s
-               CROSS JOIN period p
-               LEFT JOIN environments e ON e.id = s.environment_id
-               WHERE s.organization_id = $2
-                 AND s.started_at < p.end_at
-                 AND COALESCE(s.ended_at, NOW()) > p.start_at
-           )
-           SELECT
-              environment_id,
-              name,
-              floor(COALESCE(SUM(EXTRACT(EPOCH FROM (bill_end - bill_start))), 0))::int4 AS running_seconds,
-              MAX(cpu_millicores)::int4 AS cpu_millicores,
-              MAX(memory_mib)::int4 AS memory_mib,
-              floor(COALESCE(SUM(
-                  EXTRACT(EPOCH FROM (bill_end - bill_start))
-                  * (cpu_millicores / 1000.0 * 0.000014 + memory_mib / 1024.0 * 0.0000045)
-                  * 100.0
-              ), 0))::int4 AS cost_cents,
-              floor(((MAX(cpu_millicores) / 1000.0 * 0.000014 + MAX(memory_mib) / 1024.0 * 0.0000045) * 3600.0 * 100.0))::int4 AS hourly_cents
-           FROM bounded
-           WHERE bill_end > bill_start
-           GROUP BY environment_id, name
-           HAVING COALESCE(SUM(EXTRACT(EPOCH FROM (bill_end - bill_start))), 0) > 0
-           ORDER BY running_seconds DESC"#,
-    )
-    .bind(month_start)
-    .bind(org_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(
-            |(id, name, running_seconds, cpu_millicores, memory_mb, cost_cents, hourly_cents)| {
-                EnvironmentUsageEntry {
-                    id,
-                    name,
-                    running_seconds,
-                    cost_cents,
-                    cpu_millicores,
-                    memory_mb,
-                    hourly_cents,
-                }
-            },
-        )
-        .collect())
-}
-
-fn environment_usage_entry(
-    id: String,
-    name: String,
-    running_seconds: i32,
-    cpu: i32,
-    mem: i32,
-) -> EnvironmentUsageEntry {
-    let rate = f64::from(cpu) / 1000.0 * 0.000014 + f64::from(mem) / 1024.0 * 0.0000045;
-    EnvironmentUsageEntry {
-        id,
-        name,
-        running_seconds,
-        cost_cents: (f64::from(running_seconds) * rate * 100.0) as i32,
-        cpu_millicores: cpu,
-        memory_mb: mem,
-        hourly_cents: (rate * 3600.0 * 100.0) as i32,
-    }
 }
 
 #[cfg(test)]

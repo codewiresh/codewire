@@ -492,7 +492,8 @@ fn proto_environment_usage(
             cpu_hours: current_month.cpu_hours,
             mem_gb_hours: current_month.mem_gb_hours,
             disk_gb_hours: current_month.disk_gb_hours,
-            cost_cents: current_month.cost_cents,
+            cost_cents: whole_cents(current_month.cost_nano_eur),
+            cost_nano_eur: current_month.cost_nano_eur,
             included_cpu_hours: current_month.included_cpu_hours,
             included_mem_gb_hours: current_month.included_mem_gb_hours,
             ..Default::default()
@@ -516,7 +517,8 @@ fn proto_environment_usage_hour(
         hour: Some(timestamp(&value.hour)?).into(),
         cpu_hours: value.cpu_hours,
         mem_gb_hours: value.mem_gb_hours,
-        cost_cents: value.cost_cents,
+        cost_cents: whole_cents(value.cost_nano_eur),
+        cost_nano_eur: value.cost_nano_eur,
         ..Default::default()
     })
 }
@@ -526,12 +528,20 @@ fn proto_environment_usage_entry(value: EnvironmentUsageEntry) -> ProtoEnvironme
         id: value.id,
         name: value.name,
         running_seconds: value.running_seconds,
-        cost_cents: value.cost_cents,
+        cost_cents: whole_cents(value.cost_nano_eur),
         cpu_millicores: value.cpu_millicores,
         memory_mb: value.memory_mb,
-        hourly_cents: value.hourly_cents,
+        hourly_cents: whole_cents(value.hourly_nano_eur),
+        cost_nano_eur: value.cost_nano_eur,
+        hourly_nano_eur: value.hourly_nano_eur,
         ..Default::default()
     }
+}
+
+/// A nano-euro amount in whole cents, rounded down, for the superseded
+/// `*_cents` fields.
+fn whole_cents(nano_eur: i64) -> i32 {
+    i32::try_from(nano_eur / crate::credit::NANO_EUR_PER_CENT).unwrap_or(i32::MAX)
 }
 
 fn optional_timestamp(value: Option<&str>) -> AppResult<Option<Timestamp>> {
@@ -589,7 +599,7 @@ mod tests {
                 cpu_hours: 0.0,
                 mem_gb_hours: 0.0,
                 disk_gb_hours: 0.0,
-                cost_cents: 0,
+                cost_nano_eur: 0,
                 included_cpu_hours: 0,
                 included_mem_gb_hours: 0,
             },

@@ -19,6 +19,7 @@ pub mod stripe_client;
 pub mod stripe_endpoint_check;
 pub mod subscription_migration;
 pub mod temporal;
+pub mod usage_cost;
 pub mod webhook;
 
 pub mod org_billing;

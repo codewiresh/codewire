@@ -316,26 +316,43 @@ message EnvironmentUsageMonth {
   double cpu_hours = 1;
   double mem_gb_hours = 2;
   double disk_gb_hours = 3;
+  // Superseded by cost_nano_eur, and that value in whole cents rounded down.
   int32 cost_cents = 4;
   int32 included_cpu_hours = 5;
   int32 included_mem_gb_hours = 6;
+  // Usage drawn from credit this month, in nano-euros: the same figure as
+  // BillingOverview.month_usage_nano_eur.
+  int64 cost_nano_eur = 7;
 }
 
 message EnvironmentUsageHour {
   google.protobuf.Timestamp hour = 1;
   double cpu_hours = 2;
   double mem_gb_hours = 3;
+  // Superseded by cost_nano_eur, and that value in whole cents rounded down.
   int32 cost_cents = 4;
+  // The hour's sandbox usage at the organization's rate card, in nano-euros,
+  // through each sandbox's last observation, as credit is drawn. 0 on
+  // Unlimited.
+  int64 cost_nano_eur = 5;
 }
 
 message EnvironmentUsageEntry {
   string id = 1;
   string name = 2;
   int32 running_seconds = 3;
+  // Superseded by cost_nano_eur, and that value in whole cents rounded down.
   int32 cost_cents = 4;
   int32 cpu_millicores = 5;
   int32 memory_mb = 6;
+  // Superseded by hourly_nano_eur, and that value in whole cents rounded down.
   int32 hourly_cents = 7;
+  // This month's usage at the organization's rate card, in nano-euros,
+  // through each session's last observation, as credit is drawn. 0 on
+  // Unlimited.
+  int64 cost_nano_eur = 8;
+  // An hour at the sandbox's largest size this month, in nano-euros.
+  int64 hourly_nano_eur = 9;
 }
 
 message CreateCheckoutSessionRequest {

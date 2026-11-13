@@ -370,35 +370,39 @@ class GetEnvironmentUsageResponse(_message.Message):
     def __init__(self, current_month: _Optional[_Union[EnvironmentUsageMonth, _Mapping]] = ..., hourly_breakdown: _Optional[_Iterable[_Union[EnvironmentUsageHour, _Mapping]]] = ..., per_environment: _Optional[_Iterable[_Union[EnvironmentUsageEntry, _Mapping]]] = ...) -> None: ...
 
 class EnvironmentUsageMonth(_message.Message):
-    __slots__ = ("cpu_hours", "mem_gb_hours", "disk_gb_hours", "cost_cents", "included_cpu_hours", "included_mem_gb_hours")
+    __slots__ = ("cpu_hours", "mem_gb_hours", "disk_gb_hours", "cost_cents", "included_cpu_hours", "included_mem_gb_hours", "cost_nano_eur")
     CPU_HOURS_FIELD_NUMBER: _ClassVar[int]
     MEM_GB_HOURS_FIELD_NUMBER: _ClassVar[int]
     DISK_GB_HOURS_FIELD_NUMBER: _ClassVar[int]
     COST_CENTS_FIELD_NUMBER: _ClassVar[int]
     INCLUDED_CPU_HOURS_FIELD_NUMBER: _ClassVar[int]
     INCLUDED_MEM_GB_HOURS_FIELD_NUMBER: _ClassVar[int]
+    COST_NANO_EUR_FIELD_NUMBER: _ClassVar[int]
     cpu_hours: float
     mem_gb_hours: float
     disk_gb_hours: float
     cost_cents: int
     included_cpu_hours: int
     included_mem_gb_hours: int
-    def __init__(self, cpu_hours: _Optional[float] = ..., mem_gb_hours: _Optional[float] = ..., disk_gb_hours: _Optional[float] = ..., cost_cents: _Optional[int] = ..., included_cpu_hours: _Optional[int] = ..., included_mem_gb_hours: _Optional[int] = ...) -> None: ...
+    cost_nano_eur: int
+    def __init__(self, cpu_hours: _Optional[float] = ..., mem_gb_hours: _Optional[float] = ..., disk_gb_hours: _Optional[float] = ..., cost_cents: _Optional[int] = ..., included_cpu_hours: _Optional[int] = ..., included_mem_gb_hours: _Optional[int] = ..., cost_nano_eur: _Optional[int] = ...) -> None: ...
 
 class EnvironmentUsageHour(_message.Message):
-    __slots__ = ("hour", "cpu_hours", "mem_gb_hours", "cost_cents")
+    __slots__ = ("hour", "cpu_hours", "mem_gb_hours", "cost_cents", "cost_nano_eur")
     HOUR_FIELD_NUMBER: _ClassVar[int]
     CPU_HOURS_FIELD_NUMBER: _ClassVar[int]
     MEM_GB_HOURS_FIELD_NUMBER: _ClassVar[int]
     COST_CENTS_FIELD_NUMBER: _ClassVar[int]
+    COST_NANO_EUR_FIELD_NUMBER: _ClassVar[int]
     hour: _timestamp_pb2.Timestamp
     cpu_hours: float
     mem_gb_hours: float
     cost_cents: int
-    def __init__(self, hour: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., cpu_hours: _Optional[float] = ..., mem_gb_hours: _Optional[float] = ..., cost_cents: _Optional[int] = ...) -> None: ...
+    cost_nano_eur: int
+    def __init__(self, hour: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., cpu_hours: _Optional[float] = ..., mem_gb_hours: _Optional[float] = ..., cost_cents: _Optional[int] = ..., cost_nano_eur: _Optional[int] = ...) -> None: ...
 
 class EnvironmentUsageEntry(_message.Message):
-    __slots__ = ("id", "name", "running_seconds", "cost_cents", "cpu_millicores", "memory_mb", "hourly_cents")
+    __slots__ = ("id", "name", "running_seconds", "cost_cents", "cpu_millicores", "memory_mb", "hourly_cents", "cost_nano_eur", "hourly_nano_eur")
     ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     RUNNING_SECONDS_FIELD_NUMBER: _ClassVar[int]
@@ -406,6 +410,8 @@ class EnvironmentUsageEntry(_message.Message):
     CPU_MILLICORES_FIELD_NUMBER: _ClassVar[int]
     MEMORY_MB_FIELD_NUMBER: _ClassVar[int]
     HOURLY_CENTS_FIELD_NUMBER: _ClassVar[int]
+    COST_NANO_EUR_FIELD_NUMBER: _ClassVar[int]
+    HOURLY_NANO_EUR_FIELD_NUMBER: _ClassVar[int]
     id: str
     name: str
     running_seconds: int
@@ -413,7 +419,9 @@ class EnvironmentUsageEntry(_message.Message):
     cpu_millicores: int
     memory_mb: int
     hourly_cents: int
-    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., running_seconds: _Optional[int] = ..., cost_cents: _Optional[int] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., hourly_cents: _Optional[int] = ...) -> None: ...
+    cost_nano_eur: int
+    hourly_nano_eur: int
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., running_seconds: _Optional[int] = ..., cost_cents: _Optional[int] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., hourly_cents: _Optional[int] = ..., cost_nano_eur: _Optional[int] = ..., hourly_nano_eur: _Optional[int] = ...) -> None: ...
 
 class CreateCheckoutSessionRequest(_message.Message):
     __slots__ = ("org_id", "plan", "success_url", "cancel_url")

@@ -289,7 +289,7 @@ fn last_day(hourly: &[HourCost], now: i64) -> [i64; HOURS as usize] {
         let back = (current_hour - hour) / SECONDS_PER_HOUR;
         if (0..HOURS).contains(&back) {
             let slot = (HOURS - 1 - back) as usize;
-            hours[slot] = hours[slot].saturating_add(i64::from(entry.cost_cents.max(0)));
+            hours[slot] = hours[slot].saturating_add(entry.cost_nano_eur.max(0));
         }
     }
     hours
@@ -299,11 +299,13 @@ fn bars(hours: &[i64; HOURS as usize], scale: i64, first_hour: i64) -> Vec<Usage
     hours
         .iter()
         .enumerate()
-        .map(|(slot, cents)| {
-            let height = if *cents == 0 || scale == 0 {
+        .map(|(slot, nano_eur)| {
+            let height = if *nano_eur == 0 || scale == 0 {
                 0
             } else {
-                (cents * BAR_MAX / scale).max(BAR_MIN)
+                // Nano-euros times the bar height can pass i64 for a big hour.
+                let height = i128::from(*nano_eur) * i128::from(BAR_MAX) / i128::from(scale);
+                (height as i64).max(BAR_MIN)
             };
             let hour =
                 (first_hour + slot as i64 * SECONDS_PER_HOUR).rem_euclid(86_400) / SECONDS_PER_HOUR;
@@ -311,10 +313,7 @@ fn bars(hours: &[i64; HOURS as usize], scale: i64, first_hour: i64) -> Vec<Usage
                 x: SLOT_START + slot as i64 * SLOT_WIDTH,
                 y: AXIS_Y - height,
                 height,
-                label: format!(
-                    "{hour:02}:00 UTC, {}",
-                    euro_text(cents.saturating_mul(10_000_000))
-                ),
+                label: format!("{hour:02}:00 UTC, {}", euro_text(*nano_eur)),
             }
         })
         .collect()
@@ -360,10 +359,10 @@ mod tests {
         }
     }
 
-    fn hour(back: i64, cost_cents: i32) -> HourCost {
+    fn hour(back: i64, cents: i64) -> HourCost {
         HourCost {
             hour: NOW - NOW % 3_600 - back * 3_600,
-            cost_cents,
+            cost_nano_eur: cents * 10_000_000,
         }
     }
 

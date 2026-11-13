@@ -286,11 +286,11 @@ pub(crate) struct BillingSummary {
 }
 
 /// One hour of an organization's Sandbox cost, as the Billing page's chart
-/// reads it: the hour's start in Unix seconds and its cost in cents.
+/// reads it: the hour's start in Unix seconds and its cost in nano-euros.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HourCost {
     pub(crate) hour: i64,
-    pub(crate) cost_cents: i32,
+    pub(crate) cost_nano_eur: i64,
 }
 
 pub(crate) async fn account_home_overview(
@@ -333,7 +333,7 @@ pub(crate) async fn account_home_hourly(
         .filter_map(|entry| {
             Some(HourCost {
                 hour: entry.hour.into_option()?.seconds,
-                cost_cents: entry.cost_cents,
+                cost_nano_eur: entry.cost_nano_eur,
             })
         })
         .collect())
@@ -423,7 +423,7 @@ pub(crate) async fn billing_page(
         .collect::<Vec<_>>();
     let max_cost = hourly
         .iter()
-        .map(|entry| entry.cost_cents.max(0))
+        .map(|entry| entry.cost_nano_eur.max(0))
         .max()
         .unwrap_or(0);
     let usage_bars = hourly
@@ -433,7 +433,7 @@ pub(crate) async fn billing_page(
             let height = if max_cost == 0 {
                 2
             } else {
-                ((entry.cost_cents.max(0) as usize * 72) / max_cost as usize).max(2)
+                (i128::from(entry.cost_nano_eur.max(0)) * 72 / i128::from(max_cost)).max(2) as usize
             };
             let occurred = entry
                 .hour
@@ -444,7 +444,7 @@ pub(crate) async fn billing_page(
                 x: 8 + index * 12,
                 y: 80usize.saturating_sub(height),
                 height,
-                label: format!("{occurred}: {}", money(entry.cost_cents, "eur")),
+                label: format!("{occurred}: {}", euro_text(entry.cost_nano_eur)),
             }
         })
         .collect();
@@ -490,7 +490,7 @@ pub(crate) async fn billing_page(
             .into_iter()
             .map(|entry| BillingUsageRow {
                 name: entry.name,
-                cost: money(entry.cost_cents, "eur"),
+                cost: euro_text(entry.cost_nano_eur),
             })
             .collect(),
         usage_bars,
