@@ -82,6 +82,9 @@ impl From<AuthRequestRow> for StoredAuthRequest {
 #[async_trait]
 impl AuthorizationStore for PgAuthorizationStore {
     async fn create(&self, request: StoredAuthRequest) -> StoreResult<AuthRequestId> {
+        crate::expired_rows::auth_requests(&self.pool)
+            .await
+            .map_err(StoreError::new)?;
         let id = generate_id();
         let req = &request.request;
         sqlx::query(

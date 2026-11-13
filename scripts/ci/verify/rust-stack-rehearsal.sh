@@ -148,8 +148,8 @@ run_idp_db_flow() {
   fi
   local passed_count
   passed_count="$(sed -nE 's/.*test result: ok\. ([0-9]+) passed.*/\1/p' "$logfile" | tail -n 1)"
-  if [[ "$passed_count" != "13" ]]; then
-    echo "::error::idp db_flow did not report its 13 passing DB-backed tests"
+  if [[ "$passed_count" != "15" ]]; then
+    echo "::error::idp db_flow did not report its 15 passing DB-backed tests"
     return 1
   fi
 

@@ -112,6 +112,9 @@ impl DeviceAuthorizationStore for PgDeviceAuthorizationStore {
         let expires_in_secs = i64::try_from(expires_in_secs).map_err(|_| {
             StoreError::new("device authorization lifetime exceeds PostgreSQL range")
         })?;
+        crate::expired_rows::device_authorizations(&self.pool)
+            .await
+            .map_err(StoreError::new)?;
         let device_code_hash = hash_oauth_token(&auth.device_code);
         let user_code_hash = self.user_code_lookup_digest(&auth.user_code);
         sqlx::query(

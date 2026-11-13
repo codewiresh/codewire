@@ -153,6 +153,9 @@ impl TokenStore for PgTokenStore {
         // leaves this function only in the one-time token response. No
         // session mirror: access tokens keep this fixed expiry and never
         // ride the `sessions` sliding window.
+        crate::expired_rows::access_tokens(&self.pool, &grant.subject.0)
+            .await
+            .map_err(StoreError::new)?;
         sqlx::query(
             r#"
             INSERT INTO oidc_access_tokens (token_hash, client_id, user_id, scopes, expires_at)
@@ -198,6 +201,9 @@ impl TokenStore for PgTokenStore {
         grant: RefreshGrant,
         expires_in_secs: u64,
     ) -> StoreResult<()> {
+        crate::expired_rows::refresh_tokens(&self.pool, &grant.subject.0)
+            .await
+            .map_err(StoreError::new)?;
         sqlx::query(
             r#"
             INSERT INTO oidc_refresh_tokens

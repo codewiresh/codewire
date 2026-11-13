@@ -14,12 +14,14 @@
 
 use base64::Engine;
 use codewire_idp::{
-    IdpConfig, PgAuthorizationStore, PgDeviceAuthorizationStore, SigningKekKeyring, build_provider,
+    IdpConfig, PgAuthorizationStore, PgDeviceAuthorizationStore, PgTokenStore, SigningKekKeyring,
+    build_provider,
 };
 use codewire_oidc::{
-    AuthRequestId, AuthorizationRequest, AuthorizationStore, AuthorizeOutcome, DeviceAuthorization,
-    DeviceAuthorizationStore, DeviceStatus, ErrorCode, KeyStore, RawAuthorizeParams,
-    RequestContext, ResponseType, Scopes, StoredAuthRequest, Subject,
+    AccessGrant, AuthRequestId, AuthorizationRequest, AuthorizationStore, AuthorizeOutcome,
+    DeviceAuthorization, DeviceAuthorizationStore, DeviceStatus, ErrorCode, KeyStore,
+    RawAuthorizeParams, RefreshGrant, RequestContext, ResponseType, Scopes, StoredAuthRequest,
+    Subject, TokenStore,
 };
 use codewire_server_core::auth::{
     AuthState, AuthUser, CredentialContext, api_key_prefix, generate_api_key, hash_api_key,
@@ -4816,4 +4818,255 @@ async fn admin_resends_verification_only_for_an_unverified_account_against_postg
     .unwrap();
     assert_eq!(issued, 1);
     cleanup(pool.clone()).await;
+}
+
+/// Expired authorization requests, device authorizations and tokens go as new
+/// ones are written: a bounded batch per request or device authorization, and
+/// a token's own user's expired tokens when one is issued.
+/// It runs in its own database: sibling tests write these tables at the same
+/// time, and their writes remove expired rows too.
+#[tokio::test]
+async fn expired_oidc_rows_are_removed_as_new_ones_are_written() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping expired OIDC rows test");
+        return;
+    };
+    let admin = PgPool::connect(&url).await.expect("connect admin");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let db_name = format!("cw_idp_expired_rows_{}_{nanos}", std::process::id());
+    sqlx::query(&format!(r#"CREATE DATABASE "{db_name}""#))
+        .execute(&admin)
+        .await
+        .expect("create expired rows database");
+    let mut test_url = url::Url::parse(&url).expect("parse DATABASE_URL");
+    test_url.set_path(&db_name);
+    codewire_server_core::migrate::ensure_schema(test_url.as_str())
+        .await
+        .expect("migrate expired rows database");
+    let pool = PgPool::connect(test_url.as_str()).await.expect("connect");
+    let outcome = tokio::spawn(expired_oidc_rows(pool.clone())).await;
+    pool.close().await;
+    let _ = sqlx::query(&format!(
+        r#"DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)"#
+    ))
+    .execute(&admin)
+    .await;
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error.into_panic());
+    }
+}
+
+async fn expired_oidc_rows(pool: PgPool) {
+    seed(&pool).await;
+    for user in ["u_expired_rows_a", "u_expired_rows_b"] {
+        sqlx::query("INSERT INTO users (id, email, name, email_verified, is_admin) VALUES ($1, $1 || '@example.com', $1, true, false) ON CONFLICT (id) DO NOTHING")
+            .bind(user).execute(&pool).await.unwrap();
+    }
+    let request = || StoredAuthRequest {
+        id: AuthRequestId(String::new()),
+        request: AuthorizationRequest {
+            client_id: CLIENT.into(),
+            redirect_uri: REDIRECT.into(),
+            response_type: ResponseType::Code,
+            scopes: Scopes(vec!["openid".into()]),
+            state: None,
+            nonce: None,
+            code_challenge: Some(CHALLENGE.into()),
+            code_challenge_method: Some("S256".into()),
+            prompt: None,
+            max_age: None,
+        },
+        subject: None,
+    };
+    let mine = |prefix: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM oidc_auth_requests WHERE id LIKE $1 || '%'",
+            )
+            .bind(prefix)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    // More expired requests than one write removes, and one live request.
+    sqlx::query(
+        "INSERT INTO oidc_auth_requests (id, client_id, scopes, redirect_uri, response_type, done, expires_at) \
+         SELECT 'expired-rows-old-' || n, $1, ARRAY['openid'], $2, 'code', false, NOW() - interval '1 minute' \
+         FROM generate_series(1, 105) AS n",
+    )
+    .bind(CLIENT).bind(REDIRECT).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO oidc_auth_requests (id, client_id, scopes, redirect_uri, response_type, done, expires_at) \
+         VALUES ('expired-rows-live', $1, ARRAY['openid'], $2, 'code', false, NOW() + interval '10 minutes')",
+    )
+    .bind(CLIENT).bind(REDIRECT).execute(&pool).await.unwrap();
+    let requests = PgAuthorizationStore::new(pool.clone());
+    let first = requests.create(request()).await.expect("create a request");
+    assert!(
+        mine("expired-rows-old-").await >= 5,
+        "one write removed more than a batch"
+    );
+    let mut writes = vec![first];
+    for _ in 0..20 {
+        if mine("expired-rows-old-").await == 0 {
+            break;
+        }
+        writes.push(requests.create(request()).await.expect("create a request"));
+    }
+    assert_eq!(
+        mine("expired-rows-old-").await,
+        0,
+        "expired requests outlived the writes"
+    );
+    assert_eq!(
+        mine("expired-rows-live").await,
+        1,
+        "a live request was removed"
+    );
+    for id in writes
+        .iter()
+        .map(|id| id.0.as_str())
+        .chain(["expired-rows-live"])
+    {
+        sqlx::query("DELETE FROM oidc_auth_requests WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    // An expired device authorization goes with the next one stored.
+    sqlx::query(
+        "INSERT INTO oidc_device_authorizations (device_code_hash, user_code_hash, client_id, scopes, status, expires_at) \
+         VALUES ($2, $3, $1, ARRAY['openid'], 'pending', NOW() - interval '1 minute')",
+    )
+    .bind(CLIENT)
+    .bind(hash_oauth_token("expired-rows-device"))
+    .bind(hash_oauth_token("expired-rows-user-code"))
+    .execute(&pool).await.unwrap();
+    let devices = PgDeviceAuthorizationStore::new(pool.clone(), "expired-rows-pepper").unwrap();
+    devices
+        .store_device(
+            DeviceAuthorization {
+                device_code: "expired-rows-device-code".into(),
+                user_code: "EXPR-ROWS".into(),
+                client_id: CLIENT.into(),
+                scopes: Scopes(vec!["openid".into()]),
+                status: DeviceStatus::Pending,
+            },
+            600,
+        )
+        .await
+        .expect("store a device authorization");
+    let device: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM oidc_device_authorizations WHERE device_code_hash = $1",
+    )
+    .bind(hash_oauth_token("expired-rows-device"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        device, 0,
+        "the expired device authorization outlived the next one"
+    );
+    devices.delete("expired-rows-device-code").await.unwrap();
+
+    // Issuing a token removes that user's expired tokens, and nobody else's.
+    for (user, hash) in [
+        ("u_expired_rows_a", "expired-rows-access-a"),
+        ("u_expired_rows_b", "expired-rows-access-b"),
+    ] {
+        sqlx::query(
+            "INSERT INTO oidc_access_tokens (token_hash, client_id, user_id, scopes, expires_at) \
+             VALUES ($1, $2, $3, ARRAY['openid'], NOW() - interval '1 minute')",
+        )
+        .bind(hash_oauth_token(hash))
+        .bind(CLIENT)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    for (user, hash) in [
+        ("u_expired_rows_a", "expired-rows-refresh-a"),
+        ("u_expired_rows_b", "expired-rows-refresh-b"),
+    ] {
+        sqlx::query(
+            "INSERT INTO oidc_refresh_tokens (id, token_hash, client_id, user_id, scopes, auth_time, expires_at) \
+             VALUES ($1, $2, $3, $4, ARRAY['openid'], NOW() - interval '1 hour', NOW() - interval '1 minute')",
+        )
+        .bind(hash).bind(hash_oauth_token(hash)).bind(CLIENT).bind(user)
+        .execute(&pool).await.unwrap();
+    }
+    let tokens = PgTokenStore::new(pool.clone());
+    let grant = || {
+        (
+            Subject("u_expired_rows_a".into()),
+            CLIENT.to_string(),
+            Scopes(vec!["openid".into()]),
+        )
+    };
+    let (subject, client_id, scopes) = grant();
+    tokens
+        .store_access(
+            "expired-rows-new-access",
+            AccessGrant {
+                subject,
+                client_id,
+                scopes,
+            },
+            3600,
+        )
+        .await
+        .unwrap();
+    let (subject, client_id, scopes) = grant();
+    tokens
+        .store_refresh(
+            "expired-rows-new-refresh",
+            RefreshGrant {
+                subject,
+                client_id,
+                scopes,
+            },
+            3600,
+        )
+        .await
+        .unwrap();
+    for (table, hash, kept) in [
+        ("oidc_access_tokens", "expired-rows-access-a", false),
+        ("oidc_access_tokens", "expired-rows-access-b", true),
+        ("oidc_refresh_tokens", "expired-rows-refresh-a", false),
+        ("oidc_refresh_tokens", "expired-rows-refresh-b", true),
+    ] {
+        let present: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM {table} WHERE token_hash = $1"
+        ))
+        .bind(hash_oauth_token(hash))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(present == 1, kept, "{table} {hash}");
+    }
+    assert!(
+        tokens
+            .get_access("expired-rows-new-access")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    for user in ["u_expired_rows_a", "u_expired_rows_b"] {
+        for table in ["oidc_access_tokens", "oidc_refresh_tokens"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE user_id = $1"))
+                .bind(user)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
 }
