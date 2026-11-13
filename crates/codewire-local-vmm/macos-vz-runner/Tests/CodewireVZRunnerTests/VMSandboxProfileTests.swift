@@ -60,6 +60,20 @@
           ])
       }
 
+      /// macOS 27's cache-directory lookup needs exactly the `/var` symlink's
+      /// metadata; nothing under it, and no directory service (#4478).
+      @Test
+      func testTheCacheDirectoryLookupGetsOnlyTheVarSymlinksMetadata() throws {
+        let rules = try Self.configuration(shares: []).sandboxProfile().split(separator: "\n")
+          .map(String.init)
+        #expect(rules.contains("(allow file-read-metadata (literal \"/var\"))"))
+        let system = rules.filter { $0.contains("/var") || $0.contains("/private") }
+        #expect(system == ["(allow file-read-metadata (literal \"/var\"))"])
+        for forbidden in ["dirhelper", "opendirectoryd", "system-info"] {
+          #expect(!rules.joined().contains(forbidden), "\(forbidden)")
+        }
+      }
+
       @Test
       func testTheVirtioFSExtensionIsGrantedOnlyWithAShare() throws {
         let unshared = try Self.configuration(shares: []).sandboxProfile()

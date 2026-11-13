@@ -31,6 +31,17 @@ pub(crate) const CONFIG_NAME: &str = "vz.json";
 const GUEST_KERNEL_CMDLINE: &str = "console=ttyS0 rdinit=/init panic=-1 codewire.clock=rtc";
 /// `VMConfiguration.schemaVersion` in the helper. Schema 2 added `shares`.
 const SCHEMA_VERSION: u32 = 2;
+/// The helper's `VMExit.startRefusedBase`: a start Virtualization.framework
+/// refused exits this plus the refusal's `VZError.Code` for codes 1...63, and
+/// exactly this for any other code (#4478).
+const START_REFUSED_BASE: i32 = 64;
+
+/// The `VZError.Code` of a start the helper reports as refused, 0 when the
+/// framework gave none in range, or `None` for any other end of the helper.
+pub(crate) fn start_refused_code(status: std::process::ExitStatus) -> Option<u8> {
+    let offset = status.code()?.checked_sub(START_REFUSED_BASE)?;
+    u8::try_from(offset).ok().filter(|offset| *offset < 64)
+}
 
 /// The helper's schema-2 `VMConfiguration`. It refuses unknown or missing
 /// fields, so these names must match it exactly.
@@ -185,6 +196,20 @@ pub(crate) fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_start_is_read_from_the_helpers_exit_status() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let exited = |code: i32| std::process::ExitStatus::from_raw(code << 8);
+        assert_eq!(start_refused_code(exited(65)), Some(1));
+        assert_eq!(start_refused_code(exited(127)), Some(63));
+        assert_eq!(start_refused_code(exited(64)), Some(0));
+        for other in [0, 1, 2, 63, 128, 255] {
+            assert_eq!(start_refused_code(exited(other)), None, "{other}");
+        }
+        let killed = std::process::ExitStatus::from_raw(libc::SIGKILL);
+        assert_eq!(start_refused_code(killed), None);
+    }
 
     #[test]
     fn configuration_names_disk_order_and_shares_match_the_helper_schema() {

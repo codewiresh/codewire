@@ -1072,6 +1072,10 @@ fn operation_error_hint(error_code: &str) -> &'static str {
             " (the host port is in use on 127.0.0.1 by another program or local environment; choose another with --host-port)"
         }
         #[cfg(target_os = "macos")]
+        "create_vm_start_refused" | "start_vm_start_refused" => {
+            " (macOS's Virtualization framework refused to start the VM; if macOS was updated since this cw was released, `cw upgrade` may bring one that supports it)"
+        }
+        #[cfg(target_os = "macos")]
         "create_registry_platform" => {
             " (the image has no linux/arm64 variant; macOS local environments run arm64 Linux, so pass --image with a multi-architecture or arm64 image, such as node:22-bookworm or ubuntu:24.04)"
         }

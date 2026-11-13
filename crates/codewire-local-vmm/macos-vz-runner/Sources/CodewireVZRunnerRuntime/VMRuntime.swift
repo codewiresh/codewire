@@ -20,12 +20,7 @@ import Foundation
   /// directory through virtio-fs (Linux's virtiofsd), stops the VM on SIGTERM
   /// or SIGINT, and exits once the VM has stopped.
   public enum VMRuntime {
-    public enum Exit: Int32 {
-      /// The guest powered off, or a requested stop completed.
-      case stopped = 0
-      /// The VM failed to start or stopped with an error.
-      case failed = 1
-    }
+    public typealias Exit = VMExit
 
     public static func run(configuration: VMConfiguration) throws -> Exit {
       try validateHost()
@@ -39,6 +34,13 @@ import Foundation
         throw RuntimeError.listenerFailed
       }
       defer { removeSocket(configuration.vsockSocket, bound: identity) }
+
+      // Since macOS 27, Virtualization.framework looks up the user's cache
+      // directory as a VM starts. Confined, it can reach neither
+      // opendirectoryd nor dirhelper for it, and the start fails with "Failed
+      // to retrieve cache directory" (#4478). Resolved here first, the
+      // framework's own lookup needs only the metadata of `/var`.
+      resolveUserCacheDirectory()
 
       // From here on the helper handles bytes a guest can influence, so it
       // keeps only this VM's own files. A profile that cannot be applied stops
@@ -131,6 +133,13 @@ import Foundation
       result.socketDevices = [VZVirtioSocketDeviceConfiguration()]
       do { try result.validate() } catch { throw RuntimeError.virtualMachineConfigurationInvalid }
       return result
+    }
+
+    /// The answer stays with this process. A failure here is not fatal: a
+    /// start that then fails reports the framework's error code.
+    private static func resolveUserCacheDirectory() {
+      var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+      _ = confstr(_CS_DARWIN_USER_CACHE_DIR, &buffer, buffer.count)
     }
 
     /// Each share must still be the admitted directory: same device and inode,
@@ -243,8 +252,8 @@ import Foundation
     func start() {
       queue.async {
         self.machine.start { result in
-          if case .failure = result {
-            self.finish(.failed)
+          if case .failure(let error) = result {
+            self.finish(.startRefused(virtualizationCode: (error as? VZError)?.code.rawValue ?? 0))
           } else if !self.startedCheck() {
             self.startCheckFailed = true
             self.stop()

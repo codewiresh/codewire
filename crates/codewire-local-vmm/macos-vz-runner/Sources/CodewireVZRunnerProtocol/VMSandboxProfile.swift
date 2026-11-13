@@ -12,6 +12,10 @@ extension VMConfiguration {
       // which hold no user data.
       "(allow file-read* (subpath \"/System\") (subpath \"/usr/lib\") (literal \"/dev/null\"))",
       "(allow sysctl-read)",
+      // Since macOS 27 the framework looks up the user's cache directory as
+      // the VM starts. The helper resolves it before confinement, and the
+      // lookup then needs only the `/var` symlink's own metadata (#4478).
+      "(allow file-read-metadata (literal \"/var\"))",
       // The XPC service that runs the VM; nothing else in the Mach namespace.
       "(allow mach-lookup (xpc-service-name \"com.apple.Virtualization.VirtualMachine\"))",
     ]

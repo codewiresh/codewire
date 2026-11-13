@@ -18,7 +18,7 @@ private func runVM(configurationPath: String) throws -> Never {
       let data = try handle.read(upToCount: VMConfiguration.maxConfigurationBytes + 1)
     else { throw ConfigurationError.malformed }
     let configuration = try VMConfiguration.decode(data)
-    exit(try VMRuntime.run(configuration: configuration).rawValue)
+    exit(try VMRuntime.run(configuration: configuration).status)
   #else
     throw ConfigurationError.unsupportedSchema
   #endif

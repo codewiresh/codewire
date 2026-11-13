@@ -41,8 +41,12 @@ hybrid-vsock client already speaks to Cloud Hypervisor.
 
 SIGTERM or SIGINT stops the VM, and so does the exit of the process that
 spawned the helper (macOS has no parent-death signal). The process exits 0 after the guest powers off
-or a requested stop completes, and 1 when the VM fails to start or stops with
-an error. It removes the socket only if that path is still the one it bound.
+or a requested stop completes, and 1 when it fails before starting the VM or
+the VM stops with an error. When Virtualization.framework refuses to start the
+VM, it exits 64 plus the refusal's `VZError.Code` for codes 1 to 63, and 64
+for any other code (`VMExit`). The runner reads that status and reports
+`vm_start_refused`, so the helper never writes the error's text (#4478). It
+removes the socket only if that path is still the one it bound.
 The VM has no network, console or graphics device. The helper needs the
 `com.apple.security.virtualization` entitlement. Every signature names the
 identifier `sh.codewire.vz-runner` and carries the hardened runtime and exactly
@@ -63,7 +67,8 @@ on macOS 26:
 - The helper confines itself with Seatbelt (`sandbox_init`, the mechanism the
   packet worker uses) once its listener is bound and before the VM starts, and
   exits if the profile is not applied. Everything is denied except: reading the
-  OS's own files (`/System`, `/usr/lib`, `/dev/null`) and sysctls; reading the
+  OS's own files (`/System`, `/usr/lib`, `/dev/null`) and sysctls; the metadata
+  of the `/var` symlink alone; reading the
   kernel, the initial ramdisk and read-only disks; reading and writing writable
   disks; the granted shares, with the rights their mode gives; removing the
   socket it bound; and looking up the `com.apple.Virtualization.VirtualMachine`
@@ -71,6 +76,17 @@ on macOS 26:
   gives its service to serve them: a file extension for each share and the
   `com.apple.virtualization.extension.fuse` class. Without those the VM boots
   and the guest gets `EPERM` on every share.
+- Since macOS 27, Virtualization.framework looks up the user's cache
+  directory as the VM starts. Confined, the helper can ask neither
+  opendirectoryd for the user's UUID nor dirhelper for the directory, and the
+  start fails with `VZErrorDomain` 1, "Failed to retrieve cache directory"
+  (#4478). So the helper resolves the directory with `confstr` before it
+  confines itself, and the framework's own lookup then needs only `/var`'s
+  metadata. Observed on macOS 27.2.1 with this profile: without the early
+  lookup, or without the `/var` rule, the start fails; with both it starts.
+  The framework's other refused requests (`system-info vfs.disk-space`, the VM
+  service's task name, opendirectoryd membership) do not stop the VM, and stay
+  refused.
 - Virtualization.framework runs the VM in Apple's
   `com.apple.Virtualization.VirtualMachine` XPC service. That process is
   sandboxed by Apple, has the hardened runtime and holds exactly:

@@ -2014,6 +2014,10 @@ pub(crate) const GUEST_SETUP_FAILED: &str = "guest_setup_failed";
 pub(crate) const GUEST_WORKSPACE_FAILED: &str = "guest_workspace_failed";
 /// The runner error code for a published host port another program holds.
 pub(crate) const HOST_PORT_UNAVAILABLE: &str = "host_port_unavailable";
+/// The runner error code for a VM whose start macOS's Virtualization.framework
+/// refused (#4478).
+#[cfg(target_os = "macos")]
+pub(crate) const VM_START_REFUSED: &str = "vm_start_refused";
 
 /// Name the one prepare failure a user can fix without reading runner logs.
 fn prepare_error_code(error: &RunnerError) -> &'static str {
@@ -2029,6 +2033,8 @@ fn network_start_error_code(error: &RunnerError) -> &'static str {
         RunnerError::NetworkWorkerSpawn => "network_worker_spawn",
         RunnerError::NetworkWorkerStartTimeout => "network_worker_start_timeout",
         RunnerError::NetworkWorkerBootstrap => "network_worker_bootstrap",
+        #[cfg(target_os = "macos")]
+        RunnerError::VmStartRefused(_) => VM_START_REFUSED,
         RunnerError::GuestDockerToolingMissing => GUEST_DOCKER_TOOLING_MISSING,
         RunnerError::GuestSetupFailed => GUEST_SETUP_FAILED,
         RunnerError::GuestWorkspaceFailed => GUEST_WORKSPACE_FAILED,
@@ -3525,6 +3531,11 @@ mod tests {
         assert_eq!(
             network_start_error_code(&RunnerError::GuestWorkspaceFailed),
             GUEST_WORKSPACE_FAILED
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            network_start_error_code(&RunnerError::VmStartRefused(1)),
+            VM_START_REFUSED
         );
     }
 

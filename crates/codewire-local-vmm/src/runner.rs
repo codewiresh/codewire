@@ -1597,15 +1597,13 @@ impl RunningVm {
         let mut handshake_attempts = 0_usize;
         let mut last_handshake_failure = None;
         loop {
-            if self
-                .child
-                .try_wait()
-                .map_err(|_| RunnerError::Wait)?
-                .is_some()
-            {
-                return Err(last_handshake_failure.map_or(
-                    RunnerError::ExitedDuringStart,
-                    RunnerError::NetworkWorkerStartup,
+            if let Some(status) = self.child.try_wait().map_err(|_| RunnerError::Wait)? {
+                return Err(vmm_start_exit(
+                    status,
+                    last_handshake_failure.map_or(
+                        RunnerError::ExitedDuringStart,
+                        RunnerError::NetworkWorkerStartup,
+                    ),
                 ));
             }
             let key = NetworkKey::derive(
@@ -1702,13 +1700,8 @@ impl RunningVm {
         deadline: tokio::time::Instant,
     ) -> Result<(), RunnerError> {
         loop {
-            if self
-                .child
-                .try_wait()
-                .map_err(|_| RunnerError::Wait)?
-                .is_some()
-            {
-                return Err(RunnerError::ExitedDuringStart);
+            if let Some(status) = self.child.try_wait().map_err(|_| RunnerError::Wait)? {
+                return Err(vmm_start_exit(status, RunnerError::ExitedDuringStart));
             }
             match wait_for_network_progress_attempt(
                 &self.hybrid,
@@ -5217,6 +5210,19 @@ async fn terminate_unadmitted_child(
     Ok(())
 }
 
+/// The error for a VMM that exited while its VM started. The macOS helper
+/// binds its vsock socket before it starts the VM, so a start the framework
+/// refuses is seen here, and its exit status names it (#4478).
+fn vmm_start_exit(status: std::process::ExitStatus, otherwise: RunnerError) -> RunnerError {
+    #[cfg(target_os = "macos")]
+    if let Some(code) = crate::vz::start_refused_code(status) {
+        return RunnerError::VmStartRefused(code);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = status;
+    otherwise
+}
+
 /// Darwin readiness: the helper bound its hybrid-vsock socket and is alive.
 #[cfg(target_os = "macos")]
 async fn wait_for_vsock_endpoint(
@@ -5319,6 +5325,9 @@ pub enum RunnerError {
         "a previous VM helper (pid {0}) is still running after its runner exited; it is never adopted, so stop that process and start again"
     )]
     OrphanedVmm(u32),
+    #[cfg(target_os = "macos")]
+    #[error("macOS refused to start the VM (Virtualization.framework error {0})")]
+    VmStartRefused(u8),
     #[error("cw runtime catalog attachment changed or its live disk is invalid")]
     CwRuntimeDiskChanged,
     #[error(transparent)]
@@ -5532,6 +5541,8 @@ impl RunnerError {
             Self::GuestWorkspaceFailed => "guest_workspace_failed",
             #[cfg(target_os = "macos")]
             Self::OrphanedVmm(_) => "orphaned_vmm",
+            #[cfg(target_os = "macos")]
+            Self::VmStartRefused(_) => "vm_start_refused",
             Self::CwRuntimeDiskChanged => "cw_runtime_disk_changed",
             Self::CwRuntime(_) => "cw_runtime",
             Self::InvalidRequest => "invalid_request",

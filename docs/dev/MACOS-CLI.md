@@ -97,7 +97,11 @@ A local VM needs:
   `create_vz_helper_unentitled`. Artifact admission is exact: the lock is mode
   0400, the helper and e2fsprogs programs 0500, the kernel, initramfs and
   `mke2fs.conf` 0400, and every directory 0700; anything else fails create with
-  `create_failed`.
+  `create_failed`. When Virtualization.framework refuses to start the VM,
+  create and start fail with `create_vm_start_refused` or
+  `start_vm_start_refused`. On macOS 27, a helper from before #4478 fails
+  every start, which that cw reports only as `create_failed`; a cw that
+  includes #4478 starts it.
 - nothing installed for ext4 disks or Git workspaces. The runtime ships a
   pinned e2fsprogs (`mkfs.ext4`, `e2fsck`, `resize2fs`, `debugfs` and
   `mke2fs.conf`) and git 2.56.0 (`git` and its `git-remote-https` helper,

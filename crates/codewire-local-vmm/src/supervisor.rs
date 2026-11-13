@@ -4711,6 +4711,10 @@ impl Supervisor {
                 if error_code == crate::runner_service::HOST_PORT_UNAVAILABLE {
                     return Err(SupervisorError::HostPortUnavailable);
                 }
+                #[cfg(target_os = "macos")]
+                if error_code == crate::runner_service::VM_START_REFUSED {
+                    return Err(SupervisorError::VmStartRefused);
+                }
                 return Err(SupervisorError::VmStart(status.message().to_owned()));
             }
             (Ok(_), Some(_)) | (Err(_), None) => {
@@ -9906,6 +9910,8 @@ impl From<SupervisorError> for Status {
             | SupervisorError::VmStop
             | SupervisorError::VmResize
             | SupervisorError::VmDelete => Status::failed_precondition(error.to_string()),
+            #[cfg(target_os = "macos")]
+            SupervisorError::VmStartRefused => Status::failed_precondition(error.to_string()),
             SupervisorError::Store(SupervisorStoreError::RequestCollision)
             | SupervisorError::Store(SupervisorStoreError::JournalConflict) => {
                 Status::aborted(error.to_string())
@@ -10063,6 +10069,9 @@ pub enum SupervisorError {
         "a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; stop it, or publish a different host port"
     )]
     HostPortUnavailable,
+    #[cfg(target_os = "macos")]
+    #[error("macOS refused to start the VM (Virtualization.framework)")]
+    VmStartRefused,
     #[error("native VM stop failed")]
     VmStop,
     #[error("native VM resize failed")]
@@ -10155,6 +10164,8 @@ fn create_failure_code(error: &SupervisorError) -> &'static str {
         SupervisorError::GuestSetupFailed => "create_guest_setup_failed",
         SupervisorError::GuestWorkspaceFailed => "create_guest_workspace_failed",
         SupervisorError::HostPortUnavailable => "create_host_port_unavailable",
+        #[cfg(target_os = "macos")]
+        SupervisorError::VmStartRefused => "create_vm_start_refused",
         #[cfg(target_os = "macos")]
         SupervisorError::VzHelperMissing(_) => "create_vz_helper_missing",
         #[cfg(target_os = "macos")]
@@ -10325,6 +10336,8 @@ fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
         SupervisorError::GuestSetupFailed => "guest_setup_failed",
         SupervisorError::GuestWorkspaceFailed => "guest_workspace_failed",
         SupervisorError::HostPortUnavailable => "host_port_unavailable",
+        #[cfg(target_os = "macos")]
+        SupervisorError::VmStartRefused => "vm_start_refused",
         SupervisorError::VmStop => "vm_stop",
         SupervisorError::VmResize => "vm_resize",
         SupervisorError::VmDelete => "vm_delete",

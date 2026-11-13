@@ -61,15 +61,19 @@ for required in (
         fail(f"product VM lost its fail-closed confinement: {required}")
 if not vm_runtime.index("cw_vz_apply_sandbox(") < vm_runtime.index("machine.start()"):
     fail("product VM must be confined before it starts")
+if not vm_runtime.index("resolveUserCacheDirectory()") < vm_runtime.index("cw_vz_apply_sandbox("):
+    fail("product VM must resolve the user cache directory before it is confined (#4478)")
 profile = source("Sources/CodewireVZRunnerProtocol/VMSandboxProfile.swift")
 for required in (
     '"(version 1)", "(deny default)"',
     'xpc-service-name \\"com.apple.Virtualization.VirtualMachine\\"',
     'extension-class \\"com.apple.virtualization.extension.fuse\\"',
+    '(allow file-read-metadata (literal \\"/var\\"))',
 ):
     if required not in profile:
         fail(f"helper Seatbelt profile lost: {required}")
-for forbidden in ("network", "process-", "(allow default)", "mach-register", "iokit-"):
+for forbidden in ("network", "process-", "(allow default)", "mach-register", "iokit-",
+                  "/private/var", "dirhelper", "opendirectoryd", "system-info"):
     if forbidden in profile:
         fail(f"helper Seatbelt profile gained: {forbidden}")
 if vm_runtime.count("VZSharedDirectory(") != 1:

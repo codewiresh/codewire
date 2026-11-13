@@ -44,6 +44,18 @@ extension CodewireVZRunnerTests {
       #expect(throws: expected) { _ = try VMConfiguration.decode(data) }
     }
 
+    /// The Rust runner reads these statuses (`vz.rs`), so they are a contract.
+    @Test
+    func testExitStatusesClassifyTheEndWithoutText() {
+      #expect(VMExit.stopped.status == 0)
+      #expect(VMExit.failed.status == 1)
+      #expect(VMExit.startRefused(virtualizationCode: 1).status == 65)
+      #expect(VMExit.startRefused(virtualizationCode: 63).status == 127)
+      for unclassified in [0, 64, -1, 10_001] {
+        #expect(VMExit.startRefused(virtualizationCode: unclassified).status == 64)
+      }
+    }
+
     @Test
     func testValidConfigurationRoundTrips() throws {
       let decoded = try VMConfiguration.decode(Self.encoded(Self.configuration()))
