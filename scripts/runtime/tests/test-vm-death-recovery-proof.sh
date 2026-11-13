@@ -6,8 +6,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-# The scripts take the cluster names from their environment; these are not real.
-export CODEWIRE_DEV_CLUSTER=example-dev CODEWIRE_PROD_CLUSTER=example-prod
+# kube-access names the environment of the cluster it rendered credentials
+# for. Unset here, so each case states the class it runs with.
+unset INFRA_KUBE_ENVIRONMENT
 PROOF="$ROOT/scripts/runtime/dev/prove-dev-vm-death-recovery.sh"
 
 die_test() { printf 'test-vm-death-recovery-proof: %s\n' "$*" >&2; exit 1; }
@@ -27,9 +28,13 @@ bash -n "$PROOF"
 refuses 'only against Dev' env CODEWIRE_SERVER_URL=https://codewire.sh CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF"
 refuses 'only against Dev' env KUBE_CONTEXT=codewire-prod CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF"
 # The Dev cluster's name counts only through kube-access, which renders its KUBECONFIG.
-refuses 'only against Dev' env -u KUBECONFIG -u INFRA_TRANSIENT_KUBE_AUTH KUBE_CONTEXT=example-dev CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF"
-refuses 'only against Dev' env KUBECONFIG=/nonexistent INFRA_TRANSIENT_KUBE_AUTH=1 KUBE_CONTEXT=codewire-prod CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF"
-refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' env KUBECONFIG=/nonexistent INFRA_TRANSIENT_KUBE_AUTH=1 KUBE_CONTEXT=example-dev "$PROOF"
+refuses 'only against Dev' env -u KUBECONFIG -u INFRA_TRANSIENT_KUBE_AUTH INFRA_KUBE_ENVIRONMENT=dev KUBE_CONTEXT=example-dev CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF"
+# kube-access's marks are not enough without the dev class.
+for class in '' production system other; do
+  refuses 'only against Dev' env KUBECONFIG=/nonexistent INFRA_TRANSIENT_KUBE_AUTH=1 INFRA_KUBE_ENVIRONMENT="$class" KUBE_CONTEXT=example CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF"
+done
+refuses 'only against Dev' env KUBECONFIG=/nonexistent INFRA_TRANSIENT_KUBE_AUTH=1 KUBE_CONTEXT=example CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF"
+refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' env KUBECONFIG=/nonexistent INFRA_TRANSIENT_KUBE_AUTH=1 INFRA_KUBE_ENVIRONMENT=dev KUBE_CONTEXT=example-dev "$PROOF"
 refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' "$PROOF"
 refuses 'unknown round' env CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF" --rounds established,nonsense
 refuses '--young-tries must be' env CODEWIRE_DEV_SMOKE_API_KEY=x "$PROOF" --young-tries 0

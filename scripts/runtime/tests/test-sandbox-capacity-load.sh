@@ -14,15 +14,16 @@ LOAD="$ROOT/scripts/runtime/dev/load-dev-sandbox-capacity.sh"
 
 fail() { printf 'sandbox capacity load tests: %s\n' "$*" >&2; exit 1; }
 
-# The load takes the cluster names from its environment; these are not real.
-export CODEWIRE_DEV_CLUSTER=example-dev CODEWIRE_PROD_CLUSTER=example-prod
+# With the local codewire-dev context the load takes the Prometheus cluster
+# label from this variable; the name is not real.
+export CODEWIRE_DEV_CLUSTER=example-dev
 
 refuses() {
   local expected="$1"
   shift
   local output
   if output="$(env -u CODEWIRE_DEV_SMOKE_API_KEY -u CODEWIRE_PROD_SMOKE_API_KEY -u KUBE_CONTEXT \
-    -u INFRA_TRANSIENT_KUBE_AUTH "$@" 2>&1)"; then
+    -u INFRA_TRANSIENT_KUBE_AUTH -u INFRA_KUBE_ENVIRONMENT "$@" 2>&1)"; then
     fail "accepted: $*"
   fi
   [[ "$output" == *"$expected"* ]] || fail "unexpected refusal for $*: $output"
@@ -52,37 +53,49 @@ refuses 'MAX_NODE_MEMORY_PCT must be 1-100' env CODEWIRE_DEV_SMOKE_API_KEY=x "$L
 refuses 'shell tracing is enabled' env CODEWIRE_DEV_SMOKE_API_KEY=x bash -x "$LOAD"
 refuses 'unknown argument' env CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD" --keep
 
-# Dev mode never takes the Prod key or kube-access's Prod context.
+# kube-access marks its run (a rendered KUBECONFIG and INFRA_TRANSIENT_KUBE_AUTH)
+# and names the environment of the cluster it rendered credentials for.
+dev_access=(KUBE_CONTEXT=example-dev KUBECONFIG=/nonexistent/kubeconfig INFRA_TRANSIENT_KUBE_AUTH=1 INFRA_KUBE_ENVIRONMENT=dev)
+prod_access=(KUBE_CONTEXT=example-prod KUBECONFIG=/nonexistent/kubeconfig INFRA_TRANSIENT_KUBE_AUTH=1 INFRA_KUBE_ENVIRONMENT=production)
+
+# Dev mode never takes the Prod key or a cluster kube-access calls Production.
 refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' env CODEWIRE_PROD_SMOKE_API_KEY=x "$LOAD"
-refuses 'only against the codewire-dev context' env KUBE_CONTEXT=example-prod CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
-# Dev's own cluster context counts only as kube-access exports it: past the
-# context check, the next refusal is the missing key. Prod's marked context
-# stays refused in Dev mode.
+refuses 'only against the codewire-dev context' env "${prod_access[@]}" CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
+# A cluster context counts only with kube-access's marks and the dev class:
+# past that check, the next refusal is the missing key.
+refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' env "${dev_access[@]}" "$LOAD"
 refuses 'only against the codewire-dev context' env KUBE_CONTEXT=example-dev CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
-refuses 'CODEWIRE_DEV_SMOKE_API_KEY is required' env KUBE_CONTEXT=example-dev KUBECONFIG=/nonexistent/kubeconfig \
-  INFRA_TRANSIENT_KUBE_AUTH=1 "$LOAD"
-refuses 'only against the codewire-dev context' env KUBE_CONTEXT=example-prod KUBECONFIG=/nonexistent/kubeconfig \
+refuses 'only against the codewire-dev context' env KUBE_CONTEXT=example-dev INFRA_KUBE_ENVIRONMENT=dev \
+  CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
+# A missing, empty or unknown class is refused, and so is the system cluster.
+for class in '' system other; do
+  refuses 'only against the codewire-dev context' env KUBE_CONTEXT=example-dev KUBECONFIG=/nonexistent/kubeconfig \
+    INFRA_TRANSIENT_KUBE_AUTH=1 INFRA_KUBE_ENVIRONMENT="$class" CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
+done
+refuses 'only against the codewire-dev context' env KUBE_CONTEXT=example-dev KUBECONFIG=/nonexistent/kubeconfig \
   INFRA_TRANSIENT_KUBE_AUTH=1 CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
-# A missing cluster name refuses the mode that needs it; an empty name never
-# matches an empty context. One name for both environments is refused.
-refuses 'CODEWIRE_DEV_CLUSTER is required' env -u CODEWIRE_DEV_CLUSTER CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
-refuses 'CODEWIRE_DEV_CLUSTER is required' env CODEWIRE_DEV_CLUSTER= KUBE_CONTEXT= KUBECONFIG=/nonexistent/kubeconfig \
-  INFRA_TRANSIENT_KUBE_AUTH=1 CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
-refuses 'CODEWIRE_PROD_CLUSTER is required' env -u CODEWIRE_PROD_CLUSTER KUBE_CONTEXT=example-prod KUBECONFIG=/nonexistent/kubeconfig \
-  INFRA_TRANSIENT_KUBE_AUTH=1 CODEWIRE_PROD_SMOKE_API_KEY=x "$LOAD" --confirm-production example-prod
-refuses 'name the same cluster' env CODEWIRE_DEV_CLUSTER=example-prod CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
-# Production mode needs the exact confirmation, server, kube-access context
-# and Prod smoke key, each checked before any network or build step.
-prod_access=(KUBE_CONTEXT=example-prod KUBECONFIG=/nonexistent/kubeconfig INFRA_TRANSIENT_KUBE_AUTH=1)
-refuses '--confirm-production must be example-prod' env "${prod_access[@]}" CODEWIRE_PROD_SMOKE_API_KEY=x \
-  "$LOAD" --confirm-production codewire-prod
+# The local codewire-dev context needs the cluster label for Prometheus.
+refuses 'PROM_CLUSTER or CODEWIRE_DEV_CLUSTER is required' env -u CODEWIRE_DEV_CLUSTER -u PROM_CLUSTER \
+  CODEWIRE_DEV_SMOKE_API_KEY=x "$LOAD"
+
+# Production mode needs kube-access to call the cluster Production, the typed
+# confirmation to be the context kube-access set, the Prod server and the Prod
+# smoke key, each checked before any network or build step.
+refuses '--confirm-production must name the cluster scripts/kube-access is using' env "${prod_access[@]}" \
+  CODEWIRE_PROD_SMOKE_API_KEY=x "$LOAD" --confirm-production codewire-prod
 refuses 'Production mode runs only against https://codewire.sh' env "${prod_access[@]}" CODEWIRE_PROD_SMOKE_API_KEY=x \
   CODEWIRE_SERVER_URL=https://codewire-dev.sh "$LOAD" --confirm-production example-prod
+# The marks alone are not enough: without the production class, or with
+# another one, the run is refused even when the confirmation matches.
 refuses 'Production mode runs only through scripts/kube-access' env KUBE_CONTEXT=example-prod \
   CODEWIRE_PROD_SMOKE_API_KEY=x "$LOAD" --confirm-production example-prod
-refuses 'Production mode runs only through scripts/kube-access' env KUBE_CONTEXT=codewire-dev \
+refuses 'Production mode runs only through scripts/kube-access' env KUBE_CONTEXT=example-prod \
   KUBECONFIG=/nonexistent/kubeconfig INFRA_TRANSIENT_KUBE_AUTH=1 CODEWIRE_PROD_SMOKE_API_KEY=x \
   "$LOAD" --confirm-production example-prod
+refuses 'Production mode runs only through scripts/kube-access' env "${dev_access[@]}" \
+  CODEWIRE_PROD_SMOKE_API_KEY=x "$LOAD" --confirm-production example-dev
+refuses 'Production mode runs only through scripts/kube-access' env INFRA_KUBE_ENVIRONMENT=production \
+  KUBE_CONTEXT=example-prod CODEWIRE_PROD_SMOKE_API_KEY=x "$LOAD" --confirm-production example-prod
 refuses 'CODEWIRE_PROD_SMOKE_API_KEY is required' env "${prod_access[@]}" CODEWIRE_DEV_SMOKE_API_KEY=x \
   "$LOAD" --confirm-production example-prod
 # With every Production guard met, option validation is next.

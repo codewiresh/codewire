@@ -33,10 +33,11 @@
 # clone at a pinned commit: a mirror of github.com/noeljackson/supplychain.
 # export CODEWIRE_FORGEJO_FIXTURE_REPOSITORY=example/supplychain
 
-# Hosted cluster bindings for the Dev and Production operator scripts. These
-# have no default: the source tree carries no live cluster value (#1383).
+# The Dev cluster's name, for the Dev scripts that take a default context or
+# a metrics label from it. It has no default: the source tree carries no live
+# cluster value (#1383). Which cluster is Dev or Production is not set here:
+# the operator scripts take that from Infra's kube-access.
 # export CODEWIRE_DEV_CLUSTER=example-dev-cluster
-# export CODEWIRE_PROD_CLUSTER=example-prod-cluster
 # The Dev cluster route and trust pin the hosted checkout fixture requires,
 # from Infra clusters/kubernetes-access.json.
 # export CODEWIRE_DEV_KUBE_SERVER=https://192.0.2.30:6443

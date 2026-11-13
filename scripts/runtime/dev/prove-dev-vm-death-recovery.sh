@@ -30,10 +30,10 @@
 # Environment: CODEWIRE_DEV_SMOKE_API_KEY (from with-dev-smoke-auth.sh), CW_BIN (default
 # cw), PROOF_CPU and PROOF_MEMORY (default one 4 GiB pool shape, which fills fastest).
 # KUBE_CONTEXT is the codewire-dev context, or what scripts/kube-access gives for
-# the Dev cluster, named by CODEWIRE_DEV_CLUSTER, which is how an agent session
-# runs this:
+# the Dev cluster (it exports INFRA_KUBE_ENVIRONMENT=dev), which is how an agent
+# session runs this:
 #
-#   scripts/kube-access --mode agent "$CODEWIRE_DEV_CLUSTER" -- \
+#   scripts/kube-access --mode agent <dev-cluster> -- \
 #     scripts/runtime/dev/with-dev-smoke-auth.sh -- \
 #     scripts/runtime/dev/prove-dev-vm-death-recovery.sh
 set -euo pipefail
@@ -42,8 +42,6 @@ umask 077
 CODEWIRE_SERVER_URL="${CODEWIRE_SERVER_URL:-https://codewire-dev.sh}"
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-codewire-dev}"
-# The cluster name is deployment configuration, never written in this tree.
-readonly DEV_CLUSTER="${CODEWIRE_DEV_CLUSTER:-}"
 CW_BIN="${CW_BIN:-cw}"
 PROOF_CPU="${PROOF_CPU:-1000m}"
 PROOF_MEMORY="${PROOF_MEMORY:-4096}"
@@ -269,8 +267,8 @@ parse_args() {
   [[ "$YOUNG_TRIES" =~ ^[1-9]$ ]] || die '--young-tries must be 1-9'
   [[ "$CODEWIRE_SERVER_URL" == https://codewire-dev.sh ]] || die 'this proof runs only against Dev'
   [[ "$KUBE_CONTEXT" == codewire-dev ||
-    (-n "$DEV_CLUSTER" && "$KUBE_CONTEXT" == "$DEV_CLUSTER" && -n "${KUBECONFIG:-}" && "${INFRA_TRANSIENT_KUBE_AUTH:-}" == 1) ]] ||
-    die "this proof runs only against Dev: the codewire-dev context, or through scripts/kube-access for the cluster CODEWIRE_DEV_CLUSTER names"
+    ("${INFRA_KUBE_ENVIRONMENT:-}" == dev && -n "${KUBECONFIG:-}" && "${INFRA_TRANSIENT_KUBE_AUTH:-}" == 1) ]] ||
+    die "this proof runs only against Dev: the codewire-dev context, or through scripts/kube-access for the Dev cluster"
   [[ -n "${CODEWIRE_DEV_SMOKE_API_KEY:-}" ]] || die 'CODEWIRE_DEV_SMOKE_API_KEY is required'
   case "$-" in *x*) die 'shell tracing is enabled; it would print the key' ;; esac
 }

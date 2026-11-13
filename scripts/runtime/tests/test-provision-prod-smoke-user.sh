@@ -16,8 +16,9 @@ readonly EMAIL="codewire-prod-smoke@codewire.sh"
 cleanup() { rm -rf -- "$TEST_TMP"; }
 trap cleanup EXIT
 fail() { printf 'prod smoke provisioning tests: %s\n' "$*" >&2; exit 1; }
-# The scripts take the cluster names from their environment; these are not real.
-export CODEWIRE_DEV_CLUSTER=example-dev CODEWIRE_PROD_CLUSTER=example-prod
+# kube-access names the environment of the cluster it rendered credentials
+# for. Unset here, so each case states the class it runs with.
+unset INFRA_KUBE_ENVIRONMENT
 
 assert_redacted() {
   local file="$1" marker
@@ -198,6 +199,7 @@ run_case() {
   PATH="$dir/bin" MOCK_MODE="$mode" MOCK_STATE="$dir/state" TMPDIR="$dir/tmp" \
     INFRA_KUBECONFIG_DIR="$dir/state/kube" \
     KUBECONFIG="$dir/state/kube/scoped.yaml" \
+    KUBE_CONTEXT=example-prod INFRA_KUBE_ENVIRONMENT=production INFRA_TRANSIENT_KUBE_AUTH=1 \
     BAO_ADDR='https://openbao.example.invalid' CW_BIN="$dir/bin/cw" \
     "$PROVISIONER" --confirm-production "$confirm" >"$dir/out" 2>"$dir/err"
   rc=$?
@@ -234,7 +236,7 @@ success_events="$pre"$'\ndb-stage\nbao-put\nbao-get\nprobe\nbao-get\ndb-finalize
 run_case success success "$success_events"
 run_case interrupted success "$success_events"
 run_case first_run success "$success_events"
-run_case unconfirmed failure '' 'Production provisioning requires --confirm-production example-prod'
+run_case unconfirmed failure '' 'Production provisioning requires --confirm-production to name the cluster kube-access is using'
 run_case wrong_cluster failure '' 'scoped kube-access does not target example-prod'
 run_case two_primaries failure 'primary-lookup' 'Production database does not have exactly one running primary'
 run_case missing_plan failure "$pre" 'the smoke plan is not an active admin-only sandbox plan'
@@ -296,12 +298,26 @@ grep -F 'WHERE organizations.created_by = EXCLUDED.created_by' "$sql" >/dev/null
 if grep -E -i 'CREATE EXTENSION|INSERT INTO billing_catalog_plans|confidential_sandbox' "$sql" >/dev/null; then
   fail 'Production provisioning writes an extension or billing catalog row'
 fi
-# Without the Production cluster's name nothing runs: an empty name never
-# matches an empty confirmation.
-for confirm in example-prod ''; do
-  if output="$(env -u CODEWIRE_PROD_CLUSTER "$PROVISIONER" --confirm-production "$confirm" 2>&1)"; then
-    fail 'provisioning ran without CODEWIRE_PROD_CLUSTER'
+# Without kube-access's production class nothing runs, whatever was typed:
+# the class missing, Dev's, the system cluster's or an unknown one.
+for class in unset dev system other; do
+  class_env=(INFRA_KUBE_ENVIRONMENT="$class")
+  [[ "$class" != unset ]] || class_env=(-u INFRA_KUBE_ENVIRONMENT)
+  if output="$(env "${class_env[@]}" KUBE_CONTEXT=example-prod INFRA_TRANSIENT_KUBE_AUTH=1 \
+    "$PROVISIONER" --confirm-production example-prod 2>&1)"; then
+    fail "provisioning ran with environment class $class"
   fi
-  [[ "$output" == *'CODEWIRE_PROD_CLUSTER is required'* ]] || fail "a missing Production cluster name is not named: $output"
+  [[ "$output" == *'runs only through Infra kube-access for the Production cluster'* ]] ||
+    fail "the refusal for environment class $class does not say why: $output"
 done
+# The class alone is not enough: kube-access's mark must be there, and an
+# empty confirmation never matches an empty context.
+if output="$(env INFRA_KUBE_ENVIRONMENT=production KUBE_CONTEXT=example-prod "$PROVISIONER" --confirm-production example-prod 2>&1)"; then
+  fail 'provisioning ran without the kube-access mark'
+fi
+[[ "$output" == *'runs only through Infra kube-access'* ]] || fail "the missing mark is not named: $output"
+if output="$(env -u KUBE_CONTEXT INFRA_KUBE_ENVIRONMENT=production INFRA_TRANSIENT_KUBE_AUTH=1 "$PROVISIONER" --confirm-production '' 2>&1)"; then
+  fail 'provisioning ran with an empty confirmation and no context'
+fi
+[[ "$output" == *'requires --confirm-production'* ]] || fail "the empty confirmation is not refused for its reason: $output"
 printf 'prod smoke OpenBao provisioning tests: OK\n'

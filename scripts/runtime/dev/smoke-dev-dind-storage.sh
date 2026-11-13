@@ -19,8 +19,7 @@ POD_UID=''
 PVC_UID=''
 POLICY_UID=''
 POLICY_NAME=''
-# The cluster name is deployment configuration, never written in this tree.
-readonly NAMESPACE=dev-sandboxes DEV_CLUSTER="${CODEWIRE_DEV_CLUSTER:-}"
+readonly NAMESPACE=dev-sandboxes
 
 log() { printf '[dind-storage-smoke] %s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -52,7 +51,7 @@ network rules or admission exceptions.
   -h, --help              Show help without credentials or Kubernetes access
 
 Run live only through the existing infrastructure kube-access wrapper for
-the Dev cluster, with CODEWIRE_DEV_CLUSTER set to its name. A baseline can record expected resource failures; admission,
+the Dev cluster, which exports INFRA_KUBE_ENVIRONMENT=dev. A baseline can record expected resource failures; admission,
 bootstrap and readiness errors always fail. Qualification requires actual
 containerd/overlayfs, resource enforcement and build/save/reload custody.
 HELP
@@ -200,11 +199,12 @@ if [[ "$RENDER_ONLY" == 1 ]]; then
   exit 0
 fi
 select_host_timeout
-[[ -n "$DEV_CLUSTER" ]] || die "CODEWIRE_DEV_CLUSTER is required: the Dev cluster's name"
-[[ "${KUBE_CONTEXT:-}" == "$DEV_CLUSTER" && "${INFRA_TRANSIENT_KUBE_AUTH:-}" == 1 && -n "${KUBECONFIG:-}" ]] || \
+# kube-access names the environment of the cluster it rendered credentials
+# for; this tree holds no cluster name.
+[[ "${INFRA_KUBE_ENVIRONMENT:-}" == dev && -n "${KUBE_CONTEXT:-}" && "${INFRA_TRANSIENT_KUBE_AUTH:-}" == 1 && -n "${KUBECONFIG:-}" ]] || \
   die 'run through infrastructure scripts/kube-access for the Dev cluster; ambient kubeconfig is refused'
 command -v kubectl >/dev/null || die 'missing command: kubectl'
-k() { kubectl --context "$DEV_CLUSTER" -n "$NAMESPACE" "$@"; }
+k() { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
 
 collect_status() {
   k get pod "$NAME" -o json | jq '{name:.metadata.name,uid:.metadata.uid,node:.spec.nodeName,
@@ -279,7 +279,7 @@ cgroup_state() {
 client_for() {
   local budget="$1"
   shift
-  "$TIMEOUT_BIN" "$((budget + 5))" kubectl --context "$DEV_CLUSTER" -n "$NAMESPACE" exec "$NAME" -c client -- timeout "$budget" "$@"
+  "$TIMEOUT_BIN" "$((budget + 5))" kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" exec "$NAME" -c client -- timeout "$budget" "$@"
 }
 client() { client_for 90 "$@"; }
 deadline=$((SECONDS + WAIT_SECONDS))

@@ -2,8 +2,8 @@
 # Create or rotate the Production smoke identity: one synthetic user, its own
 # organization and one API key, published to canonical OpenBao. The Production
 # counterpart of scripts/runtime/dev/provision-dev-smoke-user.sh. Run only
-# through Infra's scoped kube-access wrapper for the Production cluster, which
-# CODEWIRE_PROD_CLUSTER names, and a current
+# through Infra's scoped kube-access wrapper for the Production cluster (it
+# exports INFRA_KUBE_ENVIRONMENT=production) and a current
 # human OpenBao OIDC session, with the owner's approval for this credential.
 set -euo pipefail
 
@@ -12,8 +12,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 readonly OPENBAO_PATH="apps/codewire/prod/ci-smoke"
 readonly CODEWIRE_SERVER_URL="https://codewire.sh"
-# The cluster name is deployment configuration, never written in this tree.
-readonly KUBE_CLUSTER="${CODEWIRE_PROD_CLUSTER:-}"
 readonly KUBE_NAMESPACE="prod"
 readonly POSTGRES_CLUSTER="codewire-db"
 readonly POSTGRES_CONTAINER="postgres"
@@ -37,7 +35,7 @@ DOCUMENT_STATE=""
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/runtime/prod/provision-prod-smoke-user.sh --confirm-production "$CODEWIRE_PROD_CLUSTER" [options]
+  scripts/runtime/prod/provision-prod-smoke-user.sh --confirm-production <production-cluster> [options]
 
 Creates or repairs the dedicated Production smoke user and organization,
 creates one API key, check-and-set publishes it to the canonical OpenBao
@@ -49,7 +47,7 @@ The organization uses the existing admin-only sandbox plan and is billing
 exempt. The script writes no billing catalog row, extension or schema object.
 
 Options:
-  --confirm-production NAME Required; must be the cluster CODEWIRE_PROD_CLUSTER names
+  --confirm-production NAME Required; must be the cluster kube-access is using
   --email EMAIL             Smoke user email
   --name NAME               Smoke user display name
   --org-name NAME           Smoke organization name
@@ -110,9 +108,13 @@ while (($# > 0)); do
 done
 
 case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
-[[ -n "$KUBE_CLUSTER" ]] || die "CODEWIRE_PROD_CLUSTER is required: the Production cluster's name"
-[[ "$CONFIRMED_CLUSTER" == "$KUBE_CLUSTER" ]] ||
-  die "Production provisioning requires --confirm-production $KUBE_CLUSTER"
+# Three things agree: kube-access says this cluster is Production, it set the
+# context, and the operator typed that context's name. This tree holds no
+# cluster name.
+[[ "${INFRA_KUBE_ENVIRONMENT:-}" == production && "${INFRA_TRANSIENT_KUBE_AUTH:-}" == 1 ]] ||
+  die 'Production provisioning runs only through Infra kube-access for the Production cluster'
+[[ -n "${KUBE_CONTEXT:-}" && "$CONFIRMED_CLUSTER" == "$KUBE_CONTEXT" ]] ||
+  die 'Production provisioning requires --confirm-production to name the cluster kube-access is using'
 [[ "$SMOKE_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] ||
   die 'smoke email has an invalid shape'
 [[ "$SMOKE_ORG_SLUG" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] ||
@@ -129,8 +131,8 @@ done
   die 'run through the scoped Infra kube-access wrapper'
 [[ "$KUBECONFIG" == "$INFRA_KUBECONFIG_DIR"/* ]] ||
   die 'KUBECONFIG is outside the scoped Infra kube-access directory'
-[[ "$(kubectl config current-context 2>/dev/null)" == "$KUBE_CLUSTER" ]] ||
-  die "scoped kube-access does not target $KUBE_CLUSTER"
+[[ "$(kubectl config current-context 2>/dev/null)" == "$KUBE_CONTEXT" ]] ||
+  die "scoped kube-access does not target $KUBE_CONTEXT"
 [[ "${BAO_ADDR:-$OPENBAO_ADDR}" == "$OPENBAO_ADDR" ]] ||
   die 'BAO_ADDR must be the canonical OpenBao Tailnet endpoint'
 export BAO_ADDR="$OPENBAO_ADDR"
