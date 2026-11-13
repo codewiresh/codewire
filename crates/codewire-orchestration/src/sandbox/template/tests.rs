@@ -1957,15 +1957,24 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        tokio::time::timeout(std::time::Duration::from_secs(3), supervisor.wait())
+        tokio::time::timeout(SUPERVISOR_HANG, supervisor.wait())
             .await
             .expect("custom supervisor shutdown")
             .unwrap();
     }
 
+    /// How long the custom supervisor's shell steps may take before the test
+    /// calls them hung: a hang guard, not a speed expectation
+    /// (`docs/dev/AGENT-WORKFLOW.md` "Failure convergence"). A restart alone
+    /// takes up to two seconds by design (one poll and one backoff), and a
+    /// loaded guest spent the former 4 s before the daemon ran again.
+    #[cfg(unix)]
+    const SUPERVISOR_HANG: std::time::Duration = std::time::Duration::from_secs(60);
+
     #[cfg(unix)]
     async fn wait_for_file_value(path: &std::path::Path, expected: &str) {
-        for _ in 0..80 {
+        let deadline = tokio::time::Instant::now() + SUPERVISOR_HANG;
+        while tokio::time::Instant::now() < deadline {
             if std::fs::read_to_string(path)
                 .ok()
                 .is_some_and(|value| value.trim() == expected)
