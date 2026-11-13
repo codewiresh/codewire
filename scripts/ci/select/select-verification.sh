@@ -1954,6 +1954,8 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/runtime/dev/provision-dev-smoke-user.sh|\
+      scripts/runtime/dev/provision-dev-invitee-user.sh|\
+      scripts/runtime/dev/invitations-journey.sh|\
       scripts/runtime/dev/make-dev-acceptance-unlimited.sh|\
       scripts/runtime/dev/smoke-dev-commodity.sh|\
       scripts/runtime/dev/smoke-dev-dind-storage.sh|\
@@ -1984,6 +1986,7 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/prod/provision-prod-smoke-user.sh|\
       scripts/runtime/prod/with-prod-smoke-auth.sh|\
       scripts/runtime/tests/test-provision-dev-smoke-user.sh|\
+      scripts/runtime/tests/test-provision-dev-invitee-user.sh|\
       scripts/runtime/tests/test-make-dev-acceptance-unlimited.sh|\
       scripts/runtime/tests/test-provision-prod-smoke-user.sh|\
       scripts/runtime/tests/test-with-prod-smoke-auth.sh|\
@@ -2030,6 +2033,8 @@ if [ "$event_selected" = false ]; then
         select_token dev_smoke_script_tests
         case "$path" in
           scripts/runtime/dev/provision-dev-smoke-user.sh|\
+          scripts/runtime/dev/provision-dev-invitee-user.sh|\
+          scripts/runtime/tests/test-provision-dev-invitee-user.sh|\
           scripts/runtime/dev/with-dev-smoke-auth.sh|\
           scripts/runtime/prod/provision-prod-smoke-user.sh|\
           scripts/runtime/prod/with-prod-smoke-auth.sh|\

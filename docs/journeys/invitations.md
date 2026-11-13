@@ -10,30 +10,41 @@ feature on Production. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-13. Nothing here is observed on Dev or Production yet.
+Updated 2026-11-13. Invite, email, accept and remove are observed on Dev
+(source 6c3651dcf); the limits wait for Dev to run #4498. Nothing is observed
+on Production.
 
 | ID | Dev | Production |
 | --- | --- | --- |
-| `invite-send` | not yet observed | not yet observed |
-| `invite-email` | not yet observed | not yet observed |
-| `invite-accept` | not yet observed | not yet observed |
-| `invite-remove` | not yet observed | not yet observed |
+| `invite-send` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
+| `invite-email` | observed 2026-11-13 on 6c3651dcf (#3847) | not yet observed |
+| `invite-accept` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
+| `invite-remove` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
 | `invite-limits` | not yet observed | not yet observed |
 | `invite-unverified` | not yet observed | not yet observed |
 
 ## Before the walk
 
-- Two accounts: the inviter, an owner or admin of an organization, and the
-  invitee. On Dev, `scripts/runtime/dev/with-dev-smoke-auth.sh -- COMMAND`
-  runs one command as the synthetic smoke identity, and `--openbao-path
-  apps/codewire/dev/ci-billing-rehearsal` as a second synthetic identity.
-  Use one as the inviter and the other as the invitee.
-- Each synthetic identity signs in with an API key bound to one
-  organization (`docs/dev/AUTH-POLICY.md`). Such a key lists only that
-  organization, so the invitee's `cw org list` never shows the organization
-  it joined. Read membership from the inviter's `cw org members`.
-- The synthetic addresses have no mailbox anyone reads. The email's arrival
-  needs one invitee address a person reads; see `invite-email`.
+- On Dev, two synthetic identities walk `invite-send`, `invite-accept` and
+  `invite-remove` with no person:
+  - **The inviter** is the smoke identity, owner of `codewire-dev-smoke`
+    (`scripts/runtime/dev/with-dev-smoke-auth.sh`).
+  - **The invitee** is a password account with no organization
+    (`scripts/runtime/dev/provision-dev-invitee-user.sh`, document
+    `apps/codewire/dev/ci-invitee`).
+  - `CW_BIN=… scripts/runtime/dev/invitations-journey.sh` runs those three
+    steps. It prints each command with what it showed, and revokes every
+    invitation it made.
+- An API key is bound to one organization (`docs/dev/AUTH-POLICY.md`) and
+  cannot list or accept invitations: `cw org invitations` with one answers
+  "organization-scoped API key cannot perform account-global operations".
+  So the invitee signs in through `cw login`'s device sign-in. The script
+  approves the device code itself, with a password session that skips
+  second-factor setup.
+- The invitee's address is a mail provider simulator address, so the
+  invitation email is accepted without reaching anyone and nothing bounces.
+  The email's arrival still needs an address a person reads; see
+  `invite-email`.
 - Record `cw version` with every observation. An observation on Dev counts
   only for the source Dev had rolled out.
 
@@ -65,7 +76,10 @@ Updated 2026-11-13. Nothing here is observed on Dev or Production yet.
   uses it. `cw` cannot revoke yet (no command yet; #4508), so a walk
   without a dashboard session calls `OrganizationService.RevokeInvitation`
   with the same credential.
-- **Observed:** not yet observed.
+- **Observed:** Dev, 2026-11-13, source 6c3651dcf, `cw` built from 27707e6c2:
+  the invitation, "Invitation email sent", and the duplicate refused, by
+  `invitations-journey.sh` (#3840); the existing member refused, by hand
+  (#3847).
 
 ## `invite-email`: the invitee receives the email
 
@@ -93,7 +107,9 @@ Updated 2026-11-13. Nothing here is observed on Dev or Production yet.
   - A synthetic address proves the outcome line, never arrival. An address
     whose domain takes no mail bounces; use the mail provider's simulator
     addresses instead.
-- **Observed:** not yet observed. On Dev on 2026-11-01, before #3847, `cw org
+- **Observed:** Dev, 2026-11-13, source 6c3651dcf: an invitation to the
+  owner's address arrived in that mailbox. The owner confirmed it, relayed by
+  the orchestrator (#3847). On Dev on 2026-11-01, before #3847, `cw org
   invite` created an invitation and sent no email.
 
 ## `invite-accept`: the invitee accepts
@@ -124,12 +140,20 @@ Updated 2026-11-13. Nothing here is observed on Dev or Production yet.
 - **Gotchas:**
   - `cw org invitations` lists invitations only for a verified address, so
     an unverified invitee sees none.
+  - `cw login` exits 1 after a successful sign-in when the account has no
+    organization yet, which an invitee always is: "logged in, but no
+    organizations found". The sign-in is saved; read it from the "Logged in
+    as" line.
   - An organization invitation is not a sign-up invite code. On hosted, a
     new account waits for an admin to enable it unless its sign-up gave a
     sign-up invite code; the organization invitation does not enable it. A
     walk with an invitee who has no account records which of the two it
     used. Verification is needed either way (owner, 2026-11-13, on #4481).
-- **Observed:** not yet observed. The dashboard's invitation page is covered
+- **Observed:** Dev, 2026-11-13, source 6c3651dcf, `cw` built from 27707e6c2:
+  `cw login`, then `cw org invitations` listing the organization, then `cw org
+  accept` joining as member, by `invitations-journey.sh` (#3840). The
+  unverified and different-email states are not yet observed on Dev. The
+  dashboard's invitation page is covered
   on Kind by `apps/dashboard/e2e/ssr-dashboard.governance.ssr.ts`.
 
 ## `invite-remove`: an owner or admin removes the member
@@ -149,12 +173,17 @@ Updated 2026-11-13. Nothing here is observed on Dev or Production yet.
   The first asks "Remove INVITEE_EMAIL (member) from NAME?" and prints
   "Removed INVITEE_EMAIL from NAME.".
 - **Proof:** `cw org members` no longer lists the invitee, and the
-  invitee's own call that names the organization is refused.
+  invitee's own `cw org list`, signed in through `cw login`, no longer
+  shows the organization.
 - **Gotchas:** an API key bound to another organization is refused for this
   organization before and after removal, so it proves nothing about losing
-  access. The invitee's refusal needs a credential that is not bound to one
-  organization, such as a `cw login` session.
-- **Observed:** not yet observed.
+  access. The invitee's side needs a `cw login` session, which is what
+  `invitations-journey.sh` uses.
+- **Observed:** Dev, 2026-11-13, source 6c3651dcf: `cw org member rm --yes`
+  removed the invitee, `cw org members` no longer listed it, and the invitee's
+  `cw org list` showed "No organizations found.", by
+  `invitations-journey.sh` (#3840). The prompt and member-refused states are
+  not yet observed on Dev.
 
 ## `invite-limits`: invitations stop at a limit and say when to try again
 
