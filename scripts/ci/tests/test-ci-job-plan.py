@@ -2,12 +2,12 @@
 """Fixture tests for scripts/ci/local/ci-job-plan.py, run-family.sh's planner.
 
 The fixtures are shaped like the real sources (ci.yaml's Policy job,
-`fj actions variables list` output, infra's vm-main.yaml, ephemeral-ci.yaml
+`fj actions variables list` output, infra's warm-vms.yaml and a warm VM's manifest, ephemeral-ci.yaml
 and dispatcher.py) with their own values, so each case asserts where a value
 came from, not a copy of today's numbers. Cases:
 - expressions: operators, functions, contexts and `if` with status functions;
 - variables: `fj` output, values spanning lines;
-- runners: main reaches vm-main.yaml (share 16, no memory limit), pr reaches
+- runners: main reaches the warm VM (share 16, no memory limit), pr reaches
   the dispatcher's medium ConfigMap (share 8, 7168Mi), the image resolves to
   its registry digest, host binds become empty volumes;
 - the job: workflow, job and step env, the selection job's outputs, step
@@ -181,13 +181,8 @@ def dispatcher(drop: str = "", shapes: str = "") -> str:
             {{"slot": 3, "class": "build", "profile": "build"}},
         )
 
-        def with_trust_size_names(labels):
-            return labels + tuple("untrusted-" + label.split("-")[-1] for label in labels if label.startswith("sized-"))
-
-        def metal_runner_labels(entry, main_only=False):
-            if main_only:
-                raise ValueError("no main boot")
-            return ("build-label",) if entry["profile"] == "build" else ("sized-medium",)
+        def metal_declared_labels(entry):
+            return ("build-label",) if entry["profile"] == "build" else ("untrusted-medium",)
 
         def metal_runner_config(entry):
             return "plain-runner-config" if entry["profile"] == "build" else "medium-runner-config"
@@ -208,7 +203,9 @@ def write_fixture(root: Path, *, dispatcher_source: str | None = None, medium_sh
     (root / "infra/forgejo-runners").mkdir(parents=True, exist_ok=True)
     (root / "ci.yaml").write_text(WORKFLOW)
     (root / "variables").write_text(VARIABLES)
-    (root / "infra/forgejo-runners/vm-main.yaml").write_text(VM_MAIN)
+    (root / "infra/forgejo-runners/warm-vms.yaml").write_text(
+        "vms:\n  fixture-main-vm-0:\n    file: fixture-main-vm.yaml\n")
+    (root / "infra/forgejo-runners/fixture-main-vm.yaml").write_text(VM_MAIN)
     (root / "infra/forgejo-runners/ephemeral-ci.yaml").write_text(ephemeral(medium_share))
     (root / "infra/forgejo-runners/dispatcher.py").write_text(dispatcher_source or dispatcher())
     (root / "dispatch").write_text("policy_expected=true\nstandard_expected=false\n")

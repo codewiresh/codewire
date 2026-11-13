@@ -9,7 +9,7 @@ environment: every value comes from one of these, read at run time.
 - The Actions variables, as `fj actions variables list` prints them (variables
   only; secrets are never read, and every `secrets.*` is empty here).
 - The runner a placement's `runs-on` label reaches, from infra:
-  - a label a runner in forgejo-runners/vm-main.yaml declares (main's warm VM)
+  - a label a runner in a warm VM's manifest declares (warm-vms.yaml lists them)
     takes that runner's `envs`, container options and image;
   - any other label is a metal guest: dispatcher.py's own slot table, label
     and runner-config functions name its ConfigMap in ephemeral-ci.yaml (its
@@ -269,8 +269,8 @@ def read_variables(path: Path) -> dict[str, str]:
 # a job on a guessed runner.
 DISPATCHER_CONTRACT = (
     "JOB_IMAGE", "METAL_JOB_IMAGE_TAG", "METAL_SLOTS", "METAL_GUEST_SHAPES",
-    "METAL_CPU_SHARE", "METAL_CPU_SHARE_ENV", "with_trust_size_names",
-    "metal_runner_labels", "metal_runner_config", "metal_worker_resources",
+    "METAL_CPU_SHARE", "METAL_CPU_SHARE_ENV",
+    "metal_declared_labels", "metal_runner_config", "metal_worker_resources",
     "metal_job_data_mib",
 )
 
@@ -300,63 +300,70 @@ def yaml_documents(path: Path) -> list[dict[str, Any]]:
     return [doc for doc in yaml.safe_load_all(path.read_text()) if isinstance(doc, dict)]
 
 
-def docker_ref(image: str, dispatcher: Any, vm_main_text: str) -> str:
+def docker_ref(image: str, dispatcher: Any, warm_text: str) -> str:
     """A runner label's image as a pullable registry reference by digest.
 
     Metal guests and main's VM preload the job image under a local tag,
     dispatcher.py's METAL_JOB_IMAGE_TAG; its registry reference is the one
-    with the same digest (dispatcher.py JOB_IMAGE, vm-main.yaml's preload).
+    with the same digest (dispatcher.py JOB_IMAGE, a warm VM's preload).
     """
     if "@sha256:" in image:
         return image
     digest = image.rsplit(":", 1)[-1]
     candidates = {dispatcher.JOB_IMAGE}
-    candidates.update(re.findall(r"[a-z0-9.\-/]+/act-node-docker@sha256:[0-9a-f]{64}", vm_main_text))
+    candidates.update(re.findall(r"[a-z0-9.\-/]+/act-node-docker@sha256:[0-9a-f]{64}", warm_text))
     for candidate in sorted(candidates):
         if candidate.endswith("@sha256:" + digest):
             return candidate
     fail(f"no registry reference for the runner image {image}")
 
 
+def warm_vm_files(infra: Path) -> list[Path]:
+    """Every warm VM's manifest, by the name infra's warm-vms.yaml gives it."""
+    listing = yaml.safe_load((infra / "forgejo-runners/warm-vms.yaml").read_text()) or {}
+    names = sorted({vm["file"] for vm in (listing.get("vms") or {}).values()})
+    if not names:
+        fail("infra's warm-vms.yaml lists no warm VM")
+    return [infra / "forgejo-runners" / name for name in names]
+
+
 def runner_for_label(label: str, infra: Path) -> dict[str, Any]:
     dispatcher = load_dispatcher(infra)
-    vm_main = infra / "forgejo-runners/vm-main.yaml"
-    vm_main_text = vm_main.read_text()
-    # Main's warm VM: a runner config in vm-main.yaml that declares the label.
-    for doc in yaml_documents(vm_main):
-        if doc.get("kind") != "ConfigMap":
-            continue
-        for key, text in (doc.get("data") or {}).items():
-            if not key.endswith(".yaml"):
+    warm_vms = warm_vm_files(infra)
+    warm_text = "".join(path.read_text() for path in warm_vms)
+    # A warm VM: a runner config in its manifest that declares the label.
+    for path in warm_vms:
+        for doc in yaml_documents(path):
+            if doc.get("kind") != "ConfigMap":
                 continue
-            config = yaml.safe_load(text)
-            for connection in ((config.get("server") or {}).get("connections") or {}).values():
-                for declared in connection.get("labels") or []:
-                    name, _, image = declared.partition(":")
-                    if name == label:
-                        return {
-                            "label": label,
-                            "source": f"forgejo-runners/vm-main.yaml {doc['metadata']['name']} {key}",
-                            "image": docker_ref(image.removeprefix("docker://"), dispatcher, vm_main_text),
-                            "envs": {k: to_str(v) for k, v in ((config.get("runner") or {}).get("envs") or {}).items()},
-                            "options": (config.get("container") or {}).get("options") or "",
-                            "memory": "",
-                        }
+            for key, text in (doc.get("data") or {}).items():
+                if not key.endswith(".yaml"):
+                    continue
+                config = yaml.safe_load(text)
+                for connection in ((config.get("server") or {}).get("connections") or {}).values():
+                    for declared in connection.get("labels") or []:
+                        name, _, image = declared.partition(":")
+                        if name == label:
+                            return {
+                                "label": label,
+                                "source": f"forgejo-runners/{path.name} {doc['metadata']['name']} {key}",
+                                "image": docker_ref(image.removeprefix("docker://"), dispatcher, warm_text),
+                                "envs": {k: to_str(v) for k, v in ((config.get("runner") or {}).get("envs") or {}).items()},
+                                "options": (config.get("container") or {}).get("options") or "",
+                                "memory": "",
+                            }
     # A metal guest: the dispatcher's slots that declare the label.
     configs = set()
     memory = set()
     try:
         for entry in dispatcher.METAL_SLOTS:
-            for main_only in (False, True):
-                try:
-                    labels = dispatcher.with_trust_size_names(dispatcher.metal_runner_labels(entry, main_only))
-                except ValueError:
-                    continue  # the dispatcher's own "no such boot" answer
-                if label in labels:
-                    configs.add(dispatcher.metal_runner_config(entry))
-                    if entry.get("class") in dispatcher.METAL_GUEST_SHAPES:
-                        resources = dispatcher.metal_worker_resources(entry["class"], dispatcher.metal_job_data_mib(entry))
-                        memory.add(resources["dind"]["limits"]["memory"])
+            # A slot declares its own class's labels only, by their page
+            # names (infra#2151 steps 5 and 8; dispatcher.py METAL_PAGE_LABELS).
+            if label in dispatcher.metal_declared_labels(entry):
+                configs.add(dispatcher.metal_runner_config(entry))
+                if entry.get("class") in dispatcher.METAL_GUEST_SHAPES:
+                    resources = dispatcher.metal_worker_resources(entry["class"], dispatcher.metal_job_data_mib(entry))
+                    memory.add(resources["dind"]["limits"]["memory"])
     except (AttributeError, KeyError, TypeError, IndexError) as error:
         dispatcher_layout_changed(f"{type(error).__name__}: {error}")
     if not configs:
@@ -377,7 +384,7 @@ def runner_for_label(label: str, infra: Path) -> dict[str, Any]:
             return {
                 "label": label,
                 "source": f"forgejo-runners/dispatcher.py METAL_SLOTS -> ephemeral-ci.yaml {config_name}",
-                "image": docker_ref(dispatcher.METAL_JOB_IMAGE_TAG, dispatcher, vm_main_text),
+                "image": docker_ref(dispatcher.METAL_JOB_IMAGE_TAG, dispatcher, warm_text),
                 "envs": envs,
                 "options": (config.get("container") or {}).get("options") or "",
                 "memory": memory.pop() if memory else "",

@@ -42,7 +42,7 @@ set -euo pipefail
 TOOL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(git -C "$TOOL_DIR" rev-parse --show-toplevel)"
 readonly TOOL_DIR REPO
-readonly RUNNER_FILES=(dispatcher.py ephemeral-ci.yaml vm-main.yaml)
+readonly RUNNER_FILES=(dispatcher.py metal-inventory.json ephemeral-ci.yaml warm-vms.yaml)
 readonly NOFILE=1048576 # Forgejo Runner's job containers; Docker's default 1024 fails Policy.
 
 usage() {
@@ -119,6 +119,17 @@ mapfile -t runner_dirs < <(git -C "$infra" ls-tree -d --name-only "$infra_commit
   exit 2
 }
 for file in "${RUNNER_FILES[@]}"; do
+  git -C "$infra" show "$infra_commit:${runner_dirs[0]}/$file" >"$work/infra/forgejo-runners/$file"
+done
+# Every warm VM's manifest, by the name warm-vms.yaml gives it: the machines are
+# named by page (infra#2151), so this tree names none of them.
+mapfile -t warm_files < <(python3 -I -c 'import sys, yaml
+listing = yaml.safe_load(open(sys.argv[1])) or {}
+print("\n".join(sorted({vm["file"] for vm in (listing.get("vms") or {}).values()})))' \
+  "$work/infra/forgejo-runners/warm-vms.yaml")
+[ "${#warm_files[@]}" -gt 0 ] || die "infra's warm-vms.yaml lists no warm VM"
+for file in "${warm_files[@]}"; do
+  [[ "$file" =~ ^[a-z0-9-]+\.yaml$ ]] || die "unexpected warm VM file name: $file"
   git -C "$infra" show "$infra_commit:${runner_dirs[0]}/$file" >"$work/infra/forgejo-runners/$file"
 done
 # Variables only. `fj actions variables list` cannot print a secret.
