@@ -13,10 +13,12 @@
 # overlay of the pinned Debian 12 cloud image in it. cloud-init installs
 # Docker Engine and the Compose plugin from Docker's repository, after
 # checking its signing key, and tcpdump, which lets a journey see every DNS
-# query the guest sends. create returns once cloud-init has finished, and
-# prints the forwarded ports. The overlay grows to at most 40 GiB, so keep
-# STATE_DIR out of /tmp. The verified base image is cached in
-# CODEWIRE_SELFHOST_VM_CACHE (default ~/.cache/codewire-selfhost-vm).
+# query the guest sends. The guest keeps QEMU's clock, so its NTP client is
+# masked, and it sends no NTP, LLMNR or mDNS traffic. create returns once
+# cloud-init has finished, and prints the forwarded ports. The overlay grows
+# to at most 40 GiB, so keep STATE_DIR out of /tmp. The verified base image is
+# cached in CODEWIRE_SELFHOST_VM_CACHE (default
+# ~/.cache/codewire-selfhost-vm).
 #
 # ssh runs COMMAND, or a login shell, as the guest's `debian` user, who has
 # passwordless sudo and is in the docker group.
@@ -103,11 +105,17 @@ base_image() {
 }
 
 # cloud-init's user-data for the guest: the debian user with this VM's key,
-# Docker from Docker's repository after checking its key, and tcpdump.
+# Docker from Docker's repository after checking its key, and tcpdump. The
+# guest keeps QEMU's clock, so its NTP client is masked, and systemd-resolved
+# sends no LLMNR or mDNS: every such request would leave the workstation as
+# QEMU's own traffic, and an application firewall would ask about each one.
 user_data() {
   cat <<EOF
 #cloud-config
 hostname: selfhost
+bootcmd:
+  - [systemctl, mask, --now, systemd-timesyncd.service, chrony.service]
+  - [sh, -c, 'mkdir -p /etc/systemd/resolved.conf.d && printf "[Resolve]\nLLMNR=no\nMulticastDNS=no\n" >/etc/systemd/resolved.conf.d/90-no-multicast.conf && systemctl try-restart systemd-resolved.service']
 users:
   - name: debian
     shell: /bin/bash
