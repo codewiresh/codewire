@@ -118,6 +118,24 @@ for name in ("build-service-images", "build-daemon-image", "publish-runtime-imag
     assert "needs.dev-delivery-turn.outputs.turn == 'go'" in job["if"], (name, job["if"])
 steps = jobs["deploy-selection"]["steps"]
 assert not any("cancel" in str(step.get("run", "")) for step in steps), "selection still cancels runs"
+# A run that waited too long defers (#4476): its marker job runs only then, and
+# the delivery that had the turn hands it on however it ended, on the light
+# runner with the job token alone.
+light = "${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}"
+deferred = jobs["dev-delivery-deferred"]
+assert deferred["name"] == "Deferred to the delivery in flight", deferred["name"]
+assert "needs.dev-delivery-turn.outputs.turn == 'deferred'" in deferred["if"], deferred["if"]
+assert all("run" in step and "uses" not in step for step in deferred["steps"]), "the deferred marker runs more than a line"
+hand_on = jobs["dev-delivery-hand-on"]
+assert set(hand_on["needs"]) == {"deploy-selection", "dev-delivery-turn", "build-service-images",
+                                 "build-daemon-image", "publish-runtime-images"}, hand_on["needs"]
+assert hand_on["if"].startswith("${{ always() && ") and "needs.dev-delivery-turn.outputs.turn == 'go'" in hand_on["if"]
+for job in (deferred, hand_on):
+    assert job["runs-on"] == light and not job.get("enable-openid-connect"), job["name"]
+hand_on_runs = [step for step in hand_on["steps"] if "run" in step]
+assert [step["run"] for step in hand_on_runs] == [
+    "python3 -I -B scripts/ci/deploy/wait-for-dev-delivery-turn.py --hand-on"], hand_on_runs
+assert set(hand_on_runs[0]["env"]) == {"GITEA_TOKEN"}, hand_on_runs[0]["env"]
 PY
 # The only run cancellations anywhere are the pull request fail-fast
 # watcher's, which cancels only after another job has failed: no job cancels
@@ -269,13 +287,14 @@ while IFS= read -r -d '' other_workflow; do
     fail "${other_workflow#"$ROOT/"} signs a runtime set; only Deploy Dev's publish job may"
   fi
 done < <(find "$ROOT/.gitea/workflows" -type f -name '*.yaml' -print0)
-# Main-CI rerun calls: this job, from CI's final push-on-main job, and a main
-# push run's fail-fast watcher, which reruns a test job's first failure once
-# (fail-fast-watch.py; owner, 2026-10-25).
-rerun_users="$(grep -rlE '/actions/jobs/[^ ]*/rerun|actions/jobs/\{job_id\}/rerun' \
+# Main-CI rerun calls: this job, from CI's final push-on-main job; the Dev
+# delivery handover, which reruns the turn job of the newest delivery that
+# deferred (#4476); and a main push run's fail-fast watcher, which reruns a
+# test job's first failure once (fail-fast-watch.py; owner, 2026-10-25).
+rerun_users="$(grep -rlE '/actions/jobs/[^ ]*/rerun|actions/jobs/\{job_id\}/rerun|actions/jobs/\{job\[.id.\]\}/rerun' \
   "$ROOT/.gitea/workflows" "$ROOT/scripts" | grep -v '/tests/' | sed "s|^$ROOT/||" | sort)"
-[[ "$rerun_users" == $'scripts/ci/deploy/rerun-dev-publish.py\nscripts/ci/select/fail-fast-watch.py' ]] ||
-  fail "a job rerun is requested outside rerun-dev-publish.py and fail-fast-watch.py: $rerun_users"
+[[ "$rerun_users" == $'scripts/ci/deploy/rerun-dev-publish.py\nscripts/ci/deploy/wait-for-dev-delivery-turn.py\nscripts/ci/select/fail-fast-watch.py' ]] ||
+  fail "a job rerun is requested outside rerun-dev-publish.py, the Dev delivery handover and fail-fast-watch.py: $rerun_users"
 
 # Execute the shared descent check in a scratch copy beside a stub resolver,
 # on a real history A-B-C (#2892). Old rule: only main's head delivered, so

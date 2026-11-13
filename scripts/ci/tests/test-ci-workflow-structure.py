@@ -80,6 +80,12 @@ LIGHT = {runners.UNTRUSTED_LIGHT, runners.TRUSTED_LIGHT}
 KNOWN_RUNNERS = METAL | BUILD | CLOUD | LIGHT
 BOUND_CARGO = "scripts/ci/setup/bound-cargo-jobs.sh"
 MAX_TIMEOUT = 90
+# Each light runner's own job cap (infra docs/ci/runners.md), which wins over a
+# job's timeout-minutes: a job that waits longer is cancelled (#4476).
+RUNNER_CAP = {runners.UNTRUSTED_LIGHT: 25, runners.TRUSTED_LIGHT: 330}
+# A dispatched release waits its turn on the unprivileged runner (#2892), up to
+# 190 minutes; which rule gives way is the owner's call (#4476).
+OVER_CAP = {("cli-release.yaml", "pending"), ("deploy-prod.yaml", "pending")}
 EXPECTED = re.compile(r"needs\.verification-selection\.outputs\.([a-z_]+_expected) == 'true'")
 NEEDS_REF = re.compile(r"needs\.([A-Za-z0-9_-]+)\.")
 NEEDS_OUTPUT = re.compile(r"needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)")
@@ -403,6 +409,10 @@ def workflow_errors(name, text):
         # it mints Forgejo integrations, and the publisher roles bind no job or
         # runner claim, so no job on the shared untrusted light runner holds
         # one (#3674, #3758). ci.yaml's metal jobs split by event instead.
+        timeout = job.get("timeout-minutes")
+        cap = RUNNER_CAP.get(runner)
+        if cap and isinstance(timeout, int) and timeout > cap and (name, job_name) not in OVER_CAP:
+            errors.append(f"{name} {job_name} timeout {timeout} outlasts its runner's {cap}-minute cap")
         if holds_oidc and runner == runners.UNTRUSTED_LIGHT and not drift_exception:
             errors.append(f"{name} {job_name} holds OIDC on the untrusted light runner")
         if holds_oidc and reads_openbao:
@@ -550,6 +560,8 @@ CHECKOUT = "noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 # Each mutation of one workflow file is a failure an earlier text pin caught,
 # or one it missed.
 WORKFLOW_MUTATIONS = {
+    "the Dev delivery turn outlasts its light runner's cap": ("deploy-dev.yaml", lambda t: in_job(
+        t, "dev-delivery-turn", "timeout-minutes: 25", "timeout-minutes: 90")),
     "the Dev publisher runs on the untrusted runner": ("deploy-dev.yaml", lambda t: in_job(
         t, "publish-runtime-images", f"runs-on: {runners.TRUSTED_LIGHT}", f"runs-on: {runners.UNTRUSTED_LIGHT}")),
     "a support publisher starts on a pull request": ("support-images.yaml", lambda t: t.replace(

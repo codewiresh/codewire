@@ -12,6 +12,11 @@ skipped. When the in-flight delivery finishes, the waiting one starts.
 Old rule (2026-10-21 and 2026-10-24): a newer green commit cancelled an older
 delivery before it published. Under a steady merge rate every delivery was
 cancelled by the next one, and Dev did not advance for over an hour.
+
+Old behaviour (until #4476): the waiting run polled for up to 80 minutes on a
+runner that cancels every job after 25, so a delivery waiting behind a longer
+one was cancelled and never reached Dev (Deploy Dev 46838, 2026-11-13). Now it
+defers at 20 minutes and the delivery in flight hands the turn on.
 """
 
 from __future__ import annotations
@@ -44,11 +49,17 @@ DEPLOY_LIST = (
     "/actions/runs?workflow_id=deploy-dev.yaml&status=waiting&status=blocked&status=running"
     "&status=unknown&page=1&limit=100"
 )
+DEPLOY_ALL = "/actions/runs?workflow_id=deploy-dev.yaml&page=1&limit=100"
 
 
 def history(directory: Path, names: str = "ABCD") -> list[str]:
     """Commits on one line, oldest first."""
-    environ = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    # No auto maintenance: a detached one still writing objects/ after the last
+    # commit made tearDown's cleanup fail with "Directory not empty" (#4477's
+    # first CI run).
+    environ = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+               "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "maintenance.auto", "GIT_CONFIG_VALUE_0": "false",
+               "GIT_CONFIG_KEY_1": "gc.auto", "GIT_CONFIG_VALUE_1": "0"}
 
     def run(*args: str) -> str:
         return subprocess.run(["git", *args], cwd=directory, env=environ, check=True,
@@ -80,11 +91,15 @@ PHASES = {
     "published": ("success", "success", "success", "success"),
     "replaced": ("success", "success", "skipped", "skipped"),
     "red": ("success", "success", "success", "skipped"),
+    "deferring": ("success", "success", "skipped", "skipped", "waiting"),
+    "deferred": ("success", "success", "skipped", "skipped", "success"),
+    "turn-cancelled": ("success", "cancelled", "skipped", "skipped"),
+    "selection-failed": ("failure", "skipped", "skipped", "skipped"),
 }
 
 
 def deploy_jobs(run_id: int, phase: str, *, turn_job: bool = True) -> list[dict]:
-    selection, turn_state, builds, publish = PHASES[phase]
+    selection, turn_state, builds, publish, *marker = PHASES[phase]
     base = run_id * 10
     jobs = [
         {"id": base + 1, "run_id": run_id, "name": "Deploy selection", "status": selection},
@@ -94,6 +109,8 @@ def deploy_jobs(run_id: int, phase: str, *, turn_job: bool = True) -> list[dict]
     ]
     if turn_job:
         jobs.append({"id": base + 5, "run_id": run_id, "name": "Dev delivery turn", "status": turn_state})
+        jobs.append({"id": base + 6, "run_id": run_id, "name": "Deferred to the delivery in flight",
+                     "status": marker[0] if marker else "skipped"})
     return jobs
 
 
@@ -244,11 +261,22 @@ class DevDeliveryTurn(unittest.TestCase):
         self.assertEqual(result, turn.GO)
         self.assertIn(f"after {turn.UNREADABLE_LIMIT} tries; {self.b} builds now", log)
 
-    def test_a_wait_past_its_bound_builds(self) -> None:
-        result, log, _ = self.wait([{10: (self.a, "building"), 20: (self.b, "waiting")}], self.b, 20,
-                                   wait_seconds=300)
-        self.assertEqual(result, turn.GO)
+    def test_a_wait_past_its_bound_defers_inside_the_runner_cap(self) -> None:
+        # The light runner cancels a job after 25 minutes (#4476); the turn
+        # defers before that instead of being cancelled, and builds nothing.
+        self.assertLess(turn.WAIT_SECONDS, 25 * 60 - 2 * turn.POLL_SECONDS)
+        result, log, api = self.wait([{10: (self.a, "building"), 20: (self.b, "waiting")}], self.b, 20,
+                                     wait_seconds=300)
+        self.assertEqual(result, turn.DEFERRED)
         self.assertIn("still waiting after 300 s", log)
+        self.assertIn("hands the turn on when it ends", log)
+        self.assertFalse([call for call in api.calls if call.startswith("POST")])
+
+    def test_a_deferred_newer_run_neither_replaces_nor_is_in_flight(self) -> None:
+        self.assertEqual(self.decide({20: (self.b, "waiting"), 30: (self.c, "deferred")}, self.b, 20)[0],
+                         turn.GO)
+        self.assertEqual(self.decide({20: (self.b, "deferred"), 30: (self.c, "waiting")}, self.c, 30)[0],
+                         turn.GO)
 
     def test_main_writes_go_outside_a_push_to_main(self) -> None:
         with tempfile.NamedTemporaryFile("r") as output:
@@ -257,6 +285,102 @@ class DevDeliveryTurn(unittest.TestCase):
             with mock.patch.dict(os.environ, environ, clear=True), redirect_stdout(io.StringIO()):
                 self.assertEqual(turn.main(), 0)
             self.assertEqual(open(output.name, encoding="utf-8").read(), "turn=go\n")
+
+
+class HandoverForgejo(FakeForgejo):
+    """Deploy Dev runs, finished or not, and the reruns the handover asks for."""
+
+    def __init__(self, polls, rerun_status=204):
+        super().__init__(polls)
+        self.rerun_status = rerun_status
+
+    def get_json(self, path: str):
+        if path == DEPLOY_ALL:
+            self.calls.append(f"GET {path}")
+            runs = [deploy_run(run_id, sha) for run_id, (sha, *_rest) in sorted(self.state().items())]
+            return {"total_count": len(runs), "workflow_runs": runs}
+        return super().get_json(path)
+
+    def post(self, path: str) -> int:
+        self.calls.append(f"POST {path}")
+        return self.rerun_status
+
+
+class DevDeliveryHandover(unittest.TestCase):
+    """The delivery that had the turn hands it to the newest one that deferred."""
+
+    A, B, C, D = ("a" * 40, "b" * 40, "c" * 40, "d" * 40)
+
+    def hand_on(self, polls: list, own: int = 10, rerun_status: int = 204):
+        api = HandoverForgejo(polls, rerun_status)
+        lines: list[str] = []
+        clock = iter(range(0, 10_000, 30))
+
+        def sleep(_seconds: float) -> None:
+            api.poll += 1
+
+        result = turn.hand_on(api, own, sleep=sleep, clock=lambda: next(clock), log=lines.append,
+                              wait_seconds=300)
+        return result, "\n".join(lines), [call for call in api.calls if call.startswith("POST")]
+
+    def test_the_newest_deferred_run_gets_the_turn_and_older_ones_stay_replaced(self) -> None:
+        # A published while B and then C waited too long and deferred: only C,
+        # the newest, is rerun; B's change is in C.
+        result, log, posts = self.hand_on([{10: (self.A, "published"), 20: (self.B, "deferred"),
+                                            30: (self.C, "deferred")}])
+        self.assertEqual(result, 0)
+        self.assertEqual(posts, ["POST /actions/jobs/305/rerun"])
+        self.assertIn("Deploy Dev run 30 deferred; reran its turn job 305", log)
+
+    def test_a_newer_run_still_waiting_takes_its_own_turn(self) -> None:
+        for phase in ("selecting", "turn-queued", "building", "replaced"):
+            with self.subTest(newest=phase):
+                result, _, posts = self.hand_on([{10: (self.A, "published"), 20: (self.B, "deferred"),
+                                                  30: (self.C, phase)}])
+                self.assertEqual((result, posts), (0, []))
+
+    def test_a_run_that_selected_nothing_is_passed_over(self) -> None:
+        for phase in ("docs-only", "selection-failed"):
+            with self.subTest(newest=phase):
+                result, _, posts = self.hand_on([{10: (self.A, "red"), 20: (self.B, "deferred"),
+                                                  30: (self.C, phase)}])
+                self.assertEqual((result, posts), (0, ["POST /actions/jobs/205/rerun"]))
+
+    def test_a_turn_cancelled_at_the_runner_cap_is_rerun(self) -> None:
+        # Deploy Dev 46838: its turn job was cancelled at 25 minutes.
+        result, _, posts = self.hand_on([{10: (self.A, "published"), 20: (self.B, "turn-cancelled")}])
+        self.assertEqual((result, posts), (0, ["POST /actions/jobs/205/rerun"]))
+
+    def test_a_turn_still_deciding_settles_first(self) -> None:
+        # B's last poll saw A in flight; it defers just after A ends.
+        result, _, posts = self.hand_on([{10: (self.A, "published"), 20: (self.B, "waiting")},
+                                         {10: (self.A, "published"), 20: (self.B, "deferring")},
+                                         {10: (self.A, "published"), 20: (self.B, "deferred")}])
+        self.assertEqual((result, posts), (0, ["POST /actions/jobs/205/rerun"]))
+        result, _, posts = self.hand_on([{10: (self.A, "published"), 20: (self.B, "waiting")},
+                                         {10: (self.A, "published"), 20: (self.B, "building")}])
+        self.assertEqual((result, posts), (0, []))
+
+    def test_nothing_later_hands_on_nothing(self) -> None:
+        result, log, posts = self.hand_on([{5: (self.D, "deferred"), 10: (self.A, "published")}])
+        self.assertEqual((result, posts), (0, []))
+        self.assertIn("no later delivery is waiting", log)
+
+    def test_a_refused_or_unsettled_handover_is_a_loud_missed_trigger(self) -> None:
+        result, log, _ = self.hand_on([{10: (self.A, "published"), 20: (self.B, "deferred")}], rerun_status=403)
+        self.assertEqual(result, 1)
+        self.assertIn("::error::missed trigger", log)
+        result, log, _ = self.hand_on([{10: (self.A, "published"), 20: (self.B, "waiting")}])
+        self.assertEqual(result, 1)
+        self.assertIn("::error::missed trigger: after 300 s", log)
+        result, log, _ = self.hand_on([turn.Unproven("forgejo-api-unavailable")])
+        self.assertEqual(result, 1)
+
+    def test_main_hands_on_only_for_a_push_to_main(self) -> None:
+        environ = {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/1/head", "GITHUB_RUN_ID": "7"}
+        with mock.patch.dict(os.environ, environ, clear=True), redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(turn.main(["--hand-on"]), 0)
+        self.assertIn("only a push to main", out.getvalue())
 
 
 if __name__ == "__main__":

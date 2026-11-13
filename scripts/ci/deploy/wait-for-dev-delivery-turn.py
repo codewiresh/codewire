@@ -24,6 +24,17 @@ Each Deploy Dev push run on main that selected a delivery runs this as its
   and only while it moves Dev forward, so a red commit's delivery ends
   without publishing and the next one starts.
 
+The light runner this job runs on cancels any job after 25 minutes, sooner
+than one delivery takes (#4476: Deploy Dev 46838 was cancelled waiting behind
+46824). So a run still waiting after WAIT_SECONDS defers: it builds nothing
+and ends with turn=deferred, and the delivery in flight hands the turn on when
+it ends. Its last job runs this with --hand-on: it finds the newest Deploy Dev
+run after its own that selected a delivery and, when that run deferred or its
+turn job was cancelled or failed, reruns that run's turn job, which takes its
+turn as above. Older deferred runs stay replaced by the newest. The handover
+reruns a job with the job token only, as main CI's Dev delivery job does; a
+handover that cannot start fails with a "missed trigger" line.
+
 A newer commit's run is one with a higher run ID: on main every later push
 gets a higher one, and a rerun keeps its run's ID. Ancestry cannot decide it,
 because this job's checkout holds only its own commit, not a newer one (the
@@ -32,8 +43,8 @@ from before this job counts as in flight while its builds or publish job has
 not ended.
 
 This job may delay a delivery but never prevents one: anything unreadable for
-UNREADABLE_LIMIT polls in a row, or a wait past WAIT_SECONDS, lets this run
-build, with a warning. It writes turn=go or turn=replaced to GITHUB_OUTPUT.
+UNREADABLE_LIMIT polls in a row lets this run build, with a warning. It writes
+turn=go, turn=replaced or turn=deferred to GITHUB_OUTPUT.
 """
 
 from __future__ import annotations
@@ -53,17 +64,21 @@ WORKFLOW = "deploy-dev.yaml"
 MAIN_REF = "refs/heads/main"
 SELECTION_JOB = "Deploy selection"
 TURN_JOB = "Dev delivery turn"
+DEFERRED_JOB = "Deferred to the delivery in flight"
 BUILD_JOBS = ("Build and push the service runtime images", "Build and push the daemon runtime image")
 PUBLISH_JOB = "Publish the exact runtime image set"
 UNFINISHED_RUN_STATES = ("waiting", "blocked", "running", "unknown")
 POLL_SECONDS = 30
-# Longer than one delivery: the builds' 60 min bound plus publishing.
-WAIT_SECONDS = 80 * 60
+# Inside the light runner's 25-minute job cap (#4476); past it the run defers.
+WAIT_SECONDS = 20 * 60
+# How long the handover waits for the newest run's turn to settle.
+HAND_ON_SECONDS = 10 * 60
 UNREADABLE_LIMIT = 5
 
 GO = "go"
 WAIT = "wait"
 REPLACED = "replaced"
+DEFERRED = "deferred"
 
 
 def load(name: str, path: Path) -> ModuleType:
@@ -165,7 +180,7 @@ def wait_for_turn(
     clock: Callable[[], float] = time.monotonic,
     log: Callable[[str], None] = print,
 ) -> str:
-    """Poll until this run may build (GO) or a newer delivery replaces it (REPLACED)."""
+    """Poll until this run may build (GO), a newer delivery replaces it (REPLACED), or it defers."""
     deadline = clock() + wait_seconds
     unreadable = 0
     last_reason = None
@@ -188,12 +203,98 @@ def wait_for_turn(
                 f"this run builds nothing")
             return REPLACED
         if clock() >= deadline:
-            log(f"::warning::Dev delivery turn for {head}: still waiting after {int(wait_seconds)} s "
-                f"({reason}); it builds now")
-            return GO
+            log(f"Dev delivery turn for {head}: still waiting after {int(wait_seconds)} s ({reason}); "
+                f"it defers, and that delivery hands the turn on when it ends")
+            return DEFERRED
         if reason != last_reason:
             log(f"Dev delivery turn for {head}: {reason}; waiting")
             last_reason = reason
+        sleep(poll_seconds)
+
+
+def all_main_runs(api) -> list[dict]:
+    """Deploy Dev's recent push runs on main, finished or not."""
+    runs = verdicts.bounded(
+        api.get_json(f"/actions/runs?workflow_id={WORKFLOW}&page=1&limit={verdicts.API_LIMIT}"),
+        "workflow_runs",
+    )
+    return [
+        run for run in runs
+        if (run.get("trigger_event") or run.get("event")) == "push"
+        and (
+            run.get("path") == f"{WORKFLOW}@{MAIN_REF}"
+            or (run.get("workflow_id") == WORKFLOW and run.get("prettyref") == "main")
+        )
+        and verdicts.positive_id(run) is not None
+    ]
+
+
+def next_turn(api, own_run_id: int) -> tuple[str, dict | None, str]:
+    """What the newest later run that selected a delivery needs: "rerun" its turn job, "settle" or "none"."""
+    for run in sorted(all_main_runs(api), key=lambda record: record["id"], reverse=True):
+        run_id = run["id"]
+        if run_id <= own_run_id:
+            break
+        jobs = verdicts.jobs_of(api, run_id)
+        selection = job_state(jobs, SELECTION_JOB, run_id)
+        turn = job_state(jobs, TURN_JOB, run_id)
+        if selection in ("not-started", "running"):
+            return "none", None, f"Deploy Dev run {run_id} is still selecting; it takes its own turn"
+        if selection != "success" or turn is None or turn == "skipped":
+            # Selected nothing (a documentation-only push), or failed before its turn.
+            continue
+        if turn == "not-started":
+            return "none", None, f"Deploy Dev run {run_id} has yet to take its turn; it takes it itself"
+        if turn == "running":
+            # It may be deferring on a decision made while this run was in flight.
+            return "settle", None, f"Deploy Dev run {run_id} is at its turn"
+        if turn in ("cancelled", "failure"):
+            return "rerun", verdicts.named_job(jobs, TURN_JOB, run_id), (
+                f"Deploy Dev run {run_id}'s turn job ended {turn}")
+        deferred = job_state(jobs, DEFERRED_JOB, run_id)
+        if deferred in ("not-started", "running"):
+            return "settle", None, f"Deploy Dev run {run_id} is deferring"
+        if deferred == "success":
+            return "rerun", verdicts.named_job(jobs, TURN_JOB, run_id), f"Deploy Dev run {run_id} deferred"
+        return "none", None, f"Deploy Dev run {run_id} took its turn"
+    return "none", None, "no later delivery is waiting"
+
+
+def hand_on(
+    api,
+    own_run_id: int,
+    *,
+    poll_seconds: float = POLL_SECONDS,
+    wait_seconds: float = HAND_ON_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    log: Callable[[str], None] = print,
+) -> int:
+    """Hand the turn to the newest waiting delivery; 0 when done or none is owed, 1 on a missed trigger."""
+    deadline = clock() + wait_seconds
+    while True:
+        try:
+            action, job, reason = next_turn(api, own_run_id)
+        except Unproven as exc:
+            action, job, reason = "settle", None, f"the later Dev deliveries are unreadable ({exc})"
+        if action == "none":
+            log(f"Dev delivery handover from run {own_run_id}: {reason}; nothing to hand on")
+            return 0
+        if action == "rerun":
+            status = api.post(f"/actions/jobs/{job['id']}/rerun")
+            if status in (200, 201, 204):
+                log(f"Dev delivery handover from run {own_run_id}: {reason}; reran its turn job {job['id']}")
+                return 0
+            if status != 400:
+                log(f"::error::missed trigger: {reason}, and Forgejo refused to rerun its turn job "
+                    f"{job['id']} (HTTP {status}); rerun that job by hand")
+                return 1
+            # 400: the job started again between the read and the rerun; look again.
+            reason = f"turn job {job['id']} started again"
+        if clock() >= deadline:
+            log(f"::error::missed trigger: after {int(wait_seconds)} s, {reason}; the waiting delivery may "
+                f"not have its turn. Rerun the newest deferred run's \"{TURN_JOB}\" job by hand")
+            return 1
         sleep(poll_seconds)
 
 
@@ -202,13 +303,24 @@ def say(line: str) -> None:
     print(line, flush=True)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     # Reading the other runs needs only the job token, never OIDC request credentials.
     for name in ("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL"):
         os.environ.pop(name, None)
     environ = dict(os.environ)
     head = environ.get("GITHUB_SHA", "")
     run_id = environ.get("GITHUB_RUN_ID", "")
+    argv = sys.argv[1:] if argv is None else argv
+    if argv == ["--hand-on"]:
+        if environ.get("GITHUB_EVENT_NAME") != "push" or environ.get("GITHUB_REF") != MAIN_REF:
+            print("only a push to main hands a Dev delivery turn on")
+            return 0
+        if not run_id.isdigit():
+            print("::error::missed trigger: the workflow run is invalid; nothing was handed on")
+            return 1
+        return hand_on(verdicts.ForgejoAPI.from_environ(environ), int(run_id), log=say)
+    if argv:
+        raise SystemExit("usage: wait-for-dev-delivery-turn.py [--hand-on]")
     turn = GO
     if environ.get("GITHUB_EVENT_NAME") != "push" or environ.get("GITHUB_REF") != MAIN_REF:
         print("only a push to main takes a Dev delivery turn; building now")

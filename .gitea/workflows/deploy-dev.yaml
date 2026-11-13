@@ -13,7 +13,9 @@ on:
 # at a time and always finishes; at most one waits behind it, the newest, and
 # a newer commit replaces the waiting one (owner, 2026-11-10, #4071; replaces
 # the 2026-10-21 and 2026-10-24 cancel rules). The "Dev delivery turn" job
-# decides; no delivery is ever cancelled. Runs of different commits never queue
+# decides; no delivery is ever cancelled. A run still waiting near its runner's
+# 25-minute cap defers, and the delivery in flight hands the turn on when it
+# ends (#4476). Runs of different commits never queue
 # behind each other through concurrency: each commit has its own group, so
 # only a rerun of the same commit queues. Leaving the block out would cancel on
 # every push.
@@ -95,15 +97,16 @@ jobs:
         run: rm -f -- "$RUNNER_TEMP/codewire-deployed-source-candidate.json"
 
   # One delivery in flight at a time; the newest waits, and a newer commit
-  # replaces the waiting one (owner, 2026-11-10, #4071). This only waits or
-  # steps aside; it never stops another run, and anything unreadable lets this
-  # run build.
+  # replaces the waiting one (owner, 2026-11-10, #4071). This only waits,
+  # defers or steps aside; it never stops another run, and anything unreadable
+  # lets this run build.
   dev-delivery-turn:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job reads run state with the job token only.
     name: Dev delivery turn
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
-    # Longer than one delivery, so a waiting run outlasts the one in flight.
-    timeout-minutes: 90
+    # The light runner's own cap: the turn defers after 20 minutes of waiting,
+    # and the delivery in flight hands the turn on (#4476).
+    timeout-minutes: 25
     needs: [deploy-selection]
     if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' }}
     outputs:
@@ -367,3 +370,35 @@ jobs:
           scripts/ci/images/sign-runtime-image-set.sh --ghcr-mirror \
             "${RUNNER_TEMP:?}/codewire-dev-image-bundle.json" \
             scripts/ci/trust/codewire-runtime-signing.pub
+
+  # A run that deferred builds nothing; this job's success is how the delivery
+  # in flight knows to hand it the turn (wait-for-dev-delivery-turn.py).
+  dev-delivery-deferred:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job holds no credential and runs no script.
+    name: Deferred to the delivery in flight
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    timeout-minutes: 5
+    needs: [deploy-selection, dev-delivery-turn]
+    if: ${{ needs.deploy-selection.outputs.deploy_dev == 'true' && needs.dev-delivery-turn.outputs.turn == 'deferred' }}
+    steps:
+      - name: Wait for the delivery in flight to hand the turn on
+        run: echo "this delivery deferred; the delivery in flight hands it the turn when it ends"
+
+  # The delivery that had the turn hands it to the newest one that deferred
+  # behind it, however this one ended (#4476; owner, 2026-11-10, #4071: when
+  # the in-flight delivery finishes, the waiting one starts). It reruns that
+  # run's turn job with the job token, as main CI's Dev delivery job does.
+  dev-delivery-hand-on:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token reads runs and reruns one Deploy Dev turn job.
+    name: Hand the Dev delivery turn on
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    timeout-minutes: 15
+    needs: [deploy-selection, dev-delivery-turn, build-service-images, build-daemon-image, publish-runtime-images]
+    if: ${{ always() && needs.deploy-selection.outputs.deploy_dev == 'true' && needs.dev-delivery-turn.outputs.turn == 'go' }}
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Rerun the turn of the newest delivery that deferred
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/deploy/wait-for-dev-delivery-turn.py --hand-on
