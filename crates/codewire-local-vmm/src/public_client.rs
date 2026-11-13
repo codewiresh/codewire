@@ -494,30 +494,40 @@ impl NativePublicDataClient {
         path: impl Into<String>,
         data: &[u8],
     ) -> Result<UploadFileResponse, NativePublicClientError> {
-        let path = path.into();
+        let chunks: Vec<_> = data.chunks(FILE_CHUNK_BYTES).map(<[u8]>::to_vec).collect();
+        self.upload_file_stream(path, futures::stream::iter(chunks))
+            .await
+    }
+
+    /// Uploads `chunks` as the stream yields them; a stream that stops
+    /// without ending holds the call open until the caller drops it, which
+    /// aborts the upload (#3968).
+    pub async fn upload_file_stream(
+        &self,
+        path: impl Into<String>,
+        chunks: impl futures::Stream<Item = Vec<u8>> + Send + 'static,
+    ) -> Result<UploadFileResponse, NativePublicClientError> {
+        use futures::StreamExt as _;
         let header = UploadFileRequest {
             payload: Some(upload_file_request::Payload::Header(Box::new(
                 UploadFileHeader {
                     org_id: self.org_id.clone(),
                     environment_id: self.environment_id.clone(),
-                    path,
+                    path: path.into(),
                     ..Default::default()
                 },
             ))),
             ..Default::default()
         };
-        // Client-streaming calls take an owned stream of the chunked file.
-        let requests: Vec<_> = std::iter::once(header)
-            .chain(
-                data.chunks(FILE_CHUNK_BYTES)
-                    .map(|chunk| UploadFileRequest {
-                        payload: Some(upload_file_request::Payload::Chunk(chunk.to_vec())),
-                        ..Default::default()
-                    }),
-            )
-            .collect();
+        let requests =
+            futures::stream::once(std::future::ready(header)).chain(chunks.map(|chunk| {
+                UploadFileRequest {
+                    payload: Some(upload_file_request::Payload::Chunk(chunk)),
+                    ..Default::default()
+                }
+            }));
         self.files
-            .upload_file(futures::stream::iter(requests))
+            .upload_file(requests)
             .await
             .map(|response| response.into_owned())
             .map_err(NativePublicClientError::Rpc)
@@ -527,24 +537,12 @@ impl NativePublicDataClient {
         &self,
         path: impl Into<String>,
     ) -> Result<DownloadedFile, NativePublicClientError> {
-        let mut stream = self
-            .files
-            .download_file(DownloadFileRequest {
-                org_id: self.org_id.clone(),
-                environment_id: self.environment_id.clone(),
-                path: path.into(),
-                ..Default::default()
-            })
-            .await
-            .map_err(NativePublicClientError::Rpc)?;
+        use futures::TryStreamExt as _;
+        let mut responses = std::pin::pin!(self.download_file_stream(path.into()).await?);
         let mut info = None;
         let mut data = Vec::new();
-        while let Some(message) = stream
-            .message::<DownloadFileResponse>()
-            .await
-            .map_err(NativePublicClientError::Rpc)?
-        {
-            match message.to_owned_message().payload {
+        while let Some(message) = responses.try_next().await? {
+            match message.payload {
                 Some(download_file_response::Payload::Info(value)) if info.is_none() => {
                     info = Some(*value);
                 }
@@ -559,6 +557,40 @@ impl NativePublicDataClient {
             return Err(NativePublicClientError::Protocol);
         }
         Ok(DownloadedFile { info, data })
+    }
+
+    /// The file's frames as they arrive, so a caller can write a large file
+    /// without holding it (#3968).
+    pub async fn download_file_stream(
+        &self,
+        path: String,
+    ) -> Result<
+        impl futures::Stream<Item = Result<DownloadFileResponse, NativePublicClientError>>
+        + Send
+        + use<>,
+        NativePublicClientError,
+    > {
+        let stream = self
+            .files
+            .download_file(DownloadFileRequest {
+                org_id: self.org_id.clone(),
+                environment_id: self.environment_id.clone(),
+                path,
+                ..Default::default()
+            })
+            .await
+            .map_err(NativePublicClientError::Rpc)?;
+        Ok(futures::stream::try_unfold(
+            stream,
+            |mut stream| async move {
+                let message = stream
+                    .message::<DownloadFileResponse>()
+                    .await
+                    .map_err(NativePublicClientError::Rpc)?
+                    .map(|message| message.to_owned_message());
+                Ok(message.map(|message| (message, stream)))
+            },
+        ))
     }
 }
 

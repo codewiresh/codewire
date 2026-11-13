@@ -3603,7 +3603,8 @@ CW_DOWNLOAD="$SMOKE_ROOT/cw-download.bin"
 from pathlib import Path
 import sys
 
-Path(sys.argv[1]).write_bytes(bytes(range(256)) * 257 + b"\x00codewire-cp\xff")
+# Over twice the 4 MiB message limit, so the transfer must stream (#3968).
+Path(sys.argv[1]).write_bytes(bytes(range(256)) * (36 * 1024 + 1) + b"\x00codewire-cp\xff")
 PY
 CW_UPLOAD_SHA256="$(sha256sum "$CW_UPLOAD" | cut -d' ' -f1)"
 run_cw cp --local "$CW_UPLOAD" "$NAME:/workspace/cw-upload.bin"

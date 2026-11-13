@@ -151,6 +151,17 @@ impl ClientConfig {
             .with_protocol(self.environment_session_protocol()))
     }
 
+    /// File transfers stream a file of any size each way, so, like
+    /// environment sessions, they carry no whole-call deadline: a large file
+    /// on a slow link takes as long as it takes (#3968). They stay on Connect,
+    /// which the public edge routes for FileService. Unary file calls apply
+    /// the unary timeout explicitly.
+    pub(crate) fn file_transfer_connect_config(
+        &self,
+    ) -> Result<connectrpc::client::ClientConfig, ClientError> {
+        self.base_connect_config(self.server_url())
+    }
+
     fn environment_session_protocol(&self) -> Protocol {
         match self.server_url.scheme() {
             "https" => Protocol::Grpc,

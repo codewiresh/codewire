@@ -1033,14 +1033,17 @@ impl EnvironmentClient {
         })
     }
 
+    /// Uploads `chunks` as they are read, and returns the size the server
+    /// stored (#3968).
     pub async fn upload_environment_file(
         &self,
         org_id: &str,
         environment_id: &str,
         remote_path: &str,
-        data: Vec<u8>,
-    ) -> anyhow::Result<()> {
-        let mut requests = vec![rpc::UploadFileRequest {
+        chunks: impl futures::Stream<Item = Vec<u8>> + Send + 'static,
+    ) -> anyhow::Result<u64> {
+        use futures::StreamExt as _;
+        let header = rpc::UploadFileRequest {
             payload: Some(rpc::upload_file_request::Payload::Header(Box::new(
                 rpc::UploadFileHeader {
                     org_id: org_id.to_string(),
@@ -1050,26 +1053,32 @@ impl EnvironmentClient {
                 },
             ))),
             ..Default::default()
-        }];
-        if !data.is_empty() {
-            requests.push(rpc::UploadFileRequest {
-                payload: Some(rpc::upload_file_request::Payload::Chunk(data)),
-                ..Default::default()
-            });
-        }
-        self.inner
+        };
+        let requests =
+            futures::stream::once(std::future::ready(header)).chain(chunks.map(|chunk| {
+                rpc::UploadFileRequest {
+                    payload: Some(rpc::upload_file_request::Payload::Chunk(chunk)),
+                    ..Default::default()
+                }
+            }));
+        let response = self
+            .inner
             .upload_file(requests)
             .await
             .map_err(display_client_error)?;
-        Ok(())
+        Ok(u64::try_from(response.size).unwrap_or(0))
     }
 
+    /// The file's frames as they arrive (#3968).
     pub async fn download_environment_file(
         &self,
         org_id: &str,
         environment_id: &str,
         remote_path: &str,
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> anyhow::Result<
+        impl futures::Stream<Item = anyhow::Result<rpc::DownloadFileResponse>> + Send + use<>,
+    > {
+        use futures::TryStreamExt as _;
         let responses = self
             .inner
             .download_file(rpc::DownloadFileRequest {
@@ -1080,14 +1089,7 @@ impl EnvironmentClient {
             })
             .await
             .map_err(display_client_error)?;
-        Ok(responses
-            .into_iter()
-            .filter_map(|response| match response.payload {
-                Some(rpc::download_file_response::Payload::Chunk(chunk)) => Some(chunk),
-                Some(rpc::download_file_response::Payload::Info(_)) | None => None,
-            })
-            .flatten()
-            .collect())
+        Ok(responses.map_err(display_client_error))
     }
 }
 

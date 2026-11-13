@@ -7,6 +7,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod progress;
 mod runtime;
 mod sources;
+mod transfer;
 
 use progress::{FollowPolicy, StartProgress, format_environment_logs_plain};
 
@@ -337,12 +338,16 @@ async fn handle_unified_environment_cp(
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         UnifiedEnvironmentTarget::NativeLocal(name) => match (src_remote, dst_remote) {
             (None, Some((_environment, remote_path))) => {
-                let data = fs::read(&args.src).context("open local file")?;
-                native_environment_data_client(&name)
-                    .await?
-                    .upload_file(remote_path, &data)
-                    .await
-                    .context("upload")?;
+                let client = native_environment_data_client(&name).await?;
+                let client = &client;
+                transfer::upload_from_file(Path::new(&args.src), |chunks| async move {
+                    let stored = client
+                        .upload_file_stream(remote_path, chunks)
+                        .await
+                        .context("upload")?;
+                    Ok(u64::try_from(stored.size).unwrap_or(0))
+                })
+                .await?;
                 print!(
                     "{}",
                     format_env_cp_upload_text(&args.src, &name, remote_path)
@@ -350,22 +355,17 @@ async fn handle_unified_environment_cp(
                 Ok(())
             }
             (Some((_environment, remote_path)), None) => {
-                let downloaded = native_environment_data_client(&name)
+                let responses = native_environment_data_client(&name)
                     .await?
-                    .download_file(remote_path)
+                    .download_file_stream(remote_path.to_owned())
                     .await
                     .context("download")?;
-                let mut out = fs::File::create(&args.dst).context("create local file")?;
-                out.write_all(&downloaded.data)
-                    .context("write local file")?;
+                let written = transfer::download_to_file(Path::new(&args.dst), responses)
+                    .await
+                    .context("download")?;
                 print!(
                     "{}",
-                    format_env_cp_download_text(
-                        &name,
-                        remote_path,
-                        &args.dst,
-                        downloaded.data.len(),
-                    )
+                    format_env_cp_download_text(&name, remote_path, &args.dst, written)
                 );
                 Ok(())
             }
@@ -2967,11 +2967,16 @@ pub(crate) async fn handle_env_cp_command(
         (None, Some((dst_env, dst_path))) => {
             let environment_id =
                 resolve_environment_id(environment_client, org_id, dst_env).await?;
-            let data = fs::read(&args.src).context("open local file")?;
-            environment_client
-                .upload_environment_file(org_id, &environment_id, dst_path, data)
-                .await
-                .context("upload")?;
+            transfer::upload_from_file(Path::new(&args.src), |chunks| {
+                environment_client.upload_environment_file(
+                    org_id,
+                    &environment_id,
+                    dst_path,
+                    chunks,
+                )
+            })
+            .await
+            .context("upload")?;
             print!(
                 "{}",
                 format_env_cp_upload_text(&args.src, &environment_id, dst_path)
@@ -2980,15 +2985,16 @@ pub(crate) async fn handle_env_cp_command(
         (Some((src_env, src_path)), None) => {
             let environment_id =
                 resolve_environment_id(environment_client, org_id, src_env).await?;
-            let data = environment_client
+            let responses = environment_client
                 .download_environment_file(org_id, &environment_id, src_path)
                 .await
                 .context("download")?;
-            let mut out = fs::File::create(&args.dst).context("create local file")?;
-            out.write_all(&data).context("write local file")?;
+            let written = transfer::download_to_file(Path::new(&args.dst), responses)
+                .await
+                .context("download")?;
             print!(
                 "{}",
-                format_env_cp_download_text(&environment_id, src_path, &args.dst, data.len())
+                format_env_cp_download_text(&environment_id, src_path, &args.dst, written)
             );
         }
     }
@@ -3031,7 +3037,7 @@ pub(crate) fn format_env_cp_download_text(
     environment_id: &str,
     remote_path: &str,
     local_path: &str,
-    bytes: usize,
+    bytes: u64,
 ) -> String {
     format!("Downloaded {environment_id}:{remote_path} -> {local_path} ({bytes} bytes)\n")
 }

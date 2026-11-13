@@ -409,7 +409,7 @@ impl CodewireClient {
         let environment_config = config.connect_config()?;
         let session_config = config.environment_session_connect_config()?;
         let exec_config = config.connect_config()?;
-        let file_config = config.connect_config()?;
+        let file_config = config.file_transfer_connect_config()?;
         let organization_config = config.connect_config()?;
         let preset_config = config.connect_config()?;
         let port_config = config.connect_config()?;
@@ -1362,38 +1362,46 @@ impl CodewireClient {
         request: ListFilesRequest,
     ) -> Result<ListFilesResponse, ClientError> {
         self.files
-            .list_files_with_options(request, self.auth_options().await?)
+            .list_files_with_options(request, self.session_unary_options().await?)
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)
     }
 
+    /// The file's frames as they arrive, so a caller can write a large file
+    /// without holding it (#3968).
     pub async fn download_file(
         &self,
         request: DownloadFileRequest,
-    ) -> Result<Vec<DownloadFileResponse>, ClientError> {
-        let mut stream = self
+    ) -> Result<
+        impl futures_util::Stream<Item = Result<DownloadFileResponse, ClientError>> + Send + use<>,
+        ClientError,
+    > {
+        let stream = self
             .files
             .download_file_with_options(request, self.auth_options().await?)
             .await
             .map_err(ClientError::from)?;
-        let mut responses = Vec::new();
-        while let Some(message) = stream
-            .message::<DownloadFileResponse>()
-            .await
-            .map_err(ClientError::from)?
-        {
-            responses.push(message.to_owned_message());
-        }
-        Ok(responses)
+        Ok(futures_util::stream::try_unfold(
+            stream,
+            |mut stream| async move {
+                let message = stream
+                    .message::<DownloadFileResponse>()
+                    .await
+                    .map_err(ClientError::from)?
+                    .map(|message| message.to_owned_message());
+                Ok(message.map(|message| (message, stream)))
+            },
+        ))
     }
 
+    /// Sends the requests as the stream yields them; a stream that stops
+    /// without ending holds the call open until the caller drops it, which
+    /// aborts the upload (#3968).
     pub async fn upload_file(
         &self,
-        requests: impl IntoIterator<Item = UploadFileRequest>,
+        requests: impl futures_util::Stream<Item = UploadFileRequest> + Send + 'static,
     ) -> Result<UploadFileResponse, ClientError> {
-        // Client-streaming calls take a stream; the chunks are already owned.
-        let requests = futures_util::stream::iter(requests.into_iter().collect::<Vec<_>>());
         self.files
             .upload_file_with_options(requests, self.auth_options().await?)
             .await
