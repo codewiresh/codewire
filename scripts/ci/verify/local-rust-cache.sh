@@ -188,7 +188,7 @@ local_rust_cache_wait_exit() {
 # Stop the hung server PID that started at START and print what stopped it.
 # Its cache directory is not touched. Fail while it still runs.
 local_rust_cache_stop_server() {
-  local pid="$3" start="$4" signal
+  local pid="$3" start="$4" signal seconds
   # A hung sccache 0.17 answers this request but may never exit.
   local_rust_cache_server_command "$1" "$2" --stop-server >/dev/null 2>&1 || true
   if local_rust_cache_wait_exit "$pid" "$start" 3; then
@@ -196,9 +196,14 @@ local_rust_cache_stop_server() {
     return 0
   fi
   for signal in TERM KILL; do
-    # Each failed wait ends on a check that PID is still that server.
+    # Each failed wait ends on a check that PID is still that server. After
+    # KILL nothing can keep it from exiting, so that wait only bounds the
+    # kernel: a process in uninterruptible disk I/O outlived 2 s on a slow
+    # guest (#4398).
+    seconds=2
+    [[ "$signal" == TERM ]] || seconds=30
     kill -s "$signal" "$pid" 2>/dev/null || true
-    if local_rust_cache_wait_exit "$pid" "$start" 2; then
+    if local_rust_cache_wait_exit "$pid" "$start" "$seconds"; then
       printf '%s\n' "$signal"
       return 0
     fi
