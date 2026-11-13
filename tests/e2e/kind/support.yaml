@@ -19,6 +19,10 @@ data:
   # issuer while the browser uses the Rust dashboard through local ingress.
   PUBLIC_OIDC_ISSUER_URL: http://127.0.0.1:8090
   PREVIEW_BASE_DOMAIN: codewire-dev.local
+  # The coordinator refuses to start without a DERP relay, and Kind's relay
+  # address is known only once the cluster runs. This name never resolves;
+  # scripts/ci/verify/kind/tailnet-edge.sh replaces it with Kind's relay.
+  DERP_HOST: derp.example.invalid
   # Workspace volumes use Kind's built-in local-path StorageClass. The
   # setting has no default (docs/CONFIGURATION.md).
   SANDBOX_WORKSPACE_STORAGE_CLASS: standard

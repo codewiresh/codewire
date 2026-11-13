@@ -43,17 +43,20 @@ pub struct CoordinatorState {
     session_secret: Arc<str>,
     peers: Arc<PeerRegistry>,
     coordination: Option<Arc<CoordinationPlane>>,
+    derp_map: DerpMap,
 }
 
 impl CoordinatorState {
-    /// Construct coordinator state from the shared database pool and session
-    /// secret used to verify sidecar coordinate tokens.
-    pub fn new(pool: PgPool, session_secret: String) -> Self {
+    /// Construct coordinator state from the shared database pool, the session
+    /// secret used to verify sidecar coordinate tokens, and the DERP map every
+    /// session advertises.
+    pub fn new(pool: PgPool, session_secret: String, derp_map: DerpMap) -> Self {
         Self {
             pool,
             session_secret: Arc::from(session_secret),
             peers: Arc::new(PeerRegistry::default()),
             coordination: None,
+            derp_map,
         }
     }
 
@@ -513,6 +516,38 @@ fn spawn_remove_subscription(
     });
 }
 
+/// The DERP map every peer session is sent first: one region with the
+/// deployment's DERP relay and any STUN servers. Built once at startup.
+#[derive(Clone, Debug)]
+pub struct DerpMap(Arc<serde_json::Value>);
+
+/// Why the coordinator could not build its DERP map.
+#[derive(Debug, thiserror::Error)]
+pub enum DerpMapConfigError {
+    /// There is no default relay: one would send every peer of this
+    /// deployment through another operator's relay.
+    #[error(
+        "DERP_HOST is required: the DERP relay the coordinator advertises to every peer (docs/CONFIGURATION.md)"
+    )]
+    MissingHost,
+}
+
+impl DerpMap {
+    /// Read `DERP_HOST`, `DERP_PORT`, `DERP_INSECURE`, `STUN_HOST`,
+    /// `STUN_PORT` and `STUN_SERVERS` from the environment.
+    pub fn from_env() -> Result<Self, DerpMapConfigError> {
+        DerpMapConfig::from_lookup(|name| env::var(name).ok()).map(Self::from_config)
+    }
+
+    fn from_config(config: DerpMapConfig) -> Self {
+        Self(Arc::new(build_derp_map(config)))
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        self.0.as_ref().clone()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct DerpMapConfig {
     derp_host: String,
@@ -527,35 +562,38 @@ struct StunServerConfig {
     port: u16,
 }
 
-fn derp_map_config_from_env() -> DerpMapConfig {
-    let stun_port = env_port("STUN_PORT", 3478);
-    let mut stun_servers = Vec::new();
-    if let Some(host) = env_string("STUN_HOST") {
-        push_stun_server(
-            &mut stun_servers,
-            StunServerConfig {
-                host,
-                port: stun_port,
-            },
-        );
-    }
-    if let Some(raw) = env_string("STUN_SERVERS") {
-        for entry in raw
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-        {
-            if let Some(server) = parse_stun_server_entry(entry, 3478) {
-                push_stun_server(&mut stun_servers, server);
+impl DerpMapConfig {
+    /// Read the settings through `lookup`, the environment outside tests.
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, DerpMapConfigError> {
+        let stun_port = port_setting(&lookup, "STUN_PORT", 3478);
+        let mut stun_servers = Vec::new();
+        if let Some(host) = setting(&lookup, "STUN_HOST") {
+            push_stun_server(
+                &mut stun_servers,
+                StunServerConfig {
+                    host,
+                    port: stun_port,
+                },
+            );
+        }
+        if let Some(raw) = setting(&lookup, "STUN_SERVERS") {
+            for entry in raw
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+            {
+                if let Some(server) = parse_stun_server_entry(entry, 3478) {
+                    push_stun_server(&mut stun_servers, server);
+                }
             }
         }
-    }
 
-    DerpMapConfig {
-        derp_host: env_string("DERP_HOST").unwrap_or_else(|| "derp.codewire.sh".to_string()),
-        derp_port: env_port("DERP_PORT", 443),
-        derp_insecure: env_bool("DERP_INSECURE"),
-        stun_servers,
+        Ok(DerpMapConfig {
+            derp_host: setting(&lookup, "DERP_HOST").ok_or(DerpMapConfigError::MissingHost)?,
+            derp_port: port_setting(&lookup, "DERP_PORT", 443),
+            derp_insecure: bool_setting(&lookup, "DERP_INSECURE"),
+            stun_servers,
+        })
     }
 }
 
@@ -606,24 +644,34 @@ fn parse_stun_server_entry(value: &str, default_port: u16) -> Option<StunServerC
     })
 }
 
-fn env_string(name: &str) -> Option<String> {
-    env::var(name)
-        .ok()
+fn setting(lookup: &impl Fn(&str) -> Option<String>, name: &str) -> Option<String> {
+    lookup(name)
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
 }
 
-fn env_port(name: &str, default: u16) -> u16 {
-    env_string(name)
+fn port_setting(lookup: &impl Fn(&str) -> Option<String>, name: &str, default: u16) -> u16 {
+    setting(lookup, name)
         .and_then(|v| v.parse::<u16>().ok())
         .filter(|v| *v != 0)
         .unwrap_or(default)
 }
 
-fn env_bool(name: &str) -> bool {
-    env_string(name)
+fn bool_setting(lookup: &impl Fn(&str) -> Option<String>, name: &str) -> bool {
+    setting(lookup, name)
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
+}
+
+/// A DERP map for tests, naming a relay that never resolves.
+#[cfg(test)]
+pub(crate) fn test_derp_map() -> DerpMap {
+    DerpMap::from_config(DerpMapConfig {
+        derp_host: "derp.example.invalid".into(),
+        derp_port: 443,
+        derp_insecure: false,
+        stun_servers: Vec::new(),
+    })
 }
 
 fn build_derp_map(cfg: DerpMapConfig) -> serde_json::Value {
@@ -957,6 +1005,49 @@ mod tests {
         assert_eq!(relay["DERPPort"], 443);
         assert_eq!(relay["STUNPort"], -1);
         assert_eq!(relay["InsecureForTests"], false);
+    }
+
+    fn lookup<'a>(settings: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            settings
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    #[test]
+    fn derp_map_config_refuses_a_missing_or_blank_host() {
+        for settings in [
+            &[][..],
+            &[("DERP_HOST", "")][..],
+            &[("DERP_HOST", "   "), ("DERP_PORT", "8443")][..],
+        ] {
+            let error = DerpMapConfig::from_lookup(lookup(settings)).unwrap_err();
+            assert!(matches!(error, DerpMapConfigError::MissingHost));
+            let message = error.to_string();
+            assert!(message.contains("DERP_HOST"), "{message}");
+            assert!(message.contains("docs/CONFIGURATION.md"), "{message}");
+        }
+    }
+
+    #[test]
+    fn derp_map_config_reads_the_configured_relay() {
+        let config = DerpMapConfig::from_lookup(lookup(&[
+            ("DERP_HOST", " derp.example.com "),
+            ("STUN_HOST", "stun.example.com"),
+        ]))
+        .unwrap();
+        assert_eq!(config.derp_host, "derp.example.com");
+        assert_eq!(config.derp_port, 443);
+        assert!(!config.derp_insecure);
+        assert_eq!(
+            config.stun_servers,
+            vec![StunServerConfig {
+                host: "stun.example.com".into(),
+                port: 3478,
+            }]
+        );
     }
 
     #[test]

@@ -15,9 +15,8 @@ use uuid::Uuid;
 use super::node_keys::SessionNodeKey;
 use super::peer::{PeerProof, PeerVerifier, ProofError, unix_now};
 use super::{
-    COORDINATE_HEARTBEAT_INTERVAL, CoordinationPlane, PeerEvent, PeerKind, PeerRegistry,
-    SIDECAR_KV_REFRESH, Transport, build_derp_map, derp_map_config_from_env, log_node,
-    spawn_node_subscription, spawn_remove_subscription,
+    COORDINATE_HEARTBEAT_INTERVAL, CoordinationPlane, DerpMap, PeerEvent, PeerKind, PeerRegistry,
+    SIDECAR_KV_REFRESH, Transport, log_node, spawn_node_subscription, spawn_remove_subscription,
 };
 
 /// A decoded message entering the shared peer session.
@@ -81,6 +80,15 @@ pub(crate) struct SessionPeer {
     pub(crate) proof: Option<PeerProof>,
 }
 
+/// What every peer session on one coordinator shares.
+#[derive(Clone)]
+pub(crate) struct SessionContext {
+    pub(crate) peers: Arc<PeerRegistry>,
+    /// The optional cross-replica NATS/KV plane.
+    pub(crate) coordination: Option<Arc<CoordinationPlane>>,
+    pub(crate) derp_map: DerpMap,
+}
+
 /// The checks behind environment-peer sessions and the cadence of their
 /// re-checks.
 #[derive(Clone)]
@@ -106,8 +114,7 @@ enum PeerEnd {
 pub(crate) async fn run_peer_session<Source, Sink>(
     mut source: Source,
     mut sink: Sink,
-    peers: Arc<PeerRegistry>,
-    coordination: Option<Arc<CoordinationPlane>>,
+    context: SessionContext,
     peer: SessionPeer,
     checks: Option<PeerChecks>,
     client_access: Option<Box<dyn ClientAccess>>,
@@ -115,6 +122,11 @@ pub(crate) async fn run_peer_session<Source, Sink>(
     Source: SessionSource,
     Sink: SessionSink,
 {
+    let SessionContext {
+        peers,
+        coordination,
+        derp_map,
+    } = context;
     let SessionPeer {
         peer_id,
         sidecar_id,
@@ -234,8 +246,7 @@ pub(crate) async fn run_peer_session<Source, Sink>(
         None
     };
 
-    let derp_map = build_derp_map(derp_map_config_from_env());
-    if !sink.send(SessionOutput::DerpMap(derp_map)).await {
+    if !sink.send(SessionOutput::DerpMap(derp_map.to_json())).await {
         peers.deregister(peer_id, owner);
         node_key.close().await;
         if let Some(task) = refresh_task {
@@ -533,8 +544,11 @@ mod tests {
         let task = tokio::spawn(run_peer_session(
             ChannelSource { rx: input_rx },
             ChannelSink { tx: output_tx },
-            peers,
-            None,
+            SessionContext {
+                peers,
+                coordination: None,
+                derp_map: crate::test_derp_map(),
+            },
             SessionPeer {
                 peer_id,
                 sidecar_id,
@@ -616,8 +630,11 @@ mod tests {
         let task = tokio::spawn(run_peer_session(
             ChannelSource { rx: input_rx },
             ChannelSink { tx: output_tx },
-            peers,
-            None,
+            SessionContext {
+                peers,
+                coordination: None,
+                derp_map: crate::test_derp_map(),
+            },
             SessionPeer {
                 peer_id: env_id,
                 sidecar_id: None,
@@ -636,6 +653,26 @@ mod tests {
             .await
             .expect("session did not end")
             .expect("session task panicked");
+    }
+
+    /// A session first sends the DERP map the coordinator built at startup.
+    #[tokio::test]
+    async fn a_session_first_sends_the_coordinators_derp_map() {
+        let (_input, mut output, task) = spawn_session(
+            Arc::new(PeerRegistry::default()),
+            Uuid::new_v4(),
+            None,
+            PeerKind::Sidecar,
+        );
+        let SessionOutput::DerpMap(map) = next_output(&mut output).await else {
+            panic!("the first output was not the DERP map");
+        };
+        assert_eq!(map, crate::test_derp_map().to_json());
+        assert_eq!(
+            map["Regions"]["1"]["Nodes"][0]["HostName"],
+            "derp.example.invalid"
+        );
+        task.abort();
     }
 
     #[tokio::test]
@@ -812,8 +849,11 @@ mod tests {
         run_peer_session(
             ChannelSource { rx: input_rx },
             ChannelSink { tx: output_tx },
-            peers.clone(),
-            None,
+            SessionContext {
+                peers: peers.clone(),
+                coordination: None,
+                derp_map: crate::test_derp_map(),
+            },
             SessionPeer {
                 peer_id: env_id,
                 sidecar_id: None,
@@ -961,8 +1001,11 @@ mod tests {
         let client_task = tokio::spawn(run_peer_session(
             ChannelSource { rx: client_rx },
             ChannelSink { tx: client_out_tx },
-            peers,
-            None,
+            SessionContext {
+                peers,
+                coordination: None,
+                derp_map: crate::test_derp_map(),
+            },
             SessionPeer {
                 peer_id: client_id,
                 sidecar_id: Some(sidecar_id),
@@ -1027,6 +1070,7 @@ mod tests {
             session_secret: Arc::from(SECRET),
             peers: peers.clone(),
             coordination: None,
+            derp_map: crate::test_derp_map(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

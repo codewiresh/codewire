@@ -1750,6 +1750,7 @@ run_coordinator() {
     DATABASE_URL="$DATABASE_URL_RUST" SESSION_SECRET="$SESSION_SECRET" \
     COORDINATOR_PORT="$COORDINATOR_PORT" \
     CODEWIRE_API_URL="http://127.0.0.1:${COORDINATOR_PORT}" NATS_URL= \
+    DERP_HOST=derp.example.invalid \
     ENVIRONMENT=local "$CARGO_CI_DIR/codewire-coordinator"
   wait_http coordinator-ready "http://127.0.0.1:${COORDINATOR_PORT}/readyz" \
     "$RUN_DIR/coordinator.pid"

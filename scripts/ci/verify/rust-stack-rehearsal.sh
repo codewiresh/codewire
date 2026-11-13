@@ -550,6 +550,7 @@ start_proc rust-coord "$RUST_COORD_PORT" env \
   SESSION_SECRET="$SESSION_SECRET" \
   COORDINATOR_PORT="$RUST_COORD_PORT" \
   CODEWIRE_API_URL="http://127.0.0.1:${RUST_COORD_PORT}" \
+  DERP_HOST=derp.example.invalid \
   NATS_URL= \
   ENVIRONMENT=local \
   RUST_LOG=info \

@@ -20,12 +20,12 @@ use uuid::Uuid;
 
 use crate::peer::{DbPeerVerifier, PEER_RECHECK_INTERVAL, PeerProof, PeerVerifier, ProofError};
 use crate::session::{
-    ClientAccess, ClientRecheck, PeerChecks, SessionInput, SessionOutput, SessionPeer, SessionSink,
-    SessionSource, run_peer_session,
+    ClientAccess, ClientRecheck, PeerChecks, SessionContext, SessionInput, SessionOutput,
+    SessionPeer, SessionSink, SessionSource, run_peer_session,
 };
 use crate::{
-    CoordinationPlane, CoordinatorState, PeerEvent, PeerKind, PeerRegistry, Transport,
-    authorize_client, bearer_token, client_environment_access,
+    CoordinatorState, PeerEvent, PeerKind, Transport, authorize_client, bearer_token,
+    client_environment_access,
 };
 
 pub(crate) fn router(state: CoordinatorState, auth: AuthState) -> axum::Router {
@@ -58,8 +58,11 @@ fn router_with_authorizer(
     checks: PeerChecks,
 ) -> axum::Router {
     let connect = connectrpc::Router::new().add_service(Arc::new(CoordinateService {
-        peers: state.peers,
-        coordination: state.coordination,
+        context: SessionContext {
+            peers: state.peers,
+            coordination: state.coordination,
+            derp_map: state.derp_map,
+        },
         authorizer,
         checks,
     }));
@@ -257,8 +260,7 @@ async fn response_to_connect_error(response: axum::response::Response) -> Connec
 }
 
 struct CoordinateService {
-    peers: Arc<PeerRegistry>,
-    coordination: Option<Arc<CoordinationPlane>>,
+    context: SessionContext,
     authorizer: Arc<dyn CoordinateAuthorizer>,
     checks: PeerChecks,
 }
@@ -295,8 +297,7 @@ impl CoordinatorService for CoordinateService {
                 tx,
                 peer_id: peer.peer_id,
             },
-            self.peers.clone(),
-            self.coordination.clone(),
+            self.context.clone(),
             SessionPeer {
                 peer_id: peer.peer_id,
                 sidecar_id: peer.sidecar_id,
@@ -439,6 +440,7 @@ fn tailnet_node_to_proto(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CoordinationPlane;
     use axum::body::Body;
     use axum::response::IntoResponse;
     use base64::Engine;
@@ -549,7 +551,7 @@ mod tests {
             .connect_lazy("postgres://codewire:codewire@127.0.0.1:1/codewire")
             .unwrap();
         (
-            CoordinatorState::new(pool.clone(), "secret".into()),
+            CoordinatorState::new(pool.clone(), "secret".into(), crate::test_derp_map()),
             AuthState { pool },
         )
     }
@@ -593,7 +595,11 @@ mod tests {
         pool: sqlx::PgPool,
         recheck: std::time::Duration,
     ) -> (std::net::SocketAddr, JoinHandle<()>) {
-        let state = CoordinatorState::new(pool.clone(), "protocol-parity-secret".into());
+        let state = CoordinatorState::new(
+            pool.clone(),
+            "protocol-parity-secret".into(),
+            crate::test_derp_map(),
+        );
         let app = codewire_server_core::AppBuilder::new("coordinator-production-auth-parity-test")
             .with_routes(production_router(state, AuthState { pool }, recheck))
             .into_router();

@@ -243,6 +243,14 @@ Every Codewire service the browser calls is served from the dashboard's own orig
 | `SANDBOX_EGRESS_BANDWIDTH` | No | The egress rate cap on every workspace Pod, rendered as its `kubernetes.io/egress-bandwidth` annotation: a positive whole number of bits per second with an optional `K`, `M` or `G` suffix. Unset or empty means `100M`. Any other form stops orchestration at startup. The cap holds only where the CNI enforces the annotation, such as Cilium with its bandwidth manager enabled; elsewhere the annotation is ignored. | `100M` |
 | `CODEWIRE_SANDBOX_PUBLIC_MESH_URL` | No | The public `https` origin of the hosted Codewire Mesh service that cloud environments join networks on, with no path, query or credentials. Orchestration names it to each workspace daemon whose environment joins a network. Unset or empty means this deployment offers no hosted Mesh to environments, and a create that names a network is refused with `mesh_unavailable`. Any other form stops orchestration at startup. | `https://mesh.example.com` |
 
+## Tailnet relay
+
+The coordinator advertises the deployment's DERP relay to every `cw` client
+and workspace daemon: the path their tailnet connections take when direct UDP
+cannot work. There is no default relay. Without `DERP_HOST` the coordinator
+refuses to start. That setting and the rest of the DERP, STUN and UDP relay
+configuration are in [dev/DERP-STUN.md](dev/DERP-STUN.md#key-config).
+
 ## Tracing
 
 Orchestration (its API and its Temporal worker) and the dashboard server export

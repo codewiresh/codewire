@@ -26,8 +26,8 @@ kind_derp_node_address() {
   printf '%s\n' "$addresses"
 }
 
-# Set the coordinator's DERP map to Kind's relay. Unset, the coordinator
-# advertises its built-in default, Production's relay. Arguments: the
+# Set the coordinator's DERP map to Kind's relay, replacing the placeholder
+# relay in tests/e2e/kind/support.yaml. Arguments: the
 # namespace, then kubectl arguments (a context). Changing the environment rolls
 # the coordinator; an unchanged one leaves it running.
 configure_kind_coordinator_derp() {

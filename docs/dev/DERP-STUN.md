@@ -315,7 +315,9 @@ already answered rejects it as a replay, so a slow response stays valid.
 | `STUN_SERVERS` | server configmap | optional comma-separated `host[:port]` list | Extra STUN candidates in the DERPMap |
 | `CODEWIRE_UDP_RELAY_ADVERTISE_ADDRS` | server configmap | dev: the peer relay VIP, such as `203.0.113.35:41641` | Public shared UDP peer-relay endpoint advertised in allocated relay descriptors |
 | `CODEWIRE_UDP_RELAY_ALLOCATOR_URL` | server configmap | empty | Predates the transport-zone catalog: without one, a value only opens the workspace's relay data egress, and nothing calls it. `AllocatePeerRelay` uses the zone's `https` `peer_relay.allocator_url` |
-| `DERP_HOST` | server configmap | `derp.codewire.sh` | DERP relay hostname |
+| `DERP_HOST` | server configmap | `derp.codewire.sh` | DERP relay hostname the coordinator advertises. Required, with no default: unset or empty, the coordinator refuses to start |
+| `DERP_PORT` | server configmap | unset (443) | The relay's HTTPS port in the DERPMap |
+| `DERP_INSECURE` | Kind only | `true` | Tells clients to skip the relay's certificate check; never set on a real deployment |
 | `DERP_MESH_KEY` | secret | 64-char hex | Shared key for multi-replica DERP mesh |
 | `DERP_VERIFY_CLIENT_URLS` | DERP deployment | comma-separated `http://host:port` | Coordinator and Mesh node-key lookups; unset serves every client |
 | `COORDINATOR_DERP_VERIFY_ADDR` | coordinator deployment | `0.0.0.0:8097` | Coordinator's node-key lookup listener |

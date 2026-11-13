@@ -151,7 +151,9 @@ Additional slice-specific requirements:
 
 - `codewire-orchestration` requires `TEMPORAL_HOST_PORT`.
 - `codewire-billing` enables Stripe paths only when `STRIPE_SECRET_KEY` is set.
-- `codewire-coordinator` uses NATS only when `NATS_URL` is set.
+- `codewire-coordinator` requires `DERP_HOST`, the DERP relay it advertises
+  (see [CONFIGURATION.md](../CONFIGURATION.md)), and uses NATS only when
+  `NATS_URL` is set.
 - IdP and billing email flows select SES only when the workload-specific
   `CODEWIRE_SES_ENABLED=true` marker, `CODEWIRE_SES_FROM`, and
   `CODEWIRE_SES_REGION` are set. The activated workload also needs its own

@@ -1,6 +1,6 @@
 //! `codewire-coordinator` -- Rust tailnet coordinator entry point.
 
-use codewire_coordinator::{CoordinatorState, derp_verify_router, router};
+use codewire_coordinator::{CoordinatorState, DerpMap, derp_verify_router, router};
 use codewire_server_core::auth::AuthState;
 use codewire_server_core::{AppBuilder, ServiceConfig};
 use std::time::Duration;
@@ -9,6 +9,7 @@ use std::time::Duration;
 async fn main() -> anyhow::Result<()> {
     let cfg = ServiceConfig::from_env("coordinator")?;
     codewire_server_core::obs::init(&cfg)?;
+    let derp_map = DerpMap::from_env()?;
 
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
     let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
@@ -16,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
     let nats =
         codewire_server_core::nats::connect(cfg.nats_url.as_deref(), cfg.nats_token.as_deref())
             .await?;
-    let mut state = CoordinatorState::new(pool.clone(), cfg.session_secret.clone());
+    let mut state = CoordinatorState::new(pool.clone(), cfg.session_secret.clone(), derp_map);
     if let Some(client) = nats {
         state = state.with_nats_client(client).await?;
     }
