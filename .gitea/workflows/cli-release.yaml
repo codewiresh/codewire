@@ -26,12 +26,20 @@ on:
   schedule:
     - cron: '2-59/5 * * * *'
 
-# No concurrency group, so Forgejo queues no run behind another: before, every
-# scheduled run waited behind the running one only to find nothing. The first
-# job's release turn keeps deliveries one at a time instead (release-turn.py;
-# owner, 2026-11-12, #3013). A group cannot be per run: Forgejo evaluates it
-# before the run has an ID, so `github.run_id` is empty there and every run
-# shared one group.
+# No group and no cancel: Forgejo 17 neither queues a run behind another nor
+# cancels one (UnlimitedConcurrency in ConfigureActionRunConcurrency). The
+# first job's release turn keeps deliveries one at a time (release-turn.py;
+# owner, 2026-11-12, #3013). Both halves matter:
+#   - with no block, a scheduled run counts as a push event, so each 5-minute
+#     tick cancels the earlier scheduled run, mid-delivery (cli-release 46578,
+#     v0.4.17, 2026-11-13);
+#   - with a group, every run queues behind the running one; a per-run group
+#     cannot exist, as `github.run_id` is empty when Forgejo evaluates it.
+# The group is present for the workflow schema; Forgejo treats an empty one as
+# none.
+concurrency:
+  group: ''
+  cancel-in-progress: false
 
 env:
   CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}

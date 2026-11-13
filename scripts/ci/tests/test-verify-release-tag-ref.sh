@@ -567,10 +567,11 @@ document = yaml.safe_load(text)
 on = document.get("on", document.get(True))
 if on.get("schedule") != [{"cron": cron}]:
     sys.exit(f"{workflow} is not scheduled at {cron}")
-# Forgejo evaluates a group before the run has an ID, so any group, even one
-# named by github.run_id, queues every release run behind the delivering one.
-if "concurrency" in document:
-    sys.exit(f"{workflow} has a concurrency group, so Forgejo queues its runs")
+# Forgejo neither queues nor cancels a run that sets cancel-in-progress false
+# with no group. With no block each tick cancels the delivery before it; with
+# any group, even one named by github.run_id, every run queues.
+if document.get("concurrency") != {"group": "", "cancel-in-progress": False}:
+    sys.exit(f"{workflow} lets Forgejo queue its runs or cancel one in flight")
 jobs = document["jobs"]
 if list(jobs)[:2] != ["pending", "release-selection"]:
     sys.exit(f"{workflow} does not start with pending, then release selection")
@@ -629,7 +630,8 @@ PY
 assert_scheduled_pickup "$deploy_workflow" deploy-prod '*/5 * * * *'
 assert_scheduled_pickup "$cli_workflow" cli-release '2-59/5 * * * *'
 for mutation in "s|    - cron: '\*/5 \* \* \* \*'|    - cron: '0 * * * *'|" \
-    's|^env:$|concurrency:\n  group: deploy-prod-release-${{ github.run_id }}\n  cancel-in-progress: false\n\nenv:|' \
+    "s|^  group: ''\$|  group: deploy-prod-release-\${{ github.run_id }}|" \
+    '/^concurrency:$/,/^$/d' \
     "/        if: \${{ steps.turn.outputs.turn == 'go' }}/d" \
     's|release-turn.py deploy-prod|release-turn.py cli-release|' \
     '/^  pending:/,/^  release-selection:/{s|CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT|CODEWIRE_CI_RUNNER_TRUSTED_LIGHT|g}' \

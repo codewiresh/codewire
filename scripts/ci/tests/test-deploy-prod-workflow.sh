@@ -332,10 +332,11 @@ done
 grep -Fxq '        run: python3 -I -B scripts/ci/release/release-turn.py deploy-prod' "$WORKFLOW" &&
   grep -Fxq "        if: \${{ steps.turn.outputs.turn == 'go' }}" "$WORKFLOW" ||
   fail "production dispatches can wait on deploy runs side by side"
-# No group: Forgejo evaluates one before the run has an ID, so a per-run group
-# queued every run behind the delivering one, and a shared one could cancel it.
-! grep -q '^concurrency:' "$WORKFLOW" ||
-  fail "a concurrency group queues release runs or cancels one while promote-prod runs"
+# cancel-in-progress false with no group: Forgejo neither queues a run nor
+# cancels one. With no block each tick cancels a delivery; with a group every
+# run queues (test-release-turn.py models Forgejo's rule).
+[[ "$(sed -n '/^concurrency:$/,/^$/p' "$WORKFLOW")" == $'concurrency:\n  group: \'\'\n  cancel-in-progress: false' ]] ||
+  fail "a tick can cancel a Production delivery, or release runs queue behind one another"
 # shellcheck disable=SC2016
 grep -Fq 'readonly wait_seconds="${DEPLOY_PROD_WAIT_SECONDS:-1800}"' \
   "$ROOT/scripts/ci/deploy/dispatch-deploy-prod.sh" ||

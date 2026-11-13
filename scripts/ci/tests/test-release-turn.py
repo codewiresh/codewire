@@ -28,6 +28,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location("codewire_ci_release_turn", ROOT / "scripts/ci/release/release-turn.py")
 assert SPEC and SPEC.loader
@@ -289,16 +291,52 @@ class Main(unittest.TestCase):
         self.assertEqual((code, written), (0, "turn=go\n"))
 
 
+def forgejo_concurrency(block, event: str) -> str:
+    """How Forgejo 17.0.0 runs a workflow with this `concurrency` value.
+
+    A port of ConfigureActionRunConcurrency (services/actions/workflows.go) and
+    runner v13.2.0's EvaluateWorkflowConcurrency. A scheduled run's event is the
+    push that registered its schedule, so `event` is "push" for a tick. A
+    cancelling run kills every earlier run of its group that still has a job
+    waiting, blocked or running (CancelPreviousWithConcurrencyGroup).
+    """
+    group, cancel = "", None
+    if isinstance(block, str):
+        group = block
+    elif isinstance(block, dict):
+        group = str(block.get("group") or "")
+        if "cancel-in-progress" in block:
+            cancel = str(block["cancel-in-progress"]).lower() == "true"
+    if cancel is None:
+        return "cancel" if event in ("push", "pull_request_sync") else "unlimited"
+    if cancel:
+        return "cancel"
+    return "unlimited" if group == "" else "queue"
+
+
 class Workflows(unittest.TestCase):
-    """Both release workflows take the turn before they look, in no concurrency group."""
+    """Both release workflows take the turn before they look; Forgejo neither queues nor cancels them."""
+
+    def test_the_concurrency_model_matches_what_was_observed(self) -> None:
+        # No block: each tick cancelled the scheduled run before it (cli-release 46578).
+        self.assertEqual(forgejo_concurrency(None, "push"), "cancel")
+        # A group whose run_id is empty at evaluation: every run queued (#4261).
+        self.assertEqual(forgejo_concurrency({"group": "cli-release-", "cancel-in-progress": False}, "push"), "queue")
+        self.assertEqual(forgejo_concurrency({"cancel-in-progress": True}, "workflow_dispatch"), "cancel")
+        # An empty group is no group (the workflow schema requires the key).
+        self.assertEqual(forgejo_concurrency({"group": "", "cancel-in-progress": False}, "push"), "unlimited")
+
+    def test_no_run_queues_or_is_cancelled(self) -> None:
+        for workflow in ("deploy-prod", "cli-release"):
+            for event in ("push", "workflow_dispatch"):
+                with self.subTest(workflow=workflow, event=event):
+                    document = yaml.safe_load((ROOT / f".gitea/workflows/{workflow}.yaml").read_text())
+                    self.assertEqual(forgejo_concurrency(document.get("concurrency"), event), "unlimited")
 
     def test_each_workflow_takes_the_turn(self) -> None:
         for workflow in ("deploy-prod", "cli-release"):
             with self.subTest(workflow=workflow):
                 text = (ROOT / f".gitea/workflows/{workflow}.yaml").read_text()
-                # Forgejo evaluates a group before the run has an ID, so even a
-                # per-run group put every run in one queue.
-                self.assertNotIn("concurrency:", text)
                 steps = text.split("      - name: Take this run's release turn\n", 1)
                 self.assertEqual(len(steps), 2)
                 self.assertTrue(steps[1].startswith(
