@@ -74,13 +74,23 @@ jobs:
           set -euo pipefail
           base="$PWD/.policy-drift-base"
           work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/policy-drift.XXXXXX")"
-          mkdir "$work/sources" "$work/bin"
-          "$base/scripts/ci/release/fetch-pinned.sh" \
-            https://github.com/kyverno/kyverno/releases/download/v1.17.1/kyverno-cli_v1.17.1_linux_x86_64.tar.gz \
-            d0c0f52e8fc8d66a3663b63942b131e5f91b63f7644b3e446546f79142d1b7a3 "$work/kyverno.tar.gz"
-          tar -xzf "$work/kyverno.tar.gz" -C "$work/bin" kyverno
+          mkdir "$work/sources"
+          # The runner image seals the official Kyverno CLI 1.17.1 off PATH;
+          # this runner's egress has no GitHub to fetch it from (#3821).
+          kyverno=/usr/local/libexec/kyverno-1.17.1
+          if [[ ! -e "$kyverno" ]]; then
+            # Until this label's runners carry the image that seals it, the
+            # check can't run; it says so rather than failing every pull
+            # request, and mints no token. Remove this before it is required.
+            echo "::warning::Policy drift did not run: this runner image has no sealed Kyverno CLI at $kyverno (#3821)"
+            printf '### Policy drift did not run\n\nThis runner image has no sealed Kyverno CLI yet (#3821).\n' \
+              >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+            exit 0
+          fi
+          printf '%s  %s\n' 31388ab9b889429cfb48923d00e46159a9cecd30cdc906edbef725a60a7e587e "$kyverno" |
+            sha256sum --check --strict --quiet -
           "$base/scripts/ci/setup/fetch-forgejo-policy-drift-token.sh" "$work/token"
           unset ACTIONS_ID_TOKEN_REQUEST_TOKEN
           "$base/scripts/ci/verify/clone-policy-drift-sources.sh" "$work/token" "$work/sources"
           "$base/scripts/ci/verify/check-policy-drift.sh" \
-            "$PWD/candidate" "$work/sources/deploy" "$work/sources/infra" "$work/bin/kyverno"
+            "$PWD/candidate" "$work/sources/deploy" "$work/sources/infra" "$kyverno"
