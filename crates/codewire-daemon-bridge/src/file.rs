@@ -24,9 +24,12 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::client::{DaemonClient, DaemonClientError, v1};
+use crate::drain::Restart;
 use crate::session::FieldViolation;
 
 const STREAM_BUFFER: usize = 8;
+const DOWNLOAD_RESTARTED: &str =
+    "Codewire restarted the server sending this file before it finished; download it again";
 const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 // One daemon read is one round trip to the sandbox, which may be in another
 // site, so each read carries many public chunks.
@@ -64,6 +67,15 @@ const GO_MODE_NON_REGULAR: u32 = GO_MODE_DIR
 
 #[async_trait]
 pub trait FileBackend: Clone + Send + Sync + 'static {
+    /// Completes when this server reaches `restart` (#4426). `None`, the
+    /// default, for a server that never drains, as the local supervisor.
+    fn server_restart(
+        &self,
+        _restart: crate::drain::Restart,
+    ) -> Option<crate::drain::RestartSignal> {
+        None
+    }
+
     fn authorize(&self, ctx: &RequestContext) -> Result<(), connectrpc::ConnectError>;
 
     fn validation_error(
@@ -208,7 +220,12 @@ where
         ));
         // File bytes are often incompressible. Gzip made each chunk larger and
         // cost the server and the client a pass over it, so send them as is.
-        Ok(connectrpc::Response::stream(receiver_stream(rx)).compress(false))
+        Ok(connectrpc::Response::stream(crate::drain::end_at(
+            receiver_stream(rx),
+            self.backend.server_restart(Restart::Deadline),
+            DOWNLOAD_RESTARTED,
+        ))
+        .compress(false))
     }
 
     async fn upload_file(
@@ -1160,6 +1177,7 @@ fn receiver_stream<T: Send + 'static>(
 mod tests {
     mod cancellation;
     mod download;
+    mod drain;
     mod parts;
 
     use std::time::{Duration, Instant};
@@ -1173,10 +1191,27 @@ mod tests {
     struct TestBackend {
         daemon: DaemonClient,
         deny_authorization: bool,
+        /// Becomes true at the drain's deadline; `None` never drains.
+        restart_deadline: Option<tokio::sync::watch::Receiver<bool>>,
     }
 
     #[async_trait::async_trait]
     impl FileBackend for TestBackend {
+        fn server_restart(
+            &self,
+            restart: crate::drain::Restart,
+        ) -> Option<crate::drain::RestartSignal> {
+            let mut deadline = self.restart_deadline.clone()?;
+            (restart == crate::drain::Restart::Deadline).then(|| {
+                Box::pin(async move {
+                    // A dropped sender never restarts the fixture's server.
+                    if deadline.wait_for(|reached| *reached).await.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                }) as crate::drain::RestartSignal
+            })
+        }
+
         fn authorize(&self, _ctx: &RequestContext) -> Result<(), connectrpc::ConnectError> {
             if self.deny_authorization {
                 Err(connectrpc::ConnectError::unauthenticated(
@@ -1298,6 +1333,7 @@ mod tests {
         let bridge = FileBridge::new(TestBackend {
             daemon: harness.client().await,
             deny_authorization: true,
+            restart_deadline: None,
         });
         let error = proto::FileService::upload_file(
             &bridge,
@@ -1318,6 +1354,7 @@ mod tests {
         let bridge = FileBridge::new(TestBackend {
             daemon: harness.client().await,
             deny_authorization: false,
+            restart_deadline: None,
         });
         let destination = harness
             .workspace_root()
@@ -1395,6 +1432,7 @@ mod tests {
         let bridge = FileBridge::new(TestBackend {
             daemon: harness.client().await,
             deny_authorization: false,
+            restart_deadline: None,
         });
         let destination = harness.workspace_root().join("canceled.bin");
         let destination = destination.to_string_lossy().into_owned();

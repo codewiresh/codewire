@@ -10,6 +10,7 @@ async fn download_streams_the_whole_file_uncompressed() {
     let bridge = FileBridge::new(TestBackend {
         daemon: harness.client().await,
         deny_authorization: false,
+        restart_deadline: None,
     });
     // More than one daemon read, ending in a short public chunk.
     let read_bytes = usize::try_from(DOWNLOAD_READ_BYTES).unwrap();

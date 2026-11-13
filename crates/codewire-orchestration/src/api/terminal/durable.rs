@@ -17,6 +17,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocketUpgrade};
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use codewire_daemon_bridge::drain::Restart;
 use codewire_daemon_proto::daemon::v1;
 use codewire_server_core::auth::{SESSION_COOKIE_NAME, authenticate, hash_session_token};
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
@@ -296,29 +297,33 @@ pub(super) async fn websocket(
             );
         }
     };
+    let drain = state.drain.clone();
     ws.protocols([PROTOCOL])
         .max_frame_size(FRAME_BYTES)
         .max_message_size(FRAME_BYTES)
         .write_buffer_size(0)
         .max_write_buffer_size(2 * FRAME_BYTES)
         .on_upgrade(move |socket| async move {
+            let restart = drain.signal(Restart::Deadline);
             let (mut browser_output, mut browser_input) = socket.split();
             let (input, output) = attachment.into_stream_parts();
             let session_id = coordinates.session_id.clone();
             let start_offset = coordinates.output_offset;
             let started = Instant::now();
             let stats = std::sync::Mutex::new(RelayStats::default());
-            let end = relay(
-                &mut browser_output,
-                &mut browser_input,
-                input,
-                output,
-                coordinates,
-                IO_TIMEOUT,
-                &stats,
-            )
-            .await;
-            if !matches!(end, End::PeerClosed | End::Complete) {
+            let end = tokio::select! {
+                end = relay(
+                    &mut browser_output,
+                    &mut browser_input,
+                    input,
+                    output,
+                    coordinates,
+                    IO_TIMEOUT,
+                    &stats,
+                ) => end,
+                () = restart => End::Restarting,
+            };
+            if !matches!(end, End::PeerClosed | End::Complete | End::Restarting) {
                 let stats = stats.into_inner().unwrap_or_default();
                 tracing::warn!(
                     environment_id = %env_id,
@@ -337,16 +342,17 @@ pub(super) async fn websocket(
                     "browser terminal relay ended abnormally"
                 );
             }
-            let code = if matches!(end, End::PeerClosed | End::Complete) {
-                1000
-            } else {
-                1008
+            // 1012 is "service restart": the browser may attach again.
+            let (code, reason) = match end {
+                End::PeerClosed | End::Complete => (1000, "terminal detached"),
+                End::Restarting => (1012, "server restarting; attach again"),
+                _ => (1008, "terminal detached"),
             };
             let _ = timeout(
                 IO_TIMEOUT,
                 browser_output.send(Message::Close(Some(CloseFrame {
                     code,
-                    reason: "terminal detached".into(),
+                    reason: reason.into(),
                 }))),
             )
             .await;
@@ -488,6 +494,9 @@ enum End {
     DaemonInputStalled,
     /// The daemon attachment ended or failed before a final session status.
     DaemonClosed,
+    /// This replica reached its drain deadline (#4426). The saved shell keeps
+    /// running; the browser attaches to it again through the next replica.
+    Restarting,
 }
 
 impl End {
@@ -500,6 +509,7 @@ impl End {
             Self::BrowserClosed => "browser_closed",
             Self::DaemonInputStalled => "daemon_input_stalled",
             Self::DaemonClosed => "daemon_closed",
+            Self::Restarting => "restarting",
         }
     }
 }

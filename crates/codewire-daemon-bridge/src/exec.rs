@@ -18,9 +18,14 @@ use crate::client::{
     DaemonClient, DaemonClientError, DaemonRunInput, DaemonRunOutput, DaemonRunSession,
     DaemonRunStart,
 };
+use crate::drain::Restart;
 use crate::session::FieldViolation;
 
 const STREAM_BUFFER: usize = 32;
+/// Ending the stream ends the command (the daemon stops its process group),
+/// so the client is told to run it again.
+const COMMAND_RESTARTED: &str =
+    "Codewire restarted the server running this command, which stopped it; run it again";
 const DEFAULT_EXEC_TIMEOUT: StdDuration = StdDuration::from_secs(600);
 // Keep the base64-expanded ProtoJSON response below Connect's default 4 MiB
 // message ceiling as well as keeping the protobuf response bounded.
@@ -28,6 +33,15 @@ const MAX_UNARY_EXEC_OUTPUT_BYTES: usize = 3 * 1024 * 1024 - 64 * 1024;
 
 #[async_trait]
 pub trait ExecBackend: Clone + Send + Sync + 'static {
+    /// Completes when this server reaches `restart` (#4426). `None`, the
+    /// default, for a server that never drains, as the local supervisor.
+    fn server_restart(
+        &self,
+        _restart: crate::drain::Restart,
+    ) -> Option<crate::drain::RestartSignal> {
+        None
+    }
+
     fn authorize(&self, ctx: &RequestContext) -> Result<(), connectrpc::ConnectError>;
 
     fn validation_error(
@@ -205,7 +219,11 @@ where
             request_id,
             tx,
         ));
-        connectrpc::Response::stream_ok(receiver_stream(rx))
+        connectrpc::Response::stream_ok(crate::drain::end_at(
+            receiver_stream(rx),
+            self.backend.server_restart(Restart::Deadline),
+            COMMAND_RESTARTED,
+        ))
     }
 
     async fn run(
@@ -283,7 +301,11 @@ where
             request_id,
             tx,
         ));
-        connectrpc::Response::stream_ok(receiver_stream(rx))
+        connectrpc::Response::stream_ok(crate::drain::end_at(
+            receiver_stream(rx),
+            self.backend.server_restart(Restart::Deadline),
+            COMMAND_RESTARTED,
+        ))
     }
 }
 
@@ -294,7 +316,13 @@ async fn relay_stream_exec<B: ExecBackend>(
     tx: mpsc::Sender<Result<proto::StreamExecResponse, connectrpc::ConnectError>>,
 ) {
     loop {
-        let message = match session.next_output().await {
+        let output = tokio::select! {
+            // Nobody reads the output any more: dropping the daemon session
+            // ends the command, as relay_run does.
+            () = tx.closed() => return,
+            output = session.next_output() => output,
+        };
+        let message = match output {
             Ok(Some(output)) => stream_output(output),
             Ok(None) => Err(backend.invalid_daemon_frame(request_id.as_deref())),
             Err(error) => Err(backend.daemon_error(error, request_id.as_deref())),

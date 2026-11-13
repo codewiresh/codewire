@@ -11,6 +11,7 @@ use std::time::Duration as StdDuration;
 use buffa::EnumValue;
 use buffa_types::{Duration, Struct, Timestamp};
 use chrono::{DateTime, NaiveDateTime};
+use codewire_daemon_bridge::drain::{Restart, end_at};
 use codewire_proto::codewire::v1 as proto;
 use codewire_server_core::connect::{auth_user, wire_error};
 use codewire_server_core::connect_error::ConnectError as RenderedConnectError;
@@ -53,6 +54,10 @@ use crate::api::logs::{
 use crate::api::prepare::{PrepareResponse, PrepareStreamEvent, RepoConfig, start_prepare_stream};
 use crate::api::trust_report::{EnvironmentTrustReport, get_environment_trust_report_core};
 use crate::connect::presets::proto_preset;
+
+/// A watch or a log follow ended as this replica restarts (#4426): nothing is
+/// lost, and the next replica serves the same stream.
+const WATCH_RESTARTED: &str = "Codewire is restarting this server; watch again to continue";
 
 /// Registers the EnvironmentService unary and streaming RPCs on generated routes.
 pub fn router(state: ApiState) -> connectrpc::Router {
@@ -666,7 +671,11 @@ impl proto::EnvironmentService for EnvironmentConnectService {
                 Some((message, events))
             }
         });
-        connectrpc::Response::stream_ok(stream)
+        connectrpc::Response::stream_ok(end_at(
+            stream,
+            Some(self.state.drain.signal(Restart::Deadline)),
+            WATCH_RESTARTED,
+        ))
     }
 
     async fn stream_logs(
@@ -699,7 +708,11 @@ impl proto::EnvironmentService for EnvironmentConnectService {
                 Some((message, events))
             }
         });
-        connectrpc::Response::stream_ok(stream)
+        connectrpc::Response::stream_ok(end_at(
+            stream,
+            Some(self.state.drain.signal(Restart::Deadline)),
+            WATCH_RESTARTED,
+        ))
     }
 }
 

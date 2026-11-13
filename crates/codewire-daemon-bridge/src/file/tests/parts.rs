@@ -10,6 +10,7 @@ fn bridge(daemon: DaemonClient) -> FileBridge<TestBackend> {
     FileBridge::new(TestBackend {
         daemon,
         deny_authorization: false,
+        restart_deadline: None,
     })
 }
 

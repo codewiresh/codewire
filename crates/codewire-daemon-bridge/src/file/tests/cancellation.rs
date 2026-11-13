@@ -16,6 +16,7 @@ impl UploadTask {
         let bridge = FileBridge::new(TestBackend {
             daemon: harness.client().await,
             deny_authorization: false,
+            restart_deadline: None,
         });
         let (messages, receiver) = mpsc::channel(2);
         let task = tokio::spawn(async move {

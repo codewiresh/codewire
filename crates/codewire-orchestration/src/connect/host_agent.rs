@@ -16,6 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use codewire_daemon_bridge::drain::{Restart, end_at};
 use codewire_proto::codewire::v1::{
     AttachHostRequest, AttachHostResponse, HostAgentService, HostAttached, HostChallenge,
     HostPlatform as ProtoHostPlatform, HostPong, HostRevoked, attach_host_request,
@@ -32,6 +33,7 @@ use crate::api::host_session::{
     attaching_host, heard_from, new_nonce, proves_key, record_hello,
 };
 use crate::api::hosts::{HostPlatform, OFFLINE_AFTER_SECS};
+use crate::drain::Drain;
 
 #[cfg(test)]
 mod database_tests;
@@ -44,6 +46,7 @@ fn seconds(duration: Duration) -> u32 {
 pub const HANDSHAKE_SECS: u64 = 10;
 /// Streams that may be unproven at once in one process.
 pub const MAX_HANDSHAKES: usize = 256;
+const HOST_SESSION_RESTARTED: &str = "Codewire is restarting this server; attach the host again";
 
 /// A session's clock. Production uses [`Timing::DEFAULT`]; tests shorten it.
 #[derive(Clone, Copy, Debug)]
@@ -65,15 +68,21 @@ impl Timing {
     };
 }
 
-pub fn router(pool: PgPool) -> connectrpc::Router {
-    router_with(pool, Timing::DEFAULT, MAX_HANDSHAKES)
+pub fn router(pool: PgPool, drain: Drain) -> connectrpc::Router {
+    router_with(pool, Timing::DEFAULT, MAX_HANDSHAKES, drain)
 }
 
-pub fn router_with(pool: PgPool, timing: Timing, max_handshakes: usize) -> connectrpc::Router {
+pub fn router_with(
+    pool: PgPool,
+    timing: Timing,
+    max_handshakes: usize,
+    drain: Drain,
+) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(HostAgentConnectService {
         pool,
         timing,
         handshakes: Arc::new(Semaphore::new(max_handshakes)),
+        drain,
     }))
 }
 
@@ -82,6 +91,9 @@ struct HostAgentConnectService {
     timing: Timing,
     /// One permit per stream that has not yet proven a key.
     handshakes: Arc<Semaphore>,
+    /// The host re-attaches on its own, so its session ends as soon as this
+    /// replica begins draining (#4426).
+    drain: Drain,
 }
 
 type Outbound = mpsc::Sender<Result<AttachHostResponse, ConnectError>>;
@@ -106,9 +118,13 @@ impl HostAgentService for HostAgentConnectService {
             requests,
             tx,
         ));
-        connectrpc::Response::stream_ok(futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|item| (item, rx))
-        }))
+        connectrpc::Response::stream_ok(end_at(
+            futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|item| (item, rx))
+            }),
+            Some(self.drain.signal(Restart::Begins)),
+            HOST_SESSION_RESTARTED,
+        ))
     }
 }
 

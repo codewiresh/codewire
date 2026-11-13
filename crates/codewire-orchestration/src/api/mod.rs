@@ -99,6 +99,8 @@ pub struct ApiState {
     /// The process-wide environment-log listener fan-out and the
     /// per-account bound on live StreamLogs follows.
     pub environment_logs: Arc<log_notifications::EnvironmentLogNotifications>,
+    /// This replica's drain, which ends its public streams (#4426).
+    pub drain: crate::drain::Drain,
 }
 
 /// The deliberately permanent browser-facing routes.

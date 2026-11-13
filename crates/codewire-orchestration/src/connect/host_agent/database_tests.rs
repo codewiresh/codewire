@@ -73,14 +73,19 @@ impl Drop for Served {
 }
 
 async fn serve(db: &TestDatabase, timing: Timing) -> Result<Served> {
-    serve_with(db, timing, MAX_HANDSHAKES).await
+    serve_with(db, timing, MAX_HANDSHAKES, Drain::default()).await
 }
 
-async fn serve_with(db: &TestDatabase, timing: Timing, max_handshakes: usize) -> Result<Served> {
+async fn serve_with(
+    db: &TestDatabase,
+    timing: Timing,
+    max_handshakes: usize,
+    drain: Drain,
+) -> Result<Served> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let router = connect_router_with_protocol_policy(
-        router_with(db.pool.clone(), timing, max_handshakes),
+        router_with(db.pool.clone(), timing, max_handshakes, drain),
         ProtocolPolicy::ConnectAndGrpc,
     );
     let stop = CancellationToken::new();
@@ -369,6 +374,37 @@ async fn db_a_host_revoked_while_attached_is_told_and_ended() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_attached_hosts_are_told_to_reattach_when_the_replica_begins_draining() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        setup(&db).await?;
+        let drain = Drain::default();
+        let served = serve_with(&db, Timing::DEFAULT, MAX_HANDSHAKES, drain.clone()).await?;
+        let mut streams = Vec::new();
+        for (protocol, name, seed) in [
+            (Protocol::Connect, "connect", 1),
+            (Protocol::Grpc, "grpc", 2),
+        ] {
+            let (id, key) = host(&db, name, seed).await?;
+            streams.push((name, attach(&served, protocol, &id, &key).await?));
+        }
+        // The deadline is far off: only the beginning of the drain counts.
+        drain.begin(Duration::from_secs(3600));
+        for (name, mut stream) in streams {
+            let ended = next(&mut stream).await?;
+            ensure!(
+                matches!(&ended, Err(error) if error.code == ErrorCode::Unavailable),
+                "{name}: the host is told to re-attach, got {ended:?}"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn db_out_of_order_messages_and_a_wrong_platform_end_the_session() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
@@ -586,7 +622,7 @@ async fn db_unproven_streams_are_bounded_and_attaching_frees_the_place() -> Resu
     let db = TestDatabase::create().await?;
     let result = async {
         setup(&db).await?;
-        let served = serve_with(&db, Timing::DEFAULT, 1).await?;
+        let served = serve_with(&db, Timing::DEFAULT, 1, Drain::default()).await?;
         let (id, key) = host(&db, "bounded", 1).await?;
 
         // The first stream holds the only place while it is unproven, so a

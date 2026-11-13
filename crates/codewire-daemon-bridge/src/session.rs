@@ -14,7 +14,11 @@ use connectrpc::{InboundStream, RequestContext, ServiceRequest, ServiceResult, S
 use futures::StreamExt as _;
 use tokio::sync::mpsc;
 
+use crate::drain::Restart;
+
 const STREAM_BUFFER: usize = 32;
+const SESSION_RESTARTED: &str =
+    "Codewire is restarting this server; the session keeps running, attach to it again";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FieldViolation {
@@ -42,6 +46,15 @@ pub trait EnvironmentSessionAttachment: Send + 'static {
 #[async_trait]
 pub trait EnvironmentSessionBackend: Clone + Send + Sync + 'static {
     type Attachment: EnvironmentSessionAttachment;
+
+    /// Completes when this server reaches `restart` (#4426). `None`, the
+    /// default, for a server that never drains, as the local supervisor.
+    fn server_restart(
+        &self,
+        _restart: crate::drain::Restart,
+    ) -> Option<crate::drain::RestartSignal> {
+        None
+    }
 
     fn authorize(&self, ctx: &RequestContext) -> Result<(), connectrpc::ConnectError>;
 
@@ -427,9 +440,15 @@ where
             request_id,
             tx,
         ));
-        connectrpc::Response::stream_ok(futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|item| (item, rx))
-        }))
+        // A durable session outlives its attachment: the client re-attaches
+        // to the next replica as soon as this one begins draining.
+        connectrpc::Response::stream_ok(crate::drain::end_at(
+            futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|item| (item, rx))
+            }),
+            self.backend.server_restart(Restart::Begins),
+            SESSION_RESTARTED,
+        ))
     }
 }
 

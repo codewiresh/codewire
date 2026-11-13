@@ -7,6 +7,7 @@
 //! stream behavior have one implementation without merging trust boundaries.
 
 pub mod client;
+pub mod drain;
 pub mod exec;
 pub mod file;
 pub mod session;

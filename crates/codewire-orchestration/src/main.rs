@@ -23,12 +23,12 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::middleware;
 use codewire_orchestration::confidential_storage::{ConfidentialStorageManager, FeatureFlags};
+use codewire_orchestration::drain::{DRAIN_WINDOW, Drain};
 use codewire_orchestration::runtime::kubernetes::KubernetesDriver;
 use codewire_orchestration::worker::{self, cloudflare::CloudflareClient};
 use codewire_server_core::{AppBuilder, ServiceConfig};
 use codewire_tls::{ServerTlsFiles, TlsListener};
 use tokio::net::TcpListener;
-use tokio_util::sync::CancellationToken;
 
 const DEFAULT_WORKER_LOOPS: &[&str] = &[
     "env-reconciler",
@@ -571,16 +571,18 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // #4426: SIGTERM, which a rollout sends only after the preStop delay has
-    // taken this replica out of the gateway, starts draining. The listeners
-    // finish their open streams; meanwhile this replica gives up leadership and
-    // takes no new Temporal tasks, so the next revision runs them at once.
-    let draining = CancellationToken::new();
+    // taken this replica out of the gateway, begins the drain. The listeners
+    // finish their open streams, ending those whose clients re-attach at once
+    // and the rest at the drain's deadline; meanwhile this replica gives up
+    // leadership and takes no new Temporal tasks, so the next revision runs
+    // them at once.
+    let drain = Drain::default();
     {
-        let draining = draining.clone();
+        let drain = drain.clone();
         tokio::spawn(async move {
             codewire_server_core::shutdown_signal().await;
-            tracing::info!("draining: releasing leadership and Temporal tasks");
-            draining.cancel();
+            tracing::info!(window = ?DRAIN_WINDOW, "draining: releasing leadership, Temporal tasks and re-attachable streams");
+            drain.begin(DRAIN_WINDOW);
         });
     }
 
@@ -588,12 +590,7 @@ async fn main() -> anyhow::Result<()> {
     // leader to run the default Rust-owned loops. WORKER_LOOPS remains an
     // explicit override for focused local diagnostics.
     if !loops.is_empty() {
-        worker::loops::start_loops(
-            ctx.clone(),
-            cfg.database_url.clone(),
-            &loops,
-            draining.clone(),
-        );
+        worker::loops::start_loops(ctx.clone(), cfg.database_url.clone(), &loops, drain.begun());
     }
     // #3572: a replica that runs the warm-pool loop, starting while a release
     // rotates its pools, reports ready and starts its Temporal worker only once
@@ -613,6 +610,7 @@ async fn main() -> anyhow::Result<()> {
     {
         let ctx = ctx.clone();
         let mut pools_warm = pools_warm.clone();
+        let draining = drain.begun();
         tokio::spawn(async move {
             worker::warm_pool::pools_warmed(&mut pools_warm).await;
             codewire_orchestration::temporal::spawn_temporal_worker(
@@ -675,6 +673,7 @@ async fn main() -> anyhow::Result<()> {
         sandbox_cfg: ctx.sandbox_cfg.clone(),
         confidential_storage_flags,
         environment_logs,
+        drain: drain.clone(),
     };
 
     let connect_auth = codewire_server_core::connect::ConnectAuthLayer::authenticated(auth.clone())
@@ -853,7 +852,10 @@ async fn main() -> anyhow::Result<()> {
         // the stream, so it takes no user credential at the HTTP layer. Its
         // public CLI edge is native gRPC, like EnvironmentSessionService.
         .with_connect_routes_and_protocol_policy(
-            codewire_orchestration::connect::host_agent::router(api_state.pool.clone()),
+            codewire_orchestration::connect::host_agent::router(
+                api_state.pool.clone(),
+                api_state.drain.clone(),
+            ),
             codewire_server_core::connect::ProtocolPolicy::ConnectAndGrpc,
         )
         // Connect conformance probe (doc 03 D8) — no-op unless

@@ -26,6 +26,13 @@ struct PlatformFileBackend {
 
 #[async_trait]
 impl FileBackend for PlatformFileBackend {
+    fn server_restart(
+        &self,
+        restart: codewire_daemon_bridge::drain::Restart,
+    ) -> Option<codewire_daemon_bridge::drain::RestartSignal> {
+        Some(self.state.drain.signal(restart))
+    }
+
     fn authorize(&self, ctx: &RequestContext) -> Result<(), connectrpc::ConnectError> {
         auth_user(ctx).map(|_| ())
     }
