@@ -208,6 +208,9 @@ struct AuthResponse {
     user: AuthUserResponse,
     #[serde(default, rename = "accessPending")]
     access_pending: bool,
+    /// The account signs in once its email is verified (#4481).
+    #[serde(default, rename = "verificationPending")]
+    verification_pending: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -516,6 +519,18 @@ pub(super) async fn signup_action(
         return render_page(AuthStatusTemplate {
             title: "Verify your email",
             description: "We sent you a verification link. Once you verify your email, you're on the list, and we'll email you as soon as we open up more capacity.",
+            primary_label: "Back to sign in",
+            primary_url: "/login",
+        });
+    }
+    if identity
+        .body
+        .as_ref()
+        .is_some_and(|body| body.verification_pending)
+    {
+        return render_page(AuthStatusTemplate {
+            title: "Check your email",
+            description: "We sent a verification link to your email address. Open it, then sign in with the password you chose.",
             primary_label: "Back to sign in",
             primary_url: "/login",
         });

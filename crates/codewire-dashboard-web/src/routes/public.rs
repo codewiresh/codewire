@@ -94,9 +94,9 @@ fn verified_view(access_pending: bool) -> AuthStatusTemplate<'static> {
     } else {
         AuthStatusTemplate {
             title: "Email verified",
-            description: "Your email address is verified. You can continue to Codewire.",
-            primary_label: "Continue to dashboard",
-            primary_url: "/dashboard/",
+            description: "Your email address is verified. Sign in with the password you chose.",
+            primary_label: "Sign in",
+            primary_url: "/login",
         }
     }
 }
@@ -196,7 +196,8 @@ mod tests {
 
         let enabled = verified_view(false);
         assert_eq!(enabled.title, "Email verified");
-        assert_eq!(enabled.primary_url, "/dashboard/");
+        assert_eq!(enabled.primary_label, "Sign in");
+        assert_eq!(enabled.primary_url, "/login");
     }
 
     /// `/privacy` and `/terms` are whole public pages, the same for a visitor

@@ -114,6 +114,17 @@ async fn identity(
                     )
                         .into_response(),
                 },
+                // An email sign-up signs no one in: it waits for the emailed
+                // link, and without an invite code for review as well.
+                "/api/auth/sign-up" => (
+                    StatusCode::ACCEPTED,
+                    Json(serde_json::json!({
+                        "user": { "id": "u", "email": json["email"] },
+                        "accessPending": json["invite_code"] == "",
+                        "verificationPending": true,
+                    })),
+                )
+                    .into_response(),
                 // The right password for an account still waiting for access.
                 "/api/auth/sign-in" if json["password"] == "right" => (
                     StatusCode::FORBIDDEN,
@@ -392,6 +403,63 @@ async fn an_account_waiting_for_access_is_told_it_is_on_the_list() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains(notice), "{body}");
     assert!(!body.contains("cw-alert--error"));
+}
+
+/// An email sign-up never signs in (#4481): with an invite code it asks for
+/// the emailed link, and without one it also says the request waits for
+/// review.
+#[tokio::test]
+async fn an_email_sign_up_waits_for_its_verification_link() {
+    let (idp, calls) = identity(Some(&["github"]), StatusCode::OK).await;
+    let server = dashboard(&idp.origin, "").await;
+    let csrf = crate::security::new_csrf_token();
+    for (invite_code, title, detail) in [
+        (
+            "INVITE-1",
+            "Check your email",
+            "We sent a verification link to your email address. Open it, then sign in with the password you chose.",
+        ),
+        (
+            "",
+            "Verify your email",
+            "Once you verify your email, you&#39;re on the list",
+        ),
+    ] {
+        let response = client()
+            .post(format!("{}/signup/_actions/sign-up", server.origin))
+            .header(header::ORIGIN, ORIGIN)
+            .header(header::COOKIE, format!("codewire_ssr_csrf={csrf}"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(format!(
+                "_csrf={csrf}&name=New+Person&email=new%40example.test\
+                 &password=Sup3r%21Strong-pass&confirm_password=Sup3r%21Strong-pass\
+                 &reason=Build+things&invite_code={invite_code}"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{invite_code}");
+        assert!(
+            response.headers().get(header::SET_COOKIE).is_none()
+                || !response.headers()[header::SET_COOKIE]
+                    .to_str()
+                    .unwrap()
+                    .contains("session_token"),
+            "a sign-up forwards no session"
+        );
+        let body = response.text().await.unwrap();
+        assert!(body.contains(title), "{invite_code}: {body}");
+        assert!(body.contains(detail), "{invite_code}: {body}");
+        assert!(body.contains("href=\"/login\""), "{invite_code}: {body}");
+        assert!(!body.contains("setup-2fa"), "{invite_code}: {body}");
+    }
+    let sign_ups = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(path, _)| path == "/api/auth/sign-up")
+        .count();
+    assert_eq!(sign_ups, 2);
 }
 
 #[tokio::test]
