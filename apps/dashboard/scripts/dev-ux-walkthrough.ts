@@ -317,8 +317,9 @@ async function settings(page: Page, slug: string, width: number): Promise<void> 
       await pageTitle(header, "Account");
       await expect(header.locator("p")).toHaveText(["Your account details, security, sign-in methods and browser sessions."]);
       // The password row leads Sign-in methods; providers follow when configured.
+      // Its heading carries the method's state beside the name (#4275).
       const methods = page.locator("#sign-in-methods");
-      await expect(methods.locator(".cw-security-row").first().locator("h3")).toHaveText("Password");
+      await expect(methods.locator(".cw-security-row").first().locator("h3")).toHaveText(/^Password (Set|Not set)$/);
       await expect(methods.getByText("Connected providers are unavailable")).toHaveCount(0);
       await expect(header.getByText(/personal/i)).toHaveCount(0);
       await settingsShell(page, "personal", "/settings/");
