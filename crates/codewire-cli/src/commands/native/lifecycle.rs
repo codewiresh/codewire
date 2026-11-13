@@ -360,11 +360,15 @@ pub(super) fn stop_result(environment: &v1::Environment) -> ResultBlock {
 /// `cw rm` on a local environment.
 pub(crate) async fn remove_native_environment(
     name: &str,
+    yes: bool,
     output: OutputFormat,
 ) -> anyhow::Result<()> {
     let caps = crate::commands::lifecycle_output::capabilities(output);
     let mut client = native_client().await?;
     let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
+    if !crate::commands::confirm_removal(&environment.name, "local VM", yes, output)? {
+        return Ok(());
+    }
     // Delete stops the environment's credential broker through the authority
     // whenever it selected a profile or secrets.
     ensure_native_credential_authority(&environment).await?;

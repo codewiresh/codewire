@@ -1639,7 +1639,11 @@ pub(crate) struct EnvTargetArgs {
 pub(crate) struct EnvDeleteArgs {
     #[arg(value_name = "ID_OR_NAME")]
     environment: String,
-    #[arg(short, long, help = "Skip confirmation prompt")]
+    #[arg(
+        short,
+        long,
+        help = "Remove without asking; needed without a terminal or with --output json"
+    )]
     yes: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     output: OutputFormat,

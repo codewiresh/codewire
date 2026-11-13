@@ -438,6 +438,64 @@ pub(crate) fn prompt_confirm_default_no(label: &str) -> anyhow::Result<bool> {
     Ok(matches!(input.trim(), "Y" | "y" | "yes" | "Yes" | "YES"))
 }
 
+/// What `cw rm` does before removing an environment (#4595).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RemovalConfirmation {
+    /// `--yes`: remove without asking.
+    Proceed,
+    /// At a terminal: name the environment and where it runs, and ask.
+    Ask,
+    /// No terminal, or `--output json`: nobody can answer, so refuse.
+    Refuse,
+}
+
+pub(crate) fn removal_confirmation(yes: bool, json: bool, terminal: bool) -> RemovalConfirmation {
+    match (yes, json, terminal) {
+        (true, _, _) => RemovalConfirmation::Proceed,
+        (false, false, true) => RemovalConfirmation::Ask,
+        _ => RemovalConfirmation::Refuse,
+    }
+}
+
+/// Asks before `cw rm` removes `name`, an environment `location` names
+/// ("local VM", "cloud VM", "trusted host"), and what it holds. True to go on;
+/// false when the user says no. Without a terminal or with `--output json`,
+/// and without `--yes`, it fails at once and names `--yes` (#4595).
+pub(crate) fn confirm_removal(
+    name: &str,
+    location: &str,
+    yes: bool,
+    output: OutputFormat,
+) -> anyhow::Result<bool> {
+    use std::io::IsTerminal as _;
+    let terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let json = matches!(output, OutputFormat::Json);
+    match removal_confirmation(yes, json, terminal) {
+        RemovalConfirmation::Proceed => Ok(true),
+        RemovalConfirmation::Refuse => Err(anyhow::anyhow!(removal_refusal(name, json))),
+        RemovalConfirmation::Ask => {
+            let confirmed = prompt_confirm_default_no(&removal_question(name, location))?;
+            if !confirmed {
+                println!("{name} was not removed.");
+            }
+            Ok(confirmed)
+        }
+    }
+}
+
+fn removal_question(name: &str, location: &str) -> String {
+    format!("Remove {name} ({location}) and everything on its disk?")
+}
+
+fn removal_refusal(name: &str, json: bool) -> String {
+    let why = if json {
+        "`cw rm --output json` never asks"
+    } else {
+        "`cw rm` asks first, and there is no terminal to ask at"
+    };
+    format!("{name} was not removed: {why}; add `--yes` to remove it")
+}
+
 pub(crate) fn prompt_exact_confirmation(label: &str, expected: &str) -> anyhow::Result<bool> {
     eprint!("{label}");
     std::io::stderr()
@@ -810,4 +868,36 @@ pub(crate) fn nodes_have_multiple_networks(nodes: &[Node]) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+
+    #[test]
+    fn rm_asks_at_a_terminal_and_refuses_without_one_unless_yes() {
+        use RemovalConfirmation::*;
+        // (yes, json, terminal)
+        assert_eq!(removal_confirmation(false, false, true), Ask);
+        assert_eq!(removal_confirmation(true, false, true), Proceed);
+        assert_eq!(removal_confirmation(false, false, false), Refuse);
+        assert_eq!(
+            removal_confirmation(false, true, true),
+            Refuse,
+            "JSON never asks"
+        );
+        assert_eq!(removal_confirmation(true, true, false), Proceed);
+        assert_eq!(
+            removal_question("app", "local VM"),
+            "Remove app (local VM) and everything on its disk?"
+        );
+        assert_eq!(
+            removal_refusal("app", false),
+            "app was not removed: `cw rm` asks first, and there is no terminal to ask at; add `--yes` to remove it"
+        );
+        assert_eq!(
+            removal_refusal("app", true),
+            "app was not removed: `cw rm --output json` never asks; add `--yes` to remove it"
+        );
+    }
 }

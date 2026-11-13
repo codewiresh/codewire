@@ -950,13 +950,7 @@ pub(crate) async fn handle_host_environment_command(
             host_lifecycle(environment, "start", a.output).await?;
         }
         EnvCommand::Rm(a) => {
-            if !a.yes
-                && !prompt_confirm_default_no(&format!(
-                    "Remove host environment {} and its retained sessions",
-                    environment.name
-                ))?
-            {
-                println!("Aborted.");
+            if !confirm_removal(&environment.name, "trusted host", a.yes, a.output)? {
                 return Ok(true);
             }
             host_lifecycle(environment, "rm", a.output).await?;

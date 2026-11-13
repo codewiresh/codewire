@@ -132,8 +132,14 @@ Credentials: none
 cw start ENV
 cw stop ENV
 cw restart ENV       # local VMs and hosts; a cloud environment restarts sessions only
-cw rm ENV [-y]       # a host asks first and keeps its project directory; a VM or sandbox is removed at once
+cw rm ENV [-y]       # asks first at a terminal; a host keeps its project directory
 ```
+
+`cw rm` names the environment and where it runs, and asks before removing it
+and everything on its disk; anything but `y` keeps it. `-y` (`--yes`) removes
+it without asking. Without a terminal, or with `--output json`, there is no one
+to ask, so `cw rm` refuses unless `--yes` is given: a script that removes an
+environment passes `--yes`.
 
 A cloud `start` returns once the environment is usable: its Git identity is
 set and its startup script has finished, as after `create`. A long startup
@@ -160,6 +166,7 @@ cw rm app
 ```text
 ✓ Environment app stopped
   local VM · environment disk retained
+Remove app (local VM) and everything on its disk? [y/N]: y
 ✓ Environment app removed
   local VM · environment disk removed
 ```

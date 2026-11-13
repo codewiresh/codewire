@@ -950,7 +950,6 @@ async fn handle_platform_env_command_with_created(
             anyhow::bail!("refresh-skills is supported only for native local environments");
         }
         EnvCommand::Rm(args) => {
-            let _skip_confirmation = args.yes;
             let environment_id =
                 resolve_environment_id(&environment_client, &org_id, &args.environment).await?;
             let caps = super::lifecycle_output::capabilities(args.output);
@@ -962,6 +961,23 @@ async fn handle_platform_env_command_with_created(
                 &caps,
             )
             .await;
+            // Machine output names the environment by its ID; a refusal names
+            // it as people do.
+            let asked = if caps.is_machine() && !args.yes {
+                display_name_for(
+                    &environment_client,
+                    &org_id,
+                    &environment_id,
+                    &args.environment,
+                    &super::lifecycle_output::capabilities(OutputFormat::Text),
+                )
+                .await
+            } else {
+                name.clone()
+            };
+            if !crate::commands::confirm_removal(&asked, "cloud VM", args.yes, args.output)? {
+                return Ok(None);
+            }
             let mut line = StatusLine::new(std::io::stderr(), &caps);
             line.begin(REMOVING_LABEL)?;
             let Some(removal) = Box::pin(lifecycle::tick_while(
@@ -2119,7 +2135,7 @@ async fn handle_unified_environment_lifecycle(
         (
             UnifiedEnvironmentTarget::NativeLocal(name),
             UnifiedEnvironmentLifecycle::Remove(args),
-        ) => Box::pin(remove_native_environment(&name, args.output)).await,
+        ) => Box::pin(remove_native_environment(&name, args.yes, args.output)).await,
         (UnifiedEnvironmentTarget::Platform(id), UnifiedEnvironmentLifecycle::Start(args)) => {
             handle_platform_env_command(
                 globals,
