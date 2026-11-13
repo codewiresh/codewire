@@ -941,7 +941,7 @@ grep -qxF "DOCKER_CONFIG=$docker_config buildx rm $trusted_name" "$platform_tree
 [[ "$(cat "$platform_tree/calls")" == "base|linux/amd64||$trusted_name|base images/base/Dockerfile images/base
 workspace|linux/amd64|registry.example.invalid/codewire/base@$base_a|$trusted_name|workspace images/workspace/Dockerfile ." ]] ||
   fail 'amd64 build does not build its base, then its workspace from that exact base, on the trusted builder'
-[[ "$(cat "$platform_tree/calls.jobs")" == $'base 14\nworkspace 14' ]] ||
+[[ "$(cat "$platform_tree/calls.jobs")" == $'base 8\nworkspace 8' ]] ||
   fail 'amd64 builds on the trusted builder did not bound Cargo'"'"'s jobs to its memory'
 [[ "$(cat "$platform_tree/output")" == "base_digest=$base_a
 workspace_digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ]] ||

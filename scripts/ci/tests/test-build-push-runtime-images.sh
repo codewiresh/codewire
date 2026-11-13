@@ -284,7 +284,7 @@ grep -Fq 'servername=ams3-1-trusted-builder-large-0.forgejo-ci-builder.svc.clust
 grep -Fq "buildx inspect $builder --bootstrap" "$docker_log" ||
   fail "wrapper did not prove the trusted builder answers before building"
 # Every image on the builder bounds Cargo's jobs to its memory.
-[[ "$(cut -d'|' -f7 "$build_log" "$daemon_build_log" | sort -u)" = 14 ]] ||
+[[ "$(cut -d'|' -f7 "$build_log" "$daemon_build_log" | sort -u)" = 8 ]] ||
   fail "trusted builds did not bound Cargo's jobs to the builder's memory"
 if grep -Eq 'driver docker-container|moby/buildkit' "$docker_log" "$daemon_docker_log"; then
   fail "wrapper started its own BuildKit daemon without the owner's recovery"

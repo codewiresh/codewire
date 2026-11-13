@@ -120,9 +120,13 @@ class CachedTarget(unittest.TestCase):
                 self.assertEqual(finalizer.prepare_target(self.root, stamp, "runtime"), "cold")
                 self.assertFalse(any(path.exists() for path in units), change)
 
-    def test_the_producer_pins_more_cargo_jobs_and_mounts_the_cache(self):
+    def test_the_producer_pins_the_builders_sized_cargo_jobs_and_mounts_the_cache(self):
+        # The trusted builder's 16 GiB guest runs two steps at once, sized for 8
+        # Cargo jobs each (infra ci-buildkit/builder.yaml, infra#1534); at 14 its
+        # Dockerfile frontend dropped under memory pressure (2026-11-13).
         trusted = (ROOT / "scripts/ci/setup/trusted-buildkit.sh").read_text()
-        self.assertIn("readonly TRUSTED_BUILDKIT_CW_PRODUCER_JOBS=14\n", trusted)
+        self.assertIn("readonly TRUSTED_BUILDKIT_CARGO_BUILD_JOBS=8\n", trusted)
+        self.assertIn("readonly TRUSTED_BUILDKIT_CW_PRODUCER_JOBS=8\n", trusted)
         dockerfile = (ROOT / "images/cw-runtime/Dockerfile").read_text()
         self.assertEqual(dockerfile.count(
             "--mount=type=cache,id=codewire-cw-producer-target-v1,target=/tmp/cargo-target,sharing=locked"), 1)

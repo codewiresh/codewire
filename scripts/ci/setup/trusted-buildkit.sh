@@ -12,19 +12,22 @@
 
 readonly TRUSTED_BUILDKIT_HOST='ams3-1-trusted-builder-large-0.forgejo-ci-builder.svc.cluster.local'
 readonly TRUSTED_BUILDKIT_ENDPOINT="tcp://$TRUSTED_BUILDKIT_HOST:1234"
-# Cargo jobs per build step: a starting value. The builder's guest has 24 GiB
-# and runs one step at a time (max-parallelism 1); a rustc job peaks near
-# 1.5 GiB. It is raised once the first trusted build measures the guest's
-# memory.peak (infra#1534).
-readonly TRUSTED_BUILDKIT_CARGO_BUILD_JOBS=14
+# Cargo jobs per build step. The builder's guest is 16 GiB and runs two build
+# steps at once (infra's ci-buildkit/builder.yaml: max-parallelism 2,
+# infra#1534), sized for two Linux release compiles of 8 jobs each (8.47 GiB
+# together). At 14 jobs a step, buildkitd's cgroup sat at 93-94.5% of 16 GiB
+# with 10,837 socket-memory throttles, and the Dockerfile frontend's gRPC
+# dropped under two concurrent steps (Dev deliveries 45596, 45607, 46581;
+# infra#1534, 2026-11-13). More jobs need more guest memory, not this value.
+readonly TRUSTED_BUILDKIT_CARGO_BUILD_JOBS=8
 # The static CW producer sizes its own Cargo jobs from the machine it runs on
 # (finalize-cw-runtime-source.py, 3 GiB per job), and the job that verifies its
 # receipt recomputes that exact command. On a remote builder those machines
-# differ, so the job pins the count both sides use. The builder runs one step
-# at a time, so the producer takes the same 14 as every other build step: at
-# 7, Cargo's jobserver also held each optimized Codewire crate to 7 of its 16
-# codegen units, and the cw compile took 579 s (support-images run 22393).
-readonly TRUSTED_BUILDKIT_CW_PRODUCER_JOBS=14
+# differ, so the job pins the count both sides use: the same 8 as every other
+# build step, since it runs beside one. Fewer jobs also hold each optimized
+# Codewire crate to fewer codegen units, so the cw compile is slower (579 s at
+# 7, support-images run 22393); a faster one needs a bigger guest.
+readonly TRUSTED_BUILDKIT_CW_PRODUCER_JOBS=8
 # deploy-dev.yaml and support-images.yaml pass no artifacts between jobs, and
 # a failed half cancels its run, so the recovery reruns the whole run.
 readonly TRUSTED_BUILDKIT_RECOVERY='after checking the builder (infra docs/runbooks/ci-buildkit-trusted.md), the owner may build this commit in the job: set the repository variable CODEWIRE_IN_JOB_BUILD_SHA to this commit and rerun all jobs of this run, or dispatch deploy-prod.yaml with in_job_build'
