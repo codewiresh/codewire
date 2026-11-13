@@ -39,6 +39,12 @@ reason = """The opt-in service that keeps the host agent running (`cw host servi
 #3609): a systemd user unit on Linux and a launchd LaunchAgent on macOS. One product, \
 each OS's own service manager."""
 
+[groups.host-key]
+reason = """Where a host keeps its key (`cw host enroll`, #4432): a Linux computer with no \
+Secret Service, such as a server, keeps it in a file only its user can read, so the agent \
+comes back after a reboot with nobody logged in (owner, 2026-11-13). A Mac always has its \
+Keychain, so `--key-store file` is refused there and nothing falls back."""
+
 [groups.snapshots]
 reason = """Local disk snapshots and VM checkpoints are not yet implemented on macOS \
 (#3803): a missing implementation, refused with that reason."""
@@ -96,6 +102,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/commands/environment.rs" = { group = "vm-backend", count = 2 }
 "crates/codewire-cli/src/commands/flat.rs" = { group = "member", count = 1 }
 "crates/codewire-cli/src/commands/host.rs" = { group = "member", count = 8 }
+"crates/codewire-cli/src/commands/hosts/key.rs" = { group = "host-key", count = 4 }
 "crates/codewire-cli/src/commands/hosts/service.rs" = { group = "host-service", count = 13 }
 "crates/codewire-cli/src/commands/mesh_commands/owner.rs" = { group = "mesh", count = 1 }
 "crates/codewire-cli/src/commands/mesh_commands/retained.rs" = { group = "member", count = 2 }

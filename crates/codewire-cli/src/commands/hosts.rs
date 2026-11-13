@@ -6,8 +6,13 @@
 //! host run` is the host agent, in the foreground. `cw host service install`
 //! is the opt-in that keeps it running (design rev 4).
 //!
-//! The key is read from the keyring only to sign, held in memory that is
-//! wiped when dropped, and never written anywhere else.
+//! A Linux computer with no Secret Service, such as a server, keeps the key
+//! in a file only its user can read instead, so the agent comes back after a
+//! reboot with nobody logged in (owner, 2026-11-13, #4432). `--key-store`
+//! chooses either one explicitly.
+//!
+//! The key is read from its store only to sign, held in memory that is wiped
+//! when dropped, and never written anywhere else.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -19,19 +24,13 @@ use codewire_client::hosts::{
     grant_host_request, revoke_host_grant_request,
 };
 use codewire_client::{ClientError, ErrorCode};
-use codewire_protected_store::{
-    OsProtectedStore, ProtectedEntryId, ProtectedStore, ProtectedStoreError, ProtectedValue,
-};
+use codewire_protected_store::ProtectedStoreError;
 use ed25519_dalek::{Signer as _, SigningKey};
-use zeroize::Zeroizing;
 
 use super::*;
 
 /// The host capability this `cw` offers. Slice 1 carries liveness only.
 pub(crate) const HOST_CAPABILITY_VERSION: u32 = 1;
-/// The keyring entries holding host keys: one per enrollment, so two
-/// configurations on one computer (say Dev and Production) never share one.
-const HOST_KEY_ENTRY_PREFIX: &str = "host/ed25519/";
 /// This computer's enrollment, beside the platform config.
 const ENROLLMENT_FILE: &str = "host.json";
 /// What the running agent last reported, for `cw host status`.
@@ -61,7 +60,9 @@ environment (`--type host`, `cw member`).
 Enrolling grants nothing: only you may use the host until you provide and
 grant it. The host key stays in the OS keyring (Secret Service, Keychain). If
 the keyring is locked, for example after a reboot with nobody logged in, the
-agent waits and `cw host status` says so.";
+agent waits and `cw host status` says so. A Linux computer with no Secret
+Service, such as a server, keeps the key in a file only you can read instead;
+`cw host enroll --key-store file` chooses that on any Linux computer.";
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum HostCommand {
@@ -111,6 +112,12 @@ pub(crate) struct HostEnrollArgs {
         help = "The host's name in the organization (default: this computer's name)"
     )]
     name: Option<String>,
+    #[arg(
+        long,
+        value_enum,
+        help = "Where to keep the host key (default: the OS keyring; on Linux with no Secret Service, a file)"
+    )]
+    key_store: Option<KeyStore>,
     #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     output: OutputFormat,
 }
@@ -180,8 +187,8 @@ pub(crate) struct HostsArgs {
     output: OutputFormat,
 }
 
-/// This computer's enrollment. It holds no secret: the key is in the
-/// keyring.
+/// This computer's enrollment. It holds no secret: the key is in
+/// `key_store`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Enrollment {
@@ -189,11 +196,14 @@ pub(crate) struct Enrollment {
     pub org_id: String,
     pub name: String,
     pub server_url: String,
-    /// The keyring entry holding this host's key: a name, not a secret.
+    /// The entry holding this host's key: a name, not a secret.
     pub key_entry: String,
     /// The CA `cw login --ca-file` pinned, copied beside this file (#4121).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment_ca: Option<config::PinnedCa>,
+    /// Where that entry is. Enrollments from before #4432 are in the keyring.
+    #[serde(default)]
+    pub key_store: KeyStore,
 }
 
 /// What the running agent last reported.
@@ -417,65 +427,14 @@ fn process_alive(pid: u32) -> bool {
 
 // ── The key ───────────────────────────────────────────────────────────────
 
-/// A fresh keyring entry name for a new enrollment.
-fn new_key_entry() -> String {
-    format!("{HOST_KEY_ENTRY_PREFIX}{}", uuid::Uuid::new_v4())
-}
-
-fn key_entry(name: &str) -> Result<ProtectedEntryId, ProtectedStoreError> {
-    if !name.starts_with(HOST_KEY_ENTRY_PREFIX) {
-        return Err(ProtectedStoreError::InvalidEntryId);
-    }
-    ProtectedEntryId::parse(name)
-}
-
-fn keyring_error(error: ProtectedStoreError) -> anyhow::Error {
-    match error {
-        ProtectedStoreError::AccessDenied => anyhow::anyhow!(
-            "the OS keyring is locked or inaccessible; unlock it (log in to this computer) and retry"
-        ),
-        other => anyhow::anyhow!("the OS keyring could not be used: {other}"),
-    }
-}
-
-/// Reads the host key, off the async runtime: the keyring calls block.
-async fn read_key(entry: &str) -> Result<Option<SigningKey>, ProtectedStoreError> {
-    let entry = key_entry(entry)?;
-    tokio::task::spawn_blocking(move || {
-        let Some(value) = OsProtectedStore.get(&entry)? else {
-            return Ok(None);
-        };
-        let seed = Zeroizing::new(
-            <[u8; 32]>::try_from(value.expose_secret())
-                .map_err(|_| ProtectedStoreError::CorruptEntry)?,
-        );
-        Ok(Some(SigningKey::from_bytes(&seed)))
-    })
-    .await
-    .unwrap_or(Err(ProtectedStoreError::Unavailable))
-}
-
-async fn store_key(entry: &str, key: &SigningKey) -> Result<(), ProtectedStoreError> {
-    let entry = key_entry(entry)?;
-    let value = ProtectedValue::from_slice(key.as_bytes())?;
-    tokio::task::spawn_blocking(move || OsProtectedStore.put(&entry, &value))
-        .await
-        .unwrap_or(Err(ProtectedStoreError::Unavailable))
-}
-
-async fn delete_key(entry: &str) -> Result<(), ProtectedStoreError> {
-    let entry = key_entry(entry)?;
-    tokio::task::spawn_blocking(move || OsProtectedStore.delete(&entry))
-        .await
-        .unwrap_or(Err(ProtectedStoreError::Unavailable))
-}
-
-fn new_key() -> SigningKey {
-    use rand::RngCore as _;
-    let mut seed = Zeroizing::new([0u8; 32]);
-    rand::rngs::OsRng.fill_bytes(seed.as_mut());
-    SigningKey::from_bytes(&seed)
-}
+mod key;
+pub(crate) use key::KeyStore;
+#[cfg(test)]
+use key::key_entry;
+use key::{
+    HostKeyStore, delete_key, key_directory, key_store_error, key_store_text, new_key,
+    new_key_entry, read_key, store_new_key,
+};
 
 // ── Clients ───────────────────────────────────────────────────────────────
 
@@ -632,11 +591,14 @@ async fn enroll(globals: &Globals, args: HostEnrollArgs) -> anyhow::Result<()> {
     )
     .await?;
 
-    // The key goes into the keyring first, so a failure there leaves no host
-    // record behind.
+    // The key is stored first, so a failure there leaves no host record
+    // behind. A key file needs its private parent directory to exist.
+    ensure_private_dir(&dir)?;
     let key = new_key();
     let entry = new_key_entry();
-    store_key(&entry, &key).await.map_err(keyring_error)?;
+    let key_store = store_new_key(&dir, args.key_store, &entry, &key).await?;
+    let opened =
+        HostKeyStore::open(&dir, key_store).map_err(|error| key_store_error(key_store, error))?;
     let public_key = key.verifying_key().to_bytes().to_vec();
     let signature = key
         .sign(&enrollment_statement(&signed.org_id, &user.id, &public_key))
@@ -660,7 +622,9 @@ async fn enroll(globals: &Globals, args: HostEnrollArgs) -> anyhow::Result<()> {
             .into_option()
             .context("the server returned no host")?,
         Err(error) => {
-            let _ = delete_key(&entry).await;
+            // Best effort: the enrollment failed already, and that error is
+            // the one to report.
+            let _ = delete_key(&opened, &entry).await;
             return Err(client_error(error));
         }
     };
@@ -675,6 +639,7 @@ async fn enroll(globals: &Globals, args: HostEnrollArgs) -> anyhow::Result<()> {
             &ResolvePaths::from_env(&OsEnv)?.platform_config_dir,
             &dir,
         )?,
+        key_store,
     };
     let written = ensure_private_dir(&dir)
         .and_then(|()| super::host::write_private_json(&dir.join(ENROLLMENT_FILE), &enrollment));
@@ -689,7 +654,8 @@ async fn enroll(globals: &Globals, args: HostEnrollArgs) -> anyhow::Result<()> {
                 ..Default::default()
             })
             .await;
-        let _ = delete_key(&enrollment.key_entry).await;
+        // Best effort, as above: saving the record is what failed.
+        let _ = delete_key(&opened, &enrollment.key_entry).await;
         let outcome = match left {
             Ok(_) => "the enrollment was undone".to_owned(),
             Err(_) => format!(
@@ -707,7 +673,13 @@ async fn enroll(globals: &Globals, args: HostEnrollArgs) -> anyhow::Result<()> {
         "Enrolled this computer as host `{}` ({}).",
         host.name, host.id
     );
-    println!("Its key is in the OS keyring. Nothing is running yet, and nothing is offered.");
+    println!(
+        "Its key is in {}. Nothing is running yet, and nothing is offered.",
+        key_store_text(&dir, key_store)
+    );
+    if key_store == KeyStore::File && args.key_store.is_none() {
+        println!("This computer has no OS keyring, so the key is in a file instead.");
+    }
     println!("Next:");
     println!("  cw host run                  run the agent now, in this terminal");
     println!("  cw host service install      or keep it running in the background");
@@ -769,6 +741,7 @@ async fn status(globals: &Globals, args: HostOutputArgs) -> anyhow::Result<()> {
         (false, count) => format!("you and {count} member(s)"),
     };
     println!("Used by:   {grants}");
+    println!("Key:       {}", key_store_text(&dir, enrollment.key_store));
     match &agent {
         Some(agent) => println!(
             "Agent:     {} since {} (pid {}){}",
@@ -970,9 +943,19 @@ async fn leave(globals: &Globals, args: HostLeaveArgs) -> anyhow::Result<()> {
     if service::state() != service::ServiceState::NotInstalled {
         service::uninstall()?;
     }
-    delete_key(&enrollment.key_entry)
+    let store = enrollment.key_store;
+    let opened = HostKeyStore::open(&dir, store).map_err(|error| key_store_error(store, error))?;
+    delete_key(&opened, &enrollment.key_entry)
         .await
-        .map_err(keyring_error)?;
+        .map_err(|error| key_store_error(store, error))?;
+    if store == KeyStore::File {
+        match fs::remove_dir(key_directory(&dir)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error).context("remove the host key directory");
+            }
+            _ => {}
+        }
+    }
     for file in [
         ENROLLMENT_FILE,
         AGENT_STATUS_FILE,
@@ -1046,26 +1029,32 @@ async fn run(_globals: &Globals) -> anyhow::Result<()> {
         "Host agent for `{}` ({}) on {}. Ctrl-C stops it.",
         enrollment.name, enrollment.host_id, enrollment.server_url
     );
+    let key_store = HostKeyStore::open(&dir, enrollment.key_store)
+        .map_err(|error| key_store_error(enrollment.key_store, error))?;
     let mut stop = StopSignal::listen()?;
     let mut backoff = Duration::from_secs(1);
     loop {
         // The key is read for each session, so unlocking the keyring is
         // noticed without a restart.
-        let key = match read_key(&enrollment.key_entry).await {
+        let key = match read_key(&key_store, &enrollment.key_entry).await {
             Ok(Some(key)) => Arc::new(key),
             Ok(None) => {
                 write_agent_status(&dir, "stopped", "the host key is missing");
                 anyhow::bail!(
-                    "this computer's host key is missing from the OS keyring; run `cw host leave` and `cw host enroll` again"
+                    "this computer's host key is missing from {}; run `cw host leave` and `cw host enroll` again",
+                    key_store_text(&dir, enrollment.key_store)
                 );
             }
             Err(error) => {
-                let detail = match error {
-                    ProtectedStoreError::AccessDenied => {
+                let detail = match (enrollment.key_store, error) {
+                    (KeyStore::Keyring, ProtectedStoreError::AccessDenied) => {
                         "waiting for a login to unlock the OS keyring that holds the host key"
                             .to_owned()
                     }
-                    other => format!("the OS keyring is unavailable: {other}"),
+                    (KeyStore::Keyring, other) => format!("the OS keyring is unavailable: {other}"),
+                    (KeyStore::File, other) => {
+                        format!("the host key file could not be read: {other}")
+                    }
                 };
                 write_agent_status(&dir, "waiting_for_key", &detail);
                 eprintln!("{detail}; retrying in {}s", KEY_RETRY.as_secs());
@@ -1319,12 +1308,23 @@ mod tests {
             server_url: "https://codewire.sh".into(),
             key_entry: "host/ed25519/00000000-0000-4000-8000-000000000002".into(),
             deployment_ca: None,
+            key_store: KeyStore::File,
         };
         let text = serde_json::to_string(&enrollment).unwrap();
+        assert!(text.contains("\"key_store\":\"file\""), "{text}");
         assert_eq!(
             serde_json::from_str::<Enrollment>(&text).unwrap(),
             enrollment
         );
         assert!(serde_json::from_str::<Enrollment>(&text.replace('}', ",\"key\":\"x\"}")).is_err());
+        // An enrollment written before #4432 has no key_store: its key is in
+        // the keyring.
+        let before = text.replace(",\"key_store\":\"file\"", "");
+        assert_eq!(
+            serde_json::from_str::<Enrollment>(&before)
+                .unwrap()
+                .key_store,
+            KeyStore::Keyring
+        );
     }
 }

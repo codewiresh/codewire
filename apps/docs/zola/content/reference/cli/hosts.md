@@ -19,7 +19,7 @@ enrolls, connects and shows its state.
 ## cw host enroll
 
 ```sh
-cw host enroll [--name NAME] [-o json]
+cw host enroll [--name NAME] [--key-store keyring|file] [-o json]
 ```
 
 Registers this computer as a host of your current organization, owned by you.
@@ -27,6 +27,16 @@ It creates the host's Ed25519 key in the OS keyring (Secret Service on Linux,
 the Keychain on macOS), proves to Codewire that this computer holds it, and
 records the host. It installs and starts nothing. `--name` defaults to this
 computer's name, as a DNS label: lowercase letters, digits and `-`.
+
+A Linux computer with no Secret Service, such as a server or a cloud VM, keeps
+the key in a file instead: one file only you can read, in a `host-key`
+directory only you can open, beside the enrollment in Codewire's config
+directory. Its safety is the filesystem's permissions and the disk's
+encryption, as with SSH host keys. The agent then comes back after a reboot
+with nobody logged in, which a keyring that only a password login unlocks
+cannot do. On Linux, `--key-store file` chooses the file even when a keyring
+exists, and `--key-store keyring` refuses to fall back. `cw host status`
+shows where the key is.
 
 ```text
 Enrolled this computer as host `build-box` (0f32162e-a4c5-4ce2-b3ae-9c62d3d69378).
@@ -53,7 +63,8 @@ Run it however you like: in a terminal, under tmux, in a container, or under
 your own init system. `cw host service install` runs it for you.
 
 If the OS keyring is locked, for example after a reboot with nobody logged in,
-the agent waits and retries every 30 seconds, and `cw host status` says so.
+the agent waits and retries every 30 seconds, and `cw host status` says so. A
+key kept in a file needs no login.
 If the host is revoked, the agent stops for good.
 
 ## cw host service install, uninstall, status
@@ -135,8 +146,9 @@ again; its name may be reused.
 cw host leave [--yes]
 ```
 
-Removes this computer's host: its record (unless it was revoked), its key in
-the OS keyring, its service if installed, and the local enrollment.
+Removes this computer's host: its record (unless it was revoked), its key
+(from the keyring or its file), its service if installed, and the local
+enrollment.
 
 ## cw hosts
 
