@@ -119,6 +119,12 @@ run_standard_family() {
     [ -z "${WEB_HOLD:-}" ] || wait_for 'grep -q "^web start " "$work/order"' || true
     return 1
   fi
+  # A real family is a list of commands: one that fails before the last
+  # fails the family only while errexit holds (run 44624: three failed
+  # design fixtures, then passing audits, and Web passed).
+  if [ "$1" = "${FAIL_STEP_FAMILY:-none}" ]; then
+    false
+  fi
   echo "$1 end $(date +%s%N)" >> "$work/order"
 }
 at() { sed -n "s/^$1 $2 //p" "$work/order"; }
@@ -149,13 +155,30 @@ grep -qF 'Contracts runs in its own job' "$work/out" || fail 'Standard did not s
 CASES=$((CASES + 1))
 
 # The first failure stops the rest: Web, still running beside it, is stopped,
-# and the families after the failed one in order never start.
+# and the families after the failed one in order never start. Each failure
+# case runs run_standard in the background, as CI runs it, never as a
+# condition: a condition turns errexit off for everything it calls.
 : > "$work/order"
 SELECTION='|valid:v3|web|go_support|sdk_go|complete|'
 rm -f "$work/release-web"
-if FAIL_FAMILY=go-support WEB_HOLD=1 run_standard > "$work/out" 2>&1; then fail 'a failed family passed'; fi
+status=0
+FAIL_FAMILY=go-support WEB_HOLD=1 run_standard > "$work/out" 2>&1 &
+wait "$!" || status=$?
+[ "$status" -ne 0 ] || fail 'a failed family passed'
 [ -n "$(at web start)" ] && [ -z "$(at web end)" ] || fail 'Web was not stopped after the first failure'
 [ -z "$(at sdk-go start)" ] || fail 'a family started after the first failure'
 CASES=$((CASES + 1))
+
+# A failed command inside a family fails it, though later commands pass.
+for family in web sdk-go; do
+  : > "$work/order"
+  SELECTION='|valid:v3|web|sdk_go|complete|'
+  status=0
+  FAIL_STEP_FAMILY="$family" run_standard > "$work/out" 2>&1 &
+  wait "$!" || status=$?
+  [ "$status" -ne 0 ] || fail "$family passed after one of its commands failed: $(cat "$work/out")"
+  [ -z "$(at "$family" end)" ] || fail "$family ran on after one of its commands failed"
+  CASES=$((CASES + 1))
+done
 
 printf '[test-standard-families] %s cases passed\n' "$CASES"

@@ -1175,7 +1175,10 @@ run_standard_in_order() {
   local family
   for family in "$@"; do
     echo "[standard] $family: start"
-    run_standard_family "$family" || return $?
+    # Not a condition: a family called on the left of || runs without
+    # errexit, so a failed command inside it, such as three failed design
+    # fixtures before passing audits, left the family green (run 44624).
+    run_standard_family "$family"
     echo "[standard] $family: finish"
   done
 }
