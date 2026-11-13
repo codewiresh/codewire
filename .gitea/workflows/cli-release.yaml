@@ -7,17 +7,21 @@ on:
         description: Existing canonical vMAJOR.MINOR.PATCH tag to recover
         required: true
         type: string
+      # A dispatch delivers what the schedule delivers unless told otherwise:
+      # with none, a recovery published only Gitea and GitHub and left
+      # releases.codewire.sh, which cw upgrade reads, without the release
+      # (v0.4.17, #4444). The channel never moves to an older release.
       r2_publication:
         description: Immutable R2 publication (requires the admitted release route)
         required: false
         type: choice
-        default: none
+        default: immutable
         options: [none, immutable]
       r2_promote_channel:
-        description: Channel to move after exact public readback (default none)
+        description: Channel to move after exact public readback (default stable)
         required: false
         type: choice
-        default: none
+        default: stable
         options: [none, stable]
 
   # A pushed, signed release tag is picked up within five minutes (owner,
@@ -1129,6 +1133,15 @@ jobs:
           ../.release-verifier/verify-release-signatures apps/cli/GPG_PUBLIC_KEY.asc \
             A38FF6BC6623FCA611A7A32B5EFBF0F4A5870815 dist/cw-release
 
+      # A published release's assets never change (#4444). Stop before
+      # anything is written when the tag's Gitea release already holds an
+      # asset with other bytes, so R2 and Gitea never disagree.
+      - name: Refuse to change an already-published release
+        working-directory: .release-source
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+        run: ../scripts/ci/release/publish-cw-release.sh --check-unchanged "$RELEASE_TAG" dist/cw-release
       - name: Publish immutable R2 release objects
         if: ${{ needs.release-selection.outputs.r2_publication == 'immutable' }}
         working-directory: .release-source

@@ -311,10 +311,12 @@ def check(text, ci_text):
     need("enable-openid-connect" not in header, "OIDC is enabled for every job")
     need(re.findall(r"^  CW_RELEASE_R2_ROUTE_ADMITTED: '([^'\n]*)'$", header, re.M) == ["true"],
          "the R2 route is not exactly the admitted true value")
-    need(re.search(r"r2_publication:\n(?:        .*\n)*?        default: none", header) is not None,
-         "R2 publication does not default to none")
-    need(re.search(r"r2_promote_channel:\n(?:        .*\n)*?        default: none", header) is not None,
-         "channel promotion does not default to none")
+    # A dispatch delivers what the schedule delivers: a recovery left without
+    # them once missed releases.codewire.sh (v0.4.17, #4444).
+    need(re.search(r"r2_publication:\n(?:        .*\n)*?        default: immutable", header) is not None,
+         "a dispatched release does not default to its R2 publication")
+    need(re.search(r"r2_promote_channel:\n(?:        .*\n)*?        default: stable", header) is not None,
+         "a dispatched release does not default to moving stable")
     need("tags:" not in header, "tag-owned workflow code may release")
     blocks = jobs(text)
     need(list(blocks) == ["pending", "release-selection", "build-runtime-linux", "build-helper-darwin", "sign-helper",
@@ -560,6 +562,7 @@ def check(text, ci_text):
              "Receive cw's release-signature verifier", "Verify the received verifier is the built verifier",
              "Reuse an already-published signed R2 release", "Sign release delivery",
              "Verify the signed delivery with cw's built-in verifier",
+             "Refuse to change an already-published release",
              "Publish immutable R2 release objects", "Receive the runtime part records",
              "Record the runtime parts this release built", "Remove the R2 publisher credential",
              "Publish signed release assets"]
@@ -568,6 +571,14 @@ def check(text, ci_text):
     need(names and names[-1] == "Publish signed release assets", "work follows mirror publication")
     by_name = dict(steps(package))
     need("secrets." not in text, "the release workflow reads a Forgejo Actions secret")
+    # Before anything is written, every R2 run included, a tag whose published
+    # assets differ from this delivery stops the run (#4444).
+    unchanged = by_name.get("Refuse to change an already-published release", "")
+    need("        if:" not in unchanged, "the published-asset check is conditional")
+    need('../scripts/ci/release/publish-cw-release.sh --check-unchanged "$RELEASE_TAG" dist/cw-release' in unchanged
+         and "GITEA_TOKEN: ${{ github.token }}" in unchanged, "the published-asset check does not compare the delivery")
+    need("fetch-openbao" not in unchanged and "GH_MIRROR" not in unchanged,
+         "the published-asset check holds more than the job token")
     sign = by_name.get("Sign release delivery", "")
     need([step for step, body in steps(package) if "fetch-openbao-release-signing-key.sh" in body]
          == ["Sign release delivery"], "the signing key is read outside the signing step")
@@ -824,8 +835,10 @@ MUTATIONS = {
                                            "          CW_RELEASE_SOURCE_SHA", 1),
     "route inactive": lambda t: t.replace("CW_RELEASE_R2_ROUTE_ADMITTED: 'true'", "CW_RELEASE_R2_ROUTE_ADMITTED: 'false'"),
     "route unknown": lambda t: t.replace("CW_RELEASE_R2_ROUTE_ADMITTED: 'true'", "CW_RELEASE_R2_ROUTE_ADMITTED: 'unknown'"),
-    "promotion default": lambda t: t.replace("        default: none\n        options: [none, stable]",
-                                             "        default: stable\n        options: [none, stable]"),
+    "promotion default": lambda t: t.replace("        default: stable\n        options: [none, stable]",
+                                             "        default: none\n        options: [none, stable]"),
+    "publication default": lambda t: t.replace("        default: immutable\n        options: [none, immutable]",
+                                               "        default: none\n        options: [none, immutable]"),
     "credential before admission": lambda t: t.replace(
         "          r2_work=\"${RUNNER_TEMP:?}/codewire-release-r2\"\n          mkdir -m 0700 \"$r2_work\"\n"
         "          ../scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh \"$r2_work/aws-credentials\"\n", "", 1)
@@ -911,6 +924,17 @@ MUTATIONS = {
     "built-in verification after R2 publication": lambda t: move_step(
         t, "Verify the signed delivery with cw's built-in verifier", "Remove the R2 publisher credential"),
     "unbound verifier": lambda t: t.replace('= "$VERIFIER_SHA256" ]', "] || true", 1),
+    "no published-asset check": lambda t: re.sub(
+        r"      - name: Refuse to change an already-published release\n(?:        .*\n|\n(?=        ))*",
+        "", t, count=1),
+    "published-asset check after R2 publication": lambda t: move_step(
+        t, "Refuse to change an already-published release", "Remove the R2 publisher credential"),
+    "conditional published-asset check": lambda t: t.replace(
+        "      - name: Refuse to change an already-published release\n",
+        "      - name: Refuse to change an already-published release\n"
+        "        if: ${{ needs.release-selection.outputs.r2_publication == 'immutable' }}\n", 1),
+    "published-asset check without the comparison": lambda t: t.replace(
+        "publish-cw-release.sh --check-unchanged", "publish-cw-release.sh --help", 1),
     "verifier compiled while signing": lambda t: t.replace(
         "          ../.release-verifier/verify-release-signatures",
         "          cargo run --locked -p codewire-cw-release --example verify-release-signatures --\n"

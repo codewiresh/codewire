@@ -183,8 +183,12 @@ if [[ "$(jq length "$release_tmp/markers.json")" -gt 0 ]]; then
   outcome=''
   [[ "$state" != pending || -z "$run_id" ]] || outcome="$(run_outcome "$run_id")"
   if [[ "$outcome" == stopped ]]; then
-    printf '::error::%s was picked up by %s, whose run ended without delivering it (%s); recover it with a dispatch of %s.yaml on main with release_tag=%s\n' \
-      "$tag" "$workflow" "$description" "$workflow" "$tag"
+    # The whole recovery: cli-release also names its public publication, which
+    # a recovery once left out (v0.4.17).
+    inputs="release_tag=$tag"
+    [[ "$workflow" != cli-release ]] || inputs+=" r2_publication=immutable r2_promote_channel=stable"
+    printf '::error::%s was picked up by %s, whose run ended without delivering it (%s); recover it with a dispatch of %s.yaml on main with %s\n' \
+      "$tag" "$workflow" "$description" "$workflow" "$inputs"
     emit ''
     exit 1
   fi

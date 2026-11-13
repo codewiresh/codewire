@@ -4,9 +4,17 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 usage: publish-cw-release.sh <vX.Y.Z> <asset-dir>
+       publish-cw-release.sh --check-unchanged <vX.Y.Z> <asset-dir>
 
 Publishes cw release assets to the Gitea source release and, when mirror
 publication is configured, to the GitHub public mirror release.
+
+A published asset never changes: one already on a release with the same
+name and the same bytes is left as it is, and one with different bytes
+stops the run. --check-unchanged only reads, the Gitea release with
+GITEA_TOKEN and the public GitHub mirror release with no token, and fails
+when any asset on either differs, so a run can stop before it publishes
+anywhere (#4444).
 
 Required:
   GITEA_TOKEN
@@ -42,6 +50,27 @@ for part in sys.argv[2].split("."):
     value = value[part]
 print(value)
 PY
+}
+
+# asset_lookup ASSETS_JSON NAME FIELD: the FIELD of the asset called NAME, or
+# nothing when the release has none.
+asset_lookup() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json
+import sys
+
+assets = json.load(open(sys.argv[1], encoding="utf-8"))
+for asset in assets:
+    if asset.get("name") == sys.argv[2]:
+        print(asset[sys.argv[3]])
+        break
+PY
+}
+
+# changed_asset HOST NAME: the stop for an asset already published with
+# different bytes.
+changed_asset() {
+  die "$2 is already published on the $1 release $tag with different bytes; a published release's assets never change, so cut the next patch release instead"
 }
 
 json_body() {
@@ -189,6 +218,11 @@ ensure_gitea_release() {
     200)
       ;;
     404)
+      if [ "$check_only" -eq 1 ]; then
+        echo "publish-cw-release: no Gitea release $tag yet; nothing published can change"
+        rm -rf "$tmp"
+        return 0
+      fi
       json_body "$tag" "$target" "$body" > "$tmp/create.json"
       status="$(api_status POST "$api/repos/$repo/releases" "$GITEA_TOKEN" "$release_json" \
         -H "Content-Type: application/json" \
@@ -211,21 +245,16 @@ ensure_gitea_release() {
     local name
     name="$(basename "$path")"
     local existing
-    existing="$(python3 - "$assets_json" "$name" <<'PY'
-import json
-import sys
-
-assets = json.load(open(sys.argv[1], encoding="utf-8"))
-for asset in assets:
-    if asset.get("name") == sys.argv[2]:
-        print(asset["id"])
-        break
-PY
-)"
+    existing="$(asset_lookup "$assets_json" "$name" browser_download_url)"
     if [ -n "$existing" ]; then
-      status="$(api_status DELETE "$api/repos/$repo/releases/$release_id/assets/$existing" "$GITEA_TOKEN" "$tmp/delete.json")"
-      [ "$status" = "204" ] || die "delete Gitea asset $name failed with HTTP $status: $(cat "$tmp/delete.json")"
+      status="$(api_status GET "$existing" "$GITEA_TOKEN" "$tmp/published" -L)"
+      [ "$status" = "200" ] || die "download Gitea asset $name failed with HTTP $status"
+      cmp -s "$tmp/published" "$path" || changed_asset Gitea "$name"
+      echo "publish-cw-release: Gitea asset $name is already published, unchanged"
+      continue
     fi
+    # Checking only: an asset not published yet has nothing to compare.
+    [ "$check_only" -eq 0 ] || continue
     status="$(api_status POST "$api/repos/$repo/releases/$release_id/assets?name=$name" "$GITEA_TOKEN" "$tmp/upload.json" \
       -F "attachment=@$path")"
     [ "$status" = "201" ] || die "upload Gitea asset $name failed with HTTP $status: $(cat "$tmp/upload.json")"
@@ -271,6 +300,49 @@ wait_for_github_tag() {
   die "GitHub mirror tag $tag did not appear for $repo"
 }
 
+# check_public_github_release TAG ASSET_DIR: every asset of the public GitHub
+# mirror release, read without a token, equals the delivery's.
+check_public_github_release() {
+  local tag="$1"
+  local asset_dir="$2"
+  local repo="${GITHUB_MIRROR_REPOSITORY:-codewiresh/codewire}"
+  local tmp status
+  tmp="$(mktemp -d)"
+  status="$(curl -sS -o "$tmp/release.json" -w '%{http_code}' \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/$repo/releases/tags/$tag")"
+  case "$status" in
+    200)
+      ;;
+    404)
+      echo "publish-cw-release: no GitHub release $tag yet; nothing published can change"
+      rm -rf "$tmp"
+      return 0
+      ;;
+    *)
+      die "read the public GitHub release $tag failed with HTTP $status"
+      ;;
+  esac
+  python3 - "$tmp/release.json" >"$tmp/assets.json" <<'PY'
+import json
+import sys
+
+json.dump(json.load(open(sys.argv[1], encoding="utf-8")).get("assets", []), sys.stdout)
+PY
+  for path in "$asset_dir"/*; do
+    [ -f "$path" ] || continue
+    local name existing
+    name="$(basename "$path")"
+    existing="$(asset_lookup "$tmp/assets.json" "$name" browser_download_url)"
+    [ -n "$existing" ] || continue
+    status="$(curl -sS -L -o "$tmp/published" -w '%{http_code}' "$existing")"
+    [ "$status" = "200" ] || die "download the public GitHub asset $name failed with HTTP $status"
+    cmp -s "$tmp/published" "$path" || changed_asset GitHub "$name"
+    echo "publish-cw-release: GitHub asset $name is already published, unchanged"
+  done
+  rm -rf "$tmp"
+}
+
 ensure_github_release() {
   local tag="$1"
   local asset_dir="$2"
@@ -312,20 +384,14 @@ ensure_github_release() {
     local name
     name="$(basename "$path")"
     local existing
-    existing="$(python3 - "$assets_json" "$name" <<'PY'
-import json
-import sys
-
-assets = json.load(open(sys.argv[1], encoding="utf-8"))
-for asset in assets:
-    if asset.get("name") == sys.argv[2]:
-        print(asset["id"])
-        break
-PY
-)"
+    existing="$(asset_lookup "$assets_json" "$name" id)"
     if [ -n "$existing" ]; then
-      status="$(github_status DELETE "https://api.github.com/repos/$repo/releases/assets/$existing" "$tmp/delete.json")"
-      [ "$status" = "204" ] || die "delete GitHub asset $name failed with HTTP $status: $(cat "$tmp/delete.json")"
+      status="$(github_status GET "https://api.github.com/repos/$repo/releases/assets/$existing" "$tmp/published" \
+        -H "Accept: application/octet-stream" -L)"
+      [ "$status" = "200" ] || die "download GitHub asset $name failed with HTTP $status"
+      cmp -s "$tmp/published" "$path" || changed_asset GitHub "$name"
+      echo "publish-cw-release: GitHub asset $name is already published, unchanged"
+      continue
     fi
     status="$(github_status POST "https://uploads.github.com/repos/$repo/releases/$release_id/assets?name=$name" "$tmp/upload.json" \
       -H "Content-Type: application/octet-stream" \
@@ -341,6 +407,11 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exit 0
 fi
 
+check_only=0
+if [ "${1:-}" = "--check-unchanged" ]; then
+  check_only=1
+  shift
+fi
 tag="${1:-}"
 asset_dir="${2:-}"
 [ -n "$tag" ] || die "tag is required"
@@ -348,6 +419,13 @@ asset_dir="${2:-}"
 [ -n "${GITEA_TOKEN:-}" ] || die "GITEA_TOKEN is required"
 [ -n "${GITHUB_SERVER_URL:-}" ] || die "GITHUB_SERVER_URL is required"
 [ -n "${GITHUB_REPOSITORY:-}" ] || die "GITHUB_REPOSITORY is required"
+
+if [ "$check_only" -eq 1 ]; then
+  ensure_gitea_release "$tag" "$asset_dir"
+  check_public_github_release "$tag" "$asset_dir"
+  echo "publish-cw-release: every asset already published for $tag is unchanged"
+  exit 0
+fi
 
 github_mirror_enabled=0
 if configure_github_mirror; then

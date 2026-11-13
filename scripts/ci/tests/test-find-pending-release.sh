@@ -229,6 +229,12 @@ for case in 'running 0 success,running,blocked' 'delivered 0 success,skipped,suc
 done
 grep -Fxq '::error::v0.4.1 was picked up by deploy-prod, whose run ended without delivering it (picked up by run 70 (id 4070)); recover it with a dispatch of deploy-prod.yaml on main with release_tag=v0.4.1' \
   "$fixture/run-failed.out" || fail "a stopped delivery did not name its recovery: $(cat "$fixture/run-failed.out")"
+# cli-release's recovery also names its public publication.
+rc=0
+FIXTURE_MARKER='release/cli-release v0.4.1' FIXTURE_RUN_JOBS='4070:success,cancelled' find_release run-cli cli-release schedule || rc=$?
+[ "$rc" = 1 ] || fail "a stopped cli-release exited $rc, not 1: $(cat "$fixture/run-cli.out")"
+grep -Fq 'recover it with a dispatch of cli-release.yaml on main with release_tag=v0.4.1 r2_publication=immutable r2_promote_channel=stable' \
+  "$fixture/run-cli.out" || fail "a stopped cli-release did not name its whole recovery: $(cat "$fixture/run-cli.out")"
 # A run whose jobs cannot be read, a marker from before markers named their
 # run, and a refusal are quiet; the next tick looks again.
 FIXTURE_MARKER='release/deploy-prod v0.4.1' FIXTURE_JOBS_STATUS=500 find_release run-unreadable deploy-prod schedule ||

@@ -36,6 +36,7 @@ cat >"$TMP/bin/curl" <<'SH'
 set -euo pipefail
 output=''
 url=''
+method=GET
 [ -z "${FIXTURE_CURL_ARG_LOG:-}" ] || printf '%q ' "$@" >>"$FIXTURE_CURL_ARG_LOG"
 [ -z "${FIXTURE_CURL_ARG_LOG:-}" ] || printf '\n' >>"$FIXTURE_CURL_ARG_LOG"
 while [ "$#" -gt 0 ]; do
@@ -53,7 +54,11 @@ while [ "$#" -gt 0 ]; do
     -w)
       shift 2
       ;;
-    -X|-H|-F|--data-binary)
+    -X)
+      method="$2"
+      shift 2
+      ;;
+    -H|-F|--data-binary)
       shift 2
       ;;
     -*)
@@ -66,14 +71,46 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$url" ]
-[ -z "${FIXTURE_CURL_LOG:-}" ] || printf '%s\n' "$url" >>"$FIXTURE_CURL_LOG"
+[ -z "${FIXTURE_CURL_LOG:-}" ] || printf '%s %s\n' "$method" "$url" >>"$FIXTURE_CURL_LOG"
+# Assets already published: FIXTURE_GITEA_PUBLISHED and FIXTURE_GITHUB_PUBLISHED
+# name directories holding them; a published release never deletes one.
+listing() { # DIR URL_PREFIX
+  local dir="$1" prefix="$2" first=1 f
+  printf '['
+  if [ -n "$dir" ]; then
+    for f in "$dir"/*; do
+      [ -f "$f" ] || continue
+      [ "$first" -eq 1 ] || printf ','
+      first=0
+      printf '{"id":"%s","name":"%s","browser_download_url":"%s%s"}' \
+        "$(basename "$f")" "$(basename "$f")" "$prefix" "$(basename "$f")"
+    done
+  fi
+  printf ']'
+}
 status=200
+[ "$method" != DELETE ] || { status=500; url=deleted; }
 case "$url" in
   */api/v1/repos/codewire/codewire/releases/tags/*)
-    body='{"id":1}'
+    if [ -n "${FIXTURE_NO_RELEASE:-}" ]; then
+      status=404
+      body='{}'
+    else
+      body='{"id":1}'
+    fi
     ;;
   */api/v1/repos/codewire/codewire/releases/1/assets)
-    body='[]'
+    body="$(listing "${FIXTURE_GITEA_PUBLISHED:-}" https://git.example.invalid/attachments/)"
+    ;;
+  https://git.example.invalid/attachments/*)
+    cat "${FIXTURE_GITEA_PUBLISHED:?}/${url##*/}" >"$output"
+    printf 200
+    exit 0
+    ;;
+  https://api.github.com/repos/codewiresh/codewire/releases/assets/*)
+    cat "${FIXTURE_GITHUB_PUBLISHED:?}/${url##*/}" >"$output"
+    printf 200
+    exit 0
     ;;
   */api/v1/repos/codewire/codewire/releases/1/assets?name=*)
     status=201
@@ -86,10 +123,20 @@ case "$url" in
     body="{\"object\":{\"type\":\"$FIXTURE_TARGET_TYPE\",\"sha\":\"$FIXTURE_TARGET_SHA\"}}"
     ;;
   https://api.github.com/repos/codewiresh/codewire/releases/tags/*)
-    body='{"id":2}'
+    if [ -n "${FIXTURE_NO_GITHUB_RELEASE:-}" ]; then
+      status=404
+      body='{}'
+    else
+      body="{\"id\":2,\"assets\":$(listing "${FIXTURE_GITHUB_PUBLISHED:-}" https://github.com/codewiresh/codewire/releases/download/v9.9.9/)}"
+    fi
+    ;;
+  https://github.com/codewiresh/codewire/releases/download/v9.9.9/*)
+    cat "${FIXTURE_GITHUB_PUBLISHED:?}/${url##*/}" >"$output"
+    printf 200
+    exit 0
     ;;
   https://api.github.com/repos/codewiresh/codewire/releases/2/assets)
-    body='[]'
+    body="$(listing "${FIXTURE_GITHUB_PUBLISHED:-}" '')"
     ;;
   https://uploads.github.com/repos/codewiresh/codewire/releases/2/assets?name=*)
     status=201
@@ -253,6 +300,79 @@ if required_output="$(
 fi
 grep -Fq 'GitHub mirror publication requires GH_MIRROR_TOKEN_FILE' \
   <<<"$required_output"
+
+# --- a published asset never changes (#4444) -------------------------------
+mkdir "$TMP/same" "$TMP/changed"
+cp "$TMP/assets/"* "$TMP/same/"
+cp "$TMP/assets/"* "$TMP/changed/"
+printf 'a different build\n' >"$TMP/changed/cw-v9.9.9-x86_64-unknown-linux-musl"
+publish_case() { # NAME [ENV=VALUE...] -- [ARGS...]: publish with these fixtures.
+  local name="$1"
+  shift
+  local envs=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
+  shift
+  : >"$TMP/$name.curl"
+  : >"$TMP/$name.args"
+  env FIXTURE_CURL="$TMP/bin/curl" GITEA_TOKEN=fixture-gitea \
+    GITHUB_SERVER_URL=https://git.example.invalid GITHUB_REPOSITORY=codewire/codewire \
+    GH_MIRROR_TOKEN_FILE="$TMP/github-token" MIRROR_CANONICAL_TAG_BIN="$TMP/bin/mirror-canonical-tag" \
+    FIXTURE_MIRROR_LOG="$TMP/mirror.log" CW_REQUIRE_GITHUB_MIRROR=1 \
+    CW_RELEASE_SOURCE_SHA="$expected_target" CW_RELEASE_TAG_OBJECT_SHA="$expected_object" \
+    FIXTURE_REF_TYPE=tag FIXTURE_REF_SHA="$expected_object" \
+    FIXTURE_TARGET_TYPE=commit FIXTURE_TARGET_SHA="$expected_target" \
+    FIXTURE_CURL_LOG="$TMP/$name.curl" FIXTURE_CURL_ARG_LOG="$TMP/$name.args" "${envs[@]}" \
+    bash "$PUBLISH" "$@" >"$TMP/$name.out" 2>&1
+}
+uploads() { grep -cE '^POST .*assets\?name=' "$TMP/$1.curl" || true; }
+# The same bytes already published on both: a retry uploads and deletes nothing.
+publish_case retry FIXTURE_GITEA_PUBLISHED="$TMP/same" FIXTURE_GITHUB_PUBLISHED="$TMP/same" -- v9.9.9 "$TMP/assets" ||
+  { echo "publish release test failed: an unchanged retry was refused: $(cat "$TMP/retry.out")" >&2; exit 1; }
+[ "$(uploads retry)" = 0 ] && ! grep -q '^DELETE' "$TMP/retry.curl" ||
+  { echo 'publish release test failed: an unchanged retry replaced an asset' >&2; exit 1; }
+grep -Fq 'GitHub asset cw-v9.9.9-x86_64-unknown-linux-musl is already published, unchanged' "$TMP/retry.out"
+# Different bytes under a published name stop the run; nothing is replaced.
+for host in Gitea GitHub; do
+  gitea="$TMP/same" github="$TMP/same"
+  [ "$host" = Gitea ] && gitea="$TMP/changed" || github="$TMP/changed"
+  if publish_case "changed-$host" FIXTURE_GITEA_PUBLISHED="$gitea" FIXTURE_GITHUB_PUBLISHED="$github" -- v9.9.9 "$TMP/assets"; then
+    echo "publish release test failed: a changed $host asset was published" >&2
+    exit 1
+  fi
+  grep -Fq "cw-v9.9.9-x86_64-unknown-linux-musl is already published on the $host release v9.9.9 with different bytes" \
+    "$TMP/changed-$host.out" || { echo "publish release test failed: $host change not named: $(cat "$TMP/changed-$host.out")" >&2; exit 1; }
+  [ "$(uploads "changed-$host")" = 0 ] && ! grep -q '^DELETE' "$TMP/changed-$host.curl" ||
+    { echo "publish release test failed: a changed $host asset was replaced" >&2; exit 1; }
+done
+# --check-unchanged reads Gitea and the public GitHub release, and publishes nothing.
+publish_case check-none FIXTURE_NO_RELEASE=1 FIXTURE_NO_GITHUB_RELEASE=1 -- --check-unchanged v9.9.9 "$TMP/assets" ||
+  { echo "publish release test failed: check refused an unpublished release: $(cat "$TMP/check-none.out")" >&2; exit 1; }
+publish_case check-same FIXTURE_GITEA_PUBLISHED="$TMP/same" FIXTURE_GITHUB_PUBLISHED="$TMP/same" -- --check-unchanged v9.9.9 "$TMP/assets" ||
+  { echo "publish release test failed: check refused an unchanged release: $(cat "$TMP/check-same.out")" >&2; exit 1; }
+if publish_case check-changed FIXTURE_GITEA_PUBLISHED="$TMP/changed" -- --check-unchanged v9.9.9 "$TMP/assets"; then
+  echo 'publish release test failed: check passed a changed asset' >&2
+  exit 1
+fi
+# A GitHub asset that already differs is caught before anything is written.
+if publish_case check-changed-github FIXTURE_GITEA_PUBLISHED="$TMP/same" FIXTURE_GITHUB_PUBLISHED="$TMP/changed" \
+    -- --check-unchanged v9.9.9 "$TMP/assets"; then
+  echo 'publish release test failed: check passed a changed GitHub asset' >&2
+  exit 1
+fi
+grep -Fq 'is already published on the GitHub release v9.9.9 with different bytes' "$TMP/check-changed-github.out" ||
+  { echo "publish release test failed: the GitHub change was not named: $(cat "$TMP/check-changed-github.out")" >&2; exit 1; }
+# A release that exists without an asset yet: nothing to compare, nothing uploaded.
+mkdir "$TMP/none-yet"
+publish_case check-partial FIXTURE_GITEA_PUBLISHED="$TMP/none-yet" FIXTURE_GITHUB_PUBLISHED="$TMP/none-yet" -- --check-unchanged v9.9.9 "$TMP/assets" ||
+  { echo "publish release test failed: check refused a release missing an asset: $(cat "$TMP/check-partial.out")" >&2; exit 1; }
+for name in check-none check-same check-changed check-changed-github check-partial; do
+  ! grep -qE '^(POST|DELETE|PATCH) ' "$TMP/$name.curl" ||
+    { echo "publish release test failed: $name wrote: $(cat "$TMP/$name.curl")" >&2; exit 1; }
+  ! grep -qE -- '--config|ghs_' "$TMP/$name.args" ||
+    { echo "publish release test failed: $name held the GitHub token" >&2; exit 1; }
+done
+grep -q '^GET https://api.github.com/repos/codewiresh/codewire/releases/tags/v9.9.9$' "$TMP/check-same.curl" ||
+  { echo 'publish release test failed: check did not read the public GitHub release' >&2; exit 1; }
 
 expect_failure flattened-tag 'is not an annotated tag object' \
   commit "$expected_target" commit "$expected_target"
