@@ -139,10 +139,17 @@ trip; the configuration is in [../CONFIGURATION.md](../CONFIGURATION.md).
 
 ## Accounts waiting for access
 
+Every email sign-up verifies its address before it signs in, invite code or
+not (owner, 2026-11-13, #4481). A password proves only who chose it, so the
+sign-up starts no session; it answers `202` with `verificationPending` and
+emails a 24-hour link. A valid invite code only enables the account, so it
+signs in once verified; without one, the sign-up is an access request.
+
 An access request is a disabled account. Sign-in checks the password before
 access, so only the right password learns why it was refused: `403
-email_unverified` while the email is unverified, otherwise `403
-account_disabled`. The dashboard shows "You're on the list" for the second.
+email_unverified` while the email is unverified, whether or not the account is
+enabled, otherwise `403 account_disabled`. The dashboard shows "You're on the
+list" for the second.
 
 With `email_unverified` the IdP returns `resendToken`, a 10-minute,
 single-use token bound to the user id and stored hashed as a

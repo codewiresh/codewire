@@ -7,6 +7,10 @@ authors.workspace = true
 license = "AGPL-3.0-only"
 description = "Codewire transactional email delivery"
 
+[features]
+# A transport that keeps sent mail in memory, for other crates' tests.
+test-support = []
+
 [dependencies]
 anyhow = { workspace = true }
 aws-credential-types = { workspace = true }

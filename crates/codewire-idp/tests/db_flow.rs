@@ -3031,12 +3031,27 @@ async fn session_auth_flow_against_postgres() {
     let invite_policy =
         codewire_idp::auth_session::SignupInvitePolicy::from_sha256_hashes(Some(&invite_hash))
             .unwrap();
-    let app = codewire_idp::auth_session::router(pool.clone(), false, invite_policy);
+    let undeliverable =
+        codewire_idp::auth_session::router(pool.clone(), false, invite_policy.clone());
+    let (mail, outbox) = codewire_email::EmailClient::recording();
+    let app = codewire_idp::auth_session::router_with_email(
+        pool.clone(),
+        false,
+        invite_policy,
+        "https://app.codewire.test".to_owned(),
+        mail,
+    );
+    let verify_app = codewire_idp::email_password::router(
+        pool.clone(),
+        "https://app.codewire.test".to_string(),
+        codewire_email::EmailClient::disabled(),
+        AuthState { pool: pool.clone() },
+    );
 
     // 1. A wrong configured invite enters review and fails closed when review
     // email delivery is unavailable, before any user is inserted.
     let (st, body, _) = sess_req(
-        &app,
+        &undeliverable,
         "POST",
         "/api/auth/sign-up",
         None,
@@ -3056,7 +3071,9 @@ async fn session_auth_flow_against_postgres() {
         "undeliverable review request must not create an account"
     );
 
-    // 2. A configured valid invite signs up and returns a session.
+    // 2. A configured valid invite enables the account, but the sign-up
+    // signs no one in: the password proves only who chose it, so the account
+    // waits for its address's owner to open the emailed link (#4481).
     let (st, body, cookie) = sess_req(
         &app,
         "POST",
@@ -3067,8 +3084,73 @@ async fn session_auth_flow_against_postgres() {
         ),
     )
     .await;
-    assert_eq!(st, 200, "signup: {body}");
+    assert_eq!(st, 202, "signup: {body}");
     assert_eq!(body["user"]["email"], email);
+    assert_eq!(body["verificationPending"], true);
+    assert!(
+        body.get("accessPending").is_none(),
+        "an invite skips review: {body}"
+    );
+    assert!(body.get("session").is_none() && cookie.is_none());
+    let (enabled, sessions): (bool, i64) = sqlx::query_as(
+        "SELECT u.enabled, (SELECT count(*) FROM sessions s WHERE s.user_id = u.id) \
+         FROM users u WHERE u.email = $1",
+    )
+    .bind(email)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((enabled, sessions), (true, 0));
+
+    // The right password before verification learns only that the address
+    // needs verifying.
+    let (st, body, cookie) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-in",
+        None,
+        &format!(r#"{{"email":"{email}","password":"{pw}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 403, "sign-in before verification: {body}");
+    assert_eq!(body["code"], "email_unverified");
+    assert!(body["resendToken"].as_str().is_some_and(|t| !t.is_empty()));
+    assert!(cookie.is_none());
+
+    // The address's owner opens the link; then the password signs in.
+    let sent = outbox.sent();
+    assert_eq!(sent.len(), 1, "one verification email");
+    assert_eq!(sent[0].to, email);
+    assert_eq!(sent[0].subject, "Verify your Codewire email");
+    // The owner's wording (2026-11-13, #4481): it tells a person who didn't
+    // sign up to ignore it, and that ignoring it leaves nothing usable.
+    for line in [
+        "Someone created a Codewire account with this address. If it was you, verify your email to finish setting it up.",
+        "If it wasn't you, ignore this email. Nobody can sign in to the account unless this link is opened.",
+        "This link expires in 24 hours.",
+    ] {
+        assert!(sent[0].html.contains(line), "{line}");
+    }
+    let verify_token = emailed_token(&sent[0].html, "/verify-email?token=");
+    let (st, body, _) = sess_req(
+        &verify_app,
+        "GET",
+        &format!("/api/auth/verify-email?token={verify_token}"),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, 200, "verify: {body}");
+    assert!(body.get("accessPending").is_none() || body["accessPending"] == false);
+    let (st, body, cookie) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-in",
+        None,
+        &format!(r#"{{"email":"{email}","password":"{pw}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "sign-in after verification: {body}");
     assert!(body["session"].get("token").is_none());
     assert!(
         cookie
@@ -3146,7 +3228,9 @@ async fn session_auth_flow_against_postgres() {
 
     // 7. Disabling an account invalidates its existing session without
     // refreshing it, and prevents a correct password from minting another.
-    sqlx::query("UPDATE users SET enabled=false WHERE email=$1")
+    // The account is also returned to unverified, the state of an access
+    // request whose link was lost, for the resend steps below.
+    sqlx::query("UPDATE users SET enabled=false, email_verified=false WHERE email=$1")
         .bind(email)
         .execute(&pool)
         .await
@@ -4264,10 +4348,12 @@ async fn two_factor_attempts_lock_account_against_postgres() {
     };
     cleanup(pool.clone()).await;
 
-    let app = codewire_idp::auth_session::router(
+    let app = codewire_idp::auth_session::router_with_email(
         pool.clone(),
         false,
         codewire_idp::auth_session::SignupInvitePolicy::open(),
+        "https://app.codewire.test".to_owned(),
+        codewire_email::EmailClient::recording().0,
     )
     .merge(codewire_idp::two_factor::router(
         pool.clone(),
@@ -4276,9 +4362,10 @@ async fn two_factor_attempts_lock_account_against_postgres() {
         AuthState { pool: pool.clone() },
     ));
 
-    // Create a real credential account, then enable and verify 2FA through
-    // the same HTTP handlers used by the login page.
-    let (st, body, cookie) = sess_req(
+    // Create a real credential account and sign in once its email is
+    // verified, then enable and verify 2FA through the same HTTP handlers
+    // used by the login page.
+    let (st, body, _) = sess_req(
         &app,
         "POST",
         "/api/auth/sign-up",
@@ -4286,7 +4373,21 @@ async fn two_factor_attempts_lock_account_against_postgres() {
         &format!(r#"{{"email":"{email}","password":"{password}","name":"2FA Lockout"}}"#),
     )
     .await;
-    assert_eq!(st, 200, "sign up: {body}");
+    assert_eq!(st, 202, "sign up: {body}");
+    sqlx::query("UPDATE users SET email_verified = true WHERE email = $1")
+        .bind(email)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, body, cookie) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-in",
+        None,
+        &format!(r#"{{"email":"{email}","password":"{password}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "sign in: {body}");
     assert!(body["session"].get("token").is_none());
     let session = session_token_from_set_cookie(cookie.as_deref().unwrap());
     let user: String = sqlx::query_scalar("SELECT id FROM users WHERE email=$1")
@@ -4685,6 +4786,15 @@ fn session_token_from_set_cookie(set_cookie: &str) -> String {
         .filter(|value| !value.is_empty())
         .expect("non-empty HttpOnly session cookie")
         .to_owned()
+}
+
+/// The token in an emailed link `<origin><path_and_query><token>`.
+fn emailed_token(html: &str, path_and_query: &str) -> String {
+    let start = html.find(path_and_query).expect("emailed link") + path_and_query.len();
+    html[start..]
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect()
 }
 
 fn current_totp_code(secret: &str, account_name: &str) -> String {

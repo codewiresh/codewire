@@ -239,8 +239,9 @@ pub(crate) async fn send_verification_email(
     let html = format!(
         r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
 	<h2>Verify your email</h2>
-	<p>Please verify your email address by clicking the link below:</p>
-	<p><a href="{verify_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;">Verify Email</a></p>
+	<p>Someone created a Codewire account with this address. If it was you, verify your email to finish setting it up.</p>
+	<p><a href="{verify_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;">Verify email</a></p>
+	<p>If it wasn't you, ignore this email. Nobody can sign in to the account unless this link is opened.</p>
 	<p style="color: #666; font-size: 14px;">This link expires in 24 hours.</p>
 </div>"#
     );

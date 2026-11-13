@@ -84,6 +84,29 @@ enum Delivery {
     Disabled,
     Resend(ResendDelivery),
     Ses(SesDelivery),
+    #[cfg(feature = "test-support")]
+    Recording(Outbox),
+}
+
+/// One message a recording client accepted.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug)]
+pub struct SentEmail {
+    pub to: String,
+    pub subject: String,
+    pub html: String,
+}
+
+/// What a recording client has sent, in order.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug, Default)]
+pub struct Outbox(Arc<std::sync::Mutex<Vec<SentEmail>>>);
+
+#[cfg(feature = "test-support")]
+impl Outbox {
+    pub fn sent(&self) -> Vec<SentEmail> {
+        self.0.lock().expect("outbox lock").clone()
+    }
 }
 
 /// The active transactional-email transport. This is intentionally safe to
@@ -93,6 +116,8 @@ pub enum EmailProvider {
     Disabled,
     Resend,
     Ses,
+    #[cfg(feature = "test-support")]
+    Recording,
 }
 
 /// The legacy credential stays within the dedicated delivery client. It is
@@ -172,6 +197,17 @@ impl EmailClient {
         }
     }
 
+    /// Returns a configured client that keeps every message in memory instead
+    /// of sending it, for other crates' tests.
+    #[cfg(feature = "test-support")]
+    pub fn recording() -> (Self, Outbox) {
+        let outbox = Outbox::default();
+        let client = Self {
+            delivery: Arc::new(Delivery::Recording(outbox.clone())),
+        };
+        (client, outbox)
+    }
+
     /// Returns the selected transactional-email transport without exposing
     /// configuration or credentials.
     pub fn provider(&self) -> EmailProvider {
@@ -179,6 +215,8 @@ impl EmailClient {
             Delivery::Disabled => EmailProvider::Disabled,
             Delivery::Resend(..) => EmailProvider::Resend,
             Delivery::Ses(..) => EmailProvider::Ses,
+            #[cfg(feature = "test-support")]
+            Delivery::Recording(..) => EmailProvider::Recording,
         }
     }
 
@@ -226,6 +264,17 @@ impl EmailClient {
                     .await
                     .context("send SES email")?;
                 ensure_ses_success(response).await
+            }
+            #[cfg(feature = "test-support")]
+            Delivery::Recording(outbox) => {
+                validate_mailbox(to, "recipient")?;
+                validate_subject(subject)?;
+                outbox.0.lock().expect("outbox lock").push(SentEmail {
+                    to: to.to_owned(),
+                    subject: subject.to_owned(),
+                    html: html.to_owned(),
+                });
+                Ok(())
             }
         }
     }

@@ -48,10 +48,8 @@ use rand::RngCore;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::fmt;
-use std::sync::Arc;
 
 use argon2::password_hash::SaltString;
 use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
@@ -72,6 +70,10 @@ pub(crate) use session_inventory::{
 };
 
 /// Web session lifetime: 8 hours (`auth.SessionDuration`, 28800s).
+mod signup_policy;
+
+pub use signup_policy::SignupInvitePolicy;
+
 pub(crate) const SESSION_DURATION_SECS: i64 = 8 * 60 * 60;
 /// Account lockout window after 5 failed sign-ins: 15 minutes.
 pub(crate) const LOCKOUT_DURATION_SECS: i64 = 15 * 60;
@@ -80,126 +82,9 @@ pub(crate) const TWO_FACTOR_TOKEN_TTL_SECS: i64 = 10 * 60;
 /// Failed-attempt threshold that triggers the lockout.
 pub(crate) const MAX_FAILED_ATTEMPTS: i32 = 5;
 
-const SIGNUP_INVITE_CODE_HASHES_ENV: &str = "IDP_SIGNUP_INVITE_CODE_HASHES";
-const SHA256_DIGEST_BYTES: usize = 32;
-const SHA256_HEX_CHARS: usize = SHA256_DIGEST_BYTES * 2;
 pub(crate) const MAX_ACCESS_REASON_CHARS: usize = 2_000;
 const MAX_TURNSTILE_TOKEN_BYTES: usize = 2_048;
 const TURNSTILE_SITEVERIFY_URL: &str = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
-
-/// Configuration-owned signup invite policy.
-///
-/// Runtime configuration sends signups through access review when the hash
-/// list is empty. Trusted tests can opt into the explicit open-signup policy.
-/// A configured policy stores only fixed-size SHA-256 digests; plaintext
-/// invite codes are never retained.
-#[derive(Clone, Default)]
-pub struct SignupInvitePolicy {
-    accepted_hashes: Arc<[[u8; SHA256_DIGEST_BYTES]]>,
-    open_signup: bool,
-}
-
-impl fmt::Debug for SignupInvitePolicy {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SignupInvitePolicy")
-            .field("configured", &self.is_configured())
-            .field("open_signup", &self.open_signup)
-            .field("accepted_hash_count", &self.accepted_hashes.len())
-            .finish()
-    }
-}
-
-impl SignupInvitePolicy {
-    /// Construct the explicit open-signup policy used by trusted tests.
-    pub fn open() -> Self {
-        Self {
-            accepted_hashes: Arc::default(),
-            open_signup: true,
-        }
-    }
-
-    /// Parse an optional comma-separated list of lowercase SHA-256 hex
-    /// digests. Absent or whitespace-only input selects access review.
-    pub fn from_sha256_hashes(value: Option<&str>) -> anyhow::Result<Self> {
-        let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-            return Ok(Self::default());
-        };
-
-        let mut accepted_hashes = Vec::new();
-        for encoded in value.split(',').map(str::trim) {
-            let digest = decode_sha256_digest(encoded)?;
-            if accepted_hashes.contains(&digest) {
-                anyhow::bail!("{SIGNUP_INVITE_CODE_HASHES_ENV} contains a duplicate digest");
-            }
-            accepted_hashes.push(digest);
-        }
-
-        Ok(Self {
-            accepted_hashes: accepted_hashes.into(),
-            open_signup: false,
-        })
-    }
-
-    /// Whether signup requires one of the configured invite codes.
-    pub fn is_configured(&self) -> bool {
-        !self.accepted_hashes.is_empty()
-    }
-
-    pub(crate) fn accepts(&self, invite_code: &str) -> bool {
-        if self.open_signup {
-            return true;
-        }
-        if !self.is_configured() || invite_code.is_empty() {
-            return false;
-        }
-
-        let candidate: [u8; SHA256_DIGEST_BYTES] = Sha256::digest(invite_code.as_bytes()).into();
-        let mut accepted = 0u8;
-        for expected in self.accepted_hashes.iter() {
-            accepted |= constant_time_digest_eq(&candidate, expected);
-        }
-        accepted == 1
-    }
-}
-
-fn decode_sha256_digest(encoded: &str) -> anyhow::Result<[u8; SHA256_DIGEST_BYTES]> {
-    let bytes = encoded.as_bytes();
-    if bytes.len() != SHA256_HEX_CHARS
-        || !bytes
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-    {
-        anyhow::bail!(
-            "{SIGNUP_INVITE_CODE_HASHES_ENV} entries must be {SHA256_HEX_CHARS}-character lowercase SHA-256 hex digests"
-        );
-    }
-
-    let mut digest = [0u8; SHA256_DIGEST_BYTES];
-    for (index, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
-        digest[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
-    }
-    Ok(digest)
-}
-
-fn hex_nibble(byte: u8) -> u8 {
-    match byte {
-        b'0'..=b'9' => byte - b'0',
-        b'a'..=b'f' => byte - b'a' + 10,
-        _ => unreachable!("digest syntax is validated before decoding"),
-    }
-}
-
-fn constant_time_digest_eq(
-    left: &[u8; SHA256_DIGEST_BYTES],
-    right: &[u8; SHA256_DIGEST_BYTES],
-) -> u8 {
-    let mut difference = 0u8;
-    for (left, right) in left.iter().zip(right) {
-        difference |= left ^ right;
-    }
-    u8::from(difference == 0)
-}
 
 #[derive(Clone)]
 pub(crate) enum HumanVerification {
@@ -334,6 +219,9 @@ pub(crate) struct SignUpResponseBody {
     session: Option<SessionResponse>,
     #[serde(rename = "accessPending", skip_serializing_if = "is_false")]
     access_pending: bool,
+    /// The account signs in only after its email is verified (#4481).
+    #[serde(rename = "verificationPending", skip_serializing_if = "is_false")]
+    verification_pending: bool,
 }
 
 #[derive(Serialize)]
@@ -613,8 +501,8 @@ fn unauthorized(detail: &'static str) -> AppError {
     }
 }
 
-/// The answer to the right password for a disabled account that never
-/// verified its email, such as an access request whose link was lost. It
+/// The answer to the right password for an account that never verified its
+/// email, such as a sign-up whose link was lost. It
 /// carries a 10-minute, single-use token for `/api/auth/resend-verification`,
 /// stored hashed. It comes only after the password matched, so it tells a
 /// stranger nothing.
@@ -928,10 +816,13 @@ fn pending_access_user_response(row: &PendingAccessSignupRow) -> UserResponse {
     }
 }
 
-async fn deliver_pending_signup_verification(
+/// Send a sign-up's verification link. An account an invite code enabled
+/// signs in once it verifies; an access request then waits for review.
+async fn deliver_signup_verification(
     state: &SessionAuthState,
     user: UserResponse,
     token: String,
+    access_pending: bool,
 ) -> Result<Response, AppError> {
     let verify_url = format!(
         "{}/verify-email?token={token}",
@@ -940,7 +831,7 @@ async fn deliver_pending_signup_verification(
     if let Err(error) = send_verification_email(&state.email, &user.email, &verify_url).await {
         tracing::error!(%error, user_id = %user.id, "failed to send signup verification email");
         return Err(AppError::ServiceUnavailable(
-            "Your access request was saved, but email delivery is temporarily unavailable. Try again shortly."
+            "Your account was saved, but email delivery is temporarily unavailable. Try again shortly."
                 .into(),
         ));
     }
@@ -949,7 +840,8 @@ async fn deliver_pending_signup_verification(
         Json(SignUpResponseBody {
             user,
             session: None,
-            access_pending: true,
+            access_pending,
+            verification_pending: true,
         }),
     )
         .into_response())
@@ -1021,7 +913,7 @@ async fn retry_pending_signup(
         "info",
     )
     .await;
-    deliver_pending_signup_verification(state, pending_access_user_response(&user), token)
+    deliver_signup_verification(state, pending_access_user_response(&user), token, true)
         .await
         .map(Some)
 }
@@ -1053,7 +945,9 @@ async fn sign_up(
             "Tell us why you want to use Codewire".into(),
         ));
     }
-    if !enabled && !state.email.is_configured() {
+    // Every email sign-up verifies its address before it signs in; an invite
+    // code only enables the account (#4481).
+    if !state.email.is_configured() {
         return Err(AppError::ServiceUnavailable(
             "Email verification is temporarily unavailable".into(),
         ));
@@ -1132,19 +1026,13 @@ async fn sign_up(
         AppError::InternalMsg("Failed to create account".into())
     })?;
 
-    let verification_token = if enabled {
-        None
-    } else {
-        Some(
-            create_verification_in_transaction(
-                &mut tx,
-                &req.email,
-                VerificationPurpose::EmailVerification,
-                Duration::hours(24),
-            )
-            .await?,
-        )
-    };
+    let verification_token = create_verification_in_transaction(
+        &mut tx,
+        &req.email,
+        VerificationPurpose::EmailVerification,
+        Duration::hours(24),
+    )
+    .await?;
 
     tx.commit().await.map_err(|e| {
         tracing::error!(error = %e, "failed to commit tx");
@@ -1179,23 +1067,9 @@ async fn sign_up(
         created_at: format_time(created_at),
     };
 
-    if !enabled {
-        let token = verification_token.expect("pending signups create a verification token");
-        return deliver_pending_signup_verification(&state, user, token).await;
-    }
-
-    let created_session = create_session(&state.pool, &user_id, &ip, &ua)
-        .await
-        .map_err(|_| AppError::InternalMsg("Account created but session failed".into()))?;
-    let body = SignUpResponseBody {
-        user,
-        session: Some(created_session.response),
-        access_pending: false,
-    };
-    Ok(with_cookie(
-        session_cookie_string(&created_session.token, state.secure),
-        Json(body),
-    ))
+    // No session: the password proves only who chose it, so the account signs
+    // in once the address's owner has verified it (#4481).
+    deliver_signup_verification(&state, user, verification_token, !enabled).await
 }
 
 /// `POST /api/auth/sign-in` (public).
@@ -1278,10 +1152,12 @@ async fn sign_in(
         return Err(unauthorized("Invalid email or password"));
     }
 
+    // An unverified address signs in to nothing, invite code or not: the
+    // password proves only who chose it (#4481).
+    if !user.email_verified.unwrap_or(false) {
+        return email_unverified(&state.pool, &user.id).await;
+    }
     if !user.enabled {
-        if !user.email_verified.unwrap_or(false) {
-            return email_unverified(&state.pool, &user.id).await;
-        }
         return Err(account_disabled());
     }
 
@@ -1582,6 +1458,21 @@ pub fn router(pool: PgPool, secure: bool, signup_invite_policy: SignupInvitePoli
     ))
 }
 
+/// [`router`] with email delivery, for in-process tests of sign-ups, which
+/// verify their address before they sign in.
+pub fn router_with_email(
+    pool: PgPool,
+    secure: bool,
+    signup_invite_policy: SignupInvitePolicy,
+    frontend_url: String,
+    email: EmailClient,
+) -> Router {
+    let mut state =
+        SessionAuthState::trusted_test(pool, secure, signup_invite_policy, frontend_url);
+    state.email = email;
+    router_with_state(state)
+}
+
 pub fn router_with_signup_delivery(
     pool: PgPool,
     secure: bool,
@@ -1678,58 +1569,6 @@ fn router_with_state(state: SessionAuthState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn invite_digest(invite_code: &str) -> String {
-        format!("{:x}", Sha256::digest(invite_code.as_bytes()))
-    }
-
-    #[test]
-    fn signup_invite_policy_requires_review_without_hashes() {
-        for value in [None, Some(""), Some("   ")] {
-            let policy = SignupInvitePolicy::from_sha256_hashes(value).unwrap();
-            assert!(!policy.is_configured());
-            assert!(!policy.accepts(""));
-            assert!(!policy.accepts("any-value"));
-        }
-
-        let open = SignupInvitePolicy::open();
-        assert!(open.accepts(""));
-        assert!(open.accepts("any-value"));
-    }
-
-    #[test]
-    fn configured_signup_invite_policy_accepts_only_matching_values() {
-        let first = invite_digest("synthetic-invite-one");
-        let second = invite_digest("synthetic-invite-two");
-        let configured = format!("{first}, {second}");
-        let policy = SignupInvitePolicy::from_sha256_hashes(Some(&configured)).unwrap();
-
-        assert!(policy.is_configured());
-        assert!(policy.accepts("synthetic-invite-one"));
-        assert!(policy.accepts("synthetic-invite-two"));
-        assert!(!policy.accepts(""));
-        assert!(!policy.accepts("synthetic-invite-three"));
-
-        let debug = format!("{policy:?}");
-        assert!(!debug.contains(&first));
-        assert!(!debug.contains("synthetic-invite"));
-    }
-
-    #[test]
-    fn signup_invite_policy_rejects_invalid_hash_configuration() {
-        let digest = invite_digest("synthetic-invite");
-        for value in [
-            "abc".to_owned(),
-            "A".repeat(SHA256_HEX_CHARS),
-            "g".repeat(SHA256_HEX_CHARS),
-            format!("{digest},"),
-            format!("{digest},{digest}"),
-        ] {
-            let error = SignupInvitePolicy::from_sha256_hashes(Some(&value)).unwrap_err();
-            assert!(error.to_string().contains(SIGNUP_INVITE_CODE_HASHES_ENV));
-            assert!(!error.to_string().contains("synthetic-invite"));
-        }
-    }
 
     #[test]
     fn turnstile_validation_binds_success_to_action_and_hostname() {

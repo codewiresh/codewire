@@ -46,6 +46,7 @@ url = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+codewire-email = { workspace = true, features = ["test-support"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { workspace = true }

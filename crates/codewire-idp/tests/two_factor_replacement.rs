@@ -8,7 +8,9 @@
 
 use axum::http::{HeaderMap, Request};
 use axum::{Router, body::Body};
-use codewire_idp::auth_session::{SignupInvitePolicy, router, router_with_signup_delivery};
+use codewire_idp::auth_session::{
+    SignupInvitePolicy, router_with_email, router_with_signup_delivery,
+};
 use codewire_server_core::auth::{AuthState, hash_session_token};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -68,7 +70,13 @@ struct Apps {
 
 fn apps(pool: &PgPool) -> Apps {
     Apps {
-        signup: router(pool.clone(), true, SignupInvitePolicy::open()),
+        signup: router_with_email(
+            pool.clone(),
+            true,
+            SignupInvitePolicy::open(),
+            ORIGIN.into(),
+            codewire_email::EmailClient::recording().0,
+        ),
         account: router_with_signup_delivery(
             pool.clone(),
             true,
@@ -211,8 +219,8 @@ async fn cleanup(pool: &PgPool, email: &str) {
         .unwrap();
 }
 
-/// A credential account that signed up, enabled and verified a factor through
-/// the real handlers. Enrollment records its verification step; clearing it
+/// A credential account that signed up, verified its email, signed in, and
+/// enabled and verified a factor through the real handlers. Enrollment records its verification step; clearing it
 /// stands in for time passing so each test chooses its own proof steps.
 async fn enrolled(pool: &PgPool, apps: &Apps, label: &str) -> Enrolled {
     let email = format!("{label}@two-factor-replacement.test");
@@ -225,8 +233,22 @@ async fn enrolled(pool: &PgPool, apps: &Apps, label: &str) -> Enrolled {
         json!({"email": email, "password": PASSWORD, "name": label}),
     )
     .await;
-    assert_eq!(signed_up.status, 200, "sign up: {}", signed_up.body);
-    let session = cookie_token(signed_up.set_cookie.as_deref().unwrap());
+    assert_eq!(signed_up.status, 202, "sign up: {}", signed_up.body);
+    sqlx::query("UPDATE users SET email_verified = true WHERE email = $1")
+        .bind(&email)
+        .execute(pool)
+        .await
+        .unwrap();
+    let signed_in = call(
+        &apps.signup,
+        "POST",
+        "/api/auth/sign-in",
+        Call::default(),
+        json!({"email": email, "password": PASSWORD}),
+    )
+    .await;
+    assert_eq!(signed_in.status, 200, "sign in: {}", signed_in.body);
+    let session = cookie_token(signed_in.set_cookie.as_deref().unwrap());
     let enabled = call(
         &apps.factor,
         "POST",
