@@ -9,12 +9,19 @@
 //! The client's first request opens the attachment (`open`); then it sends
 //! stdin, resize and detach. Closing the channel detaches, and the session
 //! keeps running. The server reports a refusal or failure on the channel's
-//! stderr and ends it with exit status 1.
+//! stderr and ends it with exit status 1, or with
+//! [`TEMPORARY_FAILURE_EXIT`] when the session's daemon stopped answering.
 
 use buffa::Message;
 
 /// The SSH subsystem name a client requests on a session channel.
 pub const SESSION_SUBSYSTEM: &str = "session@codewire.sh";
+
+/// The exit status a server ends the channel with when the session's daemon
+/// stopped answering, such as while its sandbox restarts (#4342): worth trying
+/// again, as `EX_TEMPFAIL` says. Exit status 1 is a refusal, final for the
+/// client. A server from before this ends every failure with 1.
+pub const TEMPORARY_FAILURE_EXIT: u32 = 75;
 
 /// The largest encoded message either side sends or accepts.
 pub const MAX_FRAME_BYTES: usize = 256 * 1024;

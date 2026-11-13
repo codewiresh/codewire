@@ -602,10 +602,7 @@ async fn drive_attachment(
                     // The attachment ended normally: detached, or the
                     // session finished and its last status was sent.
                     Some(0) => None,
-                    Some(_) => Some(ClientError::new(
-                        ErrorCode::FailedPrecondition,
-                        String::from_utf8_lossy(&stderr).trim().to_owned(),
-                    )),
+                    Some(status) => Some(relay_failure(status, &stderr)),
                     // No exit status: the connection dropped under it.
                     None => Some(ClientError::from(ConnectError::unavailable(
                         "the tailnet SSH connection was lost",
@@ -618,6 +615,19 @@ async fn drive_attachment(
     if let Some(error) = ended {
         let _ = terminal_error.send(Some(error.clone()));
         let _ = output.send(Err(error)).await;
+    }
+}
+
+/// How the environment's relay ended a session attachment with an error. Its
+/// daemon having stopped answering, as while the sandbox restarts, is worth
+/// trying again (#4342); any other status is a refusal. A relay from before
+/// that distinction ends every failure with 1, which stays a refusal.
+fn relay_failure(status: u32, stderr: &[u8]) -> ClientError {
+    let message = String::from_utf8_lossy(stderr).trim().to_owned();
+    if status == crate::session_wire::TEMPORARY_FAILURE_EXIT {
+        ClientError::from(ConnectError::unavailable(message))
+    } else {
+        ClientError::new(ErrorCode::FailedPrecondition, message)
     }
 }
 

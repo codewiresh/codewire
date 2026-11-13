@@ -23,6 +23,7 @@ use crate::{
     LaunchSessionRequest, SshTransportMode, attach_session_request, attach_session_response,
 };
 pub use input_stream::{InputNotice, InputStream};
+use restart::ServerAnswer as _;
 
 /// How long the shell keeps running with no client attached (owner,
 /// 2026-11-01, on #3827), and so how long a client keeps trying to reattach
@@ -74,6 +75,9 @@ pub enum ShellNotice {
     /// After a reattach: the keys typed during the drop were sent again, or
     /// were lost (#3993).
     Input(InputNotice),
+    /// The environment is restarting, such as when its runtime is replaced
+    /// (#4342); the shell waits for it. Once per restart.
+    Restarting,
 }
 
 /// The local end of a hosted shell: where its keys come from, where its
@@ -135,21 +139,31 @@ pub async fn run(
     launch: ShellLaunch,
     terminal: &mut impl ShellTerminal,
 ) -> Result<i32, HostedShellError> {
-    let launched = client
-        .launch_session(LaunchSessionRequest {
-            org_id: org_id.into(),
-            environment_id: environment_id.into(),
-            command: launch.command,
-            env: launch.env.into_iter().collect(),
-            pty: true,
-            term: launch.term,
-            columns: launch.columns.into(),
-            rows: launch.rows.into(),
-            end_after_detached_seconds: SHELL_GRACE.as_secs() as u32,
-            ..Default::default()
-        })
-        .await
-        .map_err(HostedShellError::Client)?;
+    let ask = || restart::ask_environment(client, org_id, environment_id);
+    let request = LaunchSessionRequest {
+        org_id: org_id.into(),
+        environment_id: environment_id.into(),
+        command: launch.command,
+        env: launch.env.into_iter().collect(),
+        pty: true,
+        term: launch.term,
+        columns: launch.columns.into(),
+        rows: launch.rows.into(),
+        end_after_detached_seconds: SHELL_GRACE.as_secs() as u32,
+        ..Default::default()
+    };
+    // Started while the environment restarts, the shell waits for it (#4342).
+    let launched = restart::through_restart(
+        &ask,
+        || terminal.notice(ShellNotice::Restarting),
+        || async {
+            client
+                .launch_session(request.clone())
+                .await
+                .map_err(HostedShellError::Client)
+        },
+    )
+    .await?;
     let session_id = launched
         .session
         .as_option()
@@ -190,11 +204,29 @@ pub async fn run(
                 };
                 pump(attachment, output_offset, &mut input_stream, terminal, back).await?
             }
-            Err(error) if dropped_at.is_some() => {
+            Err(error) => {
+                // A restart is waited out and doesn't count as a lost network
+                // (#4342): its time can outlast SHELL_GRACE, and the
+                // environment's daemon starts after it, so the next reattach
+                // is paced as after a drop.
+                if restart::failed_for_restart(&ask, &error).await {
+                    terminal.notice(ShellNotice::Restarting);
+                    restart::wait_for_restart(&ask).await?;
+                    dropped_at = Some(Instant::now());
+                    attempt = attempt.max(1);
+                    continue;
+                }
+                // After a drop only the network is worth trying again; any
+                // other answer, such as the session gone, is the server's.
+                let network = error
+                    .server_answer()
+                    .is_none_or(restart::is_network_failure);
+                if dropped_at.is_none() || !network {
+                    return Err(error);
+                }
                 tracing::debug!(error = %error_chain(&error), "reattach failed");
                 Pumped::Interrupted { output_offset }
             }
-            Err(error) => return Err(error),
         };
         match pumped {
             Pumped::Ended(Ok(status)) => return Ok(status),
@@ -478,6 +510,8 @@ fn resize(columns: u16, rows: u16) -> AttachSessionRequest {
 
 #[path = "hosted_shell/input_stream.rs"]
 mod input_stream;
+#[path = "hosted_shell/restart.rs"]
+pub mod restart;
 
 #[cfg(test)]
 mod tests {

@@ -16,12 +16,14 @@
 //! checks; this subsystem only attaches.
 
 use async_trait::async_trait;
-use codewire_client::session_wire::{FrameDecoder, FrameError, encode_frame};
+use codewire_client::session_wire::{
+    FrameDecoder, FrameError, TEMPORARY_FAILURE_EXIT, encode_frame,
+};
 use codewire_client::{AttachSessionRequest, attach_session_request};
 use codewire_daemon::client::{SessionAttachment, SessionAttachmentInput, SessionClient};
 use codewire_daemon_bridge::session::{
-    EnvironmentSessionAttachment, FieldViolation, coordinate_violations, private_attach_input,
-    private_attach_start, public_attach_output,
+    AttachOutputError, EnvironmentSessionAttachment, FieldViolation, coordinate_violations,
+    private_attach_input, private_attach_start, public_attach_output,
 };
 use codewire_daemon_proto::daemon::v1;
 use connectrpc::ConnectError;
@@ -48,7 +50,7 @@ impl DaemonSessionAttachRunner {
         }
     }
 
-    async fn relay(&self, channel: &mut Channel<Msg>, handle: &Handle) -> Result<(), String> {
+    async fn relay(&self, channel: &mut Channel<Msg>, handle: &Handle) -> Result<(), RelayEnd> {
         let id = channel.id();
         let mut frames = FrameDecoder::default();
         let first = loop {
@@ -65,19 +67,19 @@ impl DaemonSessionAttachRunner {
             }
         };
         let Some(attach_session_request::Input::Open(open)) = first.input else {
-            return Err("open must be the first message".into());
+            return Err(RelayEnd::refused("open must be the first message"));
         };
         if let Some(violation) =
             coordinate_violations(&open.org_id, &open.environment_id, Some(&open.session_id))
                 .first()
         {
-            return Err(violation_message(violation));
+            return Err(RelayEnd::refused(violation_message(violation)));
         }
         if open.environment_id != self.environment_id {
-            return Err(format!(
+            return Err(RelayEnd::refused(format!(
                 "this SSH server serves environment {}, not {}",
                 self.environment_id, open.environment_id
-            ));
+            )));
         }
         let start = private_attach_start(&open);
         let session_id = open.session_id;
@@ -85,7 +87,14 @@ impl DaemonSessionAttachRunner {
             .client
             .attach_from(start)
             .await
-            .map_err(|_| format!("session {session_id} could not be attached"))?;
+            .map_err(|error| match &error {
+                codewire_daemon::client::SessionClientError::Status(status)
+                    if status.code() == tonic::Code::NotFound =>
+                {
+                    RelayEnd::refused(format!("session {session_id} not found"))
+                }
+                _ => RelayEnd::temporary(format!("session {session_id} could not be attached")),
+            })?;
         let mut attachment = DaemonAttachment {
             input: attachment.input_handle(),
             attachment,
@@ -100,15 +109,17 @@ impl DaemonSessionAttachRunner {
                 .map_err(frame_error)?
             {
                 let message = private_attach_input(request, &session_id).map_err(|violations| {
-                    violations
-                        .first()
-                        .map(violation_message)
-                        .unwrap_or_else(|| "invalid attach input".into())
+                    RelayEnd::refused(
+                        violations
+                            .first()
+                            .map(violation_message)
+                            .unwrap_or_else(|| "invalid attach input".into()),
+                    )
                 })?;
                 attachment
                     .send_input(message)
                     .await
-                    .map_err(|_| "the session stopped accepting input".to_string())?;
+                    .map_err(|_| RelayEnd::temporary("the session stopped accepting input"))?;
             }
             tokio::select! {
                 message = channel.wait() => match message {
@@ -121,11 +132,17 @@ impl DaemonSessionAttachRunner {
                     let output = match output {
                         Ok(Some(output)) => output,
                         Ok(None) => return Ok(()),
-                        Err(error) => return Err(error.message.unwrap_or_default()),
+                        Err(error) => return Err(RelayEnd::from_daemon(&error)),
                     };
                     let response = public_attach_output(output, &mut attachment, &session_id)
                         .await
-                        .map_err(|_| "the session attachment sent an invalid frame".to_string())?;
+                        .map_err(|error| match error {
+                            // The daemon couldn't say what the session is.
+                            AttachOutputError::Backend(error) => RelayEnd::from_daemon(&error),
+                            AttachOutputError::InvalidFrame => {
+                                RelayEnd::refused("the session attachment sent an invalid frame")
+                            }
+                        })?;
                     let frame = encode_frame(&response).map_err(frame_error)?;
                     if handle.data(id, frame).await.is_err() {
                         return Ok(());
@@ -142,12 +159,12 @@ impl SessionAttachRunner for DaemonSessionAttachRunner {
         let id = channel.id();
         let status = match self.relay(&mut channel, &handle).await {
             Ok(()) => 0,
-            Err(message) => {
-                tracing::info!(channel = ?id, %message, "session attach over SSH ended");
+            Err(RelayEnd { message, status }) => {
+                tracing::info!(channel = ?id, %message, status, "session attach over SSH ended");
                 let _ = handle
                     .extended_data(id, 1, format!("{message}\n").into_bytes())
                     .await;
-                1
+                status
             }
         };
         end_channel(&handle, id, status).await;
@@ -160,8 +177,45 @@ async fn end_channel(handle: &Handle, id: ChannelId, status: u32) {
     let _ = handle.close(id).await;
 }
 
-fn frame_error(error: FrameError) -> String {
-    error.to_string()
+/// Why the relay ended an attachment: its stderr message and exit status.
+/// A daemon that stopped answering, as while the sandbox restarts, ends it
+/// with [`TEMPORARY_FAILURE_EXIT`], so the client tries again (#4342); a
+/// refusal ends it with 1.
+#[derive(Debug, PartialEq)]
+struct RelayEnd {
+    message: String,
+    status: u32,
+}
+
+impl RelayEnd {
+    fn refused(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            status: 1,
+        }
+    }
+
+    fn temporary(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            status: TEMPORARY_FAILURE_EXIT,
+        }
+    }
+
+    /// A failure the daemon gave: a session it doesn't have is final;
+    /// anything else is the daemon not answering.
+    fn from_daemon(error: &ConnectError) -> Self {
+        let message = error.message.clone().unwrap_or_default();
+        if error.code == connectrpc::ErrorCode::NotFound {
+            Self::refused(message)
+        } else {
+            Self::temporary(message)
+        }
+    }
+}
+
+fn frame_error(error: FrameError) -> RelayEnd {
+    RelayEnd::refused(error.to_string())
 }
 
 fn violation_message(violation: &FieldViolation) -> String {

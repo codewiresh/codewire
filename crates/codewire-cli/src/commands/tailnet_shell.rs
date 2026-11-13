@@ -66,6 +66,16 @@ impl ReconnectPacing {
         self.attached_at = Some(Instant::now());
     }
 
+    /// The environment runs again after a restart (#4342). Its daemon starts
+    /// after it, so reattaching continues as after a drop, with the time to
+    /// keep trying counted from now, and without saying the connection was
+    /// lost.
+    pub(crate) fn restarted(&mut self) {
+        self.dropped_at = Some(Instant::now());
+        self.attached_at = None;
+        self.attempt = self.attempt.max(1);
+    }
+
     /// The connection is lost at `output_offset`: how long to wait before the
     /// next try, or `None` once the time to keep trying has run out.
     pub(crate) fn lost(&mut self, output_offset: u64) -> Option<Duration> {
@@ -160,6 +170,9 @@ impl ShellTerminal for ProcessTerminal {
             ShellNotice::Reconnecting => {
                 eprintln!("[cw] connection lost; reconnecting to the same shell");
             }
+            ShellNotice::Restarting => {
+                eprintln!("[cw] the environment is restarting; waiting for it");
+            }
             ShellNotice::Input(InputNotice::Resent(keys)) => {
                 eprintln!("[cw] resent {keys} key(s) typed during the drop");
             }
@@ -253,6 +266,21 @@ mod tests {
         // A connection that opens and drops at once doesn't start it over.
         pacing.attached();
         assert_eq!(pacing.lost(42), None);
+    }
+
+    #[test]
+    fn a_restart_starts_the_time_over_without_saying_the_connection_was_lost() {
+        let mut pacing = ReconnectPacing::default();
+        assert!(pacing.lost(42).is_some());
+        // A restart that outlasted the time a lost network gets.
+        pacing.dropped_at = Some(Instant::now() - SHELL_GRACE);
+        pacing.restarted();
+        assert!(pacing.reconnecting());
+        assert!(
+            pacing.lost(42).is_some(),
+            "the restart's time isn't counted"
+        );
+        assert!(pacing.attempt > 1, "no second connection-lost notice");
     }
 
     #[test]

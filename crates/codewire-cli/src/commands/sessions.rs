@@ -1,7 +1,7 @@
 use super::*;
 use crate::terminal_attach::{RawModeGuard, SessionScreen};
 use base64::Engine as _;
-use codewire_client::hosted_shell::{InputNotice, InputStream};
+use codewire_client::hosted_shell::{InputNotice, InputStream, restart};
 #[cfg(unix)]
 pub(crate) mod agents;
 mod exec;
@@ -352,6 +352,34 @@ impl EnvironmentSessionTarget {
                     .ok_or_else(|| anyhow::anyhow!("LaunchSession returned no session"))
             }
         }
+    }
+
+    /// Make a command's first call to a hosted environment's sessions through
+    /// a restart (#4342): refused because the environment is restarting, it
+    /// says so, waits until it runs again, and is made again. Elsewhere, and
+    /// for any other failure, it is the call as it is.
+    async fn through_restart<T, Call, Called>(&self, call: Call) -> anyhow::Result<T>
+    where
+        Call: FnMut() -> Called,
+        Called: std::future::Future<Output = anyhow::Result<T>>,
+    {
+        let Self::Platform {
+            target,
+            org_id,
+            environment_id,
+            client,
+        } = self
+        else {
+            let mut call = call;
+            return call().await;
+        };
+        let ask = || restart::ask_environment(client, org_id, environment_id);
+        restart::through_restart(
+            &ask,
+            || eprintln!("[cw] {} is restarting; waiting for it", target.name),
+            call,
+        )
+        .await
     }
 
     /// The session as the server reports it, or `None` when the network is
@@ -1763,7 +1791,7 @@ async fn launch_run(
             .collect(),
         None => std::mem::take(&mut args.command),
     };
-    let sessions = match target.list().await {
+    let sessions = match target.through_restart(|| target.list()).await {
         Ok(sessions) => sessions,
         Err(error) => return Err(stopped_environment_sessions(&target).await.unwrap_or(error)),
     };
@@ -1784,16 +1812,22 @@ async fn launch_run(
     let parent_session_id = resolve_parent_session(&target, args.parent.as_deref()).await?;
     let working_dir = args.workdir.unwrap_or_else(|| target.default_working_dir());
     target.ensure_ready_for_run()?;
+    let env_overrides = parse_env_overrides(&args.env)?;
+    // A restart can begin after the list above (#4342). The launch is made
+    // again only after a restart: when the gate refused it while starting, or
+    // the daemon answered that it was still starting. Neither makes a session.
     let session = target
-        .launch(
-            command,
-            working_dir,
-            parse_env_overrides(&args.env)?,
-            pty,
-            name,
-            parent_session_id,
-            0,
-        )
+        .through_restart(|| {
+            target.launch(
+                command.clone(),
+                working_dir.clone(),
+                env_overrides.clone(),
+                pty,
+                name.clone(),
+                parent_session_id.clone(),
+                0,
+            )
+        })
         .await?;
     if matches!(args.output, OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(&session)?);
@@ -2441,6 +2475,39 @@ fn drain_stall(stalled: u8, progressed: bool, interrupted: bool) -> u8 {
     }
 }
 
+/// A hosted environment, as a reattach needs it.
+struct HostedEnvironment<'a> {
+    client: &'a codewire_client::CodewireClient,
+    org_id: &'a str,
+    environment_id: &'a str,
+    name: &'a str,
+}
+
+/// An attachment to a hosted environment's session failed to open. A restart
+/// is waited out, and doesn't count against the time to keep trying (#4342);
+/// after a drop, a network failure is tried again. Anything else is the
+/// server's answer and ends the attachment.
+async fn after_failed_attach(
+    hosted: &HostedEnvironment<'_>,
+    pacing: &mut super::tailnet_shell::ReconnectPacing,
+    error: anyhow::Error,
+) -> anyhow::Result<()> {
+    let ask = || restart::ask_environment(hosted.client, hosted.org_id, hosted.environment_id);
+    if restart::failed_for_restart(&ask, &error).await {
+        eprintln!("[cw] {} is restarting; waiting for it", hosted.name);
+        restart::wait_for_restart(&ask)
+            .await
+            .map_err(super::tailnet_shell::display_hosted_shell_error)?;
+        pacing.restarted();
+        return Ok(());
+    }
+    if pacing.reconnecting() && super::tailnet_shell::is_network_failure(&error) {
+        tracing::debug!(error = %format!("{error:#}"), "reattach failed");
+        return Ok(());
+    }
+    Err(error)
+}
+
 /// `plain` is a `cw shell`'s attachment: every key goes to the session, so
 /// it can neither detach nor move to another session, and it ends with it.
 async fn attach_session_until_detached(
@@ -2558,14 +2625,17 @@ async fn attach_session_until_detached(
                         )
                         .await?
                     }
-                    Err(error)
-                        if pacing.reconnecting()
-                            && super::tailnet_shell::is_network_failure(&error) =>
-                    {
-                        tracing::debug!(error = %format!("{error:#}"), "reattach failed");
+                    Err(error) => {
+                        let environment = SessionPlace::of(&target).environment;
+                        let hosted = HostedEnvironment {
+                            client,
+                            org_id,
+                            environment_id,
+                            name: &environment,
+                        };
+                        after_failed_attach(&hosted, &mut pacing, error).await?;
                         AttachExit::StreamInterrupted { output_offset }
                     }
-                    Err(error) => return Err(error),
                 }
             }
         };
@@ -3169,11 +3239,18 @@ pub(crate) async fn handle_attach_command(
         })?;
     let place = SessionPlace::of(&target);
     let session = match requested.as_deref() {
-        Some(requested) => match select_environment_session(&target, Some(requested)).await? {
+        Some(requested) => match target
+            .through_restart(|| select_environment_session(&target, Some(requested)))
+            .await?
+        {
             SessionSelection::Select(session) => *session,
             SessionSelection::Create => anyhow::bail!("session {requested:?} not found"),
         },
-        None => select_attach_session(&target, &place).await?,
+        None => {
+            target
+                .through_restart(|| select_attach_session(&target, &place))
+                .await?
+        }
     };
     let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Text);
     let style = caps.stderr_style();
@@ -3490,14 +3567,17 @@ async fn follow_session_output(
                         )
                         .await?
                     }
-                    Err(error)
-                        if pacing.reconnecting()
-                            && super::tailnet_shell::is_network_failure(&error) =>
-                    {
-                        tracing::debug!(error = %format!("{error:#}"), "reattach failed");
+                    Err(error) => {
+                        let environment = SessionPlace::of(target).environment;
+                        let hosted = HostedEnvironment {
+                            client,
+                            org_id,
+                            environment_id,
+                            name: &environment,
+                        };
+                        after_failed_attach(&hosted, &mut pacing, error).await?;
                         AttachExit::StreamInterrupted { output_offset }
                     }
-                    Err(error) => return Err(error),
                 }
             }
         };

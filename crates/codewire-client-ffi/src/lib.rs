@@ -346,6 +346,13 @@ impl ShellTerminal for ChannelTerminal {
                     reason: "the connection dropped".into(),
                 }
             }
+            // The app shows a restart as a reconnect with its reason (#4342).
+            ShellNotice::Restarting => {
+                self.connected.store(false, Ordering::Release);
+                ShellState::Reconnecting {
+                    reason: "the environment is restarting".into(),
+                }
+            }
             // Keys resent or lost after a reattach (#3993) change no state;
             // the terminal shows the shell's own echo of what arrived.
             ShellNotice::Input(_) => return,

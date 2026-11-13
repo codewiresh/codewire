@@ -146,6 +146,9 @@ struct DaemonSsh {
     workspace_root: PathBuf,
     ssh: SocketAddr,
     shutdown: watch::Sender<bool>,
+    /// The daemon alone, which a test can end while its SSH server serves on,
+    /// as when the sandbox's runtime is replaced (#4342).
+    daemon_task: tokio::task::JoinHandle<()>,
     access_ready: watch::Sender<bool>,
     /// The daemon's own session client, to launch and inspect sessions.
     sessions: codewire_daemon::client::SessionClient,
@@ -184,7 +187,7 @@ async fn spawn_daemon_ssh_with_access(ready: bool) -> DaemonSsh {
     let mut daemon_shutdown = shutdown_rx.clone();
     // No network listener at all: only in-process connections.
     let network = tokio_stream::empty::<io::Result<tokio::net::TcpStream>>();
-    tokio::spawn(async move {
+    let daemon_task = tokio::spawn(async move {
         serve_grpc_with_incoming(config, with_local_connections(network, local), async move {
             let _ = daemon_shutdown.changed().await;
         })
@@ -217,6 +220,7 @@ async fn spawn_daemon_ssh_with_access(ready: bool) -> DaemonSsh {
         workspace_root,
         ssh,
         shutdown,
+        daemon_task,
         access_ready: access_ready_tx,
         sessions,
         host_key,
@@ -1346,6 +1350,38 @@ mod session_attach {
             assert!(error.is_retryable_transport_interruption(), "{error:?}");
             // The session itself is untouched.
             assert_running(&daemon, &session).await;
+            let _ = daemon.shutdown.send(true);
+        }
+
+        /// #4342: the sandbox's runtime replaced under an attachment, so its
+        /// daemon stops while the SSH server serves on. That is the relay's
+        /// temporary failure, which the client tries again, not a refusal.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_daemon_that_stops_answering_is_a_retryable_interruption() {
+            let daemon = spawn_daemon_ssh().await;
+            let session = launch_echo(&daemon).await;
+            let ssh = EnvironmentSsh::connect(
+                tokio::net::TcpStream::connect(daemon.ssh).await.unwrap(),
+                &daemon.host_key,
+            )
+            .await
+            .unwrap();
+            let mut attachment = ssh.attach(open(&session, 0)).await.unwrap();
+            read_until(&mut attachment, b"hello").await;
+            daemon.daemon_task.abort();
+            let error = timeout(Duration::from_secs(20), async {
+                loop {
+                    match attachment.next_output().await {
+                        Ok(Some(_)) => continue,
+                        Ok(None) => panic!("the attachment ended without an error"),
+                        Err(error) => break error,
+                    }
+                }
+            })
+            .await
+            .expect("the daemon's end was noticed");
+            assert_eq!(error.code(), ErrorCode::Unavailable, "{error:?}");
+            assert!(error.is_retryable_transport_interruption(), "{error:?}");
             let _ = daemon.shutdown.send(true);
         }
     }
