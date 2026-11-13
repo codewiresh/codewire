@@ -434,8 +434,10 @@ jobs:
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
     needs: [support-selection, publish-support-images]
-    # An earlier commit's pair is never proposed as the pin.
-    if: ${{ needs.publish-support-images.outputs.workspace_mirrored == 'true' && needs.support-selection.outputs.source_sha == github.sha }}
+    # An earlier commit's pair is never proposed as the pin, and only main's
+    # push run may read the bot token, so a dispatch's pair, even one for
+    # main's head, is proposed by the next push run instead (#4386).
+    if: ${{ github.event_name == 'push' && needs.publish-support-images.outputs.workspace_mirrored == 'true' && needs.support-selection.outputs.source_sha == github.sha }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

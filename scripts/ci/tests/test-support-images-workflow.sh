@@ -509,7 +509,9 @@ pin_job_violation() {
   [[ -n "$job" ]] || { echo 'the published workspace image is never proposed as the pin'; return; }
   grep -Fq "needs.publish-support-images.outputs.workspace_mirrored == 'true'" <<<"$(grep '^    if: ' <<<"$job")" ||
     { echo 'the pin proposal can name an image the public mirror lacks'; return; }
-  grep -Fqx "    if: \${{ needs.publish-support-images.outputs.workspace_mirrored == 'true' && needs.support-selection.outputs.source_sha == github.sha }}" <<<"$job" ||
+  grep -Fq "github.event_name == 'push'" <<<"$(grep '^    if: ' <<<"$job")" ||
+    { echo 'the pin proposal runs on a dispatch, which may not read the bot token'; return; }
+  grep -Fqx "    if: \${{ github.event_name == 'push' && needs.publish-support-images.outputs.workspace_mirrored == 'true' && needs.support-selection.outputs.source_sha == github.sha }}" <<<"$job" ||
     { echo 'the pin proposal can name an earlier commit'"'"'s workspace'; return; }
   grep -Fq '          persist-credentials: false' <<<"$job" ||
     { echo 'the pin checkout keeps the job token, which git would send beside the bot token'; return; }
@@ -548,6 +550,7 @@ pin_mutations=(
   'token outlives the step::/trap /d'
   'no mirror gate::/workspace_mirrored == .true./d'
   'earlier commit pinned::s/ \&\& needs.support-selection.outputs.source_sha == github.sha//'
+  'a dispatch proposes::s/github.event_name == .push. \&\& //'
 )
 for mutation in "${pin_mutations[@]}"; do
   label="${mutation%%::*}"
