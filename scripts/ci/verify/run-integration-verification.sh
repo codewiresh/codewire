@@ -1052,6 +1052,12 @@ database_lane_orchestration() {
     cargo test -p codewire-orchestration --lib \
       'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek' \
       -- --ignored --exact --nocapture
+
+  counted_suite "leader handover when a replica drains" leader-drain-handover \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::loops::leader_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
 }
 
 database_lane_orchestration_journals() {

@@ -28,6 +28,7 @@ use codewire_orchestration::worker::{self, cloudflare::CloudflareClient};
 use codewire_server_core::{AppBuilder, ServiceConfig};
 use codewire_tls::{ServerTlsFiles, TlsListener};
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 
 const DEFAULT_WORKER_LOOPS: &[&str] = &[
     "env-reconciler",
@@ -569,11 +570,30 @@ async fn main() -> anyhow::Result<()> {
         credit_enforcement,
     });
 
+    // #4426: SIGTERM, which a rollout sends only after the preStop delay has
+    // taken this replica out of the gateway, starts draining. The listeners
+    // finish their open streams; meanwhile this replica gives up leadership and
+    // takes no new Temporal tasks, so the next revision runs them at once.
+    let draining = CancellationToken::new();
+    {
+        let draining = draining.clone();
+        tokio::spawn(async move {
+            codewire_server_core::shutdown_signal().await;
+            tracing::info!("draining: releasing leadership and Temporal tasks");
+            draining.cancel();
+        });
+    }
+
     // Leader-gated background loops: the orchestration replicas elect a
     // leader to run the default Rust-owned loops. WORKER_LOOPS remains an
     // explicit override for focused local diagnostics.
     if !loops.is_empty() {
-        worker::loops::start_loops(ctx.clone(), cfg.database_url.clone(), &loops);
+        worker::loops::start_loops(
+            ctx.clone(),
+            cfg.database_url.clone(),
+            &loops,
+            draining.clone(),
+        );
     }
     // #3572: a replica that runs the warm-pool loop, starting while a release
     // rotates its pools, reports ready and starts its Temporal worker only once
@@ -596,7 +616,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             worker::warm_pool::pools_warmed(&mut pools_warm).await;
             codewire_orchestration::temporal::spawn_temporal_worker(
-                ctx, host_port, namespace, task_queue,
+                ctx, host_port, namespace, task_queue, draining,
             );
         });
     }

@@ -27,7 +27,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use codewire_daemon_proto::CREDENTIAL_RELAY_TOKEN_PATH;
@@ -42,6 +41,7 @@ use zeroize::Zeroizing;
 
 use super::WorkerContext;
 use super::environment_auth::{WorkspaceCredentialScope, daemon_credential_for};
+use super::loops::{LeaderPass, Leadership};
 use crate::api::log_notifications::ENVIRONMENT_LOGS_CHANNEL;
 
 mod budget;
@@ -370,7 +370,7 @@ fn daemon_target(config: &RelayConfig, target: &Target) -> anyhow::Result<Daemon
 
 /// Runs while this process leads, relaying every live binding of its sandbox
 /// namespace. Inert without the platform credential runtime.
-pub async fn credential_relay_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBool>) {
+pub(crate) async fn credential_relay_loop(ctx: Arc<WorkerContext>, leadership: Arc<Leadership>) {
     let Some(runtime) = ctx.sandbox_cfg.credential_runtime.as_ref() else {
         tracing::info!("credential relay: no platform credential runtime; inert");
         return;
@@ -393,6 +393,7 @@ pub async fn credential_relay_loop(ctx: Arc<WorkerContext>, is_leader: Arc<Atomi
         limits: Limits::DEFAULT,
     });
     let mut relays = Relays::default();
+    let mut _serving: Option<LeaderPass> = None;
     let mut notifications = spawn_environment_notifications(ctx.pool.clone());
     let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -403,9 +404,15 @@ pub async fn credential_relay_loop(ctx: Arc<WorkerContext>, is_leader: Arc<Atomi
             _ = ticker.tick() => None,
             Some(environment) = notifications.recv() => Some(environment),
         };
-        if !is_leader.load(Ordering::SeqCst) {
-            relays.stop_all();
-            continue;
+        // Live relays are one long pass: a draining leader waits until they
+        // are stopped here before the next one can start its own.
+        match leadership.pass() {
+            Some(pass) => _serving = Some(pass),
+            None => {
+                relays.stop_all();
+                _serving = None;
+                continue;
+            }
         }
         let live = match only {
             None => live_targets(&ctx.pool, &config.namespace).await,

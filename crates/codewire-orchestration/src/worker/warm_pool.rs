@@ -19,7 +19,6 @@
 //!
 //! [`RuntimePools::keep_pools`]: crate::runtime::RuntimePools::keep_pools
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -30,6 +29,7 @@ use tokio::sync::watch;
 use super::WorkerContext;
 use super::create::{SandboxWorkerCfg, render_configured_warm_pool, warm_pool_template_opts};
 use super::image_cache::ImageCacheConfig;
+use super::loops::Leadership;
 use crate::runtime::{Placement, PoolPass, RuntimeDriver, WantedPool, WantedPools};
 use crate::sandbox::warm_pool::parse_warm_pool_shapes;
 
@@ -146,7 +146,7 @@ impl WarmPoolConfig {
 }
 
 /// Leader-gated; runs until the process exits. Inert without configuration.
-pub async fn warm_pool_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBool>) {
+pub(crate) async fn warm_pool_loop(ctx: Arc<WorkerContext>, leadership: Arc<Leadership>) {
     let image_cache_enabled =
         ImageCacheConfig::from_env(&ctx.sandbox_cfg).map(|config| config.is_some());
     let config = match startup(&ctx.sandbox_cfg, image_cache_enabled) {
@@ -176,11 +176,11 @@ pub async fn warm_pool_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBool>)
     let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
     loop {
         ticker.tick().await;
-        if let Some(result) =
-            tick(runtime.as_ref(), &config, is_leader.load(Ordering::SeqCst)).await
-        {
+        let pass = leadership.pass();
+        if let Some(result) = tick(runtime.as_ref(), &config, pass.is_some()).await {
             record_result(result);
         }
+        drop(pass);
     }
 }
 

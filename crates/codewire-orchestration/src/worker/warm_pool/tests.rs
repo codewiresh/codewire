@@ -173,7 +173,7 @@ fn an_invalid_configuration_drains_and_none_is_inert() {
 /// dropped sender all release it.
 #[tokio::test(start_paused = true)]
 async fn only_a_rotating_start_holds_the_temporal_worker() {
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::time::timeout;
 
     const DECIDE: Duration = Duration::from_secs(15);

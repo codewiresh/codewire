@@ -30,6 +30,8 @@ spec:
     spec:
       imagePullSecrets:
         - name: harbor-registry
+      # The preStop delay, then 30 s for requests already in flight (#4426).
+      terminationGracePeriodSeconds: 40
       containers:
         - name: idp
           # The Rust OIDC provider. Runs from the shared codewire/services
@@ -142,6 +144,13 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5
+          # Keep serving while the gateway drops this Pod's endpoint, so SIGTERM
+          # never closes the listener under a routed request (#4426). A native
+          # sleep needs no binary in the image.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
       volumes:
         - name: idp-signing-keks
           secret:

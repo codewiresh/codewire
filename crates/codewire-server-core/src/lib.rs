@@ -217,7 +217,10 @@ pub async fn serve_with_listener_h2_keepalive(
     Ok(())
 }
 
-async fn shutdown_signal() {
+/// Completes on SIGTERM or SIGINT: the signal every listener here drains on.
+/// Each call listens on its own, so a binary can start other shutdown work
+/// from the same signal.
+pub async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };

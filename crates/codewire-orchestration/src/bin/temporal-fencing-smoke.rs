@@ -1719,6 +1719,7 @@ mod enabled {
             &temporal_address,
             TEMPORAL_NAMESPACE,
             &queue,
+            std::future::pending::<()>(),
         )
         .await
     }

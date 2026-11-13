@@ -1962,7 +1962,7 @@ pub(crate) async fn backfill_pass(ctx: &WorkerContext, state: &mut BackfillState
 /// long as this replica leads, and starts fresh after a leadership change.
 pub(crate) async fn workspace_binding_backfill_loop(
     ctx: std::sync::Arc<WorkerContext>,
-    is_leader: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    leadership: std::sync::Arc<super::loops::Leadership>,
 ) {
     let mut state = BackfillState::default();
     let mut ticker = tokio::time::interval(BACKFILL_INTERVAL);
@@ -1970,7 +1970,7 @@ pub(crate) async fn workspace_binding_backfill_loop(
     ticker.tick().await;
     loop {
         ticker.tick().await;
-        if is_leader.load(std::sync::atomic::Ordering::SeqCst) {
+        if let Some(_pass) = leadership.pass() {
             backfill_pass(&ctx, &mut state).await;
         } else {
             state = BackfillState::default();

@@ -43,13 +43,13 @@
 
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use prometheus::{IntCounterVec, IntGauge, Opts, register_int_counter_vec, register_int_gauge};
 use sqlx::{PgPool, Row};
 
 use super::WorkerContext;
+use super::loops::Leadership;
 use crate::runtime::{MemberPhase as Phase, Placement, Resources, RuntimeDriver, RuntimeMember};
 
 /// Mirrors the retired Go billing-session controller's default
@@ -638,9 +638,9 @@ async fn run_cycle(pool: &PgPool, runtime: &dyn RuntimeDriver, namespace: &str) 
 
 /// Leader-gated poll loop. Mirrors `StartSandboxController`'s guards (no
 /// kube client / no pool → skip) and resync cadence.
-pub async fn billing_session_loop(
+pub(crate) async fn billing_session_loop(
     ctx: Arc<WorkerContext>,
-    is_leader: Arc<AtomicBool>,
+    leadership: Arc<Leadership>,
     namespace: String,
 ) {
     let Some(runtime) = ctx.runtime.clone() else {
@@ -652,9 +652,9 @@ pub async fn billing_session_loop(
     ticker.tick().await; // align with Go's NewTicker (first fire after interval)
     loop {
         ticker.tick().await;
-        if !is_leader.load(Ordering::SeqCst) {
+        let Some(_pass) = leadership.pass() else {
             continue;
-        }
+        };
         run_cycle(&ctx.pool, runtime.as_ref(), &namespace).await;
     }
 }

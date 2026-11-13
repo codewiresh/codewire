@@ -29,6 +29,10 @@ spec:
       imagePullSecrets:
         - name: harbor-registry
       serviceAccountName: codewire-orchestration
+      # After the preStop delay, open transfers finish while this replica
+      # drains; at SIGTERM it hands over leadership and its Temporal tasks
+      # at once, so only open HTTP streams keep it (#4426).
+      terminationGracePeriodSeconds: 300
       # Group-reads the 0440 internal TLS leaf; the image runs as 65532.
       securityContext:
         fsGroup: 65532
@@ -149,6 +153,13 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 6
+          # Keep serving while the gateway drops this Pod's endpoint, so SIGTERM
+          # never closes the listener under a routed request (#4426). A native
+          # sleep needs no binary in the image.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
           volumeMounts:
             - name: internal-tls
               mountPath: /run/codewire-orchestration-internal-tls

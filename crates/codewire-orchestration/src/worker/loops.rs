@@ -10,11 +10,14 @@
 //! configured.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use sqlx::{Connection, PgConnection, PgPool, Row};
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
+
+mod leadership;
+pub(crate) use leadership::{LeaderPass, Leadership};
 
 use super::WorkerContext;
 use crate::lifecycle::{PgLifecycleStore, Service};
@@ -26,6 +29,10 @@ const ADVISORY_LOCK_ID: i64 = 0x636F646577697265; // "codewire"
 
 const RECONCILER_INTERVAL: Duration = Duration::from_secs(30);
 const SANDBOX_LIVENESS_INTERVAL: Duration = Duration::from_secs(5);
+/// How long a draining leader waits for its running passes before it
+/// releases the lock anyway: longer than a reconciliation pass takes, well
+/// inside the 300 s termination grace.
+const PASS_DRAIN_BOUND: Duration = Duration::from_secs(60);
 const SANDBOX_TRANSITIONAL_LIVENESS_GRACE: Duration = Duration::from_secs(60);
 /// A sandbox that stops this soon after reaching `running` waits for the
 /// stuck-state sweep instead of restarting at once, so one that can't stay up
@@ -40,20 +47,25 @@ const INCOMPLETE_EXTERNAL_CLEANUP_STATES: [&str; 3] = ["destroying", "destroyed"
 const RECOVERY_JOURNAL_KINDS: [&str; 4] =
     ["transition", "checkpoint", "error", "reconcile_request"];
 
-/// Launches the requested loops. `is_leader` is shared with the
+/// Launches the requested loops. `leadership` is shared with the
 /// leader-election task spawned here.
-pub fn start_loops(ctx: Arc<WorkerContext>, database_url: String, loops: &[String]) {
+pub fn start_loops(
+    ctx: Arc<WorkerContext>,
+    database_url: String,
+    loops: &[String],
+    draining: CancellationToken,
+) {
     if loops.is_empty() {
         return;
     }
-    let is_leader = Arc::new(AtomicBool::new(false));
+    let leadership = Arc::new(Leadership::default());
     let leader_notify = Arc::new(Notify::new());
 
     {
-        let is_leader = is_leader.clone();
+        let leadership = leadership.clone();
         let leader_notify = leader_notify.clone();
         tokio::spawn(async move {
-            leader_loop(&database_url, is_leader, leader_notify).await;
+            leader_loop(&database_url, leadership, leader_notify, draining).await;
         });
     }
 
@@ -65,7 +77,7 @@ pub fn start_loops(ctx: Arc<WorkerContext>, database_url: String, loops: &[Strin
                 // the reconciler's cadence and with their own time budget.
                 // Nothing reads the records yet.
                 let backfill_ctx = ctx.clone();
-                let backfill_leader = is_leader.clone();
+                let backfill_leader = leadership.clone();
                 tokio::spawn(async move {
                     super::workspace_binding::workspace_binding_backfill_loop(
                         backfill_ctx,
@@ -74,29 +86,29 @@ pub fn start_loops(ctx: Arc<WorkerContext>, database_url: String, loops: &[Strin
                     .await;
                 });
                 let ctx = ctx.clone();
-                let is_leader = is_leader.clone();
+                let leadership = leadership.clone();
                 let leader_notify = leader_notify.clone();
                 tokio::spawn(async move {
-                    reconciler_loop(ctx, is_leader, leader_notify).await;
+                    reconciler_loop(ctx, leadership, leader_notify).await;
                 });
             }
             "sandbox-liveness" => {
                 let ctx = ctx.clone();
-                let is_leader = is_leader.clone();
+                let leadership = leadership.clone();
                 tokio::spawn(async move {
-                    sandbox_liveness_loop(ctx, is_leader).await;
+                    sandbox_liveness_loop(ctx, leadership).await;
                 });
             }
             // Sandbox billing-session lifecycle controller (port of
             // `internal/billing/sessions`).
             "billing-session" => {
                 let ctx = ctx.clone();
-                let is_leader = is_leader.clone();
+                let leadership = leadership.clone();
                 // Mirrors the retired Go composition-root default:
                 // firstNonEmpty(BillingControllerNamespace, SandboxNamespace).
                 let namespace = ctx.sandbox_cfg.sandbox_namespace.clone();
                 tokio::spawn(async move {
-                    super::billing_sessions::billing_session_loop(ctx, is_leader, namespace).await;
+                    super::billing_sessions::billing_session_loop(ctx, leadership, namespace).await;
                 });
             }
             // Program #2238 C2: shared identity-free warm pools. Inert, with no
@@ -104,9 +116,9 @@ pub fn start_loops(ctx: Arc<WorkerContext>, database_url: String, loops: &[Strin
             // shape.
             "warm-pool" => {
                 let ctx = ctx.clone();
-                let is_leader = is_leader.clone();
+                let leadership = leadership.clone();
                 tokio::spawn(async move {
-                    super::warm_pool::warm_pool_loop(ctx, is_leader).await;
+                    super::warm_pool::warm_pool_loop(ctx, leadership).await;
                 });
             }
             // Design §4: the credential relay pulls every bound daemon's
@@ -114,9 +126,9 @@ pub fn start_loops(ctx: Arc<WorkerContext>, database_url: String, loops: &[Strin
             // environment; inert without the platform credential runtime.
             "credential-relay" => {
                 let ctx = ctx.clone();
-                let is_leader = is_leader.clone();
+                let leadership = leadership.clone();
                 tokio::spawn(async move {
-                    super::credential_relay::credential_relay_loop(ctx, is_leader).await;
+                    super::credential_relay::credential_relay_loop(ctx, leadership).await;
                 });
             }
             // Not leader-gated: every orchestration Pod adds the image set it
@@ -137,14 +149,23 @@ pub fn start_loops(ctx: Arc<WorkerContext>, database_url: String, loops: &[Strin
 }
 
 /// Mirrors `runLeaderLoop`/`holdLock`: a dedicated connection holds
-/// pg_try_advisory_lock; lost connection = lost leadership.
-async fn leader_loop(database_url: &str, is_leader: Arc<AtomicBool>, leader_notify: Arc<Notify>) {
-    loop {
+/// pg_try_advisory_lock; lost connection = lost leadership. Draining (#4426)
+/// gives leadership up for good: no new pass starts, the running ones finish
+/// (within [`PASS_DRAIN_BOUND`]), and closing the connection then releases
+/// the lock at once, so the next replica leads within one retry while this
+/// one finishes its open streams.
+async fn leader_loop(
+    database_url: &str,
+    leadership: Arc<Leadership>,
+    leader_notify: Arc<Notify>,
+    draining: CancellationToken,
+) {
+    while !draining.is_cancelled() {
         let mut conn = match PgConnection::connect(database_url).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!(error = %e, "leader: failed to acquire connection");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                drained_during(&draining, Duration::from_secs(5)).await;
                 continue;
             }
         };
@@ -158,32 +179,65 @@ async fn leader_loop(database_url: &str, is_leader: Arc<AtomicBool>, leader_noti
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!(error = %e, "leader: failed to acquire advisory lock");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    drained_during(&draining, Duration::from_secs(2)).await;
                     continue;
                 }
             };
 
         if !acquired {
             tracing::debug!("leader: lock held by another instance, retrying");
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            drained_during(&draining, Duration::from_secs(5)).await;
             continue;
         }
 
         tracing::info!("leader: acquired leadership");
-        is_leader.store(true, Ordering::SeqCst);
+        leadership.acquired();
         leader_notify.notify_waiters();
 
-        // Hold the lock with periodic pings; connection loss drops it.
-        loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            if let Err(e) = conn.ping().await {
-                tracing::error!(error = %e, "leader: connection health check failed");
-                break;
+        if hold_leadership(&mut conn, &draining).await {
+            if !leadership.step_down(PASS_DRAIN_BOUND).await {
+                tracing::warn!(
+                    bound = ?PASS_DRAIN_BOUND,
+                    "leader: a pass still runs at the drain bound; releasing leadership"
+                );
             }
+            // Closing the session releases the lock; a close that stalls is
+            // abandoned, and dropping the connection closes its socket.
+            match tokio::time::timeout(Duration::from_secs(5), conn.close()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "leader: closing the lock connection failed")
+                }
+                Err(_) => tracing::warn!("leader: closing the lock connection timed out"),
+            }
+            tracing::info!("leader: draining, released leadership");
+            return;
         }
-        is_leader.store(false, Ordering::SeqCst);
+        leadership.lost();
         tracing::warn!("leader: connection lost, will retry");
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        drained_during(&draining, Duration::from_secs(2)).await;
+    }
+}
+
+/// Holds the lock with periodic pings until the connection fails (false) or
+/// draining starts (true).
+async fn hold_leadership(conn: &mut PgConnection, draining: &CancellationToken) -> bool {
+    loop {
+        if drained_during(draining, Duration::from_secs(5)).await {
+            return true;
+        }
+        if let Err(e) = conn.ping().await {
+            tracing::error!(error = %e, "leader: connection health check failed");
+            return false;
+        }
+    }
+}
+
+/// Sleeps for `period` unless draining starts first; true when it has.
+async fn drained_during(draining: &CancellationToken, period: Duration) -> bool {
+    tokio::select! {
+        () = draining.cancelled() => true,
+        () = tokio::time::sleep(period) => false,
     }
 }
 
@@ -191,7 +245,7 @@ async fn leader_loop(database_url: &str, is_leader: Arc<AtomicBool>, leader_noti
 /// leadership acquisition, then the reconciliation cycle every 30s.
 async fn reconciler_loop(
     ctx: Arc<WorkerContext>,
-    is_leader: Arc<AtomicBool>,
+    leadership: Arc<Leadership>,
     leader_notify: Arc<Notify>,
 ) {
     let mut ticker = tokio::time::interval(RECONCILER_INTERVAL);
@@ -200,13 +254,13 @@ async fn reconciler_loop(
     loop {
         tokio::select! {
             _ = leader_notify.notified() => {
-                if is_leader.load(Ordering::SeqCst) {
+                if let Some(_pass) = leadership.pass() {
                     recover_on_startup(&ctx).await;
                     startup_recovery_observed = true;
                 }
             }
             _ = ticker.tick() => {
-                if is_leader.load(Ordering::SeqCst) {
+                if let Some(_pass) = leadership.pass() {
                     // Notify does not retain a permit when leadership is won
                     // before this task begins waiting. The first leader tick
                     // is therefore the fallback that makes startup recovery,
@@ -764,7 +818,7 @@ pub(super) struct LivenessRow {
     pub(super) runtime_mutation_active: bool,
 }
 
-async fn sandbox_liveness_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBool>) {
+async fn sandbox_liveness_loop(ctx: Arc<WorkerContext>, leadership: Arc<Leadership>) {
     // Mirrors the Backend==nil early return.
     if ctx.runtime.is_none() {
         return;
@@ -773,9 +827,9 @@ async fn sandbox_liveness_loop(ctx: Arc<WorkerContext>, is_leader: Arc<AtomicBoo
     ticker.tick().await;
     loop {
         ticker.tick().await;
-        if !is_leader.load(Ordering::SeqCst) {
+        let Some(_pass) = leadership.pass() else {
             continue;
-        }
+        };
         reconcile_sandbox_liveness(&ctx).await;
     }
 }
@@ -1305,6 +1359,9 @@ async fn mark_sandbox_env_error(pool: &PgPool, row: &LivenessRow, reason: &str) 
         Ok(false) => {}
     }
 }
+
+#[cfg(test)]
+mod leader_database_tests;
 
 #[cfg(test)]
 mod tests {

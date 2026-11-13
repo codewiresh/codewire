@@ -25,6 +25,8 @@ spec:
           type: RuntimeDefault
       imagePullSecrets:
         - name: harbor-registry
+      # The preStop delay, then 30 s for requests already in flight (#4426).
+      terminationGracePeriodSeconds: 40
       containers:
         - name: dashboard
           image: git.example.com/codewire/dashboard:latest
@@ -92,3 +94,10 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5
+          # Keep serving while the gateway drops this Pod's endpoint, so SIGTERM
+          # never closes the listener under a routed request (#4426). A native
+          # sleep needs no binary in the image.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
