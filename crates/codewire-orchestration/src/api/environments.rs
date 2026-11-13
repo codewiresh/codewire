@@ -989,7 +989,7 @@ fn evaluate_credit(rate_card: &str, balance_nano_eur: i64) -> Result<(), AppErro
     ))
 }
 
-async fn check_credit_in(
+pub(crate) async fn check_credit_in(
     transaction: &mut Transaction<'_, Postgres>,
     org_id: &str,
 ) -> Result<(), AppError> {

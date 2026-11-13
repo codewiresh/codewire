@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use codewire_server_core::auth::AuthUser;
+use codewire_server_core::credit_enforcement::CreditEnforcement;
 use codewire_server_core::org_deletion::{
     OrganizationRuntimeMutationError, run_environment_runtime_mutation,
     run_organization_runtime_mutation,
@@ -18,7 +19,8 @@ use sqlx::{FromRow, PgPool};
 
 use super::ApiState;
 use super::environments::{
-    check_rate_limit, coded, fetch_env_summary, require_environment_access, require_org_member,
+    check_credit_in, check_rate_limit, coded, fetch_env_summary, require_environment_access,
+    require_org_member,
 };
 
 const MAX_NAME_CHARS: usize = 128;
@@ -27,7 +29,8 @@ const MAX_NAME_CHARS: usize = 128;
 const MAX_CAPTURING_PER_ORG: i64 = 4;
 /// Snapshots one organization may hold, failed ones included. A safety bound while
 /// nothing bills for them: the owner's "no quota" (Q7, #3046) is for billed storage,
-/// so this goes with the billing meter (H4), the gate for Production.
+/// so this goes with the billing meter (H4). Production runs without H4 under this
+/// bound (owner, 2026-11-12, #4370).
 const MAX_SNAPSHOTS_PER_ORG: i64 = 32;
 /// Snapshot creates per user per minute, as environment creates are limited.
 const CREATES_PER_MINUTE: i32 = 10;
@@ -70,6 +73,7 @@ fn not_found() -> AppError {
 /// Insert the row, refusing a name the creator already uses.
 async fn insert_snapshot(
     pool: &PgPool,
+    credit_enforcement: CreditEnforcement,
     user_id: &str,
     org_id: &str,
     environment_id: &str,
@@ -82,6 +86,12 @@ async fn insert_snapshot(
         .bind(org_id)
         .execute(&mut *tx)
         .await?;
+    // No credit, no capture, as creates and starts are refused (#3381): "if they
+    // don't have any balance we can't do any snapshots" (owner, 2026-11-12, #4370).
+    // A fork from a snapshot is a create, refused by the create's own check.
+    if credit_enforcement.is_on() {
+        check_credit_in(&mut tx, org_id).await?;
+    }
     let (capturing, held): (i64, i64) = sqlx::query_as(
         "SELECT count(*) FILTER (WHERE state = 'capturing'), count(*)
            FROM hosted_snapshots WHERE org_id = $1 AND state <> 'deleting'",
@@ -231,6 +241,7 @@ pub async fn create_snapshot_core(
         let result: AppResult<SnapshotRow> = async {
             let row = insert_snapshot(
                 &owned_state.pool,
+                owned_state.credit_enforcement,
                 &owned_user.user_id,
                 &owned_org_id,
                 &owned_environment_id,
@@ -488,9 +499,16 @@ mod tests {
                 result
             }
         };
-        let row = insert_snapshot(&pool, &creator, &org, "env-gone", "source")
-            .await
-            .unwrap();
+        let row = insert_snapshot(
+            &pool,
+            CreditEnforcement::Off,
+            &creator,
+            &org,
+            "env-gone",
+            "source",
+        )
+        .await
+        .unwrap();
         assert!(is_code(
             admit(creator.clone(), row.id.clone(), 80)
                 .await
@@ -599,6 +617,76 @@ mod tests {
         ));
     }
 
+    /// #3381, #4370: where credit is enforced, an organization with none can't
+    /// capture and keeps no row; credit admits the capture. Where it isn't, nothing
+    /// is checked.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_a_capture_needs_credit_where_credit_is_enforced() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("ignored DB test requires TEST_DATABASE_URL");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let (creator, _, org) = seed(&pool).await;
+
+        let refused = insert_snapshot(&pool, CreditEnforcement::On, &creator, &org, "env", "broke")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                AppError::Coded {
+                    status: StatusCode::PAYMENT_REQUIRED,
+                    code: "credit_exhausted",
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+        let rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM hosted_snapshots WHERE org_id = $1")
+                .bind(&org)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, 0, "a refused capture keeps no row");
+
+        insert_snapshot(
+            &pool,
+            CreditEnforcement::Off,
+            &creator,
+            &org,
+            "env",
+            "unenforced",
+        )
+        .await
+        .expect("without enforcement a capture is not checked");
+
+        sqlx::query(
+            "INSERT INTO billing_credit_ledger \
+             (organization_id, entry_kind, amount_nano_eur, idempotency_key, actor_user_id, reason) \
+             VALUES ($1, 'adjustment', 1000000000, $2, 'test', 'test credit')",
+        )
+        .bind(&org)
+        .bind(format!("snapshot-credit-{org}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        insert_snapshot(
+            &pool,
+            CreditEnforcement::On,
+            &creator,
+            &org,
+            "env",
+            "funded",
+        )
+        .await
+        .expect("credit admits the capture");
+    }
+
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL"]
     async fn db_a_snapshot_is_private_to_its_creator_and_a_capture_cannot_be_deleted() {
@@ -611,16 +699,30 @@ mod tests {
             .unwrap();
         let (creator, other, org) = seed(&pool).await;
 
-        let row = insert_snapshot(&pool, &creator, &org, "env-gone", "one")
-            .await
-            .unwrap();
+        let row = insert_snapshot(
+            &pool,
+            CreditEnforcement::Off,
+            &creator,
+            &org,
+            "env-gone",
+            "one",
+        )
+        .await
+        .unwrap();
         assert_eq!(row.state, "capturing");
         assert!(row.size_bytes.is_none());
 
         // Taken for this creator, and free for another member.
-        let taken = insert_snapshot(&pool, &creator, &org, "env-gone", "one")
-            .await
-            .unwrap_err();
+        let taken = insert_snapshot(
+            &pool,
+            CreditEnforcement::Off,
+            &creator,
+            &org,
+            "env-gone",
+            "one",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(
             taken,
             AppError::Coded {
@@ -628,9 +730,16 @@ mod tests {
                 ..
             }
         ));
-        let others = insert_snapshot(&pool, &other, &org, "env-other", "one")
-            .await
-            .unwrap();
+        let others = insert_snapshot(
+            &pool,
+            CreditEnforcement::Off,
+            &other,
+            &org,
+            "env-other",
+            "one",
+        )
+        .await
+        .unwrap();
 
         // Another member of the organization neither sees nor deletes it.
         let listed = creators_snapshots(&pool, &creator, &org).await.unwrap();
@@ -653,15 +762,29 @@ mod tests {
         // Bounds: at most four captures at once, then a full organization.
         let mut extra = Vec::new();
         for index in 0..2 {
-            let row = insert_snapshot(&pool, &creator, &org, "env", &format!("busy-{index}"))
-                .await
-                .unwrap();
+            let row = insert_snapshot(
+                &pool,
+                CreditEnforcement::Off,
+                &creator,
+                &org,
+                "env",
+                &format!("busy-{index}"),
+            )
+            .await
+            .unwrap();
             extra.push(row.id);
         }
         // `row`, `others` and these two are the bound's four captures.
-        let refused = insert_snapshot(&pool, &creator, &org, "env", "fifth")
-            .await
-            .unwrap_err();
+        let refused = insert_snapshot(
+            &pool,
+            CreditEnforcement::Off,
+            &creator,
+            &org,
+            "env",
+            "fifth",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(
             refused,
             AppError::Coded {
@@ -687,9 +810,16 @@ mod tests {
             .await
             .unwrap();
         }
-        let refused = insert_snapshot(&pool, &creator, &org, "env", "one-too-many")
-            .await
-            .unwrap_err();
+        let refused = insert_snapshot(
+            &pool,
+            CreditEnforcement::Off,
+            &creator,
+            &org,
+            "env",
+            "one-too-many",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(
             refused,
             AppError::Coded {

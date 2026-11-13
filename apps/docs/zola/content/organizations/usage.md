@@ -57,9 +57,10 @@ organization's limits is in [Resources and limits](@/environments/resources.md).
 
 ## When credit runs out
 
-An organization with no compute credit can't create or start cloud
-sandboxes. `cw create`, `cw start` and any other command that creates or
-starts one exit with status 1 and say so:
+An organization with no compute credit can't create, start or snapshot
+cloud sandboxes. `cw create`, `cw start`, `cw --cloud snapshot create` and any
+other command that creates, starts or snapshots one exit with status 1 and say
+so:
 
 ```text
 {organization} has no compute credit, so it can't run cloud sandboxes.
