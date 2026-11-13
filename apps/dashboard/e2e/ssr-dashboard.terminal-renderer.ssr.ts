@@ -162,11 +162,28 @@ test("terminal presentation preserves colors, metrics, selection and strict CSP"
   expect(await page.evaluate(() => (window as Window & { terminalStyleViolations?: string[] }).terminalStyleViolations)).toEqual([]);
 
   const canary = rows.getByText("codewire-terminal-copy-234", { exact: true });
-  // boundingBox does not wait: it reads null while the renderer is still
-  // laying out or replacing the row (the full fixture gate, mobile, under
-  // load). Measure once the row is rendered.
+  // The presentation fits the terminal to its box only once both font
+  // weights have loaded, on a later animation frame. On a phone that fit
+  // narrows the terminal, rewraps the long lines below the canary and scrolls
+  // the rows, so a drag measured before it lands two rows lower, on the hint
+  // line (#4512). Wait for the fonts, then measure only a row that stays put
+  // across animation frames. boundingBox does not wait: it reads null while
+  // the renderer is still laying out or replacing the row.
+  await page.evaluate(async () => {
+    const family = getComputedStyle(document.querySelector("[data-terminal-root]")!).getPropertyValue("--font-mono").trim();
+    await Promise.all([document.fonts.load(`400 13px ${family}`), document.fonts.load(`600 13px ${family}`)]);
+  });
+  const settledFrames = () => page.evaluate(() => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
   let measured: Awaited<ReturnType<typeof canary.boundingBox>> = null;
-  await expect.poll(async () => (measured = await canary.boundingBox())).not.toBeNull();
+  await expect.poll(async () => {
+    const before = await canary.boundingBox();
+    await settledFrames();
+    const after = await canary.boundingBox();
+    measured = before && after && before.x === after.x && before.y === after.y ? after : null;
+    return measured;
+  }).not.toBeNull();
   const bounds = measured!;
   await page.mouse.move(bounds.x, bounds.y + bounds.height / 2);
   await page.mouse.down();
