@@ -470,6 +470,42 @@ async fn the_invitation_email_outcome_is_observed() {
 
 /// A server that queues the email says so when the invitation is created,
 /// and only then does the CLI wait for it; an older server is not asked.
+/// The server's invitation limits and its verified-inviter rule (#4457) are
+/// what the user reads, and a refused invitation has no link to print.
+#[tokio::test]
+async fn the_servers_invitation_limits_are_shown() {
+    for (code, message) in [
+        (
+            "resource_exhausted",
+            "invitation limit reached: one account can send at most 30 invitations an hour; \
+             try again after Nov 13 14:05 UTC",
+        ),
+        (
+            "failed_precondition",
+            "verify your email address before inviting members",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(CREATE_INVITATION))
+            .respond_with(refusal(code, message))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = client(&server)
+            .create_invitation(
+                "org_acme",
+                &CreateInvitationRequest {
+                    email: "invitee@example.test".into(),
+                    role: "member".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(format!("{error:#}"), message);
+    }
+}
+
 #[tokio::test]
 async fn the_cli_waits_only_when_the_server_queued_an_email() {
     for (status, queued) in [

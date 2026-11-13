@@ -225,7 +225,8 @@ fn connect_code_for(status: StatusCode, reason: Option<&str>) -> ConnectCode {
             | "environment_protected"
             | "no_organizations"
             | "organization_not_available"
-            | "organization_not_selected",
+            | "organization_not_selected"
+            | "email_not_verified",
         ) => {
             return ConnectCode::FailedPrecondition;
         }
@@ -465,6 +466,16 @@ mod tests {
                     "platform_agent_request_refused",
                     "message 00000000-0000-4000-8000-000000000001 is still in progress; \
                      try again shortly",
+                ),
+                ConnectCode::FailedPrecondition,
+            ),
+            // An unverified inviter (#4457) is a precondition, not a
+            // malformed request.
+            (
+                coded(
+                    StatusCode::BAD_REQUEST,
+                    "email_not_verified",
+                    "verify your email address before inviting members",
                 ),
                 ConnectCode::FailedPrecondition,
             ),

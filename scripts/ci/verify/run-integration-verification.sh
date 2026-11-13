@@ -1197,6 +1197,12 @@ database_lane_orchestration_workspaces() {
       'api::organizations::invitation_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "organization invitation limits" organization-invitation-limits \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::organizations::invitation_limit_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "organization sign-up credit" organization-signup-credit \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

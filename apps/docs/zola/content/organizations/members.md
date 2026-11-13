@@ -26,6 +26,19 @@ address, verified. Someone without an account signs up with that address and
 verifies it first. Revoke a pending invitation from the same page; it can no
 longer be accepted, and an email not yet sent is not sent.
 
+To send invitations, your own email address must be verified. To keep
+invitation email from being misused, Codewire also limits how many are sent:
+
+- one account sends at most 30 invitations an hour, across all its
+  organizations;
+- one organization sends at most 60 invitations an hour, from all its owners
+  and admins;
+- one organization holds at most 200 pending invitations.
+
+Past a limit, the invitation is refused and no email is sent. The message
+says when to try again, or, for pending invitations, to revoke one or wait
+for one to expire.
+
 ## Accept an invitation
 
 Sign in with the invited address, then list your invitations and accept one

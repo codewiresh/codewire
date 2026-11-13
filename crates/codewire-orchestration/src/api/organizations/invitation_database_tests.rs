@@ -120,6 +120,8 @@ impl<'a> Invitations<'a> {
              (SELECT id FROM org_members WHERE org_id = $1 AND user_id <> $1)",
             "DELETE FROM org_members WHERE org_id = $1 AND user_id <> $1",
             "DELETE FROM org_invitations WHERE org_id = $1",
+            "DELETE FROM rate_limit WHERE key IN \
+             ('org_invite_org:' || $1, 'org_invite_user:' || $1)",
         ] {
             sqlx::query(sql)
                 .bind(&self.fixture.id)

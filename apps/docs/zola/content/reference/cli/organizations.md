@@ -71,7 +71,10 @@ cw org delete ID_OR_SLUG [--yes]       # owner only; asks you to type the name
 `invite` creates the invitation, prints its one-time link on standard output,
 then waits a few seconds for the invitation email and says what became of
 it: sent, not sent with the reason, or not sent yet. Share the link yourself
-when the email does not arrive; it is not shown again.
+when the email does not arrive; it is not shown again. Inviting needs a verified
+email address and is limited to 30 invitations an hour per account, 60 an
+hour per organization and 200 pending per organization; past a limit,
+`invite` fails with the time to try again.
 
 `invitations` lists the pending invitations addressed to your email address,
 and only once that address is verified. `accept` joins the organization you

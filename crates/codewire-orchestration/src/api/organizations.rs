@@ -14,6 +14,8 @@ use super::ApiState;
 use super::environments::format_time;
 use super::secrets::{forbidden, log_audit};
 
+mod invitation_limits;
+
 #[derive(Debug)]
 pub struct OrgMember {
     pub id: String,
@@ -713,7 +715,9 @@ impl Inviter {
 /// sends its email from (#3847), so an invitation never lacks its email and
 /// an email never names an invitation that was not created. The row holds
 /// what the email shows and no token: the email links to signing in, and
-/// the invitee accepts by invitation id with a verified address.
+/// the invitee accepts by invitation id with a verified address. The
+/// inviter's verified address and the invitation limits are checked in the
+/// same transaction first (#4457).
 async fn create_invitation(
     pool: &sqlx::PgPool,
     user: &AuthUser,
@@ -798,6 +802,7 @@ async fn create_invitation(
             "a pending invitation already exists for this email".into(),
         ));
     }
+    invitation_limits::check(&mut tx, &user.user_id, org_id).await?;
 
     let inv_id = uuid::Uuid::new_v4().simple().to_string();
     let token = uuid::Uuid::new_v4().simple().to_string();
@@ -1451,6 +1456,8 @@ async fn grant_signup_credit(
 
 #[cfg(test)]
 mod invitation_database_tests;
+#[cfg(test)]
+mod invitation_limit_database_tests;
 #[cfg(test)]
 mod membership_database_tests;
 #[cfg(test)]
