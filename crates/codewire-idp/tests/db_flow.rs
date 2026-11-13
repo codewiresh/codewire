@@ -4035,14 +4035,19 @@ async fn email_password_flow_against_postgres() {
     // finds no password answers an error, not success (#4528).
     let provider_user = "u_email_password_provider_only";
     let provider_email = "provider-only-e2e@example.com";
-    for statement in [
-        "DELETE FROM verifications WHERE identifier = $2",
-        "DELETE FROM accounts WHERE user_id = $1",
-        "DELETE FROM users WHERE id = $1",
+    // Each statement binds exactly its own parameters: sqlx caches a
+    // prepared statement per connection by its text, so binding two values to
+    // a statement other tests run with one breaks theirs on that connection.
+    for (statement, value) in [
+        (
+            "DELETE FROM verifications WHERE identifier = $1",
+            provider_email,
+        ),
+        ("DELETE FROM accounts WHERE user_id = $1", provider_user),
+        ("DELETE FROM users WHERE id = $1", provider_user),
     ] {
         sqlx::query(statement)
-            .bind(provider_user)
-            .bind(provider_email)
+            .bind(value)
             .execute(&pool)
             .await
             .unwrap();
@@ -5136,18 +5141,17 @@ async fn admin_resends_verification_only_for_an_unverified_account_against_postg
     ];
     let cleanup = |p: PgPool| async move {
         for (id, email, ..) in users {
-            for statement in [
-                "DELETE FROM verifications WHERE identifier=$2",
-                "DELETE FROM audit_logs WHERE user_id=$1 OR target_user_id=$1",
-                "DELETE FROM sessions WHERE user_id=$1",
-                "DELETE FROM users WHERE id=$1",
+            // One bind per statement, as in step 11 of the email flow.
+            for (statement, value) in [
+                ("DELETE FROM verifications WHERE identifier=$1", email),
+                (
+                    "DELETE FROM audit_logs WHERE user_id=$1 OR target_user_id=$1",
+                    id,
+                ),
+                ("DELETE FROM sessions WHERE user_id=$1", id),
+                ("DELETE FROM users WHERE id=$1", id),
             ] {
-                sqlx::query(statement)
-                    .bind(id)
-                    .bind(email)
-                    .execute(&p)
-                    .await
-                    .ok();
+                sqlx::query(statement).bind(value).execute(&p).await.ok();
             }
         }
     };
