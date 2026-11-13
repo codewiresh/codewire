@@ -296,10 +296,17 @@ test("optional-choice failure offers retry without clearing the Create form", as
     if (attempts <= 3) await route.fulfill({ status: 503, contentType: "text/plain", body: "unavailable" });
     else await route.fulfill({ status: 200, contentType: "text/html", body: hydratedCreateCard(hydratedHtml) });
   });
+  // Both retries wait on the page's clock, which the test moves once each is
+  // scheduled, so their four seconds are never spent in real time.
+  await page.clock.install();
   await page.goto(url);
   const form = page.locator("[data-environment-form]");
-  await expect(page.locator("[data-create-optional-options] [role=status]")).toHaveText("Choices did not load. Retrying (1 of 2)…");
-  await expect(page.getByRole("button", { name: "Retry loading choices" })).toBeVisible({ timeout: 10_000 });
+  const status = page.locator("[data-create-optional-options] [role=status]");
+  await expect(status).toHaveText("Choices did not load. Retrying (1 of 2)…");
+  await page.clock.runFor(1_000);
+  await expect(status).toHaveText("Choices did not load. Retrying (2 of 2)…");
+  await page.clock.runFor(3_000);
+  await expect(page.getByRole("button", { name: "Retry loading choices" })).toBeVisible();
   expect(attempts).toBe(3);
   await expect(page.locator("[data-github-status]")).toContainText("Repository access unavailable");
   await expect(page.locator("[data-github-spinner]")).toBeHidden();
@@ -327,7 +334,13 @@ test("a transient optional-choice failure recovers by itself", async ({ page }) 
     if (attempts === 1) await route.abort("connectionreset");
     else await route.fulfill({ status: 200, contentType: "text/html", body: hydratedCreateCard(hydratedHtml) });
   });
+  // The retry waits a second on the page's clock. The test moves that clock
+  // once the retry is scheduled, so a loaded host cannot spend the
+  // recovery's assertion time on the wait (run 44624).
+  await page.clock.install();
   await page.goto(url);
+  await expect(page.locator("[data-create-optional-options] [role=status]")).toHaveText("Choices did not load. Retrying (1 of 2)…");
+  await page.clock.runFor(1_000);
   await expect(page.locator("[data-environment-form]")).toHaveAttribute("data-create-options-loading", "false");
   await expect(page.getByRole("button", { name: "Retry loading choices" })).toHaveCount(0);
   expect(attempts).toBe(2);

@@ -347,6 +347,38 @@ test("single-line controls centre their capitals, not a line box", { tag: "@mobi
   }
 });
 
+// What drew a control's label, named when its capitals are off centre: the
+// platform fonts Chromium used for the text, the label's computed font and
+// the self-hosted faces' load states. CI measured the login buttons 1.23 px
+// off in every run while the same Chromium measured them centred on a
+// workstation (run 44624, PR #4351), so a failure names its fonts.
+async function labelFonts(page: Page, control: Locator) {
+  const marker = "data-label-font-probe";
+  const computed = await control.evaluate((node, attribute) => {
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, {
+      acceptNode: (child) => child.textContent!.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT,
+    });
+    const label = walker.nextNode()!.parentElement!;
+    label.setAttribute(attribute, "");
+    const faces = [...document.fonts].map((face) => `${face.family} ${face.weight} ${face.status}`).join(", ");
+    return `computed ${getComputedStyle(label).font}; faces ${faces || "none"}`;
+  }, marker);
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    await cdp.send("DOM.enable");
+    await cdp.send("CSS.enable");
+    const { root } = await cdp.send("DOM.getDocument", { depth: 0 });
+    const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: root.nodeId, selector: `[${marker}]` });
+    const { fonts } = await cdp.send("CSS.getPlatformFontsForNode", { nodeId });
+    const used = fonts.map((font) => `${font.familyName}${font.isCustomFont ? " (web)" : " (system)"} ×${font.glyphCount}`);
+    return `drawn with ${used.join(", ") || "nothing"}; ${computed}`;
+  } finally {
+    await control.evaluate((node, attribute) => node.querySelector(`[${attribute}]`)?.removeAttribute(attribute)
+      ?? node.removeAttribute(attribute), marker);
+    await cdp.detach();
+  }
+}
+
 // An icon beside a bare text node keeps the label off centre by up to 1.5 px
 // at 390; a span label is trimmed like a text-only button's.
 test("buttons with an icon centre their label's capitals", { tag: "@mobile" }, async ({ page }) => {
@@ -362,7 +394,9 @@ test("buttons with an icon centre their label's capitals", { tag: "@mobile" }, a
   ] as const) {
     await page.goto(`${origin}/reference/fixtures/${fixture}`);
     await page.evaluate(() => document.fonts.ready);
-    expect.soft(Math.abs(await capitalsOffset(control)), name).toBeLessThanOrEqual(0.75);
+    const offset = Math.abs(await capitalsOffset(control));
+    const fonts = offset > 0.75 ? `: ${await labelFonts(page, control)}` : "";
+    expect.soft(offset, `${name}${fonts}`).toBeLessThanOrEqual(0.75);
   }
 });
 
