@@ -236,7 +236,7 @@ async fn first_byte_latency(
     }
     let served = serve_banner(&pair.daemon).await;
 
-    let started = Instant::now();
+    let started = tokio::time::Instant::now();
     let dial = pair
         .client
         .dial_context_tcp(SocketAddr::new(IpAddr::V6(B_IP), 22));
@@ -261,16 +261,21 @@ async fn first_byte_latency(
     (elapsed, pair)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// On a paused clock, time moves only for timers: the DERP stand-in's
+/// one-way delays and any wait the client adds. A host too busy to run the
+/// test promptly costs no time here, so the two must match exactly; a
+/// wall-clock comparison failed on a loaded CI guest (#4467) while no code
+/// waited.
+#[tokio::test(start_paused = true)]
 async fn first_tcp_byte_with_unreachable_direct_endpoint_matches_derp_only() {
     let (derp_only, _) = first_byte_latency(ClientMode::DerpOnly, None).await;
     let (direct_capable, pair) = first_byte_latency(ClientMode::DirectCapable, None).await;
     let client_stats = pair.client_handle.as_ref().unwrap().stats();
     eprintln!("first byte: derp_only={derp_only:?} direct_capable={direct_capable:?}");
 
-    assert!(
-        direct_capable <= derp_only + Duration::from_millis(100),
-        "direct-capable first byte {direct_capable:?} vs DERP-only {derp_only:?}"
+    assert_eq!(
+        direct_capable, derp_only,
+        "the direct-capable first byte waited for something the DERP-only one didn't"
     );
     assert_eq!(client_stats.direct_wg_sent, 0, "{client_stats:?}");
     assert!(client_stats.fallback_wg_sent > 0, "{client_stats:?}");
