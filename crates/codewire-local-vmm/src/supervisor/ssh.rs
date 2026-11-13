@@ -31,7 +31,6 @@ use uuid::Uuid;
 
 use crate::control::v1;
 use crate::control::v1::ssh_stream_frame::Frame;
-use crate::hybrid_vsock::HybridVsockTarget;
 use crate::supervisor_store::{OperationKind, OperationRecord};
 
 /// Under the supervisor root: one owner-only directory per environment.
@@ -165,14 +164,9 @@ pub(super) async fn opened_environment(
 
 /// A daemon client over the environment's admitted daemon access.
 pub(super) async fn daemon_client(access: v1::DaemonAccess) -> Result<DaemonSessionClient, Status> {
-    let capability = zeroize::Zeroizing::new(access.generation_capability);
-    let unavailable = || Status::unavailable("local environment daemon is unavailable");
-    let target = HybridVsockTarget::new(PathBuf::from(access.hybrid_socket), access.guest_port)
-        .map_err(|_| unavailable())?;
-    let channel = target.connect_channel().await.map_err(|_| unavailable())?;
-    let credential = codewire_daemon::DaemonAuthToken::new(capability.as_str())
-        .map_err(|_| Status::internal("local supervisor request failed"))?;
-    Ok(DaemonSessionClient::from_channel(channel, credential))
+    crate::guest_loopback::connect_daemon_access(access)
+        .await
+        .map_err(|_| Status::unavailable("local environment daemon is unavailable"))
 }
 
 /// What the environment's daemon offers the SSH server.

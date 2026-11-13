@@ -35,6 +35,8 @@ pub mod egress_broker;
 mod fs_clone;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod generation;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod guest_loopback;
 pub mod host_addresses;
 #[cfg(target_os = "linux")]
 pub mod host_port;

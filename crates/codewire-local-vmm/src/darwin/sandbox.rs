@@ -219,7 +219,7 @@ mod tests {
             confine_egress_broker().unwrap();
 
             let dialed = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            crate::network_worker::send_worker_host_port_descriptor(
+            crate::network_worker::send_connected_stream_for_test(
                 held.as_raw_fd(),
                 dialed.as_raw_fd(),
             )

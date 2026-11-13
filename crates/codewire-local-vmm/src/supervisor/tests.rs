@@ -1217,7 +1217,9 @@ async fn unacknowledged_runner_shutdown_still_observes_natural_exit() {
     );
     let live = child.capture(&executable);
     let service = TestRunnerProtocolService {
-        reply: TestRunnerProtocolReply::Version(10),
+        reply: TestRunnerProtocolReply::Version(
+            crate::runner_service::NATIVE_RUNNER_PROTOCOL_VERSION,
+        ),
         useful_calls: Arc::new(AtomicUsize::new(0)),
         shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.0.stdin.take()))),
         info_gate: None,
@@ -1255,8 +1257,10 @@ async fn unresponsive_runner_retains_child_and_exact_pidfd_for_fallback() {
     let parent = tempfile::tempdir().unwrap();
     fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let socket = parent.path().join("unresponsive.sock");
-    let (identity, calls, stop, server) =
-        spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(10));
+    let (identity, calls, stop, server) = spawn_test_runner_protocol_server(
+        &socket,
+        TestRunnerProtocolReply::Version(crate::runner_service::NATIVE_RUNNER_PROTOCOL_VERSION),
+    );
     let executable = fs::canonicalize("/bin/sleep").unwrap();
     let mut child = ShutdownTestChild(
         crate::test_child(&mut Command::new(&executable))

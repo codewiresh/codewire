@@ -7,7 +7,7 @@
 //! AF_UNIX descriptors, never the guest daemon token or provider credentials.
 
 use std::io::{self, Read as _};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::pin::Pin;
@@ -30,18 +30,15 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::host_port::{
-    HOST_PORT_CONTROL_FRAME_LEN, HOST_PORT_CONTROL_KEY_LEN, HostPortBinding,
-    HostPortControlReceiver, is_host_port_control_frame,
-};
 #[cfg(target_os = "linux")]
 use crate::linux::confinement::{
     install_denied_syscalls, install_deny_all_filesystem_domain as restrict_filesystem,
     lock_exec_process_privileges, require_single_threaded_process as require_single_thread,
 };
 use crate::mesh_ingress::{
-    MAX_MESH_INGRESS_PORTS, MESH_INGRESS_CONTROL_KEY_LEN, MeshIngressControlReceiver,
-    is_mesh_ingress_control_frame, validate_canonical_mesh_ingress_ports,
+    MAX_MESH_INGRESS_PORTS, MESH_INGRESS_CONTROL_FRAME_LEN, MESH_INGRESS_CONTROL_KEY_LEN,
+    MeshIngressControlReceiver, is_mesh_ingress_control_frame,
+    validate_canonical_mesh_ingress_ports,
 };
 pub use crate::network_session::{
     AsyncReadWrite, BoxedBrokerStream, BrokerDnsAnswer, DenyBroker, EgressBroker, TcpFlow,
@@ -72,7 +69,6 @@ pub const WORKER_READY_MESSAGE: &[u8] = b"CWNETW1 ready\n";
 pub const WORKER_STATUS_MAX_BYTES: usize = 64;
 const WORKER_BROKER_DESCRIPTOR_MARKER: u8 = b'B';
 const WORKER_NETWORK_DESCRIPTOR_MARKER: u8 = b'N';
-const WORKER_HOST_PORT_DESCRIPTOR_MARKER: u8 = b'P';
 const WORKER_MESH_INGRESS_DESCRIPTOR_MARKER: u8 = b'M';
 const WORKER_CONTROL_BYTES: usize = 64;
 
@@ -114,14 +110,14 @@ const RECEIVE_FLAGS: libc::c_int = 0;
 
 const BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB1\0";
 const BOOTSTRAP_LEN: usize = 64;
-const PRODUCT_BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB3\0";
-const PRODUCT_BOOTSTRAP_LEN: usize = 336;
+// B4 (#4347): host ports no longer reach the worker, so its host-port key is gone.
+const PRODUCT_BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB4\0";
+const PRODUCT_BOOTSTRAP_LEN: usize = 304;
 const PRODUCT_POLICY_DIGEST_OFFSET: usize = 64;
 const PRODUCT_BROKER_KEY_OFFSET: usize = 96;
-const PRODUCT_HOST_PORT_KEY_OFFSET: usize = 128;
-const PRODUCT_MESH_INGRESS_KEY_OFFSET: usize = 160;
-const PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET: usize = 192;
-const PRODUCT_MESH_INGRESS_PORTS_OFFSET: usize = 194;
+const PRODUCT_MESH_INGRESS_KEY_OFFSET: usize = 128;
+const PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET: usize = 160;
+const PRODUCT_MESH_INGRESS_PORTS_OFFSET: usize = 162;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
 const WORKER_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
@@ -330,14 +326,17 @@ pub(crate) fn send_worker_broker_descriptor(bootstrap: RawFd, broker: RawFd) -> 
     send_worker_descriptor(bootstrap, broker, WORKER_BROKER_DESCRIPTOR_MARKER)
 }
 
-pub(crate) fn send_worker_host_port_descriptor(bootstrap: RawFd, stream: RawFd) -> io::Result<()> {
-    validate_connected_ipv4_stream(stream, None).map_err(io::Error::other)?;
-    send_worker_descriptor(bootstrap, stream, WORKER_HOST_PORT_DESCRIPTOR_MARKER)
-}
-
 pub(crate) fn send_mesh_ingress_descriptor(bootstrap: RawFd, stream: RawFd) -> io::Result<()> {
     validate_inherited_unix_socket(stream).map_err(io::Error::other)?;
     send_worker_descriptor(bootstrap, stream, WORKER_MESH_INGRESS_DESCRIPTOR_MARKER)
+}
+
+/// Sends a connected stream as the broker's hand-off does, for tests of a
+/// confined process that passes or receives one. Only the macOS Seatbelt
+/// tests use it.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn send_connected_stream_for_test(bootstrap: RawFd, stream: RawFd) -> io::Result<()> {
+    send_worker_descriptor(bootstrap, stream, WORKER_BROKER_DESCRIPTOR_MARKER)
 }
 
 fn send_worker_descriptor(bootstrap: RawFd, descriptor: RawFd, marker: u8) -> io::Result<()> {
@@ -673,14 +672,12 @@ pub fn encode_product_worker_bootstrap(
     generation: u64,
     network_key: &NetworkKey,
     broker_key: &[u8; BROKER_IPC_KEY_LEN],
-    host_port_key: &[u8; HOST_PORT_CONTROL_KEY_LEN],
     mesh_ingress_key: &[u8; MESH_INGRESS_CONTROL_KEY_LEN],
     mesh_ingress_ports: &[u16],
     policy_digest: PolicyDigest,
 ) -> Result<Zeroizing<[u8; PRODUCT_BOOTSTRAP_LEN]>, NetworkWorkerError> {
     validate_identity(vm_id, generation)?;
     if broker_key.iter().all(|byte| *byte == 0)
-        || host_port_key.iter().all(|byte| *byte == 0)
         || mesh_ingress_key.iter().all(|byte| *byte == 0)
         || validate_canonical_mesh_ingress_ports(mesh_ingress_ports).is_err()
     {
@@ -693,9 +690,7 @@ pub fn encode_product_worker_bootstrap(
     network_key.with_bytes(|key| bytes[32..64].copy_from_slice(key));
     bytes[PRODUCT_POLICY_DIGEST_OFFSET..PRODUCT_BROKER_KEY_OFFSET]
         .copy_from_slice(policy_digest.as_bytes());
-    bytes[PRODUCT_BROKER_KEY_OFFSET..PRODUCT_HOST_PORT_KEY_OFFSET].copy_from_slice(broker_key);
-    bytes[PRODUCT_HOST_PORT_KEY_OFFSET..PRODUCT_MESH_INGRESS_KEY_OFFSET]
-        .copy_from_slice(host_port_key);
+    bytes[PRODUCT_BROKER_KEY_OFFSET..PRODUCT_MESH_INGRESS_KEY_OFFSET].copy_from_slice(broker_key);
     bytes[PRODUCT_MESH_INGRESS_KEY_OFFSET..PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET]
         .copy_from_slice(mesh_ingress_key);
     bytes[PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET..PRODUCT_MESH_INGRESS_PORTS_OFFSET]
@@ -711,14 +706,12 @@ struct ProductWorkerBootstrap {
     network_key: NetworkKey,
     broker_binding: BrokerIpcBinding,
     broker_key: BrokerIpcKey,
-    host_port_key: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
     mesh_ingress_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
     mesh_ingress_ports: Vec<u16>,
 }
 
 struct ProductWorkerSession {
     network_key: NetworkKey,
-    host_port_key: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
     mesh_ingress_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
     mesh_ingress_ports: Vec<u16>,
 }
@@ -790,7 +783,6 @@ pub async fn run_inherited_worker(vm_id: Uuid, generation: u64) -> Result<(), Ne
         bootstrap,
         ProductWorkerSession {
             network_key: prepared.network_key,
-            host_port_key: prepared.host_port_key,
             mesh_ingress_key: prepared.mesh_ingress_key,
             mesh_ingress_ports: prepared.mesh_ingress_ports,
         },
@@ -888,10 +880,7 @@ async fn run_prepared_product_worker<B: EgressBroker>(
         control,
         status_rx,
         inbound_tx,
-        IngressControlKeys {
-            host_port: session.host_port_key,
-            mesh: session.mesh_ingress_key,
-        },
+        session.mesh_ingress_key,
         session.mesh_ingress_ports,
         vm_id,
         generation,
@@ -934,16 +923,11 @@ fn publish_product_worker_status(
         .map_err(|_| io::Error::other("network worker status channel closed"))
 }
 
-struct IngressControlKeys {
-    host_port: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
-    mesh: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
-}
-
 async fn run_ingress_control(
     control: tokio::net::UnixStream,
     status: oneshot::Receiver<&'static [u8]>,
     inbound: mpsc::Sender<InboundGuestStream>,
-    keys: IngressControlKeys,
+    mesh_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
     mesh_ingress_ports: Vec<u16>,
     vm_id: Uuid,
     generation: u64,
@@ -955,28 +939,19 @@ async fn run_ingress_control(
         return Err(NetworkWorkerError::Protocol);
     }
 
-    let mut host_port_receiver = HostPortControlReceiver::new(vm_id, generation)
-        .map_err(|_| NetworkWorkerError::Protocol)?;
     let mut mesh_receiver = MeshIngressControlReceiver::new(vm_id, generation, &mesh_ingress_ports)
         .map_err(|_| NetworkWorkerError::Protocol)?;
     loop {
-        let mut frame = [0_u8; HOST_PORT_CONTROL_FRAME_LEN];
+        let mut frame = [0_u8; MESH_INGRESS_CONTROL_FRAME_LEN];
         read_worker_control_exact(&control, &mut frame).await?;
-        let (guest_port, descriptor) = if is_host_port_control_frame(&frame) {
-            let frame = host_port_receiver
-                .decode(&frame, &keys.host_port)
-                .map_err(|_| NetworkWorkerError::Protocol)?;
-            let descriptor = receive_worker_host_port_descriptor(&control, frame.binding).await?;
-            (frame.binding.guest_port, descriptor)
-        } else if is_mesh_ingress_control_frame(&frame) {
-            let frame = mesh_receiver
-                .decode(&frame, &keys.mesh)
-                .map_err(|_| NetworkWorkerError::Protocol)?;
-            let descriptor = receive_mesh_ingress_descriptor(&control).await?;
-            (frame.binding.guest_port, descriptor)
-        } else {
+        if !is_mesh_ingress_control_frame(&frame) {
             return Err(NetworkWorkerError::Protocol);
-        };
+        }
+        let frame = mesh_receiver
+            .decode(&frame, &mesh_key)
+            .map_err(|_| NetworkWorkerError::Protocol)?;
+        let descriptor = receive_mesh_ingress_descriptor(&control).await?;
+        let guest_port = frame.binding.guest_port;
         let stream =
             transferred_stream(descriptor).map_err(|_| NetworkWorkerError::InheritedDescriptor)?;
         inbound
@@ -986,26 +961,6 @@ async fn run_ingress_control(
             })
             .await
             .map_err(|_| NetworkWorkerError::Engine)?;
-    }
-}
-
-pub(crate) async fn receive_worker_host_port_descriptor(
-    control: &tokio::net::UnixStream,
-    binding: HostPortBinding,
-) -> Result<OwnedFd, NetworkWorkerError> {
-    loop {
-        control
-            .readable()
-            .await
-            .map_err(|_| NetworkWorkerError::FrameIo)?;
-        match receive_worker_descriptor(control.as_raw_fd(), WORKER_HOST_PORT_DESCRIPTOR_MARKER) {
-            Ok(descriptor) => {
-                validate_connected_ipv4_stream(descriptor.as_raw_fd(), Some(binding))?;
-                return Ok(descriptor);
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(_) => return Err(NetworkWorkerError::InheritedDescriptor),
-        }
     }
 }
 
@@ -1428,66 +1383,6 @@ fn validate_inherited_unix_socket(descriptor: RawFd) -> Result<(), NetworkWorker
     Ok(())
 }
 
-fn validate_connected_ipv4_stream(
-    descriptor: RawFd,
-    expected: Option<HostPortBinding>,
-) -> Result<(SocketAddrV4, SocketAddrV4), NetworkWorkerError> {
-    // Darwin has no SO_DOMAIN and cannot read SO_ACCEPTCONN; the AF_INET
-    // local and peer addresses below prove the domain and a connection.
-    #[cfg(target_os = "linux")]
-    if socket_option(descriptor, libc::SO_DOMAIN)? != libc::AF_INET
-        || socket_option(descriptor, libc::SO_ACCEPTCONN)? != 0
-    {
-        return Err(NetworkWorkerError::InheritedDescriptor);
-    }
-    if socket_option(descriptor, libc::SO_TYPE)? != libc::SOCK_STREAM {
-        return Err(NetworkWorkerError::InheritedDescriptor);
-    }
-    let local = ipv4_socket_address(descriptor, false)?;
-    let peer = ipv4_socket_address(descriptor, true)?;
-    if !local.ip().is_loopback()
-        || !peer.ip().is_loopback()
-        || local.port() == 0
-        || peer.port() == 0
-        || expected.is_some_and(|binding| local.port() != binding.host_port)
-    {
-        return Err(NetworkWorkerError::InheritedDescriptor);
-    }
-    Ok((local, peer))
-}
-
-fn ipv4_socket_address(descriptor: RawFd, peer: bool) -> Result<SocketAddrV4, NetworkWorkerError> {
-    let mut address: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-    let mut length = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-    let result = if peer {
-        unsafe {
-            libc::getpeername(
-                descriptor,
-                (&raw mut address).cast::<libc::sockaddr>(),
-                &mut length,
-            )
-        }
-    } else {
-        unsafe {
-            libc::getsockname(
-                descriptor,
-                (&raw mut address).cast::<libc::sockaddr>(),
-                &mut length,
-            )
-        }
-    };
-    if result == -1
-        || length as usize != std::mem::size_of::<libc::sockaddr_in>()
-        || address.sin_family as i32 != libc::AF_INET
-    {
-        return Err(NetworkWorkerError::InheritedDescriptor);
-    }
-    Ok(SocketAddrV4::new(
-        Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr)),
-        u16::from_be(address.sin_port),
-    ))
-}
-
 fn socket_option(descriptor: RawFd, option: i32) -> Result<i32, NetworkWorkerError> {
     let mut value = 0_i32;
     let mut length = std::mem::size_of::<i32>() as libc::socklen_t;
@@ -1567,15 +1462,9 @@ fn decode_product_worker_bootstrap(
     let broker_binding = BrokerIpcBinding::new(vm_id, generation, policy_digest)
         .map_err(|_| NetworkWorkerError::InvalidBootstrap)?;
     let mut broker_key = Zeroizing::new([0_u8; BROKER_IPC_KEY_LEN]);
-    broker_key.copy_from_slice(&bytes[PRODUCT_BROKER_KEY_OFFSET..PRODUCT_HOST_PORT_KEY_OFFSET]);
+    broker_key.copy_from_slice(&bytes[PRODUCT_BROKER_KEY_OFFSET..PRODUCT_MESH_INGRESS_KEY_OFFSET]);
     let broker_key =
         BrokerIpcKey::from_bytes(*broker_key).map_err(|_| NetworkWorkerError::InvalidBootstrap)?;
-    let mut host_port_key = Zeroizing::new([0_u8; HOST_PORT_CONTROL_KEY_LEN]);
-    host_port_key
-        .copy_from_slice(&bytes[PRODUCT_HOST_PORT_KEY_OFFSET..PRODUCT_MESH_INGRESS_KEY_OFFSET]);
-    if host_port_key.iter().all(|byte| *byte == 0) {
-        return Err(NetworkWorkerError::InvalidBootstrap);
-    }
     let mut mesh_ingress_key = Zeroizing::new([0_u8; MESH_INGRESS_CONTROL_KEY_LEN]);
     mesh_ingress_key.copy_from_slice(
         &bytes[PRODUCT_MESH_INGRESS_KEY_OFFSET..PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET],
@@ -1611,7 +1500,6 @@ fn decode_product_worker_bootstrap(
         network_key,
         broker_binding,
         broker_key,
-        host_port_key,
         mesh_ingress_key,
         mesh_ingress_ports,
     })
@@ -1774,7 +1662,6 @@ mod tests {
     use codewire_vmm_guest_probe::{NETWORK_HOST_HELLO_LEN, NETWORK_HOST_READY_LEN, NetworkError};
     use tokio::io::{DuplexStream, duplex};
 
-    use crate::host_port::HostPortControlFrame;
     use crate::mesh_ingress::{MeshIngressBinding, MeshIngressControlFrame};
 
     /// #2714: a dropped stream's descriptor is still closed (by the blocking
@@ -1971,7 +1858,7 @@ mod tests {
         send_worker_descriptor(
             runner.as_raw_fd(),
             bridge.as_raw_fd(),
-            WORKER_HOST_PORT_DESCRIPTOR_MARKER,
+            WORKER_NETWORK_DESCRIPTOR_MARKER,
         )
         .unwrap();
         assert!(matches!(
@@ -1997,42 +1884,11 @@ mod tests {
         assert!(send_mesh_ingress_descriptor(runner.as_raw_fd(), datagram.as_raw_fd()).is_err());
     }
 
-    #[test]
-    fn host_port_descriptor_must_be_the_exact_connected_loopback_stream() {
-        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let host_port = listener.local_addr().unwrap().port();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (accepted, _) = listener.accept().unwrap();
-        let binding = HostPortBinding::new(host_port, 3_000).unwrap();
-        let client_address = match client.local_addr().unwrap() {
-            SocketAddr::V4(address) => address,
-            SocketAddr::V6(_) => panic!("IPv4 listener returned an IPv6 client address"),
-        };
-
-        assert_eq!(
-            validate_connected_ipv4_stream(accepted.as_raw_fd(), Some(binding)).unwrap(),
-            (
-                SocketAddrV4::new(Ipv4Addr::LOCALHOST, host_port),
-                client_address,
-            )
-        );
-        assert!(matches!(
-            validate_connected_ipv4_stream(
-                accepted.as_raw_fd(),
-                Some(HostPortBinding::new(host_port.saturating_sub(1), 3_000).unwrap())
-            ),
-            Err(NetworkWorkerError::InheritedDescriptor)
-        ));
-        assert!(matches!(
-            validate_connected_ipv4_stream(listener.as_raw_fd(), Some(binding)),
-            Err(NetworkWorkerError::InheritedDescriptor)
-        ));
-    }
-
+    /// #4347: host ports reach the guest through the daemon's `ForwardTcp`,
+    /// so the worker takes no host-port frame, and no host connection with one.
     #[tokio::test]
-    async fn authenticated_host_port_control_delivers_the_matching_stream() {
+    async fn the_worker_refuses_a_host_port_frame() {
         let (vm_id, generation) = identity();
-        let key = [0xa5; HOST_PORT_CONTROL_KEY_LEN];
         let (runner, worker) = StdUnixStream::pair().unwrap();
         runner.set_nonblocking(true).unwrap();
         worker.set_nonblocking(true).unwrap();
@@ -2044,10 +1900,7 @@ mod tests {
             worker,
             status_rx,
             inbound_tx,
-            IngressControlKeys {
-                host_port: Zeroizing::new(key),
-                mesh: Zeroizing::new([0x4d; MESH_INGRESS_CONTROL_KEY_LEN]),
-            },
+            Zeroizing::new([0x4d; MESH_INGRESS_CONTROL_KEY_LEN]),
             Vec::new(),
             vm_id,
             generation,
@@ -2057,31 +1910,15 @@ mod tests {
         runner.read_exact(&mut ready).await.unwrap();
         assert_eq!(&ready, WORKER_READY_MESSAGE);
 
-        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut client = std::net::TcpStream::connect(address).unwrap();
-        let (accepted, _) = listener.accept().unwrap();
-        let binding = HostPortBinding::new(address.port(), 3_000).unwrap();
-        let frame = HostPortControlFrame::encode(vm_id, generation, 1, binding, &key).unwrap();
+        let mut frame = [0_u8; MESH_INGRESS_CONTROL_FRAME_LEN];
+        frame[..8].copy_from_slice(b"CWHOSTP1");
         runner.write_all(&frame).await.unwrap();
         runner.flush().await.unwrap();
-        send_worker_host_port_descriptor(runner.as_raw_fd(), accepted.as_raw_fd()).unwrap();
-
-        let mut incoming = tokio::time::timeout(Duration::from_secs(2), inbound_rx.recv())
-            .await
-            .expect("control did not deliver the stream")
-            .expect("control closed the host-port channel");
-        assert_eq!(incoming.guest_port, binding.guest_port);
-        client.write_all(b"transferred").unwrap();
-        let mut received = [0_u8; 11];
-        incoming.stream.read_exact(&mut received).await.unwrap();
-        assert_eq!(&received, b"transferred");
-
-        drop(runner);
         assert!(matches!(
             control.await.unwrap(),
-            Err(NetworkWorkerError::FrameIo)
+            Err(NetworkWorkerError::Protocol)
         ));
+        assert!(inbound_rx.recv().await.is_none());
     }
 
     #[tokio::test]
@@ -2100,10 +1937,7 @@ mod tests {
             worker,
             status_rx,
             inbound_tx,
-            IngressControlKeys {
-                host_port: Zeroizing::new([0xa5; HOST_PORT_CONTROL_KEY_LEN]),
-                mesh: Zeroizing::new(mesh_key),
-            },
+            Zeroizing::new(mesh_key),
             vec![guest_port],
             vm_id,
             generation,
@@ -2223,7 +2057,6 @@ mod tests {
         let (vm_id, generation) = identity();
         let network_key = NetworkKey::derive(TOKEN, vm_id, generation).unwrap();
         let broker_key = [0x5a; BROKER_IPC_KEY_LEN];
-        let host_port_key = [0xa5; HOST_PORT_CONTROL_KEY_LEN];
         let mesh_ingress_key = [0x4d; MESH_INGRESS_CONTROL_KEY_LEN];
         let mesh_ingress_ports = [22, 3_000];
         let bytes = encode_product_worker_bootstrap(
@@ -2231,7 +2064,6 @@ mod tests {
             generation,
             &network_key,
             &broker_key,
-            &host_port_key,
             &mesh_ingress_key,
             &mesh_ingress_ports,
             CompiledPolicy::developer_baseline().digest(),
@@ -2266,7 +2098,7 @@ mod tests {
         zero_policy[PRODUCT_POLICY_DIGEST_OFFSET..PRODUCT_BROKER_KEY_OFFSET].fill(0);
         assert!(decode_product_worker_bootstrap(zero_policy.as_ref(), vm_id, generation).is_err());
         let mut zero_broker_key = bytes.clone();
-        zero_broker_key[PRODUCT_BROKER_KEY_OFFSET..PRODUCT_HOST_PORT_KEY_OFFSET].fill(0);
+        zero_broker_key[PRODUCT_BROKER_KEY_OFFSET..PRODUCT_MESH_INGRESS_KEY_OFFSET].fill(0);
         assert!(
             decode_product_worker_bootstrap(zero_broker_key.as_ref(), vm_id, generation).is_err()
         );
@@ -2276,18 +2108,11 @@ mod tests {
                 generation,
                 &network_key,
                 &[0_u8; BROKER_IPC_KEY_LEN],
-                &host_port_key,
                 &mesh_ingress_key,
                 &mesh_ingress_ports,
                 CompiledPolicy::developer_baseline().digest(),
             )
             .is_err()
-        );
-        let mut zero_host_port_key = bytes.clone();
-        zero_host_port_key[PRODUCT_HOST_PORT_KEY_OFFSET..PRODUCT_MESH_INGRESS_KEY_OFFSET].fill(0);
-        assert!(
-            decode_product_worker_bootstrap(zero_host_port_key.as_ref(), vm_id, generation)
-                .is_err()
         );
         let mut zero_mesh_ingress_key = bytes.clone();
         zero_mesh_ingress_key
@@ -2462,10 +2287,9 @@ mod tests {
         drop(listener);
         client.set_nonblocking(true).unwrap();
         let mut client = tokio::net::TcpStream::from_std(client).unwrap();
-        let binding = HostPortBinding::new(address.port(), guest_port).unwrap();
         inbound_tx
             .send(InboundGuestStream {
-                guest_port: binding.guest_port,
+                guest_port,
                 stream: Box::pin(transferred_stream(OwnedFd::from(accepted)).unwrap()),
             })
             .await
@@ -2734,8 +2558,8 @@ mod tests {
     }
 
     /// The deny-all worker reads and writes a connected TCP stream it receives
-    /// after confinement (the broker's dials and host-port connections), and
-    /// still cannot dial one itself.
+    /// after confinement (the broker's dials), and still cannot dial one
+    /// itself.
     #[cfg(target_os = "macos")]
     #[test]
     fn seatbelt_confined_worker_uses_a_received_tcp_stream() {
@@ -2752,10 +2576,10 @@ mod tests {
                 .unwrap();
             install_deny_all_filesystem_domain().unwrap();
             install_network_worker_seccomp().unwrap();
-            send_worker_host_port_descriptor(runner.as_raw_fd(), client.as_raw_fd()).unwrap();
+            send_connected_stream_for_test(runner.as_raw_fd(), client.as_raw_fd()).unwrap();
             drop(client);
             let received =
-                receive_worker_descriptor(control.as_raw_fd(), WORKER_HOST_PORT_DESCRIPTOR_MARKER)
+                receive_worker_descriptor(control.as_raw_fd(), WORKER_BROKER_DESCRIPTOR_MARKER)
                     .unwrap();
             let mut transferred = {
                 let _runtime_context = runtime.enter();

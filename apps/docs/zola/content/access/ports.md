@@ -1,7 +1,7 @@
 ---
 title: Ports and preview URLs
 description: Publish an application port as an HTTPS preview URL on the platform, or on 127.0.0.1 for a local VM.
-updated: 2026-10-26
+updated: 2026-11-12
 weight: 5
 aliases: ["/guides/previews", "/concepts/preview-environments"]
 ---
@@ -100,6 +100,16 @@ ports:
   - host_port: 3000
     guest_port: 3000
 ```
+
+Publishing joins your machine's loopback to the VM's. A connection to
+`127.0.0.1:3000` on your machine reaches port 3000 on the VM's own loopback,
+made as the workspace user, so a server in the VM that listens on `127.0.0.1`
+answers, and so does one on `0.0.0.0`. The host port listens on `127.0.0.1`
+only: nothing on your network can reach it, and nothing in the VM is
+reachable from your machine unless you publish that exact port. When nothing
+in the VM listens on the port yet, `cw ports --publish` says so; connections
+are closed until a server starts. The workspace's own SSH and credential
+ports can't be reached this way.
 
 ## Related
 

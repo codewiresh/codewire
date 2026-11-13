@@ -2,6 +2,8 @@
 //! on the host's 127.0.0.1. Listing never starts the VM; publishing needs it
 //! running; withdrawing works either way.
 
+use codewire_local_vmm::guest_loopback::GuestLoopbackError;
+
 use super::*;
 
 pub(crate) async fn handle_native_environment_port(
@@ -42,7 +44,12 @@ pub(crate) async fn handle_native_environment_port(
                 )
                 .await
                 .map_err(native_status)?;
-            let summary = format!("Published http://127.0.0.1:{host_port} -> {name}:{guest_port}");
+            let mut summary =
+                format!("Published http://127.0.0.1:{host_port} -> {name}:{guest_port}");
+            if let Some(note) = listening_note(&mut client, name, guest_port).await {
+                summary.push('\n');
+                summary.push_str(&note);
+            }
             print_native_ports(&environment, output, Some(&summary))
         }
         PortOperation::Unpublish {
@@ -63,6 +70,27 @@ pub(crate) async fn handle_native_environment_port(
             let summary = format!("Withdrew 127.0.0.1:{host_port} -> {name}:{guest_port}");
             print_native_ports(&environment, output, Some(&summary))
         }
+    }
+}
+
+/// What a connection to a newly published port will meet, when that is not a
+/// server: one probe through the same daemon path the host port uses (#4347).
+/// Nothing is said when the daemon cannot be reached, such as while the VM
+/// is still booting.
+async fn listening_note(
+    client: &mut NativeSupervisorClient,
+    name: &str,
+    guest_port: u16,
+) -> Option<String> {
+    let access = client.daemon_access(name).await.ok()?;
+    match codewire_local_vmm::guest_loopback::probe_guest_loopback(access, guest_port).await {
+        Ok(()) | Err(GuestLoopbackError::DaemonUnreachable) => None,
+        Err(GuestLoopbackError::NothingListens(_)) => Some(format!(
+            "Nothing in {name} listens on 127.0.0.1:{guest_port} yet; connections are refused until a server listens there."
+        )),
+        Err(GuestLoopbackError::Refused(reason)) => Some(format!(
+            "Connections to {name}:{guest_port} are refused: {reason}"
+        )),
     }
 }
 

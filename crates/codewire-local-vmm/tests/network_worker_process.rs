@@ -19,9 +19,6 @@ use codewire_local_vmm::egress_broker::{
     encode_egress_broker_bootstrap,
 };
 use codewire_local_vmm::host_addresses::{HostAddressSet, encode_frame};
-use codewire_local_vmm::host_port::{
-    HOST_PORT_CONTROL_KEY_LEN, HostPortBinding, HostPortControlFrame,
-};
 use codewire_local_vmm::mesh_enrollment::{
     MESH_ENROLLMENT_BOOTSTRAP_FD, MESH_ENROLLMENT_CONFINE_MESSAGE,
     MESH_ENROLLMENT_PREPARED_MESSAGE, MESH_ENROLLMENT_READY_MESSAGE, MESH_ENROLLMENT_TRANSFER_FD,
@@ -49,7 +46,6 @@ use uuid::Uuid;
 
 const BROKER_DESCRIPTOR_MARKER: u8 = b'B';
 const NETWORK_DESCRIPTOR_MARKER: u8 = b'N';
-const HOST_PORT_DESCRIPTOR_MARKER: u8 = b'P';
 const MESH_INGRESS_DESCRIPTOR_MARKER: u8 = b'M';
 const CONTROL_BYTES: usize = 64;
 /// How long these tests wait on a child process before calling it hung. No
@@ -307,7 +303,6 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
     worker_parent.set_write_timeout(Some(HANG_GUARD)).unwrap();
     let token = "product-worker-process-test-token-0123456789abcdef";
     let network_key = NetworkKey::derive(token, vm_id, generation).unwrap();
-    let host_port_key = [0x7b; HOST_PORT_CONTROL_KEY_LEN];
     let mesh_ingress_key = [0x4d; MESH_INGRESS_CONTROL_KEY_LEN];
     let mesh_ingress_port = 3_001;
     let worker_bootstrap = encode_product_worker_bootstrap(
@@ -315,7 +310,6 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
         generation,
         &network_key,
         &broker_key,
-        &host_port_key,
         &mesh_ingress_key,
         &[mesh_ingress_port],
         codewire_egress_policy::CompiledPolicy::developer_baseline().digest(),
@@ -410,50 +404,6 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
         ))
         .unwrap();
     assert_eq!(enforced, locked.digest());
-
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let address = listener.local_addr().unwrap();
-    let mut host_client = std::net::TcpStream::connect(address).unwrap();
-    host_client
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .unwrap();
-    let (accepted, peer) = listener.accept().unwrap();
-    assert!(peer.ip().is_loopback());
-    let binding = HostPortBinding::new(address.port(), 3_000).unwrap();
-    let frame =
-        HostPortControlFrame::encode(vm_id, generation, 1, binding, &host_port_key).unwrap();
-    worker_parent.write_all(&frame).unwrap();
-    send_descriptor(
-        worker_parent.as_raw_fd(),
-        accepted.as_raw_fd(),
-        HOST_PORT_DESCRIPTOR_MARKER,
-    );
-    drop(accepted);
-    std::thread::sleep(Duration::from_millis(100));
-    if let Some(status) = worker.0.try_wait().unwrap() {
-        panic!(
-            "confined product worker rejected host-port control before payload: exit={:?}",
-            status.code()
-        );
-    }
-    host_client
-        .write_all(b"host-port-process-boundary")
-        .unwrap();
-    let mut byte = [0_u8; 1];
-    let read = host_client.read(&mut byte);
-    if !read.as_ref().is_err_and(|error| {
-        matches!(
-            error.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-        )
-    }) {
-        let status = worker.wait_bounded();
-        panic!(
-            "confined product worker rejected the transferred host-port stream: {read:?}; exit={:?}",
-            status.code()
-        );
-    }
-    assert!(worker.0.try_wait().unwrap().is_none());
 
     let (mut mesh_peer, mesh_bridge) = std::os::unix::net::UnixStream::pair().unwrap();
     let mesh_frame = MeshIngressControlFrame::encode(

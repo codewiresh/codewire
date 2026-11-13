@@ -160,6 +160,22 @@ rev 3 until restarted`) and takes the selection at its next start.
 `--policy` is unrelated to `--network`, which joins a Mesh network. A policy an
 environment selects cannot be deleted.
 
+## Host ports
+
+`cw ports ENV --publish PORT`, and `ports:` entries with `host_port` in
+`codewire.yaml`, publish a guest port on `127.0.0.1:HOST_PORT`. The
+per-environment runner owns those listeners. It carries each accepted
+connection through the guest daemon's `ForwardTcp` to the guest port on the
+workload's loopback (`127.0.0.1`, then `::1`), made as the workload user, the
+same path `ssh -L` through `cw setup ssh` uses (#4347). A server in the VM
+bound to `127.0.0.1` or `0.0.0.0` answers; one bound only to the VM's network
+address does not. The network worker never sees a host connection.
+
+A connection the daemon can't make is closed, and the runner log records
+`host_port_forward_failed` with the guest port and one reason:
+`nothing_listens`, `refused` (a platform listener such as the workspace SSH
+port), `daemon_unreachable`, or `limit` (256 forwards open at once per VM).
+
 ## SSH keys in a local VM
 
 A local VM has no SSH key unless its credential profile has one. The key stays

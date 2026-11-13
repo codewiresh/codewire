@@ -3613,8 +3613,11 @@ run_cw run --no-tty -- /bin/sh -lc \
 run_cw cp --local "$NAME:/workspace/cw-upload.bin" "$CW_DOWNLOAD"
 cmp "$CW_UPLOAD" "$CW_DOWNLOAD" || die 'cw binary file transfer changed content'
 
-log 'checking codewire.yaml loopback host-port publication through the native VM'
-HOST_PORT_SERVER='const net=require("node:net");const server=net.createServer((socket)=>{const chunks=[];socket.on("data",(chunk)=>chunks.push(chunk));socket.on("end",()=>{const request=Buffer.concat(chunks).toString("utf8");socket.end(request==="codewire-host-port-request"?"codewire-host-port-response":"unexpected-request",()=>server.close());});});server.listen(3000,"0.0.0.0",()=>process.stdout.write("codewire-host-port-ready\n"));'
+# The declared port's server listens on the guest's loopback only, which a
+# host port reaches through the daemon (#4347); the dynamic one, below, on
+# every address.
+log 'checking codewire.yaml loopback host-port publication to a loopback-only guest server'
+HOST_PORT_SERVER='const net=require("node:net");const server=net.createServer((socket)=>{const chunks=[];socket.on("data",(chunk)=>chunks.push(chunk));socket.on("end",()=>{const request=Buffer.concat(chunks).toString("utf8");socket.end(request==="codewire-host-port-request"?"codewire-host-port-response":"unexpected-request",()=>server.close());});});server.listen(3000,"127.0.0.1",()=>process.stdout.write("codewire-host-port-ready\n"));'
 run_cw run --detach --no-tty --output json -- node -e "$HOST_PORT_SERVER"
 HOST_PORT_SESSION_ID="$(jq -er '.session_id | select(type == "string" and length > 0)' "$LAST_STDOUT")" ||
   die 'host-port guest session did not return an identity'
@@ -3676,7 +3679,7 @@ done
 
 start_guest_port_server() {
   local port="$1" session_id
-  run_cw run --detach --no-tty --output json -- node -e "${HOST_PORT_SERVER/listen(3000,/listen($port,}"
+  run_cw run --detach --no-tty --output json -- node -e "${HOST_PORT_SERVER/listen(3000,\"127.0.0.1\",/listen($port,\"0.0.0.0\",}"
   session_id="$(jq -er '.session_id | select(type == "string" and length > 0)' "$LAST_STDOUT")" ||
     die "guest port $port listener did not return an identity"
   for _attempt in {1..200}; do

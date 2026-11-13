@@ -76,7 +76,7 @@ fn stuck_create(
     let gate = RunnerInfoGate::default();
     let (socket, _calls, stop_runner, _server) = spawn_gated_test_runner_server(
         &core.config.runner_socket(environment_id),
-        TestRunnerProtocolReply::Version(10),
+        TestRunnerProtocolReply::Version(crate::runner_service::NATIVE_RUNNER_PROTOCOL_VERSION),
         Some(gate.clone()),
     );
     attach_named_test_runner_process(core, name, socket);

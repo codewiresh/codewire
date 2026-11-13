@@ -297,8 +297,6 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
         generation,
         &network_key,
         &broker_key,
-        // The host-port control key (its module is crate-private on macOS).
-        &[0x7b; 32],
         &[0x4d; MESH_INGRESS_CONTROL_KEY_LEN],
         &[3_001],
         codewire_egress_policy::CompiledPolicy::developer_baseline().digest(),

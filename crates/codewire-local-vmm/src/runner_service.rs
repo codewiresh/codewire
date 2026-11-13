@@ -58,7 +58,9 @@ const RUNNER_WATCH_BUFFER: usize = 8;
 //    broker enforces (#2537); an older runner would enforce `open` instead.
 // 9: ReplaceNetworkPolicy enforces a new policy on the running broker, which
 //    ends the flows it refuses (#2537).
-const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 10;
+// 11: host ports reach the guest's loopback through the daemon's ForwardTcp,
+//     and the network worker takes no host connections (#4347).
+pub(crate) const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 11;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =

@@ -37,7 +37,6 @@ use codewire_local_vmm::egress_broker::{
     encode_egress_broker_bootstrap,
 };
 use codewire_local_vmm::host_addresses::{HostAddressSet, encode_frame};
-use codewire_local_vmm::host_port::HOST_PORT_CONTROL_KEY_LEN;
 use codewire_local_vmm::mesh_ingress::MESH_INGRESS_CONTROL_KEY_LEN;
 use codewire_local_vmm::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, NetworkWorkerStartupStatus,
@@ -284,7 +283,6 @@ fn product_worker_bootstrap(network_key: &NetworkKey) -> Vec<u8> {
         generation,
         network_key,
         &BROKER_KEY,
-        &[0x7b; HOST_PORT_CONTROL_KEY_LEN],
         &[0x4d; MESH_INGRESS_CONTROL_KEY_LEN],
         &[3_001],
         codewire_egress_policy::CompiledPolicy::developer_baseline().digest(),
