@@ -40,7 +40,8 @@ IMAGE_BUILD_DRIVERS = {
     "scripts/ci/images/build-push-image.sh": ("daemon_image", "workspace_image"),
     "scripts/ci/images/build-push-runtime-images.sh": ("daemon_image", "workspace_image"),
     "scripts/ci/images/build-support-platform.sh": ("workspace_image",),
-    "scripts/ci/images/run-workspace-contract-on-image.sh": ("workspace_image",),
+    # The contract verifies the exact image; it builds nothing (owner, 2026-11-12, #3013).
+    "scripts/ci/images/run-workspace-contract-on-image.sh": ("workspace_image_verification",),
 }
 CREDENTIAL_ACCEPTANCE_PATHS = (
     "scripts/runtime/dev/provider-anthropic-output.py",
@@ -929,7 +930,7 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(self.dev_release_state(first), "unaffected")
         self.assertEqual(first["artifacts"]["workspace_image_verification"]["state"], "unaffected")
 
-    def test_confidential_deployment_input_selects_exact_workspace_release(self) -> None:
+    def test_confidential_deployment_input_promotes_dev_without_a_workspace_build(self) -> None:
         self.repo.change(
             "deployments/k8s/runtime-profiles/confidential-smoke/job.yaml",
             "apiVersion: batch/v1\nkind: Job\n",
@@ -940,27 +941,23 @@ class PlannerFixtureTests(unittest.TestCase):
             document["artifacts"]["confidential_workspace_acceptance_contract"]["state"],
             "affected",
         )
-        self.assertEqual(
-            self.workspace_states(document),
-            ("unaffected", "unaffected", "affected"),
-        )
+        # The workspace image's bytes do not change; it aliases (owner, 2026-11-12, #3013).
+        self.assertEqual(self.workspace_states(document), ("unaffected",) * 3)
         self.assertEqual(self.runtime_states(document), ("unaffected",) * 5)
         self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "unaffected")
 
-    def test_any_dev_release_input_selects_exact_workspace_release(self) -> None:
+    def test_any_dev_release_input_promotes_dev_without_a_workspace_build(self) -> None:
         self.repo.change(
             "deployments/k8s/base/runtime-profile.yaml",
             "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: changed\n",
         )
         document = self.repo.plan()
         self.assertEqual(self.dev_release_state(document), "affected")
-        self.assertEqual(
-            self.workspace_states(document),
-            ("unaffected", "unaffected", "affected"),
-        )
+        # The workspace image's bytes do not change; it aliases (owner, 2026-11-12, #3013).
+        self.assertEqual(self.workspace_states(document), ("unaffected",) * 3)
         self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "unaffected")
 
-    def test_confidential_smoke_script_selects_exact_workspace_release(self) -> None:
+    def test_confidential_smoke_script_builds_no_image(self) -> None:
         self.repo.change(
             "scripts/runtime/confidential/smoke-dev-confidential-snp.sh",
             "#!/usr/bin/env bash\nset -euo pipefail\nprintf smoke\\n\n",
@@ -970,10 +967,8 @@ class PlannerFixtureTests(unittest.TestCase):
             document["artifacts"]["confidential_workspace_acceptance_contract"]["state"],
             "affected",
         )
-        self.assertEqual(
-            self.workspace_states(document),
-            ("unaffected", "unaffected", "affected"),
-        )
+        # The workspace image's bytes do not change; it aliases (owner, 2026-11-12, #3013).
+        self.assertEqual(self.workspace_states(document), ("unaffected",) * 3)
         self.assertEqual(self.states(document), ("unaffected", "unaffected"))
         self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "unaffected")
 
@@ -1092,9 +1087,11 @@ class PlannerFixtureTests(unittest.TestCase):
                     expected[1] = "affected"  # The daemon image contains the source-bound CW asset.
                 document = repository.plan()
                 self.assertEqual(self.runtime_states(document), tuple(expected))
+                # A runtime image alone does not change the workspace; a
+                # lockfile reaches it through cw's source digest.
                 self.assertEqual(
-                    self.workspace_states(document),
-                    ("unaffected", "unaffected", "affected"),
+                    self.workspace_states(document)[2],
+                    "affected" if path.endswith(".lock") else "unaffected",
                 )
 
     def test_runtime_artifact_fact_does_not_change_capability_ownership(self) -> None:
@@ -1224,10 +1221,11 @@ class PlannerFixtureTests(unittest.TestCase):
                     expected[1] = "affected"
                 self.assertEqual(self.runtime_states(document), tuple(expected))
                 self.assertEqual(self.states(document), ("unaffected", "unaffected"))
-                # Every Dev-selected source still publishes its exact workspace.
+                # Dev promotes the source without rebuilding the workspace; a
+                # lockfile still reaches it through cw's source digest.
                 self.assertEqual(
-                    self.workspace_states(document),
-                    ("unaffected", "unaffected", "affected"),
+                    self.workspace_states(document)[2],
+                    "affected" if path.endswith(".lock") else "unaffected",
                 )
                 self.assertEqual(
                     document["artifacts"]["workspace_image_verification"]["state"],
@@ -1909,7 +1907,8 @@ class PlannerFixtureTests(unittest.TestCase):
             self.runtime_states(document),
             ("affected", "unaffected", "unaffected", "unaffected", "unaffected"),
         )
-        self.assertEqual(document["artifacts"]["workspace_image"]["state"], "affected")
+        # The dashboard image is not in the workspace image (owner, 2026-11-12, #3013).
+        self.assertEqual(document["artifacts"]["workspace_image"]["state"], "unaffected")
 
     def test_unknown_root_path_still_fails_closed(self) -> None:
         self.repo.change("unknown-root-input.txt", "unknown\n")
@@ -1964,6 +1963,27 @@ class PlannerFixtureTests(unittest.TestCase):
                 deploy = self.deploy_outputs(repository, plans["deploy"], head)
                 self.assertEqual(deploy["deploy_dev"], "false")
 
+    def test_only_a_change_to_the_pair_bytes_builds_the_support_pair(self) -> None:
+        # The workspace image updates only when it needs to (owner, 2026-11-12,
+        # #3013): a docs or dashboard change once rebuilt the whole pair,
+        # because the workspace depended on every Dev-selected image.
+        cases = (
+            ("apps/docs/zola/content/changed.md", "+++\ntitle = 'changed'\n+++\n", "false"),
+            ("apps/dashboard/runtime-inventory.json", '{"changed": true}\n', "false"),
+            ("images/workspace/Dockerfile", "FROM changed-workspace\n", "true"),
+            ("cli/src/main.rs", "fn main() { renamed_core::run(); let _changed = 1; }\n", "true"),
+        )
+        for path, content, build in cases:
+            with self.subTest(path=path), tempfile.TemporaryDirectory(
+                prefix="codewire-support-pair-bytes-"
+            ) as temporary:
+                repository = FixtureRepository(Path(temporary))
+                head = repository.change(path, content)
+                document = repository.support_plan(repository.support_candidate(repository.base), head)
+                self.assertFalse(document["degraded_reasons"])
+                support = self.support_outputs(repository, document, head)
+                self.assertEqual(support["build_support_images"], build)
+
     def test_image_build_scripts_still_select_their_images(self) -> None:
         # A script an artifact lists stays that artifact's input; the scripts
         # root only stopped unlisted scripts from looking like Rust inputs.
@@ -1980,22 +2000,19 @@ class PlannerFixtureTests(unittest.TestCase):
             "scripts/ci/setup/fetch-openbao-harbor-credentials.sh": {
                 "daemon_image",
                 "workspace_image",
+                "workspace_image_verification",
             },
             "scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh": {"workspace_image"},
             "scripts/ci/images/build-support-platform.sh": {"workspace_image"},
-            # The contract gates publication of the exact image it runs on.
-            "scripts/ci/images/run-workspace-contract-on-image.sh": {"workspace_image"},
-            "scripts/ci/verify/workspace-agent-contract.sh": {
-                "workspace_image",
-                "workspace_image_verification",
-            },
+            # The contract verifies the image it runs on and builds nothing:
+            # a change to it is proven on a pull request's own workspace
+            # image (owner, 2026-11-12, #3013).
+            "scripts/ci/images/run-workspace-contract-on-image.sh": {"workspace_image_verification"},
+            "scripts/ci/verify/workspace-agent-contract.sh": {"workspace_image_verification"},
             "scripts/ci/images/run-rust-build.sh": runtime_cw,
             "scripts/dev/build-cw.py": runtime_cw,
             "scripts/ci/verify/verify-workspace-image.sh": {"workspace_image_verification"},
-            "scripts/runtime/dev/smoke-dev-commodity.sh": {
-                "dev_acceptance_harness",
-                "workspace_image",
-            },
+            "scripts/runtime/dev/smoke-dev-commodity.sh": {"dev_acceptance_harness"},
             "scripts/ci/release/package-cli.sh": {"cw_cli_release_assets"},
         }
         for path, expected in cases.items():
@@ -2128,7 +2145,7 @@ class PlannerFixtureTests(unittest.TestCase):
         # A policy edit beside a real change: before #2897 every artifact was
         # unclassified, so a published or deployed range that crossed any
         # policy commit rebuilt everything. The head policy is authoritative
-        # here; only the dashboard and the workspace release it feeds change.
+        # here; only the dashboard image changes.
         # (The candidates above are untracked files an unknown root path
         # would otherwise commit.)
         deployed_candidate.unlink()
@@ -2151,12 +2168,9 @@ class PlannerFixtureTests(unittest.TestCase):
                 for name, artifact in document["artifacts"].items()
                 if artifact["state"] != "unaffected"
             }
-            self.assertEqual(changed, {"dashboard_image", "workspace_image"})
+            self.assertEqual(changed, {"dashboard_image"})
             self.assertEqual(
                 document["artifacts"]["dashboard_image"]["state"], "affected"
-            )
-            self.assertEqual(
-                document["artifacts"]["workspace_image"]["state"], "affected"
             )
 
         # The same range planned with the previous policy (a pull request or

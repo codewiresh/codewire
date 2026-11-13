@@ -50,14 +50,18 @@ exact canonical head's reviewed policy, so a policy path in the range never
 makes an artifact unclassified there, alone or beside other changes; the
 artifact fingerprints decide.
 
-The workspace image also depends on the complete Dev release selection: the
-release tree, the Dev acceptance harness, all five runtime images, and the
-confidential-workspace acceptance contract. Every source selected for Dev
-therefore publishes an exact-source workspace image even when the `cw` binary
-is unchanged. A source
-that does not select Dev and does not affect the support pair remains
-skippable. File-set and composite inputs are explicit ownership rules, so they
-do not make unrelated Rust artifacts unclassified.
+The workspace image depends only on what changes its bytes: the base image,
+its own definition and build helpers, and the `cw` binary
+(`cw_runtime_image_asset`). It rebuilds only when those change (owner,
+2026-11-12, #3013); any other commit gets its exact-source tag by aliasing the
+published pair with the same inputs. `cw`'s inputs follow its source digest
+(`SOURCE_PATHSPEC`), which every `cw` embeds, so any Rust or manifest change
+still rebuilds the pair. What only verifies the image has its own inputs: the
+agent contract and its runner belong to `workspace_image_verification`; the
+Dev release tree, acceptance harness and runtime images select Dev delivery;
+and the confidential-workspace acceptance contract stays an artifact of its
+own, which builds no image. File-set and composite inputs are explicit
+ownership rules, so they do not make unrelated Rust artifacts unclassified.
 
 PR workspace content qualification uses the separate
 `workspace_image_verification` artifact. It depends on the base image and the

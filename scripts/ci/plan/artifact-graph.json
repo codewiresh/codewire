@@ -350,23 +350,14 @@
         "scripts/ci/verify/rehearse-build-local-image.sh",
         "scripts/ci/verify/verify-workspace-image.sh",
         "scripts/ci/verify/workspace-agent-contract.sh",
-        "scripts/ci/verify/workspace-image-artifact.py"
+        "scripts/ci/verify/workspace-image-artifact.py",
+        "scripts/ci/images/run-workspace-contract-on-image.sh",
+        "scripts/ci/setup/fetch-openbao-harbor-credentials.sh"
       ]
     },
     "workspace_image": {
       "kind": "composite",
-      "dependencies": [
-        "base_image",
-        "cw_runtime_image_asset",
-        "confidential_workspace_acceptance_contract",
-        "dev_release_tree",
-        "dev_acceptance_harness",
-        "dashboard_image",
-        "daemon_image",
-        "derp_image",
-        "services_image",
-        "mesh_image"
-      ],
+      "dependencies": ["base_image", "cw_runtime_image_asset"],
       "inputs": [
         "images/workspace/**",
         "scripts/ci/images/cw-image-consumer.py",
@@ -382,10 +373,8 @@
         "scripts/ci/images/image-bundle.py",
         "scripts/ci/images/pipeline-identity.sh",
         "scripts/ci/images/build-support-platform.sh",
-        "scripts/ci/images/run-workspace-contract-on-image.sh",
         "scripts/ci/setup/fetch-openbao-arm64-buildkit-client.sh",
-        "scripts/ci/setup/fetch-openbao-harbor-credentials.sh",
-        "scripts/ci/verify/workspace-agent-contract.sh"
+        "scripts/ci/setup/fetch-openbao-harbor-credentials.sh"
       ]
     }
   }
