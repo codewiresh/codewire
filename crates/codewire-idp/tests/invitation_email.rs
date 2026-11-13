@@ -226,7 +226,7 @@ async fn a_queued_email_is_sent_once_and_recorded() {
         "You're invited to join an organization on Codewire"
     );
     assert!(html.contains("Ada invited you to join <strong>Acme &amp; Co</strong>"));
-    assert!(html.contains("<code>cw org accept acme</code>"));
+    assert!(html.contains("<code>cw login\ncw org accept acme</code>"));
     assert!(html.contains(SIGN_IN));
     let token_hash: String =
         sqlx::query_scalar("SELECT token_hash FROM org_invitations WHERE id = 'invitee'")

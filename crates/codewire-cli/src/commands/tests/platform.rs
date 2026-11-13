@@ -265,6 +265,25 @@ fn login_org_resolution_honors_explicit_selection_and_empty_membership() {
 }
 
 #[test]
+fn login_succeeds_without_an_organization_and_names_where_to_go_next() {
+    let org = test_org("org_1", "Noel Labs", "noel-labs", "owner");
+    assert_eq!(
+        super::login::login_outcome(&LoginOrgResolution::Selected(org)).unwrap(),
+        "Default org: Noel Labs (noel-labs)."
+    );
+
+    let notice = super::login::login_outcome(&LoginOrgResolution::NoOrganizations).unwrap();
+    assert!(notice.contains("not in an organization yet"));
+    assert!(notice.contains("'cw org invitations'"));
+    assert!(notice.contains("'cw org create <name>'"));
+
+    let error = super::login::login_outcome(&LoginOrgResolution::SelectionRequired)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("no default organization is selected"));
+}
+
+#[test]
 fn doctor_warns_for_stale_org_and_is_ok_only_for_live_org() {
     let orgs = vec![test_org("org_1", "Noel Labs", "noel-labs", "owner")];
     let stale = config::ResolvedPlatformConfig::static_token(

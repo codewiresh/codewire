@@ -84,21 +84,23 @@ pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> 
     }
     eprintln!("Logged in as {}.", oauth_user_display_name(&user));
     report_pin(&server_url, previous_pin.as_ref(), pin.as_ref());
-    match org_resolution {
-        LoginOrgResolution::Selected(org) => {
-            eprintln!("Default org: {} ({}).", org.name, org.slug);
-            Ok(())
-        }
-        LoginOrgResolution::NoOrganizations => {
-            anyhow::bail!(
-                "logged in, but no organizations found; run 'cw org create <name>' or join an organization"
-            )
-        }
-        LoginOrgResolution::SelectionRequired => {
-            anyhow::bail!(
-                "logged in, but no default organization is selected; run 'cw org set <id-or-slug>' or rerun 'cw login --org <id-or-slug>'"
-            )
-        }
+    eprintln!("{}", login_outcome(&org_resolution)?);
+    Ok(())
+}
+
+/// What `cw login` says once the sign-in is saved. An account in no
+/// organization yet is a new invitee's normal state (#4530): the login
+/// succeeds and names where to go next.
+pub(super) fn login_outcome(resolution: &LoginOrgResolution) -> anyhow::Result<String> {
+    match resolution {
+        LoginOrgResolution::Selected(org) => Ok(format!("Default org: {} ({}).", org.name, org.slug)),
+        LoginOrgResolution::NoOrganizations => Ok(
+            "You're not in an organization yet: see your invitations with 'cw org invitations', or create one with 'cw org create <name>'."
+                .to_owned(),
+        ),
+        LoginOrgResolution::SelectionRequired => anyhow::bail!(
+            "logged in, but no default organization is selected; run 'cw org set <id-or-slug>' or rerun 'cw login --org <id-or-slug>'"
+        ),
     }
 }
 

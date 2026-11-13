@@ -140,10 +140,10 @@ on Production.
 - **Gotchas:**
   - `cw org invitations` lists invitations only for a verified address, so
     an unverified invitee sees none.
-  - `cw login` exits 1 after a successful sign-in when the account has no
-    organization yet, which an invitee always is: "logged in, but no
-    organizations found". The sign-in is saved; read it from the "Logged in
-    as" line.
+  - An invitee has no organization yet. `cw login` succeeds for it and says
+    "You're not in an organization yet: see your invitations with 'cw org
+    invitations', or create one with 'cw org create <name>'." (#4530; before
+    it, `cw login` exited 1 here).
   - An organization invitation is not a sign-up invite code. On hosted, a
     new account waits for an admin to enable it unless its sign-up gave a
     sign-up invite code; the organization invitation does not enable it. A

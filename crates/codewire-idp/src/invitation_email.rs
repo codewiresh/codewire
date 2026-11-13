@@ -22,7 +22,8 @@
 //!
 //! The email carries no token (decided on #3840, 2026-11-12). It names the
 //! inviter, organization and role and tells the invitee to sign in with this
-//! address and run `cw org accept <slug>`. A forwarded email grants nothing:
+//! address (`cw login`) and run `cw org accept <slug>`, the two commands
+//! `cw login` itself points to (#4530). A forwarded email grants nothing:
 //! accepting needs the invitee's verified address.
 
 use std::sync::Arc;
@@ -120,8 +121,9 @@ pub fn render(email: &ClaimedEmail, sign_in_url: &str) -> RenderedEmail {
         r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
 	<h2>Join {org} on Codewire</h2>
 	<p>{inviter} invited you to join <strong>{org}</strong> on Codewire as {role}.</p>
-	<p>To accept, sign in to Codewire with this email address, {recipient}, then run:</p>
-	<pre style="padding: 12px; background: #f5f5f5; border-radius: 6px;"><code>cw org accept {slug}</code></pre>
+	<p>To accept, sign in with this email address, {recipient}, and accept:</p>
+	<pre style="padding: 12px; background: #f5f5f5; border-radius: 6px;"><code>cw login
+cw org accept {slug}</code></pre>
 	<p><a href="{sign_in_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 999px;">Sign in to Codewire</a></p>
 	<p style="color: #666; font-size: 14px;">New to Codewire? Sign up with this address and verify it first. The invitation expires on {expires} (UTC). If you weren't expecting it, you can ignore this email.</p>
 </div>"#
@@ -438,8 +440,8 @@ mod tests {
         );
         for expected in [
             "Ada invited you to join <strong>Acme</strong> on Codewire as an admin.",
-            "sign in to Codewire with this email address, invitee@example.test, then run:",
-            "<code>cw org accept acme</code>",
+            "sign in with this email address, invitee@example.test, and accept:",
+            "<code>cw login\ncw org accept acme</code>",
             r#"<a href="https://app.codewire.test/login""#,
             "Sign up with this address and verify it first.",
             "expires on November 19, 2026 (UTC)",

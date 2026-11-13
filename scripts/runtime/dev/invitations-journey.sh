@@ -154,15 +154,15 @@ form=(--data-urlencode "_csrf=$csrf")
 for i in 1 2 3 4 5 6 7 8; do form+=(--data-urlencode "user_code_$i=${code:i-1:1}"); done
 curl -sS --max-time 30 -o "$WORK/approved.html" -c "$WORK/cookies" -b "$WORK/cookies" \
   -H "Origin: $SERVER" "${form[@]}" "$SERVER/device/_actions/approve"
-# An account with no organization yet is what an invitee is, but cw login
-# still exits 1 for it after saving the sign-in, so the sign-in is read from
-# its "Logged in as" line.
+# An invitee has no organization yet; cw login succeeds for it and points to
+# its invitations (#4530).
 login_status=0
 wait "$LOGIN_PID" || login_status=$?
 LOGIN_PID=""
 grep -v '^Your code:' "$WORK/login.out"
-grep -q '^Logged in as ' "$WORK/login.out" || die "invite-accept: cw login did not sign in (exit $login_status)"
-log "cw login exited $login_status"
+[[ "$login_status" == 0 ]] || die "invite-accept: cw login exited $login_status"
+grep -q "^You're not in an organization yet: see your invitations with 'cw org invitations'" "$WORK/login.out" ||
+  die 'invite-accept: cw login did not point to cw org invitations'
 invitee whoami
 invitee org invitations
 out="$(invitee org accept "$ORG_SLUG" 2>&1)"; printf '%s\n' "$out"
