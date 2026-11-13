@@ -4105,7 +4105,7 @@ run_admin_static_negative admin_descriptor_billing \
 
 primitive_rust_body="$primitive_probe/run-rust.sh"
 awk '
-  /^(rust_shard|run_rust|check_shard_stage|shard_stage|shard_test)\(\) \{/ { capture = 1 }
+  /^(rust_shard|run_rust|check_shard_stage|shard_stage|shard_test|run_shard_archive|extract_shard_archive|shard_archive_root)\(\) \{/ { capture = 1 }
   capture { print }
   capture && /^}$/ { capture = 0 }
 ' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$primitive_rust_body"
@@ -4261,6 +4261,42 @@ run_shard_test_all_stage_case() {
   }
 }
 defer_check run_shard_test_all_stage_case
+
+# The features shard never passes silently (#4405). In the tests stage a
+# selection with no feature-graph package says so in the log and the step
+# summary; a selected step whose archive the build runner did not build fails.
+run_feature_graph_selection_case() {
+  local name="$1" token="$2" expected_exit="$3" expected_text="$4" summarised="$5"
+  local out="$primitive_probe/features-$name.out" summary="$primitive_probe/features-$name.summary"
+  local archives="$primitive_probe/features-$name.archives" status=0
+  rm -rf -- "$archives"
+  mkdir -p "$archives"
+  : > "$summary"
+  PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_STUB="$primitive_cargo_stub" \
+    PRIMITIVE_CARGO_LOG="$primitive_probe/features-$name.cargo" \
+    PRIMITIVE_PACKAGE_LOG="$primitive_probe/features-$name.packages" \
+    PRIMITIVE_RUST_BODY="$primitive_rust_body" ROOT="$ROOT" \
+    RUST_TRANSPORT_SHARD=features RUST_SHARD_STAGE=tests RUST_SHARD_ARCHIVES="$archives" \
+    GITHUB_STEP_SUMMARY="$summary" SELECTION="|valid:v3|$token|complete|" \
+    bash "$primitive_probe/dispatch.sh" > "$out" 2>&1 || status=$?
+  [[ "$status" == "$expected_exit" ]] || {
+    echo "$name: the features shard exited $status, expected $expected_exit" >&2; cat "$out" >&2; exit 1;
+  }
+  grep -qF -- "$expected_text" "$out" || {
+    echo "$name: the features shard did not say: $expected_text" >&2; cat "$out" >&2; exit 1;
+  }
+  if [[ "$summarised" == yes ]]; then
+    grep -qF 'no feature-graph package selected; nothing to run' "$summary" || {
+      echo "$name: the step summary does not say nothing ran" >&2; exit 1;
+    }
+  else
+    [[ ! -s "$summary" ]] || { echo "$name: claimed nothing ran: $(cat "$summary")" >&2; exit 1; }
+  fi
+}
+defer_check run_feature_graph_selection_case none rust_pkg_codewire_client 0 \
+  'no feature-graph package selected; nothing to run' yes
+defer_check run_feature_graph_selection_case empty_archive rust_pkg_codewire_protected_store 1 \
+  'no protected-store-platform test archive' no
 
 run_admin_rust_case() {
   local name="$1" tokens="$2" graph="$3" expected_status="$4" fail="${5:-}"

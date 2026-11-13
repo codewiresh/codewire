@@ -311,6 +311,8 @@ shard_stage() {
 shard_test() {
   local key="$1" selection="$2" arg
   local -a build=() filter=() selection_args=() run_in=()
+  # Counted so a shard that selects no test step can say so (run_rust).
+  SHARD_TESTS=$(( ${SHARD_TESTS:-0} + 1 ))
   read -r -a run_in <<< "${RUST_SHARD_RUN_IN:-}"
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -1300,6 +1302,7 @@ run_rust() {
   fi
   rust_shard features || return 0
   check_shard_stage || return $?
+  local feature_tests_before="${SHARD_TESTS:-0}"
   if shard_stage tests && { selected rust_workspace || selected rust_pkg_codewire_cli || selected rust_pkg_codewire_cli_bin; }; then
     python3 -B scripts/ci/tests/test-cli-host-managed.py || return $?
     python3 -B scripts/ci/tests/test-cli-update-mesh-endpoints.py || return $?
@@ -1370,6 +1373,14 @@ run_rust() {
     # The Swift bindings committed under apps/ios match the crate (#3825).
     shard_test client-ffi-swift-bindings '-E test(swift_bindings_tests::)' \
       -p codewire-client-ffi --features bindgen --lib -- swift_bindings_tests::
+  fi
+  # A selection with no feature-graph package leaves this shard no test to
+  # build or run. Say so where the job is read, never pass silently (#4405).
+  # A selected step whose archive is missing already fails (extract_shard_archive).
+  if [ "$RUST_SHARD_STAGE" != checks ] && [ "${SHARD_TESTS:-0}" = "$feature_tests_before" ]; then
+    local notice='no feature-graph package selected; nothing to run'
+    echo "::notice::Rust / transport feature graphs: $notice"
+    [ -z "${GITHUB_STEP_SUMMARY:-}" ] || printf 'Rust / transport feature graphs: %s\n' "$notice" >>"$GITHUB_STEP_SUMMARY"
   fi
 }
 
