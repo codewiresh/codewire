@@ -13,6 +13,7 @@ runs the same commands and holds the result to the same standard.
 | [invitations.md](invitations.md) | Invite a teammate by email, who accepts, is listed and can be removed, within the invitation limits |
 | [node-reboot.md](node-reboot.md) | Production keeps serving through one node's drain or reboot (#3542, #4461) |
 | [billing-and-credits.md](billing-and-credits.md) | Compute credit (#3381): add a card, top up, add credit, the receipt, costs in credits and the empty-balance refusal |
+| [previews-and-ports.md](previews-and-ports.md) | Reaching a server in an environment: `cw ports` on a local VM (#4347), cloud previews of loopback servers (#4357), and local HTTPS hostnames (#4316) |
 
 ## What a journey file holds
 
