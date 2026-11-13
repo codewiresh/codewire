@@ -1069,6 +1069,45 @@ impl EnvironmentClient {
         Ok(u64::try_from(response.size).unwrap_or(0))
     }
 
+    /// One part of a resumable upload (#4373): `chunks` start at `offset`, and
+    /// `finish` publishes the file. The error is the client's own, so a caller
+    /// can tell a server without resumable uploads (`Unimplemented`) apart.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upload_environment_file_part(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+        remote_path: &str,
+        upload_id: &str,
+        offset: u64,
+        finish: bool,
+        chunks: impl futures::Stream<Item = Vec<u8>> + Send + 'static,
+    ) -> Result<rpc::UploadFilePartResponse, ClientError> {
+        use futures::StreamExt as _;
+        let header = rpc::UploadFilePartRequest {
+            payload: Some(rpc::upload_file_part_request::Payload::Header(Box::new(
+                rpc::UploadFilePartHeader {
+                    org_id: org_id.to_string(),
+                    environment_id: environment_id.to_string(),
+                    path: remote_path.to_string(),
+                    upload_id: upload_id.to_string(),
+                    offset: i64::try_from(offset).unwrap_or(i64::MAX),
+                    finish,
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
+        };
+        let requests =
+            futures::stream::once(std::future::ready(header)).chain(chunks.map(|chunk| {
+                rpc::UploadFilePartRequest {
+                    payload: Some(rpc::upload_file_part_request::Payload::Chunk(chunk)),
+                    ..Default::default()
+                }
+            }));
+        self.inner.upload_file_part(requests).await
+    }
+
     /// The file's frames as they arrive (#3968).
     pub async fn download_environment_file(
         &self,

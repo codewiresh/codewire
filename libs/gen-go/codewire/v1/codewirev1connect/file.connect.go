@@ -40,6 +40,9 @@ const (
 	FileServiceDownloadFileProcedure = "/codewire.v1.FileService/DownloadFile"
 	// FileServiceUploadFileProcedure is the fully-qualified name of the FileService's UploadFile RPC.
 	FileServiceUploadFileProcedure = "/codewire.v1.FileService/UploadFile"
+	// FileServiceUploadFilePartProcedure is the fully-qualified name of the FileService's
+	// UploadFilePart RPC.
+	FileServiceUploadFilePartProcedure = "/codewire.v1.FileService/UploadFilePart"
 )
 
 // FileServiceClient is a client for the codewire.v1.FileService service.
@@ -47,6 +50,10 @@ type FileServiceClient interface {
 	ListFiles(context.Context, *connect.Request[v1.ListFilesRequest]) (*connect.Response[v1.ListFilesResponse], error)
 	DownloadFile(context.Context, *connect.Request[v1.DownloadFileRequest]) (*connect.ServerStreamForClient[v1.DownloadFileResponse], error)
 	UploadFile(context.Context) *connect.ClientStreamForClient[v1.UploadFileRequest, v1.UploadFileResponse]
+	// Uploads one part of a file, so a large file crosses proxies that cap a
+	// request body and resumes after an interruption. A request without chunks
+	// only reports the bytes held for the upload.
+	UploadFilePart(context.Context) *connect.ClientStreamForClient[v1.UploadFilePartRequest, v1.UploadFilePartResponse]
 }
 
 // NewFileServiceClient constructs a client for the codewire.v1.FileService service. By default, it
@@ -80,14 +87,21 @@ func NewFileServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(fileServiceMethods.ByName("UploadFile")),
 			connect.WithClientOptions(opts...),
 		),
+		uploadFilePart: connect.NewClient[v1.UploadFilePartRequest, v1.UploadFilePartResponse](
+			httpClient,
+			baseURL+FileServiceUploadFilePartProcedure,
+			connect.WithSchema(fileServiceMethods.ByName("UploadFilePart")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // fileServiceClient implements FileServiceClient.
 type fileServiceClient struct {
-	listFiles    *connect.Client[v1.ListFilesRequest, v1.ListFilesResponse]
-	downloadFile *connect.Client[v1.DownloadFileRequest, v1.DownloadFileResponse]
-	uploadFile   *connect.Client[v1.UploadFileRequest, v1.UploadFileResponse]
+	listFiles      *connect.Client[v1.ListFilesRequest, v1.ListFilesResponse]
+	downloadFile   *connect.Client[v1.DownloadFileRequest, v1.DownloadFileResponse]
+	uploadFile     *connect.Client[v1.UploadFileRequest, v1.UploadFileResponse]
+	uploadFilePart *connect.Client[v1.UploadFilePartRequest, v1.UploadFilePartResponse]
 }
 
 // ListFiles calls codewire.v1.FileService.ListFiles.
@@ -105,11 +119,20 @@ func (c *fileServiceClient) UploadFile(ctx context.Context) *connect.ClientStrea
 	return c.uploadFile.CallClientStream(ctx)
 }
 
+// UploadFilePart calls codewire.v1.FileService.UploadFilePart.
+func (c *fileServiceClient) UploadFilePart(ctx context.Context) *connect.ClientStreamForClient[v1.UploadFilePartRequest, v1.UploadFilePartResponse] {
+	return c.uploadFilePart.CallClientStream(ctx)
+}
+
 // FileServiceHandler is an implementation of the codewire.v1.FileService service.
 type FileServiceHandler interface {
 	ListFiles(context.Context, *connect.Request[v1.ListFilesRequest]) (*connect.Response[v1.ListFilesResponse], error)
 	DownloadFile(context.Context, *connect.Request[v1.DownloadFileRequest], *connect.ServerStream[v1.DownloadFileResponse]) error
 	UploadFile(context.Context, *connect.ClientStream[v1.UploadFileRequest]) (*connect.Response[v1.UploadFileResponse], error)
+	// Uploads one part of a file, so a large file crosses proxies that cap a
+	// request body and resumes after an interruption. A request without chunks
+	// only reports the bytes held for the upload.
+	UploadFilePart(context.Context, *connect.ClientStream[v1.UploadFilePartRequest]) (*connect.Response[v1.UploadFilePartResponse], error)
 }
 
 // NewFileServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -139,6 +162,12 @@ func NewFileServiceHandler(svc FileServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(fileServiceMethods.ByName("UploadFile")),
 		connect.WithHandlerOptions(opts...),
 	)
+	fileServiceUploadFilePartHandler := connect.NewClientStreamHandler(
+		FileServiceUploadFilePartProcedure,
+		svc.UploadFilePart,
+		connect.WithSchema(fileServiceMethods.ByName("UploadFilePart")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.v1.FileService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case FileServiceListFilesProcedure:
@@ -147,6 +176,8 @@ func NewFileServiceHandler(svc FileServiceHandler, opts ...connect.HandlerOption
 			fileServiceDownloadFileHandler.ServeHTTP(w, r)
 		case FileServiceUploadFileProcedure:
 			fileServiceUploadFileHandler.ServeHTTP(w, r)
+		case FileServiceUploadFilePartProcedure:
+			fileServiceUploadFilePartHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -166,4 +197,8 @@ func (UnimplementedFileServiceHandler) DownloadFile(context.Context, *connect.Re
 
 func (UnimplementedFileServiceHandler) UploadFile(context.Context, *connect.ClientStream[v1.UploadFileRequest]) (*connect.Response[v1.UploadFileResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.FileService.UploadFile is not implemented"))
+}
+
+func (UnimplementedFileServiceHandler) UploadFilePart(context.Context, *connect.ClientStream[v1.UploadFilePartRequest]) (*connect.Response[v1.UploadFilePartResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.FileService.UploadFilePart is not implemented"))
 }

@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/file.proto.
  */
 export const file_codewire_v1_file: GenFile = /*@__PURE__*/
-  fileDesc("ChZjb2Rld2lyZS92MS9maWxlLnByb3RvEgtjb2Rld2lyZS52MSJvChBMaXN0RmlsZXNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRIMCgRwYXRoGAMgASgJEhEKCXBhZ2Vfc2l6ZRgEIAEoBRISCgpwYWdlX3Rva2VuGAUgASgJIlUKEUxpc3RGaWxlc1Jlc3BvbnNlEicKB2VudHJpZXMYASADKAsyFi5jb2Rld2lyZS52MS5GaWxlRW50cnkSFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJInMKCUZpbGVFbnRyeRIMCgRuYW1lGAEgASgJEgwKBHNpemUYAiABKAMSDgoGaXNfZGlyGAMgASgIEgwKBG1vZGUYBCABKA0SLAoIbW9kX3RpbWUYBSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIksKE0Rvd25sb2FkRmlsZVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkiWgoURG93bmxvYWRGaWxlUmVzcG9uc2USJgoEaW5mbxgBIAEoCzIWLmNvZGV3aXJlLnYxLkZpbGVFbnRyeUgAEg8KBWNodW5rGAIgASgMSABCCQoHcGF5bG9hZCJgChFVcGxvYWRGaWxlUmVxdWVzdBIvCgZoZWFkZXIYASABKAsyHS5jb2Rld2lyZS52MS5VcGxvYWRGaWxlSGVhZGVySAASDwoFY2h1bmsYAiABKAxIAEIJCgdwYXlsb2FkIkgKEFVwbG9hZEZpbGVIZWFkZXISDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkiMAoSVXBsb2FkRmlsZVJlc3BvbnNlEgwKBHBhdGgYASABKAkSDAoEc2l6ZRgCIAEoAzKLAgoLRmlsZVNlcnZpY2USTwoJTGlzdEZpbGVzEh0uY29kZXdpcmUudjEuTGlzdEZpbGVzUmVxdWVzdBoeLmNvZGV3aXJlLnYxLkxpc3RGaWxlc1Jlc3BvbnNlIgOQAgESWgoMRG93bmxvYWRGaWxlEiAuY29kZXdpcmUudjEuRG93bmxvYWRGaWxlUmVxdWVzdBohLmNvZGV3aXJlLnYxLkRvd25sb2FkRmlsZVJlc3BvbnNlIgOQAgEwARJPCgpVcGxvYWRGaWxlEh4uY29kZXdpcmUudjEuVXBsb2FkRmlsZVJlcXVlc3QaHy5jb2Rld2lyZS52MS5VcGxvYWRGaWxlUmVzcG9uc2UoAUKsAQoPY29tLmNvZGV3aXJlLnYxQglGaWxlUHJvdG9QAVpBZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL3YxO2NvZGV3aXJldjGiAgNDWFiqAgtDb2Rld2lyZS5WMcoCC0NvZGV3aXJlXFYx4gIXQ29kZXdpcmVcVjFcR1BCTWV0YWRhdGHqAgxDb2Rld2lyZTo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp]);
+  fileDesc("ChZjb2Rld2lyZS92MS9maWxlLnByb3RvEgtjb2Rld2lyZS52MSJvChBMaXN0RmlsZXNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIWCg5lbnZpcm9ubWVudF9pZBgCIAEoCRIMCgRwYXRoGAMgASgJEhEKCXBhZ2Vfc2l6ZRgEIAEoBRISCgpwYWdlX3Rva2VuGAUgASgJIlUKEUxpc3RGaWxlc1Jlc3BvbnNlEicKB2VudHJpZXMYASADKAsyFi5jb2Rld2lyZS52MS5GaWxlRW50cnkSFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJInMKCUZpbGVFbnRyeRIMCgRuYW1lGAEgASgJEgwKBHNpemUYAiABKAMSDgoGaXNfZGlyGAMgASgIEgwKBG1vZGUYBCABKA0SLAoIbW9kX3RpbWUYBSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIksKE0Rvd25sb2FkRmlsZVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkiWgoURG93bmxvYWRGaWxlUmVzcG9uc2USJgoEaW5mbxgBIAEoCzIWLmNvZGV3aXJlLnYxLkZpbGVFbnRyeUgAEg8KBWNodW5rGAIgASgMSABCCQoHcGF5bG9hZCJgChFVcGxvYWRGaWxlUmVxdWVzdBIvCgZoZWFkZXIYASABKAsyHS5jb2Rld2lyZS52MS5VcGxvYWRGaWxlSGVhZGVySAASDwoFY2h1bmsYAiABKAxIAEIJCgdwYXlsb2FkIkgKEFVwbG9hZEZpbGVIZWFkZXISDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkiMAoSVXBsb2FkRmlsZVJlc3BvbnNlEgwKBHBhdGgYASABKAkSDAoEc2l6ZRgCIAEoAyJoChVVcGxvYWRGaWxlUGFydFJlcXVlc3QSMwoGaGVhZGVyGAEgASgLMiEuY29kZXdpcmUudjEuVXBsb2FkRmlsZVBhcnRIZWFkZXJIABIPCgVjaHVuaxgCIAEoDEgAQgkKB3BheWxvYWQifwoUVXBsb2FkRmlsZVBhcnRIZWFkZXISDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEgwKBHBhdGgYAyABKAkSEQoJdXBsb2FkX2lkGAQgASgJEg4KBm9mZnNldBgFIAEoAxIOCgZmaW5pc2gYBiABKAgiWQoWVXBsb2FkRmlsZVBhcnRSZXNwb25zZRIMCgRwYXRoGAEgASgJEhEKCXVwbG9hZF9pZBgCIAEoCRIMCgRzaXplGAMgASgDEhAKCGZpbmlzaGVkGAQgASgIMugCCgtGaWxlU2VydmljZRJPCglMaXN0RmlsZXMSHS5jb2Rld2lyZS52MS5MaXN0RmlsZXNSZXF1ZXN0Gh4uY29kZXdpcmUudjEuTGlzdEZpbGVzUmVzcG9uc2UiA5ACARJaCgxEb3dubG9hZEZpbGUSIC5jb2Rld2lyZS52MS5Eb3dubG9hZEZpbGVSZXF1ZXN0GiEuY29kZXdpcmUudjEuRG93bmxvYWRGaWxlUmVzcG9uc2UiA5ACATABEk8KClVwbG9hZEZpbGUSHi5jb2Rld2lyZS52MS5VcGxvYWRGaWxlUmVxdWVzdBofLmNvZGV3aXJlLnYxLlVwbG9hZEZpbGVSZXNwb25zZSgBElsKDlVwbG9hZEZpbGVQYXJ0EiIuY29kZXdpcmUudjEuVXBsb2FkRmlsZVBhcnRSZXF1ZXN0GiMuY29kZXdpcmUudjEuVXBsb2FkRmlsZVBhcnRSZXNwb25zZSgBQqwBCg9jb20uY29kZXdpcmUudjFCCUZpbGVQcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message codewire.v1.ListFilesRequest
@@ -245,6 +245,120 @@ export const UploadFileResponseSchema: GenMessage<UploadFileResponse> = /*@__PUR
   messageDesc(file_codewire_v1_file, 7);
 
 /**
+ * @generated from message codewire.v1.UploadFilePartRequest
+ */
+export type UploadFilePartRequest = Message<"codewire.v1.UploadFilePartRequest"> & {
+  /**
+   * @generated from oneof codewire.v1.UploadFilePartRequest.payload
+   */
+  payload: {
+    /**
+     * @generated from field: codewire.v1.UploadFilePartHeader header = 1;
+     */
+    value: UploadFilePartHeader;
+    case: "header";
+  } | {
+    /**
+     * @generated from field: bytes chunk = 2;
+     */
+    value: Uint8Array;
+    case: "chunk";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message codewire.v1.UploadFilePartRequest.
+ * Use `create(UploadFilePartRequestSchema)` to create a new message.
+ */
+export const UploadFilePartRequestSchema: GenMessage<UploadFilePartRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_file, 8);
+
+/**
+ * @generated from message codewire.v1.UploadFilePartHeader
+ */
+export type UploadFilePartHeader = Message<"codewire.v1.UploadFilePartHeader"> & {
+  /**
+   * @generated from field: string org_id = 1;
+   */
+  orgId: string;
+
+  /**
+   * @generated from field: string environment_id = 2;
+   */
+  environmentId: string;
+
+  /**
+   * @generated from field: string path = 3;
+   */
+  path: string;
+
+  /**
+   * Names the upload across its parts: 16 to 64 letters, digits, '-' or '_'.
+   * The same id must always carry the same file's bytes.
+   *
+   * @generated from field: string upload_id = 4;
+   */
+  uploadId: string;
+
+  /**
+   * Where this part's chunks start; it must equal the bytes already held.
+   *
+   * @generated from field: int64 offset = 5;
+   */
+  offset: bigint;
+
+  /**
+   * Publish the file at path once this part's chunks are written.
+   *
+   * @generated from field: bool finish = 6;
+   */
+  finish: boolean;
+};
+
+/**
+ * Describes the message codewire.v1.UploadFilePartHeader.
+ * Use `create(UploadFilePartHeaderSchema)` to create a new message.
+ */
+export const UploadFilePartHeaderSchema: GenMessage<UploadFilePartHeader> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_file, 9);
+
+/**
+ * @generated from message codewire.v1.UploadFilePartResponse
+ */
+export type UploadFilePartResponse = Message<"codewire.v1.UploadFilePartResponse"> & {
+  /**
+   * @generated from field: string path = 1;
+   */
+  path: string;
+
+  /**
+   * @generated from field: string upload_id = 2;
+   */
+  uploadId: string;
+
+  /**
+   * The bytes held for the upload after this request.
+   *
+   * @generated from field: int64 size = 3;
+   */
+  size: bigint;
+
+  /**
+   * Whether the file is now published at path.
+   *
+   * @generated from field: bool finished = 4;
+   */
+  finished: boolean;
+};
+
+/**
+ * Describes the message codewire.v1.UploadFilePartResponse.
+ * Use `create(UploadFilePartResponseSchema)` to create a new message.
+ */
+export const UploadFilePartResponseSchema: GenMessage<UploadFilePartResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_file, 10);
+
+/**
  * FileService lists and transfers files in a running sandbox environment.
  *
  * @generated from service codewire.v1.FileService
@@ -273,6 +387,18 @@ export const FileService: GenService<{
     methodKind: "client_streaming";
     input: typeof UploadFileRequestSchema;
     output: typeof UploadFileResponseSchema;
+  },
+  /**
+   * Uploads one part of a file, so a large file crosses proxies that cap a
+   * request body and resumes after an interruption. A request without chunks
+   * only reports the bytes held for the upload.
+   *
+   * @generated from rpc codewire.v1.FileService.UploadFilePart
+   */
+  uploadFilePart: {
+    methodKind: "client_streaming";
+    input: typeof UploadFilePartRequestSchema;
+    output: typeof UploadFilePartResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_codewire_v1_file, 0);

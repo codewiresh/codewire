@@ -2967,16 +2967,14 @@ pub(crate) async fn handle_env_cp_command(
         (None, Some((dst_env, dst_path))) => {
             let environment_id =
                 resolve_environment_id(environment_client, org_id, dst_env).await?;
-            transfer::upload_from_file(Path::new(&args.src), |chunks| {
-                environment_client.upload_environment_file(
-                    org_id,
-                    &environment_id,
-                    dst_path,
-                    chunks,
-                )
-            })
-            .await
-            .context("upload")?;
+            upload_cloud_file(
+                environment_client,
+                org_id,
+                &environment_id,
+                Path::new(&args.src),
+                dst_path,
+            )
+            .await?;
             print!(
                 "{}",
                 format_env_cp_upload_text(&args.src, &environment_id, dst_path)
@@ -2999,6 +2997,66 @@ pub(crate) async fn handle_env_cp_command(
         }
     }
 
+    Ok(())
+}
+
+/// A file over one part goes up in resumable parts, which pass the request
+/// body cap at the platform's edge and resume when the same copy is run
+/// again (#4373). A server without them gets the file in one request.
+async fn upload_cloud_file(
+    environment_client: &EnvironmentClient,
+    org_id: &str,
+    environment_id: &str,
+    source: &Path,
+    destination: &str,
+) -> anyhow::Result<()> {
+    let len = fs::metadata(source).context("open local file")?.len();
+    if len > transfer::PART_BYTES {
+        let upload_id = transfer::upload_id(source, environment_id, destination)?;
+        let upload_id = upload_id.as_str();
+        let uploaded = transfer::upload_resumable(source, |offset, finish, chunks| async move {
+            environment_client
+                .upload_environment_file_part(
+                    org_id,
+                    environment_id,
+                    destination,
+                    upload_id,
+                    offset,
+                    finish,
+                    chunks,
+                )
+                .await
+                .map(|held| transfer::PartHeld {
+                    size: u64::try_from(held.size).unwrap_or(0),
+                    finished: held.finished,
+                })
+                .map_err(|error| {
+                    if error.code() == codewire_client::ErrorCode::Unimplemented {
+                        transfer::PartError::Unsupported
+                    } else {
+                        transfer::PartError::Failed(
+                            crate::environment_client::display_client_error(error),
+                        )
+                    }
+                })
+        })
+        .await
+        .context("upload")?;
+        if let transfer::Resumable::Uploaded = uploaded {
+            return Ok(());
+        }
+    }
+    transfer::upload_from_file(source, |chunks| {
+        environment_client.upload_environment_file(org_id, environment_id, destination, chunks)
+    })
+    .await
+    .with_context(|| {
+        if len > transfer::PART_BYTES {
+            "upload; this server takes no resumable uploads, and a file this large may pass its request size limit"
+        } else {
+            "upload"
+        }
+    })?;
     Ok(())
 }
 

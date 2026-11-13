@@ -5,7 +5,8 @@ use std::task::{Context, Poll};
 
 use codewire_proto::codewire::v1::{
     DownloadFileRequest, FileEntry, FileService, ListFilesRequest, ListFilesResponse,
-    UploadFileRequest, UploadFileResponse, upload_file_request,
+    UploadFilePartRequest, UploadFilePartResponse, UploadFileRequest, UploadFileResponse,
+    upload_file_part_request, upload_file_request,
 };
 use connectrpc::{
     ConnectError, InboundStream, RequestContext, Response, ServiceRequest, ServiceResult,
@@ -320,6 +321,33 @@ impl FileService for FakeFiles {
             ..Default::default()
         })
     }
+
+    /// Appends each part's chunks; a part without chunks reports the size.
+    async fn upload_file_part(
+        &self,
+        _: RequestContext,
+        mut requests: InboundStream<UploadFilePartRequest>,
+    ) -> ServiceResult<UploadFilePartResponse> {
+        let mut finished = false;
+        while let Some(message) = requests.next().await {
+            match message?.to_owned_message().payload {
+                Some(upload_file_part_request::Payload::Header(header)) => {
+                    assert_eq!(header.offset as usize, self.stored.lock().unwrap().len());
+                    finished = header.finish;
+                }
+                Some(upload_file_part_request::Payload::Chunk(chunk)) => {
+                    self.largest_chunk.fetch_max(chunk.len(), Ordering::Relaxed);
+                    self.stored.lock().unwrap().extend(chunk);
+                }
+                None => {}
+            }
+        }
+        Response::ok(UploadFilePartResponse {
+            size: self.stored.lock().unwrap().len() as i64,
+            finished,
+            ..Default::default()
+        })
+    }
 }
 
 #[tokio::test]
@@ -380,4 +408,211 @@ async fn cw_cp_moves_a_file_over_the_message_limit_both_ways_through_the_platfor
         len as u64
     );
     assert!(std::fs::read(&destination).unwrap() == data);
+}
+
+/// A server holding one resumable upload, which can be told to drop the
+/// connection part way through the next parts.
+#[derive(Default)]
+struct PartServer {
+    held: Vec<u8>,
+    published: Option<Vec<u8>>,
+    /// For each coming part: keep this many of its bytes, then fail.
+    fail_after: std::collections::VecDeque<usize>,
+    unsupported: bool,
+    offsets: Vec<(u64, bool)>,
+}
+
+impl PartServer {
+    async fn part(
+        server: &Mutex<Self>,
+        offset: u64,
+        finish: bool,
+        chunks: BoxStream<'static, Vec<u8>>,
+    ) -> Result<PartHeld, PartError> {
+        if server.lock().unwrap().unsupported {
+            return Err(PartError::Unsupported);
+        }
+        let incoming: Vec<u8> = chunks.collect::<Vec<_>>().await.concat();
+        let mut server = server.lock().unwrap();
+        server.offsets.push((offset, finish));
+        if incoming.is_empty() && !finish {
+            return Ok(PartHeld {
+                size: server.held.len() as u64,
+                finished: false,
+            });
+        }
+        assert_eq!(
+            offset,
+            server.held.len() as u64,
+            "a part starts where the held bytes end"
+        );
+        if let Some(keep) = server.fail_after.pop_front() {
+            server
+                .held
+                .extend_from_slice(&incoming[..keep.min(incoming.len())]);
+            return Err(PartError::Failed(anyhow::anyhow!("connection reset")));
+        }
+        server.held.extend(incoming);
+        let size = server.held.len() as u64;
+        if finish {
+            server.published = Some(std::mem::take(&mut server.held));
+        }
+        Ok(PartHeld {
+            size,
+            finished: finish,
+        })
+    }
+}
+
+fn source_file(len: usize) -> (tempfile::TempDir, PathBuf, Vec<u8>) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big.bin");
+    let data = patterned(len);
+    std::fs::write(&path, &data).unwrap();
+    (dir, path, data)
+}
+
+const TEST_PART: u64 = 100 * 1024;
+
+#[tokio::test(start_paused = true)]
+async fn a_large_upload_goes_in_parts_and_a_failed_part_resumes_from_what_the_server_holds() {
+    let (_dir, path, data) = source_file(3 * TEST_PART as usize + 17);
+    let server = Mutex::new(PartServer {
+        fail_after: [5_000].into(),
+        ..Default::default()
+    });
+    let uploaded = upload_in_parts(&path, TEST_PART, |offset, finish, chunks| {
+        PartServer::part(&server, offset, finish, chunks)
+    })
+    .await
+    .unwrap();
+    assert!(matches!(uploaded, Resumable::Uploaded));
+    let server = server.into_inner().unwrap();
+    assert!(server.published.unwrap() == data);
+    let part = TEST_PART;
+    assert_eq!(
+        server.offsets,
+        [
+            (0, false),     // where to start
+            (0, false),     // the part that failed after 5000 bytes
+            (0, false),     // where to resume
+            (5_000, false), // resumed
+            (5_000 + part, false),
+            (5_000 + 2 * part, true), // the shorter last part
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rerun_resumes_without_sending_what_the_server_already_holds() {
+    let (_dir, path, data) = source_file(2 * TEST_PART as usize + 3);
+    let held = 150 * 1024;
+    let server = Mutex::new(PartServer {
+        held: data[..held].to_vec(),
+        ..Default::default()
+    });
+    upload_in_parts(&path, TEST_PART, |offset, finish, chunks| {
+        PartServer::part(&server, offset, finish, chunks)
+    })
+    .await
+    .unwrap();
+    let server = server.into_inner().unwrap();
+    assert!(server.published.unwrap() == data);
+    assert_eq!(server.offsets, [(0, false), (held as u64, true)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_server_without_resumable_uploads_gets_nothing_in_parts() {
+    let (_dir, path, _) = source_file(2 * TEST_PART as usize);
+    let server = Mutex::new(PartServer {
+        unsupported: true,
+        ..Default::default()
+    });
+    let uploaded = upload_in_parts(&path, TEST_PART, |offset, finish, chunks| {
+        PartServer::part(&server, offset, finish, chunks)
+    })
+    .await
+    .unwrap();
+    assert!(matches!(uploaded, Resumable::Unsupported));
+    assert!(server.into_inner().unwrap().offsets.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_upload_gives_up_after_failing_again_and_again() {
+    let (_dir, path, _) = source_file(2 * TEST_PART as usize);
+    let server = Mutex::new(PartServer {
+        fail_after: std::iter::repeat_n(0, 10).collect(),
+        ..Default::default()
+    });
+    let error = upload_in_parts(&path, TEST_PART, |offset, finish, chunks| {
+        PartServer::part(&server, offset, finish, chunks)
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(
+        format!("{error:#}"),
+        format!("the upload failed {PART_ATTEMPTS} times in a row: connection reset")
+    );
+    assert!(server.into_inner().unwrap().published.is_none());
+}
+
+#[test]
+fn an_upload_id_names_one_copy_of_one_version_of_a_file() {
+    let (_dir, path, _) = source_file(10);
+    let id = upload_id(&path, "env", "/workspace/big.bin").unwrap();
+    assert_eq!(id.len(), 32);
+    assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(id, upload_id(&path, "env", "/workspace/big.bin").unwrap());
+    assert_ne!(id, upload_id(&path, "other", "/workspace/big.bin").unwrap());
+    assert_ne!(id, upload_id(&path, "env", "/workspace/else.bin").unwrap());
+    std::fs::write(&path, b"changed!!!!").unwrap();
+    assert_ne!(id, upload_id(&path, "env", "/workspace/big.bin").unwrap());
+}
+
+#[tokio::test]
+async fn upload_parts_cross_the_wire_through_the_platform_client() {
+    let files = Arc::new(FakeFiles::default());
+    let app = axum::Router::new().fallback_service(
+        connectrpc::Router::new()
+            .add_service(Arc::clone(&files))
+            .into_axum_service(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let platform = crate::config::ResolvedPlatformConfig::static_token(
+        format!("http://{address}"),
+        "synthetic-file-transfer-token",
+        true,
+        None,
+    );
+    let client = crate::environment_client::EnvironmentClient::new(&platform).unwrap();
+    let (_dir, path, data) = source_file(2 * TEST_PART as usize + 9);
+
+    let uploaded = upload_in_parts(&path, TEST_PART, |offset, finish, chunks| {
+        let client = &client;
+        async move {
+            client
+                .upload_environment_file_part(
+                    "org",
+                    "env",
+                    "/workspace/big.bin",
+                    "wire-test-upload-0001",
+                    offset,
+                    finish,
+                    chunks,
+                )
+                .await
+                .map(|held| PartHeld {
+                    size: held.size as u64,
+                    finished: held.finished,
+                })
+                .map_err(|error| PartError::Failed(anyhow::anyhow!("{error}")))
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(uploaded, Resumable::Uploaded));
+    assert!(*files.stored.lock().unwrap() == data);
+    assert_eq!(files.largest_chunk.load(Ordering::Relaxed), CHUNK_BYTES);
 }

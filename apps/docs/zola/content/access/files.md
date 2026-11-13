@@ -1,7 +1,7 @@
 ---
 title: Files
 description: Copy files into and out of an environment with cw cp, or with scp, sftp and rsync through the SSH proxy.
-updated: 2026-10-26
+updated: 2026-11-13
 weight: 4
 ---
 
@@ -25,6 +25,25 @@ Exactly one side names an environment. This works for hosted sandboxes and
 local VMs. On a local VM the environment side must be under `/workspace`; a
 path elsewhere, such as `/tmp`, fails with `local file path is invalid or
 denied`.
+
+### Large files and interruptions
+
+`cw cp` streams a file each way, so a file of any size moves without being
+held in memory. A download is written beside its destination and renamed into
+place only when complete: if it fails or you press Ctrl-C, an existing
+destination is left as it was.
+
+A cloud upload larger than 64 MiB goes up in parts. If it is interrupted,
+run the same `cw cp` again and it resumes where the environment's copy stops:
+
+```text
+Resuming the upload at 402653184 of 1073741824 bytes
+Uploaded big.tar -> cpt:/workspace/big.tar
+```
+
+The destination appears only once every part has arrived. An upload that is
+never finished is removed after 24 hours. Changing the local file starts a
+new upload.
 
 ## With scp, sftp and rsync
 

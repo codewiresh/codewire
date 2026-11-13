@@ -13,6 +13,10 @@ service FileService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
   rpc UploadFile(stream UploadFileRequest) returns (UploadFileResponse);
+  // Uploads one part of a file, so a large file crosses proxies that cap a
+  // request body and resumes after an interruption. A request without chunks
+  // only reports the bytes held for the upload.
+  rpc UploadFilePart(stream UploadFilePartRequest) returns (UploadFilePartResponse);
 }
 
 message ListFilesRequest {
@@ -65,4 +69,33 @@ message UploadFileHeader {
 message UploadFileResponse {
   string path = 1;
   int64 size = 2;
+}
+
+message UploadFilePartRequest {
+  oneof payload {
+    UploadFilePartHeader header = 1;
+    bytes chunk = 2;
+  }
+}
+
+message UploadFilePartHeader {
+  string org_id = 1;
+  string environment_id = 2;
+  string path = 3;
+  // Names the upload across its parts: 16 to 64 letters, digits, '-' or '_'.
+  // The same id must always carry the same file's bytes.
+  string upload_id = 4;
+  // Where this part's chunks start; it must equal the bytes already held.
+  int64 offset = 5;
+  // Publish the file at path once this part's chunks are written.
+  bool finish = 6;
+}
+
+message UploadFilePartResponse {
+  string path = 1;
+  string upload_id = 2;
+  // The bytes held for the upload after this request.
+  int64 size = 3;
+  // Whether the file is now published at path.
+  bool finished = 4;
 }

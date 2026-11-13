@@ -36,6 +36,15 @@ const UPLOAD_DIRECTORY_MODE: u32 = 0o755;
 const MAX_UPLOAD_PATH_BYTES: usize = 4096;
 const MAX_UPLOAD_PATH_COMPONENTS: usize = 256;
 const UPLOAD_STAGING_PREFIX: &str = ".codewire-upload-";
+// A resumable upload's staging file, kept between its parts (#4373). It
+// shares the reserved prefix above.
+const UPLOAD_PART_STAGING_PREFIX: &str = ".codewire-upload-part-";
+// A resumable upload untouched this long is abandoned; the next part upload
+// into the same folder removes it.
+const UPLOAD_PART_EXPIRY: Duration = Duration::from_secs(24 * 60 * 60);
+const UPLOAD_PART_EXPIRY_SWEEP_LIMIT: usize = 64;
+const MIN_UPLOAD_ID_BYTES: usize = 16;
+const MAX_UPLOAD_ID_BYTES: usize = 64;
 const GO_MODE_DIR: u32 = 1 << 31;
 const GO_MODE_SYMLINK: u32 = 1 << 27;
 const GO_MODE_DEVICE: u32 = 1 << 26;
@@ -283,6 +292,106 @@ where
             ))
         })
     }
+
+    async fn upload_file_part(
+        &self,
+        ctx: RequestContext,
+        mut requests: InboundStream<proto::UploadFilePartRequest>,
+    ) -> ServiceResult<proto::UploadFilePartResponse> {
+        self.backend.authorize(&ctx)?;
+        let request_id = owned_request_id(&ctx);
+        let header_first = || {
+            self.backend.validation_error(
+                vec![FieldViolation {
+                    path: "/payload",
+                    message: "header must be the first message",
+                }],
+                request_id.as_deref(),
+            )
+        };
+        let header = match requests.next().await {
+            Some(Ok(message)) => match message.to_owned_message().payload {
+                Some(proto::upload_file_part_request::Payload::Header(header)) => *header,
+                _ => return Err(header_first()),
+            },
+            Some(Err(error)) => return Err(error),
+            None => return Err(header_first()),
+        };
+        let mut violations = coordinate_violations(
+            &header.org_id,
+            &header.environment_id,
+            Some(&header.path),
+            "/header/org_id",
+            "/header/environment_id",
+            "/header/path",
+        );
+        if !valid_upload_id(&header.upload_id) {
+            violations.push(FieldViolation {
+                path: "/header/upload_id",
+                message: "must be 16 to 64 letters, digits, '-' or '_'",
+            });
+        }
+        if header.offset < 0 {
+            violations.push(FieldViolation {
+                path: "/header/offset",
+                message: "must not be negative",
+            });
+        }
+        if !violations.is_empty() {
+            return Err(self
+                .backend
+                .validation_error(violations, request_id.as_deref()));
+        }
+        let destination = header.path.trim().to_owned();
+        let staging_path = part_staging_path(
+            &destination,
+            &header.org_id,
+            &header.environment_id,
+            &header.upload_id,
+        )
+        .map_err(|violation| {
+            self.backend
+                .validation_error(vec![violation], request_id.as_deref())
+        })?;
+        let daemon = self
+            .backend
+            .daemon(&ctx, &header.org_id, &header.environment_id)
+            .await?;
+        daemon
+            .require_ready(&[DAEMON_CAPABILITY_FILES])
+            .await
+            .map_err(|error| self.backend.daemon_error(error, request_id.as_deref()))?;
+        ensure_upload_parent(&daemon, &staging_path, &self.backend, request_id.as_deref()).await?;
+        // As for UploadFile, the worker owns every issued mutation until its
+        // reply or deadline.
+        let backend = self.backend.clone();
+        let part = UploadPart {
+            staging_path,
+            destination,
+            upload_id: header.upload_id,
+            offset: header.offset,
+            finish: header.finish,
+        };
+        let (mut response_tx, response_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = upload_part_to_daemon(
+                daemon,
+                part,
+                requests,
+                backend,
+                request_id,
+                &mut response_tx,
+            )
+            .await;
+            let _ = response_tx.send(result);
+        });
+        response_rx.await.unwrap_or_else(|_| {
+            Err(connectrpc::ConnectError::new(
+                connectrpc::ErrorCode::Internal,
+                "upload worker stopped",
+            ))
+        })
+    }
 }
 
 // Public-request cancellation is observed between mutations, not by dropping
@@ -436,6 +545,206 @@ async fn upload_to_daemon<B: FileBackend>(
         size: offset,
         ..Default::default()
     })
+}
+
+struct UploadPart {
+    staging_path: String,
+    destination: String,
+    upload_id: String,
+    offset: i64,
+    finish: bool,
+}
+
+// One part of a resumable upload (#4373). Its staging file outlives the
+// request: a canceled or failed part keeps what it wrote, and the next part
+// resumes from the size held. A part must start where the held bytes end. The
+// same upload id always carries the same file's bytes, so a late write from an
+// abandoned part rewrites identical bytes.
+async fn upload_part_to_daemon<B: FileBackend>(
+    daemon: DaemonClient,
+    part: UploadPart,
+    mut requests: InboundStream<proto::UploadFilePartRequest>,
+    backend: B,
+    request_id: Option<String>,
+    response: &mut tokio::sync::oneshot::Sender<ServiceResult<proto::UploadFilePartResponse>>,
+) -> ServiceResult<proto::UploadFilePartResponse> {
+    let daemon_error = |error| backend.daemon_error(error, request_id.as_deref());
+    if response.is_closed() {
+        return Err(upload_canceled());
+    }
+    let mut held = match upload_mutation(daemon.stat_file(part.staging_path.clone(), false)).await {
+        Ok(metadata) if metadata.mode & GO_MODE_NON_REGULAR == 0 => Some(metadata.size),
+        Ok(_) => return Err(backend.invalid_file_type(request_id.as_deref())),
+        Err(DaemonClientError::Status(status)) if status.code() == tonic::Code::NotFound => None,
+        Err(error) => return Err(daemon_error(error)),
+    };
+    remove_expired_parts(&daemon, &part.staging_path).await;
+    let mut offset = held.unwrap_or(0);
+    let mut started = false;
+
+    while let Some(message) = tokio::select! {
+        biased;
+        _ = response.closed() => return Err(upload_canceled()),
+        message = requests.next() => message,
+    } {
+        let chunk = match message?.to_owned_message().payload {
+            Some(proto::upload_file_part_request::Payload::Chunk(chunk)) => chunk,
+            Some(proto::upload_file_part_request::Payload::Header(_)) => {
+                return Err(backend.validation_error(
+                    vec![FieldViolation {
+                        path: "/payload/header",
+                        message: "must appear only once",
+                    }],
+                    request_id.as_deref(),
+                ));
+            }
+            None => {
+                return Err(backend.validation_error(
+                    vec![FieldViolation {
+                        path: "/payload",
+                        message: "is required",
+                    }],
+                    request_id.as_deref(),
+                ));
+            }
+        };
+        if !started {
+            if part.offset != offset {
+                return Err(part_offset_mismatch(offset));
+            }
+            if held.is_none() {
+                create_part_staging(&daemon, &part.staging_path)
+                    .await
+                    .map_err(daemon_error)?;
+                held = Some(0);
+            }
+            started = true;
+        }
+        for private_chunk in chunk.chunks(UPLOAD_CHUNK_BYTES) {
+            if response.is_closed() {
+                return Err(upload_canceled());
+            }
+            let expected = i64::try_from(private_chunk.len())
+                .map_err(|_| daemon_error(DaemonClientError::InvalidFrame("file write length")))?;
+            let written = upload_mutation(daemon.write_file(v1::WriteRequest {
+                path: part.staging_path.clone(),
+                offset,
+                data: private_chunk.to_vec(),
+            }))
+            .await
+            .map_err(daemon_error)?;
+            if written != expected {
+                return Err(daemon_error(DaemonClientError::InvalidFrame("file write")));
+            }
+            offset = offset.checked_add(written).ok_or_else(|| {
+                daemon_error(DaemonClientError::InvalidFrame("file write offset"))
+            })?;
+        }
+    }
+
+    if !part.finish {
+        return connectrpc::Response::ok(proto::UploadFilePartResponse {
+            path: part.destination,
+            upload_id: part.upload_id,
+            size: offset,
+            finished: false,
+            ..Default::default()
+        });
+    }
+    if !started && part.offset != offset {
+        return Err(part_offset_mismatch(offset));
+    }
+    if held.is_none() {
+        // An empty file: nothing was staged before the finishing part.
+        create_part_staging(&daemon, &part.staging_path)
+            .await
+            .map_err(daemon_error)?;
+    }
+    if response.is_closed() {
+        return Err(upload_canceled());
+    }
+    upload_mutation(daemon.set_stat(v1::SetStatRequest {
+        path: part.staging_path.clone(),
+        mode: Some(UPLOAD_MODE),
+        ..Default::default()
+    }))
+    .await
+    .map_err(daemon_error)?;
+    if response.is_closed() {
+        return Err(upload_canceled());
+    }
+    upload_mutation(daemon.rename(v1::RenameRequest {
+        old_path: part.staging_path,
+        new_path: part.destination.clone(),
+    }))
+    .await
+    .map_err(daemon_error)?;
+    connectrpc::Response::ok(proto::UploadFilePartResponse {
+        path: part.destination,
+        upload_id: part.upload_id,
+        size: offset,
+        finished: true,
+        ..Default::default()
+    })
+}
+
+async fn create_part_staging(daemon: &DaemonClient, path: &str) -> Result<(), DaemonClientError> {
+    upload_mutation(daemon.open_file(v1::OpenFileRequest {
+        path: path.to_owned(),
+        options: Some(v1::FileOpenOptions {
+            write: true,
+            create: true,
+            exclusive: true,
+            ..Default::default()
+        }),
+        perm: 0o600,
+    }))
+    .await
+}
+
+fn part_offset_mismatch(held: i64) -> connectrpc::ConnectError {
+    connectrpc::ConnectError::new(
+        connectrpc::ErrorCode::FailedPrecondition,
+        format!("the upload holds {held} bytes; send the part that starts there"),
+    )
+}
+
+/// Best effort: removes resumable uploads beside `staging_path` that nobody
+/// touched within [`UPLOAD_PART_EXPIRY`].
+async fn remove_expired_parts(daemon: &DaemonClient, staging_path: &str) {
+    let parent = Path::new(staging_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_string_lossy()
+        .into_owned();
+    let Ok(entries) = upload_mutation(daemon.list_files(parent.clone())).await else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .saturating_sub(UPLOAD_PART_EXPIRY)
+        .as_secs();
+    let expired = entries
+        .into_iter()
+        .filter(|entry| entry.name.starts_with(UPLOAD_PART_STAGING_PREFIX))
+        .filter(|entry| entry.mode & GO_MODE_NON_REGULAR == 0)
+        .filter(|entry| {
+            entry.mod_time.as_ref().is_some_and(|time| {
+                u64::try_from(time.seconds).is_ok_and(|seconds| seconds < cutoff)
+            })
+        })
+        .take(UPLOAD_PART_EXPIRY_SWEEP_LIMIT);
+    for entry in expired {
+        let path = Path::new(&parent)
+            .join(&entry.name)
+            .to_string_lossy()
+            .into_owned();
+        if path == staging_path {
+            continue;
+        }
+        let _ = upload_mutation(daemon.remove(v1::RemoveRequest { path, dir: false })).await;
+    }
 }
 
 async fn upload_mutation<T>(
@@ -737,6 +1046,47 @@ fn staging_path(destination: &str) -> Result<String, FieldViolation> {
     Ok(staging)
 }
 
+fn valid_upload_id(upload_id: &str) -> bool {
+    (MIN_UPLOAD_ID_BYTES..=MAX_UPLOAD_ID_BYTES).contains(&upload_id.len())
+        && upload_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// The staging file for one resumable upload: the same organization,
+/// environment, destination and upload id always name the same file, and no
+/// other combination does.
+fn part_staging_path(
+    destination: &str,
+    org_id: &str,
+    environment_id: &str,
+    upload_id: &str,
+) -> Result<String, FieldViolation> {
+    use sha2::Digest as _;
+    staging_path(destination)?;
+    let mut digest = sha2::Sha256::new();
+    for field in [org_id, environment_id, destination, upload_id] {
+        digest.update(field.as_bytes());
+        digest.update([0]);
+    }
+    let digest = digest.finalize();
+    let name = format!(
+        "{UPLOAD_PART_STAGING_PREFIX}{}",
+        digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let parent = Path::new(destination)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    Ok(if parent.as_os_str().is_empty() {
+        name
+    } else {
+        parent.join(name).to_string_lossy().into_owned()
+    })
+}
+
 fn reserved_upload_path(path: &str) -> bool {
     Path::new(path).components().any(|component| {
         let std::path::Component::Normal(component) = component else {
@@ -803,6 +1153,7 @@ fn receiver_stream<T: Send + 'static>(
 mod tests {
     mod cancellation;
     mod download;
+    mod parts;
 
     use std::time::{Duration, Instant};
 
@@ -872,6 +1223,7 @@ mod tests {
             proto::FILE_SERVICE_LIST_FILES_SPEC,
             proto::FILE_SERVICE_DOWNLOAD_FILE_SPEC,
             proto::FILE_SERVICE_UPLOAD_FILE_SPEC,
+            proto::FILE_SERVICE_UPLOAD_FILE_PART_SPEC,
         ]
         .into_iter()
         .map(|spec| spec.method().to_owned())
@@ -880,7 +1232,7 @@ mod tests {
             crate::test_support::public_service_methods("FileService"),
             expected
         );
-        assert_eq!(expected.len(), 3);
+        assert_eq!(expected.len(), 4);
     }
 
     #[test]

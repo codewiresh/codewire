@@ -110,7 +110,8 @@ pub use codewire_proto::codewire::v1::{
     StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest,
     StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse,
     UpdateApiKeyRequest, UpdateApiKeyResponse, UpdateEnvironmentSourcesRequest,
-    UpdateEnvironmentSourcesResponse, UploadFileHeader, UploadFileRequest, UploadFileResponse,
+    UpdateEnvironmentSourcesResponse, UploadFileHeader, UploadFilePartHeader,
+    UploadFilePartRequest, UploadFilePartResponse, UploadFileRequest, UploadFileResponse,
     WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse,
 };
 pub use codewire_proto::codewire::v1::{
@@ -159,7 +160,7 @@ pub use codewire_proto::codewire::v1::{
     RenameProjectSecretResponse, RenameSecretRequest, RenameSecretResponse,
     RenameUserSecretRequest, RenameUserSecretResponse, ResolvedWorkloadSecretMetadata,
     WorkloadSecretSource, attach_session_request, attach_session_response, download_file_response,
-    run_request, run_response, stream_logs_response, upload_file_request,
+    run_request, run_response, stream_logs_response, upload_file_part_request, upload_file_request,
     watch_environment_create_response,
 };
 pub use codewire_proto::codewire::v1::{
@@ -1404,6 +1405,18 @@ impl CodewireClient {
     ) -> Result<UploadFileResponse, ClientError> {
         self.files
             .upload_file_with_options(requests, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    /// One part of a resumable upload (#4373), sent as the stream yields it.
+    pub async fn upload_file_part(
+        &self,
+        requests: impl futures_util::Stream<Item = UploadFilePartRequest> + Send + 'static,
+    ) -> Result<UploadFilePartResponse, ClientError> {
+        self.files
+            .upload_file_part_with_options(requests, self.auth_options().await?)
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)

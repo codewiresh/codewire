@@ -88,3 +88,39 @@ class UploadFileResponse(_message.Message):
     path: str
     size: int
     def __init__(self, path: _Optional[str] = ..., size: _Optional[int] = ...) -> None: ...
+
+class UploadFilePartRequest(_message.Message):
+    __slots__ = ("header", "chunk")
+    HEADER_FIELD_NUMBER: _ClassVar[int]
+    CHUNK_FIELD_NUMBER: _ClassVar[int]
+    header: UploadFilePartHeader
+    chunk: bytes
+    def __init__(self, header: _Optional[_Union[UploadFilePartHeader, _Mapping]] = ..., chunk: _Optional[bytes] = ...) -> None: ...
+
+class UploadFilePartHeader(_message.Message):
+    __slots__ = ("org_id", "environment_id", "path", "upload_id", "offset", "finish")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    PATH_FIELD_NUMBER: _ClassVar[int]
+    UPLOAD_ID_FIELD_NUMBER: _ClassVar[int]
+    OFFSET_FIELD_NUMBER: _ClassVar[int]
+    FINISH_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    environment_id: str
+    path: str
+    upload_id: str
+    offset: int
+    finish: bool
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., path: _Optional[str] = ..., upload_id: _Optional[str] = ..., offset: _Optional[int] = ..., finish: _Optional[bool] = ...) -> None: ...
+
+class UploadFilePartResponse(_message.Message):
+    __slots__ = ("path", "upload_id", "size", "finished")
+    PATH_FIELD_NUMBER: _ClassVar[int]
+    UPLOAD_ID_FIELD_NUMBER: _ClassVar[int]
+    SIZE_FIELD_NUMBER: _ClassVar[int]
+    FINISHED_FIELD_NUMBER: _ClassVar[int]
+    path: str
+    upload_id: str
+    size: int
+    finished: bool
+    def __init__(self, path: _Optional[str] = ..., upload_id: _Optional[str] = ..., size: _Optional[int] = ..., finished: _Optional[bool] = ...) -> None: ...

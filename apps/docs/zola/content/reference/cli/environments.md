@@ -1,7 +1,7 @@
 ---
 title: Environments
 description: ls, info, create, start, stop, restart, rm, update, ports, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh, setup rex, checkpoint and preset.
-updated: 2026-11-12
+updated: 2026-11-13
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -314,7 +314,10 @@ Uploaded notes.txt -> cpt:/workspace/notes.txt
 Downloaded cpt:/workspace/result.txt -> ./result.txt (6 bytes)
 ```
 
-On a local VM the environment side must be under `/workspace`.
+On a local VM the environment side must be under `/workspace`. Files of any
+size stream; a cloud upload over 64 MiB goes in resumable parts, so running
+the same command again after an interruption resumes it. See
+[Files](@/access/files.md).
 
 ## cw checkpoint (local, Linux)
 

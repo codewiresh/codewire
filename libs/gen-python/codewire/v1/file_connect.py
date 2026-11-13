@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .file_pb2 import DownloadFileRequest, DownloadFileResponse, ListFilesRequest, ListFilesResponse, UploadFileRequest, UploadFileResponse
+from .file_pb2 import DownloadFileRequest, DownloadFileResponse, ListFilesRequest, ListFilesResponse, UploadFilePartRequest, UploadFilePartResponse, UploadFileRequest, UploadFileResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -42,6 +42,9 @@ class FileService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def upload_file(self, request: AsyncIterator[UploadFileRequest], ctx: RequestContext[UploadFileRequest, UploadFileResponse]) -> UploadFileResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def upload_file_part(self, request: AsyncIterator[UploadFilePartRequest], ctx: RequestContext[UploadFilePartRequest, UploadFilePartResponse]) -> UploadFilePartResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -87,6 +90,16 @@ class FileServiceASGIApplication(ConnectASGIApplication[FileService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.upload_file,
+                ),
+                "/codewire.v1.FileService/UploadFilePart": Endpoint.client_stream(
+                    method=MethodInfo(
+                        name="UploadFilePart",
+                        service_name="codewire.v1.FileService",
+                        input=UploadFilePartRequest,
+                        output=UploadFilePartResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.upload_file_part,
                 ),
             },
             interceptors=interceptors,
@@ -188,6 +201,26 @@ class FileServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def upload_file_part(
+        self,
+        request: AsyncIterator[UploadFilePartRequest],
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> UploadFilePartResponse:
+        return await self.execute_client_stream(
+            request=request,
+            method=MethodInfo(
+                name="UploadFilePart",
+                service_name="codewire.v1.FileService",
+                input=UploadFilePartRequest,
+                output=UploadFilePartResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class FileServiceSync(Protocol):
     def list_files(self, request: ListFilesRequest, ctx: RequestContext[ListFilesRequest, ListFilesResponse]) -> ListFilesResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -196,6 +229,9 @@ class FileServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def upload_file(self, request: Iterator[UploadFileRequest], ctx: RequestContext[UploadFileRequest, UploadFileResponse]) -> UploadFileResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def upload_file_part(self, request: Iterator[UploadFilePartRequest], ctx: RequestContext[UploadFilePartRequest, UploadFilePartResponse]) -> UploadFilePartResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -239,6 +275,16 @@ class FileServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.upload_file,
+                ),
+                "/codewire.v1.FileService/UploadFilePart": EndpointSync.client_stream(
+                    method=MethodInfo(
+                        name="UploadFilePart",
+                        service_name="codewire.v1.FileService",
+                        input=UploadFilePartRequest,
+                        output=UploadFilePartResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.upload_file_part,
                 ),
             },
             interceptors=interceptors,
@@ -332,6 +378,25 @@ class FileServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.FileService",
                 input=UploadFileRequest,
                 output=UploadFileResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def upload_file_part(
+        self,
+        request: Iterator[UploadFilePartRequest],
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> UploadFilePartResponse:
+        return self.execute_client_stream(
+            request=request,
+            method=MethodInfo(
+                name="UploadFilePart",
+                service_name="codewire.v1.FileService",
+                input=UploadFilePartRequest,
+                output=UploadFilePartResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

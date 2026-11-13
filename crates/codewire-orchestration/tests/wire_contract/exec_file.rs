@@ -1,8 +1,8 @@
 use buffa_types::google::protobuf::Duration;
 use codewire_proto::codewire::v1::{
     DownloadFileRequest, DownloadFileResponse, ExecRequest, ExecServiceClient, FileServiceClient,
-    ListFilesRequest, StreamExecRequest, StreamExecResponse, UploadFileRequest,
-    stream_exec_response, upload_file_request,
+    ListFilesRequest, StreamExecRequest, StreamExecResponse, UploadFilePartRequest,
+    UploadFileRequest, stream_exec_response, upload_file_part_request, upload_file_request,
 };
 use connectrpc::client::HttpClient;
 use connectrpc::{CodecFormat, ConnectError, ErrorCode};
@@ -389,6 +389,28 @@ async fn assert_file_gates_and_protocol(harness: &Harness) {
         assert_rpc_bad_request(
             &empty_header,
             &["header.org_id", "header.environment_id", "header.path"],
+        );
+
+        let empty_part_header = client
+            .upload_file_part(futures_util::stream::iter([UploadFilePartRequest {
+                payload: Some(upload_file_part_request::Payload::Header(Box::default())),
+                ..Default::default()
+            }]))
+            .await
+            .expect_err("empty UploadFilePart header must fail");
+        assert_rpc_error(
+            &empty_part_header,
+            ErrorCode::InvalidArgument,
+            "validation failed",
+        );
+        assert_rpc_bad_request(
+            &empty_part_header,
+            &[
+                "header.org_id",
+                "header.environment_id",
+                "header.path",
+                "header.upload_id",
+            ],
         );
     }
 }
