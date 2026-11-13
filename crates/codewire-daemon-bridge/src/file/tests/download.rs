@@ -11,7 +11,9 @@ async fn download_streams_the_whole_file_uncompressed() {
         daemon: harness.client().await,
         deny_authorization: false,
     });
-    let payload = (0..(2 * DOWNLOAD_CHUNK_BYTES as usize + 17))
+    // More than one daemon read, ending in a short public chunk.
+    let read_bytes = usize::try_from(DOWNLOAD_READ_BYTES).unwrap();
+    let payload = (0..(read_bytes + 3 * DOWNLOAD_CHUNK_BYTES + 17))
         .map(|index| (index % 251) as u8)
         .collect::<Vec<_>>();
     let source = harness.workspace_root().join("download.bin");
@@ -49,14 +51,14 @@ async fn download_streams_the_whole_file_uncompressed() {
     while let Some(frame) = frames.next().await {
         match frame.expect("download frame").payload {
             Some(proto::download_file_response::Payload::Chunk(chunk)) => {
-                assert!(chunk.len() <= DOWNLOAD_CHUNK_BYTES as usize);
+                assert!(chunk.len() <= DOWNLOAD_CHUNK_BYTES);
                 received.extend_from_slice(&chunk);
                 chunks += 1;
             }
             _ => panic!("only chunks follow the file information"),
         }
     }
-    assert_eq!(chunks, 3);
+    assert_eq!(chunks, payload.len().div_ceil(DOWNLOAD_CHUNK_BYTES));
     assert_eq!(received, payload);
 
     harness.shutdown().await;

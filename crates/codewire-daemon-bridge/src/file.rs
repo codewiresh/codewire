@@ -27,7 +27,10 @@ use crate::client::{DaemonClient, DaemonClientError, v1};
 use crate::session::FieldViolation;
 
 const STREAM_BUFFER: usize = 8;
-const DOWNLOAD_CHUNK_BYTES: i64 = 64 * 1024;
+const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
+// One daemon read is one round trip to the sandbox, which may be in another
+// site, so each read carries many public chunks.
+const DOWNLOAD_READ_BYTES: i64 = 1024 * 1024;
 const UPLOAD_CHUNK_BYTES: usize = 64 * 1024;
 const UPLOAD_MODE: u32 = 0o644;
 // Bound individual private unary operations, not the whole file transfer.
@@ -849,8 +852,8 @@ async fn relay_download<B: FileBackend>(
     }
     let mut offset = 0_i64;
     while offset < size {
-        let length = DOWNLOAD_CHUNK_BYTES.min(size - offset);
-        let chunk = match daemon
+        let length = DOWNLOAD_READ_BYTES.min(size - offset);
+        let data = match daemon
             .read_file(v1::ReadRequest {
                 path: path.clone(),
                 offset,
@@ -858,7 +861,7 @@ async fn relay_download<B: FileBackend>(
             })
             .await
         {
-            Ok(chunk) => chunk,
+            Ok(data) => data,
             Err(error) => {
                 let _ = tx
                     .send(Err(backend.daemon_error(error, request_id.as_deref())))
@@ -866,7 +869,7 @@ async fn relay_download<B: FileBackend>(
                 return;
             }
         };
-        if chunk.is_empty() {
+        if data.is_empty() {
             let _ = tx
                 .send(Err(backend.daemon_error(
                     DaemonClientError::InvalidFrame("file read ended before the advertised size"),
@@ -875,7 +878,7 @@ async fn relay_download<B: FileBackend>(
                 .await;
             return;
         }
-        let Ok(chunk_len) = i64::try_from(chunk.len()) else {
+        let Ok(read_len) = i64::try_from(data.len()) else {
             let _ = tx
                 .send(Err(backend.daemon_error(
                     DaemonClientError::InvalidFrame("file read length"),
@@ -884,7 +887,7 @@ async fn relay_download<B: FileBackend>(
                 .await;
             return;
         };
-        if chunk_len > length {
+        if read_len > length {
             let _ = tx
                 .send(Err(backend.daemon_error(
                     DaemonClientError::InvalidFrame("file read length"),
@@ -893,7 +896,7 @@ async fn relay_download<B: FileBackend>(
                 .await;
             return;
         }
-        offset = match offset.checked_add(chunk_len) {
+        offset = match offset.checked_add(read_len) {
             Some(offset) => offset,
             None => {
                 let _ = tx
@@ -905,15 +908,19 @@ async fn relay_download<B: FileBackend>(
                 return;
             }
         };
-        if tx
-            .send(Ok(proto::DownloadFileResponse {
-                payload: Some(proto::download_file_response::Payload::Chunk(chunk)),
-                ..Default::default()
-            }))
-            .await
-            .is_err()
-        {
-            return;
+        for chunk in data.chunks(DOWNLOAD_CHUNK_BYTES) {
+            if tx
+                .send(Ok(proto::DownloadFileResponse {
+                    payload: Some(proto::download_file_response::Payload::Chunk(
+                        chunk.to_vec(),
+                    )),
+                    ..Default::default()
+                }))
+                .await
+                .is_err()
+            {
+                return;
+            }
         }
     }
 }
