@@ -212,29 +212,39 @@ def wait_for_turn(
         sleep(poll_seconds)
 
 
-def all_main_runs(api) -> list[dict]:
-    """Deploy Dev's recent push runs on main, finished or not."""
-    runs = verdicts.bounded(
-        api.get_json(f"/actions/runs?workflow_id={WORKFLOW}&page=1&limit={verdicts.API_LIMIT}"),
-        "workflow_runs",
-    )
+def later_main_runs(api, own_run_id: int) -> list[dict]:
+    """Deploy Dev's push runs on main after this one, finished or not.
+
+    Unfiltered, the list is every Deploy Dev run there ever was, so its
+    total_count exceeds the page and verdicts.bounded() refuses it as
+    malformed (Deploy Dev 47202's handover, #4502). Forgejo lists runs newest
+    first, so the first page holds every run after this one unless more than
+    a page came after it, which is ambiguous and refused.
+    """
+    document = api.get_json(f"/actions/runs?workflow_id={WORKFLOW}&page=1&limit={verdicts.API_LIMIT}")
+    runs = document.get("workflow_runs") if isinstance(document, dict) else None
+    total = document.get("total_count") if isinstance(document, dict) else None
+    if (not isinstance(runs, list) or not isinstance(total, int) or isinstance(total, bool)
+            or len(runs) > verdicts.API_LIMIT or total < len(runs)):
+        raise Unproven("forgejo-api-malformed")
+    ids = [run_id for run in runs if isinstance(run, dict) and (run_id := verdicts.positive_id(run))]
+    if total > len(runs) and ids and min(ids) > own_run_id:
+        raise Unproven("forgejo-api-ambiguous")
     return [
         run for run in runs
-        if (run.get("trigger_event") or run.get("event")) == "push"
+        if isinstance(run, dict) and (verdicts.positive_id(run) or 0) > own_run_id
+        and (run.get("trigger_event") or run.get("event")) == "push"
         and (
             run.get("path") == f"{WORKFLOW}@{MAIN_REF}"
             or (run.get("workflow_id") == WORKFLOW and run.get("prettyref") == "main")
         )
-        and verdicts.positive_id(run) is not None
     ]
 
 
 def next_turn(api, own_run_id: int) -> tuple[str, dict | None, str]:
     """What the newest later run that selected a delivery needs: "rerun" its turn job, "settle" or "none"."""
-    for run in sorted(all_main_runs(api), key=lambda record: record["id"], reverse=True):
+    for run in sorted(later_main_runs(api, own_run_id), key=lambda record: record["id"], reverse=True):
         run_id = run["id"]
-        if run_id <= own_run_id:
-            break
         jobs = verdicts.jobs_of(api, run_id)
         selection = job_state(jobs, SELECTION_JOB, run_id)
         turn = job_state(jobs, TURN_JOB, run_id)

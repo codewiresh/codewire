@@ -290,6 +290,10 @@ class DevDeliveryTurn(unittest.TestCase):
 class HandoverForgejo(FakeForgejo):
     """Deploy Dev runs, finished or not, and the reruns the handover asks for."""
 
+    # Every Deploy Dev run there ever was, beyond the one page the handover
+    # reads (Deploy Dev 47202's handover read 100 runs of a far longer list).
+    HISTORY = 900
+
     def __init__(self, polls, rerun_status=204):
         super().__init__(polls)
         self.rerun_status = rerun_status
@@ -297,8 +301,9 @@ class HandoverForgejo(FakeForgejo):
     def get_json(self, path: str):
         if path == DEPLOY_ALL:
             self.calls.append(f"GET {path}")
-            runs = [deploy_run(run_id, sha) for run_id, (sha, *_rest) in sorted(self.state().items())]
-            return {"total_count": len(runs), "workflow_runs": runs}
+            # Newest first, as Forgejo lists them.
+            runs = [deploy_run(run_id, sha) for run_id, (sha, *_rest) in sorted(self.state().items(), reverse=True)]
+            return {"total_count": len(runs) + self.HISTORY, "workflow_runs": runs}
         return super().get_json(path)
 
     def post(self, path: str) -> int:
@@ -375,6 +380,41 @@ class DevDeliveryHandover(unittest.TestCase):
         self.assertIn("::error::missed trigger: after 300 s", log)
         result, log, _ = self.hand_on([turn.Unproven("forgejo-api-unavailable")])
         self.assertEqual(result, 1)
+
+    def test_the_newest_delivery_hands_on_nothing_from_a_long_history(self) -> None:
+        # Deploy Dev 47202 (#4502): the newest delivery, with hundreds of older
+        # runs beyond the page, failed as "unreadable (forgejo-api-malformed)"
+        # because the whole list was required on one page.
+        result, log, posts = self.hand_on([{5: (self.D, "published"), 8: (self.B, "replaced"),
+                                            10: (self.A, "published")}])
+        self.assertEqual((result, posts), (0, []))
+        self.assertIn("no later delivery is waiting", log)
+        self.assertNotIn("missed trigger", log)
+
+    def test_the_run_list_reads_one_page_newest_first(self) -> None:
+        class Page:
+            def __init__(self, document):
+                self.document = document
+
+            def get_json(self, _path):
+                return self.document
+
+        def page(ids, total):
+            return Page({"total_count": total, "workflow_runs": [deploy_run(i, self.A) for i in ids]})
+
+        # Later runs come from the first page whatever the history's length.
+        self.assertEqual([run["id"] for run in turn.later_main_runs(page([30, 20, 10], 900), 10)], [30, 20])
+        self.assertEqual(turn.later_main_runs(page([30, 20, 10], 900), 30), [])
+        self.assertEqual(turn.later_main_runs(page([], 0), 30), [])
+        # A page entirely after this run, with more beyond it, may miss a later
+        # run: refused rather than guessed.
+        with self.assertRaises(turn.Unproven):
+            turn.later_main_runs(page([30, 20], 900), 10)
+        # A list shorter than the page it claims to be is malformed.
+        with self.assertRaises(turn.Unproven):
+            turn.later_main_runs(page([30, 20, 10], 2), 10)
+        with self.assertRaises(turn.Unproven):
+            turn.later_main_runs(Page({"workflow_runs": []}), 10)
 
     def test_main_hands_on_only_for_a_push_to_main(self) -> None:
         environ = {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/1/head", "GITHUB_RUN_ID": "7"}
