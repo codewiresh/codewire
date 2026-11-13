@@ -805,3 +805,39 @@ async fn db_a_running_pod_a_repair_is_deleting_stays_running() -> Result<()> {
     .await;
     db.finish(result).await
 }
+
+/// A daemon repair that takes its lease after liveness read the sandbox, but
+/// before the mark, still keeps it running: the mark itself re-checks the
+/// lease (#4376 review).
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_repair_leased_after_the_read_is_never_marked_replacing() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, "running").await?;
+        let pool = &db.pool;
+        sqlx::query(
+            "INSERT INTO organization_mutation_leases(id,organization_id,mutation_class,deadline_at,environment_id) \
+             VALUES ('repair',$1,'environment_runtime_dispatch',NOW() + INTERVAL '5 minutes',$2)",
+        )
+        .bind(ORGANIZATION)
+        .bind(ENVIRONMENT)
+        .execute(pool)
+        .await?;
+        let svc = Service::for_pool(pool.clone());
+        ensure!(!svc.mark_sandbox_replacing(ENVIRONMENT).await?);
+        let (state, code, _) = row(pool).await?;
+        ensure!(state == "running" && code.is_none(), "{state} {code:?}");
+
+        // Released, the same mark applies.
+        sqlx::query(
+            "UPDATE organization_mutation_leases SET state = 'released', released_at = NOW() WHERE id = 'repair'",
+        )
+        .execute(pool)
+        .await?;
+        ensure!(svc.mark_sandbox_replacing(ENVIRONMENT).await?);
+        replacing(pool).await
+    }
+    .await;
+    db.finish(result).await
+}

@@ -1250,7 +1250,12 @@ impl LifecycleStore for PgLifecycleStore {
                 sqlx::query(
                     r#"UPDATE environments
                        SET state = 'starting', error_code = $1, error_reason = $2, state_changed_at = NOW()
-                       WHERE id = $3 AND state = 'running' AND desired_state = 'started'"#,
+                       WHERE id = $3 AND state = 'running' AND desired_state = 'started'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM organization_mutation_leases l
+                              WHERE l.environment_id = $3
+                                AND l.mutation_class = 'environment_runtime_dispatch'
+                                AND l.state = 'active')"#,
                 )
                 .bind(SANDBOX_REPLACING_ERROR_CODE)
                 .bind(SANDBOX_REPLACING_MESSAGE)
