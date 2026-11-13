@@ -2867,9 +2867,12 @@ mod tests {
         h.driver.noel.set_aside.as_mut().unwrap().deadline =
             tokio::time::Instant::now() + Duration::from_millis(300);
         let mut peer = script_peer("while IFS= read -r line; do :; done");
+        // The error names the set-aside deadline's sub-second budget, not
+        // the command's own NATIVE_RPC_TIMEOUT; the elapsed check only
+        // turns a hang into a failure, since the store's fsyncs may stall.
         let started = Instant::now();
         let error = h.driver.initialize_noel(&mut peer).await.unwrap_err();
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(started.elapsed() < NATIVE_RPC_TIMEOUT);
         assert!(
             error
                 .to_string()
@@ -2892,36 +2895,47 @@ mod tests {
         h.driver.set_aside_unknown("again").await;
         assert_eq!(h.heard(&parent, &main.id), 1);
 
-        // The same deadline holds after resume_run is sent and never answered.
+        // The same deadline holds after resume_run is sent and never
+        // answered. noel's answers to get_state and clear_queue are queued
+        // before the deadline starts, so only resume_run can miss it.
         let mut h = harness();
         let parent = h.with_parent();
         let main = h.crashed(MessageAction::Message, "task", Some(RUN));
         h.driver.recover().await.unwrap();
+        let mut answers = vec![reply(
+            1,
+            "get_state",
+            Some(resumable_state(Some(last(
+                &main.id,
+                "interrupted",
+                Some("model"),
+            )))),
+        )];
+        answers.extend(cleared(2).lines);
+        let mut script = String::new();
+        for line in &answers {
+            let line = line.to_string();
+            assert!(!line.contains('\''));
+            script.push_str(&format!("printf '%s\\n' '{line}'; "));
+        }
+        script.push_str("while IFS= read -r line; do :; done");
+        let mut peer = script_peer(&script);
+        tokio::time::timeout(HANG, async {
+            while peer.events.len() < answers.len() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("noel's answers are queued");
         h.driver.noel.set_aside.as_mut().unwrap().deadline =
             tokio::time::Instant::now() + Duration::from_millis(500);
-        let trace = h._temporary.path().join("sent.jsonl");
-        let mut peer = noel_peer(
-            &trace,
-            vec![
-                step(vec![reply(
-                    1,
-                    "get_state",
-                    Some(resumable_state(Some(last(
-                        &main.id,
-                        "interrupted",
-                        Some("model"),
-                    )))),
-                )]),
-                cleared(2),
-            ],
-        );
         let started = Instant::now();
         let error = h.driver.initialize_noel(&mut peer).await.unwrap_err();
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(started.elapsed() < NATIVE_RPC_TIMEOUT);
         assert!(
             error
                 .to_string()
-                .starts_with("noel resume_run did not answer"),
+                .starts_with("noel resume_run did not answer within 0."),
             "{error:#}"
         );
         h.driver.startup_failed(error).await.unwrap_err();
