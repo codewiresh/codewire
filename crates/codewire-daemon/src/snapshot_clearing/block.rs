@@ -1,9 +1,8 @@
 //! Clearing a restore that is a Block volume (#3718). Its fork's guest formats
 //! and reads the disk block by block, so besides the files every block the
-//! guest cannot read through the filesystem is wiped
-//! (private-docs designs/2026-11-01-commodity-workspace-direct-io.md,
-//! section 3). This runs as the only process of a clearing Sandbox, a VM with
-//! no network, so the host never parses the guest's filesystem.
+//! guest cannot read through the filesystem is wiped. This runs as the only
+//! process of a clearing Sandbox, a VM with no network, so the host never
+//! parses the guest's filesystem.
 //!
 //! It never mounts the disk, so the clearing container needs no `SYS_ADMIN`
 //! (#4013):

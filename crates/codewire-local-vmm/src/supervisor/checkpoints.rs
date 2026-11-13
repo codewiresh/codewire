@@ -1,5 +1,4 @@
-//! VM checkpoints of running local VMs (#3046 R4, private-docs:
-//! designs/2026-10-25-local-vm-checkpoints.md).
+//! VM checkpoints of running local VMs (#3046 R4).
 //!
 //! A VM checkpoint is a disk snapshot (`supervisor::snapshots`) plus the
 //! VMM's memory and device state at the same instant, a row of kind

@@ -1,7 +1,7 @@
 version: v2
 
 # Codegen template for every audience-packaged codewire/** contract
-# (connect-rpc/02-proto-authoring-guide.md WI-2). Run with
+# (docs/dev/PROTO-STYLE.md, "Codegen pipeline"). Run with
 #   cd proto && buf generate --template buf.gen.codewire.yaml
 # (or `make proto-generate`, which runs every checked-in template).
 #

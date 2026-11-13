@@ -1,4 +1,4 @@
-//! Local disk snapshots (#3046 R1, private-docs: designs/2026-10-24-local-disk-snapshots.md).
+//! Local disk snapshots (#3046 R1).
 //!
 //! A disk snapshot is a reusable copy of a stopped environment's disks on
 //! this host: `state.raw`, `docker.raw` and its active root generation,

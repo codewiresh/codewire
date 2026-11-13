@@ -56,7 +56,7 @@ buf build --config libs/daemon-proto/buf.yaml --as-file-descriptor-set -o /dev/n
 headers retained, provenance comment added after each header). They define
 the well-known error detail types (`google.rpc.BadRequest`,
 `google.rpc.ErrorInfo`, `google.rpc.RetryInfo`, …) used by the Connect
-error model (`connect-rpc/01-error-model.md`, D1). They are
+error model (`docs/dev/CONNECT-ERROR-MODEL.md`, D1). They are
 vendored — not pulled from the BSR — because CI is restricted-network and
 this module uses no remote dependencies or plugins.
 

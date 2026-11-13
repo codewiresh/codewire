@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Dev acceptance for confidential workspaces that bind like standard ones
-# (Program #2238 B2c; design: private-docs designs/2026-10-07-confidential-binding-b2c.md).
+# (Program #2238 B2c).
 #
 # Creates one confidential environment on Dev's SEV-SNP node through the
 # product CLI and proves, as a user sees it:

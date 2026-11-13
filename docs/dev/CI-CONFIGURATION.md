@@ -104,7 +104,7 @@ push and the untrusted one otherwise.
 | `CODEWIRE_CI_RUNNER_TRUSTED_LIGHT` | Protected publication, signing and release jobs, which hold OIDC roles and build on the trusted BuildKit builder | Dev and Production delivery, support images, release, mirror |
 | `CODEWIRE_CI_RUNNER_MACOS` | Native macOS builds | the macOS `cw`, the VZ helper and the runtime pack |
 
-Main's warm VM (infra#1534, private-docs `ci-warm-persistent-vms.md`, step 1)
+Main's warm VM (infra#1534)
 is one persistent Kata VM reserved for main pushes. It runs two stock Forgejo
 runners: `ci-vm-main-build` takes the build job, one at a time, in its
 persistent build folder, and `ci-vm-main` takes every other job of the run,

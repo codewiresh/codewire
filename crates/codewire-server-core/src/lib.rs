@@ -87,8 +87,8 @@ pub async fn serve(app: Router, addr: SocketAddr) -> anyhow::Result<()> {
 /// [`serve`] on an already-bound listener (tests bind port 0 and read the
 /// local address back).
 ///
-/// The listener is h2c-capable (`connect-rpc/03-connect-server-
-/// infrastructure.md` D2): `axum::serve` drives hyper-util's auto connection
+/// The listener is h2c-capable (`docs/dev/CONNECT-SERVER.md`, D2):
+/// `axum::serve` drives hyper-util's auto connection
 /// builder, which sniffs the HTTP/2 prior-knowledge preface on plaintext
 /// connections, so HTTP/1.1 and cleartext HTTP/2 share every service port.
 /// This requires axum's `http2` feature, enabled in the workspace pin; the

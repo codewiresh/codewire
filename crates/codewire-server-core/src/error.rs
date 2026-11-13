@@ -114,8 +114,9 @@ pub type AppResult<T> = Result<T, AppError>;
 impl AppError {
     // The accessors below are `pub(crate)` so the Connect renderer
     // (`crate::connect_error`) derives its view of an error from the very
-    // same single source the HTTP envelope uses (01-error-model D6: one
-    // error type, two renderers that cannot disagree).
+    // same single source the HTTP envelope uses
+    // (docs/dev/CONNECT-ERROR-MODEL.md, D6: one error type, two renderers that
+    // cannot disagree).
     pub(crate) fn status(&self) -> StatusCode {
         match self {
             AppError::NotFound(_) => StatusCode::NOT_FOUND,

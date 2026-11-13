@@ -312,8 +312,7 @@ substitute a token issued for another purpose. They are
 `codewire.internal.workspace-binding.v1`. These are Kubernetes projected Pod
 tokens, not another Codewire user bearer flavor.
 
-The credential relay is orchestration (design §4 of
-`2026-10-06-daemon-hosted-access.md`): only the
+The credential relay is orchestration: only the
 `codewire-orchestration` ServiceAccount may present the relay audience, and the
 broker additionally requires the relay Pod to be in its own namespace. The
 broker takes the environment from the workspace Pod's live binding, never from

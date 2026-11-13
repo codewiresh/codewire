@@ -65,9 +65,7 @@ pub enum VolumeMode {
     /// A volume the node formats and the guest reaches over virtio-fs, so a
     /// guest never reads its free blocks. Clearing zeroes the current token
     /// files only (option A). Removed with the virtio-fs workspace path at
-    /// the Block cutover (#3718; private-docs designs/2026-11-01-commodity-
-    /// workspace-direct-io.md section 6, step 5), together with every branch
-    /// on it.
+    /// the Block cutover (#3718), together with every branch on it.
     Filesystem,
     /// A volume the guest formats and reads block by block, so clearing also
     /// wipes every block its guest cannot read through the filesystem.

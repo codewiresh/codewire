@@ -1,8 +1,8 @@
 //! Connect-RPC mount helper.
 //!
-//! Program doc: `connect-rpc/03-connect-server-infrastructure.md`
-//! (WI-1; design decisions D1, D6b, D7, D9). Connect services mount into the
-//! same axum binaries as REST — same port, same [`crate::AppBuilder`] middleware
+//! Design: `docs/dev/CONNECT-SERVER.md` (decisions D1, D6b, D7, D9). Connect
+//! services mount into the same axum binaries as REST — same port, same
+//! [`crate::AppBuilder`] middleware
 //! stack — via [`crate::AppBuilder::with_connect_routes`], which delegates to
 //! [`connect_router`] here.
 //!

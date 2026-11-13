@@ -149,7 +149,7 @@ credential.
 ## Error model
 
 The full contract (design decisions D1–D6) is
-`connect-rpc/01-error-model.md`; this section is the
+[CONNECT-ERROR-MODEL.md](CONNECT-ERROR-MODEL.md); this section is the
 authoring/consuming summary.
 
 ### Server side

@@ -54,6 +54,9 @@ directory each.
 - [dev/CONTRACT-TESTING.md](dev/CONTRACT-TESTING.md): contract tests.
 - [dev/DATABASE-MIGRATIONS.md](dev/DATABASE-MIGRATIONS.md): schema histories.
 - [dev/PROTO-STYLE.md](dev/PROTO-STYLE.md): protobuf authoring rules.
+- [dev/CONNECT-ERROR-MODEL.md](dev/CONNECT-ERROR-MODEL.md): the decisions behind the Connect error contract.
+- [dev/CONNECT-SERVER.md](dev/CONNECT-SERVER.md): the decisions behind the shared Connect serving stack.
+- [dev/ORCHESTRATION-FENCING.md](dev/ORCHESTRATION-FENCING.md): how orchestration keeps a stale worker from writing.
 - [dev/CI-CONFIGURATION.md](dev/CI-CONFIGURATION.md): the Forgejo settings
   and Actions variables a site that runs Codewire's CI sets.
 - [dev/BROWSER-TERMINALS.md](dev/BROWSER-TERMINALS.md) and

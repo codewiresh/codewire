@@ -205,7 +205,7 @@ buffa-types = { version = "=0.9.1", features = ["json"] }
 # Phase 0 design discussion identified as the canonical Rust analog of
 # huma+chi.
 # http2 is deliberate: Connect/gRPC h2c prior-knowledge on the service
-# listeners (connect-rpc/03-connect-server-infrastructure.md D2).
+# listeners (docs/dev/CONNECT-SERVER.md, D2).
 axum = { version = "0.8", features = ["macros", "json", "http2"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "request-id", "cors", "catch-panic"] }
