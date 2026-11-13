@@ -183,7 +183,12 @@ the address's owner taking the account back from whoever chose the old password
 (#4481). The transaction that replaces the password also deletes what signing
 in with the old one minted: browser sessions, pending 2FA challenges, and OAuth
 authorization requests, access and refresh tokens and device authorizations.
-API keys stay; they are an organization's automation, not a sign-in.
+A device sign-in that the old password's session approved pays out nothing
+after the reset. API keys stay; they are an organization's automation, not a
+sign-in (owner, 2026-11-13, #4481). A sign-in that verified the old password
+just before the reset committed gets nothing either: it issues its session or
+second-factor challenge only while the account's credential row, locked
+`FOR SHARE`, still holds the hash it verified.
 
 The boundary does not erase account identity factors or user-owned
 configuration. A pending device request with no user bound to it has no subject

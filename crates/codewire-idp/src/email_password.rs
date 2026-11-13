@@ -571,6 +571,11 @@ async fn reset_password(
     // tokens. API keys are the organization's automation and stay.
     let mut signed_out_sessions = 0;
     if let Some(user_id) = &user_id {
+        // The order is load-bearing: challenges go before sessions. A
+        // second-factor completion consumes its challenge and issues its
+        // session in one transaction, so either this delete waits for it and
+        // the sessions delete below then sees its session, or it finds no
+        // challenge left to complete.
         for statement in [
             "DELETE FROM two_factor_tokens WHERE user_id = $1",
             "DELETE FROM oidc_auth_requests WHERE user_id = $1",

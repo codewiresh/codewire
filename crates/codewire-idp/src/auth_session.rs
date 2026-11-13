@@ -58,6 +58,7 @@ use crate::email_password::{
     VerificationPurpose, create_verification_in_transaction, send_verification_email,
 };
 
+mod password_grant;
 mod session_inventory;
 
 // The cookie-only account controls share one boundary: exact Origin, the
@@ -1161,28 +1162,12 @@ async fn sign_in(
         return Err(account_disabled());
     }
 
-    // 2FA challenge branch: no session, no cookie.
+    // 2FA challenge branch: no session, no cookie. A password a reset has
+    // since replaced grants nothing, here or below (#4481).
     if user.two_factor_enabled.unwrap_or(false) {
-        let tf_token = hex_token();
-        let tf_token_hash = hash_session_token(&tf_token);
-        let tf_id = hex_id();
-        sqlx::query(
-            r#"
-            INSERT INTO two_factor_tokens (id, user_id, token_hash, expires_at)
-            VALUES ($1, $2, $3, NOW() + ($4::bigint * interval '1 second'))
-            "#,
-        )
-        .bind(&tf_id)
-        .bind(&user.id)
-        .bind(&tf_token_hash)
-        .bind(TWO_FACTOR_TOKEN_TTL_SECS)
-        .execute(&state.pool)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to store 2FA token");
-            AppError::InternalMsg("Failed to store 2FA token".into())
-        })?;
-
+        let Some(tf_token) = password_grant::challenge(&state.pool, &user.id, &hash).await? else {
+            return Err(password_grant::replaced(&state.pool, &user.id, &ip, &ua).await);
+        };
         let body = SignInResponseBody {
             two_factor_required: true,
             two_factor_token: tf_token,
@@ -1202,7 +1187,11 @@ async fn sign_in(
     .await;
 
     // No 2FA: mint a session + cookie.
-    let created_session = create_session(&state.pool, &user.id, &ip, &ua).await?;
+    let Some(created_session) =
+        password_grant::session(&state.pool, &user.id, &hash, &ip, &ua).await?
+    else {
+        return Err(password_grant::replaced(&state.pool, &user.id, &ip, &ua).await);
+    };
     log_audit(
         &state.pool,
         "user.signin",

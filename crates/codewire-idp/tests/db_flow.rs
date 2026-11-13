@@ -3969,6 +3969,67 @@ async fn email_password_flow_against_postgres() {
     assert_eq!(body["user"]["email"], email);
     assert!(cookie.is_some());
 
+    // 10. A sign-in that verified the password just before a reset committed
+    // gets nothing: its session waits on the credential row, then finds the
+    // password replaced (#4481). The open transaction stands in for a reset
+    // that has replaced the hash and deleted the sessions but not committed.
+    let race_name = "idp-sign-in-reset-race";
+    let race_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url_with_application_name(&url, race_name))
+        .await
+        .expect("connect the racing sign-in");
+    let race_app = codewire_idp::auth_session::router(
+        race_pool,
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::open(),
+    );
+    let mut reset = pool.begin().await.unwrap();
+    let reset_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *reset)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE accounts SET password = 'replaced-by-a-reset' WHERE user_id = $1")
+        .bind(user)
+        .execute(&mut *reset)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+        .bind(user)
+        .execute(&mut *reset)
+        .await
+        .unwrap();
+    let racing = tokio::spawn(async move {
+        sess_req(
+            &race_app,
+            "POST",
+            "/api/auth/sign-in",
+            None,
+            &format!(r#"{{"email":"{email}","password":"{new_pw}"}}"#),
+        )
+        .await
+    });
+    wait_for_application_lock_blocker(&pool, race_name, reset_pid).await;
+    reset.commit().await.unwrap();
+    let (st, body, cookie) = racing.await.unwrap();
+    assert_eq!(st, 401, "a replaced password signs in to nothing: {body}");
+    assert!(cookie.is_none());
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_logs WHERE user_id = $1 \
+         AND action = 'user.signin.failed' AND metadata->>'reason' = 'password_replaced'",
+    )
+    .bind(user)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1, "the refused race is audited");
+    let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE user_id = $1")
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(sessions, 0);
+
     cleanup(pool.clone()).await;
 }
 
