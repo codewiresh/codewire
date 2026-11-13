@@ -135,7 +135,7 @@ gate.
   expiry checks otherwise stay blocking (owner, 2026-10-21).
 - **Forgejo checks the head, not the merged tree.** `main` CI verifies the
   landed tree after merge and a failure there is fixed forward. Cancelling and
-  rerunning runs is the orchestrator's call alone, under the `ci` skill (owner,
+  rerunning runs is the orchestrator's call alone, under the `codewire-ci` skill (owner,
   2026-10-29: cancel only what we don't need to finish, after looking): a
   `main` run is cancelled only when a newer `main` commit has replaced it, and
   release publication always finishes.
@@ -164,7 +164,7 @@ gate.
   When the candidate's pair is missing, dispatch `support-images.yaml` on
   `main` the same way (`-I source_sha=<candidate>`): it aliases or builds that
   commit's pair, and nothing waits on a merge hold (owner, 2026-11-12, #4243).
-- Every CI change follows the `ci` skill. Prefer the faster build or CI option
+- Every CI change follows the `codewire-ci` skill. Prefer the faster build or CI option
   and measure afterwards (owner, 2026-10-15). A failing guard fails its run;
   repair the classifier and its fixtures when a narrow path selects an
   expensive suite. Record actual commands, exit status and test counts; reuse

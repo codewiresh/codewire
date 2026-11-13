@@ -244,7 +244,7 @@ green on its exact head, `CI / Required verification (pull_request)` and
 journey has run (the merge rule in `AGENTS.md`). Forgejo checks the head, not
 the merged tree; `main` CI verifies the landed tree after merge, and a failure
 is fixed forward. Never cancel a `main` run by hand; cancels and reruns are
-the orchestrator's call under the `ci` skill.
+the orchestrator's call under the `codewire-ci` skill.
 
 Pull-request CI runs every family the change's paths select, as the push to
 `main` does: policy, the crate tests of the changed Rust packages and their
