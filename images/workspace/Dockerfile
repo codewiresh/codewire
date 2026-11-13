@@ -249,9 +249,8 @@ RUN --mount=type=bind,from=protoc-amd64,source=/protoc.zip,target=/tmp/protoc-am
     test "$(/opt/protoc/bin/protoc --version)" = 'libprotoc 35.1'
 ENV PATH="/opt/protoc/bin:${PATH}" PROTOC=/opt/protoc/bin/protoc
 
-RUN mkdir -p /home/codewire/go /home/codewire/.npm-global \
-      /opt/codewire/agents/npm /opt/codewire/agents/pipx /opt/codewire/agents/bin && \
-    chown -R codewire:codewire /home/codewire/go /home/codewire/.npm-global /opt/codewire/agents
+RUN mkdir -p /home/codewire/go /home/codewire/.npm-global && \
+    chown -R codewire:codewire /home/codewire/go /home/codewire/.npm-global
 
 # Persistent storage covers the home, so keep the pinned Rust payload in the
 # image. The binary/dispatcher are image-managed; normal Rustup toolchain and
@@ -312,10 +311,19 @@ USER codewire
 COPY --from=workspace-floating-go --chown=codewire:codewire /out/ /home/codewire/go/bin/
 RUN gopls version && hcloud version && \
     pipx install poetry && \
-    pipx install uv && \
-    PIPX_HOME=/opt/codewire/agents/pipx PIPX_BIN_DIR=/opt/codewire/agents/bin pipx install aider-chat
+    pipx install uv
 
-FROM workspace-floating-tools AS workspace
+# The shipped coding agents install in their own stage, as codewire, so npm's
+# script allowlist and pipx run unprivileged. The workspace copies the result
+# once, owned by root: a recursive chown in the image itself rewrote every
+# agent file into a second layer (owner, 2026-11-12, #3013).
+FROM workspace-floating-tools AS workspace-agents
+USER root
+RUN mkdir -p /opt/codewire/agents/npm/lib /opt/codewire/agents/npm/bin \
+      /opt/codewire/agents/pipx /opt/codewire/agents/bin && \
+    chown -R codewire:codewire /opt/codewire/agents
+USER codewire
+RUN PIPX_HOME=/opt/codewire/agents/pipx PIPX_BIN_DIR=/opt/codewire/agents/bin pipx install aider-chat
 # Seed coding agents from the exact versions accepted by the workspace image
 # contract, outside the persistent home mount. Interactive users can install
 # newer versions into their own prefix without sudo; PATH gives those versions
@@ -327,7 +335,6 @@ FROM workspace-floating-tools AS workspace
 # configuration does not apply to this project install. Only the agents'
 # own commands are linked.
 RUN --mount=type=bind,source=images/workspace/agents,target=/tmp/codewire-agents,readonly \
-    mkdir -p /opt/codewire/agents/npm/lib /opt/codewire/agents/npm/bin && \
     cp /tmp/codewire-agents/package.json /tmp/codewire-agents/package-lock.json \
       /opt/codewire/agents/npm/lib/ && \
     cd /opt/codewire/agents/npm/lib && \
@@ -336,7 +343,10 @@ RUN --mount=type=bind,source=images/workspace/agents,target=/tmp/codewire-agents
     npm cache clean --force && \
     for agent in claude codex gemini kimi pi; do \
       ln -s "../lib/node_modules/.bin/$agent" "/opt/codewire/agents/npm/bin/$agent"; \
-    done
+    done && \
+    chmod -R go-w /opt/codewire/agents
+
+FROM workspace-floating-tools AS workspace
 
 # Claude Code fills the terminal, its input box on the bottom rows, as with
 # `"tui": "fullscreen"` (#4332); its default draws inline below the output.
@@ -355,8 +365,8 @@ RUN printf '\n%s\nset +h\n' \
 # Codex and Gemini update into the home's npm prefix themselves; pi, Kimi Code
 # and aider reach the home through their upgrade wrappers, and Claude Code's
 # wrapper installs its native, self-updating build in the home on first use.
+COPY --from=workspace-agents --chown=0:0 /opt/codewire/agents/ /opt/codewire/agents/
 COPY --chmod=0755 images/workspace/agent-upgrade/ /opt/codewire/agents/upgrade/
-RUN chown -R -h root:root /opt/codewire/agents && chmod -R go-w /opt/codewire/agents
 # A hosted Sandbox is Ready before its pod-local Docker daemon listens, so
 # `docker` waits, bounded, for that socket and then runs the real CLI
 # unchanged (Program #2238). Plugins are found in their usual directories.

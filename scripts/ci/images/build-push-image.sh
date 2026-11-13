@@ -801,6 +801,11 @@ if [ "$image_name" = workspace ]; then
     if grep -Eqi '^FROM .+ AS workspace-floating-go$' "$dockerfile"; then
       build_args+=(--no-cache-filter workspace-floating-go)
     fi
+    # The shipped agents install in their own stage, aider from a moving
+    # channel, so they refresh with the other floating tools.
+    if grep -Eqi '^FROM .+ AS workspace-agents$' "$dockerfile"; then
+      build_args+=(--no-cache-filter workspace-agents)
+    fi
   fi
   build_args+=(--build-arg "CODEWIRE_SCCACHE_MODE=$sccache_mode")
   # The trusted BuildKit builder bounds Cargo's jobs to its memory; product

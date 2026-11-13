@@ -1200,6 +1200,8 @@ grep -qF -- "--build-arg BASE_IMAGE_REF=$base_ref" "$FAKE_DOCKER_CALLS" ||
 assert_cw_context runtime
 grep -qF -- '--no-cache-filter workspace-floating-tools' "$FAKE_DOCKER_CALLS" ||
   fail 'published workspace could reuse floating developer tools'
+grep -qF -- '--no-cache-filter workspace-agents' "$FAKE_DOCKER_CALLS" ||
+  fail 'published workspace could reuse an earlier install of the shipped agents'
 
 if (
   cd "$source_fixture"

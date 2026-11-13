@@ -184,7 +184,7 @@ workspace_cache_layer_args() {
     layer_args+=(--no-cache)
   else
     [[ "$target" != workspace ]] || layer_args+=(--no-cache-filter workspace-floating-tools
-      --no-cache-filter workspace-floating-go)
+      --no-cache-filter workspace-floating-go --no-cache-filter workspace-agents)
   fi
   if [[ "$layer_cache_mode" == r2 ]]; then
     common="type=s3,bucket=$WORKSPACE_CACHE_BUCKET,region=auto,endpoint_url=$CODEWIRE_R2_CACHE_ENDPOINT,use_path_style=true,prefix=$WORKSPACE_CACHE_PREFIX"

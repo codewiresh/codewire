@@ -298,8 +298,18 @@ grep -qF 'rm -rf /tmp/cargo-target' <<<"$builder_stage" ||
 [[ "$(grep -c '^RUN ' <<<"$builder_stage")" == 1 ]] ||
   fail 'workspace target cleanup must share the compile layer'
 floating_stage="$(sed -n '/^FROM workspace-foundation AS workspace-floating-tools$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
+# The shipped agents install in a fresh stage of their own, as codewire, and
+# reach the image once, owned by root (owner, 2026-11-12, #3013).
+agents_stage="$(sed -n '/^FROM workspace-floating-tools AS workspace-agents$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
+grep -qF 'PIPX_HOME=/opt/codewire/agents/pipx PIPX_BIN_DIR=/opt/codewire/agents/bin pipx install aider-chat' \
+  <<<"$agents_stage" || fail 'aider is not installed in the fresh agents stage'
+grep -qxF 'COPY --from=workspace-agents --chown=0:0 /opt/codewire/agents/ /opt/codewire/agents/' "$WORKSPACE_DOCKERFILE" ||
+  fail 'the shipped agents do not reach the workspace once, owned by root'
+if grep -qF 'chown -R -h root:root /opt/codewire/agents' "$WORKSPACE_DOCKERFILE"; then
+  fail 'a recursive chown copies every agent file into a second layer'
+fi
 for tool in 'NPM_CONFIG_PREFIX=/usr/local npm install' 'npm@12.2.0 pnpm@12.9.0 yarn@1.22.22' \
-  'echo "${bun_sha}  /tmp/bun.zip" | sha256sum -c -' 'pipx install poetry' 'pipx install uv' 'pipx install aider-chat' \
+  'echo "${bun_sha}  /tmp/bun.zip" | sha256sum -c -' 'pipx install poetry' 'pipx install uv' \
   'COPY --from=workspace-floating-go --chown=codewire:codewire /out/ /home/codewire/go/bin/' \
   'RUN gopls version && hcloud version'; do
   grep -qF "$tool" <<<"$floating_stage" || fail "floating tool omitted from the fresh stage: $tool"
