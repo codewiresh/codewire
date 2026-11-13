@@ -2,9 +2,10 @@
 
 This journey proves what a user does with a cloud sandbox, as `SPEC.md`
 describes it in "4. Hosted sandboxes" and "7. Access paths". It is written so
-far for copying files with `cw cp` ("File transfer" in section 7). Other parts
-of the sandbox journey are added as their owners write them. The format is in
-[README.md](README.md).
+far for copying files with `cw cp` ("File transfer" in section 7), and for what
+a user sees while a release replaces the orchestration service ("Rollouts
+drain" in section 10). Other parts of the sandbox journey are added as their
+owners write them. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
@@ -15,6 +16,7 @@ Updated 2026-11-13.
 | `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-13 (#4373) | not yet observed |
 | `sandbox-cp-resume` | cw-workspace-mount | observed 2026-11-13 (#4373) | not yet observed; v0.4.17 lacks it |
 | `sandbox-cp-download` | cw-workspace-mount | observed 2026-11-13 (#4394) | not yet observed |
+| `sandbox-rollout` | cw-rollout | observed 2026-11-13 (#4426) | not yet observed |
 
 ## Before the walk
 
@@ -67,8 +69,9 @@ Issue: #3968 (`cw cp` sent a whole file as one message).
   - Uploads run at about 2.5 MB/s on Dev, so 1 GiB takes about seven
     minutes. Each 64 KiB write crosses from orchestration to the sandbox's
     site and back. #4460 batches the writes. A slow upload is not a failure.
-  - A Dev rollout during a transfer cuts it (#4426). Check that none is
-    running before timing anything.
+  - A Dev rollout during a transfer can end it at the old Pod's drain
+    deadline (`sandbox-rollout`). Check that none is running before timing
+    anything.
 - **Observed:**
   - Dev, 2026-11-13: Dev ran source 3a3a53521, with its rollout finished;
     `cw` was built at 3a3a53521. A 1 GiB upload, interrupted and then
@@ -172,4 +175,99 @@ Issue: #3968; download speed is #4394.
   - Dev, 2026-11-12: Ctrl-C during a download left the destination
     unchanged and no partial file, with `cw` built from #4393's branch.
     Dev's source was not recorded. Evidence: #4393.
+  - Production: not yet observed.
+
+## `sandbox-rollout`: transfers and API calls across an orchestration rollout
+
+Issue: #4426 (a rollout cut open transfers); the drain shipped in #4445 and
+#4472.
+
+A release replaces the orchestration Pod. The old Pod drains instead of
+cutting what it serves. For 10 s it keeps serving while the gateway drops it.
+Then it hands over leadership and Temporal work, and lets open transfers
+finish. Streams whose clients re-attach end at once. Anything still open at
+the drain deadline, 270 s after SIGTERM and inside the 300 s grace, ends with
+an error the client can retry.
+
+- **Entry points:**
+  - `cw cp`, in either direction;
+  - a host attached with `cw host` (`AttachHost`);
+  - a session attached with `cw shell` or `cw run` (`AttachSession`);
+  - the dashboard's terminal;
+  - any API call during the rollout.
+- **States to exercise:**
+  - a download that finishes on the old Pod during its drain (the usual
+    case);
+  - a download still open at the drain deadline, which ends with "download
+    it again", never `failed to read response body`;
+  - an upload in parts across the rollout, and one with a part still open at
+    the deadline, which resumes on the new Pod (#4460);
+  - a host or session attached when the old Pod drains, which re-attaches to
+    the new one;
+  - API calls throughout, none refused.
+- **Driving it:**
+  1. Dev runs a source with #4445, so its orchestration Pods carry a 10 s
+     `preStop`. Run every `cw` command as the Dev smoke identity (see "Before
+     the walk").
+  2. Make a file in the sandbox and note its checksum:
+
+     ```sh
+     cw exec --in cp-walk sh -c 'head -c 1073741824 /dev/urandom > /workspace/gen.bin && sha256sum /workspace/gen.bin'
+     ```
+
+  3. Wait for a Dev delivery that replaces orchestration, watching the
+     `codewire-orchestration` Pods in Dev's `dev` namespace. This walk never
+     starts a delivery; deliveries follow `main`.
+  4. When a new orchestration Pod appears, until the old Pod is gone, run
+     downloads back to back and an API call once a second:
+
+     ```sh
+     cw cp cp-walk:/workspace/gen.bin ./gen.bin && sha256sum gen.bin
+     while sleep 1; do cw org list > /dev/null || date -u; done
+     ```
+
+- **Proof:**
+  - each download's checksum equals the one the sandbox printed, and a
+    download still open at the deadline ends with Codewire's "download it
+    again" error;
+  - no `cw org list` call fails at the gateway;
+  - the old Pod logs `draining: releasing leadership, Temporal tasks and
+    re-attachable streams`, then `leader: draining, released leadership` and
+    `temporal worker stopped`;
+  - the new Pod logs `leader: acquired leadership` within about 5 s of that
+    release;
+  - the old Pod is gone within its 300 s grace.
+- **Gotchas:**
+  - A Pod's own spec decides how it stops. The rollout that first delivers
+    the drain still kills Pods that have no `preStop`, so walk the rollout
+    after it.
+  - A delivery that changes no orchestration image replaces no Pod.
+  - The workstation's own network can fail a call. Count a failure only if
+    the gateway saw it (#4383).
+  - A 1 GiB download takes about 110 s on Dev, so start downloads back to
+    back to keep one open when the old Pod gets SIGTERM.
+- **Observed:**
+  - Dev, 2026-11-13, source `934d5809`, before #4445: failure observed. A
+    256 MiB download was cut at 58.9 s by the rollout's kill. Evidence:
+    #4426.
+  - Dev, 2026-11-13, source `1e0f58773`, before #4445: failure observed. A
+    1 GiB download was cut at 172 s by the 13:01Z rollout. Evidence: #4394.
+  - Dev, 2026-11-13, source `6fe84fa45` (with #4445) draining to
+    `b7272211f`: a 1 GiB download started on the old Pod 23 s before its
+    `preStop` completed with SHA-256 equal after 108.4 s. The old Pod exited
+    96 s after its deletion. The new Pod took leadership 4.75 s after the old
+    one's SIGTERM. The gateway saw no failed call. Evidence: #4426.
+  - Dev, 2026-11-13, source `b7272211f` (with #4445 and #4472) draining: a
+    1 GiB download on the draining Pod completed with SHA-256 equal. A 5 GiB
+    download still open at the deadline ended with "download it again", and
+    the gateway logged 200 with no reset. A 1 GiB upload across the rollout
+    completed in parts with SHA-256 equal in the sandbox. 772 API calls at
+    1 Hz, none failed. Leadership moved 4.2 s after its release. Evidence:
+    #4426.
+  - An upload part open at the deadline resuming (#4460), `AttachSession`
+    re-attaching through orchestration, and the dashboard's terminal: not yet
+    observed. A `cw run` across the rollout used direct UDP, not
+    orchestration.
+  - `AttachHost` at SIGTERM: not yet observed. It needs a host agent on Dev
+    (#4426).
   - Production: not yet observed.

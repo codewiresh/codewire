@@ -700,6 +700,13 @@ CLI and local VM configuration is documented for users on the site
   the release OpenPGP key. `cw upgrade` verifies a release with its compiled
   key, without GnuPG, and refuses a downgrade or different bytes under the same
   version. A release's `cw` pins its local VM runtime by digest.
+- **Rollouts drain.** A release replaces the orchestration Pod without
+  cutting what it serves (#4426). The old Pod keeps serving for 10 s while the
+  gateway drops it. Then it releases leadership and Temporal work, and lets
+  open transfers finish. Streams whose clients re-attach end at once, and
+  anything still open 270 s after SIGTERM ends with an error the client can
+  retry, before the 300 s grace runs out. The walk is `sandbox-rollout` in
+  [docs/journeys/cloud-sandbox.md](docs/journeys/cloud-sandbox.md).
 - **Verification.** Pull-request CI runs the quick checks and the
   verification families the change selects; `main` runs the full verification
   after merge. The local loop is the same scripts
