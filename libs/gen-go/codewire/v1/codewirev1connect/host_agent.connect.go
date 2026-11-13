@@ -36,6 +36,9 @@ const (
 	// HostAgentServiceAttachHostProcedure is the fully-qualified name of the HostAgentService's
 	// AttachHost RPC.
 	HostAgentServiceAttachHostProcedure = "/codewire.v1.HostAgentService/AttachHost"
+	// HostAgentServiceOpenHostTunnelProcedure is the fully-qualified name of the HostAgentService's
+	// OpenHostTunnel RPC.
+	HostAgentServiceOpenHostTunnelProcedure = "/codewire.v1.HostAgentService/OpenHostTunnel"
 )
 
 // HostAgentServiceClient is a client for the codewire.v1.HostAgentService service.
@@ -53,11 +56,30 @@ type HostAgentServiceClient interface {
 	//    `challenge`, which the host must answer with `proof` within
 	//    `proof_timeout_seconds`.
 	//
+	// Only the newest session of a host takes operations. A session that
+	// another one for the same host has replaced is sent `superseded` and
+	// ended; operations it had been sent are sent again on the new one.
+	//
 	// An unknown host or a bad proof ends the stream with UNAUTHENTICATED,
 	// without saying which. A revoked host is refused with PERMISSION_DENIED,
 	// or, once attached, sent `revoked` before the stream ends. A message out
 	// of order ends it with INVALID_ARGUMENT.
 	AttachHost(context.Context) *connect.BidiStreamForClient[v1.AttachHostRequest, v1.AttachHostResponse]
+	// OpenHostTunnel carries one byte stream to an environment on the host,
+	// which the host opens when its session is sent `open_tunnel`:
+	//
+	// 1. The host sends `open`: the host ID, the tunnel ID, and the Ed25519
+	//    signature, by the host key, of the line "codewire-host-tunnel-v1",
+	//    then the host ID, the tunnel ID and the lowercase hex of the
+	//    `open_tunnel` nonce, each on its own line ending in "\n".
+	// 2. The host connects to the environment, then sends `ready`, or `failed`
+	//    with the reason and ends the stream.
+	// 3. Both sides send `data` until either ends its side.
+	//
+	// A tunnel is opened once, within 10 seconds of its `open_tunnel`, on the
+	// replica whose session sent it. Anything else ends the stream with
+	// UNAUTHENTICATED, without saying why.
+	OpenHostTunnel(context.Context) *connect.BidiStreamForClient[v1.OpenHostTunnelRequest, v1.OpenHostTunnelResponse]
 }
 
 // NewHostAgentServiceClient constructs a client for the codewire.v1.HostAgentService service. By
@@ -77,17 +99,29 @@ func NewHostAgentServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(hostAgentServiceMethods.ByName("AttachHost")),
 			connect.WithClientOptions(opts...),
 		),
+		openHostTunnel: connect.NewClient[v1.OpenHostTunnelRequest, v1.OpenHostTunnelResponse](
+			httpClient,
+			baseURL+HostAgentServiceOpenHostTunnelProcedure,
+			connect.WithSchema(hostAgentServiceMethods.ByName("OpenHostTunnel")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // hostAgentServiceClient implements HostAgentServiceClient.
 type hostAgentServiceClient struct {
-	attachHost *connect.Client[v1.AttachHostRequest, v1.AttachHostResponse]
+	attachHost     *connect.Client[v1.AttachHostRequest, v1.AttachHostResponse]
+	openHostTunnel *connect.Client[v1.OpenHostTunnelRequest, v1.OpenHostTunnelResponse]
 }
 
 // AttachHost calls codewire.v1.HostAgentService.AttachHost.
 func (c *hostAgentServiceClient) AttachHost(ctx context.Context) *connect.BidiStreamForClient[v1.AttachHostRequest, v1.AttachHostResponse] {
 	return c.attachHost.CallBidiStream(ctx)
+}
+
+// OpenHostTunnel calls codewire.v1.HostAgentService.OpenHostTunnel.
+func (c *hostAgentServiceClient) OpenHostTunnel(ctx context.Context) *connect.BidiStreamForClient[v1.OpenHostTunnelRequest, v1.OpenHostTunnelResponse] {
+	return c.openHostTunnel.CallBidiStream(ctx)
 }
 
 // HostAgentServiceHandler is an implementation of the codewire.v1.HostAgentService service.
@@ -105,11 +139,30 @@ type HostAgentServiceHandler interface {
 	//    `challenge`, which the host must answer with `proof` within
 	//    `proof_timeout_seconds`.
 	//
+	// Only the newest session of a host takes operations. A session that
+	// another one for the same host has replaced is sent `superseded` and
+	// ended; operations it had been sent are sent again on the new one.
+	//
 	// An unknown host or a bad proof ends the stream with UNAUTHENTICATED,
 	// without saying which. A revoked host is refused with PERMISSION_DENIED,
 	// or, once attached, sent `revoked` before the stream ends. A message out
 	// of order ends it with INVALID_ARGUMENT.
 	AttachHost(context.Context, *connect.BidiStream[v1.AttachHostRequest, v1.AttachHostResponse]) error
+	// OpenHostTunnel carries one byte stream to an environment on the host,
+	// which the host opens when its session is sent `open_tunnel`:
+	//
+	// 1. The host sends `open`: the host ID, the tunnel ID, and the Ed25519
+	//    signature, by the host key, of the line "codewire-host-tunnel-v1",
+	//    then the host ID, the tunnel ID and the lowercase hex of the
+	//    `open_tunnel` nonce, each on its own line ending in "\n".
+	// 2. The host connects to the environment, then sends `ready`, or `failed`
+	//    with the reason and ends the stream.
+	// 3. Both sides send `data` until either ends its side.
+	//
+	// A tunnel is opened once, within 10 seconds of its `open_tunnel`, on the
+	// replica whose session sent it. Anything else ends the stream with
+	// UNAUTHENTICATED, without saying why.
+	OpenHostTunnel(context.Context, *connect.BidiStream[v1.OpenHostTunnelRequest, v1.OpenHostTunnelResponse]) error
 }
 
 // NewHostAgentServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -125,10 +178,18 @@ func NewHostAgentServiceHandler(svc HostAgentServiceHandler, opts ...connect.Han
 		connect.WithSchema(hostAgentServiceMethods.ByName("AttachHost")),
 		connect.WithHandlerOptions(opts...),
 	)
+	hostAgentServiceOpenHostTunnelHandler := connect.NewBidiStreamHandler(
+		HostAgentServiceOpenHostTunnelProcedure,
+		svc.OpenHostTunnel,
+		connect.WithSchema(hostAgentServiceMethods.ByName("OpenHostTunnel")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.v1.HostAgentService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case HostAgentServiceAttachHostProcedure:
 			hostAgentServiceAttachHostHandler.ServeHTTP(w, r)
+		case HostAgentServiceOpenHostTunnelProcedure:
+			hostAgentServiceOpenHostTunnelHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -140,4 +201,8 @@ type UnimplementedHostAgentServiceHandler struct{}
 
 func (UnimplementedHostAgentServiceHandler) AttachHost(context.Context, *connect.BidiStream[v1.AttachHostRequest, v1.AttachHostResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.HostAgentService.AttachHost is not implemented"))
+}
+
+func (UnimplementedHostAgentServiceHandler) OpenHostTunnel(context.Context, *connect.BidiStream[v1.OpenHostTunnelRequest, v1.OpenHostTunnelResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.HostAgentService.OpenHostTunnel is not implemented"))
 }

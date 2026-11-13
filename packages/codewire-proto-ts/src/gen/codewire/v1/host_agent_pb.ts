@@ -2,8 +2,8 @@
 // @generated from file codewire/v1/host_agent.proto (package codewire.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
-import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
 import type { HostPlatform } from "./host_pb";
 import { file_codewire_v1_host } from "./host_pb";
 import type { Message } from "@bufbuild/protobuf";
@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/host_agent.proto.
  */
 export const file_codewire_v1_host_agent: GenFile = /*@__PURE__*/
-  fileDesc("Chxjb2Rld2lyZS92MS9ob3N0X2FnZW50LnByb3RvEgtjb2Rld2lyZS52MSLIAQoRQXR0YWNoSG9zdFJlcXVlc3QSKwoEb3BlbhgBIAEoCzIbLmNvZGV3aXJlLnYxLkhvc3RBdHRhY2hPcGVuSAASLQoFcHJvb2YYAiABKAsyHC5jb2Rld2lyZS52MS5Ib3N0QXR0YWNoUHJvb2ZIABInCgVoZWxsbxgDIAEoCzIWLmNvZGV3aXJlLnYxLkhvc3RIZWxsb0gAEiUKBHBpbmcYBCABKAsyFS5jb2Rld2lyZS52MS5Ib3N0UGluZ0gAQgcKBWlucHV0ItIBChJBdHRhY2hIb3N0UmVzcG9uc2USLwoJY2hhbGxlbmdlGAEgASgLMhouY29kZXdpcmUudjEuSG9zdENoYWxsZW5nZUgAEi0KCGF0dGFjaGVkGAIgASgLMhkuY29kZXdpcmUudjEuSG9zdEF0dGFjaGVkSAASJQoEcG9uZxgDIAEoCzIVLmNvZGV3aXJlLnYxLkhvc3RQb25nSAASKwoHcmV2b2tlZBgEIAEoCzIYLmNvZGV3aXJlLnYxLkhvc3RSZXZva2VkSABCCAoGb3V0cHV0IiEKDkhvc3RBdHRhY2hPcGVuEg8KB2hvc3RfaWQYASABKAkiHgoNSG9zdENoYWxsZW5nZRINCgVub25jZRgBIAEoDCIkCg9Ib3N0QXR0YWNoUHJvb2YSEQoJc2lnbmF0dXJlGAEgASgMIpEBCgxIb3N0QXR0YWNoZWQSHQoVcGluZ19pbnRlcnZhbF9zZWNvbmRzGAEgASgNEh0KFW9mZmxpbmVfYWZ0ZXJfc2Vjb25kcxgCIAEoDRIkChxyZWNoYWxsZW5nZV9pbnRlcnZhbF9zZWNvbmRzGAMgASgNEh0KFXByb29mX3RpbWVvdXRfc2Vjb25kcxgEIAEoDSJUCglIb3N0SGVsbG8SGgoSY2FwYWJpbGl0eV92ZXJzaW9uGAEgASgNEisKCHBsYXRmb3JtGAIgASgOMhkuY29kZXdpcmUudjEuSG9zdFBsYXRmb3JtIgoKCEhvc3RQaW5nIgoKCEhvc3RQb25nIg0KC0hvc3RSZXZva2VkMmUKEEhvc3RBZ2VudFNlcnZpY2USUQoKQXR0YWNoSG9zdBIeLmNvZGV3aXJlLnYxLkF0dGFjaEhvc3RSZXF1ZXN0Gh8uY29kZXdpcmUudjEuQXR0YWNoSG9zdFJlc3BvbnNlKAEwAUKxAQoPY29tLmNvZGV3aXJlLnYxQg5Ib3N0QWdlbnRQcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_codewire_v1_host]);
+  fileDesc("Chxjb2Rld2lyZS92MS9ob3N0X2FnZW50LnByb3RvEgtjb2Rld2lyZS52MSKRAwoRQXR0YWNoSG9zdFJlcXVlc3QSKwoEb3BlbhgBIAEoCzIbLmNvZGV3aXJlLnYxLkhvc3RBdHRhY2hPcGVuSAASLQoFcHJvb2YYAiABKAsyHC5jb2Rld2lyZS52MS5Ib3N0QXR0YWNoUHJvb2ZIABInCgVoZWxsbxgDIAEoCzIWLmNvZGV3aXJlLnYxLkhvc3RIZWxsb0gAEiUKBHBpbmcYBCABKAsyFS5jb2Rld2lyZS52MS5Ib3N0UGluZ0gAEkAKEm9wZXJhdGlvbl9wcm9ncmVzcxgFIAEoCzIiLmNvZGV3aXJlLnYxLkhvc3RPcGVyYXRpb25Qcm9ncmVzc0gAEjwKEG9wZXJhdGlvbl9yZXN1bHQYBiABKAsyIC5jb2Rld2lyZS52MS5Ib3N0T3BlcmF0aW9uUmVzdWx0SAASRwoUZW52aXJvbm1lbnRfb2JzZXJ2ZWQYByABKAsyJy5jb2Rld2lyZS52MS5Ib3N0RW52aXJvbm1lbnRPYnNlcnZhdGlvbkgAQgcKBWlucHV0IuoCChJBdHRhY2hIb3N0UmVzcG9uc2USLwoJY2hhbGxlbmdlGAEgASgLMhouY29kZXdpcmUudjEuSG9zdENoYWxsZW5nZUgAEi0KCGF0dGFjaGVkGAIgASgLMhkuY29kZXdpcmUudjEuSG9zdEF0dGFjaGVkSAASJQoEcG9uZxgDIAEoCzIVLmNvZGV3aXJlLnYxLkhvc3RQb25nSAASKwoHcmV2b2tlZBgEIAEoCzIYLmNvZGV3aXJlLnYxLkhvc3RSZXZva2VkSAASLwoJb3BlcmF0aW9uGAUgASgLMhouY29kZXdpcmUudjEuSG9zdE9wZXJhdGlvbkgAEjEKCnN1cGVyc2VkZWQYBiABKAsyGy5jb2Rld2lyZS52MS5Ib3N0U3VwZXJzZWRlZEgAEjIKC29wZW5fdHVubmVsGAcgASgLMhsuY29kZXdpcmUudjEuSG9zdE9wZW5UdW5uZWxIAEIICgZvdXRwdXQiIQoOSG9zdEF0dGFjaE9wZW4SDwoHaG9zdF9pZBgBIAEoCSIeCg1Ib3N0Q2hhbGxlbmdlEg0KBW5vbmNlGAEgASgMIiQKD0hvc3RBdHRhY2hQcm9vZhIRCglzaWduYXR1cmUYASABKAwirQEKDEhvc3RBdHRhY2hlZBIdChVwaW5nX2ludGVydmFsX3NlY29uZHMYASABKA0SHQoVb2ZmbGluZV9hZnRlcl9zZWNvbmRzGAIgASgNEiQKHHJlY2hhbGxlbmdlX2ludGVydmFsX3NlY29uZHMYAyABKA0SHQoVcHJvb2ZfdGltZW91dF9zZWNvbmRzGAQgASgNEhoKEnNlc3Npb25fZ2VuZXJhdGlvbhgFIAEoBCKQAQoJSG9zdEhlbGxvEhoKEmNhcGFiaWxpdHlfdmVyc2lvbhgBIAEoDRIrCghwbGF0Zm9ybRgCIAEoDjIZLmNvZGV3aXJlLnYxLkhvc3RQbGF0Zm9ybRI6CglpbnZlbnRvcnkYAyADKAsyJy5jb2Rld2lyZS52MS5Ib3N0RW52aXJvbm1lbnRPYnNlcnZhdGlvbiIKCghIb3N0UGluZyIKCghIb3N0UG9uZyINCgtIb3N0UmV2b2tlZCIQCg5Ib3N0U3VwZXJzZWRlZCKoAgoNSG9zdE9wZXJhdGlvbhIUCgxvcGVyYXRpb25faWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkSHAoUbG9jYWxfZW52aXJvbm1lbnRfaWQYAyABKAkSGwoTZXhwZWN0ZWRfZ2VuZXJhdGlvbhgEIAEoBBIpCgZjcmVhdGUYBSABKAsyFy5jb2Rld2lyZS52MS5Ib3N0Q3JlYXRlSAASJwoFc3RhcnQYBiABKAsyFi5jb2Rld2lyZS52MS5Ib3N0U3RhcnRIABIlCgRzdG9wGAcgASgLMhUuY29kZXdpcmUudjEuSG9zdFN0b3BIABIrCgdkZXN0cm95GAggASgLMhguY29kZXdpcmUudjEuSG9zdERlc3Ryb3lIAEIGCgRraW5kIpYBCgpIb3N0Q3JlYXRlEg0KBXZjcHVzGAEgASgNEhIKCm1lbW9yeV9taWIYAiABKA0SEgoKZGlza19ieXRlcxgDIAEoBBIZChFkb2NrZXJfZGlza19ieXRlcxgEIAEoBBIZChFwcm9qZWN0X3NwZWNfanNvbhgFIAEoDBIbChNwcm9qZWN0X3NwZWNfc2hhMjU2GAYgASgJIgsKCUhvc3RTdGFydCIKCghIb3N0U3RvcCINCgtIb3N0RGVzdHJveSJOChVIb3N0T3BlcmF0aW9uUHJvZ3Jlc3MSFAoMb3BlcmF0aW9uX2lkGAEgASgJEg0KBXN0YWdlGAIgASgJEhAKCHNlcXVlbmNlGAMgASgEIuIBChNIb3N0T3BlcmF0aW9uUmVzdWx0EhQKDG9wZXJhdGlvbl9pZBgBIAEoCRI3CgRkb25lGAIgASgLMicuY29kZXdpcmUudjEuSG9zdEVudmlyb25tZW50T2JzZXJ2YXRpb25IABIzCgZmYWlsZWQYAyABKAsyIS5jb2Rld2lyZS52MS5Ib3N0T3BlcmF0aW9uRmFpbHVyZUgAEjwKEHN0YWxlX2dlbmVyYXRpb24YBCABKAsyIC5jb2Rld2lyZS52MS5Ib3N0U3RhbGVHZW5lcmF0aW9uSABCCQoHb3V0Y29tZSI1ChRIb3N0T3BlcmF0aW9uRmFpbHVyZRIMCgRjb2RlGAEgASgJEg8KB21lc3NhZ2UYAiABKAkiTgoTSG9zdFN0YWxlR2VuZXJhdGlvbhIbChNleHBlY3RlZF9nZW5lcmF0aW9uGAEgASgEEhoKEmN1cnJlbnRfZ2VuZXJhdGlvbhgCIAEoBCL5AQoaSG9zdEVudmlyb25tZW50T2JzZXJ2YXRpb24SFgoOZW52aXJvbm1lbnRfaWQYASABKAkSHAoUbG9jYWxfZW52aXJvbm1lbnRfaWQYAiABKAkSEgoKZ2VuZXJhdGlvbhgDIAEoBBIwCgVzdGF0ZRgEIAEoDjIhLmNvZGV3aXJlLnYxLkhvc3RFbnZpcm9ubWVudFN0YXRlEhIKCmVycm9yX2NvZGUYBSABKAkSDQoFdmNwdXMYBiABKA0SEgoKbWVtb3J5X21pYhgHIAEoDRISCgpkaXNrX2J5dGVzGAggASgEEhQKDHNzaF9ob3N0X2tleRgJIAEoCSKnAQoOSG9zdE9wZW5UdW5uZWwSEQoJdHVubmVsX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEhwKFGxvY2FsX2Vudmlyb25tZW50X2lkGAMgASgJEhIKCmdlbmVyYXRpb24YBCABKAQSKQoEa2luZBgFIAEoDjIbLmNvZGV3aXJlLnYxLkhvc3RUdW5uZWxLaW5kEg0KBW5vbmNlGAYgASgMIsYBChVPcGVuSG9zdFR1bm5lbFJlcXVlc3QSKwoEb3BlbhgBIAEoCzIbLmNvZGV3aXJlLnYxLkhvc3RUdW5uZWxPcGVuSAASLQoFcmVhZHkYAiABKAsyHC5jb2Rld2lyZS52MS5Ib3N0VHVubmVsUmVhZHlIABIzCgZmYWlsZWQYAyABKAsyIS5jb2Rld2lyZS52MS5Ib3N0T3BlcmF0aW9uRmFpbHVyZUgAEhMKBGRhdGEYBCABKAxCA4ABAUgAQgcKBWlucHV0IjcKFk9wZW5Ib3N0VHVubmVsUmVzcG9uc2USEwoEZGF0YRgBIAEoDEIDgAEBSABCCAoGb3V0cHV0IkcKDkhvc3RUdW5uZWxPcGVuEg8KB2hvc3RfaWQYASABKAkSEQoJdHVubmVsX2lkGAIgASgJEhEKCXNpZ25hdHVyZRgDIAEoDCIxCg9Ib3N0VHVubmVsUmVhZHkSHgoRZGFlbW9uX2NhcGFiaWxpdHkYASABKAlCA4ABASrwAQoUSG9zdEVudmlyb25tZW50U3RhdGUSJgoiSE9TVF9FTlZJUk9OTUVOVF9TVEFURV9VTlNQRUNJRklFRBAAEiIKHkhPU1RfRU5WSVJPTk1FTlRfU1RBVEVfU1RPUFBFRBABEiMKH0hPU1RfRU5WSVJPTk1FTlRfU1RBVEVfU1RBUlRJTkcQAhIiCh5IT1NUX0VOVklST05NRU5UX1NUQVRFX1JVTk5JTkcQAxIgChxIT1NUX0VOVklST05NRU5UX1NUQVRFX0VSUk9SEAQSIQodSE9TVF9FTlZJUk9OTUVOVF9TVEFURV9BQlNFTlQQBSpUCg5Ib3N0VHVubmVsS2luZBIgChxIT1NUX1RVTk5FTF9LSU5EX1VOU1BFQ0lGSUVEEAASIAocSE9TVF9UVU5ORUxfS0lORF9EQUVNT05fR1JQQxABMsQBChBIb3N0QWdlbnRTZXJ2aWNlElEKCkF0dGFjaEhvc3QSHi5jb2Rld2lyZS52MS5BdHRhY2hIb3N0UmVxdWVzdBofLmNvZGV3aXJlLnYxLkF0dGFjaEhvc3RSZXNwb25zZSgBMAESXQoOT3Blbkhvc3RUdW5uZWwSIi5jb2Rld2lyZS52MS5PcGVuSG9zdFR1bm5lbFJlcXVlc3QaIy5jb2Rld2lyZS52MS5PcGVuSG9zdFR1bm5lbFJlc3BvbnNlKAEwAUKxAQoPY29tLmNvZGV3aXJlLnYxQg5Ib3N0QWdlbnRQcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_codewire_v1_host]);
 
 /**
  * @generated from message codewire.v1.AttachHostRequest
@@ -45,6 +45,24 @@ export type AttachHostRequest = Message<"codewire.v1.AttachHostRequest"> & {
      */
     value: HostPing;
     case: "ping";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostOperationProgress operation_progress = 5;
+     */
+    value: HostOperationProgress;
+    case: "operationProgress";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostOperationResult operation_result = 6;
+     */
+    value: HostOperationResult;
+    case: "operationResult";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostEnvironmentObservation environment_observed = 7;
+     */
+    value: HostEnvironmentObservation;
+    case: "environmentObserved";
   } | { case: undefined; value?: undefined };
 };
 
@@ -86,6 +104,24 @@ export type AttachHostResponse = Message<"codewire.v1.AttachHostResponse"> & {
      */
     value: HostRevoked;
     case: "revoked";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostOperation operation = 5;
+     */
+    value: HostOperation;
+    case: "operation";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostSuperseded superseded = 6;
+     */
+    value: HostSuperseded;
+    case: "superseded";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostOpenTunnel open_tunnel = 7;
+     */
+    value: HostOpenTunnel;
+    case: "openTunnel";
   } | { case: undefined; value?: undefined };
 };
 
@@ -177,6 +213,14 @@ export type HostAttached = Message<"codewire.v1.HostAttached"> & {
    * @generated from field: uint32 proof_timeout_seconds = 4;
    */
   proofTimeoutSeconds: number;
+
+  /**
+   * This session's number among the host's sessions; each attach takes the
+   * next. For diagnosis: the host never sends it back.
+   *
+   * @generated from field: uint64 session_generation = 5;
+   */
+  sessionGeneration: bigint;
 };
 
 /**
@@ -207,6 +251,14 @@ export type HostHello = Message<"codewire.v1.HostHello"> & {
    * @generated from field: codewire.v1.HostPlatform platform = 2;
    */
   platform: HostPlatform;
+
+  /**
+   * Every environment the control plane placed on this host that the host
+   * still has, as it is now. Empty before capability version 2.
+   *
+   * @generated from field: repeated codewire.v1.HostEnvironmentObservation inventory = 3;
+   */
+  inventory: HostEnvironmentObservation[];
 };
 
 /**
@@ -256,6 +308,626 @@ export const HostRevokedSchema: GenMessage<HostRevoked> = /*@__PURE__*/
   messageDesc(file_codewire_v1_host_agent, 9);
 
 /**
+ * Another session for this host attached; this one ends, and its operations
+ * go to the new one.
+ *
+ * @generated from message codewire.v1.HostSuperseded
+ */
+export type HostSuperseded = Message<"codewire.v1.HostSuperseded"> & {
+};
+
+/**
+ * Describes the message codewire.v1.HostSuperseded.
+ * Use `create(HostSupersededSchema)` to create a new message.
+ */
+export const HostSupersededSchema: GenMessage<HostSuperseded> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 10);
+
+/**
+ * One lifecycle operation for one environment on the host. The host runs it
+ * at most once: the same `operation_id` sent again, with the same contents,
+ * is answered with the first one's result, however long ago that was. The
+ * same ID with different contents is refused.
+ *
+ * @generated from message codewire.v1.HostOperation
+ */
+export type HostOperation = Message<"codewire.v1.HostOperation"> & {
+  /**
+   * A UUID the control plane chose.
+   *
+   * @generated from field: string operation_id = 1;
+   */
+  operationId: string;
+
+  /**
+   * The environment's ID in the control plane, a UUID.
+   *
+   * @generated from field: string environment_id = 2;
+   */
+  environmentId: string;
+
+  /**
+   * The host's own ID for the environment, from an earlier result or
+   * observation. Empty only for `create`. The host refuses an operation whose
+   * environment is no longer this one.
+   *
+   * @generated from field: string local_environment_id = 3;
+   */
+  localEnvironmentId: string;
+
+  /**
+   * The boot generation the control plane last saw: 0 for `create`. The host
+   * answers `stale_generation` when its own differs.
+   *
+   * @generated from field: uint64 expected_generation = 4;
+   */
+  expectedGeneration: bigint;
+
+  /**
+   * @generated from oneof codewire.v1.HostOperation.kind
+   */
+  kind: {
+    /**
+     * @generated from field: codewire.v1.HostCreate create = 5;
+     */
+    value: HostCreate;
+    case: "create";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostStart start = 6;
+     */
+    value: HostStart;
+    case: "start";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostStop stop = 7;
+     */
+    value: HostStop;
+    case: "stop";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostDestroy destroy = 8;
+     */
+    value: HostDestroy;
+    case: "destroy";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message codewire.v1.HostOperation.
+ * Use `create(HostOperationSchema)` to create a new message.
+ */
+export const HostOperationSchema: GenMessage<HostOperation> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 11);
+
+/**
+ * Creates and starts a VM for the environment, from the default image of
+ * the host's own runtime: the control plane does not choose the image.
+ *
+ * @generated from message codewire.v1.HostCreate
+ */
+export type HostCreate = Message<"codewire.v1.HostCreate"> & {
+  /**
+   * @generated from field: uint32 vcpus = 1;
+   */
+  vcpus: number;
+
+  /**
+   * @generated from field: uint32 memory_mib = 2;
+   */
+  memoryMib: number;
+
+  /**
+   * The state disk.
+   *
+   * @generated from field: uint64 disk_bytes = 3;
+   */
+  diskBytes: bigint;
+
+  /**
+   * The guest's Docker data disk; 0 turns Docker off.
+   *
+   * @generated from field: uint64 docker_disk_bytes = 4;
+   */
+  dockerDiskBytes: bigint;
+
+  /**
+   * The canonical codewire-project JSON and its SHA-256 in lowercase hex.
+   * The host checks both before it records the operation. It names
+   * repositories or an empty workspace: never a path on the host.
+   *
+   * @generated from field: bytes project_spec_json = 5;
+   */
+  projectSpecJson: Uint8Array;
+
+  /**
+   * @generated from field: string project_spec_sha256 = 6;
+   */
+  projectSpecSha256: string;
+};
+
+/**
+ * Describes the message codewire.v1.HostCreate.
+ * Use `create(HostCreateSchema)` to create a new message.
+ */
+export const HostCreateSchema: GenMessage<HostCreate> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 12);
+
+/**
+ * @generated from message codewire.v1.HostStart
+ */
+export type HostStart = Message<"codewire.v1.HostStart"> & {
+};
+
+/**
+ * Describes the message codewire.v1.HostStart.
+ * Use `create(HostStartSchema)` to create a new message.
+ */
+export const HostStartSchema: GenMessage<HostStart> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 13);
+
+/**
+ * @generated from message codewire.v1.HostStop
+ */
+export type HostStop = Message<"codewire.v1.HostStop"> & {
+};
+
+/**
+ * Describes the message codewire.v1.HostStop.
+ * Use `create(HostStopSchema)` to create a new message.
+ */
+export const HostStopSchema: GenMessage<HostStop> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 14);
+
+/**
+ * Stops the VM and removes it and its disks. An environment the host no
+ * longer has is already destroyed: the result is `done` with state ABSENT.
+ *
+ * @generated from message codewire.v1.HostDestroy
+ */
+export type HostDestroy = Message<"codewire.v1.HostDestroy"> & {
+};
+
+/**
+ * Describes the message codewire.v1.HostDestroy.
+ * Use `create(HostDestroySchema)` to create a new message.
+ */
+export const HostDestroySchema: GenMessage<HostDestroy> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 15);
+
+/**
+ * A stage an operation reached, as it runs. Advisory: only the result
+ * completes an operation.
+ *
+ * @generated from message codewire.v1.HostOperationProgress
+ */
+export type HostOperationProgress = Message<"codewire.v1.HostOperationProgress"> & {
+  /**
+   * @generated from field: string operation_id = 1;
+   */
+  operationId: string;
+
+  /**
+   * A machine-readable stage name, at most 64 bytes.
+   *
+   * @generated from field: string stage = 2;
+   */
+  stage: string;
+
+  /**
+   * Increases with each stage of one operation.
+   *
+   * @generated from field: uint64 sequence = 3;
+   */
+  sequence: bigint;
+};
+
+/**
+ * Describes the message codewire.v1.HostOperationProgress.
+ * Use `create(HostOperationProgressSchema)` to create a new message.
+ */
+export const HostOperationProgressSchema: GenMessage<HostOperationProgress> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 16);
+
+/**
+ * How an operation ended. Sent once it has, and again whenever the same
+ * operation is sent again.
+ *
+ * @generated from message codewire.v1.HostOperationResult
+ */
+export type HostOperationResult = Message<"codewire.v1.HostOperationResult"> & {
+  /**
+   * @generated from field: string operation_id = 1;
+   */
+  operationId: string;
+
+  /**
+   * @generated from oneof codewire.v1.HostOperationResult.outcome
+   */
+  outcome: {
+    /**
+     * The environment as the operation left it.
+     *
+     * @generated from field: codewire.v1.HostEnvironmentObservation done = 2;
+     */
+    value: HostEnvironmentObservation;
+    case: "done";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostOperationFailure failed = 3;
+     */
+    value: HostOperationFailure;
+    case: "failed";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostStaleGeneration stale_generation = 4;
+     */
+    value: HostStaleGeneration;
+    case: "staleGeneration";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message codewire.v1.HostOperationResult.
+ * Use `create(HostOperationResultSchema)` to create a new message.
+ */
+export const HostOperationResultSchema: GenMessage<HostOperationResult> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 17);
+
+/**
+ * @generated from message codewire.v1.HostOperationFailure
+ */
+export type HostOperationFailure = Message<"codewire.v1.HostOperationFailure"> & {
+  /**
+   * A machine-readable reason, at most 64 bytes, such as
+   * "resource_exhausted" or "environment_mismatch".
+   *
+   * @generated from field: string code = 1;
+   */
+  code: string;
+
+  /**
+   * The host's own words, shown to the user as they are. It holds no
+   * credential or path.
+   *
+   * @generated from field: string message = 2;
+   */
+  message: string;
+};
+
+/**
+ * Describes the message codewire.v1.HostOperationFailure.
+ * Use `create(HostOperationFailureSchema)` to create a new message.
+ */
+export const HostOperationFailureSchema: GenMessage<HostOperationFailure> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 18);
+
+/**
+ * @generated from message codewire.v1.HostStaleGeneration
+ */
+export type HostStaleGeneration = Message<"codewire.v1.HostStaleGeneration"> & {
+  /**
+   * @generated from field: uint64 expected_generation = 1;
+   */
+  expectedGeneration: bigint;
+
+  /**
+   * @generated from field: uint64 current_generation = 2;
+   */
+  currentGeneration: bigint;
+};
+
+/**
+ * Describes the message codewire.v1.HostStaleGeneration.
+ * Use `create(HostStaleGenerationSchema)` to create a new message.
+ */
+export const HostStaleGenerationSchema: GenMessage<HostStaleGeneration> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 19);
+
+/**
+ * One environment as the host sees it: in a result, in the hello's
+ * inventory, and sent on its own whenever its state changes.
+ *
+ * @generated from message codewire.v1.HostEnvironmentObservation
+ */
+export type HostEnvironmentObservation = Message<"codewire.v1.HostEnvironmentObservation"> & {
+  /**
+   * @generated from field: string environment_id = 1;
+   */
+  environmentId: string;
+
+  /**
+   * The host's own ID for it, a UUID. Its disks live and die with it.
+   *
+   * @generated from field: string local_environment_id = 2;
+   */
+  localEnvironmentId: string;
+
+  /**
+   * @generated from field: uint64 generation = 3;
+   */
+  generation: bigint;
+
+  /**
+   * @generated from field: codewire.v1.HostEnvironmentState state = 4;
+   */
+  state: HostEnvironmentState;
+
+  /**
+   * A machine-readable cause when the state is ERROR, at most 64 bytes.
+   *
+   * @generated from field: string error_code = 5;
+   */
+  errorCode: string;
+
+  /**
+   * @generated from field: uint32 vcpus = 6;
+   */
+  vcpus: number;
+
+  /**
+   * @generated from field: uint32 memory_mib = 7;
+   */
+  memoryMib: number;
+
+  /**
+   * @generated from field: uint64 disk_bytes = 8;
+   */
+  diskBytes: bigint;
+
+  /**
+   * The guest's SSH host key, in OpenSSH public-key form, while running.
+   *
+   * @generated from field: string ssh_host_key = 9;
+   */
+  sshHostKey: string;
+};
+
+/**
+ * Describes the message codewire.v1.HostEnvironmentObservation.
+ * Use `create(HostEnvironmentObservationSchema)` to create a new message.
+ */
+export const HostEnvironmentObservationSchema: GenMessage<HostEnvironmentObservation> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 20);
+
+/**
+ * Asks the host to open a tunnel with `OpenHostTunnel`.
+ *
+ * @generated from message codewire.v1.HostOpenTunnel
+ */
+export type HostOpenTunnel = Message<"codewire.v1.HostOpenTunnel"> & {
+  /**
+   * A UUID the control plane chose, used once.
+   *
+   * @generated from field: string tunnel_id = 1;
+   */
+  tunnelId: string;
+
+  /**
+   * @generated from field: string environment_id = 2;
+   */
+  environmentId: string;
+
+  /**
+   * @generated from field: string local_environment_id = 3;
+   */
+  localEnvironmentId: string;
+
+  /**
+   * The tunnel is refused unless this is the running generation.
+   *
+   * @generated from field: uint64 generation = 4;
+   */
+  generation: bigint;
+
+  /**
+   * @generated from field: codewire.v1.HostTunnelKind kind = 5;
+   */
+  kind: HostTunnelKind;
+
+  /**
+   * 32 random bytes, signed in the tunnel's `open`.
+   *
+   * @generated from field: bytes nonce = 6;
+   */
+  nonce: Uint8Array;
+};
+
+/**
+ * Describes the message codewire.v1.HostOpenTunnel.
+ * Use `create(HostOpenTunnelSchema)` to create a new message.
+ */
+export const HostOpenTunnelSchema: GenMessage<HostOpenTunnel> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 21);
+
+/**
+ * @generated from message codewire.v1.OpenHostTunnelRequest
+ */
+export type OpenHostTunnelRequest = Message<"codewire.v1.OpenHostTunnelRequest"> & {
+  /**
+   * @generated from oneof codewire.v1.OpenHostTunnelRequest.input
+   */
+  input: {
+    /**
+     * @generated from field: codewire.v1.HostTunnelOpen open = 1;
+     */
+    value: HostTunnelOpen;
+    case: "open";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostTunnelReady ready = 2;
+     */
+    value: HostTunnelReady;
+    case: "ready";
+  } | {
+    /**
+     * @generated from field: codewire.v1.HostOperationFailure failed = 3;
+     */
+    value: HostOperationFailure;
+    case: "failed";
+  } | {
+    /**
+     * @generated from field: bytes data = 4;
+     */
+    value: Uint8Array;
+    case: "data";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message codewire.v1.OpenHostTunnelRequest.
+ * Use `create(OpenHostTunnelRequestSchema)` to create a new message.
+ */
+export const OpenHostTunnelRequestSchema: GenMessage<OpenHostTunnelRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 22);
+
+/**
+ * @generated from message codewire.v1.OpenHostTunnelResponse
+ */
+export type OpenHostTunnelResponse = Message<"codewire.v1.OpenHostTunnelResponse"> & {
+  /**
+   * @generated from oneof codewire.v1.OpenHostTunnelResponse.output
+   */
+  output: {
+    /**
+     * @generated from field: bytes data = 1;
+     */
+    value: Uint8Array;
+    case: "data";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message codewire.v1.OpenHostTunnelResponse.
+ * Use `create(OpenHostTunnelResponseSchema)` to create a new message.
+ */
+export const OpenHostTunnelResponseSchema: GenMessage<OpenHostTunnelResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 23);
+
+/**
+ * @generated from message codewire.v1.HostTunnelOpen
+ */
+export type HostTunnelOpen = Message<"codewire.v1.HostTunnelOpen"> & {
+  /**
+   * @generated from field: string host_id = 1;
+   */
+  hostId: string;
+
+  /**
+   * @generated from field: string tunnel_id = 2;
+   */
+  tunnelId: string;
+
+  /**
+   * The 64-byte Ed25519 signature of the tunnel statement.
+   *
+   * @generated from field: bytes signature = 3;
+   */
+  signature: Uint8Array;
+};
+
+/**
+ * Describes the message codewire.v1.HostTunnelOpen.
+ * Use `create(HostTunnelOpenSchema)` to create a new message.
+ */
+export const HostTunnelOpenSchema: GenMessage<HostTunnelOpen> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 24);
+
+/**
+ * The host reached the environment; bytes may flow.
+ *
+ * @generated from message codewire.v1.HostTunnelReady
+ */
+export type HostTunnelReady = Message<"codewire.v1.HostTunnelReady"> & {
+  /**
+   * For DAEMON_GRPC: the running generation's daemon capability, which the
+   * control plane presents to the daemon on this tunnel's connection. It is
+   * valid only for this boot generation. The control plane keeps it in
+   * memory for the life of the tunnel and never records or logs it.
+   *
+   * @generated from field: string daemon_capability = 1;
+   */
+  daemonCapability: string;
+};
+
+/**
+ * Describes the message codewire.v1.HostTunnelReady.
+ * Use `create(HostTunnelReadySchema)` to create a new message.
+ */
+export const HostTunnelReadySchema: GenMessage<HostTunnelReady> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_host_agent, 25);
+
+/**
+ * What the host's VM for one environment is doing.
+ *
+ * @generated from enum codewire.v1.HostEnvironmentState
+ */
+export enum HostEnvironmentState {
+  /**
+   * @generated from enum value: HOST_ENVIRONMENT_STATE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: HOST_ENVIRONMENT_STATE_STOPPED = 1;
+   */
+  STOPPED = 1,
+
+  /**
+   * @generated from enum value: HOST_ENVIRONMENT_STATE_STARTING = 2;
+   */
+  STARTING = 2,
+
+  /**
+   * Running, with its daemon ready.
+   *
+   * @generated from enum value: HOST_ENVIRONMENT_STATE_RUNNING = 3;
+   */
+  RUNNING = 3,
+
+  /**
+   * @generated from enum value: HOST_ENVIRONMENT_STATE_ERROR = 4;
+   */
+  ERROR = 4,
+
+  /**
+   * The host does not have it.
+   *
+   * @generated from enum value: HOST_ENVIRONMENT_STATE_ABSENT = 5;
+   */
+  ABSENT = 5,
+}
+
+/**
+ * Describes the enum codewire.v1.HostEnvironmentState.
+ */
+export const HostEnvironmentStateSchema: GenEnum<HostEnvironmentState> = /*@__PURE__*/
+  enumDesc(file_codewire_v1_host_agent, 0);
+
+/**
+ * @generated from enum codewire.v1.HostTunnelKind
+ */
+export enum HostTunnelKind {
+  /**
+   * @generated from enum value: HOST_TUNNEL_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * The environment daemon's gRPC, as `cw --local` reaches it.
+   *
+   * @generated from enum value: HOST_TUNNEL_KIND_DAEMON_GRPC = 1;
+   */
+  DAEMON_GRPC = 1,
+}
+
+/**
+ * Describes the enum codewire.v1.HostTunnelKind.
+ */
+export const HostTunnelKindSchema: GenEnum<HostTunnelKind> = /*@__PURE__*/
+  enumDesc(file_codewire_v1_host_agent, 1);
+
+/**
  * HostAgentService is the session a host keeps open to the control plane
  * (#3609): one outbound stream from the computer, so it works behind home NAT
  * with no port forwarding.
@@ -266,7 +938,10 @@ export const HostRevokedSchema: GenMessage<HostRevoked> = /*@__PURE__*/
  * every 10 minutes after. A revoked host is refused, and a host revoked while
  * attached is told so and its stream ends.
  *
- * This slice carries liveness only: no operation crosses the stream yet.
+ * From capability version 2 the session carries the host's lifecycle
+ * operations (slice 2): the control plane sends `operation`, and the host
+ * answers `operation_result` once it has finished. The operation set is the
+ * placement's, not the local supervisor's: nothing else of the host crosses.
  *
  * @generated from service codewire.v1.HostAgentService
  */
@@ -285,6 +960,10 @@ export const HostAgentService: GenService<{
    *    `challenge`, which the host must answer with `proof` within
    *    `proof_timeout_seconds`.
    *
+   * Only the newest session of a host takes operations. A session that
+   * another one for the same host has replaced is sent `superseded` and
+   * ended; operations it had been sent are sent again on the new one.
+   *
    * An unknown host or a bad proof ends the stream with UNAUTHENTICATED,
    * without saying which. A revoked host is refused with PERMISSION_DENIED,
    * or, once attached, sent `revoked` before the stream ends. A message out
@@ -296,6 +975,29 @@ export const HostAgentService: GenService<{
     methodKind: "bidi_streaming";
     input: typeof AttachHostRequestSchema;
     output: typeof AttachHostResponseSchema;
+  },
+  /**
+   * OpenHostTunnel carries one byte stream to an environment on the host,
+   * which the host opens when its session is sent `open_tunnel`:
+   *
+   * 1. The host sends `open`: the host ID, the tunnel ID, and the Ed25519
+   *    signature, by the host key, of the line "codewire-host-tunnel-v1",
+   *    then the host ID, the tunnel ID and the lowercase hex of the
+   *    `open_tunnel` nonce, each on its own line ending in "\n".
+   * 2. The host connects to the environment, then sends `ready`, or `failed`
+   *    with the reason and ends the stream.
+   * 3. Both sides send `data` until either ends its side.
+   *
+   * A tunnel is opened once, within 10 seconds of its `open_tunnel`, on the
+   * replica whose session sent it. Anything else ends the stream with
+   * UNAUTHENTICATED, without saying why.
+   *
+   * @generated from rpc codewire.v1.HostAgentService.OpenHostTunnel
+   */
+  openHostTunnel: {
+    methodKind: "bidi_streaming";
+    input: typeof OpenHostTunnelRequestSchema;
+    output: typeof OpenHostTunnelResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_codewire_v1_host_agent, 0);

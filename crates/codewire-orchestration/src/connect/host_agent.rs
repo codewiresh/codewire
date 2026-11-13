@@ -19,8 +19,8 @@ use std::time::Duration;
 use codewire_daemon_bridge::drain::{Restart, end_at};
 use codewire_proto::codewire::v1::{
     AttachHostRequest, AttachHostResponse, HostAgentService, HostAttached, HostChallenge,
-    HostPlatform as ProtoHostPlatform, HostPong, HostRevoked, attach_host_request,
-    attach_host_response,
+    HostPlatform as ProtoHostPlatform, HostPong, HostRevoked, OpenHostTunnelRequest,
+    OpenHostTunnelResponse, attach_host_request, attach_host_response,
 };
 use connectrpc::{ConnectError, InboundStream, RequestContext, ServiceResult, ServiceStream};
 use futures::StreamExt as _;
@@ -125,6 +125,15 @@ impl HostAgentService for HostAgentConnectService {
             Some(self.drain.signal(Restart::Begins)),
             HOST_SESSION_RESTARTED,
         ))
+    }
+
+    /// No session sends `open_tunnel` yet, so no tunnel can be opened.
+    async fn open_host_tunnel(
+        &self,
+        _ctx: RequestContext,
+        _requests: InboundStream<OpenHostTunnelRequest>,
+    ) -> ServiceResult<ServiceStream<OpenHostTunnelResponse>> {
+        Err(unrecognised())
     }
 }
 

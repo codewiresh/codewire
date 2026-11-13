@@ -66,8 +66,8 @@ mod tests {
     use super::codewire::v1::{
         AcceptInvitationRequest, ApiKey, ApplicationPort, CreateApiKeyResponse,
         CreateInvitationResponse, CreateMeshInviteResponse, CreateMeshNodeEnrollmentResponse,
-        CreatePortRequest, GetInvitationByTokenRequest, GetOrganizationResponse, InvitationStatus,
-        JoinMeshNetworkRequest, ListSecretProjectsResponse, ListSecretsResponse,
+        CreatePortRequest, GetInvitationByTokenRequest, GetOrganizationResponse, HostTunnelReady,
+        InvitationStatus, JoinMeshNetworkRequest, ListSecretProjectsResponse, ListSecretsResponse,
         MESH_GROUP_SERVICE_SERVICE_NAME, MESH_INVITE_SERVICE_SERVICE_NAME,
         MESH_KEY_VALUE_SERVICE_SERVICE_NAME, MESH_NETWORK_SERVICE_SERVICE_NAME,
         MESH_NODE_SERVICE_SERVICE_NAME, MeshInvite, MeshKeyValue, MeshNetwork, MeshNode,
@@ -1047,9 +1047,47 @@ mod tests {
                     ..Default::default()
                 }
             ),
+            format!(
+                "{:?}",
+                HostTunnelReady {
+                    daemon_capability: MARKER.into(),
+                    ..Default::default()
+                }
+            ),
         ] {
             assert!(debug.contains("[REDACTED]"));
             assert!(!debug.contains(MARKER));
+        }
+    }
+
+    #[test]
+    fn host_tunnel_bytes_debug_is_redacted() {
+        use super::codewire::v1::{
+            OpenHostTunnelRequest, OpenHostTunnelResponse, open_host_tunnel_request,
+            open_host_tunnel_response,
+        };
+
+        let marker = b"synthetic-host-tunnel-debug-canary".to_vec();
+        let numeric = format!("{marker:?}");
+        for rendered in [
+            format!(
+                "{:?}",
+                OpenHostTunnelRequest {
+                    input: Some(open_host_tunnel_request::Input::Data(marker.clone())),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                OpenHostTunnelResponse {
+                    output: Some(open_host_tunnel_response::Output::Data(marker)),
+                    ..Default::default()
+                }
+            ),
+        ] {
+            assert!(!rendered.contains("synthetic-host-tunnel-debug-canary"));
+            assert!(!rendered.contains(&numeric));
+            assert!(rendered.contains("[REDACTED]"));
         }
     }
 }

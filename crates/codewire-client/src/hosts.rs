@@ -160,6 +160,8 @@ pub enum HostEvent {
     Challenge(Vec<u8>),
     /// The host was revoked; the session is over for good.
     Revoked,
+    /// Another session for this host attached, and this one is over.
+    Superseded,
     /// The stream ended without an error.
     Ended,
 }
@@ -310,8 +312,16 @@ impl AttachedHost {
                 HostEvent::Challenge(challenge.nonce)
             }
             Some(attach_host_response::Output::Revoked(_)) => HostEvent::Revoked,
+            Some(attach_host_response::Output::Superseded(_)) => HostEvent::Superseded,
             Some(attach_host_response::Output::Attached(_)) => {
                 return Err(unexpected("attached again"));
+            }
+            // Sent only to a host of capability version 2 or later.
+            Some(attach_host_response::Output::Operation(_)) => {
+                return Err(unexpected("an operation"));
+            }
+            Some(attach_host_response::Output::OpenTunnel(_)) => {
+                return Err(unexpected("a tunnel"));
             }
             None => HostEvent::Ended,
         })

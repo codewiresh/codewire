@@ -340,8 +340,9 @@ A host, a computer a member enrolls to provide VMs (#3609), authenticates as
 itself with an Ed25519 key it holds in the operating system's protected store.
 This is proof of possession, not a bearer: nothing the host sends can be
 replayed as a credential. It is not another flavor, and it authenticates
-exactly one method, `HostAgentService.AttachHost`, which accepts no flavor
-1 to 4. No product method accepts a host key.
+exactly two methods, `HostAgentService.AttachHost` and
+`HostAgentService.OpenHostTunnel`, which accept no flavor 1 to 4. No product
+method accepts a host key.
 
 - **Enrollment** binds the key to one host record. It runs under the member's
   own flavor 1 to 3 credential, with a signature by the key over a
@@ -352,6 +353,17 @@ exactly one method, `HostAgentService.AttachHost`, which accepts no flavor
   signs under a separate domain (`codewire-host-attach-v1`) together with its
   host ID. It signs a new nonce every 10 minutes. An unknown host and a wrong
   key get the same `unauthenticated` answer.
+- **Only the newest session** of a host takes operations. Each attach takes
+  the next session generation; an older session is told it was superseded
+  and ended.
+- **A tunnel** to one of the host's environments is opened only when the
+  host's session asks for it, with a fresh 32-byte nonce in that request. The
+  host signs it under its own domain (`codewire-host-tunnel-v1`) with its
+  host ID and the tunnel ID, within 10 seconds, once. A daemon tunnel's
+  `ready` carries the running generation's daemon capability, which the
+  control plane holds in memory for that tunnel only and never records.
+  Until slice 2's handlers land, no session sends an operation or asks for a
+  tunnel, and every tunnel is refused.
 - **Revocation** by the owner or an organization owner or admin is final. It
   refuses the next attach, and ends a live session at the host's next
   message.

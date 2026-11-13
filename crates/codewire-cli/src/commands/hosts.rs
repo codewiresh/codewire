@@ -1173,6 +1173,12 @@ async fn session(
                 Ok(HostEvent::Revoked) => {
                     return SessionEnd::Final("this host was revoked; the agent stops".into());
                 }
+                Ok(HostEvent::Superseded) => {
+                    return attached_end(SessionEnd::Retry {
+                        reason: "another agent for this host attached".into(),
+                        attached: false,
+                    });
+                }
                 Ok(HostEvent::Ended) => {
                     return attached_end(SessionEnd::Retry {
                         reason: "the session ended".into(),

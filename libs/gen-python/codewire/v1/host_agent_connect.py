@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .host_agent_pb2 import AttachHostRequest, AttachHostResponse
+from .host_agent_pb2 import AttachHostRequest, AttachHostResponse, OpenHostTunnelRequest, OpenHostTunnelResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -36,6 +36,9 @@ _GZIP_COMPRESSION = GzipCompression()
 
 class HostAgentService(Protocol):
     def attach_host(self, request: AsyncIterator[AttachHostRequest], ctx: RequestContext[AttachHostRequest, AttachHostResponse]) -> AsyncIterator[AttachHostResponse]:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def open_host_tunnel(self, request: AsyncIterator[OpenHostTunnelRequest], ctx: RequestContext[OpenHostTunnelRequest, OpenHostTunnelResponse]) -> AsyncIterator[OpenHostTunnelResponse]:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -61,6 +64,16 @@ class HostAgentServiceASGIApplication(ConnectASGIApplication[HostAgentService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.attach_host,
+                ),
+                "/codewire.v1.HostAgentService/OpenHostTunnel": Endpoint.bidi_stream(
+                    method=MethodInfo(
+                        name="OpenHostTunnel",
+                        service_name="codewire.v1.HostAgentService",
+                        input=OpenHostTunnelRequest,
+                        output=OpenHostTunnelResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.open_host_tunnel,
                 ),
             },
             interceptors=interceptors,
@@ -120,8 +133,31 @@ class HostAgentServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    def open_host_tunnel(
+        self,
+        request: AsyncIterator[OpenHostTunnelRequest],
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AsyncIterator[OpenHostTunnelResponse]:
+        return self.execute_bidi_stream(
+            request=request,
+            method=MethodInfo(
+                name="OpenHostTunnel",
+                service_name="codewire.v1.HostAgentService",
+                input=OpenHostTunnelRequest,
+                output=OpenHostTunnelResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class HostAgentServiceSync(Protocol):
     def attach_host(self, request: Iterator[AttachHostRequest], ctx: RequestContext[AttachHostRequest, AttachHostResponse]) -> Iterator[AttachHostResponse]:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def open_host_tunnel(self, request: Iterator[OpenHostTunnelRequest], ctx: RequestContext[OpenHostTunnelRequest, OpenHostTunnelResponse]) -> Iterator[OpenHostTunnelResponse]:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -145,6 +181,16 @@ class HostAgentServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.attach_host,
+                ),
+                "/codewire.v1.HostAgentService/OpenHostTunnel": EndpointSync.bidi_stream(
+                    method=MethodInfo(
+                        name="OpenHostTunnel",
+                        service_name="codewire.v1.HostAgentService",
+                        input=OpenHostTunnelRequest,
+                        output=OpenHostTunnelResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.open_host_tunnel,
                 ),
             },
             interceptors=interceptors,
@@ -198,6 +244,25 @@ class HostAgentServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.HostAgentService",
                 input=AttachHostRequest,
                 output=AttachHostResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def open_host_tunnel(
+        self,
+        request: Iterator[OpenHostTunnelRequest],
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> Iterator[OpenHostTunnelResponse]:
+        return self.execute_bidi_stream(
+            request=request,
+            method=MethodInfo(
+                name="OpenHostTunnel",
+                service_name="codewire.v1.HostAgentService",
+                input=OpenHostTunnelRequest,
+                output=OpenHostTunnelResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

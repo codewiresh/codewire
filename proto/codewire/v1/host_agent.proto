@@ -14,7 +14,10 @@ import "codewire/v1/host.proto";
 // every 10 minutes after. A revoked host is refused, and a host revoked while
 // attached is told so and its stream ends.
 //
-// This slice carries liveness only: no operation crosses the stream yet.
+// From capability version 2 the session carries the host's lifecycle
+// operations (slice 2): the control plane sends `operation`, and the host
+// answers `operation_result` once it has finished. The operation set is the
+// placement's, not the local supervisor's: nothing else of the host crosses.
 service HostAgentService {
   // AttachHost runs one host session:
   //
@@ -29,11 +32,31 @@ service HostAgentService {
   //    `challenge`, which the host must answer with `proof` within
   //    `proof_timeout_seconds`.
   //
+  // Only the newest session of a host takes operations. A session that
+  // another one for the same host has replaced is sent `superseded` and
+  // ended; operations it had been sent are sent again on the new one.
+  //
   // An unknown host or a bad proof ends the stream with UNAUTHENTICATED,
   // without saying which. A revoked host is refused with PERMISSION_DENIED,
   // or, once attached, sent `revoked` before the stream ends. A message out
   // of order ends it with INVALID_ARGUMENT.
   rpc AttachHost(stream AttachHostRequest) returns (stream AttachHostResponse);
+
+  // OpenHostTunnel carries one byte stream to an environment on the host,
+  // which the host opens when its session is sent `open_tunnel`:
+  //
+  // 1. The host sends `open`: the host ID, the tunnel ID, and the Ed25519
+  //    signature, by the host key, of the line "codewire-host-tunnel-v1",
+  //    then the host ID, the tunnel ID and the lowercase hex of the
+  //    `open_tunnel` nonce, each on its own line ending in "\n".
+  // 2. The host connects to the environment, then sends `ready`, or `failed`
+  //    with the reason and ends the stream.
+  // 3. Both sides send `data` until either ends its side.
+  //
+  // A tunnel is opened once, within 10 seconds of its `open_tunnel`, on the
+  // replica whose session sent it. Anything else ends the stream with
+  // UNAUTHENTICATED, without saying why.
+  rpc OpenHostTunnel(stream OpenHostTunnelRequest) returns (stream OpenHostTunnelResponse);
 }
 
 message AttachHostRequest {
@@ -42,6 +65,9 @@ message AttachHostRequest {
     HostAttachProof proof = 2;
     HostHello hello = 3;
     HostPing ping = 4;
+    HostOperationProgress operation_progress = 5;
+    HostOperationResult operation_result = 6;
+    HostEnvironmentObservation environment_observed = 7;
   }
 }
 
@@ -51,6 +77,9 @@ message AttachHostResponse {
     HostAttached attached = 2;
     HostPong pong = 3;
     HostRevoked revoked = 4;
+    HostOperation operation = 5;
+    HostSuperseded superseded = 6;
+    HostOpenTunnel open_tunnel = 7;
   }
 }
 
@@ -75,6 +104,9 @@ message HostAttached {
   uint32 offline_after_seconds = 2;
   uint32 rechallenge_interval_seconds = 3;
   uint32 proof_timeout_seconds = 4;
+  // This session's number among the host's sessions; each attach takes the
+  // next. For diagnosis: the host never sends it back.
+  uint64 session_generation = 5;
 }
 
 // What the host runs, sent once after `attached`.
@@ -85,6 +117,9 @@ message HostHello {
   // Must be the platform the host enrolled with; a different one ends the
   // stream with FAILED_PRECONDITION.
   HostPlatform platform = 2;
+  // Every environment the control plane placed on this host that the host
+  // still has, as it is now. Empty before capability version 2.
+  repeated HostEnvironmentObservation inventory = 3;
 }
 
 message HostPing {}
@@ -92,3 +127,170 @@ message HostPing {}
 message HostPong {}
 
 message HostRevoked {}
+
+// Another session for this host attached; this one ends, and its operations
+// go to the new one.
+message HostSuperseded {}
+
+// One lifecycle operation for one environment on the host. The host runs it
+// at most once: the same `operation_id` sent again, with the same contents,
+// is answered with the first one's result, however long ago that was. The
+// same ID with different contents is refused.
+message HostOperation {
+  // A UUID the control plane chose.
+  string operation_id = 1;
+  // The environment's ID in the control plane, a UUID.
+  string environment_id = 2;
+  // The host's own ID for the environment, from an earlier result or
+  // observation. Empty only for `create`. The host refuses an operation whose
+  // environment is no longer this one.
+  string local_environment_id = 3;
+  // The boot generation the control plane last saw: 0 for `create`. The host
+  // answers `stale_generation` when its own differs.
+  uint64 expected_generation = 4;
+  oneof kind {
+    HostCreate create = 5;
+    HostStart start = 6;
+    HostStop stop = 7;
+    HostDestroy destroy = 8;
+  }
+}
+
+// Creates and starts a VM for the environment, from the default image of
+// the host's own runtime: the control plane does not choose the image.
+message HostCreate {
+  uint32 vcpus = 1;
+  uint32 memory_mib = 2;
+  // The state disk.
+  uint64 disk_bytes = 3;
+  // The guest's Docker data disk; 0 turns Docker off.
+  uint64 docker_disk_bytes = 4;
+  // The canonical codewire-project JSON and its SHA-256 in lowercase hex.
+  // The host checks both before it records the operation. It names
+  // repositories or an empty workspace: never a path on the host.
+  bytes project_spec_json = 5;
+  string project_spec_sha256 = 6;
+}
+
+message HostStart {}
+
+message HostStop {}
+
+// Stops the VM and removes it and its disks. An environment the host no
+// longer has is already destroyed: the result is `done` with state ABSENT.
+message HostDestroy {}
+
+// A stage an operation reached, as it runs. Advisory: only the result
+// completes an operation.
+message HostOperationProgress {
+  string operation_id = 1;
+  // A machine-readable stage name, at most 64 bytes.
+  string stage = 2;
+  // Increases with each stage of one operation.
+  uint64 sequence = 3;
+}
+
+// How an operation ended. Sent once it has, and again whenever the same
+// operation is sent again.
+message HostOperationResult {
+  string operation_id = 1;
+  oneof outcome {
+    // The environment as the operation left it.
+    HostEnvironmentObservation done = 2;
+    HostOperationFailure failed = 3;
+    HostStaleGeneration stale_generation = 4;
+  }
+}
+
+message HostOperationFailure {
+  // A machine-readable reason, at most 64 bytes, such as
+  // "resource_exhausted" or "environment_mismatch".
+  string code = 1;
+  // The host's own words, shown to the user as they are. It holds no
+  // credential or path.
+  string message = 2;
+}
+
+message HostStaleGeneration {
+  uint64 expected_generation = 1;
+  uint64 current_generation = 2;
+}
+
+// What the host's VM for one environment is doing.
+enum HostEnvironmentState {
+  HOST_ENVIRONMENT_STATE_UNSPECIFIED = 0;
+  HOST_ENVIRONMENT_STATE_STOPPED = 1;
+  HOST_ENVIRONMENT_STATE_STARTING = 2;
+  // Running, with its daemon ready.
+  HOST_ENVIRONMENT_STATE_RUNNING = 3;
+  HOST_ENVIRONMENT_STATE_ERROR = 4;
+  // The host does not have it.
+  HOST_ENVIRONMENT_STATE_ABSENT = 5;
+}
+
+// One environment as the host sees it: in a result, in the hello's
+// inventory, and sent on its own whenever its state changes.
+message HostEnvironmentObservation {
+  string environment_id = 1;
+  // The host's own ID for it, a UUID. Its disks live and die with it.
+  string local_environment_id = 2;
+  uint64 generation = 3;
+  HostEnvironmentState state = 4;
+  // A machine-readable cause when the state is ERROR, at most 64 bytes.
+  string error_code = 5;
+  uint32 vcpus = 6;
+  uint32 memory_mib = 7;
+  uint64 disk_bytes = 8;
+  // The guest's SSH host key, in OpenSSH public-key form, while running.
+  string ssh_host_key = 9;
+}
+
+enum HostTunnelKind {
+  HOST_TUNNEL_KIND_UNSPECIFIED = 0;
+  // The environment daemon's gRPC, as `cw --local` reaches it.
+  HOST_TUNNEL_KIND_DAEMON_GRPC = 1;
+}
+
+// Asks the host to open a tunnel with `OpenHostTunnel`.
+message HostOpenTunnel {
+  // A UUID the control plane chose, used once.
+  string tunnel_id = 1;
+  string environment_id = 2;
+  string local_environment_id = 3;
+  // The tunnel is refused unless this is the running generation.
+  uint64 generation = 4;
+  HostTunnelKind kind = 5;
+  // 32 random bytes, signed in the tunnel's `open`.
+  bytes nonce = 6;
+}
+
+message OpenHostTunnelRequest {
+  oneof input {
+    HostTunnelOpen open = 1;
+    HostTunnelReady ready = 2;
+    HostOperationFailure failed = 3;
+    bytes data = 4 [debug_redact = true];
+  }
+}
+
+message OpenHostTunnelResponse {
+  oneof output {
+    bytes data = 1 [debug_redact = true];
+  }
+}
+
+message HostTunnelOpen {
+  string host_id = 1;
+  string tunnel_id = 2;
+  // The 64-byte Ed25519 signature of the tunnel statement.
+  bytes signature = 3;
+}
+
+// The host reached the environment; bytes may flow.
+message HostTunnelReady {
+  // For DAEMON_GRPC: the running generation's daemon capability, which the
+  // control plane presents to the daemon on this tunnel's connection. It is
+  // valid only for this boot generation. The control plane keeps it in
+  // memory for the life of the tunnel and never records or logs it.
+  string daemon_capability = 1 [debug_redact = true];
+}
