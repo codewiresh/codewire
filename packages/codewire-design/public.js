@@ -138,9 +138,11 @@ void main() {
     }
     if (hit) {
       vec3 p = ro + rd * t; float lod = smoothstep(0.3, 0.7, pix * t / RWW), e = 0.0007 + 0.0004 * t; vec4 dm;
-      const vec2 k = vec2(1.0, -1.0);
-      vec3 n = normalize(k.xyy * rope(p + k.xyy * e, lod, pix * t, dm) + k.yyx * rope(p + k.yyx * e, lod, pix * t, dm) +
-                         k.yxy * rope(p + k.yxy * e, lod, pix * t, dm) + k.xxx * rope(p + k.xxx * e, lod, pix * t, dm));
+      // the normal from four samples round a tetrahedron, in a loop: the driver keeps one copy of rope() rather than
+      // four inlined ones, which is most of this shader's compile time on a first visit
+      const vec2 k = vec2(1.0, -1.0); vec3 n = vec3(0.0);
+      for (int j = 0; j < 4; j++) { vec3 kj = j == 0 ? k.xyy : j == 1 ? k.yyx : j == 2 ? k.yxy : k.xxx; n += kj * rope(p + kj * e, lod, pix * t, dm); }
+      n = normalize(n);
       // the same lighting and texture as the rope film: key from the upper left, a coloured rim from behind,
       // every wire a slightly different steel, grime down in the grooves
       vec3 L1 = normalize(vec3(-0.45, 0.85, 0.55)), L2 = normalize(vec3(0.75, 0.1, -0.65)), hv = normalize(L1 - rd), rf = reflect(rd, n);
@@ -173,7 +175,10 @@ void main() {
   document.documentElement.classList.add('js');   // the page's script runs: see html:not(.js) in public.css
   const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
-  // whether a WebGL program linked, once it has: KHR_parallel_shader_compile lets the GPU compile while the page runs,
+  // a WebGL context with KHR_parallel_shader_compile turned on before anything compiles: a program linked before the
+  // extension is enabled still compiles synchronously, and the first status query holds the page until it is done
+  const webgl = (canvas, opts) => { const c = canvas.getContext('webgl', opts); c?.getExtension('KHR_parallel_shader_compile'); return c; };
+  // whether a WebGL program linked, once it has: with the extension the GPU compiles while the page runs,
   // where asking for COMPILE_STATUS or LINK_STATUS at once holds the page until it is done (a quarter second for each shader on a first visit)
   const linked = async (c, pr) => {
     const par = c.getExtension('KHR_parallel_shader_compile');
@@ -656,7 +661,7 @@ void main() {
   gl_FragColor = vec4(clamp(col, 0.0, 1.0) * a, a);
 }`;
       const glSetup = () => {
-        const c = cv.getContext('webgl', { premultipliedAlpha: true, antialias: false, alpha: true });
+        const c = webgl(cv, { premultipliedAlpha: true, antialias: false, alpha: true });
         if (!c) return Promise.resolve(null);
         const sh = (type, src) => { const s = c.createShader(type); c.shaderSource(s, src); c.compileShader(s); return s; };
         const vs = sh(c.VERTEX_SHADER, 'attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }'), fs = sh(c.FRAGMENT_SHADER, FS);
@@ -1171,7 +1176,7 @@ void main() {
   }
 
   /* ---------- the wire behind the page ---------- */
-  const canvas = $('#wire'), gl = canvas.getContext('webgl', { antialias: false, alpha: false, powerPreference: 'high-performance' });
+  const canvas = $('#wire'), gl = webgl(canvas, { antialias: false, alpha: false, powerPreference: 'high-performance' });
   const ST = {
     top:      { cam: [0.0, 0.0, 8.6],  tgt: [0.0, -0.9, 0],  roll: -0.03,  spread: 1.0, twist: 1.0, fade: 0.0,  fov: 40, ws: 1.0 },
     sessions: { cam: [5.2, 1.2, 4.6],  tgt: [-0.6, 0.0, 0],   roll: 0.42,  spread: 1.9, twist: 0.45, fade: 0.55, fov: 42, ws: 1.0 },
