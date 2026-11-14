@@ -281,6 +281,16 @@ test("inventory load failure becomes unavailable and later recovery preserves ro
   await expect(page.locator("[data-environment-list-error]")).toBeHidden();
 });
 
+// Retries wait on the page's clock, and only the test moves it. An installed
+// clock still follows real time until it is paused, so on a loaded host a
+// retry could fire before the test read "Retrying (1 of 2)" and it read
+// "2 of 2" instead (#4389). Pausing before the page loads holds every timer.
+async function holdClock(page: Page) {
+  const start = Date.now();
+  await page.clock.install({ time: start });
+  await page.clock.pauseAt(start + 1);
+}
+
 test("optional-choice failure offers retry without clearing the Create form", async ({ page }) => {
   const url = fixtureUrl();
   let hydratedHtml = "";
@@ -298,7 +308,7 @@ test("optional-choice failure offers retry without clearing the Create form", as
   });
   // Both retries wait on the page's clock, which the test moves once each is
   // scheduled, so their four seconds are never spent in real time.
-  await page.clock.install();
+  await holdClock(page);
   await page.goto(url);
   const form = page.locator("[data-environment-form]");
   const status = page.locator("[data-create-optional-options] [role=status]");
@@ -337,7 +347,7 @@ test("a transient optional-choice failure recovers by itself", async ({ page }) 
   // The retry waits a second on the page's clock. The test moves that clock
   // once the retry is scheduled, so a loaded host cannot spend the
   // recovery's assertion time on the wait (run 44624).
-  await page.clock.install();
+  await holdClock(page);
   await page.goto(url);
   await expect(page.locator("[data-create-optional-options] [role=status]")).toHaveText("Choices did not load. Retrying (1 of 2)…");
   await page.clock.runFor(1_000);
