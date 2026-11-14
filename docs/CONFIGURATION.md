@@ -140,6 +140,7 @@ email before it can sign in (#4481).
 |---|---|---|---|
 | `IDP_SIGNUP` | No | `review` (the default), `open` or `invite-only`. Any other value stops the IdP from starting. | `invite-only` |
 | `IDP_SIGNUP_REASON` | No | `required` asks a sign-up that waits for the admin what they want to build; the admin reads it on Admin → Account Access. Review mode always asks. | `required` |
+| `IDP_METRICS_ADDR` | No | Where the IdP serves `/metrics` on its own, default `0.0.0.0:8092`. The port Prometheus scrapes is named `http`; the API port is `api` (8091). A NetworkPolicy admits the metrics port from every source, because Prometheus runs on host networking, and the API port only from the edge and the dashboard. | `0.0.0.0:8092` |
 
 Setup makes the server's admin before anything else:
 

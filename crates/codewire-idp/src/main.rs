@@ -7,9 +7,29 @@
 //! callback and browser device-verification route — alongside
 //! health/readiness.
 
+use anyhow::Context as _;
 use codewire_server_core::auth::AuthState;
 use codewire_server_core::{AppBuilder, ServiceConfig};
 use std::ffi::OsString;
+use std::net::SocketAddr;
+
+/// Where `/metrics` is served on its own (#4546). Prometheus runs on host
+/// networking, which no NetworkPolicy peer can name, so the port Prometheus
+/// scrapes admits any source and serves nothing but metrics, while the API
+/// port admits only the edge and the dashboard.
+const METRICS_ADDR_ENV: &str = "IDP_METRICS_ADDR";
+const DEFAULT_METRICS_ADDR: &str = "0.0.0.0:8092";
+
+fn metrics_addr(value: Option<&str>) -> anyhow::Result<SocketAddr> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_METRICS_ADDR)
+        .parse()
+        .with_context(|| {
+            format!("{METRICS_ADDR_ENV} must be a socket address such as {DEFAULT_METRICS_ADDR}")
+        })
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CommandMode {
@@ -249,17 +269,39 @@ async fn serve() -> anyhow::Result<()> {
         .merge(two_factor)
         .merge(two_factor_replacement);
 
+    let metrics_bind = metrics_addr(std::env::var(METRICS_ADDR_ENV).ok().as_deref())?;
+    let metrics = codewire_server_core::metrics::router("codewire-idp");
+
     tracing::info!(
         bind = %cfg.bind_addr,
+        metrics = %metrics_bind,
         issuer = %idp_cfg.issuer,
         "codewire-idp starting"
     );
-    codewire_server_core::serve(app, cfg.bind_addr).await
+    tokio::try_join!(
+        codewire_server_core::serve(app, cfg.bind_addr),
+        codewire_server_core::serve(metrics, metrics_bind),
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metrics_listen_on_their_own_port_unless_set() {
+        assert_eq!(metrics_addr(None).unwrap(), "0.0.0.0:8092".parse().unwrap());
+        assert_eq!(
+            metrics_addr(Some(" ")).unwrap(),
+            "0.0.0.0:8092".parse().unwrap()
+        );
+        assert_eq!(
+            metrics_addr(Some("127.0.0.1:9100")).unwrap(),
+            "127.0.0.1:9100".parse().unwrap()
+        );
+        assert!(metrics_addr(Some("8092")).is_err());
+    }
 
     #[test]
     fn no_arguments_preserve_server_mode() {

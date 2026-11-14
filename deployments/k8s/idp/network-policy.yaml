@@ -1,10 +1,14 @@
-# The IdP admits only the public edge, the dashboard and Prometheus
+# The IdP's API (8091) admits only the public edge and the dashboard
 # (#3297). Sign-up counts its per-address limit under the last
-# X-Forwarded-For hop, which the edge writes from the client's address and
-# the dashboard forwards from its own request; no other Pod, Sandboxes
-# included, can reach the IdP to write a hop of its choosing. Every other
-# service reaches the issuer, its discovery document and its keys through
-# the edge. The hosted overlays name the Envoy Gateway as the edge.
+# X-Forwarded-For hop, which the edge writes from the client's address and the
+# dashboard forwards from its own request; no other Pod, Sandboxes included,
+# can reach the API to write a hop of its choosing. Every other service reaches
+# the issuer, its discovery document and its keys through the edge. The hosted
+# overlays name the Envoy Gateway as the edge.
+#
+# Metrics (8092) admit any source: Prometheus runs on host networking, which
+# Cilium sees as a node and no NetworkPolicy peer can name (#4546), and the
+# port serves nothing but /metrics.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -28,12 +32,9 @@ spec:
             matchLabels:
               app.kubernetes.io/name: codewire
               app.kubernetes.io/component: dashboard
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: monitoring
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: prometheus
       ports:
         - protocol: TCP
           port: 8091
+    - ports:
+        - protocol: TCP
+          port: 8092

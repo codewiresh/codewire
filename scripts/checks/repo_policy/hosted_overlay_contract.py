@@ -31,6 +31,13 @@ HOSTED_OVERLAY_SOURCES = (
     "udp-relay",
 )
 
+# The components the hosted overlays' PodMonitor scrapes, each on its
+# container port named http. Prometheus runs on host networking on both
+# clusters, which Cilium sees as a node and no NetworkPolicy peer can name, so a
+# NetworkPolicy on one of these must admit that port from every source, or its
+# metrics go dark (codewire#4546). The list mirrors that PodMonitor.
+HOSTED_SCRAPED_COMPONENTS = ("orchestration", "idp", "billing", "coordinator", "udp-relay")
+
 # The image names the overlays' `images` entries rewrite.
 HOSTED_IMAGES = (
     "git.example.com/codewire/dashboard",
@@ -181,15 +188,14 @@ HOSTED_PATCH_CONTRACT: tuple[tuple[str, str, tuple[dict[str, Any], ...]], ...] =
         added("/spec/ingress/0/from/0/podSelector/matchLabels/app.kubernetes.io~1instance"),
     )),
     # Dev and Production retarget the IdP's and the dashboard's edge peer to the
-    # Envoy Gateway's public proxies by index (codewire#3297). The IdP's other
-    # peers are pinned too, so a reordered rule can't move the edge patch onto
-    # the dashboard or Prometheus peer.
+    # Envoy Gateway's public proxies by index (codewire#3297). The IdP's
+    # dashboard peer is pinned too, so a reordered rule can't move the edge
+    # patch onto it.
     ("NetworkPolicy", "codewire-idp", (
         pinned("/spec/ingress/0/from/0", peer("kube-system", {"app.kubernetes.io/name": "rke2-ingress-nginx"})),
         pinned("/spec/ingress/0/from/1", {"podSelector": {"matchLabels": {
             "app.kubernetes.io/name": "codewire", "app.kubernetes.io/component": "dashboard",
         }}}),
-        pinned("/spec/ingress/0/from/2", peer("monitoring", {"app.kubernetes.io/name": "prometheus"})),
     )),
     ("NetworkPolicy", "codewire-dashboard", (
         pinned("/spec/ingress/0/from/0", peer("kube-system", {"app.kubernetes.io/name": "rke2-ingress-nginx"})),
@@ -239,12 +245,66 @@ def render_hosted_sources(work: Path) -> str:
     return run(["kustomize", "build", "--load-restrictor", "LoadRestrictionsNone", str(root)]).stdout
 
 
+def policy_component(policy: str) -> str | None:
+    """The component a NetworkPolicy's own podSelector selects."""
+    match = re.search(
+        r"^  podSelector:\n    matchLabels:\n(?:      .*\n)*?      app\.kubernetes\.io/component: (\S+)",
+        policy,
+        re.MULTILINE,
+    )
+    return match.group(1) if match else None
+
+
+def sourceless_tcp_ranges(policy: str) -> list[tuple[int, int]]:
+    """The TCP ports a NetworkPolicy admits from every source: its ingress
+    rules with no `from`, which render first as `- ports:`, each entry a port
+    or a port to endPort range."""
+    ranges: list[tuple[int, int]] = []
+    for rule in re.finditer(r"^  - ports:\n((?:    .*\n?)*)", policy, re.MULTILINE):
+        for entry in re.split(r"^    - ", rule.group(1), flags=re.MULTILINE):
+            fields = dict(re.findall(r"(\w+): (\S+)", entry))
+            if "port" in fields and fields.get("protocol", "TCP") == "TCP":
+                low = int(fields["port"])
+                ranges.append((low, int(fields.get("endPort", low))))
+    return ranges
+
+
+def scrape_port_failures(resources: list[str]) -> list[str]:
+    """A NetworkPolicy on a scraped component must admit its http port from
+    every source: a rule with no `from`, which renders as `- ports:`."""
+    failures: list[str] = []
+    workloads = [r for r in resources if top_level_field(r, "kind") == "Deployment"]
+    for policy in (r for r in resources if top_level_field(r, "kind") == "NetworkPolicy"):
+        component = policy_component(policy)
+        if component not in HOSTED_SCRAPED_COMPONENTS:
+            continue
+        ports = {
+            match.group(1)
+            for workload in workloads
+            if re.search(rf"^\s+app\.kubernetes\.io/component: {re.escape(component)}\s*$", workload, re.MULTILINE)
+            for match in re.finditer(r"^\s*- containerPort: (\d+)\n\s+name: http\s*$", workload, re.MULTILINE)
+        }
+        name = metadata_field(policy, "name")
+        if not ports:
+            failures.append(f"NetworkPolicy/{name}: no {component} Deployment names a container port http to scrape")
+        open_to_all = sourceless_tcp_ranges(policy)
+        for port in sorted(ports, key=int):
+            if not any(low <= int(port) <= high for low, high in open_to_all):
+                failures.append(
+                    f"NetworkPolicy/{name}: the {component} port Prometheus scrapes ({port}, named http) "
+                    "isn't admitted from every source; Prometheus runs on host networking, which no peer can name"
+                )
+    return failures
+
+
 def hosted_overlay_contract_failures(
     rendered: str, work: Path, only: tuple[str, str] | None = None
 ) -> list[str]:
     """Every contract failure, or only those of one (kind, name) entry."""
     failures: list[str] = []
     resources = documents(rendered)
+    if only is None:
+        failures.extend(scrape_port_failures(resources))
     for image in HOSTED_IMAGES:
         if not re.search(rf"^\s*(?:- )?image: {re.escape(image)}(?:[:@]|$)", rendered, re.MULTILINE):
             failures.append(f"image {image}: no source workload uses it, so the hosted image pin rewrites nothing")
@@ -345,6 +405,17 @@ def hosted_overlay_contract_self_test(rendered: str, work: Path) -> list[str]:
         )
         if not any(expected in failure for failure in failures):
             problems.append(f"self-test {label}: expected a failure containing {expected!r}; got {failures!r}")
+    # The IdP's metrics rule given a peer, which host-network Prometheus can't
+    # match (codewire#4546), fails the scrape-port invariant.
+    peered = mutated(
+        rendered,
+        "NetworkPolicy",
+        "codewire-idp",
+        "  - ports:\n    - port: 8092\n",
+        "  - from:\n    - podSelector: {}\n    ports:\n    - port: 8092\n",
+    )
+    if not any("isn't admitted from every source" in failure for failure in scrape_port_failures(documents(peered))):
+        problems.append("self-test peered metrics port: the scrape-port invariant did not fail")
     return problems
 
 

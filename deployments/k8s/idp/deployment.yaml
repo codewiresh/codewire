@@ -43,7 +43,12 @@ spec:
           image: git.example.com/codewire/services:latest
           command: ["/codewire-idp"]
           ports:
+            # The API: the edge and the dashboard only (network-policy.yaml).
             - containerPort: 8091
+              name: api
+            # Metrics only, scraped by the PodMonitor's port named http from
+            # any source: Prometheus runs on host networking (#4546).
+            - containerPort: 8092
               name: http
           envFrom:
             - configMapRef:
@@ -135,13 +140,13 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: http
+              port: api
             initialDelaySeconds: 10
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /readyz
-              port: http
+              port: api
             initialDelaySeconds: 5
             periodSeconds: 5
           # Keep serving while the gateway drops this Pod's endpoint, so SIGTERM
