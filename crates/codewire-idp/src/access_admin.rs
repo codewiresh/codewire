@@ -186,6 +186,45 @@ async fn list_accounts(
     Ok(Json(AccountAccessList { accounts }))
 }
 
+/// Why an account may not be enabled now. An account being deleted stays
+/// disabled until its deletion completes (#3679), and a suspended account
+/// comes back only through unsuspension, which also clears its organizations'
+/// suspension (#3297). The caller's user row lock orders this after the
+/// request.
+async fn refuse_enabling(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: &str,
+) -> Result<(), AppError> {
+    let deleting: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM account_deletion_operations WHERE user_id = $1)",
+    )
+    .bind(user_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "failed to check account deletion state");
+        AppError::InternalMsg("Failed to update account".into())
+    })?;
+    if deleting {
+        return Err(AppError::Conflict("This account is being deleted".into()));
+    }
+    let suspended: bool =
+        sqlx::query_scalar("SELECT suspended_at IS NOT NULL FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "failed to check account suspension");
+                AppError::InternalMsg("Failed to update account".into())
+            })?;
+    if suspended {
+        return Err(AppError::Conflict(
+            "This account is suspended; unsuspend it instead".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn set_account_enabled(
     State(state): State<AccessAdminState>,
     Path(user_id): Path<String>,
@@ -234,22 +273,8 @@ async fn set_account_enabled(
         detail: "Account not found".into(),
     })?;
 
-    // An account being deleted stays disabled until its deletion completes
-    // (#3679); the user row lock above orders this after the request.
     if request.enabled {
-        let deleting: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM account_deletion_operations WHERE user_id = $1)",
-        )
-        .bind(&user_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, "failed to check account deletion state");
-            AppError::InternalMsg("Failed to update account".into())
-        })?;
-        if deleting {
-            return Err(AppError::Conflict("This account is being deleted".into()));
-        }
+        refuse_enabling(&mut tx, &user_id).await?;
     }
     // With mail an access request is verified first, and enabling sends the
     // ready email. A server with no mail cannot verify anyone, so enabling is

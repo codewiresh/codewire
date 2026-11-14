@@ -83,6 +83,12 @@ const (
 	// AdminServiceAdjustOrganizationCreditProcedure is the fully-qualified name of the AdminService's
 	// AdjustOrganizationCredit RPC.
 	AdminServiceAdjustOrganizationCreditProcedure = "/codewire.admin.v1.AdminService/AdjustOrganizationCredit"
+	// AdminServiceSuspendAccountProcedure is the fully-qualified name of the AdminService's
+	// SuspendAccount RPC.
+	AdminServiceSuspendAccountProcedure = "/codewire.admin.v1.AdminService/SuspendAccount"
+	// AdminServiceUnsuspendAccountProcedure is the fully-qualified name of the AdminService's
+	// UnsuspendAccount RPC.
+	AdminServiceUnsuspendAccountProcedure = "/codewire.admin.v1.AdminService/UnsuspendAccount"
 )
 
 // AdminServiceClient is a client for the codewire.admin.v1.AdminService service.
@@ -146,6 +152,20 @@ type AdminServiceClient interface {
 	// as a ledger entry naming the administrator, and writes an audit entry.
 	// A repeated idempotency key for the organization changes nothing.
 	AdjustOrganizationCredit(context.Context, *connect.Request[v1.AdjustOrganizationCreditRequest]) (*connect.Response[v1.AdjustOrganizationCreditResponse], error)
+	// SuspendAccount is the one-step response to abuse (#3297). The account can
+	// no longer sign in, and its sessions, OIDC tokens and API keys are revoked.
+	// Each organization it is the only owner of refuses creates, starts and
+	// snapshots, has its running environments stopped and its public and
+	// organization-wide ports narrowed to their creator. An organization with
+	// another owner is returned, not suspended, but what the account created in
+	// it is stopped and narrowed as well. Every step is audited with the
+	// reason. Suspending a suspended account is refused.
+	SuspendAccount(context.Context, *connect.Request[v1.SuspendAccountRequest]) (*connect.Response[v1.SuspendAccountResponse], error)
+	// UnsuspendAccount re-enables a suspended account and clears the suspension
+	// of the organizations its suspension marked, and writes an audit entry. It restores
+	// nothing suspension revoked or stopped: the person signs in again and
+	// creates new API keys, and environments stay stopped.
+	UnsuspendAccount(context.Context, *connect.Request[v1.UnsuspendAccountRequest]) (*connect.Response[v1.UnsuspendAccountResponse], error)
 }
 
 // NewAdminServiceClient constructs a client for the codewire.admin.v1.AdminService service. By
@@ -272,6 +292,18 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(adminServiceMethods.ByName("AdjustOrganizationCredit")),
 			connect.WithClientOptions(opts...),
 		),
+		suspendAccount: connect.NewClient[v1.SuspendAccountRequest, v1.SuspendAccountResponse](
+			httpClient,
+			baseURL+AdminServiceSuspendAccountProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("SuspendAccount")),
+			connect.WithClientOptions(opts...),
+		),
+		unsuspendAccount: connect.NewClient[v1.UnsuspendAccountRequest, v1.UnsuspendAccountResponse](
+			httpClient,
+			baseURL+AdminServiceUnsuspendAccountProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("UnsuspendAccount")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -294,6 +326,8 @@ type adminServiceClient struct {
 	getClusterCapacity                *connect.Client[v1.GetClusterCapacityRequest, v1.GetClusterCapacityResponse]
 	setOrganizationDedicatedCpu       *connect.Client[v1.SetOrganizationDedicatedCpuRequest, v1.SetOrganizationDedicatedCpuResponse]
 	adjustOrganizationCredit          *connect.Client[v1.AdjustOrganizationCreditRequest, v1.AdjustOrganizationCreditResponse]
+	suspendAccount                    *connect.Client[v1.SuspendAccountRequest, v1.SuspendAccountResponse]
+	unsuspendAccount                  *connect.Client[v1.UnsuspendAccountRequest, v1.UnsuspendAccountResponse]
 }
 
 // GetStats calls codewire.admin.v1.AdminService.GetStats.
@@ -385,6 +419,16 @@ func (c *adminServiceClient) AdjustOrganizationCredit(ctx context.Context, req *
 	return c.adjustOrganizationCredit.CallUnary(ctx, req)
 }
 
+// SuspendAccount calls codewire.admin.v1.AdminService.SuspendAccount.
+func (c *adminServiceClient) SuspendAccount(ctx context.Context, req *connect.Request[v1.SuspendAccountRequest]) (*connect.Response[v1.SuspendAccountResponse], error) {
+	return c.suspendAccount.CallUnary(ctx, req)
+}
+
+// UnsuspendAccount calls codewire.admin.v1.AdminService.UnsuspendAccount.
+func (c *adminServiceClient) UnsuspendAccount(ctx context.Context, req *connect.Request[v1.UnsuspendAccountRequest]) (*connect.Response[v1.UnsuspendAccountResponse], error) {
+	return c.unsuspendAccount.CallUnary(ctx, req)
+}
+
 // AdminServiceHandler is an implementation of the codewire.admin.v1.AdminService service.
 type AdminServiceHandler interface {
 	// GetStats returns global environment counts and current-month usage totals.
@@ -446,6 +490,20 @@ type AdminServiceHandler interface {
 	// as a ledger entry naming the administrator, and writes an audit entry.
 	// A repeated idempotency key for the organization changes nothing.
 	AdjustOrganizationCredit(context.Context, *connect.Request[v1.AdjustOrganizationCreditRequest]) (*connect.Response[v1.AdjustOrganizationCreditResponse], error)
+	// SuspendAccount is the one-step response to abuse (#3297). The account can
+	// no longer sign in, and its sessions, OIDC tokens and API keys are revoked.
+	// Each organization it is the only owner of refuses creates, starts and
+	// snapshots, has its running environments stopped and its public and
+	// organization-wide ports narrowed to their creator. An organization with
+	// another owner is returned, not suspended, but what the account created in
+	// it is stopped and narrowed as well. Every step is audited with the
+	// reason. Suspending a suspended account is refused.
+	SuspendAccount(context.Context, *connect.Request[v1.SuspendAccountRequest]) (*connect.Response[v1.SuspendAccountResponse], error)
+	// UnsuspendAccount re-enables a suspended account and clears the suspension
+	// of the organizations its suspension marked, and writes an audit entry. It restores
+	// nothing suspension revoked or stopped: the person signs in again and
+	// creates new API keys, and environments stay stopped.
+	UnsuspendAccount(context.Context, *connect.Request[v1.UnsuspendAccountRequest]) (*connect.Response[v1.UnsuspendAccountResponse], error)
 }
 
 // NewAdminServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -568,6 +626,18 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(adminServiceMethods.ByName("AdjustOrganizationCredit")),
 		connect.WithHandlerOptions(opts...),
 	)
+	adminServiceSuspendAccountHandler := connect.NewUnaryHandler(
+		AdminServiceSuspendAccountProcedure,
+		svc.SuspendAccount,
+		connect.WithSchema(adminServiceMethods.ByName("SuspendAccount")),
+		connect.WithHandlerOptions(opts...),
+	)
+	adminServiceUnsuspendAccountHandler := connect.NewUnaryHandler(
+		AdminServiceUnsuspendAccountProcedure,
+		svc.UnsuspendAccount,
+		connect.WithSchema(adminServiceMethods.ByName("UnsuspendAccount")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.admin.v1.AdminService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case AdminServiceGetStatsProcedure:
@@ -604,6 +674,10 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 			adminServiceSetOrganizationDedicatedCpuHandler.ServeHTTP(w, r)
 		case AdminServiceAdjustOrganizationCreditProcedure:
 			adminServiceAdjustOrganizationCreditHandler.ServeHTTP(w, r)
+		case AdminServiceSuspendAccountProcedure:
+			adminServiceSuspendAccountHandler.ServeHTTP(w, r)
+		case AdminServiceUnsuspendAccountProcedure:
+			adminServiceUnsuspendAccountHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -679,4 +753,12 @@ func (UnimplementedAdminServiceHandler) SetOrganizationDedicatedCpu(context.Cont
 
 func (UnimplementedAdminServiceHandler) AdjustOrganizationCredit(context.Context, *connect.Request[v1.AdjustOrganizationCreditRequest]) (*connect.Response[v1.AdjustOrganizationCreditResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.AdjustOrganizationCredit is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) SuspendAccount(context.Context, *connect.Request[v1.SuspendAccountRequest]) (*connect.Response[v1.SuspendAccountResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.SuspendAccount is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) UnsuspendAccount(context.Context, *connect.Request[v1.UnsuspendAccountRequest]) (*connect.Response[v1.UnsuspendAccountResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.AdminService.UnsuspendAccount is not implemented"))
 }

@@ -279,6 +279,29 @@ only until the stream's existing closure or reauthorization boundary. A future
 active-stream revocation feature must explicitly close those connections rather
 than claiming that database token revocation does so.
 
+## Account suspension
+
+Suspension is an administrator's one-step response to abuse (#3297), through
+the admin API's `SuspendAccount`. In one transaction it:
+- disables the account, crossing the revocation boundary above;
+- marks each organization the account is the only owner of;
+- narrows those organizations' public and organization-wide ports to their
+  creator;
+- audits the account and each organization with the administrator's reason.
+
+A suspended organization refuses creates, starts and snapshots with
+`403 organization_suspended`, and the worker stops its running environments,
+keeping their storage. Stopping a Sandbox ends the streams into it, which
+disabling the account alone does not. An organization with another owner is
+not suspended; it is returned for the administrator to take up with that
+owner.
+
+`UnsuspendAccount` re-enables the account and clears the marks. It revives
+nothing suspension revoked or stopped: the person signs in again and creates
+new API keys, environments stay stopped until started, and ports stay with
+their creator. Account Access's ordinary enable refuses a suspended account,
+so only unsuspension brings it back.
+
 ## Client use
 
 - The server-rendered dashboard is the existing Rust backend-for-frontend

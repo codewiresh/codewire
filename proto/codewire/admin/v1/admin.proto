@@ -121,6 +121,23 @@ service AdminService {
   // A repeated idempotency key for the organization changes nothing.
   rpc AdjustOrganizationCredit(AdjustOrganizationCreditRequest)
       returns (AdjustOrganizationCreditResponse);
+
+  // SuspendAccount is the one-step response to abuse (#3297). The account can
+  // no longer sign in, and its sessions, OIDC tokens and API keys are revoked.
+  // Each organization it is the only owner of refuses creates, starts and
+  // snapshots, has its running environments stopped and its public and
+  // organization-wide ports narrowed to their creator. An organization with
+  // another owner is returned, not suspended, but what the account created in
+  // it is stopped and narrowed as well. Every step is audited with the
+  // reason. Suspending a suspended account is refused.
+  rpc SuspendAccount(SuspendAccountRequest) returns (SuspendAccountResponse);
+
+  // UnsuspendAccount re-enables a suspended account and clears the suspension
+  // of the organizations its suspension marked, and writes an audit entry. It restores
+  // nothing suspension revoked or stopped: the person signs in again and
+  // creates new API keys, and environments stay stopped.
+  rpc UnsuspendAccount(UnsuspendAccountRequest)
+      returns (UnsuspendAccountResponse);
 }
 
 message GetStatsRequest {}
@@ -521,4 +538,34 @@ message AdjustOrganizationCreditResponse {
   int64 balance_nano_eur = 2;
   // False when the idempotency key had already been applied.
   bool applied = 3;
+}
+
+message SuspendAccountRequest {
+  string account_id = 1;
+  // Why, for the audit log; 1 to 2000 characters.
+  string reason = 2;
+}
+
+message SuspendAccountResponse {
+  string account_id = 1;
+  // The organizations the account alone owned, now suspended.
+  repeated string suspended_organization_ids = 2;
+  // The organizations it owns with someone else, left as they were.
+  repeated string shared_organization_ids = 3;
+  // How many ports were narrowed to their creator.
+  uint64 ports_restricted = 4;
+  // The environments the account created in organizations it doesn't alone
+  // own: stopped and their ports narrowed too, so nothing it made keeps
+  // running there.
+  repeated string created_environment_ids = 5;
+}
+
+message UnsuspendAccountRequest {
+  string account_id = 1;
+}
+
+message UnsuspendAccountResponse {
+  string account_id = 1;
+  // The organizations whose suspension was cleared.
+  repeated string unsuspended_organization_ids = 2;
 }

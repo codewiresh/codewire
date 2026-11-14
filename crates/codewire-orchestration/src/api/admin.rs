@@ -32,6 +32,9 @@ mod dedicated_cpu_database_tests;
 mod quota_database_tests;
 #[cfg(test)]
 mod startup_database_tests;
+pub mod suspension;
+#[cfg(test)]
+mod suspension_database_tests;
 
 /// Mirrors `api.AdminStatsResponse`.
 #[derive(Debug, Serialize)]

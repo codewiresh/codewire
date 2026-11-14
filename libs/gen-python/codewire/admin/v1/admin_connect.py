@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .admin_pb2 import AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse, ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse, GetClusterCapacityRequest, GetClusterCapacityResponse, GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse, ListFeedbackRequest, ListFeedbackResponse, ListOrganizationsRequest, ListOrganizationsResponse, SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse, SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse, SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest, SetOrganizationRateCardResponse
+from .admin_pb2 import AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse, ClearOrganizationEnvironmentQuotaRequest, ClearOrganizationEnvironmentQuotaResponse, GetClusterCapacityRequest, GetClusterCapacityResponse, GetDefaultEnvironmentQuotaRequest, GetDefaultEnvironmentQuotaResponse, GetEnvironmentStartupSummaryRequest, GetEnvironmentStartupSummaryResponse, GetEnvironmentStartupTimingsRequest, GetEnvironmentStartupTimingsResponse, GetOrganizationEnvironmentQuotaRequest, GetOrganizationEnvironmentQuotaResponse, GetOrganizationOverviewRequest, GetOrganizationOverviewResponse, GetStatsRequest, GetStatsResponse, ListAuditLogsRequest, ListAuditLogsResponse, ListEnvironmentLifecycleJournalRequest, ListEnvironmentLifecycleJournalResponse, ListFeedbackRequest, ListFeedbackResponse, ListOrganizationsRequest, ListOrganizationsResponse, SetDefaultEnvironmentQuotaRequest, SetDefaultEnvironmentQuotaResponse, SetOrganizationDedicatedCpuRequest, SetOrganizationDedicatedCpuResponse, SetOrganizationEnvironmentQuotaRequest, SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest, SetOrganizationRateCardResponse, SuspendAccountRequest, SuspendAccountResponse, UnsuspendAccountRequest, UnsuspendAccountResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -84,6 +84,12 @@ class AdminService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def adjust_organization_credit(self, request: AdjustOrganizationCreditRequest, ctx: RequestContext[AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse]) -> AdjustOrganizationCreditResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def suspend_account(self, request: SuspendAccountRequest, ctx: RequestContext[SuspendAccountRequest, SuspendAccountResponse]) -> SuspendAccountResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def unsuspend_account(self, request: UnsuspendAccountRequest, ctx: RequestContext[UnsuspendAccountRequest, UnsuspendAccountResponse]) -> UnsuspendAccountResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -269,6 +275,26 @@ class AdminServiceASGIApplication(ConnectASGIApplication[AdminService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.adjust_organization_credit,
+                ),
+                "/codewire.admin.v1.AdminService/SuspendAccount": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SuspendAccount",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=SuspendAccountRequest,
+                        output=SuspendAccountResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.suspend_account,
+                ),
+                "/codewire.admin.v1.AdminService/UnsuspendAccount": Endpoint.unary(
+                    method=MethodInfo(
+                        name="UnsuspendAccount",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=UnsuspendAccountRequest,
+                        output=UnsuspendAccountResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.unsuspend_account,
                 ),
             },
             interceptors=interceptors,
@@ -670,6 +696,46 @@ class AdminServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def suspend_account(
+        self,
+        request: SuspendAccountRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SuspendAccountResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SuspendAccount",
+                service_name="codewire.admin.v1.AdminService",
+                input=SuspendAccountRequest,
+                output=SuspendAccountResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def unsuspend_account(
+        self,
+        request: UnsuspendAccountRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> UnsuspendAccountResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="UnsuspendAccount",
+                service_name="codewire.admin.v1.AdminService",
+                input=UnsuspendAccountRequest,
+                output=UnsuspendAccountResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class AdminServiceSync(Protocol):
     def get_stats(self, request: GetStatsRequest, ctx: RequestContext[GetStatsRequest, GetStatsResponse]) -> GetStatsResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -720,6 +786,12 @@ class AdminServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def adjust_organization_credit(self, request: AdjustOrganizationCreditRequest, ctx: RequestContext[AdjustOrganizationCreditRequest, AdjustOrganizationCreditResponse]) -> AdjustOrganizationCreditResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def suspend_account(self, request: SuspendAccountRequest, ctx: RequestContext[SuspendAccountRequest, SuspendAccountResponse]) -> SuspendAccountResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def unsuspend_account(self, request: UnsuspendAccountRequest, ctx: RequestContext[UnsuspendAccountRequest, UnsuspendAccountResponse]) -> UnsuspendAccountResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -903,6 +975,26 @@ class AdminServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.adjust_organization_credit,
+                ),
+                "/codewire.admin.v1.AdminService/SuspendAccount": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SuspendAccount",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=SuspendAccountRequest,
+                        output=SuspendAccountResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.suspend_account,
+                ),
+                "/codewire.admin.v1.AdminService/UnsuspendAccount": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="UnsuspendAccount",
+                        service_name="codewire.admin.v1.AdminService",
+                        input=UnsuspendAccountRequest,
+                        output=UnsuspendAccountResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.unsuspend_account,
                 ),
             },
             interceptors=interceptors,
@@ -1282,6 +1374,44 @@ class AdminServiceClientSync(ConnectClientSync):
                 service_name="codewire.admin.v1.AdminService",
                 input=AdjustOrganizationCreditRequest,
                 output=AdjustOrganizationCreditResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def suspend_account(
+        self,
+        request: SuspendAccountRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SuspendAccountResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SuspendAccount",
+                service_name="codewire.admin.v1.AdminService",
+                input=SuspendAccountRequest,
+                output=SuspendAccountResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def unsuspend_account(
+        self,
+        request: UnsuspendAccountRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> UnsuspendAccountResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="UnsuspendAccount",
+                service_name="codewire.admin.v1.AdminService",
+                input=UnsuspendAccountRequest,
+                output=UnsuspendAccountResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

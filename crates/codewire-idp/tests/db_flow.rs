@@ -5978,6 +5978,30 @@ async fn admin_resends_verification_only_for_an_unverified_account_against_postg
     .await
     .unwrap();
     assert_eq!(issued, 1);
+    // A suspended account isn't enabled from Account Access: only
+    // unsuspension brings it back, with its organizations (#3297).
+    sqlx::query(
+        "UPDATE users SET suspended_at = NOW(), suspended_by = 'u_admin_resend' \
+         WHERE id = 'u_verified_resend'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/admin/accounts/u_verified_resend/enabled",
+        Some("sess_admin_resend_token"),
+        r#"{"enabled":true}"#,
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    let enabled: bool =
+        sqlx::query_scalar("SELECT enabled FROM users WHERE id = 'u_verified_resend'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!enabled, "a suspended account stays disabled");
     cleanup(pool.clone()).await;
 }
 

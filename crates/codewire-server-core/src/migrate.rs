@@ -46,6 +46,7 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 mod tests {
     mod account_deletion;
     mod account_deletion_initiator;
+    mod account_suspension;
     mod billing_rate_cards;
     mod confidential_activation_slots;
     mod default_access_profile;
@@ -85,9 +86,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced) and 0002 to 0026.
+    // (which equals the 41-migration history it replaced) and 0002 to 0027.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "7255e2a6736bb2553b838eb2b307f49222c485d95372da2d995ef42c2b2ff959";
+        "61c8b49c3bf18a96f706a0c09d714d18dcbbfd612a409c145d35822456f95497";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -159,6 +160,9 @@ mod tests {
 
     // SHA-384 of 0026_host_operations.sql (#3609).
     const APPLIED_HOST_OPERATIONS_CHECKSUM: &str = "232e295da610657e51ec588699ca5ab53b75d28b7a1536e25737bf11d4edb8eba80046e9f63299c6edf74fe424ff997b";
+
+    // SHA-384 of 0027_account_suspension.sql (#3297).
+    const APPLIED_ACCOUNT_SUSPENSION_CHECKSUM: &str = "1d65c097962b0485945992adfa2bb69e53886b2195359748805e894a37192d1bcc7659ab74d2019845b128b1b0e5dbf4";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1266,6 +1270,7 @@ mod tests {
             (24, APPLIED_ACCOUNT_DELETION_INITIATOR_CHECKSUM),
             (25, APPLIED_NETWORK_POLICIES_CHECKSUM),
             (26, APPLIED_HOST_OPERATIONS_CHECKSUM),
+            (27, APPLIED_ACCOUNT_SUSPENSION_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1296,10 +1301,10 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 26
+                first.len() == 27
                     && first.iter().map(|migration| migration.0).eq([
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-                        22, 23, 24, 25, 26
+                        22, 23, 24, 25, 26, 27
                     ])
                     && first.iter().all(|migration| migration.2)
             );

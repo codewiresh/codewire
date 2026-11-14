@@ -578,3 +578,39 @@ class AdjustOrganizationCreditResponse(_message.Message):
     balance_nano_eur: int
     applied: bool
     def __init__(self, organization_id: _Optional[str] = ..., balance_nano_eur: _Optional[int] = ..., applied: _Optional[bool] = ...) -> None: ...
+
+class SuspendAccountRequest(_message.Message):
+    __slots__ = ("account_id", "reason")
+    ACCOUNT_ID_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    account_id: str
+    reason: str
+    def __init__(self, account_id: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
+
+class SuspendAccountResponse(_message.Message):
+    __slots__ = ("account_id", "suspended_organization_ids", "shared_organization_ids", "ports_restricted", "created_environment_ids")
+    ACCOUNT_ID_FIELD_NUMBER: _ClassVar[int]
+    SUSPENDED_ORGANIZATION_IDS_FIELD_NUMBER: _ClassVar[int]
+    SHARED_ORGANIZATION_IDS_FIELD_NUMBER: _ClassVar[int]
+    PORTS_RESTRICTED_FIELD_NUMBER: _ClassVar[int]
+    CREATED_ENVIRONMENT_IDS_FIELD_NUMBER: _ClassVar[int]
+    account_id: str
+    suspended_organization_ids: _containers.RepeatedScalarFieldContainer[str]
+    shared_organization_ids: _containers.RepeatedScalarFieldContainer[str]
+    ports_restricted: int
+    created_environment_ids: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, account_id: _Optional[str] = ..., suspended_organization_ids: _Optional[_Iterable[str]] = ..., shared_organization_ids: _Optional[_Iterable[str]] = ..., ports_restricted: _Optional[int] = ..., created_environment_ids: _Optional[_Iterable[str]] = ...) -> None: ...
+
+class UnsuspendAccountRequest(_message.Message):
+    __slots__ = ("account_id",)
+    ACCOUNT_ID_FIELD_NUMBER: _ClassVar[int]
+    account_id: str
+    def __init__(self, account_id: _Optional[str] = ...) -> None: ...
+
+class UnsuspendAccountResponse(_message.Message):
+    __slots__ = ("account_id", "unsuspended_organization_ids")
+    ACCOUNT_ID_FIELD_NUMBER: _ClassVar[int]
+    UNSUSPENDED_ORGANIZATION_IDS_FIELD_NUMBER: _ClassVar[int]
+    account_id: str
+    unsuspended_organization_ids: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, account_id: _Optional[str] = ..., unsuspended_organization_ids: _Optional[_Iterable[str]] = ...) -> None: ...

@@ -19,8 +19,8 @@ use sqlx::{FromRow, PgPool};
 
 use super::ApiState;
 use super::environments::{
-    check_credit_in, coded, fetch_env_summary, require_environment_access, require_org_member,
-    take_user_rate_limit,
+    check_credit_in, check_not_suspended_in, coded, fetch_env_summary, require_environment_access,
+    require_org_member, take_user_rate_limit,
 };
 use codewire_server_core::rate_limit;
 
@@ -88,6 +88,8 @@ async fn insert_snapshot(
     // No credit, no capture, as creates and starts are refused (#3381): "if they
     // don't have any balance we can't do any snapshots" (owner, 2026-11-12, #4370).
     // A fork from a snapshot is a create, refused by the create's own check.
+    // A suspended organization captures nothing either (#3297).
+    check_not_suspended_in(&mut tx, org_id).await?;
     if credit_enforcement.is_on() {
         check_credit_in(&mut tx, org_id).await?;
     }

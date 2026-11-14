@@ -1107,6 +1107,12 @@ database_lane_orchestration_workspaces() {
       'api::admin::credit_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "admin account suspension matrix" admin-account-suspension \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::admin::suspension_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "credit exhausted stop matrix" credit-exhausted-stop \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

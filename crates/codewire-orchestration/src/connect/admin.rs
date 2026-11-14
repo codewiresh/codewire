@@ -30,7 +30,8 @@ use codewire_admin_proto::codewire::admin::v1::{
     SetDefaultEnvironmentQuotaResponse, SetOrganizationDedicatedCpuRequest,
     SetOrganizationDedicatedCpuResponse, SetOrganizationEnvironmentQuotaRequest,
     SetOrganizationEnvironmentQuotaResponse, SetOrganizationRateCardRequest,
-    SetOrganizationRateCardResponse, ShapeFit, StartupPhaseSummary,
+    SetOrganizationRateCardResponse, ShapeFit, StartupPhaseSummary, SuspendAccountRequest,
+    SuspendAccountResponse, UnsuspendAccountRequest, UnsuspendAccountResponse,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
@@ -428,14 +429,65 @@ impl AdminService for AdminConnectService {
             ..Default::default()
         })
     }
+
+    async fn suspend_account(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SuspendAccountRequest>,
+    ) -> ServiceResult<SuspendAccountResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let account_id = required_id("/account_id", request.account_id)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let suspension = admin::suspension::suspend_account_core(
+            &self.state.pool,
+            &actor.user_id,
+            account_id,
+            request.reason,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(SuspendAccountResponse {
+            account_id: account_id.to_owned(),
+            suspended_organization_ids: suspension.suspended_organizations,
+            shared_organization_ids: suspension.shared_organizations,
+            ports_restricted: suspension.ports_restricted,
+            created_environment_ids: suspension.created_environments,
+            ..Default::default()
+        })
+    }
+
+    async fn unsuspend_account(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, UnsuspendAccountRequest>,
+    ) -> ServiceResult<UnsuspendAccountResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let account_id = required_id("/account_id", request.account_id)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let unsuspension =
+            admin::suspension::unsuspend_account_core(&self.state.pool, &actor.user_id, account_id)
+                .await
+                .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(UnsuspendAccountResponse {
+            account_id: account_id.to_owned(),
+            unsuspended_organization_ids: unsuspension.unsuspended_organizations,
+            ..Default::default()
+        })
+    }
 }
 
 fn required_organization_id(value: &str) -> AppResult<&str> {
+    required_id("/organization_id", value)
+}
+
+fn required_id<'a>(path: &'static str, value: &'a str) -> AppResult<&'a str> {
     let value = value.trim();
     if value.is_empty() {
         return Err(AppError::Validation {
             errors: vec![ValidationIssue {
-                path: "/organization_id".into(),
+                path: path.into(),
                 message: "must not be empty".into(),
             }],
         });

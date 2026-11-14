@@ -41,6 +41,7 @@ pub mod setup;
 pub mod setup_lease;
 pub mod snapshots;
 mod start_timing;
+pub mod suspension_stop;
 pub mod tenant_secret_teardown;
 pub mod unverified_purge;
 pub mod warm_pool;

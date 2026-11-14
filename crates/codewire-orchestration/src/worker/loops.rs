@@ -285,6 +285,7 @@ async fn run_reconciliation(ctx: &WorkerContext) {
     super::unverified_purge::purge_unverified_signups(ctx).await;
     evict_expired_environments(ctx).await;
     stop_credit_exhausted_environments(ctx).await;
+    stop_suspended_environments(ctx).await;
     process_graced_deletions(ctx).await;
     warn_expiring_environments(ctx).await;
     reconcile_incomplete_external_cleanup(ctx).await;
@@ -358,6 +359,34 @@ async fn stop_credit_exhausted_environments(ctx: &WorkerContext) {
         }
         if let Err(e) = enqueue_environment_reconcile(ctx, &id, false, "credit exhausted").await {
             tracing::error!(environment_id = id, error = %e, "reconciler: failed to enqueue reconcile for credit exhaustion");
+        }
+    }
+}
+
+/// Stops the running sandboxes of suspended organizations (#3297). Storage is
+/// kept.
+async fn stop_suspended_environments(ctx: &WorkerContext) {
+    let svc = Service::<PgLifecycleStore>::for_pool(ctx.pool.clone());
+    let ids = match super::suspension_stop::suspended_environment_ids(&ctx.pool).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::error!(error = %e, "reconciler: query suspended environments");
+            return;
+        }
+    };
+    for id in ids {
+        tracing::info!(
+            environment_id = id,
+            "reconciler: stopping a sandbox whose organization is suspended"
+        );
+        if let Err(e) = svc.set_desired_state(&id, "stopped").await {
+            tracing::error!(environment_id = id, error = %e, "reconciler: set desired_state=stopped for suspension");
+            continue;
+        }
+        if let Err(e) =
+            enqueue_environment_reconcile(ctx, &id, false, "organization suspended").await
+        {
+            tracing::error!(environment_id = id, error = %e, "reconciler: failed to enqueue reconcile for suspension");
         }
     }
 }

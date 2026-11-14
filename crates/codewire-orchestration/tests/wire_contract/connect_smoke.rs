@@ -253,7 +253,8 @@ async fn assert_auth_boundary(harness: &Harness) {
         .await;
     assert_connect_error(&denied, StatusCode::FORBIDDEN, "permission_denied", "");
 
-    // Nor may one switch a rate card or move credit (#3381).
+    // Nor may one switch a rate card, move credit (#3381) or suspend an
+    // account (#3297).
     for (method, body) in [
         (
             "SetOrganizationDedicatedCpu",
@@ -271,6 +272,14 @@ async fn assert_auth_boundary(harness: &Harness) {
                 "reason": "contract",
                 "idempotencyKey": "contract",
             }),
+        ),
+        (
+            "SuspendAccount",
+            json!({"accountId": "contract-suspend-target", "reason": "contract"}),
+        ),
+        (
+            "UnsuspendAccount",
+            json!({"accountId": "contract-suspend-target"}),
         ),
     ] {
         let denied = harness
