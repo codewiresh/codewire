@@ -176,6 +176,23 @@ A connection the daemon can't make is closed, and the runner log records
 `nothing_listens`, `refused` (a platform listener such as the workspace SSH
 port), `daemon_unreachable`, or `limit` (256 forwards open at once per VM).
 
+### HTTPS hostnames
+
+A labelled port is also served at `https://<label>-<env>.cw.localhost`
+(#4316). The per-user supervisor runs one router (`local_https.rs`) on
+`127.0.0.1`, and on `[::1]` where that is free, on port 443 or the port in
+`<state root>/local-https/port`. It reads the server name from the
+ClientHello and refuses any name that isn't a running environment's labelled
+port. It then serves the request with the egress front door's TLS and HTTP
+handling and sends it through the same `ForwardTcp` path. A task rebuilds the
+name table after every operation and every five seconds, and listens only
+while some environment has a labelled port. The CA is
+`<state root>/local-https/ca.pem` with its key `ca-key.pem` (mode 0400, in a
+0700 directory), name-constrained to `cw.localhost`. The supervisor log
+records `local_https_state` with the state and port each time it changes.
+Linux needs `net.ipv4.ip_unprivileged_port_start` at 443 or lower, which
+`sudo cw local-https setup` sets.
+
 ## SSH keys in a local VM
 
 A local VM has no SSH key unless its credential profile has one. The key stays

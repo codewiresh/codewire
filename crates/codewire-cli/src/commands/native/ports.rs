@@ -15,7 +15,13 @@ pub(crate) async fn handle_native_environment_port(
     match operation {
         PortOperation::List => {
             let environment = client.get(name).await.map_err(native_status)?;
-            print_native_ports(&environment, output, None)
+            let mut https = https_report(&mut client, name, output_is_text(output)).await?;
+            if !https.urls.is_empty() && environment.state != v1::EnvironmentState::Running as i32 {
+                https.notes.push(format!(
+                    "{name} is not running; its HTTPS URLs answer once it starts."
+                ));
+            }
+            print_native_ports(&environment, &https, output, None)
         }
         PortOperation::Publish {
             port: guest_port,
@@ -50,7 +56,8 @@ pub(crate) async fn handle_native_environment_port(
                 summary.push('\n');
                 summary.push_str(&note);
             }
-            print_native_ports(&environment, output, Some(&summary))
+            let https = https_report(&mut client, name, output_is_text(output)).await?;
+            print_native_ports(&environment, &https, output, Some(&summary))
         }
         PortOperation::Unpublish {
             port: guest_port,
@@ -68,7 +75,8 @@ pub(crate) async fn handle_native_environment_port(
                 .await
                 .map_err(native_status)?;
             let summary = format!("Withdrew 127.0.0.1:{host_port} -> {name}:{guest_port}");
-            print_native_ports(&environment, output, Some(&summary))
+            let https = https_report(&mut client, name, output_is_text(output)).await?;
+            print_native_ports(&environment, &https, output, Some(&summary))
         }
     }
 }
@@ -137,40 +145,74 @@ fn native_port_views(environment: &v1::Environment) -> Vec<NativeHostPortView> {
         .collect()
 }
 
+fn output_is_text(output: OutputFormat) -> bool {
+    !matches!(output, OutputFormat::Json)
+}
+
+/// One entry of `cw ports --output json`: a host port, or a labelled port's
+/// HTTPS URL.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum NativePortEntry<'a> {
+    HostPort(&'a NativeHostPortView),
+    Https(&'a NativeHttpsView),
+}
+
 fn print_native_ports(
     environment: &v1::Environment,
+    https: &HttpsReport,
     output: OutputFormat,
     summary: Option<&str>,
 ) -> anyhow::Result<()> {
     let ports = native_port_views(environment);
     if matches!(output, OutputFormat::Json) {
-        println!("{}", serde_json::to_string_pretty(&ports)?);
+        let entries: Vec<NativePortEntry<'_>> = ports
+            .iter()
+            .map(NativePortEntry::HostPort)
+            .chain(https.urls.iter().map(NativePortEntry::Https))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
         return Ok(());
     }
     print!(
         "{}",
-        format_native_ports(&environment.name, &ports, summary)
+        format_native_ports(&environment.name, &ports, https, summary)
     );
     Ok(())
 }
 
-fn format_native_ports(name: &str, ports: &[NativeHostPortView], summary: Option<&str>) -> String {
+fn format_native_ports(
+    name: &str,
+    ports: &[NativeHostPortView],
+    https: &HttpsReport,
+    summary: Option<&str>,
+) -> String {
     let mut output = String::new();
     if let Some(summary) = summary {
         output.push_str(summary);
         output.push('\n');
     }
-    if ports.is_empty() {
+    if ports.is_empty() && https.urls.is_empty() {
         if summary.is_none() {
             output.push_str(&format!("{name} publishes no host ports\n"));
         }
-        return output;
+    } else {
+        if summary.is_some() {
+            output.push_str(&format!("{name} publishes:\n"));
+        }
+        for port in ports {
+            output.push_str(&format!("  {} -> {}\n", port.listen, port.guest_port));
+        }
+        for view in &https.urls {
+            output.push_str(&format!(
+                "  {} -> {} ({})\n",
+                view.url, view.guest_port, view.label
+            ));
+        }
     }
-    if summary.is_some() {
-        output.push_str(&format!("{name} publishes:\n"));
-    }
-    for port in ports {
-        output.push_str(&format!("  {} -> {}\n", port.listen, port.guest_port));
+    for note in &https.notes {
+        output.push_str(note);
+        output.push('\n');
     }
     output
 }
@@ -223,21 +265,54 @@ mod tests {
             listen: "127.0.0.1:18080".to_owned(),
             guest_port: 3_000,
         }];
+        let none = HttpsReport::default();
         assert_eq!(
-            format_native_ports("web", &ports, None),
+            format_native_ports("web", &ports, &none, None),
             "  127.0.0.1:18080 -> 3000\n"
         );
         assert_eq!(
-            format_native_ports("web", &[], None),
+            format_native_ports("web", &[], &none, None),
             "web publishes no host ports\n"
         );
         assert_eq!(
-            format_native_ports("web", &[], Some("Withdrew 127.0.0.1:18080 from web")),
+            format_native_ports("web", &[], &none, Some("Withdrew 127.0.0.1:18080 from web")),
             "Withdrew 127.0.0.1:18080 from web\n"
         );
         assert_eq!(
-            format_native_ports("web", &ports, Some("Published")),
+            format_native_ports("web", &ports, &none, Some("Published")),
             "Published\nweb publishes:\n  127.0.0.1:18080 -> 3000\n"
+        );
+    }
+
+    #[test]
+    fn labelled_ports_list_their_https_urls_and_notes() {
+        let https = HttpsReport {
+            urls: vec![NativeHttpsView {
+                url: "https://web-shop.cw.localhost".to_owned(),
+                guest_port: 3_000,
+                label: "web".to_owned(),
+            }],
+            notes: vec!["A note.".to_owned()],
+        };
+        assert_eq!(
+            format_native_ports("shop", &[], &https, None),
+            "  https://web-shop.cw.localhost -> 3000 (web)\nA note.\n"
+        );
+        let ports = [NativeHostPortView {
+            listen: "127.0.0.1:18080".to_owned(),
+            guest_port: 3_000,
+        }];
+        let entries: Vec<_> = ports
+            .iter()
+            .map(NativePortEntry::HostPort)
+            .chain(https.urls.iter().map(NativePortEntry::Https))
+            .collect();
+        assert_eq!(
+            serde_json::to_value(&entries).unwrap(),
+            serde_json::json!([
+                {"listen": "127.0.0.1:18080", "guest_port": 3000},
+                {"url": "https://web-shop.cw.localhost", "guest_port": 3000, "label": "web"},
+            ])
         );
     }
 }

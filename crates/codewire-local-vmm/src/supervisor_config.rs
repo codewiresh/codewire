@@ -15,7 +15,7 @@ use crate::control::v1;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible. Linux and Darwin serve the
 // same shared supervisor; Darwin's former stopped-state dispatcher was 8.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 22;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 23;
 /// The oldest supervisor protocol this cw works with: v0.3.388's (#2826). After a cw
 /// update, a supervisor in [minimum, current] keeps serving its VMs; only an
 /// idle older one is replaced (`supervisor_upgrade`).
@@ -73,6 +73,10 @@ pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         22,
         "operations by request ID (#3609): GetOperation also names an operation by the lifecycle request ID it was journaled for, so a host agent tells a request it already sent from a new one; an older supervisor refuses such a request as an invalid operation ID",
     ),
+    (
+        23,
+        "local HTTPS hostnames (#4316): the supervisor serves each running environment's labelled ports at https://<label>-<env>.cw.localhost, GetLocalHttps and SetLocalHttpsPort report and choose its port, and create refuses a labelled port whose hostname another environment already has; an older supervisor serves none",
+    ),
 ];
 
 /// A supervisor capability newer than the minimum protocol.
@@ -94,10 +98,13 @@ pub enum SupervisorFeature {
     LocalImageCache,
     /// `GetOperation` by request ID.
     OperationByRequest,
+    /// HTTPS hostnames for labelled ports, `GetLocalHttps` and
+    /// `SetLocalHttpsPort`.
+    LocalHttps,
 }
 
 impl SupervisorFeature {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Retire,
         Self::Ssh,
         Self::NetworkPolicies,
@@ -106,6 +113,7 @@ impl SupervisorFeature {
         Self::LocalCheckpoints,
         Self::LocalImageCache,
         Self::OperationByRequest,
+        Self::LocalHttps,
     ];
 
     /// The protocol that introduced it.
@@ -119,6 +127,7 @@ impl SupervisorFeature {
             Self::LocalCheckpoints => 20,
             Self::LocalImageCache => 21,
             Self::OperationByRequest => 22,
+            Self::LocalHttps => 23,
         }
     }
 }
@@ -414,7 +423,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 22);
+        assert_eq!(info.protocol_version, 23);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(

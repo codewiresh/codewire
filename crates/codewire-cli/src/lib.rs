@@ -215,6 +215,7 @@ const HELP_SECTIONS: &[HelpSection] = &[
             "nuke",
             "refresh-skills",
             "checkpoint",
+            "local-https",
         ],
     ),
     HelpSection::full("Reusable setup", &["preset"]),
@@ -632,6 +633,16 @@ enum Command {
         long_about = "List an environment's published ports, or change one mapping:\n  cw ports ENV\n  cw ports ENV --publish 3000 [--host-port 3001]          (local: 127.0.0.1 on this host)\n  cw ports ENV --publish 3000 [--label web] [--access creator]   (cloud: a preview URL)\n  cw ports ENV --unpublish 3000\n\nListing never starts an environment; publishing needs a running one."
     )]
     Ports(PortsArgs),
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[command(
+        name = "local-https",
+        about = "HTTPS URLs for local environments' labelled ports",
+        long_about = "A local environment's labelled ports (`ports:` entries with a `label` in codewire.yaml) are served at https://<label>-<env>.cw.localhost while it runs:\n  cw local-https status\n  cw local-https port 8443|443|off\n  sudo cw local-https setup        (Linux, once: lets port 443 be used without root)\n\n`cw ports ENV` lists each URL."
+    )]
+    LocalHttps {
+        #[command(subcommand)]
+        command: commands::LocalHttpsCommand,
+    },
     #[command(about = "Inspect or change the cw defaults in a running environment")]
     Runtime(EnvRuntimeArgs),
     #[command(about = "Inspect cloud managed agent support and saved requests")]
@@ -1046,6 +1057,8 @@ where
         Command::Logs(args) => flat::handle_logs(&globals, args).await,
         Command::Update(args) => flat::handle_update(&globals, args).await,
         Command::Ports(args) => flat::handle_ports(&globals, args).await,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Command::LocalHttps { command } => commands::handle_local_https(command).await,
         Command::Export(args) => handle_export(&globals, args).await,
         command @ (Command::Info(_)
         | Command::Create(_)

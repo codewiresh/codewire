@@ -29,6 +29,11 @@ service LocalSupervisorService {
   // environment generation. The response and request are material-free.
   rpc EnsureCredentialBroker(EnvironmentSelector) returns (CredentialBrokerRuntime);
   rpc GetDaemonAccess(EnvironmentSelector) returns (DaemonAccess);
+  // HTTPS hostnames for labelled ports (#4316, protocol 23): the router's
+  // state and, for a named environment, each labelled port's hostname.
+  rpc GetLocalHttps(EnvironmentSelector) returns (LocalHttps);
+  // Chooses the router's port, or turns it off; remembered for this user.
+  rpc SetLocalHttpsPort(SetLocalHttpsPortRequest) returns (LocalHttps);
   // Serves SSH for one running environment over this owner-only socket
   // (#3025, protocol 15). The client's first frame opens the stream; every
   // other frame in either direction carries SSH protocol bytes. The supervisor
@@ -912,6 +917,48 @@ message DeleteEnvironmentResponse {
 // The capability is intentionally returned only over an admitted owner-only
 // Unix socket. Callers must keep it in memory and must never serialize or log
 // this message.
+// What the local HTTPS router is doing (#4316).
+enum LocalHttpsState {
+  LOCAL_HTTPS_STATE_UNSPECIFIED = 0;
+  // No environment has a labelled port, so nothing listens.
+  LOCAL_HTTPS_STATE_UNUSED = 1;
+  LOCAL_HTTPS_STATE_SERVING = 2;
+  // This user may not listen on the port: on Linux, a port below
+  // net.ipv4.ip_unprivileged_port_start.
+  LOCAL_HTTPS_STATE_NOT_PERMITTED = 3;
+  // Another program listens on the port.
+  LOCAL_HTTPS_STATE_IN_USE = 4;
+  // The user turned local HTTPS off.
+  LOCAL_HTTPS_STATE_OFF = 5;
+  // Listening failed otherwise, or the local CA could not be loaded.
+  LOCAL_HTTPS_STATE_FAILED = 6;
+}
+
+message LocalHttps {
+  LocalHttpsState state = 1;
+  // The port the router serves on, or tries to. Zero when it is off.
+  uint32 port = 2;
+  // The CA certificate a browser must trust.
+  string ca_certificate_path = 3;
+  // Why listening failed, for LOCAL_HTTPS_STATE_FAILED. Carries no key
+  // material.
+  string failure = 4;
+  // The named environment's labelled ports, in guest port order.
+  repeated LocalHttpsHost hosts = 5;
+}
+
+message LocalHttpsHost {
+  uint32 guest_port = 1;
+  string label = 2;
+  // Empty when the label and the environment's name make no hostname.
+  string hostname = 3;
+}
+
+message SetLocalHttpsPortRequest {
+  // The port to listen on; zero turns local HTTPS off.
+  uint32 port = 1;
+}
+
 message DaemonAccess {
   string hybrid_socket = 1;
   uint32 guest_port = 2;

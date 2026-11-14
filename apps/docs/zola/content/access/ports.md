@@ -1,6 +1,6 @@
 ---
 title: Ports and preview URLs
-description: Publish an application port as an HTTPS preview URL on the platform, or on 127.0.0.1 for a local VM.
+description: Publish an application port as an HTTPS preview URL on the platform, or on 127.0.0.1 and an HTTPS hostname for a local VM.
 updated: 2026-11-14
 weight: 5
 aliases: ["/guides/previews", "/concepts/preview-environments"]
@@ -110,6 +110,63 @@ reachable from your machine unless you publish that exact port. When nothing
 in the VM listens on the port yet, `cw ports --publish` says so; connections
 are closed until a server starts. The workspace's own SSH and credential
 ports can't be reached this way.
+
+## Local VM: HTTPS hostnames
+
+A labelled port of a local VM is also served at an HTTPS hostname of its own
+while the VM runs:
+
+```yaml
+ports:
+  - port: 3000
+    label: web
+```
+
+```text
+https://{label}-{environment}.cw.localhost
+```
+
+`cw create` prints each URL, and `cw ports ENV` lists them beside the host
+ports. Browsers send every `.localhost` name to your own machine without
+DNS, and keep cookies per hostname. So two environments running copies of one
+app, at `web-shop-a.cw.localhost` and `web-shop-b.cw.localhost`, keep their
+own sign-ins, which two host ports on `localhost` can't. Requests reach the
+port on the VM's own loopback, as host ports do. They keep their `Host`
+header and gain `X-Forwarded-Proto: https` and `X-Forwarded-Host`.
+WebSockets work. A stopped VM's hostnames refuse connections.
+
+A hostname is one DNS label. The label and the environment's name together
+may use lowercase letters, digits and inner hyphens, 63 characters in all.
+A port whose label and name don't fit, such as a label `Web UI` or a name
+with `_`, works as before but gets no HTTPS URL, and `cw ports` says why.
+`cw create` refuses a labelled port whose hostname another environment
+already has, and names it. Ports without a label are unaffected.
+
+The certificates come from a certificate authority of your own. Codewire
+makes it the first time, keeps it in its local state readable only by you,
+and it can sign only names under `cw.localhost`. `cw local-https status`
+prints where its certificate is. Browsers don't trust it yet, so they warn.
+Command-line tools trust it when told to: `curl --cacert PATH`, or
+`SSL_CERT_FILE=PATH` for most OpenSSL-based tools, and
+`NODE_EXTRA_CA_CERTS=PATH` for Node.js.
+
+On Linux only root may listen on port 443 until you allow it once:
+
+```sh
+sudo cw local-https setup
+```
+
+It lets any program on your machine, not only root, listen on ports 443 and
+up, and changes nothing else; it prints how to undo it. If another program
+already listens on 443, `cw` names it and asks whether to serve on port 8443
+instead, where URLs end in `:8443`. `cw local-https port 8443|443|off`
+changes the choice later. Any program on your machine can open these URLs,
+as with host ports.
+
+Cookies are kept per hostname, except a cookie an app sets with
+`Domain=cw.localhost`, which every local environment's hostnames share, as
+any parent domain would. Leave `Domain` unset to keep a cookie to one
+environment.
 
 ## Related
 

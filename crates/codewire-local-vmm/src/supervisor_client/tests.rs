@@ -264,6 +264,20 @@ impl LocalSupervisorService for ProtocolPeer {
         Err(Status::unimplemented("unused synthetic method"))
     }
 
+    async fn get_local_https(
+        &self,
+        _: Request<v1::EnvironmentSelector>,
+    ) -> Result<Response<v1::LocalHttps>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
+
+    async fn set_local_https_port(
+        &self,
+        _: Request<v1::SetLocalHttpsPortRequest>,
+    ) -> Result<Response<v1::LocalHttps>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
+
     type OpenEnvironmentSshStreamStream =
         tokio_stream::Iter<std::vec::IntoIter<Result<v1::SshStreamFrame, Status>>>;
 

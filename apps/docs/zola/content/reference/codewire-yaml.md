@@ -23,7 +23,7 @@ in every file merged with repeated `--file`; see
 | `environment` | map | plain variables, up to 256; never secret values |
 | `secrets` | object | `organization: true`, `user: local|platform`, `project: NAME` |
 | `credentials` | object | `profile: NAME`, `local:NAME` or `platform:NAME` |
-| `ports` | list | `port` with `label` and `access` for a preview; `host_port` and `guest_port` for a local VM port |
+| `ports` | list | `port` with `label` and `access` for a preview; `host_port` and `guest_port` for a local VM port; on a local VM a `label` also serves the port at `https://{label}-{env}.cw.localhost` when the two form one DNS label |
 | `cpu`, `memory`, `disk` | quoted strings | `100m` to `256` CPUs; `128Mi` to `1Ti`; whole GiB from `1Gi` to `16384Gi` |
 | `agents` | object | `install: bool` and `tools: [ids]`; `claude-code` and `codex` are the agents Codewire manages |
 | `skills` | list | `source: repository` with `path` (relative to `/workspace`), or `source: user` with `name` (from `~/.codewire/skills`); optional `agents`; needs `agents.tools`. See [Agent skills](@/agents/skills.md) |

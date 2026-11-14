@@ -143,6 +143,17 @@ fn start(door: &Door) -> (DuplexStream, Outcome) {
     )
 }
 
+/// Accepts one end of an in-memory connection for whichever host its
+/// ClientHello names; returns the peer's end.
+fn start_named(door: &Door) -> (DuplexStream, Outcome) {
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let door = door.clone();
+    (
+        client,
+        tokio::spawn(async move { door.accept_named(server).await }),
+    )
+}
+
 /// A client that trusts only `ca`.
 fn client_config(ca: &EnvironmentCa, alpn: &[&[u8]]) -> Arc<ClientConfig> {
     let mut roots = RootCertStore::empty();
@@ -596,6 +607,64 @@ async fn another_server_name_is_handed_back_untouched() {
 }
 
 #[tokio::test]
+async fn a_named_accept_serves_the_host_its_client_hello_names() {
+    let (door, backend) = door();
+    for host in [BOUND, SECOND] {
+        let (client, outcome) = start_named(&door);
+        let tls = TlsConnector::from(client_config(door.ca(), &[b"http/1.1"]))
+            .connect(named(host), client)
+            .await
+            .expect("handshake");
+        let mut sender = http1(tls).await;
+        let request = Request::get("/")
+            .header(HOST, host)
+            .body(Full::default())
+            .unwrap();
+        let response = sender.send_request(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, "hello, world");
+        drop(sender);
+        assert_eq!(served(outcome).await.requests, 1);
+    }
+    let hosts: Vec<String> = backend.seen().into_iter().map(|seen| seen.host).collect();
+    assert_eq!(hosts, [BOUND, SECOND]);
+}
+
+#[tokio::test]
+async fn a_named_accept_refuses_a_host_the_source_does_not_sign_for() {
+    let (door, backend) = door();
+    let (mut client, outcome) = start_named(&door);
+    client
+        .write_all(&client_hello(door.ca(), named(OTHER)))
+        .await
+        .unwrap();
+    assert_eq!(failed(outcome).await, FrontDoorError::UnboundHost);
+    assert_closed_silently(&mut client).await;
+    assert!(backend.seen().is_empty());
+}
+
+#[tokio::test]
+async fn a_named_accept_hands_back_a_connection_that_names_no_host() {
+    let (door, backend) = door();
+    let hello = client_hello(door.ca(), address());
+    let not_tls = format!("GET / HTTP/1.1\r\nHost: {BOUND}\r\n\r\n").into_bytes();
+    for (sent, reason, read) in [
+        (hello.clone(), HandBackReason::NoServerName, hello),
+        (not_tls, HandBackReason::NotClientHello, b"G".to_vec()),
+    ] {
+        let (mut client, outcome) = start_named(&door);
+        client.write_all(&sent).await.unwrap();
+        let (stream, got, why) = handed_back(outcome).await;
+        assert_eq!(why, reason);
+        assert_eq!(got, read);
+        drop(stream);
+        assert_closed_silently(&mut client).await;
+    }
+    assert!(backend.seen().is_empty());
+}
+
+#[tokio::test]
 async fn bytes_that_are_not_tls_are_handed_back_after_one_byte() {
     let (door, backend) = door();
     let sent = format!("GET / HTTP/1.1\r\nHost: {BOUND}\r\n\r\n");
@@ -771,11 +840,37 @@ fn requests_are_routed_before_the_back_end() {
             request.uri(),
             request.headers()
         );
-        assert_eq!(route(&mut request, BOUND), expected, "{before}");
+        assert_eq!(route(&mut request, BOUND, 443), expected, "{before}");
         if expected.is_ok() {
             assert!(request.uri().authority().is_none(), "{before}");
             assert!(request.uri().path().starts_with("/x") || request.uri() == "/socket");
         }
+    }
+}
+
+#[test]
+fn an_authority_may_name_the_port_clients_connect_to() {
+    let bound_on = |port: u16| format!("{BOUND}:{port}");
+    for (authority, port, expected) in [
+        (BOUND.to_owned(), 8443, Ok(Route::Ordinary)),
+        (bound_on(8443), 8443, Ok(Route::Ordinary)),
+        (bound_on(443), 8443, Err(StatusCode::MISDIRECTED_REQUEST)),
+        (bound_on(8443), 443, Err(StatusCode::MISDIRECTED_REQUEST)),
+        (
+            format!("{OTHER}:8443"),
+            8443,
+            Err(StatusCode::MISDIRECTED_REQUEST),
+        ),
+    ] {
+        let mut request = Request::get("/x")
+            .header(HOST, authority.as_str())
+            .body(())
+            .unwrap();
+        assert_eq!(
+            route(&mut request, BOUND, port),
+            expected,
+            "{authority} on {port}"
+        );
     }
 }
 

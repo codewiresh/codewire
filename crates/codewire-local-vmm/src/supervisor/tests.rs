@@ -886,6 +886,7 @@ pub(super) fn test_supervisor_service(core: SupervisorCore) -> SupervisorRpc {
         host_keys,
         ssh_streams: Arc::default(),
         network_policies,
+        local_https: Arc::new(local_https::channel().0),
         hold_drains: Arc::default(),
     }
 }

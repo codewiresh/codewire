@@ -8,6 +8,10 @@
 //! [`Backend`]. Every other connection goes back to the caller untouched, with
 //! every byte read from it.
 //!
+//! [`FrontDoor::accept_named`] serves instead whichever host the ClientHello
+//! names, when the front door's [`LeafSource`] signs for it: how a caller with
+//! its own CA routes several hosts through one listener.
+//!
 //! The CA private key lives only in this process's memory. The front door
 //! holds no credentials and never opens an outbound connection: the back end
 //! owns everything upstream. Logs carry the bound host, an outcome category
@@ -32,7 +36,6 @@ use http::{Request, Response};
 use rustls::ServerConfig;
 use rustls::crypto::CryptoProvider;
 use rustls::server::{ClientHello, NoServerSessionStorage, ResolvesServerCert};
-use rustls::sign::CertifiedKey;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
@@ -40,6 +43,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use ca::{BACKDATE, CA_VALIDITY, CaError, EnvironmentCa, LEAF_VALIDITY, MAX_BOUND_HOSTS};
 pub use hyper::body::Incoming;
+pub use rustls::sign::CertifiedKey;
 
 /// The most bytes read while looking for a ClientHello. A real one is a few
 /// hundred bytes to a few KiB, even with post-quantum key shares.
@@ -96,7 +100,8 @@ pub trait Backend: Send + Sync + 'static {
     ) -> impl Future<Output = UpgradeOutcome> + Send;
 }
 
-/// Limits a caller may choose per front door.
+/// Limits a caller may choose per front door, and the port clients reach it
+/// on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FrontDoorConfig {
     /// Live connections, from accept to close. One more is closed before
@@ -105,6 +110,9 @@ pub struct FrontDoorConfig {
     /// A spliced WebSocket with no bytes in either direction for this long is
     /// closed at both ends.
     pub websocket_idle_timeout: Duration,
+    /// The port clients connect to. A request's authority names the host
+    /// alone or with this port; 443 by default.
+    pub port: u16,
 }
 
 impl Default for FrontDoorConfig {
@@ -112,6 +120,7 @@ impl Default for FrontDoorConfig {
         Self {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             websocket_idle_timeout: DEFAULT_WEBSOCKET_IDLE_TIMEOUT,
+            port: 443,
         }
     }
 }
@@ -182,10 +191,32 @@ pub enum FrontDoorError {
     Handshake,
 }
 
+/// Where a front door's leaf certificates come from.
+pub trait LeafSource: Send + Sync + 'static {
+    /// The canonical host `host` names and its current leaf, or
+    /// [`CaError::UnboundHost`] when this source signs nothing for it.
+    fn leaf(&self, host: &str) -> Result<(String, Arc<CertifiedKey>), CaError>;
+}
+
+impl LeafSource for EnvironmentCa {
+    fn leaf(&self, host: &str) -> Result<(String, Arc<CertifiedKey>), CaError> {
+        EnvironmentCa::leaf(self, host)
+    }
+}
+
+/// Which host a connection must be for.
+#[derive(Clone, Copy)]
+enum Expected<'a> {
+    /// The host the broker attributed the dial to.
+    Bound(&'a str),
+    /// Whichever host the ClientHello names, if the leaf source signs for it.
+    Named,
+}
+
 /// Terminates TLS for one environment's bound hosts and serves their requests
 /// to a [`Backend`]. Share it behind an `Arc` to accept concurrently.
-pub struct FrontDoor<B> {
-    ca: EnvironmentCa,
+pub struct FrontDoor<B, L = EnvironmentCa> {
+    leaves: L,
     backend: Arc<B>,
     config: FrontDoorConfig,
     provider: Arc<CryptoProvider>,
@@ -193,10 +224,10 @@ pub struct FrontDoor<B> {
     stop: CancellationToken,
 }
 
-impl<B: Backend> FrontDoor<B> {
-    pub fn new(ca: EnvironmentCa, backend: B, config: FrontDoorConfig) -> Self {
+impl<B: Backend, L: LeafSource> FrontDoor<B, L> {
+    pub fn new(leaves: L, backend: B, config: FrontDoorConfig) -> Self {
         Self {
-            ca,
+            leaves,
             backend: Arc::new(backend),
             config,
             provider: Arc::new(rustls::crypto::ring::default_provider()),
@@ -205,9 +236,9 @@ impl<B: Backend> FrontDoor<B> {
         }
     }
 
-    /// The CA whose certificate the environment trusts.
-    pub fn ca(&self) -> &EnvironmentCa {
-        &self.ca
+    /// Where the leaves come from: for an environment, the CA it trusts.
+    pub fn ca(&self) -> &L {
+        &self.leaves
     }
 
     /// Serve one connection the broker attributed to `bound_host`. Resolves
@@ -221,7 +252,7 @@ impl<B: Backend> FrontDoor<B> {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let result = self.accept_inner(stream, bound_host).await;
+        let result = self.accept_inner(stream, Expected::Bound(bound_host)).await;
         match &result {
             Ok(Accepted::Served(served)) => tracing::debug!(
                 host = bound_host,
@@ -240,10 +271,37 @@ impl<B: Backend> FrontDoor<B> {
         result
     }
 
+    /// Serve one connection for the host its ClientHello names, when the leaf
+    /// source signs for that host; a name it does not sign for is
+    /// [`FrontDoorError::UnboundHost`]. Resolves when the connection ends, or
+    /// at once with the stream when it is not a ClientHello with a server
+    /// name. The back end sees the source's canonical host.
+    pub async fn accept_named<S>(&self, stream: S) -> Result<Accepted<S>, FrontDoorError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let result = self.accept_inner(stream, Expected::Named).await;
+        // The server name is peer input, so it is not logged.
+        match &result {
+            Ok(Accepted::Served(served)) => tracing::debug!(
+                outcome = "served",
+                requests = served.requests,
+                upgraded = served.upgraded,
+            ),
+            Ok(Accepted::HandBack { read, reason, .. }) => tracing::debug!(
+                outcome = "hand_back",
+                reason = reason.as_str(),
+                bytes = read.len(),
+            ),
+            Err(error) => tracing::debug!(outcome = %error),
+        }
+        result
+    }
+
     async fn accept_inner<S>(
         &self,
         mut stream: S,
-        bound_host: &str,
+        expected: Expected<'_>,
     ) -> Result<Accepted<S>, FrontDoorError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -254,10 +312,12 @@ impl<B: Backend> FrontDoor<B> {
         let Ok(permit) = self.permits.clone().try_acquire_owned() else {
             return Err(FrontDoorError::AtCapacity);
         };
-        let (host, leaf) = self.ca.leaf(bound_host).map_err(|error| match error {
-            CaError::UnboundHost => FrontDoorError::UnboundHost,
-            _ => FrontDoorError::Certificate,
-        })?;
+        // A bound host's leaf comes first, so a host this door never signs
+        // for is refused before anything is read.
+        let bound = match expected {
+            Expected::Bound(host) => Some(self.leaf(host)?),
+            Expected::Named => None,
+        };
 
         let mut read = BytesMut::new();
         let hello = tokio::select! {
@@ -268,28 +328,36 @@ impl<B: Backend> FrontDoor<B> {
                 hello::read_client_hello(&mut stream, &mut read),
             ) => hello,
         };
-        let reason = match hello {
+        let name = match hello {
             Err(_elapsed) => return Err(FrontDoorError::HelloTimeout),
             Ok(Err(hello::HelloError::TooLarge)) => return Err(FrontDoorError::HelloTooLarge),
             Ok(Err(hello::HelloError::Io)) => return Err(FrontDoorError::Io),
-            Ok(Ok(hello::Hello::NotClientHello)) => Some(HandBackReason::NotClientHello),
+            Ok(Ok(hello::Hello::NotClientHello)) => Err(HandBackReason::NotClientHello),
             Ok(Ok(hello::Hello::ClientHello { server_name: None })) => {
-                Some(HandBackReason::NoServerName)
+                Err(HandBackReason::NoServerName)
             }
             Ok(Ok(hello::Hello::ClientHello {
                 server_name: Some(name),
-            })) if !name.eq_ignore_ascii_case(host.as_bytes()) => {
-                Some(HandBackReason::OtherServerName)
-            }
-            Ok(Ok(hello::Hello::ClientHello { .. })) => None,
+            })) => Ok(name),
         };
-        if let Some(reason) = reason {
-            return Ok(Accepted::HandBack {
-                stream,
-                read: read.freeze(),
-                reason,
-            });
-        }
+        let chosen = match (name, bound) {
+            (Err(reason), _) => Err(reason),
+            (Ok(name), Some((host, leaf))) if name.eq_ignore_ascii_case(host.as_bytes()) => {
+                Ok((host, leaf))
+            }
+            (Ok(_), Some(_)) => Err(HandBackReason::OtherServerName),
+            (Ok(name), None) => Ok(self.named_leaf(&name)?),
+        };
+        let (host, leaf) = match chosen {
+            Ok(chosen) => chosen,
+            Err(reason) => {
+                return Ok(Accepted::HandBack {
+                    stream,
+                    read: read.freeze(),
+                    reason,
+                });
+            }
+        };
 
         let acceptor = TlsAcceptor::from(self.server_config(host.clone(), leaf)?);
         let handshake = tokio::time::timeout(
@@ -313,10 +381,25 @@ impl<B: Backend> FrontDoor<B> {
             self.backend.clone(),
             self.stop.child_token(),
             self.config.websocket_idle_timeout,
+            self.config.port,
         );
         let served = connection.serve(tls, http2).await;
         drop(permit);
         Ok(Accepted::Served(served))
+    }
+
+    fn leaf(&self, host: &str) -> Result<(String, Arc<CertifiedKey>), FrontDoorError> {
+        self.leaves.leaf(host).map_err(|error| match error {
+            CaError::UnboundHost => FrontDoorError::UnboundHost,
+            _ => FrontDoorError::Certificate,
+        })
+    }
+
+    /// The leaf for a server name read from a ClientHello, which need not be
+    /// UTF-8.
+    fn named_leaf(&self, name: &[u8]) -> Result<(String, Arc<CertifiedKey>), FrontDoorError> {
+        let name = std::str::from_utf8(name).map_err(|_| FrontDoorError::UnboundHost)?;
+        self.leaf(name)
     }
 
     /// One handshake's configuration: only `host`'s leaf, for only that
@@ -342,7 +425,7 @@ impl<B: Backend> FrontDoor<B> {
     }
 }
 
-impl<B> FrontDoor<B> {
+impl<B, L> FrontDoor<B, L> {
     /// Stop accepting and end every live connection, spliced WebSockets
     /// included. Dropping the front door does the same.
     pub fn close(&self) {
@@ -351,7 +434,7 @@ impl<B> FrontDoor<B> {
     }
 }
 
-impl<B> Drop for FrontDoor<B> {
+impl<B, L> Drop for FrontDoor<B, L> {
     fn drop(&mut self) {
         self.close();
     }

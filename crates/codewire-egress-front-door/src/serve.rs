@@ -31,6 +31,8 @@ pub(crate) struct Connection<B> {
     stop: CancellationToken,
     splices: TaskTracker,
     websocket_idle_timeout: Duration,
+    /// The port clients connect to, which a request's authority may name.
+    port: u16,
     requests: AtomicU64,
     upgraded: AtomicU64,
 }
@@ -48,6 +50,7 @@ impl<B: Backend> Connection<B> {
         backend: Arc<B>,
         stop: CancellationToken,
         websocket_idle_timeout: Duration,
+        port: u16,
     ) -> Arc<Self> {
         Arc::new(Self {
             host,
@@ -55,6 +58,7 @@ impl<B: Backend> Connection<B> {
             stop,
             splices: TaskTracker::new(),
             websocket_idle_timeout,
+            port,
             requests: AtomicU64::new(0),
             upgraded: AtomicU64::new(0),
         })
@@ -115,7 +119,7 @@ impl<B: Backend> Connection<B> {
 
     async fn handle(self: Arc<Self>, mut request: Request<Incoming>) -> Response<ResponseBody> {
         self.requests.fetch_add(1, Ordering::Relaxed);
-        let route = match route(&mut request, &self.host) {
+        let route = match route(&mut request, &self.host, self.port) {
             Ok(route) => route,
             Err(status) => {
                 tracing::debug!(
@@ -181,7 +185,11 @@ impl<B: Backend> Connection<B> {
 
 /// Checks a request before the back end sees it and puts its URI in origin
 /// form. `Err` is the status to answer with instead.
-pub(crate) fn route<T>(request: &mut Request<T>, host: &str) -> Result<Route, StatusCode> {
+pub(crate) fn route<T>(
+    request: &mut Request<T>,
+    host: &str,
+    port: u16,
+) -> Result<Route, StatusCode> {
     if request.method() == Method::CONNECT {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -213,7 +221,7 @@ pub(crate) fn route<T>(request: &mut Request<T>, host: &str) -> Result<Route, St
         }
         single(request.headers(), HOST).ok().flatten()
     };
-    if !authority.is_some_and(|authority| names_host(authority, host)) {
+    if !authority.is_some_and(|authority| names_host(authority, host, port)) {
         return Err(StatusCode::MISDIRECTED_REQUEST);
     }
     let route = if !request.headers().contains_key(UPGRADE) {
@@ -227,12 +235,14 @@ pub(crate) fn route<T>(request: &mut Request<T>, host: &str) -> Result<Route, St
     Ok(route)
 }
 
-/// `authority` is the bound host, optionally with port 443.
-fn names_host(authority: &str, host: &str) -> bool {
-    authority
-        .strip_suffix(":443")
-        .unwrap_or(authority)
-        .eq_ignore_ascii_case(host)
+/// `authority` is the bound host, optionally with the port clients connect
+/// to.
+fn names_host(authority: &str, host: &str, port: u16) -> bool {
+    let named = match authority.rsplit_once(':') {
+        Some((name, given)) if given == port.to_string() => name,
+        _ => authority,
+    };
+    named.eq_ignore_ascii_case(host)
 }
 
 /// An HTTP/1.1 GET without a body, whose only Upgrade token is `websocket`

@@ -592,6 +592,38 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
+    /// The local HTTPS router's state and, for `name`, its labelled ports'
+    /// hostnames (#4316). `None` from a supervisor older than protocol 23,
+    /// which serves no hostnames; `name` empty asks only for the state.
+    pub async fn local_https(&mut self, name: &str) -> Result<Option<v1::LocalHttps>, Status> {
+        if !self.supports(SupervisorFeature::LocalHttps) {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.inner
+                .get_local_https(read_selector(name))
+                .await?
+                .into_inner(),
+        ))
+    }
+
+    /// Choose the router's port, or turn it off with 0. Fails with
+    /// `Unimplemented` before contacting a supervisor older than protocol 23.
+    pub async fn set_local_https_port(&mut self, port: u16) -> Result<v1::LocalHttps, Status> {
+        if !self.supports(SupervisorFeature::LocalHttps) {
+            return Err(Status::unimplemented(
+                "your local VMs run on an older cw's supervisor, which serves no HTTPS hostnames; `cw upgrade --vms` moves them to this cw once they are idle",
+            ));
+        }
+        Ok(self
+            .inner
+            .set_local_https_port(v1::SetLocalHttpsPortRequest {
+                port: u32::from(port),
+            })
+            .await?
+            .into_inner())
+    }
+
     pub async fn managed_runtime(
         &mut self,
         name: &str,

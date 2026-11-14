@@ -57,6 +57,7 @@ on:
       - 'crates/codewire-daemon-proto/**'
       - 'crates/codewire-derp/**'
       - 'crates/codewire-egress-broker/**'
+      - 'crates/codewire-egress-front-door/**'
       - 'crates/codewire-egress-policy/**'
       - 'crates/codewire-ext4-scrub/**'
       - 'crates/codewire-local-credentials/**'

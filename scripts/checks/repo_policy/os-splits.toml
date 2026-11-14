@@ -34,6 +34,12 @@ macOS masks that bit. ECHO, ICANON and every other terminal attribute remain exa
 reason = """The local VM backend and host facts: Cloud Hypervisor and /proc on Linux; \
 Virtualization.framework and sysctl on macOS."""
 
+[groups.local-https]
+reason = """HTTPS hostnames for local VMs (#4316): Linux lets only root listen below \
+`net.ipv4.ip_unprivileged_port_start`, which `sudo cw local-https setup` lowers to 443, and \
+names a port's holder from /proc; macOS lets any program listen on 443, so the setup does \
+nothing there, and names the holder with lsof."""
+
 [groups.host-service]
 reason = """The opt-in service that keeps the host agent running (`cw host service`, \
 #3609): a systemd user unit on Linux and a launchd LaunchAgent on macOS. One product, \
@@ -109,6 +115,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/commands/mod.rs" = { group = "dispatch", count = 15 }
 "crates/codewire-cli/src/commands/native.rs" = { group = "vm-backend", count = 16 }
 "crates/codewire-cli/src/commands/native/host_support.rs" = { group = "vm-backend", count = 7 }
+"crates/codewire-cli/src/commands/native/local_https.rs" = { group = "local-https", count = 9 }
 "crates/codewire-cli/src/commands/native/sources.rs" = { group = "vm-backend", count = 1 }
 "crates/codewire-cli/src/commands/platform_commands.rs" = { group = "browser", count = 1 }
 "crates/codewire-cli/src/commands/sessions.rs" = { group = "member", count = 7 }

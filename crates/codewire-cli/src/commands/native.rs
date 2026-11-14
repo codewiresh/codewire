@@ -28,6 +28,7 @@ use crate::commands::progress::terminal_text;
 
 mod host_support;
 mod lifecycle;
+mod local_https;
 mod ports;
 mod sources;
 
@@ -35,6 +36,9 @@ pub(crate) use lifecycle::{
     NativeCreated, local_vm_credentials, network_ref, print_native_created,
     remove_native_environment, restart_native_environment, start_native_environment,
     stop_native_environment,
+};
+pub(crate) use local_https::{
+    HttpsReport, NativeHttpsView, handle_local_https, https_report, print_created_https,
 };
 pub(crate) use ports::handle_native_environment_port;
 

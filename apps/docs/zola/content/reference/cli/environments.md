@@ -1,6 +1,6 @@
 ---
 title: Environments
-description: ls, info, create, start, stop, restart, rm, update, ports, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh, setup rex, checkpoint and preset.
+description: ls, info, create, start, stop, restart, rm, update, ports, local-https, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh, setup rex, checkpoint and preset.
 updated: 2026-11-13
 weight: 2
 aliases: ["/cli/environments"]
@@ -229,7 +229,10 @@ For a local VM, a port is published on `127.0.0.1` of your machine,
 `--access` says otherwise; `--host-port` is refused. `--unpublish` names the
 guest port; when a local guest port is published on several host ports,
 `--host-port` chooses one, and when a cloud port has several previews,
-`--label` does.
+`--label` does. A local VM's labelled ports are also listed at their
+`https://{label}-{env}.cw.localhost` URLs, with a line saying why when they
+aren't served; `--output json` gives them as entries with `url`, `guest_port`
+and `label`.
 
 Example, on a local VM:
 
@@ -244,6 +247,22 @@ app publishes:
   127.0.0.1:8080 -> 8080
 Withdrew 127.0.0.1:8080 -> app:8080
 ```
+
+## cw local-https
+
+```sh
+cw local-https status
+cw local-https port PORT|off
+sudo cw local-https setup        # Linux, once
+```
+
+A local VM's labelled ports are served at `https://{label}-{env}.cw.localhost`
+while it runs ([Ports](@/access/ports.md#local-vm-https-hostnames)). `status`
+says whether they are served, on which port, and where the CA certificate
+is. `port` chooses the port, 443 by default, or turns the URLs off; the
+choice is kept for your user. `setup` lets programs that aren't root listen
+on ports 443 and up on Linux, and prints how to undo it; on macOS there is
+nothing to set up.
 
 On a hosted sandbox the same command prints the preview URL; see
 [Ports and preview URLs](@/access/ports.md).

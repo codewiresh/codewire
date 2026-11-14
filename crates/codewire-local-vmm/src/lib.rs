@@ -47,6 +47,8 @@ pub mod hybrid_vsock;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod lifecycle;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod local_https;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod mesh_enrollment;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod mesh_ingress;

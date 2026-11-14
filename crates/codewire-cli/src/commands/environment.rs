@@ -1677,7 +1677,9 @@ async fn handle_unified_environment_create(
                 else {
                     return Ok(());
                 };
-                print_native_created(&created, output, &caps)
+                print_native_created(&created, output, &caps)?;
+                print_created_https(&created.environment.name, output).await;
+                Ok(())
             }
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {

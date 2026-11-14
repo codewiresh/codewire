@@ -538,7 +538,11 @@ with access `creator`, `org_members` or `public`; a private preview requires
 the viewer's Codewire sign-in, and the proxy strips the credential it
 authenticated with before the request reaches the application. A local VM
 publishes a guest port on the host's `127.0.0.1` only (`cw ports ENV --publish
-PORT --host-port PORT`). Neither is network isolation for the environment.
+PORT --host-port PORT`), and serves each labelled port at
+`https://{label}-{env}.cw.localhost` through a router in the per-user
+supervisor, with a certificate from the user's own CA, which is
+name-constrained to `cw.localhost`. Neither is network isolation for the
+environment.
 
 ### File transfer
 

@@ -1745,6 +1745,28 @@ pub(crate) struct EnvShareRevokeArgs {
     output: OutputFormat,
 }
 
+/// `cw local-https`: the HTTPS URLs of local environments' labelled ports
+/// (#4316).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Subcommand)]
+pub(crate) enum LocalHttpsCommand {
+    #[command(about = "Show whether labelled ports are served over HTTPS, and on which port")]
+    Status,
+    #[command(
+        about = "Serve HTTPS URLs on another port, or turn them off",
+        long_about = "Serve HTTPS URLs on another port, or turn them off:\n  cw local-https port 8443   (URLs then end in :8443)\n  cw local-https port 443\n  cw local-https port off\n\nThe choice is remembered for this user."
+    )]
+    Port {
+        #[arg(value_name = "PORT", help = "A port number from 1 to 65535, or off")]
+        port: String,
+    },
+    #[command(
+        about = "Let HTTPS URLs use port 443 on Linux (run it with sudo, once)",
+        long_about = "Linux lets only root listen on ports below 1024, and HTTPS uses 443. `sudo cw local-https setup` writes /etc/sysctl.d/60-codewire-local-https.conf and applies it: any program on this machine, not only root, may then listen on ports 443 and up. Nothing else changes. On macOS there is nothing to set up."
+    )]
+    Setup,
+}
+
 /// `cw ports [ENV]`: list, or change one mapping with --publish or
 /// --unpublish. Listing never starts a VM.
 #[derive(Debug, Args)]

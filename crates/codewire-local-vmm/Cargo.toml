@@ -39,6 +39,7 @@ codewire-tailnet = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-daemon-bridge = { workspace = true }
 codewire-egress-broker = { workspace = true }
+codewire-egress-front-door = { workspace = true }
 codewire-egress-policy = { workspace = true }
 codewire-ext4-scrub = { workspace = true }
 codewire-netstack = { workspace = true }
@@ -50,24 +51,33 @@ connectrpc = { workspace = true, features = ["axum", "client"] }
 futures = { workspace = true }
 hmac = { workspace = true }
 http = { workspace = true }
+hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util = { workspace = true }
+http-body-util = { workspace = true }
 libc = "0.2"
 oci-spec = { workspace = true }
 rand = { workspace = true }
+# The local HTTPS CA, as the egress front door makes its own: ring and PEM,
+# with key encodings wiped on drop.
+rcgen = { version = "0.13", features = ["zeroize"] }
 reqwest = { workspace = true }
 rustix = { workspace = true }
 rusqlite = { workspace = true }
 russh = { workspace = true }
+# The egress front door's Rustls: one ring provider, named explicitly.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 ssh-key = { workspace = true }
 tar = { workspace = true }
+time = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tower = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
+x509-parser = { workspace = true }
 zeroize = { workspace = true }
 
 [build-dependencies]
@@ -82,6 +92,8 @@ codewire-proto = { workspace = true, features = ["client"] }
 connectrpc = { workspace = true, features = ["client"] }
 prost-types = { workspace = true }
 tempfile = { workspace = true }
+# A TLS client for the local HTTPS router tests, as the egress front door's.
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
 wiremock = { workspace = true }
 codewire-workspace-hack.workspace = true
 

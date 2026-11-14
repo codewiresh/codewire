@@ -7,6 +7,7 @@
 mod bootstrap;
 mod checkpoints;
 mod collection_roots;
+mod local_https;
 mod metadata;
 mod network_policies;
 mod retained_images;
@@ -544,6 +545,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         .record_direct_share_discriminators_for_startup()
         .await?;
     supervisor.core().begin_rollback_of_failed_creates()?;
+    let (local_https, local_https_task) = local_https::channel();
     let service = SupervisorRpc {
         info: supervisor_info(&config),
         supervisor,
@@ -553,9 +555,11 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         host_keys: Arc::new(ssh::HostKeys::new(&config.root)),
         ssh_streams: Arc::default(),
         network_policies,
+        local_https: Arc::new(local_https),
         #[cfg(test)]
         hold_drains: Arc::default(),
     };
+    local_https_task.spawn(service.clone());
     let socket = config.supervisor_socket();
     let (listener, socket_identity) = bind_owner_only_listener(&socket)?;
     let connections = crate::uds::Connections::new();
@@ -5998,6 +6002,8 @@ struct SupervisorRpc {
     ssh_streams: Arc<ssh::SshStreams>,
     /// The host's network policies (#2537).
     network_policies: Arc<crate::network_policy_store::NetworkPolicyStore>,
+    /// The local HTTPS router's state (#4316).
+    local_https: Arc<local_https::LocalHttpsHandle>,
     /// Tests only: admitted operations wait instead of draining, so a test
     /// observes them as admitted.
     #[cfg(test)]
@@ -6142,6 +6148,21 @@ impl LocalSupervisorService for SupervisorRpc {
                     return Err(Status::from(SupervisorError::AlreadyExists(
                         request.name.clone(),
                     )));
+                }
+                // A labelled port's HTTPS hostname must be its own (#4316).
+                // A label that makes no valid hostname only goes without an
+                // HTTPS URL; a project with no labelled port is unaffected.
+                if let Some(refusal) = serde_json::from_slice(&request.project_spec_json)
+                    .ok()
+                    .and_then(|project| {
+                        local_https::hostname_refusal(
+                            &request.name,
+                            &project,
+                            self.supervisor.core().state.environments.values(),
+                        )
+                    })
+                {
+                    return Err(Status::invalid_argument(refusal));
                 }
                 // Allocate the eventual environment identity before repository
                 // preparation. Successful preparation journals this SAME ID;
@@ -7150,6 +7171,28 @@ impl LocalSupervisorService for SupervisorRpc {
             .await
             .map(Response::new)
             .map_err(Status::from)
+    }
+
+    async fn get_local_https(
+        &self,
+        request: Request<v1::EnvironmentSelector>,
+    ) -> Result<Response<v1::LocalHttps>, Status> {
+        let request = request.into_inner();
+        let name = if request.name.is_empty() {
+            String::new()
+        } else {
+            selected_name(request)?
+        };
+        self.local_https(&name).await.map(Response::new)
+    }
+
+    async fn set_local_https_port(
+        &self,
+        request: Request<v1::SetLocalHttpsPortRequest>,
+    ) -> Result<Response<v1::LocalHttps>, Status> {
+        self.set_local_https_port(request.into_inner().port)
+            .await
+            .map(Response::new)
     }
 
     async fn ensure_credential_broker(
