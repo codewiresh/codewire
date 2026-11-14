@@ -13,7 +13,7 @@ Updated 2026-11-13.
 
 | ID | Owner | Dev | Production |
 | --- | --- | --- | --- |
-| `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-13 (#4373) | not yet observed |
+| `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-14 (#4460) | not yet observed |
 | `sandbox-cp-resume` | cw-workspace-mount | observed 2026-11-13 (#4373) | not yet observed; v0.4.17 lacks it |
 | `sandbox-cp-download` | cw-workspace-mount | observed 2026-11-13 (#4394) | not yet observed |
 | `sandbox-rollout` | cw-rollout | observed 2026-11-13 (#4426) | not yet observed |
@@ -66,13 +66,22 @@ Issue: #3968 (`cw cp` sent a whole file as one message).
   - A server without parts (v0.4.17 and older) gets the file in one request,
     so a file over about 100 MB fails there with an error saying the server
     takes no resumable uploads.
-  - Uploads run at about 2.5 MB/s on Dev, so 1 GiB takes about seven
-    minutes. Each 64 KiB write crosses from orchestration to the sandbox's
-    site and back. #4460 batches the writes. A slow upload is not a failure.
+  - Uploads run at about 4.7 MB/s on Dev at low workstation load, so 1 GiB
+    takes about four minutes. Since #4460 the bridge writes to the sandbox a
+    mebibyte at a time. What bounds uploads now is not yet known (#4638). A
+    slow upload is not a failure.
   - A Dev rollout during a transfer can end it at the old Pod's drain
     deadline (`sandbox-rollout`). Check that none is running before timing
     anything.
 - **Observed:**
+  - Dev, 2026-11-14 (cw-rollout): Dev ran source 94e2e4b650, which includes
+    #4460, with its rollout finished. An optimized `cw` built from #4547's
+    branch at fb4cf048b (client side as on `main`; SHA-256 `1a8764f8…`), as
+    the Dev smoke identity, uploaded 1 GiB in 235.1 s and 221.3 s at a
+    workstation load of 34 and 8, with SHA-256 equal, 1,073,741,824 bytes,
+    mode 644 and no staging file. On source a9dd8b270, before #4460 and at a
+    load of about 100, it took 382.4 s and 379.0 s, so the gain is not
+    isolated from load. Evidence: #4460, closing comment.
   - Dev, 2026-11-13: Dev ran source 3a3a53521, with its rollout finished;
     `cw` was built at 3a3a53521. A 1 GiB upload, interrupted and then
     resumed, ended with an equal SHA-256, 1,073,741,824 bytes, mode 644 and
@@ -264,10 +273,14 @@ an error the client can retry.
     completed in parts with SHA-256 equal in the sandbox. 772 API calls at
     1 Hz, none failed. Leadership moved 4.2 s after its release. Evidence:
     #4426.
-  - An upload part open at the deadline resuming (#4460), `AttachSession`
-    re-attaching through orchestration, and the dashboard's terminal: not yet
-    observed. A `cw run` across the rollout used direct UDP, not
-    orchestration.
+  - An upload part open at the drain deadline resuming: not yet observed.
+    On Dev a 64 MiB part finishes in about 14 s, so the part on the old Pod
+    ends long before the 270 s deadline and later parts go to the new Pod.
+    Only an upload slower than about 0.24 MB/s would leave a part open at
+    the deadline. The bridge's and the CLI's tests cover it (#4460).
+  - `AttachSession` re-attaching through orchestration, and the dashboard's
+    terminal: not yet observed. A `cw run` across the rollout used direct
+    UDP, not orchestration.
   - `AttachHost` at SIGTERM: not yet observed. It needs a host agent on Dev
     (#4426).
   - Production: not yet observed.
