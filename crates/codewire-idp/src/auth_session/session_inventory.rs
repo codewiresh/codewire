@@ -150,6 +150,30 @@ pub(crate) fn unavailable() -> AppError {
     AppError::ServiceUnavailable("Account session controls unavailable".into())
 }
 
+/// Maps a database failure to [`unavailable`], logging its cause first. A
+/// client sees only "unavailable"; without the log neither CI nor an operator
+/// can tell a pool timeout from a statement ceiling or a lost connection
+/// (#4499).
+pub(crate) fn database_unavailable(
+    operation: &'static str,
+) -> impl FnOnce(sqlx::Error) -> AppError {
+    move |error| {
+        tracing::warn!(operation, %error, "account session controls unavailable");
+        unavailable()
+    }
+}
+
+/// [`unavailable`] for a route whose request budget elapsed, logged so the
+/// 503 names its cause (#4499).
+fn budget_elapsed(route: &'static str, budget: Duration) -> AppError {
+    tracing::warn!(
+        route,
+        budget_ms = budget.as_millis() as u64,
+        "account session request exceeded its budget"
+    );
+    unavailable()
+}
+
 pub(crate) fn private(response: impl IntoResponse) -> Response {
     let mut response = response.into_response();
     response
@@ -175,7 +199,11 @@ async fn list(
             return Err(AppError::BadRequest("Invalid session query".into()));
         }
         let digest = cookie_digest(&headers)?;
-        let mut tx = state.pool.begin().await.map_err(|_| unavailable())?;
+        let mut tx = state
+            .pool
+            .begin()
+            .await
+            .map_err(database_unavailable("begin"))?;
         bounded_transaction_within(&mut tx, bounds.statement).await?;
         let (account_id, current_session) =
             actor(&mut tx, &digest, &query.account_id, false).await?;
@@ -189,7 +217,7 @@ async fn list(
         .bind((PAGE_SIZE + 1) as i64)
         .fetch_all(&mut *tx)
         .await
-        .map_err(|_| unavailable())?;
+        .map_err(database_unavailable("list sessions"))?;
         if sessions.iter().any(|session| !valid_id(&session.id)) {
             return Err(unavailable());
         }
@@ -200,7 +228,7 @@ async fn list(
         } else {
             None
         };
-        tx.commit().await.map_err(|_| unavailable())?;
+        tx.commit().await.map_err(database_unavailable("commit"))?;
         Ok::<_, AppError>(Inventory {
             account_id,
             current_session,
@@ -211,7 +239,7 @@ async fn list(
     match tokio::time::timeout(bounds.request, result).await {
         Ok(Ok(inventory)) => private(Json(inventory)),
         Ok(Err(error)) => private(error),
-        Err(_) => private(unavailable()),
+        Err(_) => private(budget_elapsed("list", bounds.request)),
     }
 }
 
@@ -231,7 +259,11 @@ async fn revoke(
                 return Err(AppError::BadRequest("Invalid session request".into()));
             }
             let digest = cookie_digest(&headers)?;
-            let mut tx = state.pool.begin().await.map_err(|_| unavailable())?;
+            let mut tx = state
+                .pool
+                .begin()
+                .await
+                .map_err(database_unavailable("begin"))?;
             bounded_transaction_within(&mut tx, bounds.statement).await?;
             let (account_id, current) = actor(&mut tx, &digest, &request.account_id, true).await?;
             // Acquire the target before the final actor clock check.
@@ -241,7 +273,7 @@ async fn revoke(
                     .bind(&request.session_id)
                     .fetch_optional(&mut *tx)
                     .await
-                    .map_err(|_| unavailable())?;
+                    .map_err(database_unavailable("lock target session"))?;
             validate_actor(&mut tx, &digest, &account_id).await?;
             if target.is_none() {
                 return Err(AppError::NotFound("Active session not found".into()));
@@ -251,13 +283,13 @@ async fn revoke(
              AND EXISTS (SELECT 1 FROM sessions AS actor WHERE actor.token_hash=$3 \
              AND actor.user_id=$1 AND actor.expires_at > clock_timestamp())",
         ).bind(&account_id).bind(&request.session_id).bind(&digest)
-            .execute(&mut *tx).await.map_err(|_| unavailable())?;
+            .execute(&mut *tx).await.map_err(database_unavailable("delete session"))?;
             if deleted.rows_affected() != 1 {
                 // A foreign, expired, and missing target are indistinguishable.
                 return Err(AppError::NotFound("Active session not found".into()));
             }
             let current_session_revoked = current.id == request.session_id;
-            tx.commit().await.map_err(|_| unavailable())?;
+            tx.commit().await.map_err(database_unavailable("commit"))?;
             Ok::<_, AppError>(current_session_revoked)
         };
     match tokio::time::timeout(bounds.request, result).await {
@@ -276,7 +308,7 @@ async fn revoke(
             response
         }
         Ok(Err(error)) => private(error),
-        Err(_) => private(unavailable()),
+        Err(_) => private(budget_elapsed("revoke", bounds.request)),
     }
 }
 
@@ -292,7 +324,7 @@ pub(crate) async fn actor(
         .bind(digest)
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|_| unavailable())?
+        .map_err(database_unavailable("read session owner"))?
         .ok_or(AppError::Unauthorized)?;
     if account_id != expected_account {
         return Err(AppError::Forbidden);
@@ -306,7 +338,7 @@ pub(crate) async fn actor(
         .bind(&account_id)
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|_| unavailable())?
+        .map_err(database_unavailable("lock account"))?
         .ok_or(AppError::Unauthorized)?;
     if !enabled {
         return Err(AppError::Forbidden);
@@ -324,7 +356,7 @@ pub(crate) async fn actor(
         .bind(&account_id)
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|_| unavailable())?
+        .map_err(database_unavailable("lock actor session"))?
         .ok_or(AppError::Unauthorized)?;
     // The same two-factor boundary as the dashboard: an enabled factor, or
     // setup skipped by this browser session.
@@ -367,7 +399,7 @@ async fn validate_actor(
     .bind(account_id)
     .fetch_one(&mut **tx)
     .await
-    .map_err(|_| unavailable())?;
+    .map_err(database_unavailable("validate actor"))?;
     if active {
         Ok(())
     } else {
@@ -393,7 +425,7 @@ pub(crate) async fn bounded_transaction_within(
     .bind(ceiling_ms)
     .fetch_all(&mut **tx)
     .await
-    .map_err(|_| unavailable())?;
+    .map_err(database_unavailable("bound transaction"))?;
     if settings.len() == 2 {
         Ok(())
     } else {

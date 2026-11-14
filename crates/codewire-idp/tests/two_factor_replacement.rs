@@ -9,7 +9,7 @@
 use axum::http::{HeaderMap, Request};
 use axum::{Router, body::Body};
 use codewire_idp::auth_session::{
-    SignupInvitePolicy, router_with_email, router_with_signup_delivery,
+    SessionInventoryBounds, SignupInvitePolicy, router_with_email, router_with_signup_delivery,
 };
 use codewire_server_core::auth::{AuthState, hash_session_token};
 use serde_json::{Value, json};
@@ -23,9 +23,10 @@ const PASSWORD: &str = "Synthetic!Pass1234";
 const START: &str = "/api/auth/two-factor/replace/start";
 const CONFIRM: &str = "/api/auth/two-factor/replace/confirm";
 const REGENERATE: &str = "/api/auth/two-factor/recovery-codes/regenerate";
-/// A hang guard, not a bound under test: the replacement routes get it in
-/// place of their 5 s request and 4 s statement bounds, and the test's own
-/// waits for a request to reach a lock use it. On a loaded CI guest two
+/// A hang guard, not a bound under test: the replacement routes and the
+/// session inventory routes get it in place of their 5 s request and 4 s
+/// statement bounds, and the test's own waits for a request to reach a lock
+/// use it. On a loaded CI guest two
 /// concurrent proofs spent the production bounds and answered 503 (PR runs
 /// 23429, 23873); `production_bounds_are_five_second_requests_and_four_second_statements`
 /// pins those bounds.
@@ -68,7 +69,17 @@ struct Apps {
     factor: Router,
 }
 
+/// The IdP's warnings, in the failing test's output: a 503 from these routes
+/// then names its cause, a budget or a database error (#4499).
+fn trace_warnings() {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_max_level(tracing_subscriber::filter::LevelFilter::WARN)
+        .try_init();
+}
+
 fn apps(pool: &PgPool) -> Apps {
+    trace_warnings();
     Apps {
         signup: router_with_email(
             pool.clone(),
@@ -77,6 +88,9 @@ fn apps(pool: &PgPool) -> Apps {
             ORIGIN.into(),
             codewire_email::EmailClient::recording().0,
         ),
+        // The inventory checks which sessions confirmation revoked; its own
+        // bounds are not under test. On their production 5 s a loaded guest
+        // answered the listing with 503 (run 47171, #4499).
         account: router_with_signup_delivery(
             pool.clone(),
             true,
@@ -85,7 +99,11 @@ fn apps(pool: &PgPool) -> Apps {
             codewire_email::EmailClient::disabled(),
             String::new(),
             String::new(),
-        ),
+        )
+        .layer(axum::Extension(SessionInventoryBounds {
+            request: HANG,
+            statement: HANG,
+        })),
         factor: codewire_idp::two_factor::router(
             pool.clone(),
             SESSION_SECRET.into(),
