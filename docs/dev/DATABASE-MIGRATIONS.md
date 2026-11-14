@@ -84,6 +84,19 @@ counts, proves fresh apply and a second no-op run, and keeps checksum, dirty
 ledger, missing-history, concurrent-startup, and accepted-schema fingerprint
 failures mechanical.
 
+### Rolling back is forward only
+
+Once a migration is applied, no binary built from a source without it can
+start against that database. SQLx's migrator refuses a ledger that names a
+version its source lacks (`VersionMissing`; `ensure_schema` does not set
+`ignore_missing`), so redeploying the previous release crash-loops, and
+`_sqlx_migrations` is never edited by hand. A change that shipped a migration
+is rolled back by a new commit that reverts its code and keeps the migration
+file in the history. Its pull request says so, and says how the reverted code
+behaves against the newer schema. The "rollback" step in a migration test only
+proves that the upgrade's objects can be removed and the previous fingerprint
+restored; it leaves the ledger row and is not a deploy rollback.
+
 ### The baseline
 
 The pre-launch history of 41 migrations was squashed into the single
