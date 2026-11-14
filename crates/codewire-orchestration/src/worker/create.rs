@@ -2193,6 +2193,7 @@ impl ReconciledRuntime {
     /// Record the state transition this attempt itself just committed.
     fn entered_running(&mut self) {
         self.environment.state = "running".to_string();
+        self.environment.never_ran = false;
     }
 
     /// A later observation sees exactly this runtime, and the backend's
@@ -3884,6 +3885,8 @@ mod tests {
         );
     }
 
+    /// A first-attempt create's row as the environment query reads it:
+    /// `never_ran` follows the state, as its SQL derives it.
     fn environment(state: &str) -> EnvironmentRow {
         EnvironmentRow {
             id: "env-1".into(),
@@ -3894,7 +3897,7 @@ mod tests {
             desired_state: "started".into(),
             isolation_tier: "standard".into(),
             dedicated_cpu: false,
-            never_ran: false,
+            never_ran: matches!(state, "pending" | "creating"),
             external_cleanup_completed_at: None,
             cpu_millicores: 1000,
             memory_mb: 2048,
@@ -4239,7 +4242,9 @@ mod tests {
                     stored.pod_ip = observed.pod_ip.clone();
                 }
                 CreateAction::MarkRunning => {
+                    // The next read derives `never_ran` from the new state.
                     env.state = "running".into();
+                    env.never_ran = false;
                     reconciled.as_mut().unwrap().entered_running();
                 }
                 CreateAction::PublishSetup => return (actions, steps),
