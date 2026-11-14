@@ -1287,7 +1287,7 @@ jobs:
             --label "codewire.ci.job=${GITHUB_JOB}" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
             -e POSTGRES_DB=codewire "${INTEGRATION_POSTGRES_IMAGE:?}" \
-            -c max_locks_per_transaction=1024
+            -c max_locks_per_transaction=1024 -c synchronous_commit=off
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
           echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
 
@@ -1473,7 +1473,7 @@ jobs:
             --label "codewire.ci.job=${GITHUB_JOB}" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
             -e POSTGRES_DB=codewire "${INTEGRATION_POSTGRES_IMAGE:?}" \
-            -c max_locks_per_transaction=1024
+            -c max_locks_per_transaction=1024 -c synchronous_commit=off
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
           echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
 
@@ -1662,7 +1662,7 @@ jobs:
             --label "codewire.ci.job=${GITHUB_JOB}" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
             -e POSTGRES_DB=codewire "${INTEGRATION_POSTGRES_IMAGE:?}" \
-            -c max_locks_per_transaction=1024
+            -c max_locks_per_transaction=1024 -c synchronous_commit=off
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
           echo "INTEGRATION_DOCKER_NETWORK=${networks[0]}" >> "$GITHUB_ENV"
 

@@ -72,7 +72,7 @@ integration_postgres_configure
 [ "$INTEGRATION_POSTGRES_SOURCE" = managed ]
 [ "$DATABASE_URL" = "postgres://codewire:codewire@127.0.0.1:45678/codewire?sslmode=disable" ]
 [ "$DATABASE_URL_RUST" = "postgres://codewire:codewire@127.0.0.1:45678/codewire" ]
-grep -q '^run .*127.0.0.1::5432 docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024$' "$FAKE_DOCKER_LOG"
+grep -q '^run .*127.0.0.1::5432 docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024 -c synchronous_commit=off$' "$FAKE_DOCKER_LOG"
 grep -q '127.0.0.1:45678/codewire?sslmode=disable.*SELECT 1' "$FAKE_PSQL_LOG"
 integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER$" "$FAKE_DOCKER_LOG"
@@ -86,7 +86,7 @@ integration_postgres_lanes_available
 integration_postgres_start_lane credential-broker
 [ "$INTEGRATION_POSTGRES_LANE_URL" = "postgres://codewire:codewire@127.0.0.1:45678/codewire?sslmode=disable" ]
 [ "$INTEGRATION_POSTGRES_LANE_URL_RUST" = "postgres://codewire:codewire@127.0.0.1:45678/codewire" ]
-grep -q "^run -d --name $INTEGRATION_POSTGRES_CONTAINER-lane-credential-broker .*127.0.0.1::5432 docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
+grep -q "^run -d --name $INTEGRATION_POSTGRES_CONTAINER-lane-credential-broker .*127.0.0.1::5432 docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024 -c synchronous_commit=off$" "$FAKE_DOCKER_LOG"
 integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER$" "$FAKE_DOCKER_LOG"
 
@@ -128,7 +128,7 @@ INTEGRATION_DOCKER_NETWORK=codewire-fixture-net
 integration_postgres_lanes_available
 integration_postgres_start_lane orchestration
 [ "$INTEGRATION_POSTGRES_LANE_URL_RUST" = "postgres://codewire:codewire@codewire-integration-postgres-orchestration:5432/codewire" ]
-grep -q "^run -d --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration --pids-limit 2048 --network codewire-fixture-net --network-alias codewire-integration-postgres-orchestration .* docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
+grep -q "^run -d --name $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration --pids-limit 2048 --network codewire-fixture-net --network-alias codewire-integration-postgres-orchestration .* docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024 -c synchronous_commit=off$" "$FAKE_DOCKER_LOG"
 integration_postgres_cleanup
 grep -q "^rm -f $INTEGRATION_POSTGRES_CONTAINER-lane-orchestration$" "$FAKE_DOCKER_LOG"
 # Lanes on the job network start at once in the background (their servers
@@ -164,7 +164,7 @@ integration_postgres_configure
 [ "$INTEGRATION_POSTGRES_CONTAINER" = "codewire-product-postgres-fixture-$$-$$" ]
 [ "$DATABASE_URL" = "postgres://codewire:codewire@$INTEGRATION_POSTGRES_CONTAINER:5432/codewire?sslmode=disable" ]
 [ "$DATABASE_URL_RUST" = "postgres://codewire:codewire@$INTEGRATION_POSTGRES_CONTAINER:5432/codewire" ]
-grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER --pids-limit 2048 --network codewire-fixture-net --network-alias $INTEGRATION_POSTGRES_CONTAINER .* docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024$" "$FAKE_DOCKER_LOG"
+grep -q "^run -d --rm --name $INTEGRATION_POSTGRES_CONTAINER --pids-limit 2048 --network codewire-fixture-net --network-alias $INTEGRATION_POSTGRES_CONTAINER .* docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024 -c synchronous_commit=off$" "$FAKE_DOCKER_LOG"
 if grep -q -- '127.0.0.1:' "$FAKE_DOCKER_LOG"; then
   echo 'a job-network PostgreSQL published a loopback port' >&2
   exit 1
@@ -241,7 +241,7 @@ integration_postgres_configure
 [ "$INTEGRATION_POSTGRES_SOURCE" = managed ]
 [ "$DATABASE_URL" = "postgres://codewire:codewire@127.0.0.1:55432/codewire?sslmode=disable" ]
 [ "$DATABASE_URL_RUST" = "postgres://codewire:codewire@127.0.0.1:55432/codewire" ]
-grep -q '^run .*127.0.0.1:55432:5432 docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024$' "$FAKE_DOCKER_LOG"
+grep -q '^run .*127.0.0.1:55432:5432 docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee -c max_locks_per_transaction=1024 -c synchronous_commit=off$' "$FAKE_DOCKER_LOG"
 integration_postgres_cleanup
 
 for invalid_port in invalid 1023 65536; do
@@ -818,7 +818,7 @@ python3 -B "$ROOT/scripts/ci/verify/database-test-coverage.py" --self-test
 # "Make the fixture images present" step makes that image present first, from
 # the guest's store, its warm cache or the pin (load-fixture-images.sh), and
 # the job's PostgreSQL runs what it named.
-[ "${INTEGRATION_POSTGRES_SERVER_ARGS[*]}" = '-c max_locks_per_transaction=1024' ]
+[ "${INTEGRATION_POSTGRES_SERVER_ARGS[*]}" = '-c max_locks_per_transaction=1024 -c synchronous_commit=off' ]
 [[ "$INTEGRATION_POSTGRES_PINNED_IMAGE" =~ ^docker\.io/library/postgres:17-alpine@sha256:[0-9a-f]{64}$ ]]
 grep -qxF "  KIND_POSTGRES_IMAGE='$INTEGRATION_POSTGRES_PINNED_IMAGE'" "$ROOT/scripts/ci/verify/kind/common.sh" ||
   { echo 'the integration PostgreSQL image is not the Kind PostgreSQL pin' >&2; exit 1; }

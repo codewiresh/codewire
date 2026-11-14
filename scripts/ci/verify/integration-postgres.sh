@@ -12,7 +12,13 @@
 # locks per transaction for 100 connections) runs out at a few concurrent
 # migrations with "out of shared memory" (#3198); 1024 fits every concurrent
 # test the lanes can open within max_connections.
-INTEGRATION_POSTGRES_SERVER_ARGS=(-c max_locks_per_transaction=1024)
+# A commit does not wait for its WAL flush (synchronous_commit=off). Every
+# authenticated request commits a sliding-session UPDATE, and the lanes share
+# one server on a loaded CI disk: waiting for each flush took 1-10 s there and
+# spent the 10 s auth bound (#4315). These databases are thrown away, so a
+# crash losing the last commits costs nothing; visibility, ordering and
+# constraints are unchanged, and the cluster cannot be corrupted (fsync stays on).
+INTEGRATION_POSTGRES_SERVER_ARGS=(-c max_locks_per_transaction=1024 -c synchronous_commit=off)
 # The PostgreSQL image every integration server runs, by digest: the same pin
 # as the Kind PostgreSQL (KIND_POSTGRES_IMAGE in kind/common.sh) and as
 # ci.yaml's "Start integration Postgres" steps (test-integration-postgres.sh
