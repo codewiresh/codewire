@@ -1,7 +1,7 @@
 ---
 title: Application secrets
 description: Store values such as DATABASE_URL in organization, personal or project scope, and select which ones an environment's processes receive.
-updated: 2026-11-08
+updated: 2026-11-14
 weight: 2
 aliases: ["/guides/application-secrets"]
 ---
@@ -106,8 +106,10 @@ which source, without values:
 ```text
 PLACEMENT  KEY                              SOURCE                   OVERRIDDEN
 platform   DATABASE_URL                     project                  -
-``` In the dashboard, **Create Sandbox** has
-**Organization** and **Personal** checkboxes and a secret project picker.
+```
+
+In the dashboard, **Create Sandbox** has **Organization** and **Personal**
+checkboxes and a secret project picker.
 
 ## What the processes see
 

@@ -333,6 +333,43 @@ def verify_supply_chain(site_root: Path) -> None:
             fail(f"prohibited external dependency or dynamic runner in {path.relative_to(site_root)}")
 
 
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+FENCE_LANGUAGE = re.compile(r"[A-Za-z0-9_+.#,=:-]*")
+
+
+def code_fence_faults(text: str) -> list[tuple[int, str]]:
+    """The lines of a Markdown page where a code fence is malformed.
+
+    A closing fence followed by text on its own line does not close the
+    block, so the rest of the page renders as code (#4698). An opening fence
+    may carry only a language, and every fence must close.
+    """
+    faults: list[tuple[int, str]] = []
+    opened: tuple[str, int, int] | None = None
+    for number, line in enumerate(text.splitlines(), 1):
+        match = FENCE.match(line)
+        if not match:
+            continue
+        marker, rest = match.group(1), match.group(2).strip()
+        if opened is None:
+            if not FENCE_LANGUAGE.fullmatch(rest):
+                faults.append((number, "an opening code fence carries more than a language"))
+            opened = (marker[0], len(marker), number)
+        elif marker[0] == opened[0] and len(marker) >= opened[1]:
+            if rest:
+                faults.append((number, "text follows a closing code fence on its line"))
+            opened = None
+    if opened is not None:
+        faults.append((opened[2], "a code fence never closes"))
+    return faults
+
+
+def verify_code_fences(site_root: Path) -> None:
+    for path in sorted((site_root / "content").rglob("*.md")):
+        for number, fault in code_fence_faults(path.read_text()):
+            fail(f"{path.relative_to(site_root).as_posix()}:{number}: {fault}")
+
+
 def verify_updated_dates(routes: list[dict[str, str]], site_root: Path) -> None:
     """Every page names when it last changed, and the date is never older than its last edit.
 
@@ -375,6 +412,7 @@ def main() -> int:
     site_root = args.site_root.resolve()
     output_root = args.output.resolve()
 
+    verify_code_fences(site_root)
     routes, _ = verify_routes(site_root, output_root)
     verify_markdown(routes, site_root, output_root)
     verify_search(routes, site_root, output_root)

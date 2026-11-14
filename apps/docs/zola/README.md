@@ -25,6 +25,12 @@ the no-trailing-slash link contract consumed by the Rust server. `routes.toml`
 is the exact route mount and redirect manifest: one entry per page and per
 section landing page, and `tests/verify_site.py` pins the count.
 
+`tests/verify_site.py` also refuses a page whose code fence is malformed: a
+closing fence with text after it on the same line, an opening fence that
+carries more than a language, or a fence that never closes. Such a fence does
+not close its block, and the rest of the page renders as code. A fence
+indented four or more spaces, as in a nested list, is not checked.
+
 Pages use YAML front matter (`title`, `description`, `weight`); section
 landing pages (`_index.md`) use TOML front matter and render with
 `section.html`. The sidebar in `templates/base.html` lists every route by
