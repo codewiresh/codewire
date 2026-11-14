@@ -239,11 +239,10 @@ fn single_source(object: &Value) -> Option<(&str, &Value)> {
 /// does not know is refused. `Err` names the first path that differs.
 pub(crate) fn pool_member_isolated(
     spec: &Value,
-    wanted: &crate::runtime::WantedPool,
+    opts: &crate::sandbox::template::TemplateOpts,
 ) -> Result<(), String> {
     use codewire_daemon_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE;
 
-    let opts = &wanted.rendering;
     let profile = opts.runtime_profile_spec();
     // 1. The VM runtime of the pool's own profile, never a confidential one.
     if profile.profile == crate::sandbox::template::RUNTIME_PROFILE_CONFIDENTIAL

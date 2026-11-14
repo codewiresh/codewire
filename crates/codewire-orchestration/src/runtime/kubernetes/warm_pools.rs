@@ -51,6 +51,7 @@
 
 pub(crate) mod plan;
 
+use super::rendering::KubernetesRenderConfig;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -98,11 +99,15 @@ pub(crate) struct RenderedPools {
 
 /// Render one wanted pool, exactly as configuration rendered it before
 /// #3628 PR 5c.
-pub(crate) fn render_pool(namespace: &str, wanted: &WantedPool) -> anyhow::Result<DesiredPool> {
+pub(crate) fn render_pool(
+    config: &KubernetesRenderConfig,
+    namespace: &str,
+    wanted: &WantedPool,
+) -> anyhow::Result<DesiredPool> {
     Ok(DesiredPool {
         objects: crate::sandbox::warm_pool::render_warm_pool(
             namespace,
-            &wanted.rendering,
+            &config.pool(wanted.configured.shape)?,
             wanted.configured.members,
             wanted.allow_unpinned_images,
         )?,
@@ -111,12 +116,16 @@ pub(crate) fn render_pool(namespace: &str, wanted: &WantedPool) -> anyhow::Resul
 }
 
 /// Render every wanted pool, in their order.
-pub(crate) fn render(namespace: &str, wanted: &WantedPools) -> anyhow::Result<RenderedPools> {
+pub(crate) fn render(
+    config: &KubernetesRenderConfig,
+    namespace: &str,
+    wanted: &WantedPools,
+) -> anyhow::Result<RenderedPools> {
     Ok(RenderedPools {
         pools: wanted
             .pools
             .iter()
-            .map(|pool| render_pool(namespace, pool))
+            .map(|pool| render_pool(config, namespace, pool))
             .collect::<anyhow::Result<_>>()?,
         max_node_percent: wanted.max_host_percent,
         image_cache_enabled: wanted.image_cache_enabled,

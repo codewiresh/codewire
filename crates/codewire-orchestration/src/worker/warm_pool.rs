@@ -27,7 +27,7 @@ use prometheus::{register_int_counter_vec, register_int_gauge};
 use tokio::sync::watch;
 
 use super::WorkerContext;
-use super::create::{SandboxWorkerCfg, render_configured_warm_pool, warm_pool_template_opts};
+use super::create::{SandboxWorkerCfg, render_configured_warm_pool};
 use super::image_cache::ImageCacheConfig;
 use super::loops::Leadership;
 use crate::runtime::{Placement, PoolPass, RuntimeDriver, WantedPool, WantedPools};
@@ -128,7 +128,6 @@ impl WarmPoolConfig {
                 render_configured_warm_pool(cfg, configured.shape, configured.members)?;
                 Ok(WantedPool {
                     configured,
-                    rendering: warm_pool_template_opts(cfg, configured.shape)?,
                     allow_unpinned_images: cfg.allow_diagnostic_runtime,
                 })
             })

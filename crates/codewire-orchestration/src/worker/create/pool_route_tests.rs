@@ -1,5 +1,6 @@
 //! Create routing to shared warm pools (Program #2238 C3).
 
+use crate::sandbox::template::TemplateOpts;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -9,15 +10,17 @@ use kube::api::DynamicObject;
 use serde_json::{Value, json};
 
 use super::*;
+use crate::runtime::RenderingIntent;
 use crate::runtime::kubernetes::KubernetesDriver;
 use crate::runtime::kubernetes::pools::{live_pool_current, members_current};
+use crate::runtime::kubernetes::rendering::KubernetesRenderConfig;
 use crate::sandbox::template::render_sandbox_template;
 use crate::sandbox::template::{
     CredentialRuntimeTemplateConfig, DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_PROFILE_COMMODITY,
 };
 use crate::sandbox::warm_pool::POOL_REVISION_ANNOTATION;
 use crate::sandbox::warm_pool::WarmPoolObjects;
-use crate::worker::create::environment_template_opts;
+use crate::worker::create::{environment_rendering_intent, environment_template_opts};
 use codewire_project::ProjectSpec;
 
 const NAMESPACE: &str = "dev-sandboxes";
@@ -67,8 +70,13 @@ fn environment(cpu: i32, memory: i32, disk: i32) -> EnvironmentRow {
     }
 }
 
-fn opts(cfg: &SandboxWorkerCfg, env: &EnvironmentRow, image: &str) -> TemplateOpts {
-    environment_template_opts(cfg, image, "workspace", env, 7).unwrap()
+/// The environment's intent, which the configuration can render.
+fn opts(cfg: &SandboxWorkerCfg, env: &EnvironmentRow, image: &str) -> RenderingIntent {
+    let intent = environment_rendering_intent(image, "workspace", env, 7).unwrap();
+    KubernetesRenderConfig::from(cfg)
+        .environment(&intent)
+        .unwrap();
+    intent
 }
 
 fn candidate(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> Result<WantedPool, ColdReason> {
@@ -82,9 +90,13 @@ fn candidate(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> Result<WantedPool,
 
 /// The candidate pool as the driver renders it.
 fn objects(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> WarmPoolObjects {
-    crate::runtime::kubernetes::warm_pools::render_pool(NAMESPACE, &candidate(cfg, env).unwrap())
-        .unwrap()
-        .objects
+    crate::runtime::kubernetes::warm_pools::render_pool(
+        &cfg.into(),
+        NAMESPACE,
+        &candidate(cfg, env).unwrap(),
+    )
+    .unwrap()
+    .objects
 }
 
 #[test]
@@ -241,11 +253,15 @@ fn a_dedicated_organization_goes_cold_only_while_the_pools_share() {
     };
     let image = canonical_workspace_runtime_image();
     assert_eq!(
-        workspace_cpu(&opts(&shared, &dedicated, image)),
+        workspace_cpu(
+            &environment_template_opts(&shared, image, "workspace", &dedicated, 7).unwrap()
+        ),
         (json!("1000m"), json!("1000m"))
     );
     assert_eq!(
-        workspace_cpu(&opts(&shared, &sharing, image)),
+        workspace_cpu(
+            &environment_template_opts(&shared, image, "workspace", &sharing, 7).unwrap()
+        ),
         (json!("500m"), json!("1000m"))
     );
 }
@@ -393,7 +409,17 @@ fn api(
     api_with(objects.map(live), Vec::new(), fail)
 }
 
+/// The recorded API behind a driver configured as Dev.
 fn api_with(
+    served: Option<(DynamicObject, DynamicObject)>,
+    members: Vec<Value>,
+    fail: bool,
+) -> (Arc<dyn RuntimeDriver>, Arc<Mutex<Vec<String>>>) {
+    driver_over((&dev_cfg(SHAPES)).into(), served, members, fail)
+}
+
+fn driver_over(
+    rendering: KubernetesRenderConfig,
     served: Option<(DynamicObject, DynamicObject)>,
     members: Vec<Value>,
     fail: bool,
@@ -440,7 +466,7 @@ fn api_with(
         }
     });
     (
-        KubernetesDriver::shared(kube::Client::new(service, "default")),
+        KubernetesDriver::shared(kube::Client::new(service, "default"), rendering),
         requests,
     )
 }
@@ -708,19 +734,19 @@ fn a_create_from_a_snapshot_never_takes_a_pool_member() {
 }
 
 /// An environment whose own rendering differs from the pool's (here another
-/// storage class) is never pooled: the driver says so before reading
-/// anything (`cold_rendering`).
+/// image) is never pooled: the driver says so before reading anything
+/// (`cold_rendering`).
 #[tokio::test]
 async fn an_own_rendering_that_differs_from_the_pools_goes_cold() {
     let cfg = dev_cfg(SHAPES);
     let small = environment(1000, 4096, 10);
     let pool = candidate(&cfg, &small).unwrap();
-    let mut other_class = opts(&cfg, &small, canonical_workspace_runtime_image());
-    other_class.workspace_storage_class = "local-path".into();
+    let mut other_image = opts(&cfg, &small, canonical_workspace_runtime_image());
+    other_image.image = "registry.example.invalid/custom/workspace@sha256:4444444444444444444444444444444444444444444444444444444444444444".into();
     let (driver, requests) = api(None, false);
     assert_eq!(
         driver
-            .pool_state(&Placement::new(NAMESPACE), &pool, &other_class)
+            .pool_state(&Placement::new(NAMESPACE), &pool, &other_image)
             .await
             .unwrap(),
         PoolState::RenderingDiffers
@@ -729,16 +755,59 @@ async fn an_own_rendering_that_differs_from_the_pools_goes_cold() {
     assert_eq!(ColdReason::Rendering.as_str(), "cold_rendering");
 }
 
+/// cw-placement's review of #4571: the router and the driver each hold the
+/// CPU-sharing ratio, so the driver's own guard is pinned as well as the
+/// router's `cold_dedicated_cpu`. Under sharing, a dedicated intent renders
+/// differently from its shape's shared pool and the driver says so before
+/// reading anything; a shared intent, or any intent with sharing off, matches.
+#[tokio::test]
+async fn under_sharing_a_dedicated_intent_never_matches_its_shapes_pool() {
+    for (ratio, dedicated_cpu, differs) in
+        [("4", true, true), ("4", false, false), ("1", true, false)]
+    {
+        let cfg = SandboxWorkerCfg {
+            cpu_sharing_ratio: crate::sandbox::template::CpuSharingRatio::parse(Some(ratio))
+                .unwrap(),
+            ..dev_cfg(SHAPES)
+        };
+        let small = environment(1000, 4096, 10);
+        // The pool a shared environment of this shape would claim from.
+        let pool = candidate(&cfg, &small).unwrap();
+        let intent = RenderingIntent {
+            dedicated_cpu,
+            ..opts(&cfg, &small, canonical_workspace_runtime_image())
+        };
+        let (driver, requests) = driver_over((&cfg).into(), None, Vec::new(), false);
+        let state = driver
+            .pool_state(&Placement::new(NAMESPACE), &pool, &intent)
+            .await
+            .unwrap();
+        let case = format!("ratio {ratio}, dedicated {dedicated_cpu}");
+        if differs {
+            assert_eq!(state, PoolState::RenderingDiffers, "{case}");
+            assert!(requests.lock().unwrap().is_empty(), "{case}");
+        } else {
+            assert_ne!(state, PoolState::RenderingDiffers, "{case}");
+            assert_ne!(state, PoolState::Unrenderable, "{case}");
+            assert!(!requests.lock().unwrap().is_empty(), "{case}");
+        }
+    }
+}
+
 /// A pool that cannot render is a `cold_shape` route, answered without any
 /// API read.
 #[tokio::test]
 async fn an_unrenderable_pool_goes_cold_without_a_read() {
     let cfg = dev_cfg(SHAPES);
     let small = environment(1000, 4096, 10);
-    let mut pool = candidate(&cfg, &small).unwrap();
-    // A pool rendering never names an environment.
-    pool.rendering.environment_id = small.id.clone();
-    let (driver, requests) = api(None, false);
+    let pool = candidate(&cfg, &small).unwrap();
+    // A driver whose standard runtime is a diagnostic one it doesn't allow
+    // renders no pool.
+    let diagnostic = SandboxWorkerCfg {
+        runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_RUNC.into(),
+        ..cfg.clone()
+    };
+    let (driver, requests) = driver_over((&diagnostic).into(), None, Vec::new(), false);
     assert_eq!(
         driver
             .pool_state(

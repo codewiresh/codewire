@@ -75,7 +75,13 @@ async fn resume_requires_the_predecessor_pod_proven_gone() {
     ] {
         let (client, seen) = kube(answer);
         require_predecessor_absent(
-            Some(crate::runtime::kubernetes::KubernetesDriver::shared(client.clone()).as_ref()),
+            Some(
+                crate::runtime::kubernetes::KubernetesDriver::shared(
+                    client.clone(),
+                    Default::default(),
+                )
+                .as_ref(),
+            ),
             &predecessor(),
         )
         .await
@@ -92,7 +98,13 @@ async fn resume_requires_the_predecessor_pod_proven_gone() {
         let (client, _) = kube((StatusCode::OK, pod(POD_UID, terminating)));
         refused_as_stopping(
             require_predecessor_absent(
-                Some(crate::runtime::kubernetes::KubernetesDriver::shared(client.clone()).as_ref()),
+                Some(
+                    crate::runtime::kubernetes::KubernetesDriver::shared(
+                        client.clone(),
+                        Default::default(),
+                    )
+                    .as_ref(),
+                ),
                 &predecessor(),
             )
             .await,
@@ -118,7 +130,13 @@ async fn resume_refuses_as_unavailable_when_absence_cannot_be_read() {
         ));
         unavailable_error(
             require_predecessor_absent(
-                Some(crate::runtime::kubernetes::KubernetesDriver::shared(client.clone()).as_ref()),
+                Some(
+                    crate::runtime::kubernetes::KubernetesDriver::shared(
+                        client.clone(),
+                        Default::default(),
+                    )
+                    .as_ref(),
+                ),
                 &predecessor(),
             )
             .await,

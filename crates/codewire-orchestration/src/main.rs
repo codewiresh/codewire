@@ -574,7 +574,9 @@ async fn main() -> anyhow::Result<()> {
         cloudflare: CloudflareClient::from_env(),
         preview_base_domain: std::env::var("PREVIEW_BASE_DOMAIN").unwrap_or_default(),
         kube: kube.clone(),
-        runtime: kube.clone().map(KubernetesDriver::shared),
+        runtime: kube
+            .clone()
+            .map(|kube| KubernetesDriver::shared(kube, (&sandbox_cfg).into())),
         secrets: secrets.clone(),
         sandbox_cfg,
         confidential_storage: confidential_storage.clone(),
@@ -678,7 +680,9 @@ async fn main() -> anyhow::Result<()> {
         auth: auth.clone(),
         // Ambient kube client for the exec proxy; unavailable mirrors
         // Go's nil sandbox client (the route then 503s).
-        runtime: kube.clone().map(KubernetesDriver::shared),
+        runtime: kube
+            .clone()
+            .map(|kube| KubernetesDriver::shared(kube, (&ctx.sandbox_cfg).into())),
         kube,
         environment_daemon_endpoints,
         // Shared session secret for daemon tokens and preview authorization.

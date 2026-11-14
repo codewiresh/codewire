@@ -219,6 +219,7 @@ pub const WORKSPACE_KEEPALIVE_COMMAND: [&str; 2] = ["sleep", "infinity"];
 
 /// Inputs for rendering one environment-scoped sandbox template.
 #[derive(Clone, Default)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct TemplateOpts {
     pub name: String,
     pub image: String,

@@ -196,6 +196,15 @@ pub struct WorkspaceSandboxIdentity {
 }
 
 impl WorkspaceSandboxIdentity {
+    /// A suspended Sandbox as tests name it.
+    #[cfg(test)]
+    pub(crate) fn synthetic(name: &str, uid: &str) -> Self {
+        Self {
+            name: name.into(),
+            uid: uid.into(),
+        }
+    }
+
     fn require_match(&self, sandbox: &DynamicObject) -> anyhow::Result<()> {
         anyhow::ensure!(
             sandbox.metadata.name.as_deref() == Some(self.name.as_str())

@@ -98,6 +98,17 @@ fn template_opts(env: &EnvironmentRow) -> Result<TemplateOpts> {
     )
 }
 
+/// The environment's intent, once [`template_opts`] renders it.
+fn template_intent(env: &EnvironmentRow) -> Result<RenderingIntent> {
+    template_opts(env)?;
+    environment_rendering_intent(
+        "ghcr.io/codewiresh/workspace:synthetic",
+        "workspace",
+        env,
+        GENERATION,
+    )
+}
+
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn database_capture_distinguishes_no_sources_from_app_only_metadata() -> Result<()> {
@@ -631,7 +642,7 @@ async fn template_publication_revalidates_capture_before_poll_and_holds_row_lock
         let original_project = app_project();
         store_project(&db, &original_project).await?;
         let captured = load_environment(&db.pool, ENVIRONMENT).await?;
-        let opts = template_opts(&captured)?;
+        let opts = template_intent(&captured)?;
         let authority = ActivityAuthority::capture(&db.pool, ENVIRONMENT, GENERATION).await?;
 
         let mut changed_source = original_project.clone();

@@ -203,8 +203,10 @@ fn bindings() -> Vec<(&'static str, LiveBinding)> {
 
 #[tokio::test]
 async fn every_fact_reading_check_equals_the_object_reading_one() {
-    let driver =
-        crate::runtime::kubernetes::KubernetesDriver::shared(FakeCluster::valid().client());
+    let driver = crate::runtime::kubernetes::KubernetesDriver::shared(
+        FakeCluster::valid().client(),
+        Default::default(),
+    );
     let identity = driver
         .review_member_credential(&valid_bearer())
         .await

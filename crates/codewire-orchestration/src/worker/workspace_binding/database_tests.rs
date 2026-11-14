@@ -650,7 +650,7 @@ impl FakeKube {
 
     /// The Kubernetes driver over this fake's API.
     fn driver(&self) -> std::sync::Arc<dyn crate::runtime::RuntimeDriver> {
-        crate::runtime::kubernetes::KubernetesDriver::shared(self.client())
+        crate::runtime::kubernetes::KubernetesDriver::shared(self.client(), (&pool_cfg()).into())
     }
 
     fn client(&self) -> kube::Client {
@@ -799,8 +799,9 @@ fn pool_rendering(
     env: &EnvironmentRow,
 ) -> Result<crate::sandbox::warm_pool::WarmPoolObjects> {
     Ok(crate::runtime::kubernetes::warm_pools::render_pool(
+        &cfg.into(),
         NAMESPACE,
-        &pool_born_rendering(cfg, env)?,
+        &pool_born_rendering(cfg, env)?.0,
     )?
     .objects)
 }
@@ -1366,8 +1367,11 @@ async fn db_the_backfill_never_records_a_pod_scope_binding() -> Result<()> {
         ensure!(
             record_backfill(
                 &db.pool,
-                crate::runtime::kubernetes::KubernetesDriver::shared(identity_free.client())
-                    .as_ref(),
+                crate::runtime::kubernetes::KubernetesDriver::shared(
+                    identity_free.client(),
+                    Default::default()
+                )
+                .as_ref(),
                 ENV_A
             )
             .await?
@@ -1381,7 +1385,11 @@ async fn db_the_backfill_never_records_a_pod_scope_binding() -> Result<()> {
         ensure!(
             record_backfill(
                 &db.pool,
-                crate::runtime::kubernetes::KubernetesDriver::shared(legacy.client()).as_ref(),
+                crate::runtime::kubernetes::KubernetesDriver::shared(
+                    legacy.client(),
+                    Default::default()
+                )
+                .as_ref(),
                 ENV_B
             )
             .await?
@@ -2382,8 +2390,14 @@ async fn db_a_fresh_warm_bind_is_confirmed_without_binding_or_applying_access_ag
         let probe = client.probe_environment(ENV_A).await?;
         let observation = ReconciledRuntime::observe(&env, &backend, &probe);
         // What the skipped reconcile would have found: a current bootstrap.
-        let opts = environment_template_opts(
+        environment_template_opts(
             &cfg,
+            "registry.example.test/codewire/workspace:synthetic",
+            "workspace",
+            &env,
+            GENERATION,
+        )?;
+        let opts = crate::worker::create::environment_rendering_intent(
             "registry.example.test/codewire/workspace:synthetic",
             "workspace",
             &env,
@@ -2773,8 +2787,27 @@ fn wanted_pool() -> crate::runtime::WantedPool {
     };
     crate::runtime::WantedPool {
         configured: crate::sandbox::warm_pool::ConfiguredShape { shape, members: 0 },
-        rendering: crate::worker::create::warm_pool_template_opts(&pool_cfg(), shape).unwrap(),
         allow_unpinned_images: false,
+    }
+}
+
+/// A standard environment of [`wanted_pool`]'s shape, as intent.
+fn pool_intent() -> crate::runtime::RenderingIntent {
+    crate::runtime::RenderingIntent {
+        image: crate::sandbox::canonical_workspace_runtime_image().into(),
+        template_base: "workspace".into(),
+        isolation: crate::runtime::Isolation::Standard,
+        dedicated_cpu: false,
+        shape: wanted_pool().configured.shape,
+        identity: crate::runtime::RenderingIdentity {
+            environment_id: ENV_A.into(),
+            organization_id: String::new(),
+            operation_generation: GENERATION,
+            projection_selection_sha256: None,
+            managed_credential_clients: Default::default(),
+            source_snapshot_id: None,
+            confidential_storage_manifest_uri: String::new(),
+        },
     }
 }
 
@@ -2785,9 +2818,13 @@ fn wanted_pool() -> crate::runtime::WantedPool {
 #[tokio::test]
 async fn a_pool_birth_is_ok_only_for_the_pools_own_rendering() {
     let wanted = wanted_pool();
-    let objects = crate::runtime::kubernetes::warm_pools::render_pool(NAMESPACE, &wanted)
-        .unwrap()
-        .objects;
+    let objects = crate::runtime::kubernetes::warm_pools::render_pool(
+        &(&pool_cfg()).into(),
+        NAMESPACE,
+        &wanted,
+    )
+    .unwrap()
+    .objects;
     // The same render function makes the pool the controller keeps.
     assert_eq!(
         objects,
@@ -2858,13 +2895,19 @@ async fn a_pool_birth_is_ok_only_for_the_pools_own_rendering() {
         birth(unmarked).await,
         Err("pod /spec/containers/workspace/env".to_owned())
     );
-    // A pool that cannot render vouches for nothing.
-    let mut unrenderable = wanted.clone();
-    unrenderable.rendering.environment_id = ENV_A.into();
-    let driver = pool_born(ENV_A, POD_1, &objects, true).driver();
+    // A pool its driver cannot render, here under a diagnostic runtime it
+    // doesn't allow, vouches for nothing.
+    let diagnostic = SandboxWorkerCfg {
+        runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_RUNC.into(),
+        ..pool_cfg()
+    };
+    let driver = crate::runtime::kubernetes::KubernetesDriver::shared(
+        pool_born(ENV_A, POD_1, &objects, true).client(),
+        (&diagnostic).into(),
+    );
     let observation = driver.observe(&bind_claim(ENV_A)).await.unwrap();
     let refused = driver
-        .pool_birth(&placement, &unrenderable, &observation)
+        .pool_birth(&placement, &wanted, &observation)
         .await
         .unwrap_err();
     assert!(refused.starts_with("pool rendering"), "{refused}");
@@ -2882,7 +2925,7 @@ async fn db_a_placement_without_pools_refuses_a_pool_born_first_bind() -> Result
     let wanted = wanted_pool();
     assert_eq!(
         no_pools
-            .pool_state(&Placement::new(NAMESPACE), &wanted, &wanted.rendering)
+            .pool_state(&Placement::new(NAMESPACE), &wanted, &pool_intent())
             .await?,
         crate::runtime::PoolState::NoPools
     );

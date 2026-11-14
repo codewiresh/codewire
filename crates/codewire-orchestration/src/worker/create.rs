@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
 
 use super::activity_authority::{ActivityAuthority, AuthorityLost, await_external_mutation};
@@ -23,20 +24,25 @@ use super::workspace_binding::{
 };
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
-use crate::runtime::{ClaimRef, Pick, Placement, RuntimeDriver, RuntimeProbe, VerifiedChain};
+use crate::runtime::kubernetes::rendering::KubernetesRenderConfig;
+use crate::runtime::{
+    ClaimRef, Isolation, Pick, Placement, RenderingIdentity, RenderingIntent, RuntimeDriver,
+    RuntimeProbe, VerifiedChain,
+};
+pub use crate::sandbox::CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME;
 use crate::sandbox::client::{
     ContainerStartFailed, NoCapacity, WorkspacePodIdentity, WorkspaceSandboxIdentity,
 };
 use crate::sandbox::host_keys::RecordedHostKeys;
+#[cfg(test)]
+use crate::sandbox::template::TemplateOpts;
 use crate::sandbox::template::{
-    CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DOCKER_MODE_LOCAL_DIND_DIRECT,
-    RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec, TemplateOpts, WORKSPACE_READY_TIMEOUT,
-    confidential_init_data, runtime_profile_spec, validate_managed_runtime_profile,
+    CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, RUNTIME_PROFILE_CONFIDENTIAL, WORKSPACE_READY_TIMEOUT,
 };
 use crate::sandbox::warm_pool::{WarmPoolObjects, WorkspaceShape, render_warm_pool};
 use crate::sandbox::{
-    ClaimOpts, canonical_workspace_runtime_image, claim_name, environment_template_name,
-    is_canonical_workspace_runtime_image, shadow_warm_pool_name,
+    ClaimOpts, claim_name, environment_template_name, is_canonical_workspace_runtime_image,
+    shadow_warm_pool_name,
 };
 use crate::start_metrics::{self, CreateMilestone, StartPath, StartProfile, StartStage};
 
@@ -61,14 +67,14 @@ mod replacement_database_tests;
 #[cfg(test)]
 mod warm_pool_tests;
 
+#[cfg(test)]
+mod rendering_equivalence_tests;
+
 /// Only an exactly owned Pod with stale immutable bootstrap may be restarted.
 /// Missing/replaced identities and storage errors must never select recovery.
 #[derive(Debug, thiserror::Error)]
 #[error("workspace Pod bootstrap does not match the current environment operation")]
 pub(super) struct WorkspaceBootstrapMismatch;
-
-/// Mirrors `sandbox.CanonicalWorkspaceRuntimeTemplateName`.
-pub const CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME: &str = "workspace";
 
 // ── Create action policy (port of environmentlifecycle/create.go) ──────
 
@@ -565,23 +571,16 @@ fn parse_udp_lb_port_bound(s: &str) -> i64 {
     }
 }
 
-/// Mirrors `isFirstPartyWorkspaceImage`.
-pub fn is_first_party_workspace_image(image_ref: &str) -> bool {
-    image_ref.contains("codewiresh/workspace-")
-        || image_ref.contains("codewiresh/base")
-        || image_ref.contains("codewiresh/workspace")
-}
-
-/// Mirrors `environmentTemplateOpts`: the environment's identity on top of
-/// the cluster and shape inputs of [`shape_template_opts`].
-pub fn environment_template_opts(
-    cfg: &SandboxWorkerCfg,
+/// What one environment's runtime is, as intent for the driver (#3628 PR
+/// 8b): its image, isolation, shape and identity under the captured operation
+/// authority. The checks here need no deployment configuration; the driver
+/// makes the rest when it renders.
+pub fn environment_rendering_intent(
     image_ref: &str,
     template_base: &str,
     env: &EnvironmentRow,
     operation_generation: i64,
-) -> anyhow::Result<TemplateOpts> {
-    let env_id = env.id.as_str();
+) -> anyhow::Result<RenderingIntent> {
     anyhow::ensure!(
         operation_generation > 0 && env.operation_generation == operation_generation,
         "template metadata no longer matches operation authority"
@@ -610,240 +609,136 @@ pub fn environment_template_opts(
             }),
         "managed credential clients require an exact selected profile"
     );
-    anyhow::ensure!(
-        projection_selection_sha256.is_none() || cfg.credential_runtime.is_some(),
-        "selected environment sources require credential runtime trust"
-    );
-    let runtime_spec = match runtime_profile_for_isolation_tier(&env.isolation_tier)
-        .expect("environment isolation tier is validated at creation")
-    {
-        Some(profile) => runtime_profile_spec(profile, &cfg.docker_mode, cfg.dind_enabled),
-        None => standard_runtime_profile_spec(cfg),
-    };
-    // A confidential claim is the guest-encrypted raw Block volume of its own
-    // class; without one the environment is refused, never given the
-    // commodity class.
-    anyhow::ensure!(
-        runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL
-            || !cfg.confidential_workspace_storage_class.is_empty(),
-        "confidential workspace storage has no StorageClass: set {}",
-        crate::sandbox::template::CONFIDENTIAL_WORKSPACE_STORAGE_CLASS_ENV
-    );
-    let template_base = if is_canonical_workspace_runtime_image(image_ref) {
-        CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME
-    } else {
-        template_base
-    };
-    let shape = WorkspaceShape {
-        cpu_millicores: i64::from(env.cpu_millicores),
-        memory_mib: i64::from(env.memory_mb),
-        disk_gib: i64::from(env.disk_gb),
-    };
-    // A confidential workspace measures the roots its daemon trusts (B2c);
-    // without them no confidential rendering exists.
-    anyhow::ensure!(
-        runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL
-            || !cfg.confidential_binding_roots_pem.trim().is_empty(),
-        "confidential workspaces need orchestration's internal TLS roots to measure"
-    );
-
-    let opts = TemplateOpts {
-        name: environment_template_name(template_base, env_id),
-        environment_id: env_id.to_string(),
-        organization_id: env.org_id.clone(),
-        operation_generation,
-        projection_selection_sha256,
-        managed_credential_clients,
-        codex_login_check_period_seconds: cfg.codex_login_check_period_seconds,
-        workspace_source_snapshot: env
-            .source_snapshot_id
-            .as_deref()
-            .map(crate::sandbox::snapshots::kept_snapshot_name),
-        ..shape_template_opts(cfg, image_ref, &runtime_spec, shape)
-    };
-    let opts = if env.dedicated_cpu {
-        TemplateOpts {
-            cpu_sharing: crate::sandbox::template::CpuSharingRatio::NONE,
-            ..opts
-        }
-    } else {
-        opts
-    };
-    // Its binding listener is one of the measured anchors: a confidential
-    // rendering without one is refused here, never rendered.
-    anyhow::ensure!(
-        runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL
-            || !opts.workspace_binding_url.trim().is_empty(),
-        "confidential workspaces need the workspace binding listener to measure"
-    );
-    Ok(opts)
+    Ok(RenderingIntent {
+        image: image_ref.to_owned(),
+        template_base: template_base.to_owned(),
+        isolation: Isolation::of_tier(&env.isolation_tier)
+            .expect("environment isolation tier is validated at creation"),
+        dedicated_cpu: env.dedicated_cpu,
+        shape: WorkspaceShape {
+            cpu_millicores: i64::from(env.cpu_millicores),
+            memory_mib: i64::from(env.memory_mb),
+            disk_gib: i64::from(env.disk_gb),
+        },
+        identity: RenderingIdentity {
+            environment_id: env.id.clone(),
+            organization_id: env.org_id.clone(),
+            operation_generation,
+            projection_selection_sha256,
+            managed_credential_clients,
+            source_snapshot_id: env.source_snapshot_id.clone(),
+            confidential_storage_manifest_uri: String::new(),
+        },
+    })
 }
 
-/// The cluster and shape inputs of a workspace rendering, with no environment
-/// identity: images, runtime, resources, storage, transport and the identity
-/// mode. A warm pool renders from these alone (Program #2238 C1); an
-/// environment adds its identity in [`environment_template_opts`]. Every
-/// field is listed, so a new one must be placed on one side or the other.
-pub fn shape_template_opts(
-    cfg: &SandboxWorkerCfg,
-    image_ref: &str,
-    runtime_spec: &RuntimeProfileSpec,
-    shape: WorkspaceShape,
-) -> TemplateOpts {
-    // Codewire base images supervise the daemon beneath PID 1. Custom
-    // images also retain a keepalive alongside that managed daemon.
-    let image_command = if is_first_party_workspace_image(image_ref) {
-        Vec::new()
-    } else {
-        crate::sandbox::template::WORKSPACE_KEEPALIVE_COMMAND
-            .map(str::to_owned)
-            .to_vec()
-    };
-
-    let uses_runtime_transport_registry = !cfg.runtime_transport_zones_json.trim().is_empty();
-    // Every hosted workspace is identity-free (design §13), confidential too
-    // (B2c), which also measures its binding anchors. A Pod reaches the
-    // binding listener only with the orchestration namespace and a
-    // coordinator known, which a worker with a sandbox backend requires at
-    // startup (`require_workspace_binding_config`).
+/// Whether this deployment binds identity-free workspaces: a Pod reaches the
+/// binding listener only with the orchestration namespace and a coordinator
+/// known, which a worker with a sandbox backend requires at startup
+/// (`require_workspace_binding_config`).
+pub fn workspace_binding_configured(cfg: &SandboxWorkerCfg) -> bool {
     let has_coordinator =
         !(cfg.coordinator_url.trim().is_empty() && cfg.api_base_url.trim().is_empty());
-    let binds = !cfg.pod_namespace.trim().is_empty() && has_coordinator;
-    let measured_binding_roots = if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
-        cfg.confidential_binding_roots_pem.clone()
-    } else {
-        String::new()
-    };
-    let workspace_binding_url = if binds {
-        workspace_binding_url(cfg.pod_namespace.trim())
-    } else {
-        String::new()
-    };
+    !cfg.pod_namespace.trim().is_empty() && has_coordinator
+}
 
-    TemplateOpts {
-        // Environment identity: none.
-        name: String::new(),
-        environment_id: String::new(),
-        organization_id: String::new(),
-        operation_generation: 0,
-        projection_selection_sha256: None,
-        managed_credential_clients: Default::default(),
-        confidential_storage_manifest_uri: String::new(),
-        // Cluster and shape.
-        measured_binding_roots,
-        image: image_ref.to_string(),
-        image_command,
-        support_image: cfg.daemon_image.clone(),
-        dind_image: cfg.dind_image.clone(),
-        runtime_profile: runtime_spec.profile.clone(),
-        docker_mode: runtime_spec.docker_mode.clone(),
-        credential_runtime: cfg.credential_runtime.clone(),
-        workspace_binding_url,
-        api_base_url: cfg.api_base_url.clone(),
-        coordinator_url: cfg.coordinator_url.clone(),
-        server_namespace: cfg.pod_namespace.clone(),
-        coordinator_extra_roots: cfg.coordinator_extra_roots,
-        ingress_namespace: cfg.ingress_namespace.clone(),
-        ingress_pod_name: cfg.ingress_pod_name.clone(),
-        egress_bandwidth: cfg.egress_bandwidth.clone(),
-        // Kind's test deployment only, and the same as an environment's own
-        // rendering: a pool member must render exactly as the environment that
-        // adopts it, or every create of its shape routes cold (#3852). Kind's
-        // pool template admission names the variable; no other deployment's
-        // build reads it.
-        codex_login_check_period_seconds: cfg.codex_login_check_period_seconds,
-        derp_host: cfg.derp_host.clone(),
-        derp_port: parse_derp_port(&cfg.derp_port),
-        stun_host: cfg.stun_host.clone(),
-        stun_port: parse_stun_port(&cfg.stun_port),
-        stun_servers: cfg.stun_servers.clone(),
-        direct_udp_lb_enabled: cfg.direct_udp_lb_enabled
-            && matches!(
-                runtime_spec.profile.as_str(),
-                crate::sandbox::template::RUNTIME_PROFILE_COMMODITY
-                    | crate::sandbox::template::RUNTIME_PROFILE_CONFIDENTIAL
-            ),
-        direct_udp_lb_ip: cfg.direct_udp_lb_ip.clone(),
-        direct_udp_lb_port: 0,
-        direct_udp_lb_port_start: parse_udp_lb_port_bound(&cfg.direct_udp_lb_port_start),
-        direct_udp_lb_port_end: parse_udp_lb_port_bound(&cfg.direct_udp_lb_port_end),
-        direct_udp_lb_class: cfg.direct_udp_lb_class.clone(),
-        direct_udp_lb_sharing_key: cfg.direct_udp_lb_sharing_key.clone(),
-        direct_udp_transport_zone: cfg.direct_udp_transport_zone.clone(),
-        udp_relay_allocator_url: if uses_runtime_transport_registry {
-            String::new()
-        } else {
-            cfg.udp_relay_allocator_url.clone()
-        },
-        udp_relay_bind_addrs: if uses_runtime_transport_registry {
-            String::new()
-        } else {
-            cfg.udp_relay_bind_addrs.clone()
-        },
-        udp_relay_allocator_egress_enabled: uses_runtime_transport_registry,
-        cpu_millicores: shape.cpu_millicores,
-        // Nothing has measured a confidential VM under sharing.
-        cpu_sharing: if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
-            crate::sandbox::template::CpuSharingRatio::NONE
-        } else {
-            cfg.cpu_sharing_ratio
-        },
-        memory_mib: shape.memory_mib,
-        disk_gib: shape.disk_gib,
-        workspace_source_snapshot: None,
-        workspace_storage_class: if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
-            cfg.confidential_workspace_storage_class.clone()
-        } else {
-            cfg.workspace_storage_class.clone()
-        },
-        workspace_subfolder: cfg.workspace_subfolder,
-        network_policy_management: cfg.network_policy_management.clone(),
-        dind_enabled: runtime_spec.docker_mode == DOCKER_MODE_LOCAL_DIND_DIRECT,
-        kata_agent_policy_enabled: cfg.kata_agent_policy_enabled,
-        kata_coco_init_data_enabled: cfg.kata_coco_init_data_enabled,
-        kata_coco_kbs_url: cfg.kata_coco_kbs_url.clone(),
-        kata_coco_kbs_ca_pem: cfg.kata_coco_kbs_ca_pem.clone(),
-        kata_coco_image_registry_auth_uri: cfg.kata_coco_image_registry_auth_uri.clone(),
-        kata_coco_test_resource_uri: cfg.kata_coco_test_resource_uri.clone(),
-        kata_coco_test_resource_path: cfg.kata_coco_test_resource_path.clone(),
-        debug_tailnet: cfg.debug_tailnet,
+/// The deployment-wide half of every workspace rendering, which the driver
+/// holds (#3628 PR 8b).
+impl From<&SandboxWorkerCfg> for KubernetesRenderConfig {
+    fn from(cfg: &SandboxWorkerCfg) -> Self {
+        Self {
+            credential_runtime: cfg.credential_runtime.clone(),
+            daemon_image: cfg.daemon_image.clone(),
+            dind_image: cfg.dind_image.clone(),
+            runtime_profile: cfg.runtime_profile.clone(),
+            docker_mode: cfg.docker_mode.clone(),
+            dind_enabled: cfg.dind_enabled,
+            allow_diagnostic_runtime: cfg.allow_diagnostic_runtime,
+            workspace_storage_class: cfg.workspace_storage_class.clone(),
+            confidential_workspace_storage_class: cfg.confidential_workspace_storage_class.clone(),
+            confidential_binding_roots_pem: cfg.confidential_binding_roots_pem.clone(),
+            workspace_binding_url: if workspace_binding_configured(cfg) {
+                workspace_binding_url(cfg.pod_namespace.trim())
+            } else {
+                String::new()
+            },
+            api_base_url: cfg.api_base_url.clone(),
+            coordinator_url: cfg.coordinator_url.clone(),
+            server_namespace: cfg.pod_namespace.clone(),
+            coordinator_extra_roots: cfg.coordinator_extra_roots,
+            codex_login_check_period_seconds: cfg.codex_login_check_period_seconds,
+            ingress_namespace: cfg.ingress_namespace.clone(),
+            ingress_pod_name: cfg.ingress_pod_name.clone(),
+            egress_bandwidth: cfg.egress_bandwidth.clone(),
+            derp_host: cfg.derp_host.clone(),
+            derp_port: parse_derp_port(&cfg.derp_port),
+            stun_host: cfg.stun_host.clone(),
+            stun_port: parse_stun_port(&cfg.stun_port),
+            stun_servers: cfg.stun_servers.clone(),
+            direct_udp_lb_enabled: cfg.direct_udp_lb_enabled,
+            direct_udp_lb_ip: cfg.direct_udp_lb_ip.clone(),
+            direct_udp_lb_port_start: parse_udp_lb_port_bound(&cfg.direct_udp_lb_port_start),
+            direct_udp_lb_port_end: parse_udp_lb_port_bound(&cfg.direct_udp_lb_port_end),
+            direct_udp_lb_class: cfg.direct_udp_lb_class.clone(),
+            direct_udp_lb_sharing_key: cfg.direct_udp_lb_sharing_key.clone(),
+            direct_udp_transport_zone: cfg.direct_udp_transport_zone.clone(),
+            udp_relay_allocator_url: cfg.udp_relay_allocator_url.clone(),
+            udp_relay_bind_addrs: cfg.udp_relay_bind_addrs.clone(),
+            uses_runtime_transport_registry: !cfg.runtime_transport_zones_json.trim().is_empty(),
+            cpu_sharing_ratio: cfg.cpu_sharing_ratio,
+            workspace_subfolder: cfg.workspace_subfolder,
+            network_policy_management: cfg.network_policy_management.clone(),
+            kata_agent_policy_enabled: cfg.kata_agent_policy_enabled,
+            kata_coco_init_data_enabled: cfg.kata_coco_init_data_enabled,
+            kata_coco_kbs_url: cfg.kata_coco_kbs_url.clone(),
+            kata_coco_kbs_ca_pem: cfg.kata_coco_kbs_ca_pem.clone(),
+            kata_coco_image_registry_auth_uri: cfg.kata_coco_image_registry_auth_uri.clone(),
+            kata_coco_test_resource_uri: cfg.kata_coco_test_resource_uri.clone(),
+            kata_coco_test_resource_path: cfg.kata_coco_test_resource_path.clone(),
+            debug_tailnet: cfg.debug_tailnet,
+        }
     }
 }
 
-/// The runtime of a standard-tier environment: this process's configured
-/// profile.
-fn standard_runtime_profile_spec(cfg: &SandboxWorkerCfg) -> RuntimeProfileSpec {
-    runtime_profile_spec(&cfg.runtime_profile, &cfg.docker_mode, cfg.dind_enabled)
+/// An environment's options as the driver renders them, for tests.
+#[cfg(test)]
+pub(crate) fn environment_template_opts(
+    cfg: &SandboxWorkerCfg,
+    image_ref: &str,
+    template_base: &str,
+    env: &EnvironmentRow,
+    operation_generation: i64,
+) -> anyhow::Result<TemplateOpts> {
+    let intent = environment_rendering_intent(image_ref, template_base, env, operation_generation)?;
+    KubernetesRenderConfig::from(cfg).environment(&intent)
 }
 
-/// The identity-free inputs of one warm-pool shape (Program #2238 C1): the
-/// canonical workspace image on the standard tier, from the shape and this
-/// process's configuration alone, never from an environment row. A
-/// confidential runtime, a diagnostic runtime outside diagnostic clusters and
-/// a configuration that cannot render identity-free workspaces render no
-/// pool.
-pub fn warm_pool_template_opts(
+/// A warm pool's options as the driver renders them, for tests.
+#[cfg(test)]
+pub(crate) fn warm_pool_template_opts(
     cfg: &SandboxWorkerCfg,
     shape: WorkspaceShape,
 ) -> anyhow::Result<TemplateOpts> {
-    let runtime_spec = standard_runtime_profile_spec(cfg);
-    anyhow::ensure!(
-        runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL,
-        "confidential workspaces are never pooled"
-    );
-    validate_managed_runtime_profile(&runtime_spec, cfg.allow_diagnostic_runtime)
-        .map_err(|error| anyhow::anyhow!("warm pool runtime profile: {error}"))?;
-    let opts = shape_template_opts(
-        cfg,
-        canonical_workspace_runtime_image(),
-        &runtime_spec,
-        shape,
-    );
-    anyhow::ensure!(
-        !opts.workspace_binding_url.is_empty(),
-        "warm pools require identity-free workspaces (POD_NAMESPACE and a coordinator)"
-    );
-    Ok(opts)
+    KubernetesRenderConfig::from(cfg).pool(shape)
+}
+
+/// The cluster and shape options of a rendering, for tests.
+#[cfg(test)]
+pub(crate) fn shape_template_opts(
+    cfg: &SandboxWorkerCfg,
+    image_ref: &str,
+    runtime_spec: &crate::sandbox::template::RuntimeProfileSpec,
+    shape: WorkspaceShape,
+) -> TemplateOpts {
+    KubernetesRenderConfig::from(cfg).shape(image_ref, runtime_spec, shape)
+}
+
+/// The runtime of a standard-tier environment, for tests.
+#[cfg(test)]
+pub(crate) fn standard_runtime_profile_spec(
+    cfg: &SandboxWorkerCfg,
+) -> crate::sandbox::template::RuntimeProfileSpec {
+    KubernetesRenderConfig::from(cfg).runtime_spec(Isolation::Standard)
 }
 
 /// Render one configured warm pool in the sandbox namespace. Only diagnostic
@@ -853,7 +748,7 @@ pub fn render_configured_warm_pool(
     shape: WorkspaceShape,
     replicas: i32,
 ) -> anyhow::Result<WarmPoolObjects> {
-    let opts = warm_pool_template_opts(cfg, shape)?;
+    let opts = KubernetesRenderConfig::from(cfg).pool(shape)?;
     render_warm_pool(
         &cfg.sandbox_namespace,
         &opts,
@@ -984,7 +879,10 @@ pub(super) fn ready_timeout_for_isolation(isolation_tier: &str) -> Duration {
     }
 }
 
-fn validate_template_metadata(env: &EnvironmentRow, opts: &TemplateOpts) -> anyhow::Result<()> {
+fn validate_template_metadata(
+    env: &EnvironmentRow,
+    intent: &RenderingIntent,
+) -> anyhow::Result<()> {
     let digest = env
         .projection_selection
         .as_ref()
@@ -1000,12 +898,13 @@ fn validate_template_metadata(env: &EnvironmentRow, opts: &TemplateOpts) -> anyh
     clients
         .check_collisions(env.project_spec.environment.keys().map(String::as_str))
         .map_err(|_| AuthorityLost)?;
-    if env.id != opts.environment_id
-        || env.org_id != opts.organization_id
+    let identity = &intent.identity;
+    if env.id != identity.environment_id
+        || env.org_id != identity.organization_id
         || env.operation_generation <= 0
-        || env.operation_generation != opts.operation_generation
-        || digest != opts.projection_selection_sha256
-        || clients != opts.managed_credential_clients
+        || env.operation_generation != identity.operation_generation
+        || digest != identity.projection_selection_sha256
+        || clients != identity.managed_credential_clients
     {
         return Err(AuthorityLost.into());
     }
@@ -1017,22 +916,22 @@ fn validate_template_metadata(env: &EnvironmentRow, opts: &TemplateOpts) -> anyh
 /// row; immutable profile revisions need no separate lifecycle generation.
 pub(super) async fn run_template_mutation<F, T>(
     authority: &ActivityAuthority,
-    opts: &TemplateOpts,
+    intent: &RenderingIntent,
     states: &[&str],
     mutation: F,
 ) -> anyhow::Result<T>
 where
     F: std::future::Future<Output = anyhow::Result<T>>,
 {
-    if opts.environment_id != authority.environment_id()
-        || opts.operation_generation != authority.operation_generation()
+    if intent.identity.environment_id != authority.environment_id()
+        || intent.identity.operation_generation != authority.operation_generation()
     {
         return Err(AuthorityLost.into());
     }
     let mut guard = authority.begin_external_mutation(states).await?;
     let result = await_external_mutation(async {
         let current = load_environment_in(guard.transaction(), authority.environment_id()).await?;
-        validate_template_metadata(&current, opts)?;
+        validate_template_metadata(&current, intent)?;
         mutation.await
     })
     .await?;
@@ -1040,52 +939,94 @@ where
     Ok(result)
 }
 
+/// A measured runtime as confidential storage authorized it: the intent the
+/// driver renders it from, and the SHA-256 of the init data authorized for
+/// that intent (B2c). The driver refuses to write it if its own init data
+/// for the intent hashes differently.
+pub(super) struct MeasuredRuntime {
+    pub(super) intent: RenderingIntent,
+    pub(super) authorized: [u8; 32],
+}
+
+/// An environment's runtime, ready to be written: its intent, and when the
+/// runtime is measured, the SHA-256 of the init data confidential storage
+/// authorized for that intent. Only [`authorize_confidential_runtime`] makes
+/// one, so a bootstrap can't be written without the authorization it needs.
+pub(super) struct AuthorizedRuntime {
+    pub(super) intent: RenderingIntent,
+    pub(super) authorized: Option<[u8; 32]>,
+}
+
+/// The init data the driver measures `intent`'s runtime with, and its
+/// SHA-256; `None` when that runtime isn't measured.
+fn measured_authorization(
+    runtime: &dyn RuntimeDriver,
+    intent: &RenderingIntent,
+) -> anyhow::Result<Option<(String, [u8; 32])>> {
+    Ok(runtime.measured_init_data(intent)?.map(|init_data| {
+        let digest = Sha256::digest(init_data.as_bytes()).into();
+        (init_data, digest)
+    }))
+}
+
+/// Have confidential storage authorize the init data the driver measures
+/// `intent`'s runtime with, when it is measured.
 pub(super) async fn authorize_confidential_runtime(
     ctx: &WorkerContext,
-    opts: &TemplateOpts,
+    intent: RenderingIntent,
     authority: &ActivityAuthority,
     authoritative_states: &[&str],
-) -> anyhow::Result<()> {
-    if opts.runtime_profile_spec().profile != RUNTIME_PROFILE_CONFIDENTIAL || opts.disk_gib <= 0 {
-        return Ok(());
-    }
+) -> anyhow::Result<AuthorizedRuntime> {
+    let Some((init_data, authorized)) = measured_authorization(ctx.require_runtime()?, &intent)?
+    else {
+        return Ok(AuthorizedRuntime {
+            intent,
+            authorized: None,
+        });
+    };
     let storage = ctx
         .confidential_storage
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("confidential storage providers are not configured"))?;
-    let init_data = confidential_init_data(opts)?;
     run_template_mutation(
         authority,
-        opts,
+        &intent,
         authoritative_states,
         storage.authorize_init_data(
-            &opts.environment_id,
-            &opts.confidential_storage_manifest_uri,
+            &intent.identity.environment_id,
+            &intent.identity.confidential_storage_manifest_uri,
             init_data.as_bytes(),
         ),
     )
     .await?;
-    Ok(())
+    Ok(AuthorizedRuntime {
+        intent,
+        authorized: Some(authorized),
+    })
 }
 
-pub(super) async fn load_environment_template_opts(
+/// The environment's rendering intent from its preset, checked by the driver
+/// as it was when orchestration rendered it.
+pub(super) async fn load_environment_rendering_intent(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
     operation_generation: i64,
-) -> anyhow::Result<TemplateOpts> {
+) -> anyhow::Result<RenderingIntent> {
     let (image, base) =
         load_sandbox_template_config(&ctx.pool, env.preset_id.as_deref().unwrap_or_default())
             .await?;
-    environment_template_opts(&ctx.sandbox_cfg, &image, &base, env, operation_generation)
+    let intent = environment_rendering_intent(&image, &base, env, operation_generation)?;
+    ctx.require_runtime()?.check_rendering(&intent)?;
+    Ok(intent)
 }
 
 /// The allocated Sandbox, not only its template, owns the next Pod's immutable
 /// bootstrap. The caller first observes completed suspension and Pod absence.
 pub(super) async fn refresh_workspace_bootstrap(
-    ctx: &WorkerContext,
+    runtime: &dyn RuntimeDriver,
     env: &EnvironmentRow,
     backend: &BackendRow,
-    opts: &TemplateOpts,
+    rendering: &AuthorizedRuntime,
     suspended: &WorkspaceSandboxIdentity,
     authority: &ActivityAuthority,
     states: &[&str],
@@ -1094,11 +1035,11 @@ pub(super) async fn refresh_workspace_bootstrap(
         env.id == authority.environment_id(),
         "bootstrap authority mismatch"
     );
-    let runtime = ctx.require_runtime()?;
+    let intent = &rendering.intent;
     let mut guard = authority.begin_external_mutation(states).await?;
     await_external_mutation(async {
         let current = load_environment_in(guard.transaction(), &env.id).await?;
-        validate_template_metadata(&current, opts)?;
+        validate_template_metadata(&current, intent)?;
         let (namespace, claim_name, claim_uid): (String, String, String) = sqlx::query_as(
             "SELECT namespace, sandbox_claim_name, sandbox_claim_uid
              FROM sandbox_environment_backend WHERE environment_id=$1",
@@ -1121,66 +1062,68 @@ pub(super) async fn refresh_workspace_bootstrap(
             name: claim_name,
             uid: claim_uid,
         };
-        runtime.refresh_bootstrap(&claim, opts, suspended).await
+        runtime
+            .refresh_bootstrap(&claim, intent, suspended, rendering.authorized.as_ref())
+            .await
     })
     .await?;
     guard.commit().await
 }
 
-pub(super) async fn confidential_runtime_template_opts(
+/// A confidential environment's rendering intent, with its storage manifest,
+/// checked by the driver including its managed runtime.
+pub(super) async fn confidential_rendering_intent(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
     confidential_storage_manifest_uri: &str,
     operation_generation: i64,
-) -> anyhow::Result<TemplateOpts> {
+) -> anyhow::Result<RenderingIntent> {
     anyhow::ensure!(
         env.isolation_tier == "confidential",
         "environment is not confidential"
     );
-    let env_id = env.id.as_str();
     let preset_id = env
         .preset_id
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("confidential environment has no preset id"))?;
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, preset_id).await?;
-    let cfg = &ctx.sandbox_cfg;
-    let expected_template = environment_per_env_template_name(&image_ref, &template_base, env_id);
-    let mut template_opts =
-        environment_template_opts(cfg, &image_ref, &template_base, env, operation_generation)?;
-    template_opts.confidential_storage_manifest_uri = confidential_storage_manifest_uri.to_owned();
-    if template_opts.name != expected_template {
-        anyhow::bail!("confidential runtime template identity is inconsistent");
-    }
-    validate_managed_runtime_profile(
-        &template_opts.runtime_profile_spec(),
-        cfg.allow_diagnostic_runtime,
-    )
-    .map_err(|error| anyhow::anyhow!("runtime profile: {error}"))?;
-    Ok(template_opts)
+    let mut intent =
+        environment_rendering_intent(&image_ref, &template_base, env, operation_generation)?;
+    intent.identity.confidential_storage_manifest_uri =
+        confidential_storage_manifest_uri.to_owned();
+    let runtime = ctx.require_runtime()?;
+    runtime.check_rendering(&intent)?;
+    runtime
+        .check_runtime_profile(&intent)
+        .map_err(|error| anyhow::anyhow!("runtime profile: {error}"))?;
+    Ok(intent)
 }
 
 /// A confidential environment's measured runtime for the incarnation that
-/// replaces a terminal one, rendered and authorized; `None` for any other
-/// environment.
+/// replaces a terminal one, authorized; `None` for any other environment.
 pub(super) async fn authorize_confidential_runtime_before_replacement(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
     confidential_storage_manifest_uri: &str,
     authority: &ActivityAuthority,
     authoritative_states: &[&str],
-) -> anyhow::Result<Option<TemplateOpts>> {
+) -> anyhow::Result<Option<MeasuredRuntime>> {
     if env.isolation_tier != "confidential" {
         return Ok(None);
     }
-    let template_opts = confidential_runtime_template_opts(
+    let intent = confidential_rendering_intent(
         ctx,
         env,
         confidential_storage_manifest_uri,
         authority.operation_generation(),
     )
     .await?;
-    authorize_confidential_runtime(ctx, &template_opts, authority, authoritative_states).await?;
-    Ok(Some(template_opts))
+    let authorized =
+        authorize_confidential_runtime(ctx, intent, authority, authoritative_states).await?;
+    Ok(authorized.authorized.map(|digest| MeasuredRuntime {
+        intent: authorized.intent,
+        authorized: digest,
+    }))
 }
 
 /// What replacing one terminal incarnation needs.
@@ -1190,7 +1133,7 @@ pub(super) struct StaleReplacement<'a> {
     /// The environment is confidential, so it must have `measured`.
     pub(super) confidential: bool,
     /// The authorized measured runtime of a confidential environment.
-    pub(super) measured: Option<&'a TemplateOpts>,
+    pub(super) measured: Option<&'a MeasuredRuntime>,
     pub(super) support_image: &'a str,
     pub(super) ready_timeout: Duration,
 }
@@ -1219,12 +1162,18 @@ pub(super) async fn replace_stale_member(
         "a confidential replacement has no measured runtime"
     );
     let env_id = authority.environment_id();
-    if let Some(template_opts) = measured {
+    if let Some(measured) = measured {
         let init_data = run_template_mutation(
             authority,
-            template_opts,
+            &measured.intent,
             states,
-            runtime.publish_measured_runtime(placement, env_id, &stale.name, template_opts),
+            runtime.publish_measured_runtime(
+                placement,
+                env_id,
+                &stale.name,
+                &measured.intent,
+                &measured.authorized,
+            ),
         )
         .await?;
         authority
@@ -1716,19 +1665,16 @@ async fn run_environment_create(
                             return Err(e);
                         }
                     };
-                let mut template_opts = environment_template_opts(
-                    cfg,
+                let mut intent = environment_rendering_intent(
                     &image_ref,
                     &template_base,
                     &env,
                     authority.operation_generation(),
                 )?;
-                template_opts.confidential_storage_manifest_uri =
+                intent.identity.confidential_storage_manifest_uri =
                     confidential_storage_manifest_uri.unwrap_or_default();
-                let runtime_spec = template_opts.runtime_profile_spec();
-                if let Err(e) =
-                    validate_managed_runtime_profile(&runtime_spec, cfg.allow_diagnostic_runtime)
-                {
+                ctx.require_runtime()?.check_rendering(&intent)?;
+                if let Err(e) = ctx.require_runtime()?.check_runtime_profile(&intent) {
                     emit_create_log(
                         authority,
                         "create_claim",
@@ -1740,31 +1686,34 @@ async fn run_environment_create(
                     record_error(&svc, authority, env_id, &format!("runtime profile: {e}")).await?;
                     anyhow::bail!(e);
                 }
-                if let Err(e) = authorize_confidential_runtime(
+                let authorized = match authorize_confidential_runtime(
                     ctx,
-                    &template_opts,
+                    intent.clone(),
                     authority,
                     CREATE_MUTATION_STATES,
                 )
                 .await
                 {
-                    emit_create_log(
-                        authority,
-                        "create_claim",
-                        "failed",
-                        &format!("{e:#}"),
-                        duration_meta(started),
-                    )
-                    .await?;
-                    record_error(
-                        &svc,
-                        authority,
-                        env_id,
-                        &format!("init-data authorization: {e:#}"),
-                    )
-                    .await?;
-                    return Err(e);
-                }
+                    Ok(authorized) => authorized.authorized,
+                    Err(e) => {
+                        emit_create_log(
+                            authority,
+                            "create_claim",
+                            "failed",
+                            &format!("{e:#}"),
+                            duration_meta(started),
+                        )
+                        .await?;
+                        record_error(
+                            &svc,
+                            authority,
+                            env_id,
+                            &format!("init-data authorization: {e:#}"),
+                        )
+                        .await?;
+                        return Err(e);
+                    }
+                };
                 let claim_opts = environment_claim_opts(
                     &image_ref,
                     &template_base,
@@ -1799,7 +1748,7 @@ async fn run_environment_create(
                     cfg,
                     &env,
                     &image_ref,
-                    &template_opts,
+                    &intent,
                     runtime,
                     &placement,
                     reclaimed_cold,
@@ -1813,27 +1762,19 @@ async fn run_environment_create(
                     pool_route::Route::Cold(_) => (Pick::Cold, StartPath::Cold),
                 };
                 if claim_path == StartPath::Cold {
-                    if claim_opts.template_ref != template_opts.name {
-                        let error = anyhow::anyhow!(
-                            "claim template does not match environment-scoped daemon template"
-                        );
-                        emit_create_log(
-                            authority,
-                            "create_claim",
-                            "failed",
-                            &error.to_string(),
-                            duration_meta(started),
-                        )
-                        .await?;
-                        record_error(&svc, authority, env_id, &error.to_string()).await?;
-                        return Err(error);
-                    }
                     // Its error names the step: "template" or "shadow pool".
+                    // The driver first refuses a claim whose template isn't
+                    // the environment's own.
                     if let Err(e) = run_template_mutation(
                         authority,
-                        &template_opts,
+                        &intent,
                         CREATE_MUTATION_STATES,
-                        runtime.prepare_cold_claim(&placement, &template_opts, &claim_opts),
+                        runtime.prepare_cold_claim(
+                            &placement,
+                            &intent,
+                            &claim_opts,
+                            authorized.as_ref(),
+                        ),
                     )
                     .await
                     {
@@ -1854,7 +1795,7 @@ async fn run_environment_create(
                         .begin_external_mutation(CREATE_MUTATION_STATES)
                         .await?;
                     let current = load_environment_in(guard.transaction(), env_id).await?;
-                    validate_template_metadata(&current, &template_opts)?;
+                    validate_template_metadata(&current, &intent)?;
                     let claim =
                         await_external_mutation(runtime.claim(&placement, &claim_opts, &pick))
                             .await?;
@@ -1905,9 +1846,9 @@ async fn run_environment_create(
                 };
                 if let Err(e) = run_template_mutation(
                     authority,
-                    &template_opts,
+                    &intent,
                     CREATE_MUTATION_STATES,
-                    runtime.ensure_access(&placement, &template_opts),
+                    runtime.ensure_access(&placement, &intent),
                 )
                 .await
                 {
@@ -2724,8 +2665,8 @@ async fn resume_suspended_workspace(
         "resuming suspended workspace Sandbox before waiting for claim readiness"
     );
     let result = async {
-        let mut opts =
-            load_environment_template_opts(ctx, env, authority.operation_generation()).await?;
+        let mut intent =
+            load_environment_rendering_intent(ctx, env, authority.operation_generation()).await?;
         if env.isolation_tier == "confidential" {
             let storage = ctx.confidential_storage.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("confidential storage providers are not configured")
@@ -2739,7 +2680,7 @@ async fn resume_suspended_workspace(
                 &env.id,
             )
             .await?;
-            opts.confidential_storage_manifest_uri = authority
+            intent.identity.confidential_storage_manifest_uri = authority
                 .run_external_mutation(
                     CREATE_MUTATION_STATES,
                     storage.ensure_ready(&env.id, env.disk_gb),
@@ -2750,7 +2691,7 @@ async fn resume_suspended_workspace(
             ctx,
             env,
             backend,
-            &opts,
+            &intent,
             authority,
             CREATE_MUTATION_STATES,
         )
@@ -2785,7 +2726,6 @@ async fn resume_suspended_workspace(
 #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
 async fn ensure_access_stack_for_environment(
     ctx: &WorkerContext,
-    cfg: &SandboxWorkerCfg,
     env: &EnvironmentRow,
     env_id: &str,
     namespace: &str,
@@ -2794,23 +2734,23 @@ async fn ensure_access_stack_for_environment(
 ) -> anyhow::Result<()> {
     let preset_id = env.preset_id.clone().unwrap_or_default();
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, &preset_id).await?;
-    let template_opts = environment_template_opts(
-        cfg,
+    let intent = environment_rendering_intent(
         &image_ref,
         &template_base,
         env,
         authority.operation_generation(),
     )?;
-    let runtime_spec = template_opts.runtime_profile_spec();
-    validate_managed_runtime_profile(&runtime_spec, cfg.allow_diagnostic_runtime)
-        .map_err(|e| anyhow::anyhow!("runtime profile: {e}"))?;
     let runtime = ctx.require_runtime()?;
+    runtime.check_rendering(&intent)?;
+    runtime
+        .check_runtime_profile(&intent)
+        .map_err(|e| anyhow::anyhow!("runtime profile: {e}"))?;
     let placement = Placement::new(namespace);
     run_template_mutation(
         authority,
-        &template_opts,
+        &intent,
         states,
-        runtime.ensure_access(&placement, &template_opts),
+        runtime.ensure_access(&placement, &intent),
     )
     .await?;
     authority
@@ -2853,8 +2793,8 @@ pub(super) async fn reconcile_or_refresh_runtime_identity(
         Err(error) if allow_recovery && error.is::<WorkspaceBootstrapMismatch>() => {}
         Err(error) => return Err(error),
     }
-    let mut opts =
-        load_environment_template_opts(ctx, env, authority.operation_generation()).await?;
+    let mut intent =
+        load_environment_rendering_intent(ctx, env, authority.operation_generation()).await?;
     if env.isolation_tier == "confidential" {
         let storage = ctx
             .confidential_storage
@@ -2863,11 +2803,11 @@ pub(super) async fn reconcile_or_refresh_runtime_identity(
         // #4281: the recovery activates the volume again.
         super::confidential_slots::acquire(ctx, &backend.namespace, authority, states, &env.id)
             .await?;
-        opts.confidential_storage_manifest_uri = authority
+        intent.identity.confidential_storage_manifest_uri = authority
             .run_external_mutation(states, storage.ensure_ready(&env.id, env.disk_gb))
             .await?;
     }
-    super::lifecycle::restart_workspace_bootstrap(ctx, env, backend, &opts, authority, states)
+    super::lifecycle::restart_workspace_bootstrap(ctx, env, backend, &intent, authority, states)
         .await?;
     let runtime = ctx.require_runtime()?;
     let placement = Placement::new(&backend.namespace);
@@ -3071,8 +3011,8 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
         "runtime identity authority does not match environment"
     );
     let runtime = ctx.require_runtime()?;
-    let template_opts =
-        load_environment_template_opts(ctx, env, authority.operation_generation()).await?;
+    let intent =
+        load_environment_rendering_intent(ctx, env, authority.operation_generation()).await?;
     let mut guard = authority.begin_external_mutation(states).await?;
     let (namespace, claim_name, claim_uid, organization): (String, String, String, String) =
         sqlx::query_as(
@@ -3102,7 +3042,7 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
     };
     let chain = await_external_mutation(async {
         let current = load_environment_in(guard.transaction(), &env.id).await?;
-        validate_template_metadata(&current, &template_opts)?;
+        validate_template_metadata(&current, &intent)?;
         let chain = runtime.observe(&claim).await?.chain;
         anyhow::ensure!(
             expected_pod.is_none_or(|expected| chain.member() == expected),
@@ -3112,7 +3052,7 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
         if !workspace_bootstrap_current(
             runtime,
             &claim.placement,
-            &template_opts,
+            &intent,
             chain.member(),
             binding.as_ref(),
         )
@@ -3176,7 +3116,6 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
     // normally ready already.
     ensure_access_stack_for_environment(
         ctx,
-        &ctx.sandbox_cfg,
         env,
         &env.id,
         &claim.placement.namespace,
@@ -3196,7 +3135,7 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
 pub(super) async fn workspace_bootstrap_current(
     runtime: &dyn RuntimeDriver,
     placement: &Placement,
-    template_opts: &TemplateOpts,
+    intent: &RenderingIntent,
     pod: &WorkspacePodIdentity,
     binding: Option<&EnvironmentBinding>,
 ) -> anyhow::Result<bool> {
@@ -3211,7 +3150,7 @@ pub(super) async fn workspace_bootstrap_current(
         Some(WorkspaceCredentialScope::Environment) => Ok(false),
         Some(WorkspaceCredentialScope::Pod) => Ok(binding
             .filter(|binding| binding.pod_uid == pod.uid)
-            .is_none_or(|binding| binding_bootstrap_current(binding, template_opts))),
+            .is_none_or(|binding| binding_bootstrap_current(binding, &intent.identity))),
         None => anyhow::bail!("workspace credential scope is ambiguous"),
     }
 }
@@ -3476,6 +3415,50 @@ fn _claim_name_used(env_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::template::runtime_profile_spec;
+
+    /// The init data a measured runtime is authorized with is the driver's
+    /// own, hashed as published; a runtime that isn't measured has none.
+    #[test]
+    fn a_measured_runtime_is_authorized_with_the_drivers_own_init_data() {
+        let intent = environment_rendering_intent(
+            "registry.example.invalid/codewire/workspace@sha256:2222",
+            "workspace",
+            &EnvironmentRow {
+                id: "env-1".into(),
+                org_id: "org-1".into(),
+                preset_id: None,
+                env_type: "sandbox".into(),
+                state: "creating".into(),
+                desired_state: "started".into(),
+                isolation_tier: "confidential".into(),
+                dedicated_cpu: false,
+                never_ran: false,
+                external_cleanup_completed_at: None,
+                cpu_millicores: 2000,
+                memory_mb: 8192,
+                disk_gb: 80,
+                source_snapshot_id: None,
+                ttl_seconds: None,
+                project_spec: codewire_project::ProjectSpec::default(),
+                operation_generation: 7,
+                projection_selection: Ok(None),
+                managed_credential_clients: Ok(Default::default()),
+            },
+            7,
+        )
+        .unwrap();
+        let runtime = crate::runtime::fake::FakeRuntimeDriver::default();
+        assert_eq!(measured_authorization(&runtime, &intent).unwrap(), None);
+        *runtime.measured_init_data.lock().unwrap() = Some("init-data-a".into());
+        assert_eq!(
+            measured_authorization(&runtime, &intent).unwrap(),
+            Some((
+                "init-data-a".to_owned(),
+                Sha256::digest(b"init-data-a").into()
+            ))
+        );
+    }
 
     #[test]
     fn a_refusal_logs_the_users_message_not_the_schedulers() {
@@ -4480,7 +4463,10 @@ mod tests {
         };
         let opts = |env: &EnvironmentRow| {
             environment_template_opts(&cfg, "ghcr.io/codewiresh/workspace:1", "base", env, 7)
+                .unwrap();
+            environment_rendering_intent("ghcr.io/codewiresh/workspace:1", "base", env, 7)
                 .unwrap()
+                .identity
         };
         let step = |env: &EnvironmentRow| {
             let fresh = FreshWarmBind::from_early_bind(early_bind(

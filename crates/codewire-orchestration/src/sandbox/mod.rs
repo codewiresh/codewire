@@ -50,6 +50,9 @@ pub fn is_canonical_workspace_runtime_image(image_ref: &str) -> bool {
     runtime_images::configured().is_canonical_workspace(image_ref)
 }
 
+/// Mirrors `sandbox.CanonicalWorkspaceRuntimeTemplateName`.
+pub const CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME: &str = "workspace";
+
 /// Mirrors `sandbox.EnvironmentTemplateName`: base + "-" + envID,
 /// base truncated so the whole name fits the 253-char k8s limit.
 pub fn environment_template_name(base: &str, env_id: &str) -> String {

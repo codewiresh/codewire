@@ -22,6 +22,7 @@
 //! `workspace_pvc_uid` the first time it resolves the PVC of any environment
 //! that has a Sandbox, stopped ones included.
 
+use crate::runtime::kubernetes::rendering::KubernetesRenderConfig;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -747,9 +748,13 @@ pub(crate) async fn sandbox_bound_by_any(pool: &PgPool, sandbox_uid: &str) -> an
 
 /// The expected pool of a pool-born environment (Program #2238 C3): the
 /// identity-free pool of its exact shape on this replica, whose template
-/// carries the pool revision marker. Routing sends an environment to a pool
-/// only when its own rendering equals this one's, less the marker.
-fn pool_born_rendering(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> anyhow::Result<WantedPool> {
+/// carries the pool revision marker, and the options it renders from, which
+/// the member's isolation is checked against. Routing sends an environment to
+/// a pool only when its own rendering equals this one's, less the marker.
+fn pool_born_rendering(
+    cfg: &SandboxWorkerCfg,
+    env: &EnvironmentRow,
+) -> anyhow::Result<(WantedPool, crate::sandbox::template::TemplateOpts)> {
     anyhow::ensure!(
         env.isolation_tier == "standard",
         "only standard environments are pool-born"
@@ -759,11 +764,14 @@ fn pool_born_rendering(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> anyhow::
         memory_mib: i64::from(env.memory_mb),
         disk_gib: i64::from(env.disk_gb),
     };
-    Ok(WantedPool {
-        configured: crate::sandbox::warm_pool::ConfiguredShape { shape, members: 0 },
-        rendering: super::create::warm_pool_template_opts(cfg, shape)?,
-        allow_unpinned_images: cfg.allow_diagnostic_runtime,
-    })
+    let rendering = KubernetesRenderConfig::from(cfg).pool(shape)?;
+    Ok((
+        WantedPool {
+            configured: crate::sandbox::warm_pool::ConfiguredShape { shape, members: 0 },
+            allow_unpinned_images: cfg.allow_diagnostic_runtime,
+        },
+        rendering,
+    ))
 }
 
 /// What one checked attempt would record, before the fenced write.
@@ -868,7 +876,7 @@ async fn check_bindable_runtime(
         // isolation is checked here too, over its Pod spec, whatever the
         // driver says (#3628 PR 5c, cw-confidential's condition 3).
         let matched = match pool_born_rendering(cfg, env) {
-            Ok(wanted) => match pool_member_isolated(&member.spec_json, &wanted) {
+            Ok((wanted, rendering)) => match pool_member_isolated(&member.spec_json, &rendering) {
                 Ok(()) => {
                     runtime
                         .pool_birth(&claim.placement, &wanted, observation)
@@ -1704,22 +1712,22 @@ pub(crate) async fn environment_daemon_credential(
 
 /// Stale-bootstrap comparison for a bound Pod-scope runtime (design §12): the
 /// binding row's captured generation, projection digest and managed clients
-/// against the current template options, with the same rule as the rendered
-/// environment check: the generation only matters while a projection is
-/// selected.
+/// against the environment's current rendering identity, with the same rule
+/// as the rendered environment check: the generation only matters while a
+/// projection is selected.
 pub(crate) fn binding_bootstrap_current(
     binding: &EnvironmentBinding,
-    opts: &crate::sandbox::template::TemplateOpts,
+    identity: &crate::runtime::RenderingIdentity,
 ) -> bool {
-    let digest = opts.projection_selection_sha256.map(|digest| {
+    let digest = identity.projection_selection_sha256.map(|digest| {
         digest
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     });
     binding.projection_selection_sha256 == digest
-        && binding.managed_credential_clients == opts.managed_credential_clients.encode()
-        && (digest.is_none() || binding.operation_generation == opts.operation_generation)
+        && binding.managed_credential_clients == identity.managed_credential_clients.encode()
+        && (digest.is_none() || binding.operation_generation == identity.operation_generation)
 }
 
 // ------------------------------------------------------------- backfill

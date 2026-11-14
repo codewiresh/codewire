@@ -15,9 +15,15 @@ use crate::sandbox::template::{
 use crate::worker::create::SandboxWorkerCfg;
 use crate::worker::warm_pool::WarmPoolConfig;
 
-/// The configuration's wanted pools as this driver renders them.
+/// The configuration's wanted pools as a driver configured as Dev renders
+/// them.
 fn rendered(config: &WarmPoolConfig) -> RenderedPools {
-    render(NAMESPACE, &config.wanted).unwrap()
+    rendered_with(&dev_cfg(""), config)
+}
+
+/// The wanted pools as a driver with `cfg`'s rendering renders them.
+fn rendered_with(cfg: &SandboxWorkerCfg, config: &WarmPoolConfig) -> RenderedPools {
+    render(&cfg.into(), NAMESPACE, &config.wanted).unwrap()
 }
 
 const NAMESPACE: &str = "dev-sandboxes";
@@ -395,7 +401,8 @@ fn only_a_rotating_shape_holds_readiness() {
     .pools;
     let mut previous_cfg = dev_cfg(shapes);
     previous_cfg.daemon_image = "registry.example.invalid/codewire/daemon@sha256:4444444444444444444444444444444444444444444444444444444444444444".into();
-    let previous = rendered(
+    let previous = rendered_with(
+        &previous_cfg,
         &WarmPoolConfig::from_cfg(&previous_cfg, true)
             .unwrap()
             .unwrap(),
@@ -456,7 +463,7 @@ async fn the_driver_remembers_passes_by_placement_until_told_to_forget() {
         pools: vec![reconciled_shadow()],
         ..Cluster::default()
     }));
-    let driver = KubernetesDriver::new(api(Arc::clone(&cluster)));
+    let driver = KubernetesDriver::new(api(Arc::clone(&cluster)), (&dev_cfg("")).into());
     let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), false)
         .unwrap()
         .unwrap();
@@ -537,7 +544,8 @@ async fn a_start_rotates_only_beside_a_capable_controller_and_never_while_draini
         .unwrap();
     let mut previous_cfg = dev_cfg(shapes);
     previous_cfg.daemon_image = "registry.example.invalid/codewire/daemon@sha256:4444444444444444444444444444444444444444444444444444444444444444".into();
-    let previous = rendered(
+    let previous = rendered_with(
+        &previous_cfg,
         &WarmPoolConfig::from_cfg(&previous_cfg, false)
             .unwrap()
             .unwrap(),

@@ -1707,7 +1707,10 @@ mod enabled {
             cloudflare: None,
             preview_base_domain: String::new(),
             kube: Some(kube.clone()),
-            runtime: Some(KubernetesDriver::shared(kube)),
+            runtime: Some(KubernetesDriver::shared(
+                kube,
+                (&worker::create::SandboxWorkerCfg::from_env()).into(),
+            )),
             secrets: Arc::new(worker::secrets::SecretStore::from_env(pool)?),
             sandbox_cfg: worker::create::SandboxWorkerCfg::from_env(),
             confidential_storage: None,

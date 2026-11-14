@@ -8,6 +8,7 @@ mod evidence;
 pub(crate) mod members;
 pub(crate) mod observation;
 pub(crate) mod pools;
+pub mod rendering;
 mod suspension;
 pub(crate) mod warm_pools;
 
@@ -27,26 +28,33 @@ use kube::api::{Api, DynamicObject, LogParams};
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
     Incarnation, KeptSnapshot, MemberEvidence, MemberFacts, MemberReplacement, Pick, Placement,
-    PoolBornClaim, PoolPass, PoolState, ResizeState, RuntimeAccess, RuntimeAttestation,
-    RuntimeClaims, RuntimeDriver, RuntimeExec, RuntimeFacts, RuntimeLifecycle, RuntimeMember,
-    RuntimeObservation, RuntimeObservations, RuntimePools, RuntimeProbe, RuntimeResize,
-    RuntimeSnapshots, RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime,
-    VerifiedChain, VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef, WantedPool, WantedPools,
-    WorkspaceVolume,
+    PoolBornClaim, PoolPass, PoolState, RenderingIntent, ResizeState, RuntimeAccess,
+    RuntimeAttestation, RuntimeClaims, RuntimeDriver, RuntimeExec, RuntimeFacts, RuntimeLifecycle,
+    RuntimeMember, RuntimeObservation, RuntimeObservations, RuntimePools, RuntimeProbe,
+    RuntimeResize, RuntimeSnapshots, RuntimeStorage, RuntimeStream, RuntimeTeardown,
+    SuspendedRuntime, VerifiedChain, VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef,
+    WantedPool, WantedPools, WorkspaceVolume,
 };
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::HostKeyStore;
 use crate::sandbox::sidecar::WORKSPACE_SSH_PORT;
 use crate::sandbox::snapshots::{clearing_volume_name, kept_snapshot_name, raw_snapshot_name};
 use crate::sandbox::template::render_sandbox_template;
-use crate::sandbox::template::{KATA_COCO_INIT_DATA_ANNOTATION_KEY, TemplateOpts};
+use crate::sandbox::template::{
+    KATA_COCO_INIT_DATA_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts,
+    confidential_init_data,
+};
 use crate::sandbox::warm_pool::{pod_spec_pool_revision, pool_revision, sandbox_matches_rendering};
 use crate::sandbox::{ClaimOpts, shadow_warm_pool_name};
+use rendering::KubernetesRenderConfig;
+use sha2::{Digest as _, Sha256};
 
 const WORKSPACE_DAEMON_PORT: u16 = crate::sandbox::template::WORKSPACE_DAEMON_PORT as u16;
 
 pub struct KubernetesDriver {
     client: kube::Client,
+    /// The deployment-wide half of every rendering (#3628 PR 8b).
+    rendering: Arc<KubernetesRenderConfig>,
     /// What earlier pool passes remembered, by placement.
     pool_memory: Mutex<BTreeMap<String, warm_pools::LoopState>>,
     /// TokenReview at the workspace-binding audience, and nothing else.
@@ -54,12 +62,16 @@ pub struct KubernetesDriver {
 }
 
 impl KubernetesDriver {
-    pub fn shared(client: kube::Client) -> Arc<dyn RuntimeDriver> {
-        Arc::new(Self::new(client))
+    pub fn shared(
+        client: kube::Client,
+        rendering: KubernetesRenderConfig,
+    ) -> Arc<dyn RuntimeDriver> {
+        Arc::new(Self::new(client, rendering))
     }
 
-    pub(crate) fn new(client: kube::Client) -> Self {
+    pub(crate) fn new(client: kube::Client, rendering: KubernetesRenderConfig) -> Self {
         Self {
+            rendering: Arc::new(rendering),
             binding_reviewer: KubernetesPodIdentityVerifier::new(
                 Some(client.clone()),
                 PodIdentityPurpose::WorkspaceBinding,
@@ -72,6 +84,43 @@ impl KubernetesDriver {
     fn sandbox_client(&self, placement: &Placement) -> SandboxClient {
         SandboxClient::new(self.client.clone(), &placement.namespace)
     }
+
+    /// The options `intent` renders from here.
+    fn render(&self, intent: &RenderingIntent) -> anyhow::Result<TemplateOpts> {
+        self.rendering.environment(intent)
+    }
+}
+
+/// A measured runtime is a confidential one with persistent storage, which
+/// is exactly what confidential storage authorizes init data for.
+fn is_measured(rendering: &TemplateOpts) -> bool {
+    rendering.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL
+        && rendering.disk_gib > 0
+}
+
+/// The guard on every write of a runtime's bootstrap (B2c): a measured
+/// runtime is written only when its own init data is the one confidential
+/// storage authorized, and any other runtime only without an authorization.
+/// It runs before anything is written, so a configuration that changed
+/// between authorizing and writing is refused rather than published.
+fn check_authorized(rendering: &TemplateOpts, authorized: Option<&[u8; 32]>) -> anyhow::Result<()> {
+    match (is_measured(rendering), authorized) {
+        (false, None) => Ok(()),
+        (false, Some(_)) => {
+            anyhow::bail!("only a measured confidential runtime has authorized init data")
+        }
+        (true, None) => {
+            anyhow::bail!("a measured confidential runtime needs its authorized init data")
+        }
+        (true, Some(authorized)) => {
+            let own = Sha256::digest(confidential_init_data(rendering)?.as_bytes());
+            anyhow::ensure!(
+                own.as_slice() == authorized.as_slice(),
+                "the measured runtime differs from the init data confidential storage authorized"
+            );
+            Ok(())
+        }
+    }
 }
 
 #[async_trait]
@@ -80,12 +129,14 @@ impl RuntimePools for KubernetesDriver {
         &self,
         placement: &Placement,
         pool: &WantedPool,
-        rendering: &TemplateOpts,
+        intent: &RenderingIntent,
     ) -> anyhow::Result<PoolState> {
-        let Ok(desired) = warm_pools::render_pool(&placement.namespace, pool) else {
+        let Ok(desired) = warm_pools::render_pool(&self.rendering, &placement.namespace, pool)
+        else {
             return Ok(PoolState::Unrenderable);
         };
-        let own = pool_revision(&render_sandbox_template(&placement.namespace, rendering)["spec"]);
+        let rendering = self.render(intent)?;
+        let own = pool_revision(&render_sandbox_template(&placement.namespace, &rendering)["spec"]);
         if own != desired.objects.revision {
             return Ok(PoolState::RenderingDiffers);
         }
@@ -98,7 +149,7 @@ impl RuntimePools for KubernetesDriver {
         pool: &WantedPool,
         observation: &RuntimeObservation,
     ) -> Result<(), String> {
-        let expected = warm_pools::render_pool(&placement.namespace, pool)
+        let expected = warm_pools::render_pool(&self.rendering, &placement.namespace, pool)
             .map_err(|error| format!("pool rendering: {error:#}"))?
             .objects;
         if observation.pool != expected.name {
@@ -131,7 +182,7 @@ impl RuntimePools for KubernetesDriver {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(namespace)
             .unwrap_or_default();
-        let pass = match warm_pools::render(namespace, wanted) {
+        let pass = match warm_pools::render(&self.rendering, namespace, wanted) {
             Ok(rendered) => {
                 warm_pools::reconcile_once(&self.client, namespace, &rendered, &mut memory).await
             }
@@ -156,7 +207,7 @@ impl RuntimePools for KubernetesDriver {
         placement: &Placement,
         wanted: &WantedPools,
     ) -> anyhow::Result<Vec<WantedPool>> {
-        let rendered = warm_pools::render(&placement.namespace, wanted)?;
+        let rendered = warm_pools::render(&self.rendering, &placement.namespace, wanted)?;
         let rotating =
             warm_pools::rotating_pools(&self.client, &placement.namespace, &rendered).await?;
         Ok(rendered
@@ -175,7 +226,7 @@ impl RuntimePools for KubernetesDriver {
     async fn warm_pools(&self, placement: &Placement, pools: &[WantedPool]) -> anyhow::Result<()> {
         let rendered = pools
             .iter()
-            .map(|pool| warm_pools::render_pool(&placement.namespace, pool))
+            .map(|pool| warm_pools::render_pool(&self.rendering, &placement.namespace, pool))
             .collect::<anyhow::Result<Vec<_>>>()?;
         warm_pools::warm_pools(&self.client, &placement.namespace, &rendered).await
     }
@@ -190,9 +241,16 @@ impl RuntimeClaims for KubernetesDriver {
     async fn prepare_cold_claim(
         &self,
         placement: &Placement,
-        rendering: &TemplateOpts,
+        intent: &RenderingIntent,
         claim: &ClaimOpts,
+        authorized: Option<&[u8; 32]>,
     ) -> anyhow::Result<()> {
+        let rendering = &self.render(intent)?;
+        anyhow::ensure!(
+            claim.template_ref == rendering.name,
+            "claim template does not match environment-scoped daemon template"
+        );
+        check_authorized(rendering, authorized)?;
         let client = self.sandbox_client(placement);
         let template = rendering.name.as_str();
         let shadow_pool = if claim.warm_pool_ref.is_empty() {
@@ -244,11 +302,12 @@ impl RuntimeClaims for KubernetesDriver {
     async fn bridge_adopted_member(
         &self,
         placement: &Placement,
-        rendering: &TemplateOpts,
+        intent: &RenderingIntent,
         runtime_uid: &str,
     ) -> anyhow::Result<()> {
+        let rendering = self.render(intent)?;
         self.sandbox_client(placement)
-            .ensure_warm_member_bridge(rendering, runtime_uid)
+            .ensure_warm_member_bridge(&rendering, runtime_uid)
             .await
     }
 
@@ -458,6 +517,22 @@ impl RuntimeObservations for KubernetesDriver {
 
 #[async_trait]
 impl RuntimeLifecycle for KubernetesDriver {
+    fn check_rendering(&self, intent: &RenderingIntent) -> anyhow::Result<()> {
+        self.render(intent).map(drop)
+    }
+
+    fn check_runtime_profile(&self, intent: &RenderingIntent) -> Result<(), String> {
+        self.rendering.check_runtime_profile(intent)
+    }
+
+    fn measured_init_data(&self, intent: &RenderingIntent) -> anyhow::Result<Option<String>> {
+        let rendering = self.render(intent)?;
+        if !is_measured(&rendering) {
+            return Ok(None);
+        }
+        confidential_init_data(&rendering).map(Some)
+    }
+
     async fn probe(
         &self,
         placement: &Placement,
@@ -660,10 +735,17 @@ impl RuntimeLifecycle for KubernetesDriver {
         placement: &Placement,
         environment_id: &str,
         member_name: &str,
-        rendering: &TemplateOpts,
+        intent: &RenderingIntent,
+        authorized: &[u8; 32],
     ) -> anyhow::Result<String> {
+        let rendering = self.render(intent)?;
+        anyhow::ensure!(
+            is_measured(&rendering),
+            "only a measured confidential runtime is published"
+        );
+        check_authorized(&rendering, Some(authorized))?;
         self.sandbox_client(placement)
-            .reconcile_per_environment_runtime(environment_id, member_name, rendering)
+            .reconcile_per_environment_runtime(environment_id, member_name, &rendering)
             .await
     }
 
@@ -688,11 +770,14 @@ impl RuntimeLifecycle for KubernetesDriver {
     async fn refresh_bootstrap(
         &self,
         claim: &ClaimRef,
-        rendering: &TemplateOpts,
+        intent: &RenderingIntent,
         suspended: &SuspendedRuntime,
+        authorized: Option<&[u8; 32]>,
     ) -> anyhow::Result<()> {
+        let rendering = self.render(intent)?;
+        check_authorized(&rendering, authorized)?;
         self.sandbox_client(&claim.placement)
-            .reconcile_workspace_bootstrap(rendering, &claim.name, &claim.uid, suspended)
+            .reconcile_workspace_bootstrap(&rendering, &claim.name, &claim.uid, suspended)
             .await
     }
 }
@@ -952,10 +1037,11 @@ impl RuntimeAccess for KubernetesDriver {
     async fn ensure_access(
         &self,
         placement: &Placement,
-        rendering: &TemplateOpts,
+        intent: &RenderingIntent,
     ) -> anyhow::Result<()> {
+        let rendering = self.render(intent)?;
         self.sandbox_client(placement)
-            .ensure_access_stack(rendering)
+            .ensure_access_stack(&rendering)
             .await
     }
 
@@ -1076,6 +1162,10 @@ impl RuntimeAccess for KubernetesDriver {
 }
 
 #[cfg(test)]
+#[path = "kubernetes/measurement_tests.rs"]
+mod measurement_tests;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Mutex;
 
@@ -1114,7 +1204,10 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "the-default-namespace");
-        (KubernetesDriver::shared(client), requests)
+        (
+            KubernetesDriver::shared(client, Default::default()),
+            requests,
+        )
     }
 
     /// #3628 PR 8a: the start marks' volume read goes through the driver with
@@ -1186,7 +1279,10 @@ mod tests {
                     .unwrap()
             }
         });
-        let driver = KubernetesDriver::shared(kube::Client::new(service, "dev-sandboxes"));
+        let driver = KubernetesDriver::shared(
+            kube::Client::new(service, "dev-sandboxes"),
+            Default::default(),
+        );
         let evidence = driver
             .member_evidence(&Placement::new("dev-sandboxes"), "sandbox-env-1")
             .await
@@ -1241,7 +1337,10 @@ mod tests {
                     .body(Body::from(body.to_string()))
                     .unwrap()
             });
-            KubernetesDriver::shared(kube::Client::new(service, "dev-sandboxes"))
+            KubernetesDriver::shared(
+                kube::Client::new(service, "dev-sandboxes"),
+                Default::default(),
+            )
         };
         let probe = RuntimeProbe {
             workspace_pvc_name: "workspace-sb-1".into(),
@@ -1278,7 +1377,10 @@ mod tests {
                     .unwrap()
             }
         });
-        KubernetesDriver::shared(kube::Client::new(service, "the-default-namespace"))
+        KubernetesDriver::shared(
+            kube::Client::new(service, "the-default-namespace"),
+            Default::default(),
+        )
     }
 
     #[tokio::test]
@@ -1402,7 +1504,10 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "the-default-namespace");
-        (KubernetesDriver::shared(client), requests)
+        (
+            KubernetesDriver::shared(client, Default::default()),
+            requests,
+        )
     }
 
     const CONTROLLING_SANDBOX: &str = "1f4e3a52-8d2b-4c7e-9a60-5b1d2e3f4a5b";
@@ -1667,7 +1772,10 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "the-default-namespace");
-        (KubernetesDriver::shared(client), patches)
+        (
+            KubernetesDriver::shared(client, Default::default()),
+            patches,
+        )
     }
 
     #[tokio::test]
@@ -1910,7 +2018,7 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "the-default-namespace");
-        (KubernetesDriver::shared(client), writes)
+        (KubernetesDriver::shared(client, Default::default()), writes)
     }
 
     #[tokio::test]
@@ -2234,7 +2342,7 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "the-default-namespace");
-        (KubernetesDriver::shared(client), writes)
+        (KubernetesDriver::shared(client, Default::default()), writes)
     }
 
     fn stub_volume_identity(raw_block: bool) -> VolumeIdentity {
@@ -2538,7 +2646,31 @@ mod tests {
             }
         });
         let client = kube::Client::new(service, "the-default-namespace");
-        (KubernetesDriver::shared(client), writes)
+        (KubernetesDriver::shared(client, Default::default()), writes)
+    }
+
+    /// An environment `env-1` whose template is `workspace-env-1`.
+    fn cold_intent() -> RenderingIntent {
+        RenderingIntent {
+            image: "registry.test/team/app:1".into(),
+            template_base: "workspace".into(),
+            isolation: crate::runtime::Isolation::Standard,
+            dedicated_cpu: false,
+            shape: crate::runtime::WorkspaceShape {
+                cpu_millicores: 1000,
+                memory_mib: 2048,
+                disk_gib: 10,
+            },
+            identity: crate::runtime::RenderingIdentity {
+                environment_id: "env-1".into(),
+                organization_id: "org-1".into(),
+                operation_generation: 7,
+                projection_selection_sha256: None,
+                managed_credential_clients: Default::default(),
+                source_snapshot_id: None,
+                confidential_storage_manifest_uri: String::new(),
+            },
+        }
     }
 
     fn cold_claim_opts() -> ClaimOpts {
@@ -2595,14 +2727,10 @@ mod tests {
     #[tokio::test]
     async fn a_cold_claim_is_prepared_with_its_template_then_its_shadow_pool() {
         let placement = Placement::new("dev-sandboxes");
-        let rendering = TemplateOpts {
-            name: "workspace-env-1".into(),
-            environment_id: "env-1".into(),
-            ..Default::default()
-        };
+        let rendering = cold_intent();
         let (driver, writes) = driver_over_claimable_cluster(false);
         driver
-            .prepare_cold_claim(&placement, &rendering, &cold_claim_opts())
+            .prepare_cold_claim(&placement, &rendering, &cold_claim_opts(), None)
             .await
             .unwrap();
         let writes_of = |writes: &Writes| -> Vec<String> {
@@ -2628,7 +2756,7 @@ mod tests {
         // says which step failed.
         let (driver, writes) = driver_over_claimable_cluster(true);
         let error = driver
-            .prepare_cold_claim(&placement, &rendering, &cold_claim_opts())
+            .prepare_cold_claim(&placement, &rendering, &cold_claim_opts(), None)
             .await
             .unwrap_err();
         assert!(
@@ -2645,6 +2773,30 @@ mod tests {
         );
     }
 
+    /// The claim must name the environment's own template: anything else is
+    /// refused before a write.
+    #[tokio::test]
+    async fn a_cold_claim_for_another_template_writes_nothing() {
+        let (driver, writes) = driver_over_claimable_cluster(false);
+        let claim = ClaimOpts {
+            template_ref: "workspace-env-2".into(),
+            ..cold_claim_opts()
+        };
+        let error = driver
+            .prepare_cold_claim(
+                &Placement::new("dev-sandboxes"),
+                &cold_intent(),
+                &claim,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "claim template does not match environment-scoped daemon template"
+        );
+        assert!(writes.lock().unwrap().is_empty());
+    }
     #[tokio::test]
     async fn withdrawing_a_pool_born_claim_removes_its_bridge_before_the_claim() {
         let (driver, writes) = driver_over_claimable_cluster(false);
@@ -2722,7 +2874,10 @@ mod tests {
                 .body(Body::from(body.to_string()))
                 .unwrap()
         });
-        let driver = KubernetesDriver::shared(kube::Client::new(service, "the-default-namespace"));
+        let driver = KubernetesDriver::shared(
+            kube::Client::new(service, "the-default-namespace"),
+            Default::default(),
+        );
         let placement = Placement::new("dev-sandboxes");
         let member = Incarnation {
             name: "sandbox-a".into(),

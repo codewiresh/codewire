@@ -13,10 +13,10 @@ use tokio::sync::oneshot;
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
     Incarnation, KeptSnapshot, MemberEvidence, MemberReplacement, Pick, Placement, PoolBornClaim,
-    PoolPass, PoolState, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeExec, RuntimeLifecycle,
-    RuntimeMember, RuntimePools, RuntimeProbe, RuntimeResize, RuntimeSnapshots, RuntimeStorage,
-    RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeMode,
-    VolumeRef, WantedPool, WantedPools,
+    PoolPass, PoolState, RenderingIntent, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeExec,
+    RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeProbe, RuntimeResize, RuntimeSnapshots,
+    RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity,
+    VolumeMode, VolumeRef, WantedPool, WantedPools,
 };
 use super::{
     MemberFacts, RuntimeAttestation, RuntimeFacts, RuntimeObservation, RuntimeObservations,
@@ -24,7 +24,6 @@ use super::{
 };
 use crate::sandbox::ClaimOpts;
 use crate::sandbox::host_keys::HostKeyStore;
-use crate::sandbox::template::TemplateOpts;
 
 #[derive(Default)]
 pub(crate) struct FakeRuntimeDriver {
@@ -46,6 +45,11 @@ pub(crate) struct FakeRuntimeDriver {
     /// What publishing a measured runtime returns; unscripted, it fails. The
     /// publish and its wait are recorded with the replacement calls, in order.
     pub measured_runtime: Mutex<Option<String>>,
+    /// The init data a measured runtime is measured with; unscripted, no
+    /// runtime is measured.
+    pub measured_init_data: Mutex<Option<String>>,
+    /// The authorization each bootstrap refresh was given, in order.
+    pub refreshed: Mutex<Vec<Option<[u8; 32]>>>,
     /// The claim's readiness; an error is its message.
     pub claim_readiness: Mutex<Option<Result<ClaimReadiness, String>>>,
     /// Every placement a method was asked about, in order.
@@ -73,7 +77,7 @@ impl RuntimePools for FakeRuntimeDriver {
         &self,
         placement: &Placement,
         _pool: &WantedPool,
-        _rendering: &TemplateOpts,
+        _intent: &RenderingIntent,
     ) -> anyhow::Result<PoolState> {
         self.placements.lock().unwrap().push(placement.clone());
         // Unscripted, it stands for a placement without pools: every create
@@ -147,8 +151,9 @@ impl RuntimeClaims for FakeRuntimeDriver {
     async fn prepare_cold_claim(
         &self,
         placement: &Placement,
-        _rendering: &TemplateOpts,
+        _intent: &RenderingIntent,
         _claim: &ClaimOpts,
+        _authorized: Option<&[u8; 32]>,
     ) -> anyhow::Result<()> {
         self.placements.lock().unwrap().push(placement.clone());
         Ok(())
@@ -174,7 +179,7 @@ impl RuntimeClaims for FakeRuntimeDriver {
     async fn bridge_adopted_member(
         &self,
         placement: &Placement,
-        _rendering: &TemplateOpts,
+        _intent: &RenderingIntent,
         _runtime_uid: &str,
     ) -> anyhow::Result<()> {
         self.placements.lock().unwrap().push(placement.clone());
@@ -337,6 +342,18 @@ impl RuntimeObservations for FakeRuntimeDriver {
 
 #[async_trait]
 impl RuntimeLifecycle for FakeRuntimeDriver {
+    fn check_rendering(&self, _intent: &RenderingIntent) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn check_runtime_profile(&self, _intent: &RenderingIntent) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn measured_init_data(&self, _intent: &RenderingIntent) -> anyhow::Result<Option<String>> {
+        Ok(self.measured_init_data.lock().unwrap().clone())
+    }
+
     async fn probe(
         &self,
         placement: &Placement,
@@ -504,11 +521,15 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
         _placement: &Placement,
         environment_id: &str,
         member_name: &str,
-        rendering: &TemplateOpts,
+        _intent: &RenderingIntent,
+        authorized: &[u8; 32],
     ) -> anyhow::Result<String> {
         self.replacement_calls.lock().unwrap().push(format!(
             "publish {environment_id} {member_name} {}",
-            rendering.name
+            authorized[..4]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
         ));
         self.measured_runtime
             .lock()
@@ -534,13 +555,15 @@ impl RuntimeLifecycle for FakeRuntimeDriver {
     async fn refresh_bootstrap(
         &self,
         claim: &ClaimRef,
-        _rendering: &TemplateOpts,
+        _intent: &RenderingIntent,
         _suspended: &SuspendedRuntime,
+        authorized: Option<&[u8; 32]>,
     ) -> anyhow::Result<()> {
         self.placements
             .lock()
             .unwrap()
             .push(claim.placement.clone());
+        self.refreshed.lock().unwrap().push(authorized.copied());
         Ok(())
     }
 }
@@ -761,7 +784,7 @@ impl RuntimeAccess for FakeRuntimeDriver {
     async fn ensure_access(
         &self,
         _placement: &Placement,
-        _rendering: &TemplateOpts,
+        _intent: &RenderingIntent,
     ) -> anyhow::Result<()> {
         anyhow::bail!("not scripted")
     }

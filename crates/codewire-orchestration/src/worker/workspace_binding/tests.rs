@@ -442,10 +442,14 @@ fn environment_binding(generation: i64, digest: Option<&str>, clients: &str) -> 
 fn a_bound_runtime_is_stale_only_when_its_captured_bootstrap_differs() {
     let none = codewire_access::ManagedCredentialClients::default();
     let github = codewire_access::ManagedCredentialClients::from_profile_slots(["github"]).unwrap();
-    let mut opts = crate::sandbox::template::TemplateOpts {
+    let mut opts = crate::runtime::RenderingIdentity {
+        environment_id: String::new(),
+        organization_id: String::new(),
         operation_generation: 7,
+        projection_selection_sha256: None,
         managed_credential_clients: none,
-        ..Default::default()
+        source_snapshot_id: None,
+        confidential_storage_manifest_uri: String::new(),
     };
     // No projection: a relabelled generation is still current.
     assert!(binding_bootstrap_current(

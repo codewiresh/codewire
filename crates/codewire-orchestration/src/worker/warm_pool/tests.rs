@@ -86,7 +86,7 @@ fn configured_shapes_render_through_the_identity_free_pool_renderer() {
             .unwrap();
     assert_eq!(config.placement, Placement::new(NAMESPACE));
     assert_eq!(config.wanted.pools.len(), 2);
-    let rendered = render(NAMESPACE, &config.wanted).unwrap();
+    let rendered = render(&(&dev_cfg("")).into(), NAMESPACE, &config.wanted).unwrap();
     assert!(
         rendered.pools[0]
             .objects
@@ -104,7 +104,7 @@ fn configured_shapes_render_through_the_identity_free_pool_renderer() {
     .unwrap()
     .unwrap();
     assert_eq!(
-        runtime_classes(&render(NAMESPACE, &tiers.wanted).unwrap()),
+        runtime_classes(&render(&(&dev_cfg("")).into(), NAMESPACE, &tiers.wanted).unwrap()),
         ["commodity", "commodity-32g"]
     );
 

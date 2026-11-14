@@ -50,7 +50,7 @@ async fn admitted_repair(fixture: &LeaseFixture, kube: kube::Client) -> DaemonRe
         .expect("seeded environment carries started authority");
     DaemonRepair {
         pool: fixture.pool.clone(),
-        runtime: crate::runtime::kubernetes::KubernetesDriver::shared(kube),
+        runtime: crate::runtime::kubernetes::KubernetesDriver::shared(kube, Default::default()),
         session_secret: "synthetic-daemon-repair-session-secret".into(),
         daemon_endpoints: EnvironmentDaemonEndpointOverrides::default(),
         namespace: NAMESPACE.into(),

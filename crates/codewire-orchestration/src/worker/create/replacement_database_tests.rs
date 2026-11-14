@@ -50,19 +50,18 @@ async fn seed_creating(db: &TestDatabase) -> Result<()> {
     Ok(())
 }
 
-/// The measured rendering the publish fence accepts for the seeded row.
-async fn measured_rendering(db: &TestDatabase) -> Result<TemplateOpts> {
+/// The authorized measured runtime the publish fence accepts for the seeded
+/// row; its init data's hash starts `07070707`.
+async fn measured_rendering(db: &TestDatabase) -> Result<MeasuredRuntime> {
     let env = load_environment(&db.pool, ENVIRONMENT).await?;
-    Ok(TemplateOpts {
-        name: format!("workspace-{ENVIRONMENT}"),
-        environment_id: env.id.clone(),
-        organization_id: env.org_id.clone(),
-        operation_generation: GENERATION,
-        managed_credential_clients: *env
-            .managed_credential_clients
-            .as_ref()
-            .map_err(|_| anyhow::anyhow!("managed clients unreadable"))?,
-        ..Default::default()
+    Ok(MeasuredRuntime {
+        intent: environment_rendering_intent(
+            "registry.example.invalid/codewire/workspace@sha256:2222",
+            "workspace",
+            &env,
+            GENERATION,
+        )?,
+        authorized: [7; 32],
     })
 }
 
@@ -115,7 +114,7 @@ async fn db_a_confidential_replacement_publishes_then_sees_it_on_that_incarnatio
         ensure!(
             calls
                 == [
-                    format!("publish {ENVIRONMENT} sandbox-stale workspace-{ENVIRONMENT}"),
+                    format!("publish {ENVIRONMENT} sandbox-stale 07070707"),
                     "wait-measured sandbox-stale uid-stale init-data-a".to_string(),
                     format!("replace {ENVIRONMENT} sandbox-stale uid-stale {SUPPORT_IMAGE}"),
                     "wait sandbox-stale uid-stale".to_string(),
@@ -138,7 +137,7 @@ async fn db_a_stale_rendering_publishes_and_replaces_nothing() -> Result<()> {
         seed_creating(&db).await?;
         let authority = ActivityAuthority::capture(&db.pool, ENVIRONMENT, GENERATION).await?;
         let mut rendering = measured_rendering(&db).await?;
-        rendering.organization_id = "another-organization".into();
+        rendering.intent.identity.organization_id = "another-organization".into();
         let runtime = scripted("init-data-a");
         let placement = Placement::new("dev-sandboxes");
         let stale = stale();
@@ -237,6 +236,51 @@ async fn db_a_confidential_replacement_without_a_measured_runtime_writes_nothing
         );
         let calls = runtime.replacement_calls.lock().unwrap().clone();
         ensure!(calls.is_empty(), "{calls:?}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// cw-confidential's #3628 PR 8b condition: a bootstrap refresh hands the
+/// driver exactly the authorization its runtime was authorized with, and none
+/// for a runtime that isn't measured.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_bootstrap_refresh_carries_its_authorization() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed_creating(&db).await?;
+        sqlx::query(
+            "INSERT INTO sandbox_environment_backend(environment_id,namespace, \
+             sandbox_claim_name,sandbox_claim_uid) VALUES ($1,'dev-sandboxes','claim-a','claim-uid-a')",
+        )
+        .bind(ENVIRONMENT)
+        .execute(&db.pool)
+        .await?;
+        let env = load_environment(&db.pool, ENVIRONMENT).await?;
+        let backend = load_backend_row(&db.pool, ENVIRONMENT).await?;
+        let authority = ActivityAuthority::capture(&db.pool, ENVIRONMENT, GENERATION).await?;
+        let intent = measured_rendering(&db).await?.intent;
+        let runtime = FakeRuntimeDriver::default();
+        let suspended = crate::runtime::SuspendedRuntime::synthetic("sandbox-a", "sandbox-uid-a");
+        for authorized in [Some([9; 32]), None] {
+            refresh_workspace_bootstrap(
+                &runtime,
+                &env,
+                &backend,
+                &AuthorizedRuntime {
+                    intent: intent.clone(),
+                    authorized,
+                },
+                &suspended,
+                &authority,
+                CREATE_MUTATION_STATES,
+            )
+            .await?;
+        }
+        let refreshed = runtime.refreshed.lock().unwrap().clone();
+        ensure!(refreshed == [Some([9; 32]), None], "{refreshed:?}");
         Ok(())
     }
     .await;

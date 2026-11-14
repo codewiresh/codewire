@@ -655,6 +655,7 @@ fn fixture_allocating(
         WorkspaceBindingState::new(
             Some(crate::runtime::kubernetes::KubernetesDriver::shared(
                 cluster.client(),
+                Default::default(),
             )),
             store.clone(),
             notifications.clone(),

@@ -2,6 +2,7 @@
 //! (Program #2238 C1).
 
 use super::*;
+use crate::sandbox::canonical_workspace_runtime_image;
 use crate::sandbox::template::{
     CredentialRuntimeTemplateConfig, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_RUNC,
     render_sandbox_template,
@@ -474,8 +475,8 @@ fn rendered_pool_templates_pass_the_admission_volume_rule() {
 }
 
 /// A pool member's Pod spec: its golden template as stored, plus the
-/// workspace claim the controller adds, and what it was wanted as.
-fn golden_member(subfolder: bool) -> (Value, crate::runtime::WantedPool) {
+/// workspace claim the controller adds, and the pool rendering it came from.
+fn golden_member(subfolder: bool) -> (Value, TemplateOpts) {
     let cfg = SandboxWorkerCfg {
         workspace_subfolder: subfolder,
         ..dev_cfg()
@@ -504,15 +505,7 @@ fn golden_member(subfolder: bool) -> (Value, crate::runtime::WantedPool) {
             "name": "workspace",
             "persistentVolumeClaim": { "claimName": "workspace-sandbox-a" },
         }));
-    let wanted = crate::runtime::WantedPool {
-        configured: crate::sandbox::warm_pool::ConfiguredShape {
-            shape: shapes()[0],
-            members: 2,
-        },
-        rendering,
-        allow_unpinned_images: false,
-    };
-    (spec, wanted)
+    (spec, rendering)
 }
 
 fn container_index(spec: &Value, field: &str, name: &str) -> usize {
@@ -781,15 +774,9 @@ fn a_pool_member_is_isolated_exactly_as_its_rendering() {
     // Its member carries the confidential class, so only the profile check
     // can refuse it.
     let mut confidential = wanted.clone();
-    confidential.rendering.runtime_profile =
-        crate::sandbox::template::RUNTIME_PROFILE_CONFIDENTIAL.into();
+    confidential.runtime_profile = crate::sandbox::template::RUNTIME_PROFILE_CONFIDENTIAL.into();
     let mut member = golden.clone();
-    member["runtimeClassName"] = json!(
-        confidential
-            .rendering
-            .runtime_profile_spec()
-            .runtime_class_name
-    );
+    member["runtimeClassName"] = json!(confidential.runtime_profile_spec().runtime_class_name);
     assert_eq!(
         pool_member_isolated(&member, &confidential),
         Err("/runtimeClassName".to_owned())

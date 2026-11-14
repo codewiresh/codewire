@@ -56,8 +56,8 @@ pub(super) async fn bridge_warm_member(
     };
     let result = async {
         anyhow::ensure!(env.id == authority.environment_id(), AuthorityLost);
-        let opts =
-            super::load_environment_template_opts(ctx, env, authority.operation_generation())
+        let intent =
+            super::load_environment_rendering_intent(ctx, env, authority.operation_generation())
                 .await?;
         let mut guard = authority.begin_external_mutation(states).await?;
         let bridged = await_external_mutation(async {
@@ -66,7 +66,7 @@ pub(super) async fn bridge_warm_member(
                 return Ok(false);
             };
             runtime
-                .bridge_adopted_member(&Placement::new(&namespace), &opts, &sandbox_uid)
+                .bridge_adopted_member(&Placement::new(&namespace), &intent, &sandbox_uid)
                 .await?;
             Ok(true)
         })

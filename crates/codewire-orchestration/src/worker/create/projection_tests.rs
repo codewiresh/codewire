@@ -50,6 +50,17 @@ fn opts(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> anyhow::Result<Template
     )
 }
 
+/// The environment's intent, once the configuration renders it.
+fn intent(cfg: &SandboxWorkerCfg, env: &EnvironmentRow) -> anyhow::Result<RenderingIntent> {
+    opts(cfg, env)?;
+    environment_rendering_intent(
+        "ghcr.io/codewiresh/workspace:synthetic",
+        "workspace",
+        env,
+        7,
+    )
+}
+
 #[test]
 fn template_admission_requires_current_capture_and_trust_for_app_only_selection() {
     let mut env = environment();
@@ -95,7 +106,7 @@ fn publication_revalidation_rejects_changed_identity_selection_and_cleanup_only_
         ),
         ..Default::default()
     };
-    let rendered = opts(&cfg, &env).unwrap();
+    let rendered = intent(&cfg, &env).unwrap();
     validate_template_metadata(&env, &rendered).unwrap();
     for field in 0..7 {
         let mut changed = env.clone();
@@ -123,7 +134,7 @@ fn publication_revalidation_rejects_changed_identity_selection_and_cleanup_only_
         );
     }
     let empty = environment();
-    let empty_opts = opts(&SandboxWorkerCfg::default(), &empty).unwrap();
+    let empty_opts = intent(&SandboxWorkerCfg::default(), &empty).unwrap();
     validate_template_metadata(&empty, &empty_opts).unwrap();
     assert!(validate_template_metadata(&env, &empty_opts).is_err());
     assert!(validate_template_metadata(&empty, &rendered).is_err());
@@ -143,7 +154,7 @@ fn publication_fences_exact_client_selection_separately_from_projection_digest()
         ),
         ..Default::default()
     };
-    let rendered = opts(&cfg, &env).unwrap();
+    let rendered = intent(&cfg, &env).unwrap();
     validate_template_metadata(&env, &rendered).unwrap();
     env.managed_credential_clients =
         Ok(codewire_access::ManagedCredentialClients::from_profile_slots(["openai"]).unwrap());

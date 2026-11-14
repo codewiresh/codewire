@@ -252,6 +252,7 @@ fn state(store: Arc<TwoPodStore>, reviews: Arc<AtomicUsize>) -> Arc<WorkspaceBin
         WorkspaceBindingState::new(
             Some(crate::runtime::kubernetes::KubernetesDriver::shared(
                 cluster(reviews),
+                Default::default(),
             )),
             store,
             Arc::new(BindingNotifications::default()),

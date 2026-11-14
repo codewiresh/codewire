@@ -178,7 +178,7 @@ fn container_stages(timeline: &PodStartTimeline) -> Vec<StageMarks> {
 }
 
 /// The runtime profile label for an environment's isolation tier, resolved
-/// exactly as `environment_template_opts` resolves the rendered profile.
+/// exactly as the driver resolves the rendered profile.
 pub(super) fn start_profile(cfg: &SandboxWorkerCfg, isolation_tier: &str) -> StartProfile {
     match runtime_profile_for_isolation_tier(isolation_tier) {
         Ok(Some(profile)) => StartProfile::from_runtime_profile(profile),

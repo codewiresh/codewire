@@ -43,7 +43,7 @@ fn dev_cfg(shapes: &str) -> SandboxWorkerCfg {
 /// The pools this configuration wants, as the driver renders them.
 fn rendered(cfg: &SandboxWorkerCfg) -> super::super::RenderedPools {
     let config = WarmPoolConfig::from_cfg(cfg, true).unwrap().unwrap();
-    super::super::render(NAMESPACE, &config.wanted).unwrap()
+    super::super::render(&cfg.into(), NAMESPACE, &config.wanted).unwrap()
 }
 
 fn desired() -> Vec<DesiredPool> {
@@ -902,10 +902,9 @@ fn cache(images: &[&str], complete: bool) -> Value {
 
 #[test]
 fn the_image_cache_gate_needs_every_cacheable_image_held_and_rolled_out() {
-    let config = WarmPoolConfig::from_cfg(&dev_cfg("1000m/4096Mi/10Gi=2"), true)
-        .unwrap()
-        .unwrap();
-    let rendered = super::super::render(NAMESPACE, &config.wanted).unwrap();
+    let cfg = dev_cfg("1000m/4096Mi/10Gi=2");
+    let config = WarmPoolConfig::from_cfg(&cfg, true).unwrap().unwrap();
+    let rendered = super::super::render(&(&cfg).into(), NAMESPACE, &config.wanted).unwrap();
     let images = super::super::images(&rendered);
     assert_eq!(
         images.len(),

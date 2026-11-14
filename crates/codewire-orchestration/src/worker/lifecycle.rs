@@ -13,8 +13,8 @@ use temporalio_sdk::activities::ActivityContext;
 
 use super::activity_authority::{ActivityAuthority, AuthorityLost, is_authority_lost};
 use super::create::{
-    SandboxWorkerCfg, environment_per_env_template_name, environment_template_opts,
-    load_environment_template_opts, ready_timeout_for_isolation,
+    environment_per_env_template_name, environment_rendering_intent,
+    load_environment_rendering_intent, ready_timeout_for_isolation,
     reconcile_or_refresh_runtime_identity, reconcile_runtime_identity_for_pod,
     refresh_workspace_bootstrap, requires_running_runtime_identity, run_template_mutation,
 };
@@ -190,7 +190,6 @@ fn workspace_claim(
 
 async fn ensure_access_stack_for_env(
     ctx: &WorkerContext,
-    cfg: &SandboxWorkerCfg,
     env_id: &str,
     namespace: &str,
     authority: &ActivityAuthority,
@@ -198,20 +197,20 @@ async fn ensure_access_stack_for_env(
     let env = load_environment(&ctx.pool, env_id).await?;
     let preset_id = env.preset_id.clone().unwrap_or_default();
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, &preset_id).await?;
-    let opts = environment_template_opts(
-        cfg,
+    let intent = environment_rendering_intent(
         &image_ref,
         &template_base,
         &env,
         authority.operation_generation(),
     )?;
     let runtime = ctx.require_runtime()?;
+    runtime.check_rendering(&intent)?;
     let placement = Placement::new(namespace);
     run_template_mutation(
         authority,
-        &opts,
+        &intent,
         START_MUTATION_STATES,
-        runtime.ensure_access(&placement, &opts),
+        runtime.ensure_access(&placement, &intent),
     )
     .await?;
     authority
@@ -503,13 +502,15 @@ pub(super) async fn restart_workspace_bootstrap(
     ctx: &WorkerContext,
     env: &super::env_data::EnvironmentRow,
     backend: &super::env_data::BackendRow,
-    opts: &crate::sandbox::template::TemplateOpts,
+    intent: &crate::runtime::RenderingIntent,
     authority: &ActivityAuthority,
     states: &[&str],
 ) -> anyhow::Result<()> {
     let runtime = ctx.require_runtime()?;
     let claim = workspace_claim(env, backend);
-    super::create::authorize_confidential_runtime(ctx, opts, authority, states).await?;
+    let rendering =
+        super::create::authorize_confidential_runtime(ctx, intent.clone(), authority, states)
+            .await?;
     let deadline = tokio::time::Instant::now() + DELETED_TIMEOUT;
     let suspended = within_workspace_deadline(deadline, async {
         let previous = authority
@@ -537,7 +538,10 @@ pub(super) async fn restart_workspace_bootstrap(
     // Every previous Pod is gone: release its binding before the resumed Pod
     // gets a new UID and its own binding.
     release_workspace_binding(ctx.require_runtime()?, authority, states).await?;
-    refresh_workspace_bootstrap(ctx, env, backend, opts, &suspended, authority, states).await?;
+    refresh_workspace_bootstrap(
+        runtime, env, backend, &rendering, &suspended, authority, states,
+    )
+    .await?;
     // Converge the identity labels for this generation before resume, so the
     // resumed Pod carries them and can be bound before Claim Ready (design
     // §10, amended). The post-ready reconcile repeats this idempotently.
@@ -546,9 +550,9 @@ pub(super) async fn restart_workspace_bootstrap(
         .await?;
     run_template_mutation(
         authority,
-        opts,
+        intent,
         states,
-        runtime.resume(&claim, &suspended, opts.effective_support_image()),
+        runtime.resume(&claim, &suspended, ctx.sandbox_cfg.support_image()),
     )
     .await
 }
@@ -695,9 +699,9 @@ pub async fn handle_environment_start(
     };
 
     let ready_timeout = ready_timeout_for_isolation(&env.isolation_tier);
-    let mut runtime_opts =
-        load_environment_template_opts(ctx, &env, authority.operation_generation()).await?;
-    runtime_opts.confidential_storage_manifest_uri =
+    let mut intent =
+        load_environment_rendering_intent(ctx, &env, authority.operation_generation()).await?;
+    intent.identity.confidential_storage_manifest_uri =
         confidential_storage_manifest_uri.unwrap_or_default();
     if let Err(error) = await_reconcile_or_cancel(
         &activity_ctx,
@@ -705,7 +709,7 @@ pub async fn handle_environment_start(
             ctx,
             &env,
             &backend,
-            &runtime_opts,
+            &intent,
             authority,
             START_MUTATION_STATES,
         ),
@@ -733,9 +737,9 @@ pub async fn handle_environment_start(
         &activity_ctx,
         super::create::run_template_mutation(
             authority,
-            &runtime_opts,
+            &intent,
             START_MUTATION_STATES,
-            runtime.ensure_access(&placement, &runtime_opts),
+            runtime.ensure_access(&placement, &intent),
         ),
     )
     .await
@@ -880,8 +884,7 @@ pub async fn handle_environment_start(
         return Err(anyhow::anyhow!("update pod_ip/pod_name: {e:#}"));
     }
 
-    if let Err(e) = ensure_access_stack_for_env(ctx, &ctx.sandbox_cfg, env_id, &ns, authority).await
-    {
+    if let Err(e) = ensure_access_stack_for_env(ctx, env_id, &ns, authority).await {
         record_environment_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
         return Err(e);
     }

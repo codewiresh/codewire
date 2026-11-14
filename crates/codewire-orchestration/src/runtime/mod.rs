@@ -12,6 +12,7 @@
 pub(crate) mod fake;
 pub mod kubernetes;
 pub mod observation;
+pub mod rendering;
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -31,12 +32,12 @@ pub use crate::sandbox::exec::WorkspaceExecHandle as RuntimeExec;
 use crate::sandbox::host_keys::HostKeyStore;
 pub use crate::sandbox::sidecar::PortForwardedStream as RuntimeStream;
 pub use crate::sandbox::snapshots::{ClearingOpts, VolumeMode};
-use crate::sandbox::template::TemplateOpts;
 use crate::sandbox::warm_pool::{ConfiguredShape, shape_label};
 pub use observation::{
     ContainerFact, ControllerFact, EnvFact, MemberFacts, RuntimeFacts, RuntimeObservation,
     VerifiedChain, VolumeFact,
 };
+pub use rendering::{Isolation, RenderingIdentity, RenderingIntent, WorkspaceShape};
 
 /// Where a runtime object lives. A caller names this rather than holding a
 /// client per location; for Kubernetes it is the namespace.
@@ -178,13 +179,12 @@ pub enum PoolState {
     StaleMembers,
 }
 
-/// One pool orchestration wants: an exact shape, its unclaimed member count,
-/// and the identity-free options its members are rendered from. The driver
-/// renders it; orchestration never handles the rendering.
+/// One pool orchestration wants: an exact shape and its unclaimed member
+/// count. The driver renders it, identity-free, from its own configuration;
+/// orchestration never handles the rendering.
 #[derive(Clone)]
 pub struct WantedPool {
     pub configured: ConfiguredShape,
-    pub rendering: TemplateOpts,
     /// Diagnostic runtimes only: members' images need not be digest-pinned.
     pub allow_unpinned_images: bool,
 }
@@ -263,16 +263,16 @@ pub trait RuntimePools: Send + Sync {
     /// each has a ready member. It waits without bound: the caller bounds it.
     async fn warm_pools(&self, placement: &Placement, pools: &[WantedPool]) -> anyhow::Result<()>;
 
-    /// Whether the shared pool wanted as `pool` can take a claim for an
-    /// environment rendered from `rendering` now: only when the
-    /// environment's own rendering is the pool's. Its members are read only
+    /// Whether the shared pool wanted as `pool` can take a claim for the
+    /// environment `intent` describes now: only when the environment's own
+    /// rendering is the pool's. Its members are read only
     /// once everything else holds. A placement without pools answers
     /// [`PoolState::NoPools`].
     async fn pool_state(
         &self,
         placement: &Placement,
         pool: &WantedPool,
-        rendering: &TemplateOpts,
+        intent: &RenderingIntent,
     ) -> anyhow::Result<PoolState>;
 
     /// Whether the observed runtime was born of `pool` exactly as wanted: the
@@ -304,11 +304,16 @@ pub trait RuntimeClaims: Send + Sync {
     /// Make ready what a cold claim names: the environment's own rendering,
     /// then the empty pool `claim` selects it through. If the pool can't be
     /// made, the rendering is removed again. Each step's error says which.
+    /// `authorized` is the SHA-256 of the init data confidential storage
+    /// authorized when the runtime is measured, and `None` otherwise; the
+    /// driver refuses a mismatch before writing anything, as it does when it
+    /// publishes or refreshes a runtime.
     async fn prepare_cold_claim(
         &self,
         placement: &Placement,
-        rendering: &TemplateOpts,
+        intent: &RenderingIntent,
         claim: &ClaimOpts,
+        authorized: Option<&[u8; 32]>,
     ) -> anyhow::Result<()>;
 
     /// Create the environment's claim, or find it if it exists. Its identity
@@ -327,7 +332,7 @@ pub trait RuntimeClaims: Send + Sync {
     async fn bridge_adopted_member(
         &self,
         placement: &Placement,
-        rendering: &TemplateOpts,
+        intent: &RenderingIntent,
         runtime_uid: &str,
     ) -> anyhow::Result<()>;
 
@@ -355,6 +360,21 @@ pub trait RuntimeClaims: Send + Sync {
 /// An environment's runtime over its life.
 #[async_trait]
 pub trait RuntimeLifecycle: Send + Sync {
+    /// Whether this driver can render `intent` at all, refusing with the
+    /// reason: an isolation it can't provide, or a deployment that lacks what
+    /// the intent needs.
+    fn check_rendering(&self, intent: &RenderingIntent) -> anyhow::Result<()>;
+
+    /// Whether the runtime `intent` would run on is a managed one, or a
+    /// diagnostic one this deployment allows.
+    fn check_runtime_profile(&self, intent: &RenderingIntent) -> Result<(), String>;
+
+    /// The init data the runtime for `intent` is measured with, as this
+    /// driver renders it; `None` when that runtime isn't measured.
+    /// Confidential storage authorizes exactly these bytes before the runtime
+    /// is published.
+    fn measured_init_data(&self, intent: &RenderingIntent) -> anyhow::Result<Option<String>>;
+
     /// Observe an environment's runtime as it stands now.
     async fn probe(
         &self,
@@ -487,15 +507,19 @@ pub trait RuntimeLifecycle: Send + Sync {
         environment_id: &str,
     ) -> anyhow::Result<Option<Incarnation>>;
 
-    /// Publish the measured confidential runtime `rendering` describes, so
-    /// that the incarnation replacing `member_name` runs it. Returns what
+    /// Publish the measured confidential runtime `intent` describes, so that
+    /// the incarnation replacing `member_name` runs it. `authorized` is the
+    /// SHA-256 of the init data confidential storage authorized for it: the
+    /// driver refuses, before writing anything, a runtime whose own init data
+    /// differs. Returns what
     /// [`wait_measured_runtime`](Self::wait_measured_runtime) waits to see.
     async fn publish_measured_runtime(
         &self,
         placement: &Placement,
         environment_id: &str,
         member_name: &str,
-        rendering: &TemplateOpts,
+        intent: &RenderingIntent,
+        authorized: &[u8; 32],
     ) -> anyhow::Result<String>;
 
     /// Wait until this exact incarnation shows the published measured runtime:
@@ -508,13 +532,17 @@ pub trait RuntimeLifecycle: Send + Sync {
         timeout: Duration,
     ) -> anyhow::Result<()>;
 
-    /// Bring the claim's suspended runtime to `rendering` before it resumes.
-    /// It never changes a running incarnation.
+    /// Bring the claim's suspended runtime to `intent` before it resumes. It
+    /// never changes a running incarnation. A measured runtime takes the
+    /// SHA-256 of its authorized init data, as
+    /// [`publish_measured_runtime`](Self::publish_measured_runtime) does; any
+    /// other takes none.
     async fn refresh_bootstrap(
         &self,
         claim: &ClaimRef,
-        rendering: &TemplateOpts,
+        intent: &RenderingIntent,
         suspended: &SuspendedRuntime,
+        authorized: Option<&[u8; 32]>,
     ) -> anyhow::Result<()>;
 }
 
@@ -856,7 +884,7 @@ pub trait RuntimeAccess: Send + Sync {
     async fn ensure_access(
         &self,
         placement: &Placement,
-        rendering: &TemplateOpts,
+        intent: &RenderingIntent,
     ) -> anyhow::Result<()>;
 
     async fn delete_access(

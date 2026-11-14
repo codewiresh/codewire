@@ -20,11 +20,11 @@ use std::sync::OnceLock;
 
 use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 
-use super::{SandboxWorkerCfg, warm_pool_template_opts};
-use crate::runtime::{Placement, PoolState, RuntimeDriver, WantedPool};
+use super::{SandboxWorkerCfg, workspace_binding_configured};
+use crate::runtime::{Placement, PoolState, RenderingIntent, RuntimeDriver, WantedPool};
 use crate::sandbox::canonical_workspace_runtime_image;
-use crate::sandbox::template::{CpuSharingRatio, TemplateOpts};
-use crate::sandbox::warm_pool::{WorkspaceShape, parse_warm_pool_shapes};
+use crate::sandbox::template::CpuSharingRatio;
+use crate::sandbox::warm_pool::parse_warm_pool_shapes;
 use crate::worker::env_data::EnvironmentRow;
 
 /// Where one create claims from.
@@ -97,7 +97,7 @@ pub(crate) fn pool_candidate(
     cfg: &SandboxWorkerCfg,
     env: &EnvironmentRow,
     image_ref: &str,
-    opts: &TemplateOpts,
+    intent: &RenderingIntent,
 ) -> Result<WantedPool, ColdReason> {
     let configured = match parse_warm_pool_shapes(&cfg.warm_pool_shapes) {
         Ok(configured) if !configured.is_empty() => configured,
@@ -115,10 +115,10 @@ pub(crate) fn pool_candidate(
     if env.dedicated_cpu && cfg.cpu_sharing_ratio != CpuSharingRatio::NONE {
         return Err(ColdReason::DedicatedCpu);
     }
-    if opts.workspace_binding_url.trim().is_empty() {
+    if !workspace_binding_configured(cfg) {
         return Err(ColdReason::Identity);
     }
-    let shape = WorkspaceShape::of(opts);
+    let shape = intent.shape;
     let Some(entry) = configured
         .iter()
         .find(|entry| entry.shape == shape && entry.members > 0)
@@ -130,7 +130,6 @@ pub(crate) fn pool_candidate(
     // (`cold_rendering`).
     Ok(WantedPool {
         configured: *entry,
-        rendering: warm_pool_template_opts(cfg, shape).map_err(|_| ColdReason::Shape)?,
         allow_unpinned_images: cfg.allow_diagnostic_runtime,
     })
 }
@@ -140,9 +139,9 @@ async fn live_route(
     runtime: &dyn RuntimeDriver,
     placement: &Placement,
     pool: &WantedPool,
-    opts: &TemplateOpts,
+    intent: &RenderingIntent,
 ) -> anyhow::Result<Route> {
-    Ok(match runtime.pool_state(placement, pool, opts).await? {
+    Ok(match runtime.pool_state(placement, pool, intent).await? {
         PoolState::Claimable { pool } => Route::Pool { name: pool },
         PoolState::NoPools => Route::Cold(ColdReason::Unconfigured),
         PoolState::Unrenderable => Route::Cold(ColdReason::Shape),
@@ -158,7 +157,7 @@ pub(crate) async fn route(
     cfg: &SandboxWorkerCfg,
     env: &EnvironmentRow,
     image_ref: &str,
-    opts: &TemplateOpts,
+    intent: &RenderingIntent,
     runtime: &dyn RuntimeDriver,
     placement: &Placement,
     reclaimed: bool,
@@ -166,9 +165,9 @@ pub(crate) async fn route(
     let route = if reclaimed {
         Route::Cold(ColdReason::Reclaimed)
     } else {
-        match pool_candidate(cfg, env, image_ref, opts) {
+        match pool_candidate(cfg, env, image_ref, intent) {
             Err(reason) => Route::Cold(reason),
-            Ok(pool) => match live_route(runtime, placement, &pool, opts).await {
+            Ok(pool) => match live_route(runtime, placement, &pool, intent).await {
                 Ok(route) => route,
                 Err(error) => {
                     tracing::warn!(env = %env.id, error = %format!("{error:#}"), "warm pool unavailable; creating cold");
