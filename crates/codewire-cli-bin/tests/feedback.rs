@@ -253,7 +253,7 @@ async fn feedback_sends_signed_in_or_anonymously_and_only_what_it_shows() {
             vec!["feedback"],
             "pass --yes to send without asking",
         ),
-        ("", vec!["feedback", "--yes"], "the message is empty"),
+        ("", vec!["feedback", "--yes"], "The message is empty"),
         (
             &*"x".repeat(10 * 1024 + 1),
             vec!["feedback", "--yes"],
@@ -288,7 +288,7 @@ async fn feedback_sends_signed_in_or_anonymously_and_only_what_it_shows() {
     .await;
     assert!(!output.status.success());
     let stderr = text(&output.stderr);
-    assert!(stderr.contains("not sent: "), "{stderr}");
+    assert!(stderr.contains("Not sent: "), "{stderr}");
     assert!(stderr.contains("try again in 42 seconds"), "{stderr}");
     server.abort();
 }
@@ -424,7 +424,8 @@ async fn a_message_typed_in_the_terminal_is_sent_with_ctrl_d_or_canceled() {
             process.expect("> draft");
             process.send(cancel);
             let output = process.finish(false);
-            assert!(output.contains("canceled; no feedback sent"), "{output}");
+            // The error printer capitalises the first letter (#4609).
+            assert!(output.contains("Canceled; no feedback sent"), "{output}");
         }
         let mut process = Pty::spawn(&url, &["feedback", "--anonymous"], root.path());
         process.expect("Ctrl-D send");
@@ -435,7 +436,7 @@ async fn a_message_typed_in_the_terminal_is_sent_with_ctrl_d_or_canceled() {
         std::thread::sleep(Duration::from_millis(100));
         process.send(b"\r");
         let output = process.finish(false);
-        assert!(output.contains("canceled; no feedback sent"), "{output}");
+        assert!(output.contains("Canceled; no feedback sent"), "{output}");
         assert!(state.lock().unwrap().submitted.is_empty());
 
         // Enter starts a new line; Ctrl-D sends once confirmed.

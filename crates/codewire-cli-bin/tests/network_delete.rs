@@ -376,7 +376,7 @@ async fn cloud_create_checks_mesh_membership_before_it_creates() {
         let stderr = String::from_utf8_lossy(&refused.stderr);
         assert!(!refused.status.success(), "{stderr}");
         assert!(
-            stderr.contains("you are not a member of Codewire Cloud Mesh network cloud:absent"),
+            stderr.contains("You are not a member of Codewire Cloud Mesh network cloud:absent"),
             "{stderr}"
         );
         assert!(stderr.contains("No environment was created"), "{stderr}");

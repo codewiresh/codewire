@@ -7,6 +7,7 @@ pub mod config;
 mod console_client;
 mod credit_refusal;
 mod environment_client;
+mod error_report;
 #[cfg(target_os = "linux")]
 mod hosted_access;
 #[cfg(unix)]
@@ -798,6 +799,8 @@ pub fn native_network_worker_exit_code(error: &anyhow::Error) -> Option<i32> {
 
 /// 130 when Ctrl-C ended a lifecycle wait (`cw start`, `cw create` and the
 /// like): the error's text already says what continues in the background.
+pub use error_report::report_error;
+
 pub fn interrupted_exit_code(error: &anyhow::Error) -> Option<i32> {
     commands::lifecycle_output::interrupted_exit_code(error)
 }
