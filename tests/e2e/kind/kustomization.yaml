@@ -330,6 +330,43 @@ transformers:
       version: v1
       kind: NetworkPolicy
       name: codewire-credential-service
+  # Kind's edge is ingress-nginx for the IdP and the dashboard too; their
+  # base names the RKE2 ingress controller (#3297). The IdP's second peer,
+  # the dashboard, keeps its base labels here.
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: codewire-idp-peers
+    patch: |-
+      - op: replace
+        path: /spec/ingress/0/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
+        value: ingress-nginx
+      - op: replace
+        path: /spec/ingress/0/from/0/podSelector/matchLabels/app.kubernetes.io~1name
+        value: ingress-nginx
+    target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: codewire-idp
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: codewire-dashboard-peers
+    patch: |-
+      - op: replace
+        path: /spec/ingress/0/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
+        value: ingress-nginx
+      - op: replace
+        path: /spec/ingress/0/from/0/podSelector/matchLabels/app.kubernetes.io~1name
+        value: ingress-nginx
+    target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: codewire-dashboard
   - |-
     apiVersion: builtin
     kind: PatchTransformer
