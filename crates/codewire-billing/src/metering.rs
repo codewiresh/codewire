@@ -444,7 +444,14 @@ pub async fn check_expired_trials(pool: &PgPool, email: &EmailClient) -> anyhow:
                 .unwrap_or(None);
             if let Some((owner,)) = owner_email
                 && !owner.is_empty()
-                && let Err(e) = email.send_trial_expired(&owner).await
+                && let Err(e) = email
+                    .send_trial_expired(
+                        &owner,
+                        crate::webhook::org_slug_for_email(pool, &org_id, "trial expired")
+                            .await
+                            .as_deref(),
+                    )
+                    .await
             {
                 tracing::error!(org_id, error = %e, "billing: failed to send trial expired email");
             }

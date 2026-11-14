@@ -57,6 +57,17 @@ impl FrontendOrigin {
         format!("{}/api/webhooks/stripe", self.0.ascii_serialization())
     }
 
+    /// The organization's Billing page in the dashboard, which billing
+    /// emails link to (#4553).
+    /// The organization's Billing page, or the dashboard, which lists the
+    /// person's organizations, when the slug is unknown (#4553).
+    pub fn billing_url(&self, org_slug: Option<&str>) -> String {
+        match org_slug {
+            Some(slug) => format!("{}/{slug}/billing/", self.0.ascii_serialization()),
+            None => format!("{}/dashboard/", self.0.ascii_serialization()),
+        }
+    }
+
     pub(crate) fn validate_redirect(&self, field: &str, value: &str) -> Result<(), AppError> {
         let url = Url::parse(value).map_err(|_| {
             AppError::BadRequest(
@@ -446,6 +457,22 @@ mod tests {
             assert!(
                 matches!(error, AppError::BadRequest(_)),
                 "{value}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_billing_page_is_on_the_frontend_origin() {
+        for configured in ["https://app.codewire.test", "https://app.codewire.test/"] {
+            assert_eq!(
+                FrontendOrigin::parse(configured)
+                    .unwrap()
+                    .billing_url(Some("acme")),
+                "https://app.codewire.test/acme/billing/"
+            );
+            assert_eq!(
+                FrontendOrigin::parse(configured).unwrap().billing_url(None),
+                "https://app.codewire.test/dashboard/"
             );
         }
     }

@@ -13,13 +13,15 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use codewire_email::Email;
 use codewire_idp::invitation_email::{
     InvitationMailer, MAX_ATTEMPTS, NOT_CONFIGURED, PassReport, Recorded, SendOutcome, claim_next,
     record_result, run_pass,
 };
 use sqlx::PgPool;
 
-const SIGN_IN: &str = "https://app.codewire.test/login";
+/// The configured frontend URL; the email's button goes to its `/login`.
+const FRONTEND: &str = "https://app.codewire.test";
 
 /// A disposable, migrated database, dropped by [`TestDatabase::drop`].
 struct TestDatabase {
@@ -145,7 +147,7 @@ struct RecordingMailer {
     failures: Mutex<usize>,
     error: String,
     delay: Duration,
-    sent: Mutex<Vec<(String, String, String)>>,
+    sent: Mutex<Vec<(String, Email)>>,
 }
 
 impl RecordingMailer {
@@ -171,7 +173,7 @@ impl RecordingMailer {
             .lock()
             .unwrap()
             .iter()
-            .map(|(to, _, _)| to.clone())
+            .map(|(to, _)| to.clone())
             .collect();
         recipients.sort();
         recipients
@@ -184,12 +186,9 @@ impl InvitationMailer for RecordingMailer {
         self.available
     }
 
-    async fn send(&self, to: &str, subject: &str, html: &str) -> anyhow::Result<()> {
+    async fn send(&self, to: &str, email: &Email) -> anyhow::Result<()> {
         tokio::time::sleep(self.delay).await;
-        self.sent
-            .lock()
-            .unwrap()
-            .push((to.into(), subject.into(), html.into()));
+        self.sent.lock().unwrap().push((to.into(), email.clone()));
         let mut failures = self.failures.lock().unwrap();
         if *failures > 0 {
             *failures -= 1;
@@ -209,7 +208,7 @@ async fn a_queued_email_is_sent_once_and_recorded() {
     db.queue("invitee", "pending", "7 days").await;
     let mailer = RecordingMailer::working();
 
-    let report = run_pass(&db.pool, &mailer, SIGN_IN).await.unwrap();
+    let report = run_pass(&db.pool, &mailer, FRONTEND).await.unwrap();
     assert_eq!(
         report,
         PassReport {
@@ -219,21 +218,28 @@ async fn a_queued_email_is_sent_once_and_recorded() {
     );
     let sent = mailer.sent.lock().unwrap().clone();
     assert_eq!(sent.len(), 1);
-    let (to, subject, html) = &sent[0];
+    let (to, email) = &sent[0];
     assert_eq!(to, "invitee@example.test");
     assert_eq!(
-        subject,
+        email.subject,
         "You're invited to join an organization on Codewire"
     );
-    assert!(html.contains("Ada invited you to join <strong>Acme &amp; Co</strong>"));
-    assert!(html.contains("<code>cw login\ncw org accept acme</code>"));
-    assert!(html.contains(SIGN_IN));
+    let (html, text) = (email.html(), email.text());
+    assert!(html.contains("Ada invited you to join Acme &amp; Co on Codewire"));
+    assert!(text.contains("Ada invited you to join Acme & Co on Codewire"));
+    assert!(text.contains("    cw login\n    cw org accept acme\n"));
+    assert!(html.contains(r#"href="https://app.codewire.test/login""#));
+    assert!(text.contains(
+        "sign in at https://app.codewire.test with this email address (invitee@example.test), or accept it with the CLI:"
+    ));
     let token_hash: String =
         sqlx::query_scalar("SELECT token_hash FROM org_invitations WHERE id = 'invitee'")
             .fetch_one(&db.pool)
             .await
             .unwrap();
-    assert!(!html.contains(&token_hash) && !html.contains("token"));
+    for part in [&html, &text] {
+        assert!(!part.contains(&token_hash) && !part.contains("token"));
+    }
 
     let EmailRow {
         status,
@@ -254,7 +260,7 @@ async fn a_queued_email_is_sent_once_and_recorded() {
     .unwrap();
     assert!(sent_at);
 
-    let again = run_pass(&db.pool, &mailer, SIGN_IN).await.unwrap();
+    let again = run_pass(&db.pool, &mailer, FRONTEND).await.unwrap();
     assert_eq!(again, PassReport::default());
     assert_eq!(mailer.sent.lock().unwrap().len(), 1);
     db.drop().await;
@@ -273,7 +279,7 @@ async fn an_email_for_a_settled_invitation_is_skipped() {
     db.queue("pending", "pending", "7 days").await;
     let mailer = RecordingMailer::working();
 
-    let report = run_pass(&db.pool, &mailer, SIGN_IN).await.unwrap();
+    let report = run_pass(&db.pool, &mailer, FRONTEND).await.unwrap();
     assert_eq!(report.skipped, 3);
     assert_eq!(report.sent, 1);
     assert_eq!(mailer.recipients(), ["pending@example.test"]);
@@ -314,7 +320,7 @@ async fn a_failed_send_is_retried_later_and_can_succeed() {
     db.queue("invitee", "pending", "7 days").await;
     let mailer = RecordingMailer::failing(1, "SES email request failed with HTTP 503 (Throttling)");
 
-    let report = run_pass(&db.pool, &mailer, SIGN_IN).await.unwrap();
+    let report = run_pass(&db.pool, &mailer, FRONTEND).await.unwrap();
     assert_eq!(report.retrying, 1);
     let EmailRow {
         status,
@@ -335,12 +341,12 @@ async fn a_failed_send_is_retried_later_and_can_succeed() {
     );
     // Not due yet: the next pass leaves it alone.
     assert_eq!(
-        run_pass(&db.pool, &mailer, SIGN_IN).await.unwrap(),
+        run_pass(&db.pool, &mailer, FRONTEND).await.unwrap(),
         PassReport::default()
     );
 
     db.make_due().await;
-    let report = run_pass(&db.pool, &mailer, SIGN_IN).await.unwrap();
+    let report = run_pass(&db.pool, &mailer, FRONTEND).await.unwrap();
     assert_eq!(report.sent, 1);
     let EmailRow {
         status,
@@ -366,7 +372,7 @@ async fn a_send_that_keeps_failing_is_failed_after_the_bound() {
 
     for attempt in 1..=MAX_ATTEMPTS {
         db.make_due().await;
-        let report = run_pass(&db.pool, &mailer, SIGN_IN).await.unwrap();
+        let report = run_pass(&db.pool, &mailer, FRONTEND).await.unwrap();
         let expected = if attempt < MAX_ATTEMPTS {
             PassReport {
                 retrying: 1,
@@ -397,7 +403,7 @@ async fn a_send_that_keeps_failing_is_failed_after_the_bound() {
 
     db.make_due().await;
     assert_eq!(
-        run_pass(&db.pool, &mailer, SIGN_IN).await.unwrap(),
+        run_pass(&db.pool, &mailer, FRONTEND).await.unwrap(),
         PassReport::default()
     );
     assert_eq!(mailer.sent.lock().unwrap().len(), MAX_ATTEMPTS as usize);
@@ -414,7 +420,7 @@ async fn an_unconfigured_deployment_reports_it_and_sends_nothing() {
     db.queue("invitee", "pending", "7 days").await;
     let mailer = RecordingMailer::default();
 
-    let report = run_pass(&db.pool, &mailer, SIGN_IN).await.unwrap();
+    let report = run_pass(&db.pool, &mailer, FRONTEND).await.unwrap();
     assert_eq!(report.failed, 1);
     let EmailRow {
         status,
@@ -447,8 +453,8 @@ async fn concurrent_senders_send_each_email_once() {
     };
 
     let (first, second) = tokio::join!(
-        run_pass(&db.pool, &mailer, SIGN_IN),
-        run_pass(&db.pool, &mailer, SIGN_IN)
+        run_pass(&db.pool, &mailer, FRONTEND),
+        run_pass(&db.pool, &mailer, FRONTEND)
     );
     let (first, second) = (first.unwrap(), second.unwrap());
     assert_eq!(first.sent + second.sent, ids.len());

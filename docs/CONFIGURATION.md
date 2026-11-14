@@ -93,7 +93,7 @@ With neither, the workload starts with email delivery disabled.
 
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
-| `CODEWIRE_SES_FROM` | Required when SES is enabled | The SES sender: one plain mailbox, verified as an SES identity. | `hello@example.com` |
+| `CODEWIRE_SES_FROM` | Required when SES is enabled | The SES sender: one mailbox, bare or as `Name <address>`, whose address is verified as an SES identity. Codewire's own servers use `Codewire <hello@codewire.sh>`. | `Codewire <hello@example.com>` |
 | `CODEWIRE_SES_REGION` | Required when SES is enabled | The AWS region of that SES identity. | `eu-west-1` |
 | `CODEWIRE_RESEND_FROM` | Required when `RESEND_API_KEY` is set and SES is not enabled | The Resend `From` header: one mailbox, optionally with a display name. Its domain must be verified in the Resend account. There is no default: unset or empty, the IdP and billing refuse to start. | `Example <hello@example.com>` |
 

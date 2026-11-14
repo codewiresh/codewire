@@ -33,7 +33,7 @@ use axum::response::Response;
 use axum::routing::post;
 use axum::{Json, Router};
 use chrono::{DateTime, SecondsFormat, Utc};
-use codewire_email::EmailClient;
+use codewire_email::{Email, EmailClient};
 use codewire_server_core::AppError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -944,7 +944,9 @@ impl Notice {
         }
     }
 
-    fn html(self, reset_url: &str) -> String {
+    /// The notice email. It carries no code, secret or link that grants
+    /// access.
+    fn email(self, reset_url: &str) -> Email {
         let (heading, body) = match self {
             Self::Replaced => (
                 "Your authenticator was replaced",
@@ -955,14 +957,26 @@ impl Notice {
                 "New recovery codes were created for your Codewire account. Your previous recovery codes no longer work. Your authenticator app still works.",
             ),
         };
-        format!(
-            r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-	<h2>{heading}</h2>
-	<p>{body}</p>
-	<p>If you didn't do this, <a href="{reset_url}">reset your password</a> now and contact support.</p>
-</div>"#
-        )
+        Email::new(self.subject(), heading)
+            .paragraph(body)
+            .paragraph("If you didn't do this, reset your password now and contact support.")
+            .button("Reset your password", reset_url)
+            .reason(
+                "You got this email because two-factor authentication changed on the Codewire account for this address.",
+            )
     }
+}
+
+/// Both notices with a synthetic reset link, for the email preview writer.
+#[cfg(test)]
+pub(crate) fn notice_previews(reset_url: &str) -> [(&'static str, Email); 2] {
+    [
+        ("idp-two-factor-replaced", Notice::Replaced.email(reset_url)),
+        (
+            "idp-two-factor-regenerated",
+            Notice::Regenerated.email(reset_url),
+        ),
+    ]
 }
 
 /// Best-effort notice after commit. It runs in the background so a slow mail
@@ -979,10 +993,7 @@ fn notify(state: &ReplacementState, user_id: &str, to: String, notice: Notice) {
         state.frontend_url.trim_end_matches('/')
     );
     tokio::spawn(async move {
-        if let Err(error) = email
-            .send_html(&to, notice.subject(), &notice.html(&reset_url))
-            .await
-        {
+        if let Err(error) = email.send(&to, &notice.email(&reset_url)).await {
             tracing::warn!(%error, user_id = %user_id, "failed to send two-factor change notice");
         }
     });
@@ -1180,9 +1191,11 @@ mod tests {
     #[test]
     fn notices_carry_no_codes_or_secrets() {
         for notice in [Notice::Replaced, Notice::Regenerated] {
-            let html = notice.html("https://app.codewire.test/forgot-password");
-            assert!(html.contains("https://app.codewire.test/forgot-password"));
-            assert!(!html.contains("otpauth://"));
+            let email = notice.email("https://app.codewire.test/forgot-password");
+            for part in [email.html(), email.text()] {
+                assert!(part.contains("https://app.codewire.test/forgot-password"));
+                assert!(!part.contains("otpauth://"));
+            }
             assert!(!notice.subject().is_empty());
         }
     }

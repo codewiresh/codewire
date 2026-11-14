@@ -9,7 +9,7 @@ use axum::middleware;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{Duration, NaiveDateTime, Utc};
-use codewire_email::EmailClient;
+use codewire_email::{Email, EmailClient};
 use codewire_server_core::auth::{AuthState, AuthUser, require_session_auth};
 use codewire_server_core::{AppError, ValidatedJson};
 use schemars::JsonSchema;
@@ -214,22 +214,39 @@ async fn claim_verification(
     .await
 }
 
+/// The password reset email. Every value is raw; the layout escapes it.
+pub(crate) fn password_reset_email(reset_url: &str) -> Email {
+    Email::new("Reset your Codewire password", "Reset your password")
+        .paragraph(
+            "We received a request to reset your Codewire password. Click the link below to choose a new one:",
+        )
+        .button("Reset Password", reset_url)
+        .note("This link expires in 1 hour. If you didn't request this, you can ignore this email.")
+        .reason(
+            "You got this email because someone asked to reset the password for this address on Codewire.",
+        )
+}
+
 async fn send_password_reset_email(
     email: &EmailClient,
     to: &str,
     reset_url: &str,
 ) -> anyhow::Result<()> {
-    let html = format!(
-        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-	<h2>Reset your password</h2>
-	<p>We received a request to reset your Codewire password. Click the link below to choose a new one:</p>
-	<p><a href="{reset_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;">Reset Password</a></p>
-	<p style="color: #666; font-size: 14px;">This link expires in 1 hour. If you didn't request this, you can ignore this email.</p>
-</div>"#
-    );
-    email
-        .send_html(to, "Reset your Codewire password", &html)
-        .await
+    email.send(to, &password_reset_email(reset_url)).await
+}
+
+/// The email that verifies a new account's address.
+pub(crate) fn verification_email(verify_url: &str) -> Email {
+    Email::new("Verify your Codewire email", "Verify your email")
+        .paragraph(
+            "Someone created a Codewire account with this address. If it was you, verify your email to finish setting it up.",
+        )
+        .button("Verify email", verify_url)
+        .paragraph(
+            "If it wasn't you, ignore this email. Nobody can sign in to the account unless this link is opened.",
+        )
+        .note("This link expires in 24 hours.")
+        .reason("You got this email because this address was used to sign up for Codewire.")
 }
 
 /// What "Forgot password" sends an account that has no password (#4528): how it
@@ -240,18 +257,25 @@ async fn send_provider_sign_in_email(
     providers: &[&'static str],
     login_url: &str,
 ) -> anyhow::Result<()> {
-    let providers = providers.join(" or ");
-    let html = format!(
-        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-	<h2>Your Codewire account has no password</h2>
-	<p>Someone asked to reset the password for the Codewire account with this address. This account doesn't use a password: you sign in with {providers}.</p>
-	<p><a href="{login_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;">Go to sign in</a></p>
-	<p style="color: #666; font-size: 14px;">If this wasn't you, you can ignore this email. Nothing has changed.</p>
-</div>"#
-    );
     email
-        .send_html(to, "How you sign in to Codewire", &html)
+        .send(to, &provider_sign_in_email(providers, login_url))
         .await
+}
+
+fn provider_sign_in_email(providers: &[&'static str], login_url: &str) -> Email {
+    let providers = providers.join(" or ");
+    Email::new(
+        "How you sign in to Codewire",
+        "Your Codewire account has no password",
+    )
+    .paragraph(format!(
+        "Someone asked to reset the password for the Codewire account with this address. This account doesn't use a password: you sign in with {providers}."
+    ))
+    .button("Go to sign in", login_url)
+    .note("If this wasn't you, you can ignore this email. Nothing has changed.")
+    .reason(
+        "You got this email because someone asked to reset the password for this address on Codewire.",
+    )
 }
 
 pub(crate) async fn send_verification_email(
@@ -259,32 +283,41 @@ pub(crate) async fn send_verification_email(
     to: &str,
     verify_url: &str,
 ) -> anyhow::Result<()> {
-    let html = format!(
-        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-	<h2>Verify your email</h2>
-	<p>Someone created a Codewire account with this address. If it was you, verify your email to finish setting it up.</p>
-	<p><a href="{verify_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;">Verify email</a></p>
-	<p>If it wasn't you, ignore this email. Nobody can sign in to the account unless this link is opened.</p>
-	<p style="color: #666; font-size: 14px;">This link expires in 24 hours.</p>
-</div>"#
-    );
-    email
-        .send_html(to, "Verify your Codewire email", &html)
-        .await
+    email.send(to, &verification_email(verify_url)).await
+}
+
+/// The confirmation that an access request's address is verified.
+pub(crate) fn access_request_received_email() -> Email {
+    Email::new(
+        "Your Codewire access request is verified",
+        "Your Codewire email is verified",
+    )
+    .paragraph(
+        "We received your request for Codewire access. We will email you when your account is enabled.",
+    )
+    .reason("You got this email because this address was used to ask for access to Codewire.")
 }
 
 pub(crate) async fn send_access_request_received_email(
     email: &EmailClient,
     to: &str,
 ) -> anyhow::Result<()> {
-    let html = r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-	<h2>Your Codewire email is verified</h2>
-	<p>We received your request for Codewire access. We will email you when your account is enabled.</p>
-</div>"#
-        .to_owned();
-    email
-        .send_html(to, "Your Codewire access request is verified", &html)
-        .await
+    email.send(to, &access_request_received_email()).await
+}
+
+const SIGN_IN_METHOD_REASON: &str =
+    "You got this email because a sign-in method changed on the Codewire account for this address.";
+
+/// The notice an account's address gets when a provider is linked to it.
+pub(crate) fn provider_linked_email(provider: &str, settings_url: &str) -> Email {
+    let title = format!("{provider} was linked to your Codewire account");
+    Email::new(title.clone(), title)
+        .paragraph(format!(
+            "Someone signed in to Codewire with a {provider} account that has this verified email address, so it can now be used to sign in to your account. Your two-factor authentication still applies."
+        ))
+        .paragraph("If this wasn't you, change your password and review your account's sessions.")
+        .button("Review your account", settings_url)
+        .reason(SIGN_IN_METHOD_REASON)
 }
 
 /// The notice an account's address gets when a provider is linked to it.
@@ -295,26 +328,30 @@ pub(crate) async fn send_provider_linked_email(
     provider: &'static str,
     settings_url: &str,
 ) -> anyhow::Result<()> {
-    let html = format!(
-        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-	<h2>{provider} was linked to your Codewire account</h2>
-	<p>Someone signed in to Codewire with a {provider} account that has this verified email address, so it can now be used to sign in to your account. Your two-factor authentication still applies.</p>
-	<p>If this wasn't you, change your password and review your account's sessions.</p>
-	<p><a href="{settings_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 999px;">Review your account</a></p>
-</div>"#
-    );
     email
-        .send_html(
-            to,
-            &format!("{provider} was linked to your Codewire account"),
-            &html,
-        )
+        .send(to, &provider_linked_email(provider, settings_url))
         .await
 }
 
 /// The notice an account's address gets when its owner connects a provider
+/// from Settings.
+pub(crate) fn provider_connected_email(provider: &str, account: &str, settings_url: &str) -> Email {
+    let title = format!("{provider} was connected to your Codewire account");
+    let named = provider_account_phrase(provider, account);
+    Email::new(title.clone(), title)
+        .paragraph(format!(
+            "{named} was connected from your account's Settings and can now be used to sign in to your account. Your two-factor authentication still applies."
+        ))
+        .paragraph(
+            "If this wasn't you, disconnect it, change your password and review your account's sessions.",
+        )
+        .button("Review sign-in methods", settings_url)
+        .reason(SIGN_IN_METHOD_REASON)
+}
+
+/// The notice an account's address gets when its owner connects a provider
 /// from Settings. `provider` is a fixed label; `account` is the provider
-/// account (GitHub login or Google email), escaped here.
+/// account (GitHub login or Google email), escaped by the layout.
 pub(crate) async fn send_provider_connected_email(
     email: &EmailClient,
     to: &str,
@@ -322,22 +359,30 @@ pub(crate) async fn send_provider_connected_email(
     account: &str,
     settings_url: &str,
 ) -> anyhow::Result<()> {
-    let named = provider_account_phrase(provider, account);
-    let html = format!(
-        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-	<h2>{provider} was connected to your Codewire account</h2>
-	<p>{named} was connected from your account's Settings and can now be used to sign in to your account. Your two-factor authentication still applies.</p>
-	<p>If this wasn't you, disconnect it, change your password and review your account's sessions.</p>
-	<p><a href="{settings_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 999px;">Review sign-in methods</a></p>
-</div>"#
-    );
     email
-        .send_html(
+        .send(
             to,
-            &format!("{provider} was connected to your Codewire account"),
-            &html,
+            &provider_connected_email(provider, account, settings_url),
         )
         .await
+}
+
+/// The notice an account's address gets when a provider is disconnected
+/// from Settings.
+pub(crate) fn provider_disconnected_email(
+    provider: &str,
+    account: &str,
+    settings_url: &str,
+) -> Email {
+    let title = format!("{provider} was disconnected from your Codewire account");
+    let named = provider_account_phrase(provider, account);
+    Email::new(title.clone(), title)
+        .paragraph(format!(
+            "{named} was disconnected from your account's Settings and can no longer be used to sign in to your account."
+        ))
+        .paragraph("If this wasn't you, change your password and review your account's sessions.")
+        .button("Review sign-in methods", settings_url)
+        .reason(SIGN_IN_METHOD_REASON)
 }
 
 /// The notice an account's address gets when a provider is disconnected
@@ -349,51 +394,46 @@ pub(crate) async fn send_provider_disconnected_email(
     account: &str,
     settings_url: &str,
 ) -> anyhow::Result<()> {
-    let named = provider_account_phrase(provider, account);
-    let html = format!(
-        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-	<h2>{provider} was disconnected from your Codewire account</h2>
-	<p>{named} was disconnected from your account's Settings and can no longer be used to sign in to your account.</p>
-	<p>If this wasn't you, change your password and review your account's sessions.</p>
-	<p><a href="{settings_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 999px;">Review sign-in methods</a></p>
-</div>"#
-    );
     email
-        .send_html(
+        .send(
             to,
-            &format!("{provider} was disconnected from your Codewire account"),
-            &html,
+            &provider_disconnected_email(provider, account, settings_url),
         )
         .await
 }
 
 /// "The GitHub account octocat", or "A GitHub account" when no account name
-/// is known. The name is escaped.
-fn provider_account_phrase(provider: &'static str, account: &str) -> String {
+/// is known. The name is raw; the layout escapes it.
+fn provider_account_phrase(provider: &str, account: &str) -> String {
     if account.is_empty() {
         format!("A {provider} account")
     } else {
-        format!(
-            "The {provider} account <strong>{}</strong>",
-            html_text(account)
-        )
+        format!("The {provider} account {account}")
     }
 }
 
-/// Escape text for an HTML email body.
-pub(crate) fn html_text(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&#39;"),
-            other => escaped.push(other),
-        }
-    }
-    escaped
+/// The one-time confirmation that links a provider identity to an existing
+/// account. `account` comes from the provider, so it stays out of the
+/// subject; the layout escapes it in the body.
+pub(crate) fn provider_link_confirmation_email(
+    provider: &str,
+    account: &str,
+    confirm_url: &str,
+) -> Email {
+    Email::new(
+        format!("Connect {provider} to your Codewire account"),
+        format!("Connect the {provider} account {account} to your Codewire account?"),
+    )
+    .paragraph(format!(
+        "Someone signed in to Codewire with the {provider} account {account}, which uses this email address. If that was you, open this link in the same browser and confirm, and that {provider} account will be able to sign in to your Codewire account:"
+    ))
+    .button("Review and connect", confirm_url)
+    .note(format!(
+        "The link works once, only in the browser where you started signing in, and expires in 30 minutes. Your two-factor authentication still applies when you sign in. If you don't recognize {account}, ignore this email and nothing changes."
+    ))
+    .reason(
+        "You got this email because someone signed in to Codewire with an account that uses this address.",
+    )
 }
 
 /// The one-time confirmation that links a provider identity to an existing
@@ -407,26 +447,23 @@ pub(crate) async fn send_provider_link_confirmation_email(
     account: &str,
     confirm_url: &str,
 ) -> anyhow::Result<()> {
-    let html = provider_link_confirmation_html(provider, account, confirm_url);
     email
-        .send_html(
+        .send(
             to,
-            &format!("Connect {provider} to your Codewire account"),
-            &html,
+            &provider_link_confirmation_email(provider, account, confirm_url),
         )
         .await
 }
 
-fn provider_link_confirmation_html(provider: &str, account: &str, confirm_url: &str) -> String {
-    let account = html_text(account);
-    format!(
-        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-	<h2>Connect the {provider} account {account} to your Codewire account?</h2>
-	<p>Someone signed in to Codewire with the {provider} account <strong>{account}</strong>, which uses this email address. If that was you, open this link in the same browser and confirm, and that {provider} account will be able to sign in to your Codewire account:</p>
-	<p><a href="{confirm_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 999px;">Review and connect</a></p>
-	<p style="color: #666; font-size: 14px;">The link works once, only in the browser where you started signing in, and expires in 30 minutes. Your two-factor authentication still applies when you sign in. If you don't recognize {account}, ignore this email and nothing changes.</p>
-</div>"#
+/// The notice that an access request was approved.
+pub(crate) fn access_enabled_email(login_url: &str) -> Email {
+    Email::new(
+        "Your Codewire access is ready",
+        "Your Codewire account is enabled",
     )
+    .paragraph("Your access is ready. Sign in to finish setting up your account.")
+    .button("Sign in to Codewire", login_url)
+    .reason("You got this email because this address was used to ask for access to Codewire.")
 }
 
 pub(crate) async fn send_access_enabled_email(
@@ -434,16 +471,7 @@ pub(crate) async fn send_access_enabled_email(
     to: &str,
     login_url: &str,
 ) -> anyhow::Result<()> {
-    let html = format!(
-        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-	<h2>Your Codewire account is enabled</h2>
-	<p>Your access is ready. Sign in to finish setting up your account.</p>
-	<p><a href="{login_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 999px;">Sign in to Codewire</a></p>
-</div>"#
-    );
-    email
-        .send_html(to, "Your Codewire access is ready", &html)
-        .await
+    email.send(to, &access_enabled_email(login_url)).await
 }
 
 async fn verify_email(
@@ -851,24 +879,137 @@ mod tests {
     fn connect_and_disconnect_notices_escape_the_provider_account() {
         assert_eq!(
             provider_account_phrase("GitHub", "<octo&cat>"),
-            "The GitHub account <strong>&lt;octo&amp;cat&gt;</strong>"
+            "The GitHub account <octo&cat>"
         );
         assert_eq!(provider_account_phrase("Google", ""), "A Google account");
+        for email in [
+            provider_connected_email("GitHub", "<octo&cat>", "https://app.example/settings"),
+            provider_disconnected_email("GitHub", "<octo&cat>", "https://app.example/settings"),
+        ] {
+            let html = email.html();
+            assert!(html.contains("The GitHub account &lt;octo&amp;cat&gt;"));
+            assert!(!html.contains("<octo"));
+            assert!(email.text().contains("The GitHub account <octo&cat>"));
+        }
     }
 
     #[test]
     fn link_confirmation_names_and_escapes_the_provider_account() {
-        let html = provider_link_confirmation_html(
+        let email = provider_link_confirmation_email(
             "GitHub",
             "octocat<script>",
             "https://app.example/login/link?token=t",
         );
+        let html = email.html();
         assert!(html.contains(
             "Connect the GitHub account octocat&lt;script&gt; to your Codewire account?"
         ));
-        assert!(html.contains("<strong>octocat&lt;script&gt;</strong>"));
+        assert!(html.contains("with the GitHub account octocat&lt;script&gt;, which uses"));
         assert!(!html.contains("<script>"));
         assert!(html.contains("href=\"https://app.example/login/link?token=t\""));
+        assert!(!email.subject.contains("octocat"));
+        assert!(
+            email
+                .text()
+                .contains("Review and connect: https://app.example/login/link?token=t")
+        );
+    }
+
+    #[test]
+    fn the_verification_email_keeps_the_owner_wording() {
+        let text = verification_email("https://app.example/verify-email?token=abc").text();
+        for line in [
+            "Someone created a Codewire account with this address. If it was you, verify your email to finish setting it up.",
+            "Verify email: https://app.example/verify-email?token=abc",
+            "If it wasn't you, ignore this email. Nobody can sign in to the account unless this link is opened.",
+            "This link expires in 24 hours.",
+        ] {
+            assert!(text.contains(line), "{line}");
+        }
+    }
+
+    /// Writes every IdP email, with synthetic values, as `<name>.html` and
+    /// `<name>.txt` into `EMAIL_PREVIEW_DIR`, for review. Without the
+    /// variable it does nothing.
+    #[test]
+    #[ignore = "writes email previews"]
+    fn write_email_previews() {
+        let Some(dir) = std::env::var_os("EMAIL_PREVIEW_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = "https://codewire.sh/settings";
+        let invitation = crate::invitation_email::ClaimedEmail {
+            invitation_id: "invitation-example".into(),
+            recipient: "grace@example.com".into(),
+            org_name: "Acme".into(),
+            org_slug: "acme".into(),
+            inviter: "Ada".into(),
+            role: "member".into(),
+            expires_at: chrono::NaiveDate::from_ymd_opt(2026, 11, 20)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap(),
+            attempts: 1,
+        };
+        let mut emails = vec![
+            (
+                "idp-password-reset",
+                password_reset_email("https://codewire.sh/reset-password?token=EXAMPLE"),
+            ),
+            (
+                "idp-provider-sign-in",
+                provider_sign_in_email(&["GitHub"], "https://codewire.sh/login"),
+            ),
+            (
+                "idp-verification",
+                verification_email("https://codewire.sh/verify-email?token=EXAMPLE"),
+            ),
+            (
+                "idp-access-request-received",
+                access_request_received_email(),
+            ),
+            (
+                "idp-access-enabled",
+                access_enabled_email("https://codewire.sh/login"),
+            ),
+            (
+                "idp-provider-linked",
+                provider_linked_email("GitHub", settings),
+            ),
+            (
+                "idp-provider-connected",
+                provider_connected_email("GitHub", "ada-lovelace", settings),
+            ),
+            (
+                "idp-provider-disconnected",
+                provider_disconnected_email("Google", "ada@example.com", settings),
+            ),
+            (
+                "idp-provider-link-confirmation",
+                provider_link_confirmation_email(
+                    "GitHub",
+                    "ada-lovelace",
+                    "https://codewire.sh/login/link?token=EXAMPLE",
+                ),
+            ),
+            (
+                "idp-organization-invitation",
+                crate::invitation_email::invitation_email(
+                    &invitation,
+                    "https://codewire.sh",
+                    Some("https://codewire.sh/accept-invite?token=EXAMPLE"),
+                ),
+            ),
+        ];
+        emails.extend(crate::two_factor::notice_previews(
+            "https://codewire.sh/forgot-password",
+        ));
+        for (name, email) in emails {
+            std::fs::write(dir.join(format!("{name}.html")), email.html()).unwrap();
+            std::fs::write(dir.join(format!("{name}.txt")), email.text()).unwrap();
+        }
     }
 
     #[test]

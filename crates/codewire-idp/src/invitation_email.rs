@@ -21,20 +21,19 @@
 //! [`MAX_ATTEMPTS`] times in all.
 //!
 //! The email carries no token (decided on #3840, 2026-11-12). It names the
-//! inviter, organization and role and tells the invitee to sign in with this
-//! address (`cw login`) and run `cw org accept <slug>`, the two commands
-//! `cw login` itself points to (#4530). A forwarded email grants nothing:
-//! accepting needs the invitee's verified address.
+//! inviter, organization and role and tells the invitee to sign in at this
+//! server's own address with this email address, or to accept with the CLI:
+//! `cw login` and `cw org accept <slug>`, the two commands `cw login` itself
+//! points to (#4530, #4553). A forwarded email grants nothing: accepting
+//! needs the invitee's verified address.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
-use codewire_email::EmailClient;
+use codewire_email::{Email, EmailClient};
 use sqlx::PgPool;
-
-use crate::email_password::html_text;
 
 /// How often each replica looks for due invitation emails. A new invitation
 /// is sent within about this long, which the CLI waits for.
@@ -68,7 +67,7 @@ pub trait InvitationMailer: Send + Sync {
     /// Whether this deployment can send email at all. Without it, a claimed
     /// email is failed at once with [`NOT_CONFIGURED`].
     fn is_available(&self) -> bool;
-    async fn send(&self, to: &str, subject: &str, html: &str) -> anyhow::Result<()>;
+    async fn send(&self, to: &str, email: &Email) -> anyhow::Result<()>;
 }
 
 /// The production mailer: the IdP's transactional email.
@@ -80,8 +79,8 @@ impl InvitationMailer for EmailInvitationMailer {
         self.0.is_configured()
     }
 
-    async fn send(&self, to: &str, subject: &str, html: &str) -> anyhow::Result<()> {
-        self.0.send_html(to, subject, html).await
+    async fn send(&self, to: &str, email: &Email) -> anyhow::Result<()> {
+        self.0.send(to, email).await
     }
 }
 
@@ -99,39 +98,50 @@ pub struct ClaimedEmail {
     pub attempts: i32,
 }
 
-/// The rendered invitation email.
-#[derive(Debug, PartialEq, Eq)]
-pub struct RenderedEmail {
-    pub subject: &'static str,
-    pub html: String,
-}
-
-/// Renders the email. Every interpolated value is escaped. The subject is
-/// fixed, so text the inviter chose (their name, the organization's) stays
-/// out of it, as in idp's other mail.
-pub fn render(email: &ClaimedEmail, sign_in_url: &str) -> RenderedEmail {
-    let inviter = html_text(&email.inviter);
-    let org = html_text(&email.org_name);
-    let slug = html_text(&email.org_slug);
-    let recipient = html_text(&email.recipient);
-    let sign_in_url = html_text(sign_in_url);
+/// The invitation email. `frontend_url` is this server's configured
+/// frontend URL, so a self-hosted server shows its own address. Every value
+/// is raw; the layout escapes it. The subject is fixed, so text the inviter
+/// chose (their name, the organization's) stays out of it, as in idp's other
+/// mail. `accept_url` is the invitation's own sign-up link, when the server
+/// minted one (#4121): with it the button accepts the invitation; without
+/// it the button signs in. The sign-in line and the CLI commands stay either
+/// way.
+pub fn invitation_email(
+    email: &ClaimedEmail,
+    frontend_url: &str,
+    accept_url: Option<&str>,
+) -> Email {
+    let site = frontend_url.trim_end_matches('/');
+    let inviter = &email.inviter;
+    let org = &email.org_name;
+    let recipient = &email.recipient;
     let role = role_phrase(&email.role);
     let expires = email.expires_at.format("%B %-d, %Y");
-    let html = format!(
-        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-	<h2>Join {org} on Codewire</h2>
-	<p>{inviter} invited you to join <strong>{org}</strong> on Codewire as {role}.</p>
-	<p>To accept, sign in with this email address, {recipient}, and accept:</p>
-	<pre style="padding: 12px; background: #f5f5f5; border-radius: 6px;"><code>cw login
-cw org accept {slug}</code></pre>
-	<p><a href="{sign_in_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 999px;">Sign in to Codewire</a></p>
-	<p style="color: #666; font-size: 14px;">New to Codewire? Sign up with this address and verify it first. The invitation expires on {expires} (UTC). If you weren't expecting it, you can ignore this email.</p>
-</div>"#
-    );
-    RenderedEmail {
-        subject: SUBJECT,
-        html,
-    }
+    let message = Email::new(SUBJECT, format!("Join {org} on Codewire"))
+        .paragraph(format!(
+            "{inviter} invited you to join {org} on Codewire as {role}."
+        ))
+        .linked_paragraph(
+            "To accept, sign in at ",
+            site,
+            site,
+            format!(" with this email address ({recipient}), or accept it with the CLI:"),
+        )
+        .code([
+            "cw login".to_owned(),
+            format!("cw org accept {}", email.org_slug),
+        ]);
+    let message = match accept_url {
+        Some(url) => message.button("Accept invitation", url),
+        None => message.button("Sign in to Codewire", sign_in_url(frontend_url)),
+    };
+    message
+        .note(format!(
+            "New to Codewire? Sign up with this address and verify it first. The invitation expires on {expires} (UTC). If you weren't expecting it, you can ignore this email."
+        ))
+        .reason(
+            "You got this email because someone invited this address to join an organization on Codewire.",
+        )
 }
 
 fn role_phrase(role: &str) -> &'static str {
@@ -159,11 +169,12 @@ pub struct PassReport {
 }
 
 /// Skips the emails whose invitation is no longer pending, then claims and
-/// sends due emails, at most [`PASS_LIMIT`].
+/// sends due emails, at most [`PASS_LIMIT`]. `frontend_url` is this
+/// server's configured frontend URL, which the email shows.
 pub async fn run_pass(
     pool: &PgPool,
     mailer: &dyn InvitationMailer,
-    sign_in_url: &str,
+    frontend_url: &str,
 ) -> Result<PassReport, sqlx::Error> {
     let mut report = PassReport {
         skipped: skip_settled(pool).await?,
@@ -174,11 +185,8 @@ pub async fn run_pass(
             break;
         };
         let outcome = if mailer.is_available() {
-            let rendered = render(&email, sign_in_url);
-            match mailer
-                .send(&email.recipient, rendered.subject, &rendered.html)
-                .await
-            {
+            let message = invitation_email(&email, frontend_url, None);
+            match mailer.send(&email.recipient, &message).await {
                 Ok(()) => {
                     tracing::info!(invitation_id = %email.invitation_id, attempt = email.attempts, "sent invitation email");
                     SendOutcome::Sent
@@ -391,7 +399,7 @@ pub fn reason(error: &anyhow::Error) -> String {
 /// Starts this replica's sender: a pass every [`POLL_INTERVAL`], for the
 /// life of the process. A failed pass is logged and the next one retries.
 pub fn spawn(pool: PgPool, mailer: Arc<dyn InvitationMailer>, frontend_url: &str) {
-    let sign_in_url = sign_in_url(frontend_url);
+    let frontend_url = frontend_url.to_owned();
     if !mailer.is_available() {
         tracing::warn!(
             "invitation email: delivery is not configured; invitations will report it as failed"
@@ -402,7 +410,7 @@ pub fn spawn(pool: PgPool, mailer: Arc<dyn InvitationMailer>, frontend_url: &str
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            if let Err(error) = run_pass(&pool, mailer.as_ref(), &sign_in_url).await {
+            if let Err(error) = run_pass(&pool, mailer.as_ref(), &frontend_url).await {
                 tracing::warn!(%error, "invitation email pass failed");
             }
         }
@@ -433,29 +441,37 @@ mod tests {
 
     #[test]
     fn the_email_names_inviter_organization_and_role_and_how_to_accept() {
-        let rendered = render(&email(|_| {}), "https://app.codewire.test/login");
+        let message = invitation_email(&email(|_| {}), "https://app.codewire.test", None);
         assert_eq!(
-            rendered.subject,
+            message.subject,
             "You're invited to join an organization on Codewire"
         );
+        let text = message.text();
         for expected in [
-            "Ada invited you to join <strong>Acme</strong> on Codewire as an admin.",
-            "sign in with this email address, invitee@example.test, and accept:",
-            "<code>cw login\ncw org accept acme</code>",
-            r#"<a href="https://app.codewire.test/login""#,
+            "Join Acme on Codewire",
+            "Ada invited you to join Acme on Codewire as an admin.",
+            "To accept, sign in at https://app.codewire.test with this email address (invitee@example.test), or accept it with the CLI:\n",
+            "    cw login\n    cw org accept acme\n",
+            "Sign in to Codewire: https://app.codewire.test/login",
             "Sign up with this address and verify it first.",
             "expires on November 19, 2026 (UTC)",
         ] {
-            assert!(rendered.html.contains(expected), "{expected:?} missing");
+            assert!(text.contains(expected), "{expected:?} missing");
         }
+        let html = message.html();
+        assert!(html.contains(r#"<a href="https://app.codewire.test/login""#));
+        assert!(html.contains(
+            r#"To accept, sign in at <a href="https://app.codewire.test" style="color:#171717;text-decoration:underline;">https://app.codewire.test</a> with this email address (invitee@example.test), or accept it with the CLI:"#
+        ));
+        assert!(html.contains("cw org accept acme"));
         assert!(
-            render(&email(|e| e.role = "member".into()), "https://x.test/login")
-                .html
+            invitation_email(&email(|e| e.role = "member".into()), "https://x.test", None)
+                .text()
                 .contains("as a member.")
         );
         assert!(
-            render(&email(|e| e.role = "owner".into()), "https://x.test/login")
-                .html
+            invitation_email(&email(|e| e.role = "owner".into()), "https://x.test", None)
+                .text()
                 .contains("as an owner.")
         );
     }
@@ -463,32 +479,80 @@ mod tests {
     /// The email links to signing in, never to an invitation capability.
     #[test]
     fn the_email_carries_no_token_or_accept_link() {
-        let html = render(&email(|_| {}), "https://app.codewire.test/login").html;
-        for absent in ["token", "accept-invite", "accept?"] {
-            assert!(!html.contains(absent), "{absent:?} in {html}");
+        let message = invitation_email(&email(|_| {}), "https://app.codewire.test", None);
+        for part in [message.html(), message.text()] {
+            for absent in ["token", "accept-invite", "accept?"] {
+                assert!(!part.contains(absent), "{absent:?} in {part}");
+            }
         }
+    }
+
+    /// With the invitation's own link (#4121) the button accepts it, and the
+    /// sign-in line and the CLI commands stay.
+    #[test]
+    fn an_accept_link_becomes_the_button_and_keeps_the_other_ways_in() {
+        let accept = "https://app.codewire.test/signup?invitation=EXAMPLE";
+        let message = invitation_email(&email(|_| {}), "https://app.codewire.test", Some(accept));
+        let buttons: Vec<_> = message
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                codewire_email::Block::Button { label, url } => {
+                    Some((label.as_str(), url.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(buttons, [("Accept invitation", accept)]);
+        let text = message.text();
+        assert!(text.contains(&format!("Accept invitation: {accept}\n")));
+        assert!(
+            text.contains(
+                "To accept, sign in at https://app.codewire.test with this email address"
+            )
+        );
+        assert!(text.contains("    cw org accept acme\n"));
     }
 
     /// Text the inviter chose is escaped wherever it appears.
     #[test]
     fn interpolated_text_is_escaped() {
-        let rendered = render(
+        let message = invitation_email(
             &email(|e| {
                 e.inviter = r#"<script>alert("x")</script>"#.into();
                 e.org_name = "A & B <Corp>".into();
                 e.org_slug = "a\"b".into();
             }),
-            "https://app.codewire.test/login",
+            "https://app.codewire.test",
+            None,
         );
-        assert!(!rendered.html.contains("<script>"));
-        assert!(
-            rendered
-                .html
-                .contains("&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;")
-        );
-        assert!(rendered.html.contains("A &amp; B &lt;Corp&gt;"));
-        assert!(rendered.html.contains("cw org accept a&quot;b"));
-        assert!(!rendered.subject.contains("Corp"));
+        let html = message.html();
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;"));
+        assert!(html.contains("A &amp; B &lt;Corp&gt;"));
+        assert!(html.contains("cw org accept a&quot;b"));
+        assert!(!message.subject.contains("Corp"));
+    }
+
+    /// Nothing is hard-coded: a self-hosted server's email shows its own
+    /// address as the link and its own sign-in page as the button.
+    #[test]
+    fn the_email_shows_the_configured_frontend_address() {
+        let message = invitation_email(&email(|_| {}), "https://codewire.example.test/", None);
+        let text = message.text();
+        assert!(text.contains(
+            "sign in at https://codewire.example.test with this email address (invitee@example.test)"
+        ));
+        assert!(text.contains("Sign in to Codewire: https://codewire.example.test/login\n"));
+        let html = message.html();
+        assert!(html.contains(
+            r#"<a href="https://codewire.example.test" style="color:#171717;text-decoration:underline;">https://codewire.example.test</a>"#
+        ));
+        assert!(html.contains(
+            r#"<a href="https://codewire.example.test/login" style="display:inline-block;"#
+        ));
+        assert!(!html.contains("codewire.sh"));
+        assert!(!text.contains("codewire.sh"));
     }
 
     #[test]

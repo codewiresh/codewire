@@ -33,6 +33,8 @@ use crate::auth_session::{
 
 mod replacement;
 
+#[cfg(test)]
+pub(crate) use replacement::notice_previews;
 pub(crate) use replacement::{
     Proof, ProofKeys, ProofRequest, account_locked, fresh_proof, malformed, proof_rejected,
     validate_proof_request,

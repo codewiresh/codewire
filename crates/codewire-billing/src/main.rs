@@ -50,7 +50,12 @@ async fn main() -> anyhow::Result<()> {
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
     let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
     let auth = AuthState { pool: pool.clone() };
-    let email = EmailClient::from_env().await?;
+    // The dashboard's origin: checkout's redirects and the billing emails'
+    // links both use it.
+    let frontend_origin = FrontendOrigin::parse(
+        &std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:5173".to_string()),
+    )?;
+    let email = EmailClient::from_env(frontend_origin.clone()).await?;
     let worker_email = email.clone();
 
     codewire_billing::stripe_client::check_test_key_requirement(
@@ -71,9 +76,7 @@ async fn main() -> anyhow::Result<()> {
         stripe: StripeHandle::from_env(),
         email: email.clone(),
         credit_enforcement,
-        frontend_origin: FrontendOrigin::parse(
-            &std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:5173".to_string()),
-        )?,
+        frontend_origin,
     };
 
     // Every replica checks billing's own Stripe webhook endpoint at startup

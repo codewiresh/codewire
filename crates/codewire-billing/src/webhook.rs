@@ -812,7 +812,15 @@ async fn handle_trial_will_end(
     }
     if email.is_configured()
         && let Some(owner_email) = org_owner_email_by_id(pool, &org_id).await
-        && let Err(e) = email.send_trial_ending(&owner_email, 3).await
+        && let Err(e) = email
+            .send_trial_ending(
+                &owner_email,
+                org_slug_for_email(pool, &org_id, "trial ending")
+                    .await
+                    .as_deref(),
+                3,
+            )
+            .await
     {
         tracing::error!(error = ?e, "billing: failed to send trial ending email");
     }
@@ -944,7 +952,14 @@ async fn handle_invoice_payment_failed(
         && let Some(org_email) = org_owner_email_by_customer(pool, inv).await
         && let Err(e) = state
             .email
-            .send_payment_failed(&org_email, inv.amount_due, &inv.currency.to_string())
+            .send_payment_failed(
+                &org_email,
+                org_slug_for_email(pool, &org_id, "payment failed")
+                    .await
+                    .as_deref(),
+                inv.amount_due,
+                &inv.currency.to_string(),
+            )
             .await
     {
         tracing::error!(error = ?e, "billing: failed to send payment failed email");
@@ -1080,6 +1095,33 @@ pub(crate) async fn org_owner_email_by_id(pool: &PgPool, org_id: &str) -> Option
     .await
     .ok()
     .flatten()
+}
+
+/// The organization's slug, for a billing email's link to its Billing page
+/// (#4553). Without one the email still goes, linking to the dashboard: a
+/// missed "payment failed" is worse than a missing link. The warning names
+/// the organization and the notice, never an address.
+pub(crate) async fn org_slug_for_email(
+    pool: &PgPool,
+    org_id: &str,
+    notice: &str,
+) -> Option<String> {
+    let slug: Option<String> =
+        sqlx::query_scalar(r#"SELECT slug FROM organizations WHERE id = $1"#)
+            .bind(org_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .filter(|slug: &String| !slug.is_empty());
+    if slug.is_none() {
+        tracing::warn!(
+            org_id,
+            notice,
+            "billing: the organization's slug was not found; the email links to the dashboard"
+        );
+    }
+    slug
 }
 
 /// Mirrors `LogBillingEvent` (fire-and-forget; resource columns were

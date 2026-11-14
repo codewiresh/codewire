@@ -3129,7 +3129,7 @@ async fn session_auth_flow_against_postgres() {
         "If it wasn't you, ignore this email. Nobody can sign in to the account unless this link is opened.",
         "This link expires in 24 hours.",
     ] {
-        assert!(sent[0].html.contains(line), "{line}");
+        assert!(sent[0].text.contains(line), "{line}");
     }
     let verify_token = emailed_token(&sent[0].html, "/verify-email?token=");
     let (st, body, _) = sess_req(

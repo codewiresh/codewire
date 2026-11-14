@@ -19,8 +19,13 @@ use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue};
 
+mod layout;
+
+pub use layout::{Block, Email, escape};
+
 /// Environment variable holding the exact SES From address approved for this
-/// workload. It must be a single mailbox, without a display name.
+/// workload: a single mailbox, bare or as `Name <address>` (#4553). The
+/// sender policy's `ses:FromAddress` names the address.
 pub const FROM_ENV: &str = "CODEWIRE_SES_FROM";
 
 /// Environment variable holding the AWS region for the Codewire SES identity.
@@ -95,6 +100,7 @@ pub struct SentEmail {
     pub to: String,
     pub subject: String,
     pub html: String,
+    pub text: String,
 }
 
 /// What a recording client has sent, in order.
@@ -225,8 +231,14 @@ impl EmailClient {
         self.provider() != EmailProvider::Disabled
     }
 
-    /// Delivers one UTF-8 HTML email through the selected transport.
-    pub async fn send_html(&self, to: &str, subject: &str, html: &str) -> Result<()> {
+    /// Delivers one email in the Codewire layout, with its HTML and
+    /// plain-text parts, through the selected transport.
+    pub async fn send(&self, to: &str, email: &Email) -> Result<()> {
+        self.send_parts(to, &email.subject, &email.html(), &email.text())
+            .await
+    }
+
+    async fn send_parts(&self, to: &str, subject: &str, html: &str, text: &str) -> Result<()> {
         match self.delivery.as_ref() {
             Delivery::Disabled => bail!("transactional email delivery is not configured"),
             Delivery::Resend(delivery) => {
@@ -239,6 +251,7 @@ impl EmailClient {
                     to,
                     subject,
                     html,
+                    text,
                 )?;
                 let response = delivery
                     .client
@@ -250,7 +263,7 @@ impl EmailClient {
             Delivery::Ses(delivery) => {
                 validate_mailbox(to, "recipient")?;
                 validate_subject(subject)?;
-                let body = ses_email_payload(&delivery.from, to, subject, html)?;
+                let body = ses_email_payload(&delivery.from, to, subject, html, text)?;
                 let request = signed_ses_request(
                     &delivery.client,
                     &delivery.credentials,
@@ -273,6 +286,7 @@ impl EmailClient {
                     to: to.to_owned(),
                     subject: subject.to_owned(),
                     html: html.to_owned(),
+                    text: text.to_owned(),
                 });
                 Ok(())
             }
@@ -370,7 +384,9 @@ impl EmailConfig {
         let Some(from) = from.map(str::trim).filter(|value| !value.is_empty()) else {
             bail!("{FROM_ENV} is required when {ENABLED_ENV}=true");
         };
-        validate_mailbox(from, "sender")?;
+        if !valid_sender(from) {
+            bail!("{FROM_ENV} must be one email address, optionally as `Name <address>`");
+        }
         let region = region
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -525,7 +541,13 @@ fn resend_http_client() -> Result<reqwest::Client> {
         .context("construct Resend HTTP client")
 }
 
-fn ses_email_payload(from: &str, to: &str, subject: &str, html: &str) -> Result<Vec<u8>> {
+fn ses_email_payload(
+    from: &str,
+    to: &str,
+    subject: &str,
+    html: &str,
+    text: &str,
+) -> Result<Vec<u8>> {
     serde_json::to_vec(&serde_json::json!({
         "FromEmailAddress": from,
         "Destination": {
@@ -542,6 +564,10 @@ fn ses_email_payload(from: &str, to: &str, subject: &str, html: &str) -> Result<
                         "Data": html,
                         "Charset": "UTF-8",
                     },
+                    "Text": {
+                        "Data": text,
+                        "Charset": "UTF-8",
+                    },
                 },
             },
         },
@@ -549,12 +575,19 @@ fn ses_email_payload(from: &str, to: &str, subject: &str, html: &str) -> Result<
     .context("serialize SES email")
 }
 
-fn resend_email_payload(from: &str, to: &str, subject: &str, html: &str) -> Result<Vec<u8>> {
+fn resend_email_payload(
+    from: &str,
+    to: &str,
+    subject: &str,
+    html: &str,
+    text: &str,
+) -> Result<Vec<u8>> {
     serde_json::to_vec(&serde_json::json!({
         "from": from,
         "to": [to],
         "subject": subject,
         "html": html,
+        "text": text,
     }))
     .context("serialize Resend email")
 }
@@ -566,6 +599,7 @@ fn resend_email_request(
     to: &str,
     subject: &str,
     html: &str,
+    text: &str,
 ) -> Result<reqwest::Request> {
     let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
         .context("encode Resend authorization header")?;
@@ -574,7 +608,7 @@ fn resend_email_request(
         .post(RESEND_EMAIL_ENDPOINT)
         .header(CONTENT_TYPE, "application/json")
         .header(AUTHORIZATION, authorization)
-        .body(resend_email_payload(from, to, subject, html)?)
+        .body(resend_email_payload(from, to, subject, html, text)?)
         .build()
         .context("build Resend email request")
 }
@@ -735,13 +769,18 @@ fn resend_sender(value: Option<&str>) -> Result<String> {
              (see docs/CONFIGURATION.md)"
         );
     };
-    let invalid = || {
-        anyhow::anyhow!(
-            "{RESEND_FROM_ENV} must be one email address, optionally as `Name <address>`"
-        )
-    };
+    if !valid_sender(value) {
+        bail!("{RESEND_FROM_ENV} must be one email address, optionally as `Name <address>`");
+    }
+    Ok(value.to_owned())
+}
+
+/// One sender mailbox, bare or as `Name <address>`, such as
+/// `Codewire <hello@codewire.sh>` (#4553). The name is plain text: no
+/// quotes, brackets, separators or address of its own.
+fn valid_sender(value: &str) -> bool {
     if value.len() > 320 || value.chars().any(char::is_control) {
-        return Err(invalid());
+        return false;
     }
     match value
         .strip_suffix('>')
@@ -749,14 +788,12 @@ fn resend_sender(value: Option<&str>) -> Result<String> {
     {
         Some((name, address)) => {
             let name = name.trim();
-            if name.is_empty() || name.contains(['<', '>', '"', ',', ';', '@']) {
-                return Err(invalid());
-            }
-            validate_mailbox(address, "sender").map_err(|_| invalid())?;
+            !name.is_empty()
+                && !name.contains(['<', '>', '"', ',', ';', '@'])
+                && validate_mailbox(address, "sender").is_ok()
         }
-        None => validate_mailbox(value, "sender").map_err(|_| invalid())?,
+        None => validate_mailbox(value, "sender").is_ok(),
     }
-    Ok(value.to_owned())
 }
 
 fn validate_mailbox(value: &str, label: &str) -> Result<()> {
@@ -829,15 +866,30 @@ mod tests {
     }
 
     #[test]
-    fn sender_configuration_rejects_display_names_and_invalid_regions() {
-        assert!(
+    fn sender_configuration_names_codewire_and_rejects_invalid_senders_and_regions() {
+        assert_eq!(
             EmailConfig::parse(
                 Some("true"),
                 Some("Codewire <hello@example.invalid>"),
                 Some("eu-west-1"),
             )
-            .is_err()
+            .unwrap()
+            .unwrap()
+            .from,
+            "Codewire <hello@example.invalid>"
         );
+        for invalid in [
+            "Codewire",
+            "<hello@example.invalid>",
+            "\"Codewire\" <hello@example.invalid>",
+            "Codewire <hello@example.invalid>, Other <other@example.invalid>",
+            "Codewire <hello@example.invalid>\r\nBcc: other@example.invalid",
+        ] {
+            assert!(
+                EmailConfig::parse(Some("true"), Some(invalid), Some("eu-west-1")).is_err(),
+                "{invalid}"
+            );
+        }
         assert!(
             EmailConfig::parse(
                 Some("true"),
@@ -922,6 +974,7 @@ mod tests {
             "owner@example.com",
             "Review your Codewire request",
             "<p>review</p>",
+            "review",
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
@@ -939,6 +992,10 @@ mod tests {
             value["Content"]["Simple"]["Body"]["Html"],
             serde_json::json!({"Data": "<p>review</p>", "Charset": "UTF-8"})
         );
+        assert_eq!(
+            value["Content"]["Simple"]["Body"]["Text"],
+            serde_json::json!({"Data": "review", "Charset": "UTF-8"})
+        );
     }
 
     #[test]
@@ -951,6 +1008,7 @@ mod tests {
             "owner@example.com",
             "Review your Codewire request",
             "<p>review</p>",
+            "review",
         )
         .unwrap();
 
@@ -965,6 +1023,7 @@ mod tests {
         assert_eq!(value["to"], serde_json::json!(["owner@example.com"]));
         assert_eq!(value["subject"], "Review your Codewire request");
         assert_eq!(value["html"], "<p>review</p>");
+        assert_eq!(value["text"], "review");
     }
 
     #[test]
@@ -1007,6 +1066,7 @@ mod tests {
             "owner@example.com",
             "Review your Codewire request",
             "<p>review</p>",
+            "review",
         )
         .unwrap();
         let body = request.body().unwrap().as_bytes().unwrap();
@@ -1219,7 +1279,7 @@ mod tests {
         assert!(!client.is_configured());
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let error = runtime
-            .block_on(client.send_html("owner@example.com", "Subject", "<p>body</p>"))
+            .block_on(client.send("owner@example.com", &Email::new("Subject", "Heading")))
             .unwrap_err();
         assert_eq!(
             error.to_string(),

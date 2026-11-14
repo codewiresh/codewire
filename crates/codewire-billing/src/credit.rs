@@ -720,15 +720,25 @@ pub async fn send_credit_notices(
             );
             continue;
         };
+        let org_slug =
+            crate::webhook::org_slug_for_email(pool, organization_id, "credit notice").await;
         let result = match &notice {
             CreditNotice::Low {
                 balance_nano_eur, ..
             } => {
                 email
-                    .send_credit_low(&owner, balance_nano_eur / NANO_EUR_PER_CENT)
+                    .send_credit_low(
+                        &owner,
+                        org_slug.as_deref(),
+                        balance_nano_eur / NANO_EUR_PER_CENT,
+                    )
                     .await
             }
-            CreditNotice::Exhausted { .. } => email.send_credit_exhausted(&owner).await,
+            CreditNotice::Exhausted { .. } => {
+                email
+                    .send_credit_exhausted(&owner, org_slug.as_deref())
+                    .await
+            }
         };
         match result {
             Ok(()) => {
