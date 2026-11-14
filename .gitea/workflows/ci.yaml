@@ -648,6 +648,18 @@ jobs:
           VERIFICATION_PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: scripts/ci/verify/run-product-verification.sh standard
 
+      - name: Upload design-fixture diagnostics on failure
+        # A failed design-fixture gate keeps its JSON report (each test's
+        # browser log) and its failing tests' light traces; a passing one
+        # leaves nothing (run-design-fixtures.sh, #4678).
+        if: ${{ failure() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|web|') }}
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
+        with:
+          name: design-fixture-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .tmp/design-fixture-diagnostics/
+          if-no-files-found: ignore
+          retention-days: 5
+
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|go_tailnet|') || contains(needs.verification-selection.outputs.selection, '|go_consumer_interop|') || contains(needs.verification-selection.outputs.selection, '|web|')) }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"

@@ -2159,6 +2159,10 @@ dashboard_browser_e2e() (
     PLAYWRIGHT_KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}"
     PLAYWRIGHT_SANDBOX_NAMESPACE="$SANDBOX_NS"
     PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE="$credential_fixture"
+    # The browser's launch and stderr go into each test's results in the
+    # uploaded JSON report, not the job log (its reporters print no stdio),
+    # so a failed or stalled page arrives with the browser's side (#4678).
+    DEBUG=pw:browser
   )
   # A test quarantined through apps/dashboard/e2e/helpers/quarantine.ts leaves
   # the blocking run. On a whole-suite run the quarantined tests run after it,

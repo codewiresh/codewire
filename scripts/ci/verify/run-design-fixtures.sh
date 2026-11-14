@@ -85,6 +85,29 @@ if failures:
 PY
 }
 
+# A failed run keeps its JSON report, whose results carry each test's
+# browser log (DEBUG=pw:browser, kept out of the job log by --quiet), and its
+# test results: error contexts, screenshots and the light trace of every
+# failing test (apps/dashboard/playwright.config.ts). Standard uploads the
+# folder on failure, so a stall such as #4678's arrives with the browser's
+# side of it. A passing run leaves no folder.
+readonly DIAGNOSTICS="$ROOT/.tmp/design-fixture-diagnostics"
+keep_diagnostics() {
+  local work="$1" out="$2" status="$3"
+  rm -rf -- "$out"
+  [ "$status" != 0 ] || return 0
+  mkdir -p "$out"
+  [ ! -f "$work/report.json" ] || cp "$work/report.json" "$out/"
+  [ ! -d "$work/test-results" ] || cp -R "$work/test-results" "$out/"
+  log "kept the failed run's report and traces in $out"
+}
+
+if [ "${1:-}" = --keep-diagnostics ]; then
+  [ "$#" -eq 4 ] || die "usage: $0 --keep-diagnostics <work-dir> <out-dir> <status>"
+  keep_diagnostics "$2" "$3" "$4"
+  exit
+fi
+
 if [ "${1:-}" = --check-report ]; then
   [ "$#" -eq 2 ] || die "usage: $0 --check-report <playwright-json-report>"
   check_report "$2"
@@ -118,7 +141,7 @@ if [ "${1:-}" = --network ]; then
   network_decision
   exit
 fi
-[ "$#" -eq 0 ] || die "usage: $0 [--check-report <playwright-json-report> | --network]"
+[ "$#" -eq 0 ] || die "usage: $0 [--check-report <playwright-json-report> | --network | --keep-diagnostics <work-dir> <out-dir> <status>]"
 
 # shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
 source "$ROOT/scripts/ci/verify/playwright-browser-runtime.sh"
@@ -191,10 +214,14 @@ status=0
     PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$chromium" \
     CODEWIRE_PLAYWRIGHT_USE_DEV_SHM="$CODEWIRE_PLAYWRIGHT_USE_DEV_SHM" \
     PLAYWRIGHT_JSON_OUTPUT_FILE="$work/report.json" \
+    CODEWIRE_PLAYWRIGHT_FAILURE_TRACE=1 \
+    DEBUG=pw:browser \
     "$PLAYWRIGHT" test --config apps/dashboard/playwright.config.ts \
-      "${project_args[@]}" --retries=0 --forbid-only --reporter=line,json \
+      "${project_args[@]}" --retries=0 --forbid-only --reporter=line,json --quiet \
+      --output="$work/test-results" \
       --workers="${CODEWIRE_DESIGN_FIXTURE_WORKERS:-8}"
 ) || status=$?
 
 check_report "$work/report.json" || status=1
+keep_diagnostics "$work" "$DIAGNOSTICS" "$status"
 exit "$status"

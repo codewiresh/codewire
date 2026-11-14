@@ -41,6 +41,14 @@ const browserEnvironment = Object.fromEntries(Object.entries(process.env)
 // (browserContext.newPage, PR #3413). Nothing a fixture test checks is
 // bounded by this limit; its own steps use their own deadlines.
 const designFixtureTimeout = 60_000;
+// The design-fixture gate runs without retries, so "on-first-retry" kept no
+// trace of a failure. Its runner (scripts/ci/verify/run-design-fixtures.sh)
+// asks for the failing tests' traces instead, without screenshots, DOM
+// snapshots or sources: a stalled newPage (#4678) needs the calls and their
+// timing, and this light trace cost no measurable CPU over the full gate.
+const designFixtureTrace = process.env.CODEWIRE_PLAYWRIGHT_FAILURE_TRACE === "1"
+  ? { mode: "retain-on-failure" as const, screenshots: false, snapshots: false, sources: false }
+  : "on-first-retry" as const;
 const designFixtureProjects = [
   {
     name: "design-fixtures-desktop",
@@ -50,7 +58,7 @@ const designFixtureProjects = [
       ...devices["Desktop Chrome"],
       baseURL: designOrigin,
       viewport: { width: 1440, height: 900 },
-      trace: "on-first-retry" as const,
+      trace: designFixtureTrace,
       screenshot: "only-on-failure" as const,
     },
   },
@@ -65,7 +73,7 @@ const designFixtureProjects = [
       ...devices["Pixel 5"],
       baseURL: designOrigin,
       viewport: { width: 390, height: 844 },
-      trace: "on-first-retry" as const,
+      trace: designFixtureTrace,
     },
   },
 ];

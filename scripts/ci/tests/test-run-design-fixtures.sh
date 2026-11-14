@@ -105,8 +105,33 @@ DESIGN_FIXTURES_NETWORK='private network namespace (loopback only)' "$RUNNER" --
 grep -Fq '[design-fixtures] network: private network namespace (loopback only)' "$TMP/private.out" ||
   fail 'the private network is missing from the run summary'
 
+# A failed run keeps its report and its failing tests' results for Standard's
+# upload; a passing run removes what an earlier failure left and keeps
+# nothing (#4678).
+work="$TMP/run" kept="$TMP/kept"
+mkdir -p "$work/test-results/case-a" "$kept"
+printf '{"suites": []}\n' >"$work/report.json"
+printf 'trace\n' >"$work/test-results/case-a/trace.zip"
+"$RUNNER" --keep-diagnostics "$work" "$kept" 1 >"$TMP/keep.out" 2>&1 ||
+  fail "a failed run's diagnostics were not kept: $(cat "$TMP/keep.out")"
+cmp -s "$work/report.json" "$kept/report.json" || fail "a failed run did not keep its report"
+cmp -s "$work/test-results/case-a/trace.zip" "$kept/test-results/case-a/trace.zip" ||
+  fail "a failed run did not keep its failing test's trace"
+grep -Fq "kept the failed run's report and traces in $kept" "$TMP/keep.out" || fail 'the kept diagnostics were not named'
+"$RUNNER" --keep-diagnostics "$work" "$kept" 0 >"$TMP/keep-pass.out" 2>&1 || fail 'a passing run failed to clear diagnostics'
+[ ! -e "$kept" ] || fail 'a passing run left diagnostics behind'
+rm -rf "$work/test-results"
+"$RUNNER" --keep-diagnostics "$work" "$kept" 1 >/dev/null 2>&1 || fail 'a failed run without test results was refused'
+[ -f "$kept/report.json" ] && [ ! -e "$kept/test-results" ] || fail 'a failed run without test results kept the wrong files'
+# The gate asks for the failing tests' light traces and the browser log, and
+# keeps the log out of the job (scripts/ci/verify/run-design-fixtures.sh).
+for expected in 'CODEWIRE_PLAYWRIGHT_FAILURE_TRACE=1' 'DEBUG=pw:browser' '--reporter=line,json --quiet' \
+    '--output="$work/test-results"' 'keep_diagnostics "$work" "$DIAGNOSTICS" "$status"'; do
+  grep -Fq -- "$expected" "$RUNNER" || fail "the gate no longer runs with $expected"
+done
+
 if "$RUNNER" unexpected-argument >"$TMP/usage.out" 2>&1; then
   fail 'runner accepted an unexpected argument'
 fi
 
-printf '[test-run-design-fixtures] report judgement: pass, flaky, network namespace and fallback, empty, missing project, skipped, failed, untagged mobile, foreign project, unreadable and run errors\n'
+printf '[test-run-design-fixtures] report judgement: pass, flaky, network namespace and fallback, empty, missing project, skipped, failed, untagged mobile, foreign project, unreadable and run errors; failure diagnostics kept and cleared\n'
