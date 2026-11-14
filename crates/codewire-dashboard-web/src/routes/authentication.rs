@@ -13,7 +13,8 @@ use crate::{
     auth::authenticated_identity,
     error::WebError,
     raw_auth::{
-        IdentityErrorCode, forward_session_cookies, oauth_providers, post_json, user_message,
+        IdentityErrorCode, SignupMode, forward_session_cookies, oauth_providers, post_json,
+        user_message,
     },
     response::{error_page, redirect, render_page, render_template, safe_auth_continuation},
     security::{
@@ -1221,6 +1222,7 @@ fn base_view(query: AuthQuery) -> AuthFormView {
         show_name: false,
         show_invite_code: false,
         show_reason: false,
+        open_signup: false,
         turnstile_site_key: String::new(),
         show_totp_code: false,
         forgot_password_link: false,
@@ -1268,7 +1270,7 @@ fn continues_to_preview_handoff(view: &AuthFormView) -> bool {
             })
 }
 
-fn signup_view(query: AuthQuery, error: String) -> AuthFormView {
+fn signup_view(query: AuthQuery, error: String, mode: SignupMode) -> AuthFormView {
     let mut view = base_view(query);
     view.title = "Request Codewire access";
     view.description = "Tell us what you want to build with Codewire.";
@@ -1280,10 +1282,18 @@ fn signup_view(query: AuthQuery, error: String) -> AuthFormView {
     view.new_password = true;
     view.show_confirm_password = true;
     view.show_name = true;
-    view.show_reason = true;
+    view.show_reason = mode.reason;
     // Preserve the current UI input and raw IdP field without inventing or
     // enforcing invite policy in this presentation adapter (#1352).
     view.show_invite_code = true;
+    // Open sign-up admits everyone (#4121): no access request, no invite code.
+    if mode.open {
+        view.title = "Create your Codewire account";
+        view.description = "Sign up with your email address to start using Codewire.";
+        view.submit_label = "Create account";
+        view.show_invite_code = false;
+        view.open_signup = true;
+    }
     view.secondary_label = "Already have an account? Sign in";
     view.secondary_url = auth_path_from_view("/login", &view);
     view
@@ -1440,7 +1450,7 @@ mod tests {
 
     #[test]
     fn signup_form_carries_the_access_request_and_turnstile_contract() {
-        let mut view = signup_view(AuthQuery::default(), String::new());
+        let mut view = signup_view(AuthQuery::default(), String::new(), SignupMode::REVIEW);
         view.turnstile_site_key = "site-key-marker".into();
         let body = AuthFormTemplate { view: &view }
             .render()
@@ -1457,7 +1467,7 @@ mod tests {
     #[test]
     fn only_the_signup_form_links_the_terms_and_privacy_policy() {
         let agreement = "By requesting access you agree to the <a href=\"/terms\">Terms</a> and the <a href=\"/privacy\">Privacy policy</a>.";
-        let signup = signup_view(AuthQuery::default(), String::new());
+        let signup = signup_view(AuthQuery::default(), String::new(), SignupMode::REVIEW);
         let body = AuthFormTemplate { view: &signup }
             .render()
             .expect("render signup form");
@@ -1792,7 +1802,7 @@ mod tests {
         assert!(view.preview_sign_in);
         assert_eq!(view.return_to, preview_continuation());
         // Other auth forms keep their own copy for the same continuation.
-        assert!(!signup_view(form_query(&form), String::new()).preview_sign_in);
+        assert!(!signup_view(form_query(&form), String::new(), SignupMode::REVIEW).preview_sign_in);
         assert!(!two_factor_view(form_query(&form), String::new()).preview_sign_in);
     }
 

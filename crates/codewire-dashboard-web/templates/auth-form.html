@@ -53,7 +53,8 @@
           {%- if !view.resend_token.is_empty() %} <form class="cw-auth-resend" method="post" action="/login/_actions/resend-verification"><input type="hidden" name="_csrf" value="{{ view.csrf_token }}"><input type="hidden" name="resend_token" value="{{ view.resend_token }}"><button class="cw-link-button cw-auth-resend-link" type="submit">Resend verification email</button></form>
           {%- endif %}</div>
         {% endif %}
-        <form class="cw-form" method="post" action="{{ view.action }}"{% if is_signup %} data-signup{% endif %}>
+        {% let steps = is_signup && !view.open_signup %}
+        <form class="cw-form" method="post" action="{{ view.action }}"{% if steps %} data-signup{% endif %}>
           <input type="hidden" name="_csrf" value="{{ view.csrf_token }}">
           {% if !view.auth_request_id.is_empty() %}
           <input type="hidden" name="authRequestID" value="{{ view.auth_request_id }}">
@@ -61,7 +62,7 @@
           {% if !view.return_to.is_empty() %}
           <input type="hidden" name="return_to" value="{{ view.return_to }}">
           {% endif %}
-          {% if is_signup %}
+          {% if steps %}
           <fieldset class="cw-signup-step" data-signup-step="1">
           <legend class="cw-signup-legend">Your account <span class="cw-signup-count">Step 1 of 2</span></legend>
           {% endif %}
@@ -93,7 +94,7 @@
             <input class="cw-input cw-input--large" id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" minlength="12" required>
           </div>
           {% endif %}
-          {% if is_signup %}
+          {% if steps %}
           <button class="cw-button cw-button--pill cw-button--large cw-auth-submit" type="button" data-signup-next hidden>Continue</button>
           </fieldset>
           <fieldset class="cw-signup-step" data-signup-step="2">
@@ -123,14 +124,14 @@
             <input class="cw-input cw-input--mono cw-input--large cw-auth-code" id="code" name="code" autocomplete="one-time-code" pattern="[0-9A-Fa-f]{6,10}" maxlength="10" required autofocus>
           </div>
           {% endif %}
-          {% if is_signup %}
+          {% if steps %}
           </fieldset>
           {% endif %}
           <button class="cw-button cw-button--pill cw-button--large cw-auth-submit" type="submit">{{ view.submit_label }}</button>
-          {% if is_signup %}
+          {% if steps %}
           <button class="cw-button cw-button--outline cw-button--pill cw-button--large cw-auth-submit" type="button" data-signup-back hidden>Back</button>
           {% endif %}
-          {% if is_signup %}<p class="cw-auth-legal">By requesting access you agree to the <a href="/terms">Terms</a> and the <a href="/privacy">Privacy policy</a>.</p>{% endif %}
+          {% if is_signup %}<p class="cw-auth-legal">By {% if view.open_signup %}creating an account{% else %}requesting access{% endif %} you agree to the <a href="/terms">Terms</a> and the <a href="/privacy">Privacy policy</a>.</p>{% endif %}
         </form>
         {% if !view.oauth_providers.is_empty() %}
         <div class="cw-auth-alternatives">

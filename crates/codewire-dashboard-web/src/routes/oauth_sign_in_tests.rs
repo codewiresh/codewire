@@ -56,10 +56,20 @@ fn config(identity: &str, turnstile_site_key: &str) -> crate::Config {
 
 /// The synthetic identity service. `providers` is what it says is
 /// configured (`None` answers 500); `complete` is the status the sign-up
-/// completion answers with.
+/// completion answers with. Its sign-up mode is review, the IdP's default.
 async fn identity(
     providers: Option<&'static [&'static str]>,
     complete: StatusCode,
+) -> (TestServer, Calls) {
+    identity_in_mode(providers, complete, "review").await
+}
+
+/// [`identity`] in sign-up `mode` (`IDP_SIGNUP`); review asks why, as the
+/// IdP's `GET /api/auth/sign-up/mode` says.
+async fn identity_in_mode(
+    providers: Option<&'static [&'static str]>,
+    complete: StatusCode,
+    mode: &'static str,
 ) -> (TestServer, Calls) {
     let calls = Calls::default();
     let captured = calls.clone();
@@ -71,6 +81,13 @@ async fn identity(
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             calls.lock().unwrap().push((path.clone(), json.clone()));
             match path.as_str() {
+                "/api/auth/sign-up/mode" if mode == "unavailable" => {
+                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                }
+                "/api/auth/sign-up/mode" => {
+                    Json(serde_json::json!({ "mode": mode, "reason": mode == "review" }))
+                        .into_response()
+                }
                 "/api/auth/oauth/providers" => match providers {
                     Some(providers) => Json(serde_json::json!({ "providers": providers })).into_response(),
                     None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -668,6 +685,120 @@ async fn completing_a_provider_sign_up_signs_in_or_waits_for_review() {
     let body = response.text().await.unwrap();
     assert!(body.contains("You&#39;re on the list"));
     assert!(body.contains("as soon as we open up more capacity"));
+}
+
+/// Open sign-up (`IDP_SIGNUP=open`, #4121) admits everyone, so neither the
+/// email sign-up nor a provider's completion asks for a reason or an invite
+/// code; the pages create an account instead of requesting access.
+#[tokio::test]
+async fn open_sign_up_asks_no_reason_and_creates_an_account() {
+    let (idp, calls) = identity_in_mode(Some(&["github"]), StatusCode::OK, "open").await;
+    let server = dashboard(&idp.origin, "").await;
+    for (path, cookie) in [
+        ("/signup", None),
+        (
+            "/signup/complete",
+            Some(format!("codewire_oauth_signup={HANDLE}")),
+        ),
+    ] {
+        let (status, _, body) = page(&server, path, cookie.as_deref()).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert!(!body.contains("name=\"reason\""), "{path}: {body}");
+        assert!(!body.contains("name=\"invite_code\""), "{path}: {body}");
+        assert!(!body.contains("Request access"), "{path}: {body}");
+        assert!(body.contains("Create account"), "{path}: {body}");
+    }
+    // The email sign-up page names the account it creates.
+    let (_, _, body) = page(&server, "/signup", None).await;
+    assert!(body.contains("Create your Codewire account"), "{body}");
+    assert!(body.contains("By creating an account you agree"), "{body}");
+    // Nothing is left for a second step, so the page is one.
+    assert!(!body.contains("data-signup-step"), "{body}");
+
+    // An email sign-up with no reason goes to the IdP.
+    let csrf = crate::security::new_csrf_token();
+    let response = client()
+        .post(format!("{}/signup/_actions/sign-up", server.origin))
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::COOKIE, format!("codewire_ssr_csrf={csrf}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(format!(
+            "_csrf={csrf}&name=New+Person&email=new%40example.test\
+             &password=Sup3r%21Strong-pass&confirm_password=Sup3r%21Strong-pass"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // So does a provider's completion, which signs in.
+    let response = submit(&server, "").await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let calls = calls.lock().unwrap();
+    for path in ["/api/auth/sign-up", "/api/auth/oauth/signup/complete"] {
+        let sent = calls
+            .iter()
+            .find(|(called, _)| called == path)
+            .map(|(_, body)| body.clone())
+            .unwrap_or_else(|| panic!("{path} not called"));
+        assert_eq!(sent["reason"], "", "{path}");
+    }
+}
+
+/// Review mode, the default, still asks why and sends nothing without it.
+#[tokio::test]
+async fn review_sign_up_still_needs_a_reason() {
+    let (idp, calls) = identity_in_mode(Some(&["github"]), StatusCode::OK, "review").await;
+    let server = dashboard(&idp.origin, "").await;
+    for (path, cookie) in [
+        ("/signup", None),
+        (
+            "/signup/complete",
+            Some(format!("codewire_oauth_signup={HANDLE}")),
+        ),
+    ] {
+        let (_, _, body) = page(&server, path, cookie.as_deref()).await;
+        assert!(body.contains("name=\"reason\""), "{path}: {body}");
+        assert!(body.contains("Request access"), "{path}: {body}");
+    }
+    let (_, _, body) = page(&server, "/signup", None).await;
+    assert!(body.contains("By requesting access you agree"), "{body}");
+    assert!(body.contains("data-signup-step=\"2\""), "{body}");
+    let csrf = crate::security::new_csrf_token();
+    let response = client()
+        .post(format!("{}/signup/_actions/sign-up", server.origin))
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::COOKIE, format!("codewire_ssr_csrf={csrf}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(format!(
+            "_csrf={csrf}&name=New+Person&email=new%40example.test\
+             &password=Sup3r%21Strong-pass&confirm_password=Sup3r%21Strong-pass"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        submit(&server, "").await.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert!(
+        !calls.lock().unwrap().iter().any(|(path, _)| {
+            path == "/api/auth/sign-up" || path == "/api/auth/oauth/signup/complete"
+        }),
+        "nothing is sent without a reason"
+    );
+}
+
+/// A mode the dashboard can't read is review: it asks why, as the IdP does by
+/// default, and never drops the question by mistake.
+#[tokio::test]
+async fn an_unreadable_sign_up_mode_still_asks_for_a_reason() {
+    let (idp, _) = identity_in_mode(Some(&["github"]), StatusCode::OK, "unavailable").await;
+    let server = dashboard(&idp.origin, "").await;
+    let (status, _, body) = page(&server, "/signup", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("name=\"reason\""), "{body}");
+    assert!(body.contains("Request access"), "{body}");
 }
 
 #[tokio::test]

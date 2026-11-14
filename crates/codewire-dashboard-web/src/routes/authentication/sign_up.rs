@@ -4,18 +4,19 @@
 use codewire_server_core::client_address::forwarded_client_hop;
 
 use super::*;
-use crate::raw_auth::post_json_for_client;
+use crate::raw_auth::{SignupMode, post_json_for_client, signup_mode};
 
 pub(in crate::routes) async fn signup(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Response {
+    let mode = signup_mode(&state).await;
     auth_entry_response(
         &state,
         &headers,
         StatusCode::OK,
-        signup_view(query, String::new()),
+        signup_view(query, String::new(), mode),
     )
     .await
 }
@@ -29,22 +30,23 @@ pub(in crate::routes) async fn signup_action(
         return error_page(WebError::CsrfRejected);
     }
     let query = form_query(&form);
+    let mode = signup_mode(&state).await;
     let error = validate_new_password(&form);
     if !error.is_empty()
         || form.email.trim().is_empty()
         || form.name.trim().is_empty()
-        || form.reason.trim().is_empty()
+        || (mode.reason && form.reason.trim().is_empty())
     {
-        let error = if error.is_empty() {
-            "Name, email, and what you want to build are required.".to_owned()
-        } else {
-            error
+        let error = match (error.is_empty(), mode.reason) {
+            (true, true) => "Name, email, and what you want to build are required.".to_owned(),
+            (true, false) => "Name and email are required.".to_owned(),
+            (false, _) => error,
         };
         return auth_entry_response(
             &state,
             &headers,
             StatusCode::UNPROCESSABLE_ENTITY,
-            signup_view(query, error),
+            signup_view(query, error, mode),
         )
         .await;
     }
@@ -73,6 +75,7 @@ pub(in crate::routes) async fn signup_action(
                 signup_view(
                     query,
                     "The identity service is temporarily unavailable.".to_owned(),
+                    mode,
                 ),
             )
             .await;
@@ -83,7 +86,11 @@ pub(in crate::routes) async fn signup_action(
             &state,
             &headers,
             identity.status,
-            signup_view(query, user_message(identity.status, "sign-up").to_owned()),
+            signup_view(
+                query,
+                user_message(identity.status, "sign-up").to_owned(),
+                mode,
+            ),
         )
         .await;
     }
@@ -130,12 +137,13 @@ pub(in crate::routes) async fn signup_complete(
     let Some(token) = cookie_value(&headers, OAUTH_SIGNUP_COOKIE) else {
         return expired_oauth_signup(&state);
     };
+    let mode = signup_mode(&state).await;
     match pending_oauth_signup(&state, token).await {
         Ok(pending) => auth_form_response(
             &state,
             &headers,
             StatusCode::OK,
-            signup_complete_view(&pending, String::new()),
+            signup_complete_view(&pending, String::new(), mode),
         ),
         Err(unavailable) => unavailable.response(&state),
     }
@@ -156,12 +164,13 @@ pub(in crate::routes) async fn signup_complete_action(
         Ok(pending) => pending,
         Err(unavailable) => return unavailable.response(&state),
     };
-    if form.reason.trim().is_empty() {
+    let mode = signup_mode(&state).await;
+    if mode.reason && form.reason.trim().is_empty() {
         return auth_form_response(
             &state,
             &headers,
             StatusCode::UNPROCESSABLE_ENTITY,
-            signup_complete_view(&pending, "Tell us what you want to build.".to_owned()),
+            signup_complete_view(&pending, "Tell us what you want to build.".to_owned(), mode),
         );
     }
     let identity = match post_json_for_client::<_, OAuthSignupResponse>(
@@ -187,6 +196,7 @@ pub(in crate::routes) async fn signup_complete_action(
                 signup_complete_view(
                     &pending,
                     "The identity service is temporarily unavailable.".to_owned(),
+                    mode,
                 ),
             );
         }
@@ -232,7 +242,11 @@ pub(in crate::routes) async fn signup_complete_action(
             } else {
                 status
             },
-            signup_complete_view(&pending, user_message(status, "oauth-sign-up").to_owned()),
+            signup_complete_view(
+                &pending,
+                user_message(status, "oauth-sign-up").to_owned(),
+                mode,
+            ),
         ),
     }
 }
@@ -292,15 +306,26 @@ fn expired_oauth_signup(state: &AppState) -> Response {
     )
 }
 
-fn signup_complete_view(pending: &OAuthPendingSignup, error: String) -> AuthFormView {
+fn signup_complete_view(
+    pending: &OAuthPendingSignup,
+    error: String,
+    mode: SignupMode,
+) -> AuthFormView {
     let mut view = base_view(AuthQuery::default());
     view.title = "Finish creating your account";
     view.description = "Tell us what you want to build with Codewire.";
     view.action = SIGNUP_COMPLETE_ACTION;
     view.submit_label = "Request access";
     view.error = error;
-    view.show_reason = true;
+    view.show_reason = mode.reason;
     view.show_invite_code = true;
+    // Open sign-up admits everyone (#4121): no access request, no invite code.
+    if mode.open {
+        view.description = "Check the account below, then create it.";
+        view.submit_label = "Create account";
+        view.show_invite_code = false;
+        view.open_signup = true;
+    }
     view.identity_provider = provider_label(&pending.provider).unwrap_or_default();
     view.identity_account = pending.email.clone();
     view.secondary_label = "Use a different account";

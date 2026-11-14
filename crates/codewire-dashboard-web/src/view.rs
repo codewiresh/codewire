@@ -121,6 +121,9 @@ pub(crate) struct AuthFormView {
     pub(crate) show_name: bool,
     pub(crate) show_invite_code: bool,
     pub(crate) show_reason: bool,
+    /// Sign-up admits everyone (`IDP_SIGNUP=open`): the page creates an account
+    /// rather than requesting access.
+    pub(crate) open_signup: bool,
     pub(crate) turnstile_site_key: String,
     pub(crate) show_totp_code: bool,
     pub(crate) forgot_password_link: bool,

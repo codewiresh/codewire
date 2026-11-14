@@ -127,6 +127,71 @@ pub(crate) async fn oauth_providers(state: &AppState) -> Vec<&'static str> {
     providers
 }
 
+/// How the IdP admits a sign-up, as its `GET /api/auth/sign-up/mode` last
+/// said (#4121): whether everyone is admitted (`open`), and whether a sign-up
+/// that waits must say why. Kept a minute like the providers; a failed read
+/// is review mode, which asks for a reason as the IdP does by default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SignupMode {
+    pub(crate) open: bool,
+    pub(crate) reason: bool,
+}
+
+impl SignupMode {
+    pub(crate) const REVIEW: Self = Self {
+        open: false,
+        reason: true,
+    };
+}
+
+#[derive(Default)]
+pub(crate) struct SignupModeCache(
+    tokio::sync::Mutex<Option<(std::time::Instant, std::time::Duration, SignupMode)>>,
+);
+
+#[derive(serde::Deserialize)]
+struct SignupModeBody {
+    mode: String,
+    reason: bool,
+}
+
+pub(crate) async fn signup_mode(state: &AppState) -> SignupMode {
+    let mut cached = state.signup_mode.0.lock().await;
+    if let Some((read_at, ttl, mode)) = cached.as_ref()
+        && read_at.elapsed() < *ttl
+    {
+        return *mode;
+    }
+    let read = async {
+        let response = state
+            .http
+            .get(format!(
+                "{}/api/auth/sign-up/mode",
+                state.identity_origin_string
+            ))
+            .timeout(OAUTH_PROVIDERS_TIMEOUT)
+            .send()
+            .await
+            .ok()?;
+        decode_identity_response::<SignupModeBody>(response)
+            .await
+            .ok()?
+            .body
+    };
+    let (ttl, mode) = match read.await {
+        Some(body) => (
+            OAUTH_PROVIDERS_TTL,
+            SignupMode {
+                open: body.mode == "open",
+                reason: body.reason,
+            },
+        ),
+        None => (OAUTH_PROVIDERS_FAILURE_TTL, SignupMode::REVIEW),
+    };
+    *cached = Some((std::time::Instant::now(), ttl, mode));
+    mode
+}
+
 pub(crate) async fn post_json<I, O>(
     state: &AppState,
     path: &str,

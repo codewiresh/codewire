@@ -27,6 +27,8 @@ pub(crate) struct AppState {
     pub(crate) signup_credit: std::sync::Arc<crate::billing_connect::SignupCreditCache>,
     /// The sign-in providers the IdP last named.
     pub(crate) oauth_providers: std::sync::Arc<crate::raw_auth::OAuthProvidersCache>,
+    /// How the IdP admits a sign-up, as it last said.
+    pub(crate) signup_mode: std::sync::Arc<crate::raw_auth::SignupModeCache>,
 }
 
 impl AppState {
@@ -69,6 +71,7 @@ impl AppState {
                 .expect("static dashboard stream HTTP client configuration"),
             signup_credit: std::sync::Arc::default(),
             oauth_providers: std::sync::Arc::default(),
+            signup_mode: std::sync::Arc::default(),
         }
     }
 }
