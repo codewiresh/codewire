@@ -15,6 +15,7 @@ work="$(mktemp -d "$ROOT/.tmp/local-rust-cache-test.XXXXXX")"
 hang=''
 cleanup() {
   local pid_file pid
+  [[ -z "${watch_caller:-}" ]] || kill "$watch_caller" 2>/dev/null || true
   if [[ -n "$hang" ]]; then
     # Only processes still running this test's fake server are stopped.
     for pid_file in "$hang"/*/server.sock.pid "$hang"/*/server.sock.compiler; do
@@ -492,8 +493,11 @@ base="$hang/watch"
 start_server "$base" 2
 check "$base"
 age_mark "$base" 400 30
-sleep 60 &
+# The caller lives until the test ends it: a caller with its own lifetime
+# raced the checks below, and the watcher exits with its caller (#4197).
+sleep infinity &
 caller=$!
+watch_caller=$caller
 # A separate shell starts the watcher, as an entrypoint does; its arguments
 # name the watcher, which keeps that command line.
 watch_mark="lrc-watch-test $HELPER $base"
@@ -506,21 +510,20 @@ holders() {
 [[ -n "$(pgrep -f -- "$watch_mark")" ]] || fail 'the watcher did not start'
 [[ -z "$(holders "$hang/caller-stdout")$(holders "$hang/caller-fd")" ]] ||
   fail 'the watcher kept a caller descriptor open'
-# Hang guards, as in start_server: the watcher's 1-second period is what is
-# under test, not how fast a loaded guest runs it.
+# Wait for the watcher's own record that it restarted the server, then check
+# what it did. The tries are a hang guard, as in start_server: the watcher's
+# 1-second period is what is under test, not how fast a loaded guest runs it.
 tries=600
-while server_running "$base"; do
+until grep -Fq 'state=restarted reason=server-hung' "$base/server-check.log" 2>/dev/null; do
   ((tries-- > 0)) || fail 'the watcher did not stop the hung server'
   sleep 0.1
 done
-until grep -Fq 'state=restarted reason=server-hung' "$base/server-check.log" 2>/dev/null; do
-  ((tries-- > 0)) || fail 'the watcher did not log the restart'
-  sleep 0.1
-done
+! server_running "$base" || fail 'the watcher logged a restart but the hung server runs'
 [[ "$(cat "$base/server-restarts")" == 1 ]] || fail 'the watcher did not count its restart'
 [[ -n "$(pgrep -f -- "$watch_mark")" ]] || fail 'the watcher stopped while its caller ran'
 kill "$caller"
 wait "$caller" 2>/dev/null || true
+watch_caller=''
 tries=600
 while [[ -n "$(pgrep -f -- "$watch_mark")" ]]; do
   ((tries-- > 0)) || fail 'the watcher outlived its caller'
