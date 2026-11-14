@@ -110,6 +110,12 @@ source = "content/environments/docker.md"
 output = "environments/docker/index.html"
 
 [[routes]]
+canonical = "/docs/environments/hosts"
+redirect_from = "/docs/environments/hosts/"
+source = "content/environments/hosts.md"
+output = "environments/hosts/index.html"
+
+[[routes]]
 canonical = "/docs/environments/isolation-evidence"
 redirect_from = "/docs/environments/isolation-evidence/"
 source = "content/environments/isolation-evidence.md"

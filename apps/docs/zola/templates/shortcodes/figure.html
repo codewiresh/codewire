@@ -1,0 +1,5 @@
+{% set svg = load_data(path="figures/" ~ source ~ ".svg", format="plain") %}
+<figure class="docs-figure">
+  <div class="docs-figure-frame" role="img" aria-label="{{ alt }}" tabindex="0">{{ svg | safe }}</div>
+  <figcaption>{{ body | trim | markdown(inline=true) | safe }}</figcaption>
+</figure>

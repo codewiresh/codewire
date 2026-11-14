@@ -52,6 +52,12 @@ shortcodes become plain Markdown; a shortcode the exporter does not know fails
 the build. The Rust server also serves the two text files at `/llms.txt` and
 `/llms-full.txt`.
 
+A diagram is a `figure` shortcode: `source` names an SVG in `figures/`, `alt`
+is its text alternative, and the body is the caption. The SVG is inlined into
+the page and carries only the `fig-` classes from `sass/docs.scss`, with no
+colours, `style` attributes or scripts of its own, so it follows the theme and
+the CSP. The Markdown copy holds the text alternative and the caption.
+
 The OpenSSF page is the one HTML exception to checked-in-only content: its
 shortcode fetches the public Scorecard and Best Practices APIs at build time.
 An unavailable API produces a source-linked fallback, never a failed build or a

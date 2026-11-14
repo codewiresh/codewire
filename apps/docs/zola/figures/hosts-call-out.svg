@@ -1,0 +1,45 @@
+<svg viewBox="0 0 720 392" aria-hidden="true" focusable="false">
+  <rect class="fig-node" x="234" y="20" width="220" height="76" rx="8"/>
+  <text class="fig-strong" x="344" y="53" text-anchor="middle">Codewire</text>
+  <text class="fig-note" x="344" y="76" text-anchor="middle">its API, over HTTPS</text>
+
+  <rect class="fig-zone" x="16" y="192" width="440" height="184" rx="10"/>
+  <text class="fig-note" x="30" y="362">Home or office network. No port forwarding.</text>
+  <rect class="fig-zone" x="472" y="192" width="232" height="184" rx="10"/>
+  <text class="fig-note" x="488" y="362">Cloud account. No inbound rule.</text>
+
+  <rect class="fig-node" x="30" y="214" width="196" height="124" rx="8"/>
+  <rect class="fig-part" x="46" y="228" width="164" height="32" rx="6"/>
+  <text class="fig-text" x="128" y="249" text-anchor="middle">host agent</text>
+  <text class="fig-strong" x="46" y="286">Mac</text>
+  <text class="fig-note" x="46" y="305">macOS on Apple silicon</text>
+  <text class="fig-note" x="46" y="323">host key in the Keychain</text>
+
+  <rect class="fig-node" x="246" y="214" width="196" height="124" rx="8"/>
+  <rect class="fig-part" x="262" y="228" width="164" height="32" rx="6"/>
+  <text class="fig-text" x="344" y="249" text-anchor="middle">host agent</text>
+  <text class="fig-strong" x="262" y="286">Linux workstation</text>
+  <text class="fig-note" x="262" y="305">x86_64 with KVM</text>
+  <text class="fig-note" x="262" y="323">host key in the keyring</text>
+
+  <rect class="fig-node" x="488" y="214" width="200" height="124" rx="8"/>
+  <rect class="fig-part" x="504" y="228" width="168" height="32" rx="6"/>
+  <text class="fig-text" x="588" y="249" text-anchor="middle">host agent</text>
+  <text class="fig-strong" x="504" y="286">Cloud server</text>
+  <text class="fig-note" x="504" y="305">Linux on x86_64 with KVM</text>
+  <text class="fig-note" x="504" y="323">host key in a file</text>
+
+  <path class="fig-flow" d="M128,228 V150 H294 V106"/>
+  <polygon class="fig-flow-head" points="294,97 288.5,108 299.5,108"/>
+  <path class="fig-flow" d="M344,228 V106"/>
+  <polygon class="fig-flow-head" points="344,97 338.5,108 349.5,108"/>
+  <path class="fig-flow" d="M588,228 V150 H394 V106"/>
+  <polygon class="fig-flow-head" points="394,97 388.5,108 399.5,108"/>
+  <text class="fig-flow-text" x="282" y="122" text-anchor="end">one outbound HTTPS connection</text>
+  <text class="fig-flow-text" x="282" y="139" text-anchor="end">from each host</text>
+
+  <path class="fig-blocked" d="M454,58 H660 V180"/>
+  <circle class="fig-cross-ground" cx="660" cy="192" r="10"/>
+  <path class="fig-cross" d="M654.5,186.5 L665.5,197.5 M665.5,186.5 L654.5,197.5"/>
+  <text class="fig-note" x="557" y="46" text-anchor="middle">nothing connects in</text>
+</svg>

@@ -16,6 +16,9 @@ VMs from it (`cw host provide`) and grant it to other members
 (`cw host grant`). Creating environments on a host is coming; for now a host
 enrolls, connects and shows its state.
 
+[Hosts](@/environments/hosts.md) explains how a host connects and who may use
+it.
+
 ## cw host enroll
 
 ```sh
@@ -99,6 +102,7 @@ Server:    https://codewire.sh
 State:     offline, never seen
 Provides:  nothing (`cw host provide` to offer VMs)
 Used by:   only you
+Key:       the OS keyring
 Agent:     not running (`cw host run`, or `cw host service install`)
 Service:   not installed (`cw host service install` to keep the agent running)
 ```

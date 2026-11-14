@@ -21,6 +21,10 @@ CANONICAL_ORIGIN = "https://codewire.sh"
 
 CARD_GRID = re.compile(r"\{\{\s*card_grid\((?P<args>.*?)\)\s*\}\}", re.DOTALL)
 ASIDE = re.compile(r'\{%\s*aside\(kind="(?P<kind>\w+)"\)\s*%\}(?P<body>.*?)\{%\s*end\s*%\}', re.DOTALL)
+FIGURE = re.compile(
+    r'\{%\s*figure\(source="(?P<source>[\w-]+)",\s*alt="(?P<alt>[^"]*)"\)\s*%\}(?P<body>.*?)\{%\s*end\s*%\}',
+    re.DOTALL,
+)
 INTERNAL_LINK = re.compile(r"\]\(@/(?P<source>[^)#\s]+\.md)(?P<fragment>#[^)\s]*)?\)")
 DOCS_LINK = re.compile(r"\]\((?P<path>/docs(?:/[^)#\s]*)?)(?P<fragment>#[^)\s]*)?\)")
 
@@ -89,9 +93,18 @@ def aside(match: re.Match[str]) -> str:
     return f"> **{match.group('kind').capitalize()}:** {text}"
 
 
+def figure(match: re.Match[str]) -> str:
+    # A drawing has no Markdown form: its text alternative and its caption
+    # stand in for it.
+    lines = [line.strip() for line in match.group("body").strip().splitlines()]
+    caption = " ".join(line for line in lines if line)
+    return f"> **Figure:** {match.group('alt').strip()} {caption}"
+
+
 def convert(body: str, canonical_by_source: dict[str, str], routes: set[str]) -> str:
     body = CARD_GRID.sub(card_grid, body)
     body = ASIDE.sub(aside, body)
+    body = FIGURE.sub(figure, body)
     body = re.sub(
         r"\{\{\s*security_posture\(\)\s*\}\}",
         "OpenSSF data is rendered into the HTML page at build time. Verify the current results in the "
