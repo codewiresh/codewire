@@ -17,6 +17,7 @@ runs the same commands and holds the result to the same standard.
 | [cloud-sandbox.md](cloud-sandbox.md) | A cloud sandbox: copying files in and out with `cw cp`, and transfers and API calls across an orchestration rollout, with other parts to follow |
 | [signup-and-verification.md](signup-and-verification.md) | Getting an account and proving its address: email sign-up, verification, GitHub and Google, and the abuse gates (#4481, #4062, #3297, #2053) |
 | [hosts.md](hosts.md) | Hosts (#3609): enroll a computer, keep its agent connected through proxies, logouts and reboots, the Hosts page, and environments created on a host |
+| [snapshots-and-forks.md](snapshots-and-forks.md) | Disk snapshots and forks: capture, list, inspect and remove a snapshot, and create sandboxes from it, in the cloud and on a local VM (#3046, #4370) |
 
 ## What a journey file holds
 

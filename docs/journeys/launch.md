@@ -28,7 +28,7 @@ step 8 is reported working, and nothing else is.
 | 7 | `launch-idle-wake` | out of the launch | out of the launch (owner, 2026-11-13) | out of the launch |
 | 8 | `launch-password-reset` | [signup-and-verification.md](signup-and-verification.md) | not yet observed | reported working by the owner 2026-11-13 (#2053); no walk recorded |
 | 9 | `launch-node-reboot` | [node-reboot.md](node-reboot.md), and below for the restart notice | restart notice observed 2026-11-13 after a Pod delete (#4376) | two worker drains observed 2026-11-13 (#3542); a reboot, STUN and the relay, Mesh and the restart notice not yet observed |
-| 10 | `launch-snapshot-fork` | below | a snapshot and three forks observed 2026-11-13 with `v0.4.17` (#4370) | a snapshot and three forks observed 2026-11-13 on `v0.4.18` (#4370) |
+| 10 | `launch-snapshot-fork` | [snapshots-and-forks.md](snapshots-and-forks.md), and below | a snapshot and three forks observed 2026-11-13 with `v0.4.17` (#4370) | a snapshot and three forks observed 2026-11-13 on `v0.4.18` (#4370) |
 | 11 | `launch-mac-local-vm` | [local-vm-mac.md](local-vm-mac.md) | runs on a Mac: observed 2026-11-13 on macOS 27 and 26 with a development build (#4478); the fix is tagged `v0.4.18`, not yet observed with it | does not apply |
 
 The owner reported on 2026-11-13 that signing in with GitHub and with Google
