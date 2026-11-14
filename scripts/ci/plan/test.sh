@@ -25,31 +25,8 @@ if [ "${#rust_artifacts[@]}" -eq 0 ]; then
   exit 1
 fi
 
-cargo_oracle_inputs_available() {
-  local artifact package manifest
-  for artifact in "${rust_artifacts[@]}"; do
-    IFS=$'\t' read -r package manifest <<<"$artifact"
-    local -a command=(
-      cargo tree --locked --offline --edges "normal,build" --prefix none --format="{p}" -p "$package"
-    )
-    if [ "$manifest" != Cargo.toml ]; then
-      command+=(--manifest-path "$manifest")
-    fi
-    "${command[@]}" >/dev/null 2>&1
-  done
-}
-
-hydrate_cargo_oracle_inputs() {
-  local artifact package manifest
-  for artifact in "${rust_artifacts[@]}"; do
-    IFS=$'\t' read -r package manifest <<<"$artifact"
-    local -a command=(env -u CARGO_NET_OFFLINE cargo fetch --locked --config net.offline=false)
-    if [ "$manifest" != Cargo.toml ]; then
-      command+=(--manifest-path "$manifest")
-    fi
-    "${command[@]}"
-  done
-}
+# shellcheck source=scripts/ci/plan/cargo-oracle-inputs.sh
+source scripts/ci/plan/cargo-oracle-inputs.sh
 
 # The Cargo oracle reads the exact lock-pinned Cargo inputs. When they are
 # missing, they are fetched beside the unit tests and the first planner run,
