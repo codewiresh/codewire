@@ -1,17 +1,21 @@
-//! Copy-on-write file copies for local disk snapshots (Linux).
+//! Copy-on-write file copies for local disk snapshots and VM checkpoints.
 //!
-//! A disk is copied with `FICLONE` where the filesystem shares extents
-//! (btrfs, XFS): the copy costs only metadata until either file changes. Where
+//! A disk is copied into a new file by clone where the filesystem shares
+//! blocks between files: `FICLONE` on Linux (btrfs, XFS), `fclonefileat` on
+//! macOS (APFS). The copy costs only metadata until either file changes. Where
 //! it does not, the copy is sparse: only the source's data ranges, found with
-//! `SEEK_DATA` and `SEEK_HOLE`, are copied with `copy_file_range`, so a mostly
-//! empty disk stays mostly holes. A sparse copy costs its allocated bytes at
-//! once, so its caller checks free space first. `FIEMAP` reports how many of a
-//! file's bytes are still shared with another file.
+//! `SEEK_DATA` and `SEEK_HOLE`, are copied (with `copy_file_range` on Linux),
+//! so a mostly empty disk stays mostly holes. A sparse copy costs its allocated
+//! bytes at once, so its caller checks free space first. On Linux `FIEMAP`
+//! reports how many of a file's bytes are still shared with another file.
+//!
+//! macOS can only clone into a file it creates, so every copy here creates its
+//! destination: an existing file is refused.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd as _;
-use std::os::unix::fs::{FileExt as _, MetadataExt as _};
+use std::os::unix::fs::{FileExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::Path;
 
 /// How a file was copied.
@@ -34,50 +38,84 @@ impl CloneMode {
 }
 
 /// `FICLONE`: `_IOW(0x94, 9, int)`.
+#[cfg(target_os = "linux")]
 const FICLONE: libc::c_ulong = 0x4004_9409;
 /// `FS_IOC_FIEMAP`: `_IOWR('f', 11, struct fiemap)`.
+#[cfg(target_os = "linux")]
 const FS_IOC_FIEMAP: libc::c_ulong = 0xc020_660b;
+#[cfg(target_os = "linux")]
 const FIEMAP_FLAG_SYNC: u32 = 0x0000_0001;
+#[cfg(target_os = "linux")]
 const FIEMAP_EXTENT_LAST: u32 = 0x0000_0001;
+#[cfg(target_os = "linux")]
 const FIEMAP_EXTENT_SHARED: u32 = 0x0000_2000;
+#[cfg(target_os = "linux")]
 const FIEMAP_BATCH: usize = 256;
 /// The largest single `copy_file_range` request.
+#[cfg(target_os = "linux")]
 const COPY_CHUNK: u64 = 1 << 30;
 /// The largest `pread`/`pwrite` buffer when the kernel copies nothing itself.
 const FALLBACK_BUFFER: usize = 1 << 20;
 
-/// Copy `source` into the empty `destination`, by reflink where the
+/// Copy `source` into the new file `destination` (0600), by clone where the
 /// filesystem allows it, otherwise sparsely after `reserve` accepts the bytes
-/// the copy will allocate. `destination` is synced either way.
+/// the copy will allocate. `destination` must not exist, and is synced either
+/// way.
 pub(crate) fn clone_or_copy(
     source: &File,
-    destination: &File,
+    destination: &Path,
     reserve: impl FnOnce(u64) -> io::Result<()>,
-) -> io::Result<CloneMode> {
-    if destination.metadata()?.len() != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "a copy destination is not empty",
-        ));
-    }
-    let mode = match reflink(source, destination) {
-        Ok(()) => CloneMode::Reflink,
+) -> io::Result<(File, CloneMode)> {
+    let (target, mode) = match clone_new(source, destination) {
+        Ok(target) => (target, CloneMode::Reflink),
         Err(error) if reflink_unsupported(&error) => {
             reserve(allocated_bytes(source)?)?;
-            sparse_copy(source, destination)?;
-            CloneMode::Copy
+            let target = create_new(destination)?;
+            sparse_copy(source, &target)?;
+            (target, CloneMode::Copy)
         }
         Err(error) => return Err(error),
     };
-    destination.sync_all()?;
-    Ok(mode)
+    target.sync_all()?;
+    Ok((target, mode))
 }
 
-/// Share every extent of `source` with the empty `destination`. A VM
-/// checkpoint clones a running VM's disks this way while it is paused: the
-/// filesystem writes back the source's dirty pages first, so the clone is the
-/// disk exactly as the paused VM left it.
-pub(crate) fn reflink(source: &File, destination: &File) -> io::Result<()> {
+/// Create `destination` (0600) as a clone of `source`: it shares every block
+/// of `source` until either changes, and nothing is copied. A VM checkpoint
+/// clones a running VM's disks this way while it is paused: the filesystem
+/// writes back the source's dirty pages first, so the clone is the disk
+/// exactly as the paused VM left it. Leaves nothing behind when it fails.
+pub(crate) fn clone_new(source: &File, destination: &Path) -> io::Result<File> {
+    #[cfg(target_os = "linux")]
+    {
+        let target = create_new(destination)?;
+        if let Err(error) = reflink(source, &target) {
+            drop(target);
+            // The clone's error matters, not this cleanup's.
+            let _ = std::fs::remove_file(destination);
+            return Err(error);
+        }
+        Ok(target)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        clonefile(source, destination)
+    }
+}
+
+/// Create the empty file `destination` (0600), refusing an existing one.
+fn create_new(destination: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(destination)
+}
+
+#[cfg(target_os = "linux")]
+fn reflink(source: &File, destination: &File) -> io::Result<()> {
     // SAFETY: both descriptors are live for the call; FICLONE takes the source
     // descriptor as its integer argument and writes nothing back.
     let result = unsafe {
@@ -94,13 +132,52 @@ pub(crate) fn reflink(source: &File, destination: &File) -> io::Result<()> {
     }
 }
 
+/// `fclonefileat` into `destination`'s directory. The clone takes `source`'s
+/// mode, so it is set to 0600 before anything is returned.
+#[cfg(target_os = "macos")]
+fn clonefile(source: &File, destination: &Path) -> io::Result<File> {
+    use rustix::fs::CloneFlags;
+    use std::os::unix::fs::PermissionsExt as _;
+    let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "not a file path");
+    let parent = destination.parent().ok_or_else(invalid)?;
+    let name = destination.file_name().ok_or_else(invalid)?;
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        })?;
+    // The clone is owned by this process's user, never the source's owner.
+    rustix::fs::fclonefileat(
+        source,
+        &directory,
+        name,
+        CloneFlags::NOFOLLOW | CloneFlags::NOOWNERCOPY,
+    )?;
+    let opened = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(destination)
+        .and_then(|target| {
+            target.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            Ok(target)
+        });
+    if opened.is_err() {
+        // The open's error matters; this only removes the clone it made.
+        let _ = std::fs::remove_file(destination);
+    }
+    opened
+}
+
 /// Whether files in `directory` can share extents: a VM checkpoint needs
 /// that, since it clones the disks while the VM is paused (#3046 R4).
 pub(crate) fn reflink_works(directory: &Path) -> io::Result<bool> {
     use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
     let probe = |name: &str| {
-        std::fs::OpenOptions::new()
+        OpenOptions::new()
             .create_new(true)
             .read(true)
             .write(true)
@@ -115,9 +192,8 @@ pub(crate) fn reflink_works(directory: &Path) -> io::Result<bool> {
         let mut source = probe(&source_name)?;
         source.write_all(&[0x5a; 4096])?;
         source.sync_all()?;
-        let destination = probe(&destination_name)?;
-        match reflink(&source, &destination) {
-            Ok(()) => Ok(true),
+        match clone_new(&source, &directory.join(&destination_name)) {
+            Ok(_) => Ok(true),
             Err(error) if reflink_unsupported(&error) => Ok(false),
             Err(error) => Err(error),
         }
@@ -135,6 +211,10 @@ pub(crate) fn reflink_works(directory: &Path) -> io::Result<bool> {
 /// Errors that mean "this filesystem cannot share extents here", not a
 /// failure of the files themselves.
 fn reflink_unsupported(error: &io::Error) -> bool {
+    #[cfg(target_os = "macos")]
+    if error.raw_os_error() == Some(libc::ENOTSUP) {
+        return true;
+    }
     matches!(
         error.raw_os_error(),
         Some(libc::EOPNOTSUPP | libc::EXDEV | libc::EINVAL | libc::ENOTTY | libc::ENOSYS)
@@ -177,6 +257,13 @@ fn seek(file: &File, offset: u64, whence: libc::c_int) -> io::Result<Option<u64>
     Ok(Some(result as u64))
 }
 
+/// macOS has no `copy_file_range`, so its data ranges go through memory.
+#[cfg(target_os = "macos")]
+fn copy_range(source: &File, destination: &File, start: u64, end: u64) -> io::Result<()> {
+    copy_range_through_memory(source, destination, start, end)
+}
+
+#[cfg(target_os = "linux")]
 fn copy_range(source: &File, destination: &File, start: u64, end: u64) -> io::Result<()> {
     let mut position = start;
     while position < end {
@@ -251,7 +338,15 @@ pub(crate) fn free_bytes(directory: &Path) -> io::Result<u64> {
 }
 
 /// Of `file`'s mapped bytes, how many the filesystem reports as shared with
+/// another file; `None` when it reports no extent map, as macOS never does.
+#[cfg(target_os = "macos")]
+pub(crate) fn shared_bytes(_file: &File) -> Option<u64> {
+    None
+}
+
+/// Of `file`'s mapped bytes, how many the filesystem reports as shared with
 /// another file; `None` when it reports no extent map.
+#[cfg(target_os = "linux")]
 pub(crate) fn shared_bytes(file: &File) -> Option<u64> {
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
@@ -319,210 +414,4 @@ pub(crate) fn shared_bytes(file: &File) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs::OpenOptions;
-    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
-
-    use super::*;
-
-    const MIB: u64 = 1024 * 1024;
-
-    fn sparse_source(path: &Path) -> File {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .write(true)
-            .open(path)
-            .unwrap();
-        file.set_len(64 * MIB).unwrap();
-        for (offset, byte) in [(0, b'a'), (20 * MIB, b'b'), (63 * MIB, b'c')] {
-            file.seek(SeekFrom::Start(offset)).unwrap();
-            file.write_all(&vec![byte; MIB as usize]).unwrap();
-        }
-        file.sync_all().unwrap();
-        file
-    }
-
-    fn new_file(path: &Path) -> File {
-        OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .write(true)
-            .open(path)
-            .unwrap()
-    }
-
-    fn contents(mut file: &File) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        file.seek(SeekFrom::Start(0)).unwrap();
-        file.read_to_end(&mut bytes).unwrap();
-        bytes
-    }
-
-    #[test]
-    fn a_sparse_copy_keeps_the_bytes_and_the_holes() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = sparse_source(&directory.path().join("source"));
-        let destination = new_file(&directory.path().join("destination"));
-
-        sparse_copy(&source, &destination).unwrap();
-
-        assert_eq!(destination.metadata().unwrap().len(), 64 * MIB);
-        assert_eq!(contents(&source), contents(&destination));
-        // Three mebibytes of data; the 61 MiB between them stay holes.
-        assert!(allocated_bytes(&destination).unwrap() < 8 * MIB);
-    }
-
-    #[test]
-    fn a_copy_falls_back_when_the_filesystem_cannot_share_extents() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = sparse_source(&directory.path().join("source"));
-        let destination = new_file(&directory.path().join("destination"));
-        let mut reserved = None;
-
-        let mode = clone_or_copy(&source, &destination, |bytes| {
-            reserved = Some(bytes);
-            Ok(())
-        })
-        .unwrap();
-
-        assert_eq!(contents(&source), contents(&destination));
-        match mode {
-            // A filesystem that shares extents reserves nothing.
-            CloneMode::Reflink => assert_eq!(reserved, None),
-            CloneMode::Copy => assert!(reserved.is_some_and(|bytes| bytes >= 3 * MIB)),
-        }
-    }
-
-    #[test]
-    fn a_copy_between_filesystems_is_sparse_and_checks_space_first() {
-        // tmpfs never shares extents with the test directory's filesystem.
-        let Ok(shared_memory) = tempfile::tempdir_in("/dev/shm") else {
-            return;
-        };
-        let directory = tempfile::tempdir().unwrap();
-        let source = sparse_source(&directory.path().join("source"));
-        let destination = new_file(&shared_memory.path().join("destination"));
-
-        let refused = clone_or_copy(&source, &destination, |bytes| {
-            Err(io::Error::new(
-                io::ErrorKind::StorageFull,
-                format!("{bytes} bytes needed"),
-            ))
-        })
-        .unwrap_err();
-        assert_eq!(refused.kind(), io::ErrorKind::StorageFull);
-        assert_eq!(destination.metadata().unwrap().len(), 0);
-
-        let mode = clone_or_copy(&source, &destination, |_| Ok(())).unwrap();
-        assert_eq!(mode, CloneMode::Copy);
-        assert_eq!(contents(&source), contents(&destination));
-    }
-
-    #[test]
-    fn a_reflink_shares_its_extents_where_the_filesystem_allows_it() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = sparse_source(&directory.path().join("source"));
-        let destination = new_file(&directory.path().join("destination"));
-        if reflink(&source, &destination).is_err() {
-            return;
-        }
-        assert_eq!(contents(&source), contents(&destination));
-        if let Some(shared) = shared_bytes(&destination) {
-            assert!(shared >= 3 * MIB);
-        }
-        let destination_path = directory.path().join("destination");
-        OpenOptions::new()
-            .write(true)
-            .open(&destination_path)
-            .unwrap()
-            .write_all_at(b"changed", 0)
-            .unwrap();
-        assert_eq!(contents(&source)[..7], [b'a'; 7]);
-    }
-
-    #[test]
-    fn the_reflink_probe_agrees_with_a_reflink_and_leaves_nothing_behind() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = sparse_source(&directory.path().join("source"));
-        let destination = new_file(&directory.path().join("destination"));
-        let works = reflink(&source, &destination).is_ok();
-        let probe = tempfile::tempdir().unwrap();
-        assert_eq!(reflink_works(probe.path()).unwrap(), works);
-        assert_eq!(std::fs::read_dir(probe.path()).unwrap().count(), 0);
-    }
-
-    const REFUSED_WRITE_CHILD: &str = "CODEWIRE_FS_CLONE_REFUSED_WRITE_CHILD";
-
-    /// Run in a child whose file-size limit is 8 MiB: the kernel refuses the
-    /// copy's write past it (EFBIG), as a full disk refuses one (ENOSPC).
-    #[test]
-    fn refused_write_child() {
-        let Some(directory) = std::env::var_os(REFUSED_WRITE_CHILD) else {
-            return;
-        };
-        let directory = Path::new(&directory);
-        let source = File::open(directory.join("source")).unwrap();
-        let destination = OpenOptions::new()
-            .write(true)
-            .open(directory.join("destination"))
-            .unwrap();
-        let error = clone_or_copy(&source, &destination, |_| Ok(())).unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(libc::EFBIG), "{error}");
-    }
-
-    #[test]
-    fn a_write_the_filesystem_refuses_mid_copy_fails_the_copy() {
-        use std::os::unix::process::CommandExt as _;
-
-        let Ok(shared_memory) = tempfile::tempdir_in("/dev/shm") else {
-            return;
-        };
-        // The source lives on another filesystem, so the copy is sparse; its
-        // second data range lies past the limit.
-        let directory = tempfile::tempdir().unwrap();
-        sparse_source(&directory.path().join("source"));
-        std::os::unix::fs::symlink(
-            directory.path().join("source"),
-            shared_memory.path().join("source"),
-        )
-        .unwrap();
-        new_file(&shared_memory.path().join("destination"));
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command
-            .args([
-                "--exact",
-                "fs_clone::tests::refused_write_child",
-                "--nocapture",
-            ])
-            .env(REFUSED_WRITE_CHILD, shared_memory.path())
-            .stdin(std::process::Stdio::null());
-        // SAFETY: only async-signal-safe calls run between fork and exec.
-        unsafe {
-            command.pre_exec(|| {
-                let limit = libc::rlimit {
-                    rlim_cur: 8 * MIB,
-                    rlim_max: 8 * MIB,
-                };
-                if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0
-                    || libc::signal(libc::SIGXFSZ, libc::SIG_IGN) == libc::SIG_ERR
-                {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let status = command.status().unwrap();
-        assert!(status.success(), "{status}");
-    }
-
-    #[test]
-    fn a_non_empty_destination_is_refused() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = sparse_source(&directory.path().join("source"));
-        let mut destination = new_file(&directory.path().join("destination"));
-        destination.write_all(b"existing").unwrap();
-        let error = clone_or_copy(&source, &destination, |_| Ok(())).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-    }
-}
+mod tests;

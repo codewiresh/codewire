@@ -1220,7 +1220,7 @@ pub(in crate::supervisor) mod linux {
         result
     }
 
-    /// Reflink `source` into the new `destination` with `mode`.
+    /// Clone `source` into the new `destination` with `mode`.
     fn clone_file(source: &Path, destination: &Path, mode: u32) -> Result<(), SupervisorError> {
         use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
         let io_error = |path: &Path, error: io::Error| SupervisorError::Io {
@@ -1232,15 +1232,8 @@ pub(in crate::supervisor) mod linux {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(source)
             .map_err(|error| io_error(source, error))?;
-        let to = fs::OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(destination)
+        let to = crate::fs_clone::clone_new(&from, destination)
             .map_err(|error| io_error(destination, error))?;
-        crate::fs_clone::reflink(&from, &to).map_err(|error| io_error(destination, error))?;
         to.sync_all()
             .map_err(|error| io_error(destination, error))?;
         to.set_permissions(fs::Permissions::from_mode(mode))

@@ -31,7 +31,9 @@ mod diagnostic_log;
 mod direct_share;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod egress_broker;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+// Disk snapshots and VM checkpoints call it on macOS from #4654's later slices.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod fs_clone;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod generation;

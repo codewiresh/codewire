@@ -314,15 +314,7 @@ fn clone_disk(source: &Path, destination: &Path) -> Result<(), RunnerError> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(source)
         .map_err(|error| io_error(source, error))?;
-    let target = std::fs::OpenOptions::new()
-        .create_new(true)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(destination)
-        .map_err(|error| io_error(destination, error))?;
-    crate::fs_clone::reflink(&source_file, &target).map_err(|_| {
+    let target = crate::fs_clone::clone_new(&source_file, destination).map_err(|_| {
         RunnerError::Checkpoint(
             "the disks could not be cloned; VM checkpoints need a filesystem that shares blocks (btrfs or XFS)",
         )

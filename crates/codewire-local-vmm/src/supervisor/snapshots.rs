@@ -1763,19 +1763,11 @@ mod linux {
                     role.as_str()
                 ))
             })?;
-        let target = OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(destination)
-            .map_err(|source| io_error(destination, source))?;
         let directory = destination
             .parent()
             .ok_or_else(|| status(SupervisorError::InvalidState))?
             .to_owned();
-        let mode = fs_clone::clone_or_copy(opened.file(), &target, |needed| {
+        let (target, mode) = fs_clone::clone_or_copy(opened.file(), destination, |needed| {
             require_space(&directory, needed)
         })
         .map_err(|error| copy_status(role, error))?;
@@ -2197,7 +2189,7 @@ mod linux {
         Ok(manifest.root_generation)
     }
 
-    /// Reflink `source` into the new `destination`, sealed 0400.
+    /// Clone `source` into the new `destination`, sealed 0400.
     fn clone_sealed(source: &Path, destination: &Path) -> Result<(), SupervisorError> {
         let io_error = |path: &Path, error: io::Error| SupervisorError::Io {
             path: path.to_owned(),
@@ -2208,15 +2200,8 @@ mod linux {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(source)
             .map_err(|error| io_error(source, error))?;
-        let to = OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(destination)
+        let to = fs_clone::clone_new(&from, destination)
             .map_err(|error| io_error(destination, error))?;
-        fs_clone::reflink(&from, &to).map_err(|error| io_error(destination, error))?;
         to.sync_all()
             .and_then(|()| to.set_permissions(fs::Permissions::from_mode(0o400)))
             .map_err(|error| io_error(destination, error))
