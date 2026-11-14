@@ -10,14 +10,8 @@ struct AuthView: View {
             VStack(spacing: 32) {
                 Spacer(minLength: 60)
 
-                VStack(spacing: 12) {
-                    Image(systemName: "cloud.fill")
-                        .font(.system(size: 64))
-                        .foregroundStyle(.blue)
-
-                    Text("Codewire")
-                        .font(.largeTitle)
-                        .fontWeight(.bold)
+                VStack(spacing: 16) {
+                    BrandWordmark()
 
                     Text("Cloud development environments")
                         .font(.subheadline)

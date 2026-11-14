@@ -142,7 +142,9 @@ final class AuthViewModel: ObservableObject {
             }
         }
         session.presentationContextProvider = provider
-        session.prefersEphemeralWebBrowserSession = false
+        // Never reuse Safari's codewire.sh sign-in: after Sign Out the next
+        // sign-in asks who you are, so a different account can sign in.
+        session.prefersEphemeralWebBrowserSession = true
         presentationContextProvider = provider
         authenticationSession = session
         guard session.start() else {
@@ -203,13 +205,36 @@ final class AuthViewModel: ObservableObject {
     #endif
 
     func signOut() {
+        let stored = try? tokenStore.load()
         do {
             try tokenStore.delete()
-            accessToken = nil
-            isAuthenticated = false
-            error = nil
         } catch {
             self.error = "Unable to sign out. Please try again."
+            return
+        }
+        accessToken = nil
+        isAuthenticated = false
+        error = nil
+        guard let stored else { return }
+
+        // End the sign-in on the server as well, so a copy of either token
+        // stops working. Best effort: this device has already forgotten it.
+        let baseURL = baseURL
+        Task.detached {
+            if let refreshToken = stored.refreshToken, !refreshToken.isEmpty {
+                try? await OIDCFlow.revoke(
+                    baseURL: baseURL,
+                    clientID: OIDCFlow.nativeClientID,
+                    token: refreshToken,
+                    tokenTypeHint: "refresh_token"
+                )
+            }
+            try? await OIDCFlow.revoke(
+                baseURL: baseURL,
+                clientID: OIDCFlow.nativeClientID,
+                token: stored.accessToken,
+                tokenTypeHint: "access_token"
+            )
         }
     }
 

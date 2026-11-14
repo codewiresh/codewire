@@ -236,6 +236,34 @@ extension OIDCFlow {
         return try await tokenResponse(for: req, session: session)
     }
 
+    /// Revoke an access or refresh token (RFC 7009). The server answers 200
+    /// for a token it doesn't know, so success means the token is unusable.
+    public static func revoke(
+        baseURL: URL,
+        clientID: String,
+        token: String,
+        tokenTypeHint: String,
+        session: HTTPSession = URLSession.shared
+    ) async throws {
+        var req = URLRequest(url: baseURL.appendingPathComponent("api/oauth/revoke"))
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded",
+                     forHTTPHeaderField: "Content-Type")
+        req.httpBody = formData([
+            URLQueryItem(name: "client_id", value: clientID),
+            URLQueryItem(name: "token", value: token),
+            URLQueryItem(name: "token_type_hint", value: tokenTypeHint),
+        ])
+        let (_, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode)
+        else {
+            throw OAuthFlowError.tokenRequestFailed(
+                (response as? HTTPURLResponse)?.statusCode ?? 0
+            )
+        }
+    }
+
     private static func tokenResponse(
         for request: URLRequest,
         session: HTTPSession

@@ -100,6 +100,54 @@ final class OIDCFlowTests: XCTestCase {
         XCTAssertEqual(values["code"], "a code&more")
     }
 
+    func testRevoke_postsTokenAndHintToRevocationEndpoint() async throws {
+        let session = MockHTTPSession()
+        let url = URL(string: "https://codewire.sh/api/oauth/revoke")!
+        session.responses[url.absoluteString] = (
+            Data(),
+            HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        )
+        try await OIDCFlow.revoke(
+            baseURL: URL(string: "https://codewire.sh")!,
+            clientID: OIDCFlow.nativeClientID,
+            token: "a refresh&token",
+            tokenTypeHint: "refresh_token",
+            session: session
+        )
+
+        XCTAssertEqual(session.recordedRequests.count, 1)
+        let request = session.recordedRequests[0]
+        XCTAssertEqual(request.httpMethod, "POST")
+        let body = String(data: request.httpBody ?? Data(), encoding: .utf8)!
+        let form = URLComponents(string: "https://form.invalid/?\(body)")!
+        let values = Dictionary(uniqueKeysWithValues:
+            (form.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        XCTAssertEqual(values["client_id"], "codewire-ios")
+        XCTAssertEqual(values["token"], "a refresh&token")
+        XCTAssertEqual(values["token_type_hint"], "refresh_token")
+    }
+
+    func testRevoke_failsOnServerError() async {
+        let session = MockHTTPSession()
+        let url = URL(string: "https://codewire.sh/api/oauth/revoke")!
+        session.responses[url.absoluteString] = (
+            Data(),
+            HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil)!
+        )
+        do {
+            try await OIDCFlow.revoke(
+                baseURL: URL(string: "https://codewire.sh")!,
+                clientID: OIDCFlow.nativeClientID,
+                token: "t",
+                tokenTypeHint: "access_token",
+                session: session
+            )
+            XCTFail("a 401 revocation must not look like success")
+        } catch {
+            XCTAssertEqual(error as? OAuthFlowError, .tokenRequestFailed(401))
+        }
+    }
+
     func testRefreshToken_returnsNewToken() async throws {
         let session = MockHTTPSession()
         let url = URL(string: "https://codewire.sh/api/oauth/token")!

@@ -1,3 +1,5 @@
 version: 1
 bundleID: sh.codewire.ios
 infoPath: Resources/Info.plist
+# Rendered from logo/avatar.svg at 1024x1024, opaque.
+iconPath: Resources/AppIcon.png

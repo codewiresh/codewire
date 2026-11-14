@@ -53,6 +53,8 @@ let package = Package(
                 ),
             ] + (rustShell ? ["CodewireClientFFI"] : []),
             path: "Sources/CodewireApp",
+            // The brand wordmark, rendered from logo/wordmark.svg.
+            resources: [.process("Resources")],
             linkerSettings: [
                 .linkedLibrary("resolv"),
             ]
