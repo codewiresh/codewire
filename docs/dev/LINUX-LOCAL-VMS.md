@@ -46,6 +46,35 @@ from the same source with `cw setup --local --from DIR`. Setup refuses a
 runtime built from other source, and `--replace` overwrites a different
 installed runtime.
 
+### A runtime built from source
+
+To boot a local VM on a change to the guest (its init, boot seed or `cw`),
+build the runtime from the same commit as your `cw`. On an x86_64 Linux host
+with Docker, from a clean checkout whose `HEAD` is that commit:
+
+```sh
+export TMPDIR=~/.cache/<scratch>/tmp   # executable; /tmp may be noexec
+scripts/ci/release/build-local-runtime.sh linux --source-sha "$(git rev-parse HEAD)" \
+  --version v0.1.0 --output ~/.cache/<scratch>/runtime
+sh -c 'codewire-cpu run $$ && exec cargo build -p codewire-cli-bin' </dev/null
+target/debug/cw setup --local --from ~/.cache/<scratch>/runtime/linux-x86_64
+```
+
+- `build-local-runtime.sh linux` is what the release's "Build the local
+  runtime's Linux side" job runs. It needs no credential. The kernels come
+  from the release parts cache unless your change touches their inputs, and
+  Cloud Hypervisor and virtiofsd are pinned downloads. It rebuilds both
+  architectures' guest roots and sealed `cw` runtimes in the pinned
+  containers, in the local VM slice. The output directory must not exist yet.
+- `--version` is the version of the `cw` sealed into the guest. A development
+  `cw` reports the workspace version, `0.1.0`.
+- `DIR/linux-x86_64` is the runtime directory. A development `cw` built
+  without `CODEWIRE_SOURCE_REVISION` warns that it cannot check the runtime's
+  source, then installs it.
+- Measured on 2026-11-14 at main 97dc3f473 on a 16-core workstation, with
+  both kernels cached: the runtime build took 38 minutes and wrote 882 MB, and
+  the installed runtime is 202 MB.
+
 ## Host requirements
 
 Local VMs need an x86_64 Linux host with:
