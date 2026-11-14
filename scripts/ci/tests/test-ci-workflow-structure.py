@@ -337,6 +337,7 @@ POLICY_DRIFT_PATHS = {"${{ steps.selection.outputs.base_sha }}": ".policy-drift-
 POLICY_DRIFT_KYVERNO_CHECK = ("printf '%s  %s\\n' 31388ab9b889429cfb48923d00e46159a9cecd30cdc906edbef725a60a7e587e "
                               '"$kyverno" |')
 POLICY_DRIFT_TOKEN = '"$base/scripts/ci/setup/fetch-forgejo-policy-drift-token.sh"'
+POLICY_DRIFT_BASE_GUARD = 'if [[ "$base_ref" != main ]]; then'
 
 
 def policy_drift_errors(workflow):
@@ -363,6 +364,12 @@ def policy_drift_errors(workflow):
         with_ = checkouts.get(ref) or {}
         if with_.get("path") != path or with_.get("persist-credentials") is not False:
             errors.append(f"{POLICY_DRIFT} checks out {ref} at {with_.get('path')!r}, not apart at {path!r}")
+    # The integration refuses a token from any base but main, so a stacked pull
+    # request fails before anything is selected, naming its base (#4686).
+    selection = next((str(step.get("run", "")) for step in steps if step.get("id") == "selection"), "")
+    guard, selected = selection.find(POLICY_DRIFT_BASE_GUARD), selection.find("head_sha=")
+    if guard < 0 or selected < guard or "exit 1" not in selection[guard:selected]:
+        errors.append(f"{POLICY_DRIFT} selects a pull request based on another branch instead of refusing it")
     checks = [str(step.get("run", "")) for step in steps if POLICY_DRIFT_TOKEN in str(step.get("run", ""))]
     if len(checks) != 1:
         errors.append(f"{POLICY_DRIFT} mints its token in {len(checks)} steps, not one")
@@ -636,6 +643,8 @@ WORKFLOW_MUTATIONS = {
         t, "propose-workspace-image-pin", f"runs-on: {runners.TRUSTED_LIGHT}", f"runs-on: {runners.UNTRUSTED_LIGHT}")),
     "a Dev build drops the selection it reads": ("deploy-dev.yaml", lambda t: in_job(
         t, "build-service-images", "    needs: [deploy-selection, dev-delivery-turn]\n", "")),
+    "the drift check selects a pull request based on another branch": ("policy-drift.yml", lambda t: t.replace(
+        '          if [[ "$base_ref" != main ]]; then\n', '          if false; then\n', 1)),
     "the drift check also starts on push": ("policy-drift.yml", lambda t: t.replace(
         "  pull_request_target:\n", "  push:\n    branches: [main]\n  pull_request_target:\n", 1)),
     "the drift check gains a second job": ("policy-drift.yml", lambda t: t + (

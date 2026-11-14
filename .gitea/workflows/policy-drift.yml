@@ -15,7 +15,9 @@ name: Policy drift
 # integration.json) is reachable only from this job. Its claims bind
 # pull_request_target and this file at refs/heads/main, which Forgejo sets
 # from the base branch for that event. The supply-chain scan, which parses
-# untrusted content, runs in another workflow without OIDC.
+# untrusted content, runs in another workflow without OIDC. A pull request
+# based on another branch is therefore never checked here: it fails at once,
+# naming its base, and is checked by the next push after it targets main.
 on:
   # zizmor: ignore[dangerous-triggers] The protected-base workflow runs only base scripts and deploy main's guards over candidate data.
   pull_request_target:
@@ -36,6 +38,18 @@ jobs:
           EVENT_PATH: ${{ forgejo.event_path }}
         run: |
           set -euo pipefail
+          # The integration admits only main's copy of this workflow, and
+          # pull_request_target runs the base branch's copy, so a pull request
+          # based on another branch (a stacked one) cannot read deploy's guards.
+          # It asks for no token and fails, naming its base: a pass here would
+          # stay on its head when it is retargeted to main, which starts no run
+          # (#4686). Into main, the next push runs the check.
+          base_ref="$(jq -er '.pull_request.base.ref | strings' "$EVENT_PATH")"
+          if [[ "$base_ref" != main ]]; then
+            [[ "$base_ref" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] || base_ref='another branch'
+            echo "::error::Policy drift not checked: base is $base_ref. After retargeting to main, push again (or merge main in) to run the check (#4686)."
+            exit 1
+          fi
           head_sha="$(jq -er '.pull_request.head.sha | strings | select(test("^[0-9a-f]{40}$"))' "$EVENT_PATH")"
           base_sha="$(jq -er '.pull_request.base.sha | strings | select(test("^[0-9a-f]{40}$"))' "$EVENT_PATH")"
           {

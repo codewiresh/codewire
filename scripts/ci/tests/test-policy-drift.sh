@@ -225,4 +225,30 @@ CODEWIRE_POLICY_DRIFT_INFRA_REPOSITORY='' GIT_BIN="$work/git" "$CLONE" "$work/jw
 grep -q 'CODEWIRE_POLICY_DRIFT_INFRA_REPOSITORY must be OWNER/NAME' "$work/out" || fail 'the missing repository is not named'
 [[ -e "$work/jwt" ]] || fail 'an unconfigured clone consumed the token'
 
-printf '[test-policy-drift] builder, verdicts, token and clone contracts passed\n'
+# --- a pull request based on another branch is not checked, and says so ---
+# The workflow's own selection step runs against a fake event: into main it
+# selects both commits; based on another branch it fails before any token,
+# naming the base, and selects nothing (#4686).
+python3 -I - "$ROOT/.gitea/workflows/policy-drift.yml" >"$work/selection.sh" <<'PY'
+import sys
+import yaml
+steps = yaml.safe_load(open(sys.argv[1]))["jobs"]["policy-drift"]["steps"]
+print(next(step["run"] for step in steps if step.get("id") == "selection"))
+PY
+select_on() {
+  local base_ref="$1"
+  jq -n --arg ref "$base_ref" --arg head "$(printf 'a%.0s' {1..40})" --arg base "$(printf 'b%.0s' {1..40})" \
+    '{pull_request: {head: {sha: $head}, base: {ref: $ref, sha: $base}}}' >"$work/event.json"
+  : >"$work/selected"
+  EVENT_PATH="$work/event.json" FORGEJO_OUTPUT="$work/selected" bash "$work/selection.sh" >"$work/out" 2>&1
+}
+select_on main || { cat "$work/out" >&2; fail 'a pull request into main was not selected'; }
+grep -qx "head_sha=$(printf 'a%.0s' {1..40})" "$work/selected" || fail 'the selection did not name the head'
+select_on stranded-leases-4518 && fail 'a pull request based on another branch was checked'
+grep -qx '::error::Policy drift not checked: base is stranded-leases-4518. After retargeting to main, push again (or merge main in) to run the check (#4686).' "$work/out" ||
+  fail "the stacked base is not named: $(cat "$work/out")"
+[[ ! -s "$work/selected" ]] || fail 'a stacked pull request selected commits'
+select_on $'evil\n::warning::x' && fail 'a base with a newline was checked'
+grep -q '^::error::Policy drift not checked: base is another branch\.' "$work/out" || fail 'an unprintable base was echoed'
+
+printf '[test-policy-drift] builder, verdicts, token, clone and base contracts passed\n'
