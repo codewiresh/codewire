@@ -275,6 +275,7 @@ impl BindingClient {
         &self,
         public_key_openssh: &str,
     ) -> Result<(), AttemptError> {
+        let _in_flight = self.in_flight.lock().await;
         let options = self.authorized().await?;
         self.client
             .record_host_key_with_options(

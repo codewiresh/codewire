@@ -668,6 +668,30 @@ async fn refresh_record_and_allocate_use_the_bound_exchange() {
     );
 }
 
+/// The listener refuses a second concurrent call from one Pod, so the host
+/// key waits behind any call in flight instead of racing it (#2238).
+#[tokio::test]
+async fn a_host_key_record_waits_for_the_call_in_flight() {
+    let fixture = fixture(vec![]).await;
+    let in_flight = fixture.client.in_flight.lock().await;
+    let record = fixture.client.record_host_key(HOST_KEY);
+    tokio::pin!(record);
+    // Never done while the slot is held; the window bounds only how long
+    // this test looks.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut record)
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.recorded.lock().unwrap().host_key, None);
+    drop(in_flight);
+    record.await.unwrap();
+    assert_eq!(
+        fixture.recorded.lock().unwrap().host_key.as_deref(),
+        Some(HOST_KEY)
+    );
+}
+
 #[tokio::test]
 async fn the_listener_must_present_a_certificate_from_the_mounted_roots() {
     let fixture = fixture(vec![]).await;

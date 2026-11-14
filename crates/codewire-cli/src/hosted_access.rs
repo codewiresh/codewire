@@ -8,9 +8,9 @@
 //! port (its NetworkPolicy); local processes reaching it gain nothing they do
 //! not already have, because sessions run as the workspace user.
 //!
-//! The daemon is also the environment's tailnet peer, started in parallel
-//! from the binding's access grant and not part of readiness; it serves the
-//! same SSH server over the tailnet.
+//! The daemon is also the environment's tailnet peer, started from the
+//! binding's access grant once the host key is recorded, and not part of
+//! readiness; it serves the same SSH server over the tailnet.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -186,7 +186,7 @@ pub(crate) async fn serve(
     let recorded_generation = grants
         .as_ref()
         .map(|grants| grants.current().operation_generation());
-    match &grants {
+    let start_grant_tasks = || match &grants {
         Some(grants) => {
             tokio::spawn(grants.clone().keep_fresh(shutdown.clone()));
             // Every grant restates the application ports; pushes replace
@@ -258,29 +258,19 @@ pub(crate) async fn serve(
             });
         }
         None => tracing::info!("binding carries no tailnet access; serving SSH only"),
-    }
+    };
 
-    match record_host_key_until_accepted(
-        plane.as_ref(),
-        &public_key,
-        RECORD_INITIAL_BACKOFF,
-        RECORD_MAX_BACKOFF,
-    )
-    .await
-    {
-        Ok(()) => {
-            paths
-                .mark_access_ready()
-                .context("mark workspace access ready")?;
-            access_ready.send_replace(true);
-            tracing::info!("workspace SSH host key recorded; access ready");
-        }
-        Err(_) => {
-            // Another key is recorded for this Pod: clients would refuse
-            // this one, so access is never reported ready and SSH sessions
-            // stay refused.
-            tracing::error!("workspace SSH host key refused for this Pod; access is not ready");
-        }
+    if record_host_key_then_start(plane.as_ref(), &public_key, start_grant_tasks).await {
+        paths
+            .mark_access_ready()
+            .context("mark workspace access ready")?;
+        access_ready.send_replace(true);
+        tracing::info!("workspace SSH host key recorded; access ready");
+    } else {
+        // Another key is recorded for this Pod: clients would refuse this
+        // one, so access is never reported ready and SSH sessions stay
+        // refused.
+        tracing::error!("workspace SSH host key refused for this Pod; access is not ready");
     }
     if let (Some(grants), Some(recorded)) = (grants, recorded_generation) {
         tokio::spawn(record_host_key_per_generation(
@@ -294,6 +284,29 @@ pub(crate) async fn serve(
     ssh.await
         .context("workspace SSH listener task")?
         .context("serve workspace SSH")
+}
+
+/// Record this Pod's host key, then `start` the grant's tasks (#2238). The
+/// client sends one binding call at a time, so readiness's record goes
+/// first instead of queueing behind the tasks' first calls. The tasks start
+/// once the record is accepted or refused; while the listener is
+/// unavailable they wait with it, which loses nothing: until the key is
+/// recorded, clients refuse this host and sessions are refused.
+async fn record_host_key_then_start(
+    plane: &dyn AccessControlPlane,
+    public_key: &str,
+    start: impl FnOnce(),
+) -> bool {
+    let recorded = record_host_key_until_accepted(
+        plane,
+        public_key,
+        RECORD_INITIAL_BACKOFF,
+        RECORD_MAX_BACKOFF,
+    )
+    .await
+    .is_ok();
+    start();
+    recorded
 }
 
 /// Bind the Mesh connect socket in the owner-only state directory, owner
@@ -344,7 +357,80 @@ async fn restate_app_ports(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    /// Answers the record from a script and logs every call in order.
+    struct OrderedPlane {
+        answers: Mutex<Vec<Result<(), ControlPlaneError>>>,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl AccessControlPlane for OrderedPlane {
+        async fn record_host_key(&self, _public_key: &str) -> Result<(), ControlPlaneError> {
+            self.calls.lock().unwrap().push("record_host_key");
+            let mut answers = self.answers.lock().unwrap();
+            if answers.is_empty() {
+                Ok(())
+            } else {
+                answers.remove(0)
+            }
+        }
+
+        async fn refresh_access(&self) -> Result<WorkspaceAccessGrant, ControlPlaneError> {
+            unreachable!("only the started tasks refresh")
+        }
+
+        async fn allocate_peer_relay(
+            &self,
+            _disco_keys: [String; 2],
+            _relay_generation: u32,
+        ) -> Result<PeerRelayAllocation, ControlPlaneError> {
+            unreachable!("only the started tasks allocate relays")
+        }
+    }
+
+    async fn record_then_start(
+        answers: Vec<Result<(), ControlPlaneError>>,
+    ) -> (bool, Vec<&'static str>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let plane = OrderedPlane {
+            answers: Mutex::new(answers),
+            calls: calls.clone(),
+        };
+        let started = calls.clone();
+        let recorded = record_host_key_then_start(&plane, "ssh-ed25519 AAAA", move || {
+            started.lock().unwrap().push("start");
+        })
+        .await;
+        let calls = calls.lock().unwrap().clone();
+        (recorded, calls)
+    }
+
+    /// #2238: nothing else calls the binding listener until the record is
+    /// settled, so it is never refused for a concurrent call of this Pod.
+    #[tokio::test(start_paused = true)]
+    async fn the_host_key_is_recorded_before_the_grant_tasks_start() {
+        assert_eq!(
+            record_then_start(vec![]).await,
+            (true, vec!["record_host_key", "start"])
+        );
+        assert_eq!(
+            record_then_start(vec![Err(ControlPlaneError::Retryable)]).await,
+            (true, vec!["record_host_key", "record_host_key", "start"])
+        );
+    }
+
+    /// A refused key still starts the grant's tasks; access stays not ready.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_host_key_still_starts_the_grant_tasks() {
+        assert_eq!(
+            record_then_start(vec![Err(ControlPlaneError::Refused)]).await,
+            (false, vec!["record_host_key", "start"])
+        );
+    }
 
     #[test]
     fn only_failed_precondition_is_a_permanent_refusal() {
