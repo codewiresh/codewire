@@ -28,7 +28,7 @@ use codewire_proto::codewire::{
 use tokio::sync::Barrier;
 
 use crate::{
-    account_home::{AccountOverviewView, CardStats, GetStartedView, OrganizationCardView},
+    account_home::{AccountOverviewView, Balance, CardStats, GetStartedView, OrganizationCardView},
     templates::AccountOverviewTemplate,
 };
 
@@ -618,7 +618,8 @@ fn a_member_is_told_who_adds_the_card() {
 }
 
 /// An unmetered organization: the card step is done with nothing to add, and
-/// its card says Unlimited instead of a balance.
+/// its card shows ∞ instead of a balance, named Unlimited for a screen reader
+/// and in its tooltip (#4464).
 #[test]
 fn an_unmetered_organization_shows_unlimited() {
     let mut get_started = steps(false, true, false, true);
@@ -626,14 +627,16 @@ fn an_unmetered_organization_shows_unlimited() {
     let html = render(&AccountOverviewView {
         get_started: Some(get_started),
         organizations: vec![card(Some(CardStats {
-            balance: "Unlimited".into(),
+            balance: Balance::Unlimited,
             month: "€0.00".into(),
             running: 0,
         }))],
         shared_scale: false,
     });
     assert!(html.contains("<p>Nothing to add: cloud use isn’t charged here.</p>"));
-    assert!(html.contains("<dt>Balance</dt><dd>Unlimited</dd>"));
+    assert!(html.contains(
+        r#"<dt>Balance</dt><dd title="Unlimited"><span aria-hidden="true">∞</span><span class="cw-sr-only">Unlimited</span></dd>"#
+    ));
 }
 
 /// The reviewed design fixtures show exactly what the template renders for
@@ -731,6 +734,34 @@ fn the_design_fixtures_are_what_the_home_renders() {
         "example-org",
         now,
     );
+    // An organization on the Unlimited rate card whose month so far is under
+    // a cent: ∞, "< €0.01", and its one card across the whole width (#4464).
+    let unlimited = build(
+        true,
+        &[organization("example-org", true)],
+        &[OrganizationReads {
+            billing: Some(BillingSummary {
+                has_card: false,
+                metered: false,
+                balance_nano_eur: 0,
+                month_nano_eur: 4_200_000,
+            }),
+            sandboxes: Some(SandboxSummary {
+                running: 1,
+                ever: true,
+            }),
+            hourly: Some(
+                (9..13)
+                    .map(|hour| HourCost {
+                        hour: midnight + hour * 3_600,
+                        cost_nano_eur: 1_050_000,
+                    })
+                    .collect(),
+            ),
+        }],
+        "example-org",
+        now,
+    );
     for (name, fixture, overview, sandboxes) in [
         (
             "account-overview.html",
@@ -746,6 +777,14 @@ fn the_design_fixtures_are_what_the_home_renders() {
                 "../../../../packages/codewire-design/reference/fixtures/account-overview-active.html"
             ),
             active,
+            "sandboxes.html",
+        ),
+        (
+            "account-overview-unlimited.html",
+            include_str!(
+                "../../../../packages/codewire-design/reference/fixtures/account-overview-unlimited.html"
+            ),
+            unlimited,
             "sandboxes.html",
         ),
     ] {

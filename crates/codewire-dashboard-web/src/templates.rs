@@ -1,5 +1,6 @@
 use askama::Template;
 
+use crate::account_home::Balance;
 use crate::admin_connect::{
     AdminCatalogView, AdminOrganizationRow, AdminOrganizationView, AdminStatsView, AuditLogRow,
     QuotaView,

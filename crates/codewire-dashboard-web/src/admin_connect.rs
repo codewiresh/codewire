@@ -931,7 +931,7 @@ fn quota_view(quota: EnvironmentQuota) -> QuotaView {
     }
 }
 
-const NANO_EUR_PER_CENT: i64 = 10_000_000;
+pub(crate) const NANO_EUR_PER_CENT: i64 = 10_000_000;
 const NANO_EUR_PER_EURO: i64 = 1_000_000_000;
 
 /// A nano-euro amount in euros: two decimals, or up to six when the amount

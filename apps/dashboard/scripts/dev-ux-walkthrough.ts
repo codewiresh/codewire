@@ -200,7 +200,12 @@ async function accountHome(page: Page, slug: string): Promise<void> {
   await expect(card.getByRole("link", { name: "Sandboxes", exact: true })).toHaveAttribute("href", `/${slug}/`);
   if (await card.locator("dl.cw-stat-grid").count()) {
     await expect(card.locator("dl.cw-stat-grid dt")).toHaveText(["Balance", "This month", "Running"]);
-    await expect(card.locator("dl.cw-stat-grid dd").nth(0)).toHaveText(/^(?:Unlimited|-?€\d+\.\d{2,6})$/);
+    // Two decimals, "< €0.01" under a cent, and ∞ (named Unlimited) for an Unlimited organization (#4464).
+    const amount = /^(?:-?€\d+\.\d{2}|< €0\.01|> -€0\.01)$/;
+    const balance = card.locator("dl.cw-stat-grid dd").nth(0);
+    if (await balance.getAttribute("title") === "Unlimited") await expect(balance).toHaveText("∞Unlimited");
+    else await expect(balance).toHaveText(amount);
+    await expect(card.locator("dl.cw-stat-grid dd").nth(1)).toHaveText(amount);
     await expect(card.locator("dl.cw-stat-grid dd").nth(2)).toHaveText(/^\d+$/);
   } else {
     await expect(card.getByText("Its balance and usage are unavailable right now.", { exact: true })).toBeVisible();

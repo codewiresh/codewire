@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::http::HeaderValue;
 
 use crate::{
-    admin_connect::euro_text,
+    admin_connect::{NANO_EUR_PER_CENT, euro_text},
     billing_connect::{self, BillingSummary, HourCost},
     environment_connect,
     state::AppState,
@@ -97,10 +97,29 @@ pub(crate) struct OrganizationCardView {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CardStats {
-    /// "Unlimited" for an organization that pays for nothing.
-    pub(crate) balance: String,
+    pub(crate) balance: Balance,
+    /// Two decimals, as `tile_euro_text` writes it.
     pub(crate) month: String,
     pub(crate) running: usize,
+}
+
+/// A card's balance tile: an amount, or ∞ for an organization that pays for
+/// nothing (owner, 2026-11-13, #4464).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Balance {
+    Amount(String),
+    Unlimited,
+}
+
+/// Money on the home's tiles: two decimals, never rounded up, and "< €0.01"
+/// for an amount above zero but under a cent, so a value fits its tile on one
+/// line (owner, 2026-11-13, #4464). The Billing page keeps exact amounts.
+pub(crate) fn tile_euro_text(nano_eur: i64) -> String {
+    match nano_eur {
+        1..NANO_EUR_PER_CENT => "< €0.01".to_owned(),
+        _ if nano_eur < 0 && nano_eur > -NANO_EUR_PER_CENT => "> -€0.01".to_owned(),
+        _ => euro_text(nano_eur / NANO_EUR_PER_CENT * NANO_EUR_PER_CENT),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -247,11 +266,11 @@ pub(crate) fn build(
             let stats = match (reads.billing, reads.sandboxes) {
                 (Some(billing), Some(sandboxes)) => Some(CardStats {
                     balance: if billing.metered {
-                        euro_text(billing.balance_nano_eur)
+                        Balance::Amount(tile_euro_text(billing.balance_nano_eur))
                     } else {
-                        "Unlimited".to_owned()
+                        Balance::Unlimited
                     },
-                    month: euro_text(billing.month_nano_eur),
+                    month: tile_euro_text(billing.month_nano_eur),
                     running: sandboxes.running,
                 }),
                 _ => None,
@@ -402,7 +421,7 @@ mod tests {
         assert_eq!(
             card.stats,
             Some(CardStats {
-                balance: "€42.18".into(),
+                balance: Balance::Amount("€42.18".into()),
                 month: "€17.82".into(),
                 running: 0,
             })
@@ -453,8 +472,28 @@ mod tests {
         );
     }
 
+    /// The home's tiles show two decimals, never rounded up, and say so when
+    /// an amount is under a cent rather than showing zero (#4464).
+    #[test]
+    fn tile_amounts_have_two_decimals_and_name_less_than_a_cent() {
+        for (nano_eur, text) in [
+            (0, "€0.00"),
+            (1, "< €0.01"),
+            (3_385_000, "< €0.01"),
+            (9_999_999, "< €0.01"),
+            (10_000_000, "€0.01"),
+            (13_937_000, "€0.01"),
+            (17_829_999_999, "€17.82"),
+            (-3_385_000, "> -€0.01"),
+            (-10_000_000, "-€0.01"),
+            (-1_509_000_000, "-€1.50"),
+        ] {
+            assert_eq!(tile_euro_text(nano_eur), text, "{nano_eur}");
+        }
+    }
+
     /// An organization that pays for nothing has no card to add: the step is
-    /// done, and its card says Unlimited instead of a balance.
+    /// done, and its card shows ∞ instead of a balance.
     #[test]
     fn an_unmetered_organization_has_nothing_to_add() {
         let unmetered = BillingSummary {
@@ -475,7 +514,7 @@ mod tests {
         assert_eq!(steps.done, 1);
         assert_eq!(
             view.organizations[0].stats.as_ref().unwrap().balance,
-            "Unlimited"
+            Balance::Unlimited
         );
     }
 

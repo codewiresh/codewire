@@ -16,6 +16,10 @@
 .cw-checklist-text > p { margin: 0; color: var(--fg-tertiary); font-size: var(--text-small); }
 .cw-org-overview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); margin: 0; padding: 0; list-style: none; }
 .cw-org-overview > li { min-width: 0; }
+/* One organization's card takes the whole width; several share the grid (#4464). */
+.cw-org-overview > li:only-child { grid-column: 1 / -1; }
+/* A tile's value stays on one line: the home writes short values (∞, two decimals). */
+.cw-org-overview .cw-stat > dd { overflow-wrap: normal; white-space: nowrap; }
 .cw-org-overview .cw-card { height: 100%; }
 .cw-org-overview .cw-card-body { display: grid; align-content: start; gap: var(--space-4); }
 .cw-org-overview .cw-usage-chart { margin-top: 0; }
