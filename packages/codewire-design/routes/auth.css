@@ -61,3 +61,11 @@
   .cw-auth-shell { padding-inline: var(--space-4); }
   .cw-auth-actions { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Recovery codes: the heading and Copy codes share a line; the status says what copying did (#4558). */
+.cw-recovery-codes { display: grid; gap: var(--space-3); }
+.cw-recovery-codes-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.cw-recovery-codes-heading .cw-card-title { margin: 0; }
+.cw-recovery-codes-status { margin: 0; color: var(--fg-secondary); font-size: var(--text-small); line-height: var(--leading-body); }
+/* Empty, it takes no row, yet stays a live region so its first message is announced. */
+.cw-recovery-codes-status:empty { position: absolute; }

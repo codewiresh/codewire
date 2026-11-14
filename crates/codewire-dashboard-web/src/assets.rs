@@ -22,6 +22,7 @@ pub(crate) const AUTH_STYLE_PATH: &str = "/assets/codewire/routes/auth-v2.css";
 pub(crate) const PUBLIC_STYLE_PATH: &str = "/assets/codewire/routes/public-v2.css";
 pub(crate) const DEVICE_SCRIPT_PATH: &str = "/assets/codewire/device-v1.js";
 pub(crate) const SIGNUP_SCRIPT_PATH: &str = "/assets/codewire/signup-v1.js";
+pub(crate) const RECOVERY_CODES_SCRIPT_PATH: &str = "/assets/codewire/recovery-codes-v1.js";
 pub(crate) const SETTINGS_STYLE_PATH: &str = "/assets/codewire/routes/settings-v1.css";
 pub(crate) const ORGANIZATIONS_STYLE_PATH: &str = "/assets/codewire/routes/organizations-v1.css";
 pub(crate) const HOSTS_STYLE_PATH: &str = "/assets/codewire/routes/hosts-v1.css";
@@ -73,6 +74,8 @@ const AUTH_STYLES: &str = include_str!("../../../packages/codewire-design/routes
 const PUBLIC_STYLES: &str = include_str!("../../../packages/codewire-design/routes/public.css");
 const DEVICE_SCRIPT: &str = include_str!("../../../packages/codewire-design/device.js");
 const SIGNUP_SCRIPT: &str = include_str!("../../../packages/codewire-design/signup.js");
+const RECOVERY_CODES_SCRIPT: &str =
+    include_str!("../../../packages/codewire-design/recovery-codes.js");
 const SETTINGS_STYLES: &str = include_str!("../../../packages/codewire-design/routes/settings.css");
 const ORGANIZATIONS_STYLES: &str =
     include_str!("../../../packages/codewire-design/routes/organizations.css");
@@ -148,6 +151,11 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
     (STYLE_PATH, CSS, STYLES.as_bytes()),
     (DEVICE_SCRIPT_PATH, JS, DEVICE_SCRIPT.as_bytes()),
     (SIGNUP_SCRIPT_PATH, JS, SIGNUP_SCRIPT.as_bytes()),
+    (
+        RECOVERY_CODES_SCRIPT_PATH,
+        JS,
+        RECOVERY_CODES_SCRIPT.as_bytes(),
+    ),
     (DASHBOARD_STYLE_PATH, CSS, DASHBOARD_STYLES.as_bytes()),
     (AUTH_STYLE_PATH, CSS, AUTH_STYLES.as_bytes()),
     (PUBLIC_STYLE_PATH, CSS, PUBLIC_STYLES.as_bytes()),

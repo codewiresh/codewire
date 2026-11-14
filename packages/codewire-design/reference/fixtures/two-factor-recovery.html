@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <script src="../../theme.js"></script>
+  <script src="../../recovery-codes.js" defer></script>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Two-factor authentication enabled · Codewire</title>
   <link rel="icon" href="../../assets/brand-icon.svg" type="image/svg+xml">
@@ -19,11 +20,12 @@
           <p class="cw-auth-copy">Save these recovery codes now. Each code works once, and Codewire will not show this set again.</p>
         </header>
         <div class="cw-setup-grid">
-          <section aria-labelledby="backup-title">
-            <h2 id="backup-title" class="cw-card-title">Save recovery codes</h2>
-            <ul class="cw-backup-codes">
+          <section class="cw-recovery-codes" aria-labelledby="backup-title">
+            <div class="cw-recovery-codes-heading"><h2 id="backup-title" class="cw-card-title">Save recovery codes</h2><button class="cw-button cw-button--outline cw-button--small" type="button" data-copy-codes hidden><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-copy"/></svg><span>Copy codes</span></button></div>
+            <ul class="cw-backup-codes" data-recovery-codes>
               <li><code data-testid="recovery-code">a1b2-c3d4</code></li><li><code data-testid="recovery-code">e5f6-a7b8</code></li><li><code data-testid="recovery-code">c9d0-e1f2</code></li><li><code data-testid="recovery-code">a3b4-c5d6</code></li><li><code data-testid="recovery-code">e7f8-a9b0</code></li><li><code data-testid="recovery-code">c1d2-e3f4</code></li><li><code data-testid="recovery-code">a5b6-c7d8</code></li><li><code data-testid="recovery-code">e9f0-a1b2</code></li><li><code data-testid="recovery-code">c3d4-e5f6</code></li><li><code data-testid="recovery-code">a7b8-c9d0</code></li>
             </ul>
+            <p class="cw-recovery-codes-status" role="status" data-copy-codes-status></p>
           </section>
           <a class="cw-button cw-button--pill cw-button--large cw-auth-submit" href="settings-account.html">Continue to Codewire</a>
         </div>

@@ -131,8 +131,44 @@ test("the replaced state shows ten new codes and withholds revoked sessions", { 
   await artifactScreenshot(page, "account-authenticator-replaced.png");
 });
 
+// Copy codes copies every recovery code, one per line, in the order shown;
+// where the browser refuses the clipboard, the codes are selected instead
+// and the status says how to copy them (#4558).
+test("Copy codes puts every recovery code on the clipboard, or selects them when copying is refused", async ({ page, context }) => {
+  test.skip(!process.env.CODEWIRE_DESIGN_ORIGIN, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: process.env.CODEWIRE_DESIGN_ORIGIN! });
+  await page.goto(fixture("two-factor-recovery.html"));
+  const codes = await page.getByTestId("recovery-code").allTextContents();
+  expect(codes).toHaveLength(10);
+  const copy = page.getByRole("button", { name: "Copy codes", exact: true });
+  await expect(copy).toBeVisible();
+  await copy.click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(codes.join("\n"));
+  await expect(page.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+  await expect(page.getByRole("status")).toHaveText("Recovery codes copied, one per line.");
+  await expect(copy).toBeVisible();
+
+  await page.evaluate(() => {
+    Object.defineProperty(navigator.clipboard, "writeText", {
+      configurable: true,
+      value: () => Promise.reject(new DOMException("Synthetic denial", "NotAllowedError")),
+    });
+  });
+  await copy.click();
+  await expect(page.getByRole("status")).toContainText("the codes are selected");
+  const selected = await page.evaluate(() => window.getSelection()?.toString() ?? "");
+  for (const code of codes) expect(selected).toContain(code);
+});
+
 test.describe("without JavaScript", () => {
   test.use({ javaScriptEnabled: false });
+
+  test("the recovery codes show without a Copy codes button", async ({ page }) => {
+    test.skip(!process.env.CODEWIRE_DESIGN_ORIGIN, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
+    await page.goto(fixture("two-factor-recovery.html"));
+    await expect(page.getByTestId("recovery-code")).toHaveCount(10);
+    await expect(page.getByRole("button", { name: "Copy codes", exact: true })).toBeHidden();
+  });
 
   test("factor dialogs open through native GET launchers and one-time states render in place", async ({ page }) => {
     test.skip(!process.env.CODEWIRE_DESIGN_ORIGIN, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
