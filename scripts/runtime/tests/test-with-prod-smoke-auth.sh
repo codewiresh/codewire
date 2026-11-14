@@ -103,6 +103,14 @@ bao_names=( "${!BAO_@}" )
 # inherited one (#4156).
 [[ "$CODEWIRE_NATIVE_STATE_ROOT" == "$TMPDIR"/*/no-local-vm-state ]]
 [[ ! -e "$CODEWIRE_NATIVE_STATE_ROOT" && ! -e "$(dirname "$CODEWIRE_NATIVE_STATE_ROOT")" ]]
+# Nor the caller's saved cw login: its config dir is private and absent, and
+# the caller's cw profile settings are gone (codewire#4553).
+[[ "$CW_CONFIG_DIR" == "$TMPDIR"/*/no-cw-config && ! -e "$CW_CONFIG_DIR" ]]
+[[ ! -e "$CALLER_LOGIN" || "$CW_CONFIG_DIR" != "$(dirname "$CALLER_LOGIN")" ]]
+for name in CODEWIRE_ORG CW_HOST_DATA_DIR CW_LOCAL_MESH_STATE_DIR CW_MESH_DATA_DIR \
+  CODEWIRE_DAEMON_AUTH_TOKEN CODEWIRE_MESH_AUTH_TOKEN CODEWIRE_LOCAL_CREDENTIAL_KEYCHAIN; do
+  [[ -z "${!name+x}" ]]
+done
 shopt -s nullglob
 leftovers=( "$TMPDIR"/codewire-prod-smoke-auth.* )
 [[ "${#leftovers[@]}" == 0 ]]
@@ -133,6 +141,9 @@ run_case() {
     relative_client) access='access' ;;
   esac
   make_child "$dir/child"
+  # The caller is signed in: a saved cw login the child must never read.
+  mkdir -p "$dir/caller-cw" && chmod 0700 "$dir/caller-cw"
+  printf 'api_key = "cw_owner"\n' >"$dir/caller-cw/config.toml"
 
   set +e
   PATH="$dir/bin" MOCK_MODE="$mode" MOCK_STATE="$dir/state" TMPDIR="$dir/tmp" \
@@ -144,6 +155,10 @@ run_case() {
     EXPECTED_CODEWIRE_SMOKE_USER_EMAIL="$STALE_EMAIL" \
     CODEWIRE_API_KEY="$STALE_API_KEY" \
     CODEWIRE_NATIVE_STATE_ROOT="$HOME/.codewire/native-v1" \
+    CW_CONFIG_DIR="$dir/caller-cw" CALLER_LOGIN="$dir/caller-cw/config.toml" \
+    CODEWIRE_ORG=owner-org CW_HOST_DATA_DIR="$dir/caller-host" CW_LOCAL_MESH_STATE_DIR="$dir/caller-mesh" \
+    CW_MESH_DATA_DIR="$dir/caller-mesh" CODEWIRE_DAEMON_AUTH_TOKEN=caller-daemon \
+    CODEWIRE_MESH_AUTH_TOKEN=caller-mesh CODEWIRE_LOCAL_CREDENTIAL_KEYCHAIN="$dir/caller.keychain" \
     "$WRAPPER" "${command[@]}" >"$dir/out" 2>"$dir/err"
   rc=$?
   set -e

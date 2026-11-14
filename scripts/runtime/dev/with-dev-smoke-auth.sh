@@ -25,7 +25,10 @@ command as CODEWIRE_DEV_SMOKE_API_KEY and EXPECTED_CODEWIRE_SMOKE_USER_EMAIL.
 The wrapper removes all OpenBao and inherited smoke credentials, and execs the
 requested command with CODEWIRE_NATIVE_STATE_ROOT naming a local VM state root
 that does not exist, so it never reaches the owner's local VMs or starts their
-supervisor. With no command, runs:
+supervisor, and with CW_CONFIG_DIR naming a cw config folder that does not
+exist, so a cw the command runs never uses the owner's saved login. The
+caller's cw profile settings (CODEWIRE_ORG, CW_*_DIR, mesh and daemon tokens)
+are removed. With no command, runs:
 
   scripts/runtime/dev/smoke-dev-commodity.sh
 
@@ -135,11 +138,19 @@ IFS= read -r EXPECTED_CODEWIRE_SMOKE_USER_EMAIL <"$EMAIL_FILE"
 # can start the owner's supervisor (#3793, #4156). This root lies in the
 # private folder cleanup removes, so it does not exist and nothing creates it.
 CODEWIRE_NATIVE_STATE_ROOT="$AUTH_TMPDIR/no-local-vm-state"
+# Nor may it reach the owner's saved cw login: a `cw org invite` run under this
+# wrapper once acted as the owner (codewire#4553). cw reads its login from
+# CW_CONFIG_DIR, else ~/.config/cw; this one is private and absent like the
+# state root, so a cw the child runs is signed in only with what it is handed.
+# HOME itself stays, for the toolchain and kubeconfig the scripts use.
+CW_CONFIG_DIR="$AUTH_TMPDIR/no-cw-config"
 cleanup || die 'failed to remove temporary smoke auth material'
 trap - EXIT HUP INT TERM
 unset_openbao_environment
-unset CODEWIRE_API_KEY
-export CODEWIRE_DEV_SMOKE_API_KEY EXPECTED_CODEWIRE_SMOKE_USER_EMAIL CODEWIRE_NATIVE_STATE_ROOT
+# The caller's cw profile and local data settings stay with the caller.
+unset CODEWIRE_API_KEY CODEWIRE_ORG CW_HOST_DATA_DIR CW_LOCAL_MESH_STATE_DIR CW_MESH_DATA_DIR \
+  CODEWIRE_DAEMON_AUTH_TOKEN CODEWIRE_MESH_AUTH_TOKEN CODEWIRE_LOCAL_CREDENTIAL_KEYCHAIN
+export CODEWIRE_DEV_SMOKE_API_KEY EXPECTED_CODEWIRE_SMOKE_USER_EMAIL CODEWIRE_NATIVE_STATE_ROOT CW_CONFIG_DIR
 
 if [[ "${1:-}" == '--' ]]; then shift; fi
 if [[ "$#" -eq 0 ]]; then set -- "$ROOT/scripts/runtime/dev/smoke-dev-commodity.sh"; fi
