@@ -36,6 +36,9 @@ where
         let request = ValidatedGuestRequest::parse(entry, request, body.is_some())?;
         let slot = request.slot.clone();
         let result = match body {
+            _ if request.intercepted_host.is_some() => {
+                self.execute_intercepted(request, body.is_some()).await
+            }
             None => self.execute_validated(request).await,
             Some(body) => self.execute_github(request, Some(body)).await,
         };
@@ -45,6 +48,26 @@ where
             }
             result => result,
         }
+    }
+}
+
+impl<P, U> OpenAiBroker<P, U>
+where
+    P: BrokerLeaseProvider + 'static,
+    U: BrokerUpstreamTransport + 'static,
+{
+    /// A front-door request, under the swap rule. Only the Anthropic route
+    /// has it yet; any other route's front-door request is refused before a
+    /// lease, never served by always injecting.
+    async fn execute_intercepted(
+        &self,
+        request: ValidatedGuestRequest,
+        streamed_body: bool,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        if streamed_body || request.slot.as_str() != "anthropic" {
+            return Err(BrokerRequestError::InvalidRequest);
+        }
+        self.execute_swap(request).await
     }
 }
 

@@ -7,8 +7,8 @@ use std::sync::{
 use crate::BrokerCredentialLease;
 use codewire_access::{
     AccessProfileId, BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind,
-    CredentialId, CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentId,
-    GrantPermission, GrantProfile, Owner, OwnerId, Placement, ProviderId,
+    CredentialId, CredentialMetadata, CredentialPlaceholder, CredentialStatus, DerivedGrant,
+    EnvironmentId, GrantPermission, GrantProfile, Owner, OwnerId, Placement, ProviderId,
 };
 use zeroize::Zeroizing;
 
@@ -20,6 +20,7 @@ pub(crate) struct Lease {
     pub permission: GrantPermission,
     pub material: Zeroizing<Vec<u8>>,
     pub reads: Arc<AtomicUsize>,
+    pub placeholder: Option<CredentialPlaceholder>,
 }
 
 impl Lease {
@@ -65,6 +66,7 @@ impl Lease {
             permission,
             material: Zeroizing::new(TOKEN.to_vec()),
             reads: Arc::new(AtomicUsize::new(0)),
+            placeholder: None,
         }
     }
 }
@@ -85,5 +87,8 @@ impl BrokerCredentialLease for Lease {
     fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T {
         self.reads.fetch_add(1, Ordering::Relaxed);
         operation(&self.material)
+    }
+    fn placeholder(&self) -> Option<&CredentialPlaceholder> {
+        self.placeholder.as_ref()
     }
 }

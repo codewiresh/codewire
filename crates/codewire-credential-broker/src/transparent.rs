@@ -26,15 +26,11 @@ use crate::CredentialBrokerError;
 const MAX_PATH_BYTES: usize = 2048;
 const MAX_QUERY_BYTES: usize = 4096;
 
-/// Request headers that carry guest credentials or framing.
-const STRIPPED_REQUEST_HEADERS: &[&str] = &[
-    "authorization",
-    "x-api-key",
-    "cookie",
-    "proxy-authorization",
+/// Framing and hop-by-hop headers, which the transport sets itself. Every
+/// route drops them both ways, and so does a front-door forward (#3999).
+pub(crate) const FRAMING_HEADERS: &[&str] = &[
     "host",
     "content-length",
-    "accept-encoding",
     "connection",
     "keep-alive",
     "proxy-connection",
@@ -44,18 +40,18 @@ const STRIPPED_REQUEST_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
-/// Response headers that carry framing or provider cookies.
-const STRIPPED_RESPONSE_HEADERS: &[&str] = &[
-    "set-cookie",
-    "content-length",
-    "connection",
-    "keep-alive",
-    "proxy-connection",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
+/// Request headers, besides framing, that carry guest credentials or would
+/// make a response unredactable.
+const STRIPPED_REQUEST_HEADERS: &[&str] = &[
+    "authorization",
+    "x-api-key",
+    "cookie",
+    "proxy-authorization",
+    "accept-encoding",
 ];
+
+/// Response headers, besides framing, that carry provider cookies.
+const STRIPPED_RESPONSE_HEADERS: &[&str] = &["set-cookie"];
 
 /// One guest request admitted by a transparent route. It holds no credential.
 #[derive(Clone)]
@@ -141,6 +137,7 @@ impl TransparentRequest {
         for (name, value) in &self.headers {
             let lower = name.as_str();
             if STRIPPED_REQUEST_HEADERS.contains(&lower)
+                || FRAMING_HEADERS.contains(&lower)
                 || also_stripped.contains(&lower)
                 || named_by_connection.iter().any(|token| token == lower)
             {
@@ -168,6 +165,7 @@ pub(crate) fn response_headers(
     for (name, value) in upstream {
         let lower = name.as_str();
         if STRIPPED_RESPONSE_HEADERS.contains(&lower)
+            || FRAMING_HEADERS.contains(&lower)
             || named_by_connection.iter().any(|token| token == lower)
         {
             continue;
@@ -178,6 +176,24 @@ pub(crate) fn response_headers(
         headers.append(name.clone(), value);
     }
     Ok(headers)
+}
+
+/// `headers` without framing, hop-by-hop headers, or the headers
+/// `connection` names, and nothing else removed: a front-door request that
+/// is forwarded, and its reply (#3999).
+pub(crate) fn without_framing(headers: &HeaderMap) -> HeaderMap {
+    let named_by_connection = connection_tokens(headers);
+    let mut kept = HeaderMap::new();
+    for (name, value) in headers {
+        let lower = name.as_str();
+        if FRAMING_HEADERS.contains(&lower)
+            || named_by_connection.iter().any(|token| token == lower)
+        {
+            continue;
+        }
+        kept.append(name.clone(), value.clone());
+    }
+    kept
 }
 
 /// Header names listed in `Connection`, which are hop-by-hop by declaration.

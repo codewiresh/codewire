@@ -37,7 +37,7 @@ pub(crate) const BASE_URL: &str = "https://api.anthropic.com";
 const CREDENTIAL_KEY: &str = "ANTHROPIC_API_KEY";
 const MAX_KEY_BYTES: usize = 1024;
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
-const MAX_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
 
 /// Immutable API-key policy; it never accepts a caller-selected destination.
 pub struct AnthropicApiKeyAdapter {
@@ -107,6 +107,24 @@ impl Default for AnthropicApiKeyAdapter {
 /// Credential-free validated request; its private field prevents route
 /// changes between validation and lease consumption.
 pub struct ValidatedAnthropicRequest(TransparentRequest);
+
+impl ValidatedAnthropicRequest {
+    /// The request as the environment sent it, every header kept, aimed at
+    /// the pinned origin: for a front-door request that carries no
+    /// placeholder, which is forwarded without a lease (#3999).
+    pub(crate) fn into_forwarded(
+        self,
+    ) -> Result<(Method, Url, HeaderMap, Vec<u8>), CredentialBrokerError> {
+        let target = self.0.target(BASE_URL)?;
+        let TransparentRequest {
+            method,
+            headers,
+            body,
+            ..
+        } = self.0;
+        Ok((method, target, headers, body))
+    }
+}
 
 /// Secret-bearing broker-only plan. No Debug, Clone, or serialization.
 pub struct PreparedAnthropicRequest {

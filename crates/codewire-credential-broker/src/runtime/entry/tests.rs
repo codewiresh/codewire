@@ -155,6 +155,11 @@ fn malformed(host: &str) -> Vec<String> {
 struct Recorded {
     leases: Arc<AtomicUsize>,
     outbound: Arc<Mutex<Vec<Outbound>>>,
+    /// The placeholder every lease carries.
+    placeholder: Option<&'static str>,
+    /// The upstream echoes the credential it received in a reply header and
+    /// the body.
+    echo_credential: bool,
 }
 
 impl Recorded {
@@ -162,9 +167,11 @@ impl Recorded {
         OpenAiBroker::new(
             Authority {
                 leases: Arc::clone(&self.leases),
+                placeholder: self.placeholder,
             },
             Upstream {
                 outbound: Arc::clone(&self.outbound),
+                echo_credential: self.echo_credential,
             },
         )
         .unwrap()
@@ -181,6 +188,7 @@ impl Recorded {
 
 struct Authority {
     leases: Arc<AtomicUsize>,
+    placeholder: Option<&'static str>,
 }
 
 #[async_trait]
@@ -203,13 +211,17 @@ impl BrokerLeaseProvider for Authority {
             "github" => ("github", CredentialAuthKind::OAuth),
             _ => return Err(BrokerLeaseError::Denied),
         };
-        Ok(Lease::new(
+        let mut lease = Lease::new(
             provider,
             kind,
             slot.as_str(),
             operation.as_str(),
             route.as_str(),
-        ))
+        );
+        lease.placeholder = self
+            .placeholder
+            .map(|value| codewire_access::CredentialPlaceholder::parse(value).unwrap());
+        Ok(lease)
     }
 
     async fn begin_credential_refresh(
@@ -246,6 +258,7 @@ impl BrokerLeaseProvider for Authority {
 
 struct Upstream {
     outbound: Arc<Mutex<Vec<Outbound>>>,
+    echo_credential: bool,
 }
 
 #[async_trait]
@@ -255,6 +268,10 @@ impl BrokerUpstreamTransport for Upstream {
         request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         let (method, target, headers, body) = request.into_parts();
+        let echoed = headers
+            .get("x-api-key")
+            .map(|value| value.as_bytes().to_vec())
+            .unwrap_or_default();
         let media = if target.host_str() == Some("github.com") {
             "application/x-git-upload-pack-result"
         } else {
@@ -269,10 +286,21 @@ impl BrokerUpstreamTransport for Upstream {
                 .collect(),
             body,
         ));
+        let mut reply_headers =
+            HeaderMap::from_iter([(http::header::CONTENT_TYPE, HeaderValue::from_static(media))]);
+        let reply_body = if self.echo_credential {
+            reply_headers.insert("x-echo", HeaderValue::from_bytes(&echoed).unwrap());
+            let mut body = b"{\"echo\":\"".to_vec();
+            body.extend_from_slice(&echoed);
+            body.extend_from_slice(b"\"}");
+            Bytes::from(body)
+        } else {
+            Bytes::from_static(b"{}")
+        };
         Ok(BrokerUpstreamResponse::new(
             StatusCode::OK,
-            HeaderMap::from_iter([(http::header::CONTENT_TYPE, HeaderValue::from_static(media))]),
-            Box::pin(futures::stream::iter([Ok(Bytes::from_static(b"{}"))])),
+            reply_headers,
+            Box::pin(futures::stream::iter([Ok(reply_body)])),
         ))
     }
 }
@@ -286,34 +314,41 @@ async fn collect(response: BrokerHttpResponse) -> (StatusCode, HeaderMap, Vec<u8
     (status, headers, bytes)
 }
 
-/// A front-door request naming one of its route's hosts is served exactly as
-/// the same request on a loopback session: one lease each, and the provider
-/// receives the same request, headers and all (the request id never leaves
-/// the broker), and the guest the same response. The validated request keeps
-/// the host it named.
+/// A front-door request naming one of its route's hosts is validated with
+/// that host. Only the Anthropic route has the swap rule yet: a front-door
+/// request on any other route is refused before a lease, never served by
+/// always injecting; an Anthropic one with no credential is forwarded as the
+/// environment sent it, without a lease.
 #[tokio::test]
-async fn a_front_door_request_naming_a_host_of_its_route_is_served_as_on_loopback() {
+async fn a_front_door_request_is_served_only_on_a_route_with_the_swap_rule() {
     for case in cases() {
         for host in case.hosts {
             let recorded = Recorded::default();
             let broker = recorded.broker();
-            let loopback = collect(broker.execute(case.request("")).await.unwrap()).await;
-            let front_door =
-                collect(broker.execute_front_door(case.request(host)).await.unwrap()).await;
-            assert_eq!(loopback.0, StatusCode::OK, "{}/{}", case.slot, case.route);
-            assert_eq!(
-                front_door, loopback,
-                "{}/{} via {host}",
-                case.slot, case.route
-            );
-            let outbound = recorded.outbound();
-            assert_eq!(outbound.len(), 2);
-            assert_eq!(
-                outbound[1], outbound[0],
-                "{}/{} via {host}",
-                case.slot, case.route
-            );
-            assert_eq!(recorded.leases(), 2);
+            let front_door = broker.execute_front_door(case.request(host)).await;
+            if case.slot == "anthropic" {
+                let (status, _, body) = collect(front_door.unwrap()).await;
+                assert_eq!((status, body.as_slice()), (StatusCode::OK, &b"{}"[..]));
+                assert_eq!(recorded.leases(), 0);
+                let outbound = recorded.outbound();
+                assert_eq!(outbound.len(), 1);
+                assert!(
+                    outbound[0]
+                        .2
+                        .iter()
+                        .all(|(name, _)| name != "authorization" && name != "x-api-key"),
+                    "nothing is injected into a forwarded request"
+                );
+            } else {
+                assert!(
+                    matches!(front_door, Err(BrokerRequestError::InvalidRequest)),
+                    "{}/{} via {host}",
+                    case.slot,
+                    case.route
+                );
+                assert_eq!(recorded.leases(), 0);
+                assert!(recorded.outbound().is_empty());
+            }
 
             let validated =
                 ValidatedGuestRequest::parse(BridgeEntry::FrontDoor, case.request(host), false)
@@ -328,6 +363,348 @@ async fn a_front_door_request_naming_a_host_of_its_route_is_served_as_on_loopbac
             assert_eq!(validated.intercepted_host, None);
         }
     }
+}
+
+const OURS: &str = "cwp1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+/// Another environment's placeholder: the right shape, not this lease's.
+const THEIRS: &str = "cwp1_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA";
+
+fn anthropic(intercepted_host: &str, credential: &[(&str, String)]) -> v1::CredentialBridgeRequest {
+    let mut request = cases()[2].request(intercepted_host);
+    assert_eq!(request.capability_slot, "anthropic");
+    request.headers.extend(
+        credential
+            .iter()
+            .map(|(name, value)| v1::CredentialHttpHeader {
+                name: (*name).into(),
+                value: value.as_bytes().to_vec(),
+            }),
+    );
+    request
+}
+
+fn header<'a>(outbound: &'a Outbound, name: &str) -> Vec<&'a [u8]> {
+    outbound
+        .2
+        .iter()
+        .filter(|(header, _)| header == name)
+        .map(|(_, value)| value.as_slice())
+        .collect()
+}
+
+/// This environment's placeholder, in either header the rule swaps, is
+/// swapped: one lease, and the provider receives exactly what a loopback
+/// request without a credential sends, the leased key and never the
+/// placeholder.
+#[tokio::test]
+async fn this_environments_placeholder_is_swapped_for_the_leased_credential() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        ..Recorded::default()
+    };
+    let broker = recorded.broker();
+    collect(broker.execute(anthropic("", &[])).await.unwrap()).await;
+    for credential in [
+        ("authorization", format!("Bearer {OURS}")),
+        ("x-api-key", OURS.to_owned()),
+    ] {
+        let (status, _, _) = collect(
+            broker
+                .execute_front_door(anthropic(
+                    "api.anthropic.com",
+                    std::slice::from_ref(&credential),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let outbound = recorded.outbound();
+        let (loopback, swapped) = (&outbound[0], outbound.last().unwrap());
+        assert_eq!(swapped, loopback, "{credential:?}");
+        assert!(
+            swapped.2.iter().all(|(_, value)| !value
+                .windows(OURS.len())
+                .any(|window| window == OURS.as_bytes())),
+            "the placeholder never leaves"
+        );
+        assert_eq!(
+            header(swapped, "x-api-key"),
+            [crate::http_test_support::TOKEN]
+        );
+    }
+    assert_eq!(recorded.leases(), 3);
+}
+
+/// A user's own key takes no lease and reaches the provider as it was sent;
+/// another environment's placeholder takes the lease, doesn't match it, and
+/// is forwarded the same way. Neither reply is redacted.
+#[tokio::test]
+async fn anything_but_this_environments_placeholder_is_forwarded_untouched() {
+    for (credential, leases) in [
+        (("x-api-key", "sk-ant-users-own-key".to_owned()), 0),
+        (
+            ("authorization", "Bearer sk-ant-users-own-key".to_owned()),
+            0,
+        ),
+        (("authorization", format!("Bearer {THEIRS}")), 1),
+    ] {
+        let recorded = Recorded {
+            placeholder: Some(OURS),
+            ..Recorded::default()
+        };
+        let broker = recorded.broker();
+        let (status, _, body) = collect(
+            broker
+                .execute_front_door(anthropic(
+                    "api.anthropic.com",
+                    std::slice::from_ref(&credential),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!((status, body.as_slice()), (StatusCode::OK, &b"{}"[..]));
+        assert_eq!(recorded.leases(), leases, "{credential:?}");
+        let outbound = recorded.outbound();
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(
+            header(&outbound[0], credential.0),
+            [credential.1.as_bytes()]
+        );
+        assert_eq!(
+            header(&outbound[0], "anthropic-version"),
+            [&b"2023-06-01"[..]]
+        );
+        let other = if credential.0 == "x-api-key" {
+            "authorization"
+        } else {
+            "x-api-key"
+        };
+        assert!(header(&outbound[0], other).is_empty(), "{credential:?}");
+    }
+}
+
+/// A placeholder beside another credential header is refused before any
+/// lease with its own answer, telling the client to send one, and nothing is
+/// sent.
+#[tokio::test]
+async fn a_placeholder_beside_another_credential_is_refused() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        ..Recorded::default()
+    };
+    let broker = recorded.broker();
+    let (status, _, body) = collect(
+        broker
+            .execute_front_door(anthropic(
+                "api.anthropic.com",
+                &[
+                    ("x-api-key", OURS.to_owned()),
+                    ("authorization", "Bearer sk-ant-users-own-key".to_owned()),
+                ],
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body["error"]["code"],
+        super::super::swap::CREDENTIAL_CONFLICT_CODE
+    );
+    assert_eq!(recorded.leases(), 0);
+    assert!(recorded.outbound().is_empty());
+}
+
+/// A lease that names no placeholder, as every hosted lease does today, swaps
+/// nothing: a placeholder-shaped value is forwarded as sent, after one lease,
+/// and the leased key never leaves.
+#[tokio::test]
+async fn a_lease_without_a_placeholder_swaps_nothing() {
+    let recorded = Recorded::default();
+    let broker = recorded.broker();
+    let credential = ("authorization", format!("Bearer {OURS}"));
+    let (status, _, _) = collect(
+        broker
+            .execute_front_door(anthropic(
+                "api.anthropic.com",
+                std::slice::from_ref(&credential),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(recorded.leases(), 1);
+    let outbound = recorded.outbound();
+    assert_eq!(outbound.len(), 1);
+    assert_eq!(
+        header(&outbound[0], "authorization"),
+        [credential.1.as_bytes()]
+    );
+    assert!(header(&outbound[0], "x-api-key").is_empty());
+    assert!(outbound[0].2.iter().all(|(_, value)| {
+        !value
+            .windows(crate::http_test_support::TOKEN.len())
+            .any(|window| window == crate::http_test_support::TOKEN)
+    }));
+}
+
+/// A placeholder that is not this environment's costs one lease, not one per
+/// request: while the lease's placeholder is fresh, a mismatch is forwarded
+/// without another. This environment's placeholder still takes a lease each
+/// time, since only a lease carries the key.
+#[tokio::test]
+async fn a_foreign_placeholder_costs_one_lease_while_ours_is_fresh() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        ..Recorded::default()
+    };
+    let broker = recorded.broker();
+    for _ in 0..3 {
+        collect(
+            broker
+                .execute_front_door(anthropic(
+                    "api.anthropic.com",
+                    &[("authorization", format!("Bearer {THEIRS}"))],
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+    }
+    assert_eq!(recorded.leases(), 1);
+    collect(
+        broker
+            .execute_front_door(anthropic(
+                "api.anthropic.com",
+                &[("x-api-key", OURS.to_owned())],
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(recorded.leases(), 2);
+    let outbound = recorded.outbound();
+    assert_eq!(
+        header(outbound.last().unwrap(), "x-api-key"),
+        [crate::http_test_support::TOKEN]
+    );
+}
+
+/// A swapped request's reply is redacted on the front door as on the loopback
+/// path: an upstream that echoes the leased key in a header and the body
+/// returns neither.
+#[tokio::test]
+async fn a_swapped_reply_that_echoes_the_key_is_redacted() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        echo_credential: true,
+        ..Recorded::default()
+    };
+    let broker = recorded.broker();
+    let (status, headers, body) = collect(
+        broker
+            .execute_front_door(anthropic(
+                "api.anthropic.com",
+                &[("x-api-key", OURS.to_owned())],
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = crate::http_test_support::TOKEN;
+    let echoed = headers.get("x-echo").unwrap().as_bytes();
+    assert!(!echoed.windows(token.len()).any(|window| window == token));
+    assert!(!body.windows(token.len()).any(|window| window == token));
+    assert!(!body.is_empty());
+}
+
+/// A forwarded request carries the user's own key through the broker; no log
+/// line, at any level, names it.
+#[tokio::test]
+async fn a_forwarded_credential_is_never_logged() {
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    tracing::callsite::rebuild_interest_cache();
+    let users_key = "sk-ant-users-own-key-never-logged";
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        echo_credential: true,
+        ..Recorded::default()
+    };
+    let broker = recorded.broker();
+    for credential in [
+        ("x-api-key", users_key.to_owned()),
+        ("authorization", format!("Bearer {users_key}")),
+    ] {
+        collect(
+            broker
+                .execute_front_door(anthropic(
+                    "api.anthropic.com",
+                    std::slice::from_ref(&credential),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+    }
+    assert_eq!(recorded.outbound().len(), 2);
+    let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(!text.contains(users_key), "{text}");
+}
+
+/// The loopback path is unchanged by the rule: whatever credential the
+/// environment sends, a placeholder or its own key, is dropped and the leased
+/// one injected, and the provider receives the same bytes as for a request
+/// that sent none.
+#[tokio::test]
+async fn a_loopback_request_always_has_its_credential_replaced() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        ..Recorded::default()
+    };
+    let broker = recorded.broker();
+    for credential in [
+        vec![],
+        vec![("x-api-key", OURS.to_owned())],
+        vec![("authorization", format!("Bearer {THEIRS}"))],
+        vec![("x-api-key", "sk-ant-users-own-key".to_owned())],
+        vec![
+            ("x-api-key", OURS.to_owned()),
+            ("authorization", "Bearer sk-ant-users-own-key".to_owned()),
+        ],
+    ] {
+        collect(broker.execute(anthropic("", &credential)).await.unwrap()).await;
+    }
+    let outbound = recorded.outbound();
+    assert_eq!(outbound.len(), 5);
+    assert!(outbound.iter().all(|request| request == &outbound[0]));
+    assert_eq!(
+        header(&outbound[0], "x-api-key"),
+        [crate::http_test_support::TOKEN]
+    );
+    assert_eq!(recorded.leases(), 5);
 }
 
 /// A front-door request that names no host, a malformed one, or another
@@ -404,7 +781,7 @@ fn front_door_frames(environment_id: Uuid) -> [v1::CredentialBridgeGuestMessage;
             .collect(),
     };
     let ready = v1::CredentialBridgeReady::decode(open.encode_to_vec().as_slice()).unwrap();
-    let request = cases()[0].request("chatgpt.com");
+    let request = anthropic("api.anthropic.com", &[("x-api-key", OURS.to_owned())]);
     [
         v1::CredentialBridgeGuestMessage {
             payload: Some(v1::credential_bridge_guest_message::Payload::Ready(ready)),
@@ -487,7 +864,10 @@ async fn a_loopback_session_whose_peer_sends_what_a_front_door_sends_stays_loopb
 /// one lease, one provider request, and a whole response.
 #[tokio::test]
 async fn the_front_door_runner_serves_the_frames_a_loopback_session_refuses() {
-    let recorded = Recorded::default();
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        ..Recorded::default()
+    };
     let (frames, ended) = serve_on(BridgeEntry::FrontDoor, &recorded).await;
     let Some(Payload::ResponseStart(start)) = frames.first() else {
         panic!("expected a response, got {frames:?}");
@@ -498,7 +878,7 @@ async fn the_front_door_runner_serves_the_frames_a_loopback_session_refuses() {
     assert_eq!(recorded.leases(), 1);
     let outbound = recorded.outbound();
     assert_eq!(outbound.len(), 1);
-    assert_eq!(outbound[0].1, "https://api.openai.com/v1/responses");
+    assert_eq!(outbound[0].1, "https://api.anthropic.com/v1/messages");
 }
 
 /// A front-door session serves HTTP requests only: its executor keeps the
