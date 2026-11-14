@@ -71,9 +71,9 @@ use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
 
 use crate::auth_session::{
-    CreatedSession, SessionAuthState, SignupInvitePolicy, TWO_FACTOR_TOKEN_TTL_SECS, UserAuthRow,
-    configured_human_verification, create_session, hex_id, hex_token, log_audit, log_audit_in,
-    request_info, session_cookie_string,
+    CreatedSession, SessionAuthState, SignupInvitePolicy, SignupMode, TWO_FACTOR_TOKEN_TTL_SECS,
+    UserAuthRow, configured_human_verification, create_session, hex_id, hex_token, log_audit,
+    log_audit_in, request_info, session_cookie_string,
 };
 use crate::email_password::{send_provider_link_confirmation_email, send_provider_linked_email};
 use providers::{IdentityError, ProviderIdentity};
@@ -134,6 +134,9 @@ enum Refusal {
     Disabled,
     /// This client address holds too many started sign-ins.
     RateLimited,
+    /// An invite-only server: sign up from the invite link, then connect the
+    /// provider in Settings (#4121).
+    InviteOnly,
     /// Anything else: the provider failed or answered badly.
     Failed,
 }
@@ -151,6 +154,7 @@ impl Refusal {
             | Self::Locked
             | Self::Disabled
             | Self::RateLimited
+            | Self::InviteOnly
             | Self::Failed => LinkResult::Failed,
         }
     }
@@ -165,6 +169,7 @@ impl Refusal {
             Self::Locked => "locked",
             Self::Disabled => "disabled",
             Self::RateLimited => "rate_limited",
+            Self::InviteOnly => "invite_only",
             Self::Failed => "failed",
         }
     }
@@ -918,6 +923,10 @@ async fn resolve(
             .await
             .map_err(failed)?;
             match owners.as_slice() {
+                [] if state.session.signup_invite_policy.mode() == SignupMode::InviteOnly => {
+                    tx.rollback().await.map_err(failed)?;
+                    return Err(Refusal::InviteOnly);
+                }
                 [] => {
                     tx.commit().await.map_err(failed)?;
                     return pending_signup_row(pool, provider, identity, target)

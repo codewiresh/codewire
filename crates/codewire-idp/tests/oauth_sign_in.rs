@@ -16,7 +16,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use codewire_idp::auth_session::SignupInvitePolicy;
+use codewire_idp::auth_session::{SignupInvitePolicy, SignupMode};
 use codewire_idp::oauth::{
     LinkConfirmationMailer, OAuthProviders, OAuthUpstream, Provider, UpstreamError,
     UpstreamRequest, UpstreamResponse, trusted_test_router,
@@ -745,6 +745,46 @@ async fn new_identity_with_an_invite_signs_up_active_and_gets_a_session() {
 }
 
 #[tokio::test]
+async fn an_open_server_signs_up_a_new_identity_active_without_an_invite_or_reason() {
+    let Some(h) = Harness::new(invite_policy().with_mode(SignupMode::Open)).await else {
+        return;
+    };
+    let email = "oauth-open@example.test";
+    cleanup(&h.pool, &[email], &["9100041"]).await;
+
+    let started = h.start("github", "").await;
+    h.answer(&started, "open-code", github(9100041, email, true));
+    let reply = h.callback("github", &started, "open-code").await;
+    assert_eq!(reply.location.as_deref(), Some("/signup/complete"));
+    let handle = cookie_value(&reply.cookie("codewire_oauth_signup").unwrap());
+
+    let complete = h
+        .request(
+            "POST",
+            "/api/auth/oauth/signup/complete",
+            &[],
+            Some(json!({ "token": handle })),
+        )
+        .await;
+    assert_eq!(complete.status, StatusCode::OK, "{:?}", complete.body);
+    assert!(complete.body.get("accessPending").is_none());
+    assert!(complete.cookie("codewire.session_token").is_some());
+    let (user_id, verified, enabled, reason): (String, bool, bool, Option<String>) =
+        sqlx::query_as(
+            "SELECT id, email_verified, enabled, access_reason FROM users WHERE email = $1",
+        )
+        .bind(email)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert!(verified && enabled);
+    assert!(reason.is_none());
+    assert_eq!(sessions(&h.pool, &user_id).await, 1);
+    assert_eq!(audit_count(&h.pool, &user_id, "user.signup").await, 1);
+    cleanup(&h.pool, &[email], &["9100041"]).await;
+}
+
+#[tokio::test]
 async fn a_linked_identity_signs_in_and_returns_to_its_target() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
@@ -1278,6 +1318,62 @@ async fn starts_are_bounded_per_client_address() {
     .await
     .assert_refused("cancelled");
     h.start("github", "").await;
+}
+
+#[tokio::test]
+async fn an_invite_only_server_refuses_provider_sign_up() {
+    let Some(h) =
+        Harness::new(SignupInvitePolicy::default().with_mode(SignupMode::InviteOnly)).await
+    else {
+        return;
+    };
+    let email = "oauth-invite-only-new@example.test";
+    cleanup(&h.pool, &[email], &["9100031"]).await;
+
+    let started = h.start("github", "").await;
+    h.answer(&started, "invite-only-code", github(9100031, email, true));
+    h.callback("github", &started, "invite-only-code")
+        .await
+        .assert_refused("invite_only");
+    let created: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE email = $1")
+        .bind(email)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(created, 0);
+}
+
+#[tokio::test]
+async fn a_vouched_address_is_never_linked_by_a_provider_that_owns_it() {
+    let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
+        return;
+    };
+    // Google vouches for a whole @gmail.com address, the case that links at
+    // once when the account's address is verified.
+    let email = "oauth-vouched-owner@gmail.com";
+    cleanup(&h.pool, &[email], &["google-sub-vouched"]).await;
+    insert_user(&h.pool, "oauth-vouched-owner", email, false, true).await;
+    sqlx::query(
+        "UPDATE users SET email_vouched_by = 'invitation' WHERE id = 'oauth-vouched-owner'",
+    )
+    .execute(&h.pool)
+    .await
+    .unwrap();
+
+    let started = h.start("google", "").await;
+    let claims = google(&started, "google-sub-vouched", email);
+    h.answer(&started, "vouched-code", Answer::Google { claims });
+    h.callback("google", &started, "vouched-code")
+        .await
+        .assert_refused("link_required");
+    let linked: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM accounts WHERE user_id = 'oauth-vouched-owner' AND provider_id = 'google'")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(linked, 0);
+    assert_eq!(sessions(&h.pool, "oauth-vouched-owner").await, 0);
+    cleanup(&h.pool, &[email], &["google-sub-vouched"]).await;
 }
 
 #[tokio::test]

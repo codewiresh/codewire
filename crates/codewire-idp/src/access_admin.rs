@@ -39,9 +39,28 @@ struct AccountAccessRow {
     enabled: bool,
     access_reason: Option<String>,
     created_at: NaiveDateTime,
+    /// Who vouched for the address on a server with no mail (#4121):
+    /// `invitation`, `bootstrap` or `admin`.
+    vouched_by: Option<String>,
     /// The GitHub and Google identities that sign in to this account.
     #[sqlx(skip)]
     linked_identities: Vec<LinkedIdentityRow>,
+    /// The invitation whose link let this account in, so an admin who gave a
+    /// link to the wrong person sees it here and can disable the account.
+    #[sqlx(skip)]
+    joined_via: Option<JoinedViaRow>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+struct JoinedViaRow {
+    #[serde(skip)]
+    user_id: String,
+    invitation_id: String,
+    organization: Option<String>,
+    inviter_name: Option<String>,
+    inviter_email: Option<String>,
+    joined_at: NaiveDateTime,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -98,7 +117,8 @@ async fn list_accounts(
                   COALESCE(email_verified, false) AS email_verified,
                   enabled,
                   access_reason,
-                  COALESCE(created_at, NOW()::timestamp) AS created_at
+                  COALESCE(created_at, NOW()::timestamp) AS created_at,
+                  email_vouched_by AS vouched_by
            FROM users
            WHERE id <> $1
            ORDER BY enabled ASC,
@@ -129,12 +149,38 @@ async fn list_accounts(
         tracing::error!(%error, "failed to list linked identities");
         AppError::InternalMsg("Failed to list accounts".into())
     })?;
+    // An invited sign-up's audit row names its invitation, never the token.
+    let joined = sqlx::query_as::<_, JoinedViaRow>(
+        "SELECT a.user_id, i.id AS invitation_id, o.name AS organization, \
+                inviter.name AS inviter_name, inviter.email AS inviter_email, \
+                a.timestamp AS joined_at \
+           FROM audit_logs a \
+           JOIN org_invitations i ON i.id = a.metadata ->> 'invitation_id' \
+           LEFT JOIN organizations o ON o.id = i.org_id \
+           LEFT JOIN users inviter ON inviter.id = i.invited_by \
+          WHERE a.user_id = ANY($1) AND a.action = 'user.signup'",
+    )
+    .bind(&ids)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "failed to list how accounts joined");
+        AppError::InternalMsg("Failed to list accounts".into())
+    })?;
     for identity in identities {
         if let Some(account) = accounts
             .iter_mut()
             .find(|account| account.id == identity.user_id)
         {
             account.linked_identities.push(identity);
+        }
+    }
+    for joined_via in joined {
+        if let Some(account) = accounts
+            .iter_mut()
+            .find(|account| account.id == joined_via.user_id)
+        {
+            account.joined_via = Some(joined_via);
         }
     }
     Ok(Json(AccountAccessList { accounts }))
@@ -205,27 +251,33 @@ async fn set_account_enabled(
             return Err(AppError::Conflict("This account is being deleted".into()));
         }
     }
-    if request.enabled && account.access_reason.is_some() && !account.email_verified {
+    // With mail an access request is verified first, and enabling sends the
+    // ready email. A server with no mail cannot verify anyone, so enabling is
+    // the admin vouching for the address (#4121), and nothing is sent.
+    let mail = state.email.is_configured();
+    if request.enabled && mail && account.access_reason.is_some() && !account.email_verified {
         return Err(AppError::BadRequest(
             "Verify the account email before enabling access".into(),
         ));
     }
-    if request.enabled && !state.email.is_configured() {
-        return Err(AppError::ServiceUnavailable(
-            "Account email is temporarily unavailable".into(),
-        ));
-    }
+    let vouches = request.enabled && !mail && !account.email_verified;
 
     if account.enabled != request.enabled {
-        sqlx::query("UPDATE users SET enabled = $1, updated_at = NOW() WHERE id = $2")
-            .bind(request.enabled)
-            .bind(&user_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                tracing::error!(%error, "failed to update account access state");
-                AppError::InternalMsg("Failed to update account".into())
-            })?;
+        sqlx::query(
+            "UPDATE users SET enabled = $1, updated_at = NOW(), \
+             email_vouched_by = CASE WHEN $3 THEN COALESCE(email_vouched_by, 'admin') \
+                                     ELSE email_vouched_by END \
+             WHERE id = $2",
+        )
+        .bind(request.enabled)
+        .bind(&user_id)
+        .bind(vouches)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to update account access state");
+            AppError::InternalMsg("Failed to update account".into())
+        })?;
 
         sqlx::query(
             r#"INSERT INTO audit_logs
@@ -243,7 +295,7 @@ async fn set_account_enabled(
         .bind(&user_id)
         .bind(&ip)
         .bind(&user_agent)
-        .bind(json!({ "enabled": request.enabled, "email": &account.email }))
+        .bind(json!({ "enabled": request.enabled, "email": &account.email, "vouched": vouches }))
         .execute(&mut *tx)
         .await
         .map_err(|error| {
@@ -257,7 +309,7 @@ async fn set_account_enabled(
         AppError::InternalMsg("Failed to update account".into())
     })?;
 
-    if request.enabled {
+    if request.enabled && mail {
         let login_url = format!("{}/login", state.frontend_url.trim_end_matches('/'));
         if let Err(error) =
             send_access_enabled_email(&state.email, &account.email, &login_url).await

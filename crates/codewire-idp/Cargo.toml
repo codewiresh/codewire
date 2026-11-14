@@ -15,6 +15,7 @@ codewire-server-core = { workspace = true }
 codewire-oidc = { workspace = true, features = ["axum"] }
 codewire-email = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }

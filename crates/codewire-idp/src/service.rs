@@ -24,7 +24,8 @@ use sqlx::PgPool;
 
 use crate::{
     PgAuthorizationStore, PgClientStore, PgDeviceAuthorizationStore, PgKeyStore, PgTokenCustomizer,
-    PgTokenStore, PgUserAuthenticator, SigningKekKeyring, auth_session::SignupInvitePolicy,
+    PgTokenStore, PgUserAuthenticator, SigningKekKeyring,
+    auth_session::{SignupInvitePolicy, SignupMode},
 };
 
 /// Static configuration for the idp service.
@@ -116,7 +117,9 @@ impl IdpConfig {
             pick(&["IDP_TURNSTILE_BYPASS_EMAIL"], &mut value).unwrap_or_default();
         let signup_invite_policy = SignupInvitePolicy::from_sha256_hashes(
             value("IDP_SIGNUP_INVITE_CODE_HASHES").as_deref(),
-        )?;
+        )?
+        .with_mode(SignupMode::from_env_value(value("IDP_SIGNUP").as_deref())?)
+        .with_reason_setting(value("IDP_SIGNUP_REASON").as_deref())?;
         let revoke_reused_refresh_tokens =
             match pick(&["IDP_REFRESH_REUSE_REVOKES"], &mut value).as_deref() {
                 None | Some("false") => false,
@@ -282,7 +285,7 @@ fn require_secure_issuer(issuer: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{IdpConfig, SignupInvitePolicy, require_secure_issuer};
+    use super::{IdpConfig, SignupInvitePolicy, SignupMode, require_secure_issuer};
 
     #[test]
     fn config_debug_redacts_turnstile_secret() {
@@ -466,5 +469,27 @@ mod tests {
 
         assert!(error.to_string().contains("IDP_SIGNUP_INVITE_CODE_HASHES"));
         assert!(!error.to_string().contains("plaintext-is-not-valid"));
+    }
+
+    #[test]
+    fn signup_mode_is_owned_by_idp_configuration() {
+        let config = |mode: Option<&str>| {
+            IdpConfig::from_values(|key| match key {
+                "PUBLIC_OIDC_ISSUER_URL" => Some("https://idp.example".to_owned()),
+                "IDP_SIGNUP" => mode.map(str::to_owned),
+                _ => None,
+            })
+        };
+        for (value, mode) in [
+            (None, SignupMode::Review),
+            (Some("review"), SignupMode::Review),
+            (Some("invite-only"), SignupMode::InviteOnly),
+            (Some("open"), SignupMode::Open),
+        ] {
+            let cfg = config(value).expect("a known mode resolves");
+            assert_eq!(cfg.signup_invite_policy.mode(), mode, "{value:?}");
+        }
+        let unknown = config(Some("closed")).unwrap_err();
+        assert!(unknown.to_string().contains("IDP_SIGNUP"));
     }
 }

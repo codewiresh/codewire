@@ -111,6 +111,47 @@ holds no invitation token: it tells the invitee to sign in at `FRONTEND_URL`
 `/login` with the invited address and run `cw org accept <slug>`. No setting
 controls it.
 
+## Sign-up
+
+`IDP_SIGNUP` chooses how the IdP admits a new account. Every mode runs the
+same sign-up; the mode decides only what admits an account and what a
+sign-up that nothing admits does. With mail, every address is verified by
+email before it can sign in (#4481).
+
+- `review`, the default: a Turnstile challenge; a code whose SHA-256 digest
+  is in `IDP_SIGNUP_INVITE_CODE_HASHES` admits at once, and anyone else waits
+  for access review with a reason.
+- `open`: a Turnstile challenge; everyone is admitted, including a sign-up
+  with GitHub or Google, which signs in at once.
+- `invite-only`, for a self-hosted server: setup creates the admin
+  (`codewire-idp create-admin`, below), and no sign-up is taken before it
+  has. Then an organization invitation for the person's exact address admits;
+  anyone else waits, disabled, for the admin to enable them. Turnstile is
+  checked only when its keys are set, and never for a sign-up from an invite
+  link. `IDP_SIGNUP_REASON=required` makes a sign-up without an invite say
+  why. On a server with no mail the admin vouches for each address: by handing
+  over an invite link, by creating the admin, or by enabling a waiting
+  account, and an invite link admits a sign-up for 24 hours after it was
+  issued. If the server adds mail later, each vouched account, the admin
+  included, verifies its address by email at its next sign-in. Sign-up with
+  GitHub or Google is refused; connect them in Settings after signing up.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `IDP_SIGNUP` | No | `review` (the default), `open` or `invite-only`. Any other value stops the IdP from starting. | `invite-only` |
+| `IDP_SIGNUP_REASON` | No | `required` asks a sign-up that waits for the admin what they want to build; the admin reads it on Admin → Account Access. Review mode always asks. | `required` |
+
+Setup makes the server's admin before anything else:
+
+```sh
+printf '%s\n' "$password" | codewire-idp create-admin --email admin@example.com
+```
+
+The password is read from stdin, so it never appears in a process list. A
+second run changes nothing once an admin exists. With mail, the admin verifies
+the address before signing in, like any account; without mail, setup vouches
+for it.
+
 ## Sign in with GitHub or Google
 
 The IdP offers "Continue with GitHub" and "Continue with Google" on the

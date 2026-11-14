@@ -3361,6 +3361,738 @@ async fn session_auth_flow_against_postgres() {
     cleanup(pool.clone()).await;
 }
 
+/// A freshly migrated database of its own, for tests that need to know every
+/// account in it. `drop_isolated` removes it.
+async fn isolated_database(label: &str) -> Option<(PgPool, PgPool, String)> {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping {label}");
+        return None;
+    };
+    let admin = PgPool::connect(&url).await.expect("connect admin");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let db_name = format!("cw_idp_{label}_{}_{nanos}", std::process::id());
+    sqlx::query(&format!(r#"CREATE DATABASE "{db_name}""#))
+        .execute(&admin)
+        .await
+        .expect("create isolated database");
+    let mut test_url = url::Url::parse(&url).expect("parse DATABASE_URL");
+    test_url.set_path(&db_name);
+    codewire_server_core::migrate::ensure_schema(test_url.as_str())
+        .await
+        .expect("migrate isolated database");
+    let pool = PgPool::connect(test_url.as_str()).await.expect("connect");
+    Some((admin, pool, db_name))
+}
+
+async fn drop_isolated(admin: PgPool, pool: PgPool, db_name: &str) {
+    pool.close().await;
+    sqlx::query(&format!(
+        r#"DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)"#
+    ))
+    .execute(&admin)
+    .await
+    .expect("drop isolated database");
+}
+
+/// The production sign-up router on an invite-only server with no mail.
+fn invite_only_app(pool: &PgPool) -> axum::Router {
+    let policy = codewire_idp::auth_session::SignupInvitePolicy::default()
+        .with_mode(codewire_idp::auth_session::SignupMode::InviteOnly);
+    codewire_idp::auth_session::router_with_signup_delivery(
+        pool.clone(),
+        false,
+        policy,
+        "https://app.codewire.test".to_string(),
+        codewire_email::EmailClient::disabled(),
+        String::new(),
+        String::new(),
+    )
+}
+
+async fn invite_only_sign_up(
+    app: &axum::Router,
+    email: &str,
+    tokens: &str,
+) -> (u16, serde_json::Value, Option<String>) {
+    sess_req(
+        app,
+        "POST",
+        "/api/auth/sign-up",
+        None,
+        &format!(
+            r#"{{"email":"{email}","password":"Sup3rStrong!Pass","name":"Invited Person"{tokens}}}"#
+        ),
+    )
+    .await
+}
+
+fn assert_invite_only_refusal((st, body, cookie): (u16, serde_json::Value, Option<String>)) {
+    assert_eq!(st, 403, "invite-only refusal: {body}");
+    assert_eq!(body["code"], "invite_only");
+    assert_eq!(
+        body["detail"],
+        codewire_idp::auth_session::INVITE_ONLY_REFUSAL
+    );
+    assert!(cookie.is_none());
+}
+
+async fn account_state(pool: &PgPool, email: &str) -> (String, bool, bool, Option<String>, bool) {
+    sqlx::query_as(
+        "SELECT id, enabled, COALESCE(email_verified, false), email_vouched_by, \
+                COALESCE(is_admin, false) \
+           FROM users WHERE email = $1",
+    )
+    .bind(email)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn invite_only_sign_up_without_mail_vouches_by_invitation_against_postgres() {
+    let Some((admin, pool, db_name)) = isolated_database("invite_only").await else {
+        return;
+    };
+    sqlx::query("INSERT INTO users (id, email, name, email_verified, is_admin, enabled) VALUES ('u_owner', 'owner@example.test', 'Owner', true, true, true)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES ('s_owner', 'u_owner', $1, NOW() + interval '1 hour')")
+        .bind(hash_session_token("sess_owner_invite_only"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO organizations (id, name, slug, created_by) VALUES ('org_invite', 'Invite Org', 'invite-org', 'u_owner')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // (id, address, token, status, issued hours ago, expires in hours)
+    for (id, email, token, status, issued, expires) in [
+        (
+            "inv_alice",
+            "alice@example.test",
+            "alice-token",
+            "pending",
+            1,
+            167,
+        ),
+        (
+            "inv_old",
+            "old@example.test",
+            "old-token",
+            "pending",
+            25,
+            143,
+        ),
+        (
+            "inv_expired",
+            "expired@example.test",
+            "expired-token",
+            "pending",
+            10,
+            -1,
+        ),
+        (
+            "inv_revoked",
+            "revoked@example.test",
+            "revoked-token",
+            "revoked",
+            1,
+            167,
+        ),
+        (
+            "inv_erin",
+            "erin@example.test",
+            "erin-token",
+            "pending",
+            1,
+            167,
+        ),
+        (
+            "inv_gina",
+            "gina@example.test",
+            "gina-token",
+            "pending",
+            1,
+            167,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO org_invitations (id, org_id, email, role, invited_by, status, expires_at, created_at, token_hash) \
+             VALUES ($1, 'org_invite', $2, 'member', 'u_owner', $3, \
+                     NOW() + make_interval(hours => $5), NOW() - make_interval(hours => $4), $6)",
+        )
+        .bind(id)
+        .bind(email)
+        .bind(status)
+        .bind(issued)
+        .bind(expires)
+        .bind(hash_oauth_token(token))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let app = invite_only_app(&pool);
+    let token = |token: &str| format!(r#","invitation_token":"{token}""#);
+
+    // Every invitation that does not admit this address gets the same words
+    // and creates nothing.
+    for (email, presented) in [
+        ("alice@example.test", "wrong-token"),
+        ("bob@example.test", "alice-token"),
+        ("old@example.test", "old-token"),
+        ("expired@example.test", "expired-token"),
+        ("revoked@example.test", "revoked-token"),
+    ] {
+        assert_invite_only_refusal(invite_only_sign_up(&app, email, &token(presented)).await);
+    }
+    let accounts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM users WHERE id NOT IN ('u_owner', 'deleted-user')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(accounts, 0);
+
+    // The invitation admits its own address: enabled, vouched, not verified.
+    let (st, body, cookie) =
+        invite_only_sign_up(&app, "alice@example.test", &token("alice-token")).await;
+    assert_eq!(st, 200, "invited sign-up: {body}");
+    assert!(cookie.unwrap().starts_with("codewire.session_token="));
+    let (alice, enabled, verified, vouched, is_admin) =
+        account_state(&pool, "alice@example.test").await;
+    assert!(enabled && !verified && !is_admin);
+    assert_eq!(vouched.as_deref(), Some("invitation"));
+    let audit: serde_json::Value = sqlx::query_scalar(
+        "SELECT metadata FROM audit_logs WHERE user_id = $1 AND action = 'user.signup'",
+    )
+    .bind(&alice)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audit["invitation_id"], "inv_alice");
+    assert!(!audit.to_string().contains("alice-token"));
+
+    // One account per address, whatever its case.
+    for email in ["alice@example.test", "ALICE@example.test"] {
+        let (st, body, _) = invite_only_sign_up(&app, email, &token("alice-token")).await;
+        assert_eq!(st, 409, "{email}: {body}");
+    }
+    // A vouched address signs in.
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-in",
+        None,
+        r#"{"email":"alice@example.test","password":"Sup3rStrong!Pass"}"#,
+    )
+    .await;
+    assert_eq!(st, 200, "vouched sign-in: {body}");
+
+    // Without an invitation the account waits for the admin, and sign-in
+    // says so instead of asking for a verification it cannot send.
+    let (st, body, cookie) = invite_only_sign_up(&app, "carol@example.test", "").await;
+    assert_eq!(st, 202, "waiting sign-up: {body}");
+    assert_eq!(body["accessPending"], true);
+    assert!(cookie.is_none());
+    let (carol, enabled, _, vouched, _) = account_state(&pool, "carol@example.test").await;
+    assert!(!enabled);
+    assert!(vouched.is_none());
+    let carol_sign_in = r#"{"email":"carol@example.test","password":"Sup3rStrong!Pass"}"#;
+    let (st, body, _) = sess_req(&app, "POST", "/api/auth/sign-in", None, carol_sign_in).await;
+    assert_eq!(st, 403);
+    assert_eq!(body["code"], "account_disabled");
+
+    // The admin enabling it is the admin vouching for it.
+    let access = codewire_idp::access_admin::router(
+        pool.clone(),
+        "https://app.codewire.test".to_string(),
+        codewire_email::EmailClient::disabled(),
+        AuthState { pool: pool.clone() },
+    );
+    let (st, body, _) = sess_req(
+        &access,
+        "POST",
+        &format!("/api/admin/accounts/{carol}/enabled"),
+        Some("sess_owner_invite_only"),
+        r#"{"enabled":true}"#,
+    )
+    .await;
+    assert_eq!(st, 200, "admin enable: {body}");
+    let (_, enabled, verified, vouched, _) = account_state(&pool, "carol@example.test").await;
+    assert!(enabled && !verified);
+    assert_eq!(vouched.as_deref(), Some("admin"));
+    let (st, _, _) = sess_req(&app, "POST", "/api/auth/sign-in", None, carol_sign_in).await;
+    assert_eq!(st, 200);
+
+    // The admin's list shows how each vouched account joined: the
+    // invitation, its organization, the inviter and the time.
+    let (st, body, _) = sess_req(
+        &access,
+        "GET",
+        "/api/admin/accounts",
+        Some("sess_owner_invite_only"),
+        "",
+    )
+    .await;
+    assert_eq!(st, 200, "admin list: {body}");
+    let row = |email: &str| {
+        body["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|account| account["email"] == email)
+            .cloned()
+            .unwrap()
+    };
+    let alice_row = row("alice@example.test");
+    assert_eq!(alice_row["vouchedBy"], "invitation");
+    assert_eq!(alice_row["joinedVia"]["invitationId"], "inv_alice");
+    assert_eq!(alice_row["joinedVia"]["organization"], "Invite Org");
+    assert_eq!(alice_row["joinedVia"]["inviterName"], "Owner");
+    assert_eq!(alice_row["joinedVia"]["inviterEmail"], "owner@example.test");
+    assert!(alice_row["joinedVia"]["joinedAt"].is_string());
+    assert!(!body.to_string().contains("alice-token"));
+    let carol_row = row("carol@example.test");
+    assert_eq!(carol_row["vouchedBy"], "admin");
+    assert!(carol_row["joinedVia"].is_null());
+
+    // With IDP_SIGNUP_REASON=required a sign-up without an invite says why;
+    // an invited one is never asked.
+    let policy = |reason: Option<&str>| {
+        codewire_idp::auth_session::SignupInvitePolicy::default()
+            .with_mode(codewire_idp::auth_session::SignupMode::InviteOnly)
+            .with_reason_setting(reason)
+            .unwrap()
+    };
+    let asks_reason = codewire_idp::auth_session::router_with_signup_delivery(
+        pool.clone(),
+        false,
+        policy(Some("required")),
+        "https://app.codewire.test".to_string(),
+        codewire_email::EmailClient::disabled(),
+        String::new(),
+        String::new(),
+    );
+    let (st, body, _) = invite_only_sign_up(&asks_reason, "dave@example.test", "").await;
+    assert_eq!(st, 400, "no reason: {body}");
+    let (st, body, _) = invite_only_sign_up(
+        &asks_reason,
+        "dave@example.test",
+        r#","reason":"Run my team's agents""#,
+    )
+    .await;
+    assert_eq!(st, 202, "with a reason: {body}");
+    let reason: Option<String> =
+        sqlx::query_scalar("SELECT access_reason FROM users WHERE email = 'dave@example.test'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(reason.as_deref(), Some("Run my team's agents"));
+    let (st, body, _) =
+        invite_only_sign_up(&asks_reason, "erin@example.test", &token("erin-token")).await;
+    assert_eq!(st, 200, "an invited sign-up gives no reason: {body}");
+
+    // With Turnstile keys set a sign-up without an invite passes the
+    // challenge; one from a per-address invite link skips it (#4121).
+    let challenged = codewire_idp::auth_session::router_with_signup_delivery(
+        pool.clone(),
+        false,
+        policy(None),
+        "https://app.codewire.test".to_string(),
+        codewire_email::EmailClient::disabled(),
+        "synthetic-turnstile-secret".to_string(),
+        String::new(),
+    );
+    let (st, body, _) = invite_only_sign_up(&challenged, "frank@example.test", "").await;
+    assert_eq!(st, 400, "uninvited: {body}");
+    assert_eq!(body["detail"], "Complete the human verification challenge");
+    // A wrong token is no way around the challenge: it is asked, not refused
+    // as an invitation.
+    let (st, body, _) = invite_only_sign_up(
+        &challenged,
+        "frank@example.test",
+        r#","invitation_token":"not-an-invitation""#,
+    )
+    .await;
+    assert_eq!(st, 400, "bogus token: {body}");
+    assert_eq!(body["detail"], "Complete the human verification challenge");
+    let (st, body, _) =
+        invite_only_sign_up(&challenged, "gina@example.test", &token("gina-token")).await;
+    assert_eq!(st, 200, "invited: {body}");
+
+    // A mailbox verification replaces the vouch.
+    sqlx::query(
+        "INSERT INTO verifications (id, identifier, purpose, token_hash, expires_at) \
+         VALUES ('ver_vouched', 'alice@example.test', 'email_verification', $1, NOW() + interval '1 hour')",
+    )
+    .bind(verification_token_hash("email_verification", "vouched-verify"))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mail = codewire_idp::email_password::router(
+        pool.clone(),
+        "https://app.codewire.test".to_string(),
+        codewire_email::EmailClient::disabled(),
+        AuthState { pool: pool.clone() },
+    );
+    let (st, _, _) = sess_req(
+        &mail,
+        "GET",
+        "/api/auth/verify-email?token=vouched-verify",
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, 200);
+    let (_, _, verified, vouched, _) = account_state(&pool, "alice@example.test").await;
+    assert!(verified);
+    assert!(vouched.is_none());
+
+    drop_isolated(admin, pool, &db_name).await;
+}
+
+#[tokio::test]
+async fn email_sign_up_without_a_code_waits_in_review_and_is_admitted_when_open_against_postgres() {
+    use codewire_idp::auth_session::SignupMode;
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping review and open sign-up");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+    let email = "open-mode@example.com";
+    let forget = || async {
+        for statement in [
+            "DELETE FROM verifications WHERE identifier = $1",
+            "DELETE FROM accounts WHERE account_id = $1",
+            "DELETE FROM users WHERE email = $1",
+        ] {
+            sqlx::query(statement).bind(email).execute(&pool).await.ok();
+        }
+    };
+    // No code: review takes an access request, with its reason; open admits
+    // without one. Either way nobody is signed in until the address's owner
+    // opens the emailed link.
+    for (mode, fields, admitted) in [
+        (SignupMode::Review, r#","reason":"Build agents""#, false),
+        (SignupMode::Open, "", true),
+    ] {
+        forget().await;
+        let (mail, outbox) = codewire_email::EmailClient::recording();
+        let app = codewire_idp::auth_session::router_with_email(
+            pool.clone(),
+            false,
+            codewire_idp::auth_session::SignupInvitePolicy::default().with_mode(mode),
+            "https://app.codewire.test".to_owned(),
+            mail,
+        );
+        let (st, body, cookie) = invite_only_sign_up(&app, email, fields).await;
+        assert_eq!(st, 202, "{mode:?} sign-up: {body}");
+        assert_eq!(body["verificationPending"], true);
+        assert_eq!(
+            body.get("accessPending").is_some(),
+            !admitted,
+            "{mode:?}: {body}"
+        );
+        assert!(cookie.is_none());
+        let (_, enabled, verified, vouched, _) = account_state(&pool, email).await;
+        assert_eq!(enabled, admitted, "{mode:?}");
+        assert!(!verified);
+        assert!(vouched.is_none());
+        assert_eq!(outbox.sent().len(), 1);
+        let (st, body, _) = sess_req(
+            &app,
+            "POST",
+            "/api/auth/sign-in",
+            None,
+            &format!(r#"{{"email":"{email}","password":"Sup3rStrong!Pass"}}"#),
+        )
+        .await;
+        assert_eq!(st, 403);
+        assert_eq!(body["code"], "email_unverified");
+    }
+    forget().await;
+}
+
+#[tokio::test]
+async fn invite_only_sign_up_with_mail_verifies_before_sign_in_against_postgres() {
+    let Some((admin, pool, db_name)) = isolated_database("invite_only_mail").await else {
+        return;
+    };
+    sqlx::query("INSERT INTO users (id, email, name, email_verified, is_admin, enabled) VALUES ('u_owner', 'owner@example.test', 'Owner', true, true, true)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO organizations (id, name, slug, created_by) VALUES ('org_mail', 'Mail Org', 'mail-org', 'u_owner')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Issued a day and an hour ago: with mail only the invitation's own
+    // expiry applies.
+    sqlx::query(
+        "INSERT INTO org_invitations (id, org_id, email, role, invited_by, status, expires_at, created_at, token_hash) \
+         VALUES ('inv_hana', 'org_mail', 'hana@example.test', 'member', 'u_owner', 'pending', \
+                 NOW() + interval '6 days', NOW() - interval '25 hours', $1)",
+    )
+    .bind(hash_oauth_token("hana-token"))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (mail, outbox) = codewire_email::EmailClient::recording();
+    let app = codewire_idp::auth_session::router_with_email(
+        pool.clone(),
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::default()
+            .with_mode(codewire_idp::auth_session::SignupMode::InviteOnly),
+        "https://app.codewire.test".to_owned(),
+        mail,
+    );
+
+    let (st, body, cookie) = invite_only_sign_up(
+        &app,
+        "hana@example.test",
+        r#","invitation_token":"hana-token""#,
+    )
+    .await;
+    assert_eq!(st, 202, "invited with mail: {body}");
+    assert_eq!(body["verificationPending"], true);
+    assert!(cookie.is_none());
+    let (_, enabled, verified, vouched, _) = account_state(&pool, "hana@example.test").await;
+    assert!(enabled && !verified);
+    assert!(vouched.is_none(), "with mail nothing is vouched");
+    assert_eq!(outbox.sent().len(), 1);
+
+    let sign_in = r#"{"email":"hana@example.test","password":"Sup3rStrong!Pass"}"#;
+    let (st, body, _) = sess_req(&app, "POST", "/api/auth/sign-in", None, sign_in).await;
+    assert_eq!(st, 403);
+    assert_eq!(body["code"], "email_unverified");
+    sqlx::query("UPDATE users SET email_verified = true WHERE email = 'hana@example.test'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, body, _) = sess_req(&app, "POST", "/api/auth/sign-in", None, sign_in).await;
+    assert_eq!(st, 200, "after verification: {body}");
+
+    drop_isolated(admin, pool, &db_name).await;
+}
+
+#[tokio::test]
+async fn setup_creates_one_admin_before_any_sign_up_against_postgres() {
+    let Some((admin, pool, db_name)) = isolated_database("create_admin").await else {
+        return;
+    };
+    use codewire_idp::admin_bootstrap::{CreateAdmin, CreateAdminError, create_admin};
+    let no_mail = codewire_email::EmailClient::disabled();
+    let frontend = "https://app.codewire.test";
+    let app = invite_only_app(&pool);
+
+    // Nothing is taken before the admin exists.
+    let (st, body, _) = invite_only_sign_up(&app, "early@example.test", "").await;
+    assert_eq!(st, 503, "before setup: {body}");
+
+    // A weak or missing password, or no address, makes nothing.
+    for (email, password) in [
+        ("admin@example.test", "short"),
+        ("admin@example.test", ""),
+        ("not-an-address", "Sup3rStrong!Pass"),
+    ] {
+        let refused = create_admin(&pool, email, password, &no_mail, frontend).await;
+        assert!(
+            matches!(
+                refused,
+                Err(CreateAdminError::WeakPassword(_) | CreateAdminError::InvalidEmail)
+            ),
+            "{email}: {refused:?}"
+        );
+    }
+    assert!(
+        !codewire_idp::admin_bootstrap::admin_exists(&pool)
+            .await
+            .unwrap()
+    );
+
+    // Without mail setup vouches for the admin, who signs in at once.
+    assert_eq!(
+        create_admin(
+            &pool,
+            "admin@example.test",
+            "Sup3rStrong!Pass",
+            &no_mail,
+            frontend
+        )
+        .await
+        .unwrap(),
+        CreateAdmin::Created {
+            verification_sent: false
+        }
+    );
+    let (_, enabled, verified, vouched, is_admin) =
+        account_state(&pool, "admin@example.test").await;
+    assert!(enabled && is_admin && !verified);
+    assert_eq!(vouched.as_deref(), Some("bootstrap"));
+    let (st, body, _) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-in",
+        None,
+        r#"{"email":"admin@example.test","password":"Sup3rStrong!Pass"}"#,
+    )
+    .await;
+    assert_eq!(st, 200, "admin sign-in: {body}");
+
+    // A second run makes no second admin.
+    assert_eq!(
+        create_admin(
+            &pool,
+            "second@example.test",
+            "Sup3rStrong!Pass",
+            &no_mail,
+            frontend
+        )
+        .await
+        .unwrap(),
+        CreateAdmin::AdminExists
+    );
+    let admins: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM users WHERE is_admin AND id <> 'deleted-user'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(admins, 1);
+    // Now sign-ups are taken.
+    let (st, body, _) = invite_only_sign_up(&app, "early@example.test", "").await;
+    assert_eq!(st, 202, "after setup: {body}");
+    drop_isolated(admin, pool, &db_name).await;
+
+    // With mail the admin verifies first, like any account.
+    let Some((admin, pool, db_name)) = isolated_database("create_admin_mail").await else {
+        return;
+    };
+    let (mail, outbox) = codewire_email::EmailClient::recording();
+    assert_eq!(
+        create_admin(
+            &pool,
+            "admin@example.test",
+            "Sup3rStrong!Pass",
+            &mail,
+            frontend
+        )
+        .await
+        .unwrap(),
+        CreateAdmin::Created {
+            verification_sent: true
+        }
+    );
+    let (_, enabled, verified, vouched, is_admin) =
+        account_state(&pool, "admin@example.test").await;
+    assert!(enabled && is_admin && !verified);
+    assert!(vouched.is_none());
+    assert_eq!(outbox.sent().len(), 1);
+    let mailed = codewire_idp::auth_session::router_with_email(
+        pool.clone(),
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::default()
+            .with_mode(codewire_idp::auth_session::SignupMode::InviteOnly),
+        frontend.to_owned(),
+        codewire_email::EmailClient::recording().0,
+    );
+    let (st, body, _) = sess_req(
+        &mailed,
+        "POST",
+        "/api/auth/sign-in",
+        None,
+        r#"{"email":"admin@example.test","password":"Sup3rStrong!Pass"}"#,
+    )
+    .await;
+    assert_eq!(st, 403);
+    assert_eq!(body["code"], "email_unverified");
+    drop_isolated(admin, pool, &db_name).await;
+}
+
+#[tokio::test]
+async fn a_server_that_adds_mail_has_its_vouched_admin_verify_against_postgres() {
+    let Some((admin, pool, db_name)) = isolated_database("mail_added").await else {
+        return;
+    };
+    let frontend = "https://app.codewire.test";
+    let sign_in = r#"{"email":"admin@example.test","password":"Sup3rStrong!Pass"}"#;
+    codewire_idp::admin_bootstrap::create_admin(
+        &pool,
+        "admin@example.test",
+        "Sup3rStrong!Pass",
+        &codewire_email::EmailClient::disabled(),
+        frontend,
+    )
+    .await
+    .unwrap();
+    let (st, body, _) = sess_req(
+        &invite_only_app(&pool),
+        "POST",
+        "/api/auth/sign-in",
+        None,
+        sign_in,
+    )
+    .await;
+    assert_eq!(st, 200, "vouched admin without mail: {body}");
+
+    // The same server with mail asks the admin to verify the address.
+    let (mail, outbox) = codewire_email::EmailClient::recording();
+    let app = codewire_idp::auth_session::router_with_email(
+        pool.clone(),
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::default()
+            .with_mode(codewire_idp::auth_session::SignupMode::InviteOnly),
+        frontend.to_owned(),
+        mail.clone(),
+    );
+    let (st, body, cookie) = sess_req(&app, "POST", "/api/auth/sign-in", None, sign_in).await;
+    assert_eq!(st, 403, "vouched admin with mail: {body}");
+    assert_eq!(body["code"], "email_unverified");
+    assert!(cookie.is_none());
+    let resend_token = body["resendToken"].as_str().unwrap().to_owned();
+    let mail_routes = codewire_idp::email_password::router(
+        pool.clone(),
+        frontend.to_owned(),
+        mail,
+        AuthState { pool: pool.clone() },
+    );
+    let (st, body, _) = sess_req(
+        &mail_routes,
+        "POST",
+        "/api/auth/resend-verification",
+        None,
+        &format!(r#"{{"token":"{resend_token}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 202, "resend: {body}");
+    let sent = outbox.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "admin@example.test");
+
+    // Verifying replaces the vouch, and the admin signs in again.
+    let verify_token = emailed_token(&sent[0].html, "/verify-email?token=");
+    let (st, body, _) = sess_req(
+        &mail_routes,
+        "GET",
+        &format!("/api/auth/verify-email?token={verify_token}"),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, 200, "verify: {body}");
+    let (_, enabled, verified, vouched, is_admin) =
+        account_state(&pool, "admin@example.test").await;
+    assert!(enabled && verified && is_admin);
+    assert!(vouched.is_none());
+    let (st, body, _) = sess_req(&app, "POST", "/api/auth/sign-in", None, sign_in).await;
+    assert_eq!(st, 200, "verified admin with mail: {body}");
+
+    drop_isolated(admin, pool, &db_name).await;
+}
+
 #[tokio::test]
 async fn get_session_accepts_codewire_api_key_against_postgres() {
     let Ok(url) = std::env::var("DATABASE_URL") else {

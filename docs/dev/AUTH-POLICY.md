@@ -137,6 +137,45 @@ trip; the configuration is in [../CONFIGURATION.md](../CONFIGURATION.md).
   (`user.oauth.linked`, `user.oauth.unlinked`) and the account's address is
   told.
 
+## Invite-only sign-up
+
+Email sign-up is one path for every `IDP_SIGNUP` mode
+([../CONFIGURATION.md](../CONFIGURATION.md#sign-up));
+`auth_session/email_sign_up.rs` decides admission from the mode. With
+`IDP_SIGNUP=invite-only` (#4121), the self-hosted mode:
+
+- **Admission.** Nothing is taken before setup has made the admin. A sign-up
+  presents an organization invitation's link token. The invitation is read in the sign-up's own
+  transaction, `FOR SHARE`: it must be pending and unexpired, addressed to
+  the sign-up's address (compared with `lower()`), and, on a server with no
+  mail, issued within the last 24 hours. No account may exist at the address
+  in any case; that person signs in. A missing, wrong, used, revoked or
+  expired link and one for another address all get the same `403
+  invite_only`. Sign-up only reads the invitation; accepting it is still
+  AcceptInvitation's. The audit names the invitation id, never its token.
+- **The admin** is made by setup, `codewire-idp create-admin`, with the
+  password on stdin; an advisory lock lets only one run make it, and a second
+  run changes nothing.
+- **Vouching, on a server with no mail.** Nothing can prove who owns an
+  address, so the admin's approval stands in for proof, by the owner's rule:
+  the admin issued the invite link, setup created the admin, or the admin
+  enabled a waiting account. The account records it in `email_vouched_by`
+  (`invitation`, `bootstrap` or `admin`) and keeps `email_verified` false, so
+  every check that needs a verified address, such as provider auto-linking
+  and ListMyInvitations, still refuses it. A database check keeps the two
+  apart: a mailbox verification, the proof #4481 settled on, replaces the
+  vouch. So a server that adds mail later asks its vouched accounts, the
+  setup admin included, to verify their addresses, and they sign in again
+  once they have.
+- **Sign-in** needs a verified or vouched address. A waiting account is told
+  it is disabled, not asked to verify an email that cannot be sent.
+- **Provider sign-up** is refused (`oauth_error=invite_only`). A provider is
+  connected from Settings after signing up.
+- **The admin's account list** shows each address's vouch and, for a sign-up
+  through an invitation, the invitation, its organization, the inviter and the
+  time, so an admin who gave a link to the wrong person can disable the
+  account there.
+
 ## Accounts waiting for access
 
 Every email sign-up verifies its address before it signs in, invite code or

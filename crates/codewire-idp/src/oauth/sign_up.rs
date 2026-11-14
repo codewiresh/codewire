@@ -18,8 +18,9 @@ use sqlx::PgPool;
 
 use super::{OAuthState, Provider, valid_handle};
 use crate::auth_session::{
-    MAX_ACCESS_REASON_CHARS, SessionResponse, UserResponse, create_session, format_time, hex_id,
-    log_audit_in, request_info, session_cookie_string, validate_turnstile,
+    INVITE_ONLY_REFUSAL, MAX_ACCESS_REASON_CHARS, SessionResponse, SignupMode, UserResponse,
+    create_session, format_time, hex_id, log_audit_in, request_info, session_cookie_string,
+    validate_turnstile,
 };
 use crate::email_password::send_access_request_received_email;
 
@@ -144,13 +145,25 @@ async fn complete_signup(
     ValidatedJson(request): ValidatedJson<CompleteSignupRequest>,
 ) -> Result<Response, AppError> {
     let session = &state.session;
+    // A pending sign-up from before the server became invite-only is refused
+    // as the callback now refuses a new one (#4121).
+    if session.signup_invite_policy.mode() == SignupMode::InviteOnly {
+        return Err(AppError::Coded {
+            status: StatusCode::FORBIDDEN,
+            code: "invite_only",
+            detail: INVITE_ONLY_REFUSAL.into(),
+        });
+    }
     let row = live_pending_row(&session.pool, &request.token).await?;
     let (provider, identity) = pending_parts(&row)?;
 
     // The same checks as email sign-up, before the row is used up, so a
-    // failed challenge or a missing reason can be corrected on the page.
+    // failed challenge or a missing reason can be corrected on the page. The
+    // provider proved the address, so open mode signs the account in at once.
     validate_turnstile(session, &identity.email, &request.turnstile_token).await?;
-    let enabled = session.signup_invite_policy.accepts(&request.invite_code);
+    let enabled = session
+        .signup_invite_policy
+        .admits_at_once(&request.invite_code);
     let access_reason = request.reason.trim();
     if !enabled
         && (access_reason.is_empty() || access_reason.chars().count() > MAX_ACCESS_REASON_CHARS)
@@ -196,7 +209,7 @@ async fn complete_signup(
     let user_id = hex_id();
     let stored_access_reason = (!enabled).then_some(access_reason);
     // The provider verified the email, so the account starts verified and
-    // has no password; `enabled` follows the invite policy.
+    // has no password; `enabled` follows the sign-up mode.
     let created_at: NaiveDateTime = sqlx::query_scalar(
         r#"
         INSERT INTO users

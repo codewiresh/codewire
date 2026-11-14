@@ -471,8 +471,12 @@ async fn verify_email(
         return Err(bad_request("Verification token has expired"));
     }
 
+    // The mailbox proof replaces a vouch (#4121): a server that adds mail
+    // later asks its vouched accounts, the setup admin included, to verify,
+    // and the two are never set together.
     let access_pending: bool = sqlx::query_scalar(
-        "UPDATE users SET email_verified = true, updated_at = NOW() WHERE email = $1 \
+        "UPDATE users SET email_verified = true, email_vouched_by = NULL, updated_at = NOW() \
+         WHERE email = $1 \
          RETURNING NOT enabled AND access_reason IS NOT NULL",
     )
     .bind(&row.identifier)

@@ -162,7 +162,9 @@ Issue: #4062. Launch step 1 (`launch-signup`) walks this on Production.
   the sign-up and sign-in pages, and on the page `cw login` opens; linking
   and unlinking in Settings.
 - **States to exercise:**
-  - a new identity, through the same review as an email sign-up;
+  - a new identity, through the same review as an email sign-up, or, with
+    `IDP_SIGNUP=open`, signed in at once with no invite and no reason
+    (#4121);
   - a second sign-in with the same identity reaches the same account;
   - an identity whose email matches an existing account links only after
     that account proves itself, never by the email alone;

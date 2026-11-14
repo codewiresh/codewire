@@ -11,10 +11,14 @@ use codewire_server_core::auth::AuthState;
 use codewire_server_core::{AppBuilder, ServiceConfig};
 use std::ffi::OsString;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum CommandMode {
     Serve,
     RewrapSigningKeks,
+    /// Setup makes the server's admin (#4121); the password is on stdin.
+    CreateAdmin {
+        email: String,
+    },
 }
 
 #[tokio::main]
@@ -22,17 +26,28 @@ async fn main() -> anyhow::Result<()> {
     match parse_command(std::env::args_os().skip(1))? {
         CommandMode::Serve => serve().await,
         CommandMode::RewrapSigningKeks => rewrap_signing_keks().await,
+        CommandMode::CreateAdmin { email } => create_admin(&email).await,
     }
 }
 
 fn parse_command(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<CommandMode> {
     let mut args = args.into_iter();
-    match (args.next(), args.next()) {
-        (None, None) => Ok(CommandMode::Serve),
-        (Some(command), None) if command == "rewrap-signing-keks" => {
+    match (args.next(), args.next(), args.next(), args.next()) {
+        (None, None, None, None) => Ok(CommandMode::Serve),
+        (Some(command), None, None, None) if command == "rewrap-signing-keks" => {
             Ok(CommandMode::RewrapSigningKeks)
         }
-        _ => anyhow::bail!("usage: codewire-idp [rewrap-signing-keks]"),
+        (Some(command), Some(flag), Some(email), None)
+            if command == "create-admin" && flag == "--email" =>
+        {
+            let email = email
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("the admin's email must be UTF-8"))?;
+            Ok(CommandMode::CreateAdmin { email })
+        }
+        _ => anyhow::bail!(
+            "usage: codewire-idp [rewrap-signing-keks | create-admin --email <address>]"
+        ),
     }
 }
 
@@ -51,6 +66,42 @@ async fn rewrap_signing_keks() -> anyhow::Result<()> {
 
     println!("{}", format_rewrap_report(&report));
     pool.close().await;
+    Ok(())
+}
+
+/// `codewire-idp create-admin --email <address>`: makes the server's admin
+/// with the password read from stdin, so it never appears in a process list
+/// or a shell history. A second run changes nothing.
+async fn create_admin(email: &str) -> anyhow::Result<()> {
+    use std::io::Read as _;
+    let database_url = codewire_server_core::config::database_url_from_env()?;
+    codewire_server_core::migrate::ensure_schema_logged(&database_url).await?;
+    let pool = codewire_server_core::db::connect(&database_url).await?;
+    let idp_cfg = codewire_idp::IdpConfig::from_env()?;
+    let mail = codewire_email::EmailClient::from_env().await?;
+    let mut password = String::new();
+    std::io::stdin().read_to_string(&mut password)?;
+    let password = password.trim_end_matches(['\n', '\r']);
+    let outcome = codewire_idp::admin_bootstrap::create_admin(
+        &pool,
+        email,
+        password,
+        &mail,
+        &idp_cfg.frontend_url,
+    )
+    .await;
+    pool.close().await;
+    match outcome? {
+        codewire_idp::admin_bootstrap::CreateAdmin::Created {
+            verification_sent: true,
+        } => println!("created the admin {email}; open the verification email before signing in"),
+        codewire_idp::admin_bootstrap::CreateAdmin::Created {
+            verification_sent: false,
+        } => println!("created the admin {email}"),
+        codewire_idp::admin_bootstrap::CreateAdmin::AdminExists => {
+            println!("this server already has an admin; nothing changed")
+        }
+    }
     Ok(())
 }
 
@@ -104,6 +155,8 @@ async fn serve() -> anyhow::Result<()> {
     // Session-core credential auth (`/api/auth/{sign-up,sign-in,sign-out,
     // get-session}`). Cookies are `Secure` only for HTTPS frontends.
     let secure = idp_cfg.frontend_url.starts_with("https");
+    let signup_mode =
+        codewire_idp::auth_session::signup_policy::mode_router(&idp_cfg.signup_invite_policy);
     let session_auth = codewire_idp::auth_session::router_with_signup_delivery(
         pool.clone(),
         secure,
@@ -181,6 +234,7 @@ async fn serve() -> anyhow::Result<()> {
         .merge(oidc)
         .merge(device_verification)
         .merge(session_auth)
+        .merge(signup_mode)
         .merge(oauth)
         .merge(email_password)
         .merge(access_admin)
@@ -202,6 +256,30 @@ mod tests {
     #[test]
     fn no_arguments_preserve_server_mode() {
         assert_eq!(parse_command(Vec::new()).unwrap(), CommandMode::Serve);
+    }
+
+    #[test]
+    fn create_admin_takes_only_an_email() {
+        assert_eq!(
+            parse_command(["create-admin", "--email", "admin@example.test"].map(OsString::from))
+                .unwrap(),
+            CommandMode::CreateAdmin {
+                email: "admin@example.test".into()
+            }
+        );
+        for args in [
+            vec!["create-admin"],
+            vec!["create-admin", "--email"],
+            vec!["create-admin", "--password", "secret"],
+            vec![
+                "create-admin",
+                "--email",
+                "admin@example.test",
+                "--password",
+            ],
+        ] {
+            assert!(parse_command(args.into_iter().map(OsString::from)).is_err());
+        }
     }
 
     #[test]

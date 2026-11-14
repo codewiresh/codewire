@@ -71,9 +71,13 @@ pub(crate) use session_inventory::{
 };
 
 /// Web session lifetime: 8 hours (`auth.SessionDuration`, 28800s).
-mod signup_policy;
+mod email_sign_up;
+mod sign_up_invitation;
+pub mod signup_policy;
 
-pub use signup_policy::SignupInvitePolicy;
+pub use sign_up_invitation::INVITE_ONLY_REFUSAL;
+use signup_policy::SignInRefusal;
+pub use signup_policy::{SignupInvitePolicy, SignupMode};
 
 pub(crate) const SESSION_DURATION_SECS: i64 = 8 * 60 * 60;
 /// Account lockout window after 5 failed sign-ins: 15 minutes.
@@ -134,6 +138,9 @@ pub(crate) struct SignUpRequest {
     reason: String,
     #[serde(default, rename = "turnstile_token", alias = "cf-turnstile-response")]
     turnstile_token: String,
+    /// Invite-only: the organization invitation's link token.
+    #[serde(default)]
+    invitation_token: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -264,6 +271,10 @@ pub(crate) struct UserAuthRow {
     pub(crate) enabled: bool,
     pub(crate) locked_until: Option<NaiveDateTime>,
     pub(crate) created_at: Option<NaiveDateTime>,
+    /// Someone vouched for the address (`email_vouched_by`); only password
+    /// sign-in selects it.
+    #[sqlx(default)]
+    pub(crate) email_vouched: bool,
 }
 
 /// A disabled, unverified account that is waiting for an administrator to
@@ -921,158 +932,6 @@ async fn retry_pending_signup(
 
 // --- handlers ---
 
-/// `POST /api/auth/sign-up` (public).
-async fn sign_up(
-    State(state): State<SessionAuthState>,
-    headers: HeaderMap,
-    ValidatedJson(req): ValidatedJson<SignUpRequest>,
-) -> Result<Response, AppError> {
-    // email-required → 400 "Email is required".
-    if req.email.is_empty() {
-        return Err(AppError::BadRequest("Email is required".into()));
-    }
-    // ValidatePassword → 400 with its message.
-    if let Err(msg) = validate_password(&req.password) {
-        return Err(AppError::BadRequest(msg.into()));
-    }
-    validate_turnstile(&state, &req.email, &req.turnstile_token).await?;
-
-    let enabled = state.signup_invite_policy.accepts(&req.invite_code);
-    let access_reason = req.reason.trim();
-    if !enabled
-        && (access_reason.is_empty() || access_reason.chars().count() > MAX_ACCESS_REASON_CHARS)
-    {
-        return Err(AppError::BadRequest(
-            "Tell us why you want to use Codewire".into(),
-        ));
-    }
-    // Every email sign-up verifies its address before it signs in; an invite
-    // code only enables the account (#4481).
-    if !state.email.is_configured() {
-        return Err(AppError::ServiceUnavailable(
-            "Email verification is temporarily unavailable".into(),
-        ));
-    }
-
-    // A repeated request for an unverified pending account only reissues its
-    // verification email. This makes the post-commit delivery failure
-    // recoverable without changing a password or allowing a disabled account
-    // to sign in.
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
-        .bind(&req.email)
-        .fetch_optional(&state.pool)
-        .await?;
-    if exists.is_some() {
-        if let Some(response) = retry_pending_signup(&state, &headers, &req.email).await? {
-            return Ok(response);
-        }
-        return Err(AppError::Conflict(
-            "An account with this email already exists".into(),
-        ));
-    }
-
-    let hash = hash_password(&req.password)?;
-    let user_id = hex_id();
-    let account_id = hex_id();
-    let name: Option<&str> = if req.name.is_empty() {
-        None
-    } else {
-        Some(&req.name)
-    };
-    let stored_access_reason = (!enabled).then_some(access_reason);
-
-    // users + accounts in one transaction (`provider_id='credential'`,
-    // `account_id=email`, `password=hash`). `created_at`/`updated_at`
-    // are set to the same NOW() the session/response will format.
-    let mut tx = state.pool.begin().await.map_err(|e| {
-        tracing::error!(error = %e, "failed to begin tx");
-        AppError::InternalMsg("Failed to create account".into())
-    })?;
-
-    let created_at: NaiveDateTime = sqlx::query_scalar(
-        r#"
-        INSERT INTO users
-            (id, email, email_verified, name, enabled, access_reason, created_at, updated_at)
-        VALUES ($1, $2, false, $3, $4, $5, NOW(), NOW())
-        RETURNING created_at
-        "#,
-    )
-    .bind(&user_id)
-    .bind(&req.email)
-    .bind(name)
-    .bind(enabled)
-    .bind(stored_access_reason)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "failed to create user");
-        AppError::InternalMsg("Failed to create account".into())
-    })?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO accounts
-            (id, user_id, provider_id, account_id, password, created_at, updated_at)
-        VALUES ($1, $2, 'credential', $3, $4, NOW(), NOW())
-        "#,
-    )
-    .bind(&account_id)
-    .bind(&user_id)
-    .bind(&req.email)
-    .bind(&hash)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "failed to create account");
-        AppError::InternalMsg("Failed to create account".into())
-    })?;
-
-    let verification_token = create_verification_in_transaction(
-        &mut tx,
-        &req.email,
-        VerificationPurpose::EmailVerification,
-        Duration::hours(24),
-    )
-    .await?;
-
-    tx.commit().await.map_err(|e| {
-        tracing::error!(error = %e, "failed to commit tx");
-        AppError::InternalMsg("Failed to create account".into())
-    })?;
-
-    let (ip, ua) = request_info(&headers);
-    log_audit(
-        &state.pool,
-        if enabled {
-            "user.signup"
-        } else {
-            "user.signup.access_requested"
-        },
-        &user_id,
-        &ip,
-        &ua,
-        json!({ "email": req.email, "enabled": enabled }),
-        "info",
-    )
-    .await;
-
-    let user = UserResponse {
-        id: user_id.clone(),
-        email: req.email.clone(),
-        email_verified: false,
-        name: name.map(str::to_owned),
-        image: None,
-        is_admin: false,
-        two_factor_enabled: false,
-        cli_signed_in: false,
-        created_at: format_time(created_at),
-    };
-
-    // No session: the password proves only who chose it, so the account signs
-    // in once the address's owner has verified it (#4481).
-    deliver_signup_verification(&state, user, verification_token, !enabled).await
-}
-
 /// `POST /api/auth/sign-in` (public).
 async fn sign_in(
     State(state): State<SessionAuthState>,
@@ -1084,7 +943,8 @@ async fn sign_in(
         r#"
         SELECT id, email, email_verified, name, image, is_admin,
                two_factor_enabled, cli_signed_in_at IS NOT NULL AS cli_signed_in,
-               enabled, locked_until, created_at
+               enabled, locked_until, created_at,
+               email_vouched_by IS NOT NULL AS email_vouched
         FROM users WHERE email = $1
         "#,
     )
@@ -1154,12 +1014,21 @@ async fn sign_in(
     }
 
     // An unverified address signs in to nothing, invite code or not: the
-    // password proves only who chose it (#4481).
-    if !user.email_verified.unwrap_or(false) {
-        return email_unverified(&state.pool, &user.id).await;
-    }
-    if !user.enabled {
-        return Err(account_disabled());
+    // password proves only who chose it (#4481). On an invite-only server
+    // with no mail, the admin's vouch stands in for verification (#4121).
+    let verified = user.email_verified.unwrap_or(false);
+    let mail = state.email.is_configured();
+    match (state.signup_invite_policy).sign_in_refusal(
+        mail,
+        user.enabled,
+        verified,
+        user.email_vouched,
+    ) {
+        Some(SignInRefusal::EmailUnverified) => {
+            return email_unverified(&state.pool, &user.id).await;
+        }
+        Some(SignInRefusal::Disabled) => return Err(account_disabled()),
+        None => {}
     }
 
     // 2FA challenge branch: no session, no cookie. A password a reset has
@@ -1342,6 +1211,7 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
             enabled: row.enabled,
             locked_until: row.locked_until,
             created_at: row.created_at,
+            email_vouched: false,
         };
 
         return Json(AuthResponse {
@@ -1547,7 +1417,7 @@ impl SessionAuthState {
 
 fn router_with_state(state: SessionAuthState) -> Router {
     Router::new()
-        .route("/api/auth/sign-up", post(sign_up))
+        .route("/api/auth/sign-up", post(email_sign_up::sign_up))
         .route("/api/auth/sign-in", post(sign_in))
         .route("/api/auth/sign-out", post(sign_out))
         .route("/api/auth/get-session", get(get_session))
