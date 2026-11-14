@@ -11,9 +11,10 @@ feature on Production. The format is in [README.md](README.md).
 ## Where the journey stands
 
 Updated 2026-11-14. Invite, email, accept and remove are observed on Dev
-(source 6c3651dcf); the limits wait for Dev to run #4498. On Production
-(v0.4.18, source a9dd8b270), the invitation and its email's send are
-observed; the email's arrival is observed on Dev only.
+(source 6c3651dcf). On Production (v0.4.18, source a9dd8b270), the
+invitation and its email's send are observed; the email's arrival is
+observed on Dev only. The account's hourly limit is observed on Dev and on
+Production (v0.4.19, source 92672c5c4); the other limits are not.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -22,7 +23,7 @@ observed; the email's arrival is observed on Dev only.
 | `invite-accept` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
 | `invite-remove` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
 | `org-leave` | not yet observed | not yet observed |
-| `invite-limits` | the account's hourly limit observed 2026-11-14 on 09c05f268 (#4457); the rest not yet observed | not yet observed |
+| `invite-limits` | the account's hourly limit observed 2026-11-14 on 09c05f268 (#4457); the rest not yet observed | the account's hourly limit observed 2026-11-14 on 92672c5c4 (#4457); the rest not yet observed |
 | `invite-unverified` | not yet observed | not yet observed |
 
 ## Before the walk
@@ -290,6 +291,9 @@ invitations.
     refusal, not its wording.
   - The count lasts an hour, and deleting the organization does not reset
     it. The walk's account cannot invite for the rest of that hour.
+  - A revoked invitation still counts toward its hour. An account that
+    already sent some is refused that many invitations sooner, and the
+    refusal names the time the oldest one leaves the hour.
   - Reaching the pending cap takes 200 invitations, more than one account's
     hourly limit allows; it needs several inviters or several hours.
   - A synthetic identity that signs in with an organization-bound API key
@@ -307,9 +311,18 @@ invitations.
   - The pending cap of 200: not walked. The database tests in
     `crates/codewire-orchestration/src/api/organizations/invitation_limit_database_tests.rs`
     cover it.
+  - Production, 2026-11-14, v0.4.19 (source `92672c5c4`), `cw` v0.4.17, as
+    the Production smoke identity in its own organization (#4457): the
+    account had sent one invitation at 18:43 UTC, since revoked.
+    Invitations 1 to 29 to the mail provider's simulator were accepted, and
+    the 30th, the account's 31st in the hour, exited 1 with "invite:
+    invitation limit reached: one account can send at most 30 invitations
+    an hour; try again after Nov 14 19:43 UTC", the minute the earlier
+    invitation's hour ended. The organization then held 29 invitations from
+    the walk and none for the 30th address. All 29 were revoked by ID.
+    Whether an email was recorded for the refused address was not read.
   - The organization's limit of 60 an hour, and the refusal on the
-    dashboard: not yet observed.
-  - Production: not yet observed.
+    dashboard: not yet observed on Dev or Production.
 
 ## `invite-unverified`: an unverified inviter is refused
 
