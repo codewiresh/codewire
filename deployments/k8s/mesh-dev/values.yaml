@@ -49,6 +49,10 @@ ingress:
         - mesh.codewire-dev.sh
       secretName: mesh-codewire-dev-tls
 
+# Kept unmounted, annotated keep, at its existing size (codewire#3542).
+retainedDataClaim:
+  size: 2Gi
+
 resources:
   requests:
     cpu: 100m

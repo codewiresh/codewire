@@ -1843,6 +1843,11 @@ run_deploy() {
   fi
   # Any other render failure would also land here: require the guard's own.
   grep -Fq 'replicaCount must be 1' <<<"$mesh_replicas_render"
+  # Helm deletes what a chart stops rendering, and the clusters' deletion
+  # guard refuses that for claims, namespaces, CRDs and CNPG clusters
+  # (codewire#3542).
+  python3 scripts/checks/repo_checks.py chart-deletion-guard --self-test
+  python3 scripts/checks/repo_checks.py chart-deletion-guard
   local dev_mesh_render database_reference_canary_render
   dev_mesh_render="$(helm template codewire-mesh-dev apps/cli/charts/codewire-mesh \
     -f deployments/k8s/mesh-dev/values.yaml \

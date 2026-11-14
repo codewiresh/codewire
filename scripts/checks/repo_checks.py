@@ -27,6 +27,7 @@ from repo_policy.proto import check_proto_package_boundaries
 from repo_policy.workspace_identity import check_identity_free_workspace
 from repo_policy.webpki_roots_floor import check_webpki_roots_floor
 from repo_policy.cargo_lock_integrity import check_cargo_lock_integrity
+from repo_policy.chart_deletion_guard import check_chart_deletion_guard
 from repo_policy.sqlx_sqlite_unused import check_sqlx_sqlite_unused
 from repo_policy.image_patch_paths import check_image_patch_paths
 from repo_policy.workspace_image_pin import check_workspace_image_pin
@@ -130,6 +131,9 @@ def main(argv: list[str] | None = None) -> int:
     private_host_parser = subparsers.add_parser("private-host-literals")
     private_host_parser.add_argument("--self-test", action="store_true")
     private_host_parser.set_defaults(func=check_private_host_literals)
+    chart_guard_parser = subparsers.add_parser("chart-deletion-guard")
+    chart_guard_parser.add_argument("--self-test", action="store_true")
+    chart_guard_parser.set_defaults(func=check_chart_deletion_guard)
 
     args = parser.parse_args(argv)
     return args.func(args)

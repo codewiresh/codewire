@@ -1,0 +1,24 @@
+{{- /*
+The claim Mesh's retired /data volume used. Nothing mounts it. It stays in the
+chart, annotated keep, because dropping it would make Helm delete it, and the
+clusters' deletion guard refuses that and fails the release (codewire#3542).
+Once a release with keep is deployed in every environment, removing this
+template leaves the claim in place; retiring the volume itself is a separate,
+approved step.
+*/ -}}
+{{- with .Values.retainedDataClaim.size }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "codewire-mesh.fullname" $ }}-data
+  labels:
+    {{- include "codewire-mesh.labels" $ | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ . }}
+{{- end }}

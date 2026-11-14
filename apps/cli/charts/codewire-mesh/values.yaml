@@ -38,6 +38,11 @@ imagePullSecrets: []
 # and can run on any node.
 replicaCount: 1
 
+# The size of the retired data volume's claim, kept unmounted where an older
+# release created one (templates/retained-data-pvc.yaml). Empty renders none.
+retainedDataClaim:
+  size: ""
+
 ingress:
   enabled: false
   className: ""
