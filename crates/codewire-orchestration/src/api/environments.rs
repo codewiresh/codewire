@@ -1032,10 +1032,10 @@ pub(crate) fn quota_unavailable(org_id: &str, error: &sqlx::Error) -> AppError {
     )
 }
 
-/// Refuses a create or start when the organization's rate card draws credit
-/// and its balance is zero or below (#3381). An organization on the
-/// Unlimited card is never refused. A card or balance that cannot be read
-/// refuses (fail closed); the request is safe to retry.
+/// Refuses a create, start or snapshot capture when the organization's rate
+/// card draws credit and its balance is zero or below (#3381, #4370). An
+/// organization on the Unlimited card is never refused. A card or balance that
+/// cannot be read refuses (fail closed); the request is safe to retry.
 fn evaluate_credit(rate_card: &str, balance_nano_eur: i64) -> Result<(), AppError> {
     if rate_card == UNLIMITED_RATE_CARD || balance_nano_eur > 0 {
         return Ok(());
