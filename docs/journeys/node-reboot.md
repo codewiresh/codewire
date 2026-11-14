@@ -2,8 +2,9 @@
 
 Production keeps serving through the loss of any one worker node: Mesh, NATS
 and the coordinator stay up, the tailnet's STUN and peer relay stay up, and
-sandboxes on other nodes keep their sessions (#3542, #4461). This file is how
-that is proved and what has been seen. It is step 9 of the
+sandboxes on other nodes keep their sessions (#3542, #4461). A sandbox that
+was on the lost node comes back and tells its user why it restarted (#3772).
+This file is how that is proved and what has been seen. It is step 9 of the
 [launch walk](launch.md). The format is in [README.md](README.md).
 
 A **drain** (cordon, then evict every Pod under its disruption budget) is the
@@ -22,6 +23,7 @@ Updated 2026-11-13.
 | `reboot-spread` | every multi-replica service still on two or more nodes afterwards | failure observed 2026-11-13; fixed by hand, rule pending | not yet observed |
 | `reboot-stun-relay` | STUN and the UDP peer relay | not yet observed (#4461) | not yet observed |
 | `reboot-mesh` | the Mesh API and its members' sessions | not yet observed (#3542 step 5) | not yet observed |
+| `reboot-restart-notice` | the sandbox on the lost node comes back and says why | not yet observed; a Pod deletion on Dev observed 2026-11-13 | not yet observed |
 
 ## Before any of these
 
@@ -163,3 +165,66 @@ Updated 2026-11-13.
   reaching each other throughout.
 - **Gotchas:** the node that holds Mesh has not been drained for this reason.
 - **Observed:** not yet observed.
+
+## `reboot-restart-notice`: the sandbox on that node says why it restarted
+
+- **Entry points:** `cw info` (its `Notice:` line), `cw info --output json`
+  (`error_code` and `error_reason`), and the dashboard: the Sandbox's page
+  and the Sandbox list (#3772).
+- **States to exercise:**
+  - while the sandbox comes back: `starting`, code `sandbox_replacing`;
+  - back and running: `running`, code `sandbox_restarted`;
+  - the next stop or start, which clears the notice (#3786, #4340);
+  - an SSH session and a preview held open across the loss.
+- **Driving it:** before the node goes away, start a long-running session in
+  a sandbox on it. While the node is away and after it returns:
+
+  ```sh
+  cw ls
+  cw info SANDBOX
+  cw info SANDBOX --output json
+  ```
+
+  and open the Sandbox's page in the dashboard.
+  - While the sandbox comes back, `cw info` shows `State: starting` and a
+    `Notice:` that its runtime is being replaced, that its files are safe
+    and that running processes were lost. The dashboard shows the same text
+    in a banner across the top of the terminal column, with the startup line
+    below it.
+  - Once it is back, `cw info` shows `State: running` and `Notice: Restarted
+    at HH:MM UTC after its runtime was replaced. Running processes were
+    lost.` The dashboard shows that text in a banner the user can dismiss
+    above the terminal, and the Sandbox list shows it under the sandbox's
+    name.
+- **Proof:** the sandbox returns to `running`, and `cw info` and the
+  dashboard both say that it restarted, at the time it came back, and that
+  running processes were lost. The codes are `sandbox_replacing`, then
+  `sandbox_restarted`.
+- **Gotchas:**
+  - Deleting a running sandbox's Pod on Dev stands in for its node going
+    away. It replaces one sandbox's runtime; the node and every other
+    sandbox stay up, so it is not a drain or a reboot.
+  - `scripts/runtime/dev/prove-dev-vm-death-recovery.sh` kills one
+    sandbox's VM and proves recovery by a new guest boot ID and Pod UID. The
+    node stays up there too.
+  - A dismissed banner stays hidden in that browser until its text changes,
+    so a later restart shows again. Read a fresh restart in a fresh tab.
+- **Observed:**
+  - Kind, 2026-10-31: a sandbox's container was stopped by hand and the
+    CLI's wording for an unexpected stop was read through recovery (#3772,
+    #3786). That is neither a node loss nor a real kill.
+  - Dev, 2026-11-12, at `37fad5f88`: a sandbox whose Pod was deleted while
+    it ran stayed `running` and showed no notice. #4376 fixed that.
+  - Dev, 2026-11-13, at `1c99c3a6b` (#4340 and #4376): the Pod of a running
+    standard sandbox was deleted. `cw info --output json` reported
+    `starting` with code `sandbox_replacing` after 5.9 s, and `running`
+    with code `sandbox_restarted` and the reason "Restarted at 09:02 UTC
+    after its runtime was replaced. Running processes were lost." after
+    14.1 s. The walk read the JSON fields; the printed `Notice:` lines are
+    not yet observed with a released `cw`. The open session ended with "the
+    session attachment ended unexpectedly" (#4342).
+  - The dashboard: not yet observed. #3772's page and list ship in #4565.
+    Its review on Kind used database rows seeded per state, which is not
+    an observation.
+  - Production: not yet observed. The drains of 2026-11-13 did not record
+    what a sandbox on the drained node showed.

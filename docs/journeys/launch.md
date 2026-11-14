@@ -305,51 +305,12 @@ were drained and the first three were observed through both drains; a
 reboot, STUN and the relay, and Mesh are not yet observed, and the spread
 check failed and was put right by hand.
 
-**The sandbox on that node says why it restarted.** No journey file holds
-this half yet, so it stays here.
-
-- **Entry points:** none for the user. An operator reboots one Production
-  node during the walk; the user reads `cw info`, `cw ls` and the
-  dashboard.
-- **States to exercise:** a sandbox on the rebooted node, with an SSH
-  session and a preview held open across the reboot.
-- **Driving it:** before the reboot, start a long-running session in the
-  sandbox. While the node is down and after it returns:
-
-  ```sh
-  cw ls
-  cw info launch-walk
-  ```
-
-  While the sandbox comes back, `cw info` shows `State: starting` and a
-  `Notice:` that its runtime is being replaced, that its files are safe
-  and that running processes were lost. Once it is back it shows `State:
-  running` and `Notice: Restarted at HH:MM UTC after its runtime was
-  replaced.`
-- **Proof:** the sandbox on the rebooted node returns to `running`, and
-  `cw info` and the dashboard both say that it restarted, when, and that
-  running processes were lost.
-- **Gotchas:** `scripts/runtime/dev/prove-dev-vm-death-recovery.sh` is the
-  nearest Dev proof. It kills one sandbox's VM and proves recovery by a new
-  guest boot ID and Pod UID. The node stays up, so it is not a node reboot.
-- **Observed:**
-  - Kind, 2026-10-31: a sandbox's container was stopped by hand and the
-    CLI's wording for an unexpected stop was read through recovery (#3772,
-    #3786). That is neither a node reboot nor a real kill.
-  - Dev, 2026-11-12, at `37fad5f88`: a sandbox whose Pod was deleted while
-    it ran stayed `running` and showed no notice. #4376 fixed that.
-  - Dev, 2026-11-13, at `1c99c3a6b` (#4340 and #4376): the Pod of a
-    running standard sandbox was deleted, which stands in for a node going
-    away. `cw info --output json` reported `starting` with code
-    `sandbox_replacing` after 5.9 s, and `running` with code
-    `sandbox_restarted` and the reason "Restarted at 09:02 UTC after its
-    runtime was replaced. Running processes were lost." after 14.1 s. The
-    walk read the JSON fields; the printed `Notice:` lines are not yet
-    observed with a released `cw`. The open session ended with "the
-    session attachment ended unexpectedly" (#4342).
-  - Production: not yet observed. The drains of 2026-11-13 did not record
-    what a sandbox on the drained node showed.
-  - The dashboard does not show the reason yet (#3772).
+**The sandbox on that node says why it restarted.** This is
+`reboot-restart-notice` in [node-reboot.md](node-reboot.md). On Dev, on
+2026-11-13, a deleted Pod stood in for the node: `cw info --output json`
+reported `sandbox_replacing`, then `sandbox_restarted` with its reason. The
+printed `Notice:` lines, the dashboard (#3772) and Production are not yet
+observed.
 
 ## 10. `launch-snapshot-fork`: take a snapshot and create a fork from it
 
