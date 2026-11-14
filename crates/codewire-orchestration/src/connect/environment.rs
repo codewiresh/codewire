@@ -89,6 +89,7 @@ impl proto::EnvironmentService for EnvironmentConnectService {
                 env_type: request.r#type.to_owned(),
                 state,
                 include_destroyed: request.include_destroyed,
+                include_failed_creates: request.include_failed_creates,
             },
         )
         .await

@@ -270,20 +270,22 @@ class Environment(_message.Message):
     def __init__(self, id: _Optional[str] = ..., org_id: _Optional[str] = ..., created_by: _Optional[str] = ..., preset_id: _Optional[str] = ..., type: _Optional[str] = ..., name: _Optional[str] = ..., state: _Optional[_Union[EnvironmentState, str]] = ..., desired_state: _Optional[_Union[DesiredState, str]] = ..., error_reason: _Optional[str] = ..., recoverable: _Optional[bool] = ..., state_changed_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., retry_count: _Optional[int] = ..., setup_phase: _Optional[int] = ..., setup_complete: _Optional[bool] = ..., setup_error: _Optional[str] = ..., ttl_seconds: _Optional[int] = ..., shutdown_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., disk_gb: _Optional[int] = ..., total_running_seconds: _Optional[int] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., stopped_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., destroyed_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., protected: _Optional[bool] = ..., deletion_requested_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., deletion_grace_until: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., preset_name: _Optional[str] = ..., network: _Optional[str] = ..., ports: _Optional[_Iterable[_Union[_port_pb2.Port, _Mapping]]] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., operation_generation: _Optional[int] = ..., source_selection: _Optional[_Union[EnvironmentSourceSelection, _Mapping]] = ..., network_state: _Optional[_Union[NetworkAttachmentState, str]] = ..., network_failure: _Optional[_Union[NetworkAttachmentFailure, str]] = ..., error_code: _Optional[str] = ...) -> None: ...
 
 class ListEnvironmentsRequest(_message.Message):
-    __slots__ = ("org_id", "type", "state", "include_destroyed", "page_size", "page_token")
+    __slots__ = ("org_id", "type", "state", "include_destroyed", "page_size", "page_token", "include_failed_creates")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     TYPE_FIELD_NUMBER: _ClassVar[int]
     STATE_FIELD_NUMBER: _ClassVar[int]
     INCLUDE_DESTROYED_FIELD_NUMBER: _ClassVar[int]
     PAGE_SIZE_FIELD_NUMBER: _ClassVar[int]
     PAGE_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    INCLUDE_FAILED_CREATES_FIELD_NUMBER: _ClassVar[int]
     org_id: str
     type: str
     state: EnvironmentState
     include_destroyed: bool
     page_size: int
     page_token: str
-    def __init__(self, org_id: _Optional[str] = ..., type: _Optional[str] = ..., state: _Optional[_Union[EnvironmentState, str]] = ..., include_destroyed: _Optional[bool] = ..., page_size: _Optional[int] = ..., page_token: _Optional[str] = ...) -> None: ...
+    include_failed_creates: bool
+    def __init__(self, org_id: _Optional[str] = ..., type: _Optional[str] = ..., state: _Optional[_Union[EnvironmentState, str]] = ..., include_destroyed: _Optional[bool] = ..., page_size: _Optional[int] = ..., page_token: _Optional[str] = ..., include_failed_creates: _Optional[bool] = ...) -> None: ...
 
 class ListEnvironmentsResponse(_message.Message):
     __slots__ = ("environments", "next_page_token", "poll_interval")

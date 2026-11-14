@@ -55,6 +55,41 @@ pub struct Environment {
     pub source_selection: Option<EnvironmentSourceSelection>,
 }
 
+/// How long the platform lists a create it ended, matching the server's
+/// `FAILED_CREATE_LISTED_HOURS`.
+const FAILED_CREATE_LISTED_HOURS: i64 = 24;
+
+impl Environment {
+    /// A create the platform ended within the last day: no capacity, or a
+    /// container that could not start. The platform destroyed it at once, and
+    /// the row stays listed for a day so that its user can see why (#4482).
+    pub fn failed_create(&self) -> bool {
+        self.failed_create_at(chrono::Utc::now())
+    }
+
+    /// [`Self::failed_create`] at a given time. The rule is the server's: an
+    /// older one, or one that ever ran, is an ordinary destroyed environment.
+    pub fn failed_create_at(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        self.state == "destroyed"
+            && self.started_at.is_none()
+            && self.stopped_at.is_none()
+            && matches!(
+                self.error_code.as_deref(),
+                Some("no_capacity" | "container_start_failed")
+            )
+            && chrono::DateTime::parse_from_rfc3339(self.failed_create_time()).is_ok_and(|at| {
+                now.signed_duration_since(at).num_hours() < FAILED_CREATE_LISTED_HOURS
+            })
+    }
+
+    /// When the platform removed a failed create.
+    pub fn failed_create_time(&self) -> &str {
+        self.destroyed_at
+            .as_deref()
+            .unwrap_or(&self.state_changed_at)
+    }
+}
+
 /// Complete value-free selection, including the immutable credential revision.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

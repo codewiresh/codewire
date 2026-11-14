@@ -1618,6 +1618,26 @@ impl EnvDaemonCommand {
     }
 }
 
+/// Why and when a create the platform ended failed.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub(crate) struct FailedCreate {
+    /// `no_capacity` or `container_start_failed`.
+    pub(crate) code: String,
+    pub(crate) reason: String,
+    /// RFC 3339, when the platform removed it.
+    pub(crate) at: String,
+}
+
+impl FailedCreate {
+    pub(crate) fn of(environment: &Environment) -> Option<Self> {
+        environment.failed_create().then(|| Self {
+            code: environment.error_code.clone().unwrap_or_default(),
+            reason: environment.error_reason.clone().unwrap_or_default(),
+            at: environment.failed_create_time().to_owned(),
+        })
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub(crate) struct UnifiedEnvironmentListEntry {
     #[serde(rename = "type")]
@@ -1629,6 +1649,9 @@ pub(crate) struct UnifiedEnvironmentListEntry {
     /// Running again after its Pod failed, with every process lost (#3772).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub(crate) restarted: bool,
+    /// A create the platform ended; `state` is then `failed` (#4482).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) failed: Option<FailedCreate>,
     pub(crate) daemon_health: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) id: String,
@@ -2285,7 +2308,19 @@ pub(crate) async fn resolve_unified_environment_target(
         .list_environments(&org_id, false)
         .await
         .context("list environments")?;
-    let platform_match = find_environment_match(&environments, target_ref)?;
+    let mut platform_match = find_environment_match(&environments, target_ref)?;
+    // `cw ls` shows a create the platform ended, so the two commands that can
+    // answer for one find it too. A live environment of the same name wins.
+    if platform_match.is_none() && matches!(command, "info" | "rm") {
+        let failed: Vec<Environment> = environment_client
+            .list_environments_and_failed_creates(&org_id, false)
+            .await
+            .context("list environments")?
+            .into_iter()
+            .filter(Environment::failed_create)
+            .collect();
+        platform_match = find_environment_match(&failed, target_ref)?;
+    }
 
     if placement == Some(EnvironmentPlacement::Platform) {
         let Some((id, _)) = platform_match else {
@@ -3395,6 +3430,7 @@ pub(crate) fn filter_environments(
     environment_type: Option<&str>,
     state: Option<&str>,
     all: bool,
+    failed_creates: bool,
 ) -> Vec<Environment> {
     let environment_type = environment_type.and_then(trimmed_str);
     let state = state.and_then(trimmed_str);
@@ -3404,7 +3440,10 @@ pub(crate) fn filter_environments(
             environment_type.is_none_or(|wanted| environment.environment_type == wanted)
         })
         .filter(|environment| state.is_none_or(|wanted| environment.state == wanted))
-        .filter(|environment| all || environment.state != "destroyed")
+        .filter(|environment| {
+            all || environment.state != "destroyed"
+                || (failed_creates && environment.failed_create())
+        })
         .cloned()
         .collect()
 }
@@ -4100,6 +4139,9 @@ pub(crate) fn env_state_label(environment: &Environment) -> &str {
         && !matches!(environment.state.as_str(), "destroyed" | "destroying")
     {
         return "deleting";
+    }
+    if environment.failed_create() {
+        return "failed";
     }
     trimmed_str(&environment.state).unwrap_or("--")
 }

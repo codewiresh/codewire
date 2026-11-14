@@ -3,7 +3,7 @@
 /* eslint-disable */
 
 // Never-routed conformance fixture for the Connect serving infrastructure
-// (connect-rpc/03-connect-server-infrastructure.md, D8).
+// (docs/dev/CONNECT-SERVER.md, D8).
 //
 // PingService exists to prove mount + auth + error wire-shape + edge routing
 // before any product surface does. It is mounted only when

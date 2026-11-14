@@ -330,6 +330,7 @@ const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[
             field(4, "include_destroyed", ZERO),
             field(5, "page_size", REJECTED),
             field(6, "page_token", REJECTED),
+            field(7, "include_failed_creates", ZERO),
         ],
     },
     MessageSemantics {

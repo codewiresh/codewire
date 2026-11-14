@@ -200,6 +200,9 @@ pub(crate) struct InventoryOptions {
     pub(crate) state: Option<String>,
     /// `--all`: include destroyed cloud environments.
     pub(crate) include_destroyed: bool,
+    /// Include creates the platform ended in the last day. Only `cw ls`
+    /// asks: nothing may select or act on one.
+    pub(crate) failed_creates: bool,
     /// Ask each running cloud environment and host for its daemon health
     /// (the `daemon_health` JSON field).
     pub(crate) daemon_health: bool,
@@ -216,6 +219,7 @@ impl InventoryOptions {
             environment_type: args.environment_type.clone(),
             state: args.state.clone(),
             include_destroyed: args.all,
+            failed_creates: true,
             daemon_health: true,
             credentials: false,
             hosts: true,
@@ -405,15 +409,22 @@ pub(crate) async fn cloud_listing(
         .await
         .context("list orgs")?;
     let organization_id = current_org_id(platform, &orgs)?;
-    let environments = environment_client
-        .list_environments(&organization_id, options.include_destroyed)
-        .await
-        .context("list environments")?;
+    let environments = if options.failed_creates {
+        environment_client
+            .list_environments_and_failed_creates(&organization_id, options.include_destroyed)
+            .await
+    } else {
+        environment_client
+            .list_environments(&organization_id, options.include_destroyed)
+            .await
+    }
+    .context("list environments")?;
     let environments = filter_environments(
         &environments,
         options.environment_type.as_deref(),
         options.state.as_deref(),
         options.include_destroyed,
+        options.failed_creates,
     );
     let environments = if options.daemon_health {
         platform_environment_daemon_health(&environment_client, &organization_id, environments)
@@ -458,6 +469,7 @@ pub(crate) fn local_entry(
                 .is_some_and(|selected| selected.is_local_vm(&environment.id, &environment.name)),
             state: native_state_label(environment.state).to_owned(),
             restarted: false,
+            failed: None,
             daemon_health: if environment.state == EnvironmentState::Running as i32 {
                 "ready".into()
             } else {
@@ -484,6 +496,7 @@ pub(crate) fn cloud_entry(
     profiles: Option<&BTreeMap<String, String>>,
     selection: Option<&EnvironmentSelection>,
 ) -> InventoryEntry {
+    let failed = FailedCreate::of(environment);
     InventoryEntry {
         list: UnifiedEnvironmentListEntry {
             environment_type: "sandbox".into(),
@@ -492,8 +505,13 @@ pub(crate) fn cloud_entry(
             selected: selection.is_some_and(|selected| {
                 selected.location == SelectionLocation::Cloud && selected.id == environment.id
             }),
-            state: environment.state.clone(),
+            state: if failed.is_some() {
+                "failed".to_owned()
+            } else {
+                environment.state.clone()
+            },
             restarted: environment.error_code.as_deref() == Some("sandbox_restarted"),
+            failed,
             daemon_health: daemon_health.to_owned(),
             id: environment.id.clone(),
         },
@@ -548,6 +566,7 @@ fn host_entry(
             }),
             state: environment.state,
             restarted: false,
+            failed: None,
             daemon_health,
             id: environment.id,
         },
@@ -731,7 +750,7 @@ pub(crate) fn picker_rows(
         let cells = vec![
             entry.name().to_owned(),
             entry.location.label().to_owned(),
-            state_cell(&entry.list),
+            state_cell(&entry.list, chrono::Utc::now()),
             cpu.unwrap_or_else(|| dash.to_owned()),
             memory.unwrap_or_else(|| dash.to_owned()),
             disk.unwrap_or_else(|| dash.to_owned()),
@@ -945,6 +964,18 @@ fn format_environment_inventory(
     not_configured: &[(Location, &str)],
     style: Style,
 ) -> String {
+    format_environment_inventory_at(rows, placement, not_configured, style, chrono::Utc::now())
+}
+
+/// [`format_environment_inventory`] with the time a failed create's age is
+/// measured from.
+fn format_environment_inventory_at(
+    rows: &[InventoryRow],
+    placement: Option<EnvironmentPlacement>,
+    not_configured: &[(Location, &str)],
+    style: Style,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
     let dim = |text: &str| style.paint(crate::output::Role::Dim, text);
     let next = style.status(Status::Next);
     // Signed out, or in no organization yet: the account's state, with what
@@ -1017,7 +1048,7 @@ fn format_environment_inventory(
             [
                 terminal_text(&row.entry.name),
                 row.location.label().to_owned(),
-                terminal_text(&state_cell(&row.entry)),
+                terminal_text(&state_cell(&row.entry, now)),
                 sessions,
                 network,
             ]
@@ -1074,9 +1105,12 @@ fn format_environment_inventory(
     legend.push("NETWORK is the saved attachment".to_owned());
     out.push_str(&format!("\n  {}\n", dim(&legend.join(style.separator()))));
     out.push_str(&notes);
+    out.push_str(&failed_create_notes(rows, style));
+    // A failed create has no sessions to list, so it is the last choice.
     let first = rows
         .iter()
         .find(|row| row.entry.selected)
+        .or_else(|| rows.iter().find(|row| row.entry.failed.is_none()))
         .unwrap_or(&rows[0]);
     let duplicated = rows
         .iter()
@@ -1099,12 +1133,61 @@ fn format_environment_inventory(
 
 /// A listing's STATE cell. A sandbox that came back after its Pod failed says so,
 /// because its processes went with the old Pod (#3772).
-fn state_cell(entry: &UnifiedEnvironmentListEntry) -> String {
-    if entry.restarted {
+///
+/// A create the platform ended says when, because a new environment may
+/// already carry its name (#4482).
+fn state_cell(entry: &UnifiedEnvironmentListEntry, now: chrono::DateTime<chrono::Utc>) -> String {
+    if let Some(failed) = &entry.failed {
+        format!(
+            "{} {}",
+            display_str(&entry.state),
+            super::collaboration::time_ago_at(&failed.at, now)
+        )
+    } else if entry.restarted {
         format!("{} (restarted)", display_str(&entry.state))
     } else {
         display_str(&entry.state).to_owned()
     }
+}
+
+/// How much of a failed create's reason a listing prints. `cw info` has all
+/// of it.
+const FAILED_REASON_LISTED_CHARS: usize = 200;
+
+/// One line under the table for each create the platform ended, saying why.
+fn failed_create_notes(rows: &[InventoryRow], style: Style) -> String {
+    let mut notes = String::new();
+    for row in rows {
+        let Some(failed) = &row.entry.failed else {
+            continue;
+        };
+        let reason = failed.reason.lines().next().unwrap_or_default().trim();
+        let reason = if reason.is_empty() {
+            failed.code.as_str()
+        } else {
+            reason
+        };
+        let mut shown: String = reason.chars().take(FAILED_REASON_LISTED_CHARS).collect();
+        if shown.len() < reason.len() {
+            shown.push('…');
+        }
+        notes.push_str(&format!(
+            "\n{} {} was not created: {}\n",
+            style.status(Status::Attention),
+            terminal_text(&row.entry.name),
+            terminal_text(&shown)
+        ));
+    }
+    if !notes.is_empty() {
+        notes.push_str(&format!(
+            "  {}\n",
+            style.paint(
+                crate::output::Role::Dim,
+                "A failed create is already removed. cw ls shows it for a day; cw ls --all keeps it as destroyed."
+            )
+        ));
+    }
+    notes
 }
 
 #[cfg(test)]
@@ -1124,6 +1207,7 @@ mod tests {
             selected: name == "app",
             state: state.into(),
             restarted: false,
+            failed: None,
             daemon_health: String::new(),
             id: format!(
                 "{name}-{}-id",
@@ -1683,12 +1767,15 @@ mod tests {
     #[test]
     fn a_restarted_sandbox_says_so_in_the_state_cell_and_json() {
         let mut restarted = list("app", "platform", "sandbox", "running");
-        assert_eq!(state_cell(&restarted), "running");
+        assert_eq!(state_cell(&restarted, chrono::Utc::now()), "running");
         let quiet = serde_json::to_value(&restarted).unwrap();
         assert!(quiet.get("restarted").is_none(), "{quiet}");
 
         restarted.restarted = true;
-        assert_eq!(state_cell(&restarted), "running (restarted)");
+        assert_eq!(
+            state_cell(&restarted, chrono::Utc::now()),
+            "running (restarted)"
+        );
         let json = serde_json::to_value(&restarted).unwrap();
         // Scripts reading the state still see the state.
         assert_eq!(json["state"], "running");
@@ -1770,6 +1857,63 @@ mod tests {
         let colored =
             format_environment_inventory(&rows, None, &[], Style::new(true, Charset::Unicode));
         assert!(colored.contains("\x1b[36m›\x1b[0m app     local     \x1b[32mrunning\x1b[0m  1"));
+    }
+
+    /// A create the platform ended is listed as failed with its age and its
+    /// reason, apart from a live environment of the same name (#4482).
+    #[test]
+    fn ls_marks_a_failed_create_with_its_age_and_says_why() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-13T14:29:05Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let live = entry("web", Location::Cloud, "running");
+        let mut failed = entry("web", Location::Cloud, "failed");
+        failed.list.id = "failed-id".into();
+        failed.list.failed = Some(FailedCreate {
+            code: "container_start_failed".into(),
+            reason: "The sandbox could not start: container workspace could not start: ErrImagePull\nmore".into(),
+            at: "2026-11-13T14:17:05Z".into(),
+        });
+        let rows = [
+            row(&failed, None, NetworkRef::NotAttached),
+            row(&live, Some(0), NetworkRef::NotAttached),
+        ];
+        assert_eq!(
+            format_environment_inventory_at(&rows, None, &[], PLAIN, now),
+            concat!(
+                "  NAME  LOCATION  STATE           SESSIONS  NETWORK\n",
+                "  web   cloud     failed 12m ago  —         —\n",
+                "  web   cloud     running         0         —\n",
+                "\n",
+                "  NETWORK is the saved attachment\n",
+                "\n",
+                "! web was not created: The sandbox could not start: container workspace could not start: ErrImagePull\n",
+                "  A failed create is already removed. cw ls shows it for a day; cw ls --all keeps it as destroyed.\n",
+                "\n",
+                "→ Sessions: cw ls web-platform-id\n",
+            )
+        );
+        let json = serde_json::to_value(&rows[0]).unwrap();
+        assert_eq!(json["state"], "failed");
+        assert_eq!(json["failed"]["code"], "container_start_failed");
+        assert_eq!(json["failed"]["at"], "2026-11-13T14:17:05Z");
+        assert!(
+            serde_json::to_value(&rows[1])
+                .unwrap()
+                .get("failed")
+                .is_none()
+        );
+
+        // A long reason is cut in the listing; `cw info` prints all of it.
+        failed.list.failed.as_mut().unwrap().reason = "x".repeat(FAILED_REASON_LISTED_CHARS + 1);
+        let long = format_environment_inventory_at(
+            &[row(&failed, None, NetworkRef::NotAttached)],
+            None,
+            &[],
+            PLAIN,
+            now,
+        );
+        assert!(long.contains(&format!("{}…\n", "x".repeat(FAILED_REASON_LISTED_CHARS))));
     }
 
     #[test]

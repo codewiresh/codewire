@@ -2601,16 +2601,76 @@ fn filter_environments_honors_type_state_and_destroyed_default() {
     let environments = vec![running.clone(), stopped, destroyed.clone()];
 
     assert_eq!(
-        filter_environments(&environments, Some("sandbox"), Some("running"), false),
+        filter_environments(&environments, Some("sandbox"), Some("running"), false, false),
         vec![running]
     );
     assert_eq!(
-        filter_environments(&environments, Some("sandbox"), Some("destroyed"), false),
+        filter_environments(&environments, Some("sandbox"), Some("destroyed"), false, false),
         Vec::<Environment>::new()
     );
     assert_eq!(
-        filter_environments(&environments, Some("sandbox"), Some("destroyed"), true),
+        filter_environments(&environments, Some("sandbox"), Some("destroyed"), true, false),
         vec![destroyed]
+    );
+}
+
+/// A create the platform ended is destroyed, so only a caller that asks for
+/// failed creates keeps it, and one its user removed is never a failed create
+/// (#4482).
+#[test]
+fn a_failed_create_is_kept_only_for_a_caller_that_asks() {
+    let running = test_environment(
+        "12345678-abcd-4000-9000-000000000001",
+        Some("builder"),
+        "running",
+    );
+    let removed = test_environment(
+        "99999999-abcd-4000-9000-000000000003",
+        Some("old"),
+        "destroyed",
+    );
+    let mut failed = test_environment(
+        "77777777-abcd-4000-9000-000000000004",
+        Some("builder"),
+        "destroyed",
+    );
+    failed.error_code = Some("container_start_failed".into());
+    failed.error_reason = Some("The sandbox could not start: ErrImagePull".into());
+    failed.started_at = None;
+    let now = chrono::Utc::now();
+    failed.destroyed_at = Some((now - chrono::Duration::minutes(10)).to_rfc3339());
+    assert!(failed.failed_create());
+    assert!(!removed.failed_create() && !running.failed_create());
+    assert_eq!(env_state_label(&failed), "failed");
+    assert_eq!(env_state_label(&removed), "destroyed");
+
+    let mut ran = failed.clone();
+    ran.started_at = Some("2026-11-13T10:00:00Z".into());
+    assert!(!ran.failed_create(), "one that ran was not a failed create");
+    // The server lists a failed create for a day, and only one that never
+    // ran. An older one is an ordinary destroyed environment, whatever
+    // `--all` or a state filter returns.
+    let mut stopped = failed.clone();
+    stopped.stopped_at = Some("2026-11-13T10:00:00Z".into());
+    assert!(!stopped.failed_create(), "one that stopped had run");
+    let mut old = failed.clone();
+    old.destroyed_at = Some((now - chrono::Duration::days(5)).to_rfc3339());
+    assert!(!old.failed_create());
+    assert_eq!(env_state_label(&old), "destroyed");
+    assert_eq!(FailedCreate::of(&old), None);
+    assert!(old.failed_create_at(now - chrono::Duration::days(5)));
+    let mut erroring = failed.clone();
+    erroring.state = "error".into();
+    assert!(!erroring.failed_create(), "not until the platform removed it");
+
+    let environments = vec![running.clone(), removed, failed.clone()];
+    assert_eq!(
+        filter_environments(&environments, None, None, false, false),
+        vec![running.clone()]
+    );
+    assert_eq!(
+        filter_environments(&environments, None, None, false, true),
+        vec![running, failed]
     );
 }
 

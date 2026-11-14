@@ -199,6 +199,11 @@ message ListEnvironmentsRequest {
   bool include_destroyed = 4;
   int32 page_size = 5;
   string page_token = 6;
+  // Also return creates the platform ended in the last 24 hours: ones that
+  // never ran, with error_code no_capacity or container_start_failed. They
+  // are destroyed and hold nothing. A caller that resolves a name against
+  // the list leaves this unset.
+  bool include_failed_creates = 7;
 }
 
 message ListEnvironmentsResponse {

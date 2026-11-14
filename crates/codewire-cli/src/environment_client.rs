@@ -55,11 +55,32 @@ impl EnvironmentClient {
         org_id: &str,
         include_destroyed: bool,
     ) -> anyhow::Result<Vec<Environment>> {
+        self.list(org_id, include_destroyed, false).await
+    }
+
+    /// The live environments and the creates the platform ended in the last
+    /// day ([`Environment::failed_create`]). Only a listing asks for these: a
+    /// command that resolves a name must never be handed a destroyed one.
+    pub async fn list_environments_and_failed_creates(
+        &self,
+        org_id: &str,
+        include_destroyed: bool,
+    ) -> anyhow::Result<Vec<Environment>> {
+        self.list(org_id, include_destroyed, true).await
+    }
+
+    async fn list(
+        &self,
+        org_id: &str,
+        include_destroyed: bool,
+        include_failed_creates: bool,
+    ) -> anyhow::Result<Vec<Environment>> {
         let response = self
             .inner
             .list_environments(rpc::ListEnvironmentsRequest {
                 org_id: org_id.to_string(),
                 include_destroyed,
+                include_failed_creates,
                 ..Default::default()
             })
             .await

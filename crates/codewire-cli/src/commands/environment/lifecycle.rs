@@ -246,6 +246,9 @@ pub(crate) fn stop_result(name: &str) -> ResultBlock {
 pub(crate) enum CloudRemoval {
     /// Destroyed, or no longer found.
     Removed,
+    /// A create the platform ended and removed itself; its row is still
+    /// listed for the rest of its day (#4482).
+    AlreadyRemoved,
     /// A deletion grace period runs until the given time, when known.
     Scheduled { until: Option<String> },
     /// The platform is removing it in the background.
@@ -285,6 +288,14 @@ impl CloudRemoval {
                     .detail(format!("{cloud} · environment disk removed"))
                     .next("cw ls")
             }
+            CloudRemoval::AlreadyRemoved => ResultBlock::new(
+                Status::Done,
+                format!("Environment {name} was already removed"),
+            )
+            .detail(format!(
+                "{cloud} · its create failed; it leaves cw ls within a day"
+            ))
+            .next("cw ls"),
             CloudRemoval::Scheduled { until } => {
                 let detail = match until {
                     Some(until) => format!("{cloud} · grace period until {until}"),
@@ -343,6 +354,15 @@ pub(crate) async fn remove_cloud_environment(
     environment_id: &str,
     environment_ref: &str,
 ) -> anyhow::Result<CloudRemoval> {
+    // A create the platform ended is already destroyed, and the platform
+    // refuses to destroy it twice. Its row leaves the listing by itself.
+    if client
+        .get_environment(org_id, environment_id)
+        .await
+        .is_ok_and(|environment| environment.failed_create())
+    {
+        return Ok(CloudRemoval::AlreadyRemoved);
+    }
     match client.delete_environment(org_id, environment_id).await {
         Ok(()) => Ok(CloudRemoval::observe(
             client.get_environment(org_id, environment_id).await,
@@ -720,6 +740,39 @@ mod tests {
 
         async fn remove(server: &MockServer) -> anyhow::Result<CloudRemoval> {
             remove_cloud_environment(&client(server), "org_demo", "env_demo", "app").await
+        }
+
+        /// A create the platform ended is already destroyed, and the platform
+        /// refuses a second destroy, so removing it asks for nothing (#4482).
+        #[tokio::test]
+        async fn a_failed_create_is_removed_without_asking_the_platform() {
+            let mut failed = get_response(codewire_client::EnvironmentState::Destroyed, false);
+            let mut environment = (*failed.environment).clone();
+            environment.error_code = "container_start_failed".into();
+            environment.destroyed_at = Some(codewire_client::Timestamp {
+                seconds: chrono::Utc::now().timestamp() - 600,
+                ..Default::default()
+            })
+            .into();
+            failed.environment = Some(environment).into();
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(DELETE))
+                .respond_with(error(409, "failed_precondition", "already destroyed", None))
+                .expect(0)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path(GET))
+                .respond_with(proto(failed))
+                .mount(&server)
+                .await;
+            let removal = remove(&server).await.unwrap();
+            assert_eq!(removal, CloudRemoval::AlreadyRemoved);
+            assert_eq!(
+                removal.result("app").render(PLAIN),
+                "✓ Environment app was already removed\n  cloud VM · its create failed; it leaves cw ls within a day\n\n→ cw ls\n"
+            );
         }
 
         #[tokio::test]

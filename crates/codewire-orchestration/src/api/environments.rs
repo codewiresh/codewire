@@ -464,6 +464,27 @@ pub struct ListEnvironmentsQuery {
     pub state: String,
     #[serde(default)]
     pub include_destroyed: bool,
+    /// Also list creates the platform ended, for [`FAILED_CREATE_LISTED_HOURS`]
+    /// after it destroyed them (#4482).
+    #[serde(default)]
+    pub include_failed_creates: bool,
+}
+
+/// How long a create the platform ended stays listed for a caller that asks
+/// for failed creates. It is destroyed at once and holds nothing; the row is
+/// what tells its user why it failed.
+pub(crate) const FAILED_CREATE_LISTED_HOURS: i32 = 24;
+
+/// The condition that makes a destroyed environment a recently failed create.
+/// It never ran, so the only thing that set these codes was the create's end.
+fn failed_create_filter() -> String {
+    format!(
+        "(e.error_code IN ('{}', '{}') AND e.started_at IS NULL AND e.stopped_at IS NULL \
+          AND COALESCE(e.destroyed_at, e.state_changed_at) > NOW() - make_interval(hours => {}))",
+        crate::lifecycle::NO_CAPACITY_ERROR_CODE,
+        crate::lifecycle::CONTAINER_START_FAILED_ERROR_CODE,
+        FAILED_CREATE_LISTED_HOURS,
+    )
 }
 
 pub(crate) async fn list_environments_core(
@@ -479,7 +500,15 @@ pub(crate) async fn list_environments_core(
             "organization not found",
         ));
     }
+    list_environment_rows(&state.pool, org_id, &q).await
+}
 
+/// The organization's environments under the query's filters, newest first.
+async fn list_environment_rows(
+    pool: &PgPool,
+    org_id: &str,
+    q: &ListEnvironmentsQuery,
+) -> AppResult<Vec<Environment>> {
     // Mirrors listEnvironments' dynamic filters (strPtrOrNil: empty
     // query values mean "no filter").
     let mut sql = format!(
@@ -496,7 +525,14 @@ pub(crate) async fn list_environments_core(
         sql.push_str(&format!(" AND e.state = ${idx}"));
     }
     if !q.include_destroyed && st.is_none() {
-        sql.push_str(" AND e.state NOT IN ('destroyed', 'destroying')");
+        if q.include_failed_creates {
+            sql.push_str(&format!(
+                " AND (e.state NOT IN ('destroyed', 'destroying') OR {})",
+                failed_create_filter()
+            ));
+        } else {
+            sql.push_str(" AND e.state NOT IN ('destroyed', 'destroying')");
+        }
     }
     sql.push_str(" ORDER BY e.created_at DESC");
 
@@ -508,7 +544,7 @@ pub(crate) async fn list_environments_core(
         query = query.bind(s.to_string());
     }
 
-    let rows = query.fetch_all(&state.pool).await.map_err(|e| {
+    let rows = query.fetch_all(pool).await.map_err(|e| {
         tracing::error!(error = %e, "list environments query failed");
         coded(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1530,6 +1566,9 @@ mod access_database_tests;
 
 #[cfg(test)]
 mod rate_limit_database_tests;
+
+#[cfg(test)]
+mod failed_create_listing_database_tests;
 
 #[cfg(test)]
 mod tests {

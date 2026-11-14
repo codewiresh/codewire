@@ -295,6 +295,8 @@ When the scheduler refuses a workspace Pod for lack of a resource for 60 seconds
 
 A create also ends early when a container of its workspace Pod cannot start: after 60 seconds for an image that cannot be pulled, which the kubelet retries, and after 15 seconds for a container that cannot be created, run or started. The sandbox, which has never run, is removed, with the error code `container_start_failed` and a message that carries the container, the kubelet's reason and its text, so it says whether the image or the node is at fault. A container that is still being created or initialized is never counted as failed, however long it takes.
 
+A create the platform ended this way, or for lack of capacity, is destroyed at once and holds no quota. So that its user can still see why it failed, `cw ls` lists it for 24 hours as `failed`, with its age and its reason; `cw info` prints the whole message, and `cw rm` answers at once because nothing is left to remove. The API returns these rows only to a caller that sets `include_failed_creates` on `ListEnvironments`, with their true state, `destroyed`; every other listing, and every command that resolves a name, sees only live environments. A new environment may take the failed one's name straight away.
+
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
 | `CODEWIRE_SANDBOX_CPU_SHARING_RATIO` | No | How many vCPUs share one reserved CPU: a whole number from 1 to 8. A workspace requests its vCPUs divided by this, rounded up. Unset, empty or `1` means off, one reserved CPU per vCPU. Any other form stops orchestration at startup. | `2` |
