@@ -1,0 +1,28 @@
+# The dashboard admits only the public edge (#3297). On sign-up it forwards
+# the client address it received, the last X-Forwarded-For hop the edge
+# wrote, to the IdP's per-address limit; no other Pod, Sandboxes included,
+# may call it and choose that address. It serves no metrics and no other
+# service calls it. Production's overlay names the Envoy Gateway as the
+# edge; Dev and Kind run dashboards of their own.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codewire-dashboard
+  namespace: prod
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: dashboard
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: rke2-ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 5173

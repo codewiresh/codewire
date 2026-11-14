@@ -61,8 +61,19 @@ pub const SNAPSHOT_CREATE: Limit = Limit {
     per_user: true,
 };
 
+/// Email and provider sign-ups across the whole site (#3297), counted before
+/// any other check. A per-address limit follows once nothing but the edge and
+/// the dashboard can write the counted address.
+pub const SIGNUP: Limit = Limit {
+    name: "signup",
+    key_prefix: "signup",
+    window_secs: 3_600,
+    default_max: 100,
+    per_user: false,
+};
+
 /// Every named limit, in the order an admin sees them.
-pub const LIMITS: &[Limit] = &[SANDBOX_CREATE, SANDBOX_START, SNAPSHOT_CREATE];
+pub const LIMITS: &[Limit] = &[SANDBOX_CREATE, SANDBOX_START, SNAPSHOT_CREATE, SIGNUP];
 
 /// What [`consume`] decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +95,16 @@ impl Decision {
             window_phrase(limit.window_secs),
             self.resets_at.format("%H:%M:%S")
         )
+    }
+}
+
+impl Decision {
+    /// Whole seconds from `now` until the window resets, for `Retry-After`:
+    /// at least 1, so a client never retries at once.
+    pub fn retry_after_secs(&self, now: DateTime<Utc>) -> u64 {
+        u64::try_from((self.resets_at - now).num_seconds())
+            .unwrap_or(0)
+            .max(1)
     }
 }
 
@@ -171,6 +192,19 @@ pub async fn take_for_user(
     consume(connection, &limit.key(user_id), limit.window_secs, max, now).await
 }
 
+/// Counts one request against a limit with no per-user count, such as the
+/// site-wide sign-up limit, under `subject`, at the admin's global count or
+/// the default. The time is the database's, as in [`take_for_user`].
+pub async fn take(
+    connection: &mut PgConnection,
+    limit: &Limit,
+    subject: &str,
+) -> Result<Decision, sqlx::Error> {
+    let max = max_in_force(&mut *connection, limit, None).await?;
+    let now = database_now(&mut *connection).await?;
+    consume(connection, &limit.key(subject), limit.window_secs, max, now).await
+}
+
 /// The database's current time: `clock_timestamp()`, which advances within a
 /// transaction, unlike `now()`.
 async fn database_now(connection: &mut PgConnection) -> Result<DateTime<Utc>, sqlx::Error> {
@@ -203,9 +237,28 @@ mod tests {
         assert_eq!(SANDBOX_CREATE.key("u1"), "env_create:u1");
         assert_eq!(SANDBOX_START.key("u1"), "env_start:u1");
         assert_eq!(SNAPSHOT_CREATE.key("u1"), "snapshot_create:u1");
+        assert_eq!(SIGNUP.key("all"), "signup:all");
         let mut names: Vec<_> = LIMITS.iter().map(|limit| limit.name).collect();
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), LIMITS.len());
+    }
+
+    #[test]
+    fn a_sign_up_refusal_says_an_hour_and_retry_after_counts_down_to_the_reset() {
+        let at = |time: &str| DateTime::parse_from_rfc3339(time).unwrap().to_utc();
+        let decision = Decision {
+            allowed: false,
+            max: 100,
+            resets_at: at("2026-11-13T15:00:00Z"),
+        };
+        assert_eq!(
+            decision.refusal("sign-ups", &SIGNUP),
+            "at most 100 sign-ups an hour; try again after 15:00:00 UTC"
+        );
+        assert_eq!(decision.retry_after_secs(at("2026-11-13T14:59:30Z")), 30);
+        // At or past the reset a client still waits a second, never zero.
+        assert_eq!(decision.retry_after_secs(at("2026-11-13T15:00:00Z")), 1);
+        assert_eq!(decision.retry_after_secs(at("2026-11-13T15:10:00Z")), 1);
     }
 }

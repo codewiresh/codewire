@@ -32,6 +32,7 @@ pub mod keys;
 pub mod oauth;
 pub mod provisioning;
 pub mod service;
+mod signup_limit;
 pub mod tokens;
 pub mod two_factor;
 pub mod user_auth;

@@ -137,10 +137,10 @@ async fn bounded_json<T: DeserializeOwned>(mut response: reqwest::Response) -> R
 
 /// The browser's User-Agent, which the IdP records on the audit row and on a
 /// rotated session. It only describes the client and grants nothing. The
-/// browser's X-Forwarded-For is deliberately not forwarded: the IdP takes the
-/// first hop of that header without a trusted-proxy list, and no other
-/// dashboard call to the IdP forwards it, so relaying it here would let a
-/// browser choose the address the IdP records.
+/// browser's X-Forwarded-For is deliberately not relayed: the IdP records the
+/// last hop of whatever it receives, so relaying the browser's header would
+/// let a browser choose the address the IdP records. Only sign-up sends a
+/// hop, and only the one the edge wrote (`raw_auth::post_json_for_client`).
 pub(crate) fn browser_user_agent(headers: &HeaderMap) -> Option<HeaderValue> {
     let mut values = headers.get_all(header::USER_AGENT).iter();
     let value = values.next()?;

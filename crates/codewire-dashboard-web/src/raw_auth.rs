@@ -137,6 +137,25 @@ where
     I: Serialize + ?Sized,
     O: DeserializeOwned,
 {
+    post_json_for_client(state, path, cookie, None, body).await
+}
+
+/// [`post_json`] for a call the IdP counts per client address, such as
+/// sign-up (#3297). `client` is the one hop this dashboard trusts, the last
+/// `X-Forwarded-For` hop the edge wrote on the browser's request, and it is
+/// sent as the whole header: never the browser's chain, so no hop the browser
+/// chose reaches the IdP. With no trusted hop the header is left out.
+pub(crate) async fn post_json_for_client<I, O>(
+    state: &AppState,
+    path: &str,
+    cookie: Option<HeaderValue>,
+    client: Option<&str>,
+    body: &I,
+) -> Result<IdentityResponse<O>, ()>
+where
+    I: Serialize + ?Sized,
+    O: DeserializeOwned,
+{
     debug_assert!(path.starts_with('/'));
     let mut request = state
         .http
@@ -144,6 +163,9 @@ where
         .json(&body);
     if let Some(cookie) = cookie {
         request = request.header(header::COOKIE, cookie);
+    }
+    if let Some(client) = client {
+        request = request.header("x-forwarded-for", client);
     }
     let response = request.send().await.map_err(|_| ())?;
     decode_identity_response(response).await

@@ -1,0 +1,39 @@
+# The IdP admits only the public edge, the dashboard and Prometheus
+# (#3297). Sign-up counts its per-address limit under the last
+# X-Forwarded-For hop, which the edge writes from the client's address and
+# the dashboard forwards from its own request; no other Pod, Sandboxes
+# included, can reach the IdP to write a hop of its choosing. Every other
+# service reaches the issuer, its discovery document and its keys through
+# the edge. The hosted overlays name the Envoy Gateway as the edge.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codewire-idp
+  namespace: prod
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: idp
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: rke2-ingress-nginx
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: codewire
+              app.kubernetes.io/component: dashboard
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 8091

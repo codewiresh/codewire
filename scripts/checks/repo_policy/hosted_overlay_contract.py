@@ -180,6 +180,20 @@ HOSTED_PATCH_CONTRACT: tuple[tuple[str, str, tuple[dict[str, Any], ...]], ...] =
         added("/spec/ingress/0/from/0/podSelector/matchLabels/app.kubernetes.io~1component"),
         added("/spec/ingress/0/from/0/podSelector/matchLabels/app.kubernetes.io~1instance"),
     )),
+    # Dev and Production retarget the IdP's and the dashboard's edge peer to the
+    # Envoy Gateway's public proxies by index (codewire#3297). The IdP's other
+    # peers are pinned too, so a reordered rule can't move the edge patch onto
+    # the dashboard or Prometheus peer.
+    ("NetworkPolicy", "codewire-idp", (
+        pinned("/spec/ingress/0/from/0", peer("kube-system", {"app.kubernetes.io/name": "rke2-ingress-nginx"})),
+        pinned("/spec/ingress/0/from/1", {"podSelector": {"matchLabels": {
+            "app.kubernetes.io/name": "codewire", "app.kubernetes.io/component": "dashboard",
+        }}}),
+        pinned("/spec/ingress/0/from/2", peer("monitoring", {"app.kubernetes.io/name": "prometheus"})),
+    )),
+    ("NetworkPolicy", "codewire-dashboard", (
+        pinned("/spec/ingress/0/from/0", peer("kube-system", {"app.kubernetes.io/name": "rke2-ingress-nginx"})),
+    )),
     # Sandbox-namespace roles move to {dev,prod}-sandboxes, their subjects to
     # the application namespace (one regular-expression selector each).
     sandbox_role("Role", "codewire-orchestration-internal-roots"),
@@ -294,6 +308,9 @@ SELF_TEST_MUTATIONS = (
     ("reshaped credential edge peer", "NetworkPolicy", "codewire-credential-service",
      "          kubernetes.io/metadata.name: kube-system\n", "          kubernetes.io/metadata.name: ingress-nginx\n",
      "NetworkPolicy/codewire-credential-service: a hosted overlay patch no longer applies: testing value /spec/ingress/0/from/0"),
+    ("changed IdP dashboard peer", "NetworkPolicy", "codewire-idp",
+     "app.kubernetes.io/component: dashboard\n", "app.kubernetes.io/component: billing\n",
+     "NetworkPolicy/codewire-idp: a hosted overlay patch no longer applies: testing value /spec/ingress/0/from/1"),
     ("dropped configuration key", "ConfigMap", "codewire-config",
      "  BAO_ADDR: \"\"\n", "",
      "ConfigMap/codewire-config: a hosted overlay patch no longer applies"),

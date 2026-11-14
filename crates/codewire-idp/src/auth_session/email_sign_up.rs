@@ -14,7 +14,9 @@
 //! With mail every address is verified by email before it signs in, and
 //! sign-up issues no session (#4481).
 
-use super::sign_up_invitation::{address_taken, invitation_for_sign_up, invitation_is_live};
+use super::sign_up_invitation::{
+    address_taken, invitation_for_sign_up, invitation_is_live, invite_only_refusal,
+};
 use super::*;
 
 /// Whether a sign-up from an invite link also passes Turnstile when an
@@ -116,12 +118,41 @@ async fn admit(
     Ok(decided)
 }
 
+/// Whether this sign-up counts against the site-wide limit (#3297). On an
+/// invite-only server an invitation bounds its own sign-up, so an invited
+/// sign-up doesn't count, and nothing uninvited can use up the allowance and
+/// lock invitees out. A token that names no live invitation is refused here,
+/// before anything is counted; the transaction still checks the invitation
+/// again before admitting. Every other sign-up counts, an uninvited one on an
+/// invite-only server included, since it creates an account that waits.
+async fn counts_against_signup_limit(
+    state: &SessionAuthState,
+    req: &SignUpRequest,
+) -> Result<bool, AppError> {
+    if state.signup_invite_policy.mode() != SignupMode::InviteOnly
+        || req.invitation_token.is_empty()
+    {
+        return Ok(true);
+    }
+    let mail = state.email.is_configured();
+    if invitation_is_live(&state.pool, &req.invitation_token, &req.email, mail).await? {
+        Ok(false)
+    } else {
+        Err(invite_only_refusal())
+    }
+}
+
 pub(super) async fn sign_up(
     State(state): State<SessionAuthState>,
     headers: HeaderMap,
     ValidatedJson(req): ValidatedJson<SignUpRequest>,
 ) -> Result<Response, AppError> {
     let decided = admit(&state, &req).await?;
+    if counts_against_signup_limit(&state, &req).await?
+        && let Err(refused) = crate::signup_limit::take(&state.pool).await
+    {
+        return Ok(refused.into_response());
+    }
 
     // A repeated request for an unverified pending account only reissues its
     // verification email. This makes the post-commit delivery failure

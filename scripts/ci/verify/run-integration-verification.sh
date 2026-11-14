@@ -1618,7 +1618,7 @@ service_build_idp() {
   if selected service_idp; then
     cargo_ci test --locked --profile ci -p codewire-idp --test db_flow \
       --test session_inventory --test two_factor_replacement --test rewrap_cli \
-      --test oauth_sign_in --test invitation_email --no-run
+      --test oauth_sign_in --test invitation_email --test signup_limit --no-run
   fi
 }
 service_build_coordinator() {
@@ -1752,6 +1752,20 @@ run_idp_invitation_email() {
   assert_passed_count "idp invitation email" "$logfile" 7
 }
 
+# The site-wide sign-up limit (#3297). It owns the signup:all counter while
+# it runs, so it runs alone, after the suites that sign up.
+run_idp_signup_limit() {
+  local logfile="$RUN_DIR/idp-signup-limit.log"
+  DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo_ci test --profile ci -p codewire-idp --test signup_limit -- --nocapture \
+    | tee "$logfile"
+  if grep -q 'DATABASE_URL unset' "$logfile"; then
+    echo "::error::idp sign-up limit DB tests skipped"
+    return 1
+  fi
+  assert_passed_count "idp sign-up limit" "$logfile" 1
+}
+
 run_idp() {
   run_idp_flow
   run_idp_session_inventory
@@ -1759,6 +1773,7 @@ run_idp() {
   run_idp_rewrap_cli
   run_idp_oauth_sign_in
   run_idp_invitation_email
+  run_idp_signup_limit
 }
 
 run_coordinator() {
@@ -2407,6 +2422,7 @@ run_service_lane() {
       run_idp_rewrap_cli
       run_idp_oauth_sign_in
       run_idp_invitation_email
+      run_idp_signup_limit
       ;;
     connect-auth) run_connect_auth_matrix ;;
     billing)
