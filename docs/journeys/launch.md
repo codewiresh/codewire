@@ -14,10 +14,27 @@ keeps its detail here until that file exists. Step 7 is out of the launch
 since 2026-11-13; its number stays so that the others keep theirs. Use one
 sandbox for steps 2 to 10; the examples call it `launch-walk`.
 
+## Who walks what
+
+Sessions prove every UI and CLI state of the walk themselves: on Kind, with
+the UI specs, and with their own walks on Dev. The owner is asked for three
+things only. The first two are the owner's decision (owner, 2026-11-14,
+#4370: "we aren't worried about emails. we are worried about the ui. i can
+check emails myself."); the third needs a person, as a real inbox does:
+
+- that an email arrived, because no session can read a real inbox: the
+  verification and access-enabled emails (step 1), the invitation (step 5),
+  the billing emails (step 6) and the password reset (step 8). Each is
+  marked "Owner: email arrived" in its step;
+- "land it" on a design preview;
+- a purchase with a real card on Production (step 6), which is the walker's
+  own card and the walker's own decision.
+
 ## Where the walk stands
 
-Updated 2026-11-13. On Production, step 10 and parts of step 9 are observed,
-step 8 is reported working, and nothing else is.
+Updated 2026-11-14. On Production, step 10, parts of step 9 and the sending
+of step 5's invitation are observed, step 8 is reported working, and nothing
+else is.
 
 | Step | ID | Detail | Dev | Production |
 | --- | --- | --- | --- | --- |
@@ -25,7 +42,7 @@ step 8 is reported working, and nothing else is.
 | 2 | `launch-agent-push` | below | not yet observed; the fix (#4303) is released in `v0.4.17` | not yet observed |
 | 3 | `launch-preview` | [previews-and-ports.md](previews-and-ports.md) | not yet observed | not yet observed |
 | 4 | `launch-cp` | [cloud-sandbox.md](cloud-sandbox.md) | upload, resume and download observed 2026-11-13 with builds of the fixes (#4373, #4394), which are tagged `v0.4.18`; not yet observed with it | not yet observed |
-| 5 | `launch-invite` | [invitations.md](invitations.md) | invite, email, accept and remove observed 2026-11-13 (#3847, #3840) | not yet observed |
+| 5 | `launch-invite` | [invitations.md](invitations.md) | invite, email, accept and remove observed 2026-11-13 (#3847, #3840) | the invitation and its email's send observed 2026-11-14 on `v0.4.18` (#3847); arrival, accept and remove not yet observed |
 | 6 | `launch-buy-credit` | [billing-and-credits.md](billing-and-credits.md) | card, top-up, costs and refusal observed (#3381, #3954); Add credit and the receipt not yet observed | not yet observed |
 | 7 | `launch-idle-wake` | out of the launch | out of the launch (owner, 2026-11-13) | out of the launch |
 | 8 | `launch-password-reset` | [signup-and-verification.md](signup-and-verification.md) | not yet observed | reported working by the owner 2026-11-13 (#2053); no walk recorded |
@@ -112,6 +129,9 @@ to give. The email and password steps, from sign-up through verification, are
      names the account. `cw cost` prints the organization's `Balance`.
 - **Proof:** `cw whoami` names the same account after the second sign-in,
   and `Balance` equals the sign-up credit the platform is set to give.
+- **Owner: email arrived:** the verification email and the access-enabled
+  email reach a real inbox. Every page and command of this step is a
+  session's to prove.
 - **Gotchas:**
   - The sign-up credit is a platform setting, `signup_credit_cents`, that
     starts at 0. A new organization gets it once, when it is created, and
@@ -239,6 +259,8 @@ sub-features on Production, in this order: `invite-send`, `invite-email`,
 `invite-accept` and `invite-remove`. The email has to arrive in the
 teammate's own mailbox; handing the link over by hand skips half the step.
 
+- **Owner: email arrived:** the invitation email reaches a real inbox.
+  Sending, accepting and removing are a session's to prove.
 - **Observed:**
   - Dev, 2026-11-13, Dev at `6c3651dcf` and `cw` built from `27707e6c2`
     (#3847): `cw org invite` created an invitation and reported the email
@@ -252,7 +274,10 @@ teammate's own mailbox; handing the link over by hand skips half the step.
     was gone from that list and from the invitee's `cw org list`.
   - The `cw` commands for accepting, listing and removing (#4453) are
     tagged `v0.4.18`.
-  - Production: not yet observed.
+  - Production, 2026-11-14, on `v0.4.18` (#3847): as the Production smoke
+    identity, `cw org invite` created an invitation and the mail provider
+    accepted its email. Arrival in a real inbox, accepting and removing:
+    not yet observed.
 
 ## 6. `launch-buy-credit`: buy credit, get a receipt, see correct costs
 
@@ -266,6 +291,9 @@ Production: `billing-card`; then `billing-auto-top-up` or
 `billing-add-credit`; `billing-receipt`; and `billing-costs`.
 `billing-zero-refusal` is what step 2's organization with no credit meets.
 
+- **Owner: email arrived:** the receipt, and the low-credit and
+  out-of-credit emails, reach a real inbox. The Billing page and the `cw`
+  commands are a session's to prove.
 - **Gotchas:**
   - On Production this step spends real money. It is the walker's own card
     and the walker's own decision.
@@ -295,6 +323,9 @@ walks it on Production with a password account: the email has to arrive in a
 mailbox outside Codewire's own domain, the old password is refused and the
 new one signs in.
 
+- **Owner: email arrived:** the reset email reaches a real inbox. The reset
+  pages, the refused old password and the new sign-in are a session's to
+  prove.
 - **Observed:**
   - Production: the owner reported on 2026-11-13 that the reset email
     arrived and the reset worked (#2053). The report names no release, and
