@@ -810,6 +810,10 @@ async fn create_invitation(
     let now = chrono::Utc::now().naive_utc();
     let expires_at = now + chrono::Duration::days(7);
 
+    #[cfg(test)]
+    invitation_refusals::fail_if_refused(&mut tx, invitation_refusals::Step::Invitation, email)
+        .await
+        .map_err(failed("create invitation", "failed to create invitation"))?;
     sqlx::query(
         r#"INSERT INTO org_invitations
             (id, org_id, email, role, invited_by, token_hash, status, expires_at, created_at, assignments)
@@ -834,6 +838,13 @@ async fn create_invitation(
         .await
         .map_err(failed("load inviter", "failed to create invitation"))?;
     let inviter_name = inviter.name.clone();
+    #[cfg(test)]
+    invitation_refusals::fail_if_refused(&mut tx, invitation_refusals::Step::Outbox, email)
+        .await
+        .map_err(failed(
+            "queue invitation email",
+            "failed to create invitation",
+        ))?;
     let queued = sqlx::query(
         r#"INSERT INTO org_invitation_emails
                (invitation_id, recipient, org_id, org_name, org_slug, inviter, role)
@@ -1452,6 +1463,51 @@ async fn grant_signup_credit(
     .bind(organization_id)
     .fetch_optional(&mut **tx)
     .await
+}
+
+/// Test-only refusals (#4613): an invitation test makes one step of
+/// CreateInvitation fail for one recipient. The step runs a statement
+/// PostgreSQL rejects inside the real transaction, so the rollback and the
+/// error path are the production ones, and no DDL locks the tables that
+/// parallel tests use.
+#[cfg(test)]
+pub(crate) mod invitation_refusals {
+    use std::sync::Mutex;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Step {
+        Invitation,
+        Outbox,
+    }
+
+    static REFUSED: Mutex<Vec<(Step, String)>> = Mutex::new(Vec::new());
+
+    pub(crate) fn refuse(step: Step, recipient: &str) {
+        REFUSED.lock().unwrap().push((step, recipient.to_owned()));
+    }
+
+    pub(crate) fn clear(recipient: &str) {
+        REFUSED
+            .lock()
+            .unwrap()
+            .retain(|(_, refused)| refused != recipient);
+    }
+
+    pub(super) async fn fail_if_refused(
+        conn: &mut sqlx::PgConnection,
+        step: Step,
+        recipient: &str,
+    ) -> sqlx::Result<()> {
+        let refused = REFUSED
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(at, refused)| *at == step && refused == recipient);
+        if refused {
+            sqlx::query("SELECT 1 / 0").execute(conn).await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -666,29 +666,11 @@ async fn db_an_invitation_and_its_email_commit_together() {
     let fixture = LeaseFixture::seed("synthetic-invitation-email-atomic").await;
     let t = Invitations::new(&fixture);
     let (outbox_refused, invitation_refused) = (t.email("outbox"), t.email("invitation"));
-    let refuse = format!("{}_refuse", fixture.id);
-    sqlx::raw_sql(&format!(
-        r#"CREATE FUNCTION "{refuse}"() RETURNS trigger LANGUAGE plpgsql AS $$
-           BEGIN
-             -- Each table's row has only its own columns, so test the table
-             -- before reading one.
-             IF TG_TABLE_NAME = 'org_invitation_emails' THEN
-               IF NEW.recipient = '{outbox_refused}' THEN
-                 RAISE EXCEPTION 'synthetic outbox refusal';
-               END IF;
-             ELSIF NEW.email = '{invitation_refused}' THEN
-               RAISE EXCEPTION 'synthetic invitation refusal';
-             END IF;
-             RETURN NEW;
-           END $$;
-           CREATE TRIGGER "{refuse}" BEFORE INSERT ON org_invitation_emails
-             FOR EACH ROW EXECUTE FUNCTION "{refuse}"();
-           CREATE TRIGGER "{refuse}" BEFORE INSERT ON org_invitations
-             FOR EACH ROW EXECUTE FUNCTION "{refuse}"();"#
-    ))
-    .execute(t.pool())
-    .await
-    .unwrap();
+    // Each refusal names its own recipient, so parallel tests are untouched
+    // and no DDL runs while they do (#4613).
+    use super::invitation_refusals::{Step, clear, refuse};
+    refuse(Step::Outbox, &outbox_refused);
+    refuse(Step::Invitation, &invitation_refused);
 
     let outbox = create(&t, &outbox_refused, "member").await;
     let invitation = create(&t, &invitation_refused, "member").await;
@@ -698,14 +680,8 @@ async fn db_an_invitation_and_its_email_commit_together() {
     );
     let created = create(&t, &t.email("unrefused"), "member").await;
 
-    sqlx::raw_sql(&format!(
-        r#"DROP TRIGGER "{refuse}" ON org_invitation_emails;
-           DROP TRIGGER "{refuse}" ON org_invitations;
-           DROP FUNCTION "{refuse}"();"#
-    ))
-    .execute(t.pool())
-    .await
-    .unwrap();
+    clear(&outbox_refused);
+    clear(&invitation_refused);
     assert_eq!(code(outbox), ConnectCode::Internal);
     assert_eq!(code(invitation), ConnectCode::Internal);
     assert_eq!(
