@@ -141,13 +141,26 @@ only.
   for one process launch from the selected sources. It is ephemeral and
   restores nothing.
 - A **snapshot** is saved state that can be reused or restored, always
-  qualified: a **skill snapshot** (immutable reusable skill content, seeded
-  into a local VM's root disk by `crates/codewire-local-vmm`) is implemented;
-  workspace and environment snapshots are reserved names and not implemented,
+  qualified ([GLOSSARY.md](docs/GLOSSARY.md#snapshot)). Two kinds ship:
+  - a **skill snapshot**: immutable reusable skill content, seeded into a
+    local VM's root disk by `crates/codewire-local-vmm`;
+  - a **disk snapshot**: a stopped environment's disks, saved by `cw snapshot
+    create` and forked into new environments by `cw create --snapshot`. It
+    holds no memory. Hosted sandboxes have them (`--cloud`), and so do local
+    VMs on Linux; on macOS, local disk snapshots are refused for now (#3803).
+
+  Workspace and environment snapshots are reserved names and not implemented,
   and the `pulling_snapshot` state is defined in the contract but never
-  entered. Workspace storage surviving a stop is not a snapshot.
-- A **VM checkpoint** is saved running-VM execution state. Codewire does not
-  implement VM checkpoints.
+  entered. Workspace storage surviving a stop is not a snapshot. What each
+  snapshot command does, and what it refuses, is in
+  [docs/journeys/snapshots-and-forks.md](docs/journeys/snapshots-and-forks.md).
+- A **VM checkpoint** is saved running-VM execution state: memory and device
+  state, with the VM's disks ([GLOSSARY.md](docs/GLOSSARY.md#vm-checkpoint)).
+  Local VMs on Linux have them: `cw checkpoint` creates, lists, inspects,
+  restores and removes them, and `cw create --local --checkpoint` forks one
+  into new environments with fresh identity. A checkpoint stays on the host
+  that made it. On macOS they are refused for now, and hosted sandboxes have
+  none.
 
 ## 3. Components
 
