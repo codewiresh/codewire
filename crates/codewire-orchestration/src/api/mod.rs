@@ -18,6 +18,7 @@ pub mod environment_sources;
 pub mod environments;
 pub mod feedback;
 pub mod host_key;
+pub mod host_operations;
 pub mod host_session;
 pub mod hosts;
 pub mod log_notifications;
