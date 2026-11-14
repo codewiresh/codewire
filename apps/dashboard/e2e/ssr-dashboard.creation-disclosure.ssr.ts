@@ -285,10 +285,12 @@ test("inventory load failure becomes unavailable and later recovery preserves ro
 // clock still follows real time until it is paused, so on a loaded host a
 // retry could fire before the test read "Retrying (1 of 2)" and it read
 // "2 of 2" instead (#4389). Pausing before the page loads holds every timer.
+// pauseAt installs the clock itself, starting at the epoch, so now is always
+// ahead of it. A separate install would set the blank page's clock to now and
+// keep it following real time, and on a loaded host it passed a target taken
+// just after ("Cannot fast-forward to the past", #4655).
 async function holdClock(page: Page) {
-  const start = Date.now();
-  await page.clock.install({ time: start });
-  await page.clock.pauseAt(start + 1);
+  await page.clock.pauseAt(Date.now());
 }
 
 test("optional-choice failure offers retry without clearing the Create form", async ({ page }) => {
