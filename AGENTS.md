@@ -183,6 +183,13 @@ iteration checkpoint gates landing, not local development: edit locally, review
 the real application, and do not commit, push, open a PR or run hosted CI until
 the owner says "land it".
 
+## CLI output
+
+The `codewire-cli-design` skill (`.agents/skills/codewire-cli-design/SKILL.md`)
+is the home of the CLI presentation rules: streams and terminal capabilities,
+status glyphs and colour, help layout, results and next steps, errors, empty
+and first-run states, prompts and tables (owner, 2026-11-13; cited on #3013).
+
 ## Rust
 
 The `codewire-rust` skill (`.agents/skills/codewire-rust/SKILL.md`) is the

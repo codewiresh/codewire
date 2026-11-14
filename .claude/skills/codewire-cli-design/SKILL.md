@@ -1,0 +1,1 @@
+../../../.agents/skills/codewire-cli-design/SKILL.md

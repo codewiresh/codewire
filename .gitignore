@@ -16,6 +16,7 @@ apps/docs/.astro/
 !.claude/settings.json
 !.claude/skills/
 .claude/skills/*
+!.claude/skills/codewire-cli-design/
 !.claude/skills/codewire-design/
 !.claude/skills/codewire-rust/
 
