@@ -27,13 +27,19 @@ stub() { # PATH BODY: a stand-in that logs its name and arguments, then runs BOD
     "$(basename "$1")" "$log" "$2" >"$tree/$1"
   chmod +x "$tree/$1"
 }
-# build-push-image.sh IMAGE ...: sleeps so the five overlap, fails for
-# FIXTURE_FAIL_IMAGE, and reports the image's candidate.
+# build-push-image.sh IMAGE ...: ends only once all five have started, so
+# side-by-side aliases overlap however slowly the host starts them, and
+# aliases run one after another wait out the 60 s hang guard and fail the
+# overlap check (#3739). Fails for FIXTURE_FAIL_IMAGE, and reports the image's
+# candidate.
 stub scripts/ci/images/build-push-image.sh '
 [ "$REQUIRE_EXISTING_SOURCE_IMAGE" = 1 ] || exit 90
 printf "origin %s\n" "$(git -C "$CODEWIRE_SOURCE_DIR" remote get-url origin)" >>"'"$TMP"'/origins.log"
 printf "%s start\n" "$1" >>"'"$TMP"'/order.log"
-sleep 0.3
+n=0
+until [ "$(grep -c " start$" "'"$TMP"'/order.log")" -ge 5 ] || [ "$n" -ge 6000 ]; do
+  n=$((n + 1)); sleep 0.01
+done
 printf "%s end\n" "$1" >>"'"$TMP"'/order.log"
 [ "$1" != "${FIXTURE_FAIL_IMAGE:-}" ] || { echo "$1 is not published for this source" >&2; exit 1; }
 printf "source_sha=%s\ncandidate_ref=registry.example.invalid/codewire/%s@sha256:%064d\n" "$CODEWIRE_SOURCE_SHA" "$1" 1 >>"$GITHUB_OUTPUT"'
