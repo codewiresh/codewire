@@ -671,7 +671,8 @@ async fn main() -> anyhow::Result<()> {
         http_client: codewire_orchestration::api::preview::http_client()?,
         preview_upstream: codewire_orchestration::api::preview::PreviewUpstream::new(
             pool.clone(),
-            kube.clone().map(KubernetesDriver::shared),
+            kube.clone()
+                .map(|kube| KubernetesDriver::shared(kube, (&ctx.sandbox_cfg).into())),
             cfg.session_secret.clone(),
             environment_daemon_endpoints.clone(),
         ),
