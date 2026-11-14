@@ -6003,7 +6003,7 @@ async fn startup_retires_a_runner_whose_executable_was_replaced() {
         spawn_test_runner_protocol_server(&runner_socket, TestRunnerProtocolReply::Version(2));
     let directory = fs::canonicalize(_parent.path()).unwrap();
     let executable = directory.join("recorded_runner");
-    fs::copy(fs::canonicalize("/bin/sleep").unwrap(), &executable).unwrap();
+    crate::copy_test_executable(&fs::canonicalize("/bin/sleep").unwrap(), &executable);
     let (_, process_identity) =
         attach_test_runner_process_running(&mut core, "dev", runner_socket_identity, &executable);
     let mut detached_child = core.children.remove(&environment_id).unwrap();

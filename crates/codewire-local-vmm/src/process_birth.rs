@@ -138,11 +138,11 @@ mod tests {
         // and links; only its change time records that it happened.
         let directory = tempfile::tempdir().unwrap();
         let executable = directory.path().join("sleeper");
-        std::fs::copy(sleep_binary(), &executable).unwrap();
+        crate::copy_test_executable(&sleep_binary(), &executable);
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut command = Command::new(&executable);
         command.arg("30");
-        let mut child = spawn_copied(&mut command);
+        let mut child = command.spawn().unwrap();
         let pid = child.id();
         let birth = exec_birth(pid, &executable, &mut child);
         assert_eq!(birth, ProcessBirth::observe(pid).unwrap());
@@ -173,21 +173,6 @@ mod tests {
             );
             std::thread::yield_now();
         }
-    }
-
-    /// Spawn an executable this test just copied. A concurrent test's fork
-    /// child can hold the copy's write descriptor until its own exec, so the
-    /// kernel briefly refuses it with ETXTBSY; retry only that, bounded.
-    fn spawn_copied(command: &mut Command) -> std::process::Child {
-        for _ in 1..50 {
-            match command.spawn() {
-                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                result => return result.unwrap(),
-            }
-        }
-        command.spawn().unwrap()
     }
 
     fn sleep_binary() -> PathBuf {

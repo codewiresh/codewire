@@ -446,7 +446,7 @@ mod tests {
         let executable = fs::canonicalize(directory.path())
             .unwrap()
             .join("recorded_runner");
-        fs::copy(fs::canonicalize("/bin/sleep").unwrap(), &executable).unwrap();
+        crate::copy_test_executable(&fs::canonicalize("/bin/sleep").unwrap(), &executable);
         let mut child = crate::test_child(&mut std::process::Command::new(&executable))
             .arg("60")
             .spawn()

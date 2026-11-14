@@ -110,6 +110,23 @@ pub(crate) fn test_child(command: &mut std::process::Command) -> &mut std::proce
     command
 }
 
+/// Copy `source` to `destination`, an executable the test then runs, with a
+/// `cp` child, so this process never opens the copy for writing. A child that
+/// another test thread forks holds this process's descriptors until it execs,
+/// close-on-exec or not; while it holds a writable one to the copy, running the
+/// copy fails with ETXTBSY (#4210). Renaming a copy into place leaves the same
+/// file open, and retrying would only wait the race out.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn copy_test_executable(source: &std::path::Path, destination: &std::path::Path) {
+    let status = std::process::Command::new("cp")
+        .arg("--")
+        .arg(source)
+        .arg(destination)
+        .status()
+        .expect("run cp for a test executable");
+    assert!(status.success(), "cp {source:?} {destination:?}: {status}");
+}
+
 /// Kill and reap, when this test process exits, a long-lived test child it
 /// still owns (#3813). A fixture that hands its `Child` to a structure the test
 /// drops would otherwise leave the child running past the test binary: a
