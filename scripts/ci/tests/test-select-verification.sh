@@ -4141,9 +4141,19 @@ RUST_SHARD_STAGE="${RUST_SHARD_STAGE:-all}"
 run_rust_packages() { printf '%s\n' "$*" > "$PRIMITIVE_PACKAGE_LOG"; }
 # The namespaced and stock-gh steps are traced by
 # test-cargo-target-runner-failures.sh; routing here does not run them.
-run_host_interface_refusal() { :; }
-run_daemon_stock_gh() { :; }
+# Each counts as the one test step it runs, unless the step is made to run
+# none (as the host-interface refusal does where no network namespace can be
+# made).
+run_host_interface_refusal() {
+  [[ -n "${PRIMITIVE_STEP_RUNS_NOTHING:-}" ]] || SHARD_TESTS=$(( ${SHARD_TESTS:-0} + 1 ))
+}
+run_daemon_stock_gh() {
+  [[ -n "${PRIMITIVE_STEP_RUNS_NOTHING:-}" ]] || SHARD_TESTS=$(( ${SHARD_TESTS:-0} + 1 ))
+}
 python3() {
+  if [[ -n "${PRIMITIVE_PYTHON_PASSES:-}" && "$*" == '-B scripts/ci/tests/'* ]]; then
+    return 0
+  fi
   if [[ "$*" == '-B scripts/ci/tests/test-cli-host-managed.py' ]]; then
     if [[ -n "${PRIMITIVE_HOST_ROUTING_LOG:-}" ]]; then
       printf '%s\n' host-fixture >> "$PRIMITIVE_HOST_ROUTING_LOG"
@@ -4186,7 +4196,7 @@ run_host_fixture_routing_case() {
     echo "$name: host fixture routing count changed" >&2; exit 1;
   }
   if [[ "$expected_exit" != 0 ]]; then
-    [[ "$(wc -l < "$log")" == 1 ]] || {
+    [[ "$(wc -l < "$log")" == "$expected_calls" ]] || {
       echo "$name: verification continued or emitted success after host fixture failure" >&2; exit 1;
     }
   else
@@ -4197,7 +4207,9 @@ defer_check run_host_fixture_routing_case workspace rust_workspace features 1 0 
 defer_check run_host_fixture_routing_case cli rust_pkg_codewire_cli features 1 0 0
 defer_check run_host_fixture_routing_case cli_bin rust_pkg_codewire_cli_bin features 1 0 0
 defer_check run_host_fixture_routing_case combined 'rust_pkg_codewire_cli|rust_pkg_codewire_cli_bin' features 1 0 0
-defer_check run_host_fixture_routing_case unrelated rust_pkg_codewire_client features 0 0 0
+# A package the features shard has no test for: its job is not dispatched,
+# and run anyway it fails for testing nothing (#4405), without the fixture.
+defer_check run_host_fixture_routing_case unrelated rust_pkg_codewire_client features 0 0 1
 defer_check run_host_fixture_routing_case packages rust_pkg_codewire_cli packages 0 0 0
 defer_check run_host_fixture_routing_case local_vmm rust_pkg_codewire_cli local-vmm 0 0 0
 defer_check run_host_fixture_routing_case refused rust_pkg_codewire_cli features 1 79 79
@@ -4275,27 +4287,31 @@ run_shard_test_all_stage_case() {
 }
 defer_check run_shard_test_all_stage_case
 
-# The features shard never passes silently (#4405). In the tests stage a
-# selection with no feature-graph package says so in the log and the step
-# summary; a selected step whose archive the build runner did not build fails.
+# The features shard never passes silently (#4405). Its job runs only when a
+# package it tests is selected, so there a stage that tested nothing fails:
+# whether the selection names no such package or a selected step ran none. A
+# selected step whose archive the build runner did not build fails. Building
+# the archives with nothing to build is not an error (the job then does not
+# run), and a full local run says so in the log and the step summary.
 run_feature_graph_selection_case() {
-  local name="$1" token="$2" expected_exit="$3" expected_text="$4" summarised="$5"
+  local name="$1" shard="$2" stage="$3" token="$4" expected_exit="$5" expected_text="$6" summarised="$7"
+  shift 7
   local out="$primitive_probe/features-$name.out" summary="$primitive_probe/features-$name.summary"
   local archives="$primitive_probe/features-$name.archives" status=0
   rm -rf -- "$archives"
   mkdir -p "$archives"
   : > "$summary"
-  PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_STUB="$primitive_cargo_stub" \
+  env PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_STUB="$primitive_cargo_stub" \
     PRIMITIVE_CARGO_LOG="$primitive_probe/features-$name.cargo" \
     PRIMITIVE_PACKAGE_LOG="$primitive_probe/features-$name.packages" \
-    PRIMITIVE_RUST_BODY="$primitive_rust_body" ROOT="$ROOT" \
-    RUST_TRANSPORT_SHARD=features RUST_SHARD_STAGE=tests RUST_SHARD_ARCHIVES="$archives" \
-    GITHUB_STEP_SUMMARY="$summary" SELECTION="|valid:v3|$token|complete|" \
+    PRIMITIVE_RUST_BODY="$primitive_rust_body" ROOT="$ROOT" PRIMITIVE_PYTHON_PASSES=1 \
+    RUST_TRANSPORT_SHARD="$shard" RUST_SHARD_STAGE="$stage" RUST_SHARD_ARCHIVES="$archives" \
+    GITHUB_STEP_SUMMARY="$summary" SELECTION="|valid:v3|rust|$token|complete|" "$@" \
     bash "$primitive_probe/dispatch.sh" > "$out" 2>&1 || status=$?
   [[ "$status" == "$expected_exit" ]] || {
     echo "$name: the features shard exited $status, expected $expected_exit" >&2; cat "$out" >&2; exit 1;
   }
-  grep -qF -- "$expected_text" "$out" || {
+  [[ -z "$expected_text" ]] || grep -qF -- "$expected_text" "$out" || {
     echo "$name: the features shard did not say: $expected_text" >&2; cat "$out" >&2; exit 1;
   }
   if [[ "$summarised" == yes ]]; then
@@ -4306,10 +4322,59 @@ run_feature_graph_selection_case() {
     [[ ! -s "$summary" ]] || { echo "$name: claimed nothing ran: $(cat "$summary")" >&2; exit 1; }
   fi
 }
-defer_check run_feature_graph_selection_case none rust_pkg_codewire_client 0 \
-  'no feature-graph package selected; nothing to run' yes
-defer_check run_feature_graph_selection_case empty_archive rust_pkg_codewire_protected_store 1 \
+feature_graph_error='::error::Rust / transport feature graphs ran no test'
+# Run 46128: transport alone dispatched the job, which tested nothing and passed.
+defer_check run_feature_graph_selection_case none features tests transport 1 "$feature_graph_error" no
+defer_check run_feature_graph_selection_case untested_package features tests rust_pkg_codewire_client 1 \
+  "$feature_graph_error" no
+# A full build on the job's own runner (an archive miss) is held to the same rule.
+defer_check run_feature_graph_selection_case none_built_here features all transport 1 "$feature_graph_error" no
+# A selected package whose one step ran nothing fails too.
+defer_check run_feature_graph_selection_case selected_ran_nothing features tests rust_pkg_codewire_daemon 1 \
+  "$feature_graph_error" no PRIMITIVE_STEP_RUNS_NOTHING=1
+defer_check run_feature_graph_selection_case selected_ran features tests rust_pkg_codewire_daemon 0 '' no
+defer_check run_feature_graph_selection_case empty_archive features tests rust_pkg_codewire_protected_store 1 \
   'no protected-store-platform test archive' no
+defer_check run_feature_graph_selection_case nothing_to_build features archives transport 0 '' yes
+defer_check run_feature_graph_selection_case local_full_run all all transport 0 \
+  'no feature-graph package selected; nothing to run' yes
+
+# scripts/ci/select/feature-graph-tokens, which dispatches the features job,
+# names exactly the tokens whose selection gives the shard a test to run: one
+# a run would miss is never dispatched, and one that tests nothing would fail.
+check_feature_graph_tokens() {
+  local listed tested token status out
+  mkdir -p "$primitive_probe/features-token.archives"
+  listed="$(grep -v '^#' "$ROOT/scripts/ci/select/feature-graph-tokens" | sort)"
+  tested=''
+  for token in $(sed -n '/^  rust_shard features || return 0$/,/^}$/p' "$ROOT/scripts/ci/verify/run-product-verification.sh" \
+      | grep -oE 'selected [a-z_]+' | awk '{print $2}' | sort -u); do
+    out="$primitive_probe/features-token-$token.out"
+    status=0
+    env PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_STUB="$primitive_cargo_stub" \
+      PRIMITIVE_CARGO_LOG="$primitive_probe/features-token.cargo" \
+      PRIMITIVE_PACKAGE_LOG="$primitive_probe/features-token.packages" \
+      PRIMITIVE_RUST_BODY="$primitive_rust_body" ROOT="$ROOT" PRIMITIVE_PYTHON_PASSES=1 \
+      RUST_TRANSPORT_SHARD=features RUST_SHARD_STAGE=tests RUST_SHARD_ARCHIVES="$primitive_probe/features-token.archives" \
+      SELECTION="|valid:v3|rust|$token|complete|" \
+      bash "$primitive_probe/dispatch.sh" > "$out" 2>&1 || status=$?
+    if grep -qF 'ran no test' "$out"; then
+      continue
+    fi
+    # A step with no archive here still means the token has a test to run.
+    [[ "$status" == 0 ]] || grep -qE 'no [a-z0-9-]+ test archive' "$out" || {
+      echo "feature-graph token $token: the shard failed" >&2; cat "$out" >&2; exit 1;
+    }
+    tested+="$token"$'\n'
+  done
+  [[ -n "$tested" ]] || { echo 'no token gives the features shard a test' >&2; exit 1; }
+  [[ "$listed" == "$(printf '%s' "$tested" | sort)" ]] || {
+    echo 'scripts/ci/select/feature-graph-tokens differs from the tokens the features shard tests' >&2
+    diff <(printf '%s\n' "$listed") <(printf '%s' "$tested" | sort) >&2 || true
+    exit 1
+  }
+}
+defer_check check_feature_graph_tokens
 
 run_admin_rust_case() {
   local name="$1" tokens="$2" graph="$3" expected_status="$4" fail="${5:-}"
@@ -4764,7 +4829,7 @@ pr_dispatch_and_require() {
     results+=("VERIFICATION_${group^^}_EXPECTED=$value")
     jobs=("${group^^}")
     if [ "$group" = rust_shards ]; then
-      jobs=(RUST_PACKAGES RUST_FEATURES)
+      jobs=(RUST_PACKAGES)
     fi
     # Rust checks runs with the test archives' build (compile once).
     if [ "$group" = rust_compile ]; then

@@ -22,6 +22,7 @@ green_results=(
   VERIFICATION_RUST_CHECKS_RESULT=success
   VERIFICATION_RUST_SHARDS_EXPECTED=true
   VERIFICATION_RUST_PACKAGES_RESULT=success
+  VERIFICATION_RUST_FEATURES_EXPECTED=true
   VERIFICATION_RUST_FEATURES_RESULT=success
   VERIFICATION_DATABASE_EXPECTED=true
   VERIFICATION_DATABASE_RESULT=success
@@ -49,6 +50,7 @@ unselected_results=(
   VERIFICATION_RUST_CHECKS_RESULT=skipped
   VERIFICATION_RUST_SHARDS_EXPECTED=false
   VERIFICATION_RUST_PACKAGES_RESULT=skipped
+  VERIFICATION_RUST_FEATURES_EXPECTED=false
   VERIFICATION_RUST_FEATURES_RESULT=skipped
   VERIFICATION_DATABASE_EXPECTED=false
   VERIFICATION_DATABASE_RESULT=skipped
@@ -131,13 +133,33 @@ env "${green_results[@]}" \
   VERIFICATION_SELECTION='|valid:v3|policy|rust_curated_locks|complete|' \
   VERIFICATION_RUST_SHARDS_EXPECTED=false \
   VERIFICATION_RUST_PACKAGES_RESULT=skipped \
+  VERIFICATION_RUST_FEATURES_EXPECTED=false \
   VERIFICATION_RUST_FEATURES_RESULT=skipped \
   "$CHECK" >/dev/null
+
+# A selection with no feature-graph package runs the packages shard alone; the
+# feature-graph shard stays skipped, never a green that tested nothing (#4405).
+env "${green_results[@]}" \
+  VERIFICATION_SELECTION='|valid:v3|policy|transport|complete|' \
+  VERIFICATION_RUST_FEATURES_EXPECTED=false \
+  VERIFICATION_RUST_FEATURES_RESULT=skipped \
+  "$CHECK" >/dev/null
+
+expect_failure features_ran_unselected \
+  'rust-features unselected capability group concluded success' \
+  VERIFICATION_SELECTION='|valid:v3|policy|transport|complete|' \
+  VERIFICATION_RUST_FEATURES_EXPECTED=false
+
+expect_failure missing_features_expectation \
+  'rust-features capability expectation is missing' \
+  VERIFICATION_SELECTION='|valid:v3|policy|rust|complete|' \
+  VERIFICATION_RUST_FEATURES_EXPECTED=
 
 expect_failure shards_ran_unselected \
   'rust-packages unselected capability group concluded success' \
   VERIFICATION_SELECTION='|valid:v3|policy|rust_curated_locks|complete|' \
   VERIFICATION_RUST_SHARDS_EXPECTED=false \
+  VERIFICATION_RUST_FEATURES_EXPECTED=false \
   VERIFICATION_RUST_FEATURES_RESULT=skipped
 
 expect_failure missing_shards_expectation \

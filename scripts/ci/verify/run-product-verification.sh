@@ -1309,7 +1309,9 @@ run_rust() {
   if shard_stage tests && { selected rust_workspace || selected rust_pkg_codewire_cli || selected rust_pkg_codewire_cli_bin; }; then
     python3 -B scripts/ci/tests/test-cli-host-managed.py || return $?
     python3 -B scripts/ci/tests/test-cli-update-mesh-endpoints.py || return $?
-    python3 -B scripts/ci/tests/test-build-cw-release-dir.py
+    python3 -B scripts/ci/tests/test-build-cw-release-dir.py || return $?
+    # The CLI's own tests count as this shard's tests (#4405).
+    SHARD_TESTS=$(( ${SHARD_TESTS:-0} + 1 ))
   fi
   if shard_stage checks && { selected rust_workspace || selected rust_pkg_codewire_cli \
       || selected rust_pkg_codewire_cli_bin || selected rust_pkg_codewire_admin_proto \
@@ -1377,9 +1379,18 @@ run_rust() {
     shard_test client-ffi-swift-bindings '-E test(swift_bindings_tests::)' \
       -p codewire-client-ffi --features bindgen --lib -- swift_bindings_tests::
   fi
-  # A selection with no feature-graph package leaves this shard no test to
-  # build or run. Say so where the job is read, never pass silently (#4405).
-  # A selected step whose archive is missing already fails (extract_shard_archive).
+  # The features job is dispatched only when a token in
+  # scripts/ci/select/feature-graph-tokens is selected, so there a run that
+  # tested nothing is an error, never a green (#4405). Building the archives
+  # with nothing selected is not: the job then does not run. A selected step
+  # whose archive is missing already fails (extract_shard_archive).
+  if [ "$RUST_SHARD_STAGE" != checks ] && [ "$RUST_SHARD_STAGE" != archives ] \
+      && [ "${SHARD_TESTS:-0}" = "$feature_tests_before" ] && [ "${RUST_TRANSPORT_SHARD:-all}" = features ]; then
+    echo '::error::Rust / transport feature graphs ran no test: its selection names no package this shard tests, or a selected step ran nothing' >&2
+    return 1
+  fi
+  # A full local run (RUST_TRANSPORT_SHARD=all) whose selection has no
+  # feature-graph package says so.
   if [ "$RUST_SHARD_STAGE" != checks ] && [ "${SHARD_TESTS:-0}" = "$feature_tests_before" ]; then
     local notice='no feature-graph package selected; nothing to run'
     echo "::notice::Rust / transport feature graphs: $notice"

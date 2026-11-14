@@ -47,6 +47,7 @@ declare -A expected=(
   [tooling]=false
   [rust_compile]=false
   [rust_shards]=false
+  [rust_features]=false
   [rust_transport]=false
   [database]=false
   [services_control]=false
@@ -101,6 +102,14 @@ elif [ "$tested_tree_receipt" = fallback ]; then
   fi
   # The packages and feature-graph shards run only selected Rust or transport.
   selected_any rust transport && expected[rust_shards]=true
+  # The feature-graph shard runs only when it has a test to run: one of the
+  # tokens it tests is selected. A selection of transport alone gave it none,
+  # and it passed having tested nothing (#4405).
+  if [ "${expected[rust_shards]}" = true ]; then
+    mapfile -t feature_graph_tokens < <(grep -v '^#' "$(dirname "${BASH_SOURCE[0]}")/feature-graph-tokens")
+    [ "${#feature_graph_tokens[@]}" -gt 0 ] || fail 'feature-graph-tokens lists no token'
+    selected_any "${feature_graph_tokens[@]}" && expected[rust_features]=true
+  fi
   # Rust / transport verification also owns the curated locks and the desktop
   # package, which it builds separately unless the Rust selection names it.
   if selected_any rust rust_curated_locks transport \
@@ -161,7 +170,7 @@ elif [ "$tested_tree_receipt" = fallback ]; then
 fi
 
 for group in \
-    policy contracts standard tooling rust_compile rust_shards rust_transport database \
+    policy contracts standard tooling rust_compile rust_shards rust_features rust_transport database \
     services_control services_runtime edge_kind; do
   value="${expected[$group]}"
   printf '%s_expected=%s\n' "$group" "$value"

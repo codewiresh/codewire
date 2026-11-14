@@ -1,0 +1,18 @@
+# The selection tokens whose tests the Rust features shard runs
+# (run-product-verification.sh run_rust). The selection dispatches Rust /
+# transport feature graphs only when one of them is selected, and the shard
+# fails when it runs no test (#4405). Tokens whose only feature-graph work is
+# a check (rust_pkg_codewire_admin_proto, rust_pkg_codewire_proto) are not
+# here: the checks run in Build test archives. test-select-verification.sh
+# proves this list matches the shard.
+rust_workspace
+rust_pkg_codewire_cli
+rust_pkg_codewire_cli_bin
+rust_pkg_codewire_client_ffi
+rust_pkg_codewire_credential_broker
+rust_pkg_codewire_credential_service
+rust_pkg_codewire_daemon
+rust_pkg_codewire_oidc
+rust_pkg_codewire_orchestration
+rust_pkg_codewire_protected_store
+rust_pkg_codewire_server_core

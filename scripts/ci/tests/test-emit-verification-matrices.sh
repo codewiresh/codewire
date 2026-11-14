@@ -87,6 +87,25 @@ for rust_case in 'rust:true:true' 'transport:true:true' 'rust_curated_locks:fals
   assert_output "$rust_output" rust_transport "$transport_expected"
 done
 
+# The feature-graph shard is expected only when a package it tests is
+# selected: transport alone, or a crate it has no test for, gave it nothing to
+# run and it passed (#4405). Every listed token dispatches it.
+for features_case in '|rust|transport|:false' '|transport|:false' '|rust|rust_pkg_codewire_client|:false' \
+    '|rust|rust_pkg_codewire_admin_proto|:false' '|rust|rust_workspace|:true' \
+    '|rust|transport|rust_pkg_codewire_protected_store|:true'; do
+  features_output="$(emit "|valid:v3${features_case%:*}complete|" fallback false false)"
+  assert_output "$features_output" rust_shards true
+  assert_output "$features_output" rust_features "${features_case##*:}"
+done
+while read -r features_token; do
+  case "$features_token" in ''|'#'*) continue ;; esac
+  assert_output "$(emit "|valid:v3|rust|${features_token}|complete|" fallback false false)" rust_features true
+done < "$ROOT/scripts/ci/select/feature-graph-tokens"
+# A token the selector does not know dispatches every group, this one too.
+assert_output "$(emit '|valid:v3|transport|future_token|complete|' fallback false false 2>/dev/null)" rust_features true
+# Without the shards nothing dispatches it.
+assert_output "$(emit '|valid:v3|rust_curated_locks|complete|' fallback false false)" rust_features false
+
 # Tokens that only shape a running step dispatch no job alone.
 for shaping_token in contracts_proto go_tailnet go_consumer_interop security_go; do
   shaping_output="$(emit "|valid:v3|${shaping_token}|complete|" fallback false false)"

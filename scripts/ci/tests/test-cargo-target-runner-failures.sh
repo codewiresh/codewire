@@ -278,7 +278,10 @@ def comparable(trace_records):
     return sorted(json.dumps(r, sort_keys=True) for r in trace_records)
 sharded = []
 for shard in ('packages', 'features', 'local-vmm'):
-    shard_records, _ = run(special, shard=shard)
+    # This selection names no package the features shard tests: CI does not
+    # dispatch it, and run anyway it fails having run nothing (#4405).
+    shard_records, _ = run(special, shard=shard, status=1 if shard == 'features' else None)
+    assert shard != 'features' or not shard_records, shard_records
     sharded += shard_records
 assert comparable(sharded) == comparable(records), 'Rust/transport shards diverged from the single job'
 _, invalid_shard_output = run(special, shard='everything', status=2)

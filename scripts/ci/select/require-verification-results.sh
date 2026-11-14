@@ -54,8 +54,10 @@ require_group_result rust-checks \
 require_group_result rust-packages \
   "${VERIFICATION_RUST_SHARDS_EXPECTED:-missing}" \
   "${VERIFICATION_RUST_PACKAGES_RESULT:-missing}"
+# The feature-graph shard has its own decision: it runs only when one of its
+# packages is selected (#4405).
 require_group_result rust-features \
-  "${VERIFICATION_RUST_SHARDS_EXPECTED:-missing}" \
+  "${VERIFICATION_RUST_FEATURES_EXPECTED:-missing}" \
   "${VERIFICATION_RUST_FEATURES_RESULT:-missing}"
 require_group_result rust-transport \
   "${VERIFICATION_RUST_TRANSPORT_EXPECTED:-missing}" \
