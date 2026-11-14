@@ -22,7 +22,7 @@ observed; the email's arrival is observed on Dev only.
 | `invite-accept` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
 | `invite-remove` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
 | `org-leave` | not yet observed | not yet observed |
-| `invite-limits` | not yet observed | not yet observed |
+| `invite-limits` | the account's hourly limit observed 2026-11-14 on 09c05f268 (#4457); the rest not yet observed | not yet observed |
 | `invite-unverified` | not yet observed | not yet observed |
 
 ## Before the walk
@@ -292,7 +292,24 @@ invitations.
     it. The walk's account cannot invite for the rest of that hour.
   - Reaching the pending cap takes 200 invitations, more than one account's
     hourly limit allows; it needs several inviters or several hours.
-- **Observed:** not yet observed.
+  - A synthetic identity that signs in with an organization-bound API key
+    cannot make an organization for the walk. It walks in its own, and the
+    walk's invitations count toward that organization's hour too.
+- **Observed:**
+  - Dev, 2026-11-14, Dev running source `09c05f268`, `cw` v0.4.17, as the
+    Dev smoke identity in its own organization (#4457): invitations 1 to
+    30 to the mail provider's simulator were accepted, and the 31st exited
+    1 with "invite: invitation limit reached: one account can send at most
+    30 invitations an hour; try again after Nov 14 20:14 UTC". Straight
+    after, the organization held 30 pending invitations and none for the
+    31st address; 30 emails were recorded as sent and none for the 31st
+    address. All 30 were then revoked.
+  - The pending cap of 200: not walked. The database tests in
+    `crates/codewire-orchestration/src/api/organizations/invitation_limit_database_tests.rs`
+    cover it.
+  - The organization's limit of 60 an hour, and the refusal on the
+    dashboard: not yet observed.
+  - Production: not yet observed.
 
 ## `invite-unverified`: an unverified inviter is refused
 
@@ -307,5 +324,7 @@ invitations.
   sent. After verifying, the same invitation succeeds.
 - **Gotchas:** accounts made through GitHub or Google sign-in are verified
   at sign-up, and so are the synthetic Dev identities. This state needs a
-  new email and password account.
+  new email and password account. Sign-up asks for a human check, and no
+  checked-in helper makes an unverified account, so the walk needs a
+  person's browser sign-up or a reviewed helper.
 - **Observed:** not yet observed.
