@@ -33,14 +33,10 @@ image:
 
 imagePullSecrets: []
 
+# Must stay 1 until replicas share the live registry (codewire#3542).
+# Mesh keeps no files: durable state is in the database, so it has no volume
+# and can run on any node.
 replicaCount: 1
-
-persistence:
-  enabled: true
-  size: 1Gi
-  storageClass: ""
-  accessModes:
-    - ReadWriteOnce
 
 ingress:
   enabled: false

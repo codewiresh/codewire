@@ -158,9 +158,9 @@ Updated 2026-11-13.
 - **Entry points:** `cw network` commands; every Mesh member's session.
 - **States to exercise:** the node running Mesh drained; members on other
   nodes reaching each other meanwhile.
-- **Driving it:** no command yet: Mesh runs one replica, pinned to one node
-  by its volume, so draining that node takes Mesh down. Two replicas sharing
-  their state are #3542's step 5.
+- **Driving it:** no command yet: Mesh runs one replica, so draining its node
+  takes Mesh down until the replacement pod is ready on another node. Two
+  replicas sharing their state are #3542's step 5.
 - **Proof:** `cw network list` answers and two members on other nodes keep
   reaching each other throughout.
 - **Gotchas:** the node that holds Mesh has not been drained for this reason.

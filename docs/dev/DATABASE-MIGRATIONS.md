@@ -29,10 +29,9 @@ release inputs reference only the controller-generated Secret name and `uri`
 key; rendered private desired state carries that reference without copying any
 credential value. Dev is disposable at the environment level, but its database
 keeps Mesh state durable across pod replacements and ordinary main deployments.
-The separate Mesh PVC remains deliberately retained through the WS18
-convergence work; it is not a substitute for the PostgreSQL store. Do not
-remove or recreate it merely because the retired native Mesh SSH relay no
-longer writes a host key there.
+Mesh keeps no files, so the chart gives it no volume. Its old PVC held only
+the host key of the retired native SSH relay, and tied the pod to one node
+(codewire#3542).
 
 ## Primary Application Database
 

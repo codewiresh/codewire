@@ -1826,6 +1826,23 @@ run_deploy() {
     echo "::error::retired Mesh legacy-auth command rendered"
     return 1
   fi
+  # Mesh keeps no files, so no volume ties it to a node, and one in-memory
+  # registry must never be served by two pods (codewire#3542).
+  if grep -Fq 'kind: PersistentVolumeClaim' <<<"$default_mesh_render" ||
+      grep -Fq 'mountPath: /data' <<<"$default_mesh_render"; then
+    echo "::error::Mesh rendered a data volume"
+    return 1
+  fi
+  grep -Fq 'type: Recreate' <<<"$default_mesh_render"
+  local mesh_replicas_render
+  if mesh_replicas_render="$(helm template codewire-mesh-replicas-canary \
+      apps/cli/charts/codewire-mesh \
+      --set mesh.baseURL=https://mesh.test --set replicaCount=2 2>&1)"; then
+    echo "::error::Mesh rendered two replicas without a shared registry"
+    return 1
+  fi
+  # Any other render failure would also land here: require the guard's own.
+  grep -Fq 'replicaCount must be 1' <<<"$mesh_replicas_render"
   local dev_mesh_render database_reference_canary_render
   dev_mesh_render="$(helm template codewire-mesh-dev apps/cli/charts/codewire-mesh \
     -f deployments/k8s/mesh-dev/values.yaml \

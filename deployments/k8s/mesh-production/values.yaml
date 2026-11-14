@@ -42,10 +42,6 @@ ingress:
         - mesh.codewire.sh
       secretName: mesh-codewire-tls
 
-persistence:
-  enabled: true
-  size: 10Gi
-
 resources:
   requests:
     cpu: 250m

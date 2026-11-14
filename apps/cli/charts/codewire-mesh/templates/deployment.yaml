@@ -16,8 +16,13 @@ metadata:
 {{- if ne (not (empty .Values.meshAuthorization.url)) (not (empty .Values.meshAuthorization.tlsRootsConfigMap)) }}
 {{- fail "meshAuthorization.url and meshAuthorization.tlsRootsConfigMap must be set together" }}
 {{- end }}
+{{- if gt (int .Values.replicaCount) 1 }}
+{{- fail "replicaCount must be 1: each Mesh replica keeps its own in-memory registry, so a second one would split the network (codewire#3542)" }}
+{{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  # The live registry is in process memory, so two pods must never serve at
+  # once: the old pod stops before the new one starts.
   strategy:
     type: Recreate
   selector:
@@ -105,27 +110,18 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if .Values.meshAuthorization.tlsRootsConfigMap }}
           volumeMounts:
-            - name: data
-              mountPath: /data
-            {{- if .Values.meshAuthorization.tlsRootsConfigMap }}
             - name: mesh-authorization-roots
               mountPath: /run/codewire-mesh-authorization-roots
               readOnly: true
-            {{- end }}
+          {{- end }}
+      {{- if .Values.meshAuthorization.tlsRootsConfigMap }}
       volumes:
-        {{- if .Values.meshAuthorization.tlsRootsConfigMap }}
         - name: mesh-authorization-roots
           configMap:
             name: {{ .Values.meshAuthorization.tlsRootsConfigMap }}
-        {{- end }}
-        - name: data
-          {{- if .Values.persistence.enabled }}
-          persistentVolumeClaim:
-            claimName: {{ include "codewire-mesh.fullname" . }}-data
-          {{- else }}
-          emptyDir: {}
-          {{- end }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
