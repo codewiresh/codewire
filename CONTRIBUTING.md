@@ -7,6 +7,22 @@ contributions open (see [License](#license)). The
 [SPEC.md](SPEC.md) describes the system; [docs/README.md](docs/README.md)
 maps the rest of the documentation.
 
+## Repository layout
+
+```text
+apps/cli/        cw installer, packaging and release metadata
+apps/dashboard/  dashboard image and browser tests
+apps/docs/       documentation site (codewire.sh/docs)
+crates/          Rust workspace: services, daemon, CLI, local VM runtime, dashboard
+deployments/     Kubernetes manifests, kustomize overlays, Docker images
+images/          workspace and runtime OCI images
+integrations/    plugins that bring Codewire into other terminal and agent tools
+libs/            SDKs (TypeScript, Go, Python) and generated clients
+packages/        design system and generated TypeScript schemas
+proto/           Connect-RPC contract source
+docs/            architecture, glossary and developer docs
+```
+
 ## Build, test, run
 
 The Rust build needs a Rust toolchain (`rustup`) and `protoc`, the Protocol

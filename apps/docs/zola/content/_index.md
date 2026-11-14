@@ -22,14 +22,18 @@ Codewire platform where it stays up and is reachable from anywhere.
 ## Try it
 
 ```sh
-curl -fsSL https://get.codewire.sh | sh     # install cw
-cw setup --local                            # install the local VM runtime
-cw create --local --name my-app --path .    # a VM with this folder mounted live
-cw run claude --in my-app                   # Claude Code in the VM; Ctrl-B, then d detaches
+curl -fsSL https://get.codewire.sh | sh                  # install cw
+cw setup                                                 # sign in in your browser
+cw create --name hello --image workspace                 # a sandbox on the platform
+cw run --in hello --name web --detach -- python3 -m http.server 3000
+cw ports hello --publish 3000                            # an HTTPS preview URL
+cw rm hello                                              # when you are done
 ```
 
-The [Quickstart](@/quickstart.md) walks through it with the output of every
-step, then does the same on the platform.
+No account? `cw setup --local` and `cw create --local --name hello --path .`
+run the same in a VM on your own machine. The [Quickstart](@/quickstart.md)
+walks through it with the output of every step, and adds a credential and a
+secret on the way.
 
 ## What people use it for
 
@@ -56,68 +60,30 @@ step, then does the same on the platform.
 - **Run as many as you need.** One VM per agent, per branch or per pull
   request, each with its own files, processes and ports.
 
-## How it compares
-
-| | Agent on your own machine | Containers | Codewire |
-| --- | --- | --- | --- |
-| Isolation | none: the agent runs as you | a shared host kernel | its own kernel per environment |
-| Your files and keys | all readable | whatever you mount | your project only; credentials brokered |
-| Docker inside | your own Docker | needs a privileged container | a Docker daemon in every VM |
-| Close the terminal | the agent stops, unless you use tmux | depends on your setup | sessions keep running; reattach anywhere |
-| Where it runs | your machine | your machine or a server | your machine, or the platform with preview URLs and SSH |
-
-Hosted development environments are mostly built for a person in an editor.
-Codewire is built for agents that run unattended: a VM boundary, durable
-sessions, managed agent conversations, and the same commands on your machine
-and hosted.
-
-## What you get
-
-- **Durable sessions.** Every command and agent runs in a session that belongs
-  to the environment. Detach, close the laptop, reattach from another
-  terminal. See [Agents](@/agents/_index.md).
-- **Claude Code and Codex built in.** `cw run claude` opens Claude Code in the
-  VM. Managed conversations add a lead and workers, queued tasks and recorded
-  results. See [Run and orchestrate](@/agents/run.md).
-- **Your project, live.** `--path .` mounts your folder in a local VM;
-  `--repo` clones a repository into a hosted sandbox. See
-  [`codewire.yaml`](@/environments/codewire-yaml.md).
-- **Ports and previews.** Publish a port on `127.0.0.1` from a local VM, or
-  as an HTTPS preview URL from a hosted sandbox. See
-  [Ports and preview URLs](@/access/ports.md).
-- **SSH, VS Code and files.** `ssh`, `scp`, VS Code Remote and a browser
-  terminal. See [Access](@/access/_index.md).
-- **Secrets and credentials.** Application secrets delivered as environment
-  variables, provider credentials kept outside. See
-  [Credentials](@/secrets/credentials.md) and
-  [Application secrets](@/secrets/application-secrets.md).
-- **Private networks.** Environments and your own machines on one encrypted
-  Mesh network. See [Mesh networks](@/networking/mesh.md).
-- **Teams.** Organizations, members, shared presets and secrets. See
-  [Members and sharing](@/organizations/members.md).
-
 ## Where it runs
 
-| Placement | Where it runs | Isolation | Account |
-| --- | --- | --- | --- |
-| Local VM | your Linux x86_64 machine or Apple Silicon Mac | Cloud Hypervisor on KVM; Virtualization.framework on macOS | none |
-| Hosted sandbox | the Codewire platform | one VM per environment | an organization; [billed per second](@/organizations/usage.md) |
-| Trusted host session | your machine, as your own user | none: process ownership only | none |
-
-See [Environments](@/environments/_index.md#where-it-runs) for what each one supports, and the
-[security model](@/reference/security.md) for what each one protects.
+An environment is a hosted sandbox on the Codewire platform, a local VM on your
+Linux x86_64 machine or Apple Silicon Mac, or a trusted host session that runs
+as your own user with no isolation. A local VM and a trusted host session need
+no account; a hosted sandbox needs an organization and is
+[billed per second](@/organizations/usage.md). See
+[Environments](@/environments/_index.md#where-it-runs) for what each supports,
+and the [security model](@/reference/security.md) for what each protects.
 
 ## How the documentation is organized
 
 Each section is one part of Codewire, and each topic has one page, whether a
 person or an agent uses it.
 
-- [Quickstart](@/quickstart.md) and [Install and sign in](@/install.md).
+- [Quickstart](@/quickstart.md), [Install and sign in](@/install.md) and
+  [Update and roll back](@/update.md).
 - [Use cases](@/use-cases/_index.md): recipes from start to finish.
 - [Environments](@/environments/_index.md): what an environment is, how to
   describe it, its size, image and lifecycle.
 - [Access](@/access/_index.md): terminals, SSH and VS Code, Git, files and
   ports.
+- [Integrations](@/integrations/_index.md): Codewire in other terminal and
+  agent tools.
 - [Agents](@/agents/_index.md): managed Claude Code and Codex conversations,
   messages and skills.
 - [Secrets and credentials](@/secrets/_index.md): provider credentials and

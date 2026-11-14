@@ -6,99 +6,77 @@ sort_by: weight
 aliases: ["/concepts/secrets-and-credentials"]
 ---
 
-Codewire keeps two things apart on purpose.
+Codewire keeps two kinds of sensitive value, and they go to different places.
 
-| | Application secrets | Provider credentials |
+| You have | It is | Where it goes |
 | --- | --- | --- |
-| Examples | `DATABASE_URL`, `SENTRY_DSN`, a signing key your app reads | a Codex sign-in, an OpenAI or Anthropic API key, a Claude subscription token, your GitHub connection, an SSH key |
-| Who uses it | your application and tools, by name | Codex, Claude Code, Git, `gh`, `ssh` |
-| Where the value goes | into the environment's processes | nowhere near the environment; a broker uses it on the environment's behalf |
-| Selected by | `--secrets`, `--user-secrets`, `--org-secrets`, or `secrets:` in `codewire.yaml` | `--profile`, or `credentials.profile` in `codewire.yaml` |
+| a value your application reads, such as `DATABASE_URL` | an [application secret](@/secrets/application-secrets.md) | into the environment's processes, as an environment variable |
+| a key or sign-in a tool uses to reach a provider: a model API key, your GitHub connection, an SSH key | a [provider credential](@/secrets/credentials.md) | nowhere near the environment: Codewire uses it on the environment's behalf |
 
-Storing either does nothing by itself. An environment with no selected sources
-has no application secrets; one with no profile has no provider access.
-Codewire never infers the category from a key's name or value.
+Storing either does nothing by itself. An environment gets only the secrets and
+the credential profile you select for it.
+
+## Try it
+
+```sh
+cw secrets --cloud --user set GREETING                  # type the value; it is never shown again
+cw credentials --cloud generate ssh --name my-key       # prints the public key for your Git host
+cw credentials --cloud --profile me set ssh my-key      # your first profile becomes your default
+cw create --name app --image workspace --user-secrets platform   # your secrets; your default profile
+cw exec --in app -- sh -c 'echo "$GREETING"'
+```
+
+The last command prints the value you typed. Inside `app`, `git` and `ssh` sign
+with `my-key` through a socket, and the private key stays with Codewire. The
+[Quickstart](@/quickstart.md) runs the same steps with their output.
 
 ## Application secrets
 
 A secret is a named value stored write-only: after you set it, lists show only
-the key and its timestamps. Three scopes exist on the platform, one locally:
+its key and timestamps. Pick a scope when you store it, and select the scope
+when you create the environment:
 
-| Scope | Where | Selected with |
+| Scope | Store with | Select with |
 | --- | --- | --- |
-| Organization | organization **Secrets** page, `cw secrets --cloud --organization` | `--org-secrets` |
-| Personal | **Settings → Secrets**, `cw secrets --cloud --user` or `--local --user` | `--user-secrets platform` or `local` |
-| Project | a named collection owned by the organization, `cw secrets --cloud --project NAME` | `--secrets NAME` |
+| Organization | `cw secrets --cloud --organization set KEY` (owners and admins) | `--org-secrets` |
+| Personal | `cw secrets --cloud --user set KEY`, or `--local --user` on your machine | `--user-secrets platform` or `local` |
+| Project, a named collection | `cw secrets --cloud --project NAME set KEY` | `--secrets NAME` |
 
-When a process launches, Codewire assembles the selected values into an
-**environment projection** for that launch and hands them to the process
-under their original names: setup, install and startup commands, shells,
-`cw run` commands and managed agents alike. If a key is set in several
-selected sources, the environment's own configuration wins, then personal,
-then project, then organization. Those processes and the environment's root
-can read the values; Codewire does not promise secrecy from the workload
-itself. A changed value reaches the next launch; running processes keep what
-they were given.
-
-Keys match `[A-Za-z_][A-Za-z0-9_]*`. Values are UTF-8 up to 64 KiB.
+Every process the environment starts gets the selected values under their own
+names: setup commands, shells, `cw run` and `cw exec` commands and managed
+agents. Those processes and the environment's root can read them. See
+[Application secrets](@/secrets/application-secrets.md).
 
 ## Provider credentials
 
-A credential is a named identity for an external provider. Its private
-material stays in a protected store, on the platform or on your machine
-(the Secret Service on Linux, the Keychain on macOS), and reaches an
-environment only as a typed capability:
+A credential is a named identity for a provider. Its private material stays in a
+protected store, on the platform or on your machine (the Secret Service on
+Linux, the Keychain on macOS). The environment gets a way to use it, never the
+material:
 
-| Provider | Credential kinds | What the environment gets |
-| --- | --- | --- |
-| Codex and OpenAI | Codex (ChatGPT) sign-in, OpenAI API key | a local HTTP route; the broker adds the real key and redacts it from responses |
-| Anthropic | API key, Claude subscription token, Claude sign-in | the same kind of route (`ANTHROPIC_BASE_URL` plus a placeholder token) |
-| GitHub | your one GitHub App connection | Git over HTTPS and `gh` through a route that adds the token |
-| SSH | a generated Ed25519 key or an imported OpenSSH key | an agent socket; the host or platform signs, and only signatures cross |
-
-Two exceptions exist so that the agents' plan features work: your own Codex
-sign-in and your own Claude sign-in access tokens are written as those
-clients' login files in a hosted sandbox or your own local VM. Everything in
-that environment can read them. See the [security model](@/reference/security.md).
-
-Sign-ins are personal: an organization can hold API keys and SSH keys, never a
-Codex, Claude or GitHub login.
-
-## Credential profiles
-
-A profile is a named selection of identities, one per slot:
-
-| Slot | Accepts |
+| Provider | What the environment gets |
 | --- | --- |
-| `codex` | a Codex sign-in or an OpenAI API key |
-| `openai` | an OpenAI API key |
-| `anthropic` | an Anthropic API key, a Claude subscription token or a Claude sign-in |
-| `ssh` | an SSH key |
+| Codex and OpenAI, Anthropic | a local HTTP route; Codewire adds the real key to each request and redacts it from responses |
+| GitHub | Git over HTTPS and `gh` through a route that adds the token |
+| SSH | an agent socket; Codewire signs, and only signatures cross |
 
-Your GitHub connection is part of every profile automatically. A profile holds
-identities only: no secret mappings, no exposure rules. Editing a profile
-creates a new revision; an environment keeps the revision it selected until
-you run `cw update ENV --profile NAME` again.
+Your own Codex and Claude sign-ins are the exception: so that plan features
+work, their access tokens are written into the environment as those clients'
+login files. See the [security model](@/reference/security.md).
 
-```sh
-cw credentials --cloud --profile work set codex work-codex
-cw credentials --cloud --profile work set anthropic work-claude
-cw create --name app --image workspace --profile platform:work
-```
+An environment selects credentials through a **credential profile**: a named
+set of one identity per provider. Your first cloud profile is your default, and
+a cloud `cw create` that names no profile uses it. See
+[Credentials](@/secrets/credentials.md).
 
-Managed Codex takes the `codex` slot, or the `openai` slot without one; Claude
-Code takes the `anthropic` slot.
+## On the platform or on your machine
 
-## Local and platform origin
+Every `cw secrets` and `cw credentials` command names its store: `--cloud` for
+the platform, `--local` for the protected store on your machine. A hosted
+sandbox selects platform sources only; a local VM may select either. Codewire
+never copies values between the two.
 
-Secrets and credentials live either in your local store (`--local`) or on the
-platform (`--cloud`). References name the origin: `local:work`,
-`platform:work`, or a bare name when it is unique. A local VM may select local
-or platform sources; a hosted sandbox selects platform ones only. Codewire
-never copies material between stores.
-
-- [Credentials](@/secrets/credentials.md): add, connect and build a
-  profile.
+- [Credentials](@/secrets/credentials.md): add, connect and build a profile.
 - [Application secrets](@/secrets/application-secrets.md): store and select
   values.
 - [CLI: secrets and credentials](@/reference/cli/secrets-and-credentials.md).

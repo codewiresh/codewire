@@ -2,7 +2,8 @@
 title: Rex
 description: Run commands, open shells and attach to sessions from Rex's command palette, and see each session's state with its pane.
 updated: 2026-11-14
-weight: 6
+weight: 1
+aliases: ["/access/rex"]
 ---
 
 [Rex](https://superlogical.com) is a terminal multiplexer with a command

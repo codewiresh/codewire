@@ -6,7 +6,7 @@ Codewire environment: a local VM on your computer or a cloud sandbox. It adds
 create a workspace (Orca's **Settings → Experimental → Cloud VM**).
 
 Setup, what each recipe does and what goes into the environment:
-<https://codewire.sh/docs/access/orca>.
+<https://codewire.sh/docs/integrations/orca>.
 
 ## Development
 

@@ -76,6 +76,7 @@
             {{ nav::item(path="/docs", label="What is Codewire?", current=current_path) }}
             {{ nav::item(path="/docs/quickstart", label="Quickstart", current=current_path) }}
             {{ nav::item(path="/docs/install", label="Install and sign in", current=current_path) }}
+            {{ nav::item(path="/docs/update", label="Update and roll back", current=current_path) }}
             <details class="docs-nav-group" open data-docs-nav-group>
               <summary>{{ nav::item(path="/docs/use-cases", label="Use cases", current=current_path) }}<svg class="docs-nav-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></summary>
               <div class="docs-nav-group-items">
@@ -108,9 +109,14 @@
                 {{ nav::item(path="/docs/access/git", label="Git repositories", current=current_path) }}
                 {{ nav::item(path="/docs/access/files", label="Files", current=current_path) }}
                 {{ nav::item(path="/docs/access/ports", label="Ports and preview URLs", current=current_path) }}
-                {{ nav::item(path="/docs/access/rex", label="Rex", current=current_path) }}
-                {{ nav::item(path="/docs/access/orca", label="Orca", current=current_path) }}
-                {{ nav::item(path="/docs/access/herdr", label="herdr", current=current_path) }}
+              </div>
+            </details>
+            <details class="docs-nav-group" open data-docs-nav-group>
+              <summary>{{ nav::item(path="/docs/integrations", label="Integrations", current=current_path) }}<svg class="docs-nav-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></summary>
+              <div class="docs-nav-group-items">
+                {{ nav::item(path="/docs/integrations/rex", label="Rex", current=current_path) }}
+                {{ nav::item(path="/docs/integrations/orca", label="Orca", current=current_path) }}
+                {{ nav::item(path="/docs/integrations/herdr", label="herdr", current=current_path) }}
               </div>
             </details>
             <details class="docs-nav-group" open data-docs-nav-group>

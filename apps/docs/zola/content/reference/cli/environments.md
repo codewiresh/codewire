@@ -1,7 +1,7 @@
 ---
 title: Environments
 description: ls, info, create, start, stop, restart, rm, update, ports, local-https, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh, setup rex, checkpoint and preset.
-updated: 2026-11-13
+updated: 2026-11-14
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -371,7 +371,7 @@ Linux host for now; on macOS the command says so.
 
 After an upgrade, local VMs keep running on the `cw` that started them.
 `cw upgrade --vms` restarts them onto the selected `cw`; see
-[Update cw](@/install.md).
+[Update cw](@/update.md).
 
 ## cw access, runtime (advanced)
 
@@ -514,7 +514,7 @@ selected; `cw use` and `cw rm` rewrite that line and reload Rex's config, so
 the palette follows the selection. It checks the result with `rex config
 check`, puts the config back as it was if Rex refuses it, and asks a running
 Rex server to reload it. A config Rex already refuses is left unchanged. See
-[Rex](@/access/rex.md) for the actions.
+[Rex](@/integrations/rex.md) for the actions.
 
 `cw setup rex remove` deletes only the managed block and the plugin, keeping
 the rest of the config. Both refuse, changing nothing, when one of the two

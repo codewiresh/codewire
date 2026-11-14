@@ -14,11 +14,10 @@ are signed in; a local VM only from your own machine.
 | --- | --- |
 | run a shell, a command or a long job that survives disconnects | [Terminal sessions](@/access/sessions.md) |
 | use `ssh`, `scp`, `rsync` or VS Code Remote | [SSH and VS Code](@/access/ssh-and-vscode.md) |
-| run commands and attach to sessions from Rex's command palette | [Rex](@/access/rex.md) |
 | clone or push private repositories without a key in the environment | [Git repositories](@/access/git.md) |
 | move files in or out | [Files](@/access/files.md) |
 | open a server running inside, from a browser or another machine | [Ports and preview URLs](@/access/ports.md) |
-| run Orca workspaces in environments, or connect Orca to one | [Orca](@/access/orca.md) |
-| open shells and agents in environments from herdr | [herdr](@/access/herdr.md) |
 
-How the tunnel itself works is in [Networking](@/networking/_index.md).
+How the tunnel itself works is in [Networking](@/networking/_index.md). Other
+terminal and agent tools that reach environments are in
+[Integrations](@/integrations/_index.md).

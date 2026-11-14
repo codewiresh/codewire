@@ -72,7 +72,7 @@ generation and build identity; `--json` reports every field.
 | `rollback --to` | A retained version by SHA-256, a unique 8+ digit prefix, or package version; default the previous one |
 
 `cw upgrade` changes the CLI; `cw update ENV` changes an environment. See
-[Update cw](@/install.md).
+[Update cw](@/update.md).
 
 Example:
 

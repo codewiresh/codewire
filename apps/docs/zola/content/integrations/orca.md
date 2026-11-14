@@ -1,8 +1,9 @@
 ---
 title: Orca
 description: Run each Orca workspace in its own Codewire environment, a local VM or a cloud sandbox, with the Codewire plugin, or connect Orca to an environment you already have over SSH.
-updated: 2026-11-12
-weight: 6
+updated: 2026-11-14
+weight: 2
+aliases: ["/access/orca"]
 ---
 
 [Orca](https://www.onorca.dev) runs coding agents in parallel, each in its

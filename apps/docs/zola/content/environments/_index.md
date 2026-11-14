@@ -37,9 +37,6 @@ A `codewire.yaml` in the project describes most of this once; see
 
 ## Where it runs
 
-An environment runs in one of three placements. The same `cw` commands drive
-all of them.
-
 A placement is where an environment runs. The same `cw` commands work in all
 three; what differs is isolation, who owns the compute, and a few features.
 

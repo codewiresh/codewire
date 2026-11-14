@@ -8,7 +8,7 @@ herdr plugin install codewiresh/codewire/integrations/herdr
 ```
 
 Actions, keybindings and troubleshooting:
-<https://codewire.sh/docs/access/herdr>.
+<https://codewire.sh/docs/integrations/herdr>.
 
 ## Development
 

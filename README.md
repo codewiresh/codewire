@@ -1,15 +1,20 @@
 # Codewire
 
-Isolated development environments for developers and AI coding agents.
+**A Linux VM for every developer and coding agent, in the cloud or on your own
+machine, driven by one command line.**
+
+Each environment is its own virtual machine with its own kernel. Your keys stay
+outside it, what you start in it keeps running when you disconnect, and any
+port in it can become a private HTTPS link.
 Open source under AGPL-3.0-only.
 
-Codewire runs each environment in its own hardware-virtualized VM with its own
-kernel, keeps durable terminal and agent sessions inside it, and lets you reach
-it by shell, SSH, file transfer, browser terminal and preview URLs. The same
-`cw` CLI drives three placements: a hosted sandbox on the Codewire platform, a
-local VM on your own Linux or Apple Silicon machine, and a trusted session on
-your host. This repository holds the platform services, the dashboard, the
-CLI, the local VM runtime and the SDKs.
+[Documentation](https://codewire.sh/docs) ·
+[Quickstart](https://codewire.sh/docs/quickstart) ·
+[Request an account](https://codewire.sh/signup) ·
+[Security](SECURITY.md)
+
+<!-- Terminal recording of "Five minutes on the platform", about 25 seconds.
+     Its script is checked in beside it so it can be recorded again. -->
 
 ## Install
 
@@ -17,110 +22,110 @@ CLI, the local VM runtime and the SDKs.
 curl -fsSL https://get.codewire.sh | sh
 ```
 
-It redirects to the installer, which you can also fetch directly:
+On Linux and macOS. The installer checks the download against its SHA-256 sum
+and installs `cw`, which `cw upgrade` keeps current. Other options are in
+[Install and sign in](https://codewire.sh/docs/install).
+
+## Five minutes on the platform
+
+A hosted sandbox needs a Codewire account
+([request one](https://codewire.sh/signup)). No account yet? See
+[On your own machine](#on-your-own-machine).
 
 ```sh
-curl -fsSL https://codewire.sh/install.sh | sh
+# 1. Sign in
+cw setup                        # opens your browser; choose or create an organization
+
+# 2. Add a credential: an SSH key that never enters a sandbox
+cw credentials --cloud generate ssh --name my-key    # prints the public key for your Git host
+cw credentials --cloud --profile me set ssh my-key   # your first profile becomes your default
+
+# 3. Add a secret
+cw secrets --cloud --user set GREETING               # type the value; it is never shown again
+
+# 4. Launch a sandbox that uses both
+cw create --name hello --image workspace --user-secrets platform
+cw exec --in hello -- sh -c 'echo "$GREETING"'       # prints the value you typed
+
+# 5. Run a server and open it
+cw run --in hello --name web --detach -- python3 -m http.server 3000
+cw ports hello --publish 3000 --label web
+#   URL: https://web-02e72-{organization}.{preview domain}   (only you can open it)
+
+# 6. Stop it
+cw stop hello                   # frees the machine, keeps the disk; `cw start hello` resumes
+cw rm hello                     # deletes the sandbox and its disk
 ```
 
-The installer needs only a POSIX shell, `curl` and a SHA-256 tool. It
-downloads the stable release for your platform (Linux x86_64/arm64, macOS
-Apple Silicon/Intel), checks it against the release's `SHA256SUMS`, and
-installs it as a managed `cw` that `cw upgrade` keeps current with signed
-releases from `releases.codewire.sh`. See
-[docs/dev/CLI-MANAGED-INSTALL.md](docs/dev/CLI-MANAGED-INSTALL.md).
+Inside the sandbox, `git` and `ssh` sign with your key through a socket; the
+private key stays with Codewire. The secret reaches every process you start
+there as `$GREETING`. `--access org_members` or `--access public` on
+`cw ports` widens who can open the link.
 
-From a checkout, `make cli-install` builds and installs the same way.
-`cargo build -p codewire-cli-bin --bin cw` gives an unmanaged development
-binary at `target/debug/cw`. Building from source needs a Rust toolchain
-(`rustup`) and `protoc`, the Protocol Buffers compiler, on `PATH` (or `PROTOC`
-set to its path):
+## On your own machine
+
+A local VM needs no account: an x86_64 Linux machine with KVM, or an Apple
+Silicon Mac on macOS 26 or later.
 
 ```sh
-sudo apt-get install protobuf-compiler   # Debian/Ubuntu
-sudo pacman -S protobuf                  # Arch
-brew install protobuf                    # macOS
+cw setup --local                               # downloads the VM runtime this cw pins
+cw create --local --name hello --path .        # this folder, mounted live in the VM
+cw run --in hello --name web --detach -- python3 -m http.server 3000
+cw ports hello --publish 3000                  # http://127.0.0.1:3000
+cw rm hello                                    # your folder is not touched
 ```
 
-## Quick start
+## Why a VM for each environment
 
-A local VM needs no account:
+- **What runs inside can't reach your machine.** An agent runs whatever it
+  writes and whatever its dependencies pull in. Each environment has its own
+  kernel, so the boundary is the hypervisor, not your user account.
+- **Your keys stay out.** Model API keys, Git access and SSH keys stay with
+  Codewire. The environment gets a local route or a signing socket that uses
+  them on its behalf. The [security model](https://codewire.sh/docs/reference/security)
+  names the two sign-in tokens that are the exception.
+- **Application secrets are just environment variables.** Values such as
+  `DATABASE_URL` reach the processes you start, and only in the environments
+  you select them for.
+- **Work outlives your terminal.** Every command runs in a session. Detach,
+  close the laptop, and reattach from anywhere.
+- **Your machine stays clean.** Toolchains, dependencies, databases and
+  containers live in the environment. Remove it and they are gone.
 
-```sh
-cw setup --local                            # install the pinned VM runtime
-cw create --local --name my-app --path .    # a VM with this folder mounted live
-cw run claude --in my-app                   # Claude Code in the VM; Ctrl-B, then d detaches
-```
+## Everyday commands
 
-The [Quickstart](https://codewire.sh/docs/quickstart) continues from there
-with the output of every step: sessions, a dev server on a published port,
-cleanup, and the same on the hosted platform.
+| Command | What it does |
+| --- | --- |
+| `cw create --name NAME` | Create an environment (`--local` for a VM on this machine) |
+| `cw run --in NAME -- CMD` | Start a command in a session that keeps running |
+| `cw run AGENT --in NAME` | Open a [supported coding agent](https://codewire.sh/docs/agents/supported) in a session |
+| `cw exec --in NAME -- CMD` | Run a command once and wait for it |
+| `cw shell NAME` | Open a shell |
+| `cw attach NAME --session S` | Reattach to a session |
+| `cw ls` | List environments; `cw ls NAME` lists its sessions |
+| `cw ports NAME --publish PORT` | Open a port: a preview URL, or `127.0.0.1` for a local VM |
+| `cw stop NAME` / `cw start NAME` | Stop or start an environment |
+| `cw rm NAME` | Remove an environment |
 
-## How it works
-
-- **Control plane.** Rust services behind one shared chassis
-  (`crates/codewire-server-core`): identity and OIDC (`codewire-idp`),
-  environment lifecycle (`codewire-orchestration`, a Temporal worker and the
-  Kubernetes sandbox client), billing (`codewire-billing`), the credential
-  broker (`codewire-credential-service`), the tailnet coordinator, DERP and
-  UDP relays, and Codewire Mesh. PostgreSQL holds product state; Temporal runs
-  lifecycle workflows. The dashboard (`crates/codewire-dashboard-web`) is
-  server-rendered HTML with HTMX.
-- **Hosted environment.** One Pod per environment, created through the
-  kubernetes-sigs `agent-sandbox` CRDs and scheduled with a RuntimeClass:
-  `commodity` is Kata Containers with Cloud Hypervisor; `confidential` is Kata
-  with QEMU-SNP on eligible hosts. The Pod holds a `workspace` container and a
-  guest-local `dind` container. The workspace runs `cw __hosted-daemon`.
-- **Daemon.** The daemon is the in-environment control plane: exec, PTY and
-  file RPCs for sessions, an SSH server (with SFTP and SCP) on port 2222, and
-  the environment's tailnet peer. Orchestration binds it, records its host
-  key, and relays its credential bridge to the broker so provider secrets stay
-  outside the sandbox. There is no sidecar or gateway.
-- **Access.** `cw` reaches a hosted environment over WireGuard: direct UDP
-  first, then the UDP relay, then DERP, and finally a WebSocket SSH proxy
-  through orchestration. `cw setup ssh` lets OpenSSH, VS Code and `rsync`
-  use the same path.
-- **Local VM.** `cw` supervises the VM on your machine with the same guest
-  daemon and workspace image; secrets and provider credentials stay in a host
-  broker and reach the VM only as bounded capabilities.
-
-## Repository layout
-
-```text
-apps/cli/        cw installer, packaging and release metadata
-apps/dashboard/  dashboard image and browser tests
-apps/docs/       documentation site (codewire.sh/docs)
-crates/          Rust workspace: services, daemon, CLI, local VM runtime, dashboard
-deployments/     Kubernetes manifests, kustomize overlays, Docker images
-images/          workspace and runtime OCI images
-libs/            SDKs (TypeScript, Go, Python) and generated clients
-packages/        design system and generated TypeScript schemas
-proto/           Connect-RPC contract source
-docs/            architecture, glossary and developer docs
-```
+`cw help --all` lists every command.
 
 ## Documentation
 
-- [User guide](https://codewire.sh/docs)
-- [Specification](SPEC.md): what Codewire is and how it behaves, for
-  engineers and self-hosters
-- [Hosted platform architecture](docs/ARCHITECTURE.md) and
-  [glossary](docs/GLOSSARY.md)
-- [Local VMs on Linux](docs/dev/LINUX-LOCAL-VMS.md) and [on macOS](docs/dev/MACOS-CLI.md)
-- [Sessions and agent orchestration](docs/dev/CLI-ORCHESTRATION.md)
-- [Sandbox daemon](docs/dev/SANDBOX-DAEMON.md), [networking](docs/dev/DERP-STUN.md),
-  [secrets and credentials](docs/dev/SECRETS-AND-CREDENTIALS.md)
-- [Local development](docs/dev/LOCAL-DEV.md), [contributing](CONTRIBUTING.md)
-  and the [docs index](docs/README.md)
+- **Using Codewire:** the [user guide](https://codewire.sh/docs), starting with
+  the [Quickstart](https://codewire.sh/docs/quickstart).
+- **For agents:** the whole guide as one Markdown file,
+  [llms-full.txt](https://codewire.sh/docs/llms-full.txt).
+- **How it works and self-hosting:** the [specification](SPEC.md) and the
+  [architecture](docs/ARCHITECTURE.md).
+- **Building and contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) and
+  [local development](docs/dev/LOCAL-DEV.md).
 
 ## Status
 
 Codewire is pre-1.0. Breaking changes can land between releases.
 
-## Security
+## Security, conduct and licence
 
-See [SECURITY.md](SECURITY.md) for the disclosure policy.
-
-## License
-
+Report vulnerabilities as [SECURITY.md](SECURITY.md) describes. Contributors
+follow the [code of conduct](CODE_OF_CONDUCT.md).
 Codewire is licensed under AGPL-3.0-only. See [LICENSE](LICENSE).

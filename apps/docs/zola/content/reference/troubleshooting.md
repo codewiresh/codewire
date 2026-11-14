@@ -1,7 +1,7 @@
 ---
 title: Troubleshooting
 description: "Local VMs: what their messages mean, what cw doctor local reports, and how to recover."
-updated: 2026-11-08
+updated: 2026-11-14
 weight: 6
 aliases: ["/guides/troubleshoot-local-vms"]
 ---
@@ -36,7 +36,7 @@ Reconnect and run `cw setup --local`. With an application firewall, allow
 
 **`your local VMs ... still run on the cw you updated from`**. Restart them on
 this version with `cw upgrade --vms`, or stop them and rerun. See
-[Update cw](@/install.md).
+[Update cw](@/update.md).
 
 **`Local VMs aren't available on Linux arm64 yet`**. Local VMs run on x86_64
 Linux and on Apple Silicon Macs. Elsewhere, use hosted sandboxes.

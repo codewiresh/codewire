@@ -1,7 +1,7 @@
 ---
 title: FAQ
 description: Account, organization and billing questions. Questions about a feature are answered on that feature's page.
-updated: 2026-11-08
+updated: 2026-11-14
 weight: 8
 ---
 
@@ -9,7 +9,7 @@ Questions about using a feature are answered at the end of its page:
 [Quickstart](@/quickstart.md#faq), [Run and orchestrate](@/agents/run.md#faq),
 [Lifecycle](@/environments/lifecycle.md#faq),
 [Secrets and credentials](@/secrets/_index.md#faq) and
-[Install and sign in](@/install.md#faq).
+[Update and roll back](@/update.md#faq).
 
 ## Account
 

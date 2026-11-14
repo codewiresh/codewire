@@ -1,8 +1,9 @@
 ---
 title: herdr
 description: Open shells and coding agents in Codewire environments as herdr tabs with the Codewire plugin, or reach any environment over SSH from a herdr pane.
-updated: 2026-11-12
-weight: 7
+updated: 2026-11-14
+weight: 3
+aliases: ["/access/herdr"]
 ---
 
 [herdr](https://herdr.dev) is a terminal workspace manager for coding agents.

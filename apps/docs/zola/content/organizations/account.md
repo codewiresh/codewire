@@ -1,7 +1,7 @@
 ---
 title: Account and organization
 description: Request access, sign in with two-factor authentication, create the organization that owns your hosted sandboxes, and delete your account.
-updated: 2026-11-08
+updated: 2026-11-14
 weight: 1
 aliases: ["/getting-started/account", "/guides/account"]
 ---
@@ -103,5 +103,5 @@ sandbox or an API key, is never deleted this way.
 
 ## Next
 
-The [Quickstart](@/quickstart.md#9-the-same-on-the-platform) picks up from
+The [Quickstart](@/quickstart.md#2-sign-in) picks up from
 `cw setup`.

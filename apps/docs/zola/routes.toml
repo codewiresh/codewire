@@ -26,28 +26,10 @@ source = "content/access/git.md"
 output = "access/git/index.html"
 
 [[routes]]
-canonical = "/docs/access/herdr"
-redirect_from = "/docs/access/herdr/"
-source = "content/access/herdr.md"
-output = "access/herdr/index.html"
-
-[[routes]]
-canonical = "/docs/access/orca"
-redirect_from = "/docs/access/orca/"
-source = "content/access/orca.md"
-output = "access/orca/index.html"
-
-[[routes]]
 canonical = "/docs/access/ports"
 redirect_from = "/docs/access/ports/"
 source = "content/access/ports.md"
 output = "access/ports/index.html"
-
-[[routes]]
-canonical = "/docs/access/rex"
-redirect_from = "/docs/access/rex/"
-source = "content/access/rex.md"
-output = "access/rex/index.html"
 
 [[routes]]
 canonical = "/docs/access/sessions"
@@ -150,6 +132,30 @@ canonical = "/docs/install"
 redirect_from = "/docs/install/"
 source = "content/install.md"
 output = "install/index.html"
+
+[[routes]]
+canonical = "/docs/integrations"
+redirect_from = "/docs/integrations/"
+source = "content/integrations/_index.md"
+output = "integrations/index.html"
+
+[[routes]]
+canonical = "/docs/integrations/herdr"
+redirect_from = "/docs/integrations/herdr/"
+source = "content/integrations/herdr.md"
+output = "integrations/herdr/index.html"
+
+[[routes]]
+canonical = "/docs/integrations/orca"
+redirect_from = "/docs/integrations/orca/"
+source = "content/integrations/orca.md"
+output = "integrations/orca/index.html"
+
+[[routes]]
+canonical = "/docs/integrations/rex"
+redirect_from = "/docs/integrations/rex/"
+source = "content/integrations/rex.md"
+output = "integrations/rex/index.html"
 
 [[routes]]
 canonical = "/docs/networking"
@@ -366,6 +372,12 @@ canonical = "/docs/secrets/credentials"
 redirect_from = "/docs/secrets/credentials/"
 source = "content/secrets/credentials.md"
 output = "secrets/credentials/index.html"
+
+[[routes]]
+canonical = "/docs/update"
+redirect_from = "/docs/update/"
+source = "content/update.md"
+output = "update/index.html"
 
 [[routes]]
 canonical = "/docs/use-cases"
