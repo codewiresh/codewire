@@ -41,7 +41,7 @@ extension CodewireVZRunnerTests {
     }
 
     static func expect(_ expected: ConfigurationError, _ data: Data) {
-      #expect(throws: expected) { _ = try VMConfiguration.decode(data) }
+      #expect(throws: expected) { _ = try VMConfiguration.decode(data, directory: "/state") }
     }
 
     /// The Rust runner reads these statuses (`vz.rs`), so they are a contract.
@@ -58,7 +58,8 @@ extension CodewireVZRunnerTests {
 
     @Test
     func testValidConfigurationRoundTrips() throws {
-      let decoded = try VMConfiguration.decode(Self.encoded(Self.configuration()))
+      let decoded = try VMConfiguration.decode(
+        Self.encoded(Self.configuration()), directory: "/state")
       #expect(decoded == Self.configuration())
     }
 
@@ -100,7 +101,7 @@ extension CodewireVZRunnerTests {
     func testBoundsAndPathsFailClosed() throws {
       let cases: [(ConfigurationError, (inout VMConfiguration) -> Void)] = [
         (.unsupportedSchema, { $0.schemaVersion = 1 }),
-        (.unsupportedSchema, { $0.schemaVersion = 3 }),
+        (.unsupportedSchema, { $0.schemaVersion = 4 }),
         (.invalidArtifact, { $0.kernel = "kernel" }),
         (.invalidArtifact, { $0.initialRamdisk = "/state/../etc/initramfs" }),
         (.invalidArtifact, { $0.commandLine = "" }),
@@ -161,9 +162,13 @@ extension CodewireVZRunnerTests {
           tag: VMConfiguration.shareTag($0), path: "/Users/someone/\($0)", readOnly: $0 % 2 == 0,
           device: 1, inode: UInt64($0) + 1)
       }
-      #expect(try VMConfiguration.decode(Self.encoded(configuration)) == configuration)
+      #expect(
+        try VMConfiguration.decode(Self.encoded(configuration), directory: "/state")
+          == configuration)
       configuration.shares = []
-      #expect(try VMConfiguration.decode(Self.encoded(configuration)) == configuration)
+      #expect(
+        try VMConfiguration.decode(Self.encoded(configuration), directory: "/state")
+          == configuration)
     }
 
     @Test

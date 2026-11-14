@@ -26,6 +26,15 @@ extension VMConfiguration {
     for disk in disks where !disk.readOnly {
       rules.append("(allow file-read* file-write* (literal \(Self.profileString(disk.path))))")
     }
+    // Schema 3 (#4654): a save writes exactly `saveState` and a restore reads
+    // exactly `restoreState`. Decoding admitted both as safe literals inside
+    // the VM's directory, so nothing here is escaped into a wider rule.
+    if let saveState {
+      rules.append("(allow file-read* file-write* (literal \(Self.profileString(saveState))))")
+    }
+    if let restoreState {
+      rules.append("(allow file-read* (literal \(Self.profileString(restoreState))))")
+    }
     for share in shares {
       let rights = share.readOnly ? "file-read*" : "file-read* file-write*"
       let path = Self.profileString(share.path)

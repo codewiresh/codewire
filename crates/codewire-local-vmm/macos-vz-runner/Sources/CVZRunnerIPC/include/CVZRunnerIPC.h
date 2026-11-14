@@ -22,6 +22,16 @@ int cw_vz_splice(int a, int b);
 // st_ino), still named exactly `path`. Returns 0 on a match and -1 otherwise.
 int cw_vz_verify_shared_directory(const char *path, uint32_t device, uint64_t inode);
 
+// Product VM control channel (#4654). The runner passes one end of an unnamed
+// AF_UNIX stream socketpair as an inherited descriptor. Returns 0 when `fd`
+// is exactly that (a socket, SOCK_STREAM, AF_UNIX, no name) and marks it
+// close-on-exec; -1 for anything else, a closed number included.
+int cw_vz_check_control(int fd);
+// Read up to `size` control bytes. Ancillary data is never accepted: any
+// descriptors that arrive with it are closed and -2 is returned. Returns the
+// byte count, 0 at EOF, or -1 on error.
+ssize_t cw_vz_control_read(int fd, uint8_t *buffer, size_t size);
+
 // Irreversibly confine this whole process with one inline Seatbelt profile.
 // Returns 0, or -1 when the profile was not applied.
 int cw_vz_apply_sandbox(const char *profile);

@@ -16,7 +16,8 @@
                 .init(path: "/vm/state.raw", serial: "CWSTATE1", readOnly: false),
                 .init(path: "/vm/seed.raw", serial: "CWSEED1", readOnly: true),
               ],
-              shares: shares, vsockSocket: "/tmp/vm/vsock/v")))
+              shares: shares, vsockSocket: "/tmp/vm/vsock/v")),
+          directory: "/vm")
       }
 
       static func share(_ index: Int, _ path: String, readOnly: Bool) -> VMConfiguration.Share {

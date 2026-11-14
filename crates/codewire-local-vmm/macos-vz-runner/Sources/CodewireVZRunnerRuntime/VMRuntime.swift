@@ -12,6 +12,8 @@ import Foundation
     case virtualMachineConfigurationInvalid
     case sharedDirectoryChanged
     case sandboxNotApplied
+    case controlInvalid
+    case machineIdentifierInvalid
   }
 
   /// The product VM process: the macOS counterpart of the Cloud Hypervisor
@@ -34,6 +36,14 @@ import Foundation
         throw RuntimeError.listenerFailed
       }
       defer { removeSocket(configuration.vsockSocket, bound: identity) }
+
+      // Schema 3's control socket must be exactly the unnamed AF_UNIX stream
+      // the runner passed (cw-security, condition 2, #4654), checked before
+      // anything starts.
+      let checkpointing = configuration.checkpointing
+      if let checkpointing, cw_vz_check_control(checkpointing.controlDescriptor) != 0 {
+        throw RuntimeError.controlInvalid
+      }
 
       // Since macOS 27, Virtualization.framework looks up the user's cache
       // directory as a VM starts. Confined, it can reach neither
@@ -73,7 +83,22 @@ import Foundation
       parentExit.resume()
       machine.retain(parentExit)
       if getppid() != parent { machine.queue.async { machine.stop() } }
-      machine.start()
+      if let checkpointing {
+        let identifier =
+          (vmConfiguration.platform as? VZGenericPlatformConfiguration)?.machineIdentifier
+          .dataRepresentation.base64EncodedString() ?? ""
+        let control = VMControl(
+          descriptor: checkpointing.controlDescriptor, saveState: checkpointing.saveState,
+          machineIdentifier: identifier, machine: machine)
+        machine.retain(control)
+        machine.queue.sync { machine.onStarted = { control.started() } }
+        control.startReading()
+      }
+      if let restoreState = checkpointing?.restoreState {
+        machine.restore(from: restoreState)
+      } else {
+        machine.start()
+      }
       let acceptor = Thread { acceptConnections(listener: listener, machine: machine) }
       acceptor.start()
       // The acceptor and any live bridges end with this process.
@@ -109,7 +134,17 @@ import Foundation
       else { throw ConfigurationError.invalidMemory }
       result.cpuCount = request.cpuCount
       result.memorySize = memory
-      result.platform = VZGenericPlatformConfiguration()
+      // Schema 3 keeps one machine identifier per VM; a restore needs the
+      // one its state was saved with (#4654). Without one, the framework
+      // makes a new identifier, which the helper reports in `started`.
+      let platform = VZGenericPlatformConfiguration()
+      if let machineIdentifier = request.machineIdentifier {
+        guard let data = Data(base64Encoded: machineIdentifier),
+          let identifier = VZGenericMachineIdentifier(dataRepresentation: data)
+        else { throw RuntimeError.machineIdentifierInvalid }
+        platform.machineIdentifier = identifier
+      }
+      result.platform = platform
       result.storageDevices = try request.disks.map { disk in
         let attachment = try VZDiskImageStorageDeviceAttachment(
           url: URL(fileURLWithPath: disk.path), readOnly: disk.readOnly,
@@ -243,6 +278,8 @@ import Foundation
 
     func retain(_ object: AnyObject) { retained.append(object) }
 
+    /// Read and written only on `queue`: told when the VM runs.
+    var onStarted: (() -> Void)?
     /// Read and written only on `queue`.
     private var stopRequested = false
     /// Read and written only on `queue`: the started VM failed its check and
@@ -259,8 +296,55 @@ import Foundation
             self.stop()
           } else if self.stopRequested {
             self.stop()
+          } else {
+            self.onStarted?()
           }
         }
+      }
+    }
+
+    /// Restore `path`, a state saved from this VM's exact configuration and
+    /// machine identifier, instead of starting; then resume it.
+    func restore(from path: String) {
+      queue.async {
+        self.machine.restoreMachineStateFrom(url: URL(fileURLWithPath: path)) { error in
+          if let error {
+            self.finish(.startRefused(virtualizationCode: (error as? VZError)?.code.rawValue ?? 0))
+            return
+          }
+          self.machine.resume { result in
+            if case .failure(let error) = result {
+              self.finish(
+                .startRefused(virtualizationCode: (error as? VZError)?.code.rawValue ?? 0))
+            } else if !self.startedCheck() {
+              self.startCheckFailed = true
+              self.stop()
+            } else if self.stopRequested {
+              self.stop()
+            } else {
+              self.onStarted?()
+            }
+          }
+        }
+      }
+    }
+
+    /// On `queue`: pause the vCPUs and devices.
+    func pause(_ done: @escaping ((any Error)?) -> Void) {
+      machine.pause { result in
+        if case .failure(let error) = result { done(error) } else { done(nil) }
+      }
+    }
+
+    /// On `queue`: write the paused VM's state to the new file `url`.
+    func save(to url: URL, _ done: @escaping ((any Error)?) -> Void) {
+      machine.saveMachineStateTo(url: url) { done($0) }
+    }
+
+    /// On `queue`: resume a paused VM.
+    func resume(_ done: @escaping ((any Error)?) -> Void) {
+      machine.resume { result in
+        if case .failure(let error) = result { done(error) } else { done(nil) }
       }
     }
 

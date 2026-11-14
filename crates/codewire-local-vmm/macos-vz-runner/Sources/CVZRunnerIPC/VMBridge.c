@@ -2,11 +2,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <sys/param.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -181,6 +183,58 @@ int cw_vz_verify_shared_directory(const char *path, uint32_t device, uint64_t in
 extern int sandbox_init(const char *profile, uint64_t flags, char **errorbuf);
 extern void sandbox_free_error(char *errorbuf);
 #endif
+
+// The control channel's descriptor: an inherited socket, a stream, AF_UNIX,
+// unnamed. A regular file, a pipe, a named socket or a closed number fails.
+int cw_vz_check_control(int fd) {
+    struct stat status;
+    if (fd < 3 || fstat(fd, &status) != 0 || !S_ISSOCK(status.st_mode)) { return -1; }
+    int type = 0;
+    socklen_t type_length = sizeof(type);
+    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &type_length) != 0 || type != SOCK_STREAM) {
+        return -1;
+    }
+    struct sockaddr_un address;
+    socklen_t length = sizeof(address);
+    memset(&address, 0, sizeof(address));
+    if (getsockname(fd, (struct sockaddr *)&address, &length) != 0 || address.sun_family != AF_UNIX) {
+        return -1;
+    }
+    // A socketpair end has no path; a bound socket names one.
+    if (length > offsetof(struct sockaddr_un, sun_path) && address.sun_path[0] != '\0') { return -1; }
+    return set_cloexec(fd);
+}
+
+ssize_t cw_vz_control_read(int fd, uint8_t *buffer, size_t size) {
+    struct iovec vector = {.iov_base = buffer, .iov_len = size};
+    union {
+        struct cmsghdr header;
+        char bytes[CMSG_SPACE(sizeof(int) * 16)];
+    } control;
+    memset(&control, 0, sizeof(control));
+    struct msghdr message = {
+        .msg_iov = &vector,
+        .msg_iovlen = 1,
+        .msg_control = control.bytes,
+        .msg_controllen = sizeof(control.bytes),
+    };
+    ssize_t received;
+    do {
+        received = recvmsg(fd, &message, 0);
+    } while (received < 0 && errno == EINTR);
+    if (received < 0) { return -1; }
+    int refused = (message.msg_flags & MSG_CTRUNC) != 0;
+    for (struct cmsghdr *header = CMSG_FIRSTHDR(&message); header != NULL;
+         header = CMSG_NXTHDR(&message, header)) {
+        if (header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS) {
+            int *descriptors = (int *)CMSG_DATA(header);
+            size_t count = (header->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+            for (size_t index = 0; index < count; index++) { close(descriptors[index]); }
+        }
+        refused = 1;
+    }
+    return refused ? -2 : received;
+}
 
 int cw_vz_apply_sandbox(const char *profile) {
 #if defined(__APPLE__)

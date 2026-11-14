@@ -2,12 +2,46 @@
 
 `codewire-vz-runner vm --config FILE` is the macOS counterpart of the Cloud
 Hypervisor process that the Linux runner owns. The JSON configuration
-(`VMConfiguration`, schema 2) names the kernel, initial ramdisk, kernel
+(`VMConfiguration`, schema 2 or 3) names the kernel, initial ramdisk, kernel
 command line, CPU count, memory and virtio-blk disks by absolute path, with
 each disk's serial and read-only flag, and the admitted direct shares. The
 Rust runner admits every disk under its private state root before writing the
 file. Unknown or missing fields fail closed; schema 1, which had no `shares`,
 is refused.
+
+Schema 3 (#4654) adds four fields, all present together (schema 2 has none of
+them), for VM checkpoints:
+- `machineIdentifier`: base64 of the `VZGenericMachineIdentifier`'s data
+  representation, or `null` on a VM's first start, when the framework makes
+  one. A restore needs the identifier its state was saved with, so the runner
+  keeps it per VM.
+- `saveState`: the one file a save writes.
+- `restoreState`: a saved state to restore and resume instead of starting, or
+  `null`.
+- `controlDescriptor`: the inherited control socket, 3 to 1023.
+
+The sandbox profile embeds the two state paths as literals: `saveState` read and
+write, `restoreState` read only. So decoding refuses either path, never
+escaping it, unless it is absolute, normalized, strictly inside the VM's
+directory (the one holding the configuration file) and made only of
+`[A-Za-z0-9._/-]`. A restore path equal to the save path is refused too.
+
+The control channel is one end of an unnamed `AF_UNIX` stream socketpair that
+only the runner holds. Before confinement, the helper requires the descriptor
+to be exactly that: a socket, `SOCK_STREAM`, `AF_UNIX`, unnamed. Otherwise it
+exits 1 before the VM starts. Each message is one JSON line of at most 4 KiB:
+- a request is exactly `{"id": N, "op": "pause" | "save" | "resume" | "stop"}`,
+  with no path, descriptor or size, and `save` always writes `saveState`;
+- each request gets one reply: `{"id","result":"done","ms"}`,
+  `{"id","result":"failed","code"}` (the `VZError.Code`) or
+  `{"id","result":"refused"}`, when the VM's state doesn't allow it;
+- the one event is `{"event":"started","machineIdentifier"}`, sent once the VM
+  runs: started, or restored and resumed.
+
+A capture is pause, save, resume, and stop is allowed from any state. EOF, a
+malformed or over-long line, or any ancillary data stops the VM. Descriptors
+sent with ancillary data are closed unread. The exit statuses are unchanged; a
+refused restore exits like a refused start.
 
 Each share is `{tag, path, readOnly, device, inode}`: the guest's virtio-fs tag
 `cw-direct-NN` in plan order (at most 16), the canonical directory the Rust

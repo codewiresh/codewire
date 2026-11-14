@@ -17,7 +17,12 @@ private func runVM(configurationPath: String) throws -> Never {
       let handle = FileHandle(forReadingAtPath: configurationPath),
       let data = try handle.read(upToCount: VMConfiguration.maxConfigurationBytes + 1)
     else { throw ConfigurationError.malformed }
-    let configuration = try VMConfiguration.decode(data)
+    // The VM's private directory is the one holding its configuration.
+    guard let slash = configurationPath.lastIndex(of: "/") else {
+      throw ConfigurationError.malformed
+    }
+    let directory = String(configurationPath[..<slash])
+    let configuration = try VMConfiguration.decode(data, directory: directory)
     exit(try VMRuntime.run(configuration: configuration).status)
   #else
     throw ConfigurationError.unsupportedSchema

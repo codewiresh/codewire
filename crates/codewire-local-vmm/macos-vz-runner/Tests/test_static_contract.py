@@ -32,15 +32,46 @@ if (set(entitlements) != {"com.apple.security.virtualization"}
 
 vm_configuration = source("Sources/CodewireVZRunnerProtocol/VMConfiguration.swift")
 for required in (
-    "schemaVersion = 2", "maxShares = 16", 'shareTagPrefix = "cw-direct-"',
-    "Set(root.keys) == Set(CodingKeys.allNames)",
+    "schemaVersion = 3", "supportedSchemaVersions = [2, 3]", "maxShares = 16",
+    'shareTagPrefix = "cw-direct-"', "Set(root.keys) == Set(names)",
     'Set($0.keys) == ["tag", "path", "readOnly", "device", "inode"]',
     "share.tag == Self.shareTag(index)", "share.inode != 0",
     "Set(shares.map(\\.path)).count == shares.count",
 ):
     if required not in vm_configuration:
         fail(f"product VM configuration lost share admission: {required}")
+# Schema 3's control channel and checkpoint files (#4654, cw-security's
+# conditions 2, 3 and 5): the descriptor is checked before the VM starts, a
+# request is an id and an operation only, lines are bounded, ancillary data is
+# refused and closed, and the two state paths are safe literals.
+for required in (
+    "guard let saveState, Self.isProfileLiteral(saveState, inside: directory)",
+    "Self.isProfileLiteral(restoreState, inside: directory), restoreState != saveState",
+    "controlDescriptor >= 3, controlDescriptor < 1024",
+):
+    if required not in vm_configuration:
+        fail(f"schema 3 lost a checkpoint-file rule: {required}")
+control = source("Sources/CodewireVZRunnerProtocol/ControlProtocol.swift")
+for required in (
+    "maxLineBytes = 4096", 'Set(object.keys) == ["id", "op"]',
+    "guard line.count <= ControlRequest.maxLineBytes else { throw ControlError.lineTooLong }",
+):
+    if required not in control:
+        fail(f"the control protocol lost a bound: {required}")
+bridge = source("Sources/CVZRunnerIPC/VMBridge.c")
+for required in (
+    "!S_ISSOCK(status.st_mode)", "type != SOCK_STREAM", "address.sun_family != AF_UNIX",
+    "address.sun_path[0] != '\\0'", "header->cmsg_type == SCM_RIGHTS",
+    "close(descriptors[index])", "return refused ? -2 : received;",
+):
+    if required not in bridge:
+        fail(f"the control channel's C checks lost: {required}")
 vm_runtime = source("Sources/CodewireVZRunnerRuntime/VMRuntime.swift")
+check = vm_runtime.find("cw_vz_check_control(checkpointing.controlDescriptor)")
+sandbox = vm_runtime.find("cw_vz_apply_sandbox(configuration.sandboxProfile())")
+start = vm_runtime.find("machine.start()")
+if not 0 <= check < sandbox < start:
+    fail("the control descriptor must be checked before confinement and before the VM starts")
 for required in (
     "try verifySharedDirectories(request.shares)",
     "startedCheck: { (try? verifySharedDirectories(shares)) != nil }",
