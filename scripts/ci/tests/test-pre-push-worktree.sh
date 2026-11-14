@@ -293,14 +293,18 @@ fi
 # codewire-cpu, and builder containers join the slice only from inside it.
 grep -qx 'readonly SLICE=cwvmtest.slice' "$ROOT/scripts/dev/workstation-cpu.sh" ||
   fail 'workstation-cpu.sh no longer names the slice cpu-slice.sh uses'
+# Preflight exports CODEWIRE_CPU_SLICE once it has joined the slice, and this
+# test runs under preflight, so the probe starts without the caller's value.
 slice_probe() { # CGROUP_FILE SHELL_CODE, without CI, from the real helper
-  env -u CI -u GITHUB_ACTIONS CPU_SLICE_CGROUP_FILE="$1" \
+  env -u CI -u GITHUB_ACTIONS -u CODEWIRE_CPU_SLICE CPU_SLICE_CGROUP_FILE="$1" \
     bash -c ". '$ROOT/scripts/dev/cpu-slice.sh'; $2" 2>&1
 }
 : > "$cpu_log"
 output="$(PATH=/usr/bin:/bin slice_probe "$TMP/cgroup-outside" 'cpu_slice_enter probe; echo "var=${CODEWIRE_CPU_SLICE:-}"')"
 [ "$output" = var= ] || fail "the helper acted without codewire-cpu: $output"
 [ ! -s "$cpu_log" ] || fail 'the helper ran a codewire-cpu outside PATH'
+output="$(CODEWIRE_CPU_SLICE=inherited PATH=/usr/bin:/bin slice_probe "$TMP/cgroup-outside" 'cpu_slice_enter probe; echo "var=${CODEWIRE_CPU_SLICE:-}"')"
+[ "$output" = var= ] || fail "the probe read the caller's CODEWIRE_CPU_SLICE: $output"
 output="$(slice_probe "$TMP/cgroup-inside" 'cpu_slice_enter probe; echo "var=${CODEWIRE_CPU_SLICE:-}"')"
 [ "$output" = var=cwvmtest.slice ] || fail "inside the slice, the helper did not export it: $output"
 args='cpu_slice_docker_args; echo "args=${CPU_SLICE_DOCKER_ARGS[*]-}"'
