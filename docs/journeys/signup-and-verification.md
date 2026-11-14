@@ -11,7 +11,7 @@ Production. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-13.
+Updated 2026-11-14.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -109,7 +109,12 @@ Issue: #4481.
 - **States to exercise:**
   - someone signs up at an address they cannot read, with a password they
     chose, with and without an invite code;
-  - the address's owner never opens the link.
+  - the address's owner never opens the link;
+  - the address's owner opens the link anyway: the stranger's password then
+    signs in until the owner resets it, the residual accepted by design
+    (owner, 2026-11-13, #4481);
+  - the owner's reset ends the stranger's sessions, and the old password
+    grants nothing (#4507).
 - **Driving it:**
   1. Sign up at a second walk address, as the stranger, and do not open the
      link.
@@ -118,10 +123,24 @@ Issue: #4481.
   3. Read the verification email in the second address's inbox: it says
      someone created an account with this address, and to ignore it if that
      wasn't them.
+  4. As the address's owner, open the link anyway. As the stranger, sign in
+     with the password again: it now works, in a second browser.
+  5. As the address's owner, choose **Forgot password**, set a new password
+     from the reset email, and sign in.
+  6. As the stranger, reload the dashboard in the second browser, then sign
+     in with the old password.
 - **Proof:** step 2 answers `403` `email_unverified` and sets no session
-  cookie, invite code or not. The stranger holds nothing that signs in.
-- **Gotchas:** if the address's owner does open the link, the stranger's
-  password then works. The email's wording is the guard for that case (owner,
+  cookie, invite code or not. The stranger holds nothing that signs in. In
+  step 6 the stranger's session is signed out, and the old password answers
+  `401` "Invalid email or password".
+- **Gotchas:**
+  - Only a person can walk this. Sign-up meets Turnstile, and Dev exempts no
+    address since codewire/deploy#254. Each email step needs an inbox the
+    walker reads. e2e@codewire.sh is already an account (`codewire-dev-e2e`),
+    so it can't be the second address. Use two throwaway addresses the walker
+    reads, and delete both accounts afterwards (Settings → Delete account).
+  - If the address's owner does open the link, the stranger's
+    password then works. The email's wording is the guard for that case (owner,
   2026-11-13, #4481): "Someone created a Codewire account with this address.
   If it was you, verify your email to finish setting it up." and "If it wasn't
   you, ignore this email. Nobody can sign in to the account unless this link

@@ -83,7 +83,10 @@ to give. The email and password steps, from sign-up through verification, are
   - an identity whose email matches an existing account links only after
     that account signs in, never by the email alone;
   - an email-and-password sign-up cannot sign in until its address is
-    verified;
+    verified, and a sign-up at someone else's address is taken back by the
+    address's owner with **Forgot password**
+    ([signup-and-verification.md](signup-and-verification.md),
+    `signup-unverified-stranger`, which only a person can walk);
   - every new identity, by provider or by password, cannot sign in until an
     admin approves it, and can once approved.
 - **Driving it:**
