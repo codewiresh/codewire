@@ -274,6 +274,17 @@ jobs:
               "$scanner_configs" >&2
             exit 65
           fi
+          # Gitleaks skips a line that carries its in-file allow marker, so a
+          # candidate could hide a secret beside one. No scanned file may
+          # carry the marker, in any case. The pattern is written so that
+          # this file does not match it.
+          allow_markers="$(grep -r -i -l -a -e 'gitleaks[:]allow' --exclude-dir=.git . ||
+            [[ $? == 1 ]])"
+          if [[ -n "$allow_markers" ]]; then
+            printf '::error::an in-file Gitleaks allow marker in the scanned tree could hide a secret; put exceptions in the protected .gitleaks.toml (#3991):\n%s\n' \
+              "$(sort <<<"$allow_markers")" >&2
+            exit 65
+          fi
           # END scanner-configuration guard
 
           supplychain \

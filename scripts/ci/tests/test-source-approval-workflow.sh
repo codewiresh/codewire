@@ -272,5 +272,188 @@ linked="$(scanner_tree linked)"
 ln -s src/main.rs "$linked/osv-scanner.toml"
 [[ "$(guard_exit "$linked")" == 65 ]] ||
   fail 'the scanner-configuration guard admitted a symbolic link'
+[[ "$(guard_exit "$(scanner_tree deep a/b/c/d/e/osv-scanner.toml)")" == 65 ]] ||
+  fail 'the scanner-configuration guard admitted a deeply nested osv-scanner.toml'
+
+# Gitleaks honours an in-file allow marker, so the guard also refuses any file
+# that carries one, in any case and at any depth (#3991). The marker is put
+# together here, so that neither this file nor the workflow carries it.
+marker="gitleaks"":allow"
+upper_marker="GITLEAKS"":ALLOW"
+if grep -r -i -l -a -e 'gitleaks[:]allow' "$WORKFLOW" "${BASH_SOURCE[0]}" >/dev/null; then
+  fail 'the workflow or this test carries the allow marker and would refuse itself'
+fi
+guard_output() { # TREE
+  (cd "$1" && { bash -euo pipefail "$guard" >/dev/null; } 2>&1) || true
+}
+marked_tree() { # NAME MARKER PATH
+  local tree
+  tree="$(scanner_tree "$1")"
+  mkdir -p "$(dirname "$tree/$3")"
+  printf 'token = "not-a-secret"  # %s\n' "$2" >"$tree/$3"
+  printf '%s' "$tree"
+}
+for case in "lower:$marker:config.py" "upper:$upper_marker:config.py" "nested:$marker:a/b/c/settings.env"; do
+  IFS=: read -r name first second path <<<"$case"
+  tree="$(marked_tree "marker-$name" "$first:$second" "$path")"
+  [[ "$(guard_exit "$tree")" == 65 ]] || fail "the guard admitted an allow marker ($name)"
+  grep -Fq "./$path" <<<"$(guard_output "$tree")" ||
+    fail "the guard did not name the file that carries the allow marker ($name)"
+done
+git_internal="$(scanner_tree marker-git-internal)"
+printf '# %s\n' "$marker" >"$git_internal/.git/description"
+[[ "$(guard_exit "$git_internal")" == 0 ]] ||
+  fail 'the allow-marker guard looked inside .git'
+unreadable="$(scanner_tree marker-unreadable)"
+printf 'data\n' >"$unreadable/src/locked.txt"
+chmod 000 "$unreadable/src/locked.txt"
+if [[ -r "$unreadable/src/locked.txt" ]]; then
+  : # Running as root, where every file is readable.
+else
+  [[ "$(guard_exit "$unreadable")" != 0 ]] ||
+    fail 'the allow-marker guard passed a tree it could not read'
+fi
+chmod 600 "$unreadable/src/locked.txt"
+
+# #3991, the scanners themselves. The guard is the first layer. These cases run
+# the sealed scanner with the guard out of the way, on a tree a candidate
+# could send:
+#   - osv-scanner.toml files, at the root and nested, that ignore a real
+#     advisory (RUSTSEC-2021-0003, smallvec 1.6.0). The sealed revision must
+#     still report it for both lock files, because it gives osv-scanner an
+#     empty configuration of its own.
+#   - a token beside an allow marker. The sealed revision does not report
+#     it, which is why the guard above exists; that control flips when the
+#     scanner stops honouring the marker.
+# Everything is offline: the advisory database is one record written here.
+expected_supplychain="$(sed -n 's/^ *EXPECTED_SUPPLYCHAIN: \([0-9a-f]\{40\}\)$/\1/p' "$WORKFLOW")"
+[[ "$expected_supplychain" =~ ^[0-9a-f]{40}$ ]] || fail 'the workflow names no sealed Supplychain revision'
+sealed() { # supplychain arguments, run as the sealed revision
+  EXPECTED_SUPPLYCHAIN="$expected_supplychain" supplychain "$@"
+}
+if [[ "$(sealed version 2>/dev/null || true)" != "supplychain $expected_supplychain" ]]; then
+  # The CI runner image seals every pinned revision and selects one by
+  # EXPECTED_SUPPLYCHAIN. A workstation usually has some other build.
+  [[ -z "${CI:-}${GITHUB_ACTIONS:-}" ]] ||
+    fail "the sealed Supplychain revision $expected_supplychain is not in this runner image"
+  printf '[test-source-approval-workflow] note: supplychain %s is not installed here; the sealed-scanner cases were skipped\n' \
+    "${expected_supplychain:0:12}"
+  printf '[test-source-approval-workflow] PASS\n'
+  exit 0
+fi
+command -v osv-scanner >/dev/null || fail 'osv-scanner is required for the sealed-scanner cases'
+
+database="$FIXTURE/advisory-database"
+mkdir -p "$database/osv-scanner/crates.io" "$FIXTURE/supplychain-data"
+python3 -I - "$database/osv-scanner/crates.io/all.zip" <<'PY'
+import json, sys, zipfile
+
+record = {
+    "schema_version": "1.4.0",
+    "id": "RUSTSEC-2021-0003",
+    "modified": "2023-06-13T13:10:24Z",
+    "published": "2021-01-08T12:00:00Z",
+    "summary": "Buffer overflow in SmallVec::insert_many",
+    "affected": [{
+        "package": {"ecosystem": "crates.io", "name": "smallvec"},
+        "ranges": [{"type": "SEMVER", "events": [
+            {"introduced": "0.6.3"}, {"fixed": "0.6.14"},
+            {"introduced": "1.0.0"}, {"fixed": "1.6.1"},
+        ]}],
+    }],
+}
+with zipfile.ZipFile(sys.argv[1], "w") as archive:
+    archive.writestr("RUSTSEC-2021-0003.json", json.dumps(record))
+PY
+export OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$database"
+export SUPPLYCHAIN_DATA_DIR="$FIXTURE/supplychain-data"
+
+candidate_repository() { # NAME: an empty Git repository for a candidate tree
+  local tree="$FIXTURE/candidate-$1"
+  mkdir -p "$tree"
+  git -C "$tree" init -q
+  printf '%s' "$tree"
+}
+track() { # TREE
+  git -C "$1" add -A
+  git -C "$1" -c user.name=fixture -c user.email=fixture@example.invalid \
+    -c commit.gpgsign=false commit -q -m 'candidate'
+}
+
+suppressing="$(candidate_repository suppressing)"
+for directory in "$suppressing" "$suppressing/crates/nested"; do
+  mkdir -p "$directory"
+  cat >"$directory/Cargo.lock" <<'LOCK'
+# This file is automatically @generated by Cargo.
+# It is not intended for manual editing.
+version = 3
+
+[[package]]
+name = "fixture"
+version = "0.1.0"
+dependencies = [
+ "smallvec",
+]
+
+[[package]]
+name = "smallvec"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a55ca5f3b68e41c979bf8c46a6f1da892ca4db8f94023ce0bd32407573b1ac0"
+LOCK
+  printf '[[IgnoredVulns]]\nid = "RUSTSEC-2021-0003"\nreason = "a candidate hiding a finding"\n' \
+    >"$directory/osv-scanner.toml"
+done
+track "$suppressing"
+
+# The first layer refuses this tree and names both files.
+[[ "$(guard_exit "$suppressing")" == 65 ]] ||
+  fail 'the guard admitted a tree whose osv-scanner.toml files ignore an advisory'
+refused="$(guard_output "$suppressing")"
+for named in ./osv-scanner.toml ./crates/nested/osv-scanner.toml; do
+  grep -Fxq "$named" <<<"$refused" || fail "the guard did not name $named"
+done
+
+# Control: the files do hide the advisory from a scanner that reads them.
+honoured="$(cd "$suppressing" && osv-scanner scan source --offline --offline-vulnerabilities \
+  --no-resolve --recursive --format json . 2>/dev/null || true)"
+[[ "$(jq -r '[.results[]?.packages[]?.vulnerabilities[]?.id] | length' <<<"$honoured")" == 0 ]] ||
+  fail 'the fixture osv-scanner.toml files do not hide the advisory, so this case proves nothing'
+
+# The second layer: the sealed scanner reports it for both lock files.
+report="$FIXTURE/suppressing-report.json"
+status=0
+(cd "$suppressing" && sealed --no-update --osv-offline --json ci --policy=strict . >"$report" 2>"$FIXTURE/suppressing.log") ||
+  status=$?
+[[ "$status" != 0 ]] || fail 'the sealed scan passed a tree with a known advisory'
+found="$(jq -r --arg root "$suppressing/" \
+  '[.findings.osv[]? | select(.ids | index("RUSTSEC-2021-0003")) | .source_path | ltrimstr($root)] | sort | join(" ")' \
+  "$report")"
+[[ "$found" == 'Cargo.lock crates/nested/Cargo.lock' ]] || {
+  cat "$FIXTURE/suppressing.log" >&2
+  fail "the sealed scan reported the ignored advisory for '$found', not for both lock files"
+}
+
+# The allow marker: a token Gitleaks reports, and the same token beside the
+# marker. The token is derived here; it is no credential and is never stored.
+token="ghp_$(printf 'codewire source-approval fixture' | sha256sum | cut -c1-36)"
+secrets_exit() { # TREE
+  (cd "$1" && sealed secrets . >/dev/null 2>&1) && echo 0 || echo "$?"
+}
+plain="$(candidate_repository plain-token)"
+printf 'token = "%s"\n' "$token" >"$plain/config.py"
+track "$plain"
+[[ "$(secrets_exit "$plain")" != 0 ]] ||
+  fail 'the sealed secrets scan does not report the fixture token, so the marker case proves nothing'
+[[ "$(guard_exit "$plain")" == 0 ]] || fail 'the guard refused a tree without an allow marker'
+marked="$(candidate_repository marked-token)"
+printf 'token = "%s"  # %s\n' "$token" "$marker" >"$marked/config.py"
+track "$marked"
+[[ "$(guard_exit "$marked")" == 65 ]] || fail 'the guard admitted a token beside an allow marker'
+# Not yet closed in the scanner: beside the marker, the token is not reported.
+# When the sealed revision stops honouring the marker, this exit becomes
+# nonzero; change the expectation then, and keep the guard.
+[[ "$(secrets_exit "$marked")" == 0 ]] ||
+  fail 'the sealed secrets scan now reports a token beside the allow marker: update this control (#3991)'
 
 printf '[test-source-approval-workflow] PASS\n'
