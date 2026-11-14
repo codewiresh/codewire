@@ -272,10 +272,12 @@ fn login_succeeds_without_an_organization_and_names_where_to_go_next() {
         "Default org: Noel Labs (noel-labs)."
     );
 
-    let notice = super::login::login_outcome(&LoginOrgResolution::NoOrganizations).unwrap();
-    assert!(notice.contains("not in an organization yet"));
-    assert!(notice.contains("'cw org invitations'"));
-    assert!(notice.contains("'cw org create <name>'"));
+    // The same words as `cw ls`, `cw org list` and a cloud create (#4592).
+    assert_eq!(
+        super::login::login_outcome(&LoginOrgResolution::NoOrganizations).unwrap(),
+        "You're not in an organization yet; create one with `cw org create NAME`, or accept an \
+         invitation with `cw org invitations`."
+    );
 
     let error = super::login::login_outcome(&LoginOrgResolution::SelectionRequired)
         .unwrap_err()

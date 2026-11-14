@@ -287,6 +287,12 @@ pub(crate) async fn environment_inventory(
                         .entries
                         .extend(listing.entries(selection, options.credentials));
                 }
+                // No organization yet is the account's state, not a failed
+                // listing: nothing to list and nothing to retry (#4589).
+                Err(error) if super::is_no_organization(&error) => inventory.report(
+                    Location::Cloud,
+                    LocationStatus::NotConfigured(super::NO_ORGANIZATION.to_owned()),
+                ),
                 Err(error) => inventory.report(
                     Location::Cloud,
                     LocationStatus::Unavailable(format!("{error:#}")),
@@ -294,9 +300,12 @@ pub(crate) async fn environment_inventory(
             },
             Err(error) => {
                 let reason = cloud_not_configured(&error);
+                // Signed out is an expected state even when the cloud is
+                // asked for by name; any other setup error is a failure there.
+                let signed_out = reason == super::NOT_SIGNED_IN;
                 inventory.report(
                     Location::Cloud,
-                    if placement == Some(EnvironmentPlacement::Platform) {
+                    if placement == Some(EnvironmentPlacement::Platform) && !signed_out {
                         LocationStatus::Unavailable(reason)
                     } else {
                         LocationStatus::NotConfigured(reason)
@@ -346,12 +355,12 @@ async fn local_vms() -> anyhow::Result<Option<Vec<codewire_local_vmm::control::v
 /// Why the cloud is not set up, with its repair.
 pub(crate) fn cloud_not_configured(error: &anyhow::Error) -> String {
     match error.downcast_ref::<config::ConfigError>() {
-        Some(config::ConfigError::NoPlatformServer { .. }) => {
-            "no Codewire server is set up (`cw login`)".to_owned()
-        }
-        Some(config::ConfigError::NoPlatformToken { .. }) => {
-            "not logged in (`cw login`)".to_owned()
-        }
+        // Before `cw login` there is no server set up, after `cw logout` no
+        // token: to the user both are the same state (#4589).
+        Some(
+            config::ConfigError::NoPlatformServer { .. }
+            | config::ConfigError::NoPlatformToken { .. },
+        ) => super::NOT_SIGNED_IN.to_owned(),
         _ => format!("{error:#}"),
     }
 }
@@ -937,13 +946,37 @@ fn format_environment_inventory(
     style: Style,
 ) -> String {
     let dim = |text: &str| style.paint(crate::output::Role::Dim, text);
+    let next = style.status(Status::Next);
+    // Signed out, or in no organization yet: the account's state, with what
+    // to run, in the words every command uses (#4589).
+    let account = not_configured
+        .iter()
+        .find(|(location, reason)| {
+            *location == Location::Cloud && super::account_next_step(reason).is_some()
+        })
+        .map(|(_, reason)| *reason);
+    if placement == Some(EnvironmentPlacement::Platform)
+        && rows.is_empty()
+        && let Some(state) = account
+    {
+        return format!(
+            "{}.\n\n{next} {}\n",
+            super::sentence(state),
+            super::account_next_step(state).unwrap_or_default()
+        );
+    }
     let mut notes = String::new();
     if placement.is_none() {
         for (location, reason) in not_configured {
             if *location == Location::Cloud {
+                let hint = super::account_hint(reason)
+                    .map(|hint| format!(" ({hint})"))
+                    .unwrap_or_default();
                 notes.push_str(&format!(
                     "  {}\n",
-                    dim(&format!("Cloud environments are not listed: {reason}"))
+                    dim(&format!(
+                        "Cloud environments are not listed: {reason}{hint}"
+                    ))
                 ));
             }
         }
@@ -958,11 +991,13 @@ fn format_environment_inventory(
         if !notes.is_empty() {
             out.push_str(&notes);
         }
-        out.push_str(&format!(
-            "\n{} {} run claude\n",
-            style.status(Status::Next),
-            placement_prefix(placement)
-        ));
+        let step = match account {
+            Some(state) if placement.is_none() => {
+                super::account_next_step(state).unwrap_or_default()
+            }
+            _ => format!("{} run claude", placement_prefix(placement)),
+        };
+        out.push_str(&format!("\n{next} {step}\n"));
         return out;
     }
     let dash = missing(style);
@@ -1658,6 +1693,44 @@ mod tests {
         // Scripts reading the state still see the state.
         assert_eq!(json["state"], "running");
         assert_eq!(json["restarted"], true);
+    }
+
+    #[test]
+    fn signed_out_or_with_no_organization_ls_names_the_state_and_its_next_step() {
+        // #4589: an expected state, one line and one next step, with no
+        // Retry and nothing repeated.
+        let cloud = |state: &'static str| vec![(Location::Cloud, state)];
+        assert_eq!(
+            format_environment_inventory(
+                &[],
+                Some(EnvironmentPlacement::Platform),
+                &cloud(super::super::NOT_SIGNED_IN),
+                PLAIN
+            ),
+            "Not signed in.\n\n→ cw login\n"
+        );
+        assert_eq!(
+            format_environment_inventory(
+                &[],
+                Some(EnvironmentPlacement::Platform),
+                &cloud(super::super::NO_ORGANIZATION),
+                PLAIN
+            ),
+            "You're not in an organization yet.\n\n→ cw org create NAME, or `cw org invitations` to accept an invitation\n"
+        );
+        assert_eq!(
+            format_environment_inventory(&[], None, &cloud(super::super::NO_ORGANIZATION), PLAIN),
+            "No environments yet.\n  Cloud environments are not listed: you're not in an organization yet \
+             (`cw org create NAME` or `cw org invitations`)\n\n→ cw org create NAME, or `cw org \
+             invitations` to accept an invitation\n"
+        );
+        assert_eq!(
+            format_environment_inventory(&[], None, &cloud(super::super::NOT_SIGNED_IN), PLAIN),
+            "No environments yet.\n  Cloud environments are not listed: not signed in (`cw login`)\n\n→ cw login\n"
+        );
+        // Not an error: the outcome only fails for a location that could
+        // not be listed.
+        assert!(inventory_outcome(&[]).is_ok());
     }
 
     #[test]

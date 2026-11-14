@@ -3086,7 +3086,13 @@ async fn a_cloud_create_sends_the_requested_organization() {
 #[tokio::test]
 async fn a_cloud_create_keeps_the_organization_refusals() {
     for (default_org, reason, message) in [
-        (None, "NO_ORGANIZATIONS", "no organizations found".to_owned()),
+        (
+            None,
+            "NO_ORGANIZATIONS",
+            "you're not in an organization yet; create one with `cw org create NAME`, or accept \
+             an invitation with `cw org invitations`"
+                .to_owned(),
+        ),
         (
             None,
             "ORGANIZATION_NOT_SELECTED",

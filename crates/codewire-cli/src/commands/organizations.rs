@@ -130,7 +130,26 @@ pub(crate) async fn handle_org_command(
     let guided = super::additions::org_metadata(&mut command)?;
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
-    let platform = resolve_platform(globals, &paths, &env)?;
+    let platform = match resolve_platform(globals, &paths, &env) {
+        Ok(platform) => platform,
+        // Signed out, listing has nothing to fail at: it says so and how to
+        // sign in (#4592).
+        Err(error)
+            if super::inventory::cloud_not_configured(&error) == super::NOT_SIGNED_IN
+                && let Some(OrgCommand::List(args)) = &command =>
+        {
+            match args.output {
+                OutputFormat::Json => println!("[]"),
+                OutputFormat::Text => {
+                    let caps =
+                        crate::output::Capabilities::from_process(crate::output::OutputMode::Text);
+                    print!("{}", super::format_not_signed_in(caps.stdout_style()));
+                }
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     let client = organization_client(&platform)?;
 
     match command.unwrap_or(OrgCommand::Set(OrgSetArgs { id_or_slug: None })) {

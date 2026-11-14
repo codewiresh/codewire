@@ -40,10 +40,9 @@ pub(super) fn org_choice<'a>(
     if selected.is_some() || !guided::available(OutputFormat::Text) {
         return select_org(orgs, selected);
     }
-    anyhow::ensure!(
-        !orgs.is_empty(),
-        "no organizations found; create one with `cw org create`"
-    );
+    if orgs.is_empty() {
+        return Err(no_organizations_found());
+    }
     let choices = orgs
         .iter()
         .map(|org| {

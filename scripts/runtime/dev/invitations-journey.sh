@@ -161,7 +161,7 @@ wait "$LOGIN_PID" || login_status=$?
 LOGIN_PID=""
 grep -v '^Your code:' "$WORK/login.out"
 [[ "$login_status" == 0 ]] || die "invite-accept: cw login exited $login_status"
-grep -q "^You're not in an organization yet: see your invitations with 'cw org invitations'" "$WORK/login.out" ||
+grep -qF "You're not in an organization yet; create one with \`cw org create NAME\`, or accept an invitation with \`cw org invitations\`." "$WORK/login.out" ||
   die 'invite-accept: cw login did not point to cw org invitations'
 invitee whoami
 invitee org invitations

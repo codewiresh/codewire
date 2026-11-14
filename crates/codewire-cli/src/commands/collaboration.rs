@@ -217,6 +217,69 @@ pub(crate) fn format_euros(nano_eur: i64) -> String {
     format!("{sign}€{whole}.{fraction:0<2}")
 }
 
+/// An account's first states, in the same words everywhere they meet the
+/// user: `cw ls`, `cw org list`, a cloud `cw create` and `cw login` (#4589,
+/// #4592, #4530; `codewire-cli-design`, "Empty and first-run states").
+pub(crate) const NOT_SIGNED_IN: &str = "not signed in";
+pub(crate) const NOT_SIGNED_IN_NEXT: &str = "cw login";
+pub(crate) const NO_ORGANIZATION: &str = "you're not in an organization yet";
+pub(crate) const NO_ORGANIZATION_NEXT: &str = "cw org create NAME";
+pub(crate) const NO_ORGANIZATION_INVITATIONS: &str = "cw org invitations";
+
+/// `text` with its first letter capitalized, as a sentence starts.
+pub(crate) fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// The next step for an account state, by its words above.
+pub(crate) fn account_next_step(state: &str) -> Option<String> {
+    match state {
+        NOT_SIGNED_IN => Some(NOT_SIGNED_IN_NEXT.to_owned()),
+        NO_ORGANIZATION => Some(format!(
+            "{NO_ORGANIZATION_NEXT}, or `{NO_ORGANIZATION_INVITATIONS}` to accept an invitation"
+        )),
+        _ => None,
+    }
+}
+
+/// The commands for an account state, short enough for a note's parentheses.
+pub(crate) fn account_hint(state: &str) -> Option<String> {
+    match state {
+        NOT_SIGNED_IN => Some(format!("`{NOT_SIGNED_IN_NEXT}`")),
+        NO_ORGANIZATION => Some(format!(
+            "`{NO_ORGANIZATION_NEXT}` or `{NO_ORGANIZATION_INVITATIONS}`"
+        )),
+        _ => None,
+    }
+}
+
+/// The account belongs to no organization yet: an expected state, not a
+/// failure, for anything that only reads (#4589).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NoOrganization;
+
+impl std::fmt::Display for NoOrganization {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{NO_ORGANIZATION}; create one with `{NO_ORGANIZATION_NEXT}`, or accept an invitation with `{NO_ORGANIZATION_INVITATIONS}`"
+        )
+    }
+}
+
+impl std::error::Error for NoOrganization {}
+
+/// Whether `error` is, at any depth, [`NoOrganization`].
+pub(crate) fn is_no_organization(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<NoOrganization>().is_some())
+}
+
 pub(crate) fn print_orgs(
     orgs: &[OrgWithRole],
     current_org: Option<&str>,
@@ -224,14 +287,40 @@ pub(crate) fn print_orgs(
 ) -> anyhow::Result<()> {
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(orgs)?),
+        OutputFormat::Text if orgs.is_empty() => {
+            let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Text);
+            print!("{}", format_no_organization(caps.stdout_style()));
+        }
         OutputFormat::Text => print!("{}", format_org_list_text(orgs, current_org)),
     }
     Ok(())
 }
 
+/// Signed out: the state, then what to run.
+pub(crate) fn format_not_signed_in(style: crate::output::Style) -> String {
+    format!(
+        "{}.\n\n{} {NOT_SIGNED_IN_NEXT}\n",
+        sentence(NOT_SIGNED_IN),
+        style.status(crate::output::Status::Next)
+    )
+}
+
+/// The empty `cw org list`: the state, then what to run.
+pub(crate) fn format_no_organization(style: crate::output::Style) -> String {
+    format!(
+        "{}.\n\n{} {}\n",
+        sentence(NO_ORGANIZATION),
+        style.status(crate::output::Status::Next),
+        account_next_step(NO_ORGANIZATION).unwrap_or_default()
+    )
+}
+
 pub(crate) fn format_org_list_text(orgs: &[OrgWithRole], current_org: Option<&str>) -> String {
     if orgs.is_empty() {
-        return "No organizations found.\n".to_string();
+        return format_no_organization(crate::output::Style::new(
+            false,
+            crate::output::Charset::Unicode,
+        ));
     }
 
     let current_org = current_org.and_then(trimmed_str);
@@ -298,7 +387,7 @@ pub(crate) fn configured_org_unavailable(configured_org: &str) -> anyhow::Error 
 }
 
 pub(crate) fn no_organizations_found() -> anyhow::Error {
-    anyhow::anyhow!("no organizations found")
+    anyhow::Error::new(NoOrganization)
 }
 
 pub(crate) fn no_org_selected() -> anyhow::Error {
@@ -310,7 +399,7 @@ pub(crate) fn select_org<'a>(
     id_or_slug: Option<&str>,
 ) -> anyhow::Result<&'a OrgWithRole> {
     if orgs.is_empty() {
-        anyhow::bail!("no organizations found");
+        return Err(no_organizations_found());
     }
 
     let Some(id_or_slug) = id_or_slug.and_then(trimmed_str) else {
@@ -868,6 +957,43 @@ pub(crate) fn nodes_have_multiple_networks(nodes: &[Node]) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod account_state_tests {
+    use super::*;
+
+    #[test]
+    fn an_account_in_no_organization_is_told_what_to_run_in_one_wording() {
+        // #4592: `cw org list`, a cloud `cw create` and `cw ls` share it.
+        assert_eq!(
+            format_org_list_text(&[], None),
+            "You're not in an organization yet.\n\n→ cw org create NAME, or `cw org invitations` to accept an invitation\n"
+        );
+        assert_eq!(
+            format_no_organization(crate::output::Style::new(
+                false,
+                crate::output::Charset::Ascii
+            )),
+            "You're not in an organization yet.\n\n-> cw org create NAME, or `cw org invitations` to accept an invitation\n"
+        );
+        let error = no_organizations_found().context("create app");
+        assert!(is_no_organization(&error));
+        assert_eq!(
+            format!("{:#}", no_organizations_found()),
+            "you're not in an organization yet; create one with `cw org create NAME`, or accept an invitation with `cw org invitations`"
+        );
+        assert!(!is_no_organization(&anyhow::anyhow!(
+            "no organizations found"
+        )));
+        assert_eq!(
+            format_not_signed_in(crate::output::Style::new(
+                false,
+                crate::output::Charset::Unicode
+            )),
+            "Not signed in.\n\n→ cw login\n"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -93,11 +93,14 @@ pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> 
 /// succeeds and names where to go next.
 pub(super) fn login_outcome(resolution: &LoginOrgResolution) -> anyhow::Result<String> {
     match resolution {
-        LoginOrgResolution::Selected(org) => Ok(format!("Default org: {} ({}).", org.name, org.slug)),
-        LoginOrgResolution::NoOrganizations => Ok(
-            "You're not in an organization yet: see your invitations with 'cw org invitations', or create one with 'cw org create <name>'."
-                .to_owned(),
-        ),
+        LoginOrgResolution::Selected(org) => {
+            Ok(format!("Default org: {} ({}).", org.name, org.slug))
+        }
+        // The same words as `cw ls`, `cw org list` and a cloud create (#4592).
+        LoginOrgResolution::NoOrganizations => Ok(format!(
+            "{}.",
+            super::sentence(&super::NoOrganization.to_string())
+        )),
         LoginOrgResolution::SelectionRequired => anyhow::bail!(
             "logged in, but no default organization is selected; run 'cw org set <id-or-slug>' or rerun 'cw login --org <id-or-slug>'"
         ),
