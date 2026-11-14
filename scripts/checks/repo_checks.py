@@ -13,6 +13,7 @@ from repo_policy.kind_suite_rows import check_kind_suite_rows
 from repo_policy.ses_security import check_ses_sender_isolation
 from repo_policy.turnstile_security import check_turnstile_access_projection
 from repo_policy.licensing import check_license_map
+from repo_policy.live_state import check_live_state
 from repo_policy.material_cache import check_epoch_material_cache_owner
 from repo_policy.database_pools import check_database_pools
 from repo_policy.deployment_http_clients import check_deployment_http_clients
@@ -99,6 +100,9 @@ def main(argv: list[str] | None = None) -> int:
     design_parser.add_argument("--self-test", action="store_true")
     design_parser.add_argument("--root", default=str(ROOT))
     design_parser.set_defaults(func=check_design_tokens)
+    live_state_parser = subparsers.add_parser("live-state")
+    live_state_parser.add_argument("--self-test", action="store_true")
+    live_state_parser.set_defaults(func=check_live_state)
     workspace_pin_parser = subparsers.add_parser("workspace-image-pin")
     workspace_pin_parser.add_argument("--self-test", action="store_true")
     workspace_pin_parser.set_defaults(func=check_workspace_image_pin)

@@ -1,0 +1,58 @@
+{
+  "$comment": "Polling sites repo_checks.py live-state allows (codewire#4762; private-docs designs/live-updates.md). A poll names the issue and the migration step that removes it; a client-only timer fetches nothing and says why; a bounded retry that reschedules itself says retry and why. count is the exact number of sites of that pattern in the file. The list only shrinks.",
+  "entries": [
+    {
+      "path": "crates/codewire-dashboard-web/templates/organization-environments-content.html",
+      "pattern": "hx-every",
+      "count": 1,
+      "issue": "#4762",
+      "step": "Sandboxes list and rail: subscribe to codewire:live:sandbox"
+    },
+    {
+      "path": "packages/codewire-design/dashboard.js",
+      "pattern": "setInterval",
+      "count": 2,
+      "issue": "#4762",
+      "step": "Sandboxes list and rail: subscribe to codewire:live:sandbox"
+    },
+    {
+      "path": "crates/codewire-dashboard-web/templates/environment-resize-operation.html",
+      "pattern": "hx-every",
+      "count": 1,
+      "issue": "#4762",
+      "step": "Resize: subscribe to codewire:live:resize"
+    },
+    {
+      "path": "packages/codewire-design/terminal-readiness.js",
+      "pattern": "setTimeout-loop",
+      "count": 1,
+      "issue": "#4762",
+      "step": "Terminal page: re-fetch readiness on codewire:live:sandbox"
+    },
+    {
+      "path": "packages/codewire-design/sandbox-resize.js",
+      "pattern": "setTimeout-loop",
+      "count": 1,
+      "issue": "#4762",
+      "step": "Resize: subscribe to codewire:live:resize"
+    },
+    {
+      "path": "packages/codewire-design/reference/source/runtime.js",
+      "pattern": "setTimeout-loop",
+      "count": 1,
+      "client_only": "The design handoff's runtime waits for an imported script's global to appear on window; fetches nothing."
+    },
+    {
+      "path": "packages/codewire-design/setup-progress.js",
+      "pattern": "setInterval",
+      "count": 1,
+      "client_only": "Redraws the elapsed time of the running step every 500 ms; fetches nothing."
+    },
+    {
+      "path": "packages/codewire-design/reference/fixtures/sandbox-journey.js",
+      "pattern": "setInterval",
+      "count": 1,
+      "client_only": "Plays the design fixture's journey animation; fetches nothing."
+    }
+  ]
+}

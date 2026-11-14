@@ -890,6 +890,10 @@ run_paths_case repo_public_address_guard pull_request refs/pull/2203/head false 
   'policy security security_js' scripts/checks/repo_policy/public_addresses.py
 run_paths_case repo_private_host_guard pull_request refs/pull/3189/head false \
   'policy security security_js' scripts/checks/repo_policy/private_hosts.py
+run_present_paths_case repo_live_state_guard pull_request refs/pull/4762/head false \
+  'policy security security_js' scripts/checks/repo_policy/live_state.py
+run_present_paths_case live_state_allowlist pull_request refs/pull/4763/head false \
+  'policy security security_js' scripts/checks/contracts/live-state-allowlist.json
 run_paths_case repo_license_with_other_policy pull_request refs/pull/2202/head false \
   'contracts contracts_proto deploy go_consumer_interop go_support policy release confidential_script_tests security security_idp_kek security_js' \
   scripts/checks/repo_policy/licensing.py scripts/checks/repo_policy/mesh.py

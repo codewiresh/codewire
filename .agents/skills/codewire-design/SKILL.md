@@ -222,7 +222,43 @@ The semantic HTML rule at the top of this skill, in short:
    recovery states. Never recreate the cluster.
 5. When visible text, control names or counts change, update
    `apps/dashboard/scripts/dev-ux-walkthrough.ts`, which pins them on Dev.
-6. Before landing, run `scripts/dev/preflight.sh --explain` and
-   `git diff --check`.
+6. Before landing, run `scripts/dev/preflight.sh --explain`,
+   `python3 scripts/checks/repo_checks.py live-state` and `git diff --check`.
 7. Diagnose from specs or scratch scripts under the gitignored `.tmp/`. Never
    add probes, logging or temporary attributes to tracked templates or fixtures.
+
+## 9. Live state
+
+Owner, 2026-11-14 (codewire#3013): Server-Sent Events are the default for
+live state, and pages don't poll for it. Design: private-docs
+`designs/live-updates.md`; build: codewire#4762.
+
+- A page learns that state changed from the shared stream: `live.js` opens
+  `/_events/live` once per page. A live region subscribes to its kind and
+  re-fetches its own fragment, for example
+  `hx-trigger="codewire:live:sandbox from:body"`, and refreshes on
+  `codewire:live:resync`. Events carry ids only; the fragment request
+  authorizes as usual.
+- Never poll for state the server knows: no htmx `every`, no `setInterval`, no
+  `setTimeout` loop that fetches. If the stream has no event for your state,
+  add the database notification and the event, not a timer.
+- Allowed timers:
+  - `live.js`'s own fallback when the stream is busy or unavailable;
+  - client-only timers that fetch nothing, such as an elapsed-time display or
+    an animation;
+  - retries with backoff after a failed request (section 5). A retry is not a
+    poll.
+- Setup progress keeps its own per-Sandbox stream (`setup-progress.js`); a page
+  opens it on `codewire:live:setup`.
+- Until the stream lands, a region that must update live waits for it. A poll
+  that can't wait goes on the allow-list under its issue.
+- **Guard:** `python3 scripts/checks/repo_checks.py live-state` fails on an
+  htmx `every` trigger, a `setInterval(`, or a `setTimeout(` that schedules
+  the function it is written in, in templates, the dashboard's Rust sources
+  and `packages/codewire-design`, unless it is listed in
+  `scripts/checks/contracts/live-state-allowlist.json`. A poll's entry names
+  its issue and the step that removes it; a client-only timer or a bounded
+  self-rescheduling retry says why. The list only shrinks.
+- **Review checklist:** this change adds no periodic request; every live
+  region subscribes to a `codewire:live:*` event, refreshes on `resync`, and
+  still shows the right state after the stream reconnects.

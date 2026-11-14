@@ -697,6 +697,7 @@ run_repo_rules() {
   python3 scripts/checks/repo_checks.py kind-suite-rows --self-test
   python3 scripts/checks/repo_checks.py kind-suite-rows
   python3 scripts/checks/repo_checks.py design-tokens --self-test
+  python3 scripts/checks/repo_checks.py live-state --self-test
   python3 scripts/checks/repo_checks.py identity-free-workspace --self-test
   python3 scripts/checks/repo_checks.py workspace-image-pin --self-test
   python3 scripts/checks/repo_checks.py workspace-image-pin

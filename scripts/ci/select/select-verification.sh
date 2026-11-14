@@ -1047,8 +1047,10 @@ if [ "$event_selected" = false ]; then
         select_js_security
         recognized=true
         ;;
-      scripts/checks/repo_policy/licensing.py|scripts/checks/repo_policy/public_addresses.py|scripts/checks/repo_policy/private_hosts.py)
-        # The package inventory and the public address and private host guards run only in
+      scripts/checks/repo_policy/licensing.py|scripts/checks/repo_policy/public_addresses.py|scripts/checks/repo_policy/private_hosts.py|\
+      scripts/checks/repo_policy/live_state.py)
+        # The package inventory, the public address and private host guards and the live-state
+        # polling guard run only in
         # policy-core; they do not execute contracts, deployments, releases,
         # or runtime security.
         select_token policy
@@ -1134,6 +1136,11 @@ if [ "$event_selected" = false ]; then
         ;;
       scripts/checks/contracts/design-token-policy.json)
         # The design-system guard reads only this contract and runs in
+        # Policy; product paths in the same change keep their own classifiers.
+        recognized=true
+        ;;
+      scripts/checks/contracts/live-state-allowlist.json)
+        # The live-state polling guard reads only this list and runs in
         # Policy; product paths in the same change keep their own classifiers.
         recognized=true
         ;;
