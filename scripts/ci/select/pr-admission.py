@@ -53,7 +53,10 @@ GATE_JOB = "PR admission"
 # Not "blocked": a run awaiting approval holds no slot until it is approved.
 UNFINISHED_RUN_STATES = ("waiting", "running", "unknown")
 ADMITTED_LIMIT = 6
-WAITING_LIMIT = 16
+# Waiting gates hold light runner slots. The light runner takes 24 jobs
+# (owner, 2026-11-14: faster jobs, not more of them; infra#2471), so at most 6
+# wait and at least 18 slots stay for every repository's real light jobs.
+WAITING_LIMIT = 6
 POLL_SECONDS = 45
 # Inside the gate job's 235 minutes and the light runner's 240-minute cap.
 WAIT_SECONDS = 230 * 60

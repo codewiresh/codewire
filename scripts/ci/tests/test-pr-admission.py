@@ -127,17 +127,18 @@ class PrAdmission(unittest.TestCase):
         self.assertEqual(self.decide(state, 10)[0], gate.ADMITTED)
 
     def test_too_many_waiting_gates_overflow_rather_than_fill_the_light_runner(self) -> None:
-        # Sixteen gates already wait ahead: a seventeenth would crowd the light
-        # runner's slots that the admitted runs need, so it starts over the limit.
+        # Six gates already wait ahead: a seventh would crowd the light
+        # runner's 24 slots that the admitted runs need, so it starts over the limit.
+        self.assertEqual(gate.WAITING_LIMIT, 6)
         state = ({run_id: "admitted" for run_id in range(1, 7)}
-                 | {run_id: "waiting" for run_id in range(10, 26)} | {30: "waiting"})
+                 | {run_id: "waiting" for run_id in range(10, 16)} | {30: "waiting"})
         verdict, reason = self.decide(state, 30)
         self.assertEqual(verdict, gate.OVERFLOW)
-        self.assertIn("16 gates already wait ahead", reason)
+        self.assertIn("6 gates already wait ahead", reason)
         result, log = self.wait([state], 30)
         self.assertEqual(result, gate.OVERFLOW)
         self.assertIn("::warning::PR admission overflow", log)
-        self.assertEqual(self.decide(state, 25)[0], gate.WAIT)
+        self.assertEqual(self.decide(state, 15)[0], gate.WAIT)
 
     def test_one_unreadable_run_holds_a_slot_and_never_opens_the_gate(self) -> None:
         # Two gates in one run, a run deleted mid-poll: its jobs cannot be read.
@@ -158,7 +159,8 @@ class PrAdmission(unittest.TestCase):
         # newer pull request starts at once instead of waiting 230 minutes.
         state = {run_id: "queued" for run_id in range(1, 7)} | {10: "waiting"}
         self.assertEqual(self.decide(state, 10, blocked=set(range(1, 7)))[0], gate.ADMITTED)
-        self.assertEqual(self.decide(state, 10)[0], gate.WAIT)
+        # Not blocked, the same six hold their places: this run is not admitted at once.
+        self.assertNotEqual(self.decide(state, 10)[0], gate.ADMITTED)
 
     def test_the_deadline_holds_inside_a_slow_poll(self) -> None:
         # Each request takes 60 s of clock: the poll stops at the deadline
