@@ -1,4 +1,4 @@
-import { test as base, type Locator, type Page } from "@playwright/test";
+import { test as base, expect, type Locator, type Page } from "@playwright/test";
 
 export * from "@playwright/test";
 
@@ -37,6 +37,16 @@ export async function artifactScreenshot(target: Page | Locator, name: string, o
   if ("goto" in target) await target.screenshot({ path, scale: "css", ...options });
   else await target.screenshot({ path, scale: "css" });
   return path;
+}
+
+// The Sandbox page checks its readiness by itself: every 5 s, and whenever
+// the tab becomes visible again. It has no Refresh control (#4542), so a test
+// asks for a check now the way a returning tab does.
+// A check in flight swallows a new one, so wait until its status line is no
+// longer busy, as a click on the old button waited for it to be enabled.
+export async function checkReadinessNow(page: Page) {
+  await expect(page.locator("[data-sandbox-observation-status]")).not.toHaveAttribute("aria-busy", "true", { timeout: 12_000 });
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
 }
 
 // Pause a page's installed clock a second ahead of where that clock is now.

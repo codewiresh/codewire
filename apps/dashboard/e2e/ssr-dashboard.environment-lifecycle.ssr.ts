@@ -47,8 +47,8 @@ type TerminalClientFrame = { type: "input"; data: string }
   | { type: "ack"; offset: string };
 
 // The Sandbox workspace keeps terminal actions (Rename, Copy selection, the
-// existing-session picker, Refresh sessions) and Sandbox actions (Resize,
-// Refresh sandbox status, Delete) in two menus.
+// existing-session picker, Refresh sessions) and Sandbox actions (Open in VS
+// Code, Resize, Delete) in two menus.
 // Chromium can evict a response body before the test reads it (#2346), so
 // these JSON responses are read in a route as they pass through.
 async function jsonResponses(page: Page, suffix: string) {

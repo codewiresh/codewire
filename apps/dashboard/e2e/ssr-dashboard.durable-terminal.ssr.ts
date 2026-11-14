@@ -1,4 +1,4 @@
-import { artifactScreenshot, expect, pauseClock, test, type Locator, type Page, type WebSocketRoute } from "./helpers/fixture-test";
+import { artifactScreenshot, checkReadinessNow, expect, pauseClock, test, type Locator, type Page, type WebSocketRoute } from "./helpers/fixture-test";
 import { expectOnAnchorLines, type AnchorCheck } from "./helpers/anchor-lines";
 
 // Browser controller proof on the checked-in design server. These explicitly
@@ -103,7 +103,7 @@ const readinessDeadline = { timeout: 12_000 };
 const listDeadline = { timeout: 17_000 };
 
 async function settleStartup(page: Page) {
-  await expect(page.locator("[data-terminal-readiness-refresh]")).toBeEnabled(readinessDeadline);
+  await expect(page.locator("[data-sandbox-observation-status]")).not.toHaveAttribute("aria-busy", "true", readinessDeadline);
   await expect(page.locator("[data-terminal-refresh]")).toBeEnabled(listDeadline);
 }
 
@@ -127,7 +127,8 @@ async function automaticTerminal(page: Page, state: { launches: number; connecti
 
 // The terminal menu (Terminal actions) holds Rename, the selected tab's Copy
 // selection and Replay recent output, the existing-session picker and Refresh
-// sessions. More actions holds Resize, Refresh sandbox status and Delete.
+// sessions. More actions holds the Sandbox's details and, below them, Open in
+// VS Code, Resize and Delete as three equal buttons (#4542).
 // Open a menu as a person does before using what it holds.
 type Menu = "Terminal actions" | "More actions";
 function menuOf(page: Page, menu: Menu) {
@@ -203,9 +204,12 @@ async function dropConnection(page: Page, connection: Connection) {
 // A fake-clock jump can start a readiness poll. Let it finish before time
 // moves again so its own abort deadline cannot report the Sandbox unavailable.
 async function settleReadiness(page: Page) {
-  await expect(page.locator("[data-terminal-readiness-refresh]")).toBeEnabled(readinessDeadline);
+  await expect(page.locator("[data-sandbox-observation-status]")).not.toHaveAttribute("aria-busy", "true", readinessDeadline);
 }
 
+// A test that counts session lists reaches the next readiness check through
+// the page's clock: dispatching visibilitychange or focus to ask sooner also
+// makes the terminal re-check its account, which lists sessions (#4542).
 // fastForward fires each due timer once at the target time; runFor would also
 // fire a just-started poll's abort deadline within the same long advance.
 async function advance(page: Page, ms: number) {
@@ -326,10 +330,8 @@ test("the header keeps its actions on one line and the selected tab carries the 
   state.sessions = [1, 2, 3].map((index) => ({ sessionId: sessionId(index), state: "running" }));
   await openFixture(page);
   await expect(page.getByRole("tab")).toHaveCount(3);
-  await expect(page.getByRole("link", { name: "Open in VS Code", exact: true })).toBeVisible();
   const actions = [
     page.getByRole("button", { name: "Ports", exact: true }),
-    page.getByRole("link", { name: "Open in VS Code", exact: true }),
     page.getByRole("button", { name: "Stop", exact: true }),
     page.locator("[data-sandbox-menu] > summary"),
   ];
@@ -347,7 +349,7 @@ test("the header keeps its actions on one line and the selected tab carries the 
     // Each control's capitals sit on its centre: the shared primitives carry
     // no leading and trim their labels to the capitals.
     const offsets: number[] = [];
-    for (const control of [...actions.slice(0, 3), page.locator("[data-sandbox-state]")]) {
+    for (const control of [...actions.slice(0, 2), page.locator("[data-sandbox-state]")]) {
       offsets.push(await capitalsOffset(control));
       expect.soft(Math.abs(offsets.at(-1)!), `${width}: ${await control.textContent()}`).toBeLessThanOrEqual(0.75);
     }
@@ -379,6 +381,27 @@ test("the header keeps its actions on one line and the selected tab carries the 
   }
   await page.setViewportSize({ width: 1440, height: 900 });
   await artifactScreenshot(page, "workspace-1440.png");
+});
+
+// More actions lists Open in VS Code with the Resize and Delete items, under
+// the Sandbox's details; its icon says it opens outside the page, and the
+// link's name is its words alone (owner, 2026-11-13, #4542).
+test("More actions lists Open in VS Code, marked as opening outside the page, with Resize and Delete", { tag: "@mobile" }, async ({ page }) => {
+  await transport(page);
+  await openFixture(page);
+  const menu = await openMenu(page, "More actions");
+  const open = menu.getByRole("link", { name: "Open in VS Code", exact: true });
+  await expect(open).toBeVisible();
+  await expect(open).toHaveClass(/\bcw-menu-item\b/);
+  await expect(open).toHaveAttribute("href", /^vscode:\/\//);
+  await expect(open.locator('svg[aria-hidden="true"] use')).toHaveAttribute("href", /#icon-external$/);
+  // The icon sits to the right of the label, on its line.
+  const label = (await open.locator("span").boundingBox())!;
+  const icon = (await open.locator("svg").boundingBox())!;
+  expect(icon.x).toBeGreaterThanOrEqual(label.x + label.width);
+  expect(Math.abs(icon.y + icon.height / 2 - (label.y + label.height / 2))).toBeLessThanOrEqual(1);
+  const items = menu.locator(":scope > .cw-menu-panel > .cw-menu-item:visible");
+  await expect(items).toHaveText(["Open in VS Code", "Resize", "Delete"]);
 });
 
 test("the status bar follows the selected terminal's connection", async ({ page }) => {
@@ -513,9 +536,6 @@ test("workspace menus close after an in-place action and stay open behind a dial
   await expect(page.getByRole("tab")).toHaveCount(1);
   const more = menuOf(page, "More actions");
   const terminalMenu = menuOf(page, "Terminal actions");
-  await (await sandboxAction(page, "Refresh sandbox status")).click();
-  await expect(more).toHaveJSProperty("open", false);
-  await expect(more.locator(":scope > summary")).toBeFocused();
   // Rename opens a dialog, so its menu stays open to take focus back.
   const rename = await terminalAction(page, "Rename terminal");
   await rename.click();
@@ -527,13 +547,14 @@ test("workspace menus close after an in-place action and stay open behind a dial
   await expect(terminalMenu).toHaveJSProperty("open", false);
   await expect(terminalMenu.locator(":scope > summary")).toBeFocused();
   // On a phone the More actions panel covers the tab bar while it is open;
-  // once its action has run, the tab bar is in reach again.
+  // once it closes, the tab bar is in reach again.
   await page.setViewportSize({ width: 390, height: 844 });
   const panel = (await openMenu(page, "More actions")).locator(":scope > .cw-menu-panel");
   const box = (await panel.boundingBox())!;
   expect(box.x).toBeGreaterThanOrEqual(0);
   expect(box.x + box.width).toBeLessThanOrEqual(390);
-  await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await page.keyboard.press("Escape");
+  await expect(more).toHaveJSProperty("open", false);
   await page.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect(page.getByRole("tab")).toHaveCount(2);
   expect(state.launches).toBe(1);
@@ -1240,8 +1261,8 @@ test("a failed Sandbox operation is announced and Start retries it", async ({ pa
   await expect(status).toHaveText("The Sandbox operation failed. Choose Start to try again.");
   await expect(page.getByRole("button", { name: "Start", exact: true })).toBeEnabled();
   state.detail = { ...state.detail, startEligible: false };
-  await (await sandboxAction(page, "Refresh sandbox status")).click();
-  await expect(status).toHaveText("The Sandbox operation failed. Refresh status to check its current state; no action was retried.");
+  await checkReadinessNow(page);
+  await expect(status).toHaveText("The Sandbox operation failed. No action was retried; its status here updates on its own.");
   expect(state.launches).toBe(0);
 });
 
@@ -1788,10 +1809,12 @@ test("a Sandbox stopped at load says how to use its terminals instead of checkin
 });
 
 test("incomplete setup blocks launch and attachment until readiness, then re-attaches without launching", async ({ page }) => {
+  await page.clock.install();
   const state = await transport(page);
   state.setupComplete = false;
   state.sessions = [{ sessionId: sessionId(9), state: "running" }];
   await openFixture(page);
+  await pauseClock(page);
   await expect(page.locator("[data-terminal-empty]")).toContainText("setup is not complete");
   expect(state.lists).toBe(0);
   // An explicit inventory read still permits inspecting/stopping a shell
@@ -1805,7 +1828,7 @@ test("incomplete setup blocks launch and attachment until readiness, then re-att
   expect(state.launches).toBe(0);
   expect(state.connections).toHaveLength(0);
   state.setupComplete = true;
-  await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await advance(page, 5000);
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
   // Readiness re-attaches the restored existing session; it never launches one.
   await expect.poll(() => state.connections.length).toBe(1);
@@ -1819,10 +1842,12 @@ test("incomplete setup blocks launch and attachment until readiness, then re-att
 });
 
 test("initial terminal inventory waits until workspace setup finishes", async ({ page }) => {
+  await page.clock.install();
   const state = await transport(page);
   state.setupComplete = false;
   state.listStatus = 503;
   await openFixture(page);
+  await pauseClock(page);
   await expect(page.locator("[data-terminal-empty]")).toContainText("setup is not complete");
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
   expect(state.lists).toBe(0);
@@ -1830,7 +1855,7 @@ test("initial terminal inventory waits until workspace setup finishes", async ({
   expect(state.launches).toBe(0);
   state.setupComplete = true;
   state.listStatus = 200;
-  await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await advance(page, 5000);
   // The first list after setup finishes opens the page's terminal, once.
   await automaticTerminal(page, state);
   expect(state.lists).toBe(1);
@@ -1864,25 +1889,27 @@ test("a Sandbox still being created says its terminals open when ready, then wit
   state.running = true;
   state.setupComplete = true;
   state.detail = null;
-  await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await checkReadinessNow(page);
   await automaticTerminal(page, state);
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
   await expect(page.locator("[data-sandbox-creation-notice]")).toBeHidden();
 });
 
 test("starting a stopped Sandbox enables terminals after its first ready status without reload", async ({ page }) => {
+  await page.clock.install();
   const state = await transport(page);
   state.running = false;
   state.setupComplete = false;
   state.listStatus = 503;
   await openFixture(page);
+  await pauseClock(page);
   await expect(page.locator("[data-terminal-empty]")).toContainText("Start this Sandbox");
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
   expect(state.lists).toBe(0);
   state.running = true;
   state.setupComplete = true;
   state.listStatus = 200;
-  await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await advance(page, 5000);
   await automaticTerminal(page, state);
   expect(state.lists).toBe(1);
 });
@@ -1893,7 +1920,7 @@ test("setup loss pauses input and attachment but still permits explicit Stop", a
   await openFixture(page);
   await expect.poll(() => state.connections.length).toBe(1);
   state.setupComplete = false;
-  await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await checkReadinessNow(page);
   await expect.poll(() => state.connections[0].closed).toBe(true);
   await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeDisabled();
   await closeSelected(page);
@@ -1902,6 +1929,7 @@ test("setup loss pauses input and attachment but still permits explicit Stop", a
 });
 
 test("a pending stopped-state list cannot consume initial restoration when setup becomes ready", async ({ page }) => {
+  await page.clock.install();
   const state = await transport(page);
   state.running = false;
   state.setupComplete = false;
@@ -1909,12 +1937,13 @@ test("a pending stopped-state list cannot consume initial restoration when setup
   let release!: () => void;
   state.listGate = new Promise<void>((resolve) => { release = resolve; });
   await openFixture(page);
+  await pauseClock(page);
   await expect(page.locator("[data-terminal-empty]")).toContainText("Start this Sandbox");
   await (await terminalAction(page, "Refresh sessions")).click();
   await expect.poll(() => state.lists).toBe(1);
   state.running = true;
   state.setupComplete = true;
-  await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await advance(page, 5000);
   await expect(page.locator("[data-terminal-empty]")).toHaveText("Opening a terminal…");
   release();
   // The failed list replaces the empty state's text, beside Retry.
@@ -1922,7 +1951,7 @@ test("a pending stopped-state list cannot consume initial restoration when setup
   await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
   expect(state.launches).toBe(0);
   state.listStatus = 200;
-  await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await advance(page, 5000);
   await automaticTerminal(page, state);
   expect(state.lists).toBe(2);
 });
@@ -2472,6 +2501,36 @@ test("inventory Stop has an explicit no-JavaScript confirmation", async ({ brows
   } finally { await context.close(); }
 });
 
+// The Sandbox page's Resize form for a browser without scripts sits in
+// <noscript>: with scripts it is never drawn, so it cannot flash beside the
+// Resize button; without them it is how a Sandbox is resized (#4542).
+test("Sandbox Resize keeps a no-JavaScript form that scripts never draw", async ({ browser }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
+  const context = await browser.newContext({ javaScriptEnabled: false });
+  try {
+    const page = await context.newPage();
+    let posts = 0;
+    page.on("request", (request) => { if (request.method() === "POST") posts += 1; });
+    await page.goto(`${origin}/reference/fixtures/terminal-tabs.html`);
+    await page.locator("[data-sandbox-menu] > summary").click();
+    const fallback = page.locator("details[data-sandbox-resize]");
+    await fallback.locator(":scope > summary").click();
+    await expect(fallback.getByLabel("CPU", { exact: true })).toBeVisible();
+    await expect(fallback.getByRole("button", { name: "Review resize", exact: true })).toBeVisible();
+    await expect(fallback.locator("form")).toHaveAttribute("action", "/fixture-org/_actions/sandboxes/resize/plan");
+    expect(posts).toBe(0);
+  } finally { await context.close(); }
+  const scripted = await browser.newPage();
+  try {
+    await scripted.goto(`${origin}/reference/fixtures/terminal-tabs.html`);
+    const menu = scripted.locator("[data-sandbox-menu]");
+    await menu.locator(":scope > summary").click();
+    await expect(menu.getByRole("button", { name: "Resize", exact: true })).toBeVisible();
+    await expect(scripted.locator("details[data-sandbox-resize]")).toHaveCount(0);
+  } finally { await scripted.close(); }
+});
+
 test("inventory Stop retains its native fallback when refreshed metadata is invalid", async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
@@ -2513,13 +2572,13 @@ test("live deletion metadata preserves nanoseconds, terminal and open confirmati
   await page.getByRole("button", { name: "Stop", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Stop Fixture Sandbox?" });
   state.detail = { ...state.detail, shutdownAt: "2026-09-17T00:26:00.987654321Z" };
-  await page.locator("[data-terminal-readiness-refresh]").evaluate((button: HTMLButtonElement) => button.click());
+  await checkReadinessNow(page);
   await expect(lifetime.locator("time")).toHaveAttribute("datetime", state.detail.shutdownAt!);
   await expect(lifetime).toHaveText("17 Sep 2026, 00:26 UTC");
   await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
   await expect(dialog.getByRole("button", { name: "Stop Sandbox", exact: true })).toBeEnabled();
   state.detail = { ...state.detail, deletionState: "protected", shutdownAt: null };
-  await page.locator("[data-terminal-readiness-refresh]").evaluate((button: HTMLButtonElement) => button.click());
+  await checkReadinessNow(page);
   await expect(lifetime).toHaveText("off (protected)");
   await expect(lifetime.locator("time")).toHaveCount(0);
   const geometry = await page.locator(".cw-workspace-main").evaluate((main) => ({
@@ -2529,7 +2588,7 @@ test("live deletion metadata preserves nanoseconds, terminal and open confirmati
   expect(geometry.output).toBeGreaterThanOrEqual(180);
   expect(geometry.overflow).toBeLessThanOrEqual(1);
   state.detail = { ...state.detail, deletionState: "unavailable" };
-  await page.locator("[data-terminal-readiness-refresh]").evaluate((button: HTMLButtonElement) => button.click());
+  await checkReadinessNow(page);
   await expect(lifetime).toHaveText("unavailable");
   await expect(dialog.getByRole("button", { name: "Stop Sandbox", exact: true })).toBeEnabled();
   expect(await terminal!.evaluate((node) => node.isConnected)).toBe(true);
@@ -2557,14 +2616,14 @@ test("malformed or contradictory deletion metadata fails closed and retains last
     ["unexpected", null],
   ] as Array<[string, string | null]>) {
     state.detail = { ...state.detail, deletionState, shutdownAt };
-    await (await sandboxAction(page, "Refresh sandbox status")).click();
+    await checkReadinessNow(page);
     await expect(page.locator("[data-sandbox-observation-status]")).toContainText("unavailable");
     await expect(lifetime).toHaveText("17 Sep 2026, 00:26 UTC");
     await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeDisabled();
     // Re-establish a valid observation so every invalid case proves a fresh
     // transition, rather than merely inheriting the first unavailable result.
     state.detail = { ...state.detail, deletionState: "scheduled", shutdownAt: "2026-09-17T00:26:00.123456789Z" };
-    await (await sandboxAction(page, "Refresh sandbox status")).click();
+    await checkReadinessNow(page);
     await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
   }
   expect(state.launches).toBe(0);
@@ -2586,7 +2645,7 @@ test("live detail distinguishes pending desired state and preserves terminal and
     resources: "2 vCPU · 4 GiB · 20 GiB", cpuMillicores: 2000, memoryMib: 4096, diskGib: 20,
     startEligible: false, stopEligible: false, deleteEligible: false, deletionState: "unscheduled", shutdownAt: null, actionsAllowed: true, pending: true };
   // Request from outside the modal without disturbing its focused Cancel.
-  await page.locator("[data-terminal-readiness-refresh]").evaluate((button: HTMLButtonElement) => button.click());
+  await checkReadinessNow(page);
   await expect(page.locator("[data-sandbox-observation-status]")).toContainText("operation is pending");
   await expect(page.locator("[data-sandbox-state]")).toHaveText("running");
   await expect(dialog.getByRole("button", { name: "Stop Sandbox", exact: true })).toBeDisabled();
@@ -2599,7 +2658,7 @@ test("live detail distinguishes pending desired state and preserves terminal and
   state.setupComplete = false;
   state.detail = { ...state.detail, state: "stopped", tone: "neutral", startEligible: true,
     stopEligible: false, deleteEligible: true, pending: false };
-  await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await checkReadinessNow(page);
   await expect(page.locator("[data-sandbox-state]")).toHaveText("stopped");
   await expect(page.getByRole("button", { name: "Start", exact: true })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeHidden();
@@ -2609,7 +2668,7 @@ test("live detail distinguishes pending desired state and preserves terminal and
   expect(state.stops).toBe(0);
 });
 
-test("live detail pauses stale actions and leaves open Resize drafts unchanged", async ({ page }) => {
+test("live detail pauses stale actions and leaves an open Resize draft unchanged", async ({ page }) => {
   await page.clock.install();
   const state = await transport(page);
   // An attached terminal, so any launch below would come from the status.
@@ -2617,19 +2676,17 @@ test("live detail pauses stale actions and leaves open Resize drafts unchanged",
   await openFixture(page);
   await pauseClock(page);
   await settleReadiness(page);
-  await openMenu(page, "More actions");
-  const resize = page.locator("[data-sandbox-resize]");
-  await resize.getByText("Resize", { exact: true }).click();
+  await (await sandboxAction(page, "Resize")).click();
+  const resize = page.getByRole("dialog", { name: "Resize Fixture Sandbox", exact: true });
   await resize.getByLabel("CPU", { exact: true }).selectOption("4000");
   state.statusAvailable = false;
-  // The periodic poll (every 5 s) refreshes without a deliberate outside
-  // click, which correctly dismisses the native action menu. The page's clock
+  // The periodic poll (every 5 s) refreshes on its own. The page's clock
   // reaches it, not real time: waiting for a real 5 s poll timed out under
   // load (PR run 23655).
   await advance(page, 5000);
   await expect(page.locator("[data-sandbox-observation-status]")).toContainText("status is unavailable");
   await expect(resize.getByRole("button", { name: "Review resize" })).toBeDisabled();
-  await expect(resize).toHaveAttribute("open", "");
+  await expect(resize).toBeVisible();
   await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("4000");
   state.statusAvailable = true;
   state.detail = { state: "running", desiredState: "started", tone: "success", lastEvent: "a moment ago",
@@ -2639,9 +2696,11 @@ test("live detail pauses stale actions and leaves open Resize drafts unchanged",
   await expect(page.locator("[data-sandbox-resources]")).toHaveText([state.detail.resources, state.detail.resources]);
   await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("4000");
   await expect(resize.getByRole("button", { name: "Review resize" })).toBeEnabled();
-  await resize.locator("summary").click();
-  await (await sandboxAction(page, "Refresh sandbox status")).click();
-  await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("2000");
+  // Closed, the dialog follows the Sandbox's current resources again.
+  await resize.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(resize).toBeHidden();
+  await advance(page, 5000);
+  await expect(page.locator('#sandbox-resize [name="cpu_millicores"]')).toHaveValue("2000");
   expect(state.launches).toBe(0);
 });
 
@@ -2655,7 +2714,7 @@ test("displayed lifecycle state is not inferred from policy-gated terminal readi
   await expect(page.locator("[data-sandbox-state]")).toHaveText("running");
   await expect(page.getByRole("button", { name: "Start", exact: true })).toBeHidden();
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeHidden();
-  await expect(page.locator("[data-sandbox-resize]")).toHaveAttribute("hidden", "");
+  await expect(await sandboxAction(page, "Resize")).toBeDisabled();
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
   expect(state.launches).toBe(0);
 });
@@ -2679,7 +2738,7 @@ test("a lifecycle submit remains locked across fresh polling and a cached return
   await openFixture(page);
   await page.getByRole("button", { name: "Start", exact: true }).click();
   await expect.poll(() => submitted).toBe(1);
-  await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await checkReadinessNow(page);
   await expect(page.locator("[data-sandbox-observation-status]")).toContainText("Action submitted");
   await expect(page.locator('[data-sandbox-actions] [data-sandbox-action="start"]')).toBeDisabled();
   await page.evaluate(() => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
@@ -2703,7 +2762,7 @@ test("a prevented native lifecycle submit does not leave the submission lock lat
   await page.evaluate(() => document.addEventListener("submit", (event) => event.preventDefault(), { once: true }));
   await page.getByRole("button", { name: "Start", exact: true }).click();
   await expect(page.locator("[data-sandbox-observation-status]")).toContainText("status is unavailable");
-  await (await sandboxAction(page, "Refresh sandbox status")).click();
+  await checkReadinessNow(page);
   await expect(page.getByRole("button", { name: "Start", exact: true })).toBeEnabled();
   await expect(page.getByRole("link", { name: "Reload Sandbox status", exact: true })).toBeHidden();
   expect(state.launches).toBe(0);

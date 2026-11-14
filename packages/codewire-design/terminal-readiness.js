@@ -90,9 +90,6 @@
     // them for pages that predate them, whose closed-shape check would
     // otherwise reject the response.
     const url = `/${encodeURIComponent(slug)}/${environmentId}/_fragments/terminal-readiness?fields=status`;
-    // The workspace keeps Refresh sandbox status in its More actions menu.
-    const button = root.querySelector("[data-terminal-readiness-refresh]")
-      || document.querySelector("[data-terminal-readiness-refresh]");
     const heading = document.querySelector("[data-sandbox-observation]");
     const observesDetail = heading?.dataset.sandboxEnvironmentId === environmentId;
     let submissionPending = false;
@@ -174,19 +171,13 @@
         heading.querySelector("[data-sandbox-last-event]").textContent = detail.lastEvent;
         document.querySelectorAll("[data-sandbox-resources]").forEach((node) => { node.textContent = detail.resources; });
         heading.querySelectorAll("[data-sandbox-lifetime]").forEach((node) => { showDeadline(node, detail); });
-        // Never overwrite a draft while its Resize menu is open or focused.
-        const resize = document.querySelector('dialog[data-resize-enhanced="true"]') || document.querySelector("details[data-sandbox-resize]");
+        // Never overwrite a draft while the Resize dialog is open or focused.
+        // Its no-script form sits in <noscript>, so it is never here (#4542).
+        const resize = document.querySelector('dialog[data-resize-enhanced="true"]');
         if (resize && !resize.open && !resize.contains(document.activeElement)) {
           for (const [name, key] of [["cpu_millicores", "cpuMillicores"], ["memory_mb", "memoryMib"], ["disk_gb", "diskGib"]]) {
             showResource(resize.querySelector(`[name="${name}"]`), detail[key]);
           }
-        }
-        if (resize instanceof HTMLDetailsElement && !resize.open) resize.hidden = !detail.actionsAllowed;
-        // The enhanced Resize dialog owns its controls and unknown-outcome
-        // latch. Never re-expose its native fallback behind that latch.
-        if (document.querySelector("[data-resize-open]")) {
-          const fallback = document.querySelector("details[data-sandbox-resize]");
-          if (fallback && document.querySelector('dialog[data-resize-enhanced="true"]')) fallback.hidden = true;
         }
       }
       // Before any response the page keeps its rendered status (a deletion
@@ -205,10 +196,10 @@
         : ["error", "build failed"].includes(detail.state) ? detail.desiredState === "destroyed"
           ? detail.deleteEligible
             ? "This Sandbox could not be deleted. Choose Delete to try again."
-            : "This Sandbox could not be deleted. Refresh status to check its current state; no action was retried."
+            : "This Sandbox could not be deleted. No action was retried; its status here updates on its own."
           : detail.startEligible
             ? "The Sandbox operation failed. Choose Start to try again."
-            : "The Sandbox operation failed. Refresh status to check its current state; no action was retried."
+            : "The Sandbox operation failed. No action was retried; its status here updates on its own."
         : "";
       status.hidden = status.textContent.length === 0;
       if (reload) reload.hidden = !returnedAfterSubmission;
@@ -270,14 +261,21 @@
       // detaching it. Only source-owned running/setup observation can do that.
       if (lastObservation) observe(lastObservation.available, lastObservation.value);
     });
-    const controls = () => { if (button) button.disabled = !!pending || paused; };
+    // The status line is busy while a check runs, so a screen reader waits for
+    // its result instead of reading a line about to change (#4542).
+    const checking = () => {
+      const status = heading?.querySelector("[data-sandbox-observation-status]");
+      if (!status) return;
+      if (pending) status.setAttribute("aria-busy", "true");
+      else status.removeAttribute("aria-busy");
+    };
     function invalidate() {
       epoch += 1;
       clearTimeout(timer);
       timer = null;
       pending?.abort();
       pending = null;
-      controls();
+      checking();
       report(false);
     }
     async function refresh() {
@@ -286,8 +284,8 @@
       const version = ++epoch;
       const controller = new AbortController();
       pending = controller;
+      checking();
       lastRequest = Date.now();
-      controls();
       const timeout = setTimeout(() => controller.abort(), 10000);
       try {
         const response = await fetch(url, { credentials: "same-origin", cache: "no-store",
@@ -324,13 +322,12 @@
       } finally {
         clearTimeout(timeout);
         if (pending === controller) pending = null;
+        checking();
         if (version === epoch) {
-          controls();
           if (!paused && !document.hidden && root.isConnected && !deleted) timer = setTimeout(refresh, 5000);
         }
       }
     }
-    button?.addEventListener("click", () => { void refresh(); });
     document.addEventListener("visibilitychange", () => {
       paused = document.hidden;
       if (paused) invalidate();
@@ -367,7 +364,6 @@
         if (root.isConnected) report(false);
       }, 0);
     });
-    controls();
     report(false);
     void refresh();
   }

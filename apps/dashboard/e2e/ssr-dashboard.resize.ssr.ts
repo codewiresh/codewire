@@ -1,4 +1,4 @@
-import { artifactScreenshot, expect, test, type Locator, type Page } from "./helpers/fixture-test";
+import { artifactScreenshot, checkReadinessNow, expect, test, type Locator, type Page } from "./helpers/fixture-test";
 
 // Synthetic private-controller proof, not managed auth/daemon qualification.
 test.use({ storageState: { cookies: [], origins: [] }, screenshot: "off", trace: "off" });
@@ -167,16 +167,16 @@ test("Resize waits for setup with a visible reason and returns when setup finish
   const bounds = (await reason.boundingBox())!;
   expect(bounds.x + bounds.width).toBeLessThanOrEqual(page.viewportSize()!.width);
   state.setupRunning = false;
-  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await checkReadinessNow(page);
   await expect(opener).toBeEnabled();
   await expect(reason).toBeHidden();
   await expect(opener).toHaveAccessibleDescription("");
   // A server from before setupRunning omits it: Resize works as it did.
   state.setupRunning = true;
-  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await checkReadinessNow(page);
   await expect(opener).toBeDisabled();
   state.setupRunning = undefined;
-  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await checkReadinessNow(page);
   await expect(opener).toBeEnabled();
   await expect(reason).toBeHidden();
   await expect(page.locator("[data-sandbox-observation-status]")).toBeHidden();
@@ -237,7 +237,7 @@ test("lost Apply acknowledgement remains locked across dismissal, readiness and 
   });
   await expectReadOnly(dialog);
   await dialog.getByRole("button", { name: "Done", exact: true }).click();
-  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await checkReadinessNow(page);
   await page.getByRole("button", { name: "Resize", exact: true }).click();
   await expectReadOnly(dialog);
   await page.reload();
@@ -361,7 +361,7 @@ test("readiness updates while closed invalidate an older reviewed tuple on reope
   await open(page);
   const dialog = await review(page);
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await checkReadinessNow(page);
   await expect(page.locator('#sandbox-resize [name="cpu_millicores"]')).toHaveValue("1000");
   await page.getByRole("button", { name: "Resize", exact: true }).click();
   await expect(dialog.locator("[data-resize-plan]")).toBeHidden();
@@ -410,13 +410,13 @@ test("a current value outside the fixed choices stays selected as its own choice
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   // A catalog value selects that choice and drops the extra option.
   Object.assign(live, { cpuMillicores: 2000, memoryMib: 4096 });
-  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await checkReadinessNow(page);
   await expect(cpu).toHaveValue("2000");
   await expect(cpu.locator("option")).toHaveText(["1 vCPU", "2 vCPU", "4 vCPU", "8 vCPU"]);
   await expect(memory.locator("option:checked")).toHaveText("4 GiB");
   await expect(memory.locator("option")).toHaveText(["2 GiB", "4 GiB", "8 GiB", "16 GiB"]);
   Object.assign(live, { cpuMillicores: 750, memoryMib: 1536 });
-  await page.getByRole("button", { name: "Refresh sandbox status", exact: true }).click();
+  await checkReadinessNow(page);
   await expect(cpu).toHaveValue("750");
   await expect(cpu.locator("option")).toHaveText(["750 millicores (current)", "1 vCPU", "2 vCPU", "4 vCPU", "8 vCPU"]);
   await expect(memory.locator("option:checked")).toHaveText("1536 MiB (current)");

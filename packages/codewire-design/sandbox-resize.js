@@ -143,9 +143,7 @@
         if (!validAttempt(attempt)) throw new Error("Invalid resize attempt");
       }
     } catch { attempt = null; storageBlocked = true; }
-    const fallback = document.querySelector("details[data-sandbox-resize]");
     dialog.dataset.resizeEnhanced = "true";
-    if (fallback) fallback.hidden = true;
     notify();
     if (locked()) unresolved();
     controls();

@@ -738,7 +738,6 @@ mod tests {
                 "data-terminal-tab-actions",
                 "data-terminal-menu",
                 "data-sandbox-menu",
-                "data-terminal-readiness-refresh",
                 "data-sandbox-last-event",
                 "data-sandbox-lifetime",
             ] {
