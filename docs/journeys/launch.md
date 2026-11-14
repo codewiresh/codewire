@@ -392,3 +392,7 @@ local VM, open a shell in it, run a command, stop it and start it again.
 #4370 also requires that the public source names no cluster or private host
 and cites no document that exists only in private files (#1383, #2996).
 That is checked in the source, not walked.
+
+`cw feedback` (#4061) is a launch item beside the walk: it is how a beta user
+reaches us. Its commands, proof and observations are in
+[feedback.md](feedback.md). Nothing in it is observed on Production yet.
