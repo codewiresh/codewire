@@ -90,6 +90,7 @@ class Environments:
         omit_application_previews: bool = False,
         network: str | None = None,
         source_snapshot_id: str | None = None,
+        network_policy: str | None = None,
         wait: bool = False,
         wait_timeout: float = 300,
     ) -> Environment:
@@ -128,6 +129,11 @@ class Environments:
             if not isinstance(network, str) or not network:
                 raise ValueError("codewire: network must be a nonempty Mesh network name")
             request.network = network
+        if network_policy is not None:
+            # An organization network policy; none is `hosted-default`.
+            if not isinstance(network_policy, str) or not network_policy:
+                raise ValueError("codewire: network_policy must be a nonempty policy reference")
+            request.network_policy = network_policy
         request.project_spec.CopyFrom(project_spec_from_dict(project_spec))
         if request.project_spec.HasField("credentials") != request.HasField("expected_profile_revision"):
             raise ValueError("codewire: credential profile selection requires its exact revision")

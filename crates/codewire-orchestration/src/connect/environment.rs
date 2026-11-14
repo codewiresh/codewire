@@ -51,6 +51,7 @@ use crate::api::host_key::{RecordedHostKeys, get_environment_host_key_core};
 use crate::api::logs::{
     EnvironmentLog as ApiEnvironmentLog, LogStreamEvent, open_environment_log_stream,
 };
+use crate::api::network_policies::NetworkPolicyFlags;
 use crate::api::prepare::{PrepareResponse, PrepareStreamEvent, RepoConfig, start_prepare_stream};
 use crate::api::trust_report::{EnvironmentTrustReport, get_environment_trust_report_core};
 use crate::connect::presets::proto_preset;
@@ -101,7 +102,7 @@ impl proto::EnvironmentService for EnvironmentConnectService {
             .map(Duration::from_secs);
         let environments = environments
             .into_iter()
-            .map(proto_environment)
+            .map(|environment| proto_environment(environment, self.state.network_policy_flags))
             .collect::<AppResult<Vec<_>>>()
             .map_err(|error| environment_rpc_error(&error, &ctx))?;
 
@@ -130,7 +131,7 @@ impl proto::EnvironmentService for EnvironmentConnectService {
 
         connectrpc::Response::ok(proto::CreateEnvironmentResponse {
             environment: Some(
-                proto_environment(environment)
+                proto_environment(environment, self.state.network_policy_flags)
                     .map_err(|error| environment_rpc_error(&error, &ctx))?,
             )
             .into(),
@@ -153,7 +154,7 @@ impl proto::EnvironmentService for EnvironmentConnectService {
 
         connectrpc::Response::ok(proto::GetEnvironmentResponse {
             environment: Some(
-                proto_environment(environment)
+                proto_environment(environment, self.state.network_policy_flags)
                     .map_err(|error| environment_rpc_error(&error, &ctx))?,
             )
             .into(),
@@ -242,7 +243,7 @@ impl proto::EnvironmentService for EnvironmentConnectService {
             )
             .into(),
             environment: Some(
-                proto_environment(result.environment)
+                proto_environment(result.environment, self.state.network_policy_flags)
                     .map_err(|error| environment_rpc_error(&error, &ctx))?,
             )
             .into(),
@@ -295,7 +296,7 @@ impl proto::EnvironmentService for EnvironmentConnectService {
         connectrpc::Response::ok(proto::PlanEnvironmentResizeResponse {
             plan: Some(proto_environment_resize_plan(result.plan)).into(),
             environment: Some(
-                proto_environment(result.environment)
+                proto_environment(result.environment, self.state.network_policy_flags)
                     .map_err(|error| environment_rpc_error(&error, &ctx))?,
             )
             .into(),
@@ -328,7 +329,7 @@ impl proto::EnvironmentService for EnvironmentConnectService {
             )
             .into(),
             environment: Some(
-                proto_environment(result.environment)
+                proto_environment(result.environment, self.state.network_policy_flags)
                     .map_err(|error| environment_rpc_error(&error, &ctx))?,
             )
             .into(),
@@ -776,6 +777,7 @@ fn create_body(request: proto::CreateEnvironmentRequest) -> AppResult<CreateEnvi
         network: (!request.network.is_empty()).then_some(request.network),
         source_snapshot_id: (!request.source_snapshot_id.is_empty())
             .then_some(request.source_snapshot_id),
+        network_policy: (!request.network_policy.is_empty()).then_some(request.network_policy),
     })
 }
 
@@ -1018,6 +1020,7 @@ fn proto_create_request(
         confirm_personal_secrets: body.confirm_personal_secrets,
         omit_application_previews: body.omit_application_previews,
         network: body.network.unwrap_or_default(),
+        network_policy: body.network_policy.unwrap_or_default(),
         ..Default::default()
     }
 }
@@ -1151,7 +1154,15 @@ fn poll_interval_seconds(environment: &Environment) -> Option<i64> {
     }
 }
 
-fn proto_environment(environment: Environment) -> AppResult<proto::Environment> {
+fn proto_environment(
+    environment: Environment,
+    network_policies: NetworkPolicyFlags,
+) -> AppResult<proto::Environment> {
+    // Unset while the deployment's platform network policies are off (#4000).
+    let network_policy = environment
+        .network_policy
+        .filter(|_| network_policies.enabled)
+        .map(super::network_policies::proto_environment_policy);
     Ok(proto::Environment {
         id: environment.id,
         org_id: environment.org_id,
@@ -1191,6 +1202,7 @@ fn proto_environment(environment: Environment) -> AppResult<proto::Environment> 
         network_state: proto_network_state(environment.network_state.as_deref())?.into(),
         network_failure: proto_network_failure(environment.network_failure.as_deref())?.into(),
         network: environment.network.unwrap_or_default(),
+        network_policy: network_policy.into(),
         ports: environment
             .ports
             .into_iter()
@@ -1603,7 +1615,7 @@ mod tests {
             .unwrap()
             .secrets
             .organization = true;
-        let wire = proto_environment(environment).unwrap();
+        let wire = proto_environment(environment, NetworkPolicyFlags::default()).unwrap();
         assert_eq!(wire.operation_generation, 7);
         assert!(
             wire.source_selection
@@ -1617,7 +1629,7 @@ mod tests {
         let mut unavailable = test_environment("destroyed", true);
         unavailable.source_selection = None;
         assert!(
-            proto_environment(unavailable)
+            proto_environment(unavailable, NetworkPolicyFlags::default())
                 .unwrap()
                 .source_selection
                 .is_unset()
@@ -2055,15 +2067,39 @@ ports: [{port: 3000, label: web, access: public}]
             let mut environment = test_environment("running", true);
             environment.shutdown_at =
                 crate::api::environments::shutdown_deadline_string(Some(source));
-            let mapped = proto_environment(environment).unwrap();
+            let mapped = proto_environment(environment, NetworkPolicyFlags::default()).unwrap();
             let timestamp = mapped.shutdown_at.as_option().unwrap();
             assert_eq!(timestamp.seconds, source.and_utc().timestamp());
             assert_eq!(timestamp.nanos, expected_nanos);
             let json = serde_json::to_value(&mapped).unwrap();
             assert_eq!(json["shutdownAt"], value);
         }
-        let absent = proto_environment(test_environment("running", true)).unwrap();
+        let absent = proto_environment(
+            test_environment("running", true),
+            NetworkPolicyFlags::default(),
+        )
+        .unwrap();
         assert!(absent.shutdown_at.as_option().is_none());
+    }
+
+    #[test]
+    fn the_network_policy_shows_only_while_platform_policies_are_on() {
+        let mut environment = test_environment("running", true);
+        environment.network_policy = Some(crate::api::network_policies::EnvironmentPolicyView {
+            reference: "hosted-default".into(),
+            name: "hosted-default".into(),
+            revision: 0,
+            digest: codewire_egress_policy::HOSTED_DEFAULT_DIGEST.into(),
+        });
+        let off = proto_environment(environment.clone(), NetworkPolicyFlags::default()).unwrap();
+        assert!(off.network_policy.as_option().is_none());
+        let on = proto_environment(environment, NetworkPolicyFlags { enabled: true }).unwrap();
+        let policy = on.network_policy.as_option().unwrap();
+        assert_eq!(policy.reference, "hosted-default");
+        assert_eq!(
+            policy.enforcement.as_known(),
+            Some(proto::NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED)
+        );
     }
 
     fn test_environment(state: &str, setup_complete: bool) -> Environment {
@@ -2105,6 +2141,7 @@ ports: [{port: 3000, label: web, access: public}]
             network_state: None,
             network_failure: None,
             ports: Vec::new(),
+            network_policy: None,
         }
     }
 }

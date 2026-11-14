@@ -135,7 +135,7 @@ pub fn confidential_refusal_reason(code: &str) -> &'static str {
     }
 }
 
-fn env_setting(name: &str) -> anyhow::Result<Option<String>> {
+pub(crate) fn env_setting(name: &str) -> anyhow::Result<Option<String>> {
     match std::env::var(name) {
         Err(std::env::VarError::NotPresent) => Ok(None),
         Ok(value) => Ok(Some(value)),
@@ -143,7 +143,7 @@ fn env_setting(name: &str) -> anyhow::Result<Option<String>> {
     }
 }
 
-fn parse_bool(name: &str, value: Option<&str>, default: bool) -> anyhow::Result<bool> {
+pub(crate) fn parse_bool(name: &str, value: Option<&str>, default: bool) -> anyhow::Result<bool> {
     match value {
         None => Ok(default),
         Some("true") => Ok(true),

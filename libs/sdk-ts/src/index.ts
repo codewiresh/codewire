@@ -4,6 +4,7 @@ import { APIKeys } from "./api-keys.js";
 import { Secrets } from "./secrets.js";
 import { SecretProjects } from "./secret-projects.js";
 import { AccessProfiles } from "./access-profiles.js";
+import { NetworkPolicies } from "./network-policies.js";
 import { Credentials } from "./credentials.js";
 import { createCodewireClients } from "./transport.js";
 import type { ClientOptions } from "./types.js";
@@ -15,6 +16,7 @@ export class Codewire {
   readonly secrets: Secrets;
   readonly secretProjects: SecretProjects;
   readonly accessProfiles: AccessProfiles;
+  readonly networkPolicies: NetworkPolicies;
   readonly credentials: Credentials;
 
   constructor(opts: ClientOptions = {}) {
@@ -35,6 +37,7 @@ export class Codewire {
     this.secrets = new Secrets(clients.secrets, orgId);
     this.secretProjects = new SecretProjects(clients.secrets, orgId);
     this.accessProfiles = new AccessProfiles(clients.accessProfiles);
+    this.networkPolicies = new NetworkPolicies(clients.networkPolicies, orgId);
     this.credentials = new Credentials(clients.credentials, clients.credentialMutations, clients.githubRepositories);
   }
 }
@@ -56,6 +59,14 @@ export type {
   UpdateEnvironmentCwRuntimeHeader, RollbackEnvironmentCwRuntimeRequest,
 } from "./cw-runtime.js";
 export { AccessProfiles } from "./access-profiles.js";
+export { NetworkPolicies } from "./network-policies.js";
+export type {
+  EnvironmentNetworkPolicy,
+  NetworkPolicy,
+  NetworkPolicyEnforcementState,
+  NetworkPolicyRule,
+  NetworkPolicySelector,
+} from "./network-policies.js";
 export { Credentials, EnrollmentOutcomeUnknownError } from "./credentials.js";
 export type {
   Credential,

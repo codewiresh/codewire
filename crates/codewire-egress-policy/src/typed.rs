@@ -380,6 +380,52 @@ impl TypedPolicy {
         CompiledPolicy::compile(self.to_document())
             .expect("a typed egress policy always compiles within the library ceilings")
     }
+    /// These rules plus `rules`. A target already allowed gains the new
+    /// ports. Every store makes its revisions with this, so the same edits
+    /// give the same document and digest wherever they are stored.
+    pub fn with_rules(
+        &self,
+        rules: impl IntoIterator<Item = AllowRule>,
+    ) -> Result<Self, TypedPolicyError> {
+        let mut merged: Vec<AllowRule> = self.rules.clone();
+        for rule in rules {
+            match merged
+                .iter_mut()
+                .find(|existing| existing.target == rule.target)
+            {
+                Some(existing) => {
+                    let ports = existing
+                        .ports
+                        .iter()
+                        .chain(rule.ports())
+                        .copied()
+                        .collect::<BTreeSet<_>>();
+                    *existing = AllowRule::new(existing.target.clone(), ports)?;
+                }
+                None => merged.push(rule),
+            }
+        }
+        Self::new(merged)
+    }
+
+    /// These rules without the rules for `targets`. Every target must have a
+    /// rule: the first that has none is the error.
+    pub fn without_targets(&self, targets: &[AllowTarget]) -> Result<Self, AllowTarget> {
+        if let Some(missing) = targets
+            .iter()
+            .find(|target| !self.rules.iter().any(|rule| rule.target == **target))
+        {
+            return Err(missing.clone());
+        }
+        Ok(Self {
+            rules: self
+                .rules
+                .iter()
+                .filter(|rule| !targets.contains(&rule.target))
+                .cloned()
+                .collect(),
+        })
+    }
 }
 
 #[derive(Debug, Error)]

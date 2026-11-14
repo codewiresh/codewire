@@ -1,5 +1,6 @@
 import { Code, ConnectError } from "@connectrpc/connect";
 import { BadRequestSchema, ErrorInfoSchema } from "@codewire/proto-ts";
+import type { EnvironmentNetworkPolicy } from "./network-policies.js";
 
 /** SDK-owned public value types for the canonical Connect API. */
 
@@ -127,6 +128,9 @@ export interface EnvironmentData {
   /** Lossless concurrency coordinate for environment mutations. */
   operation_generation: bigint;
   source_selection?: EnvironmentSourceSelection;
+  /** The network policy it selects, and what enforces it; absent while the
+   * deployment's platform network policies are off. */
+  network_policy?: EnvironmentNetworkPolicy;
 }
 
 export interface EnvironmentResources {
@@ -219,6 +223,8 @@ export interface CreateEnvironmentRequest {
   network?: string | null;
   /** Start from this hosted disk snapshot, which the caller created in the organization. */
   source_snapshot_id?: string | null;
+  /** The organization network policy to select; none is `hosted-default`. */
+  network_policy?: string | null;
 }
 
 export type NetworkAttachmentState = "pending" | "attached" | "failed" | "revoked" | "unknown";

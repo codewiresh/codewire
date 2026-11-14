@@ -1,0 +1,18 @@
+# `hosted-default`: what a hosted Sandbox that selects no policy enforces.
+# D2 in codewire#3997's Boundaries (owner, 2026-11-10): any TCP port through
+# the broker, plus DNS; other UDP stays off. Protected names and addresses are
+# refused before any rule, so this reaches public addresses only.
+version: 1
+default: deny
+rules:
+  - id: hosted-default-dns
+    action: allow
+    protocols: [dns]
+    ports: [53]
+    destinations: ["*"]
+    route_classes: [general]
+  - id: hosted-default-tcp
+    action: allow
+    protocols: [tcp]
+    cidrs: [0.0.0.0/0, "::/0"]
+    route_classes: [general]

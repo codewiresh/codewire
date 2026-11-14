@@ -1045,6 +1045,12 @@ impl LifecycleStore for PgLifecycleStore {
                        USING target
                        WHERE binding.environment_id = target.id
                        RETURNING binding.environment_id
+                   ), removed_network_policy AS (
+                       -- A destroyed environment no longer holds its policy (#4000).
+                       DELETE FROM platform_environment_network_policies selection
+                       USING target
+                       WHERE selection.environment_id = target.id
+                       RETURNING selection.environment_id
                    )
                    UPDATE environments env
                    SET state = 'destroyed',

@@ -1191,6 +1191,12 @@ database_lane_orchestration_workspaces() {
       'connect::host_agent::database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "platform network policies, revisions and selections" network-policies \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::network_policies::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "organization membership credential matrix" organization-membership-credentials \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

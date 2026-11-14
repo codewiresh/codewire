@@ -24,6 +24,7 @@ pub mod file;
 pub mod host_agent;
 pub mod hosts;
 pub mod mesh_authorization;
+pub mod network_policies;
 pub mod organizations;
 pub mod ports;
 pub mod presets;

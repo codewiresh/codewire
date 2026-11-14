@@ -22,6 +22,7 @@ pub mod host_session;
 pub mod hosts;
 pub mod log_notifications;
 pub mod logs;
+pub mod network_policies;
 pub mod organizations;
 pub mod platform_agents;
 pub mod ports;
@@ -99,6 +100,8 @@ pub struct ApiState {
     pub sandbox_cfg: SandboxWorkerCfg,
     /// Disabled-by-default confidential storage product gates.
     pub confidential_storage_flags: FeatureFlags,
+    /// The disabled-by-default platform network policy switch (#4000).
+    pub network_policy_flags: network_policies::NetworkPolicyFlags,
     /// The process-wide environment-log listener fan-out and the
     /// per-account bound on live StreamLogs follows.
     pub environment_logs: Arc<log_notifications::EnvironmentLogNotifications>,

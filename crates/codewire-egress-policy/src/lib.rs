@@ -23,7 +23,9 @@ pub mod reference;
 pub mod typed;
 
 pub use builtin::{
-    BuiltinPolicy, LOCKED_ID, LOCKED_POLICY_DIGEST, LOCKED_POLICY_YAML, is_reserved_policy_name,
+    BuiltinPolicy, HOSTED_DEFAULT_DIGEST, HOSTED_DEFAULT_ID, HOSTED_DEFAULT_NAME,
+    HOSTED_DEFAULT_YAML, LOCKED_ID, LOCKED_POLICY_DIGEST, LOCKED_POLICY_YAML,
+    is_reserved_policy_name,
 };
 use cidr::IpNetwork;
 use hostname::{NamePattern, canonical_hostname, protected_name};
@@ -583,6 +585,13 @@ impl CompiledPolicy {
     /// The built-in `locked` policy: no rules, so no workload egress.
     pub fn locked() -> Self {
         BuiltinPolicy::Locked.compile()
+    }
+
+    /// `hosted-default`, `codewire-hosted-default-v1`: what a hosted Sandbox
+    /// with no selection enforces.
+    pub fn hosted_default() -> Self {
+        PolicyDocument::parse_yaml(HOSTED_DEFAULT_YAML)
+            .expect("the hosted default egress policy must remain valid")
     }
 
     pub fn digest(&self) -> PolicyDigest {

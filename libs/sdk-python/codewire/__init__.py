@@ -22,6 +22,12 @@ from codewire.access_profiles import (
     EnvironmentAccessProfile,
     EnvironmentAccessProfileBinding,
 )
+from codewire.network_policies import (
+    EnvironmentNetworkPolicy,
+    NetworkPolicies,
+    NetworkPolicy,
+    NetworkPolicyRule,
+)
 from codewire.mesh import (
     MeshClient,
     MeshEnrollment,
@@ -63,6 +69,10 @@ __all__ = [
     "AccessProfileEntry",
     "EnvironmentAccessProfile",
     "EnvironmentAccessProfileBinding",
+    "EnvironmentNetworkPolicy",
+    "NetworkPolicies",
+    "NetworkPolicy",
+    "NetworkPolicyRule",
     "MeshClient",
     "MeshEnrollment",
     "MeshGroup",

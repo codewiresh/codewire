@@ -24,7 +24,7 @@ _ENVIRONMENT_DESCRIPTOR_FIELDS = {
     28: "deletion_grace_until", 29: "preset_name", 30: "network",
     31: "ports", 32: "isolation_tier", 33: "operation_generation",
     34: "source_selection", 35: "network_state", 36: "network_failure",
-    37: "error_code",
+    37: "error_code", 38: "network_policy",
 }
 
 _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
@@ -33,7 +33,7 @@ _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
     27: "confirm_personal_credentials", 28: "confirm_personal_secrets",
     29: "omit_application_previews", 30: "network", 31: "source_snapshot_id",
     # The SDK always names its organization by org_id, so this stays unset.
-    32: "organization",
+    32: "organization", 33: "network_policy",
 }
 
 _SOURCE_DESCRIPTOR_FIELDS = {
@@ -139,6 +139,12 @@ def environment_to_dict(message: Message) -> dict[str, Any]:
         else:
             value[field] = _enum_suffix_or_unknown(message, field, prefix)
     value["ports"] = [port_to_dict(port) for port in message.ports]
+    # Absent while the deployment's platform network policies are off.
+    value.pop("network_policy", None)
+    if message.HasField("network_policy"):
+        from codewire.network_policies import environment_network_policy
+
+        value["network_policy"] = environment_network_policy(message.network_policy)
     return value
 
 

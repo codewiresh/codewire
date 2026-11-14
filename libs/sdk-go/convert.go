@@ -651,6 +651,7 @@ func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewi
 		OmitApplicationPreviews: body.OmitApplicationPreviews,
 		Network:                 valueOrEmpty(body.Network),
 		SourceSnapshotId:        valueOrEmpty(body.SourceSnapshotId),
+		NetworkPolicy:           valueOrEmpty(body.NetworkPolicy),
 	}, nil
 }
 
@@ -705,6 +706,13 @@ func fromProtoEnvironment(environment *codewirev1.Environment) (EnvironmentData,
 	if err != nil {
 		return EnvironmentData{}, err
 	}
+	// Absent while the deployment's platform network policies are off.
+	var networkPolicy *EnvironmentNetworkPolicy
+	if environment.GetNetworkPolicy() != nil {
+		if networkPolicy, err = fromProtoEnvironmentNetworkPolicy(environment.GetNetworkPolicy()); err != nil {
+			return EnvironmentData{}, err
+		}
+	}
 	var ttl *int64
 	if environment.TtlSeconds != nil {
 		value := int64(*environment.TtlSeconds)
@@ -721,7 +729,8 @@ func fromProtoEnvironment(environment *codewirev1.Environment) (EnvironmentData,
 		NetworkState:        networkAttachmentState(environment.GetNetworkState()),
 		NetworkFailure:      networkAttachmentFailure(environment.GetNetworkFailure()),
 		OperationGeneration: environment.GetOperationGeneration(), SourceSelection: sourceSelection,
-		PresetId: stringPointer(environment.GetPresetId()), PresetName: stringPointer(environment.GetPresetName()),
+		NetworkPolicy: networkPolicy,
+		PresetId:      stringPointer(environment.GetPresetId()), PresetName: stringPointer(environment.GetPresetName()),
 		Protected: environment.GetProtected(), Recoverable: environment.GetRecoverable(), RetryCount: int64(environment.GetRetryCount()),
 		SetupComplete: environment.GetSetupComplete(), SetupError: stringPointer(environment.GetSetupError()),
 		SetupPhase: int64(environment.GetSetupPhase()), ShutdownAt: shutdownAt, StartedAt: startedAt,
@@ -1174,14 +1183,14 @@ func ensureEnvironmentConverterCoverage() error {
 		messages := codewirev1.File_codewire_v1_environment_proto.Messages()
 		environmentCoverageErr = ensureDescriptorCoverage("environment", messages.ByName("Environment"), map[protoreflect.FieldNumber]protoreflect.Name{
 			1: "id", 2: "org_id", 3: "created_by", 4: "preset_id", 5: "type", 6: "name", 7: "state", 8: "desired_state", 9: "error_reason", 10: "recoverable", 11: "state_changed_at", 12: "retry_count", 13: "setup_phase", 14: "setup_complete", 15: "setup_error", 16: "ttl_seconds", 17: "shutdown_at", 18: "cpu_millicores", 19: "memory_mb", 20: "disk_gb", 21: "total_running_seconds", 22: "created_at", 23: "started_at", 24: "stopped_at", 25: "destroyed_at", 26: "protected", 27: "deletion_requested_at", 28: "deletion_grace_until", 29: "preset_name", 30: "network", 31: "ports", 32: "isolation_tier",
-			33: "operation_generation", 34: "source_selection", 35: "network_state", 36: "network_failure", 37: "error_code",
+			33: "operation_generation", 34: "source_selection", 35: "network_state", 36: "network_failure", 37: "error_code", 38: "network_policy",
 		})
 		if environmentCoverageErr != nil {
 			return
 		}
 		environmentCoverageErr = ensureDescriptorCoverage("create environment request", messages.ByName("CreateEnvironmentRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
 			// The SDK always names its organization by org_id, so organization (32) stays unset.
-			1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds", 24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision", 27: "confirm_personal_credentials", 28: "confirm_personal_secrets", 29: "omit_application_previews", 30: "network", 31: "source_snapshot_id", 32: "organization",
+			1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds", 24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision", 27: "confirm_personal_credentials", 28: "confirm_personal_secrets", 29: "omit_application_previews", 30: "network", 31: "source_snapshot_id", 32: "organization", 33: "network_policy",
 		})
 		if environmentCoverageErr != nil {
 			return

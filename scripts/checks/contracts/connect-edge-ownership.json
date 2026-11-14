@@ -24,6 +24,7 @@
     "codewire.v1.FileService": "orchestration",
     "codewire.v1.HostAgentService": "orchestration",
     "codewire.v1.HostService": "orchestration",
+    "codewire.v1.NetworkPolicyService": "orchestration",
     "codewire.v1.MeshGroupService": "mesh",
     "codewire.v1.MeshInviteService": "mesh",
     "codewire.v1.MeshKeyValueService": "mesh",

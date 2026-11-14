@@ -21,13 +21,14 @@ const DefaultBaseURL = "https://codewire.sh"
 
 // Client is the SDK entry point.
 type Client struct {
-	Environments   *EnvironmentService
-	Presets        *PresetService
-	APIKeys        *APIKeyService
-	Secrets        *SecretService
-	SecretProjects *SecretProjectService
-	AccessProfiles *AccessProfileService
-	Credentials    *CredentialService
+	Environments    *EnvironmentService
+	Presets         *PresetService
+	APIKeys         *APIKeyService
+	Secrets         *SecretService
+	SecretProjects  *SecretProjectService
+	AccessProfiles  *AccessProfileService
+	NetworkPolicies *NetworkPolicyService
+	Credentials     *CredentialService
 
 	baseURL               string
 	apiKey                string
@@ -41,6 +42,7 @@ type Client struct {
 	presets               codewirev1connect.PresetServiceClient
 	secrets               codewirev1connect.SecretServiceClient
 	accessProfiles        codewirev1connect.AccessProfileServiceClient
+	networkPolicies       codewirev1connect.NetworkPolicyServiceClient
 	credentials           codewirev1connect.CredentialServiceClient
 	credentialMutations   codewirev1connect.CredentialMutationServiceClient
 	githubRepositories    codewirev1connect.GithubRepositoryServiceClient
@@ -95,6 +97,7 @@ func New(apiKey string, opts ...Option) *Client {
 	c.presets = codewirev1connect.NewPresetServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.secrets = codewirev1connect.NewSecretServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.accessProfiles = codewirev1connect.NewAccessProfileServiceClient(c.httpClient, c.baseURL, connectOptions)
+	c.networkPolicies = codewirev1connect.NewNetworkPolicyServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.credentials = codewirev1connect.NewCredentialServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.credentialMutations = codewirev1connect.NewCredentialMutationServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.githubRepositories = codewirev1connect.NewGithubRepositoryServiceClient(c.httpClient, c.baseURL, connectOptions)
@@ -110,6 +113,7 @@ func New(apiKey string, opts ...Option) *Client {
 	c.Secrets = &SecretService{c}
 	c.SecretProjects = &SecretProjectService{c}
 	c.AccessProfiles = &AccessProfileService{c}
+	c.NetworkPolicies = &NetworkPolicyService{c}
 	c.Credentials = &CredentialService{c}
 	return c
 }

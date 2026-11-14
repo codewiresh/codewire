@@ -467,6 +467,8 @@ async fn main() -> anyhow::Result<()> {
     let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
     codewire_orchestration::resize_metrics::start_active_refresh(pool.clone());
     let confidential_storage_flags = FeatureFlags::from_env()?;
+    let network_policy_flags =
+        codewire_orchestration::api::network_policies::NetworkPolicyFlags::from_env()?;
 
     let loops = env_list("WORKER_LOOPS");
 
@@ -696,6 +698,7 @@ async fn main() -> anyhow::Result<()> {
         )),
         sandbox_cfg: ctx.sandbox_cfg.clone(),
         confidential_storage_flags,
+        network_policy_flags,
         environment_logs,
         drain: drain.clone(),
     };
@@ -829,6 +832,14 @@ async fn main() -> anyhow::Result<()> {
         // Hosts that provide VMs (#3609).
         .with_unary_connect_routes_auth(
             codewire_orchestration::connect::hosts::router(api_state.pool.clone()),
+            connect_auth.clone(),
+        )
+        // Platform network policies (#4000), behind their deployment switch.
+        .with_unary_connect_routes_auth(
+            codewire_orchestration::connect::network_policies::router(
+                api_state.pool.clone(),
+                network_policy_flags,
+            ),
             connect_auth.clone(),
         )
         .with_unary_connect_routes_auth(

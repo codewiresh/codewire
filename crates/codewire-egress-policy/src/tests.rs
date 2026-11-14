@@ -112,6 +112,48 @@ fn protected_addresses_override_an_explicit_public_allow() {
 }
 
 #[test]
+fn hosted_default_allows_public_dns_and_every_tcp_port_and_nothing_protected() {
+    // D2 (codewire#3997): the document allows TCP to 0.0.0.0/0 and ::/0 on
+    // every port, which reads wider than it is. Protected names and
+    // addresses are refused before any rule, so only public ones are reached.
+    let policy = CompiledPolicy::hosted_default();
+    assert_eq!(policy.digest().to_hex(), HOSTED_DEFAULT_DIGEST);
+    for address in [PUBLIC_V4, PUBLIC_V6] {
+        for port in [22, 443, 5432, 8080, 65535] {
+            let decision = policy.evaluate(&request(address, port, None, RouteClass::General));
+            assert!(decision.is_allowed(), "{address}:{port} was denied");
+            assert_eq!(decision.rule_id.as_deref(), Some("hosted-default-tcp"));
+        }
+    }
+    let query = EgressRequest::dns_query("registry.npmjs.org", RouteClass::General).unwrap();
+    assert!(policy.evaluate(&query).is_allowed());
+
+    for (address, class) in [
+        ("10.0.0.1", AddressClass::Private),
+        ("100.64.0.1", AddressClass::Shared),
+        ("127.0.0.1", AddressClass::Loopback),
+        ("169.254.169.254", AddressClass::LinkLocal),
+        ("192.168.1.1", AddressClass::Private),
+        ("::1", AddressClass::Loopback),
+        ("fc00::1", AddressClass::Private),
+        ("fe80::1", AddressClass::LinkLocal),
+    ] {
+        let address = address.parse().unwrap();
+        for port in [80, 443, 6443, 10250] {
+            let decision = policy.evaluate(&request(address, port, None, RouteClass::General));
+            assert_eq!(
+                decision.reason,
+                DecisionReason::ProtectedAddress(class),
+                "{address}:{port} was not refused as protected"
+            );
+        }
+    }
+    let metadata =
+        EgressRequest::dns_query("metadata.google.internal", RouteClass::General).unwrap();
+    assert!(!policy.evaluate(&metadata).is_allowed());
+}
+
+#[test]
 fn protected_names_override_dns_and_tcp_allows() {
     let policy = CompiledPolicy::developer_baseline();
     let cases = [
@@ -465,6 +507,17 @@ fn builtin_policies_have_stable_names_ids_bytes_and_digests() {
     );
     assert_eq!(BuiltinPolicy::from_name("Open"), None);
     assert_eq!(BuiltinPolicy::from_name("work"), None);
+
+    // `hosted-default` has its own bytes and digest, and is never selectable.
+    assert_eq!(HOSTED_DEFAULT_NAME, "hosted-default");
+    assert_eq!(HOSTED_DEFAULT_ID, "codewire-hosted-default-v1");
+    assert_eq!(
+        CompiledPolicy::hosted_default().digest().to_hex(),
+        HOSTED_DEFAULT_DIGEST
+    );
+    assert_eq!(BuiltinPolicy::from_name(HOSTED_DEFAULT_NAME), None);
+    // Only the platform store reserves it; a local store may hold the name.
+    assert!(!is_reserved_policy_name(HOSTED_DEFAULT_NAME));
 }
 
 #[test]

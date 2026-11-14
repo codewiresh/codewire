@@ -1911,6 +1911,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "org_subscriptions:cascade",
             "platform_access_profiles:cascade",
             "platform_credentials:cascade",
+            "platform_network_policies:cascade",
             "preview_auth_challenges:cascade",
             "preview_browser_grants:cascade",
             "repo_configs:no_action",
@@ -1937,6 +1938,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "environment_resize_operations:cascade",
             "environment_sessions:cascade",
             "platform_environment_access_bindings:cascade",
+            "platform_environment_network_policies:cascade",
             "preview_auth_challenges:cascade",
             "preview_browser_grants:cascade",
             "sandbox_environment_backend:cascade",
@@ -1956,5 +1958,14 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
     assert_eq!(
         referencing_tables(&pool, "environment_mesh_attachments").await,
         vec!["environment_mesh_enrollments:cascade"]
+    );
+    // An organization's network policies go with it; a policy an environment
+    // selects cannot, so the environments go first (#4000).
+    assert_eq!(
+        referencing_tables(&pool, "platform_network_policies").await,
+        vec![
+            "platform_environment_network_policies:no_action",
+            "platform_network_policy_revisions:cascade",
+        ]
     );
 }

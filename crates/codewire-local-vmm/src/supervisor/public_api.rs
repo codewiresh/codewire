@@ -272,6 +272,10 @@ const ENVIRONMENT_FIELDS: &[FieldSemantics] = &[
     field(35, "network_state", ZERO),
     field(36, "network_failure", ZERO),
     field(37, "error_code", ZERO),
+    // A local VM's network policy is reported by its supervisor's own control
+    // API (`EnvironmentNetworkPolicy` there); this public view leaves the
+    // hosted one absent (#4000).
+    field(38, "network_policy", ZERO),
 ];
 
 const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[

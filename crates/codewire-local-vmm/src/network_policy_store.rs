@@ -239,54 +239,6 @@ impl EnvironmentPolicy {
     }
 }
 
-/// Add `rules` to `policy`. A target it already allows gains the new ports.
-pub fn with_rules(
-    policy: &TypedPolicy,
-    rules: impl IntoIterator<Item = AllowRule>,
-) -> Result<TypedPolicy, TypedPolicyError> {
-    let mut merged: Vec<AllowRule> = policy.rules().to_vec();
-    for rule in rules {
-        match merged
-            .iter_mut()
-            .find(|existing| existing.target() == rule.target())
-        {
-            Some(existing) => {
-                let ports = existing
-                    .ports()
-                    .iter()
-                    .chain(rule.ports())
-                    .copied()
-                    .collect::<std::collections::BTreeSet<_>>();
-                *existing = AllowRule::new(existing.target().clone(), ports)?;
-            }
-            None => merged.push(rule),
-        }
-    }
-    TypedPolicy::new(merged)
-}
-
-/// Remove the rules for `targets` from `policy`. Every target must have a rule.
-pub fn without_targets(
-    policy: &TypedPolicy,
-    targets: &[AllowTarget],
-) -> Result<TypedPolicy, NetworkPolicyStoreError> {
-    if let Some(missing) = targets
-        .iter()
-        .find(|target| !policy.rules().iter().any(|rule| rule.target() == *target))
-    {
-        return Err(NetworkPolicyStoreError::Unchanged(format!(
-            "the policy has no rule for {missing}"
-        )));
-    }
-    Ok(TypedPolicy::new(
-        policy
-            .rules()
-            .iter()
-            .filter(|rule| !targets.contains(rule.target()))
-            .cloned(),
-    )?)
-}
-
 /// The supervisor's network policy store.
 pub struct NetworkPolicyStore {
     connection: Mutex<Connection>,
@@ -373,7 +325,7 @@ impl NetworkPolicyStore {
             PolicyBase::Locked => TypedPolicy::default(),
             PolicyBase::Policy(selector) => load_current(&transaction, selector)?.policy,
         };
-        let policy = with_rules(&start, rules)?;
+        let policy = start.with_rules(rules)?;
         let id = PolicyId::parse(&Uuid::new_v4().to_string())
             .expect("a v4 UUID is a canonical policy id");
         let now = now_unix_ms();
@@ -398,7 +350,13 @@ impl NetworkPolicyStore {
         let mut connection = self.connection.lock().expect("policy store lock");
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = load_current(&transaction, selector)?;
-        let edited = without_targets(&with_rules(&current.policy, add)?, remove)?;
+        let edited = current
+            .policy
+            .with_rules(add)?
+            .without_targets(remove)
+            .map_err(|missing| {
+                NetworkPolicyStoreError::Unchanged(format!("the policy has no rule for {missing}"))
+            })?;
         if edited == current.policy {
             return Err(NetworkPolicyStoreError::Unchanged(format!(
                 "{} already allows exactly that",
@@ -820,6 +778,39 @@ mod tests {
             .collect()
     }
 
+    /// What a revision of these rules is, byte for byte. The platform store
+    /// asserts the same two values for the same rules
+    /// (codewire-orchestration `api::network_policies` database tests, #4000).
+    const SHARED_DOCUMENT: &str = r#"{"version":1,"default":"deny","rules":[{"id":"allow-5901884b7857ae99.tcp","action":"allow","protocols":["tcp"],"ports":[443],"cidrs":["93.184.216.0/24"],"destinations":[],"route_classes":["general"]},{"id":"allow-a6ad0e232c75e1ac.dns","action":"allow","protocols":["dns"],"ports":[53],"cidrs":[],"destinations":["github.com"],"route_classes":["general"]},{"id":"allow-a6ad0e232c75e1ac.tcp","action":"allow","protocols":["tcp"],"ports":[22,443],"cidrs":[],"destinations":["github.com"],"route_classes":["general"]}]}"#;
+    const SHARED_DIGEST: &str = "90edf3723213a00ccc8639cc0386f5261c9128c281f2a73dc3805a0bfef1df35";
+
+    #[test]
+    fn a_revision_is_the_document_and_digest_the_platform_store_writes() {
+        let store = NetworkPolicyStore::in_memory().unwrap();
+        let shared = store
+            .create(
+                &name("shared"),
+                &PolicyBase::Locked,
+                vec![
+                    rule("github.com", &[443, 22]),
+                    rule("93.184.216.0/24", &[443]),
+                ],
+            )
+            .unwrap();
+        let connection = store.connection.lock().expect("policy store lock");
+        let (document, digest): (Vec<u8>, Vec<u8>) = connection
+            .query_row(
+                "SELECT document, digest FROM policy_revisions WHERE policy_id = ?1",
+                [shared.id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(String::from_utf8(document).unwrap(), SHARED_DOCUMENT);
+        let digest: [u8; 32] = digest.try_into().unwrap();
+        assert_eq!(PolicyDigest::from_bytes(digest).to_hex(), SHARED_DIGEST);
+        assert_eq!(shared.digest.to_hex(), SHARED_DIGEST);
+    }
+
     #[test]
     fn a_policy_starts_from_locked_or_another_policy_at_revision_one() {
         let store = NetworkPolicyStore::in_memory().unwrap();
@@ -953,6 +944,36 @@ mod tests {
             Err(NetworkPolicyStoreError::Unchanged(_))
         ));
         assert_eq!(store.get(&selector, None).unwrap().revision, 1);
+    }
+
+    /// `hosted-default` names the hosted D2 policy, but only the platform
+    /// store reserves it (#4000): a local policy that has that name, made
+    /// before it meant anything, still lists, selects and deletes.
+    #[test]
+    fn a_local_policy_named_hosted_default_stays_usable() {
+        let store = NetworkPolicyStore::in_memory().unwrap();
+        let selector = PolicySelector::Name(name("hosted-default"));
+        store
+            .create(
+                &name("hosted-default"),
+                &PolicyBase::Locked,
+                vec![rule("github.com", &[443])],
+            )
+            .unwrap();
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name.as_str(), "hosted-default");
+        let environment = Uuid::new_v4();
+        let selected = store
+            .select(
+                environment,
+                Some(&PolicySelection::Stored(selector.clone())),
+            )
+            .unwrap();
+        assert_eq!(selected.display_name(), "hosted-default");
+        store.select(environment, None).unwrap();
+        store.delete(&selector, |_| Vec::new()).unwrap();
+        assert!(store.list().unwrap().is_empty());
     }
 
     #[test]

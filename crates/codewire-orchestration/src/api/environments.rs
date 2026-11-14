@@ -87,6 +87,10 @@ pub struct Environment {
     pub network_failure: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub ports: Vec<EnvironmentPort>,
+    /// The network policy it selects (#4000). Only the Connect API shows it,
+    /// and only while the deployment's platform network policies are on.
+    #[serde(skip)]
+    pub network_policy: Option<super::network_policies::EnvironmentPolicyView>,
 }
 
 /// Mirrors `api.EnvironmentPort`.
@@ -145,7 +149,8 @@ pub(crate) fn compute_preview_url(
 
 /// Mirrors `envSelectCols` (environment_db.go) — columns only, so the
 /// create handler's `WITH ins AS (...)` CTE can reuse them.
-pub(crate) const ENV_SELECT_COLS: &str = r#"e.id, e.org_id, e.created_by, e.preset_id, e.type, e.name,
+pub(crate) const ENV_SELECT_COLS: &str = concat!(
+    r#"e.id, e.org_id, e.created_by, e.preset_id, e.type, e.name,
     e.state, e.desired_state, e.error_reason, e.error_code, e.recoverable, e.state_changed_at, e.retry_count,
     e.environment_operation_generation,
     jsonb_build_object('secrets',COALESCE(e.project_spec->'secrets','{}'::jsonb),
@@ -164,12 +169,19 @@ pub(crate) const ENV_SELECT_COLS: &str = r#"e.id, e.org_id, e.created_by, e.pres
          WHEN ma.status = 'pending' OR ma.status_pod_uid IS DISTINCT FROM b.pod_uid THEN 'pending'
          ELSE ma.status END AS mesh_network_state,
     CASE WHEN ma.status = 'failed' AND ma.status_pod_uid IS NOT DISTINCT FROM b.pod_uid
-         THEN ma.failure END AS mesh_network_failure"#;
+         THEN ma.failure END AS mesh_network_failure,
+    "#,
+    super::network_policies::environment_policy_cols!()
+);
 
-pub(crate) const ENV_SELECT_JOINS: &str = r#"LEFT JOIN environment_presets t ON e.preset_id = t.id
+pub(crate) const ENV_SELECT_JOINS: &str = concat!(
+    r#"LEFT JOIN environment_presets t ON e.preset_id = t.id
     LEFT JOIN sandbox_environment_backend b ON b.environment_id = e.id
     LEFT JOIN platform_environment_access_bindings ab ON ab.environment_id = e.id
-    LEFT JOIN environment_mesh_attachments ma ON ma.environment_id = e.id"#;
+    LEFT JOIN environment_mesh_attachments ma ON ma.environment_id = e.id
+    "#,
+    super::network_policies::environment_policy_joins!()
+);
 
 pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> {
     let setup_error: String = row.try_get("setup_error")?;
@@ -231,6 +243,15 @@ pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> 
         network_state: row.try_get("mesh_network_state")?,
         network_failure: row.try_get("mesh_network_failure")?,
         ports: Vec::new(),
+        // A selection that does not decode never fails the environment read:
+        // it is logged and left out, not reported as hosted-default (#4000).
+        network_policy: match super::network_policies::environment_policy_from_row(row) {
+            Ok(policy) => Some(policy),
+            Err(error) => {
+                tracing::error!(%error, "environment network policy selection does not decode");
+                None
+            }
+        },
     })
 }
 
@@ -1733,6 +1754,7 @@ mod tests {
             network_state: None,
             network_failure: None,
             ports: Vec::new(),
+            network_policy: None,
         };
         let v: serde_json::Value = serde_json::to_value(&env).unwrap();
         // Omitted optionals + empty ports, exactly like Go omitempty.

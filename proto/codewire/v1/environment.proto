@@ -3,6 +3,7 @@ syntax = "proto3";
 package codewire.v1;
 
 import "codewire/v1/common.proto";
+import "codewire/v1/network_policy.proto";
 import "codewire/v1/port.proto";
 import "codewire/v1/preset.proto";
 import "google/protobuf/duration.proto";
@@ -161,6 +162,9 @@ message Environment {
   // Why error_reason was set, when it has a stable name: no_capacity means the
   // cluster had no room. error_reason is its message, written for the user.
   string error_code = 37;
+  // The network policy the environment selects, and what enforces it
+  // (#4000). Unset while the deployment's platform network policies are off.
+  EnvironmentNetworkPolicy network_policy = 38;
 }
 
 // NetworkAttachmentState is how far an environment's Mesh network
@@ -241,6 +245,11 @@ message CreateEnvironmentRequest {
   // Present, the server resolves the organization: this ID or slug, or when
   // empty the caller's only one. Sending org_id too is refused.
   optional string organization = 32;
+  // The network policy to select (#4000), as
+  // UpdateEnvironmentNetworkPolicyRequest.network_policy. Empty selects none,
+  // and the environment is on `hosted-default`. Refused with UNAVAILABLE
+  // while the deployment's platform network policies are off.
+  string network_policy = 33;
 }
 
 // Complete selection. Empty means no sources and no provider profile.

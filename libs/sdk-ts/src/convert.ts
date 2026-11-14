@@ -1,3 +1,9 @@
+import { fromEnvironmentNetworkPolicy } from "./network-policies.js";
+import {
+  EnvironmentNetworkPolicySchema,
+  NetworkPolicyRuleSchema,
+  NetworkPolicySchema,
+} from "@codewire/proto-ts/gen/codewire/v1/network_policy_pb";
 import type { Duration, Timestamp } from "@bufbuild/protobuf/wkt";
 import {
   ApiKeySchema,
@@ -761,6 +767,9 @@ export function fromProtoEnvironment(value: ProtoEnvironment): EnvironmentData {
     source_selection: value.sourceSelection
       ? fromProtoEnvironmentSourceSelection(value.sourceSelection)
       : undefined,
+    network_policy: value.networkPolicy
+      ? fromEnvironmentNetworkPolicy(value.networkPolicy)
+      : undefined,
   };
 }
 
@@ -1007,6 +1016,7 @@ export function toProtoCreateEnvironmentRequest(
     ),
     network: optionalNetwork(body.network),
     sourceSnapshotId: optionalSourceSnapshot(body.source_snapshot_id),
+    networkPolicy: body.network_policy ?? "",
   };
 }
 
@@ -1186,11 +1196,20 @@ export function assertRuntimeConverterCoverage(): void {
     [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [18, "credentials"],
   ]));
   assertDescriptorCoverage("environment", EnvironmentSchema.fields, new Map([
-    [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"], [33, "operation_generation"], [34, "source_selection"], [35, "network_state"], [36, "network_failure"], [37, "error_code"],
+    [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"], [33, "operation_generation"], [34, "source_selection"], [35, "network_state"], [36, "network_failure"], [37, "error_code"], [38, "network_policy"],
   ]));
   assertDescriptorCoverage("create environment request", CreateEnvironmentRequestSchema.fields, new Map([
     // The SDK always names its organization by org_id, so this stays unset.
-    [1, "org_id"], [2, "preset_id"], [3, "name"], [7, "ttl_seconds"], [24, "isolation_tier"], [25, "project_spec"], [26, "expected_profile_revision"], [27, "confirm_personal_credentials"], [28, "confirm_personal_secrets"], [29, "omit_application_previews"], [30, "network"], [31, "source_snapshot_id"], [32, "organization"],
+    [1, "org_id"], [2, "preset_id"], [3, "name"], [7, "ttl_seconds"], [24, "isolation_tier"], [25, "project_spec"], [26, "expected_profile_revision"], [27, "confirm_personal_credentials"], [28, "confirm_personal_secrets"], [29, "omit_application_previews"], [30, "network"], [31, "source_snapshot_id"], [32, "organization"], [33, "network_policy"],
+  ]));
+  assertDescriptorCoverage("network policy", NetworkPolicySchema.fields, new Map([
+    [1, "id"], [2, "org_id"], [3, "name"], [4, "revision"], [5, "current_revision"], [6, "rules"], [7, "digest"], [8, "created_at"], [9, "created_by"],
+  ]));
+  assertDescriptorCoverage("network policy rule", NetworkPolicyRuleSchema.fields, new Map([
+    [1, "target"], [2, "ports"],
+  ]));
+  assertDescriptorCoverage("environment network policy", EnvironmentNetworkPolicySchema.fields, new Map([
+    [1, "reference"], [2, "name"], [3, "revision"], [4, "digest"], [5, "enforcement"], [6, "enforced_revision"], [7, "enforced_digest"], [8, "enforced_at"],
   ]));
   assertDescriptorCoverage("environment source selection", EnvironmentSourceSelectionSchema.fields, new Map([
     [1, "secrets"], [2, "credentials"], [3, "profile_revision"],

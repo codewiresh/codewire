@@ -435,6 +435,9 @@ mod tests {
                 Err(PolicyReferenceError::ReservedName)
             );
         }
+        // hosted-default is no built-in here: locally it is an ordinary name,
+        // which only the platform store reserves (#4000).
+        assert_eq!(name("hosted-default").as_str(), "hosted-default");
         assert_eq!(
             PolicyName::parse("Open"),
             Err(PolicyReferenceError::InvalidName)

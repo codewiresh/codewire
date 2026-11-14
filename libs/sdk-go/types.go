@@ -105,7 +105,10 @@ type EnvironmentData struct {
 	// NetworkState is pending, attached, failed or revoked when Network is set.
 	NetworkState *string `json:"network_state,omitempty"`
 	// NetworkFailure says why joining Network failed when NetworkState is failed.
-	NetworkFailure      *string                     `json:"network_failure,omitempty"`
+	NetworkFailure *string `json:"network_failure,omitempty"`
+	// NetworkPolicy is what the environment selects and what enforces it; nil
+	// while the deployment's platform network policies are off.
+	NetworkPolicy       *EnvironmentNetworkPolicy   `json:"network_policy,omitempty"`
 	OrgId               string                      `json:"org_id"`
 	OperationGeneration uint64                      `json:"operation_generation"`
 	Ports               *[]EnvironmentPort          `json:"ports,omitempty"`
@@ -197,6 +200,9 @@ type CreateEnvironmentBody struct {
 	// SourceSnapshotId starts from this hosted disk snapshot, which the caller
 	// created in the organization. Not with a repository or the confidential tier.
 	SourceSnapshotId *string `json:"source_snapshot_id,omitempty"`
+	// NetworkPolicy selects an organization network policy; nil is
+	// hosted-default.
+	NetworkPolicy *string `json:"network_policy,omitempty"`
 }
 
 // UpdateEnvironmentSourcesRequest replaces only an environment's complete

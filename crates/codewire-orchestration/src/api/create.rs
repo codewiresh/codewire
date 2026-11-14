@@ -69,6 +69,8 @@ pub struct CreateEnvironmentBody {
     /// The hosted disk snapshot to start from. The caller must have created it
     /// in this organization; the workspace disk is restored from it.
     pub source_snapshot_id: Option<String>,
+    /// The network policy to select (#4000); none is `hosted-default`.
+    pub network_policy: Option<String>,
 }
 
 /// Mirrors `api.Preset` (the slice the create flow consumes; the full
@@ -778,6 +780,10 @@ async fn insert_environment(
         )
         .await?;
     }
+    if let Some(reference) = p.body.network_policy.as_deref() {
+        super::network_policies::select_in(&mut transaction, p.org_id, &environment_id, reference)
+            .await?;
+    }
     // Admission has resolved exact source IDs and created the immutable profile
     // pin. Only this final, same-transaction read describes the published row.
     let sql =
@@ -1089,6 +1095,18 @@ async fn resolve_project_preset(
     })
 }
 
+/// A create that names a network policy needs the deployment's platform
+/// network policies on; one that names none never consults the switch (#4000).
+fn require_network_policies(
+    flags: super::network_policies::NetworkPolicyFlags,
+    body: &CreateEnvironmentBody,
+) -> AppResult<()> {
+    match body.network_policy {
+        Some(_) => flags.require(),
+        None => Ok(()),
+    }
+}
+
 /// The create API's span: the environment id is recorded once the row exists.
 #[tracing::instrument(
     level = "debug",
@@ -1106,6 +1124,7 @@ pub(crate) async fn create_environment_core(
     let mut body = input;
 
     require_org_member(pool, user, org_id).await?;
+    require_network_policies(state.network_policy_flags, &body)?;
     validate_network_request(
         body.network.as_deref(),
         body.name.as_deref(),
@@ -2788,6 +2807,72 @@ credentials: {profile: user/work}
                 ..
             }
         )
+    }
+
+    #[test]
+    fn only_a_create_that_names_a_policy_needs_the_switch() {
+        use crate::api::network_policies::NetworkPolicyFlags;
+        let named = CreateEnvironmentBody {
+            network_policy: Some("web".into()),
+            ..Default::default()
+        };
+        let off = NetworkPolicyFlags::default();
+        assert!(matches!(
+            require_network_policies(off, &named),
+            Err(AppError::Coded {
+                code: "NETWORK_POLICIES_DISABLED",
+                ..
+            })
+        ));
+        assert!(require_network_policies(off, &CreateEnvironmentBody::default()).is_ok());
+        assert!(require_network_policies(NetworkPolicyFlags { enabled: true }, &named).is_ok());
+    }
+
+    /// #4000: a create records the network policy it names in its own
+    /// transaction. Naming none is `hosted-default`; naming one that does not
+    /// resolve leaves no environment behind.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_a_create_records_its_network_policy_or_creates_nothing() {
+        let fixture = QuotaFixture::new(2, 6).await;
+        let unselected = fixture
+            .create(&CreateEnvironmentBody::default())
+            .await
+            .unwrap();
+        let reference = |environment: &Environment| {
+            environment
+                .network_policy
+                .as_ref()
+                .map(|policy| policy.reference.clone())
+        };
+        assert_eq!(reference(&unselected).as_deref(), Some("hosted-default"));
+        let locked = fixture
+            .create(&CreateEnvironmentBody {
+                network_policy: Some("locked".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(reference(&locked).as_deref(), Some("locked"));
+        let error = fixture
+            .create(&CreateEnvironmentBody {
+                network_policy: Some("missing".into()),
+                ..Default::default()
+            })
+            .await
+            .expect_err("an unknown policy is refused");
+        assert!(
+            matches!(
+                error,
+                AppError::Coded {
+                    code: "network_policy_not_found",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(fixture.environment_count().await, 2);
+        fixture.cleanup().await;
     }
 
     /// #3381: with no credit left and enforcement on, a Regular or Discounted

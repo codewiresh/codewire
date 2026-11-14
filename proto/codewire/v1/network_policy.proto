@@ -1,0 +1,197 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// NetworkPolicyService manages an organization's network policies (`cw policy
+// --cloud`, #4000): named sets of destinations a hosted environment may
+// reach. Every change makes a new, immutable revision. A revision's document
+// and digest are exactly those a local VM's policy with the same rules has,
+// so one set of rules means one digest wherever it runs. A policy holds no
+// secret.
+//
+// `open` and `locked` are built-ins and are never stored. `hosted-default`
+// is what a hosted environment that selects no policy enforces: any TCP
+// port and DNS, to public addresses only. No stored policy may take any of
+// those names.
+//
+// Every method needs a signed-in caller who is a member of `org_id`; a
+// non-member is told the organization does not exist, and a policy of
+// another organization does not exist either. Members read the
+// organization's policies and select them for environments they created.
+// Creating, changing and deleting a policy is for organization owners and
+// admins.
+//
+// The deployment switch CODEWIRE_PLATFORM_NETWORK_POLICIES_ENABLED is off by
+// default. While it is off, every method answers UNAVAILABLE.
+//
+// Nothing enforces a hosted policy yet. Until cw-egress does, an
+// environment's EnvironmentNetworkPolicy reports
+// NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED.
+service NetworkPolicyService {
+  // CreateNetworkPolicy stores a policy at revision 1: the rules of `from`, or
+  // none, plus `allow`. A name the organization already uses is refused with
+  // ALREADY_EXISTS. An organization holds at most 256 policies.
+  rpc CreateNetworkPolicy(CreateNetworkPolicyRequest) returns (CreateNetworkPolicyResponse);
+
+  // ListNetworkPolicies returns the organization's policies at their current
+  // revisions, by name, in one page.
+  rpc ListNetworkPolicies(ListNetworkPoliciesRequest) returns (ListNetworkPoliciesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc GetNetworkPolicy(GetNetworkPolicyRequest) returns (GetNetworkPolicyResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // UpdateNetworkPolicy adds and removes rules in one new revision. A change
+  // that changes nothing is refused with FAILED_PRECONDITION, as is one whose
+  // expected_revision is no longer the current revision. A policy holds at
+  // most 10,000 revisions.
+  rpc UpdateNetworkPolicy(UpdateNetworkPolicyRequest) returns (UpdateNetworkPolicyResponse);
+
+  // DeleteNetworkPolicy removes a policy and its revisions. It is refused
+  // with FAILED_PRECONDITION while any environment selects it.
+  rpc DeleteNetworkPolicy(DeleteNetworkPolicyRequest) returns (DeleteNetworkPolicyResponse);
+
+  // UpdateEnvironmentNetworkPolicy selects the network policy of a hosted
+  // environment the caller created. `hosted-default` removes the selection.
+  // A running environment keeps running.
+  rpc UpdateEnvironmentNetworkPolicy(UpdateEnvironmentNetworkPolicyRequest) returns (UpdateEnvironmentNetworkPolicyResponse);
+}
+
+message NetworkPolicySelector {
+  oneof selector {
+    string name = 1;
+    // The canonical UUID a `platform:id:` reference names.
+    string id = 2;
+  }
+}
+
+// One allow rule: an exact name, a `*.` descendant pattern or a public CIDR,
+// and the TCP ports it may be dialed on.
+message NetworkPolicyRule {
+  string target = 1;
+  repeated uint32 ports = 2;
+}
+
+message NetworkPolicy {
+  string id = 1;
+  string org_id = 2;
+  string name = 3;
+  // The revision this message describes.
+  uint32 revision = 4;
+  uint32 current_revision = 5;
+  // In canonical order.
+  repeated NetworkPolicyRule rules = 6;
+  // Lowercase hex SHA-256 of the canonical document, as a local VM's policy
+  // with the same rules has.
+  string digest = 7;
+  // When this revision was made, and by whom.
+  google.protobuf.Timestamp created_at = 8;
+  string created_by = 9;
+}
+
+message CreateNetworkPolicyRequest {
+  string org_id = 1;
+  string name = 2;
+  // A policy of the organization to start from, at its current revision.
+  // Unset starts from the built-in `locked`, which has no rules.
+  NetworkPolicySelector from = 3;
+  repeated NetworkPolicyRule allow = 4;
+}
+
+message CreateNetworkPolicyResponse {
+  NetworkPolicy policy = 1;
+}
+
+message ListNetworkPoliciesRequest {
+  string org_id = 1;
+}
+
+message ListNetworkPoliciesResponse {
+  repeated NetworkPolicy policies = 1;
+}
+
+message GetNetworkPolicyRequest {
+  string org_id = 1;
+  NetworkPolicySelector policy = 2;
+  // Zero means the current revision.
+  uint32 revision = 3;
+}
+
+message GetNetworkPolicyResponse {
+  NetworkPolicy policy = 1;
+}
+
+message UpdateNetworkPolicyRequest {
+  string org_id = 1;
+  NetworkPolicySelector policy = 2;
+  repeated NetworkPolicyRule allow = 3;
+  // Targets whose rules the new revision drops.
+  repeated string remove = 4;
+  // Nonzero: the change applies only to this current revision, so a
+  // concurrent change is refused rather than lost.
+  uint32 expected_revision = 5;
+}
+
+message UpdateNetworkPolicyResponse {
+  NetworkPolicy policy = 1;
+}
+
+message DeleteNetworkPolicyRequest {
+  string org_id = 1;
+  NetworkPolicySelector policy = 2;
+}
+
+message DeleteNetworkPolicyResponse {
+  // The policy as it was, at its last revision.
+  NetworkPolicy policy = 1;
+}
+
+message UpdateEnvironmentNetworkPolicyRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  // `open`, `locked`, `hosted-default`, or a policy of the organization by
+  // `NAME`, `platform:NAME` or `platform:id:UUID`. `local:` is refused.
+  string network_policy = 3;
+}
+
+message UpdateEnvironmentNetworkPolicyResponse {
+  EnvironmentNetworkPolicy network_policy = 1;
+}
+
+// How far an environment's runtime enforces its selection.
+enum NetworkPolicyEnforcement {
+  NETWORK_POLICY_ENFORCEMENT_UNSPECIFIED = 0;
+  // Nothing enforces the selection: the environment is not running, or its
+  // placement has no egress broker yet.
+  NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED = 1;
+  // The running environment's broker enforces enforced_revision.
+  NETWORK_POLICY_ENFORCEMENT_ENFORCED = 2;
+  // The broker is moving to the selection; until it has, enforced_revision
+  // is what it enforces.
+  NETWORK_POLICY_ENFORCEMENT_ENFORCING = 3;
+  // Enforcement could not be confirmed, so the environment's egress is
+  // refused.
+  NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED = 4;
+}
+
+// An environment's network policy: what it selects, and what its runtime
+// enforces.
+message EnvironmentNetworkPolicy {
+  // `open`, `locked`, `hosted-default` or `platform:id:UUID`.
+  string reference = 1;
+  // `open`, `locked`, `hosted-default` or the stored policy's name.
+  string name = 2;
+  // The stored policy's current revision; zero for a built-in.
+  uint32 revision = 3;
+  // The selection's digest at that revision.
+  string digest = 4;
+  NetworkPolicyEnforcement enforcement = 5;
+  // What the runtime enforces: zero and empty when nothing does.
+  uint32 enforced_revision = 6;
+  string enforced_digest = 7;
+  google.protobuf.Timestamp enforced_at = 8;
+}

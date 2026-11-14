@@ -32,6 +32,7 @@ fn main() {
         "codewire/v1/file.proto",
         "codewire/v1/host.proto",
         "codewire/v1/host_agent.proto",
+        "codewire/v1/network_policy.proto",
         "codewire/v1/mesh_group.proto",
         "codewire/v1/mesh_invite.proto",
         "codewire/v1/mesh_kv.proto",
