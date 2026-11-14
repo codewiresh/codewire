@@ -38,6 +38,7 @@ ZOLA_BIN="$zola_bin" "$site_root/build.sh" "$output_b"
 ) >"$manifest_b"
 diff -u "$manifest_a" "$manifest_b"
 
+python3 "$site_root/tests/test_updated_dates.py"
 python3 "$site_root/tests/verify_site.py" --site-root "$site_root" --output "$output_a"
 
 (

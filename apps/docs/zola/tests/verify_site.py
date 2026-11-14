@@ -334,7 +334,15 @@ def verify_supply_chain(site_root: Path) -> None:
 
 
 def verify_updated_dates(routes: list[dict[str, str]], site_root: Path) -> None:
-    """Every page names when it last changed, and the date is never older than its last commit."""
+    """Every page names when it last changed, and the date is never older than its last edit.
+
+    The edit is the page's last commit, unless that commit is a squash merge:
+    `scripts/dev/merge-pr.sh` squashes with a `Reviewed-on: #N` trailer and
+    both its dates are the merge's, so a page written one day and merged the
+    next would look stale although nothing changed (#4632). A squash merge
+    carries no edit date, so such a page is not compared; the edit's own
+    commit is, wherever the change still has it (its branch, before merge).
+    """
     import subprocess
     from datetime import date
 
@@ -349,11 +357,13 @@ def verify_updated_dates(routes: list[dict[str, str]], site_root: Path) -> None:
             fail(f"{source} needs `updated: YYYY-MM-DD` in its front matter")
         # Outside a Git checkout (an image build) there is no history to compare with.
         result = subprocess.run(
-            ["git", "log", "-1", "--format=%cs", "--", source],
+            ["git", "log", "-1", "--format=%cs%x00%(trailers:key=Reviewed-on,valueonly)", "--", source],
             cwd=site_root, capture_output=True, text=True, check=False,
         )
-        committed = result.stdout.strip()
-        if result.returncode == 0 and committed and stated < date.fromisoformat(committed):
+        committed, _, reviewed_on = result.stdout.strip().partition("\0")
+        if result.returncode != 0 or not committed or reviewed_on.strip():
+            continue
+        if stated < date.fromisoformat(committed):
             fail(f"{source} says updated {updated} but last changed {committed}; update the date")
 
 
