@@ -1,6 +1,8 @@
 use std::path::Path;
 
+use crate::commands::lifecycle_output::environment_command;
 use crate::commands::progress::terminal_text;
+use crate::output::VmLocation;
 
 use super::*;
 
@@ -270,6 +272,12 @@ pub(crate) async fn handle_vscode_command(
             || environment_id.clone(),
             |alias| alias.environment_ref.to_owned(),
         );
+        // Refused here, not as an opaque Remote-SSH failure in the editor.
+        let environment = environment_client
+            .get_environment(&org_id, &environment_id)
+            .await
+            .context("look up the environment")?;
+        ensure_cloud_connectable(&environment, &shown)?;
         (format!("{CLOUD_ALIAS_PREFIX}{environment_id}"), shown)
     };
 
@@ -317,7 +325,34 @@ pub(crate) async fn handle_shell_stdio(
         resolve_alias_or_selected(&environment_client, &org_id, &paths.mesh_data_dir, alias)
             .await?;
     let mode = tailnet_ssh::SshTransportMode::from_env()?;
-    tailnet_ssh::pipe_shell_stdio(&client, &org_id, &environment_id, mode).await
+    let piped = tailnet_ssh::pipe_shell_stdio(&client, &org_id, &environment_id, mode).await;
+    // A connection that fails, or ends, because the environment stopped says
+    // so, not what the transport saw. Looked up only then, so a connection
+    // that works costs nothing more.
+    if piped.is_err()
+        && let Ok(environment) = environment_client
+            .get_environment(&org_id, &environment_id)
+            .await
+    {
+        let shown = alias.map_or(environment_id.as_str(), |alias| alias.environment_ref);
+        ensure_cloud_connectable(&environment, shown)?;
+    }
+    piped
+}
+
+/// Refuses a cloud environment that is stopped, naming the command that
+/// starts it. Any other state is left to the connection.
+pub(crate) fn ensure_cloud_connectable(
+    environment: &Environment,
+    shown: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !matches!(environment.state.as_str(), "stopped" | "stopping"),
+        "cloud environment {} is stopped; start it with `{}`",
+        terminal_text(shown),
+        environment_command(VmLocation::Cloud, "start", &terminal_text(shown))
+    );
+    Ok(())
 }
 
 /// `CW_DEBUG_TAILNET` timeline on stderr for `cw shell`: tailnet and client

@@ -1428,7 +1428,8 @@ pub enum ConfigError {
     // would print it again.
     #[error("no server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login'){}", config_note(cause.as_deref()))]
     NoPlatformServer { cause: Option<Box<ConfigError>> },
-    #[error("not logged in (set CODEWIRE_API_KEY, run 'cw setup', or run 'cw login'){}", config_note(cause.as_deref()))]
+    // The wording every command shares for a signed-out user (#4626, #4643).
+    #[error("not signed in (run `cw login`, or set CODEWIRE_API_KEY){}", config_note(cause.as_deref()))]
     NoPlatformToken { cause: Option<Box<ConfigError>> },
     #[error(
         "not logged in for {requested} (saved config is for {saved}; set CODEWIRE_API_KEY or log in to that server)"
@@ -1882,6 +1883,17 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("not logged in for https://codewire-dev.sh")
+        );
+    }
+
+    /// `ssh` and the editor show this error as it is, through
+    /// `cw shell --stdio` (#4643), so it says "not signed in" with the one
+    /// command, like every other signed-out command (#4626).
+    #[test]
+    fn signed_out_is_one_wording_with_the_command_that_signs_in() {
+        assert_eq!(
+            ConfigError::NoPlatformToken { cause: None }.to_string(),
+            "not signed in (run `cw login`, or set CODEWIRE_API_KEY)"
         );
     }
 

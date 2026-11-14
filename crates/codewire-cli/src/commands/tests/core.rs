@@ -2358,3 +2358,24 @@ fn checkpoint_is_listed_with_restore_the_fork_and_its_host() {
         assert!(help.contains(needle), "{needle}: {help}");
     }
 }
+
+/// ssh and the editor reach a stopped cloud environment only as a transport
+/// failure ("400 Bad Request"), so `cw` names the stop and its command (#4643).
+#[test]
+fn a_stopped_cloud_environment_is_refused_with_the_command_that_starts_it() {
+    for state in ["stopped", "stopping"] {
+        let err = ensure_cloud_connectable(&test_environment("env-1", Some("walk"), state), "walk")
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "cloud environment walk is stopped; start it with `cw --cloud start walk`"
+        );
+    }
+    for state in ["running", "starting", "creating"] {
+        assert!(
+            ensure_cloud_connectable(&test_environment("env-1", Some("walk"), state), "walk")
+                .is_ok(),
+            "{state}"
+        );
+    }
+}
