@@ -174,9 +174,9 @@ Production (v0.4.19, source 92672c5c4); the other limits are not.
   - `cw org invitations` lists invitations only for a verified address, so
     an unverified invitee sees none.
   - An invitee has no organization yet. `cw login` succeeds for it and says
-    "You're not in an organization yet: see your invitations with 'cw org
-    invitations', or create one with 'cw org create <name>'." (#4530; before
-    it, `cw login` exited 1 here).
+    "You're not in an organization yet; create one with `cw org create
+    NAME`, or accept an invitation with `cw org invitations`." (#4530, from
+    v0.4.19; before it, `cw login` exited 1 here).
   - An organization invitation is not a sign-up invite code. On hosted, a
     new account waits for an admin to enable it unless its sign-up gave a
     sign-up invite code; the organization invitation does not enable it. A
@@ -186,9 +186,12 @@ Production (v0.4.19, source 92672c5c4); the other limits are not.
   `cw login`, then `cw org invitations` listing the organization, then `cw org
   accept` joining as member, by `invitations-journey.sh` (#3840). With `cw`
   built from e8cad6589 (#4530), `cw login` exited 0 for the invitee and
-  named `cw org invitations` (#4530). The unverified and different-email states are not yet observed on Dev. The
-  dashboard's invitation page is covered
-  on Kind by `apps/dashboard/e2e/ssr-dashboard.governance.ssr.ts`.
+  named `cw org invitations` (#4530). Dev, 2026-11-14, source b84376346,
+  with the released `cw` v0.4.19: the same script passed, and `cw login`
+  exited 0 for the invitee with the sentence above (#4530). The unverified
+  and different-email states are not yet observed on Dev. The dashboard's
+  invitation page is covered on Kind by
+  `apps/dashboard/e2e/ssr-dashboard.governance.ssr.ts`.
 
 ## `invite-remove`: an owner or admin removes the member
 
