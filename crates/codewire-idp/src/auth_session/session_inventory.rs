@@ -168,7 +168,7 @@ pub(crate) fn database_unavailable(
 fn budget_elapsed(route: &'static str, budget: Duration) -> AppError {
     tracing::warn!(
         route,
-        budget_ms = budget.as_millis() as u64,
+        budget_ms = u64::try_from(budget.as_millis()).unwrap_or(u64::MAX),
         "account session request exceeded its budget"
     );
     unavailable()
