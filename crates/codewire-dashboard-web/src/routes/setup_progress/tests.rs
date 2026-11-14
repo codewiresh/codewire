@@ -128,17 +128,17 @@ fn a_first_connection_shows_only_the_current_run() {
         row(4, "git_clone", "progress"),
     ];
     let history: Vec<_> = previous.iter().chain(&running).cloned().collect();
-    assert_eq!(current_run(&history), &running);
+    assert_eq!(current_run(&history, Run::Current), &running);
     // A history that ends on a terminal row shows the run that row ended.
     let failed = [
         row(5, "health_check", "started"),
         row(6, "health_check", "failed"),
     ];
     let history: Vec<_> = previous.iter().chain(&failed).cloned().collect();
-    assert_eq!(current_run(&history), &failed);
-    assert_eq!(current_run(&previous), &previous);
-    assert_eq!(current_run(&running), &running);
-    assert!(current_run(&[]).is_empty());
+    assert_eq!(current_run(&history, Run::Current), &failed);
+    assert_eq!(current_run(&previous, Run::Current), &previous);
+    assert_eq!(current_run(&running, Run::Current), &running);
+    assert!(current_run(&[], Run::Current).is_empty());
 }
 
 #[test]
@@ -185,8 +185,12 @@ impl LogSource for Script {
 }
 
 async fn relayed(script: &Script, resume: Option<String>) -> Vec<String> {
+    relayed_run(script, resume, Run::Current).await
+}
+
+async fn relayed_run(script: &Script, resume: Option<String>, run: Run) -> Vec<String> {
     let (frames, mut receiver) = mpsc::channel(64);
-    relay(script.clone(), resume, frames).await;
+    relay(script.clone(), resume, run, frames).await;
     let mut out = Vec::new();
     while let Ok(frame) = receiver.try_recv() {
         out.push(String::from_utf8(frame.to_vec()).unwrap());
@@ -328,7 +332,7 @@ async fn a_browser_leaving_closes_the_follow_without_waiting_for_a_heartbeat() {
         closed: Arc::new(Mutex::new(Some(closed))),
     };
     let (frames, receiver) = mpsc::channel(4);
-    let relay = tokio::spawn(relay(source, Some(id(1)), frames));
+    let relay = tokio::spawn(relay(source, Some(id(1)), Run::Current, frames));
     tokio::task::yield_now().await;
     drop(receiver);
     tokio::time::timeout(std::time::Duration::from_secs(5), follow_closed)
@@ -336,4 +340,37 @@ async fn a_browser_leaving_closes_the_follow_without_waiting_for_a_heartbeat() {
         .expect("the orchestration follow is dropped promptly")
         .unwrap();
     relay.await.unwrap();
+}
+
+#[test]
+fn a_starting_page_never_sees_a_run_that_already_ended() {
+    let failed = [
+        row(1, "health_check", "started"),
+        row(2, "health_check", "failed"),
+    ];
+    assert!(current_run(&failed, Run::Next).is_empty());
+    let running = [row(3, "health_check", "started")];
+    assert_eq!(current_run(&running, Run::Next), &running);
+}
+
+#[tokio::test]
+async fn a_starting_page_skips_an_ended_run_and_follows_the_next() {
+    let script = Script::default();
+    *script.answers.lock().unwrap() = vec![
+        vec![
+            Ok(response(&row(1, "health_check", "started"))),
+            Ok(response(&row(2, "health_check", "failed"))),
+        ],
+        vec![
+            Ok(response(&row(3, "health_check", "started"))),
+            Ok(response(&row(4, "complete", "completed"))),
+        ],
+    ];
+    let frames = relayed_run(&script, None, Run::Next).await;
+    assert_eq!(
+        *script.opens.lock().unwrap(),
+        vec![(String::new(), false), (id(2), true)]
+    );
+    assert_eq!(ids(&frames), vec![id(3), id(4)]);
+    assert!(frames.last().unwrap().contains("\"outcome\":\"complete\""));
 }

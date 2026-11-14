@@ -5,7 +5,8 @@ import { expect, test, type Page, type Route } from "./helpers/fixture-test";
 test.use({ storageState: { cookies: [], origins: [] }, screenshot: "off", trace: "off" });
 
 const environment = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
-const eventsPath = `**/fixture-org/${environment}/_events/setup-progress`;
+// A starting page adds `?run=next`; the pattern takes either form.
+const eventsPath = `**/fixture-org/${environment}/_events/setup-progress*`;
 const id = (n: number) => n.toString(16).padStart(32, "0");
 
 const fixtureUrl = () => {
@@ -103,7 +104,10 @@ test("a first start shows one starting row, never a start phase, then setup unde
   await expect(stages.nth(0)).toHaveAttribute("data-state", "running");
   // The stream opens only once readiness says setup has not finished.
   expect(resumes).toHaveLength(0);
+  const request = page.waitForRequest((candidate) => candidate.url().includes("/_events/setup-progress"));
   await status(page, { starting: true, setupComplete: false });
+  // It asks only for this start's run, so an earlier, ended run never shows.
+  expect(new URL((await request).url()).search).toBe("?run=next");
   await expect(stages).toHaveText([/^Starting the Sandbox/, /^Checking sidecar readiness/]);
   await expect(stages.nth(0)).toHaveAttribute("data-state", "completed");
   await expect(stages.nth(1)).toHaveAttribute("data-state", "running");
@@ -141,6 +145,11 @@ test("a failed stage is announced and stream text is never markup", async ({ pag
   await expect(setup.getByRole("alert")).toHaveText(`Cloning repositories failed: git clone: exited 128 ${hostile}`);
   await expect(setup.locator("[data-setup-status]")).toHaveText("Setup stopped.");
   await expect(setup.locator("img")).toHaveCount(0);
+  // After a failure nothing runs: the bar and the times stay where they were.
+  const bar = setup.getByRole("progressbar", { name: "Starting your Sandbox" });
+  const frozen = await bar.getAttribute("aria-valuenow");
+  await page.waitForTimeout(1200);
+  await expect(bar).toHaveAttribute("aria-valuenow", frozen ?? "");
   expect(await page.evaluate(() => document.body.dataset.injected)).toBeUndefined();
   // A failure stays visible even after readiness reports setup state.
   await status(page, { running: true, setupComplete: true });

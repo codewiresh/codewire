@@ -21,19 +21,23 @@
 //! is in progress (or that ended last) are history, not progress. One
 //! connection lives at most [`STREAM_LIFETIME`]; the browser then reconnects
 //! and resumes.
+//!
+//! A page whose Sandbox is starting asks for `?run=next` (#3772): a run that
+//! already ended belongs to an earlier start, so it is not replayed and the
+//! connection waits for this start's rows.
 
 use std::{convert::Infallible, time::Duration};
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use codewire_proto::codewire::v1::{StreamLogsResponse, stream_logs_response::Event};
 use connectrpc::{ConnectError, ErrorCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::{StreamExt as _, wrappers::ReceiverStream};
 
@@ -196,11 +200,32 @@ pub(super) fn stage_event(row: &LogRow) -> Option<StageEvent> {
     })
 }
 
+/// Which run a first connection shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Run {
+    /// The run in progress, or the one that ended last.
+    #[default]
+    Current,
+    /// Only a run that has not ended: a starting Sandbox's page.
+    Next,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct EventsQuery {
+    #[serde(default)]
+    run: Run,
+}
+
 /// The rows of the current run in a full history: everything after the last
 /// terminal row, unless the history itself ends on a terminal row, in which
-/// case the run that row ended.
-pub(super) fn current_run(rows: &[LogRow]) -> &[LogRow] {
+/// case the run that row ended, or nothing for [`Run::Next`].
+pub(super) fn current_run(rows: &[LogRow], run: Run) -> &[LogRow] {
     let ends_terminal = rows.last().is_some_and(LogRow::terminal);
+    if ends_terminal && run == Run::Next {
+        return &rows[rows.len()..];
+    }
     let scan = if ends_terminal {
         &rows[..rows.len() - 1]
     } else {
@@ -291,6 +316,7 @@ impl LogSource for Orchestration {
 pub(super) async fn relay(
     source: impl LogSource,
     resume: Option<String>,
+    run: Run,
     frames: mpsc::Sender<Bytes>,
 ) {
     let cursor = match resume {
@@ -308,14 +334,15 @@ pub(super) async fn relay(
                 }
             }
             let history = Vec::from(history);
-            for row in current_run(&history) {
+            for row in current_run(&history, run) {
                 if !send_row(&frames, row).await {
                     return;
                 }
             }
             match history.last() {
-                // The last run already ended; there is nothing to follow.
-                Some(row) if row.terminal() => return,
+                // The last run already ended; there is nothing to follow,
+                // unless the page waits for the next run.
+                Some(row) if row.terminal() && run == Run::Current => return,
                 Some(row) => row.id.clone(),
                 None => String::new(),
             }
@@ -381,8 +408,12 @@ pub(super) fn resume_cursor(headers: &HeaderMap) -> Result<Option<String>, ()> {
 pub(super) async fn events(
     State(state): State<AppState>,
     Path((slug, environment_id)): Path<(String, String)>,
+    query: Result<Query<EventsQuery>, axum::extract::rejection::QueryRejection>,
     headers: HeaderMap,
 ) -> Response {
+    let Ok(Query(EventsQuery { run })) = query else {
+        return status(StatusCode::BAD_REQUEST);
+    };
     if !codewire_server_core::organization_slug::valid_organization_slug(&slug)
         || !super::terminal::canonical_environment_id(&environment_id)
     {
@@ -435,7 +466,7 @@ pub(super) async fn events(
     };
     let (frames, receiver) = mpsc::channel(32);
     tokio::spawn(async move {
-        let _ = tokio::time::timeout(STREAM_LIFETIME, relay(source, resume, frames)).await;
+        let _ = tokio::time::timeout(STREAM_LIFETIME, relay(source, resume, run, frames)).await;
     });
     let body = ReceiverStream::new(receiver).map(Ok::<Bytes, Infallible>);
     Response::builder()

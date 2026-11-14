@@ -31,7 +31,7 @@
     "reconcile_enqueue", "ensure_namespace", "store_backend", "create_claim", "wait_for_ready", "workspace_bind",
     "access_ready", "pod_created", "pod_volume_provisioned", "pod_volume_bound", "pod_scheduled", "pod_sandbox_ready",
     "pod_initialized", "pod_workspace_started", "pod_dind_started", "pod_running", "pod_containers_ready",
-    "mark_running", "daemon_ready", "file_ready",
+    "mark_running", "daemon_ready", "file_ready", "publish_setup", "resume_workspace",
   ]);
   const STARTING = "Starting the Sandbox";
   const SETUP_GROUP = "Setting up your project";
@@ -53,6 +53,7 @@
   let firstSeen = null;
   let done = false;
   let startRow = null;
+  const starting = section.hasAttribute("data-setup-starting");
   // The running step is announced to screen readers only: the list shows it.
   // Failures and stream trouble stay in the visible status line.
   const say = (text) => { if (announce instanceof HTMLElement) announce.textContent = text; };
@@ -196,7 +197,7 @@
   }
 
   function progress() {
-    if (!(bar instanceof HTMLElement)) return;
+    if (!(bar instanceof HTMLElement) || (timer === null && !done)) return;
     const fraction = done ? 1 : firstSeen === null ? 0 : Math.min(0.95, 1 - Math.exp(-(Date.now() - firstSeen) / TYPICAL_MS));
     const fill = bar.firstElementChild;
     if (fill instanceof HTMLElement) fill.style.transform = `scaleX(${fraction.toFixed(4)})`;
@@ -283,6 +284,7 @@
         settleRepositories(stage, "failed");
         stage.detail.textContent = "Failed";
         status.textContent = "Setup stopped.";
+        halt();
         if (failure instanceof HTMLElement) {
           failure.textContent = `${stage.label.textContent} failed${event.label && event.label !== stage.label.textContent ? `: ${event.label}` : "."}`;
           failure.hidden = false;
@@ -296,16 +298,23 @@
     follow();
   }
 
-  function finish() {
-    ended = true;
-    source?.close();
+  // Times and the bar stop where they are: after a failure, nothing runs.
+  function halt() {
     if (timer !== null) clearInterval(timer);
     timer = null;
   }
 
+  function finish() {
+    ended = true;
+    source?.close();
+    halt();
+  }
+
   function followStream() {
     if (source || ended) return;
-    source = new EventSource(`/${encodeURIComponent(slug)}/${environmentId}/_events/setup-progress`);
+    // A starting page asks only for this start's run, never one that ended.
+    const run = starting ? "?run=next" : "";
+    source = new EventSource(`/${encodeURIComponent(slug)}/${environmentId}/_events/setup-progress${run}`);
     source.addEventListener("stage", (message) => {
       let event;
       try { event = JSON.parse(message.data); } catch { return; }
@@ -314,12 +323,13 @@
     source.addEventListener("end", () => { source?.close(); });
     // This account already follows as many live logs as orchestration allows.
     source.addEventListener("busy", () => {
-      source?.close();
+      finish();
       status.textContent = "Too many live setup views are open for this account. Close one, then reload this page to follow setup here.";
     });
     source.addEventListener("error", () => {
       // An open source retries by itself and resumes. A closed one was refused.
       if (!ended && source?.readyState === EventSource.CLOSED) {
+        halt();
         status.textContent = "Live setup progress is unavailable. Sandbox status below still updates.";
       }
     });
@@ -327,7 +337,6 @@
 
   firstSeen = Date.now();
   timer = setInterval(tick, 500);
-  const starting = section.hasAttribute("data-setup-starting");
   if (starting) {
     startRow = item(STARTING);
     startRow.item.dataset.state = "running";
