@@ -65,6 +65,7 @@ cw org invitations [--output json]     # your pending invitations
 cw org accept ORG                      # ORG: the slug, name or ID that invitations lists
 cw org members [--org ID_OR_SLUG] [--output json]
 cw org member rm USER [--org ID_OR_SLUG] [--yes]   # USER: user ID or email; alias: remove
+cw org leave ID_OR_SLUG [--yes]        # leave an organization yourself
 cw org delete ID_OR_SLUG [--yes]       # owner only; asks you to type the name
 ```
 
@@ -84,8 +85,13 @@ address and run it again.
 
 `members` lists the current organization's members, or those of `--org`.
 `member rm` asks before removing someone; `--yes` skips the question. Owners
-and admins remove members, and anyone can remove themselves to leave. An
-owner cannot be removed, and an admin cannot remove another admin.
+and admins remove members. No one removes an owner, and an admin cannot
+remove another admin.
+
+`leave` asks, then takes you out of the organization; `--yes` skips the
+question. Any member can leave, an owner too while another owner remains.
+The last owner is refused: make someone else an owner first, or delete the
+organization. Leaving your current organization clears it as the default.
 
 Example:
 

@@ -11,7 +11,7 @@ use serde::Serialize;
 use sqlx::Row;
 
 use super::ApiState;
-use super::environments::format_time;
+use super::environments::{coded_owned, format_time};
 use super::secrets::{forbidden, log_audit};
 
 mod invitation_limits;
@@ -271,47 +271,15 @@ pub(crate) async fn update_member_role_core(
     }
 
     run_organization_database_mutation(&state.pool, &org_id, async {
-        let target_role = target_member_role(&state, &org_id, &user_id)
+        target_member_role(&state, &org_id, &user_id)
             .await?
             .ok_or_else(|| AppError::NotFound("member not found".into()))?;
 
-        if target_role == "owner" && body.role != "owner" {
-            let owner_count: i64 = sqlx::query_scalar(
-                r#"SELECT COUNT(*) FROM org_members WHERE org_id = $1 AND role = 'owner'"#,
-            )
-            .bind(&org_id)
-            .fetch_one(&state.pool)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "organizations: count owners failed");
-                AppError::InternalMsg("failed to count owners".into())
-            })?;
-            if owner_count <= 1 {
-                return Err(AppError::BadRequest("cannot demote the last owner".into()));
-            }
+        if caller_role == "admin" && body.role == "owner" {
+            return Err(forbidden("admins cannot promote to owner"));
         }
 
-        if caller_role == "admin" {
-            if body.role == "owner" {
-                return Err(forbidden("admins cannot promote to owner"));
-            }
-            if target_role == "owner" || target_role == "admin" {
-                return Err(forbidden("admins cannot change owner or admin roles"));
-            }
-        }
-
-        sqlx::query(
-            r#"UPDATE org_members SET role = $1, updated_at = NOW() WHERE org_id = $2 AND user_id = $3"#,
-        )
-        .bind(&body.role)
-        .bind(&org_id)
-        .bind(&user_id)
-        .execute(&state.pool)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "organizations: update role failed");
-            AppError::InternalMsg("failed to update role".into())
-        })?;
+        set_member_role(&state.pool, &org_id, &user_id, &body.role, &caller_role).await?;
 
         log_audit(
             &state,
@@ -347,19 +315,24 @@ pub(crate) async fn remove_member_core(
             .await?
             .ok_or_else(|| AppError::NotFound("member not found".into()))?;
 
-        if target_role == "owner" {
+        let leaving = user.user_id == user_id;
+        if target_role == "owner" && !leaving {
             return Err(AppError::BadRequest("cannot remove the owner".into()));
         }
-        if caller_role == "admin" && target_role == "admin" {
+        if caller_role == "admin" && target_role == "admin" && !leaving {
             return Err(forbidden("admins cannot remove other admins"));
         }
 
-        delete_membership(&state.pool, &org_id, &user_id)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "organizations: remove member failed");
-                AppError::InternalMsg("failed to remove member".into())
-            })?;
+        if target_role == "owner" {
+            leave_as_owner(&state.pool, &org_id, &user_id).await?;
+        } else {
+            delete_membership(&state.pool, &org_id, &user_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "organizations: remove member failed");
+                    AppError::InternalMsg("failed to remove member".into())
+                })?;
+        }
 
         log_audit(
             &state,
@@ -379,10 +352,19 @@ pub(crate) async fn remove_member_core(
 /// outlive the membership, and a later re-add does not revive it (#3254).
 async fn delete_membership(pool: &sqlx::PgPool, org_id: &str, user_id: &str) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
+    delete_membership_in(&mut tx, org_id, user_id).await?;
+    tx.commit().await
+}
+
+async fn delete_membership_in(
+    conn: &mut sqlx::PgConnection,
+    org_id: &str,
+    user_id: &str,
+) -> sqlx::Result<()> {
     sqlx::query(r#"DELETE FROM org_members WHERE org_id = $1 AND user_id = $2"#)
         .bind(org_id)
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     sqlx::query(
         r#"UPDATE api_keys SET disabled_at = NOW()
@@ -390,9 +372,114 @@ async fn delete_membership(pool: &sqlx::PgPool, org_id: &str, user_id: &str) -> 
     )
     .bind(org_id)
     .bind(user_id)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
-    tx.commit().await
+    Ok(())
+}
+
+/// An owner leaves while another owner remains; the last owner is refused
+/// (#4519).
+async fn leave_as_owner(pool: &sqlx::PgPool, org_id: &str, user_id: &str) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+    lock_organization(&mut tx, org_id).await?;
+    refuse_only_owner(
+        &mut tx,
+        org_id,
+        user_id,
+        "you are the organization's only owner; make someone else an owner first, or delete the organization",
+    )
+    .await?;
+    delete_membership_in(&mut tx, org_id, user_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Sets a member's role. Any change away from owner locks the organization's
+/// row and reads the member's current role under that lock, so the admin
+/// rules and a demotion's owner check (the same as leaving) see the role the
+/// update replaces, even when the member was promoted a moment before
+/// (#4519).
+async fn set_member_role(
+    pool: &sqlx::PgPool,
+    org_id: &str,
+    user_id: &str,
+    role: &str,
+    caller_role: &str,
+) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+    if role != "owner" {
+        lock_organization(&mut tx, org_id).await?;
+        let current: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2 FOR UPDATE",
+        )
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if caller_role == "admin" && matches!(current.as_deref(), Some("owner" | "admin")) {
+            return Err(forbidden("admins cannot change owner or admin roles"));
+        }
+        if current.as_deref() == Some("owner") {
+            refuse_only_owner(
+                &mut tx,
+                org_id,
+                user_id,
+                "this member is the organization's only owner; make someone else an owner first",
+            )
+            .await?;
+        }
+    }
+    sqlx::query(
+        r#"UPDATE org_members SET role = $1, updated_at = NOW() WHERE org_id = $2 AND user_id = $3"#,
+    )
+    .bind(role)
+    .bind(org_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "organizations: update role failed");
+        AppError::InternalMsg("failed to update role".into())
+    })?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Locks the organization's row until the caller's transaction ends. Every
+/// change that can take away an owner holds it while it counts the owners, so
+/// owners leaving or demoted at once cannot each count the other and leave
+/// the organization with none.
+async fn lock_organization(conn: &mut sqlx::PgConnection, org_id: &str) -> AppResult<()> {
+    sqlx::query("SELECT 1 FROM organizations WHERE id = $1 FOR UPDATE")
+        .bind(org_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Refuses when `user_id` is the organization's only owner. The caller holds
+/// `lock_organization` in the same transaction.
+async fn refuse_only_owner(
+    conn: &mut sqlx::PgConnection,
+    org_id: &str,
+    user_id: &str,
+    message: &str,
+) -> AppResult<()> {
+    let other_owners: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM org_members WHERE org_id = $1 AND role = 'owner' AND user_id <> $2",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if other_owners == 0 {
+        return Err(coded_owned(
+            axum::http::StatusCode::BAD_REQUEST,
+            "last_owner",
+            message.to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 // ── Invitations (org-scoped CRUD) ────────────────────────────────────────
@@ -1233,6 +1320,10 @@ pub struct OrgWithRole {
     pub billing_plan: String,
     pub billing_status: String,
     pub trial_ends_at: Option<String>,
+    /// When the caller joined (#4519).
+    pub joined_at: Option<String>,
+    /// The caller is the only owner, so cannot leave (#4519).
+    pub only_owner: bool,
 }
 
 #[derive(Debug)]
@@ -1307,7 +1398,12 @@ async fn list_memberships(pool: &sqlx::PgPool, user: &AuthUser) -> AppResult<Vec
     let scoped = user.via_api_key && user.org_id.as_deref().is_some_and(|o| !o.is_empty());
 
     let base = r#"SELECT o.id, o.name, o.slug, o.created_by, o.created_at, o.updated_at,
-                         m.role, o.billing_plan, o.billing_status, o.trial_ends_at,
+                         m.role, m.created_at AS joined_at, o.billing_plan,
+                         (m.role = 'owner' AND NOT EXISTS (
+                             SELECT 1 FROM org_members other
+                             WHERE other.org_id = o.id AND other.role = 'owner'
+                               AND other.user_id <> m.user_id)) AS only_owner,
+                         o.billing_status, o.trial_ends_at,
                          ARRAY(SELECT a.assignment FROM org_member_assignments a
                                 WHERE a.org_member_id = m.id) AS assignments
                   FROM organizations o
@@ -1333,6 +1429,8 @@ async fn list_memberships(pool: &sqlx::PgPool, user: &AuthUser) -> AppResult<Vec
         let updated_at: chrono::NaiveDateTime = r.try_get("updated_at").map_err(AppError::from)?;
         let trial_ends_at: Option<chrono::NaiveDateTime> =
             r.try_get("trial_ends_at").map_err(AppError::from)?;
+        let joined_at: Option<chrono::NaiveDateTime> =
+            r.try_get("joined_at").map_err(AppError::from)?;
         result.push(OrgWithRole {
             id: r.try_get("id").map_err(AppError::from)?,
             name: r.try_get("name").map_err(AppError::from)?,
@@ -1345,6 +1443,8 @@ async fn list_memberships(pool: &sqlx::PgPool, user: &AuthUser) -> AppResult<Vec
             billing_plan: r.try_get("billing_plan").map_err(AppError::from)?,
             billing_status: r.try_get("billing_status").map_err(AppError::from)?,
             trial_ends_at: trial_ends_at.map(format_time),
+            joined_at: joined_at.map(format_time),
+            only_owner: r.try_get("only_owner").map_err(AppError::from)?,
         });
     }
     Ok(result)
@@ -1536,6 +1636,8 @@ mod tests {
             billing_plan: String::new(),
             billing_status: String::new(),
             trial_ends_at: None,
+            joined_at: None,
+            only_owner: false,
         }
     }
 

@@ -115,6 +115,10 @@ message OrganizationMembership {
   string billing_plan = 4;
   string billing_status = 5;
   optional google.protobuf.Timestamp trial_ends_at = 6;
+  // When the caller joined the organization (#4519).
+  optional google.protobuf.Timestamp joined_at = 7;
+  // The caller is the organization's only owner, so cannot leave it (#4519).
+  bool only_owner = 8;
 }
 
 message OrgMember {

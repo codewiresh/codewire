@@ -615,3 +615,90 @@ fn the_membership_commands_parse() {
     }
     assert!(crate::Cli::try_parse_from(["cw", "org", "accept"]).is_err());
 }
+
+const LIST_ORGS: &str = "/codewire.v1.OrganizationService/ListOrganizations";
+
+async fn one_organization(server: &MockServer) {
+    let organization = rpc::Organization {
+        id: "org_acme".into(),
+        name: "Acme".into(),
+        slug: "acme".into(),
+        ..Default::default()
+    };
+    Mock::given(method("POST"))
+        .and(path(LIST_ORGS))
+        .respond_with(proto(rpc::ListOrganizationsResponse {
+            organizations: vec![rpc::OrganizationMembership {
+                organization: Some(organization).into(),
+                role: rpc::OrgRole::ORG_ROLE_MEMBER.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
+        .mount(server)
+        .await;
+}
+
+/// `cw org leave` (#4519) names the organization by slug, asks first,
+/// leaves nothing when declined, and removes only the caller's own
+/// membership.
+#[tokio::test]
+async fn leaving_asks_first_and_removes_only_the_callers_membership() {
+    let server = MockServer::start().await;
+    one_organization(&server).await;
+    Mock::given(method("POST"))
+        .and(path(REMOVE))
+        .and(body_bytes(remove_request("user_self")))
+        .respond_with(proto(rpc::RemoveMemberResponse::default()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+
+    let mut asked = Vec::new();
+    let declined = leave_organization(&client, "acme", "user_self", |org| {
+        asked.push(org.name.clone());
+        Ok(false)
+    })
+    .await
+    .unwrap();
+    assert!(declined.is_none());
+    assert_eq!(asked, ["Acme"]);
+
+    let left = leave_organization(&client, "acme", "user_self", |_| Ok(true))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((left.id.as_str(), left.slug.as_str()), ("org_acme", "acme"));
+
+    let unknown = leave_organization(&client, "beta", "user_self", |_| Ok(true))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(unknown.contains("\"beta\" not found"), "{unknown}");
+}
+
+/// The last owner's refusal reaches the user as the server says it.
+#[tokio::test]
+async fn the_last_owners_refusal_to_leave_is_shown() {
+    let server = MockServer::start().await;
+    one_organization(&server).await;
+    Mock::given(method("POST"))
+        .and(path(REMOVE))
+        .respond_with(refusal(
+            "failed_precondition",
+            "you are the organization's only owner; make someone else an owner first, or delete the organization",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let error = leave_organization(&client(&server), "acme", "user_self", |_| Ok(true))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}")
+            .contains("make someone else an owner first, or delete the organization"),
+        "{error:#}"
+    );
+}

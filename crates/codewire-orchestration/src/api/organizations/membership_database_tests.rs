@@ -158,6 +158,12 @@ async fn db_listing_reads_every_membership_and_its_assignments_at_once() {
         via_api_key: org_id.is_some(),
     };
     let listed = list_memberships(&fixture.pool, &user(None)).await.unwrap();
+    // Each membership says when the caller joined (#4519).
+    assert!(
+        listed
+            .iter()
+            .all(|membership| membership.joined_at.is_some())
+    );
     let rows: Vec<_> = listed
         .iter()
         .map(|row| {
@@ -216,5 +222,211 @@ async fn db_listing_reads_every_membership_and_its_assignments_at_once() {
     ] {
         execute(&fixture, sql, binds).await;
     }
+    fixture.cleanup().await;
+}
+
+async fn is_member(fixture: &LeaseFixture, org_id: &str, user_id: &str) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM org_members WHERE org_id = $1 AND user_id = $2)",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap()
+}
+
+/// Whether listing says `user_id` is `org_id`'s only owner.
+async fn listed_as_only_owner(fixture: &LeaseFixture, org_id: &str, user_id: &str) -> bool {
+    let caller = AuthUser {
+        user_id: user_id.to_owned(),
+        org_id: None,
+        is_admin: false,
+        via_api_key: false,
+    };
+    list_memberships(&fixture.pool, &caller)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|membership| membership.id == org_id)
+        .unwrap()
+        .only_owner
+}
+
+fn is_last_owner_refusal(result: &AppResult<()>) -> bool {
+    matches!(
+        result,
+        Err(AppError::Coded {
+            code: "last_owner",
+            ..
+        })
+    )
+}
+
+/// Adds a second owner to the fixture's organization and returns its id.
+async fn second_owner(fixture: &LeaseFixture) -> String {
+    let owner = format!("{}-co-owner", fixture.id);
+    execute(
+        fixture,
+        "INSERT INTO users (id, email, name, email_verified) \
+         VALUES ($1, $1 || '@example.test', 'Second owner', true)",
+        &[owner.as_str()],
+    )
+    .await;
+    execute(
+        fixture,
+        "INSERT INTO org_members (id, org_id, user_id, role) VALUES ($1 || '-' || $2, $1, $2, 'owner')",
+        &[fixture.id.as_str(), owner.as_str()],
+    )
+    .await;
+    owner
+}
+
+async fn remove_user(fixture: &LeaseFixture, user_id: &str) {
+    execute(
+        fixture,
+        "DELETE FROM org_members WHERE user_id = $1",
+        &[user_id],
+    )
+    .await;
+    execute(fixture, "DELETE FROM users WHERE id = $1", &[user_id]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_an_owner_leaves_while_another_owner_remains_and_the_last_is_refused() {
+    let fixture = LeaseFixture::seed("synthetic-membership-leave").await;
+    let org = fixture.id.clone();
+    let owner = second_owner(&fixture).await;
+    assert!(!listed_as_only_owner(&fixture, &org, &org).await);
+
+    leave_as_owner(&fixture.pool, &org, &owner).await.unwrap();
+    assert!(!is_member(&fixture, &org, &owner).await);
+    assert!(listed_as_only_owner(&fixture, &org, &org).await);
+
+    // The fixture's owner is now the only one: refused, and still a member.
+    let refused = leave_as_owner(&fixture.pool, &org, &org).await;
+    assert!(is_last_owner_refusal(&refused), "{refused:?}");
+    assert!(is_member(&fixture, &org, &org).await);
+
+    remove_user(&fixture, &owner).await;
+    fixture.cleanup().await;
+}
+
+async fn owner_count(fixture: &LeaseFixture, org_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM org_members WHERE org_id = $1 AND role = 'owner'")
+        .bind(org_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap()
+}
+
+/// Runs `contender` while `leaver` is part-way through leaving: its owner
+/// check has run and its membership is deleted, but nothing is committed. The
+/// contender must wait on the organization's row lock until the leave
+/// commits, then count no other owner and be refused, leaving one owner.
+async fn contend_with_a_leave_in_progress(
+    fixture: &LeaseFixture,
+    leaver: &str,
+    contender: impl std::future::Future<Output = AppResult<()>> + Send + 'static,
+) {
+    let org = fixture.id.as_str();
+    let mut leave = fixture.pool.begin().await.unwrap();
+    lock_organization(&mut leave, org).await.unwrap();
+    refuse_only_owner(&mut leave, org, leaver, "")
+        .await
+        .unwrap();
+    delete_membership_in(&mut leave, org, leaver).await.unwrap();
+
+    let mut contender = tokio::spawn(contender);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), &mut contender)
+            .await
+            .is_err(),
+        "the contender went ahead without waiting for the organization's row lock"
+    );
+    leave.commit().await.unwrap();
+    let refused = contender.await.unwrap();
+    assert!(is_last_owner_refusal(&refused), "{refused:?}");
+    assert_eq!(owner_count(fixture, org).await, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_an_owner_leaving_while_the_other_leaves_leaves_one_owner() {
+    let fixture = LeaseFixture::seed("synthetic-membership-leave-race").await;
+    let org = fixture.id.clone();
+    let owner = second_owner(&fixture).await;
+
+    let (pool, org_id) = (fixture.pool.clone(), org.clone());
+    contend_with_a_leave_in_progress(&fixture, &owner, async move {
+        leave_as_owner(&pool, &org_id, &org_id).await
+    })
+    .await;
+    assert!(is_member(&fixture, &org, &org).await);
+
+    remove_user(&fixture, &owner).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_an_owner_leaving_while_the_other_is_demoted_leaves_one_owner() {
+    let fixture = LeaseFixture::seed("synthetic-membership-leave-demote-race").await;
+    let org = fixture.id.clone();
+    let owner = second_owner(&fixture).await;
+
+    let (pool, org_id) = (fixture.pool.clone(), org.clone());
+    contend_with_a_leave_in_progress(&fixture, &owner, async move {
+        set_member_role(&pool, &org_id, &org_id, "admin", "owner").await
+    })
+    .await;
+
+    remove_user(&fixture, &owner).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_the_only_owner_is_never_demoted() {
+    let fixture = LeaseFixture::seed("synthetic-membership-demote").await;
+    let org = fixture.id.clone();
+
+    let refused = set_member_role(&fixture.pool, &org, &org, "admin", "owner").await;
+    assert!(is_last_owner_refusal(&refused), "{refused:?}");
+    assert_eq!(owner_count(&fixture, &org).await, 1);
+
+    let owner = second_owner(&fixture).await;
+    set_member_role(&fixture.pool, &org, &owner, "member", "owner")
+        .await
+        .unwrap();
+    assert_eq!(owner_count(&fixture, &org).await, 1);
+
+    remove_user(&fixture, &owner).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_an_admin_never_changes_an_owners_or_an_admins_role() {
+    let fixture = LeaseFixture::seed("synthetic-membership-admin-role").await;
+    let org = fixture.id.clone();
+    let owner = second_owner(&fixture).await;
+    let forbidden = |result: &AppResult<()>| matches!(result, Err(AppError::Coded { status, .. }) if *status == axum::http::StatusCode::FORBIDDEN);
+
+    // The admin rules read the role the update replaces, inside its
+    // transaction, so a promotion that lands first is seen.
+    for role in ["member", "admin"] {
+        let refused = set_member_role(&fixture.pool, &org, &owner, role, "admin").await;
+        assert!(forbidden(&refused), "{refused:?}");
+    }
+    set_member_role(&fixture.pool, &org, &owner, "admin", "owner")
+        .await
+        .unwrap();
+    let refused = set_member_role(&fixture.pool, &org, &owner, "member", "admin").await;
+    assert!(forbidden(&refused), "{refused:?}");
+    assert_eq!(owner_count(&fixture, &org).await, 1);
+
+    remove_user(&fixture, &owner).await;
     fixture.cleanup().await;
 }

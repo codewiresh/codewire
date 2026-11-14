@@ -20,13 +20,14 @@ on Production.
 | `invite-email` | observed 2026-11-13 on 6c3651dcf (#3847) | not yet observed |
 | `invite-accept` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
 | `invite-remove` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
+| `org-leave` | not yet observed | not yet observed |
 | `invite-limits` | not yet observed | not yet observed |
 | `invite-unverified` | not yet observed | not yet observed |
 
 ## Before the walk
 
-- On Dev, two synthetic identities walk `invite-send`, `invite-accept` and
-  `invite-remove` with no person:
+- On Dev, two synthetic identities walk `invite-send`, `invite-accept`,
+  `invite-remove` and `org-leave` with no person:
   - **The inviter** is the smoke identity, owner of `codewire-dev-smoke`
     (`scripts/runtime/dev/with-dev-smoke-auth.sh`).
   - **The invitee** is a password account with no organization
@@ -45,6 +46,10 @@ on Production.
   invitation email is accepted without reaching anyone and nothing bounces.
   The email's arrival still needs an address a person reads; see
   `invite-email`.
+- The browser walk (the dashboard's invitation pages, and `invite-email`) uses
+  e2e@codewire.sh as the invitee. It was created on Dev on 2026-11-13,
+  verified, with two-factor, and owns `codewire-dev-e2e`. Its sign-in moves
+  into OpenBao after the owner's enroll, which is pending.
 - Record `cw version` with every observation. An observation on Dev counts
   only for the source Dev had rolled out.
 
@@ -91,7 +96,12 @@ on Production.
   - sending failed or is waiting: the line says "Email not sent" or "Email
     not sent yet" with the reason, and to share the link instead;
   - an invitation refused by `invite-limits` or `invite-unverified` sends no
-    email.
+    email;
+  - the email's button opens the invitation at `/accept-invite#t=<token>`
+    (#3840, decided 2026-11-13). No command yet: the page and its token are
+    not built (#3840, #4121);
+  - the email uses the plain shared layout with a text part, from "Codewire
+    <hello@codewire.sh>" (#4553). Not on main yet.
 - **Driving it:** invite an address a person reads, and read the email
   there.
 - **Proof:** the email arrives in that mailbox with the subject "You're
@@ -126,7 +136,19 @@ on Production.
   - the one-time link opened by an account with a different email:
     refused;
   - `cw org accept` naming an organization with no pending invitation lists
-    the ones the invitee has.
+    the ones the invitee has;
+  - from the email's button, `/accept-invite#t=<token>` (#3840, decided
+    2026-11-13; no command yet, not built):
+    - signed in as the invited, verified address: one click accepts;
+    - signed out: asked to sign in or sign up, then returned to the
+      invitation to accept;
+    - signed in as a different account: refused with a clear message, and
+      offered to switch account;
+    - the link never signs anyone in by itself;
+  - a new invitee who signs up from the invitation's link is admitted with no
+    invite code and no access review, on hosted and self-hosted servers
+    (#4121), and still verifies its email before it can sign in (#4481). No
+    command yet: not built.
 - **Driving it:** as the invitee:
 
   ```sh
@@ -151,8 +173,9 @@ on Production.
     used. Verification is needed either way (owner, 2026-11-13, on #4481).
 - **Observed:** Dev, 2026-11-13, source 6c3651dcf, `cw` built from 27707e6c2:
   `cw login`, then `cw org invitations` listing the organization, then `cw org
-  accept` joining as member, by `invitations-journey.sh` (#3840). The
-  unverified and different-email states are not yet observed on Dev. The
+  accept` joining as member, by `invitations-journey.sh` (#3840). With `cw`
+  built from e8cad6589 (#4530), `cw login` exited 0 for the invitee and
+  named `cw org invitations` (#4530). The unverified and different-email states are not yet observed on Dev. The
   dashboard's invitation page is covered
   on Kind by `apps/dashboard/e2e/ssr-dashboard.governance.ssr.ts`.
 
@@ -184,6 +207,39 @@ on Production.
   `cw org list` showed "No organizations found.", by
   `invitations-journey.sh` (#3840). The prompt and member-refused states are
   not yet observed on Dev.
+
+## `org-leave`: a member leaves an organization
+
+- **Entry points:** `cw org leave`; **Leave** in the Organizations card of
+  Settings → Account (#4519).
+- **States to exercise:**
+  - a member leaves, after the prompt and with `--yes`;
+  - an owner leaves while another owner remains;
+  - the only owner is refused: "you are the organization's only owner; make
+    someone else an owner first, or delete the organization". On the
+    dashboard its Leave is disabled, with the same reason;
+  - answering no to the prompt: "Not left.";
+  - an account in no organization: the card says "You're not in an
+    organization yet." and offers to create one or see your invitations.
+- **Driving it:** as the member:
+
+  ```sh
+  cw org leave SLUG
+  ```
+
+  It asks "Leave NAME? You lose access to its sandboxes, secrets and
+  billing." and prints "Left NAME (SLUG).". `invitations-journey.sh` walks it
+  with the invitee, then makes its own organization for the walk to show the
+  only-owner refusal, and deletes it.
+- **Proof:** the inviter's `cw org members` no longer lists the member, and
+  the member's own `cw org list` no longer shows the organization. The only
+  owner's organization is still there after the refusal.
+- **Gotchas:**
+  - Never walk the only-owner refusal in the smoke organization: a bug would
+    leave it without an owner. The script uses `codewire-dev-invitee-walk`.
+  - Deleting an organization finishes in the background. A rerun soon after
+    can still find `codewire-dev-invitee-walk` while it is being deleted.
+- **Observed:** not yet observed.
 
 ## `invite-limits`: invitations stop at a limit and say when to try again
 

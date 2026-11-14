@@ -81,20 +81,24 @@ class Organization(_message.Message):
     def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., slug: _Optional[str] = ..., created_by: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., deletion_state: _Optional[_Union[OrganizationDeletionState, str]] = ..., deletion_operation_id: _Optional[str] = ..., deletion_failure_code: _Optional[str] = ...) -> None: ...
 
 class OrganizationMembership(_message.Message):
-    __slots__ = ("organization", "role", "assignments", "billing_plan", "billing_status", "trial_ends_at")
+    __slots__ = ("organization", "role", "assignments", "billing_plan", "billing_status", "trial_ends_at", "joined_at", "only_owner")
     ORGANIZATION_FIELD_NUMBER: _ClassVar[int]
     ROLE_FIELD_NUMBER: _ClassVar[int]
     ASSIGNMENTS_FIELD_NUMBER: _ClassVar[int]
     BILLING_PLAN_FIELD_NUMBER: _ClassVar[int]
     BILLING_STATUS_FIELD_NUMBER: _ClassVar[int]
     TRIAL_ENDS_AT_FIELD_NUMBER: _ClassVar[int]
+    JOINED_AT_FIELD_NUMBER: _ClassVar[int]
+    ONLY_OWNER_FIELD_NUMBER: _ClassVar[int]
     organization: Organization
     role: OrgRole
     assignments: _containers.RepeatedScalarFieldContainer[str]
     billing_plan: str
     billing_status: str
     trial_ends_at: _timestamp_pb2.Timestamp
-    def __init__(self, organization: _Optional[_Union[Organization, _Mapping]] = ..., role: _Optional[_Union[OrgRole, str]] = ..., assignments: _Optional[_Iterable[str]] = ..., billing_plan: _Optional[str] = ..., billing_status: _Optional[str] = ..., trial_ends_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    joined_at: _timestamp_pb2.Timestamp
+    only_owner: bool
+    def __init__(self, organization: _Optional[_Union[Organization, _Mapping]] = ..., role: _Optional[_Union[OrgRole, str]] = ..., assignments: _Optional[_Iterable[str]] = ..., billing_plan: _Optional[str] = ..., billing_status: _Optional[str] = ..., trial_ends_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., joined_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., only_owner: _Optional[bool] = ...) -> None: ...
 
 class OrgMember(_message.Message):
     __slots__ = ("id", "org_id", "user_id", "role", "email", "name", "image", "assignments", "created_at")

@@ -65,7 +65,7 @@ cw org member rm someone@example.com --org my-org
 ```
 
 - an admin cannot promote anyone to owner or change another admin or owner;
-- an owner cannot be removed, and the last owner cannot be demoted;
+- no one removes an owner, and the last owner cannot be demoted;
 - a removed member loses access to the organization and its environments at
   once; invite them again to bring them back.
 
@@ -87,7 +87,9 @@ or a user with an `owner` grant.
 
 ## Leave or delete an organization
 
-To leave an organization, remove yourself with
-`cw org member rm YOUR_EMAIL --org SLUG`; an owner cannot leave this way.
-Only an owner can delete the organization, with `cw org delete SLUG`, which
-asks you to type its name.
+To leave an organization, run `cw org leave SLUG`. It asks first, and you
+lose access to the organization's sandboxes, secrets and billing at once. An
+owner can leave while another owner remains; the last owner is refused, so
+make someone else an owner first, or delete the organization. Only an owner
+can delete the organization, with `cw org delete SLUG`, which asks you to
+type its name.

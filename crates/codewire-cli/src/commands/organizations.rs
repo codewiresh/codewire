@@ -22,6 +22,8 @@ pub(crate) enum OrgCommand {
     Accept(OrgAcceptArgs),
     #[command(about = "List an organization's members")]
     Members(OrgMembersArgs),
+    #[command(about = "Leave an organization")]
+    Leave(OrgLeaveArgs),
     #[command(about = "Manage an organization's members")]
     Member {
         #[command(subcommand)]
@@ -51,6 +53,17 @@ pub(crate) struct OrgAcceptArgs {
         help = "The organization's slug, name or ID, as `cw org invitations` lists it"
     )]
     pub(super) org: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct OrgLeaveArgs {
+    #[arg(
+        value_name = "ID_OR_SLUG",
+        help = "The organization's ID or slug, as `cw org list` shows it"
+    )]
+    pub(super) org: String,
+    #[arg(long, help = "Skip confirmation prompt")]
+    pub(super) yes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -184,6 +197,7 @@ pub(crate) async fn handle_org_command(
             let members = client.list_members(&org_id).await.context("list members")?;
             print_members(&members, args.output)?;
         }
+        OrgCommand::Leave(args) => leave(&client, &platform, &paths, args).await?,
         OrgCommand::Member {
             command: OrgMemberCommand::Rm(args),
         } => remove(&client, &platform, args).await?,
@@ -342,6 +356,59 @@ async fn invite(
         report_invitation_email(client, &org_id, &created).await
     );
     Ok(())
+}
+
+/// `cw org leave`: confirms, then removes the caller's own membership. The
+/// server refuses the organization's last owner (#4519). Leaving the saved
+/// default organization clears the default.
+async fn leave(
+    client: &OrganizationClient,
+    platform: &config::ResolvedPlatformConfig,
+    paths: &ResolvePaths,
+    args: OrgLeaveArgs,
+) -> anyhow::Result<()> {
+    let user =
+        current_platform_user(&codewire_client(platform)?, &platform.oauth_client()?).await?;
+    let confirm = |org: &OrgWithRole| {
+        Ok(args.yes
+            || prompt_confirm_default_no(&format!(
+                "Leave {}? You lose access to its sandboxes, secrets and billing.",
+                org.name
+            ))?)
+    };
+    let Some(org) = leave_organization(client, &args.org, &user.id, confirm).await? else {
+        eprintln!("Not left.");
+        return Ok(());
+    };
+    if let Ok(mut saved) = config::load_platform_config(&paths.platform_config_dir)
+        && config::same_server_url(&saved.server_url, &platform.server_url)
+        && saved.default_org == org.id
+    {
+        saved.default_org.clear();
+        config::save_platform_config(&paths.platform_config_dir, &saved).context("save config")?;
+    }
+    eprintln!("Left {} ({}).", org.name, org.slug);
+    Ok(())
+}
+
+/// Leaves `org` (an ID or slug) as `user_id` once `confirm` agrees, and
+/// returns the organization left, or `None` when declined.
+async fn leave_organization(
+    client: &OrganizationClient,
+    org: &str,
+    user_id: &str,
+    confirm: impl FnOnce(&OrgWithRole) -> anyhow::Result<bool>,
+) -> anyhow::Result<Option<OrgWithRole>> {
+    let orgs = client.list_orgs().await.context("list orgs")?;
+    let org = select_org(&orgs, Some(org))?.clone();
+    if !confirm(&org)? {
+        return Ok(None);
+    }
+    client
+        .remove_member(&org.id, user_id)
+        .await
+        .context("leave")?;
+    Ok(Some(org))
 }
 
 /// `cw org member rm`: confirms, then removes the member.

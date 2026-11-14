@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Walk the invite, accept and remove steps of docs/journeys/invitations.md on
+# Walk the invite, accept, remove and leave steps of docs/journeys/invitations.md on
 # Dev with two synthetic identities and no person: the Dev smoke identity
 # (organization codewire-dev-smoke) invites the synthetic invitee
 # (provision-dev-invitee-user.sh), the invitee signs in through `cw login`'s
@@ -28,7 +28,7 @@ usage() {
 Usage:
   CW_BIN=/path/to/cw scripts/runtime/dev/invitations-journey.sh
 
-Runs invite-send, invite-accept and invite-remove of docs/journeys/invitations.md
+Runs invite-send, invite-accept, invite-remove and org-leave of docs/journeys/invitations.md
 on Dev as the smoke identity (inviter) and the synthetic invitee, prints each
 command with what it showed, and revokes every invitation it made. Needs the
 workstation OpenBao access client, as the smoke wrapper does.
@@ -178,7 +178,32 @@ out="$(inviter org members --org "$ORG_SLUG")"; printf '%s\n' "$out"
 out="$(invitee org list 2>&1 || true)"; printf '%s\n' "$out"
 ! grep -q "$ORG_SLUG" <<<"$out" || die "invite-remove: the invitee still sees $ORG_SLUG"
 
+# org-leave (#4519): the invitee joins again and leaves by itself. Then, as the
+# only owner of an organization it makes for the walk, it is refused, and that
+# organization is deleted. The smoke organization's owner never tries to leave.
+out="$(inviter org invite "$INVITEE_EMAIL" --role member --org "$ORG_SLUG" 2>&1)"; printf '%s\n' "$out"
+grep -q "^Invitation email sent to $INVITEE_EMAIL" <<<"$out" || die 'org-leave: the second invitation was not sent'
+out="$(invitee org accept "$ORG_SLUG" 2>&1)"; printf '%s\n' "$out"
+grep -q "^Joined .* ($ORG_SLUG) as member\.$" <<<"$out" || die 'org-leave: cw org accept did not join'
+out="$(invitee org leave "$ORG_SLUG" --yes 2>&1)"; printf '%s\n' "$out"
+grep -q "^Left .* ($ORG_SLUG)\.$" <<<"$out" || die 'org-leave: cw org leave did not leave'
+out="$(inviter org members --org "$ORG_SLUG")"; printf '%s\n' "$out"
+! grep -qF "$INVITEE_EMAIL" <<<"$out" || die 'org-leave: the invitee is still listed'
+out="$(invitee org list 2>&1 || true)"; printf '%s\n' "$out"
+! grep -q "$ORG_SLUG" <<<"$out" || die "org-leave: the invitee still sees $ORG_SLUG"
+
+readonly OWN_SLUG="codewire-dev-invitee-walk"
+if ! invitee org list 2>&1 | grep -q "$OWN_SLUG"; then
+  invitee org create "Codewire Dev invitee walk" --slug "$OWN_SLUG"
+fi
+out="$(invitee org leave "$OWN_SLUG" --yes 2>&1 || true)"; printf '%s\n' "$out"
+grep -q 'make someone else an owner first, or delete the organization' <<<"$out" ||
+  die 'org-leave: the only owner was not refused'
+out="$(invitee org list 2>&1 || true)"; printf '%s\n' "$out"
+grep -q "$OWN_SLUG" <<<"$out" || die 'org-leave: the refused owner lost its organization'
+invitee org delete "$OWN_SLUG" --yes
+
 revoke_walk_invitations
 invitee logout >/dev/null 2>&1 || true
 curl -sS --max-time 30 -o /dev/null -b "$WORK/cookies" -H "Origin: $SERVER" -X POST "$SERVER/api/auth/sign-out" || true
-log 'PASS invite-send invite-accept invite-remove; secret_values_printed=false'
+log 'PASS invite-send invite-accept invite-remove org-leave; secret_values_printed=false'

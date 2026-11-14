@@ -488,6 +488,11 @@ fn proto_membership(membership: OrgWithRole) -> AppResult<OrganizationMembership
         .as_deref()
         .map(proto_timestamp)
         .transpose()?;
+    let joined_at = membership
+        .joined_at
+        .as_deref()
+        .map(proto_timestamp)
+        .transpose()?;
     Ok(OrganizationMembership {
         organization: Some(organization).into(),
         role: proto_role(&membership.role)?.into(),
@@ -495,6 +500,8 @@ fn proto_membership(membership: OrgWithRole) -> AppResult<OrganizationMembership
         billing_plan: membership.billing_plan,
         billing_status: membership.billing_status,
         trial_ends_at: trial_ends_at.into(),
+        joined_at: joined_at.into(),
+        only_owner: membership.only_owner,
         ..Default::default()
     })
 }

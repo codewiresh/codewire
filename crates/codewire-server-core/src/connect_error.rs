@@ -226,7 +226,8 @@ fn connect_code_for(status: StatusCode, reason: Option<&str>) -> ConnectCode {
             | "no_organizations"
             | "organization_not_available"
             | "organization_not_selected"
-            | "email_not_verified",
+            | "email_not_verified"
+            | "last_owner",
         ) => {
             return ConnectCode::FailedPrecondition;
         }
@@ -476,6 +477,16 @@ mod tests {
                     StatusCode::BAD_REQUEST,
                     "email_not_verified",
                     "verify your email address before inviting members",
+                ),
+                ConnectCode::FailedPrecondition,
+            ),
+            // The last owner leaving (#4519) is a precondition the caller can
+            // change: make someone else an owner, or delete the organization.
+            (
+                coded(
+                    StatusCode::BAD_REQUEST,
+                    "last_owner",
+                    "you are the organization's only owner; make someone else an owner first, or delete the organization",
                 ),
                 ConnectCode::FailedPrecondition,
             ),
