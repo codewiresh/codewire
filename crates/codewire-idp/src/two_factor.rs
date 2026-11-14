@@ -33,6 +33,10 @@ use crate::auth_session::{
 
 mod replacement;
 
+pub(crate) use replacement::{
+    Proof, ProofKeys, ProofRequest, account_locked, fresh_proof, malformed, proof_rejected,
+    validate_proof_request,
+};
 pub use replacement::{TwoFactorReplacementBounds, replacement_router};
 
 /// TOTP period in seconds. Steps are `unix_time / TOTP_PERIOD_SECS`.

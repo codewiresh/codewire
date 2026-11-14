@@ -580,6 +580,7 @@ async fn main() -> anyhow::Result<()> {
         confidential_storage: confidential_storage.clone(),
         temporal_trigger: temporal_trigger.clone(),
         credit_enforcement,
+        unverified_signup_purge: worker::unverified_purge::UnverifiedSignupPurge::from_env()?,
     });
 
     // #4426: SIGTERM, which a rollout sends only after the preStop delay has

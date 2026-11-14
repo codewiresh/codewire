@@ -1289,3 +1289,285 @@ async fn concurrent_proofs_with_one_code_have_exactly_one_winner() {
     assert_eq!(rejected, 1);
     cleanup(&pool, &user.email).await;
 }
+
+// An admin's account deletion (#4541) takes the same fresh proof.
+
+const ADMIN_DELETE: &str = "/api/admin/accounts";
+
+fn admin_delete_app(pool: PgPool) -> Router {
+    codewire_idp::account_admin_delete::router(
+        pool.clone(),
+        SESSION_SECRET.into(),
+        ORIGIN.into(),
+        AuthState { pool },
+    )
+    .layer(axum::Extension(
+        codewire_idp::two_factor::TwoFactorReplacementBounds {
+            request: HANG,
+            statement: HANG,
+        },
+    ))
+}
+
+/// An enrolled user made a global admin.
+async fn enrolled_admin(pool: &PgPool, apps: &Apps, label: &str) -> Enrolled {
+    let admin = enrolled(pool, apps, label).await;
+    sqlx::query("UPDATE users SET is_admin = true WHERE id = $1")
+        .bind(&admin.user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    admin
+}
+
+/// An unverified, disabled access request, as an email sign-up without an
+/// invite code leaves it.
+async fn access_request(pool: &PgPool, label: &str) -> (String, String) {
+    let email = format!("{label}@two-factor-replacement.test");
+    cleanup(pool, &email).await;
+    let id = format!("u_{label}");
+    sqlx::query(
+        "INSERT INTO users (id, email, name, email_verified, enabled, access_reason) \
+         VALUES ($1, $2, 'Waiting', false, false, 'Build things')",
+    )
+    .bind(&id)
+    .bind(&email)
+    .execute(pool)
+    .await
+    .unwrap();
+    (id, email)
+}
+
+async fn delete_as(
+    app: &Router,
+    admin: &Enrolled,
+    target: &str,
+    confirm_email: &str,
+    proof: &str,
+) -> Response {
+    call(
+        app,
+        "POST",
+        &format!("{ADMIN_DELETE}/{target}/delete"),
+        Call {
+            cookie: Some(&admin.session),
+            origin: Some(ORIGIN),
+            ..Default::default()
+        },
+        json!({"confirm_email": confirm_email, "password": PASSWORD, "proof": proof}),
+    )
+    .await
+}
+
+async fn deletion_of(pool: &PgPool, user_id: &str) -> Option<(String, Option<String>, bool)> {
+    sqlx::query_as(
+        "SELECT initiator, actor_user_id, notify_email FROM account_deletion_operations \
+         WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+}
+
+async fn admin_cleanup(pool: &PgPool, user_id: &str, email: &str) {
+    for statement in [
+        "DELETE FROM account_deletion_operations WHERE user_id = $1",
+        "DELETE FROM audit_logs WHERE target_user_id = $1",
+    ] {
+        sqlx::query(statement)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    cleanup(pool, email).await;
+}
+
+#[tokio::test]
+async fn an_admin_with_a_fresh_code_deletes_an_access_request_once() {
+    let Some(pool) = pool().await else { return };
+    let apps = apps(&pool);
+    let app = admin_delete_app(pool.clone());
+    let admin = enrolled_admin(&pool, &apps, "admin-deletes").await;
+    let (target, target_email) = access_request(&pool, "admin-deletes-target").await;
+
+    let code = code_at(&admin.secret, &admin.email, 0);
+    let deleted = delete_as(&app, &admin, &target, &target_email.to_uppercase(), &code).await;
+    assert_eq!(deleted.status, 200, "{}", deleted.body);
+    assert!(
+        deleted.body["operationId"]
+            .as_str()
+            .unwrap()
+            .starts_with("account-deletion/")
+    );
+    assert_eq!(
+        deletion_of(&pool, &target).await,
+        Some(("admin".into(), Some(admin.user_id.clone()), false))
+    );
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_logs WHERE user_id = $1 AND target_user_id = $2 \
+         AND action IN ('admin.account.deletion_requested', 'account.deletion_requested')",
+    )
+    .bind(&admin.user_id)
+    .bind(&target)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 2);
+
+    // The same time step is spent: a second request with it is refused.
+    let (other, other_email) = access_request(&pool, "admin-deletes-other").await;
+    let replayed = delete_as(&app, &admin, &other, &other_email, &code).await;
+    assert_eq!(replayed.status, 422, "{}", replayed.body);
+    assert_eq!(deletion_of(&pool, &other).await, None);
+
+    admin_cleanup(&pool, &target, &target_email).await;
+    admin_cleanup(&pool, &other, &other_email).await;
+    cleanup(&pool, &admin.email).await;
+}
+
+#[tokio::test]
+async fn an_admin_delete_is_refused_without_proof_authority_or_the_address() {
+    let Some(pool) = pool().await else { return };
+    let apps = apps(&pool);
+    let app = admin_delete_app(pool.clone());
+    let admin = enrolled_admin(&pool, &apps, "admin-refused").await;
+    let other_admin = enrolled_admin(&pool, &apps, "admin-refused-other").await;
+    let member = enrolled(&pool, &apps, "admin-refused-member").await;
+    let (target, target_email) = access_request(&pool, "admin-refused-target").await;
+
+    let wrong = delete_as(
+        &app,
+        &admin,
+        &target,
+        &target_email,
+        &wrong_code(&admin.secret, &admin.email),
+    )
+    .await;
+    assert_eq!(wrong.status, 422, "wrong code: {}", wrong.body);
+    let failures: i32 =
+        sqlx::query_scalar("SELECT COALESCE(failed_login_attempts, 0) FROM users WHERE id = $1")
+            .bind(&admin.user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(failures, 1, "a wrong code counts against the lockout");
+
+    let not_admin = delete_as(
+        &app,
+        &member,
+        &target,
+        &target_email,
+        &code_at(&member.secret, &member.email, 0),
+    )
+    .await;
+    assert_eq!(not_admin.status, 403, "not an admin: {}", not_admin.body);
+
+    let own = delete_as(
+        &app,
+        &admin,
+        &admin.user_id,
+        &admin.email,
+        &code_at(&admin.secret, &admin.email, 0),
+    )
+    .await;
+    assert_eq!(own.status, 400, "own account: {}", own.body);
+
+    forget_steps(&pool, &admin.user_id).await;
+    let another_admin = delete_as(
+        &app,
+        &admin,
+        &other_admin.user_id,
+        &other_admin.email,
+        &code_at(&admin.secret, &admin.email, 0),
+    )
+    .await;
+    assert_eq!(
+        another_admin.status, 400,
+        "another admin: {}",
+        another_admin.body
+    );
+    assert!(
+        another_admin.body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("demoted")),
+        "another admin: {}",
+        another_admin.body
+    );
+
+    forget_steps(&pool, &admin.user_id).await;
+    let wrong_address = delete_as(
+        &app,
+        &admin,
+        &target,
+        "someone@example.test",
+        &code_at(&admin.secret, &admin.email, 0),
+    )
+    .await;
+    assert_eq!(
+        wrong_address.status, 400,
+        "wrong address: {}",
+        wrong_address.body
+    );
+
+    for user in [&target, &other_admin.user_id] {
+        assert_eq!(deletion_of(&pool, user).await, None, "{user}");
+    }
+    admin_cleanup(&pool, &target, &target_email).await;
+    for enrolled in [&admin, &other_admin, &member] {
+        cleanup(&pool, &enrolled.email).await;
+    }
+}
+
+#[tokio::test]
+async fn an_admin_may_ask_for_ten_deletions_an_hour() {
+    let Some(pool) = pool().await else { return };
+    let apps = apps(&pool);
+    let app = admin_delete_app(pool.clone());
+    let admin = enrolled_admin(&pool, &apps, "admin-capped").await;
+    let (target, target_email) = access_request(&pool, "admin-capped-target").await;
+    let key = codewire_server_core::rate_limit::ADMIN_ACCOUNT_DELETE.key(&admin.user_id);
+    let now_ms: i64 =
+        sqlx::query_scalar("SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO rate_limit (id, key, count, last_request) VALUES ($1, $2, 10, $3) \
+         ON CONFLICT (key) DO UPDATE SET count = 10, last_request = $3",
+    )
+    .bind(format!("rl_{}", admin.user_id))
+    .bind(&key)
+    .bind(now_ms)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let capped = delete_as(
+        &app,
+        &admin,
+        &target,
+        &target_email,
+        &code_at(&admin.secret, &admin.email, 0),
+    )
+    .await;
+    assert_eq!(capped.status, 429, "{}", capped.body);
+    assert_eq!(capped.body["code"], "rate_limited", "{}", capped.body);
+    assert_eq!(deletion_of(&pool, &target).await, None);
+    let step: Option<i64> =
+        sqlx::query_scalar("SELECT last_totp_step FROM two_factor WHERE user_id = $1")
+            .bind(&admin.user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(step, None, "a capped request spends no code");
+
+    sqlx::query("DELETE FROM rate_limit WHERE key = $1")
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .unwrap();
+    admin_cleanup(&pool, &target, &target_email).await;
+    cleanup(&pool, &admin.email).await;
+}

@@ -61,6 +61,17 @@ pub const SNAPSHOT_CREATE: Limit = Limit {
     per_user: true,
 };
 
+/// Account deletions one admin may ask for in an hour (#4541). Not in
+/// [`LIMITS`], so no admin setting or override can raise it: it bounds what a
+/// stolen admin session can do.
+pub const ADMIN_ACCOUNT_DELETE: Limit = Limit {
+    name: "admin_account_delete",
+    key_prefix: "admin_account_delete",
+    window_secs: 3_600,
+    default_max: 10,
+    per_user: true,
+};
+
 /// Email and provider sign-ups across the whole site (#3297), counted before
 /// any other check. A per-address limit follows once nothing but the edge and
 /// the dashboard can write the counted address.
@@ -207,6 +218,24 @@ pub async fn take(
 
 /// The database's current time: `clock_timestamp()`, which advances within a
 /// transaction, unlike `now()`.
+/// Counts one request against `user_id` at the limit's own count, with no
+/// setting or override applied: for a cap no admin may raise.
+pub async fn take_fixed_for_user(
+    connection: &mut PgConnection,
+    limit: &Limit,
+    user_id: &str,
+) -> Result<Decision, sqlx::Error> {
+    let now = database_now(&mut *connection).await?;
+    consume(
+        connection,
+        &limit.key(user_id),
+        limit.window_secs,
+        limit.default_max,
+        now,
+    )
+    .await
+}
+
 async fn database_now(connection: &mut PgConnection) -> Result<DateTime<Utc>, sqlx::Error> {
     sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(connection)

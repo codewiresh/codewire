@@ -160,7 +160,13 @@ impl AccountDeletionBillingActivities {
             AccountDeletionPhase::Completed => return Ok(()),
             _ => return Err(account_deletion_error("the user is not deleted yet")),
         }
-        match operation.email.as_deref() {
+        // No mail goes to an address nobody verified: a purged sign-up, or
+        // an admin's deletion of an unverified account (#4541).
+        match operation
+            .email
+            .as_deref()
+            .filter(|_| operation.notify_email)
+        {
             Some(address) if self.email.is_configured() => self
                 .email
                 .send_account_deleted(address)

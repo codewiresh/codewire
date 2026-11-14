@@ -28,6 +28,13 @@ use uuid::Uuid;
 use crate::AppError;
 use crate::org_deletion::begin_organization_deletion_in;
 
+mod purge;
+
+pub use purge::{
+    Holding, KeptReason, PurgeMode, PurgeOutcome, UNVERIFIED_SIGNUP_LIFETIME_SECS,
+    purge_unverified_signup, unverified_signup_candidates, unverified_signups_kept_for_holdings,
+};
+
 /// The disabled user that rows naming a deleted user are moved to. Created by
 /// migration 0007; it has no credential and can never sign in.
 pub const DELETED_USER_ID: &str = "deleted-user";
@@ -96,6 +103,13 @@ pub struct AccountDeletionOperation {
     pub personal_organization_ids: Vec<String>,
     pub stripe_customer_ids: Vec<String>,
     pub start_attempts: i32,
+    /// `self`, `admin` or `unverified_purge`.
+    pub initiator: String,
+    /// Whether the "your account was deleted" mail is sent: never to an
+    /// address nobody verified.
+    pub notify_email: bool,
+    pub actor_user_id: Option<String>,
+    pub actor_email: Option<String>,
 }
 
 impl AccountDeletionOperation {
@@ -207,6 +221,96 @@ async fn plan_in(
     Ok(plan)
 }
 
+/// Who asks for an account's deletion. Each goes through the same operation
+/// and workflow; they differ in what they must prove and who is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Initiator<'a> {
+    /// The account itself, confirming with its address.
+    SelfService { confirm_email: &'a str },
+    /// A platform admin, confirming with the account's address. The caller
+    /// has already locked the admin's row and checked their second factor in
+    /// the same transaction (#4541).
+    Admin {
+        actor_user_id: &'a str,
+        confirm_email: &'a str,
+    },
+}
+
+/// The stored kind of initiator, `account_deletion_operations.initiator`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InitiatorKind {
+    SelfService,
+    Admin,
+    UnverifiedPurge,
+}
+
+impl InitiatorKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::SelfService => "self",
+            Self::Admin => "admin",
+            Self::UnverifiedPurge => "unverified_purge",
+        }
+    }
+}
+
+/// The admin who asked, as recorded on the operation and in the audit log.
+pub(crate) struct Actor {
+    pub(crate) user_id: String,
+    pub(crate) email: String,
+}
+
+/// The account row, locked for the decision.
+#[derive(FromRow)]
+pub(crate) struct LockedAccount {
+    pub(crate) email: String,
+    pub(crate) enabled: bool,
+    pub(crate) is_admin: bool,
+    pub(crate) email_verified: bool,
+    /// An admin vouched for the address on a server with no mail (#4121):
+    /// proven another way, so never purged as unverified.
+    pub(crate) email_vouched: bool,
+}
+
+pub(crate) async fn lock_account(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+) -> Result<Option<LockedAccount>, AppError> {
+    sqlx::query_as::<_, LockedAccount>(
+        r#"SELECT email, enabled, COALESCE(is_admin, false) AS is_admin,
+                  COALESCE(email_verified, false) AS email_verified,
+                  email_vouched_by IS NOT NULL AS email_vouched
+           FROM users WHERE id = $1 FOR UPDATE"#,
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::from)
+}
+
+pub(crate) async fn existing_operation(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+) -> Result<Option<AccountDeletionOperation>, AppError> {
+    sqlx::query_as::<_, AccountDeletionOperation>(
+        "SELECT * FROM account_deletion_operations WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::from)
+}
+
+fn require_confirmation(confirm_email: &str, email: &str) -> Result<(), AppError> {
+    if confirm_email.trim().eq_ignore_ascii_case(email) {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(
+            "type the account's email address to confirm".into(),
+        ))
+    }
+}
+
 /// Request the deletion of the user's own account. `confirm_email` must be
 /// the account's address. Repeating the request while one is in progress
 /// returns that operation.
@@ -215,39 +319,92 @@ pub async fn begin_account_deletion(
     user_id: &str,
     confirm_email: &str,
 ) -> Result<AccountDeletionOperation, AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::from)?;
+    let operation =
+        begin_account_deletion_in(&mut tx, user_id, Initiator::SelfService { confirm_email })
+            .await?;
+    tx.commit().await.map_err(AppError::from)?;
+    Ok(operation)
+}
+
+/// Request an account's deletion inside the caller's transaction. For an
+/// admin, the admin's row is locked before the account's, so two admins
+/// acting on each other wait rather than deadlock; an admin can't delete
+/// their own account here (Settings does that) or another admin's (they are
+/// demoted first). Repeating the request while one is in progress returns
+/// that operation.
+pub async fn begin_account_deletion_in(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+    initiator: Initiator<'_>,
+) -> Result<AccountDeletionOperation, AppError> {
     if user_id == DELETED_USER_ID {
         return Err(AppError::Forbidden);
     }
-    let mut tx = pool.begin().await.map_err(AppError::from)?;
-    let user: Option<(String, bool)> =
-        sqlx::query_as("SELECT email, enabled FROM users WHERE id = $1 FOR UPDATE")
-            .bind(user_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(AppError::from)?;
-    let Some((email, enabled)) = user else {
+    let actor = match initiator {
+        Initiator::SelfService { .. } => None,
+        Initiator::Admin { actor_user_id, .. } => {
+            if actor_user_id == user_id {
+                return Err(AppError::BadRequest(
+                    "delete your own account from Settings".into(),
+                ));
+            }
+            match lock_account(tx, actor_user_id).await? {
+                Some(admin) if admin.is_admin && admin.enabled => Some(Actor {
+                    user_id: actor_user_id.to_owned(),
+                    email: admin.email,
+                }),
+                _ => return Err(AppError::Forbidden),
+            }
+        }
+    };
+    let Some(account) = lock_account(tx, user_id).await? else {
         return Err(AppError::NotFound("account not found".into()));
     };
-    if let Some(operation) = sqlx::query_as::<_, AccountDeletionOperation>(
-        "SELECT * FROM account_deletion_operations WHERE user_id = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(AppError::from)?
-    {
-        tx.commit().await.map_err(AppError::from)?;
+    if let Some(operation) = existing_operation(tx, user_id).await? {
         return Ok(operation);
     }
-    if !enabled {
-        return Err(AppError::Forbidden);
-    }
-    if !confirm_email.trim().eq_ignore_ascii_case(&email) {
-        return Err(AppError::BadRequest(
-            "type the account's email address to confirm".into(),
-        ));
-    }
+    let (kind, notify_email) = match initiator {
+        Initiator::SelfService { confirm_email } => {
+            if !account.enabled {
+                return Err(AppError::Forbidden);
+            }
+            require_confirmation(confirm_email, &account.email)?;
+            (InitiatorKind::SelfService, true)
+        }
+        Initiator::Admin { confirm_email, .. } => {
+            if account.is_admin {
+                return Err(AppError::Precondition(
+                    "an admin is demoted before their account is deleted".into(),
+                ));
+            }
+            require_confirmation(confirm_email, &account.email)?;
+            (InitiatorKind::Admin, account.email_verified)
+        }
+    };
+    request_in(
+        tx,
+        user_id,
+        &account.email,
+        kind,
+        actor.as_ref(),
+        notify_email,
+    )
+    .await
+}
 
+/// The request itself, once the initiator's checks passed: refuse while the
+/// account is the only owner of an organization with other members, begin
+/// deleting its personal organizations, end its other memberships, disable
+/// it and record the operation and the audit entry.
+pub(crate) async fn request_in(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+    email: &str,
+    kind: InitiatorKind,
+    actor: Option<&Actor>,
+    notify_email: bool,
+) -> Result<AccountDeletionOperation, AppError> {
     // Lock every organization the user belongs to, in one order, so a
     // concurrent deletion or ownership change waits for this decision.
     sqlx::query(
@@ -258,10 +415,10 @@ pub async fn begin_account_deletion(
            FOR UPDATE OF o"#,
     )
     .bind(user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(AppError::from)?;
-    let plan = plan_in(&mut tx, user_id).await?;
+    let plan = plan_in(tx, user_id).await?;
     if !plan.blocking.is_empty() {
         let names: Vec<&str> = plan.blocking.iter().map(|o| o.name.as_str()).collect();
         return Err(AppError::Precondition(
@@ -273,9 +430,10 @@ pub async fn begin_account_deletion(
         ));
     }
 
+    let requested_by = actor.map_or(user_id, |actor| actor.user_id.as_str());
     let mut stripe_customer_ids = Vec::new();
     for organization in &plan.personal {
-        begin_organization_deletion_in(&mut tx, &organization.id, user_id).await?;
+        begin_organization_deletion_in(tx, &organization.id, requested_by).await?;
         if let Some(customer) = &organization.stripe_customer_id {
             stripe_customer_ids.push(customer.clone());
         }
@@ -287,7 +445,7 @@ pub async fn begin_account_deletion(
         sqlx::query("DELETE FROM org_members WHERE org_id = $1 AND user_id = $2")
             .bind(&organization.id)
             .bind(user_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(AppError::from)?;
     }
@@ -296,7 +454,7 @@ pub async fn begin_account_deletion(
     // API keys, in this transaction.
     sqlx::query("UPDATE users SET enabled = false, updated_at = NOW() WHERE id = $1")
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(AppError::from)?;
 
@@ -305,32 +463,45 @@ pub async fn begin_account_deletion(
     let operation = sqlx::query_as::<_, AccountDeletionOperation>(
         r#"
         INSERT INTO account_deletion_operations
-            (id, user_id, workflow_id, email, personal_organization_ids, stripe_customer_ids)
-        VALUES ($1, $2, $1, $3, $4, $5)
+            (id, user_id, workflow_id, email, personal_organization_ids, stripe_customer_ids,
+             initiator, notify_email, actor_user_id, actor_email)
+        VALUES ($1, $2, $1, $3, $4, $5, $6, $7, $8, $9)
         RETURNING *
         "#,
     )
     .bind(&operation_id)
     .bind(user_id)
-    .bind(&email)
+    .bind(email)
     .bind(&personal_ids)
     .bind(&stripe_customer_ids)
-    .fetch_one(&mut *tx)
+    .bind(kind.as_str())
+    .bind(notify_email)
+    .bind(actor.map(|actor| actor.user_id.as_str()))
+    .bind(actor.map(|actor| actor.email.as_str()))
+    .fetch_one(&mut **tx)
     .await
     .map_err(AppError::from)?;
 
+    // The account's own request names it as the actor, as before; an admin's
+    // names the admin and targets the account; the purge has no actor.
+    let (audit_user, audit_target) = match kind {
+        InitiatorKind::SelfService => (Some(user_id), None),
+        InitiatorKind::Admin => (actor.map(|actor| actor.user_id.as_str()), Some(user_id)),
+        InitiatorKind::UnverifiedPurge => (None, Some(user_id)),
+    };
     insert_audit(
-        &mut tx,
+        tx,
         DELETION_REQUESTED_ACTION,
-        user_id,
+        audit_user,
+        audit_target,
         serde_json::json!({
             "operation_id": operation_id,
+            "initiator": kind.as_str(),
             "personal_organizations": plan.personal.len(),
             "shared_memberships": plan.shared.len(),
         }),
     )
     .await?;
-    tx.commit().await.map_err(AppError::from)?;
     Ok(operation)
 }
 
@@ -624,6 +795,14 @@ pub async fn finalize_account_deletion_database(
             .await
             .map_err(AppError::from)?;
     }
+    // Verification and reset links are keyed by address or user id, with no
+    // foreign key; none outlives the account, as its address is free again.
+    sqlx::query("DELETE FROM verifications WHERE identifier = $1 OR lower(identifier) = lower($2)")
+        .bind(&user_id)
+        .bind(operation.email.as_deref().unwrap_or_default())
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::from)?;
     let removed = sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(&user_id)
         .execute(&mut *tx)
@@ -638,7 +817,8 @@ pub async fn finalize_account_deletion_database(
     insert_audit(
         &mut tx,
         DELETED_ACTION,
-        DELETED_USER_ID,
+        Some(DELETED_USER_ID),
+        None,
         serde_json::json!({
             "operation_id": operation_id,
             "personal_organizations": operation.personal_organization_ids.len(),
@@ -702,16 +882,18 @@ async fn set_phase(
 async fn insert_audit(
     tx: &mut Transaction<'_, Postgres>,
     action: &str,
-    user_id: &str,
+    user_id: Option<&str>,
+    target_user_id: Option<&str>,
     metadata: serde_json::Value,
 ) -> Result<(), AppError> {
     sqlx::query(
-        r#"INSERT INTO audit_logs (id, timestamp, action, user_id, metadata, severity)
-           VALUES ($1, NOW(), $2, $3, $4, 'warn')"#,
+        r#"INSERT INTO audit_logs (id, timestamp, action, user_id, target_user_id, metadata, severity)
+           VALUES ($1, NOW(), $2, $3, $4, $5, 'warn')"#,
     )
     .bind(Uuid::new_v4().to_string())
     .bind(action)
     .bind(user_id)
+    .bind(target_user_id)
     .bind(metadata)
     .execute(&mut **tx)
     .await

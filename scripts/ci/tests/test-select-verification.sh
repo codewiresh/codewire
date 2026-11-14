@@ -2736,7 +2736,7 @@ if grep -Eq 'cargo_ci build .*-p codewire-orchestration' <<<"$orchestration_buil
 fi
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'assert_passed_count "idp db_flow" "$logfile" 21' "$integration_runner"
-grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 11' "$integration_runner"
+grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 14' "$integration_runner"
 grep -qF 'selected service_connectcore && run_connect_auth_matrix' \
   "$integration_runner"
 if rg -n 'run_connectcore|CONNECTCORE_BASE_URLS|go test.*connectcore' \

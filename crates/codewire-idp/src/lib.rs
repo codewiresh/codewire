@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 pub mod access_admin;
+pub mod account_admin_delete;
 pub mod admin_bootstrap;
 pub mod auth_requests;
 pub mod auth_session;

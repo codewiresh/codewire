@@ -1711,7 +1711,7 @@ run_idp_two_factor() {
     echo "::error::idp two-factor replacement DB tests skipped"
     return 1
   fi
-  assert_passed_count "idp two-factor replacement" "$logfile" 11
+  assert_passed_count "idp two-factor replacement" "$logfile" 14
 }
 
 run_idp_rewrap_cli() {

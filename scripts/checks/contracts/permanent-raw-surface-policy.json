@@ -6,6 +6,7 @@
     "/.well-known/oauth-authorization-server",
     "/.well-known/openid-configuration",
     "/api/admin/accounts",
+    "/api/admin/accounts/{user_id}/delete",
     "/api/admin/accounts/{user_id}/enabled",
     "/api/admin/accounts/{user_id}/resend-verification",
     "/api/auth/forget-password",

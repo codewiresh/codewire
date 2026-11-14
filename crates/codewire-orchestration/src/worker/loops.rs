@@ -282,6 +282,7 @@ async fn run_reconciliation(ctx: &WorkerContext) {
     tracing::debug!("reconciler: running reconciliation cycle");
     reconcile_pending_organization_deletions(ctx).await;
     reconcile_pending_account_deletions(ctx).await;
+    super::unverified_purge::purge_unverified_signups(ctx).await;
     evict_expired_environments(ctx).await;
     stop_credit_exhausted_environments(ctx).await;
     process_graced_deletions(ctx).await;

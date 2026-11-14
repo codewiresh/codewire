@@ -96,10 +96,28 @@ struct ReplacementState {
 /// Deliberately not `Debug`: every field except the account is a secret.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProofRequest {
-    account_id: String,
-    password: String,
-    proof: String,
+pub(crate) struct ProofRequest {
+    pub(crate) account_id: String,
+    pub(crate) password: String,
+    pub(crate) proof: String,
+}
+
+/// What the fresh-proof check reads: the database and the key that
+/// encrypts the second factor. An admin's account deletion (#4541) uses the
+/// same check.
+#[derive(Clone, Copy)]
+pub(crate) struct ProofKeys<'a> {
+    pub(crate) pool: &'a PgPool,
+    pub(crate) session_secret: &'a str,
+}
+
+impl ReplacementState {
+    fn keys(&self) -> ProofKeys<'_> {
+        ProofKeys {
+            pool: &self.pool,
+            session_secret: &self.session_secret,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -155,11 +173,11 @@ pub fn replacement_router(
         })
 }
 
-fn malformed() -> AppError {
+pub(crate) fn malformed() -> AppError {
     AppError::BadRequest("Invalid two-factor request".into())
 }
 
-fn proof_rejected() -> AppError {
+pub(crate) fn proof_rejected() -> AppError {
     AppError::Coded {
         status: StatusCode::UNPROCESSABLE_ENTITY,
         code: "proof_rejected",
@@ -167,7 +185,7 @@ fn proof_rejected() -> AppError {
     }
 }
 
-fn account_locked() -> AppError {
+pub(crate) fn account_locked() -> AppError {
     AppError::Coded {
         status: StatusCode::TOO_MANY_REQUESTS,
         code: "account_locked",
@@ -240,7 +258,7 @@ fn classify_proof(proof: &str) -> ProofKind {
     }
 }
 
-fn validate_proof_request(request: &ProofRequest) -> Result<(), AppError> {
+pub(crate) fn validate_proof_request(request: &ProofRequest) -> Result<(), AppError> {
     if !valid_id(&request.account_id)
         || request.password.is_empty()
         || request.password.len() > MAX_PASSWORD_BYTES
@@ -256,14 +274,14 @@ fn rfc3339(time: DateTime<Utc>) -> String {
     time.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-struct ProvenAccount {
-    user_id: String,
+pub(crate) struct ProvenAccount {
+    pub(crate) user_id: String,
     email: String,
     session_id: String,
-    used_recovery_code: bool,
+    pub(crate) used_recovery_code: bool,
 }
 
-enum Proof {
+pub(crate) enum Proof {
     Accepted(ProvenAccount),
     /// The password or second factor was wrong; one failure was recorded.
     Rejected {
@@ -312,12 +330,12 @@ type Prepared = (Transaction<'static, Postgres>, Outcome);
 
 async fn store_recovery_codes(
     tx: &mut Transaction<'_, Postgres>,
-    state: &ReplacementState,
+    session_secret: &str,
     user_id: &str,
     codes: &[String],
 ) -> Result<(), AppError> {
     let json = serde_json::to_string(codes).map_err(|_| unavailable())?;
-    let encrypted = encrypt(&json, &state.session_secret).map_err(|_| unavailable())?;
+    let encrypted = encrypt(&json, session_secret).map_err(|_| unavailable())?;
     let updated = sqlx::query("UPDATE two_factor SET backup_codes = $2 WHERE user_id = $1")
         .bind(user_id)
         .bind(encrypted)
@@ -333,8 +351,8 @@ async fn store_recovery_codes(
 /// The shared fresh-proof check. The slow password hash is verified before
 /// the transaction so no lock is held during it; the hash is re-read under
 /// the locks and must be the one that was verified.
-async fn fresh_proof(
-    state: &ReplacementState,
+pub(crate) async fn fresh_proof(
+    keys: ProofKeys<'_>,
     statement: Duration,
     digest: &str,
     request: &ProofRequest,
@@ -351,7 +369,7 @@ async fn fresh_proof(
          WHERE session.token_hash = $1 AND session.expires_at > clock_timestamp()",
     )
     .bind(digest)
-    .fetch_optional(&state.pool)
+    .fetch_optional(keys.pool)
     .await
     .map_err(|_| unavailable())?;
     let Some((owner, verified_hash, locked_before)) = preflight else {
@@ -372,7 +390,7 @@ async fn fresh_proof(
         None => false,
     };
 
-    let mut tx = state.pool.begin().await.map_err(|_| unavailable())?;
+    let mut tx = keys.pool.begin().await.map_err(|_| unavailable())?;
     bounded_transaction_within(&mut tx, statement).await?;
     // users FOR UPDATE, then this session FOR UPDATE, then a clock check.
     let (user_id, session) = lock_account_actor(&mut tx, digest, &request.account_id, true).await?;
@@ -411,7 +429,7 @@ async fn fresh_proof(
     let password_matches =
         password_matches && current_hash.is_some() && current_hash == verified_hash;
 
-    let secret = decrypt(&encrypted_secret, &state.session_secret).map_err(|_| unavailable())?;
+    let secret = decrypt(&encrypted_secret, keys.session_secret).map_err(|_| unavailable())?;
     let mut accepted_step = None;
     let mut remaining_codes = None;
     match classify_proof(&request.proof) {
@@ -422,7 +440,7 @@ async fn fresh_proof(
         ProofKind::RecoveryCode(code) => {
             let codes = encrypted_codes
                 .as_deref()
-                .and_then(|codes| decrypt(codes, &state.session_secret).ok())
+                .and_then(|codes| decrypt(codes, keys.session_secret).ok())
                 .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
                 .unwrap_or_default();
             let mut matched = None;
@@ -454,7 +472,7 @@ async fn fresh_proof(
         record_totp_step(&mut tx, &user_id, step).await?;
     }
     if let Some(codes) = &remaining_codes {
-        store_recovery_codes(&mut tx, state, &user_id, codes).await?;
+        store_recovery_codes(&mut tx, keys.session_secret, &user_id, codes).await?;
     }
     reset_failed_attempts(&mut tx, &user_id).await?;
     Ok((
@@ -499,7 +517,7 @@ async fn prepare_start(
     let digest = cookie_digest(headers)?;
     let Json(request) = request.map_err(|_| malformed())?;
     validate_proof_request(&request)?;
-    let (mut tx, proof) = fresh_proof(state, statement, &digest, &request).await?;
+    let (mut tx, proof) = fresh_proof(state.keys(), statement, &digest, &request).await?;
     let account = match proof {
         Proof::Accepted(account) => account,
         failure => return Ok((tx, proof_failure(failure, "replace"))),
@@ -703,13 +721,19 @@ async fn prepare_regenerate(
     let digest = cookie_digest(headers)?;
     let Json(request) = request.map_err(|_| malformed())?;
     validate_proof_request(&request)?;
-    let (mut tx, proof) = fresh_proof(state, statement, &digest, &request).await?;
+    let (mut tx, proof) = fresh_proof(state.keys(), statement, &digest, &request).await?;
     let account = match proof {
         Proof::Accepted(account) => account,
         failure => return Ok((tx, proof_failure(failure, "regenerate"))),
     };
     let backup_codes = generate_backup_codes(RECOVERY_CODE_COUNT, RECOVERY_CODE_LENGTH);
-    store_recovery_codes(&mut tx, state, &account.user_id, &backup_codes).await?;
+    store_recovery_codes(
+        &mut tx,
+        &state.session_secret,
+        &account.user_id,
+        &backup_codes,
+    )
+    .await?;
     Ok((
         tx,
         Outcome::Regenerated {

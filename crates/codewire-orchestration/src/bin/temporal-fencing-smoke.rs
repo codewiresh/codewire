@@ -1713,6 +1713,10 @@ mod enabled {
             confidential_storage: None,
             temporal_trigger: trigger,
             credit_enforcement: Default::default(),
+            unverified_signup_purge: worker::unverified_purge::UnverifiedSignupPurge {
+                setting: worker::unverified_purge::PurgeSetting::Off,
+                ..Default::default()
+            },
         });
         codewire_orchestration::temporal::run_temporal_worker(
             context,

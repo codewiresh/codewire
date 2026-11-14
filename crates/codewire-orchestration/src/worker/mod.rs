@@ -42,6 +42,7 @@ pub mod setup_lease;
 pub mod snapshots;
 mod start_timing;
 pub mod tenant_secret_teardown;
+pub mod unverified_purge;
 pub mod warm_pool;
 pub mod workspace_binding;
 
@@ -99,6 +100,8 @@ pub struct WorkerContext {
     pub temporal_trigger: std::sync::Arc<crate::temporal::TemporalTrigger>,
     /// Whether this deployment stops sandboxes that ran out of credit.
     pub credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
+    /// What the purge of unverified email sign-ups does (#4541).
+    pub unverified_signup_purge: unverified_purge::UnverifiedSignupPurge,
 }
 
 impl WorkerContext {

@@ -90,6 +90,11 @@ Type your account's email address to confirm. Deleting your account:
 When the deletion is done, Codewire emails a confirmation. You can then sign
 up again with the same address.
 
+An email sign-up that never verifies its address is deleted 7 days after it
+was created, with no email, and the address can sign up again. A sign-up
+that already holds something, such as an organization membership, a
+sandbox or an API key, is never deleted this way.
+
 {% aside(kind="caution") %}
   Deleting your account cannot be undone. While you are the only owner of an
   organization with other members, the page lists it instead: make another

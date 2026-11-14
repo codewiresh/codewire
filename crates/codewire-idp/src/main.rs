@@ -208,6 +208,13 @@ async fn serve() -> anyhow::Result<()> {
         pool.clone(),
         cfg.session_secret.clone(),
         secure,
+        auth_state.clone(),
+    );
+    // An admin deletes an account with a fresh second factor (#4541).
+    let account_admin_delete = codewire_idp::account_admin_delete::router(
+        pool.clone(),
+        cfg.session_secret.clone(),
+        idp_cfg.frontend_url.clone(),
         auth_state,
     );
     // Fresh-proof authenticator replacement and recovery-code regeneration:
@@ -238,6 +245,7 @@ async fn serve() -> anyhow::Result<()> {
         .merge(oauth)
         .merge(email_password)
         .merge(access_admin)
+        .merge(account_admin_delete)
         .merge(two_factor)
         .merge(two_factor_replacement);
 

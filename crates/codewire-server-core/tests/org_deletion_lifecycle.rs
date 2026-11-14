@@ -34,6 +34,8 @@ use uuid::Uuid;
 
 #[path = "org_deletion_lifecycle/account_deletion.rs"]
 mod account_deletion;
+#[path = "org_deletion_lifecycle/account_deletion_initiators.rs"]
+mod account_deletion_initiators;
 
 /// Bounds a wait on an event, so a hang fails instead of stalling the run. It
 /// is never the expected duration: a slow CI slot can stall the test process

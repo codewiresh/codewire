@@ -199,6 +199,37 @@ a URL. `POST /api/auth/resend-verification` claims the token and sends a new
 writes `user.verification.resent` to the audit log. Nobody can ask for a link
 by typing an email address.
 
+## Account deletion by an admin or the purge
+
+An account is deleted only through the account deletion that Settings
+starts (`server-core/src/account_deletion.rs`), whoever asks (#4541):
+
+- **The purge of unverified sign-ups.** An email and password sign-up still
+  unverified 7 days after it was created is deleted (owner, 2026-11-13,
+  #4541), which frees its address. The orchestration leader runs it at most
+  once an hour, up to 100 accounts a run. `UNVERIFIED_SIGNUP_PURGE` is
+  `off`, `report` (the default: every check runs and nothing changes) or
+  `enforce`. Only a server with mail sets `enforce`: without mail no account
+  can verify, so an unverified account there is an access request waiting
+  for the admin, not an abandoned sign-up, and the self-hosted setup leaves
+  the purge in `report`. `UNVERIFIED_SIGNUP_LIFETIME_SECS` shortens the 7 days, never
+  below an hour, and is for proving the purge on Dev. It never deletes an
+  admin, an account whose address an admin vouched for on a server with no
+  mail (`email_vouched_by`, #4121), or an account that holds anything: an organization membership, a
+  sandbox it created, an API key, a user secret, or a GitHub or Google
+  sign-in. It keeps such an account and logs why. Each condition is checked
+  again in the deletion transaction with the account's row locked, so an
+  address verified meanwhile keeps its account. No mail is sent.
+- **An admin.** `POST /api/admin/accounts/{user_id}/delete` takes the
+  account's address and the admin's password with a fresh second factor:
+  the same check as replacing an authenticator. The proof locks the admin's
+  row, then the deletion locks the account's, and in that transaction the
+  actor must still be an admin and the account must not be one. An admin
+  deletes their own account from Settings, and demotes another admin before
+  deleting them. Each admin may ask for 10 deletions an hour, a count no
+  setting raises. The operation records the admin as its actor, and the
+  "account deleted" mail goes only to a verified address.
+
 ## Account access revocation
 
 `users.enabled = false` is a security revocation boundary. The disabling

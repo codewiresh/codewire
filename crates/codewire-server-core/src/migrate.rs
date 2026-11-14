@@ -45,6 +45,7 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     mod account_deletion;
+    mod account_deletion_initiator;
     mod billing_rate_cards;
     mod confidential_activation_slots;
     mod default_access_profile;
@@ -82,9 +83,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced) and 0002 to 0023.
+    // (which equals the 41-migration history it replaced) and 0002 to 0024.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "88c522b681ba7e6099b50c188c8decb8e279c058a7e7c3ab33be13b9f2450184";
+        "4ac7ad499f48d2fb422a59f1d41c800307b207a581b8369f45e59850000253e0";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -149,6 +150,8 @@ mod tests {
     const APPLIED_RATE_LIMIT_SETTINGS_CHECKSUM: &str = "577f30add81a0745385c6c74cef04e52ce2dd9057018cf5ceb9ba5841e4ea93f159c971cb80dd081225f7d4be24d18bb";
     // SHA-384 of 0023_invite_only_sign_up.sql (#4121).
     const APPLIED_INVITE_ONLY_SIGN_UP_CHECKSUM: &str = "0d29a3cd63e528e7948271c704451f4d80d7eed6b4d48127407cef12d41945163367cea5b5cb7513842c45d039558e5e";
+    // SHA-384 of 0024_account_deletion_initiator.sql (#4541).
+    const APPLIED_ACCOUNT_DELETION_INITIATOR_CHECKSUM: &str = "346922afaa78226b36b08669ec9f693fdfc3722bf0b2b377b048c0e986761526ac9eae29bc57216dfbdb9fdf7c340298";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1253,6 +1256,7 @@ mod tests {
             (21, APPLIED_ORG_INVITATION_EMAILS_CHECKSUM),
             (22, APPLIED_RATE_LIMIT_SETTINGS_CHECKSUM),
             (23, APPLIED_INVITE_ONLY_SIGN_UP_CHECKSUM),
+            (24, APPLIED_ACCOUNT_DELETION_INITIATOR_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1283,10 +1287,10 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 23
+                first.len() == 24
                     && first.iter().map(|migration| migration.0).eq([
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-                        22, 23
+                        22, 23, 24
                     ])
                     && first.iter().all(|migration| migration.2)
             );
