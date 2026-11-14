@@ -44,6 +44,20 @@ def main() -> None:
             temporary_html.write_text(normalized, encoding="utf-8")
             temporary_html.replace(html)
 
+    # The docs load no font (their CSP is font-src 'none'), but the shared
+    # design stylesheet they import declares the site's Geist Mono, so every
+    # page asked for a font its own policy refuses (#4674). The docs CSS drops
+    # that declaration and keeps the system fonts it renders with today.
+    stylesheet = args.output / "docs.css"
+    css = stylesheet.read_text(encoding="utf-8")
+    font_face = re.compile(r"@font-face\{[^}]*\}")
+    declarations = font_face.findall(css)
+    if len(declarations) != 1 or "geist-mono" not in declarations[0]:
+        raise SystemExit(f"docs.css: expected the one Geist Mono @font-face, found {declarations}")
+    temporary_css = stylesheet.with_suffix(".css.tmp")
+    temporary_css.write_text(font_face.sub("", css), encoding="utf-8")
+    temporary_css.replace(stylesheet)
+
 
 if __name__ == "__main__":
     main()

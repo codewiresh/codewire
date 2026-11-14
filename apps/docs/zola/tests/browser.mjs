@@ -89,12 +89,18 @@ try {
   await mobile.keyboard.press("Escape");
   ensure(await toggle.getAttribute("aria-expanded") === "false", "Escape did not close mobile navigation");
 
-  // A light system turns the docs light: the white wordmark is inverted, and code takes the light syntax theme.
+  // A light system turns the docs light: the white wordmark takes the design tokens' light logo filter, and code takes
+  // the light syntax theme.
   const light = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: "light" });
   light.on("pageerror", (error) => browserErrors.push(error.message));
   await light.goto(new URL("docs/environments/codewire-yaml", baseUrl.origin + "/").href, { waitUntil: "networkidle" });
   ensure(await light.locator("body").evaluate((body) => getComputedStyle(body).backgroundColor) === "rgb(255, 255, 255)", "light docs background is not white");
-  ensure(await light.locator(".docs-brand img").evaluate((img) => getComputedStyle(img).filter) === "invert(1)", "light docs wordmark is not inverted");
+  const { lightLogoFilter, wordmarkFilter } = await light.locator(".docs-brand img").evaluate((img) => ({
+    lightLogoFilter: getComputedStyle(document.documentElement).getPropertyValue("--light-logo-filter").trim(),
+    wordmarkFilter: getComputedStyle(img).filter,
+  }));
+  ensure(lightLogoFilter !== "" && lightLogoFilter !== "none", `the light logo filter token leaves the white wordmark white: ${lightLogoFilter || "unset"}`);
+  ensure(wordmarkFilter === lightLogoFilter, `light docs wordmark filter ${wordmarkFilter} is not the light logo filter token ${lightLogoFilter}`);
   ensure(await light.locator("pre.z-code").first().evaluate((pre) => getComputedStyle(pre).color) === "rgb(36, 41, 46)", "light docs code does not use the light syntax theme");
   await light.screenshot({ path: resolve(screenshotDirectory, "docs-light-1440x900.png") });
   await light.close();
