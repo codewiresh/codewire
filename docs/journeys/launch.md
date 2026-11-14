@@ -1,6 +1,8 @@
 # The launch walk
 
-The public launch (#4370) is done when a new account, with no help from us,
+The launch (#4370) is a closed beta with access review on, on 2026-11-26
+(owner, 2026-11-14, #3013: "i am doing a launch as a closed beta with review
+for now"). It is done when a newly approved account, with no help from us,
 walks these steps on Production and every one is observed working. This file
 is the index of that walk: the order, what the launch asks of each step,
 where each step's commands and observations are kept, and where the whole
@@ -52,14 +54,19 @@ Production and no release, so it is shown as a report, not as an observation.
 - Step 11 needs an Apple silicon Mac on the current macOS and one on the
   previous release.
 
-## 1. `launch-signup`: sign up, verify and start at the sign-up credit
+## 1. `launch-signup`: request access, get approved, sign in and start at the sign-up credit
 
 Issues: #4062 (sign in with GitHub or Google), #4481 (an email sign-up is
 verified by the person who chose its password), #3297 (sign-up and creation
 rate limits), #3381 (compute credit; the sign-up credit is #3989).
 
-The launch asks for sign-up with GitHub, with Google, and with an email and
-password, with no access review, and a verified email. The new organization
+The launch asks for an access request with GitHub, with Google, or with an
+email and password and a verified email; an admin approves it; then the
+person signs in. Production and Dev stay in review mode (owner, 2026-11-14,
+#3013: "Stay in review"; this replaces the 2026-11-13 plan to turn review
+off at launch). The review steps for an email sign-up are
+[signup-and-verification.md](signup-and-verification.md),
+`signup-email-review`. The new organization
 is on the Regular rate card with whatever sign-up credit the platform is set
 to give. The email and password steps, from sign-up through verification, are
 [signup-and-verification.md](signup-and-verification.md).
@@ -76,16 +83,21 @@ to give. The email and password steps, from sign-up through verification, are
   - an identity whose email matches an existing account links only after
     that account signs in, never by the email alone;
   - an email-and-password sign-up cannot sign in until its address is
-    verified.
+    verified;
+  - every new identity, by provider or by password, cannot sign in until an
+    admin approves it, and can once approved.
 - **Driving it:**
   1. On the sign-up page choose **Continue with GitHub**, or **Continue with
      Google**, and finish at the provider; or sign up with an email and a
-     password and follow the verification email. The account is usable at
-     once: access review is off at launch (owner, 2026-11-13, #3013). If it
-     waits for review, review is still on and the step fails.
-  2. Create an organization (**New Organization** in the organization
+     password and follow the verification email. The account is usable
+     only after review: until an admin approves it, sign-in answers "You're on
+     the list." and gives no session.
+  2. An admin approves the request on the admin accounts page. The person
+     gets an email saying their access is enabled, and signing in now
+     continues.
+  3. Create an organization (**New Organization** in the organization
      switcher).
-  3. From a terminal:
+  4. From a terminal:
 
      ```sh
      cw login
