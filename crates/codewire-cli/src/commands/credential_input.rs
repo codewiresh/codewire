@@ -77,6 +77,15 @@ pub(crate) async fn handle_credentials_command(
             "supply the provider and --name NAME; profile changes also need --profile NAME and a credential selector",
         )?;
     }
+    // A list reads: it never asks where to store something. Without
+    // `--local` or `--cloud` it lists every store, each under its heading
+    // (#4594). JSON still needs one store named.
+    if globals.placement.is_none()
+        && !credential_command_json(&args.command)
+        && let Some(list) = list_command(&args.command)
+    {
+        return list_every_store(globals, args.profile, list).await;
+    }
     // The global `--local` / `--cloud` is the explicit storage choice here.
     let placement = resolve_storage_placement(
         globals.placement == Some(super::EnvironmentPlacement::Local),
@@ -96,6 +105,79 @@ pub(crate) async fn handle_credentials_command(
         super::guided_credentials::offer_assignment(globals, placement, &slot, &saved).await?;
     }
     Ok(())
+}
+
+/// The list a command asks for, as a command that can be made once per store.
+fn list_command(command: &CredentialsCommand) -> Option<fn() -> CredentialsCommand> {
+    match command {
+        CredentialsCommand::List(_) => Some(|| {
+            CredentialsCommand::List(super::CredentialListArgs {
+                output: OutputFormat::Text,
+            })
+        }),
+        CredentialsCommand::Profiles {
+            command: super::CredentialProfilesCommand::List(_),
+        } => Some(|| CredentialsCommand::Profiles {
+            command: super::CredentialProfilesCommand::List(super::CredentialListArgs {
+                output: OutputFormat::Text,
+            }),
+        }),
+        _ => None,
+    }
+}
+
+/// Lists every store under its heading. A store that can't be read says why
+/// under its heading, and the others are still listed. Signed out is an
+/// expected state; it fails only when no store could be read and one of them
+/// failed for another reason, which its heading already showed.
+async fn list_every_store(
+    globals: &Globals,
+    profile: Option<String>,
+    list: fn() -> CredentialsCommand,
+) -> anyhow::Result<()> {
+    let mut read = 0;
+    let mut failed = false;
+    for (index, (placement, heading)) in super::storage_placement::store_headings()
+        .into_iter()
+        .enumerate()
+    {
+        if index > 0 {
+            println!();
+        }
+        println!("{heading}");
+        let operation = resolve_credential_operation(profile.clone(), list(), placement)?;
+        match execute_credential_operation(globals, operation, placement).await {
+            Ok(_) => read += 1,
+            Err(error) => {
+                if signed_out(&error) {
+                    // The words of `cw ls` and `cw org list` (#4589).
+                    println!(
+                        "  {} (`{}`)",
+                        super::NOT_SIGNED_IN,
+                        super::NOT_SIGNED_IN_NEXT
+                    );
+                } else {
+                    println!("  could not be read: {error:#}");
+                    failed = true;
+                }
+            }
+        }
+    }
+    anyhow::ensure!(read > 0 || !failed, "no credential store could be read");
+    Ok(())
+}
+
+/// Whether `error` is, at any depth, having no server or no sign-in.
+fn signed_out(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<crate::config::ConfigError>(),
+            Some(
+                crate::config::ConfigError::NoPlatformServer { .. }
+                    | crate::config::ConfigError::NoPlatformToken { .. }
+            )
+        )
+    })
 }
 
 pub(super) async fn execute_credential_operation(
@@ -899,6 +981,38 @@ mod tests {
         }
     }
     use clap::Parser as _;
+
+    #[test]
+    fn a_credential_list_reads_every_store_and_never_asks_where_to_store() {
+        // #4594: lists, never writes, are listed per store.
+        let parse = |args: &[&str]| {
+            let crate::Command::Credentials(credentials) =
+                crate::Cli::try_parse_from(args).unwrap().command
+            else {
+                panic!("{args:?} is not a credentials command");
+            };
+            credentials.command
+        };
+        assert!(list_command(&parse(&["cw", "credentials", "list"])).is_some());
+        assert!(list_command(&parse(&["cw", "credentials", "profiles", "list"])).is_some());
+        assert!(list_command(&parse(&["cw", "credentials", "get", "work"])).is_none());
+        let stores = crate::commands::storage_placement::store_headings();
+        let placements: Vec<_> = stores.iter().map(|(placement, _)| *placement).collect();
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert_eq!(
+                placements,
+                [StoragePlacement::Local, StoragePlacement::Platform]
+            );
+        }
+        assert_eq!(
+            stores.last().unwrap().1,
+            "In your Codewire account (protected cloud storage)"
+        );
+        assert!(signed_out(&anyhow::Error::new(
+            crate::config::ConfigError::NoPlatformToken { cause: None }
+        )));
+        assert!(!signed_out(&anyhow::anyhow!("connection refused")));
+    }
 
     #[test]
     fn hidden_terminal_cancel_never_returns_partial_material() {

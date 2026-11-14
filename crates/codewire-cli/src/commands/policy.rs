@@ -147,22 +147,12 @@ pub(crate) async fn handle_policy_command(
             "platform network policies are not available yet; keep this policy on this host with --local"
         ),
         Some(EnvironmentPlacement::Local) => {}
+        // Policies have one store, this computer's, so there is nothing to
+        // ask: a list names the store it read (#4594).
         None => {
-            super::guided::require_available(
-                if args.command.json() {
-                    OutputFormat::Json
-                } else {
-                    OutputFormat::Text
-                },
-                "select the policy store: `cw --local policy ...`",
-            )?;
-            super::guided::choose(
-                "Where should Codewire store this policy?",
-                &[super::guided::Choice::new(
-                    "On this computer",
-                    "Local policy store; cloud policy storage is not available yet",
-                )],
-            )?;
+            if !args.command.json() && matches!(args.command, PolicyCommand::List(_)) {
+                eprintln!("Policies on this computer (cloud policy storage is not available yet):");
+            }
         }
     }
     handle_local_policy_command(args.command, guided_create).await

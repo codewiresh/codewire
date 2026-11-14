@@ -99,14 +99,37 @@ fn selected_storage(
     }
 }
 
+/// Each store a list reads, with the heading it is listed under (#4594): this
+/// computer's, where local storage runs here, then the account's.
+pub(crate) fn store_headings() -> Vec<(StoragePlacement, String)> {
+    let mut stores = Vec::new();
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        let backend = ResolvePaths::from_env(&OsEnv)
+            .map_err(anyhow::Error::from)
+            .and_then(|paths| {
+                super::credential_input::configured_local_credential_store(&paths.mesh_data_dir)
+            })
+            .map_err(|error| error.to_string());
+        let detail = match backend {
+            Ok(backend) => backend_label(backend).to_owned(),
+            Err(error) => format!("unavailable: {error}"),
+        };
+        stores.push((
+            StoragePlacement::Local,
+            format!("{} ({detail})", local_label()),
+        ));
+    }
+    stores.push((
+        StoragePlacement::Platform,
+        "In your Codewire account (protected cloud storage)".to_owned(),
+    ));
+    stores
+}
+
 fn storage_choices(backend: Result<ProtectedStoreBackend, &String>) -> Vec<Choice> {
     vec![
         Choice::new(
-            if cfg!(target_os = "macos") {
-                "On this Mac"
-            } else {
-                "On this computer"
-            },
+            local_label(),
             match backend {
                 Ok(backend) => backend_label(backend).to_owned(),
                 Err(error) => format!("Unavailable: {error}"),
@@ -114,6 +137,14 @@ fn storage_choices(backend: Result<ProtectedStoreBackend, &String>) -> Vec<Choic
         ),
         Choice::new("In your Codewire account", "Protected cloud storage"),
     ]
+}
+
+fn local_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "On this Mac"
+    } else {
+        "On this computer"
+    }
 }
 
 fn backend_label(backend: ProtectedStoreBackend) -> &'static str {
