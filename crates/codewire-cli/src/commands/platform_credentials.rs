@@ -329,7 +329,10 @@ async fn handle_with_receipt(
                 );
             }
             validate_key_arguments(&args)?;
-            let material = prompt_credential_material()?;
+            let material = prompt_credential_material(
+                args.provider.as_deref().unwrap_or_default(),
+                codewire_access::CredentialAuthKind::ApiKey,
+            )?;
             let response = client.add_api_key_credential(rpc::AddApiKeyCredentialRequest {
                 provider: args.provider.context("credential provider is required")?,
                 name: args.name.as_deref().context("credential name is required")?.trim().to_owned(),
@@ -370,7 +373,10 @@ async fn handle_with_receipt(
             }
             let expected = rotation_metadata(&current, args.expires_at)?;
             eprintln!("{}", rotation_notice(&current, args.expires_at));
-            let material = prompt_credential_material()?;
+            let material = prompt_credential_material(
+                &current.provider,
+                codewire_access::CredentialAuthKind::ApiKey,
+            )?;
             let response = client.rotate_api_key_credential(rpc::RotateApiKeyCredentialRequest {
                 credential_id: current.id,
                 expected_revocation_generation: current.revocation_generation,

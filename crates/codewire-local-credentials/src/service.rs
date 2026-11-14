@@ -1425,7 +1425,7 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
             expires_at_unix: request.expires_at_unix,
         };
         let material = ProtectedValue::new(mem::take(&mut request.material))
-            .map_err(|_| Status::invalid_argument("invalid credential material"))?;
+            .map_err(|_| Status::invalid_argument("the value is not a valid credential"))?;
         let authority = Arc::clone(&self.authority);
         let record = run_blocking(move || authority.add_credential(input, material)).await?;
         Ok(Response::new(credential_to_proto(record)))
@@ -1534,7 +1534,7 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
             ));
         }
         let material = ProtectedValue::new(mem::take(&mut request.material))
-            .map_err(|_| Status::invalid_argument("invalid credential material"))?;
+            .map_err(|_| Status::invalid_argument("the value is not a valid credential"))?;
         let expires_at_unix = request.expires_at_unix;
         let account_hint = request.account_hint.take();
         let authority = Arc::clone(&self.authority);

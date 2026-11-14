@@ -417,9 +417,10 @@ pub(super) fn supported_profile_slot(
 ) -> anyhow::Result<CapabilitySlot> {
     anyhow::ensure!(
         matches!(value, "codex" | "openai" | "github" | "anthropic" | "ssh"),
-        "unsupported credential profile provider"
+        "unsupported provider; use codex, openai, github, anthropic or ssh"
     );
-    let slot = CapabilitySlot::parse(value).context("invalid capability slot")?;
+    let slot = CapabilitySlot::parse(value)
+        .context("unknown provider; use codex, openai, github, anthropic or ssh")?;
     let catalog = builtin_provider_catalog();
     let policy = catalog
         .get(provider)
@@ -432,8 +433,34 @@ pub(super) fn supported_profile_slot(
     Ok(slot)
 }
 
-pub(super) fn prompt_credential_material() -> anyhow::Result<ProtectedValue> {
-    prompt_named_material("Credential material")
+/// Asks for the value of a credential of `kind` for `provider`, in plain
+/// words: what to paste and where to get it (#4715). The input is hidden.
+pub(super) fn prompt_credential_material(
+    provider: &str,
+    kind: CredentialAuthKind,
+) -> anyhow::Result<ProtectedValue> {
+    prompt_named_material(&paste_prompt(provider, kind))
+}
+
+/// The prompt for a credential's value. Known providers name their own key
+/// and where it is made; any other provider is named as configured.
+pub(super) fn paste_prompt(provider: &str, kind: CredentialAuthKind) -> String {
+    let what = match kind {
+        CredentialAuthKind::AccessToken => "access token",
+        _ => "API key",
+    };
+    match (provider, kind) {
+        ("anthropic", CredentialAuthKind::ApiKey) => {
+            "Paste your Anthropic API key (from console.anthropic.com/settings/keys)".to_owned()
+        }
+        ("openai", CredentialAuthKind::ApiKey) => {
+            "Paste your OpenAI API key (from platform.openai.com/api-keys)".to_owned()
+        }
+        ("github", CredentialAuthKind::AccessToken) => {
+            "Paste your GitHub access token (from github.com/settings/tokens)".to_owned()
+        }
+        (provider, _) => format!("Paste the {provider} {what}"),
+    }
 }
 
 /// Read one write-only value from a no-echo terminal prompt, or all of a piped
@@ -450,7 +477,7 @@ pub(super) fn prompt_hidden(prompt: &str, indent: &str) -> anyhow::Result<Protec
     let interactive = std::io::stdin().is_terminal();
     let value = if interactive {
         read_hidden_terminal_bytes(prompt, MAX_PROTECTED_VALUE_BYTES).and_then(|mut bytes| {
-            ProtectedValue::new(std::mem::take(&mut *bytes)).context("invalid credential material")
+            ProtectedValue::new(std::mem::take(&mut *bytes)).context("the pasted value isn't valid")
         })
     } else {
         read_protected_value(std::io::stdin().lock(), false)
@@ -661,11 +688,11 @@ pub(super) fn read_protected_value<R: std::io::BufRead>(
     if single_line {
         reader
             .read_until(b'\n', &mut bytes)
-            .context("read credential material")?;
+            .context("read the pasted value")?;
     } else {
         reader
             .read_to_end(&mut bytes)
-            .context("read credential material")?;
+            .context("read the pasted value")?;
     }
     if bytes.last() == Some(&b'\n') {
         bytes.pop();
@@ -673,7 +700,7 @@ pub(super) fn read_protected_value<R: std::io::BufRead>(
             bytes.pop();
         }
     }
-    ProtectedValue::new(std::mem::take(&mut *bytes)).context("invalid credential material")
+    ProtectedValue::new(std::mem::take(&mut *bytes)).context("the pasted value isn't valid")
 }
 
 pub(super) struct SshImport {
@@ -835,6 +862,42 @@ fn read_ssh_passphrase(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each provider's prompt says what to paste and where to get it, in the
+    /// user's words (#4715).
+    #[test]
+    fn each_provider_prompt_says_what_to_paste_and_where_to_get_it() {
+        use CredentialAuthKind::{AccessToken, ApiKey};
+        assert_eq!(
+            paste_prompt("anthropic", ApiKey),
+            "Paste your Anthropic API key (from console.anthropic.com/settings/keys)"
+        );
+        assert_eq!(
+            paste_prompt("openai", ApiKey),
+            "Paste your OpenAI API key (from platform.openai.com/api-keys)"
+        );
+        assert_eq!(
+            paste_prompt("github", AccessToken),
+            "Paste your GitHub access token (from github.com/settings/tokens)"
+        );
+        assert_eq!(paste_prompt("acme", ApiKey), "Paste the acme API key");
+        assert_eq!(
+            paste_prompt("acme", AccessToken),
+            "Paste the acme access token"
+        );
+        assert_eq!(
+            CLAUDE_SUBSCRIPTION_TOKEN_PROMPT,
+            "Paste the token from claude setup-token"
+        );
+        for provider in ["anthropic", "openai", "github", "acme"] {
+            for kind in [ApiKey, AccessToken] {
+                let prompt = paste_prompt(provider, kind).to_lowercase();
+                for internal in ["material", "slot", "projection"] {
+                    assert!(!prompt.contains(internal), "{prompt}");
+                }
+            }
+        }
+    }
     use clap::Parser as _;
 
     #[test]

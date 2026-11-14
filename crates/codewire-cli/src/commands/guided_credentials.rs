@@ -189,7 +189,7 @@ async fn complete_profile(
     let CredentialsCommand::Set(set) = &mut args.command else {
         return Ok(());
     };
-    let slot = set.slot.as_deref().context("provider slot is required")?;
+    let slot = set.slot.as_deref().context("a provider is required")?;
     if placement == StoragePlacement::Local {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
@@ -414,7 +414,7 @@ async fn enroll_for_profile(
             key_file: None,
             guided: false,
         }),
-        _ => anyhow::bail!("unsupported profile slot"),
+        _ => anyhow::bail!("unsupported provider; use codex, openai, github, anthropic or ssh"),
     };
     let mut args = CredentialsArgs {
         profile: None,

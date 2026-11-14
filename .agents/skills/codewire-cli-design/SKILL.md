@@ -132,6 +132,11 @@ the docs, and nothing on screen is internal.
 - An unasked notice, such as the update notice (#4534), is one stderr line,
   only at a terminal, at most once a day, never under JSON, a pipe or CI, and
   it says how to turn it off.
+- A prompt for a secret says in plain words what to paste and, for a known
+  provider, where to get it ("Paste your Anthropic API key (from
+  console.anthropic.com/settings/keys)"). The input stays hidden. Internal
+  words such as "material", "slot" and "projection" never appear in a prompt
+  or a message; say "key", "token", "value" or "provider" (#4715).
 - A wait for the user, such as device sign-in, shows what it is waiting for, the
   code in bold, a URL that already carries the code where the server supports
   it, and how to cancel. It never says it is opening a browser when it cannot.

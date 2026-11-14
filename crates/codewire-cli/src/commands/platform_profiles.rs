@@ -64,7 +64,7 @@ async fn handle_profile(
             let credential = super::platform_credentials::resolve(client, selector).await?;
             let kind = platform_authentication_kind(&credential)?;
             let slot = supported_profile_slot(
-                args.slot.as_deref().context("provider slot is required")?,
+                args.slot.as_deref().context("a provider is required")?,
                 &ProviderId::parse(&credential.provider)?,
                 kind,
             )?

@@ -536,7 +536,7 @@ async fn add_credential(
             .transpose()?,
         expires_at_unix: args.expires_at,
     };
-    let material = prompt_credential_material()?;
+    let material = prompt_credential_material(input.provider.as_str(), input.authentication_kind)?;
     let record = client
         .add_credential(input, material)
         .await
@@ -597,11 +597,14 @@ async fn rotate_credential(
     }
     if !manually_supplied_credential_kind(record.metadata.authentication_kind) {
         anyhow::bail!(
-            "{} credential material cannot be entered manually; use credentials connect with the existing OAuth provider and --name to reconnect it",
+            "a {} credential can't be pasted; reconnect it with `cw credentials connect` and its --name",
             authentication_kind_label(record.metadata.authentication_kind)
         );
     }
-    let material = prompt_credential_material()?;
+    let material = prompt_credential_material(
+        record.metadata.provider.as_str(),
+        record.metadata.authentication_kind,
+    )?;
     let rotated = client
         .rotate_credential_material(
             &record.metadata.id,
@@ -818,7 +821,7 @@ async fn set_profile_entry(
     let selector = profile_set_credential(&args)?;
     let credential = resolve_credential(client, selector).await?;
     let slot = supported_profile_slot(
-        args.slot.as_deref().context("provider slot is required")?,
+        args.slot.as_deref().context("a provider is required")?,
         &credential.metadata.provider,
         credential.metadata.authentication_kind,
     )?;
@@ -878,12 +881,12 @@ async fn unset_profile_entry(
 ) -> anyhow::Result<()> {
     anyhow::ensure!(args.slot != "github", GITHUB_ALWAYS_INCLUDED);
     let profile = resolve_profile(client, &args.profile).await?;
-    let slot = CapabilitySlot::parse(trimmed_required(&args.slot, "capability slot")?)
-        .context("invalid capability slot")?;
+    let slot = CapabilitySlot::parse(trimmed_required(&args.slot, "provider")?)
+        .context("unknown provider; use codex, openai, github, anthropic or ssh")?;
     let mut entries = profile.profile.entries.clone();
     if entries.remove(&slot).is_none() {
         anyhow::bail!(
-            "local access profile {:?} does not select slot {slot}",
+            "local access profile {:?} has no credential for {slot}",
             profile.profile.name.to_string()
         );
     }

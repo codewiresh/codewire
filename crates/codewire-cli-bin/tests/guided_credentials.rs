@@ -320,7 +320,7 @@ async fn hidden_cancellation_restores_terminal_without_a_credential_write() {
             process.send(b"\r");
             process.expect("Enter a value");
             process.send(b"work\r");
-            process.expect("Credential material:");
+            process.expect("Paste your OpenAI API key (from platform.openai.com/api-keys):");
             process.send(b"synthetic-partial");
             process.send(&[cancel]);
             process.finish(false);
@@ -345,7 +345,7 @@ async fn successful_addition_binds_the_saved_id_after_unicode_correction() {
         );
         process.expect("Credential name");
         process.send(b"work\r");
-        process.expect("Credential material:");
+        process.expect("Paste your OpenAI API key (from platform.openai.com/api-keys):");
         process.send("synthetic-é".as_bytes());
         process.send(b"\x7fx\r");
         process.expect("Use this credential in a profile?");
@@ -462,7 +462,7 @@ async fn empty_codex_profile_can_enroll_an_openai_api_key_and_return_to_binding(
         process.send(b"\x1b[B\r");
         process.expect("Credential name");
         process.send(b"work\r");
-        process.expect("Credential material:");
+        process.expect("Paste your OpenAI API key (from platform.openai.com/api-keys):");
         process.send(b"synthetic-x\r");
         process.finish(true);
         let state = state.lock().unwrap();

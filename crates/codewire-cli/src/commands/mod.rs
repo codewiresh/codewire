@@ -494,7 +494,7 @@ pub(crate) enum CredentialsCommand {
     Get(CredentialGetArgs),
     #[command(about = "Rename a credential")]
     Rename(CredentialRenameArgs),
-    #[command(about = "Replace credential material")]
+    #[command(about = "Replace a credential's key or token")]
     Rotate(CredentialRotateArgs),
     #[command(about = "Revoke a credential immediately")]
     Revoke(CredentialSelectorArgs),
