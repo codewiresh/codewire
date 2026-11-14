@@ -53,6 +53,7 @@ pub(crate) const ON_THE_LIST_DETAIL: &str =
 const SIGNUP_ACTION: &str = "/signup/_actions/sign-up";
 pub(crate) const SIGNUP_COMPLETE_ACTION: &str = "/signup/complete/_actions/complete";
 const LINK_CONFIRM_ACTION: &str = "/login/link/_actions/confirm";
+const TWO_FACTOR_ACTION: &str = "/two-factor/_actions/validate";
 /// The emailed link confirmation is valid for thirty minutes; its cookie
 /// lasts as long, so a page left open can still be confirmed.
 const LINK_CONFIRM_TTL_SECONDS: u32 = 30 * 60;
@@ -60,6 +61,19 @@ const LINK_CONFIRM_TTL_SECONDS: u32 = 30 * 60;
 /// the orchestration handoff (`AUTHORIZE_PATH`) with one sealed, URL-safe
 /// base64 `challenge` (crates/codewire-orchestration/src/api/preview).
 const PREVIEW_HANDOFF_CONTINUATION: &str = "/api/v1/preview-auth/authorize?challenge=";
+/// Sign-in can finish in the iOS app: a form's POST then redirects through
+/// `/api/oidc/callback` to the app's registered callback,
+/// `sh.codewire.ios:/oauth/callback` (codewire-idp `ensure_ios_client`).
+/// Browsers apply the submitting page's form-action to that redirect chain
+/// too, so without this the last hop is silently blocked and the app never
+/// gets its code (#3825). Only the three pages whose POST can end in the
+/// callback add the scheme, and only while they carry a sign-in request:
+/// sign-in and two-factor (`completion_target`), and two-factor setup and
+/// its skip, which continue to `return_to` (that exact path). Sign-up completion continues to
+/// setup first; every other page keeps form-action 'self'.
+const NATIVE_APP_FORM_ACTION: &str = "sh.codewire.ios:";
+/// Where a sign-in request resumes; see `completion_target`.
+const OIDC_CALLBACK_PATH: &str = "/api/oidc/callback";
 const TURNSTILE_CSP: &str = "default-src 'self'; base-uri 'none'; connect-src 'self' https://challenges.cloudflare.com; form-action 'self'; frame-ancestors 'none'; frame-src https://challenges.cloudflare.com; img-src 'self' data:; object-src 'none'; script-src 'self' https://challenges.cloudflare.com; style-src 'self'";
 
 #[derive(Serialize)]
@@ -1127,6 +1141,10 @@ fn setup_two_factor_response(
         return error_page(WebError::IdentityUnavailable);
     };
     let csrf = page_csrf_token(headers);
+    let continuation_path = return_to
+        .split_once('?')
+        .map_or(return_to.as_str(), |(path, _)| path);
+    let ends_in_callback = continuation_path == OIDC_CALLBACK_PATH;
     let view = SetupTwoFactorView {
         csrf_token: csrf.clone(),
         return_to,
@@ -1134,10 +1152,15 @@ fn setup_two_factor_response(
         secret: setup.secret.clone(),
         error,
     };
-    with_csrf_cookie(
+    let response = with_csrf_cookie(
         render_template(status, SetupTwoFactorTemplate { view: &view }),
         csrf_cookie(&state.public_origin, &csrf),
-    )
+    );
+    if ends_in_callback {
+        allow_native_app_callback(response, status)
+    } else {
+        response
+    }
 }
 
 pub(super) async fn sign_out_action(
@@ -1191,6 +1214,38 @@ fn auth_form_response(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static(TURNSTILE_CSP),
         );
+    }
+    let ends_in_callback = (view.action == LOGIN_ACTION || view.action == TWO_FACTOR_ACTION)
+        && !view.auth_request_id.is_empty();
+    if ends_in_callback {
+        response = allow_native_app_callback(response, status);
+    }
+    response
+}
+
+/// Add the iOS app's callback scheme to this page's form-action
+/// (`NATIVE_APP_FORM_ACTION`). Error pages keep the default policy.
+fn allow_native_app_callback(mut response: Response, status: StatusCode) -> Response {
+    if response.status() != status {
+        return response;
+    }
+    let policy = response
+        .headers()
+        .get(header::CONTENT_SECURITY_POLICY)
+        .and_then(|value| value.to_str().ok())
+        .map(|policy| {
+            policy.replacen(
+                "form-action 'self'",
+                &format!("form-action 'self' {NATIVE_APP_FORM_ACTION}"),
+                1,
+            )
+        });
+    if let Some(policy) = policy
+        && let Ok(policy) = HeaderValue::from_str(&policy)
+    {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_SECURITY_POLICY, policy);
     }
     response
 }
@@ -1329,7 +1384,7 @@ fn two_factor_view(query: AuthQuery, error: String) -> AuthFormView {
     let mut view = base_view(query);
     view.title = "Two-factor authentication";
     view.description = "Enter the six-digit code from your authenticator app or a recovery code.";
-    view.action = "/two-factor/_actions/validate";
+    view.action = TWO_FACTOR_ACTION;
     view.submit_label = "Verify";
     view.error = error;
     view.show_totp_code = true;
@@ -1371,7 +1426,7 @@ fn completion_target(auth_request_id: &str, return_to: &str) -> String {
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("id", &auth_request_id)
             .finish();
-        format!("/api/oidc/callback?{query}")
+        format!("{OIDC_CALLBACK_PATH}?{query}")
     } else {
         safe_target(return_to)
     }

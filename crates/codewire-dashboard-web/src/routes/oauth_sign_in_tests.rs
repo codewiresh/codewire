@@ -196,6 +196,22 @@ async fn identity_in_mode(
                     )
                         .into_response(),
                 },
+                // A signed-in account without two-factor, for the setup page.
+                "/api/auth/get-session" => Json(serde_json::json!({
+                    "user": {
+                        "id": "user-1",
+                        "email": "person@example.test",
+                        "two_factor_enabled": false,
+                        "email_verified": true,
+                    }
+                }))
+                .into_response(),
+                "/api/auth/two-factor/enable" => Json(serde_json::json!({
+                    "totpUri": "otpauth://totp/Codewire:person%40example.test?secret=JBSWY3DPEHPK3PXP&issuer=Codewire",
+                    "secret": "JBSWY3DPEHPK3PXP",
+                    "backupCodes": [],
+                }))
+                .into_response(),
                 other => panic!("unexpected identity call {other}"),
             }
         }
@@ -260,13 +276,11 @@ async fn provider_buttons_follow_the_providers_the_identity_service_names() {
             assert_eq!(body.contains("cw-auth-providers"), github || google);
             // The password form is always there.
             assert!(body.contains("name=\"password\""));
-            // The buttons are links, so the page policy is unchanged.
-            assert!(
-                headers[header::CONTENT_SECURITY_POLICY]
-                    .to_str()
-                    .unwrap()
-                    .contains("form-action 'self';")
-            );
+            // The buttons are links, so no provider joins form-action (the iOS
+            // app's scheme is pinned per page by the test below).
+            let policy = headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+            assert!(!policy.contains("github.com"), "{path}: {policy}");
+            assert!(!policy.contains("accounts.google.com"), "{path}: {policy}");
         }
         if github {
             let (_, _, body) = page(&server, "/login?authRequestID=oidc-request", None).await;
@@ -288,6 +302,78 @@ async fn provider_buttons_follow_the_providers_the_identity_service_names() {
             let (_, _, body) = page(&server, "/signup?return_to=%2Fdevice", None).await;
             assert!(body.contains("href=\"/api/auth/oauth/github/start?return_to=%2Fdevice\""));
         }
+    }
+}
+
+#[tokio::test]
+async fn only_pages_that_finish_a_sign_in_let_the_ios_app_receive_its_code() {
+    // Signing in from the iOS app ends in a redirect to its registered
+    // callback, sh.codewire.ios:/oauth/callback. Browsers check that hop
+    // against the submitting page's form-action, so the pages whose POST can
+    // end there allow the app's scheme while they carry a sign-in request,
+    // and every other page these renderers serve keeps 'self' (#3825).
+    let (idp, _) = identity(Some(&[]), StatusCode::OK).await;
+    let server = dashboard(&idp.origin, "").await;
+    let turnstile = dashboard(&idp.origin, "site-key-marker").await;
+    let challenge = format!(
+        "{}=challenge-marker",
+        crate::security::TWO_FACTOR_CHALLENGE_COOKIE
+    );
+    let session = format!(
+        "{}=session-marker",
+        codewire_server_core::auth::SESSION_COOKIE_NAME
+    );
+    let signup = format!("{}={HANDLE}", crate::security::OAUTH_SIGNUP_COOKIE);
+    let link = format!("{}={HANDLE}", crate::security::OAUTH_LINK_COOKIE);
+    let reset = format!("{}=reset-marker", crate::security::PASSWORD_RESET_COOKIE);
+    let widened = "form-action 'self' sh.codewire.ios:;";
+    let default = "form-action 'self';";
+    for (server, path, cookie, expected) in [
+        (&server, "/login?authRequestID=oidc-request", None, widened),
+        (&server, "/login", None, default),
+        (
+            &server,
+            "/two-factor?authRequestID=oidc-request",
+            Some(&challenge),
+            widened,
+        ),
+        (&server, "/two-factor", Some(&challenge), default),
+        (
+            &server,
+            "/setup-2fa?return_to=%2Fapi%2Foidc%2Fcallback%3Fid%3Doidc-request",
+            Some(&session),
+            widened,
+        ),
+        (
+            &server,
+            "/setup-2fa?return_to=%2Fdashboard%2F",
+            Some(&session),
+            default,
+        ),
+        // Only that exact path is the callback, not a longer lookalike.
+        (
+            &server,
+            "/setup-2fa?return_to=%2Fapi%2Foidc%2Fcallbackfoo%3Fid%3Doidc-request",
+            Some(&session),
+            default,
+        ),
+        (&server, "/signup?authRequestID=oidc-request", None, default),
+        (
+            &turnstile,
+            "/signup?authRequestID=oidc-request",
+            None,
+            default,
+        ),
+        (&server, "/signup/complete", Some(&signup), default),
+        (&server, "/forgot-password", None, default),
+        (&server, "/reset-password", Some(&reset), default),
+        (&server, "/login/link", Some(&link), default),
+    ] {
+        let (status, headers, _) = page(server, path, cookie.map(String::as_str)).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        let policy = headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+        assert!(policy.contains(expected), "{path}: {policy}");
+        assert_eq!(policy.matches("form-action").count(), 1, "{path}: {policy}");
     }
 }
 
