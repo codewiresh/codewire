@@ -14,26 +14,27 @@ sandbox for steps 2 to 10; the examples call it `launch-walk`.
 
 ## Where the walk stands
 
-Updated 2026-11-13. On Production, parts of step 9 are observed and nothing
-else is.
+Updated 2026-11-13. On Production, step 10 and parts of step 9 are observed,
+step 8 is reported working, and nothing else is.
 
 | Step | ID | Detail | Dev | Production |
 | --- | --- | --- | --- | --- |
-| 1 | `launch-signup` | below | failure paths observed 2026-11-11 (#4062); a sign-up not yet observed | not yet observed |
+| 1 | `launch-signup` | below, and [signup-and-verification.md](signup-and-verification.md) | failure paths observed 2026-11-11 (#4062); a sign-up not yet observed | not yet observed |
 | 2 | `launch-agent-push` | below | not yet observed; the fix (#4303) is released in `v0.4.17` | not yet observed |
 | 3 | `launch-preview` | [previews-and-ports.md](previews-and-ports.md) | not yet observed | not yet observed |
-| 4 | `launch-cp` | [cloud-sandbox.md](cloud-sandbox.md) | upload, resume and download observed 2026-11-13 with builds of the fixes (#4373, #4394); not yet with a released `cw` | not yet observed |
-| 5 | `launch-invite` | [invitations.md](invitations.md) | invite and email observed 2026-11-13 (#3847); accept and remove not yet observed | not yet observed |
+| 4 | `launch-cp` | [cloud-sandbox.md](cloud-sandbox.md) | upload, resume and download observed 2026-11-13 with builds of the fixes (#4373, #4394), which are tagged `v0.4.18`; not yet observed with it | not yet observed |
+| 5 | `launch-invite` | [invitations.md](invitations.md) | invite, email, accept and remove observed 2026-11-13 (#3847, #3840) | not yet observed |
 | 6 | `launch-buy-credit` | [billing-and-credits.md](billing-and-credits.md) | card, top-up, costs and refusal observed (#3381, #3954); Add credit and the receipt not yet observed | not yet observed |
 | 7 | `launch-idle-wake` | out of the launch | out of the launch (owner, 2026-11-13) | out of the launch |
-| 8 | `launch-password-reset` | below | not yet observed | not yet observed |
+| 8 | `launch-password-reset` | [signup-and-verification.md](signup-and-verification.md) | not yet observed | reported working by the owner 2026-11-13 (#2053); no walk recorded |
 | 9 | `launch-node-reboot` | [node-reboot.md](node-reboot.md), and below for the restart notice | restart notice observed 2026-11-13 after a Pod delete (#4376) | two worker drains observed 2026-11-13 (#3542); a reboot, STUN and the relay, Mesh and the restart notice not yet observed |
-| 10 | `launch-snapshot-fork` | below | a snapshot and three forks observed 2026-11-13 with `v0.4.17` (#4370) | not yet observed |
-| 11 | `launch-mac-local-vm` | [local-vm-mac.md](local-vm-mac.md) | runs on a Mac: observed 2026-11-13 on macOS 27 and 26 with a development build (#4478); not yet with a released `cw` | does not apply |
+| 10 | `launch-snapshot-fork` | below | a snapshot and three forks observed 2026-11-13 with `v0.4.17` (#4370) | a snapshot and three forks observed 2026-11-13 on `v0.4.18` (#4370) |
+| 11 | `launch-mac-local-vm` | [local-vm-mac.md](local-vm-mac.md) | runs on a Mac: observed 2026-11-13 on macOS 27 and 26 with a development build (#4478); the fix is tagged `v0.4.18`, not yet observed with it | does not apply |
 
 The owner reported on 2026-11-13 that signing in with GitHub and with Google
 works (#4062). The record does not name the surface or the release, so
-neither column of step 1 counts it.
+neither column of step 1 counts it. The owner's report for step 8 names
+Production and no release, so it is shown as a report, not as an observation.
 
 ## Before the walk
 
@@ -204,13 +205,13 @@ Production in the `launch-walk` sandbox: a file over 4 MiB in and out with
 equal checksums, and a 1 GiB upload that is interrupted and resumed by
 running the same command again.
 
-- **Gotchas:** resumable uploads (#4416) are on `main` and in no release
-  yet. `v0.4.17` refuses a cloud upload over about 100 MB, so this step
-  cannot pass on Production before a release that includes #4416.
+- **Gotchas:** resumable uploads (#4416) are tagged `v0.4.18`. `v0.4.17`
+  and older refuse a cloud upload over about 100 MB, so this step needs a
+  `cw` and a server of `v0.4.18` or later.
 - **Observed:**
   - Dev: all three are observed with builds of the fixes, on 2026-11-12 and
     2026-11-13. The evidence is in the file above.
-  - With a released `cw`, and on Production: not yet observed.
+  - With `v0.4.18`, and on Production: not yet observed.
 
 ## 5. `launch-invite`: invite a teammate, who accepts and can be removed
 
@@ -229,9 +230,13 @@ teammate's own mailbox; handing the link over by hand skips half the step.
     sent; a second invitation to the same address and one to an existing
     member were each refused; an invitation to a mailbox the owner reads
     arrived.
-  - Accepting and removing: not yet observed.
-  - The `cw` commands for accepting, listing and removing (#4453) are on
-    `main` and in no release yet.
+  - Dev, 2026-11-13, `cw` built from `main`, a synthetic invitee that
+    signs in with a password (#3840): the invitee listed the invitation
+    with `cw org invitations` and accepted with `cw org accept`, the
+    inviter's `cw org members` listed it, and after `cw org member rm` it
+    was gone from that list and from the invitee's `cw org list`.
+  - The `cw` commands for accepting, listing and removing (#4453) are
+    tagged `v0.4.18`.
   - Production: not yet observed.
 
 ## 6. `launch-buy-credit`: buy credit, get a receipt, see correct costs
@@ -267,26 +272,23 @@ move. Its design is on #3384, and its walk gets a journey of its own when
 
 ## 8. `launch-password-reset`: a reset email arrives and works
 
-Issue: #2053 (mail delivery on Production).
+Issues: #2053 (mail delivery on Production), #4481 (what a reset ends).
 
-- **Entry points:** **Forgot password?** on the login page; **Settings →
-  Account → Security → Reset password**.
-- **States to exercise:** a link used twice, and a link opened after its
-  hour has passed.
-- **Driving it:** on the login page choose **Forgot password?**, enter the
-  walker's address and choose **Send reset link**; the page answers "Check
-  your email". Open the link from the email and set a new password. This
-  applies to an account that has a password; record what an account
-  created through GitHub or Google is offered.
-- **Proof:** the email arrives in a mailbox outside Codewire's own domain;
-  the old password is refused and the new one signs in.
-- **Gotchas:** the Kind spec binds a synthetic reset token. It proves the
-  page flow, not that mail is delivered.
-- **Observed:** not yet observed on Dev or Production; no delivered reset
-  email can be cited (#2053). Related, and not this step: on Production
-  on 2026-10-29 the sign-up access email reached an outside mailbox with
-  DKIM, SPF and DMARC passing (#2053). The page flow is covered on Kind by
-  `apps/dashboard/e2e/ssr-dashboard.auth.ssr.ts`.
+The commands, the proof and the observations are `account-password-reset`
+in [signup-and-verification.md](signup-and-verification.md). The launch
+walks it on Production with a password account: the email has to arrive in a
+mailbox outside Codewire's own domain, the old password is refused and the
+new one signs in.
+
+- **Observed:**
+  - Production: the owner reported on 2026-11-13 that the reset email
+    arrived and the reset worked (#2053). The report names no release, and
+    the other states of the journey were not part of it, so the walk is
+    still to be recorded.
+  - Dev: not yet observed.
+  - The page flow is covered on Kind by
+    `apps/dashboard/e2e/ssr-dashboard.auth.ssr.ts`, which binds a synthetic
+    reset token and so proves nothing about mail.
 
 ## 9. `launch-node-reboot`: a node reboots and the user is told why
 
@@ -397,9 +399,13 @@ Issue: #4370 (hosted snapshots on Production; forks landed in #3754).
   - Production, 2026-11-12, storage only (#4370): a volume snapshot was
     taken and restored, including when the scheduler first chose another
     node. That is a prerequisite, not this step.
-  - The user step on Production: not yet observed. Production turns
-    snapshots on with the promotion that delivers deploy#242, which had not
-    happened when read on 2026-11-13.
+  - Production, 2026-11-13, on `v0.4.18` with `cw` built from `v0.4.18`,
+    as the Production smoke identity (#4370, "Step 10: a snapshot of a
+    sandbox on Production, forked three times"): `cw --cloud snapshot
+    create` on a stopped sandbox printed both lines above in 20 s and the
+    snapshot read `ready`; `cw --cloud create --snapshot` with `--count 3`
+    created three forks in 44 s, each running with the source's files.
+    Everything was removed afterwards. A new account has not walked it.
 
 ## 11. `launch-mac-local-vm`: a local VM on a Mac
 
@@ -417,8 +423,8 @@ local VM, open a shell in it, run a command, stop it and start it again.
   - macOS 27 and macOS 26, 2026-11-13: the walk is observed with a
     development build of the fix, set up from a local runtime directory
     in place of the install steps. `v0.4.16` failed on macOS 27.
-  - The fix (#4491) is on `main` and in no release yet. The walk with a
-    released `cw`, install steps included: not yet observed.
+  - The fix (#4491) is tagged `v0.4.18`. The walk with it, install steps
+    included: not yet observed.
 
 ## Beside the walk
 
