@@ -16,6 +16,7 @@ runs the same commands and holds the result to the same standard.
 | [previews-and-ports.md](previews-and-ports.md) | Reaching a server in an environment: `cw ports` on a local VM (#4347), cloud previews of loopback servers (#4357), and local HTTPS hostnames (#4316) |
 | [cloud-sandbox.md](cloud-sandbox.md) | A cloud sandbox: copying files in and out with `cw cp`, and transfers and API calls across an orchestration rollout, with other parts to follow |
 | [signup-and-verification.md](signup-and-verification.md) | Getting an account and proving its address: email sign-up, verification, GitHub and Google, and the abuse gates (#4481, #4062, #3297, #2053) |
+| [hosts.md](hosts.md) | Hosts (#3609): enroll a computer, keep its agent connected through proxies, logouts and reboots, the Hosts page, and environments created on a host |
 
 ## What a journey file holds
 
