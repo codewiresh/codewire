@@ -6,7 +6,6 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use codewire_proto::codewire::v1::DesiredState;
 use connectrpc::ErrorCode;
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +22,11 @@ struct Readiness {
     /// fields, and must keep their terminals across a deploy.
     #[serde(skip_serializing_if = "Option::is_none")]
     setup_running: Option<bool>,
+    /// The one thing the page says about the Sandbox's state, and the action
+    /// it offers (#3772). Sent only on request, for the same reason as
+    /// `setupRunning`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notice: Option<environment_connect::SandboxNotice>,
     detail: Detail,
 }
 
@@ -39,6 +43,8 @@ pub(super) struct ReadinessQuery {
 enum ReadinessFields {
     /// `fields=setup` adds `setupRunning` (#2333).
     Setup,
+    /// `fields=status` adds `setupRunning` and `notice` (#3772).
+    Status,
 }
 
 /// Lifecycle eligibility is presentation, never mutation authorization. Each
@@ -63,54 +69,26 @@ struct Detail {
     pending: bool,
 }
 
-fn desired_state_name(value: i32) -> &'static str {
-    match value {
-        value if value == DesiredState::Started as i32 => "started",
-        value if value == DesiredState::Stopped as i32 => "stopped",
-        value if value == DesiredState::Destroyed as i32 => "destroyed",
-        value if value == DesiredState::Archived as i32 => "archived",
-        value if value == DesiredState::Resized as i32 => "resized",
-        _ => "unknown",
-    }
-}
-
-fn lifecycle_pending(state: &str, desired: &str) -> bool {
-    match state {
-        "running" => !matches!(desired, "started" | "resized"),
-        "stopped" => desired != "stopped",
-        "destroyed" => desired != "destroyed",
-        "archived" => desired != "archived",
-        "error" | "build failed" => false,
-        _ => true,
-    }
-}
-
-/// A create or start that has not converged stays deletable. Destroy already
-/// supersedes the `started` intent in any state but destroying/destroyed, and
-/// a retry that cannot converge must not leave the Sandbox with no action
-/// (#2328). Pending stop, resize, and destroy intents keep their own guard.
-fn start_intent_unconverged(state: &str, desired: &str) -> bool {
-    desired == "started" && matches!(state, "pending" | "creating" | "starting")
-}
-
 impl Readiness {
     fn new(
-        row: EnvironmentRow,
+        mut row: EnvironmentRow,
         setup_complete: bool,
         desired_state: i32,
         fields: Option<ReadinessFields>,
     ) -> Self {
-        let desired_state = desired_state_name(desired_state);
-        let pending = lifecycle_pending(row.state, desired_state);
+        row.desired_state = environment_connect::desired_state_name(desired_state);
+        let actions = environment_connect::lifecycle_actions(&row);
         let allowed = row.confidential_actions_allowed;
+        let status = fields == Some(ReadinessFields::Status);
         Self {
-            environment_id: row.id,
+            environment_id: row.id.clone(),
             running: row.state == "running" && row.confidential_actions_allowed,
             setup_complete,
-            setup_running: (fields == Some(ReadinessFields::Setup)).then_some(row.setup_running),
+            setup_running: fields.is_some().then_some(row.setup_running),
+            notice: status.then(|| row.notice()),
             detail: Detail {
                 state: row.state,
-                desired_state,
+                desired_state: row.desired_state,
                 tone: row.state_tone,
                 last_event: row.last_event,
                 resources: row.resources,
@@ -119,12 +97,11 @@ impl Readiness {
                 cpu_millicores: row.cpu_millicores,
                 memory_mib: row.memory_mb,
                 disk_gib: row.disk_gb,
-                start_eligible: allowed && !pending && row.can_start,
-                stop_eligible: allowed && !pending && row.can_stop,
-                delete_eligible: row.can_destroy
-                    && (!pending || start_intent_unconverged(row.state, desired_state)),
+                start_eligible: actions.start,
+                stop_eligible: actions.stop,
+                delete_eligible: actions.delete,
                 actions_allowed: allowed,
-                pending,
+                pending: actions.pending,
             },
         }
     }
@@ -216,6 +193,8 @@ pub(super) async fn get(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::environment_connect::lifecycle_pending;
+    use codewire_proto::codewire::v1::DesiredState;
     use codewire_proto::codewire::v1::{Environment, EnvironmentState};
 
     #[test]
@@ -441,6 +420,51 @@ mod tests {
             ))
             .expect("opted-in readiness shape");
         assert_eq!(earlier_detail, opted_in_detail);
+    }
+
+    /// #3772: a page that asks for the status receives the notice beside
+    /// `setupRunning`; a page that asks only for setup gets exactly the shape
+    /// it knows.
+    #[test]
+    fn the_status_is_sent_only_to_a_page_that_asks_for_it() {
+        use axum::http::Uri;
+        let base = "https://dashboard.invalid/org/id/_fragments/terminal-readiness";
+        let query = Query::<ReadinessQuery>::try_from_uri(
+            &format!("{base}?fields=status").parse::<Uri>().unwrap(),
+        )
+        .map(|Query(query)| query.fields);
+        assert!(query.unwrap() == Some(ReadinessFields::Status));
+
+        let render = |fields: Option<ReadinessFields>| {
+            let row = environment_connect::environment_row(Environment {
+                id: "00000000-0000-4000-8000-000000000001".into(),
+                state: EnvironmentState::Starting.into(),
+                error_code: "sandbox_replacing".into(),
+                error_reason: "This sandbox's runtime is being replaced.".into(),
+                ..Default::default()
+            });
+            serde_json::to_string(&Readiness::new(
+                row,
+                false,
+                DesiredState::Started as i32,
+                fields,
+            ))
+            .unwrap()
+        };
+        let setup = render(Some(ReadinessFields::Setup));
+        assert!(!setup.contains("notice"));
+        let status = render(Some(ReadinessFields::Status));
+        let (head, detail) = status.split_once(",\"detail\":").unwrap();
+        assert!(
+            head.ends_with(
+                "\"setupRunning\":false,\"notice\":{\"kind\":\"banner\",\"text\":\"This sandbox's runtime is being replaced.\",\"tone\":\"info\",\"action\":\"\",\"label\":\"\",\"dismissible\":false,\"graphic\":\"\"}"
+            ),
+            "{head}"
+        );
+        assert_eq!(
+            Some(detail),
+            setup.split_once(",\"detail\":").map(|(_, d)| d)
+        );
     }
 
     #[test]

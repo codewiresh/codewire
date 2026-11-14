@@ -49,8 +49,8 @@ test("setup stages and clone progress stream, resume after a reconnect, and end"
       + end("complete"),
   ]);
   await page.goto(fixtureUrl());
-  const setup = page.getByRole("region", { name: "Setup" });
-  await expect(setup.getByRole("heading", { level: 2, name: "Setup" })).toBeVisible();
+  const setup = page.getByRole("region", { name: "Setting up this Sandbox" });
+  await expect(setup.getByRole("heading", { level: 2, name: "Setting up this Sandbox" })).toBeVisible();
   const first = setup.getByRole("progressbar", { name: "Repository 1 of 2" });
   const second = setup.getByRole("progressbar", { name: "Repository 2 of 2" });
   await expect(second).toHaveJSProperty("value", 100);
@@ -77,7 +77,7 @@ test("a failed stage is announced and stream text is never markup", async ({ pag
       + end("failed"),
   ]);
   await page.goto(fixtureUrl());
-  const setup = page.getByRole("region", { name: "Setup" });
+  const setup = page.getByRole("region", { name: "Setting up this Sandbox" });
   await expect(setup.getByRole("alert")).toHaveText(`Cloning repositories failed: git clone: exited 128 ${hostile}`);
   await expect(setup.getByRole("status")).toHaveText("Setup stopped.");
   await expect(setup.locator("img")).toHaveCount(0);
@@ -91,14 +91,14 @@ test("a failed stage is announced and stream text is never markup", async ({ pag
 test("a refused stream says live progress is unavailable", async ({ page }) => {
   await page.route(eventsPath, (route) => route.fulfill({ status: 401, body: "" }));
   await page.goto(fixtureUrl());
-  await expect(page.getByRole("region", { name: "Setup" }).getByRole("status"))
+  await expect(page.getByRole("region", { name: "Setting up this Sandbox" }).getByRole("status"))
     .toHaveText("Live setup progress is unavailable. Sandbox status below still updates.");
 });
 
 test("the account follow limit stops retrying and says what to do", async ({ page }) => {
   const resumes = await streams(page, ["retry: 50\n\nevent: busy\ndata: {}\n\n", "event: busy\ndata: {}\n\n"]);
   await page.goto(fixtureUrl());
-  await expect(page.getByRole("region", { name: "Setup" }).getByRole("status"))
+  await expect(page.getByRole("region", { name: "Setting up this Sandbox" }).getByRole("status"))
     .toHaveText("Too many live setup views are open for this account. Close one, then reload this page to follow setup here.");
   // A busy answer closes the source: no reconnect follows the short retry.
   await page.waitForTimeout(500);

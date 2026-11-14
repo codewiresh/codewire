@@ -998,6 +998,18 @@ pub(crate) struct EnvironmentRow {
     /// completed, bounded for display; empty otherwise. The viewer already
     /// receives it from GetEnvironment.
     pub(crate) setup_failure: String,
+    /// What the Sandbox's state says to its user beside the state: the reason
+    /// the API wrote, bounded for display, such as a crash, a runtime being
+    /// replaced, a restart or a refusal for capacity (#3772). Empty when there
+    /// is none.
+    pub(crate) status_message: String,
+    /// `danger` for a failure, `warning` for a refusal for capacity, `info`
+    /// for a notice.
+    pub(crate) status_tone: &'static str,
+    /// The code the API wrote beside [`Self::status_message`], if any.
+    pub(crate) status_code: String,
+    /// The lifecycle state the Sandbox was asked to reach.
+    pub(crate) desired_state: &'static str,
     pub(crate) confidential_actions_allowed: bool,
     pub(crate) vscode_url: String,
     pub(crate) ports: Vec<EnvironmentPortRow>,
@@ -1024,6 +1036,11 @@ impl EnvironmentRow {
         let revision = sources.selection.profile_revision?;
         let id = sources.profile_id();
         (!id.is_empty()).then_some((id, revision))
+    }
+
+    /// What the Sandbox's page says about its state (#3772).
+    pub(crate) fn notice(&self) -> crate::environment_connect::SandboxNotice {
+        crate::environment_connect::sandbox_notice(self)
     }
 
     /// The lifecycle state as people read it. Deletion uses the product's

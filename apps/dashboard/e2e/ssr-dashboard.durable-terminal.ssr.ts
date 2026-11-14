@@ -20,7 +20,7 @@ async function transport(page: Page) {
     launches: 0, stops: 0, lists: 0, launchFailure: "", stopFailure: "", listStatus: 200, listError: "sign-in-required", listGate: Promise.resolve(), launchGate: Promise.resolve(),
     statusGate: Promise.resolve(), statusAvailable: true, running: true, setupComplete: true, detail: null as Detail | null };
   // Only the opted-in readiness request is answered with setupRunning.
-  await page.route("**/_fragments/terminal-readiness?fields=setup", async (route) => {
+  await page.route("**/_fragments/terminal-readiness?fields=status", async (route) => {
     await state.statusGate;
     await route.fulfill({ status: state.statusAvailable ? 200 : 503, json: {
       environmentId: environment, running: state.running, setupComplete: state.setupComplete,
@@ -2681,15 +2681,15 @@ test("a lifecycle submit remains locked across fresh polling and a cached return
   await expect.poll(() => submitted).toBe(1);
   await (await sandboxAction(page, "Refresh sandbox status")).click();
   await expect(page.locator("[data-sandbox-observation-status]")).toContainText("Action submitted");
-  await expect(page.locator('[data-sandbox-action="start"]')).toBeDisabled();
+  await expect(page.locator('[data-sandbox-actions] [data-sandbox-action="start"]')).toBeDisabled();
   await page.evaluate(() => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
   await expect(page.locator("[data-sandbox-observation-status]")).toContainText("outcome is not confirmed");
   await expect(page.getByRole("link", { name: "Reload Sandbox status", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Reload Sandbox status", exact: true })).toHaveAttribute("href", "terminal-tabs.html?list_search=quiet-mesa&list_state=running");
   await expect(page.getByRole("link", { name: "Back to Sandboxes", exact: true })).toHaveAttribute("href", "sandboxes.html?search=quiet-mesa&state=running");
   await expect(page.locator("[data-terminal-reload]")).toHaveAttribute("href", "terminal-tabs.html?list_search=quiet-mesa&list_state=running");
-  await page.locator('[data-sandbox-action="start"]').evaluate((button: HTMLButtonElement) => button.form!.requestSubmit(button));
-  await expect(page.locator('[data-sandbox-action="start"]')).toBeDisabled();
+  await page.locator('[data-sandbox-actions] [data-sandbox-action="start"]').evaluate((button: HTMLButtonElement) => button.form!.requestSubmit(button));
+  await expect(page.locator('[data-sandbox-actions] [data-sandbox-action="start"]')).toBeDisabled();
   expect(submitted).toBe(1);
   expect(state.launches).toBe(0);
   expect(state.stops).toBe(0);

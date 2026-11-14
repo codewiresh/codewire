@@ -3229,6 +3229,10 @@ mod tests {
                 can_destroy: true,
                 setup_running: false,
                 setup_failure: String::new(),
+                status_message: String::new(),
+                status_tone: "info",
+                status_code: String::new(),
+                desired_state: "started",
                 confidential_actions_allowed: false,
                 vscode_url: "https://vscode.invalid".into(),
                 ports: Vec::new(),
@@ -3312,6 +3316,10 @@ mod tests {
             can_destroy: true,
             setup_running: false,
             setup_failure: String::new(),
+            status_message: String::new(),
+            status_tone: "info",
+            status_code: String::new(),
+            desired_state: "started",
             confidential_actions_allowed: true,
             vscode_url: "https://vscode.invalid".into(),
             ports: Vec::new(),
@@ -3484,7 +3492,8 @@ mod tests {
         const READY: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
         const SETUP: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
         let organization = test_organization();
-        let section = "<section class=\"cw-setup-progress\" aria-labelledby=\"setup-progress-title\" data-setup-progress";
+        let section =
+            "<section class=\"cw-setup-progress\" aria-labelledby=\"setup-progress-title\"";
         let ready = render_terminal(&organization, resize_test_row(READY, 1_000, 2_048));
         assert!(!ready.contains(section));
         assert!(ready.contains(crate::assets::SETUP_PROGRESS_SCRIPT_PATH));
@@ -3502,7 +3511,7 @@ mod tests {
             let page = render_terminal(&organization, row);
             assert!(page.contains(section));
             assert!(page.contains(&format!(
-                "data-setup-environment-id=\"{SETUP}\" data-setup-org-slug=\"{}\"><h2 id=\"setup-progress-title\">Setup</h2><p class=\"cw-setup-progress-status\" role=\"status\" data-setup-status>",
+                "data-setup-environment-id=\"{SETUP}\" data-setup-org-slug=\"{}\"><h2 id=\"setup-progress-title\">Setting up this Sandbox</h2><p class=\"cw-setup-progress-status\" role=\"status\" data-setup-status>",
                 organization.slug
             )));
             assert!(page.contains("<p class=\"cw-alert cw-alert--error\" role=\"alert\" data-setup-failure hidden></p><ol class=\"cw-setup-stages\" data-setup-stages></ol>"));
@@ -3526,6 +3535,128 @@ mod tests {
         assert!(page.contains(
             "<p class=\"cw-alert cw-alert--error\" role=\"alert\" data-setup-failure>Setup failed: git clone: exited 128 &#60;b&#62;x&#60;/b&#62;</p>"
         ));
+    }
+
+    /// #3772: the reason the API wrote is on the Sandbox page, said once, and
+    /// in the list, escaped, in its tone. Beside a usable terminal it is a
+    /// banner that can be dismissed; where nothing runs it is a centred
+    /// message with its drawing and only the action it allows; once deletion
+    /// started, the page says neither.
+    #[test]
+    fn a_sandboxs_status_message_is_on_its_page_and_in_the_list() {
+        const RESTARTED: &str = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+        const CRASHED: &str = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        let organization = test_organization();
+        let restarted = crate::view::EnvironmentRow {
+            status_message: "Restarted at 20:31 UTC after its runtime was replaced. <b>x</b>"
+                .into(),
+            status_tone: "info",
+            ..resize_test_row(RESTARTED, 1_000, 2_048)
+        };
+        let crashed = crate::view::EnvironmentRow {
+            state: "error",
+            status_code: "sandbox_stopped".into(),
+            status_message: "This sandbox stopped unexpectedly and is restarting.".into(),
+            status_tone: "danger",
+            ..resize_test_row(CRASHED, 1_000, 2_048)
+        };
+        // A restart beside a usable terminal: a dismissible banner.
+        let page = render_terminal(&organization, restarted.clone());
+        assert!(page.contains(
+            "data-sandbox-notice data-kind=\"banner\" data-tone=\"info\" data-graphic=\"\">"
+        ));
+        assert!(page.contains(
+            "data-sandbox-notice-text>Restarted at 20:31 UTC after its runtime was replaced. &#60;b&#62;x&#60;/b&#62;</p>"
+        ));
+        assert!(
+            page.contains("data-sandbox-notice-dismiss aria-label=\"Dismiss\" title=\"Dismiss\">")
+        );
+        // A crash: a centred message with its drawing and its reason, and
+        // Start again only when a start is allowed.
+        let page = render_terminal(&organization, crashed.clone());
+        assert!(page.contains(
+            "data-sandbox-notice data-kind=\"message\" data-tone=\"danger\" data-graphic=\"crashed\">"
+        ));
+        assert!(page.contains(
+            "data-sandbox-notice-text>This sandbox stopped unexpectedly and is restarting.</p>"
+        ));
+        assert!(page.contains(
+            "data-sandbox-notice-dismiss aria-label=\"Dismiss\" title=\"Dismiss\" hidden>"
+        ));
+        assert!(!page.contains("Choose Start"));
+        for action in ["start", "delete", "refresh"] {
+            let marker = format!("data-sandbox-notice-action=\"{action}\" hidden");
+            assert!(page.contains(&marker), "{action} offered");
+        }
+        let page = render_terminal(
+            &organization,
+            crate::view::EnvironmentRow {
+                can_start: true,
+                ..crashed.clone()
+            },
+        );
+        assert!(page.contains("data-sandbox-notice-action=\"start\">Start again</button>"));
+        // The message offers Start again, so the header's own Start waits
+        // (owner, 2026-11-13, #3772).
+        assert!(
+            page.contains("type=\"submit\" data-sandbox-action=\"start\" hidden>Start</button>")
+        );
+        // A refusal for capacity: one line, and Try again as its one action.
+        let full = crate::view::EnvironmentRow {
+            state: "stopped",
+            desired_state: "stopped",
+            status_code: "no_capacity".into(),
+            can_start: true,
+            can_stop: false,
+            status_message: "The node holding this sandbox is full.".into(),
+            ..resize_test_row(CRASHED, 1_000, 2_048)
+        };
+        let page = render_terminal(&organization, full);
+        assert!(page.contains("data-graphic=\"no-capacity\">"));
+        assert!(
+            page.contains("data-sandbox-notice-text>No room to start this sandbox right now.</p>")
+        );
+        assert!(page.contains("data-sandbox-notice-action=\"start\">Try again</button>"));
+        let page = render_terminal(
+            &organization,
+            crate::view::EnvironmentRow {
+                state: "destroying",
+                ..restarted.clone()
+            },
+        );
+        assert!(page.contains("data-sandbox-notice data-kind=\"none\""));
+        assert!(page.contains("data-graphic=\"\" hidden>"));
+
+        let view = EnvironmentsPageView {
+            environments: vec![
+                restarted,
+                crashed,
+                resize_test_row("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 1_000, 2_048),
+            ],
+            environments_loading: false,
+            create_form: default_create_form("csrf".into(), false),
+            source_editor: None,
+            port_panel: None,
+            trust_summary: None,
+            resize_confirmation: None,
+            resize_operation: None,
+            search: String::new(),
+            state: "all".into(),
+            message: String::new(),
+            error: String::new(),
+            start: None,
+        };
+        let list = EnvironmentListTemplate {
+            organization: &organization,
+            page: &view,
+        }
+        .render()
+        .unwrap();
+        assert!(list.contains(
+            "<small class=\"cw-environment-preset cw-environment-status\" data-tone=\"info\" title=\"Restarted at 20:31 UTC after its runtime was replaced. &#60;b&#62;x&#60;/b&#62;\">Restarted at 20:31 UTC after its runtime was replaced. &#60;b&#62;x&#60;/b&#62;</small>"
+        ));
+        assert!(list.contains("data-tone=\"danger\" title=\"This sandbox stopped unexpectedly"));
+        assert_eq!(list.matches("cw-environment-status").count(), 2);
     }
 
     /// #2333: orchestration refuses Resize while setup owns a running Sandbox.
@@ -3590,7 +3721,7 @@ mod tests {
         assert!(offered.contains(
             "data-sandbox-action=\"resize\" data-sandbox-confirm>Review resize</button>"
         ));
-        // Only the readiness v3 and Resize v3 controllers keep this reason
+        // Only the readiness v4 and Resize v3 controllers keep this reason
         // and the Resize button in step. A cached older script would leave
         // the reason stale beside an enabled Resize, so both URLs moved.
         for path in [
@@ -3601,7 +3732,7 @@ mod tests {
         }
         assert_eq!(
             crate::assets::TERMINAL_READINESS_SCRIPT_PATH,
-            "/assets/codewire/terminal-readiness-v3.js"
+            "/assets/codewire/terminal-readiness-v4.js"
         );
         assert_eq!(
             page_error("setup-running"),

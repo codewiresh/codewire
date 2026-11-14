@@ -27,8 +27,8 @@ pub(crate) const ORGANIZATIONS_STYLE_PATH: &str = "/assets/codewire/routes/organ
 pub(crate) const HOSTS_STYLE_PATH: &str = "/assets/codewire/routes/hosts-v1.css";
 pub(crate) const SECRET_MANAGEMENT_STYLE_PATH: &str =
     "/assets/codewire/routes/secret-management-v1.css";
-pub(crate) const ENVIRONMENTS_STYLE_PATH: &str = "/assets/codewire/routes/environments-v2.css";
-pub(crate) const TERMINAL_STYLE_PATH: &str = "/assets/codewire/routes/terminal-v2.css";
+pub(crate) const ENVIRONMENTS_STYLE_PATH: &str = "/assets/codewire/routes/environments-v3.css";
+pub(crate) const TERMINAL_STYLE_PATH: &str = "/assets/codewire/routes/terminal-v3.css";
 pub(crate) const BILLING_ADMIN_STYLE_PATH: &str = "/assets/codewire/routes/billing-admin-v1.css";
 pub(crate) const OVERVIEW_STYLE_PATH: &str = "/assets/codewire/routes/overview-v1.css";
 pub(crate) const XTERM_STYLE_PATH: &str = "/assets/codewire/xterm-6.0.0.css";
@@ -41,7 +41,7 @@ pub(crate) const ENVIRONMENTS_SCRIPT_PATH: &str = "/assets/codewire/environments
 pub(crate) const TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/terminal-v1.js";
 pub(crate) const DURABLE_TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/durable-terminal-v2.js";
 pub(crate) const TERMINAL_PROTOCOL_SCRIPT_PATH: &str = "/assets/codewire/terminal-protocol-v1.js";
-pub(crate) const TERMINAL_READINESS_SCRIPT_PATH: &str = "/assets/codewire/terminal-readiness-v3.js";
+pub(crate) const TERMINAL_READINESS_SCRIPT_PATH: &str = "/assets/codewire/terminal-readiness-v4.js";
 pub(crate) const SETUP_PROGRESS_SCRIPT_PATH: &str = "/assets/codewire/setup-progress-v1.js";
 pub(crate) const SANDBOX_RESIZE_SCRIPT_PATH: &str = "/assets/codewire/sandbox-resize-v3.js";
 pub(crate) const TERMINAL_RENDERER_SCRIPT_PATH: &str = "/assets/codewire/terminal-renderer-v1.js";
@@ -470,7 +470,7 @@ mod tests {
         );
         assert_eq!(
             ENVIRONMENTS_STYLE_PATH,
-            "/assets/codewire/routes/environments-v2.css"
+            "/assets/codewire/routes/environments-v3.css"
         );
         assert_eq!(DEVICE_SCRIPT_PATH, "/assets/codewire/device-v1.js");
         assert_eq!(SIGNUP_SCRIPT_PATH, "/assets/codewire/signup-v1.js");

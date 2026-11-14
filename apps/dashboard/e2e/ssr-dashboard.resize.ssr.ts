@@ -15,7 +15,7 @@ async function transport(page: Page) {
     setupRunning: false as boolean | undefined,
     planRefusal: null as Record<string, unknown> | null, planGate: Promise.resolve(), applyGate: Promise.resolve() };
   // Only the opted-in readiness request is answered.
-  await page.route("**/_fragments/terminal-readiness?fields=setup", (route) => route.fulfill({ json: {
+  await page.route("**/_fragments/terminal-readiness?fields=status", (route) => route.fulfill({ json: {
     environmentId: environment, running: true, setupComplete: state.setupRunning !== true,
     ...(state.setupRunning === undefined ? {} : { setupRunning: state.setupRunning }),
     detail: { state: "running", desiredState: "started", tone: "success", lastEvent: "just now",
@@ -376,7 +376,7 @@ test("a current value outside the fixed choices stays selected as its own choice
   let release = () => {};
   const held = new Promise<void>((resolve) => { release = resolve; });
   const live = { cpuMillicores: 1500, memoryMib: 3072 };
-  await page.route("**/_fragments/terminal-readiness?fields=setup", async (route) => {
+  await page.route("**/_fragments/terminal-readiness?fields=status", async (route) => {
     await held;
     await route.fulfill({ json: {
       environmentId: environment, running: true, setupComplete: true, setupRunning: false,

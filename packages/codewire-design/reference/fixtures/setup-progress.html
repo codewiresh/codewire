@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/environments.css"><link rel="stylesheet" href="../../routes/terminal.css">
   <script src="../../dashboard.js" defer></script>
   <script src="../../setup-progress.js" defer></script>
+  <script src="setup-progress-preview.js" defer></script>
 </head>
 <body class="cw-body cw-terminal-page">
   <!-- Setup progress fixture. Events are synthetic; the browser spec answers this page's event stream. -->
@@ -84,12 +85,15 @@
       </header>
       <main class="cw-workspace-main">
         <div class="cw-workspace-notices"><p class="cw-alert" role="status">Sandbox creation started.</p></div>
-        <section class="cw-setup-progress" aria-labelledby="setup-progress-title" data-setup-progress data-setup-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" data-setup-org-slug="fixture-org"><h2 id="setup-progress-title">Setup</h2><p class="cw-setup-progress-status" role="status" data-setup-status>Waiting for setup progress…</p><p class="cw-alert cw-alert--error" role="alert" data-setup-failure hidden></p><ol class="cw-setup-stages" data-setup-stages></ol><noscript><p class="cw-setup-progress-status">Live setup progress needs JavaScript. Reload this page to check setup.</p></noscript></section>
         <section class="cw-sandbox-terminal cw-durable-terminal" aria-label="Sandbox terminal">
           <header class="cw-terminal-tabs-bar">
             <nav aria-label="Terminal tabs"><ul role="tablist" aria-label="Terminal tabs"></ul></nav>
             <button class="cw-icon-button cw-terminal-new" type="button" disabled aria-label="New terminal" title="New terminal"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg></button>
           </header>
+          <section class="cw-sandbox-notice" aria-label="Sandbox status" data-sandbox-notice data-kind="setup" data-tone="neutral" data-graphic="">
+            <p class="cw-sandbox-notice-text" role="status" data-sandbox-notice-text hidden>Setting up this Sandbox. Terminals open when setup completes.</p>
+            <section class="cw-setup-progress" aria-labelledby="setup-progress-title" data-setup-progress data-setup-environment-id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" data-setup-org-slug="fixture-org"><h2 id="setup-progress-title">Setting up this Sandbox</h2><p class="cw-setup-progress-status" role="status" data-setup-status>Waiting for setup progress…</p><p class="cw-alert cw-alert--error" role="alert" data-setup-failure hidden></p><ol class="cw-setup-stages" data-setup-stages></ol><noscript><p class="cw-setup-progress-status">Live setup progress needs JavaScript. Reload this page to check setup.</p></noscript></section>
+          </section>
           <div class="cw-terminal-empty"><p>Sandbox setup is not complete. Terminal controls will be available when setup completes.</p></div>
           <footer class="cw-workspace-statusbar">
             <dl class="cw-workspace-facts"><div><dt>Last event</dt><dd>just now</dd></div><div><dt>Auto-delete</dt><dd>off</dd></div><div class="cw-workspace-fact-id"><dt class="cw-sr-only">Sandbox ID</dt><dd>bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb</dd></div></dl>

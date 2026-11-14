@@ -212,7 +212,7 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     // The creation notice stands until the Sandbox runs, well after this
     // Kind Sandbox lands here.
     await expect(page.getByRole("status").filter({ hasText: "Sandbox creation started" })).toBeVisible();
-    await expect(page.getByRole("region", { name: "Setup", exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Setting up this Sandbox", exact: true })).toBeVisible();
     // The rest of this journey starts from the Sandboxes list.
     await page.goto(`${ssrUrl}/${slug}/`);
     // The live sidebar, with this Sandbox in its rail, keeps its marks on the

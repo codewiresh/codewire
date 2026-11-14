@@ -5,7 +5,7 @@ use codewire_proto::codewire::{
     console::v1::{EnvironmentSetupServiceClient, GetEnvironmentCreateOptionsRequest},
     v1::{
         CreateEnvironmentRequest, CreatePortRequest, DeleteEnvironmentRequest, DeletePortRequest,
-        Environment, EnvironmentResizeExecutionMode, EnvironmentResizeOperation,
+        DesiredState, Environment, EnvironmentResizeExecutionMode, EnvironmentResizeOperation,
         EnvironmentResizeOperationState, EnvironmentResizePlan, EnvironmentResources,
         EnvironmentServiceClient, EnvironmentSourcesUpdateOutcome, EnvironmentState,
         GetEnvironmentRequest, GetEnvironmentResizeOperationRequest,
@@ -16,6 +16,7 @@ use codewire_proto::codewire::{
     },
 };
 use connectrpc::{ConnectError, client::ClientConfig};
+use serde::Serialize;
 
 use crate::{
     state::AppState,
@@ -834,6 +835,256 @@ pub(crate) async fn delete_port(
     Ok(())
 }
 
+/// API text bounded for one line of display: control characters become spaces,
+/// and it ends after 300 characters.
+fn display_line(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(300)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// What a Sandbox's state says to its user (#3772): the reason the API wrote,
+/// whenever there is one, as the CLI shows it. A runtime being replaced and a
+/// restart are notices; a refusal for capacity is a warning, as the Sandbox's
+/// page shows it; any other reason on a Sandbox in `error` is a failure. A
+/// code this page doesn't know still shows its text.
+pub(crate) fn status_notice(state: &str, code: &str, reason: &str) -> (String, &'static str) {
+    let message = display_line(reason);
+    let tone = match code {
+        "sandbox_replacing" | "sandbox_restarted" => "info",
+        "no_capacity" => "warning",
+        _ if state == "error" => "danger",
+        _ => "info",
+    };
+    (message, tone)
+}
+
+/// The requested lifecycle state as the dashboard names it.
+pub(crate) fn desired_state_name(value: i32) -> &'static str {
+    match value {
+        value if value == DesiredState::Started as i32 => "started",
+        value if value == DesiredState::Stopped as i32 => "stopped",
+        value if value == DesiredState::Destroyed as i32 => "destroyed",
+        value if value == DesiredState::Archived as i32 => "archived",
+        value if value == DesiredState::Resized as i32 => "resized",
+        _ => "unknown",
+    }
+}
+
+pub(crate) fn lifecycle_pending(state: &str, desired: &str) -> bool {
+    match state {
+        "running" => !matches!(desired, "started" | "resized"),
+        "stopped" => desired != "stopped",
+        "destroyed" => desired != "destroyed",
+        "archived" => desired != "archived",
+        "error" | "build failed" => false,
+        _ => true,
+    }
+}
+
+/// A create or start that has not converged stays deletable. Destroy already
+/// supersedes the `started` intent in any state but destroying/destroyed, and
+/// a retry that cannot converge must not leave the Sandbox with no action
+/// (#2328). Pending stop, resize, and destroy intents keep their own guard.
+fn start_intent_unconverged(state: &str, desired: &str) -> bool {
+    desired == "started" && matches!(state, "pending" | "creating" | "starting")
+}
+
+/// Which lifecycle actions the page offers. Presentation only: each mutation
+/// is authorized again where it lands.
+pub(crate) struct LifecycleActions {
+    pub(crate) pending: bool,
+    pub(crate) start: bool,
+    pub(crate) stop: bool,
+    pub(crate) delete: bool,
+}
+
+pub(crate) fn lifecycle_actions(row: &EnvironmentRow) -> LifecycleActions {
+    let pending = lifecycle_pending(row.state, row.desired_state);
+    let allowed = row.confidential_actions_allowed;
+    LifecycleActions {
+        pending,
+        start: allowed && !pending && row.can_start,
+        stop: allowed && !pending && row.can_stop,
+        delete: row.can_destroy
+            && (!pending || start_intent_unconverged(row.state, row.desired_state)),
+    }
+}
+
+/// The one thing a Sandbox's page says about its state, and the one action it
+/// offers there (#3772). The owner's rule (2026-11-13, on #3772): a banner
+/// while something still shows below it, a centred message when nothing runs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct SandboxNotice {
+    /// `banner` runs across the top of the terminal column, above the
+    /// terminal or its startup; `message` is centred where the terminal would
+    /// be; `setup` lists setup's steps there; `none` says nothing.
+    pub(crate) kind: &'static str,
+    pub(crate) text: String,
+    /// `neutral`, `info`, `warning` or `danger`.
+    pub(crate) tone: &'static str,
+    /// `start`, `retry` (a start after a refusal), `delete`, `refresh`, or none.
+    pub(crate) action: &'static str,
+    /// The action's button text; empty with no action.
+    pub(crate) label: &'static str,
+    /// Whether the banner can be dismissed until the notice changes.
+    pub(crate) dismissible: bool,
+    /// A message's drawing: `crashed`, `no-capacity`, `stopped`, or none.
+    pub(crate) graphic: &'static str,
+}
+
+impl SandboxNotice {
+    /// A centred message offers its own Start, so the header's waits (owner,
+    /// 2026-11-13, #3772).
+    pub(crate) fn offers_start(&self) -> bool {
+        self.kind == "message" && matches!(self.action, "start" | "retry")
+    }
+
+    fn none() -> Self {
+        Self::banner(String::new(), "neutral").kind("none")
+    }
+
+    fn banner(text: String, tone: &'static str) -> Self {
+        Self {
+            kind: "banner",
+            text,
+            tone,
+            action: "",
+            label: "",
+            dismissible: false,
+            graphic: "",
+        }
+    }
+
+    fn message(graphic: &'static str, text: String, tone: &'static str) -> Self {
+        Self {
+            graphic,
+            ..Self::banner(text, tone).kind("message")
+        }
+    }
+
+    fn kind(self, kind: &'static str) -> Self {
+        Self { kind, ..self }
+    }
+
+    /// Offers `action` under `label` when `allowed`, and nothing otherwise.
+    fn offering(self, allowed: bool, action: &'static str, label: &'static str) -> Self {
+        if !allowed {
+            return self;
+        }
+        Self {
+            action,
+            label,
+            ..self
+        }
+    }
+}
+
+const SETTING_UP: &str = "Setting up this Sandbox. Terminals open when setup completes.";
+const STARTING: &str = "This Sandbox is starting. Terminals open when it is ready.";
+const PENDING: &str =
+    "A Sandbox operation is pending. Waiting for the observed state to match its requested state.";
+const NO_ROOM: &str = "No room to start this sandbox right now.";
+
+/// What the page says for a Sandbox's state. A reason the API wrote is said
+/// as written, except a refusal for capacity, which the page says in one line;
+/// otherwise the state is, and only an action the state allows is offered. A
+/// Sandbox on its way to a state offers none; a crashed one offers Start again
+/// when a start is allowed.
+pub(crate) fn sandbox_notice(row: &EnvironmentRow) -> SandboxNotice {
+    let actions = lifecycle_actions(row);
+    let reason = row.status_message.as_str();
+    let said = |default: &str| {
+        if reason.is_empty() {
+            default.to_owned()
+        } else {
+            reason.to_owned()
+        }
+    };
+    let failed = |text: String| {
+        SandboxNotice::message("crashed", text, "danger").offering(
+            actions.start,
+            "start",
+            "Start again",
+        )
+    };
+    match (row.state, row.status_code.as_str()) {
+        ("destroying" | "destroyed", _) => SandboxNotice::none(),
+        ("running", _) if !row.confidential_actions_allowed => SandboxNotice::none(),
+        ("running", _) if row.setup_running || !row.setup_failure.is_empty() => {
+            SandboxNotice::banner(SETTING_UP.to_owned(), "neutral").kind("setup")
+        }
+        ("running", _) if !reason.is_empty() => SandboxNotice {
+            dismissible: true,
+            ..SandboxNotice::banner(said(""), "info")
+        },
+        ("running", _) => SandboxNotice::none(),
+        ("error" | "build failed", _) if row.desired_state == "destroyed" => {
+            let notice = SandboxNotice::message(
+                "crashed",
+                "This Sandbox could not be deleted.".to_owned(),
+                "danger",
+            );
+            if actions.delete {
+                notice.offering(true, "delete", "Delete")
+            } else {
+                notice.offering(true, "refresh", "Refresh status")
+            }
+        }
+        ("error" | "stopped", "no_capacity") => SandboxNotice::message(
+            "no-capacity",
+            NO_ROOM.to_owned(),
+            "warning",
+        )
+        .offering(actions.start, "retry", "Try again"),
+        ("error", "sandbox_stopped") => {
+            failed(said("This sandbox stopped unexpectedly and is restarting."))
+        }
+        ("error" | "build failed", _) => {
+            let notice = failed(said("The Sandbox operation failed."));
+            let unoffered = notice.action.is_empty();
+            notice.offering(unoffered, "refresh", "Refresh status")
+        }
+        // Only a pending start is "starting"; a stopped Sandbox being archived
+        // or deleted is a pending operation like any other.
+        ("stopped", _) if actions.pending => SandboxNotice::banner(
+            if row.desired_state == "started" {
+                STARTING
+            } else {
+                PENDING
+            }
+            .to_owned(),
+            "info",
+        ),
+        ("stopped", _) => SandboxNotice::message(
+            "stopped",
+            "This Sandbox is stopped. Its files are kept.".to_owned(),
+            "neutral",
+        )
+        .offering(actions.start, "start", "Start"),
+        (_, "sandbox_replacing") => SandboxNotice::banner(said(STARTING), "info"),
+        ("stopping", _) => SandboxNotice::banner("This Sandbox is stopping.".to_owned(), "info"),
+        ("resizing", _) => SandboxNotice::banner(
+            "This Sandbox is being resized. Terminals open when it is ready.".to_owned(),
+            "info",
+        ),
+        (_, _) if actions.pending && row.desired_state == "started" => {
+            SandboxNotice::banner(STARTING.to_owned(), "info")
+        }
+        (_, _) if actions.pending => SandboxNotice::banner(PENDING.to_owned(), "info"),
+        (_, _) => SandboxNotice::none(),
+    }
+}
+
 pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
     let sources = source_summary(&environment);
     let (deletion_state, shutdown_at, shutdown_at_label) = deletion_deadline(&environment);
@@ -843,23 +1094,12 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
         && !environment.setup_complete
         && environment.setup_error.trim().is_empty();
     let setup_failure = if state == "running" && !environment.setup_complete {
-        environment
-            .setup_error
-            .chars()
-            .map(|character| {
-                if character.is_control() {
-                    ' '
-                } else {
-                    character
-                }
-            })
-            .take(300)
-            .collect::<String>()
-            .trim()
-            .to_owned()
+        display_line(&environment.setup_error)
     } else {
         String::new()
     };
+    let (status_message, status_tone) =
+        status_notice(state, &environment.error_code, &environment.error_reason);
     let display_name = if environment.name.trim().is_empty() {
         environment.id.chars().take(8).collect()
     } else {
@@ -911,6 +1151,10 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
         can_destroy: !matches!(state, "destroying" | "destroyed"),
         setup_running,
         setup_failure,
+        status_message,
+        status_tone,
+        status_code: environment.error_code.clone(),
+        desired_state: desired_state_name(environment.desired_state.to_i32()),
         confidential_actions_allowed: true,
         vscode_url: format!(
             "vscode://vscode-remote/ssh-remote+cw-cloud-{}/workspace",
@@ -1199,6 +1443,233 @@ fn past_time(seconds: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #3772: each kind of status reads in its own tone, every reason is
+    /// shown, and nothing is said when there is no reason.
+    #[test]
+    fn a_sandboxs_status_says_what_happened_in_its_tone() {
+        for (state, code, tone) in [
+            ("error", "sandbox_stopped", "danger"),
+            ("error", "", "danger"),
+            ("error", "something_new", "danger"),
+            ("starting", "sandbox_replacing", "info"),
+            ("running", "sandbox_restarted", "info"),
+            ("stopped", "no_capacity", "warning"),
+            ("error", "no_capacity", "warning"),
+            ("running", "something_new", "info"),
+            ("stopped", "", "info"),
+        ] {
+            assert_eq!(
+                status_notice(state, code, "What happened."),
+                ("What happened.".to_owned(), tone),
+                "{state} {code}"
+            );
+        }
+        assert_eq!(status_notice("running", "", "").0, "");
+        assert_eq!(status_notice("error", "", "  \n ").0, "");
+        // One line, bounded, as the setup failure is.
+        let long = format!("a\nb\t{}", "x".repeat(400));
+        let (message, _) = status_notice("error", "", &long);
+        assert!(message.starts_with("a b "));
+        assert_eq!(message.chars().count(), 300);
+    }
+
+    /// #3772: one notice per state, consistent with it. A Sandbox restarting
+    /// by itself offers no action; one the user must act on offers exactly
+    /// the action it allows; a notice beside a usable terminal can be
+    /// dismissed; setup shows its progress.
+    #[test]
+    fn each_state_says_one_thing_and_offers_only_its_action() {
+        let row = |state: EnvironmentState, desired: DesiredState, code: &str, reason: &str| {
+            environment_row(Environment {
+                id: "00000000-0000-4000-8000-000000000001".into(),
+                state: state.into(),
+                desired_state: desired.into(),
+                error_code: code.into(),
+                error_reason: reason.into(),
+                setup_complete: true,
+                ..Default::default()
+            })
+        };
+        use EnvironmentState as S;
+        // Each case: kind, tone, action and its label, graphic, text.
+        for (environment, kind, tone, (action, label), graphic, text) in [
+            (
+                row(
+                    S::Error,
+                    DesiredState::Started,
+                    "sandbox_stopped",
+                    "Stopped; restarting.",
+                ),
+                "message",
+                "danger",
+                ("start", "Start again"),
+                "crashed",
+                "Stopped; restarting.",
+            ),
+            (
+                row(
+                    S::Starting,
+                    DesiredState::Started,
+                    "sandbox_replacing",
+                    "Being replaced.",
+                ),
+                "banner",
+                "info",
+                ("", ""),
+                "",
+                "Being replaced.",
+            ),
+            (
+                row(
+                    S::Running,
+                    DesiredState::Started,
+                    "sandbox_restarted",
+                    "Restarted at 09:02 UTC.",
+                ),
+                "banner",
+                "info",
+                ("", ""),
+                "",
+                "Restarted at 09:02 UTC.",
+            ),
+            (
+                row(
+                    S::Stopped,
+                    DesiredState::Stopped,
+                    "no_capacity",
+                    "The node is full.",
+                ),
+                "message",
+                "warning",
+                ("retry", "Try again"),
+                "no-capacity",
+                NO_ROOM,
+            ),
+            (
+                row(S::Error, DesiredState::Started, "", ""),
+                "message",
+                "danger",
+                ("start", "Start again"),
+                "crashed",
+                "The Sandbox operation failed.",
+            ),
+            (
+                row(S::Error, DesiredState::Destroyed, "", ""),
+                "message",
+                "danger",
+                ("delete", "Delete"),
+                "crashed",
+                "This Sandbox could not be deleted.",
+            ),
+            (
+                row(S::Stopped, DesiredState::Stopped, "", ""),
+                "message",
+                "neutral",
+                ("start", "Start"),
+                "stopped",
+                "This Sandbox is stopped. Its files are kept.",
+            ),
+            (
+                row(S::Stopped, DesiredState::Started, "", ""),
+                "banner",
+                "info",
+                ("", ""),
+                "",
+                STARTING,
+            ),
+            (
+                row(S::Stopped, DesiredState::Destroyed, "", ""),
+                "banner",
+                "info",
+                ("", ""),
+                "",
+                PENDING,
+            ),
+            (
+                row(S::Stopped, DesiredState::Archived, "", ""),
+                "banner",
+                "info",
+                ("", ""),
+                "",
+                PENDING,
+            ),
+            (
+                row(S::Creating, DesiredState::Started, "", ""),
+                "banner",
+                "info",
+                ("", ""),
+                "",
+                STARTING,
+            ),
+            (
+                row(S::Running, DesiredState::Started, "", ""),
+                "none",
+                "neutral",
+                ("", ""),
+                "",
+                "",
+            ),
+            (
+                row(S::Destroying, DesiredState::Destroyed, "", "Gone soon."),
+                "none",
+                "neutral",
+                ("", ""),
+                "",
+                "",
+            ),
+        ] {
+            assert_eq!(
+                sandbox_notice(&environment),
+                SandboxNotice {
+                    kind,
+                    text: text.into(),
+                    tone,
+                    action,
+                    label,
+                    // Only a notice beside a live terminal can be dismissed.
+                    dismissible: environment.status_code == "sandbox_restarted",
+                    graphic,
+                },
+                "{} {} {}",
+                environment.state,
+                environment.desired_state,
+                environment.status_code
+            );
+        }
+        let mut setup = row(S::Running, DesiredState::Started, "", "");
+        setup.setup_running = true;
+        assert_eq!(sandbox_notice(&setup).kind, "setup");
+        // An action the state doesn't allow is never offered.
+        let mut hidden = row(S::Stopped, DesiredState::Stopped, "", "");
+        hidden.confidential_actions_allowed = false;
+        assert_eq!(
+            (
+                sandbox_notice(&hidden).action,
+                sandbox_notice(&hidden).label
+            ),
+            ("", "")
+        );
+        // A failure that can't be started again can still be refreshed.
+        let mut failed = row(S::Error, DesiredState::Started, "", "");
+        failed.can_start = false;
+        assert_eq!(
+            (
+                sandbox_notice(&failed).action,
+                sandbox_notice(&failed).label
+            ),
+            ("refresh", "Refresh status")
+        );
+        // A crashed sandbox restarting by itself offers nothing it can't do.
+        let mut restarting = row(
+            S::Error,
+            DesiredState::Started,
+            "sandbox_stopped",
+            "Restarting.",
+        );
+        restarting.can_start = false;
+        assert_eq!(sandbox_notice(&restarting).action, "");
+    }
 
     fn with_deadline(seconds: i64, nanos: i32) -> Environment {
         let mut environment = Environment::default();

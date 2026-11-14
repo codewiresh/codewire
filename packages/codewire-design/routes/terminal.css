@@ -44,17 +44,24 @@
 .cw-workspace-attention .cw-credential-attention { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3); }
 
 /* Terminal: tab bar, session messages, the active tab's output, status bar. */
-.cw-durable-terminal { position: relative; display: grid; min-width: 0; min-height: calc(var(--tab-bar-height) + var(--status-bar-height) + 11.25rem); flex: 1 1 auto; grid-template-rows: auto auto auto auto minmax(0, 1fr) auto; background: var(--bg-base); }
+.cw-durable-terminal { position: relative; display: grid; min-width: 0; min-height: calc(var(--tab-bar-height) + var(--status-bar-height) + 11.25rem); flex: 1 1 auto; grid-template-rows: auto auto auto auto auto minmax(0, 1fr) auto; background: var(--bg-base); }
 .cw-durable-terminal > * { min-width: 0; }
-.cw-durable-terminal > .cw-terminal-tabs-bar { grid-row: 1; }
-.cw-durable-terminal > .cw-terminal-limit { grid-row: 2; }
-.cw-durable-terminal > .cw-terminal-session-message { grid-row: 3; }
-.cw-durable-terminal > .cw-terminal-reload { grid-row: 4; }
-.cw-durable-terminal > .cw-terminal-empty, .cw-durable-terminal > .cw-terminal-panels { grid-row: 5; grid-column: 1; }
+.cw-durable-terminal > .cw-terminal-tabs-bar { grid-row: 2; }
+.cw-durable-terminal > .cw-terminal-limit { grid-row: 3; }
+.cw-durable-terminal > .cw-terminal-session-message { grid-row: 4; }
+.cw-durable-terminal > .cw-terminal-reload { grid-row: 5; }
+.cw-durable-terminal > .cw-terminal-empty, .cw-durable-terminal > .cw-terminal-panels { grid-row: 6; grid-column: 1; }
 /* With no tabs open the output container is shown but empty; the message
    shares its cell and stays above it. */
 .cw-durable-terminal > .cw-terminal-empty { z-index: 1; }
-.cw-durable-terminal > .cw-workspace-statusbar { grid-row: 6; }
+.cw-durable-terminal > .cw-workspace-statusbar { grid-row: 7; }
+/* The Sandbox's state, said once (#3772; the owner's rule, 2026-11-13): a
+   banner across the top of the column while something still shows below it,
+   or a message centred where the output would be when nothing runs, in place
+   of the empty state's own line. */
+.cw-durable-terminal > .cw-sandbox-notice { grid-row: 6; grid-column: 1; z-index: 2; }
+.cw-durable-terminal > .cw-sandbox-notice[data-kind="banner"] { grid-row: 1; }
+.cw-durable-terminal:has(> .cw-sandbox-notice:not([hidden], [data-kind="banner"])) > .cw-terminal-empty { display: none; }
 
 /* Tabs scroll inside the bar, never the page. New terminal stays in reach
    after the last tab, and the terminal menu stays at the end. */
@@ -90,6 +97,56 @@
 /* With no tab open: what happens next, or why it failed with Retry beneath. */
 .cw-terminal-empty { display: grid; place-content: center; justify-items: center; gap: var(--space-3); margin: 0; padding: var(--space-8) max(var(--space-4), calc((100% - var(--measure)) / 2)); color: var(--fg-tertiary); font-size: var(--text-secondary); line-height: var(--leading-body); text-align: center; }
 .cw-terminal-empty > p { margin: 0; }
+
+.cw-sandbox-notice[hidden] { display: none; }
+.cw-sandbox-notice-text { margin: 0; max-inline-size: var(--measure); color: var(--fg-primary); font-size: var(--text-body); line-height: var(--leading-body); }
+.cw-sandbox-notice-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-2); }
+.cw-sandbox-notice-actions:not(:has(> :not([hidden]), > form > :not([hidden]))) { display: none; }
+.cw-sandbox-notice-actions form { display: contents; }
+/* A banner: one solid full-width block with square corners and no rule,
+   always tinted by its tone, and as tall with or without its dismiss button,
+   so its text sits with equal space above and below (the owner, 2026-11-13). */
+.cw-sandbox-notice[data-kind="banner"] { display: flex; align-items: center; gap: var(--space-3); min-block-size: calc(var(--icon-button-size) + 2 * var(--space-2)); padding: var(--space-2) var(--space-4); background: var(--info-muted); }
+.cw-sandbox-notice[data-kind="banner"][data-tone="warning"] { background: var(--warning-muted); }
+.cw-sandbox-notice[data-kind="banner"][data-tone="danger"] { background: var(--destructive-muted); }
+.cw-sandbox-notice[data-kind="banner"] .cw-sandbox-notice-text { flex: 1 1 auto; max-inline-size: none; font-size: var(--text-secondary); }
+.cw-sandbox-notice[data-kind="banner"] .cw-sandbox-notice-actions { flex: none; }
+.cw-sandbox-notice-dismiss { flex: none; }
+/* A message: a drawing, one line and one button, with no box around them. */
+.cw-sandbox-notice[data-kind="message"] { display: grid; place-content: center; justify-items: center; gap: var(--space-4); padding: var(--space-8) var(--space-4); background: var(--bg-base); text-align: center; }
+.cw-sandbox-notice-graphic { display: none; inline-size: 6rem; block-size: 5rem; color: var(--fg-tertiary); fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
+.cw-sandbox-notice[data-graphic="crashed"] > [data-notice-graphic="crashed"],
+.cw-sandbox-notice[data-graphic="no-capacity"] > [data-notice-graphic="no-capacity"],
+.cw-sandbox-notice[data-graphic="stopped"] > [data-notice-graphic="stopped"] { display: block; }
+.cw-sandbox-notice[data-tone="danger"] > .cw-sandbox-notice-graphic { color: var(--destructive); }
+.cw-sandbox-notice[data-tone="warning"] > .cw-sandbox-notice-graphic { color: var(--warning); }
+/* Setup: a simple list of steps, centred both ways with no box. Each step's
+   circle spins while it runs and fills with a check when it finishes, and its
+   time sits at the end of its line (the owner, 2026-11-13). */
+.cw-sandbox-notice[data-kind="setup"] { display: grid; grid-template-columns: min(100%, var(--prose-narrow)); place-content: center; padding: var(--space-8) var(--space-4); background: var(--bg-base); }
+.cw-sandbox-notice .cw-setup-progress { padding: 0; border: 0; background: none; }
+.cw-sandbox-notice .cw-setup-progress h2, .cw-sandbox-notice .cw-setup-progress-status { text-align: center; }
+.cw-sandbox-notice .cw-setup-progress h2 { font-size: var(--text-body); }
+.cw-sandbox-notice .cw-setup-stages { gap: 0; }
+.cw-sandbox-notice .cw-setup-stage > .cw-setup-row { position: relative; flex-wrap: nowrap; padding-block: var(--space-1-5); }
+.cw-sandbox-notice .cw-setup-stage-label { flex: 1 1 auto; }
+.cw-sandbox-notice .cw-setup-stage-detail { flex: none; font-variant-numeric: tabular-nums; text-align: end; }
+.cw-sandbox-notice .cw-setup-stage > .cw-setup-row::before { display: inline-grid; flex: none; inline-size: var(--space-4); block-size: var(--space-4); place-items: center; border: var(--border-width) solid var(--border-subtle); border-radius: 50%; color: var(--fg-tertiary); font-size: var(--text-micro); line-height: var(--leading-none); content: ""; transition: background-color 200ms ease-out, border-color 200ms ease-out; }
+.cw-sandbox-notice .cw-setup-stage[data-state="running"] > .cw-setup-row::before { border-color: var(--accent) var(--accent) var(--border-subtle) var(--border-subtle); animation: cw-spin 0.9s linear infinite; }
+.cw-sandbox-notice .cw-setup-stage[data-state="completed"] > .cw-setup-row::before { border-color: var(--success); background: var(--success); }
+/* The check: two strokes of a rotated box, drawn into the filled circle. */
+.cw-sandbox-notice .cw-setup-stage[data-state="completed"] > .cw-setup-row::after { position: absolute; inset-block-start: 50%; inset-inline-start: calc(var(--space-4) / 2); inline-size: 0.3rem; block-size: 0.55rem; border: solid var(--bg-base); border-width: 0 calc(2 * var(--border-width)) calc(2 * var(--border-width)) 0; content: ""; transform: translate(-50%, -60%) rotate(45deg); animation: cw-setup-check 260ms ease-out 120ms both; }
+.cw-sandbox-notice .cw-setup-stage[data-state="warning"] > .cw-setup-row::before { border-color: var(--warning); color: var(--warning); content: "!"; }
+.cw-sandbox-notice .cw-setup-stage[data-state="failed"] > .cw-setup-row::before { border-color: var(--destructive); color: var(--destructive); content: "✕"; }
+@keyframes cw-setup-check {
+  from { opacity: 0; transform: translate(-50%, -60%) rotate(45deg) scale(0.3); }
+  to { opacity: 1; transform: translate(-50%, -60%) rotate(45deg) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cw-sandbox-notice .cw-setup-stage[data-state="running"] > .cw-setup-row::before { animation: none; }
+  .cw-sandbox-notice .cw-setup-stage > .cw-setup-row::before { transition: none; }
+  .cw-sandbox-notice .cw-setup-stage[data-state="completed"] > .cw-setup-row::after { animation: none; }
+}
 
 /* Output fills its cell edge to edge with one small inner gutter. */
 .cw-terminal-panels { min-height: 0; background: var(--bg-base); }

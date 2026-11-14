@@ -66,13 +66,30 @@
       && ["startEligible", "stopEligible", "deleteEligible", "actionsAllowed", "pending"].every((key) => typeof value[key] === "boolean");
   }
 
+  // The one thing the page says about the Sandbox's state, and its action (#3772).
+  // A banner sits above whatever still shows below it; a message is centred
+  // where nothing runs; setup lists its steps there.
+  const noticeActions = { "": [""], start: ["Start", "Start again"], retry: ["Try again"], delete: ["Delete"],
+    refresh: ["Refresh status"] };
+  function validNotice(value) {
+    return P.closed(value, ["kind", "text", "tone", "action", "label", "dismissible", "graphic"])
+      && ["none", "banner", "message", "setup"].includes(value.kind)
+      && typeof value.text === "string" && [...value.text].length <= 300
+      && ["neutral", "info", "warning", "danger"].includes(value.tone)
+      && Object.hasOwn(noticeActions, value.action) && noticeActions[value.action].includes(value.label)
+      && typeof value.dismissible === "boolean"
+      && ["", "crashed", "no-capacity", "stopped"].includes(value.graphic);
+  }
+  const NONE = { kind: "none", text: "", tone: "neutral", action: "", label: "", dismissible: false, graphic: "" };
+
   function mount(root) {
     const environmentId = root.dataset.terminalEnvironmentId;
     const slug = root.dataset.terminalOrgSlug;
     if (!P.uuid.test(environmentId || "") || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug || "") || slug.length < 3 || slug.length > 48) return;
-    // Ask for setupRunning explicitly: the server omits it for pages that
-    // predate it, whose closed-shape check would otherwise reject the response.
-    const url = `/${encodeURIComponent(slug)}/${environmentId}/_fragments/terminal-readiness?fields=setup`;
+    // Ask for setupRunning and the status message explicitly: the server omits
+    // them for pages that predate them, whose closed-shape check would
+    // otherwise reject the response.
+    const url = `/${encodeURIComponent(slug)}/${environmentId}/_fragments/terminal-readiness?fields=status`;
     // The workspace keeps Refresh sandbox status in its More actions menu.
     const button = root.querySelector("[data-terminal-readiness-refresh]")
       || document.querySelector("[data-terminal-readiness-refresh]");
@@ -88,6 +105,45 @@
     let everSettled = false;
     // Deletion is final: once observed, the page stops asking for status.
     let deleted = false;
+    const notice = root.querySelector("[data-sandbox-notice]");
+    const dismissedKey = `codewire:sandbox-notice-dismissed:${environmentId}`;
+    const messageOffersStart = () => !!notice && !notice.hidden && notice.dataset.kind === "message"
+      && notice.querySelector('[data-sandbox-notice-action="start"]')?.hidden === false;
+    function dismissed(text) {
+      try { return localStorage.getItem(dismissedKey) === text; } catch { return false; }
+    }
+    // One place says the state and offers its action. A dismissible banner's
+    // dismissal lasts until its text changes.
+    function showNotice(value) {
+      if (!notice) return;
+      const setup = notice.querySelector("[data-setup-progress]");
+      const text = notice.querySelector("[data-sandbox-notice-text]");
+      notice.hidden = value.kind === "none" || (value.dismissible && dismissed(value.text));
+      notice.dataset.kind = value.kind;
+      notice.dataset.tone = value.tone;
+      notice.dataset.graphic = value.graphic;
+      if (text.textContent !== value.text) text.textContent = value.text;
+      text.hidden = value.kind === "setup" && !!setup;
+      if (setup) setup.hidden = value.kind !== "setup";
+      for (const action of notice.querySelectorAll("[data-sandbox-notice-action]")) {
+        const name = action.dataset.sandboxNoticeAction;
+        action.hidden = name === "start" ? !["start", "retry"].includes(value.action) : name !== value.action;
+        if (name === "start" && value.label && action.textContent !== value.label) action.textContent = value.label;
+      }
+      notice.querySelector("[data-sandbox-notice-dismiss]").hidden = !value.dismissible;
+    }
+    notice?.querySelector("[data-sandbox-notice-dismiss]")?.addEventListener("click", () => {
+      const text = notice.querySelector("[data-sandbox-notice-text]").textContent;
+      try { localStorage.setItem(dismissedKey, text); } catch { /* Dismissed for this page view only. */ }
+      notice.hidden = true;
+    });
+    // A banner dismissed earlier stays dismissed from the first paint.
+    if (notice && !notice.hidden && !notice.querySelector("[data-sandbox-notice-dismiss]").hidden
+      && dismissed(notice.querySelector("[data-sandbox-notice-text]").textContent)) notice.hidden = true;
+    notice?.querySelector('[data-sandbox-notice-action="refresh"]')?.addEventListener("click", (event) => {
+      event.preventDefault();
+      void refresh();
+    });
     function observe(available, value) {
       if (!observesDetail) return;
       const detail = value?.detail;
@@ -107,6 +163,9 @@
         // the actions that recover it.
         const ending = deletionStates.includes(detail.state);
         deleted = detail.state === "destroyed";
+        // A server from before the notice sends none; the page keeps what it
+        // rendered and the status line below says the rest.
+        if (Object.hasOwn(value, "notice")) showNotice(ending ? NONE : value.notice);
         const actions = heading.querySelector("[data-sandbox-actions]");
         if (actions) actions.hidden = ending;
         const back = heading.querySelector("[data-sandbox-deleted]");
@@ -132,6 +191,7 @@
       }
       // Before any response the page keeps its rendered status (a deletion
       // message, or nothing) rather than calling the Sandbox unavailable.
+      const noticed = available && Object.hasOwn(value, "notice");
       status.textContent = !available ? !settled ? everSettled ? "" : status.textContent
           : "Sandbox status is unavailable. Last known values are shown; actions are paused."
         : submissionPending ? returnedAfterSubmission
@@ -139,6 +199,8 @@
           : "Action submitted. Waiting for its response; no action will be retried automatically."
         : detail.state === "destroyed" ? "This Sandbox was deleted."
         : detail.state === "destroying" ? "This Sandbox is being deleted."
+        // The notice says the state and offers its action.
+        : noticed ? ""
         : detail.pending ? "A Sandbox operation is pending. Waiting for the observed state to match its requested state."
         : ["error", "build failed"].includes(detail.state) ? detail.desiredState === "destroyed"
           ? detail.deleteEligible
@@ -163,9 +225,11 @@
           continue;
         }
         // Keep an open confirmation and its Cancel/Close usable while disabling
-        // its stale submit. Only header controls change their visibility.
+        // its stale submit. Only header controls change their visibility, and
+        // the header's Start waits while a centred message offers its own.
         if (!control.hasAttribute("data-sandbox-confirm") && settled) {
-          control.hidden = !eligible && available && !submissionPending;
+          control.hidden = (!eligible && available && !submissionPending)
+            || (action === "start" && messageOffersStart());
         }
       }
       // Resize waits while setup owns the running Sandbox, as New terminal
@@ -248,10 +312,11 @@
         const value = JSON.parse(text);
         // A server from before setupRunning omits it; that reads as false, so
         // Resize behaves as before and the server's refusal covers setup.
-        if (!P.closed(value, ["environmentId", "running", "setupComplete", "detail"], ["setupRunning"])
+        if (!P.closed(value, ["environmentId", "running", "setupComplete", "detail"], ["setupRunning", "notice"])
           || value.environmentId !== environmentId || typeof value.running !== "boolean"
           || typeof value.setupComplete !== "boolean"
           || (Object.hasOwn(value, "setupRunning") && typeof value.setupRunning !== "boolean")
+          || (Object.hasOwn(value, "notice") && !validNotice(value.notice))
           || !validDetail(value.detail)) throw new Error("Invalid readiness");
         if (version === epoch && !paused && !document.hidden && root.isConnected) { settled = everSettled = true; report(true, value); }
       } catch {

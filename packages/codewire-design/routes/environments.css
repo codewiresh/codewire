@@ -24,6 +24,9 @@
 .cw-environment-name { max-width: 18rem; overflow: hidden; font-family: var(--font-sans); font-size: var(--text-body); font-weight: var(--weight-medium); line-height: var(--leading-ui); text-overflow: ellipsis; white-space: nowrap; }
 .cw-sandbox-table .cw-environment-name { max-width: none; color: var(--fg-primary); }
 .cw-environment-preset { overflow: hidden; margin-top: var(--space-0-5); color: var(--fg-tertiary); font-size: var(--text-small); line-height: var(--leading-ui); text-overflow: ellipsis; white-space: nowrap; }
+.cw-environment-status[data-tone="danger"] { color: var(--destructive); }
+.cw-environment-status[data-tone="info"] { color: var(--info); }
+.cw-environment-status[data-tone="warning"] { color: var(--warning); }
 .cw-sandbox-table .cw-sandbox-lifetime { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 .cw-environment-table .cw-status > span { width: var(--icon-size-sm); text-align: center; }
 .cw-row-menu { display: inline-block; }

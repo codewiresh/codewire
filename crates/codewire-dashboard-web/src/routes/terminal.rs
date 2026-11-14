@@ -204,10 +204,11 @@ mod tests {
             template
                 .matches("name=\"return_to\" value=\"detail\"")
                 .count(),
-            3
+            4
         );
+        // Start, the status panel's Start, Stop and Delete.
         for name in ["list_search", "list_state"] {
-            assert_eq!(template.matches(&format!("name=\"{name}\"")).count(), 3);
+            assert_eq!(template.matches(&format!("name=\"{name}\"")).count(), 4);
         }
         assert!(
             template
