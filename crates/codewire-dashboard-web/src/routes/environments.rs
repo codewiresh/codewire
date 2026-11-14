@@ -1065,7 +1065,6 @@ pub(super) async fn create(
     match create.await {
         // Land on the new Sandbox, where its setup stages stream live (A5c).
         Ok(environment_id) => mutation_redirect(
-            &state,
             super::terminal::terminal_path(&slug, &environment_id),
             "environment-created",
             "",
@@ -1147,7 +1146,6 @@ pub(super) async fn update_sources(
         Ok(request) => request,
         Err(()) => {
             return mutation_redirect(
-                &state,
                 environments_path(&slug),
                 "",
                 "The source selection changed or is invalid. Reload and review it again.",
@@ -1156,12 +1154,11 @@ pub(super) async fn update_sources(
         }
     };
     match environment_connect::update_environment_sources(&state, cookie, request).await {
-        Ok(outcome) => mutation_redirect(&state, environments_path(&slug), outcome, "", &headers),
+        Ok(outcome) => mutation_redirect(environments_path(&slug), outcome, "", &headers),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             login_redirect(&environments_path(&slug), &headers)
         }
         Err(error) => mutation_redirect(
-            &state,
             environments_path(&slug),
             "",
             match error.code {
@@ -1255,7 +1252,7 @@ pub(super) async fn resize_plan(
         &submission.memory_mb,
         &submission.disk_gb,
     ) else {
-        return mutation_redirect(&state, environments_path(&slug), "", "invalid", &headers);
+        return mutation_redirect(environments_path(&slug), "", "invalid", &headers);
     };
     let result = environment_connect::plan_environment_resize(
         &state,
@@ -1278,7 +1275,7 @@ pub(super) async fn resize_plan(
             } else {
                 mutation_error(&error)
             };
-            return mutation_redirect(&state, environments_path(&slug), "", code, &headers);
+            return mutation_redirect(environments_path(&slug), "", code, &headers);
         }
     };
     let (plan, environment) = response;
@@ -1327,10 +1324,10 @@ pub(super) async fn resize_apply(
         &submission.memory_mb,
         &submission.disk_gb,
     ) else {
-        return mutation_redirect(&state, environments_path(&slug), "", "invalid", &headers);
+        return mutation_redirect(environments_path(&slug), "", "invalid", &headers);
     };
     if submission.request_id.trim().is_empty() || submission.request_id.len() > 128 {
-        return mutation_redirect(&state, environments_path(&slug), "", "invalid", &headers);
+        return mutation_redirect(environments_path(&slug), "", "invalid", &headers);
     }
     let allow_restart = checkbox_checked(&submission.allow_restart);
     let force = checkbox_checked(&submission.force);
@@ -1362,7 +1359,6 @@ pub(super) async fn resize_apply(
         }
         Err(error) => {
             return mutation_redirect(
-                &state,
                 environments_path(&slug),
                 "",
                 mutation_error(&error),
@@ -1370,13 +1366,7 @@ pub(super) async fn resize_apply(
             );
         }
     };
-    resize_operation_redirect(
-        &state,
-        &headers,
-        &slug,
-        &submission.environment_id,
-        &response.id,
-    )
+    resize_operation_redirect(&headers, &slug, &submission.environment_id, &response.id)
 }
 
 pub(super) async fn resize_operation_fragment(
@@ -1437,7 +1427,7 @@ pub(super) async fn create_port(
         if submission.dialog && headers.contains_key(HTMX_REQUEST) {
             return StatusCode::BAD_REQUEST.into_response();
         }
-        return mutation_redirect(&state, environments_path(&slug), "", "invalid", &headers);
+        return mutation_redirect(environments_path(&slug), "", "invalid", &headers);
     }
     let port = submission
         .port
@@ -1516,7 +1506,7 @@ pub(super) async fn delete_port(
         if submission.dialog && headers.contains_key(HTMX_REQUEST) {
             return StatusCode::BAD_REQUEST.into_response();
         }
-        return mutation_redirect(&state, environments_path(&slug), "", "invalid", &headers);
+        return mutation_redirect(environments_path(&slug), "", "invalid", &headers);
     }
     let result = match environment_connect::delete_port(
         &state,
@@ -1601,7 +1591,6 @@ async fn port_response(
         render_port_dialog(state, headers, organization, cookie, action).await
     } else {
         ports_redirect(
-            state,
             headers,
             &organization.slug,
             action.environment_id,
@@ -1735,7 +1724,6 @@ where
         };
     if !valid_identifier(&submission.environment_id) {
         return mutation_redirect(
-            state,
             lifecycle_feedback_path(&list_context.list_url(slug), "", "invalid"),
             "",
             "",
@@ -1750,13 +1738,12 @@ where
             } else {
                 lifecycle_feedback_path(&continuation, message, "")
             };
-            mutation_redirect(state, destination, "", "", headers)
+            mutation_redirect(destination, "", "", headers)
         }
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             login_redirect(&continuation, headers)
         }
         Err(error) => mutation_redirect(
-            state,
             lifecycle_feedback_path(&continuation, "", mutation_error(&error)),
             "",
             "",
@@ -2467,7 +2454,6 @@ fn checkbox_checked(value: &str) -> bool {
 }
 
 fn resize_operation_redirect(
-    state: &AppState,
     headers: &HeaderMap,
     slug: &str,
     environment_id: &str,
@@ -2490,7 +2476,7 @@ fn resize_operation_redirect(
             .map(|query| format!("?{query}"))
             .unwrap_or_default()
     );
-    mutation_redirect(state, target, "", "", headers)
+    mutation_redirect(target, "", "", headers)
 }
 
 pub(super) fn page_error(value: &str) -> &'static str {
@@ -2535,13 +2521,7 @@ fn port_error(value: &str) -> &'static str {
     }
 }
 
-fn ports_redirect(
-    state: &AppState,
-    headers: &HeaderMap,
-    slug: &str,
-    environment_id: &str,
-    result: &str,
-) -> Response {
+fn ports_redirect(headers: &HeaderMap, slug: &str, environment_id: &str, result: &str) -> Response {
     let mut target = environments_path(slug);
     target.push_str("?ports=");
     target.push_str(environment_id);
@@ -2551,7 +2531,7 @@ fn ports_redirect(
         target.push_str("&error=");
     }
     target.push_str(result);
-    mutation_redirect(state, target, "", "", headers)
+    mutation_redirect(target, "", "", headers)
 }
 
 fn environments_path(slug: &str) -> String {

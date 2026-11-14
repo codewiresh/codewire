@@ -144,7 +144,6 @@ pub(super) async fn create_secret_project(
     };
     if !organization.can_admin {
         return secret_mutation_redirect(
-            &state,
             secrets_path(&organization.slug),
             &draft,
             "",
@@ -180,7 +179,6 @@ pub(super) async fn create_secret_project(
     .await
     {
         Ok(()) => secret_mutation_redirect(
-            &state,
             secrets_path(&organization.slug),
             &draft,
             "project-created",
@@ -227,7 +225,6 @@ pub(super) async fn delete_secret_project(
     };
     if !organization.can_admin || !valid_identifier(&submission.project_id) {
         return secret_mutation_redirect(
-            &state,
             secrets_path(&organization.slug),
             &draft,
             "",
@@ -243,7 +240,7 @@ pub(super) async fn delete_secret_project(
         submission.project_id,
     )
     .await;
-    secret_mutation_result(&state, &headers, path, &draft, result, "project-deleted")
+    secret_mutation_result(&headers, path, &draft, result, "project-deleted")
 }
 
 pub(super) async fn set_secret(
@@ -269,7 +266,6 @@ pub(super) async fn set_secret(
     };
     if !bucket_can_manage(&organization, &bucket) {
         return secret_mutation_redirect(
-            &state,
             secret_bucket_path(&organization.slug, &bucket),
             &draft,
             "",
@@ -307,7 +303,6 @@ pub(super) async fn set_secret(
     .await;
     match result {
         Ok(()) => secret_mutation_redirect(
-            &state,
             secret_bucket_path(&organization.slug, &bucket),
             &draft,
             "secret-saved",
@@ -356,7 +351,6 @@ pub(super) async fn delete_secret(
     };
     if !bucket_can_manage(&organization, &bucket) || !valid_secret_key(&submission.key) {
         return secret_mutation_redirect(
-            &state,
             secret_bucket_path(&organization.slug, &bucket),
             &draft,
             "",
@@ -373,7 +367,7 @@ pub(super) async fn delete_secret(
         submission.key,
     )
     .await;
-    secret_mutation_result(&state, &headers, path, &draft, result, "secret-deleted")
+    secret_mutation_result(&headers, path, &draft, result, "secret-deleted")
 }
 
 pub(super) async fn rename_secret(
@@ -403,7 +397,6 @@ pub(super) async fn rename_secret(
         || submission.key == submission.new_key
     {
         return secret_mutation_redirect(
-            &state,
             secret_bucket_path(&organization.slug, &bucket),
             &draft,
             "",
@@ -421,7 +414,7 @@ pub(super) async fn rename_secret(
         submission.new_key,
     )
     .await;
-    secret_mutation_result(&state, &headers, path, &draft, result, "secret-renamed")
+    secret_mutation_result(&headers, path, &draft, result, "secret-renamed")
 }
 
 pub(super) async fn presets_page(
@@ -478,7 +471,7 @@ pub(super) async fn update_preset(
         Err(response) => return response,
     };
     if !organization.can_admin || !valid_identifier(&submission.preset_id) {
-        return mutation_redirect(&state, continuation, "", "not-authorized", &headers);
+        return mutation_redirect(continuation, "", "not-authorized", &headers);
     }
     let mut form = preset_form(&submission);
     let cpu = parse_positive_i32(&form.cpu, "CPU", &mut form.cpu_error);
@@ -551,7 +544,7 @@ pub(super) async fn update_preset(
         ..Default::default()
     };
     match secrets_presets_connect::update_preset(&state, cookie.clone(), request).await {
-        Ok(()) => mutation_redirect(&state, continuation, "preset-updated", "", &headers),
+        Ok(()) => mutation_redirect(continuation, "preset-updated", "", &headers),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             login_redirect(&continuation, &headers)
         }
@@ -590,7 +583,7 @@ pub(super) async fn delete_preset(
         Err(response) => return response,
     };
     if !organization.can_admin || !valid_identifier(&submission.preset_id) {
-        return mutation_redirect(&state, continuation, "", "not-authorized", &headers);
+        return mutation_redirect(continuation, "", "not-authorized", &headers);
     }
     let result = secrets_presets_connect::delete_preset(
         &state,
@@ -600,12 +593,11 @@ pub(super) async fn delete_preset(
     )
     .await;
     match result {
-        Ok(()) => mutation_redirect(&state, continuation, "preset-deleted", "", &headers),
+        Ok(()) => mutation_redirect(continuation, "preset-deleted", "", &headers),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             login_redirect(&continuation, &headers)
         }
         Err(error) => mutation_redirect(
-            &state,
             continuation,
             "",
             if error.code == ErrorCode::FailedPrecondition || error.code == ErrorCode::Aborted {
@@ -960,7 +952,6 @@ fn apply_preset_error(form: &mut PresetFormView, error: &ConnectError) {
 }
 
 fn secret_mutation_result(
-    state: &AppState,
     headers: &HeaderMap,
     path: String,
     draft: &DraftReturn,
@@ -968,12 +959,12 @@ fn secret_mutation_result(
     message: &str,
 ) -> Response {
     match result {
-        Ok(()) => secret_mutation_redirect(state, path, draft, message, "", headers),
+        Ok(()) => secret_mutation_redirect(path, draft, message, "", headers),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             login_redirect(&secret_navigation_path(path, draft), headers)
         }
         Err(error) => {
-            secret_mutation_redirect(state, path, draft, "", mutation_error_code(&error), headers)
+            secret_mutation_redirect(path, draft, "", mutation_error_code(&error), headers)
         }
     }
 }
@@ -1018,7 +1009,6 @@ fn secret_feedback_target(path: String, draft: &DraftReturn, message: &str, erro
 }
 
 fn secret_mutation_redirect(
-    state: &AppState,
     path: String,
     draft: &DraftReturn,
     message: &str,
@@ -1028,7 +1018,6 @@ fn secret_mutation_redirect(
     // Preserve the existing token rotation and response behavior, without
     // handing a query-bearing path to its feedback-appending API.
     mutation_redirect(
-        state,
         secret_feedback_target(path, draft, message, error),
         "",
         "",

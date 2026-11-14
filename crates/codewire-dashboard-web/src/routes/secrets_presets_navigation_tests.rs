@@ -575,9 +575,9 @@ async fn every_secret_mutation_preserves_navigation_without_changing_connect_pay
                                     }
                                 )
                             );
-                            let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
-                            assert!(cookie.starts_with("codewire_ssr_csrf="));
-                            assert!(!cookie.contains(&csrf));
+                            // The browser keeps its CSRF token across actions,
+                            // so other open forms stay valid (#4555).
+                            assert!(!response.headers().contains_key(header::SET_COOKIE));
                         }
                     }
                     let html = response.text().await.unwrap();

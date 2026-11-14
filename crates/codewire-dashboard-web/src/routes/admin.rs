@@ -11,7 +11,7 @@ use crate::{
     admin_connect::{self, CatalogPlanView, PlanMutation, PriceMutation, QuotaMutation},
     auth::{authenticated_identity, enforce_two_factor},
     error::WebError,
-    raw_auth::{forward_session_cookies, get_json, post_json},
+    raw_auth::{append_session_cookies, get_json, post_json},
     response::{error_page, login_redirect, redirect, render_page, two_factor_redirect},
     routes::{
         dashboard::{dashboard_shell_view_from_identity, select_shell_organization},
@@ -310,7 +310,13 @@ pub(super) async fn accounts(
         .iter()
         .map(account_access_view)
         .collect::<Vec<_>>();
-    let token = page_csrf_token(&headers);
+    // A session the IdP changed gets a new token, and the forms render with
+    // the token the browser keeps.
+    let token = if identity.changes_session() {
+        new_csrf_token()
+    } else {
+        page_csrf_token(&headers)
+    };
     let response = with_csrf_cookie(
         render_page(AdminAccountsTemplate {
             view: &dashboard,
@@ -321,7 +327,7 @@ pub(super) async fn accounts(
         }),
         csrf_cookie(&state.public_origin, &token),
     );
-    forward_session_cookies(response, &identity)
+    append_session_cookies(response, &identity)
 }
 
 pub(super) async fn set_account_enabled(
@@ -343,7 +349,7 @@ pub(super) async fn set_account_enabled(
         Err(response) => return response,
     };
     if !valid_identifier(&submission.user_id) {
-        return account_redirect(&state, "", "invalid", &headers);
+        return account_redirect("", "invalid", &headers);
     }
     let path = format!("/api/admin/accounts/{}/enabled", submission.user_id);
     let identity = match post_json::<_, SetAccountEnabledResponse>(
@@ -358,7 +364,7 @@ pub(super) async fn set_account_enabled(
     {
         Ok(identity) => identity,
         Err(()) => {
-            return account_redirect(&state, "", "unavailable", &headers);
+            return account_redirect("", "unavailable", &headers);
         }
     };
     match identity.status {
@@ -370,7 +376,6 @@ pub(super) async fn set_account_enabled(
                     .is_some_and(|body| body.enabled == submission.enabled) =>
         {
             account_redirect(
-                &state,
                 if submission.enabled {
                     "account-enabled"
                 } else {
@@ -382,12 +387,10 @@ pub(super) async fn set_account_enabled(
         }
         StatusCode::UNAUTHORIZED => login_redirect(ACCOUNTS_PATH, &headers),
         StatusCode::FORBIDDEN => error_page(WebError::Forbidden),
-        StatusCode::NOT_FOUND => account_redirect(&state, "", "not-found", &headers),
-        StatusCode::BAD_REQUEST => account_redirect(&state, "", "invalid", &headers),
-        StatusCode::SERVICE_UNAVAILABLE => {
-            account_redirect(&state, "", "email-unavailable", &headers)
-        }
-        _ => account_redirect(&state, "", "unavailable", &headers),
+        StatusCode::NOT_FOUND => account_redirect("", "not-found", &headers),
+        StatusCode::BAD_REQUEST => account_redirect("", "invalid", &headers),
+        StatusCode::SERVICE_UNAVAILABLE => account_redirect("", "email-unavailable", &headers),
+        _ => account_redirect("", "unavailable", &headers),
     }
 }
 
@@ -411,7 +414,7 @@ pub(super) async fn resend_account_verification(
         Err(response) => return response,
     };
     if !valid_identifier(&submission.user_id) {
-        return account_redirect(&state, "", "not-found", &headers);
+        return account_redirect("", "not-found", &headers);
     }
     let path = format!(
         "/api/admin/accounts/{}/resend-verification",
@@ -426,20 +429,20 @@ pub(super) async fn resend_account_verification(
     .await
     {
         Ok(identity) => identity,
-        Err(()) => return account_redirect(&state, "", "unavailable", &headers),
+        Err(()) => return account_redirect("", "unavailable", &headers),
     };
     match identity.status {
         status if status.is_success() && identity.body.as_ref().is_some_and(|body| body.sent) => {
-            account_redirect(&state, "verification-sent", "", &headers)
+            account_redirect("verification-sent", "", &headers)
         }
         StatusCode::UNAUTHORIZED => login_redirect(ACCOUNTS_PATH, &headers),
         StatusCode::FORBIDDEN => error_page(WebError::Forbidden),
-        StatusCode::NOT_FOUND => account_redirect(&state, "", "not-found", &headers),
-        StatusCode::CONFLICT => account_redirect(&state, "", "already-verified", &headers),
+        StatusCode::NOT_FOUND => account_redirect("", "not-found", &headers),
+        StatusCode::CONFLICT => account_redirect("", "already-verified", &headers),
         StatusCode::SERVICE_UNAVAILABLE => {
-            account_redirect(&state, "", "verification-unavailable", &headers)
+            account_redirect("", "verification-unavailable", &headers)
         }
-        _ => account_redirect(&state, "", "unavailable", &headers),
+        _ => account_redirect("", "unavailable", &headers),
     }
 }
 
@@ -501,16 +504,10 @@ pub(super) async fn set_default_quota(
         memory_mb: submission.memory_mb,
     };
     if !valid_quota(quota) {
-        return admin_redirect_to(&state, ORGANIZATIONS_PATH, "", "invalid", &headers);
+        return admin_redirect_to(ORGANIZATIONS_PATH, "", "invalid", &headers);
     }
     let result = admin_connect::set_default_quota(&state, cookie, quota).await;
-    quota_response(
-        &state,
-        result,
-        ORGANIZATIONS_PATH,
-        "defaults-saved",
-        &headers,
-    )
+    quota_response(result, ORGANIZATIONS_PATH, "defaults-saved", &headers)
 }
 
 pub(super) async fn organization(
@@ -571,12 +568,12 @@ pub(super) async fn set_organization_quota(
         memory_mb: submission.memory_mb,
     };
     if !valid_quota(quota) {
-        return admin_redirect_to(&state, &path, "", "invalid", &headers);
+        return admin_redirect_to(&path, "", "invalid", &headers);
     }
     let result =
         admin_connect::set_organization_quota(&state, cookie, &submission.organization_id, quota)
             .await;
-    quota_response(&state, result, &path, "quota-saved", &headers)
+    quota_response(result, &path, "quota-saved", &headers)
 }
 
 pub(super) async fn set_organization_rate_card(
@@ -600,7 +597,7 @@ pub(super) async fn set_organization_rate_card(
         .iter()
         .any(|(value, _)| *value == submission.rate_card)
     {
-        return admin_redirect_to(&state, &path, "", "invalid-rate-card", &headers);
+        return admin_redirect_to(&path, "", "invalid-rate-card", &headers);
     }
     let result = admin_connect::set_organization_rate_card(
         &state,
@@ -609,7 +606,7 @@ pub(super) async fn set_organization_rate_card(
         &submission.rate_card,
     )
     .await;
-    quota_response(&state, result, &path, "rate-card-saved", &headers)
+    quota_response(result, &path, "rate-card-saved", &headers)
 }
 
 /// Give an organization dedicated CPU, or return it to sharing (#3635).
@@ -642,7 +639,7 @@ pub(super) async fn set_organization_dedicated_cpu(
     } else {
         "dedicated-cpu-cleared"
     };
-    quota_response(&state, result, &path, message, &headers)
+    quota_response(result, &path, message, &headers)
 }
 
 pub(super) async fn adjust_organization_credit(
@@ -664,13 +661,13 @@ pub(super) async fn adjust_organization_credit(
         };
     let reason = submission.reason.trim();
     let Some(amount_nano_eur) = admin_connect::euro_amount_nano(&submission.amount) else {
-        return admin_redirect_to(&state, &path, "", "invalid-credit", &headers);
+        return admin_redirect_to(&path, "", "invalid-credit", &headers);
     };
     if reason.is_empty()
         || reason.chars().count() > 500
         || !valid_organization_id(&submission.idempotency_key)
     {
-        return admin_redirect_to(&state, &path, "", "invalid-credit", &headers);
+        return admin_redirect_to(&path, "", "invalid-credit", &headers);
     }
     let result = admin_connect::adjust_organization_credit(
         &state,
@@ -681,7 +678,7 @@ pub(super) async fn adjust_organization_credit(
         &submission.idempotency_key,
     )
     .await;
-    quota_response(&state, result, &path, "credit-adjusted", &headers)
+    quota_response(result, &path, "credit-adjusted", &headers)
 }
 
 pub(super) async fn clear_organization_quota(
@@ -703,7 +700,7 @@ pub(super) async fn clear_organization_quota(
         };
     let result =
         admin_connect::clear_organization_quota(&state, cookie, &submission.organization_id).await;
-    quota_response(&state, result, &path, "quota-cleared", &headers)
+    quota_response(result, &path, "quota-cleared", &headers)
 }
 
 /// Opt an organization in to, or out of, confidential environments (#2497),
@@ -728,14 +725,13 @@ pub(super) async fn set_organization_confidential(
         };
     let slug = submission.organization_slug;
     if !codewire_server_core::organization_slug::valid_organization_slug(&slug) {
-        return admin_redirect_to(&state, &path, "", "not-found", &headers);
+        return admin_redirect_to(&path, "", "not-found", &headers);
     }
     let result =
         admin_connect::set_confidential_environments(&state, cookie, slug, submission.enabled)
             .await;
     match result {
         Ok(()) => admin_redirect_to(
-            &state,
             &path,
             if submission.enabled {
                 "confidential-enabled"
@@ -751,7 +747,7 @@ pub(super) async fn set_organization_confidential(
                 "unavailable" | "conflict" => "confidential-unavailable",
                 code => code,
             };
-            admin_redirect_to(&state, &path, "", code, &headers)
+            admin_redirect_to(&path, "", code, &headers)
         }
     }
 }
@@ -850,10 +846,9 @@ pub(super) async fn create_plan(
         Err(response) => return response,
     };
     let Some(mutation) = plan_mutation(submission) else {
-        return admin_redirect(&state, "", "invalid", &headers);
+        return admin_redirect("", "invalid", &headers);
     };
     mutation_response(
-        &state,
         admin_connect::create_plan(&state, cookie, mutation).await,
         "plan-created",
         &headers,
@@ -871,10 +866,9 @@ pub(super) async fn update_plan(
         Err(response) => return response,
     };
     let Some(mutation) = plan_mutation(submission) else {
-        return admin_redirect(&state, "", "invalid", &headers);
+        return admin_redirect("", "invalid", &headers);
     };
     mutation_response(
-        &state,
         admin_connect::update_plan(&state, cookie, mutation).await,
         "plan-saved",
         &headers,
@@ -892,10 +886,9 @@ pub(super) async fn archive_plan(
         Err(response) => return response,
     };
     if !valid_identifier(&submission.resource_type) || !valid_identifier(&submission.plan_key) {
-        return admin_redirect(&state, "", "invalid", &headers);
+        return admin_redirect("", "invalid", &headers);
     }
     mutation_response(
-        &state,
         admin_connect::set_plan_archived(
             &state,
             cookie,
@@ -945,10 +938,9 @@ pub(super) async fn archive_price(
         stripe_price_id: String::new(),
     };
     if !valid_price(&price, false) {
-        return admin_redirect(&state, "", "invalid", &headers);
+        return admin_redirect("", "invalid", &headers);
     }
     mutation_response(
-        &state,
         admin_connect::set_price_archived(&state, cookie, price, submission.archived).await,
         "price-archived",
         &headers,
@@ -966,10 +958,9 @@ pub(super) async fn update_setting(
         Err(response) => return response,
     };
     if !valid_identifier(&submission.setting_key) {
-        return admin_redirect(&state, "", "invalid", &headers);
+        return admin_redirect("", "invalid", &headers);
     }
     mutation_response(
-        &state,
         admin_connect::update_setting(&state, cookie, submission.setting_key, submission.int_value)
             .await,
         "setting-saved",
@@ -989,7 +980,7 @@ pub(super) async fn preview_migration(
             Err(response) => return response,
         };
     if !valid_migration(&submission) {
-        return admin_redirect(&state, "", "invalid", &headers);
+        return admin_redirect("", "invalid", &headers);
     }
     let mut catalog = match admin_connect::catalog(
         &state,
@@ -1037,10 +1028,9 @@ pub(super) async fn run_migration(
         Err(response) => return response,
     };
     if !valid_migration(&submission) {
-        return admin_redirect(&state, "", "invalid", &headers);
+        return admin_redirect("", "invalid", &headers);
     }
     mutation_response(
-        &state,
         admin_connect::run_migration(
             &state,
             cookie,
@@ -1075,7 +1065,7 @@ async fn price_action(
         stripe_price_id: submission.stripe_price_id,
     };
     if !valid_price(&price, true) {
-        return admin_redirect(state, "", "invalid", headers);
+        return admin_redirect("", "invalid", headers);
     }
     let result = if create {
         admin_connect::create_price(state, cookie, price).await
@@ -1083,7 +1073,6 @@ async fn price_action(
         admin_connect::update_price(state, cookie, price).await
     };
     mutation_response(
-        state,
         result,
         if create {
             "price-created"
@@ -1296,35 +1285,28 @@ fn audit_url(offset: i32, action: &str, severity: &str) -> String {
 }
 
 fn mutation_response(
-    state: &AppState,
     result: Result<(), ConnectError>,
     message: &str,
     headers: &HeaderMap,
 ) -> Response {
     match result {
-        Ok(()) => admin_redirect(state, message, "", headers),
+        Ok(()) => admin_redirect(message, "", headers),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             login_redirect(BILLING_PATH, headers)
         }
-        Err(error) => admin_redirect(state, "", mutation_error(&error), headers),
+        Err(error) => admin_redirect("", mutation_error(&error), headers),
     }
 }
 
-fn admin_redirect(state: &AppState, message: &str, error: &str, headers: &HeaderMap) -> Response {
-    admin_redirect_to(state, BILLING_PATH, message, error, headers)
+fn admin_redirect(message: &str, error: &str, headers: &HeaderMap) -> Response {
+    admin_redirect_to(BILLING_PATH, message, error, headers)
 }
 
-fn account_redirect(state: &AppState, message: &str, error: &str, headers: &HeaderMap) -> Response {
-    admin_redirect_to(state, ACCOUNTS_PATH, message, error, headers)
+fn account_redirect(message: &str, error: &str, headers: &HeaderMap) -> Response {
+    admin_redirect_to(ACCOUNTS_PATH, message, error, headers)
 }
 
-fn admin_redirect_to(
-    state: &AppState,
-    path: &str,
-    message: &str,
-    error: &str,
-    headers: &HeaderMap,
-) -> Response {
+fn admin_redirect_to(path: &str, message: &str, error: &str, headers: &HeaderMap) -> Response {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     if !message.is_empty() {
         query.append_pair("message", message);
@@ -1337,11 +1319,9 @@ fn admin_redirect_to(
     } else {
         format!("{path}?{query}")
     };
-    let token = new_csrf_token();
-    with_csrf_cookie(
-        redirect(target, headers),
-        csrf_cookie(&state.public_origin, &token),
-    )
+    // The browser keeps its CSRF token across actions, so a form open in
+    // another tab stays valid (#4555).
+    redirect(target, headers)
 }
 
 /// Organization ids reach a URL path, so only the characters ids are made of
@@ -1371,16 +1351,15 @@ fn valid_quota(quota: QuotaMutation) -> bool {
 }
 
 fn quota_response(
-    state: &AppState,
     result: Result<(), ConnectError>,
     path: &str,
     message: &str,
     headers: &HeaderMap,
 ) -> Response {
     match result {
-        Ok(()) => admin_redirect_to(state, path, message, "", headers),
+        Ok(()) => admin_redirect_to(path, message, "", headers),
         Err(error) if error.code == ErrorCode::Unauthenticated => login_redirect(path, headers),
-        Err(error) => admin_redirect_to(state, path, "", mutation_error(&error), headers),
+        Err(error) => admin_redirect_to(path, "", mutation_error(&error), headers),
     }
 }
 

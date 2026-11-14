@@ -25,7 +25,7 @@ use crate::{
     error::WebError,
     organization_connect::future_time,
     response::{error_page, login_redirect, redirect, render_template, two_factor_redirect},
-    security::{canonical_cookie, csrf_cookie, new_csrf_token, page_csrf_token, with_csrf_cookie},
+    security::{canonical_cookie, csrf_cookie, page_csrf_token, with_csrf_cookie},
     state::AppState,
     view::{ASSIGNMENTS, AssignmentView, DashboardView},
 };
@@ -204,14 +204,14 @@ pub(super) async fn accept(
         Err(response) => return private(response),
     };
     if !super::organization_governance::valid_identifier(&form.invitation_id) {
-        return private(back(&state, &headers, AcceptError::NotFound));
+        return private(back(&headers, AcceptError::NotFound));
     }
     match connect::accept_invitation_by_id(&state, cookie.clone(), form.invitation_id).await {
         Ok(org_id) => private(joined(&state, &headers, cookie, &org_id).await),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             private(login_redirect(PATH, &headers))
         }
-        Err(error) => private(back(&state, &headers, AcceptError::from_code(error.code))),
+        Err(error) => private(back(&headers, AcceptError::from_code(error.code))),
     }
 }
 
@@ -235,20 +235,12 @@ async fn joined(
             || super::DASHBOARD_PATH.to_owned(),
             |organization| organization.url,
         );
-    with_csrf_cookie(
-        redirect(target, headers),
-        csrf_cookie(&state.public_origin, &new_csrf_token()),
-    )
+    // The browser keeps its CSRF token across actions (#4555).
+    redirect(target, headers)
 }
 
-fn back(state: &AppState, headers: &HeaderMap, error: AcceptError) -> Response {
-    super::organization_governance::mutation_redirect(
-        state,
-        PATH.to_owned(),
-        "",
-        error.code(),
-        headers,
-    )
+fn back(headers: &HeaderMap, error: AcceptError) -> Response {
+    super::organization_governance::mutation_redirect(PATH.to_owned(), "", error.code(), headers)
 }
 
 /// The pending invitations as rows, newest first as the platform sends them.

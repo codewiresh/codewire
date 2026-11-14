@@ -12,8 +12,7 @@ use crate::{
     error::WebError,
     response::{error_page, redirect, render_page, render_template, two_factor_redirect},
     security::{
-        canonical_cookie, csrf_cookie, new_csrf_token, request_has_same_origin, valid_csrf_token,
-        with_csrf_cookie,
+        canonical_cookie, csrf_cookie, request_has_same_origin, valid_csrf_token, with_csrf_cookie,
     },
     state::AppState,
     templates::{AuthStatusTemplate, InvitationTemplate},
@@ -41,7 +40,7 @@ pub(super) async fn invitation_page(
         Err(error) => return error_page(error),
     };
     let continuation = invite_continuation(&query.token);
-    let csrf = new_csrf_token();
+    let csrf = crate::security::page_csrf_token(&headers);
     let view = InvitationPageView {
         email_matches: identity
             .as_ref()
@@ -97,6 +96,7 @@ pub(super) async fn accept(
     {
         return render_invitation_error(
             &state,
+            &headers,
             invitation_view,
             form.token,
             Refusal::EmailMismatch,
@@ -119,10 +119,16 @@ pub(super) async fn accept(
         }
         Err(error) if error.code == ErrorCode::NotFound => invalid_invitation(),
         // The platform accepts only for a verified email address (#3840).
-        Err(error) if error.code == ErrorCode::FailedPrecondition => {
-            render_invitation_error(&state, invitation_view, token, Refusal::EmailUnverified)
+        Err(error) if error.code == ErrorCode::FailedPrecondition => render_invitation_error(
+            &state,
+            &headers,
+            invitation_view,
+            token,
+            Refusal::EmailUnverified,
+        ),
+        Err(_) => {
+            render_invitation_error(&state, &headers, invitation_view, token, Refusal::Failed)
         }
-        Err(_) => render_invitation_error(&state, invitation_view, token, Refusal::Failed),
     }
 }
 
@@ -149,11 +155,12 @@ impl Refusal {
 
 fn render_invitation_error(
     state: &AppState,
+    headers: &HeaderMap,
     invitation: crate::view::InvitationView,
     token: String,
     refusal: Refusal,
 ) -> Response {
-    let csrf = new_csrf_token();
+    let csrf = crate::security::page_csrf_token(headers);
     let continuation = invite_continuation(&token);
     let view = InvitationPageView {
         invitation,

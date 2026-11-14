@@ -17,8 +17,8 @@ use crate::{
     },
     routes::dashboard::dashboard_shell_view,
     security::{
-        canonical_cookie, csrf_cookie, new_csrf_token, page_csrf_token, request_has_same_origin,
-        valid_csrf_token, with_csrf_cookie,
+        canonical_cookie, csrf_cookie, page_csrf_token, request_has_same_origin, valid_csrf_token,
+        with_csrf_cookie,
     },
     state::AppState,
     templates::{
@@ -110,7 +110,7 @@ pub(super) async fn invite_member(
         Err(response) => return response,
     };
     if !organization.can_admin {
-        return mutation_redirect(&state, members_path(&slug), "", "not-authorized", &headers);
+        return mutation_redirect(members_path(&slug), "", "not-authorized", &headers);
     }
 
     let assignments = submission.assignments();
@@ -236,12 +236,12 @@ pub(super) async fn update_role(
         Err(response) => return response,
     };
     if !organization.can_admin || !valid_identifier(&submission.user_id) {
-        return mutation_redirect(&state, members_path(&slug), "", "not-authorized", &headers);
+        return mutation_redirect(members_path(&slug), "", "not-authorized", &headers);
     }
     let role = match submission.role.as_str() {
         "member" => OrgRole::Member,
         "admin" => OrgRole::Admin,
-        _ => return mutation_redirect(&state, members_path(&slug), "", "invalid", &headers),
+        _ => return mutation_redirect(members_path(&slug), "", "invalid", &headers),
     };
     let result = organization_connect::update_member_role(
         &state,
@@ -251,7 +251,7 @@ pub(super) async fn update_role(
         role,
     )
     .await;
-    mutation_result(&state, &headers, &slug, result, "role-updated")
+    mutation_result(&headers, &slug, result, "role-updated")
 }
 
 pub(super) async fn update_assignments(
@@ -273,7 +273,7 @@ pub(super) async fn update_assignments(
         Err(response) => return response,
     };
     if !organization.can_admin || !valid_identifier(&submission.member_id) {
-        return mutation_redirect(&state, members_path(&slug), "", "not-authorized", &headers);
+        return mutation_redirect(members_path(&slug), "", "not-authorized", &headers);
     }
     let assignments = submission.assignments();
     let result = organization_connect::update_member_assignments(
@@ -284,7 +284,7 @@ pub(super) async fn update_assignments(
         assignments,
     )
     .await;
-    mutation_result(&state, &headers, &slug, result, "assignments-updated")
+    mutation_result(&headers, &slug, result, "assignments-updated")
 }
 
 pub(super) async fn remove_member(
@@ -306,12 +306,12 @@ pub(super) async fn remove_member(
         Err(response) => return response,
     };
     if !organization.can_admin || !valid_identifier(&submission.user_id) {
-        return mutation_redirect(&state, members_path(&slug), "", "not-authorized", &headers);
+        return mutation_redirect(members_path(&slug), "", "not-authorized", &headers);
     }
     let result =
         organization_connect::remove_member(&state, cookie, organization.id, submission.user_id)
             .await;
-    mutation_result(&state, &headers, &slug, result, "member-removed")
+    mutation_result(&headers, &slug, result, "member-removed")
 }
 
 pub(super) async fn revoke_invitation(
@@ -333,7 +333,7 @@ pub(super) async fn revoke_invitation(
         Err(response) => return response,
     };
     if !organization.can_admin || !valid_identifier(&submission.invitation_id) {
-        return mutation_redirect(&state, members_path(&slug), "", "not-authorized", &headers);
+        return mutation_redirect(members_path(&slug), "", "not-authorized", &headers);
     }
     let result = organization_connect::revoke_invitation(
         &state,
@@ -342,7 +342,7 @@ pub(super) async fn revoke_invitation(
         submission.invitation_id,
     )
     .await;
-    mutation_result(&state, &headers, &slug, result, "invitation-revoked")
+    mutation_result(&headers, &slug, result, "invitation-revoked")
 }
 
 pub(super) async fn api_keys_page(
@@ -519,7 +519,7 @@ pub(super) async fn toggle_api_key(
         Err(response) => return response,
     };
     if !valid_identifier(&submission.key_id) {
-        return mutation_redirect(&state, api_keys_path(&slug), "", "invalid", &headers);
+        return mutation_redirect(api_keys_path(&slug), "", "invalid", &headers);
     }
     let result = organization_connect::update_api_key(
         &state,
@@ -529,7 +529,7 @@ pub(super) async fn toggle_api_key(
         submission.disabled,
     )
     .await;
-    api_key_mutation_result(&state, &headers, &slug, result, "key-updated")
+    api_key_mutation_result(&headers, &slug, result, "key-updated")
 }
 
 pub(super) async fn delete_api_key(
@@ -551,12 +551,12 @@ pub(super) async fn delete_api_key(
         Err(response) => return response,
     };
     if !organization.can_admin || !valid_identifier(&submission.key_id) {
-        return mutation_redirect(&state, api_keys_path(&slug), "", "not-authorized", &headers);
+        return mutation_redirect(api_keys_path(&slug), "", "not-authorized", &headers);
     }
     let result =
         organization_connect::delete_api_key(&state, cookie, organization.id, submission.key_id)
             .await;
-    api_key_mutation_result(&state, &headers, &slug, result, "key-deleted")
+    api_key_mutation_result(&headers, &slug, result, "key-deleted")
 }
 
 #[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
@@ -777,41 +777,34 @@ fn apply_api_key_error(form: &mut ApiKeyFormView, error: &ConnectError) {
 }
 
 fn mutation_result(
-    state: &AppState,
     headers: &HeaderMap,
     slug: &str,
     result: Result<(), ConnectError>,
     message: &str,
 ) -> Response {
     match result {
-        Ok(()) => mutation_redirect(state, members_path(slug), message, "", headers),
+        Ok(()) => mutation_redirect(members_path(slug), message, "", headers),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             login_redirect(&members_path(slug), headers)
         }
-        Err(error) => mutation_redirect(
-            state,
-            members_path(slug),
-            "",
-            mutation_error_code(&error),
-            headers,
-        ),
+        Err(error) => {
+            mutation_redirect(members_path(slug), "", mutation_error_code(&error), headers)
+        }
     }
 }
 
 fn api_key_mutation_result(
-    state: &AppState,
     headers: &HeaderMap,
     slug: &str,
     result: Result<(), ConnectError>,
     message: &str,
 ) -> Response {
     match result {
-        Ok(()) => mutation_redirect(state, api_keys_path(slug), message, "", headers),
+        Ok(()) => mutation_redirect(api_keys_path(slug), message, "", headers),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             login_redirect(&api_keys_path(slug), headers)
         }
         Err(error) => mutation_redirect(
-            state,
             api_keys_path(slug),
             "",
             mutation_error_code(&error),
@@ -830,7 +823,6 @@ fn mutation_error_code(error: &ConnectError) -> &'static str {
 }
 
 pub(super) fn mutation_redirect(
-    state: &AppState,
     path: String,
     message: &str,
     error: &str,
@@ -844,11 +836,8 @@ pub(super) fn mutation_redirect(
         target.push_str("?error=");
         target.push_str(error);
     }
-    let token = new_csrf_token();
-    with_csrf_cookie(
-        redirect(target, headers),
-        csrf_cookie(&state.public_origin, &token),
-    )
+    // The browser keeps its CSRF token across actions (#4555).
+    redirect(target, headers)
 }
 
 pub(super) fn connect_page_error(

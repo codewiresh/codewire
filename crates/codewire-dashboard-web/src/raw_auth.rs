@@ -19,6 +19,13 @@ pub(crate) struct IdentityResponse<T> {
     set_cookies: Vec<HeaderValue>,
 }
 
+impl<T> IdentityResponse<T> {
+    /// The IdP set a session cookie: a session started, changed or ended.
+    pub(crate) fn changes_session(&self) -> bool {
+        !self.set_cookies.is_empty()
+    }
+}
+
 /// The IdP error codes a page distinguishes. Any other code, and the rest of
 /// an error body, is discarded.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -188,7 +195,30 @@ where
     })
 }
 
+/// Pass the IdP's session cookie to the browser. A session that starts or
+/// ends also gets a new CSRF token: forms keep one token per browser between
+/// renders (#4555), and a sign-in or sign-out is where it changes hands.
 pub(crate) fn forward_session_cookies<T>(
+    response: Response,
+    identity: &IdentityResponse<T>,
+    public_origin: &str,
+) -> Response {
+    let mut response = append_session_cookies(response, identity);
+    if identity.changes_session()
+        && let Ok(rotated) = HeaderValue::from_str(&crate::security::csrf_cookie(
+            public_origin,
+            &crate::security::new_csrf_token(),
+        ))
+    {
+        response.headers_mut().append(header::SET_COOKIE, rotated);
+    }
+    response
+}
+
+/// Pass the IdP's session cookie to the browser without a CSRF token. Only
+/// for a page that renders its forms with the token it sets itself, chosen
+/// with [`IdentityResponse::changes_session`].
+pub(crate) fn append_session_cookies<T>(
     mut response: Response,
     identity: &IdentityResponse<T>,
 ) -> Response {
@@ -265,6 +295,56 @@ mod tests {
                 .unwrap()
                 .starts_with("codewire.session_token=")
         );
+    }
+
+    #[test]
+    fn only_a_session_change_rotates_the_csrf_token() {
+        let identity = |set_cookies: Vec<HeaderValue>| IdentityResponse::<()> {
+            status: StatusCode::OK,
+            body: None,
+            error_code: None,
+            resend_token: None,
+            set_cookies,
+        };
+        let csrf_cookies = |response: &Response| {
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter(|value| value.to_str().unwrap().starts_with("codewire_ssr_csrf="))
+                .count()
+        };
+        let origin = "https://codewire.test";
+        let session = HeaderValue::from_static("codewire.session_token=new; Path=/; HttpOnly");
+
+        let unchanged = identity(Vec::new());
+        assert!(!unchanged.changes_session());
+        assert_eq!(
+            csrf_cookies(&forward_session_cookies(
+                Response::default(),
+                &unchanged,
+                origin
+            )),
+            0
+        );
+
+        let changed = identity(vec![session.clone()]);
+        assert!(changed.changes_session());
+        let forwarded = forward_session_cookies(Response::default(), &changed, origin);
+        assert_eq!(csrf_cookies(&forwarded), 1);
+        assert_eq!(
+            forwarded
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .count(),
+            2
+        );
+
+        // A page that renders its own token gets the session cookie alone.
+        let appended = append_session_cookies(Response::default(), &changed);
+        assert_eq!(csrf_cookies(&appended), 0);
+        assert_eq!(appended.headers().get(header::SET_COOKIE), Some(&session));
     }
 
     #[test]

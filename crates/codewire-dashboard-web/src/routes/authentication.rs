@@ -19,7 +19,7 @@ use crate::{
     security::{
         OAUTH_LINK_COOKIE, OAUTH_LINK_PATH, OAUTH_LINK_REQUESTER_COOKIE, OAUTH_SIGNUP_COOKIE,
         OAUTH_SIGNUP_PATH, PASSWORD_RESET_COOKIE, TWO_FACTOR_CHALLENGE_COOKIE, canonical_cookie,
-        clear_scoped_cookie, cookie_value, csrf_cookie, lax_scoped_secret_cookie, new_csrf_token,
+        clear_scoped_cookie, cookie_value, csrf_cookie, lax_scoped_secret_cookie, page_csrf_token,
         request_has_same_origin, scoped_secret_cookie, valid_csrf_token, with_csrf_cookie,
         with_response_cookie,
     },
@@ -259,6 +259,7 @@ struct SkipSetupResponse {
 
 pub(super) async fn login(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Response {
     // A provider sign-in to an account still waiting for access is not an
@@ -273,7 +274,7 @@ pub(super) async fn login(
     };
     let mut view = login_view(query, error.to_owned());
     view.notice = notice.unwrap_or_default();
-    auth_entry_response(&state, StatusCode::OK, view).await
+    auth_entry_response(&state, &headers, StatusCode::OK, view).await
 }
 
 /// The message for a provider sign-in that needs the person's attention. It
@@ -341,11 +342,12 @@ async fn provider_links(state: &AppState, view: &AuthFormView) -> Vec<OAuthProvi
 /// The sign-in and sign-up pages, with the provider buttons.
 async fn auth_entry_response(
     state: &AppState,
+    headers: &HeaderMap,
     status: StatusCode,
     mut view: AuthFormView,
 ) -> Response {
     view.oauth_providers = provider_links(state, &view).await;
-    auth_form_response(state, status, view)
+    auth_form_response(state, headers, status, view)
 }
 
 pub(super) async fn login_action(
@@ -360,6 +362,7 @@ pub(super) async fn login_action(
     if form.email.trim().is_empty() || form.password.is_empty() {
         return auth_entry_response(
             &state,
+            &headers,
             StatusCode::UNPROCESSABLE_ENTITY,
             login_view(query, "Email and password are required.".to_owned()),
         )
@@ -380,6 +383,7 @@ pub(super) async fn login_action(
         Err(()) => {
             return auth_entry_response(
                 &state,
+                &headers,
                 StatusCode::BAD_GATEWAY,
                 login_view(
                     query,
@@ -401,11 +405,12 @@ pub(super) async fn login_action(
         } else {
             view.notice = ON_THE_LIST;
         }
-        return auth_entry_response(&state, identity.status, view).await;
+        return auth_entry_response(&state, &headers, identity.status, view).await;
     }
     if !identity.status.is_success() {
         return auth_entry_response(
             &state,
+            &headers,
             identity.status,
             login_view(query, user_message(identity.status, "sign-in").to_owned()),
         )
@@ -438,14 +443,21 @@ pub(super) async fn login_action(
     } else {
         auth_url_for_target("/setup-2fa", &completion)
     };
-    forward_session_cookies(redirect(target, &headers), &identity)
+    forward_session_cookies(redirect(target, &headers), &identity, &state.public_origin)
 }
 
 pub(super) async fn signup(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<AuthQuery>,
 ) -> Response {
-    auth_entry_response(&state, StatusCode::OK, signup_view(query, String::new())).await
+    auth_entry_response(
+        &state,
+        &headers,
+        StatusCode::OK,
+        signup_view(query, String::new()),
+    )
+    .await
 }
 
 pub(super) async fn signup_action(
@@ -470,6 +482,7 @@ pub(super) async fn signup_action(
         };
         return auth_entry_response(
             &state,
+            &headers,
             StatusCode::UNPROCESSABLE_ENTITY,
             signup_view(query, error),
         )
@@ -494,6 +507,7 @@ pub(super) async fn signup_action(
         Err(()) => {
             return auth_entry_response(
                 &state,
+                &headers,
                 StatusCode::BAD_GATEWAY,
                 signup_view(
                     query,
@@ -506,6 +520,7 @@ pub(super) async fn signup_action(
     if !identity.status.is_success() {
         return auth_entry_response(
             &state,
+            &headers,
             identity.status,
             signup_view(query, user_message(identity.status, "sign-up").to_owned()),
         )
@@ -539,6 +554,7 @@ pub(super) async fn signup_action(
     forward_session_cookies(
         redirect(auth_url_for_target("/setup-2fa", &completion), &headers),
         &identity,
+        &state.public_origin,
     )
 }
 
@@ -553,6 +569,7 @@ pub(super) async fn signup_complete(State(state): State<AppState>, headers: Head
     match pending_oauth_signup(&state, token).await {
         Ok(pending) => auth_form_response(
             &state,
+            &headers,
             StatusCode::OK,
             signup_complete_view(&pending, String::new()),
         ),
@@ -578,6 +595,7 @@ pub(super) async fn signup_complete_action(
     if form.reason.trim().is_empty() {
         return auth_form_response(
             &state,
+            &headers,
             StatusCode::UNPROCESSABLE_ENTITY,
             signup_complete_view(&pending, "Tell us what you want to build.".to_owned()),
         );
@@ -599,6 +617,7 @@ pub(super) async fn signup_complete_action(
         Err(()) => {
             return auth_form_response(
                 &state,
+                &headers,
                 StatusCode::BAD_GATEWAY,
                 signup_complete_view(
                     &pending,
@@ -623,6 +642,7 @@ pub(super) async fn signup_complete_action(
             let response = forward_session_cookies(
                 redirect(auth_url_for_target("/setup-2fa", &completion), &headers),
                 &identity,
+                &state.public_origin,
             );
             with_response_cookie(response, clear)
         }
@@ -641,6 +661,7 @@ pub(super) async fn signup_complete_action(
         ),
         (status, _) => auth_form_response(
             &state,
+            &headers,
             if status.is_success() {
                 StatusCode::BAD_GATEWAY
             } else {
@@ -732,8 +753,13 @@ fn signup_complete_view(pending: &OAuthPendingSignup, error: String) -> AuthForm
     view
 }
 
-pub(super) async fn forgot_password(State(state): State<AppState>) -> Response {
-    auth_form_response(&state, StatusCode::OK, forgot_password_view(String::new()))
+pub(super) async fn forgot_password(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    auth_form_response(
+        &state,
+        &headers,
+        StatusCode::OK,
+        forgot_password_view(String::new()),
+    )
 }
 
 /// The "Resend verification email" button on the sign-in notice. It posts
@@ -771,7 +797,7 @@ pub(super) async fn resend_verification_action(
             view.error = "We couldn't send the email. Sign in again shortly to retry.".to_owned();
         }
     }
-    auth_entry_response(&state, StatusCode::OK, view).await
+    auth_entry_response(&state, &headers, StatusCode::OK, view).await
 }
 
 pub(super) async fn forgot_password_action(
@@ -785,6 +811,7 @@ pub(super) async fn forgot_password_action(
     if form.email.trim().is_empty() {
         return auth_form_response(
             &state,
+            &headers,
             StatusCode::UNPROCESSABLE_ENTITY,
             forgot_password_view("Email is required.".to_owned()),
         );
@@ -811,6 +838,7 @@ pub(super) async fn forgot_password_action(
     }
     auth_form_response(
         &state,
+        &headers,
         StatusCode::BAD_GATEWAY,
         forgot_password_view("The reset request could not be completed. Try again.".to_owned()),
     )
@@ -877,7 +905,7 @@ pub(super) async fn link_confirm(
                 .as_ref()
                 .and_then(|body| link_confirm_view(&body.provider, &body.account))
             {
-                Some(view) => auth_form_response(&state, StatusCode::OK, view),
+                Some(view) => auth_form_response(&state, &headers, StatusCode::OK, view),
                 None => error_page(WebError::IdentityUnavailable),
             }
         }
@@ -1053,7 +1081,12 @@ pub(super) async fn reset_password(
     if cookie_value(&headers, PASSWORD_RESET_COOKIE).is_none() {
         return invalid_reset_link();
     }
-    auth_form_response(&state, StatusCode::OK, reset_password_view(String::new()))
+    auth_form_response(
+        &state,
+        &headers,
+        StatusCode::OK,
+        reset_password_view(String::new()),
+    )
 }
 
 pub(super) async fn reset_password_action(
@@ -1071,6 +1104,7 @@ pub(super) async fn reset_password_action(
     if !error.is_empty() {
         return auth_form_response(
             &state,
+            &headers,
             StatusCode::UNPROCESSABLE_ENTITY,
             reset_password_view(error),
         );
@@ -1095,6 +1129,7 @@ pub(super) async fn reset_password_action(
         Ok(response) => {
             return auth_form_response(
                 &state,
+                &headers,
                 response.status,
                 reset_password_view(user_message(response.status, "reset-password").to_owned()),
             );
@@ -1102,6 +1137,7 @@ pub(super) async fn reset_password_action(
         Err(()) => {
             return auth_form_response(
                 &state,
+                &headers,
                 StatusCode::BAD_GATEWAY,
                 reset_password_view("The identity service is temporarily unavailable.".to_owned()),
             );
@@ -1125,6 +1161,7 @@ pub(super) async fn two_factor(
     if cookie_value(&headers, TWO_FACTOR_CHALLENGE_COOKIE).is_none() {
         return auth_form_response(
             &state,
+            &headers,
             StatusCode::BAD_REQUEST,
             two_factor_view(
                 query,
@@ -1134,6 +1171,7 @@ pub(super) async fn two_factor(
     }
     auth_form_response(
         &state,
+        &headers,
         StatusCode::OK,
         two_factor_view(query, String::new()),
     )
@@ -1150,6 +1188,7 @@ pub(super) async fn two_factor_action(
     let Some(challenge) = cookie_value(&headers, TWO_FACTOR_CHALLENGE_COOKIE) else {
         return auth_form_response(
             &state,
+            &headers,
             StatusCode::BAD_REQUEST,
             two_factor_view(
                 form_query(&form),
@@ -1174,6 +1213,7 @@ pub(super) async fn two_factor_action(
     if !identity.status.is_success() {
         return auth_form_response(
             &state,
+            &headers,
             identity.status,
             two_factor_view(
                 form_query(&form),
@@ -1187,6 +1227,7 @@ pub(super) async fn two_factor_action(
             &headers,
         ),
         &identity,
+        &state.public_origin,
     );
     with_response_cookie(
         response,
@@ -1246,7 +1287,14 @@ pub(super) async fn setup_two_factor(
         }
         _ => return error_page(WebError::IdentityUnavailable),
     };
-    setup_two_factor_response(&state, StatusCode::OK, &setup, target, String::new())
+    setup_two_factor_response(
+        &state,
+        &headers,
+        StatusCode::OK,
+        &setup,
+        target,
+        String::new(),
+    )
 }
 
 pub(super) async fn setup_two_factor_action(
@@ -1303,6 +1351,7 @@ pub(super) async fn setup_two_factor_action(
         }
         Ok(response) => setup_two_factor_response(
             &state,
+            &headers,
             response.status,
             &setup,
             safe_target(&form.return_to),
@@ -1362,6 +1411,7 @@ pub(super) fn totp_qr_svg(totp_uri: &str) -> Option<String> {
 
 fn setup_two_factor_response(
     state: &AppState,
+    headers: &HeaderMap,
     status: StatusCode,
     setup: &TwoFactorEnableResponse,
     return_to: String,
@@ -1370,7 +1420,7 @@ fn setup_two_factor_response(
     let Some(qr_svg) = totp_qr_svg(&setup.totp_uri) else {
         return error_page(WebError::IdentityUnavailable);
     };
-    let csrf = new_csrf_token();
+    let csrf = page_csrf_token(headers);
     let view = SetupTwoFactorView {
         csrf_token: csrf.clone(),
         return_to,
@@ -1397,7 +1447,11 @@ pub(super) async fn sign_out_action(
         post_json::<_, SuccessResponse>(&state, "/api/auth/sign-out", cookie, &EmptyRequest {})
             .await;
     match identity {
-        Ok(identity) => forward_session_cookies(redirect("/login".to_owned(), &headers), &identity),
+        Ok(identity) => forward_session_cookies(
+            redirect("/login".to_owned(), &headers),
+            &identity,
+            &state.public_origin,
+        ),
         Err(()) => error_page(WebError::IdentityUnavailable),
     }
 }
@@ -1409,8 +1463,15 @@ fn valid_form_request(state: &AppState, headers: &HeaderMap, csrf: &str) -> bool
     request_has_same_origin(headers, &state.public_origin) && valid_csrf_token(headers, csrf)
 }
 
-fn auth_form_response(state: &AppState, status: StatusCode, mut view: AuthFormView) -> Response {
-    let csrf = new_csrf_token();
+/// Every form page keeps the browser's one CSRF token: minting a new one per
+/// render would invalidate a form already open in another tab (#4555).
+fn auth_form_response(
+    state: &AppState,
+    headers: &HeaderMap,
+    status: StatusCode,
+    mut view: AuthFormView,
+) -> Response {
+    let csrf = page_csrf_token(headers);
     view.csrf_token = csrf.clone();
     if view.action == SIGNUP_ACTION || view.action == SIGNUP_COMPLETE_ACTION {
         view.turnstile_site_key = state.turnstile_site_key.clone();
@@ -1669,6 +1730,7 @@ mod oauth_sign_in_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::new_csrf_token;
     use askama::Template as _;
 
     #[test]

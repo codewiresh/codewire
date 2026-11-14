@@ -8,8 +8,7 @@ use crate::{
     raw_auth::{post_json, user_message},
     response::{error_page, login_redirect, render_page, two_factor_redirect},
     security::{
-        canonical_cookie, csrf_cookie, new_csrf_token, request_has_same_origin, valid_csrf_token,
-        with_csrf_cookie,
+        canonical_cookie, csrf_cookie, request_has_same_origin, valid_csrf_token, with_csrf_cookie,
     },
     state::AppState,
     templates::DeviceTemplate,
@@ -43,7 +42,7 @@ pub(super) async fn device(
         Err(error) => return error_page(error),
     }
     let user_code = normalize_user_code(&query.user_code).unwrap_or_default();
-    render_device(&state, user_code, String::new(), false)
+    render_device(&state, &headers, user_code, String::new(), false)
 }
 
 pub(super) async fn approve(
@@ -74,6 +73,7 @@ pub(super) async fn approve(
     let Some(user_code) = normalized_user_code else {
         return render_device(
             &state,
+            &headers,
             submitted_user_code,
             "Enter a valid 8-character device code.".to_owned(),
             false,
@@ -94,10 +94,11 @@ pub(super) async fn approve(
     .await
     {
         Ok(response) if response.status.is_success() => {
-            render_device(&state, user_code, String::new(), true)
+            render_device(&state, &headers, user_code, String::new(), true)
         }
         Ok(response) => render_device(
             &state,
+            &headers,
             user_code,
             user_message(response.status, "device").to_owned(),
             false,
@@ -106,8 +107,14 @@ pub(super) async fn approve(
     }
 }
 
-fn render_device(state: &AppState, user_code: String, error: String, approved: bool) -> Response {
-    let csrf = new_csrf_token();
+fn render_device(
+    state: &AppState,
+    headers: &HeaderMap,
+    user_code: String,
+    error: String,
+    approved: bool,
+) -> Response {
+    let csrf = crate::security::page_csrf_token(headers);
     let view = DevicePageView {
         user_code_slots: device_code_slots(&user_code),
         csrf_token: csrf.clone(),

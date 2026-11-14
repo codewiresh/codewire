@@ -155,10 +155,10 @@ pub(super) async fn add_credit(
             Err(response) => return response,
         };
     if !organization.can_admin {
-        return mutation_redirect(&state, path, "", "not-authorized", &headers);
+        return mutation_redirect(path, "", "not-authorized", &headers);
     }
     let Some(amount_cents) = credit_cents(&submission.choice, &submission.amount) else {
-        return mutation_redirect(&state, path, "", "invalid-credit", &headers);
+        return mutation_redirect(path, "", "invalid-credit", &headers);
     };
     let return_url = format!("{}{}", state.public_origin, organization.billing_url);
     let result = billing_connect::add_credit(
@@ -175,7 +175,7 @@ pub(super) async fn add_credit(
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             return login_redirect(&path, &headers);
         }
-        Err(error) => return mutation_redirect(&state, path, "", mutation_error(&error), &headers),
+        Err(error) => return mutation_redirect(path, "", mutation_error(&error), &headers),
     };
     match response.outcome.as_known() {
         Some(AddCreditOutcome::Paid) => with_csrf_cookie(
@@ -188,7 +188,7 @@ pub(super) async fn add_credit(
         Some(AddCreditOutcome::ActionRequired) => {
             let url = billing_connect::safe_stripe_url(response.payment_url);
             if url.is_empty() {
-                mutation_redirect(&state, path, "", "invalid-redirect", &headers)
+                mutation_redirect(path, "", "invalid-redirect", &headers)
             } else {
                 redirect(url, &headers)
             }
@@ -198,9 +198,9 @@ pub(super) async fn add_credit(
                 Some(AddCreditRefusal::InProgress) => "credit-in-progress",
                 _ => credit_decline(&response.decline_code),
             };
-            mutation_redirect(&state, path, "", error, &headers)
+            mutation_redirect(path, "", error, &headers)
         }
-        _ => mutation_redirect(&state, path, "", "unavailable", &headers),
+        _ => mutation_redirect(path, "", "unavailable", &headers),
     }
 }
 
@@ -227,10 +227,10 @@ pub(super) async fn auto_top_up(
             Err(response) => return response,
         };
     if !organization.can_admin {
-        return mutation_redirect(&state, path, "", "not-authorized", &headers);
+        return mutation_redirect(path, "", "not-authorized", &headers);
     }
     let Some(amount_cents) = billing_connect::top_up_cents(&submission.amount) else {
-        return mutation_redirect(&state, path, "", "invalid-top-up", &headers);
+        return mutation_redirect(path, "", "invalid-top-up", &headers);
     };
     let enabled = submission.enabled.as_deref() == Some("true");
     match billing_connect::update_auto_top_up(
@@ -242,9 +242,9 @@ pub(super) async fn auto_top_up(
     )
     .await
     {
-        Ok(()) => mutation_redirect(&state, path, "top-up-saved", "", &headers),
+        Ok(()) => mutation_redirect(path, "top-up-saved", "", &headers),
         Err(error) if error.code == ErrorCode::Unauthenticated => login_redirect(&path, &headers),
-        Err(error) => mutation_redirect(&state, path, "", mutation_error(&error), &headers),
+        Err(error) => mutation_redirect(path, "", mutation_error(&error), &headers),
     }
 }
 
@@ -262,7 +262,7 @@ async fn billing_session(
             Err(response) => return response,
         };
     if !organization.can_admin {
-        return mutation_redirect(state, path, "", "not-authorized", headers);
+        return mutation_redirect(path, "", "not-authorized", headers);
     }
     let return_url = format!("{}{}", state.public_origin, organization.billing_url);
     let result = if portal {
@@ -274,13 +274,13 @@ async fn billing_session(
         Ok(raw_url) => {
             let url = billing_connect::safe_stripe_url(raw_url);
             if url.is_empty() {
-                mutation_redirect(state, path, "", "invalid-redirect", headers)
+                mutation_redirect(path, "", "invalid-redirect", headers)
             } else {
                 redirect(url, headers)
             }
         }
         Err(error) if error.code == ErrorCode::Unauthenticated => login_redirect(&path, headers),
-        Err(error) => mutation_redirect(state, path, "", mutation_error(&error), headers),
+        Err(error) => mutation_redirect(path, "", mutation_error(&error), headers),
     }
 }
 

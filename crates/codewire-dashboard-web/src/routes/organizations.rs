@@ -15,8 +15,8 @@ use crate::{
     },
     routes::{DASHBOARD_PATH, NEW_ORGANIZATION_PATH},
     security::{
-        canonical_cookie, csrf_cookie, new_csrf_token, page_csrf_token, request_has_same_origin,
-        valid_csrf_token, with_csrf_cookie,
+        canonical_cookie, csrf_cookie, page_csrf_token, request_has_same_origin, valid_csrf_token,
+        with_csrf_cookie,
     },
     state::AppState,
     templates::{NewOrganizationTemplate, OrganizationListTemplate},
@@ -115,14 +115,9 @@ pub(super) async fn create_organization(
         }
     };
     match create_organization_rpc(&state, cookie, &form).await {
-        Ok(()) => {
-            let rotated = new_csrf_token();
-            // A new organization opens on its own home.
-            with_csrf_cookie(
-                redirect(format!("/{}/", form.slug), &headers),
-                csrf_cookie(&state.public_origin, &rotated),
-            )
-        }
+        // A new organization opens on its own home. The browser keeps its
+        // CSRF token across actions (#4555).
+        Ok(()) => redirect(format!("/{}/", form.slug), &headers),
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             login_redirect(NEW_ORGANIZATION_PATH, &headers)
         }

@@ -126,6 +126,15 @@ async fn identity(
                 )
                     .into_response(),
                 // The right password for an account still waiting for access.
+                // A password that signs in: the IdP sets the session cookie.
+                "/api/auth/sign-in" if json["password"] == "signs-in" => (
+                    [(header::SET_COOKIE, "codewire.session_token=synthetic-session; Path=/; HttpOnly")],
+                    Json(serde_json::json!({
+                        "user": { "id": "u", "email": "member@example.test", "two_factor_enabled": true },
+                        "session": { "id": "s", "expires_at": "2026-11-14T00:00:00Z" },
+                    })),
+                )
+                    .into_response(),
                 "/api/auth/sign-in" if json["password"] == "right" => (
                     StatusCode::FORBIDDEN,
                     Json(serde_json::json!({ "code": "account_disabled" })),
@@ -347,6 +356,92 @@ async fn the_completion_page_shows_the_provider_identity_and_the_access_request(
         assert!(body.contains("Sign-up expired"));
         assert!(body.contains("href=\"/signup\""));
     }
+}
+
+/// The CSRF token in a form rendered from `body`.
+fn form_token(body: &str) -> String {
+    body.split(r#"name="_csrf" value=""#)
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("a form token")
+        .to_owned()
+}
+
+/// The CSRF token a response sets, if any.
+fn set_csrf(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|value| value.strip_prefix("codewire_ssr_csrf="))
+        .and_then(|value| value.split(';').next())
+        .map(str::to_owned)
+}
+
+/// A second form page in the same browser leaves the first one valid: the
+/// browser keeps one CSRF token across renders, and only a sign-in or a
+/// sign-out issues a new one (#4555). The check itself is unchanged.
+#[tokio::test]
+async fn a_second_form_page_leaves_the_first_one_valid() {
+    let (idp, _) = identity(Some(&["github"]), StatusCode::OK).await;
+    let server = dashboard(&idp.origin, "").await;
+    let (_, headers, first) = page(&server, "/login", None).await;
+    let token = set_csrf(&headers).expect("the first render sets the cookie");
+    assert_eq!(form_token(&first), token);
+    let cookie = format!("codewire_ssr_csrf={token}");
+    // Another tab, or a reload: the same token, and any cookie it sets
+    // carries that same token.
+    for path in ["/login", "/signup", "/forgot-password"] {
+        let (_, headers, body) = page(&server, path, Some(&cookie)).await;
+        assert_eq!(form_token(&body), token, "{path}");
+        assert!(
+            set_csrf(&headers).is_none_or(|set| set == token),
+            "{path} replaced the browser's token"
+        );
+    }
+    let submit = |origin: &'static str, cookie: Option<String>, password: &'static str| {
+        let mut request = client()
+            .post(format!("{}/login/_actions/sign-in", server.origin))
+            .header(header::ORIGIN, origin)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(format!(
+                "_csrf={token}&email=member%40example.test&password={password}"
+            ));
+        if let Some(cookie) = cookie {
+            request = request.header(header::COOKIE, cookie);
+        }
+        request.send()
+    };
+    let refused = "The form expired or came from another site";
+    // The first copy of the form still submits.
+    let response = submit(ORIGIN, Some(cookie.clone()), "wrong").await.unwrap();
+    assert!(!response.text().await.unwrap().contains(refused));
+    // A foreign origin, a missing cookie or another token is still refused.
+    for (origin, cookie) in [
+        ("https://evil.example", Some(cookie.clone())),
+        (ORIGIN, None),
+        (
+            ORIGIN,
+            Some(format!(
+                "codewire_ssr_csrf={}",
+                crate::security::new_csrf_token()
+            )),
+        ),
+    ] {
+        let body = submit(origin, cookie, "wrong")
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(body.contains(refused), "{origin}: {body}");
+    }
+    // Signing in issues a new token.
+    let response = submit(ORIGIN, Some(cookie.clone()), "signs-in")
+        .await
+        .unwrap();
+    let rotated = set_csrf(response.headers()).expect("sign-in issues a new token");
+    assert_ne!(rotated, token);
 }
 
 #[tokio::test]
