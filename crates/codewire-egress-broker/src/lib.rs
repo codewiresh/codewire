@@ -25,6 +25,7 @@ use tokio::sync::Mutex;
 pub mod adapters;
 #[cfg(unix)]
 pub mod ipc;
+pub mod records;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DnsRecordFamily {

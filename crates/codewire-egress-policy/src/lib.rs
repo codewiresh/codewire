@@ -19,6 +19,7 @@ pub mod host_addresses;
 mod hostname;
 pub mod intercept;
 pub mod lease;
+pub mod record;
 pub mod reference;
 pub mod typed;
 
