@@ -65,6 +65,9 @@ mod projection_database_tests;
 mod replacement_database_tests;
 
 #[cfg(test)]
+mod running_row_database_tests;
+
+#[cfg(test)]
 mod warm_pool_tests;
 
 #[cfg(test)]

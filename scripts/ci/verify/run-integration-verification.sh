@@ -1038,6 +1038,12 @@ database_lane_orchestration() {
       'worker::create::replacement_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "running row after mark_running" running-row-after-mark-running \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::create::running_row_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "confidential activation slot matrix" confidential-activation-slots \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
