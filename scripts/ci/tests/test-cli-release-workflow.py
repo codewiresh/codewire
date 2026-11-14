@@ -565,10 +565,20 @@ def check(text, ci_text):
              "Refuse to change an already-published release",
              "Publish immutable R2 release objects", "Receive the runtime part records",
              "Record the runtime parts this release built", "Remove the R2 publisher credential",
-             "Publish signed release assets"]
+             "Publish signed release assets", "Confirm cw upgrade offers this release"]
     positions = [names.index(name) if name in names else -1 for name in order]
     need(-1 not in positions and positions == sorted(positions), "publication steps are missing or reordered")
-    need(names and names[-1] == "Publish signed release assets", "work follows mirror publication")
+    need(names[-2:] == ["Publish signed release assets", "Confirm cw upgrade offers this release"],
+         "work follows mirror publication, or the run ends before cw upgrade offers the release")
+    # Every run ends by reading the public channel as cw upgrade does (#4492).
+    offered = dict(steps(package)).get("Confirm cw upgrade offers this release", "")
+    need("        if:" not in offered, "the offered check is conditional")
+    need(re.findall(r"^        run:(.*)$", offered, re.M)
+         == [' python3 ../scripts/ci/release/cw_release_r2.py offered --version "$RELEASE_TAG"'],
+         "the run does not confirm cw upgrade offers the release, or its failure can pass")
+    need("continue-on-error" not in offered, "the offered check's failure can pass")
+    need("env:\n          RELEASE_TAG:" in offered and "TOKEN" not in offered and "credentials" not in offered,
+         "the offered check holds a credential")
     by_name = dict(steps(package))
     need("secrets." not in text, "the release workflow reads a Forgejo Actions secret")
     # Before anything is written, every R2 run included, a tag whose published
@@ -632,7 +642,9 @@ def check(text, ci_text):
     mirror = by_name.get("Publish signed release assets", "")
     need("fetch-openbao-github-mirror-credentials.sh" in mirror and "mint-github-app-token.sh" in mirror,
          "GitHub mirror no longer uses the OIDC GitHub App boundary")
-    need(mirror.rstrip().endswith('../scripts/ci/release/publish-cw-release.sh "$RELEASE_TAG" dist/cw-release'),
+    # The next step's leading comment parses into this body; commands only.
+    mirror_commands = "\n".join(line for line in mirror.splitlines() if not line.lstrip().startswith("#"))
+    need(mirror_commands.rstrip().endswith('../scripts/ci/release/publish-cw-release.sh "$RELEASE_TAG" dist/cw-release'),
          "mirror publication is not the final command")
     need(not re.search(r"ghp_|github_pat_|ssh-key|SSH_PRIVATE_KEY|secrets\.(GH|GITHUB)_", text),
          "a PAT or SSH deploy key appears")
@@ -924,6 +936,24 @@ MUTATIONS = {
     "built-in verification after R2 publication": lambda t: move_step(
         t, "Verify the signed delivery with cw's built-in verifier", "Remove the R2 publisher credential"),
     "unbound verifier": lambda t: t.replace('= "$VERIFIER_SHA256" ]', "] || true", 1),
+    "no offered check": lambda t: re.sub(
+        r"      - name: Confirm cw upgrade offers this release\n(?:        .*\n|\n(?=        ))*",
+        "", t, count=1),
+    "conditional offered check": lambda t: t.replace(
+        "      - name: Confirm cw upgrade offers this release\n",
+        "      - name: Confirm cw upgrade offers this release\n"
+        "        if: ${{ needs.release-selection.outputs.r2_publication == 'immutable' }}\n", 1),
+    "offered check failure ignored": lambda t: t.replace(
+        'offered --version "$RELEASE_TAG"\n', 'offered --version "$RELEASE_TAG" || true\n', 1),
+    "offered check exits 0": lambda t: t.replace(
+        'offered --version "$RELEASE_TAG"\n', 'offered --version "$RELEASE_TAG"; exit 0\n', 1),
+    "offered check continues on error": lambda t: t.replace(
+        "      - name: Confirm cw upgrade offers this release\n",
+        "      - name: Confirm cw upgrade offers this release\n        continue-on-error: true\n", 1),
+    # The offered check is the file's last step, so move_step cannot cut it.
+    "offered check before publication": lambda t: (lambda step: t.replace(step, "", 1).replace(
+        "      - name: Publish signed release assets\n", step + "      - name: Publish signed release assets\n", 1))(
+        t[t.index("      - name: Confirm cw upgrade offers this release\n"):]),
     "no published-asset check": lambda t: re.sub(
         r"      - name: Refuse to change an already-published release\n(?:        .*\n|\n(?=        ))*",
         "", t, count=1),

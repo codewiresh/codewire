@@ -1218,3 +1218,12 @@ jobs:
           export GH_MIRROR_TOKEN_FILE="$github_work/token"
           gpg --verify dist/cw-release/SHA256SUMS.asc dist/cw-release/SHA256SUMS
           ../scripts/ci/release/publish-cw-release.sh "$RELEASE_TAG" dist/cw-release
+      # A release is done only when cw upgrade offers it: the public stable
+      # channel names this tag under its signature and serves the release it
+      # names, read as cw upgrade reads it, with no credential (#4492). A run
+      # that left releases.codewire.sh behind (v0.4.17) fails here.
+      - name: Confirm cw upgrade offers this release
+        working-directory: .release-source
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+        run: python3 ../scripts/ci/release/cw_release_r2.py offered --version "$RELEASE_TAG"

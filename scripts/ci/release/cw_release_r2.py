@@ -22,6 +22,9 @@ Subcommands:
            reuses its exact signed bytes instead of re-signing
   publish  write and read back the release objects; `--promote stable` also
            moves the stable channel
+  offered  read the public stable channel as cw upgrade does, with no
+           credential, and fail unless it names this release and the release
+           object it names is served exactly (#4492)
 
 Diagnostics go to standard error; probe's standard output is only its result.
 
@@ -38,6 +41,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -59,6 +63,10 @@ CHANNEL_CACHE = "no-cache"
 MAX_OBJECT = release.MAX_EXECUTABLE + 8 * 1024 * 1024
 MAX_CREDENTIAL_FILE = 4096
 ATTEMPTS = 3
+# The public channel is served no-cache; a few reads cover an edge that has
+# not yet seen a promotion made seconds earlier.
+OFFER_ATTEMPTS = 6
+OFFER_WAIT_SECONDS = 10
 TIMEOUT = 120
 RECEIPT = "recovery.json"
 SIGNED_NAMES = ("release.json", "release.json.asc", "SHA256SUMS", "SHA256SUMS.asc")
@@ -524,6 +532,43 @@ def publish(s3, origin, dist, trust, promote_channel=None):
     return counts, promote(s3, origin, objects, channel_bytes, version, trust)
 
 
+def offered(origin, version, trust, channel="stable", sleep=time.sleep):
+    """cw upgrade offers VERSION: the public channel names it under a valid
+    signature, and the release object it names is served with exactly the
+    named bytes. Unproven after OFFER_ATTEMPTS reads, it fails."""
+    require(release.release_version(version), "release version is invalid")
+    key = release.channel_key(channel)
+    reason = "the public channel was not read"
+    for attempt in range(OFFER_ATTEMPTS):
+        if attempt:
+            sleep(OFFER_WAIT_SECONDS)
+        try:
+            current = origin.get(key, release.MAX_JSON)
+        except TransportError:
+            reason = "the public channel read failed"
+            continue
+        if current.status != 200:
+            reason = f"the public channel answered status {current.status}"
+            continue
+        pointer = release.verify_channel(current.body, trust)
+        if pointer["release_tag"] != version:
+            reason = f"the public {channel} channel names {pointer['release_tag']}"
+            continue
+        named = pointer["release"]
+        try:
+            manifest = origin.get(named["key"], release.MAX_JSON)
+        except TransportError:
+            reason = f"the public read of {named['key']} failed"
+            continue
+        if manifest.status != 200 or len(manifest.body) != named["size"] \
+                or hashlib.sha256(manifest.body).hexdigest() != named["sha256"]:
+            reason = f"the public origin does not serve exactly the {named['key']} the channel names"
+            continue
+        log(f"offered channel={channel} release={version} manifest={named['sha256']}")
+        return pointer
+    raise PublishError(f"cw upgrade does not offer {version}: {reason}")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -536,9 +581,14 @@ def main(argv=None):
     publish_parser.add_argument("--dist", type=Path, required=True)
     publish_parser.add_argument("--credentials", type=Path, required=True)
     publish_parser.add_argument("--promote", choices=("none",) + release.CHANNELS, default="none")
+    offered_parser = sub.add_parser("offered")
+    offered_parser.add_argument("--version", required=True)
     args = parser.parse_args(argv)
     try:
         transport = HttpsTransport()
+        if args.command == "offered":
+            offered(PublicOrigin(transport), args.version, release.PRODUCTION_TRUST)
+            return 0
         s3 = S3(transport, load_credentials(args.credentials))
         if args.command == "probe":
             require(release.release_version(args.version), "release version is invalid")

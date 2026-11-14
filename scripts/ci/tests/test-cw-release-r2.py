@@ -453,6 +453,67 @@ class PublisherTest(unittest.TestCase):
     def local_channel(self, name):
         return release.delivery_paths(self.deliveries[name])["channel"].read_bytes()
 
+    # --- cw upgrade offers the release (#4492) ---------------------------------------
+
+    def offered(self, version=fx.VERSION):
+        sleeps = []
+        with self.quiet():
+            try:
+                return r2.offered(self.origin, version, self.trust, sleep=sleeps.append), sleeps
+            except r2.PublishError as error:
+                return error, sleeps
+
+    def test_a_promoted_release_is_offered_publicly_without_a_credential(self):
+        self.publish("new", promote="stable")
+        before = len(self.fake.requests)
+        pointer, sleeps = self.offered()
+        self.assertEqual((pointer["release_tag"], sleeps), (fx.VERSION, []))
+        # Only the public origin is read, as cw upgrade reads it.
+        self.assertEqual({host for _, host, _, _ in self.fake.requests[before:]}, {r2.PUBLIC_HOST})
+
+    def test_a_release_the_channel_does_not_name_is_not_offered(self):
+        self.publish("new")  # published, stable never moved
+        error, sleeps = self.offered()
+        self.assertIn(f"cw upgrade does not offer {fx.VERSION}: the public channel answered status 404", str(error))
+        self.assertEqual(sleeps, [r2.OFFER_WAIT_SECONDS] * (r2.OFFER_ATTEMPTS - 1))
+        self.publish("old", promote="stable")
+        error, _ = self.offered()
+        self.assertIn("the public stable channel names v0.4.1", str(error))
+
+    def test_a_channel_naming_bytes_the_origin_does_not_serve_is_not_offered(self):
+        self.publish("new", promote="stable")
+        manifest = release.release_key(fx.VERSION, "release.json")
+        self.fake.store(manifest, self.fake.objects[manifest][0] + b" ")
+        error, _ = self.offered()
+        self.assertIn(f"does not serve exactly the {manifest} the channel names", str(error))
+
+    def test_a_promotion_the_edge_has_not_seen_yet_is_offered_on_a_later_read(self):
+        self.publish("new", promote="stable")
+        key = release.channel_key("stable")
+        self.fake.public_missing.add(key)
+        reads = []
+
+        class Late:
+            def get(origin, wanted, limit):
+                reads.append(wanted)
+                if wanted == key and reads.count(key) == 3:
+                    self.fake.public_missing.discard(key)
+                return self.origin.get(wanted, limit)
+
+        sleeps = []
+        with self.quiet():
+            pointer = r2.offered(Late(), fx.VERSION, self.trust, sleep=sleeps.append)
+        self.assertEqual((pointer["release_tag"], len(sleeps)), (fx.VERSION, 2))
+
+    def test_a_channel_with_a_bad_signature_fails_at_once(self):
+        self.publish("new", promote="stable")
+        key = release.channel_key("stable")
+        self.fake.store(key, self.fake.objects[key][0].replace(b"BEGIN PGP SIGNATURE", b"BEGIN PGP SIGNATURE ", 1))
+        sleeps = []
+        with self.quiet(), self.assertRaises(release.ReleaseError):
+            r2.offered(self.origin, fx.VERSION, self.trust, sleep=sleeps.append)
+        self.assertEqual(sleeps, [])
+
     def test_explicit_promotion_creates_then_swaps_with_observed_etag(self):
         _, first = self.publish("old", promote="stable")
         self.assertEqual(first, "promoted")
