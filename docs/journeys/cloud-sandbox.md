@@ -1,18 +1,24 @@
 # A cloud sandbox
 
 This journey proves what a user does with a cloud sandbox, as `SPEC.md`
-describes it in "4. Hosted sandboxes" and "7. Access paths". It is written so
-far for copying files with `cw cp` ("File transfer" in section 7), and for what
-a user sees while a release replaces the orchestration service ("Rollouts
-drain" in section 10). Other parts of the sandbox journey are added as their
-owners write them. The format is in [README.md](README.md).
+describes it in "4. Hosted sandboxes" and "7. Access paths": creating one,
+what a create that fails leaves behind, running commands and shells in it,
+stopping and starting it, copying files with `cw cp` ("File transfer" in
+section 7), and what a user sees while a release replaces the orchestration
+service ("Rollouts drain" in section 10). Large `cw run` output is not written
+yet; its owner adds it. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-13.
+Updated 2026-11-14.
 
 | ID | Owner | Dev | Production |
 | --- | --- | --- | --- |
+| `sandbox-create` | cw-cleanup | observed 2026-11-14 | not yet observed |
+| `sandbox-create-fails` | cw-cleanup | observed 2026-11-14 (#4482) | not yet observed; v0.4.17 lacks it |
+| `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
+| `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
+| `sandbox-stop-start` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-14 (#4460) | not yet observed |
 | `sandbox-cp-resume` | cw-workspace-mount | observed 2026-11-13 (#4373) | not yet observed; v0.4.17 lacks it |
 | `sandbox-cp-download` | cw-workspace-mount | observed 2026-11-13 (#4394) | not yet observed |
@@ -20,8 +26,9 @@ Updated 2026-11-13.
 
 ## Before the walk
 
-- Use one running cloud sandbox for every step. The examples call it
-  `cp-walk`.
+- The `sandbox-cp` steps use one running cloud sandbox, called `cp-walk` in
+  the examples. The create, command and stop steps make their own, called
+  `walk`, and remove it at the end.
 - On Dev, `scripts/runtime/dev/with-dev-smoke-auth.sh -- COMMAND` runs one
   command as the synthetic Dev identity. On Production, the smoke identity
   (`scripts/runtime/prod/with-prod-smoke-auth.sh`) may create, inspect and
@@ -31,6 +38,233 @@ Updated 2026-11-13.
   services digest in the deploy repository's Dev `release.json` and that its
   rollout has finished. A promotion that has not rolled out is not the source
   you tested.
+
+## `sandbox-create`: create a sandbox and remove it
+
+- **Entry points:** `cw --cloud create`; the dashboard's new-environment
+  form; the SDKs. Only `cw` is walked here.
+- **States to exercise:**
+  - a create that waits and ends usable;
+  - a create with `--no-wait`, which returns at once and is followed with
+    `cw ls`;
+  - a create the platform ends (see `sandbox-create-fails`).
+- **Driving it:**
+
+  ```sh
+  cw --cloud create --name walk --no-file --ttl 30m --no-network
+  cw --cloud ls
+  cw --cloud info walk
+  cw --cloud rm walk --yes
+  cw --cloud ls
+  ```
+
+- **Proof:**
+  - `cw create` exits 0 and prints "Environment walk created";
+  - `cw ls` shows `walk` as `running`, and `cw info` gives it an ID, `State:
+    running` and a `StartedAt` time;
+  - after `cw rm`, `cw ls` no longer shows it.
+- **Gotchas:**
+  - `--no-file` keeps a `codewire.yaml` in the current directory out of the
+    walk. Without it the create takes that file's image, repositories and
+    setup, and its time is not comparable.
+  - A create from the warm pool takes a few seconds. One that misses the pool
+    waits for a new sandbox and can take a minute or more; both are correct.
+  - `--ttl` removes a walk's sandbox if the walk is abandoned. Set it.
+  - `cw rm` answers "Removal started" while the platform removes the sandbox
+    in the background; the row leaves `cw ls` at once.
+- **Observed:**
+  - Dev, 2026-11-14 (cw-cleanup): Dev's latest promotion was source
+    f9a5fa8d2; whether its rollout had finished was not checked. `cw`
+    v0.4.17, as the Dev smoke identity: the create ended in 2 s, `cw ls`
+    showed `running`, `cw info` showed `State: running`, and after `cw rm`
+    the name was gone from `cw ls`. Evidence: the pull
+    request that added this section.
+
+## `sandbox-create-fails`: a create the platform ends says why
+
+Issues: #4431 (the create never ended), #4482 (the failed create vanished).
+
+- **Entry points:** `cw create`, then `cw ls`, `cw info` and `cw rm`. The
+  dashboard does not show a failed create yet (#4484).
+- **States to exercise:**
+  - an image that cannot be pulled;
+  - a container whose command cannot start;
+  - both with a create that waits, and with `--no-wait`;
+  - the failed row one day later.
+- **Driving it:**
+
+  ```sh
+  cw --cloud create --name walk --no-file --ttl 30m --no-network \
+    --image registry.invalid/none/none:0 --no-wait
+  sleep 120
+  cw --cloud ls
+  cw --cloud ls --output json
+  cw --cloud info walk
+  cw --cloud rm walk --yes
+  cw --cloud start walk
+  ```
+
+  Without `--no-wait`, the same create stays in the foreground until the
+  platform ends it.
+- **Proof:**
+  - the waiting create exits 1 within about two minutes and prints the
+    reason, here that the image could not be pulled;
+  - `cw ls` shows the row as `failed`, with how long ago, and a line under
+    the table that begins "walk was not created:" and gives the reason;
+  - the JSON entry has `"state": "failed"` and a `failed` object with `code`
+    `container_start_failed`, the reason and the time;
+  - `cw info walk` shows `State: failed` and the whole reason;
+  - `cw rm walk` exits 0 and says the environment was already removed;
+  - `cw start walk` answers "not found": a failed create is no target for
+    any command but `info` and `rm`;
+  - no Pod and no claim is left for the environment's ID. On Dev that is
+    read from the cluster; a user cannot see it.
+- **Gotchas:**
+  - A pull failure ends the create after about a minute, a start error after
+    about 20 seconds. Looking sooner shows `creating`, which is correct.
+  - The failed row is listed for 24 hours and then shows only under
+    `cw ls --all`, as `destroyed`. A walk of that part needs a row made the
+    day before.
+  - A `cw` older than the change (v0.4.17 and older) never asks for failed
+    creates, so its `cw ls` does not show the row. That is the old client,
+    not a failure of the server.
+  - The reason is the container runtime's own text and can be long (#4483).
+- **Observed:**
+  - Dev, 2026-11-14 (cw-cleanup): Dev ran source b98e0702d, which includes
+    #4497; the server answered the new list request, which only that source
+    does. `cw` built from #4497's head 3e61900ac, as the Dev smoke identity.
+    A `--no-wait` create with the image above was listed as `failed` 73 s
+    after the create, with `ErrImagePull` in its reason; no Pod or claim was
+    left; `cw info`, `cw rm` and `cw start` answered as under Proof. Three
+    failed creates from the day before left `cw ls` once they were 24 hours
+    old and read `destroyed` under `cw ls --all`. Evidence: #4482, the two
+    closing comments.
+  - Dev, 2026-11-13 (cw-cleanup): Dev ran source 3abfebe8b, which includes
+    #4441. A waiting create with an image tag that does not exist exited 1
+    after 27 s with the reason; a container whose command could not start
+    ended about 20 s after its create; a healthy create still succeeded.
+    Evidence: #4431, closing comment.
+
+## `sandbox-run-exec`: run a command in a sandbox
+
+- **Entry points:** `cw exec --in SANDBOX COMMAND` (no session; the command's
+  exit status is `cw`'s) and `cw run --in SANDBOX COMMAND` (a session that
+  `cw ls SANDBOX` lists and `cw logs` replays). `ssh` through `cw setup ssh`
+  takes a different path and does not count here.
+- **States to exercise:**
+  - a command that succeeds, with its output;
+  - a command that exits non-zero;
+  - input on stdin;
+  - a command in a stopped sandbox, which is refused;
+  - output larger than a terminal's worth (`sandbox-run-large-output`, not
+    written yet).
+- **Driving it:**
+
+  ```sh
+  cw exec --in walk -- sh -c 'echo marker-1 > /workspace/marker && cat /workspace/marker'
+  cw exec --in walk -- sh -c 'exit 7'; echo $?
+  printf 'from stdin\n' | cw exec --in walk -- cat
+  cw run --in walk --name job -- sh -c 'echo run-output-1; echo run-output-2'
+  cw ls walk
+  cw logs walk --session job
+  ```
+
+- **Proof:**
+  - the first command prints `marker-1`;
+  - the second makes `cw` exit 7;
+  - the third prints `from stdin`;
+  - `cw run` prints both lines, `cw ls walk` lists session `job` as `Exited`,
+    and `cw logs` prints the same two lines again.
+- **Gotchas:**
+  - `cw`'s own options go before the command. After `--`, every word is the
+    command's.
+  - `cw exec` in a stopped sandbox fails with a message about a missing SSH
+    host key for the sandbox's Pod. The refusal is right; the message does
+    not say that the sandbox is stopped (#4689). Seen with `cw` v0.4.17 and
+    with one built from `main` at 14fb7f56a.
+- **Observed:**
+  - Dev, 2026-11-14 (cw-cleanup): surface and client as for
+    `sandbox-create`. All four results under Proof were seen: the marker,
+    exit status 7, the stdin line, and the two `cw run` lines again from
+    `cw logs`. Evidence: the pull
+    request that added this section.
+
+## `sandbox-shell`: open a shell in a sandbox
+
+- **Entry points:** `cw shell SANDBOX`; the dashboard's terminal; `ssh`
+  through `cw setup ssh`. Only `cw shell` is walked here.
+- **States to exercise:**
+  - a shell that runs a command and is left with `exit`;
+  - the shell's exit status reaching `cw`;
+  - `--durable`, a shell that keeps running after its terminal detaches (not
+    walked yet).
+- **Driving it:** `cw shell` needs a terminal. By hand:
+
+  ```sh
+  cw shell walk
+  echo shell-says-$((6*7))
+  exit 3
+  echo $?
+  ```
+
+  Without a person, give it a terminal with `script`:
+
+  ```sh
+  printf 'echo shell-says-$((6*7)); exit 3\n' | script -qec 'cw shell walk' /dev/null
+  echo $?
+  ```
+
+- **Proof:** the shell prints `shell-says-42`, which only a shell in the
+  sandbox computes from that input, and `cw` exits 3.
+- **Gotchas:**
+  - Run without a terminal, `cw shell` is not this journey. Use `cw exec` for
+    a command with no terminal.
+  - Every key goes to the shell, Ctrl-B included, unless it was opened with
+    `--durable`.
+- **Observed:**
+  - Dev, 2026-11-14 (cw-cleanup): surface and client as for
+    `sandbox-create`, driven with `script`. The shell printed
+    `shell-says-42` and `cw` exited 3. The dashboard terminal and `ssh` were
+    not walked. Evidence: the pull
+    request that added this section.
+
+## `sandbox-stop-start`: stop a sandbox and start it again
+
+- **Entry points:** `cw stop SANDBOX` and `cw start SANDBOX`; the dashboard's
+  stop and start buttons. Only `cw` is walked here.
+- **States to exercise:**
+  - stop a running sandbox;
+  - a command against it while stopped;
+  - start it again, and find the files under `/workspace` unchanged;
+  - a start the cluster has no room for, which ends with a "no capacity"
+    message (not walked yet).
+- **Driving it:**
+
+  ```sh
+  cw exec --in walk -- sh -c 'echo marker-1 > /workspace/marker'
+  cw --cloud stop walk
+  cw --cloud ls
+  cw --cloud start walk
+  cw --cloud ls
+  cw exec --in walk -- cat /workspace/marker
+  ```
+
+- **Proof:**
+  - after the stop, `cw ls` shows `walk` as `stopped`;
+  - after the start, `cw ls` shows it as `running`;
+  - the last command prints the marker written before the stop. A file that
+    survives is the proof; "running" alone is not.
+- **Gotchas:**
+  - Only files under `/workspace` and `/home/codewire` survive a stop.
+    Processes and sessions do not.
+  - `cw start` returns once the sandbox is usable, so the next command needs
+    no wait.
+- **Observed:**
+  - Dev, 2026-11-14 (cw-cleanup): surface and client as for
+    `sandbox-create`. The stop took 3 s and `cw ls` showed `stopped`; the
+    start took 8 s and `cw ls` showed `running`; the marker written before
+    the stop was read back unchanged. Evidence: the pull
+    request that added this section.
 
 ## `sandbox-cp-upload`: copy a file into a sandbox
 

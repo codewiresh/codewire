@@ -15,7 +15,7 @@ runs the same commands and holds the result to the same standard.
 | [node-reboot.md](node-reboot.md) | Production keeps serving through one node's drain or reboot (#3542, #4461) |
 | [billing-and-credits.md](billing-and-credits.md) | Compute credit (#3381): add a card, top up, add credit, the receipt, costs in credits and the empty-balance refusal |
 | [previews-and-ports.md](previews-and-ports.md) | Reaching a server in an environment: `cw ports` on a local VM (#4347), cloud previews of loopback servers (#4357), and local HTTPS hostnames (#4316) |
-| [cloud-sandbox.md](cloud-sandbox.md) | A cloud sandbox: copying files in and out with `cw cp`, and transfers and API calls across an orchestration rollout, with other parts to follow |
+| [cloud-sandbox.md](cloud-sandbox.md) | A cloud sandbox: create it, see why a create failed, run commands and shells, stop and start it, copy files with `cw cp`, and keep working across an orchestration rollout |
 | [signup-and-verification.md](signup-and-verification.md) | Getting an account and proving its address: email sign-up, verification, GitHub and Google, and the abuse gates (#4481, #4062, #3297, #2053) |
 | [hosts.md](hosts.md) | Hosts (#3609): enroll a computer, keep its agent connected through proxies, logouts and reboots, the Hosts page, and environments created on a host |
 | [snapshots-and-forks.md](snapshots-and-forks.md) | Disk snapshots and forks: capture, list, inspect and remove a snapshot, and create sandboxes from it, in the cloud and on a local VM (#3046, #4370) |
