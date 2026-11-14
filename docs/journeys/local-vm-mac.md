@@ -26,9 +26,11 @@ Updated 2026-11-13.
   never share a supervisor.
 - An application firewall must allow the installed `cw` to reach
   `releases.codewire.sh`, `ghcr.io` and `pkg-containers.githubusercontent.com`.
-  Each `cw` version runs from its own path under
+  The guest's own DNS and connections leave the Mac through `cw` too. Each `cw`
+  version runs from its own path under
   `~/.local/share/codewire/cli/versions/`, so a firewall that decides per
-  executable asks again after every upgrade.
+  executable asks again after every upgrade. Until it was allowed, guest egress
+  failed with `bad address` (DNS), then with `Connection refused` (TCP).
 
 ## 1. `mac-vm-lifecycle`: install, create, shell, run, stop, start
 
@@ -54,6 +56,13 @@ Issues: #4478 (VMs did not start on macOS 27), #4370 (launch step 11).
   7. `cw --local start mac-walk` ends with `✓ Environment mac-walk started`.
      `cw run --in mac-walk --no-tty -- sh -c 'echo after-restart; uptime'`.
   8. `cw --local rm mac-walk`.
+
+  `scripts/dev/test-cli-local-vm-macos.py --cw CW --runtime DIR` walks steps
+  2, 3 and 5 to 8 with a small image, without the interactive shell. It adds
+  guest egress, a lost network worker or egress broker failing closed, a
+  stalled VM resuming, and the VZ helper's sandbox posture. The release dry
+  run's Mac job runs it with each run's own `cw` and runtime
+  (`scripts/ci/verify/macos-local-vm-journey.sh`); it is advisory until #4506.
 - **Proof:** the shell prints `aarch64`; `cw --local ls` reads `stopped` after
   step 6 and `running` after step 7; the command after the restart prints
   `after-restart` and an uptime under a minute.
@@ -77,6 +86,10 @@ Issues: #4478 (VMs did not start on macOS 27), #4370 (launch step 11).
     The create took 126 s, 71 s of it the image pull; the stop took
     2 s and the start 3 s. With the helper from 3abfebe8b instead, and the same
     `cw`, the create failed at "Starting the VM" (#4478).
+  - macOS 27.2.1, the same `cw` and runtime directory, 2026-11-13, once the
+    Mac's firewall allowed that `cw`: `test-cli-local-vm-macos.py` passed
+    every check in 108 s, including egress, both fail-closed losses, the stall
+    and the helper's posture (#4478).
   - macOS 26.6.2, the same `cw` and runtime directory, 2026-11-13: steps 3 to
     8 observed, after `cw setup --local --from DIR`. The create took 195 s,
     about 2 minutes of it the image pull; the stop took 1 s and the start 4 s.

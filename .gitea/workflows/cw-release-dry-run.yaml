@@ -38,8 +38,8 @@ on:
     # build reads, the runtime recipes, and the release scripts and
     # workflows, and what the Linux cws' build on the trusted BuildKit
     # builder reads outside them (#3119): the rust-base toolchain, the
-    # builder's attach and its client certificate's fetch. A server,
-    # dashboard or SDK change starts none.
+    # builder's attach and its client certificate's fetch, and the Mac's
+    # local VM walk (#4509). A server, dashboard or SDK change starts none.
     # dry-run-superseded.sh reads this list; keep it one entry per line.
     paths:
       - 'Cargo.lock'
@@ -99,6 +99,11 @@ on:
       - 'scripts/dev/macos-ext4-tool.py'
       - 'scripts/dev/macos-command-owner.py'
       - 'scripts/dev/macos-git-tool.py'
+      - 'scripts/ci/verify/macos-local-vm-journey.sh'
+      - 'scripts/ci/verify/macos-vz-helper-tests.sh'
+      - 'scripts/dev/native_socket_dir.py'
+      - 'scripts/dev/test-cli-host.py'
+      - 'scripts/dev/test-cli-local-vm-macos.py'
       - '.gitea/workflows/cli-release.yaml'
       - '.gitea/workflows/cw-release-dry-run.yaml'
   workflow_dispatch:
@@ -603,6 +608,94 @@ jobs:
           path: dist/cw-release/
           if-no-files-found: error
           retention-days: 1
+
+  walk-local-vm-darwin:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
+    # The macOS local VM journey (#4478; owner-confirmed plan on infra#2151):
+    # this run's own arm64 cw and packed runtime create a VM on the Mac, run in
+    # it, fail closed, stall and resume, and remove it
+    # (scripts/dev/test-cli-local-vm-macos.py), and the VZ helper's own tests
+    # run. Until the dry run embeds a runtime (a new helper is signed only by a
+    # release), the journey is not walked and the job says so. Its two checks
+    # are advisory until a run passes on the Mac; #4506 makes them blocking.
+    name: Walk a local VM on the Mac
+    needs: [protected-main, pack-runtime, build-darwin]
+    if: needs.build-darwin.outputs.superseded == 'false'
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_MACOS || 'unset-CODEWIRE_CI_RUNNER_MACOS' }}
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: ${{ needs.protected-main.outputs.source_sha }}
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.protected-main.outputs.source_sha }}
+          fetch-depth: 0
+
+      # Main may have moved on while this run waited for the Mac: decide
+      # again, by the same rule, before using it.
+      - name: Skip a superseded commit
+        id: superseded
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"
+
+      - name: Test the VZ helper
+        id: helper-tests
+        if: steps.superseded.outputs.superseded == 'false'
+        continue-on-error: true
+        timeout-minutes: 5
+        run: scripts/ci/verify/macos-vz-helper-tests.sh
+
+      - name: Receive the local runtime
+        if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
+        with:
+          name: cw-dry-run-runtime-${{ github.run_id }}
+          path: .local-runtime
+
+      - name: Verify the received runtime is the packed runtime
+        if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
+        env:
+          DOCUMENT_SHA256: ${{ needs.pack-runtime.outputs.document_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$DOCUMENT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(shasum -a 256 .local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]
+          echo "CW_RELEASE_LOCAL_RUNTIME_DIR=$PWD/.local-runtime" >> "$GITHUB_ENV"
+
+      - name: Receive the macOS pair
+        if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
+        with:
+          name: cw-dry-run-darwin-${{ github.run_id }}
+          path: dist-darwin
+
+      - name: Verify the received macOS pair is the built pair
+        if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
+        env:
+          UNSIGNED_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$UNSIGNED_SUMS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(shasum -a 256 dist-darwin/SHA256SUMS | cut -c1-64)" = "$UNSIGNED_SUMS_SHA256" ]
+          (cd dist-darwin && shasum -a 256 -c SHA256SUMS)
+
+      - name: Walk a local VM with this run's cw and runtime
+        id: walk
+        if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
+        continue-on-error: true
+        timeout-minutes: 12
+        run: scripts/ci/verify/macos-local-vm-journey.sh dist-darwin "$CW_RELEASE_LOCAL_RUNTIME_DIR"
+
+      # An advisory step's failure shows as a success; say it on the run.
+      - name: Say that an advisory Mac check failed
+        if: steps.superseded.outputs.superseded == 'false' && (steps.helper-tests.outcome == 'failure' || steps.walk.outcome == 'failure')
+        run: echo '::warning::AN ADVISORY MAC CHECK FAILED (the VZ helper tests or the local VM walk; #4506 makes them blocking). Read its step above.'
+
+      - name: Say that no runtime was walked
+        if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime != 'true'
+        run: |
+          echo '::warning::NO LOCAL VM WALKED ON THE MAC: this dry run embeds no runtime (a runtime part, such as a changed VZ helper, is signed only by a release). Walk docs/journeys/local-vm-mac.md by hand for this change.'
 
   sign-darwin:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.

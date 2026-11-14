@@ -176,6 +176,13 @@ def arm_owned_session():
         code = os.waitstatus_to_exitcode(status)
         os._exit(code if code >= 0 else 128 - code)
     os.setsid()
+    # SIGINT already raises KeyboardInterrupt. A forwarded SIGTERM or SIGHUP
+    # (a cancelled or timed-out CI step) unwinds the same way, so the journey's
+    # `finally` runs its cleanup instead of dying with the default handler.
+    def unwind(received, _frame):
+        raise SystemExit(128 + received)
+    for number in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, unwind)
 
 
 def owned_family(root):

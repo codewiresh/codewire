@@ -54,7 +54,8 @@ cli_host = load("cli_host", "test-cli-host.py")
 packer = load("macos_local_runtime", "macos-local-runtime.py")
 socket_dir = load("native_socket_dir", "native_socket_dir.py")
 
-IMAGE = "docker.io/library/alpine:3.22"
+# alpine 3.22 (3.22.8), its multi-arch index, pinned by digest (#4509).
+IMAGE = "docker.io/library/alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f"
 NAME = "proof"
 RUN_BUDGET_SECONDS = 1.0
 

@@ -1066,12 +1066,13 @@ def check_dry_run(text, release):
     errors.extend(external_download_errors(text))
     blocks = jobs(text)
     need(list(blocks) == ["protected-main", "superseded", "build-runtime-linux", "build-helper-darwin",
-                          "sign-helper", "pack-runtime", "build-darwin", "sign-darwin", "build-linux-musl",
-                          "build-linux-gnu", "assemble"], "unexpected dry-run job set")
+                          "sign-helper", "pack-runtime", "build-darwin", "walk-local-vm-darwin", "sign-darwin",
+                          "build-linux-musl", "build-linux-gnu", "assemble"], "unexpected dry-run job set")
     # A wedged step must fail within its job's limit instead of holding the
     # one-at-a-time dry-run queue until the runner's 330-minute limit.
     for job, limit in (("build-runtime-linux", 75), ("build-helper-darwin", 30), ("sign-helper", 20),
-                       ("pack-runtime", 30), ("build-darwin", 60), ("sign-darwin", 20),
+                       ("pack-runtime", 30), ("build-darwin", 60), ("walk-local-vm-darwin", 30),
+                       ("sign-darwin", 20),
                        ("build-linux-musl", 60), ("build-linux-gnu", 60), ("assemble", 30)):
         found = re.findall(r"^    timeout-minutes: ([0-9]+)$", blocks.get(job, ""), re.M)
         need(found == [str(limit)], f"dry-run job {job} lacks its {limit}-minute limit")
@@ -1159,8 +1160,8 @@ def check_dry_run(text, release):
                "          BEFORE: ${{ github.event.before }}\n"
                '        run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"')
     gate = re.compile(r"^        if: steps\.superseded\.outputs\.superseded == 'false'( && |$)", re.M)
-    for job in ("build-runtime-linux", "build-helper-darwin", "pack-runtime", "build-darwin", "build-linux-musl",
-                "build-linux-gnu", "assemble"):
+    for job in ("build-runtime-linux", "build-helper-darwin", "pack-runtime", "build-darwin",
+                "walk-local-vm-darwin", "build-linux-musl", "build-linux-gnu", "assemble"):
         named = steps(blocks.get(job, ""))
         need(len(named) > 2 and "actions-checkout" in named[0][0] and named[1][1].startswith(recheck),
              f"dry-run job {job} does not decide supersession again before its first step")
@@ -1177,6 +1178,49 @@ def check_dry_run(text, release):
     need("    if: needs.build-linux-musl.outputs.superseded == 'false'"
          " && needs.build-linux-gnu.outputs.superseded == 'false'\n" in assemble,
          "the dry-run assembly runs after a Linux cw build found the commit superseded")
+    # The Mac walks a local VM with exactly this run's arm64 cw and packed
+    # runtime, and runs the VZ helper's own tests (#4478). Only those two
+    # steps may continue on error, until #4506 makes them blocking.
+    walk = blocks.get("walk-local-vm-darwin", "")
+    walked = dict(steps(walk))
+    need("    needs: [protected-main, pack-runtime, build-darwin]\n"
+         "    if: needs.build-darwin.outputs.superseded == 'false'\n"
+         f"    runs-on: {MACOS}\n" in walk,
+         "the Mac's local VM walk does not wait for this run's macOS cw on the Mac")
+    need("          DOCUMENT_SHA256: ${{ needs.pack-runtime.outputs.document_sha256 }}\n"
+         in walked.get("Verify the received runtime is the packed runtime", "")
+         and '.local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]'
+         in walked.get("Verify the received runtime is the packed runtime", ""),
+         "the Mac's local VM walk may use a runtime other than the packed one")
+    need("          UNSIGNED_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}\n"
+         in walked.get("Verify the received macOS pair is the built pair", "")
+         and "(cd dist-darwin && shasum -a 256 -c SHA256SUMS)"
+         in walked.get("Verify the received macOS pair is the built pair", ""),
+         "the Mac's local VM walk may run a cw other than the built pair's")
+    need('        run: scripts/ci/verify/macos-local-vm-journey.sh dist-darwin "$CW_RELEASE_LOCAL_RUNTIME_DIR"'
+         in walked.get("Walk a local VM with this run's cw and runtime", "")
+         and "        run: scripts/ci/verify/macos-vz-helper-tests.sh" in walked.get("Test the VZ helper", ""),
+         "the Mac's local VM walk does not run the checked-in journey and helper tests")
+    need("::warning::NO LOCAL VM WALKED ON THE MAC" in walked.get("Say that no runtime was walked", "")
+         and "needs.pack-runtime.outputs.runtime != 'true'" in walked.get("Say that no runtime was walked", ""),
+         "a dry run without a runtime does not say that no local VM was walked")
+    advisory = sorted(name for name, body in steps(walk) if "        continue-on-error: true\n" in body)
+    need(advisory == ["Test the VZ helper", "Walk a local VM with this run's cw and runtime"]
+         and text.count("continue-on-error:") == 2,
+         "steps other than the Mac's local VM walk and helper tests continue on error")
+    # An advisory step that hangs must stop at its own limit, not time the job
+    # out and turn the dry run red, and its failure must still show on the run.
+    helper_tests = walked.get("Test the VZ helper", "")
+    walk_step = walked.get("Walk a local VM with this run's cw and runtime", "")
+    need("        id: helper-tests\n" in helper_tests and "        timeout-minutes: 5\n" in helper_tests
+         and "        id: walk\n" in walk_step and "        timeout-minutes: 12\n" in walk_step,
+         "an advisory Mac step has no limit of its own, so a hang times the job out")
+    need("needs.pack-runtime.outputs.runtime == 'true'" in walk_step,
+         "the Mac walks a local VM without a packed runtime")
+    warned = walked.get("Say that an advisory Mac check failed", "")
+    need("(steps.helper-tests.outcome == 'failure' || steps.walk.outcome == 'failure')" in warned
+         and "::warning::AN ADVISORY MAC CHECK FAILED" in warned,
+         "a failed advisory Mac check leaves no warning on the run")
     errors.extend(dry_run_path_errors(text))
     need("    needs: [protected-main]\n    runs-on: " + UNTRUSTED_LIGHT + "\n" in superseded
          and not re.search(r"^    if:", superseded, re.M)
@@ -1324,6 +1368,27 @@ def check_dry_run(text, release):
 # The dry run gates every build step on supersession; so does its injected cancel.
 DRY_RUN_CANCEL_IF = "steps.superseded.outputs.superseded == 'false' && failure()"
 DRY_RUN_MUTATIONS = {
+    "Mac local VM walk on an unverified runtime": lambda t: in_job(
+        t, "walk-local-vm-darwin",
+        '          [ "$(shasum -a 256 .local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]\n', ""),
+    "Mac local VM walk before the macOS pair is built": lambda t: in_job(
+        t, "walk-local-vm-darwin", "    needs: [protected-main, pack-runtime, build-darwin]\n",
+        "    needs: [protected-main, pack-runtime]\n"),
+    "macOS signing continues on error": lambda t: in_job(
+        t, "sign-darwin", "    timeout-minutes: 20\n", "    timeout-minutes: 20\n    continue-on-error: true\n"),
+    "Mac local VM walk without a packed runtime": lambda t: t.replace(
+        "        if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'\n"
+        "        continue-on-error: true\n        timeout-minutes: 12\n",
+        "        if: steps.superseded.outputs.superseded == 'false'\n"
+        "        continue-on-error: true\n        timeout-minutes: 12\n", 1),
+    "Mac local VM walk on an unverified pair": lambda t: t.replace(
+        "          (cd dist-darwin && shasum -a 256 -c SHA256SUMS)\n", "", 1),
+    "advisory Mac walk without a step limit": lambda t: t.replace("        timeout-minutes: 12\n", "", 1),
+    "advisory Mac helper tests without a step limit": lambda t: t.replace("        timeout-minutes: 5\n", "", 1),
+    "a failed advisory Mac check leaves no warning": lambda t: t.replace(
+        "::warning::AN ADVISORY MAC CHECK FAILED", "an advisory Mac check failed", 1),
+    "a dry run without a runtime walks nothing silently": lambda t: t.replace(
+        "::warning::NO LOCAL VM WALKED ON THE MAC", "no local VM walked", 1),
     "Linux side without a job limit": lambda t: t.replace("    timeout-minutes: 75\n", "", 1),
     "dry-run Linux side from another commit": lambda t: t.replace(
         'linux --source-sha "$SOURCE_SHA"', 'linux --source-sha "$BEFORE"', 1),
