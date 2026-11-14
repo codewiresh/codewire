@@ -1,7 +1,7 @@
 ---
 title: Hosts
 description: host and hosts, for computers that provide VMs for your organization's environments.
-updated: 2026-11-11
+updated: 2026-11-14
 weight: 11
 aliases: ["/cli/hosts"]
 ---

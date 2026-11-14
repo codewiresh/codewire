@@ -1,7 +1,7 @@
 ---
 title: cw itself
 description: version, install, upgrade, doctor, feedback, config and completion.
-updated: 2026-11-11
+updated: 2026-11-14
 weight: 8
 aliases: ["/cli/cw"]
 ---

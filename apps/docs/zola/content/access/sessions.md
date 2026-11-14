@@ -1,7 +1,7 @@
 ---
 title: Terminal sessions
 description: Run commands that outlive your terminal, read their output later, type into them, wait for them in a script, and stop or restart them.
-updated: 2026-10-26
+updated: 2026-11-14
 weight: 1
 aliases: ["/guides/sessions"]
 ---

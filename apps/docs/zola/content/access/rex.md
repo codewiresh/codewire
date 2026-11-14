@@ -1,7 +1,7 @@
 ---
 title: Rex
 description: Run commands, open shells and attach to sessions from Rex's command palette, and see each session's state with its pane.
-updated: 2026-11-12
+updated: 2026-11-14
 weight: 6
 ---
 

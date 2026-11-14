@@ -1,7 +1,7 @@
 ---
 title: codewire.yaml
 description: Describe an environment once in codewire.yaml so that cw create builds it the same way every time, locally or on the platform.
-updated: 2026-11-11
+updated: 2026-11-14
 weight: 1
 aliases: ["/guides/project-file"]
 ---

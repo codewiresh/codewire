@@ -1,7 +1,7 @@
 ---
 title: Configuration
 description: Where cw keeps its files and which environment variables it reads.
-updated: 2026-11-11
+updated: 2026-11-14
 weight: 9
 aliases: ["/cli/configuration"]
 ---

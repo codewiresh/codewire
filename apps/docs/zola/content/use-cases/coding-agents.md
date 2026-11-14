@@ -1,7 +1,7 @@
 ---
 title: Coding agents
 description: Give each coding agent its own VM with your project, run several on one task, and come back to their results later.
-updated: 2026-10-26
+updated: 2026-11-14
 weight: 3
 aliases: ["/use-cases/parallel-agents"]
 ---

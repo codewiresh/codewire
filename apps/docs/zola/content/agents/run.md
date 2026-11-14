@@ -1,7 +1,7 @@
 ---
 title: Run and orchestrate
 description: Launch a lead and workers, send tasks, read results, steer or interrupt a turn, and recover after a disconnect or a stop.
-updated: 2026-10-26
+updated: 2026-11-14
 weight: 2
 aliases: ["/guides/run-agents"]
 ---

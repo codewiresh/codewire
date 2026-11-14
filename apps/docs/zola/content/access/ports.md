@@ -1,7 +1,7 @@
 ---
 title: Ports and preview URLs
 description: Publish an application port as an HTTPS preview URL on the platform, or on 127.0.0.1 for a local VM.
-updated: 2026-11-12
+updated: 2026-11-14
 weight: 5
 aliases: ["/guides/previews", "/concepts/preview-environments"]
 ---

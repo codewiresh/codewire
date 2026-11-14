@@ -1,7 +1,7 @@
 ---
 title: Access
 description: run, exec, ls, attach, logs, send, wait, stop and restart, and the attach key bindings.
-updated: 2026-11-11
+updated: 2026-11-14
 weight: 3
 aliases: ["/cli/sessions"]
 ---

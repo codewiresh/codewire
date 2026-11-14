@@ -1,7 +1,7 @@
 ---
 title: Supported agents
 description: The coding agents Codewire runs as managed conversations, how each one signs in, what each supports, and how to run any other agent.
-updated: 2026-10-26
+updated: 2026-11-14
 weight: 1
 ---
 
