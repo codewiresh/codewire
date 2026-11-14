@@ -51,8 +51,9 @@ else is.
 | 11 | `launch-mac-local-vm` | [local-vm-mac.md](local-vm-mac.md) | runs on a Mac: observed 2026-11-13 on macOS 27 and 26 with a development build (#4478); the fix is tagged `v0.4.18`, not yet observed with it | does not apply |
 
 The owner reported on 2026-11-13 that signing in with GitHub and with Google
-works (#4062). The record does not name the surface or the release, so
-neither column of step 1 counts it. The owner's report for step 8 names
+works, and on 2026-11-14 that this was on Dev and on Production (#4062). The
+record names no release and no state, so neither column of step 1 counts it
+as an observation. The owner's report for step 8 names
 Production and no release, so it is shown as a report, not as an observation.
 
 ## Before the walk
@@ -441,4 +442,6 @@ That is checked in the source, not walked.
 
 `cw feedback` (#4061) is a launch item beside the walk: it is how a beta user
 reaches us. Its commands, proof and observations are in
-[feedback.md](feedback.md). Nothing in it is observed on Production yet.
+[feedback.md](feedback.md). Nothing in it is observed on Production yet:
+the owner checks feedback on Production in person, and no walk sends any
+there (owner, 2026-11-14, #4061).

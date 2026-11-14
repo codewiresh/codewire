@@ -19,7 +19,7 @@ Updated 2026-11-14.
 | `signup-email-review` | not yet observed | not yet observed |
 | `signup-unverified-stranger` | failure observed 2026-11-13 before #4489 (#4481) | not yet observed |
 | `signup-resend` | not yet observed | not yet observed |
-| `signup-provider` | not yet observed by a walk; reported working by the owner 2026-11-13 (#4062), surface and release not recorded | not yet observed |
+| `signup-provider` | not yet observed by a walk; reported working by the owner 2026-11-14 (#4062), release not recorded | not yet observed by a walk; reported working by the owner 2026-11-14 (#4062), release not recorded |
 | `signup-gates` | not yet observed | not yet observed |
 | `account-password-reset` | not yet observed | not yet observed |
 | `account-receipt-email` | not yet observed | not yet observed |
@@ -195,9 +195,11 @@ Issue: #4062. Launch step 1 (`launch-signup`) walks this on Production.
 - **Observed:**
   - Not yet observed by a walk on any surface.
   - The owner reported on 2026-11-13 that signing in with GitHub and with
-    Google works ("GitHub and Google both work for me", #4062). The record
-    names no surface, no release and none of the states above, so it is a
-    report, not an observation.
+    Google works ("GitHub and Google both work for me", #4062), and on
+    2026-11-14 that this was on Dev and on Production ("it works on both").
+    The record names no release and none of the states above, so on both
+    surfaces it is a report, not an observation. The launch walk observes
+    the states.
   - Dev, 2026-11-11, at `91d8c52e2` (#4062): both provider buttons were
     shown, each redirected to its provider, and a cancelled sign-in
     returned to the login page with its message. No account was created.

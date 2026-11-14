@@ -13,7 +13,9 @@ The limits and the refusal wording are in
 
 ## Where it stands
 
-Updated 2026-11-14. Nothing here is observed on Production.
+Updated 2026-11-14. Nothing here is observed on Production. The owner
+checks feedback on Production in person (owner, 2026-11-14, #4061): no walk
+sends feedback there, and the Production column is the owner's to fill.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -30,9 +32,8 @@ Updated 2026-11-14. Nothing here is observed on Production.
   list can ignore it. A stored message cannot be removed by its sender.
 - On Dev, `scripts/runtime/dev/with-dev-smoke-auth.sh -- COMMAND` runs one
   command as the synthetic Dev identity. It hands the key to the command as
-  `CODEWIRE_DEV_SMOKE_API_KEY`; `cw` reads `CODEWIRE_API_KEY`. On Production,
-  `scripts/runtime/prod/with-prod-smoke-auth.sh -- COMMAND` does the same for
-  the Production smoke identity, as `CODEWIRE_PROD_SMOKE_API_KEY`.
+  `CODEWIRE_DEV_SMOKE_API_KEY`; `cw` reads `CODEWIRE_API_KEY`. No walk sends
+  feedback on Production, so there is no Production command here.
 - Give `cw` a throwaway `HOME`, so the walk never touches the walker's own
   sign-in.
 - Send with `-o json` and keep the `id` it prints. Reading the stored rows
@@ -128,8 +129,8 @@ from one address, and 500 an hour for everyone together.
   past its limit reads "feedback is limited to 10 an hour per account; try
   again in N seconds".
 - **Gotchas:**
-  - Every accepted message is a stored row an admin will see. On Production,
-    walk this state only when the rows are wanted.
+  - Every accepted message is a stored row an admin will see, and its
+    sender cannot remove it.
   - Two machines behind one router share an address, and so one anonymous
     allowance.
   - No command reaches the ceiling for everyone; it is covered by tests
