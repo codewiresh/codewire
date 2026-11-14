@@ -24,9 +24,11 @@ fi
 readonly server_url="${GITHUB_SERVER_URL:?set to the Forgejo base URL}"
 readonly deploy_api="${server_url%/}/api/v1/repos/codewire/deploy/actions"
 readonly dispatch_url="$deploy_api/workflows/promote-prod.yaml/dispatches"
-# promote-prod usually finishes within four minutes of being dispatched. The
-# integration token lasts an hour; the wait renews it well before that.
-readonly wait_seconds="${DEPLOY_PROD_WAIT_SECONDS:-1800}"
+# promote-prod usually finishes within four minutes of being dispatched, and
+# its Production check (deploy#170) may wait up to 22 more for Production to
+# run the release. The integration token lasts an hour; the wait renews it
+# well before that.
+readonly wait_seconds="${DEPLOY_PROD_WAIT_SECONDS:-2700}"
 readonly poll_seconds="${DEPLOY_PROD_POLL_SECONDS:-20}"
 readonly renew_seconds=600
 [[ "$wait_seconds" =~ ^[1-9][0-9]*$ ]] ||

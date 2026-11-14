@@ -177,9 +177,9 @@ jobs:
     name: Publish the release and deliver it to Production
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
-    # Aliases and publication take minutes; the delivery then waits up to 30
+    # Aliases and publication take minutes; the delivery then waits up to 45
     # minutes for promote-prod's verdict, so the work keeps 45 of its own.
-    timeout-minutes: 75
+    timeout-minutes: 90
     needs: [release-selection]
     outputs:
       build: ${{ steps.pair.outputs.build }}
@@ -428,9 +428,9 @@ jobs:
     name: Publish the built support pair and deliver the release to Production
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
-    # The join and publication take minutes; the delivery then waits up to 30
+    # The join and publication take minutes; the delivery then waits up to 45
     # minutes for promote-prod's verdict.
-    timeout-minutes: 50
+    timeout-minutes: 65
     needs: [release-selection, publish-release, build-support-amd64, build-support-arm64]
     if: ${{ always() && needs.release-selection.result == 'success' && needs.publish-release.result == 'success' && needs.publish-release.outputs.build == 'true' && needs.build-support-amd64.result == 'success' && needs.build-support-arm64.result == 'success' }}
     steps:

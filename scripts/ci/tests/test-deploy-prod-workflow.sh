@@ -338,7 +338,7 @@ grep -Fxq '        run: python3 -I -B scripts/ci/release/release-turn.py deploy-
 [[ "$(sed -n '/^concurrency:$/,/^$/p' "$WORKFLOW")" == $'concurrency:\n  group: \'\'\n  cancel-in-progress: false' ]] ||
   fail "a tick can cancel a Production delivery, or release runs queue behind one another"
 # shellcheck disable=SC2016
-grep -Fq 'readonly wait_seconds="${DEPLOY_PROD_WAIT_SECONDS:-1800}"' \
+grep -Fq 'readonly wait_seconds="${DEPLOY_PROD_WAIT_SECONDS:-2700}"' \
   "$ROOT/scripts/ci/deploy/dispatch-deploy-prod.sh" ||
   fail "production dispatch does not wait for promote-prod's verdict"
 if grep -Fq 'CODEWIRE_DEPLOY_PROMOTION_TOKEN' "$WORKFLOW"; then
