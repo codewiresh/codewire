@@ -10,14 +10,15 @@ feature on Production. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-13. Invite, email, accept and remove are observed on Dev
-(source 6c3651dcf); the limits wait for Dev to run #4498. Nothing is observed
-on Production.
+Updated 2026-11-14. Invite, email, accept and remove are observed on Dev
+(source 6c3651dcf); the limits wait for Dev to run #4498. On Production
+(v0.4.18, source a9dd8b270), the invitation and its email's send are
+observed; the email's arrival is observed on Dev only.
 
 | ID | Dev | Production |
 | --- | --- | --- |
-| `invite-send` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
-| `invite-email` | observed 2026-11-13 on 6c3651dcf (#3847) | not yet observed |
+| `invite-send` | observed 2026-11-13 on 6c3651dcf (#3840) | observed 2026-11-14 on a9dd8b270 (#3847) |
+| `invite-email` | observed 2026-11-13 on 6c3651dcf (#3847) | sent 2026-11-14 on a9dd8b270, arrival not observed (#3847) |
 | `invite-accept` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
 | `invite-remove` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
 | `org-leave` | not yet observed | not yet observed |
@@ -84,7 +85,11 @@ on Production.
 - **Observed:** Dev, 2026-11-13, source 6c3651dcf, `cw` built from 27707e6c2:
   the invitation, "Invitation email sent", and the duplicate refused, by
   `invitations-journey.sh` (#3840); the existing member refused, by hand
-  (#3847).
+  (#3847). Production, 2026-11-14, v0.4.18 (source a9dd8b270), `cw` built
+  from ecfe816e5, as the Production smoke identity in its own organization:
+  the invitation to the mail provider's success simulator, "Invitation email
+  sent", listed pending, the duplicate refused, then revoked by id and listed
+  revoked (#3847).
 
 ## `invite-email`: the invitee receives the email
 
@@ -120,7 +125,12 @@ on Production.
 - **Observed:** Dev, 2026-11-13, source 6c3651dcf: an invitation to the
   owner's address arrived in that mailbox. The owner confirmed it, relayed by
   the orchestrator (#3847). On Dev on 2026-11-01, before #3847, `cw org
-  invite` created an invitation and sent no email.
+  invite` created an invitation and sent no email. Production, 2026-11-14,
+  v0.4.18 (source a9dd8b270): an invitation to the mail provider's success
+  simulator printed "Invitation email sent", and the IdP logged "sent
+  invitation email" for it on the first attempt, which it logs only after the
+  mail provider accepts the message. That is the send; arrival on Production
+  is not observed (#3847).
 
 ## `invite-accept`: the invitee accepts
 
