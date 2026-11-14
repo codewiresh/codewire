@@ -148,6 +148,35 @@ test("late Create choices preserve edited core fields, focus, rows, and profile 
   await expect(page.locator("[data-github-browser]")).toBeVisible();
 });
 
+// The drawer moves focus to Name on its first frame, which comes late on a busy
+// page. Someone already typing in another field keeps every keystroke there.
+test("typing before the Create drawer's first frame stays in the field it started in", async ({ page }) => {
+  const url = fixtureUrl();
+  // Animation frames wait until the test lets them run, partway through typing.
+  await page.addInitScript(() => {
+    const frame = window.requestAnimationFrame.bind(window);
+    const held: FrameRequestCallback[] = [];
+    window.requestAnimationFrame = (callback) => { held.push(callback); return 0; };
+    Object.assign(window, {
+      releaseFrames: () => new Promise<void>((resolve) => {
+        window.requestAnimationFrame = frame;
+        held.splice(0).forEach((callback) => frame(callback));
+        frame(() => frame(() => resolve()));
+      }),
+    });
+  });
+  await page.goto(url);
+  const repository = page.getByLabel("Repository URL");
+  await repository.click();
+  await repository.press("ControlOrMeta+a");
+  await repository.pressSequentially("https://example.test/");
+  await page.evaluate(() => (window as unknown as { releaseFrames: () => Promise<void> }).releaseFrames());
+  await repository.pressSequentially("owner/repo");
+  await expect(repository).toHaveValue("https://example.test/owner/repo");
+  await expect(repository).toBeFocused();
+  await expect(page.getByLabel("Name", { exact: true })).toHaveValue("");
+});
+
 // Credit arrives with the late choices: when billing refuses cloud Sandboxes
 // the alert fills its slot and billing replaces Create in the footer.
 test("late Create choices that refuse cloud Sandboxes say why and offer billing in place of Create", async ({ page }) => {

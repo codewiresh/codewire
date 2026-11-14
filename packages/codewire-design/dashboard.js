@@ -707,7 +707,9 @@ if (app) {
     drawer.dataset.open = String(open);
     drawer.setAttribute("aria-hidden", String(!open));
     document.body.toggleAttribute("data-drawer-open", open);
-    if (open && focus) window.requestAnimationFrame(() => focusDrawer(drawer));
+    // The focus waits for the first frame, which can come late on a busy page: by then someone may already be
+    // typing in one of the drawer's fields, and moving focus would send the rest of their keystrokes elsewhere.
+    if (open && focus) window.requestAnimationFrame(() => { if (!drawer.contains(document.activeElement)) focusDrawer(drawer); });
   };
 
   const openDrawer = (href) => {
