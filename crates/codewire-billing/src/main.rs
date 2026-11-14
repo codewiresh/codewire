@@ -14,7 +14,12 @@ use codewire_server_core::auth::AuthState;
 use codewire_server_core::connect::ConnectAuthLayer;
 use codewire_server_core::{AppBuilder, ServiceConfig};
 
-const DEFAULT_BILLING_LOOPS: &[&str] = &["env-usage-metering", "credit-metering", "trials"];
+const DEFAULT_BILLING_LOOPS: &[&str] = &[
+    "env-usage-metering",
+    "credit-metering",
+    "trials",
+    "stripe-delivery-check",
+];
 
 fn billing_loops_from_env() -> Vec<String> {
     billing_loops_from(std::env::var("BILLING_LOOPS").ok().as_deref())
@@ -92,6 +97,10 @@ async fn main() -> anyhow::Result<()> {
             email: Arc::new(email),
             credit_enforcement,
             database_url: cfg.database_url.clone(),
+            webhook_self_url: format!(
+                "http://127.0.0.1:{}/api/webhooks/stripe",
+                cfg.bind_addr.port()
+            ),
         });
         codewire_billing::metering::start_loops(deps, &loops);
     }
@@ -149,7 +158,12 @@ mod tests {
     fn billing_loops_default_to_rust_owned_set() {
         assert_eq!(
             billing_loops_from(None),
-            vec!["env-usage-metering", "credit-metering", "trials"]
+            vec![
+                "env-usage-metering",
+                "credit-metering",
+                "trials",
+                "stripe-delivery-check"
+            ]
         );
     }
 

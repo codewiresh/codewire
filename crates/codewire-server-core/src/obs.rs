@@ -89,10 +89,29 @@ fn json_log_layer<S>() -> impl tracing_subscriber::Layer<S>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
+    json_log_layer_to(std::io::stdout)
+}
+
+fn json_log_layer_to<S, W>(writer: W) -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    W: for<'w> tracing_subscriber::fmt::MakeWriter<'w> + Send + Sync + 'static,
+{
+    use tracing_subscriber::Layer as _;
+
     tracing_subscriber::fmt::layer()
         .json()
         .with_target(true)
         .with_current_span(false)
+        .with_writer(writer)
+        .with_filter(tracing_subscriber::filter::filter_fn(logged_span))
+}
+
+/// Keeps a library span whose fields hold request bodies out of every log
+/// line's span list; its events still log. The Stripe SDK's `parse_payload`
+/// span holds each webhook payload, customer details included (#3263).
+fn logged_span(metadata: &tracing::Metadata<'_>) -> bool {
+    !(metadata.is_span() && metadata.target().starts_with("stripe_webhook"))
 }
 
 fn init_service(
@@ -748,6 +767,39 @@ mod tests {
             "http://tempo.observability:4317"
         );
         assert_eq!(display_endpoint("not a url"), "<unparseable endpoint>");
+    }
+
+    #[test]
+    fn a_stripe_sdk_span_never_puts_its_payload_in_a_log_line() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        #[derive(Clone, Default)]
+        struct Lines(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Lines {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let lines = Lines::default();
+        let writer = lines.clone();
+        let subscriber =
+            tracing_subscriber::registry().with(json_log_layer_to(move || writer.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let _request = tracing::info_span!(target: "codewire_billing::webhook", "webhook", route = "stripe").entered();
+            let _parse = tracing::info_span!(target: "stripe_webhook::webhook", "parse_payload", payload = "SYNTHETIC_CUSTOMER_EMAIL").entered();
+            tracing::warn!(target: "stripe_webhook::webhook", "API version mismatch");
+        });
+        let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+        let line: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(line["fields"]["message"], "API version mismatch", "{text}");
+        assert!(!text.contains("SYNTHETIC_CUSTOMER_EMAIL"), "{text}");
+        // Codewire's own spans still give the line its context.
+        assert_eq!(line["spans"][0]["route"], "stripe", "{text}");
     }
 
     /// Without an endpoint the initializer installs no exporter, whatever the

@@ -32,5 +32,9 @@ pub fn router(state: BillingState) -> Router {
             "/healthz/stripe-webhook-endpoint",
             get(stripe_endpoint_check::status),
         )
+        .route(
+            "/healthz/stripe-webhook-delivery",
+            get(crate::stripe_delivery_check::status),
+        )
         .with_state(state)
 }

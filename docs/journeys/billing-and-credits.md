@@ -188,7 +188,9 @@ the first Production release after codewire/deploy#245.
 ## 8. `billing-stripe-delivery`: Stripe reaches billing
 
 - **Entry points:** Stripe's webhook endpoint for the environment's
-  `/api/webhooks/stripe`; billing's `/healthz/stripe-webhook-endpoint`.
+  `/api/webhooks/stripe`; billing's `/healthz/stripe-webhook-endpoint` and
+  `/healthz/stripe-webhook-delivery` (the daily delivery check, `disabled`
+  until a sentinel customer exists).
 - **Proof:** the health check reports `ok` with the endpoint's ID, and a
   Stripe-sent event is accepted with its signature verified and recorded.
 - **Gotchas:** billing signs nothing itself in this walk; an event billing
@@ -199,5 +201,9 @@ the first Production release after codewire/deploy#245.
     accepted with no signature failure.
   - Production: endpoint created 2026-10-24 (#3263); a delivered event not
     yet observed.
-  - Continuous proof on Dev and Production (#3263 items 3 and 4): no
-    command yet.
+  - Continuous proof on Dev and Production (#3263 items 3 and 4): Dev
+    acceptance runs `scripts/runtime/dev/smoke-dev-billing-roundtrip.sh`
+    after each promotion; billing's daily delivery check runs wherever a
+    sentinel customer exists, which infra's
+    `openbao-codewire-prod-stripe-delivery-sentinel apply` creates for
+    Production. Not yet observed.

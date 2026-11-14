@@ -4,7 +4,8 @@
 //! endpoints with billing's own Stripe key and checks the endpoint for
 //! billing's public webhook URL: it exists exactly once, is enabled, is in
 //! the key's mode, uses the API version of billing's Stripe SDK, and sends
-//! every event type billing handles and nothing else.
+//! every event type billing handles and nothing else, but for the delivery
+//! check's sentinel event ([`DELIVERY_SENTINEL_EVENT`]).
 //!
 //! A failed check logs one ERROR line, sets
 //! `codewire_billing_stripe_webhook_endpoint_healthy` to 0 and reports
@@ -25,6 +26,12 @@ use crate::stripe_client::{StripeHandle, WebhookEndpoint};
 use crate::webhook::HANDLED_EVENT_TYPES;
 
 const INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// The one event type billing does not handle that its endpoint may also
+/// send: the delivery check touches a sentinel customer, and this event is
+/// how Stripe answers ([`crate::stripe_delivery_check`], #3263). Billing
+/// records it as an unhandled no-op.
+pub const DELIVERY_SENTINEL_EVENT: &str = "customer.updated";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -140,7 +147,7 @@ pub fn evaluate(
         .enabled_events
         .iter()
         .map(String::as_str)
-        .filter(|event| !HANDLED_EVENT_TYPES.contains(event))
+        .filter(|event| !HANDLED_EVENT_TYPES.contains(event) && *event != DELIVERY_SENTINEL_EVENT)
         .collect();
     unexpected.sort_unstable();
     if !unexpected.is_empty() {
@@ -311,6 +318,21 @@ mod tests {
         assert_fails(
             &[endpoint(|e| e.enabled_events = vec!["*".into()])],
             "unexpected *",
+        );
+    }
+
+    #[test]
+    fn the_delivery_sentinel_event_is_the_one_extra_allowed() {
+        let with_sentinel = endpoint(|e| e.enabled_events.push(DELIVERY_SENTINEL_EVENT.into()));
+        assert!(failures(&[with_sentinel]).is_empty());
+        assert!(!HANDLED_EVENT_TYPES.contains(&DELIVERY_SENTINEL_EVENT));
+        // Anything else beside it is still unexpected.
+        assert_fails(
+            &[endpoint(|e| {
+                e.enabled_events.push(DELIVERY_SENTINEL_EVENT.into());
+                e.enabled_events.push("charge.succeeded".into());
+            })],
+            "unexpected charge.succeeded",
         );
     }
 

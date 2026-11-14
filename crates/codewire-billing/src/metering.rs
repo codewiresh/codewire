@@ -38,6 +38,9 @@ pub struct MeteringDeps {
     pub email: Arc<EmailClient>,
     pub database_url: String,
     pub credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
+    /// Billing's own webhook route on its listener, for the delivery
+    /// check's forged event.
+    pub webhook_self_url: String,
 }
 
 pub fn start_loops(deps: Arc<MeteringDeps>, loops: &[String]) {
@@ -161,6 +164,37 @@ pub fn start_loops(deps: Arc<MeteringDeps>, loops: &[String]) {
                     .await;
                 });
                 tracing::info!(interval = ?interval, "env overage billing: started");
+            }
+            "stripe-delivery-check" => {
+                if deps.stripe.enabled().is_none() {
+                    tracing::info!(
+                        "Stripe webhook delivery check: disabled (Stripe not configured)"
+                    );
+                    continue;
+                }
+                let deps = deps.clone();
+                let is_leader = is_leader.clone();
+                tokio::spawn(async move {
+                    // The first run comes soon after start, so a deploy that
+                    // restarts billing daily still gets one; then daily.
+                    let mut ticker = tokio::time::interval_at(
+                        tokio::time::Instant::now() + crate::stripe_delivery_check::FIRST_RUN_AFTER,
+                        crate::stripe_delivery_check::INTERVAL,
+                    );
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    loop {
+                        ticker.tick().await;
+                        if is_leader.load(Ordering::SeqCst) {
+                            crate::stripe_delivery_check::run_once(
+                                &deps.stripe,
+                                &deps.pool,
+                                &deps.webhook_self_url,
+                            )
+                            .await;
+                        }
+                    }
+                });
+                tracing::info!("Stripe webhook delivery check: started");
             }
             "trials" => {
                 let deps = deps.clone();

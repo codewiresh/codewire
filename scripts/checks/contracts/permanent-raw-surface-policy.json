@@ -52,6 +52,7 @@
     "/api/v1/preview-auth/authorize",
     "/api/webhooks/stripe",
     "/healthz",
+    "/healthz/stripe-webhook-delivery",
     "/healthz/stripe-webhook-endpoint",
     "/readyz"
   ],

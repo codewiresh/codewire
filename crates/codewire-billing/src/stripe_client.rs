@@ -51,7 +51,8 @@ use stripe_checkout::checkout_session::{
 };
 use stripe_client_core::{RequestBuilder, StripeMethod};
 use stripe_core::customer::{
-    CreateCustomer, DeleteCustomer, RetrieveCustomer, UpdateCustomer, UpdateCustomerInvoiceSettings,
+    CreateCustomer, DeleteCustomer, RetrieveCustomer, SearchCustomer, UpdateCustomer,
+    UpdateCustomerInvoiceSettings,
 };
 use stripe_core::setup_intent::RetrieveSetupIntent;
 
@@ -668,6 +669,34 @@ impl StripeHandle {
     /// `true` for an `sk_live_` key: its webhook endpoints must be live too.
     pub fn is_live(&self) -> bool {
         self.live
+    }
+
+    /// The customers marked as the webhook delivery sentinel
+    /// (`metadata.codewire_sentinel` = `delivery`), at most two: the check
+    /// wants exactly one.
+    pub async fn delivery_sentinels(&self) -> Result<Vec<String>, AppError> {
+        let found = SearchCustomer::new("metadata['codewire_sentinel']:'delivery'")
+            .limit(2)
+            .send(self.client()?)
+            .await
+            .map_err(stripe_err)?;
+        Ok(found.data.into_iter().map(|c| c.id.to_string()).collect())
+    }
+
+    /// Sets the sentinel's `codewire_probe` metadata to `probe`. Stripe
+    /// answers a customer update with a `customer.updated` event; nothing is
+    /// charged.
+    pub async fn touch_delivery_sentinel(
+        &self,
+        customer: &str,
+        probe: &str,
+    ) -> Result<(), AppError> {
+        UpdateCustomer::new(customer)
+            .metadata([("codewire_probe".to_string(), probe.to_string())])
+            .send(self.client()?)
+            .await
+            .map_err(stripe_err)?;
+        Ok(())
     }
 
     /// Every webhook endpoint of the account. More than one page is an

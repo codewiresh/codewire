@@ -164,7 +164,8 @@ billing's SDK, and send exactly the event types billing handles:
 `checkout.session.completed`, `customer.subscription.updated`,
 `customer.subscription.deleted`, `customer.subscription.trial_will_end`,
 `invoice.created`, `invoice.paid`, `invoice.payment_failed` and
-`invoice.finalized`.
+`invoice.finalized`. The one other type it may also send is
+`customer.updated`, the delivery check's sentinel event below.
 
 A mismatch logs `billing: Stripe webhook endpoint check failed` at ERROR with
 every difference. It also sets the `codewire_billing_stripe_webhook_endpoint_healthy`
@@ -173,6 +174,29 @@ metric to 0 and reports `degraded` at billing's internal
 a Stripe outage or a mismatched endpoint cannot take billing out of service.
 When Stripe cannot be reached, the report says `unknown` and the metric keeps
 its last value.
+
+The endpoint check proves the endpoint is configured; the delivery check proves
+Stripe's deliveries arrive and pass signature verification with the secret
+billing holds. A deployment opts in by creating one Stripe customer with
+metadata `codewire_sentinel` = `delivery`. Once a day (first ten minutes after
+start), the billing leader:
+
+1. finds that one customer (`sentinel`);
+2. sets its `codewire_probe` metadata, which Stripe answers with a
+   `customer.updated` event and no charge (`touch`);
+3. waits up to ten minutes for a `customer.updated` delivery recorded after the
+   touch; billing records an event only after its signature verifies
+   (`delivery`);
+4. posts one event signed with a wrong secret to its own webhook route and
+   expects 400 (`forged`).
+
+A failed step logs `billing: Stripe webhook delivery check failed` at ERROR,
+naming the sentinel and the step. It sets
+`codewire_billing_stripe_webhook_delivery_healthy` to 0 and reports `degraded`
+at billing's internal `/healthz/stripe-webhook-delivery`. Like the endpoint
+check it never fails readiness or liveness. With no sentinel customer, or
+without Stripe, the report says `disabled`. `BILLING_LOOPS` without
+`stripe-delivery-check` turns it off.
 
 ## Workspace storage
 

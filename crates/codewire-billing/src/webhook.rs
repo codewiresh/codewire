@@ -6,6 +6,8 @@
 //! - no signing secret configured → 401
 //!   `{"error":"webhook signing is not configured"}`
 //! - bad signature → 400 `{"error":"invalid signature"}`
+//! - verified, but an object the Stripe SDK cannot parse: recorded and 200
+//!   for a type billing does not act on, else 400 as a bad signature
 //! - handler failure → 500 `{"error":"webhook processing failed"}`
 //! - success → 200 `{"status":"ok"}`
 //!
@@ -27,7 +29,7 @@ use codewire_server_core::org_deletion::{
 };
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use stripe_webhook::{Event, EventObject, Webhook};
+use stripe_webhook::{Event, EventObject, Webhook, WebhookError};
 
 use crate::email::{EmailClient, ReceiptData};
 use crate::routes::BillingState;
@@ -77,6 +79,14 @@ pub async fn stripe_webhook(
 
     let event = match Webhook::construct_event(payload, signature, state.stripe.webhook_secret()) {
         Ok(event) => event,
+        // The SDK parses only after checking the signature and timestamp.
+        Err(WebhookError::BadParse(reason)) => {
+            if let Some(response) = record_unparsed_event(&state.pool, payload, &reason).await {
+                return response;
+            }
+            tracing::warn!(error = %reason, "billing: webhook signature verification failed");
+            return err_response(StatusCode::BAD_REQUEST, "invalid signature");
+        }
         Err(e) => {
             tracing::warn!(error = ?e, "billing: webhook signature verification failed");
             return err_response(StatusCode::BAD_REQUEST, "invalid signature");
@@ -91,7 +101,69 @@ pub async fn stripe_webhook(
         );
     }
 
+    ok_response()
+}
+
+fn ok_response() -> Response {
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
+}
+
+/// A verified delivery whose object the Stripe SDK could not parse. When
+/// billing does not act on its type, as with every customer's
+/// `customer.updated` that the delivery check subscribes to, it is recorded by
+/// id, type and time only and answered 200: refusing it would make Stripe
+/// retry and in time disable the endpoint. `None` for a type billing acts on,
+/// or a body without an id, type and time.
+async fn record_unparsed_event(pool: &PgPool, payload: &str, reason: &str) -> Option<Response> {
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        id: String,
+        #[serde(rename = "type")]
+        event_type: String,
+        created: i64,
+    }
+    let envelope = serde_json::from_str::<Envelope>(payload)
+        .ok()
+        .filter(|envelope| !HANDLED_EVENT_TYPES.contains(&envelope.event_type.as_str()))?;
+    tracing::debug!(
+        event_type = %envelope.event_type,
+        error = %reason,
+        "billing: recording an unhandled webhook event the Stripe SDK could not parse"
+    );
+    Some(
+        match claim_event(pool, &envelope.id, &envelope.event_type, envelope.created).await {
+            Ok(_) => ok_response(),
+            Err(error) => {
+                tracing::error!(error = ?error, "billing: webhook processing failed");
+                err_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "webhook processing failed",
+                )
+            }
+        },
+    )
+}
+
+/// Records a delivery by id, type and Stripe's creation time. The unique
+/// insert is the claim: `false` when the event was recorded before.
+async fn claim_event(
+    pool: &PgPool,
+    id: &str,
+    event_type: &str,
+    created: i64,
+) -> sqlx::Result<bool> {
+    let claimed: Option<String> = sqlx::query_scalar(
+        r#"INSERT INTO stripe_webhook_events (id, event_type, stripe_created_at, processed_at)
+           VALUES ($1, $2, to_timestamp($3), NOW())
+           ON CONFLICT (id) DO NOTHING
+           RETURNING id"#,
+    )
+    .bind(id)
+    .bind(event_type)
+    .bind(created)
+    .fetch_optional(pool)
+    .await?;
+    Ok(claimed.is_some())
 }
 
 /// The Stripe event types `handle_webhook_event` acts on. Billing's Stripe
@@ -114,18 +186,14 @@ pub async fn handle_webhook_event(state: &BillingState, event: Event) -> anyhow:
 
     // The unique insert is the claim. `SELECT EXISTS` followed by a later
     // best-effort insert races across replicas and can double-apply an event.
-    let claimed: Option<String> = sqlx::query_scalar(
-        r#"INSERT INTO stripe_webhook_events (id, event_type, stripe_created_at, processed_at)
-           VALUES ($1, $2, to_timestamp($3), NOW())
-           ON CONFLICT (id) DO NOTHING
-           RETURNING id"#,
+    if !claim_event(
+        pool,
+        event.id.as_str(),
+        &event.type_.to_string(),
+        event.created,
     )
-    .bind(event.id.as_str())
-    .bind(event.type_.to_string())
-    .bind(event.created)
-    .fetch_optional(pool)
-    .await?;
-    if claimed.is_none() {
+    .await?
+    {
         tracing::debug!(event_id = %event.id, "billing: skipping duplicate webhook event");
         return Ok(());
     }
@@ -1182,6 +1250,114 @@ mod tests {
         let (status, body) = deliver(stripe, "").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "invalid signature");
+    }
+
+    /// A signed `event_type` event whose object the Stripe SDK cannot parse.
+    fn unparsable(id: &str, event_type: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","object":"event","api_version":"2026-04-22.dahlia","created":1780396200,"livemode":false,"pending_webhooks":1,"data":{{"object":{{"object":"customer","id":"cus_partial"}}}},"type":"{event_type}"}}"#
+        )
+    }
+
+    async fn deliver_signed(billing: BillingState, payload: String) -> StatusCode {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Stripe-Signature",
+            Webhook::generate_test_header(&payload, "whsec_test", None)
+                .parse()
+                .unwrap(),
+        );
+        stripe_webhook(State(billing), headers, axum::body::Bytes::from(payload))
+            .await
+            .status()
+    }
+
+    fn signed_state() -> BillingState {
+        state(StripeHandle::for_test("http://127.0.0.1:1").with_webhook_secret("whsec_test"))
+    }
+
+    #[tokio::test]
+    async fn an_unparsable_event_of_a_handled_type_is_refused_before_the_database() {
+        let payload = unparsable("evt_partial_invoice", "invoice.paid");
+        let header = Webhook::generate_test_header(&payload, "whsec_test", None);
+        assert!(matches!(
+            Webhook::construct_event(&payload, &header, "whsec_test"),
+            Err(WebhookError::BadParse(_))
+        ));
+        // The pool is never connected, so reaching it would answer 500.
+        assert_eq!(
+            deliver_signed(signed_state(), payload).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unparsable_event_is_recorded_only_once_its_signature_and_timestamp_pass() {
+        // The fallback relies on the SDK parsing last; pin that. Reaching the
+        // never-connected pool would answer 500.
+        let payload = unparsable("evt_partial_forged", "customer.updated");
+        for header in [
+            Webhook::generate_test_header(&payload, "whsec_other", None),
+            Webhook::generate_test_header(
+                &payload,
+                "whsec_test",
+                Some(chrono::Utc::now().timestamp() - 301),
+            ),
+        ] {
+            assert!(!matches!(
+                Webhook::construct_event(&payload, &header, "whsec_test"),
+                Err(WebhookError::BadParse(_))
+            ));
+            let mut headers = HeaderMap::new();
+            headers.insert("Stripe-Signature", header.parse().unwrap());
+            let response = stripe_webhook(
+                State(signed_state()),
+                headers,
+                axum::body::Bytes::from(payload.clone()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn db_any_customers_unparsable_customer_updated_is_recorded_and_answered_200() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL unset; skipping the unparsed webhook event flow");
+            return;
+        };
+        let mut billing = signed_state();
+        billing.pool = PgPool::connect(&url).await.unwrap();
+        let id = format!("evt_unparsed_test_{}", uuid::Uuid::new_v4().simple());
+        let payload = unparsable(&id, "customer.updated");
+        let header = Webhook::generate_test_header(&payload, "whsec_test", None);
+        assert!(matches!(
+            Webhook::construct_event(&payload, &header, "whsec_test"),
+            Err(WebhookError::BadParse(_))
+        ));
+
+        assert_eq!(
+            deliver_signed(billing.clone(), payload.clone()).await,
+            StatusCode::OK
+        );
+        let recorded: Option<String> =
+            sqlx::query_scalar("SELECT event_type FROM stripe_webhook_events WHERE id = $1")
+                .bind(&id)
+                .fetch_optional(&billing.pool)
+                .await
+                .unwrap();
+        assert_eq!(recorded.as_deref(), Some("customer.updated"));
+        // A redelivery is a duplicate, and still 200.
+        assert_eq!(
+            deliver_signed(billing.clone(), payload).await,
+            StatusCode::OK
+        );
+
+        sqlx::query("DELETE FROM stripe_webhook_events WHERE id = $1")
+            .bind(&id)
+            .execute(&billing.pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
