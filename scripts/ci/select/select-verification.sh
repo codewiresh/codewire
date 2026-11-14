@@ -2271,6 +2271,14 @@ if [ "$event_selected" = false ]; then
         select_token policy
         recognized=true
         ;;
+      # At most six pull request runs at once, oldest first (infra#2471). Its
+      # contract, with the ci.yaml job that runs it, runs in Policy.
+      scripts/ci/select/pr-admission.py|\
+      scripts/ci/tests/test-pr-admission.py)
+        select_token deploy
+        select_token policy
+        recognized=true
+        ;;
       # Main CI's final job starts Dev delivery (#2892); its contract, with
       # the ci.yaml job that runs it, runs in Policy and Deploy.
       scripts/ci/deploy/rerun-dev-publish.py|\

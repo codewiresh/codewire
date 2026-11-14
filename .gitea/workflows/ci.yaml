@@ -90,11 +90,49 @@ env:
 # (docs/dev/CI-CONFIGURATION.md); an unset one leaves the job queued on an
 # `unset-<variable>` label that no runner advertises.
 jobs:
+  # At most six pull request runs at once, oldest first (owner, 2026-11-13:
+  # "We'd like less faster runs is better than a bunch of slow runs";
+  # infra#2471). Every job needs Verification selection, which needs this, so
+  # a waiting run holds no build or test slot. The gate script is the pull
+  # request base's copy, so a pull request cannot change how places are
+  # counted; one that edits this workflow can drop the gate, so review of
+  # ci.yaml changes is the control. A base from before the gate admits at once.
+  # A push or schedule passes straight through, and the gate never fails its run.
+  pr-admission:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token only reads runs.
+    name: PR admission
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    # The light runner's 240-minute cap is the gate's; it starts the run by 230.
+    timeout-minutes: 235
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .trusted-ci-policy
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+
+      - name: Wait for this run's admission
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+          PR_ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+          gate=.trusted-ci-policy/scripts/ci/select/pr-admission.py
+          if [ ! -f "$gate" ]; then
+            echo 'PR admission: no gate in this run'"'"'s base; it starts now'
+            exit 0
+          fi
+          python3 -I -B "$gate"
+
   verification-selection:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job receives no write-capable integration.
     name: Verification selection
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
     timeout-minutes: 25
+    needs: [pr-admission]
     # A closed pull request verifies nothing; every other job needs this one.
     if: ${{ github.event.action != 'closed' }}
     outputs:

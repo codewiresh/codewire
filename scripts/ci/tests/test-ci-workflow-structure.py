@@ -64,6 +64,10 @@ import ci_runner_fixtures as runners  # noqa: E402
 WORKFLOWS = ROOT / ".gitea/workflows"
 CI = WORKFLOWS / "ci.yaml"
 SELECTION = "verification-selection"
+# At most six pull request runs at once (infra#2471): the one job before
+# selection, which selection needs, so a waiting run holds no other job.
+ADMISSION = "pr-admission"
+ADMISSION_GATE = ".trusted-ci-policy/scripts/ci/select/pr-admission.py"
 REQUIRED = "required-verification"
 TRUSTED_POLICY = ".trusted-ci-policy/"
 # The trusted base's copies these steps run (select, receipt, dispatch).
@@ -88,7 +92,9 @@ MAX_TIMEOUT = 90
 JOB_LIMIT = {runners.UNTRUSTED_LIGHT: 25, runners.TRUSTED_LIGHT: 330}
 # A dispatched release waits its turn on the unprivileged runner (#2892) for
 # the release in flight, so it always delivers (owner, 2026-11-12; #4476).
-LONG_WAITS = {("cli-release.yaml", "pending"): 190, ("deploy-prod.yaml", "pending"): 190}
+LONG_WAITS = {("cli-release.yaml", "pending"): 190, ("deploy-prod.yaml", "pending"): 190,
+              # The pull request admission gate, inside the runner's 240 (infra#2471).
+              ("ci.yaml", ADMISSION): 235}
 EXPECTED = re.compile(r"needs\.verification-selection\.outputs\.([a-z_]+_expected) == 'true'")
 NEEDS_REF = re.compile(r"needs\.([A-Za-z0-9_-]+)\.")
 NEEDS_OUTPUT = re.compile(r"needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)")
@@ -138,10 +144,22 @@ def graph_errors(jobs, ci=True):
             for ref in STEPS_REF.findall(str(value)):
                 if ref not in seen:
                     errors.append(f"{name} output {output} reads a step it does not have: {ref}")
-        if ci and name != SELECTION and SELECTION not in needs:
+        if ci and name not in (SELECTION, ADMISSION) and SELECTION not in needs:
             errors.append(f"{name} does not need {SELECTION}, so it could run for a closed pull request")
     if not ci:
         return errors
+    gate = jobs.get(ADMISSION, {})
+    if needs_of(jobs.get(SELECTION, {})) != [ADMISSION]:
+        errors.append(f"{SELECTION} does not wait for {ADMISSION}, so pull request runs start without a cap")
+    if needs_of(gate) or gate.get("if"):
+        errors.append(f"{ADMISSION} needs a job or has a condition, so a run could skip its gate")
+    if not any(ADMISSION_GATE in str(step.get("run", "")) for step in gate.get("steps") or []):
+        errors.append(f"{ADMISSION} does not run the pull request base's gate")
+    # A push has no pull request base to read; its gate admits at once.
+    for step in gate.get("steps") or []:
+        if (step.get("with") or {}).get("path") == TRUSTED_POLICY.rstrip("/") and (
+                step.get("if") != "${{ github.event_name == 'pull_request' }}"):
+            errors.append(f"{ADMISSION} checks out the base outside a pull request: {step.get('if')!r}")
     required = set(needs_of(jobs.get(REQUIRED, {})))
     required_text = dump(jobs.get(REQUIRED, {}))
     for name, expectation in sorted(groups(jobs).items()):
@@ -176,7 +194,8 @@ def dispatch_errors(jobs):
         for script in scripts:
             if TRUSTED_POLICY + script not in str(steps.get(step_id, {}).get("run", "")):
                 errors.append(f"selection step {step_id} does not run the trusted base's {script}")
-    for step in selection.get("steps") or []:
+    # The admission gate reads the same trusted base, under the same rules.
+    for step in (selection.get("steps") or []) + (jobs.get(ADMISSION, {}).get("steps") or []):
         options = step.get("with") or {}
         if options.get("path") == TRUSTED_POLICY.rstrip("/"):
             if options.get("persist-credentials") is not False:
@@ -489,6 +508,18 @@ TRUSTED_RUNNER = runners.MEDIUM
 UNTRUSTED_MEDIUM = "${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM' }}"
 # Each mutation is a failure an earlier text pin caught, or one it missed.
 MUTATIONS = {
+    "selection starts without the admission gate": lambda t: in_job(
+        t, SELECTION, "    needs: [pr-admission]\n", ""),
+    "the admission gate runs the pull request's own copy": lambda t: in_job(
+        t, ADMISSION, "gate=.trusted-ci-policy/scripts/ci/select/pr-admission.py", "gate=scripts/ci/select/pr-admission.py"),
+    "the admission gate can be skipped": lambda t: in_job(
+        t, ADMISSION, "    timeout-minutes: 235\n", "    timeout-minutes: 235\n    if: ${{ github.event_name == 'push' }}\n"),
+    "the admission gate reads the pull request head": lambda t: in_job(
+        t, ADMISSION, "ref: ${{ github.event.pull_request.base.sha }}", "ref: ${{ github.event.pull_request.head.sha }}"),
+    "the admission gate's checkout keeps credentials": lambda t: in_job(
+        t, ADMISSION, "          persist-credentials: false\n", ""),
+    "the admission gate checks out the base on a push": lambda t: in_job(
+        t, ADMISSION, "        if: ${{ github.event_name == 'pull_request' }}\n", ""),
     # The archive consumers read the compile job's outputs and result.
     "database drops rust-compile from needs": lambda t: in_job(
         t, "database", "needs: [verification-selection, rust-compile]", "needs: [verification-selection]"),
@@ -518,8 +549,8 @@ MUTATIONS = {
         "'scripts/ci/select/emit-verification-matrices.sh'", 1),
     "the planner runs from the candidate": lambda t: t.replace(
         "'.trusted-ci-policy/scripts/ci/plan/planner.py'", "'scripts/ci/plan/planner.py'", 1),
-    "the trusted checkout keeps credentials": lambda t: t.replace(
-        "          persist-credentials: false\n", "", 1),
+    "the trusted checkout keeps credentials": lambda t: in_job(
+        t, SELECTION, "          persist-credentials: false\n", ""),
     "a group step loses its tested-tree guard": lambda t: in_job(
         t, "database", "        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}\n"
         "        run: scripts/ci/setup/bound-cargo-jobs.sh", "        run: scripts/ci/setup/bound-cargo-jobs.sh"),

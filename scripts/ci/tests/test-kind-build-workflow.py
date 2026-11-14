@@ -111,8 +111,16 @@ class WorkflowContractTests(unittest.TestCase):
             "scripts/ci/select/dispatch-source.sh .gitea/workflows/ci.yaml"))
         self.assertEqual(switch["env"], {"VERIFICATION_SOURCE_SHA": "${{ steps.source.outputs.source_sha }}"})
         self.assertEqual(switch["run"], 'git checkout -q --detach "$VERIFICATION_SOURCE_SHA"')
+        # The pull request admission gate runs before selection chooses a
+        # commit (infra#2471): its one checkout is the pull request base's
+        # policy, never the code under test.
+        gate_checkouts = [step for step in self.jobs["pr-admission"]["steps"]
+                          if "actions-checkout@" in step.get("uses", "")]
+        self.assertEqual([(step["with"]["ref"], step["with"]["path"], step["with"]["persist-credentials"])
+                          for step in gate_checkouts],
+                         [("${{ github.event.pull_request.base.sha }}", ".trusted-ci-policy", False)])
         for name, job in self.jobs.items():
-            if name == "verification-selection":
+            if name in ("verification-selection", "pr-admission"):
                 continue
             checkouts = [step for step in job["steps"] if "actions-checkout@" in step.get("uses", "")]
             with self.subTest(job=name):

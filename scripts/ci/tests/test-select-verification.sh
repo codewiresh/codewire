@@ -863,6 +863,10 @@ run_paths_case pull_request_fail_fast pull_request refs/pull/3400/head false \
   'deploy policy security security_js' \
   scripts/ci/select/fail-fast-watch.py \
   scripts/ci/tests/test-fail-fast-watch.py
+run_paths_case pull_request_admission pull_request refs/pull/4510/head false \
+  'deploy policy security security_js' \
+  scripts/ci/select/pr-admission.py \
+  scripts/ci/tests/test-pr-admission.py
 run_paths_case production_signature_reuse pull_request refs/pull/2007/head false \
   'deploy go_consumer_interop go_support policy policy_shell release confidential_script_tests security security_js' \
   scripts/ci/images/verify-runtime-image-signatures.sh \
@@ -3240,6 +3244,8 @@ defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-rerun-dev-publish.py"
 defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-wait-for-dev-delivery-turn.py"
 # A pull request's run stops at its first failed job (infra#1632).
 defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-fail-fast-watch.py"
+# At most six pull request runs at once, oldest first (infra#2471).
+defer_slow_check python3 -B "$ROOT/scripts/ci/tests/test-pr-admission.py"
 if grep -qF 'selector_version=v2' "$selection_block" \
     || grep -qF 'One-time contract bridge' "$selection_block"; then
   echo 'verification selection retains a superseded v2 transition bridge' >&2
