@@ -120,33 +120,61 @@
 .cw-sandbox-notice[data-graphic="stopped"] > [data-notice-graphic="stopped"] { display: block; }
 .cw-sandbox-notice[data-tone="danger"] > .cw-sandbox-notice-graphic { color: var(--destructive); }
 .cw-sandbox-notice[data-tone="warning"] > .cw-sandbox-notice-graphic { color: var(--warning); }
-/* Setup: a simple list of steps, centred both ways with no box. Each step's
-   circle spins while it runs and fills with a check when it finishes, and its
-   time sits at the end of its line (the owner, 2026-11-13). */
+/* Starting and setup: one list of steps, centred both ways with no box, under
+   a fixed heading (the owner's journey, "land it" 2026-11-14, #3772). Steps
+   scroll through a window five rows tall: the list fills from the top, holds
+   the running step on the third row, fades finished steps out above, and
+   ends with the last step on the bottom row. A 6px bar under it carries the
+   progress; the line naming the running step is for screen readers only. */
 .cw-sandbox-notice[data-kind="setup"] { display: grid; grid-template-columns: min(100%, var(--prose-narrow)); place-content: center; padding: var(--space-8) var(--space-4); background: var(--bg-base); }
 .cw-sandbox-notice .cw-setup-progress { padding: 0; border: 0; background: none; }
-.cw-sandbox-notice .cw-setup-progress h2, .cw-sandbox-notice .cw-setup-progress-status { text-align: center; }
-.cw-sandbox-notice .cw-setup-progress h2 { font-size: var(--text-body); }
-.cw-sandbox-notice .cw-setup-stages { gap: 0; }
-.cw-sandbox-notice .cw-setup-stage > .cw-setup-row { position: relative; flex-wrap: nowrap; padding-block: var(--space-1-5); }
+.cw-sandbox-notice .cw-setup-progress h2 { font-size: var(--text-body); text-align: center; }
+/* Trouble with the stream or setup shows here; the running step does not. */
+.cw-sandbox-notice .cw-setup-progress-status { text-align: center; }
+.cw-sandbox-notice .cw-setup-progress-status:empty { display: none; }
+.cw-setup-window { --setup-row: var(--space-8); block-size: calc(5 * var(--setup-row)); overflow: hidden; scroll-behavior: smooth; }
+.cw-setup-window[data-scrolled] { mask-image: linear-gradient(to bottom, transparent 0, #000 calc(1.75 * var(--setup-row))); }
+.cw-sandbox-notice .cw-setup-window > .cw-setup-stages { gap: 0; }
+.cw-sandbox-notice .cw-setup-stages > .cw-setup-stage > .cw-setup-row { flex-wrap: nowrap; min-block-size: var(--setup-row); padding-block: 0; }
 .cw-sandbox-notice .cw-setup-stage-label { flex: 1 1 auto; }
+.cw-sandbox-notice .cw-setup-stage:not([data-state]) > .cw-setup-row .cw-setup-stage-label { color: var(--fg-tertiary); }
 .cw-sandbox-notice .cw-setup-stage-detail { flex: none; font-variant-numeric: tabular-nums; text-align: end; }
-.cw-sandbox-notice .cw-setup-stage > .cw-setup-row::before { display: inline-grid; flex: none; inline-size: var(--space-4); block-size: var(--space-4); place-items: center; border: var(--border-width) solid var(--border-subtle); border-radius: 50%; color: var(--fg-tertiary); font-size: var(--text-micro); line-height: var(--leading-none); content: ""; transition: background-color 200ms ease-out, border-color 200ms ease-out; }
-.cw-sandbox-notice .cw-setup-stage[data-state="running"] > .cw-setup-row::before { border-color: var(--accent) var(--accent) var(--border-subtle) var(--border-subtle); animation: cw-spin 0.9s linear infinite; }
-.cw-sandbox-notice .cw-setup-stage[data-state="completed"] > .cw-setup-row::before { border-color: var(--success); background: var(--success); }
-/* The check: two strokes of a rotated box, drawn into the filled circle. */
-.cw-sandbox-notice .cw-setup-stage[data-state="completed"] > .cw-setup-row::after { position: absolute; inset-block-start: 50%; inset-inline-start: calc(var(--space-4) / 2); inline-size: 0.3rem; block-size: 0.55rem; border: solid var(--bg-base); border-width: 0 calc(2 * var(--border-width)) calc(2 * var(--border-width)) 0; content: ""; transform: translate(-50%, -60%) rotate(45deg); animation: cw-setup-check 260ms ease-out 120ms both; }
-.cw-sandbox-notice .cw-setup-stage[data-state="warning"] > .cw-setup-row::before { border-color: var(--warning); color: var(--warning); content: "!"; }
-.cw-sandbox-notice .cw-setup-stage[data-state="failed"] > .cw-setup-row::before { border-color: var(--destructive); color: var(--destructive); content: "✕"; }
-@keyframes cw-setup-check {
-  from { opacity: 0; transform: translate(-50%, -60%) rotate(45deg) scale(0.3); }
-  to { opacity: 1; transform: translate(-50%, -60%) rotate(45deg) scale(1); }
-}
+.cw-setup-group { display: flex; min-block-size: var(--setup-row); align-items: flex-end; padding-block-end: var(--space-1); color: var(--fg-tertiary); font-size: var(--text-small); font-weight: var(--weight-medium); }
+/* Each step's mark: a faint ring waiting, a spinning arc running, and on
+   finishing a circle that pops in while its ring and then its check draw. */
+.cw-setup-mark { flex: none; inline-size: var(--space-4); block-size: var(--space-4); overflow: visible; }
+.cw-setup-mark circle, .cw-setup-mark path { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.cw-setup-mark-ring { stroke: var(--border-subtle); stroke-width: 2; }
+.cw-setup-mark-arc, .cw-setup-mark-done, .cw-setup-mark-check, .cw-setup-mark-cross, .cw-setup-mark-warning { display: none; }
+[data-state="running"] > .cw-setup-row .cw-setup-mark-arc { display: block; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 0.3 1; transform-origin: 12px 12px; animation: cw-spin 0.9s linear infinite; }
+[data-state="completed"] > .cw-setup-row .cw-setup-mark-ring { display: none; }
+[data-state="completed"] > .cw-setup-row .cw-setup-mark-done { display: block; stroke: var(--success); stroke-width: 2; fill: var(--success); fill-opacity: 0; stroke-dasharray: 1; stroke-dashoffset: 1; transform-origin: 12px 12px; animation: cw-setup-pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both, cw-setup-draw 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) 0.05s forwards, cw-setup-fill 0.2s ease-out 0.4s forwards; }
+[data-state="completed"] > .cw-setup-row .cw-setup-mark-check { display: block; stroke: var(--bg-base); stroke-width: 2.6; stroke-dasharray: 1; stroke-dashoffset: 1; animation: cw-setup-draw 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) 0.45s forwards; }
+[data-state="failed"] > .cw-setup-row .cw-setup-mark-ring { stroke: var(--destructive); }
+[data-state="failed"] > .cw-setup-row .cw-setup-mark-cross { display: block; stroke: var(--destructive); stroke-width: 2; }
+[data-state="warning"] > .cw-setup-row .cw-setup-mark-ring { stroke: var(--warning); }
+[data-state="warning"] > .cw-setup-row .cw-setup-mark-warning { display: block; stroke: var(--warning); stroke-width: 2; }
+@keyframes cw-setup-pop { 0% { transform: scale(0.4); } 80% { transform: scale(1.12); } 100% { transform: scale(1); } }
+@keyframes cw-setup-draw { to { stroke-dashoffset: 0; } }
+@keyframes cw-setup-fill { to { fill-opacity: 1; } }
+/* A repository being cloned keeps its small circle beside its progress. */
+.cw-sandbox-notice .cw-setup-repositories .cw-setup-row::before { display: inline-grid; flex: none; inline-size: var(--space-3); block-size: var(--space-3); border: var(--border-width) solid var(--border-subtle); border-radius: 50%; content: ""; }
+.cw-sandbox-notice .cw-setup-repositories [data-state="running"] > .cw-setup-row::before { border-color: var(--accent) var(--accent) var(--border-subtle) var(--border-subtle); animation: cw-spin 0.9s linear infinite; }
+.cw-sandbox-notice .cw-setup-repositories [data-state="completed"] > .cw-setup-row::before { border-color: var(--success); background: var(--success); }
+.cw-setup-bar { block-size: 6px; margin-block-start: var(--space-4); overflow: hidden; border-radius: var(--radius-pill); background: var(--border-subtle); }
+.cw-setup-bar > span { display: block; block-size: 100%; border-radius: inherit; background: var(--fg-primary); transform-origin: left center; transition: transform 120ms linear; }
 @media (prefers-reduced-motion: reduce) {
-  .cw-sandbox-notice .cw-setup-stage[data-state="running"] > .cw-setup-row::before { animation: none; }
-  .cw-sandbox-notice .cw-setup-stage > .cw-setup-row::before { transition: none; }
-  .cw-sandbox-notice .cw-setup-stage[data-state="completed"] > .cw-setup-row::after { animation: none; }
+  [data-state="running"] > .cw-setup-row .cw-setup-mark-arc,
+  .cw-sandbox-notice .cw-setup-repositories [data-state="running"] > .cw-setup-row::before { animation: none; }
+  [data-state="completed"] > .cw-setup-row .cw-setup-mark-done,
+  [data-state="completed"] > .cw-setup-row .cw-setup-mark-check { animation: none; stroke-dashoffset: 0; fill-opacity: 1; }
+  .cw-setup-window { scroll-behavior: auto; }
+  .cw-setup-bar > span { transition: none; }
 }
+/* While the list or a centred message shows, the page says that one thing:
+   no tab bar, no session line and no creation notice above it. */
+.cw-durable-terminal:has(> .cw-sandbox-notice:not([hidden], [data-kind="banner"])) > :is(.cw-terminal-tabs-bar, .cw-terminal-session-message, .cw-terminal-reload) { display: none; }
+.cw-workspace-main:has(.cw-sandbox-notice:not([hidden], [data-kind="banner"])) [data-sandbox-creation-notice] { display: none; }
 
 /* Output fills its cell edge to edge with one small inner gutter. */
 .cw-terminal-panels { min-height: 0; background: var(--bg-base); }

@@ -1,0 +1,14 @@
+/* Sandbox journey preview: only what the product never ships. The list, its
+   window, marks and progress bar come from routes/terminal.css. */
+
+/* A ready terminal, faked for the preview. */
+.cw-journey-screen { grid-row: 6; grid-column: 1; padding: var(--space-3) var(--space-4); background: var(--bg-base); }
+.cw-journey-screen[hidden] { display: none; }
+.cw-journey-terminal { margin: 0; color: var(--fg-primary); font-family: var(--font-mono); font-size: var(--text-small); }
+.cw-journey-prompt { color: var(--success); }
+.cw-journey-cursor { display: inline-block; inline-size: 0.6em; block-size: 1.1em; vertical-align: text-bottom; background: var(--fg-primary); animation: cw-journey-blink 1s steps(1) infinite; }
+@keyframes cw-journey-blink { 50% { opacity: 0; } }
+
+/* Preview controls. */
+.cw-journey-controls { position: fixed; inset: auto var(--space-4) var(--space-4) auto; z-index: 50; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: var(--border-width) solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--bg-secondary); box-shadow: var(--shadow-popover); font-size: var(--text-small); }
+.cw-journey-controls label { display: flex; align-items: center; gap: var(--space-1); color: var(--fg-secondary); }

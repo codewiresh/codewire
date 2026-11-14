@@ -28,7 +28,7 @@ pub(crate) const HOSTS_STYLE_PATH: &str = "/assets/codewire/routes/hosts-v1.css"
 pub(crate) const SECRET_MANAGEMENT_STYLE_PATH: &str =
     "/assets/codewire/routes/secret-management-v1.css";
 pub(crate) const ENVIRONMENTS_STYLE_PATH: &str = "/assets/codewire/routes/environments-v3.css";
-pub(crate) const TERMINAL_STYLE_PATH: &str = "/assets/codewire/routes/terminal-v3.css";
+pub(crate) const TERMINAL_STYLE_PATH: &str = "/assets/codewire/routes/terminal-v4.css";
 pub(crate) const BILLING_ADMIN_STYLE_PATH: &str = "/assets/codewire/routes/billing-admin-v1.css";
 pub(crate) const OVERVIEW_STYLE_PATH: &str = "/assets/codewire/routes/overview-v1.css";
 pub(crate) const XTERM_STYLE_PATH: &str = "/assets/codewire/xterm-6.0.0.css";
@@ -42,7 +42,7 @@ pub(crate) const TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/terminal-v1.js";
 pub(crate) const DURABLE_TERMINAL_SCRIPT_PATH: &str = "/assets/codewire/durable-terminal-v2.js";
 pub(crate) const TERMINAL_PROTOCOL_SCRIPT_PATH: &str = "/assets/codewire/terminal-protocol-v1.js";
 pub(crate) const TERMINAL_READINESS_SCRIPT_PATH: &str = "/assets/codewire/terminal-readiness-v4.js";
-pub(crate) const SETUP_PROGRESS_SCRIPT_PATH: &str = "/assets/codewire/setup-progress-v1.js";
+pub(crate) const SETUP_PROGRESS_SCRIPT_PATH: &str = "/assets/codewire/setup-progress-v2.js";
 pub(crate) const SANDBOX_RESIZE_SCRIPT_PATH: &str = "/assets/codewire/sandbox-resize-v3.js";
 pub(crate) const TERMINAL_RENDERER_SCRIPT_PATH: &str = "/assets/codewire/terminal-renderer-v1.js";
 pub(crate) const TERMINAL_PRESENTATION_SCRIPT_PATH: &str =

@@ -22,6 +22,20 @@ const fulfill = (route: Route, body: string) => route.fulfill({
   status: 200, headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store" }, body,
 });
 
+// A Sandbox that is not running yet: the page marks its setup section so.
+async function starting(page: Page) {
+  await page.addInitScript(() => {
+    new MutationObserver((_, observer) => {
+      const section = document.querySelector("[data-setup-progress]");
+      if (!section) return;
+      section.setAttribute("data-setup-starting", "");
+      observer.disconnect();
+    }).observe(document, { childList: true, subtree: true });
+  });
+}
+const status = (page: Page, detail: Record<string, boolean>) => page.evaluate(([environmentId, value]) =>
+  document.dispatchEvent(new CustomEvent("codewire:sandbox-status", { detail: { environmentId, ...value } })), [environment, detail] as const);
+
 async function streams(page: Page, answers: string[]) {
   const resumes: Array<string | null> = [];
   await page.route(eventsPath, async (route) => {
@@ -49,24 +63,70 @@ test("setup stages and clone progress stream, resume after a reconnect, and end"
       + end("complete"),
   ]);
   await page.goto(fixtureUrl());
-  const setup = page.getByRole("region", { name: "Setting up this Sandbox" });
-  await expect(setup.getByRole("heading", { level: 2, name: "Setting up this Sandbox" })).toBeVisible();
+  const setup = page.getByRole("region", { name: "Starting your Sandbox" });
+  await expect(setup.getByRole("heading", { level: 2, name: "Starting your Sandbox" })).toBeVisible();
   const first = setup.getByRole("progressbar", { name: "Repository 1 of 2" });
   const second = setup.getByRole("progressbar", { name: "Repository 2 of 2" });
   await expect(second).toHaveJSProperty("value", 100);
   await expect(first).toHaveJSProperty("value", 100);
-  await expect(setup.getByRole("status")).toHaveText("Setup complete. The terminal opens when the Sandbox reports it is ready.");
+  await expect(setup.locator("[data-setup-announce]")).toHaveText("Setup complete. The terminal opens when the Sandbox reports it is ready.");
+  await expect(setup.locator("[data-setup-status]")).toBeHidden();
   const stages = setup.locator("[data-setup-stages] > li");
-  await expect(stages).toHaveCount(3);
+  // "complete" ends the list; it is not a step of its own.
+  await expect(stages).toHaveCount(2);
   await expect(stages.nth(0)).toContainText("Checking sidecar readiness");
-  await expect(stages.nth(0)).toContainText("Done in 1.2 s");
+  await expect(stages.nth(0)).toContainText("1.2 s");
+  await expect(setup.getByRole("progressbar", { name: "Starting your Sandbox" })).toHaveAttribute("aria-valuenow", "100");
   await expect(stages.nth(1).getByRole("listitem")).toHaveCount(2);
   expect(resumes).toEqual([null, id(5)]);
   await expect(setup.getByRole("alert")).toBeHidden();
-  // The terminal's readiness, not the stream, decides when setup is over.
-  await page.evaluate((environmentId) => document.dispatchEvent(new CustomEvent("codewire:sandbox-status",
-    { detail: { environmentId, setupComplete: true } })), environment);
+  // The terminal's readiness, not the stream, decides when setup is over:
+  // only a running Sandbox whose setup completed closes the list.
+  await status(page, { setupComplete: true });
+  await expect(setup).toBeVisible();
+  await status(page, { running: true, setupComplete: true });
   await expect(setup).toBeHidden();
+});
+
+test("a first start shows one starting row, never a start phase, then setup under the project", async ({ page }) => {
+  await starting(page);
+  const resumes = await streams(page, [
+    frame(1, { phase: "create_claim", status: "started", label: "Claiming workspace" })
+      + frame(2, { phase: "pod_scheduled", status: "completed", label: "Workspace pod scheduled", durationMs: 500 })
+      + frame(3, { phase: "health_check", status: "started", label: "Checking sidecar readiness" }),
+  ]);
+  await page.goto(fixtureUrl());
+  const setup = page.getByRole("region", { name: "Starting your Sandbox" });
+  const stages = setup.locator("[data-setup-stages] > .cw-setup-stage");
+  await expect(stages).toHaveCount(1);
+  await expect(stages.nth(0)).toContainText("Starting the Sandbox");
+  await expect(stages.nth(0)).toHaveAttribute("data-state", "running");
+  // The stream opens only once readiness says setup has not finished.
+  expect(resumes).toHaveLength(0);
+  await status(page, { starting: true, setupComplete: false });
+  await expect(stages).toHaveText([/^Starting the Sandbox/, /^Checking sidecar readiness/]);
+  await expect(stages.nth(0)).toHaveAttribute("data-state", "completed");
+  await expect(stages.nth(1)).toHaveAttribute("data-state", "running");
+  await expect(setup.locator(".cw-setup-group")).toHaveText("Setting up your project");
+  await expect(setup).not.toContainText("Claiming workspace");
+  await expect(setup).not.toContainText("Workspace pod scheduled");
+});
+
+test("a restart shows the starting row, replays no earlier run, and closes once running", async ({ page }) => {
+  await starting(page);
+  const resumes = await streams(page, [frame(1, { phase: "health_check", status: "completed", label: "an earlier run" })]);
+  await page.goto(fixtureUrl());
+  const setup = page.getByRole("region", { name: "Starting your Sandbox" });
+  // Setup finished on an earlier run, so this start follows no stream.
+  await status(page, { starting: true, setupComplete: true });
+  await expect(setup).toBeVisible();
+  const stages = setup.locator("[data-setup-stages] > .cw-setup-stage");
+  await expect(stages).toHaveCount(1);
+  await expect(stages.nth(0)).toHaveAttribute("data-state", "running");
+  await status(page, { running: true, setupComplete: true });
+  await expect(setup).toBeHidden();
+  expect(resumes).toHaveLength(0);
+  await expect(page.getByText("an earlier run")).toHaveCount(0);
 });
 
 test("a failed stage is announced and stream text is never markup", async ({ page }) => {
@@ -77,28 +137,27 @@ test("a failed stage is announced and stream text is never markup", async ({ pag
       + end("failed"),
   ]);
   await page.goto(fixtureUrl());
-  const setup = page.getByRole("region", { name: "Setting up this Sandbox" });
+  const setup = page.getByRole("region", { name: "Starting your Sandbox" });
   await expect(setup.getByRole("alert")).toHaveText(`Cloning repositories failed: git clone: exited 128 ${hostile}`);
-  await expect(setup.getByRole("status")).toHaveText("Setup stopped.");
+  await expect(setup.locator("[data-setup-status]")).toHaveText("Setup stopped.");
   await expect(setup.locator("img")).toHaveCount(0);
   expect(await page.evaluate(() => document.body.dataset.injected)).toBeUndefined();
   // A failure stays visible even after readiness reports setup state.
-  await page.evaluate((environmentId) => document.dispatchEvent(new CustomEvent("codewire:sandbox-status",
-    { detail: { environmentId, setupComplete: true } })), environment);
+  await status(page, { running: true, setupComplete: true });
   await expect(setup).toBeVisible();
 });
 
 test("a refused stream says live progress is unavailable", async ({ page }) => {
   await page.route(eventsPath, (route) => route.fulfill({ status: 401, body: "" }));
   await page.goto(fixtureUrl());
-  await expect(page.getByRole("region", { name: "Setting up this Sandbox" }).getByRole("status"))
+  await expect(page.getByRole("region", { name: "Starting your Sandbox" }).locator("[data-setup-status]"))
     .toHaveText("Live setup progress is unavailable. Sandbox status below still updates.");
 });
 
 test("the account follow limit stops retrying and says what to do", async ({ page }) => {
   const resumes = await streams(page, ["retry: 50\n\nevent: busy\ndata: {}\n\n", "event: busy\ndata: {}\n\n"]);
   await page.goto(fixtureUrl());
-  await expect(page.getByRole("region", { name: "Setting up this Sandbox" }).getByRole("status"))
+  await expect(page.getByRole("region", { name: "Starting your Sandbox" }).locator("[data-setup-status]"))
     .toHaveText("Too many live setup views are open for this account. Close one, then reload this page to follow setup here.");
   // A busy answer closes the source: no reconnect follows the short retry.
   await page.waitForTimeout(500);

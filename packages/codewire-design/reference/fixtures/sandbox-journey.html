@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><script src="../../theme.js"></script><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'none'">
+  <title>Sandbox journey preview</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/environments.css"><link rel="stylesheet" href="../../routes/terminal.css">
+  <script src="../../dashboard.js" defer></script>
+  <link rel="stylesheet" href="sandbox-journey.css">
+  <script src="sandbox-journey.js" defer></script>
+</head>
+<body class="cw-body cw-terminal-page">
+  <!--
+    THE JOURNEY: edit this block, save, reload. Everything the page says and
+    every timing comes from here. Times are seconds at 1x speed.
+  -->
+  <script type="application/json" id="journey-config">
+{
+  "heading": "Starting your Sandbox",
+  "setupHeading": "Setting up your project",
+  "readyNote": "Your Sandbox is ready.",
+  "creation": [
+    ["Reserving a machine", 1.4],
+    ["Choosing a region", 0.6],
+    ["Preparing the disk", 2.6],
+    ["Pulling the workspace image", 3.4],
+    ["Starting the VM", 4.2],
+    ["Mounting your files", 1.1],
+    ["Starting the network", 0.8],
+    ["Starting Docker", 1.8],
+    ["Securing access", 0.9],
+    ["Starting the SSH server", 0.7],
+    ["Waiting for the Sandbox to answer", 2.3]
+  ],
+  "setup": [
+    ["Installing credentials", 0.4],
+    ["Loading your secrets", 0.5],
+    ["Cloning repositories", 3.8],
+    ["Checking out your branch", 0.6],
+    ["Installing dependencies", 7.4],
+    ["Running setup commands", 6.1],
+    ["Running database migrations", 2.2],
+    ["Building the project", 5.3],
+    ["Starting services", 1.7]
+  ],
+  "failedStep": "Running setup commands",
+  "failureText": "npm install exited with code 1. Fix .codewire/setup.sh, then retry.",
+  "noCapacityText": "No room to start this sandbox right now.",
+  "stoppedText": "This Sandbox is stopped. Its files are kept.",
+  "crashedText": "This sandbox stopped unexpectedly and is restarting.",
+  "restartedText": "Restarted at 14:02 UTC after its node was replaced. Running processes were lost."
+}
+  </script>
+  <div class="cw-app" data-dashboard-app data-mobile-open="false" data-sidebar-collapsed="false">
+    <aside class="cw-sidebar-slot">
+      <nav class="cw-sidebar cw-console-sidebar" aria-label="Main navigation">
+        <header class="cw-console-brand-row"><a class="cw-brand cw-console-brand" href="index.html"><img src="../../assets/console-logo.svg" alt=""><span>codewire</span></a><button class="cw-icon-button" type="button" data-sidebar-close aria-label="Collapse navigation"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-sidebar"/></svg></button><button class="cw-icon-button cw-sidebar-expand" type="button" data-sidebar-expand aria-label="Expand navigation"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-sidebar"/></svg></button></header>
+        <div class="cw-console-org-switcher">
+          <details class="cw-menu cw-org-switcher">
+            <summary class="cw-button cw-button--outline cw-button--pill"><span class="cw-org-initial" aria-hidden="true">P</span><span class="cw-org-switcher-label">Personal</span><svg class="cw-icon cw-org-chevron" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-down"/></svg></summary>
+            <section class="cw-menu-panel cw-menu-panel--fill cw-org-menu"><h2 class="cw-menu-heading">Organizations</h2><ul><li><a href="#personal">Personal <span class="cw-menu-meta">owner</span></a></li><li><a href="#new-organization">＋ New Organization</a></li></ul></section>
+          </details>
+        </div>
+        <section class="cw-console-sandboxes" aria-label="Sandboxes">
+          <a class="cw-console-create cw-button cw-button--accent cw-button--pill" href="create-sandbox.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg><span>Create Sandbox</span></a>
+          <header class="cw-console-rail-heading"><button class="cw-icon-button" type="button" data-rail-sort aria-label="Sort: newest first"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-sort"/></svg></button><h2>Sandboxes</h2><details class="cw-menu cw-rail-filter" data-rail-filter><summary class="cw-icon-button" aria-label="Filter by status"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-filter"/></svg></summary><div class="cw-menu-panel cw-menu-panel--end" role="group" aria-label="Show Sandboxes"><button class="cw-menu-item" type="button" data-rail-filter-value="all" aria-pressed="true"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-check"/></svg><span>All</span></button><button class="cw-menu-item" type="button" data-rail-filter-value="running" aria-pressed="false"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-check"/></svg><span>Running</span></button><button class="cw-menu-item" type="button" data-rail-filter-value="starting" aria-pressed="false"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-check"/></svg><span>Starting</span></button><button class="cw-menu-item" type="button" data-rail-filter-value="stopped" aria-pressed="false"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-check"/></svg><span>Stopped</span></button><button class="cw-menu-item" type="button" data-rail-filter-value="failed" aria-pressed="false"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-check"/></svg><span>Failed</span></button></div></details><a class="cw-icon-button" href="#sandbox-inventory" aria-label="View all sandboxes"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-expand"/></svg></a></header>
+          <div class="cw-console-rail" data-sandbox-rail data-rail-loading="false">
+            <ul class="cw-rail-list">
+              <li><a class="cw-rail-row" href="#quiet-mesa"><span class="cw-rail-dot" data-tone="success" aria-hidden="true"></span><span class="cw-rail-name">quiet-mesa</span><span class="cw-rail-state">eu</span></a></li>
+              <li><a class="cw-rail-row" href="#amber-loop"><span class="cw-rail-dot" data-tone="success" aria-hidden="true"></span><span class="cw-rail-name">amber-loop</span><span class="cw-rail-state">eu</span></a></li>
+              <li><a class="cw-rail-row" href="#dry-harbor"><span class="cw-rail-dot" aria-hidden="true"></span><span class="cw-rail-name">dry-harbor</span><span class="cw-rail-state">us</span></a></li>
+            </ul>
+          </div>
+        </section>
+        <ul class="cw-console-get-started">
+          <li><a class="cw-nav-link" href="#docs-getting-started"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-play-circle"/></svg>Get Started</a></li><li><a class="cw-nav-link" href="#docs"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-book"/></svg>Documentation</a></li>
+        </ul>
+        <div class="cw-console-footer"><details class="cw-menu cw-account-menu"><summary class="cw-button cw-button--ghost"><span class="cw-org-initial" aria-hidden="true">E</span><span class="cw-account-name">Example user</span><svg class="cw-icon cw-account-chevrons" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevrons-up-down"/></svg></summary><div class="cw-menu-panel cw-menu-panel--fill cw-menu-panel--up"><div class="cw-user-menu-identity"><strong>Example user</strong><span>Authenticated account</span></div><a href="settings-account.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-settings"/></svg>Settings</a><button class="cw-menu-item cw-theme-switch" type="button" data-theme-switch data-theme-current="system"><svg class="cw-icon cw-theme-icon cw-theme-icon--system" aria-hidden="true"><use href="../../assets/icons.svg#icon-auto"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--light" aria-hidden="true"><use href="../../assets/icons.svg#icon-sun"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--dark" aria-hidden="true"><use href="../../assets/icons.svg#icon-moon"/></svg><span data-theme-label>Theme: System</span></button><form data-sign-out><button class="cw-menu-item" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-log-out"/></svg>Sign Out</button></form></div></details></div>
+      </nav>
+    </aside>
+    <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-menu"/></svg></button><a class="cw-brand" href="index.html"><img src="../../assets/console-logo.svg" alt=""><span class="cw-sr-only">Codewire</span></a></header>
+    <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+    <aside class="cw-mobile-drawer">
+      <nav class="cw-sidebar cw-console-sidebar" aria-label="Main navigation">
+        <header class="cw-console-brand-row"><a class="cw-brand cw-console-brand" href="index.html"><img src="../../assets/console-logo.svg" alt=""><span>codewire</span></a><button class="cw-icon-button" type="button" data-sidebar-close aria-label="Collapse navigation"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-sidebar"/></svg></button><button class="cw-icon-button cw-sidebar-expand" type="button" data-sidebar-expand aria-label="Expand navigation"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-sidebar"/></svg></button></header>
+        <div class="cw-console-org-switcher">
+          <details class="cw-menu cw-org-switcher">
+            <summary class="cw-button cw-button--outline cw-button--pill"><span class="cw-org-initial" aria-hidden="true">P</span><span class="cw-org-switcher-label">Personal</span><svg class="cw-icon cw-org-chevron" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-down"/></svg></summary>
+            <section class="cw-menu-panel cw-menu-panel--fill cw-org-menu"><h2 class="cw-menu-heading">Organizations</h2><ul><li><a href="#personal">Personal <span class="cw-menu-meta">owner</span></a></li><li><a href="#new-organization">＋ New Organization</a></li></ul></section>
+          </details>
+        </div>
+        <section class="cw-console-sandboxes" aria-label="Sandboxes">
+          <a class="cw-console-create cw-button cw-button--accent cw-button--pill" href="create-sandbox.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg><span>Create Sandbox</span></a>
+          <header class="cw-console-rail-heading"><button class="cw-icon-button" type="button" data-rail-sort aria-label="Sort: newest first"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-sort"/></svg></button><h2>Sandboxes</h2><details class="cw-menu cw-rail-filter" data-rail-filter><summary class="cw-icon-button" aria-label="Filter by status"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-filter"/></svg></summary><div class="cw-menu-panel cw-menu-panel--end" role="group" aria-label="Show Sandboxes"><button class="cw-menu-item" type="button" data-rail-filter-value="all" aria-pressed="true"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-check"/></svg><span>All</span></button><button class="cw-menu-item" type="button" data-rail-filter-value="running" aria-pressed="false"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-check"/></svg><span>Running</span></button><button class="cw-menu-item" type="button" data-rail-filter-value="starting" aria-pressed="false"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-check"/></svg><span>Starting</span></button><button class="cw-menu-item" type="button" data-rail-filter-value="stopped" aria-pressed="false"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-check"/></svg><span>Stopped</span></button><button class="cw-menu-item" type="button" data-rail-filter-value="failed" aria-pressed="false"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-check"/></svg><span>Failed</span></button></div></details><a class="cw-icon-button" href="#sandbox-inventory" aria-label="View all sandboxes"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-expand"/></svg></a></header>
+          <div class="cw-console-rail" data-sandbox-rail data-rail-loading="false">
+            <ul class="cw-rail-list">
+              <li><a class="cw-rail-row" href="#quiet-mesa"><span class="cw-rail-dot" data-tone="success" aria-hidden="true"></span><span class="cw-rail-name">quiet-mesa</span><span class="cw-rail-state">eu</span></a></li>
+              <li><a class="cw-rail-row" href="#amber-loop"><span class="cw-rail-dot" data-tone="success" aria-hidden="true"></span><span class="cw-rail-name">amber-loop</span><span class="cw-rail-state">eu</span></a></li>
+              <li><a class="cw-rail-row" href="#dry-harbor"><span class="cw-rail-dot" aria-hidden="true"></span><span class="cw-rail-name">dry-harbor</span><span class="cw-rail-state">us</span></a></li>
+            </ul>
+          </div>
+        </section>
+        <ul class="cw-console-get-started">
+          <li><a class="cw-nav-link" href="#docs-getting-started"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-play-circle"/></svg>Get Started</a></li><li><a class="cw-nav-link" href="#docs"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-book"/></svg>Documentation</a></li>
+        </ul>
+        <div class="cw-console-footer"><details class="cw-menu cw-account-menu"><summary class="cw-button cw-button--ghost"><span class="cw-org-initial" aria-hidden="true">E</span><span class="cw-account-name">Example user</span><svg class="cw-icon cw-account-chevrons" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevrons-up-down"/></svg></summary><div class="cw-menu-panel cw-menu-panel--fill cw-menu-panel--up"><div class="cw-user-menu-identity"><strong>Example user</strong><span>Authenticated account</span></div><a href="settings-account.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-settings"/></svg>Settings</a><button class="cw-menu-item cw-theme-switch" type="button" data-theme-switch data-theme-current="system"><svg class="cw-icon cw-theme-icon cw-theme-icon--system" aria-hidden="true"><use href="../../assets/icons.svg#icon-auto"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--light" aria-hidden="true"><use href="../../assets/icons.svg#icon-sun"/></svg><svg class="cw-icon cw-theme-icon cw-theme-icon--dark" aria-hidden="true"><use href="../../assets/icons.svg#icon-moon"/></svg><span data-theme-label>Theme: System</span></button><form data-sign-out><button class="cw-menu-item" type="button"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-log-out"/></svg>Sign Out</button></form></div></details></div>
+      </nav>
+    </aside>
+    <div class="cw-main cw-workspace">
+      <header class="cw-workspace-header">
+        <div class="cw-workspace-title"><a class="cw-terminal-back" href="sandboxes.html" aria-label="Back to Sandboxes"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-arrow-left"/></svg></a><h1>Fixture Sandbox</h1><span class="cw-status cw-status--pill" data-tone="warning">starting</span><span class="cw-workspace-resources">2 vCPU · 8 GiB · 10 GiB</span></div>
+        <div class="cw-workspace-actions">
+          <button class="cw-button cw-button--outline cw-button--small" type="button">Ports</button>
+          <details class="cw-menu">
+            <summary class="cw-button cw-button--outline cw-button--small cw-workspace-more" title="More actions"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-more"/></svg><span class="cw-sr-only">More actions</span></summary>
+            <div class="cw-menu-panel cw-menu-panel--end cw-workspace-menu-panel">
+              <button class="cw-menu-item" type="button" disabled>Resize</button>
+              <p class="cw-row-menu-note">Resize is available when setup finishes.</p>
+              <hr class="cw-menu-separator">
+              <button class="cw-menu-item cw-menu-danger" type="button">Delete</button>
+            </div>
+          </details>
+        </div>
+      </header>
+      <main class="cw-workspace-main">
+        <section class="cw-sandbox-terminal cw-durable-terminal" aria-label="Sandbox terminal">
+          <header class="cw-terminal-tabs-bar">
+            <nav aria-label="Terminal tabs"><ul role="tablist" aria-label="Terminal tabs" data-journey-tabs></ul></nav>
+            <button class="cw-icon-button cw-terminal-new" type="button" disabled aria-label="New terminal" title="New terminal" data-journey-new><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-plus"/></svg></button>
+          </header>
+          <section class="cw-sandbox-notice" aria-label="Sandbox status" data-sandbox-notice data-kind="setup" data-tone="neutral" data-graphic="">
+            <svg class="cw-sandbox-notice-graphic" data-notice-graphic="crashed" viewBox="0 0 96 80" aria-hidden="true"><rect x="14" y="10" width="68" height="58" rx="8"/><path d="M14 22h68"/><path d="M33 33l8 8m0-8l-8 8M55 33l8 8m0-8l-8 8"/><path d="M36 59q12-9 24 0"/></svg>
+            <svg class="cw-sandbox-notice-graphic" data-notice-graphic="no-capacity" viewBox="0 0 96 80" aria-hidden="true"><rect x="8" y="8" width="56" height="64" rx="6"/><path d="M8 29h56M8 51h56"/><rect x="15" y="14" width="18" height="10" rx="2"/><rect x="38" y="14" width="19" height="10" rx="2"/><rect x="15" y="35" width="24" height="11" rx="2"/><rect x="44" y="35" width="13" height="11" rx="2"/><rect x="15" y="57" width="13" height="10" rx="2"/><rect x="33" y="57" width="24" height="10" rx="2"/><rect x="72" y="52" width="18" height="16" rx="3" stroke-dasharray="3 3"/></svg>
+            <svg class="cw-sandbox-notice-graphic" data-notice-graphic="stopped" viewBox="0 0 96 80" aria-hidden="true"><rect x="14" y="14" width="60" height="56" rx="8"/><path d="M14 26h60"/><path d="M29 43q5 4 10 0M49 43q5 4 10 0"/><path d="M38 56q6 3 12 0"/><path d="M78 6h9l-9 10h9"/></svg>
+            <p class="cw-sandbox-notice-text" role="status" data-sandbox-notice-text hidden></p>
+            <div class="cw-sandbox-notice-actions" data-journey-actions><button class="cw-button cw-button--outline cw-button--small" type="button" data-journey-action hidden></button></div>
+            <section class="cw-setup-progress" aria-labelledby="journey-title" data-setup-progress>
+              <h2 id="journey-title" data-journey-heading></h2>
+              <p class="cw-setup-progress-status cw-sr-only" role="status" data-setup-status></p>
+              <p class="cw-alert cw-alert--error" role="alert" data-setup-failure hidden></p>
+              <div class="cw-setup-window" data-journey-window><ol class="cw-setup-stages" data-setup-stages></ol></div>
+              <div class="cw-setup-bar" role="progressbar" aria-label="Progress" aria-valuemin="0" aria-valuemax="100" data-journey-progress><span></span></div>
+            </section>
+          </section>
+          <div class="cw-journey-screen" data-journey-terminal hidden><pre class="cw-journey-terminal"><span class="cw-journey-prompt">dev@test3:~/app$</span> <span class="cw-journey-cursor"></span></pre></div>
+          <footer class="cw-workspace-statusbar">
+            <dl class="cw-workspace-facts"><div><dt>Last event</dt><dd>just now</dd></div><div><dt>Auto-delete</dt><dd>off</dd></div><div class="cw-workspace-fact-id"><dt class="cw-sr-only">Sandbox ID</dt><dd>bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb</dd></div></dl>
+          </footer>
+        </section>
+      </main>
+    </div>
+  </div>
+  <aside class="cw-journey-controls" aria-label="Preview controls">
+    <button class="cw-button cw-button--accent cw-button--small" type="button" data-journey="replay">Replay</button>
+    <button class="cw-button cw-button--outline cw-button--small" type="button" data-journey="pause">Pause</button>
+    <button class="cw-button cw-button--outline cw-button--small" type="button" data-journey="step">Next step</button>
+    <label>Speed <select class="cw-select" data-journey="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
+    <label>Jump to <select class="cw-select" data-journey="jump"><option value="">…</option></select></label>
+  </aside>
+</body>
+</html>

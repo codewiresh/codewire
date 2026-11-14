@@ -1056,15 +1056,12 @@ pub(crate) fn sandbox_notice(row: &EnvironmentRow) -> SandboxNotice {
         }
         // Only a pending start is "starting"; a stopped Sandbox being archived
         // or deleted is a pending operation like any other.
-        ("stopped", _) if actions.pending => SandboxNotice::banner(
-            if row.desired_state == "started" {
-                STARTING
-            } else {
-                PENDING
-            }
-            .to_owned(),
-            "info",
-        ),
+        // A start says itself through the step list (#3772, the owner's
+        // journey); other pending operations stay a banner.
+        ("stopped", _) if actions.pending && row.desired_state == "started" => {
+            SandboxNotice::banner(STARTING.to_owned(), "neutral").kind("setup")
+        }
+        ("stopped", _) if actions.pending => SandboxNotice::banner(PENDING.to_owned(), "info"),
         ("stopped", _) => SandboxNotice::message(
             "stopped",
             "This Sandbox is stopped. Its files are kept.".to_owned(),
@@ -1078,7 +1075,7 @@ pub(crate) fn sandbox_notice(row: &EnvironmentRow) -> SandboxNotice {
             "info",
         ),
         (_, _) if actions.pending && row.desired_state == "started" => {
-            SandboxNotice::banner(STARTING.to_owned(), "info")
+            SandboxNotice::banner(STARTING.to_owned(), "neutral").kind("setup")
         }
         (_, _) if actions.pending => SandboxNotice::banner(PENDING.to_owned(), "info"),
         (_, _) => SandboxNotice::none(),
@@ -1572,8 +1569,8 @@ mod tests {
             ),
             (
                 row(S::Stopped, DesiredState::Started, "", ""),
-                "banner",
-                "info",
+                "setup",
+                "neutral",
                 ("", ""),
                 "",
                 STARTING,
@@ -1596,8 +1593,8 @@ mod tests {
             ),
             (
                 row(S::Creating, DesiredState::Started, "", ""),
-                "banner",
-                "info",
+                "setup",
+                "neutral",
                 ("", ""),
                 "",
                 STARTING,

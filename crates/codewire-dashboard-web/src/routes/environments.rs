@@ -2540,10 +2540,10 @@ fn environments_path(slug: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use askama::Template as _;
-
+    mod journey;
     use super::*;
     use crate::templates::EnvironmentCreateFormTemplate;
+    use askama::Template as _;
 
     fn setup_hrefs(html: &str) -> Vec<&str> {
         html.split("href=\"")
@@ -3511,10 +3511,10 @@ mod tests {
             let page = render_terminal(&organization, row);
             assert!(page.contains(section));
             assert!(page.contains(&format!(
-                "data-setup-environment-id=\"{SETUP}\" data-setup-org-slug=\"{}\"><h2 id=\"setup-progress-title\">Setting up this Sandbox</h2><p class=\"cw-setup-progress-status\" role=\"status\" data-setup-status>",
+                "data-setup-environment-id=\"{SETUP}\" data-setup-org-slug=\"{}\"><h2 id=\"setup-progress-title\">Starting your Sandbox</h2><p class=\"cw-sr-only\" role=\"status\" data-setup-announce>Waiting for setup progress…</p><p class=\"cw-setup-progress-status\" role=\"status\" data-setup-status></p>",
                 organization.slug
             )));
-            assert!(page.contains("<p class=\"cw-alert cw-alert--error\" role=\"alert\" data-setup-failure hidden></p><ol class=\"cw-setup-stages\" data-setup-stages></ol>"));
+            assert!(page.contains("<p class=\"cw-alert cw-alert--error\" role=\"alert\" data-setup-failure hidden></p><div class=\"cw-setup-window\" data-setup-window hidden><ol class=\"cw-setup-stages\" data-setup-stages></ol></div><div class=\"cw-setup-bar\" role=\"progressbar\""));
         }
     }
 

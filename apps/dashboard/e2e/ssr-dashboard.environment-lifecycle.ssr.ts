@@ -209,10 +209,10 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     await expect(page).toHaveURL(
       new RegExp(`^${ssrUrl}/${slug}/[0-9a-f-]{36}/\\?message=environment-created$`),
     );
-    // The creation notice stands until the Sandbox runs, well after this
-    // Kind Sandbox lands here.
-    await expect(page.getByRole("status").filter({ hasText: "Sandbox creation started" })).toBeVisible();
-    await expect(page.getByRole("region", { name: "Setting up this Sandbox", exact: true })).toBeVisible();
+    // A starting Sandbox says one thing: the step list, with no creation
+    // notice above it (#3772).
+    await expect(page.getByRole("region", { name: "Starting your Sandbox", exact: true })).toBeVisible();
+    await expect(page.locator("[data-sandbox-creation-notice]")).toBeHidden();
     // The rest of this journey starts from the Sandboxes list.
     await page.goto(`${ssrUrl}/${slug}/`);
     // The live sidebar, with this Sandbox in its rail, keeps its marks on the
