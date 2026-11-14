@@ -1136,8 +1136,10 @@ async fn accept_invitation_transaction(
            WHERE {} = $1
              AND status = 'pending'
              AND expires_at > NOW()
-           RETURNING org_id, email, role, assignments"#,
-        key.column()
+           RETURNING org_id, email, role, assignments,
+                     created_at > NOW() - make_interval(hours => {}) AS issued_within_vouch_window"#,
+        key.column(),
+        VOUCHED_LINK_HOURS,
     ))
     .bind(key.value())
     .fetch_optional(&mut *tx)
@@ -1205,7 +1207,7 @@ async fn accept_invitation_transaction(
     }
     // Anyone holding the link could otherwise register the invitee's address
     // without owning its mailbox and join with the invitation's role.
-    if !caller.verified {
+    if !caller.verified && !vouched_for_this_link(&caller, key, &claimed)? {
         return Err(AppError::Precondition(
             "verify your email address, then accept the invitation again".into(),
         ));
@@ -1264,6 +1266,26 @@ async fn accept_invitation_transaction(
     })
 }
 
+/// How long after its issue an invitation's own link admits a vouched account,
+/// the same day the IdP gives that link's sign-up on a server with no mail.
+const VOUCHED_LINK_HOURS: i64 = 24;
+
+/// On a server with no mail the admin vouches for an address instead of a
+/// mailbox proving it (#4121): a vouched account accepts only by the
+/// invitation's own token, within [`VOUCHED_LINK_HOURS`] of its issue. The
+/// claim computes the window in SQL, on the database's clock, as it checks
+/// `expires_at`.
+fn vouched_for_this_link(
+    caller: &CallerAddress,
+    key: &InvitationKey,
+    claimed: &sqlx::postgres::PgRow,
+) -> AppResult<bool> {
+    let within_window: Option<bool> = claimed
+        .try_get("issued_within_vouch_window")
+        .map_err(AppError::from)?;
+    Ok(caller.vouched && matches!(key, InvitationKey::TokenHash(_)) && within_window == Some(true))
+}
+
 /// What a caller who is not the invitee sees, whatever the invitation's
 /// state: the same answer as for an id or token that names nothing.
 fn invitation_not_found() -> AppError {
@@ -1275,6 +1297,8 @@ fn invitation_not_found() -> AppError {
 struct CallerAddress {
     matches: bool,
     verified: bool,
+    /// The server's admin vouched for the address (`email_vouched_by`).
+    vouched: bool,
 }
 
 /// Reads the caller's address against an invitation's inside `tx` and holds
@@ -1288,8 +1312,9 @@ async fn caller_address(
     user_id: &str,
     invitation_email: &str,
 ) -> AppResult<CallerAddress> {
-    let (matches, verified): (bool, bool) = sqlx::query_as(
-        r#"SELECT lower(email) = lower($2), COALESCE(email_verified, false)
+    let (matches, verified, vouched): (bool, bool, bool) = sqlx::query_as(
+        r#"SELECT lower(email) = lower($2), COALESCE(email_verified, false),
+                  email_vouched_by IS NOT NULL
            FROM users
            WHERE id = $1
            FOR SHARE"#,
@@ -1302,7 +1327,11 @@ async fn caller_address(
         tracing::error!(error = %e, "organizations: load caller email failed");
         AppError::InternalMsg("failed to load user".into())
     })?;
-    Ok(CallerAddress { matches, verified })
+    Ok(CallerAddress {
+        matches,
+        verified,
+        vouched,
+    })
 }
 
 // ── Org list / create (#38) ──────────────────────────────────────────────

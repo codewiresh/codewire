@@ -98,6 +98,26 @@ impl<'a> Invitations<'a> {
         .unwrap()
     }
 
+    /// The server's admin vouches for the user's address (#4121).
+    async fn vouch(&self, user: &str) {
+        sqlx::query("UPDATE users SET email_vouched_by = 'invitation' WHERE id = $1")
+            .bind(user)
+            .execute(self.pool())
+            .await
+            .unwrap();
+    }
+
+    async fn issued_hours_ago(&self, invitation: &str, hours: i32) {
+        sqlx::query(
+            "UPDATE org_invitations SET created_at = NOW() - make_interval(hours => $2) WHERE id = $1",
+        )
+        .bind(invitation)
+        .bind(hours)
+        .execute(self.pool())
+        .await
+        .unwrap();
+    }
+
     async fn verify(&self, user: &str) {
         sqlx::query("UPDATE users SET email_verified = true WHERE id = $1")
             .bind(user)
@@ -239,6 +259,49 @@ async fn db_id_acceptance_requires_a_verified_matching_email() {
         AcceptInvitationBy::Id(id.clone())
     })
     .await;
+}
+
+/// On a server with no mail the admin vouches for an address (#4121): a
+/// vouched account accepts an invitation only by its own token and within a
+/// day of its issue, never by id, and ListMyInvitations shows it nothing.
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_a_vouched_address_accepts_only_by_its_own_token_within_a_day() {
+    let fixture = LeaseFixture::seed("synthetic-invitation-vouched").await;
+    let mut t = Invitations::new(&fixture);
+    let email = t.email("vouched");
+    let vouched = t.user("vouched", &email, false).await;
+    t.vouch(&vouched).await;
+    let by_id = t.invite("by-id", &email, "pending", "1 hour").await;
+    let stale = t.invite("stale", &email, "pending", "7 days").await;
+    t.issued_hours_ago(&stale.0, 25).await;
+    let fresh = t.invite("fresh", &email, "pending", "7 days").await;
+
+    let listed = list_my_invitations(t.pool(), &caller(&vouched))
+        .await
+        .unwrap();
+    assert!(listed.is_empty(), "a vouched address lists nothing");
+
+    for (refused, by) in [
+        (&by_id, AcceptInvitationBy::Id(by_id.0.clone())),
+        (&stale, AcceptInvitationBy::Token(stale.1.clone())),
+    ] {
+        assert_eq!(
+            code(t.accept(&vouched, by).await),
+            ConnectCode::FailedPrecondition
+        );
+        assert_eq!(t.status(&refused.0).await, "pending");
+    }
+    assert!(!t.is_member(&vouched).await);
+
+    t.accept(&vouched, AcceptInvitationBy::Token(fresh.1.clone()))
+        .await
+        .unwrap();
+    assert_eq!(t.status(&fresh.0).await, "accepted");
+    assert!(t.is_member(&vouched).await);
+
+    t.cleanup().await;
+    fixture.cleanup().await;
 }
 
 /// A stranger learns nothing of someone else's invitation, by token or by id:
