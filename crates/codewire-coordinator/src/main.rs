@@ -14,9 +14,14 @@ async fn main() -> anyhow::Result<()> {
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
     let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
     let auth = AuthState { pool: pool.clone() };
-    let nats =
-        codewire_server_core::nats::connect(cfg.nats_url.as_deref(), cfg.nats_token.as_deref())
-            .await?;
+    let nats = codewire_server_core::nats::connect_with_login(
+        cfg.nats_url.as_deref(),
+        cfg.nats_login
+            .as_ref()
+            .map(|(user, password)| (user.as_str(), password.as_str())),
+        cfg.nats_token.as_deref(),
+    )
+    .await?;
     let mut state = CoordinatorState::new(pool.clone(), cfg.session_secret.clone(), derp_map);
     if let Some(client) = nats {
         state = state.with_nats_client(client, cfg.nats_kv_replicas).await?;

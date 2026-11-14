@@ -21,11 +21,25 @@ pub async fn connect(
     url: Option<&str>,
     token: Option<&str>,
 ) -> anyhow::Result<Option<async_nats::Client>> {
+    connect_with_login(url, None, token).await
+}
+
+/// Connects as this service's own NATS user when `login` (user, password)
+/// is set, otherwise with the shared `token`. A service carries both while
+/// NATS moves from the one shared token to per-service users (#3542): its
+/// own user wins once it has one.
+pub async fn connect_with_login(
+    url: Option<&str>,
+    login: Option<(&str, &str)>,
+    token: Option<&str>,
+) -> anyhow::Result<Option<async_nats::Client>> {
     let Some(url) = url else {
         return Ok(None);
     };
     let mut options = ConnectOptions::new().connection_timeout(std::time::Duration::from_secs(5));
-    if let Some(token) = token {
+    if let Some((user, password)) = login {
+        options = options.user_and_password(user.to_string(), password.to_string());
+    } else if let Some(token) = token {
         options = options.token(token.to_string());
     }
     let client = options.connect(url).await?;

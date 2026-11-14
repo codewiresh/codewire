@@ -9,6 +9,7 @@
 //! | `DB_PASSWORD` | required when `DATABASE_URL` is unset | — |
 //! | `NATS_URL` | no | unset → service runs without NATS |
 //! | `NATS_TOKEN` | no | unset → unauthenticated NATS |
+//! | `NATS_USER`, `NATS_PASSWORD` | no | set together; this service's own NATS user, used instead of `NATS_TOKEN` |
 //! | `NATS_KV_REPLICAS` | no | `1`; 1, 3 or 5 replicas of every KV bucket |
 //! | `SESSION_SECRET` | yes | — |
 //! | `<SERVICE>_PORT` (e.g. `BILLING_PORT`) | no | derived per service |
@@ -52,6 +53,9 @@ pub struct ServiceConfig {
     pub nats_url: Option<String>,
     /// NATS bearer token; `None` means unauthenticated NATS.
     pub nats_token: Option<String>,
+    /// This service's own NATS user and password, used instead of the
+    /// shared token when set (#3542).
+    pub nats_login: Option<(String, String)>,
     /// Replicas of every JetStream KV bucket the service keeps (#3542).
     pub nats_kv_replicas: usize,
     /// Shared platform-internal secret: HMAC sidecar/gateway tokens and
@@ -81,6 +85,15 @@ impl ServiceConfig {
         let session_secret = require(lookup, "SESSION_SECRET")?;
         let nats_url = optional(lookup, "NATS_URL");
         let nats_token = optional(lookup, "NATS_TOKEN");
+        let nats_login = match (
+            optional(lookup, "NATS_USER"),
+            optional(lookup, "NATS_PASSWORD"),
+        ) {
+            (Some(user), Some(password)) => Some((user, password)),
+            (None, None) => None,
+            (Some(_), None) => return Err(ConfigError::Missing("NATS_PASSWORD")),
+            (None, Some(_)) => return Err(ConfigError::Missing("NATS_USER")),
+        };
         let nats_kv_replicas = optional(lookup, "NATS_KV_REPLICAS")
             .map(|value| {
                 crate::nats::parse_kv_replicas(&value).map_err(|source| ConfigError::Parse {
@@ -120,6 +133,7 @@ impl ServiceConfig {
             database_url,
             nats_url,
             nats_token,
+            nats_login,
             nats_kv_replicas,
             session_secret,
             otlp_endpoint,
@@ -275,6 +289,43 @@ mod tests {
             cfg.database_url,
             "postgres://codewire:p%40ss%20word@codewire-db-rw.dev:5432/codewire?sslmode=require"
         );
+    }
+
+    /// A service's own NATS user comes as a pair (#3542).
+    #[test]
+    fn a_nats_login_is_a_user_and_password_together() {
+        let with = |all: &'static [(&'static str, &'static str)]| {
+            ServiceConfig::from_lookup("coordinator", &vars(all))
+        };
+        let cfg = with(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("SESSION_SECRET", "y"),
+            ("NATS_USER", "coordinator"),
+            ("NATS_PASSWORD", "secret"),
+        ])
+        .unwrap();
+        assert_eq!(
+            cfg.nats_login,
+            Some(("coordinator".to_owned(), "secret".to_owned()))
+        );
+        let none = with(&[("DATABASE_URL", "postgres://x"), ("SESSION_SECRET", "y")]);
+        assert!(none.unwrap().nats_login.is_none());
+        assert!(matches!(
+            with(&[
+                ("DATABASE_URL", "postgres://x"),
+                ("SESSION_SECRET", "y"),
+                ("NATS_USER", "coordinator"),
+            ]),
+            Err(ConfigError::Missing("NATS_PASSWORD"))
+        ));
+        assert!(matches!(
+            with(&[
+                ("DATABASE_URL", "postgres://x"),
+                ("SESSION_SECRET", "y"),
+                ("NATS_PASSWORD", "secret"),
+            ]),
+            Err(ConfigError::Missing("NATS_USER"))
+        ));
     }
 
     #[test]

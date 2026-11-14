@@ -65,6 +65,21 @@ spec:
                 secretKeyRef:
                   name: nats-auth-token
                   key: token
+            # The coordinator's own NATS user, once infra issues it (#3542). It
+            # wins over the shared token above; until the Secret exists the
+            # token is used.
+            - name: NATS_USER
+              valueFrom:
+                secretKeyRef:
+                  name: nats-coordinator-login
+                  key: user
+                  optional: true
+            - name: NATS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: nats-coordinator-login
+                  key: password
+                  optional: true
             - name: MY_POD_IP
               valueFrom:
                 fieldRef:
