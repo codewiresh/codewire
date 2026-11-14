@@ -2205,6 +2205,8 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hmac 0.12.1",
+ "http-body-util",
+ "hyper",
  "hyper-util",
  "k8s-openapi",
  "kube",

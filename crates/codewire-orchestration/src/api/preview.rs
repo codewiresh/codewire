@@ -21,6 +21,9 @@ const PREVIEW_SERVICE_NAME: &str = "codewire-orchestration";
 pub(crate) mod authorization;
 mod browser;
 mod headers;
+mod upstream;
+
+pub use upstream::PreviewUpstream;
 
 /// Authorize one target, then return its response to the browser. A workload
 /// redirect must never cause the service to fetch another internal origin.
@@ -38,6 +41,8 @@ struct PreviewTarget {
     access: String,
     created_by: String,
     pod_ip: String,
+    /// The Pod's namespace, which names its daemon's Service.
+    namespace: String,
     isolation_tier: String,
 }
 
@@ -401,7 +406,8 @@ async fn resolve_preview_target(
     let rows = sqlx::query(
         r#"SELECT ep.id AS port_id, ep.port, e.id,
                   ep.access, e.created_by, e.state, e.isolation_tier,
-                  COALESCE(b.pod_ip, '') AS pod_ip
+                  COALESCE(b.pod_ip, '') AS pod_ip,
+                  COALESCE(b.namespace, '') AS namespace
              FROM environment_ports ep
              JOIN environments e ON e.id = ep.environment_id
              LEFT JOIN sandbox_environment_backend b ON b.environment_id = e.id
@@ -462,6 +468,9 @@ async fn resolve_preview_target(
             .try_get("created_by")
             .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?,
         pod_ip,
+        namespace: row
+            .try_get("namespace")
+            .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?,
         isolation_tier: row
             .try_get("isolation_tier")
             .map_err(|_| preview_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?,
@@ -480,13 +489,116 @@ async fn proxy_to_preview_target(
     target: &PreviewTarget,
 ) -> Response {
     let path_and_query = uri.path_and_query().map(|v| v.as_str()).unwrap_or("/");
+    let request_headers = headers::workload_request_headers(&headers, platform_bearer);
+    // Through the daemon to the workload's loopback when it can (#4357), so
+    // a server bound only to 127.0.0.1 answers; otherwise the Pod's address.
+    let response = if !target.namespace.is_empty()
+        && state
+            .preview_upstream
+            .forwards(&target.namespace, &target.env_id)
+            .await
+    {
+        proxy_forwarded(
+            state,
+            method,
+            path_and_query,
+            &request_headers,
+            body,
+            original_host,
+            target,
+        )
+        .await
+    } else {
+        proxy_by_pod_address(
+            state,
+            method,
+            path_and_query,
+            &request_headers,
+            body,
+            original_host,
+            target,
+        )
+        .await
+    };
+    if target.access != "public" || target.isolation_tier == "confidential" {
+        private_response(response)
+    } else {
+        response
+    }
+}
+
+/// Send the request through the environment's daemon, over a pooled
+/// connection to the port on the workload's loopback.
+async fn proxy_forwarded(
+    state: &ApiState,
+    method: axum::http::Method,
+    path_and_query: &str,
+    request_headers: &HeaderMap,
+    body: Body,
+    original_host: &str,
+    target: &PreviewTarget,
+) -> Response {
+    let Ok(port) = u16::try_from(target.port) else {
+        return preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable");
+    };
+    let Ok(upstream_uri) =
+        PreviewUpstream::uri(&target.namespace, &target.env_id, port, path_and_query)
+    else {
+        return preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable");
+    };
+    let mut request = Request::builder().method(method).uri(upstream_uri);
+    for (name, value) in request_headers.iter() {
+        request = request.header(name, value);
+    }
+    let Ok(request) = request
+        .header(header::HOST, original_host)
+        .header("x-forwarded-host", original_host)
+        .header("x-forwarded-proto", "https")
+        .body(body)
+    else {
+        return preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable");
+    };
+    match state.preview_upstream.send(request).await {
+        Ok(response) => {
+            let (parts, body) = response.into_parts();
+            preview_response_builder(parts.status, &parts.headers, original_host)
+                .body(stream_preview_response(
+                    http_body_util::BodyExt::into_data_stream(body),
+                    target.env_id.clone(),
+                ))
+                .unwrap_or_else(|_| {
+                    preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable")
+                })
+        }
+        Err(upstream::UpstreamError::NothingListens(_)) => preview_error(
+            StatusCode::BAD_GATEWAY,
+            "preview backend unreachable: nothing in the sandbox listens on this port",
+        ),
+        Err(error) => {
+            tracing::warn!(env = %target.env_id, error = %error, "preview proxy error");
+            preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable")
+        }
+    }
+}
+
+/// Send the request to the Pod's own address, for a daemon that doesn't
+/// forward. A server bound only to loopback doesn't answer this way.
+async fn proxy_by_pod_address(
+    state: &ApiState,
+    method: axum::http::Method,
+    path_and_query: &str,
+    request_headers: &HeaderMap,
+    body: Body,
+    original_host: &str,
+    target: &PreviewTarget,
+) -> Response {
     let target_url = format!("http://{}:{}{}", target.pod_ip, target.port, path_and_query);
 
     let Ok(method) = method.as_str().parse::<reqwest::Method>() else {
         return preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable");
     };
     let mut req = state.http_client.request(method, target_url);
-    for (name, value) in headers::workload_request_headers(&headers, platform_bearer).iter() {
+    for (name, value) in request_headers.iter() {
         req = req.header(name.as_str(), value.as_bytes());
     }
     req = req
@@ -506,14 +618,9 @@ async fn proxy_to_preview_target(
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let builder = preview_response_builder(status, resp.headers(), original_host);
     let body = stream_preview_response(resp.bytes_stream(), target.env_id.clone());
-    let response = builder
+    builder
         .body(body)
-        .unwrap_or_else(|_| preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable"));
-    if target.access != "public" || target.isolation_tier == "confidential" {
-        private_response(response)
-    } else {
-        response
-    }
+        .unwrap_or_else(|_| preview_error(StatusCode::BAD_GATEWAY, "preview backend unreachable"))
 }
 
 fn private_response(mut response: Response) -> Response {

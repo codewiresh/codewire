@@ -65,6 +65,9 @@ pub struct ApiState {
     pub frontend_url: String,
     /// Reusable HTTP client for app preview reverse proxy requests.
     pub http_client: reqwest::Client,
+    /// The preview proxy's pooled way into sandboxes, through their daemons
+    /// (#4357).
+    pub preview_upstream: preview::PreviewUpstream,
     /// The lifecycle trigger: Temporal is the only orchestrator, so this
     /// is always present (the binary fails fast if it can't connect).
     pub temporal_trigger: Arc<TemporalTrigger>,

@@ -102,6 +102,16 @@ is otherwise unchanged. WebSocket upgrade support is not added by this flow.
 Application redirects are returned to the browser unchanged; the proxy never
 follows them into a different target on the application's behalf.
 
+## How the proxy reaches the app
+
+The proxy sends each request through the environment's daemon (#4357).
+- Each upstream connection is one `ForwardTcp` stream to the preview's port on the workload's loopback, `127.0.0.1` then `::1`, made as the workload user. A server bound only to loopback answers, and so does one on `0.0.0.0`.
+- Connections are pooled per environment and port, for 30 seconds and eight at most, so a page's assets reuse them.
+- The daemon channel for a forward has no request deadline; only connecting is bounded.
+- A daemon without `forward.workload_loopback.v1`, in a Pod from before it, is reached at the Pod's own address, as before. The proxy asks each daemon once and reuses the answer for five minutes.
+- Nothing listening on the port is a 502, "preview backend unreachable: nothing in the sandbox listens on this port". The daemon refuses its platform listeners (2222, 38081).
+- Code: `crates/codewire-orchestration/src/api/preview/upstream.rs`.
+
 Storage is bounded per authenticated user/session and distinct preview scope.
 Starting a challenge needs no account, so steering a signed-in browser through
 eight challenges for previews it can open fills that session's quota for up to

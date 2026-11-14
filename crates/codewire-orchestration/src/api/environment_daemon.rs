@@ -58,13 +58,17 @@ const DAEMON_LAUNCH_TIMEOUT: Duration = Duration::from_secs(40);
 enum DaemonRequestBudget {
     Control,
     Launch,
+    /// A preview's forwarded connection (#4357): it lasts as long as the
+    /// browser's, so only connecting is bounded.
+    Stream,
 }
 
 impl DaemonRequestBudget {
-    fn timeout(self) -> Duration {
+    fn timeout(self) -> Option<Duration> {
         match self {
-            Self::Control => DAEMON_CONTROL_TIMEOUT,
-            Self::Launch => DAEMON_LAUNCH_TIMEOUT,
+            Self::Control => Some(DAEMON_CONTROL_TIMEOUT),
+            Self::Launch => Some(DAEMON_LAUNCH_TIMEOUT),
+            Self::Stream => None,
         }
     }
 }
@@ -1204,6 +1208,29 @@ async fn send_app_ports(channel: Channel, token: &str, ports: Vec<i32>) -> AppRe
     Ok(())
 }
 
+/// A daemon client for an environment's bound Pod whose calls have no
+/// deadline, for the preview proxy's forwarded connections (#4357).
+pub(crate) async fn streaming_daemon_client(
+    pool: &PgPool,
+    runtime: Option<&dyn RuntimeDriver>,
+    session_secret: &str,
+    endpoints: &EnvironmentDaemonEndpointOverrides,
+    namespace: &str,
+    environment_id: &str,
+) -> AppResult<codewire_daemon::client::SessionClient> {
+    let (channel, token) = daemon_channel_for_endpoint(
+        pool,
+        runtime,
+        session_secret,
+        environment_id,
+        endpoints.endpoint(namespace, environment_id),
+        DaemonRequestBudget::Stream,
+    )
+    .await?;
+    codewire_daemon::client::SessionClient::from_channel(channel, token)
+        .map_err(|_| AppError::InternalMsg("failed to authorize environment daemon".into()))
+}
+
 pub(crate) fn cluster_daemon_endpoint(namespace: &str, environment_id: &str) -> String {
     format!(
         "http://{}.{}.svc.cluster.local:{}",
@@ -1240,15 +1267,18 @@ async fn daemon_channel_for_endpoint(
             AppError::InternalMsg("failed to resolve environment daemon".into())
         })?
         .connect_timeout(DAEMON_CONNECT_TIMEOUT)
-        .executor(codewire_server_core::span_free::DetachedExecutor)
-        .timeout(budget.timeout())
-        .connect()
-        .await
-        .map_err(|error| {
-            let error = daemon_connect_failure(error);
-            tracing::warn!(environment_id, %endpoint, %error, "connect environment daemon failed");
-            AppError::Upstream("environment daemon is unavailable".into())
-        })?;
+        .executor(codewire_server_core::span_free::DetachedExecutor);
+    let channel = match budget.timeout() {
+        Some(timeout) => channel.timeout(timeout),
+        None => channel,
+    }
+    .connect()
+    .await
+    .map_err(|error| {
+        let error = daemon_connect_failure(error);
+        tracing::warn!(environment_id, %endpoint, %error, "connect environment daemon failed");
+        AppError::Upstream("environment daemon is unavailable".into())
+    })?;
     Ok((channel, token))
 }
 
@@ -1466,13 +1496,16 @@ mod tests {
         assert_eq!(DAEMON_CONNECT_TIMEOUT, Duration::from_secs(5));
         assert_eq!(
             DaemonRequestBudget::Control.timeout(),
-            Duration::from_secs(5)
+            Some(Duration::from_secs(5))
         );
         let projection =
             Duration::from_millis(codewire_workload_secrets::MAX_PROJECTION_LIFETIME_MS);
         assert_eq!(projection, Duration::from_secs(30));
-        assert!(DaemonRequestBudget::Launch.timeout() >= projection + Duration::from_secs(10));
-        assert!(DaemonRequestBudget::Launch.timeout() < Duration::from_secs(60));
+        let launch = DaemonRequestBudget::Launch.timeout().unwrap();
+        assert!(launch >= projection + Duration::from_secs(10));
+        assert!(launch < Duration::from_secs(60));
+        // A forwarded preview connection lasts as long as the browser's.
+        assert_eq!(DaemonRequestBudget::Stream.timeout(), None);
     }
 
     #[test]

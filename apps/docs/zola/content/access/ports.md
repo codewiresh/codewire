@@ -14,8 +14,10 @@ address, so it publishes on `127.0.0.1` of your machine instead.
 
 ## Hosted sandbox: preview URLs
 
-A preview forwards HTTPS requests to one port inside the sandbox. There is no
-external port number to choose; the URL is
+A preview forwards HTTPS requests to one port inside the sandbox, on the
+sandbox's own loopback: a server listening on `127.0.0.1`, as most dev servers
+do, answers, and so does one on `0.0.0.0`. There is no external port number to
+choose; the URL is
 
 ```text
 https://{label}-{sandbox-id-prefix}-{organization-slug}.{preview domain}

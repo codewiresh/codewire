@@ -1485,7 +1485,8 @@ fn local_session_error(error: SessionClientError) -> connectrpc::ConnectError {
         }
         SessionClientError::InvalidEndpoint
         | SessionClientError::InvalidCredential
-        | SessionClientError::MissingSessionRecord => {
+        | SessionClientError::MissingSessionRecord
+        | SessionClientError::InvalidForwardFrame => {
             connectrpc::ConnectError::internal("local environment session request failed")
         }
     }

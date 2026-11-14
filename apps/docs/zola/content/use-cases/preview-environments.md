@@ -1,7 +1,7 @@
 ---
 title: Preview environments
 description: A hosted sandbox for each branch or pull request, with the app running in a session and an HTTPS preview URL, that deletes itself after a lifetime you choose.
-updated: 2026-11-08
+updated: 2026-11-14
 weight: 2
 aliases: ["/use-cases/preview-per-pull-request"]
 ---
@@ -47,6 +47,9 @@ cw logs pr-42 --session web
 ✓ Started session pr-42/web · cloud
 Serving HTTP on 0.0.0.0 port 3000 (http://0.0.0.0:3000/) ...
 ```
+
+The server may listen on `0.0.0.0` or only on `127.0.0.1`; the preview reaches
+either.
 
 Start a server as a session, not with `--startup`: setup waits for the
 startup script to finish, so a server there keeps the sandbox in setup and

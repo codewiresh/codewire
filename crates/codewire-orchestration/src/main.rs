@@ -667,6 +667,12 @@ async fn main() -> anyhow::Result<()> {
         frontend_url: std::env::var("FRONTEND_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:5173".into()),
         http_client: codewire_orchestration::api::preview::http_client()?,
+        preview_upstream: codewire_orchestration::api::preview::PreviewUpstream::new(
+            pool.clone(),
+            kube.clone().map(KubernetesDriver::shared),
+            cfg.session_secret.clone(),
+            environment_daemon_endpoints.clone(),
+        ),
         temporal_trigger,
         secrets: secrets.clone(),
         auth: auth.clone(),

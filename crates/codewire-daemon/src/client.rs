@@ -26,6 +26,7 @@ use zeroize::Zeroizing;
 
 pub const HOSTED_WORKSPACE_AUTHORIZATION: &str = "x-codewire-workspace-authorization-bin";
 
+mod forward;
 mod hosted;
 pub use hosted::HostedCredentialBridgeDrain;
 
@@ -54,6 +55,8 @@ pub enum SessionClientError {
     NotReady { message: String },
     #[error("local environment daemon does not support required capability {capability}")]
     MissingCapability { capability: &'static str },
+    #[error("environment daemon answered a forward with an unexpected frame")]
+    InvalidForwardFrame,
 }
 
 impl SessionClientError {

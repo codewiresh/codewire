@@ -79,7 +79,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 kube = { workspace = true, features = ["jsonpatch"] }
 futures = { workspace = true }
-hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+# The preview proxy's pooled client over ForwardTcp streams (#4357).
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
 reqwest = { workspace = true }
 k8s-openapi = { workspace = true }
 sqlx = { workspace = true }
