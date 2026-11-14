@@ -3,9 +3,9 @@
 A host is a computer, yours or your team's, that runs Codewire VMs for your
 organization: `cw host` enrolls it and keeps its agent connected, `cw hosts`
 lists the organization's hosts, and the dashboard's Hosts page shows them.
-`SPEC.md` has no section for hosts yet, so this file is the journey for the
-placement program #3609: slice 1 (hosts enroll, connect and show their state)
-and slice 2 (environments created on a host). The commands are in the
+The contract is in [`SPEC.md`, section 5, Hosts](../../SPEC.md#hosts). This
+file is the journey for the placement program #3609: slice 1 (hosts enroll,
+connect and show their state) and slice 2 (environments created on a host). The commands are in the
 CLI reference, `apps/docs/zola/content/reference/cli/hosts.md`. The format is
 in [README.md](README.md).
 

@@ -85,7 +85,9 @@ all three.
 | Trusted host | `cw create --local --type host --name app --path .` | the user's machine, as their own user | none: process ownership only | a host daemon owned by the user |
 
 A local VM needs no account. A trusted host session has no containment: an
-agent there can read and change anything the user can.
+agent there can read and change anything the user can. A
+[host](#hosts) is a computer enrolled to run VMs for an organization; hosts
+enroll and connect today, and no environment runs on one yet.
 
 ### Sessions and managed agents
 
@@ -455,6 +457,56 @@ by default; `CW_HOST_DATA_DIR` overrides it). VM, secret and network flags are
 refused. Codewire provides owned process cleanup only. Stop and remove retire
 the daemon's runtime and keep the project directory. Linux and macOS are the
 admitted hosts.
+
+### Hosts
+
+A **host** is a computer that a member enrolls to run Codewire VMs for their
+organization, through the same local VM runtime and supervisor as `cw
+--local`. It is not a trusted host: its environments are VMs. Hosts are a
+preview (#3609): today a host enrolls, connects and shows its state, and no
+environment runs on one yet. The user guide is
+`apps/docs/zola/content/environments/hosts.md`; the commands are in
+`reference/cli/hosts.md` beside it.
+
+- **Record.** `cw host enroll` (`HostService.EnrollHost`, `proto/codewire/v1/host.proto`)
+  creates an Ed25519 key on the computer and registers its public key; the
+  private key never leaves the computer. A host belongs to one organization and
+  one owner, has a platform (`linux-x86_64-kvm` or `darwin-arm64-vz`), and its
+  name is unique among the organization's hosts that are not revoked. A key
+  belongs to one host record ever (migration `0015_hosts.sql`). The key is
+  kept in the OS keyring (Secret Service, Keychain), or, on a Linux computer
+  with no Secret Service, in a file only the user can read; the local
+  enrollment beside it holds no secret.
+- **Who may use it.** Enrolling grants nothing. The owner offers VMs with
+  `cw host provide` (at least a maximum VM count; vCPU, memory and disk caps
+  are optional) and lets named members or the whole organization place
+  environments on it with `cw host grant`. A grant never follows from
+  membership alone.
+- **The session.** `cw host run` is the host agent. It opens one outbound
+  HTTPS stream, `HostAgentService.AttachHost` (`proto/codewire/v1/host_agent.proto`),
+  and nothing connects in to a host. The stream carries no bearer credential:
+  the host opens with its ID, the control plane answers with a fresh nonce,
+  and the host signs `codewire-host-attach-v1`, its ID and the nonce with its
+  key, within 10 seconds of opening. The control plane pings every 15 seconds,
+  asks for a new proof every 10 minutes (30 seconds to answer), and ends a
+  session the host has gone quiet on. A host unheard for 45 seconds shows as
+  offline. The agent connects again by itself, through `HTTPS_PROXY` when it is
+  set. `OpenHostTunnel` is in the contract and refused until a later slice uses
+  it.
+- **Running the agent.** `cw host service install` keeps it running as a user
+  service: systemd `--user` on Linux, a LaunchAgent on macOS. On Linux it
+  names `loginctl enable-linger` when linger is off, which keeps the agent
+  running while the user is logged out and starts it at boot.
+- **Seen from anywhere.** `cw hosts` and the dashboard's Hosts page list the
+  organization's hosts with their state, revoked ones included.
+- **Ending.** `cw host revoke` (the owner, or an organization owner or admin)
+  is final: the session is told and ended at its next message, the record
+  stays, and its key can never be enrolled again. `cw host leave` removes this
+  computer's host: its record unless revoked, its key, its service and the
+  local enrollment.
+
+The journey, with what has been observed on Dev, is
+[docs/journeys/hosts.md](docs/journeys/hosts.md).
 
 ## 6. Contracts
 
