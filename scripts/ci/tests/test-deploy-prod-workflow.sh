@@ -367,7 +367,10 @@ fi
 
 # The join script never builds: a built pair is joined from both exact
 # platform digests, a reused pair must already exist.
-stub_tree="$(mktemp -d)"
+# The stub runs, so it lives in the repository's .tmp: a workstation /tmp may be
+# noexec, where a stub there cannot run and every join looks failed.
+mkdir -p "$ROOT/.tmp"
+stub_tree="$(mktemp -d "$ROOT/.tmp/deploy-prod-join.XXXXXX")"
 trap 'rm -rf -- "$contract_tree" "$stub_tree"' EXIT
 cat >"$stub_tree/builder" <<'STUB'
 #!/usr/bin/env bash
