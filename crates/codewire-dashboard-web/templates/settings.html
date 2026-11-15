@@ -24,7 +24,7 @@
         <div class="cw-settings-layout">
           {% let settings_section = "account" %}{% include "settings-nav.html" %}
           <div class="cw-settings-content cw-account-page">
-        <header class="cw-page-header"><div><h1 class="cw-page-title">Account</h1><p class="cw-page-description">Your account details, security, sign-in methods and browser sessions.</p></div></header>
+        <header class="cw-page-header"><div><h1 class="cw-page-title">Account</h1><p class="cw-page-description">Your account details, organizations, security, sign-in methods and browser sessions.</p></div></header>
         <section id="account-details" class="cw-card cw-settings-card" aria-labelledby="account-title">
           <header class="cw-card-header"><h2 id="account-title" class="cw-card-title">Account details</h2><p class="cw-card-description">Your Codewire account identity. GitHub connections do not change it.</p></header>
           <div class="cw-card-content">
@@ -35,6 +35,30 @@
             <div><dt>Email</dt><dd class="cw-settings-email"><span>{{ settings.account_email }}</span>{% if settings.email_verified %}<span class="cw-badge" data-tone="success">Verified</span>{% else %}<span class="cw-badge" data-tone="warning">Not verified</span><form method="post" action="/settings/_actions/send-verification"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline cw-button--small" type="submit">Send verification email</button></form>{% endif %}</dd></div>
             <div><dt>Created</dt><dd>{{ settings.account_created }}</dd></div>
           </dl></div>
+        </section>
+        <section id="organizations" class="cw-card cw-settings-card" aria-labelledby="organizations-title">
+          <header class="cw-card-header"><h2 id="organizations-title" class="cw-card-title">Organizations</h2><p class="cw-card-description">The organizations you belong to, and your role in each.</p></header>
+          <div class="cw-card-content">
+          {% if !settings.organizations_message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ settings.organizations_message }}</p>{% endif %}
+          {% if !settings.organizations_error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ settings.organizations_error }}</p>{% endif %}
+          {% if !settings.organizations_available %}<p class="cw-alert cw-alert--warning" role="status">Your organizations could not be loaded. Reload to try again.</p>
+          {% else if settings.organizations.is_empty() %}<p>You're not in an organization yet.</p>
+          <div class="cw-form-actions"><a class="cw-button cw-button--small" href="/organizations/new/">Create an organization</a><a class="cw-button cw-button--outline cw-button--small" href="/settings/invitations/">See your invitations</a></div>
+          {% else %}<ul class="cw-row-list cw-account-organizations">
+            {% for org in settings.organizations %}<li class="cw-account-organization">
+              <header><h3><a href="{{ org.url }}">{{ org.display_name() }}</a></h3><p>{{ org.role }}{% if !org.joined.is_empty() %} · Joined {{ org.joined }}{% endif %}</p>{% if org.only_owner %}<p>You're its only owner. Make someone else an owner first, or delete the organization.</p>{% endif %}</header>
+              {% if org.only_owner %}<button class="cw-button cw-button--outline cw-button--small" type="button" disabled>Leave</button>{% else %}<button class="cw-button cw-button--outline cw-button--small" type="button" data-dialog-open="leave-organization-{{ org.slug }}" aria-haspopup="dialog" aria-controls="leave-organization-{{ org.slug }}">Leave</button>
+              <dialog class="cw-dialog" data-dialog id="leave-organization-{{ org.slug }}" aria-labelledby="leave-title-{{ org.slug }}">
+                <header class="cw-dialog-header"><h2 id="leave-title-{{ org.slug }}">Leave {{ org.display_name() }}?</h2></header>
+                <div class="cw-dialog-body"><p>You lose access to its sandboxes, secrets and billing at once. An owner or admin can invite you again.</p></div>
+                <form method="post" action="/settings/_actions/organizations/leave">
+                  <input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><input type="hidden" name="org_id" value="{{ org.id }}">
+                  <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close autofocus>Cancel</button><button class="cw-button" type="submit">Leave organization</button></footer>
+                </form>
+              </dialog>{% endif %}
+            </li>{% endfor %}
+          </ul>{% endif %}
+          </div>
         </section>
         <section id="security" class="cw-card cw-settings-card" aria-labelledby="security-title">
           <header class="cw-card-header"><h2 id="security-title" class="cw-card-title">Security</h2></header>

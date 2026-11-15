@@ -11,13 +11,13 @@ feature on Production. The format is in [README.md](README.md).
 ## Where the journey stands
 
 Updated 2026-11-15. Invite, email, accept and remove are observed on Dev
-(source 6c3651dcf). On Production (v0.4.18, source a9dd8b270), the
-invitation and its email's send are observed; the email's arrival is
-observed on Dev only. The account's hourly limit is observed on Dev and on
-Production (v0.4.19, source 92672c5c4). The organization's hourly limit,
-and the dashboard's refusal for both, are observed on Dev (source
-e8e593b86). The pending cap and the unverified-inviter refusal are observed
-on Kind (source 35bacfcbb).
+(source 6c3651dcf), and leaving from `cw` on Dev (source 20f2f4b0a). On
+Production (v0.4.18, source a9dd8b270), the invitation and its email's send
+are observed; the email's arrival is observed on Dev only. The account's
+hourly limit is observed on Dev and on Production (v0.4.19, source
+92672c5c4). The organization's hourly limit, and the dashboard's refusal for
+both, are observed on Dev (source e8e593b86). The pending cap and the
+unverified-inviter refusal are observed on Kind (source 35bacfcbb).
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -25,7 +25,7 @@ on Kind (source 35bacfcbb).
 | `invite-email` | observed 2026-11-13 on 6c3651dcf (#3847) | sent 2026-11-14 on a9dd8b270, arrival not observed (#3847) |
 | `invite-accept` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
 | `invite-remove` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
-| `org-leave` | not yet observed | not yet observed |
+| `org-leave` | the CLI observed 2026-11-15 on 20f2f4b0a (#4519); the account page not yet observed | not yet observed |
 | `invite-limits` | the account's hourly limit observed 2026-11-14 on 09c05f268; the organization's limit and the dashboard refusal observed 2026-11-15 on e8e593b86 (#4457); the pending cap observed on Kind only, 2026-11-15 on 35bacfcbb (#4457) | the account's hourly limit observed 2026-11-14 on 92672c5c4 (#4457); the rest not yet observed |
 | `invite-unverified` | observed on Kind only, 2026-11-15 on 35bacfcbb (#4457) | not yet observed |
 
@@ -256,7 +256,16 @@ on Kind (source 35bacfcbb).
     leave it without an owner. The script uses `codewire-dev-invitee-walk`.
   - Deleting an organization finishes in the background. A rerun soon after
     can still find `codewire-dev-invitee-walk` while it is being deleted.
-- **Observed:** not yet observed.
+- **Observed:** Dev, 2026-11-15, source 20f2f4b0a (deploy-dev run 50777),
+  `cw` built from 528ac2680, by `invitations-journey.sh`: the invitee joined
+  again and left with `--yes` ("Left Codewire Dev Smoke
+  (codewire-dev-smoke)."); the inviter's `cw org members` then listed only
+  the owner, and the invitee's `cw org list` said "You're not in an
+  organization yet.". In its own `codewire-dev-invitee-walk` the invitee was
+  refused as the only owner, the organization was still listed, and it was
+  deleted (#4519). Not yet observed: the prompt and "Not left.", an owner
+  leaving while another remains (covered by the database tests), and the
+  account page's card.
 
 ## `invite-limits`: invitations stop at a limit and say when to try again
 

@@ -390,6 +390,12 @@ pub(crate) struct SettingsPageView {
     pub(crate) sessions_replaced: bool,
     pub(crate) two_factor: TwoFactorDialogView,
     pub(crate) sign_in_methods: SignInMethodsView,
+    /// The organizations the account belongs to (#4519), and whether they
+    /// could be read; with the outcome of leaving one.
+    pub(crate) organizations: Vec<OrganizationRow>,
+    pub(crate) organizations_available: bool,
+    pub(crate) organizations_message: String,
+    pub(crate) organizations_error: String,
 }
 
 /// The Account page's Sign-in methods card: the password and each configured
@@ -894,6 +900,10 @@ pub(crate) struct OrganizationRow {
     pub(crate) can_admin: bool,
     pub(crate) billing_plan: String,
     pub(crate) url: String,
+    /// When the user joined, for the account page (#4519); empty if unknown.
+    pub(crate) joined: String,
+    /// The user is its only owner, so cannot leave it.
+    pub(crate) only_owner: bool,
 }
 
 impl OrganizationRow {
@@ -922,6 +932,8 @@ mod organization_row_tests {
             can_admin: true,
             billing_plan: String::new(),
             url: String::new(),
+            joined: String::new(),
+            only_owner: false,
         };
         assert_eq!(row("Alpha team").display_name(), "Alpha team");
         assert_eq!(row("  ").display_name(), "alpha-team");

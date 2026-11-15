@@ -64,9 +64,19 @@ pub(crate) async fn organizations(
                         .any(|assignment| assignment == "super_admin"),
                 billing_plan: membership.billing_plan,
                 url: format!("/{}/", organization.slug),
+                joined: joined_date(membership.joined_at.into_option().map(|at| at.seconds)),
+                only_owner: membership.only_owner,
             })
         })
         .collect())
+}
+
+/// "Nov 13, 2026" for the account page (#4519); empty when unknown.
+fn joined_date(seconds: Option<i64>) -> String {
+    seconds
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .map(|at| at.format("%b %-d, %Y").to_string())
+        .unwrap_or_default()
 }
 
 pub(crate) async fn create_organization(

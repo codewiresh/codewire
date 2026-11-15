@@ -127,6 +127,8 @@ fn organization_rows(
             id: organization.id,
             name: organization.name,
             url: format!("/{}/", organization.slug),
+            joined: String::new(),
+            only_owner: false,
             slug: organization.slug,
             role,
             can_admin: matches!(role, "Owner" | "Admin")

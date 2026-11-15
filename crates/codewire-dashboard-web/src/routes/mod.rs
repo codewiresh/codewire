@@ -503,6 +503,10 @@ pub(crate) fn router() -> Router<AppState> {
             post(credentials::update_identity_action),
         )
         .route(
+            "/settings/_actions/organizations/leave",
+            post(settings::leave_organization_action).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
             "/settings/_actions/sessions/revoke",
             post(settings::revoke_session_action).layer(DefaultBodyLimit::max(2048)),
         )

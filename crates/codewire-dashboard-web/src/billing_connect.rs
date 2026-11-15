@@ -801,6 +801,8 @@ mod tests {
             role: "Owner",
             can_admin: true,
             url: "/test/".into(),
+            joined: String::new(),
+            only_owner: false,
         })
     }
 

@@ -660,6 +660,8 @@ fn the_design_fixtures_are_what_the_home_renders() {
         can_admin,
         billing_plan: String::new(),
         url: format!("/{slug}/"),
+        joined: String::new(),
+        only_owner: false,
     };
     // 2026-11-10 23:20 UTC: the last 24 hours are that day's.
     let now = 1_794_352_800;

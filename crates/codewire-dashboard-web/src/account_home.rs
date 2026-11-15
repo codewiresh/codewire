@@ -354,6 +354,8 @@ mod tests {
             can_admin,
             billing_plan: String::new(),
             url: format!("/{slug}/"),
+            joined: String::new(),
+            only_owner: false,
         }
     }
 

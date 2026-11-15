@@ -459,6 +459,8 @@ fn organization_template_escapes_upstream_data() {
         can_admin: true,
         billing_plan: "trial".into(),
         url: "/safe/".into(),
+        joined: String::new(),
+        only_owner: false,
     }];
     let body = OrganizationListTemplate {
         organizations: &organizations,

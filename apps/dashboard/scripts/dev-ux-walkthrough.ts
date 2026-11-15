@@ -320,7 +320,7 @@ async function settings(page: Page, slug: string, width: number): Promise<void> 
       // A plain "Account" title and one short description, with no eyebrow.
       const header = page.locator(".cw-settings-content > .cw-page-header");
       await pageTitle(header, "Account");
-      await expect(header.locator("p")).toHaveText(["Your account details, security, sign-in methods and browser sessions."]);
+      await expect(header.locator("p")).toHaveText(["Your account details, organizations, security, sign-in methods and browser sessions."]);
       // The password row leads Sign-in methods; providers follow when configured.
       // Its heading carries the method's state beside the name (#4275).
       const methods = page.locator("#sign-in-methods");

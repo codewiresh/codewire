@@ -108,6 +108,8 @@ pub(super) async fn settings(
     page.settings.account_message = approved_account_message(&query.message).to_owned();
     page.settings.account_error = approved_account_error(&query.error).to_owned();
     page.settings.security_error = approved_security_error(&query.security).to_owned();
+    page.settings.organizations_message = approved_organizations_message(&query.message).to_owned();
+    page.settings.organizations_error = approved_organizations_error(&query.error).to_owned();
     page.settings.two_factor.active =
         approved_dialog(&query.dialog, page.settings.two_factor_enabled);
     super::sign_in_methods::apply_notice(
@@ -131,6 +133,7 @@ async fn account_page(
     selected_org: &str,
     cursor: Option<&str>,
 ) -> Result<AccountPage, Response> {
+    let account_organizations = organizations.as_ref().ok().cloned();
     let dashboard = match super::dashboard::personal_settings_shell_view_from_rows(
         state,
         headers,
@@ -173,6 +176,8 @@ async fn account_page(
         first_sessions_url: format!("{}#sessions", SETTINGS_PATH.to_owned()),
         csrf_token: page_csrf_token(headers),
         sign_in_methods,
+        organizations_available: account_organizations.is_some(),
+        organizations: account_organizations.unwrap_or_default(),
         ..Default::default()
     };
     if let Some(inventory) = inventory {
@@ -1034,6 +1039,83 @@ fn approved_account_error(code: &str) -> &'static str {
     }
 }
 
+fn approved_organizations_message(code: &str) -> &'static str {
+    match code {
+        "organization-left" => "You left the organization.",
+        _ => "",
+    }
+}
+
+fn approved_organizations_error(code: &str) -> &'static str {
+    match code {
+        "last-owner" => "Make someone else an owner first, or delete the organization.",
+        "leave-failed" => "You could not leave the organization. Reload and try again.",
+        _ => "",
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct LeaveOrganizationForm {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    org_id: String,
+}
+
+/// Leaves one organization: the account's own membership removal (#4519).
+/// The server refuses the last owner; the page says what to do instead.
+pub(super) async fn leave_organization_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    form: Result<Form<LeaveOrganizationForm>, axum::extract::rejection::FormRejection>,
+) -> Response {
+    let Ok(Form(form)) = form else {
+        return private(error_page(WebError::Forbidden));
+    };
+    let identity = match authenticated_identity(&state, &headers).await {
+        Ok(identity) => identity,
+        Err(WebError::Unauthorized) => return private(login_redirect(SETTINGS_PATH, &headers)),
+        Err(error) => return private(error_page(error)),
+    };
+    let cookie = match mutation_cookie(&state, &headers, &form.csrf, SETTINGS_PATH).await {
+        Ok(cookie) => cookie,
+        Err(response) => return private(response),
+    };
+    let left = crate::organization_connect::remove_member(
+        &state,
+        cookie,
+        form.org_id,
+        identity.id.clone(),
+    )
+    .await;
+    private(match leave_outcome(&left) {
+        Some((code, error)) => organizations_redirect(code, error, &headers),
+        None => login_redirect(SETTINGS_PATH, &headers),
+    })
+}
+
+/// The page outcome of leaving: a message or error code, or `None` when the
+/// session ended and the user must sign in again.
+fn leave_outcome(left: &Result<(), connectrpc::ConnectError>) -> Option<(&'static str, bool)> {
+    match left {
+        Ok(()) => Some(("organization-left", false)),
+        Err(error) if error.code == ErrorCode::Unauthenticated => None,
+        Err(error) if crate::view::connect_error_reason(error).as_deref() == Some("LAST_OWNER") => {
+            Some(("last-owner", true))
+        }
+        Err(_) => Some(("leave-failed", true)),
+    }
+}
+
+fn organizations_redirect(code: &str, error: bool, headers: &HeaderMap) -> Response {
+    let key = if error { "error" } else { "message" };
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair(key, code);
+    redirect(
+        format!("{SETTINGS_PATH}?{}#organizations", query.finish()),
+        headers,
+    )
+}
+
 fn approved_message(code: &str) -> &'static str {
     match code {
         "session-revoked" => {
@@ -1098,6 +1180,117 @@ mod tests {
             sidebar_collapsed: false,
             support_mailto: String::new(),
         }
+    }
+
+    fn organization(slug: &str, role: &'static str, only_owner: bool) -> OrganizationRow {
+        OrganizationRow {
+            id: format!("id-{slug}"),
+            name: slug.to_uppercase(),
+            slug: slug.to_owned(),
+            role,
+            can_admin: role != "Member",
+            billing_plan: String::new(),
+            url: format!("/{slug}/"),
+            joined: "Nov 13, 2026".into(),
+            only_owner,
+        }
+    }
+
+    fn render_organizations(settings: &SettingsPageView) -> String {
+        SettingsTemplate {
+            view: &dashboard_view(),
+            settings,
+        }
+        .render()
+        .expect("render settings")
+    }
+
+    /// The account page lists each organization with the role and when the
+    /// user joined, and offers Leave behind a confirmation; the only owner
+    /// is told why it cannot leave (#4519).
+    #[test]
+    fn organizations_are_listed_with_their_role_and_leave_is_confirmed_or_explained() {
+        let settings = SettingsPageView {
+            csrf_token: "csrf".into(),
+            organizations_available: true,
+            organizations: vec![
+                organization("acme", "Member", false),
+                organization("solo", "Owner", true),
+            ],
+            ..Default::default()
+        };
+        let body = render_organizations(&settings);
+
+        assert!(body.contains(r#"<a href="/acme/">ACME</a>"#));
+        assert!(body.contains("Member · Joined Nov 13, 2026"));
+        assert!(body.contains(r#"data-dialog-open="leave-organization-acme""#));
+        assert!(body.contains("Leave ACME?"));
+        assert!(body.contains(r#"<input type="hidden" name="org_id" value="id-acme">"#));
+        assert!(body.contains(r#"action="/settings/_actions/organizations/leave""#));
+
+        assert!(body.contains(
+            "You're its only owner. Make someone else an owner first, or delete the organization."
+        ));
+        assert!(!body.contains(r#"data-dialog-open="leave-organization-solo""#));
+        assert!(!body.contains(r#"value="id-solo""#));
+    }
+
+    #[test]
+    fn no_organization_offers_create_and_invitations_and_an_outage_says_so() {
+        let empty = SettingsPageView {
+            organizations_available: true,
+            ..Default::default()
+        };
+        let body = render_organizations(&empty);
+        assert!(body.contains("You're not in an organization yet."));
+        assert!(body.contains(r#"href="/organizations/new/""#));
+        assert!(body.contains(r#"href="/settings/invitations/""#));
+
+        let unavailable = render_organizations(&SettingsPageView::default());
+        assert!(unavailable.contains("Your organizations could not be loaded."));
+        assert!(!unavailable.contains("You're not in an organization yet."));
+    }
+
+    #[test]
+    fn leaving_reports_its_outcome_and_names_the_last_owner_rule() {
+        use connectrpc::{ConnectError, ErrorCode};
+        assert_eq!(leave_outcome(&Ok(())), Some(("organization-left", false)));
+        assert_eq!(
+            leave_outcome(&Err(ConnectError::new(
+                ErrorCode::Unauthenticated,
+                "signed out"
+            ))),
+            None
+        );
+        assert_eq!(
+            leave_outcome(&Err(ConnectError::new(ErrorCode::Internal, "boom"))),
+            Some(("leave-failed", true))
+        );
+        let mut last_owner = ConnectError::new(
+            ErrorCode::FailedPrecondition,
+            "you are the organization's only owner; make someone else an owner first, or delete the organization",
+        );
+        last_owner
+            .details
+            .push(connectrpc::ErrorDetail::from_message(
+                "google.rpc.ErrorInfo",
+                &codewire_proto::google::rpc::ErrorInfo {
+                    domain: "codewire.sh".into(),
+                    reason: "LAST_OWNER".into(),
+                    ..Default::default()
+                },
+            ));
+        assert_eq!(leave_outcome(&Err(last_owner)), Some(("last-owner", true)));
+        assert_eq!(
+            approved_organizations_error("last-owner"),
+            "Make someone else an owner first, or delete the organization."
+        );
+        assert_eq!(
+            approved_organizations_message("organization-left"),
+            "You left the organization."
+        );
+        assert_eq!(approved_organizations_message("session-revoked"), "");
+        assert_eq!(approved_message("organization-left"), "");
     }
 
     #[test]
