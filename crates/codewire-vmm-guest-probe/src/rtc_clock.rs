@@ -43,6 +43,12 @@ pub(crate) fn follow_if_requested() -> Result<()> {
     Ok(())
 }
 
+/// Whether this boot follows the RTC: its host is a Mac, whose
+/// Virtualization.framework stops the guest's clocks while the VM is paused.
+pub(crate) fn followed() -> bool {
+    fs::read_to_string("/proc/cmdline").is_ok_and(|command_line| requested(&command_line))
+}
+
 fn requested(command_line: &str) -> bool {
     command_line
         .split_ascii_whitespace()

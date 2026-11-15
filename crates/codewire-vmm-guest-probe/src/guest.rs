@@ -292,6 +292,7 @@ pub fn run_init() -> Result<()> {
     // preflight reads it from the admitted boot image without executing it.
     std::hint::black_box(crate::GUEST_RUNTIME_ABI_MARKER);
     std::hint::black_box(crate::GUEST_CHECKPOINT_ABI_MARKER);
+    std::hint::black_box(crate::GUEST_CHECKPOINT_THAW_CLOCK_MARKER);
     std::hint::black_box(crate::cw_runtime_live::LIVE_RUNTIME_CAPABILITY_MARKER);
     std::hint::black_box(crate::VM_ONLY_CAPABILITY_MARKER);
     std::hint::black_box(crate::WORKSPACE_ROOT_SHARE_CAPABILITY_MARKER);

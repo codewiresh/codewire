@@ -243,6 +243,7 @@ impl RunningVm {
             &self.hybrid.socket,
             &self.token,
             CheckpointRequest {
+                abi: GUEST_CHECKPOINT_ABI,
                 action,
                 operation_id,
                 vm_id: self.request.vm_id,
@@ -581,6 +582,7 @@ pub(super) async fn resume_restored(
         socket,
         token,
         CheckpointRequest {
+            abi: GUEST_CHECKPOINT_ABI,
             action: CheckpointAction::Resume,
             operation_id,
             vm_id,
@@ -601,6 +603,7 @@ pub(super) async fn resume_restored(
         socket,
         token,
         CheckpointRequest {
+            abi: GUEST_CHECKPOINT_ABI,
             action: CheckpointAction::Thaw,
             operation_id,
             vm_id,

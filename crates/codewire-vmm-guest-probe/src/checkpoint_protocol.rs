@@ -2,7 +2,9 @@
 //! PID 1 (#3046 R4).
 //!
 //! The runner freezes the guest workload before it pauses the VM to take a VM
-//! checkpoint, and thaws it afterwards. A VM restored from a checkpoint
+//! checkpoint, and thaws it afterwards. On a macOS host the guest's clocks
+//! stop while the VM is paused, so an ABI 2 `Thaw` carries the host's clock
+//! and the guest steps to it first (#4654). A VM restored from a checkpoint
 //! resumes with that workload still frozen; before it thaws, the runner sends
 //! `Resume`, and the guest reseeds its RNG with host entropy and moves every
 //! boot-scoped secret to the restored boot's identity.
@@ -23,8 +25,14 @@ use uuid::Uuid;
 /// The guest's checkpoint hook listens here, for the host CID only.
 pub const GUEST_CHECKPOINT_VSOCK_PORT: u32 = 7_779;
 /// The hook protocol this guest speaks; the sealed init carries it in
-/// [`crate::GUEST_CHECKPOINT_ABI_MARKER`].
+/// [`crate::GUEST_CHECKPOINT_ABI_MARKER`], and the hello announces it.
 pub const GUEST_CHECKPOINT_ABI: u32 = 1;
+/// The request ABI whose `Thaw` may carry the host's clock, so the guest
+/// steps it after a capture pause (#4654). A guest whose init carries
+/// [`crate::GUEST_CHECKPOINT_THAW_CLOCK_MARKER`] accepts it beside
+/// [`GUEST_CHECKPOINT_ABI`]; its hello still announces 1, so an older host
+/// still drives it.
+pub const GUEST_CHECKPOINT_THAW_CLOCK_ABI: u32 = 2;
 pub const CHECKPOINT_CHALLENGE_LEN: usize = 32;
 pub const CHECKPOINT_HELLO_LEN: usize = 48;
 pub const CHECKPOINT_REQUEST_LEN: usize = 192;
@@ -156,13 +164,17 @@ impl TryFrom<u16> for CheckpointAction {
 /// boot's for `Resume`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckpointRequest {
+    /// [`GUEST_CHECKPOINT_ABI`], or [`GUEST_CHECKPOINT_THAW_CLOCK_ABI`] for a
+    /// guest whose init carries its marker.
+    pub abi: u32,
     pub action: CheckpointAction,
     pub operation_id: Uuid,
     pub vm_id: Uuid,
     pub generation: u64,
     /// Host entropy for `Resume`; zero otherwise.
     pub host_entropy: [u8; CHECKPOINT_HOST_ENTROPY_LEN],
-    /// The host's wall clock in nanoseconds since the epoch, for `Resume`.
+    /// The host's wall clock in nanoseconds since the epoch: for `Resume`,
+    /// and for an ABI 2 `Thaw` that steps the guest's clock; zero otherwise.
     pub host_time_ns: u64,
 }
 
@@ -176,7 +188,7 @@ impl CheckpointRequest {
         let mut bytes = [0_u8; CHECKPOINT_REQUEST_LEN];
         bytes[..8].copy_from_slice(REQUEST_MAGIC);
         bytes[8..10].copy_from_slice(&(self.action as u16).to_le_bytes());
-        bytes[12..16].copy_from_slice(&GUEST_CHECKPOINT_ABI.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.abi.to_le_bytes());
         bytes[16..32].copy_from_slice(self.operation_id.as_bytes());
         bytes[32..48].copy_from_slice(self.vm_id.as_bytes());
         bytes[48..56].copy_from_slice(&self.generation.to_le_bytes());
@@ -222,12 +234,8 @@ impl CheckpointRequest {
         {
             return Err(CheckpointError::InvalidFraming);
         }
-        if u32::from_le_bytes(bytes[12..16].try_into().expect("fixed request abi"))
-            != GUEST_CHECKPOINT_ABI
-        {
-            return Err(CheckpointError::UnsupportedAbi);
-        }
         let request = Self {
+            abi: u32::from_le_bytes(bytes[12..16].try_into().expect("fixed request abi")),
             action,
             operation_id: Uuid::from_slice(&bytes[16..32]).expect("fixed operation id"),
             vm_id,
@@ -240,12 +248,25 @@ impl CheckpointRequest {
     }
 
     fn validate(&self) -> Result<(), CheckpointError> {
+        if !matches!(
+            self.abi,
+            GUEST_CHECKPOINT_ABI | GUEST_CHECKPOINT_THAW_CLOCK_ABI
+        ) {
+            return Err(CheckpointError::UnsupportedAbi);
+        }
         if self.operation_id.is_nil() || self.vm_id.is_nil() || self.generation == 0 {
             return Err(CheckpointError::InvalidIdentity);
         }
-        let resume = self.action == CheckpointAction::Resume;
         let entropy = self.host_entropy.iter().any(|byte| *byte != 0);
-        if resume != entropy || resume != (self.host_time_ns != 0) {
+        let time = self.host_time_ns != 0;
+        let framed = match self.action {
+            CheckpointAction::Freeze => !entropy && !time,
+            CheckpointAction::Thaw => {
+                !entropy && (!time || self.abi == GUEST_CHECKPOINT_THAW_CLOCK_ABI)
+            }
+            CheckpointAction::Resume => entropy && time,
+        };
+        if !framed {
             return Err(CheckpointError::InvalidFraming);
         }
         Ok(())
@@ -261,7 +282,8 @@ pub enum CheckpointStatus {
     /// identity that is not a fork or a newer generation. Nothing changed.
     Refused = 1,
     /// The guest could not do it, such as a freeze that timed out. A failed
-    /// `Freeze` has thawed again.
+    /// `Freeze` has thawed again; a failed `Thaw` may have left the workload
+    /// frozen.
     Failed = 2,
 }
 
@@ -301,15 +323,22 @@ pub struct CheckpointReply {
     /// The guest-side duration: the freeze for `Freeze`, the whole hook for
     /// `Resume`.
     pub elapsed_us: u64,
-    /// For `Resume`: how far the guest's wall clock was from the host's
-    /// before any step, in milliseconds (guest minus host).
+    /// For `Resume`, and a `Thaw` that carried the host's clock: how far the
+    /// guest's wall clock was from the host's before any step, in
+    /// milliseconds (guest minus host).
     pub clock_skew_ms: i64,
+    /// A `Thaw` that carried the host's clock thawed the workload but could
+    /// not step its wall clock, which still runs behind (#4654); the skew is
+    /// then zero. Only a `Done` reply to an ABI 2 `Thaw` with the host's
+    /// clock carries it.
+    pub clock_not_stepped: bool,
     pub resume: ResumeReport,
 }
 
 const FLAG_RESEEDED: u32 = 1;
 const FLAG_VMGENID_DRIVER: u32 = 2;
 const FLAG_REMOVED_LOGINS: u32 = 4;
+const FLAG_CLOCK_NOT_STEPPED: u32 = 8;
 
 impl CheckpointReply {
     pub fn encode(
@@ -323,7 +352,8 @@ impl CheckpointReply {
         bytes[10..12].copy_from_slice(&(self.status as u16).to_le_bytes());
         let flags = (u32::from(self.resume.reseeded) * FLAG_RESEEDED)
             | (u32::from(self.resume.vmgenid_driver) * FLAG_VMGENID_DRIVER)
-            | (u32::from(self.resume.removed_logins) * FLAG_REMOVED_LOGINS);
+            | (u32::from(self.resume.removed_logins) * FLAG_REMOVED_LOGINS)
+            | (u32::from(self.clock_not_stepped) * FLAG_CLOCK_NOT_STEPPED);
         bytes[12..16].copy_from_slice(&flags.to_le_bytes());
         bytes[16..32].copy_from_slice(self.operation_id.as_bytes());
         bytes[32..48].copy_from_slice(self.vm_id.as_bytes());
@@ -354,7 +384,9 @@ impl CheckpointReply {
         mac.verify_slice(&bytes[REPLY_AUTHENTICATED_LEN..])
             .map_err(|_| CheckpointError::AuthenticationFailed)?;
         let flags = u32::from_le_bytes(bytes[12..16].try_into().expect("fixed flags"));
-        if flags & !(FLAG_RESEEDED | FLAG_VMGENID_DRIVER | FLAG_REMOVED_LOGINS) != 0
+        if flags
+            & !(FLAG_RESEEDED | FLAG_VMGENID_DRIVER | FLAG_REMOVED_LOGINS | FLAG_CLOCK_NOT_STEPPED)
+            != 0
             || bytes[72..REPLY_AUTHENTICATED_LEN]
                 .iter()
                 .any(|byte| *byte != 0)
@@ -373,6 +405,7 @@ impl CheckpointReply {
             generation: u64::from_le_bytes(bytes[48..56].try_into().expect("fixed generation")),
             elapsed_us: u64::from_le_bytes(bytes[56..64].try_into().expect("fixed elapsed")),
             clock_skew_ms: i64::from_le_bytes(bytes[64..72].try_into().expect("fixed skew")),
+            clock_not_stepped: flags & FLAG_CLOCK_NOT_STEPPED != 0,
             resume: ResumeReport {
                 reseeded: flags & FLAG_RESEEDED != 0,
                 vmgenid_driver: flags & FLAG_VMGENID_DRIVER != 0,
@@ -385,6 +418,12 @@ impl CheckpointReply {
             || reply.generation != request.generation
         {
             return Err(CheckpointError::InvalidIdentity);
+        }
+        let clocked_thaw = request.action == CheckpointAction::Thaw
+            && request.abi == GUEST_CHECKPOINT_THAW_CLOCK_ABI
+            && request.host_time_ns != 0;
+        if reply.clock_not_stepped && !(clocked_thaw && reply.status == CheckpointStatus::Done) {
+            return Err(CheckpointError::InvalidFraming);
         }
         Ok(reply)
     }
@@ -436,6 +475,7 @@ mod tests {
 
     fn resume(vm_id: Uuid, generation: u64) -> CheckpointRequest {
         CheckpointRequest {
+            abi: GUEST_CHECKPOINT_ABI,
             action: CheckpointAction::Resume,
             operation_id: Uuid::new_v4(),
             vm_id,
@@ -485,6 +525,7 @@ mod tests {
             generation: 4,
             elapsed_us: 1234,
             clock_skew_ms: -40,
+            clock_not_stepped: false,
             resume: ResumeReport {
                 reseeded: true,
                 vmgenid_driver: true,
@@ -496,6 +537,63 @@ mod tests {
             CheckpointReply::decode(&encoded, &key, &challenge, &request).unwrap(),
             reply
         );
+    }
+
+    /// #4654: a thawed guest whose clock could not be stepped says so, apart
+    /// from a thaw that failed; nothing else may carry that.
+    #[test]
+    fn only_a_done_clocked_thaw_says_its_clock_was_not_stepped() {
+        let vm_id = Uuid::new_v4();
+        let key = key(vm_id, 3);
+        let challenge = [4; CHECKPOINT_CHALLENGE_LEN];
+        let thaw = |abi, host_time_ns| CheckpointRequest {
+            abi,
+            action: CheckpointAction::Thaw,
+            operation_id: Uuid::new_v4(),
+            vm_id,
+            generation: 3,
+            host_entropy: [0; CHECKPOINT_HOST_ENTROPY_LEN],
+            host_time_ns,
+        };
+        let reply = |request: &CheckpointRequest, status| CheckpointReply {
+            action: request.action,
+            status,
+            operation_id: request.operation_id,
+            vm_id,
+            generation: 3,
+            elapsed_us: 10,
+            clock_skew_ms: 0,
+            clock_not_stepped: true,
+            resume: ResumeReport::default(),
+        };
+        let clocked = thaw(GUEST_CHECKPOINT_THAW_CLOCK_ABI, 1_800_000_000_000_000_000);
+        let not_stepped = reply(&clocked, CheckpointStatus::Done);
+        assert_eq!(
+            CheckpointReply::decode(
+                &not_stepped.encode(&key, &challenge),
+                &key,
+                &challenge,
+                &clocked
+            ),
+            Ok(not_stepped)
+        );
+        for (request, status) in [
+            (clocked.clone(), CheckpointStatus::Failed),
+            (
+                thaw(GUEST_CHECKPOINT_THAW_CLOCK_ABI, 0),
+                CheckpointStatus::Done,
+            ),
+            (thaw(GUEST_CHECKPOINT_ABI, 0), CheckpointStatus::Done),
+            (resume(vm_id, 3), CheckpointStatus::Done),
+        ] {
+            let encoded = reply(&request, status).encode(&key, &challenge);
+            assert_eq!(
+                CheckpointReply::decode(&encoded, &key, &challenge, &request),
+                Err(CheckpointError::InvalidFraming),
+                "{:?} {status:?}",
+                request.action
+            );
+        }
     }
 
     #[test]
@@ -526,12 +624,81 @@ mod tests {
         }
     }
 
+    /// #4654: only an ABI 2 `Thaw` carries the host's clock; ABI 1 keeps its
+    /// rules, and no other ABI is spoken.
+    #[test]
+    fn only_an_abi_2_thaw_carries_the_host_clock() {
+        use hmac::Mac as _;
+        let vm_id = Uuid::new_v4();
+        let key = key(vm_id, 3);
+        let challenge = [6; CHECKPOINT_CHALLENGE_LEN];
+        let thaw = |abi, host_time_ns| CheckpointRequest {
+            abi,
+            action: CheckpointAction::Thaw,
+            operation_id: Uuid::new_v4(),
+            vm_id,
+            generation: 3,
+            host_entropy: [0; CHECKPOINT_HOST_ENTROPY_LEN],
+            host_time_ns,
+        };
+        for request in [
+            thaw(GUEST_CHECKPOINT_THAW_CLOCK_ABI, 1_800_000_000_000_000_000),
+            thaw(GUEST_CHECKPOINT_THAW_CLOCK_ABI, 0),
+            thaw(GUEST_CHECKPOINT_ABI, 0),
+            CheckpointRequest {
+                abi: GUEST_CHECKPOINT_THAW_CLOCK_ABI,
+                ..resume(vm_id, 3)
+            },
+        ] {
+            let bytes = request.encode(&key, &challenge).unwrap();
+            assert_eq!(
+                CheckpointRequest::decode(&bytes, &key, &challenge),
+                Ok(request)
+            );
+        }
+
+        let refused = [
+            (
+                thaw(GUEST_CHECKPOINT_ABI, 1_800_000_000_000_000_000),
+                CheckpointError::InvalidFraming,
+            ),
+            (
+                CheckpointRequest {
+                    action: CheckpointAction::Freeze,
+                    ..thaw(GUEST_CHECKPOINT_THAW_CLOCK_ABI, 1_800_000_000_000_000_000)
+                },
+                CheckpointError::InvalidFraming,
+            ),
+            (thaw(3, 0), CheckpointError::UnsupportedAbi),
+            (thaw(0, 0), CheckpointError::UnsupportedAbi),
+        ];
+        for (request, error) in refused {
+            assert_eq!(request.encode(&key, &challenge).unwrap_err(), error);
+            // The guest refuses it too, even correctly MACed.
+            let mut bytes = thaw(GUEST_CHECKPOINT_THAW_CLOCK_ABI, 0)
+                .encode(&key, &challenge)
+                .unwrap();
+            bytes[8..10].copy_from_slice(&(request.action as u16).to_le_bytes());
+            bytes[12..16].copy_from_slice(&request.abi.to_le_bytes());
+            bytes[16..32].copy_from_slice(request.operation_id.as_bytes());
+            bytes[120..128].copy_from_slice(&request.host_time_ns.to_le_bytes());
+            let mut mac = key.mac(REQUEST_DOMAIN, &challenge);
+            mac.update(&bytes[..REQUEST_AUTHENTICATED_LEN]);
+            bytes[REQUEST_AUTHENTICATED_LEN..].copy_from_slice(&mac.finalize().into_bytes());
+            assert_eq!(
+                CheckpointRequest::decode(&bytes, &key, &challenge).unwrap_err(),
+                error
+            );
+        }
+    }
+
     #[test]
     fn a_reply_must_answer_its_own_request() {
         let vm_id = Uuid::new_v4();
         let key = key(vm_id, 2);
         let challenge = [5; CHECKPOINT_CHALLENGE_LEN];
         let request = CheckpointRequest {
+            abi: GUEST_CHECKPOINT_ABI,
             action: CheckpointAction::Freeze,
             operation_id: Uuid::new_v4(),
             vm_id,
@@ -551,6 +718,7 @@ mod tests {
             generation: 2,
             elapsed_us: 0,
             clock_skew_ms: 0,
+            clock_not_stepped: false,
             resume: ResumeReport::default(),
         }
         .encode(&key, &challenge);

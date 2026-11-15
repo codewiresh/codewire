@@ -46,7 +46,8 @@ pub use checkpoint_protocol::{
     CHECKPOINT_CHALLENGE_LEN, CHECKPOINT_HELLO_LEN, CHECKPOINT_HOST_ENTROPY_LEN,
     CHECKPOINT_REPLY_LEN, CHECKPOINT_REQUEST_LEN, CheckpointAction, CheckpointError,
     CheckpointHello, CheckpointKey, CheckpointReply, CheckpointRequest, CheckpointStatus,
-    GUEST_CHECKPOINT_ABI, GUEST_CHECKPOINT_VSOCK_PORT, ResumeReport, resume_transition_allowed,
+    GUEST_CHECKPOINT_ABI, GUEST_CHECKPOINT_THAW_CLOCK_ABI, GUEST_CHECKPOINT_VSOCK_PORT,
+    ResumeReport, resume_transition_allowed,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use direct_share::{
@@ -58,6 +59,11 @@ pub use direct_share::{
 /// boot whose init lacks it has no checkpoint hook, so it is never
 /// checkpointed (#3046 R4). The version is [`GUEST_CHECKPOINT_ABI`].
 pub const GUEST_CHECKPOINT_ABI_MARKER: &[u8] = b"\0CWCHECKPOINTABI\0hook=1\0";
+/// Beside [`GUEST_CHECKPOINT_ABI_MARKER`] in an init that also accepts
+/// requests of [`GUEST_CHECKPOINT_THAW_CLOCK_ABI`], whose `Thaw` steps the
+/// guest's clock to the host's (#4654). A host sends that ABI only to a guest
+/// whose init carries this.
+pub const GUEST_CHECKPOINT_THAW_CLOCK_MARKER: &[u8] = b"\0CWCHECKPOINTABI\0hook=2\0";
 pub use network::{
     GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN,
     NETWORK_HOST_HELLO_LEN, NETWORK_HOST_READY_LEN, NETWORK_HOST_READY_TIMEOUT_SECONDS,

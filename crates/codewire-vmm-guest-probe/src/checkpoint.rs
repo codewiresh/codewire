@@ -45,8 +45,12 @@ const REKEY_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long one connection may take, request to reply.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-/// A wall clock this far from the host's is stepped on `Resume`.
+/// A wall clock this far from the host's is stepped on `Resume`, and on a
+/// `Thaw` that carries the host's clock.
 const MAX_SKEW: Duration = Duration::from_secs(2);
+/// The same for a guest that follows the RTC: its clocks stopped for the
+/// whole pause, so any pause leaves it behind (#4654).
+const MAX_SKEW_FOLLOWING_RTC: Duration = Duration::from_millis(50);
 const HOST_ENTROPY_BITS: i32 = 512;
 const VMGENID_DRIVERS: [&str; 2] = [
     "/sys/bus/acpi/drivers/vmgenid",
@@ -220,12 +224,21 @@ fn act(request: CheckpointRequest) -> CheckpointReply {
         generation: request.generation,
         elapsed_us: 0,
         clock_skew_ms: 0,
+        clock_not_stepped: false,
         resume: ResumeReport::default(),
     };
     let workload = WorkloadCgroup::at(Path::new(super::CGROUP_HIERARCHY_PATH));
     let result = match request.action {
         CheckpointAction::Freeze => workload.freeze(FREEZE_TIMEOUT).map(drop),
-        CheckpointAction::Thaw => workload.thaw(THAW_TIMEOUT),
+        CheckpointAction::Thaw => thaw_stepping_clock(
+            request.host_time_ns,
+            |host_time_ns| step_clock(host_time_ns, max_skew()),
+            || workload.thaw(THAW_TIMEOUT),
+        )
+        .map(|clock| {
+            reply.clock_skew_ms = clock.skew_ms;
+            reply.clock_not_stepped = clock.not_stepped;
+        }),
         CheckpointAction::Resume => match resume(&request) {
             Ok(Some((report, skew_ms))) => {
                 reply.resume = report;
@@ -270,7 +283,7 @@ fn resume(request: &CheckpointRequest) -> Result<Option<(ResumeReport, i64)>> {
     );
 
     reseed(&request.host_entropy)?;
-    let skew_ms = step_clock(request.host_time_ns)?;
+    let skew_ms = step_clock(request.host_time_ns, max_skew())?;
 
     let fork = request.vm_id != current.0;
     {
@@ -326,16 +339,76 @@ fn reseed(entropy: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Steps the wall clock to the host's when they differ by [`MAX_SKEW`] or
+/// What a thaw did with the wall clock.
+#[derive(Debug, PartialEq, Eq)]
+struct ThawedClock {
+    /// The skew before any step, in milliseconds: zero without the host's
+    /// clock or when the step failed.
+    skew_ms: i64,
+    /// The host's clock came with the request, but the step failed.
+    not_stepped: bool,
+}
+
+/// Thaws the workload. An ABI 2 thaw carries the host's clock (`host_time_ns`
+/// is not zero): the clock the capture pause stopped is stepped first, so the
+/// workload never runs on it. The workload thaws even when the step fails,
+/// and the reply then says its clock was not stepped (#4654). A failed thaw
+/// is the error, since the workload may still be frozen.
+fn thaw_stepping_clock(
+    host_time_ns: u64,
+    step: impl FnOnce(u64) -> Result<i64>,
+    thaw: impl FnOnce() -> Result<()>,
+) -> Result<ThawedClock> {
+    let stepped = if host_time_ns == 0 {
+        Ok(0)
+    } else {
+        step(host_time_ns)
+    };
+    thaw()?;
+    Ok(match stepped {
+        Ok(skew_ms) => ThawedClock {
+            skew_ms,
+            not_stepped: false,
+        },
+        Err(error) => {
+            eprintln!("codewire guest: the thaw's clock step failed: {error:#}");
+            ThawedClock {
+                skew_ms: 0,
+                not_stepped: true,
+            }
+        }
+    })
+}
+
+fn max_skew() -> Duration {
+    max_skew_for(crate::rtc_clock::followed())
+}
+
+/// The skew at which the wall clock is stepped: 50 ms on a guest that
+/// follows the RTC, 2 s otherwise.
+fn max_skew_for(follows_rtc: bool) -> Duration {
+    if follows_rtc {
+        MAX_SKEW_FOLLOWING_RTC
+    } else {
+        MAX_SKEW
+    }
+}
+
+/// Whether a skew of `skew_ns` is stepped at `max_skew`.
+fn steps(skew_ns: i128, max_skew: Duration) -> bool {
+    skew_ns.unsigned_abs() >= max_skew.as_nanos()
+}
+
+/// Steps the wall clock to the host's when they differ by `max_skew` or
 /// more; returns the skew in milliseconds before any step.
-fn step_clock(host_time_ns: u64) -> Result<i64> {
+fn step_clock(host_time_ns: u64, max_skew: Duration) -> Result<i64> {
     let guest_ns = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("read the guest wall clock")?
         .as_nanos();
     let skew_ns = i128::try_from(guest_ns).unwrap_or(i128::MAX) - i128::from(host_time_ns);
     let skew_ms = i64::try_from(skew_ns / 1_000_000).unwrap_or(i64::MAX);
-    if skew_ns.unsigned_abs() >= MAX_SKEW.as_nanos() {
+    if steps(skew_ns, max_skew) {
         let time = libc::timespec {
             tv_sec: (host_time_ns / 1_000_000_000) as _,
             tv_nsec: (host_time_ns % 1_000_000_000) as _,
@@ -552,13 +625,72 @@ mod tests {
     }
 
     #[test]
+    fn a_thaw_steps_the_clock_first_and_thaws_even_when_the_step_fails() {
+        let order = std::cell::RefCell::new(Vec::new());
+        let step = |result: Result<i64>| {
+            let order = &order;
+            move |host_time_ns: u64| {
+                order.borrow_mut().push(format!("step {host_time_ns}"));
+                result
+            }
+        };
+        let thaw = |result: Result<()>| {
+            let order = &order;
+            move || {
+                order.borrow_mut().push("thaw".to_owned());
+                result
+            }
+        };
+
+        let clock = |skew_ms, not_stepped| ThawedClock {
+            skew_ms,
+            not_stepped,
+        };
+        // An ABI 2 thaw: step, then thaw, and report the skew.
+        assert_eq!(
+            thaw_stepping_clock(7, step(Ok(-1290)), thaw(Ok(()))).unwrap(),
+            clock(-1290, false)
+        );
+        assert_eq!(order.take(), ["step 7", "thaw"]);
+        // Without the host's clock only the thaw runs.
+        assert_eq!(
+            thaw_stepping_clock(0, step(Ok(5)), thaw(Ok(()))).unwrap(),
+            clock(0, false)
+        );
+        assert_eq!(order.take(), ["thaw"]);
+        // A failed step still thaws, and says the clock was not stepped.
+        assert_eq!(
+            thaw_stepping_clock(7, step(Err(anyhow::anyhow!("step"))), thaw(Ok(()))).unwrap(),
+            clock(0, true)
+        );
+        assert_eq!(order.take(), ["step 7", "thaw"]);
+        // A failed thaw is the error, even after a good step.
+        let error =
+            thaw_stepping_clock(7, step(Ok(3)), thaw(Err(anyhow::anyhow!("thaw")))).unwrap_err();
+        assert_eq!(error.to_string(), "thaw");
+    }
+
+    /// #4654: a guest that follows the RTC steps from 50 ms either way; any
+    /// other steps from 2 s.
+    #[test]
+    fn a_guest_that_follows_the_rtc_steps_from_50_ms() {
+        let ms = |ms: i128| ms * 1_000_000;
+        let rtc = max_skew_for(true);
+        assert!(steps(ms(50), rtc) && steps(ms(-50), rtc) && steps(ms(1290), rtc));
+        assert!(!steps(ms(49), rtc) && !steps(ms(-49), rtc));
+        let other = max_skew_for(false);
+        assert!(!steps(ms(1290), other) && !steps(ms(-1999), other));
+        assert!(steps(ms(2000), other) && steps(ms(-2000), other));
+    }
+
+    #[test]
     fn small_skews_are_left_alone() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
         // Within the bound nothing is stepped, so this needs no privilege.
-        let skew = step_clock(now).unwrap();
+        let skew = step_clock(now, MAX_SKEW).unwrap();
         assert!(skew.abs() < 1_000, "{skew}");
     }
 }
