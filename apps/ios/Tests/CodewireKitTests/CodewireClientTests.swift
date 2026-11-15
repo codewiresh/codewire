@@ -46,6 +46,57 @@ final class CodewireClientTests: XCTestCase {
         assertConnectRequest(session.recordedRequests[0], token: "tok", body: ["orgId": "o1"])
     }
 
+    // proto3 JSON leaves out an empty list, so an organization with no
+    // environments answers `{}`; it must read as an empty list, not fail.
+    func testListEnvironments_omittedListIsEmpty() async throws {
+        let session = MockHTTPSession()
+        let url = URL(string: "https://codewire.sh/codewire.v1.EnvironmentService/ListEnvironments")!
+        session.responses[url.absoluteString] = (
+            Data("{}".utf8),
+            HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        )
+        let client = CodewireClient(baseURL: baseURL, session: session)
+
+        let environments = try await client.listEnvironments(token: "tok", orgID: "o1")
+
+        XCTAssertEqual(environments, [])
+    }
+
+    func testListOrganizations_omittedListIsEmpty() async throws {
+        let session = MockHTTPSession()
+        let url = URL(string: "https://codewire.sh/codewire.v1.OrganizationService/ListOrganizations")!
+        session.responses[url.absoluteString] = (
+            Data("{}".utf8),
+            HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        )
+        let client = CodewireClient(baseURL: baseURL, session: session)
+
+        let organizations = try await client.listOrganizations(token: "tok")
+
+        XCTAssertEqual(organizations, [])
+    }
+
+    // Zero numbers are left out too; they read as zero.
+    func testListEnvironments_omittedNumbersAreZero() async throws {
+        let session = MockHTTPSession()
+        let url = URL(string: "https://codewire.sh/codewire.v1.EnvironmentService/ListEnvironments")!
+        session.responses[url.absoluteString] = (
+            Data(#"""
+            {"environments":[{"id":"e1","name":"dev","orgId":"o1","desiredState":"DESIRED_STATE_STOPPED","state":"ENVIRONMENT_STATE_STOPPED","createdAt":"2026-04-01T00:00:00Z"}],"pollInterval":"5s"}
+            """#.utf8),
+            HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        )
+        let client = CodewireClient(baseURL: baseURL, session: session)
+
+        let environments = try await client.listEnvironments(token: "tok", orgID: "o1")
+
+        XCTAssertEqual(environments.count, 1)
+        XCTAssertEqual(environments[0].cpuMillicores, 0)
+        XCTAssertEqual(environments[0].memoryMb, 0)
+        XCTAssertEqual(environments[0].diskGb, 0)
+        XCTAssertNil(environments[0].errorReason)
+    }
+
     func testListOrganizations_rejectsMalformedConnectMembership() async {
         let session = MockHTTPSession()
         let url = URL(string: "https://codewire.sh/codewire.v1.OrganizationService/ListOrganizations")!

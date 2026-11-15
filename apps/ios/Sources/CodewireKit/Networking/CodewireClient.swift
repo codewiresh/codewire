@@ -39,7 +39,7 @@ public actor CodewireClient {
             token: token,
             request: EmptyRequest()
         )
-        return try response.organizations.map(Self.organization(from:))
+        return try (response.organizations ?? []).map(Self.organization(from:))
     }
 
     public func listEnvironments(token: String, orgID: String) async throws -> [Environment] {
@@ -48,7 +48,7 @@ public actor CodewireClient {
             token: token,
             request: OrganizationRequest(orgId: orgID)
         )
-        return try response.environments.map(Self.environment(from:))
+        return try (response.environments ?? []).map(Self.environment(from:))
     }
 
     public func startEnvironment(token: String, orgID: String, envID: String) async throws {
@@ -128,19 +128,14 @@ public actor CodewireClient {
 
     private static func organization(from membership: OrganizationMembership) throws -> Organization {
         guard let organization = membership.organization,
-              !organization.id.isEmpty,
-              !organization.name.isEmpty,
-              !organization.slug.isEmpty,
+              let id = organization.id, !id.isEmpty,
+              let name = organization.name, !name.isEmpty,
+              let slug = organization.slug, !slug.isEmpty,
               let role = organizationRole(membership.role)
         else {
             throw CodewireClientError.invalidResponse
         }
-        return Organization(
-            id: organization.id,
-            name: organization.name,
-            slug: organization.slug,
-            role: role
-        )
+        return Organization(id: id, name: name, slug: slug, role: role)
     }
 
     private static func environment(from wire: EnvironmentWire) throws -> Environment {
@@ -149,9 +144,6 @@ public actor CodewireClient {
               let orgID = wire.orgId, !orgID.isEmpty,
               let desiredState = desiredState(wire.desiredState),
               let state = environmentState(wire.state),
-              let cpuMillicores = wire.cpuMillicores,
-              let memoryMb = wire.memoryMb,
-              let diskGb = wire.diskGb,
               let createdAt = wire.createdAt, !createdAt.isEmpty
         else {
             throw CodewireClientError.invalidResponse
@@ -162,9 +154,9 @@ public actor CodewireClient {
             orgId: orgID,
             desiredState: desiredState,
             state: state,
-            cpuMillicores: cpuMillicores,
-            memoryMb: memoryMb,
-            diskGb: diskGb,
+            cpuMillicores: wire.cpuMillicores ?? 0,
+            memoryMb: wire.memoryMb ?? 0,
+            diskGb: wire.diskGb ?? 0,
             errorReason: wire.errorReason,
             createdAt: createdAt
         )
@@ -220,12 +212,18 @@ private struct EmptyResponse: Decodable {}
 private struct OrganizationRequest: Encodable { let orgId: String }
 private struct EnvironmentRequest: Encodable { let orgId: String; let environmentId: String }
 
+// Wire messages follow proto3 JSON, which leaves out every field at its
+// default: an empty list, an empty string, zero, an unset message or the
+// zero enum value. So every field is optional here; a missing list or number
+// means its default, and the mapping above rejects only what a display model
+// cannot do without.
+
 private struct ConnectError: Decodable {
     let code: String?
 }
 
 private struct ListOrganizationsResponse: Decodable {
-    let organizations: [OrganizationMembership]
+    let organizations: [OrganizationMembership]?
 }
 
 private struct OrganizationMembership: Decodable {
@@ -234,13 +232,13 @@ private struct OrganizationMembership: Decodable {
 }
 
 private struct OrganizationWire: Decodable {
-    let id: String
-    let name: String
-    let slug: String
+    let id: String?
+    let name: String?
+    let slug: String?
 }
 
 private struct ListEnvironmentsResponse: Decodable {
-    let environments: [EnvironmentWire]
+    let environments: [EnvironmentWire]?
 }
 
 private struct EnvironmentWire: Decodable {
