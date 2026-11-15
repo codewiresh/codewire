@@ -59,6 +59,10 @@ pub struct KubernetesDriver {
     pool_memory: Mutex<BTreeMap<String, warm_pools::LoopState>>,
     /// TokenReview at the workspace-binding audience, and nothing else.
     binding_reviewer: KubernetesPodIdentityVerifier,
+    /// TokenReview of cw-egress calling `EgressService` (#4000).
+    egress_node_reviewer: KubernetesPodIdentityVerifier,
+    /// TokenReview of a guest's forwarded egress token (#4000).
+    egress_guest_reviewer: KubernetesPodIdentityVerifier,
 }
 
 impl KubernetesDriver {
@@ -75,6 +79,14 @@ impl KubernetesDriver {
             binding_reviewer: KubernetesPodIdentityVerifier::new(
                 Some(client.clone()),
                 PodIdentityPurpose::WorkspaceBinding,
+            ),
+            egress_node_reviewer: KubernetesPodIdentityVerifier::new(
+                Some(client.clone()),
+                PodIdentityPurpose::EgressNode,
+            ),
+            egress_guest_reviewer: KubernetesPodIdentityVerifier::new(
+                Some(client.clone()),
+                PodIdentityPurpose::Egress,
             ),
             client,
             pool_memory: Mutex::default(),
@@ -354,6 +366,34 @@ impl RuntimeAttestation for KubernetesDriver {
         identity: &VerifiedPodIdentity,
     ) -> anyhow::Result<Option<MemberFacts>> {
         attestation::member(&self.client, identity.namespace(), identity.pod_name()).await
+    }
+
+    async fn review_egress_node(
+        &self,
+        headers: &axum::http::HeaderMap,
+        namespace: &str,
+    ) -> Result<VerifiedPodIdentity, PodIdentityError> {
+        self.egress_node_reviewer
+            .authenticate_in(headers, namespace)
+            .await
+    }
+
+    async fn review_egress_guest(
+        &self,
+        token: &str,
+        namespace: &str,
+    ) -> Result<VerifiedPodIdentity, PodIdentityError> {
+        self.egress_guest_reviewer
+            .authenticate_token_in(token, namespace)
+            .await
+    }
+
+    async fn attested_pod(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<MemberFacts>> {
+        attestation::member(&self.client, namespace, name).await
     }
 
     async fn attested_runtime(

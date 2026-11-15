@@ -15,6 +15,7 @@ pub mod confidential_storage;
 pub mod connect;
 pub mod credentials;
 pub mod drain;
+pub mod egress;
 pub mod environment_mesh;
 pub mod lifecycle;
 pub(crate) mod repository_mount;

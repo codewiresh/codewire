@@ -227,6 +227,36 @@ impl RuntimeAttestation for FakeRuntimeDriver {
         anyhow::bail!("not scripted")
     }
 
+    async fn review_egress_node(
+        &self,
+        _headers: &axum::http::HeaderMap,
+        _namespace: &str,
+    ) -> Result<
+        codewire_server_core::pod_identity::VerifiedPodIdentity,
+        codewire_server_core::pod_identity::PodIdentityError,
+    > {
+        Err(codewire_server_core::pod_identity::PodIdentityError::Unavailable)
+    }
+
+    async fn review_egress_guest(
+        &self,
+        _token: &str,
+        _namespace: &str,
+    ) -> Result<
+        codewire_server_core::pod_identity::VerifiedPodIdentity,
+        codewire_server_core::pod_identity::PodIdentityError,
+    > {
+        Err(codewire_server_core::pod_identity::PodIdentityError::Unavailable)
+    }
+
+    async fn attested_pod(
+        &self,
+        _namespace: &str,
+        _name: &str,
+    ) -> anyhow::Result<Option<MemberFacts>> {
+        anyhow::bail!("not scripted")
+    }
+
     async fn attested_runtime(
         &self,
         placement: &Placement,

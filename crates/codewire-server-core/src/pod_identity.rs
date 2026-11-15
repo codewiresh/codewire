@@ -17,7 +17,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codewire_daemon_proto::{
     CREDENTIAL_RELAY_SERVICE_ACCOUNT, CREDENTIAL_RELAY_TOKEN_AUDIENCE,
-    CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE, SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE,
+    CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE, EGRESS_NODE_SERVICE_ACCOUNT, EGRESS_NODE_TOKEN_AUDIENCE,
+    EGRESS_TOKEN_AUDIENCE, SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE,
 };
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec, TokenReviewStatus};
 use kube::api::PostParams;
@@ -39,6 +40,12 @@ pub enum PodIdentityPurpose {
     CredentialRelay,
     CredentialWorkspace,
     WorkspaceBinding,
+    /// A broker-mode workspace Pod's egress stream, forwarded by cw-egress
+    /// (#4000).
+    Egress,
+    /// cw-egress calling orchestration's `EgressService`. The caller must
+    /// also check the namespace: the review pins only the account name.
+    EgressNode,
 }
 
 impl PodIdentityPurpose {
@@ -47,6 +54,8 @@ impl PodIdentityPurpose {
             Self::CredentialRelay => CREDENTIAL_RELAY_TOKEN_AUDIENCE,
             Self::CredentialWorkspace => CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
             Self::WorkspaceBinding => WORKSPACE_BINDING_TOKEN_AUDIENCE,
+            Self::Egress => EGRESS_TOKEN_AUDIENCE,
+            Self::EgressNode => EGRESS_NODE_TOKEN_AUDIENCE,
         }
     }
 
@@ -56,8 +65,11 @@ impl PodIdentityPurpose {
         // additionally required by the runtime authority. The relay is
         // orchestration itself, under its own account.
         match self {
-            Self::CredentialWorkspace | Self::WorkspaceBinding => SANDBOX_SERVICE_ACCOUNT,
+            Self::CredentialWorkspace | Self::WorkspaceBinding | Self::Egress => {
+                SANDBOX_SERVICE_ACCOUNT
+            }
             Self::CredentialRelay => CREDENTIAL_RELAY_SERVICE_ACCOUNT,
+            Self::EgressNode => EGRESS_NODE_SERVICE_ACCOUNT,
         }
     }
 }
@@ -166,7 +178,47 @@ impl KubernetesPodIdentityVerifier {
         &self,
         headers: &HeaderMap,
     ) -> Result<VerifiedPodIdentity, PodIdentityError> {
-        let mut token = bearer(headers)?;
+        self.review(bearer(headers)?).await
+    }
+
+    /// [`authenticate`](Self::authenticate), refusing a Pod outside
+    /// `namespace`: the review pins only the account name, so a purpose
+    /// whose callers live in one namespace pins it here.
+    pub async fn authenticate_in(
+        &self,
+        headers: &HeaderMap,
+        namespace: &str,
+    ) -> Result<VerifiedPodIdentity, PodIdentityError> {
+        in_namespace(self.authenticate(headers).await?, namespace)
+    }
+
+    /// [`authenticate_token`](Self::authenticate_token), refusing a Pod
+    /// outside `namespace`.
+    pub async fn authenticate_token_in(
+        &self,
+        token: &str,
+        namespace: &str,
+    ) -> Result<VerifiedPodIdentity, PodIdentityError> {
+        in_namespace(self.authenticate_token(token).await?, namespace)
+    }
+
+    /// Reviews a token carried in a request body rather than a header: the
+    /// guest token cw-egress forwards (#4000). It must be the exact token, as
+    /// a bearer would be.
+    pub async fn authenticate_token(
+        &self,
+        token: &str,
+    ) -> Result<VerifiedPodIdentity, PodIdentityError> {
+        if !valid_exact_value(token, MAX_TOKEN_BYTES) {
+            return Err(PodIdentityError::Unauthenticated);
+        }
+        self.review(Zeroizing::new(token.to_owned())).await
+    }
+
+    async fn review(
+        &self,
+        mut token: Zeroizing<String>,
+    ) -> Result<VerifiedPodIdentity, PodIdentityError> {
         let reviewer = self
             .reviewer
             .as_ref()
@@ -218,6 +270,16 @@ impl KubernetesPodIdentityVerifier {
             timeout: TOKEN_REVIEW_TIMEOUT,
         }
     }
+}
+
+fn in_namespace(
+    identity: VerifiedPodIdentity,
+    namespace: &str,
+) -> Result<VerifiedPodIdentity, PodIdentityError> {
+    if namespace.is_empty() || identity.namespace != namespace {
+        return Err(PodIdentityError::PermissionDenied);
+    }
+    Ok(identity)
 }
 
 /// Discards garbage before any TokenReview capacity is spent: exactly one

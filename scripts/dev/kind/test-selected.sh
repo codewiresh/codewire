@@ -127,6 +127,9 @@ map_token() {
     # Nor its credential route back end (#3999).
     rust_pkg_codewire_egress_front_door_bridge)
       unobserved "$token" 'no binary uses it yet' ;;
+    # Nor cw-egress, until its binary and manifests exist (#4000).
+    rust_pkg_codewire_egress_node)
+      unobserved "$token" 'no binary uses it yet' ;;
     # Kind runs the relay (tests/e2e/kind/tailnet.yaml), but no retained suite
     # drives a tailnet through it yet: walk the host tailnet journey.
     transport_pkg_codewire_derp)

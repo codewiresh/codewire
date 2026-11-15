@@ -9,10 +9,12 @@ use tokio::sync::Notify;
 
 use super::*;
 
-const PURPOSES: [PodIdentityPurpose; 3] = [
+const PURPOSES: [PodIdentityPurpose; 5] = [
     PodIdentityPurpose::CredentialRelay,
     PodIdentityPurpose::CredentialWorkspace,
     PodIdentityPurpose::WorkspaceBinding,
+    PodIdentityPurpose::Egress,
+    PodIdentityPurpose::EgressNode,
 ];
 const CANARY: &str = "synthetic-sensitive-pod-token-canary";
 
@@ -242,6 +244,97 @@ async fn the_credential_relay_is_only_orchestrations_service_account() {
                 .authenticate(&headers(&future_token()))
                 .await,
             Err(PodIdentityError::PermissionDenied)
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_egress_node_is_only_cw_egress_service_account_and_a_sandbox_cannot_present_it() {
+    let node = PodIdentityPurpose::EgressNode;
+    assert_eq!(node.service_account(), "codewire-egress");
+    // A guest reading its own projected token cannot call EgressService as
+    // cw-egress, whatever audience its token was projected for.
+    let mut sandbox = status(node);
+    sandbox.user.as_mut().unwrap().username = Some(format!(
+        "system:serviceaccount:runtime:{}",
+        SANDBOX_SERVICE_ACCOUNT
+    ));
+    assert_eq!(
+        KubernetesPodIdentityVerifier::for_test(FakeReviewer::status(sandbox), node)
+            .authenticate(&headers(&future_token()))
+            .await,
+        Err(PodIdentityError::PermissionDenied)
+    );
+    // And cw-egress cannot present a guest's egress purpose.
+    let mut egress_node = status(PodIdentityPurpose::Egress);
+    egress_node.user.as_mut().unwrap().username = Some(format!(
+        "system:serviceaccount:runtime:{}",
+        node.service_account()
+    ));
+    assert_eq!(
+        KubernetesPodIdentityVerifier::for_test(
+            FakeReviewer::status(egress_node),
+            PodIdentityPurpose::Egress
+        )
+        .authenticate(&headers(&future_token()))
+        .await,
+        Err(PodIdentityError::PermissionDenied)
+    );
+}
+
+#[tokio::test]
+async fn a_pinned_namespace_refuses_a_pod_anywhere_else() {
+    let purpose = PodIdentityPurpose::EgressNode;
+    let verifier =
+        || KubernetesPodIdentityVerifier::for_test(FakeReviewer::status(status(purpose)), purpose);
+    let token = future_token();
+    assert!(
+        verifier()
+            .authenticate_in(&headers(&token), "runtime")
+            .await
+            .is_ok()
+    );
+    assert!(
+        verifier()
+            .authenticate_token_in(&token, "runtime")
+            .await
+            .is_ok()
+    );
+    for other in ["elsewhere", ""] {
+        assert_eq!(
+            verifier().authenticate_in(&headers(&token), other).await,
+            Err(PodIdentityError::PermissionDenied)
+        );
+        assert_eq!(
+            verifier().authenticate_token_in(&token, other).await,
+            Err(PodIdentityError::PermissionDenied)
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_body_token_is_reviewed_exactly_as_a_bearer_is() {
+    let purpose = PodIdentityPurpose::Egress;
+    let token = future_token();
+    let reviewer = FakeReviewer::status(status(purpose));
+    let verifier = KubernetesPodIdentityVerifier::for_test(reviewer.clone(), purpose);
+    let identity = verifier.authenticate_token(&token).await.unwrap();
+    assert_eq!(identity.purpose(), purpose);
+    assert_eq!(
+        reviewer.requests.lock().unwrap()[0].token.as_deref(),
+        Some(token.as_str())
+    );
+
+    for garbage in ["", " leading", "trailing ", "two\nlines"] {
+        let reviewer = FakeReviewer::status(status(purpose));
+        let verifier = KubernetesPodIdentityVerifier::for_test(reviewer.clone(), purpose);
+        assert_eq!(
+            verifier.authenticate_token(garbage).await,
+            Err(PodIdentityError::Unauthenticated)
+        );
+        assert!(
+            reviewer.requests.lock().unwrap().is_empty(),
+            "{garbage:?} reached review"
         );
     }
 }

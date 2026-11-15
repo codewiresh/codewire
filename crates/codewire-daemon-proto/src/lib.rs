@@ -41,6 +41,23 @@ pub const WORKSPACE_BINDING_TOKEN_PATH: &str = "/var/run/secrets/codewire/worksp
 pub const WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS: i64 = 600;
 /// Dedicated orchestration listener that serves only `WorkspaceBindingService`.
 pub const WORKSPACE_BINDING_PORT: u16 = 8087;
+/// Exact projected-token purpose for a broker-mode workspace Pod opening its
+/// egress stream to the cw-egress on its node (#4000). cw-egress forwards it
+/// to orchestration, which reviews it for [`SANDBOX_SERVICE_ACCOUNT`].
+pub const EGRESS_TOKEN_AUDIENCE: &str = "codewire.internal.egress.v1";
+pub const EGRESS_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/codewire/egress";
+pub const EGRESS_TOKEN_PATH: &str = "/var/run/secrets/codewire/egress/token";
+pub const EGRESS_TOKEN_EXPIRATION_SECONDS: i64 = 600;
+/// Exact projected-token purpose for cw-egress calling orchestration's
+/// `EgressService`. Orchestration accepts it only for
+/// [`EGRESS_NODE_SERVICE_ACCOUNT`] in its own (server) namespace, and reads
+/// the caller's node from the caller's live Pod.
+pub const EGRESS_NODE_TOKEN_AUDIENCE: &str = "codewire.internal.egress-node.v1";
+/// The only service account that may present an egress-node token.
+pub const EGRESS_NODE_SERVICE_ACCOUNT: &str = "codewire-egress";
+/// cw-egress's stream port, on the Pod network, reached through its
+/// node-local Service.
+pub const EGRESS_STREAM_PORT: u16 = 8089;
 /// Selects the hosted daemon's binding mode: the URL of the dedicated
 /// workspace-binding listener. A binding-mode Pod carries no environment
 /// identity; it comes only from the bind response.
@@ -507,6 +524,8 @@ mod tests {
             CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
             CREDENTIAL_RELAY_TOKEN_AUDIENCE,
             WORKSPACE_BINDING_TOKEN_AUDIENCE,
+            EGRESS_TOKEN_AUDIENCE,
+            EGRESS_NODE_TOKEN_AUDIENCE,
         ];
         for (index, audience) in audiences.iter().enumerate() {
             assert!(audience.starts_with("codewire.internal.") && audience.ends_with(".v1"));
@@ -523,6 +542,13 @@ mod tests {
             format!("{CREDENTIAL_RELAY_TOKEN_MOUNT_PATH}/token")
         );
         assert_ne!(CREDENTIAL_RELAY_SERVICE_ACCOUNT, SANDBOX_SERVICE_ACCOUNT);
+        assert_eq!(
+            EGRESS_TOKEN_PATH,
+            format!("{EGRESS_TOKEN_MOUNT_PATH}/token")
+        );
+        for account in [CREDENTIAL_RELAY_SERVICE_ACCOUNT, SANDBOX_SERVICE_ACCOUNT] {
+            assert_ne!(EGRESS_NODE_SERVICE_ACCOUNT, account);
+        }
         assert_eq!(
             CREDENTIAL_RELAY_TOKEN_EXPIRATION_SECONDS,
             WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS

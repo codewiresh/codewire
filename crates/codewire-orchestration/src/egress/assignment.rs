@@ -1,0 +1,197 @@
+//! The policy an environment's sandbox enforces through cw-egress (#4000):
+//! its selection's current revision, as the canonical document cw-egress
+//! compiles and checks against the digest. An environment that selects
+//! nothing is on `hosted-default` (#3997 D2), and stores no row.
+
+use codewire_egress_policy::{
+    BuiltinPolicy, CompiledPolicy, HOSTED_DEFAULT_NAME, HOSTED_DEFAULT_YAML, PolicyDocument,
+    PolicyError,
+};
+use sqlx::PgPool;
+use thiserror::Error;
+
+/// One policy revision, ready to send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignedPolicy {
+    /// `platform:NAME`, or a built-in's name.
+    pub name: String,
+    /// Zero for a built-in.
+    pub revision: u32,
+    /// Canonical JSON.
+    pub document: Vec<u8>,
+    pub digest: [u8; 32],
+}
+
+#[derive(Debug, Error)]
+pub enum AssignmentError {
+    #[error("read the environment's network policy: {0}")]
+    Store(#[from] sqlx::Error),
+    #[error("the environment does not exist")]
+    NoEnvironment,
+    #[error("the environment's network policy selection is not valid")]
+    CorruptSelection,
+    #[error("compile a built-in network policy: {0}")]
+    Builtin(#[from] PolicyError),
+}
+
+#[derive(sqlx::FromRow)]
+struct SelectionRow {
+    policy_id: Option<String>,
+    builtin: Option<String>,
+    policy_name: Option<String>,
+    revision: Option<i32>,
+    document: Option<Vec<u8>>,
+    digest: Option<Vec<u8>>,
+}
+
+/// The current revision of what `environment_id` selects.
+pub async fn environment_policy(
+    pool: &PgPool,
+    environment_id: &str,
+) -> Result<AssignedPolicy, AssignmentError> {
+    let row: Option<SelectionRow> = sqlx::query_as(
+        "SELECT np.policy_id, np.builtin, npp.name AS policy_name,
+                npp.current_revision AS revision, npr.document, npr.digest
+           FROM environments e
+      LEFT JOIN platform_environment_network_policies np ON np.environment_id = e.id
+      LEFT JOIN platform_network_policies npp
+             ON npp.id = np.policy_id AND npp.org_id = e.org_id
+      LEFT JOIN platform_network_policy_revisions npr
+             ON npr.policy_id = npp.id AND npr.revision = npp.current_revision
+          WHERE e.id = $1",
+    )
+    .bind(environment_id)
+    .fetch_optional(pool)
+    .await?;
+    selection(row.ok_or(AssignmentError::NoEnvironment)?)
+}
+
+fn selection(row: SelectionRow) -> Result<AssignedPolicy, AssignmentError> {
+    match (row.policy_id, row.builtin.as_deref()) {
+        (None, None) => compiled(
+            HOSTED_DEFAULT_NAME,
+            &PolicyDocument::parse_yaml(HOSTED_DEFAULT_YAML)?,
+        ),
+        (None, Some(name)) => {
+            let builtin =
+                BuiltinPolicy::from_name(name).ok_or(AssignmentError::CorruptSelection)?;
+            compiled(builtin.name(), &builtin.compile())
+        }
+        (Some(_), None) => {
+            let (Some(name), Some(revision), Some(document), Some(digest)) =
+                (row.policy_name, row.revision, row.document, row.digest)
+            else {
+                return Err(AssignmentError::CorruptSelection);
+            };
+            Ok(AssignedPolicy {
+                name: format!("platform:{name}"),
+                revision: u32::try_from(revision).map_err(|_| AssignmentError::CorruptSelection)?,
+                document,
+                digest: digest
+                    .try_into()
+                    .map_err(|_| AssignmentError::CorruptSelection)?,
+            })
+        }
+        (Some(_), Some(_)) => Err(AssignmentError::CorruptSelection),
+    }
+}
+
+fn compiled(name: &str, policy: &CompiledPolicy) -> Result<AssignedPolicy, AssignmentError> {
+    Ok(AssignedPolicy {
+        name: name.to_owned(),
+        revision: 0,
+        document: policy.canonical_json()?,
+        digest: *policy.digest().as_bytes(),
+    })
+}
+
+#[cfg(test)]
+mod database_tests;
+
+#[cfg(test)]
+mod tests {
+    use codewire_egress_policy::HOSTED_DEFAULT_DIGEST;
+
+    use super::*;
+
+    fn row() -> SelectionRow {
+        SelectionRow {
+            policy_id: None,
+            builtin: None,
+            policy_name: None,
+            revision: None,
+            document: None,
+            digest: None,
+        }
+    }
+
+    fn hex(bytes: &[u8; 32]) -> String {
+        codewire_egress_policy::PolicyDigest::from_bytes(*bytes).to_hex()
+    }
+
+    #[test]
+    fn no_selection_is_hosted_default_with_its_pinned_digest() {
+        let policy = selection(row()).unwrap();
+        assert_eq!(policy.name, "hosted-default");
+        assert_eq!(policy.revision, 0);
+        assert_eq!(hex(&policy.digest), HOSTED_DEFAULT_DIGEST);
+    }
+
+    #[test]
+    fn a_builtin_selection_sends_the_builtin_document() {
+        let policy = selection(SelectionRow {
+            builtin: Some("locked".to_owned()),
+            ..row()
+        })
+        .unwrap();
+        assert_eq!(policy.name, "locked");
+        assert_eq!(hex(&policy.digest), BuiltinPolicy::Locked.digest_hex());
+        assert_eq!(
+            policy.document,
+            BuiltinPolicy::Locked.compile().canonical_json().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_stored_selection_sends_its_current_revision() {
+        let policy = selection(SelectionRow {
+            policy_id: Some("id".to_owned()),
+            policy_name: Some("web".to_owned()),
+            revision: Some(3),
+            document: Some(b"{}".to_vec()),
+            digest: Some(vec![7; 32]),
+            ..row()
+        })
+        .unwrap();
+        assert_eq!(policy.name, "platform:web");
+        assert_eq!(policy.revision, 3);
+        assert_eq!(policy.digest, [7; 32]);
+    }
+
+    #[test]
+    fn a_selection_that_cannot_be_read_is_refused_not_defaulted() {
+        let both = SelectionRow {
+            policy_id: Some("id".to_owned()),
+            builtin: Some("locked".to_owned()),
+            ..row()
+        };
+        let unknown_builtin = SelectionRow {
+            builtin: Some("hosted-default".to_owned()),
+            ..row()
+        };
+        let short_digest = SelectionRow {
+            policy_id: Some("id".to_owned()),
+            policy_name: Some("web".to_owned()),
+            revision: Some(1),
+            document: Some(b"{}".to_vec()),
+            digest: Some(vec![7; 31]),
+            ..row()
+        };
+        for broken in [both, unknown_builtin, short_digest] {
+            assert!(matches!(
+                selection(broken),
+                Err(AssignmentError::CorruptSelection)
+            ));
+        }
+    }
+}

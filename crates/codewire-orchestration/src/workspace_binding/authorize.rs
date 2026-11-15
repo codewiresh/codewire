@@ -43,7 +43,7 @@ pub(super) fn bindable_pod(
         || member.terminating
         || member.service_account.as_deref() != Some(SANDBOX_SERVICE_ACCOUNT)
         || label(member, LABEL_TYPE) != Some("workspace")
-        || member.phase.as_deref() != Some("Running")
+        || !member.is_running()
     {
         return None;
     }
@@ -84,7 +84,7 @@ pub(super) fn bound_sandbox(
 }
 
 /// Whether the TCP peer is one of this Pod's own addresses (design S1).
-pub(super) fn peer_is_pod(member: &MemberFacts, peer: IpAddr) -> bool {
+pub(crate) fn peer_is_pod(member: &MemberFacts, peer: IpAddr) -> bool {
     member
         .ips
         .iter()

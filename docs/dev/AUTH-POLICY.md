@@ -397,13 +397,22 @@ is not admission. Subsequent admission replies are protocol errors.
 ### Kubernetes Pod identity
 
 The optional `codewire-server-core/kubernetes-identity` verifier has fixed
-purposes: credential relay, credential workspace and workspace binding. Their
-audiences are distinct. A caller cannot choose an arbitrary audience or
-substitute a token issued for another purpose. They are
+purposes: credential relay, credential workspace, workspace binding, egress
+and egress node. Their audiences are distinct. A caller cannot choose an
+arbitrary audience or substitute a token issued for another purpose. They are
 `codewire.internal.credential-relay.v1`,
-`codewire.internal.credential-workspace.v1` and
-`codewire.internal.workspace-binding.v1`. These are Kubernetes projected Pod
+`codewire.internal.credential-workspace.v1`,
+`codewire.internal.workspace-binding.v1`, `codewire.internal.egress.v1` and
+`codewire.internal.egress-node.v1`. These are Kubernetes projected Pod
 tokens, not another Codewire user bearer flavor.
+
+Egress (#4000): a broker-mode workspace Pod presents its egress token, for
+the sandbox ServiceAccount, to cw-egress on its node, which forwards it to
+orchestration's `EgressService`. cw-egress itself authenticates with the
+egress-node audience, which only the `codewire-egress` ServiceAccount may
+present; orchestration also requires that Pod to be in its own namespace and
+reads cw-egress's node from its live Pod, never from a request field. A guest
+Pod is admitted only on that node.
 
 The credential relay is orchestration: only the
 `codewire-orchestration` ServiceAccount may present the relay audience, and the

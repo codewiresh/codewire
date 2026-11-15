@@ -23,11 +23,11 @@ Connect stack.
 
 | Listener | Port | Served by | Services |
 |---|---|---|---|
-| `internal-connect` (TLS only) | 8088 | orchestration | `MeshAuthorizationService`, `EnvironmentMeshService` |
+| `internal-connect` (TLS only) | 8088 | orchestration | `MeshAuthorizationService`, `EnvironmentMeshService`, `EgressService` (behind `CODEWIRE_HOSTED_EGRESS_ENABLED`) |
 | `workspace-binding` | 8087 | orchestration | `WorkspaceBindingService` |
 | `derp-admission` | 8097 | coordinator, mesh | `DerpAdmissionService` |
 
-All four are in the `codewire.internal.v1` package. The public listeners
+All five are in the `codewire.internal.v1` package. The public listeners
 carry none of them.
 
 Reason: with one stack an RPC cannot miss request ids, tracing or panic

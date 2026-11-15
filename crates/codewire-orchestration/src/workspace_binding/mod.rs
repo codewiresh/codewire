@@ -21,13 +21,13 @@
 //! value-blind.
 
 mod access;
-mod authorize;
+pub(crate) mod authorize;
 #[cfg(test)]
 mod authorize_reference;
 pub mod limits;
 mod metrics;
 mod service;
-mod store;
+pub(crate) mod store;
 
 use std::time::Duration;
 

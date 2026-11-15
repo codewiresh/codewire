@@ -1922,6 +1922,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-egress-node"
+version = "0.1.0"
+dependencies = [
+ "codewire-vmm-guest-probe",
+ "codewire-workspace-hack",
+ "hmac 0.12.1",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "codewire-egress-policy"
 version = "0.1.0"
 dependencies = [
@@ -2189,6 +2202,7 @@ dependencies = [
  "codewire-daemon",
  "codewire-daemon-bridge",
  "codewire-daemon-proto",
+ "codewire-egress-node",
  "codewire-egress-policy",
  "codewire-platform-credentials",
  "codewire-project",

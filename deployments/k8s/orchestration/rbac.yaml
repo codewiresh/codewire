@@ -23,10 +23,12 @@ metadata:
     app.kubernetes.io/name: codewire
     app.kubernetes.io/component: orchestration
 rules:
-  # Exact-audience workspace binding and OpenBao Kubernetes Auth validate their
-  # presented workload JWTs through the cluster TokenReview API as this
-  # ServiceAccount. They need only TokenReview creation; SubjectAccessReview
-  # and broader auth-delegator access are not required.
+  # Exact-audience workspace binding, hosted egress admission (#4000: both
+  # cw-egress's own token and a guest's forwarded egress token) and OpenBao
+  # Kubernetes Auth validate their presented workload JWTs through the
+  # cluster TokenReview API as this ServiceAccount. They need only
+  # TokenReview creation; SubjectAccessReview and broader auth-delegator
+  # access are not required. cw-egress itself has no Role or ClusterRole.
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]

@@ -134,6 +134,14 @@ pub struct MemberFacts {
     pub spec_json: Value,
 }
 
+impl MemberFacts {
+    /// Whether its reported phase is `Running`: the one place the phase
+    /// string is compared.
+    pub fn is_running(&self) -> bool {
+        self.phase.as_deref() == Some("Running")
+    }
+}
+
 /// Raw facts about the runtime an incarnation belongs to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeFacts {

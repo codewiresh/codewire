@@ -63,6 +63,7 @@ codewire-daemon = { workspace = true }
 codewire-daemon-bridge = { workspace = true }
 codewire-daemon-proto = { workspace = true }
 # Platform network policies compile and digest like local ones (#4000).
+codewire-egress-node = { workspace = true }
 codewire-egress-policy = { workspace = true }
 codewire-platform-credentials = { workspace = true }
 codewire-project = { workspace = true }

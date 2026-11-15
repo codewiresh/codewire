@@ -1,0 +1,174 @@
+syntax = "proto3";
+
+package codewire.internal.v1;
+
+// EgressService is how cw-egress, the per-node egress supervisor for hosted
+// sandboxes (#4000), learns what each sandbox on its node may reach and
+// reports what it enforced. It is served on the internal-connect listener.
+//
+// Every method authenticates the caller by TokenReview of cw-egress's own
+// projected token (audience codewire.internal.egress-node.v1, cw-egress's
+// service account and namespace only). Orchestration reads the caller Pod's
+// node from the live Pod and answers only about Pods on that node: every
+// method, not only Admit, refuses a pod_uid on another node with
+// PERMISSION_DENIED. No request field names the caller's node.
+//
+// A Pod UID is not a secret; the node check is what bounds a caller to the
+// Pods it already serves. No admission handle is issued, so a cw-egress can
+// resume WatchAssignment after an orchestration restart.
+service EgressService {
+  // Admits one guest stream. Orchestration reviews the guest's Pod-bound
+  // egress token, reads the Pod it names and refuses unless the Pod is on
+  // the caller's node with the same UID, is not terminating, carries
+  // codewire.sh/egress=broker and has peer_ip among its addresses. Refused
+  // admissions are PERMISSION_DENIED with no detail. Starts from one peer on
+  // one node are limited before the guest's token is reviewed: past the limit
+  // the answer is RESOURCE_EXHAUSTED, and cw-egress retries later. A review
+  // that cannot run is UNAVAILABLE.
+  rpc Admit(AdmitRequest) returns (AdmitResponse);
+
+  // The current assignment of an admitted Pod on the caller's node, then
+  // every change to it: a bind, a new policy revision, a stop. cw-egress
+  // keeps enforcing the last assignment it received if the stream breaks,
+  // and opens it again to resume.
+  rpc WatchAssignment(WatchAssignmentRequest) returns (stream WatchAssignmentResponse);
+
+  // What cw-egress enforces for a Pod now.
+  rpc ReportEnforcement(ReportEnforcementRequest) returns (ReportEnforcementResponse);
+
+  // A batch of a Pod's egress records since the last report. They carry
+  // the raw refusal reason, which only the owner's log shows: anything
+  // orchestration serves back to the guest goes through the same
+  // protected-reason projection as local (record::guest_records).
+  rpc ReportRecords(ReportRecordsRequest) returns (ReportRecordsResponse);
+}
+
+message AdmitRequest {
+  // The guest's projected token, audience codewire.internal.egress.v1.
+  string guest_token = 1;
+  // The TCP peer of the guest's stream, as cw-egress saw it. Orchestration
+  // cannot verify it: a caller could misstate it only for Pods on its own
+  // node, which it already serves.
+  string peer_ip = 2;
+}
+
+message AdmitResponse {
+  string pod_uid = 1;
+  EgressAssignment assignment = 2;
+  // The admitted Pod's name. The other methods name the Pod by name and UID:
+  // orchestration reads it by name and refuses it unless the UID matches
+  // and it is on the caller's node.
+  string pod_name = 3;
+}
+
+message WatchAssignmentRequest {
+  string pod_uid = 1;
+  string pod_name = 2;
+}
+
+message WatchAssignmentResponse {
+  EgressAssignment assignment = 1;
+}
+
+message EgressAssignment {
+  oneof binding {
+    // An identity-free warm-pool member: platform allows only.
+    UnboundAssignment unbound = 1;
+    BoundAssignment bound = 2;
+  }
+  // Destinations the daemon depends on (the control plane, DERP, Mesh).
+  // Orchestration sets them from its own deployment configuration only, never
+  // from a user's policy or any other user input. Allowed whatever the policy
+  // says; a user's deny does not override them.
+  repeated PlatformAllow platform_allows = 3;
+}
+
+message UnboundAssignment {}
+
+message BoundAssignment {
+  string environment_id = 1;
+  int64 operation_generation = 2;
+  EgressPolicyRevision policy = 3;
+}
+
+message EgressPolicyRevision {
+  // The reference as the environment selected it, for example
+  // "platform:web", "locked" or "hosted-default", as the public
+  // EnvironmentNetworkPolicy names it.
+  string reference = 1;
+  // 0 for a built-in policy.
+  uint32 revision = 2;
+  // The revision's canonical JSON document. cw-egress compiles it and
+  // refuses one whose digest differs.
+  bytes document = 3;
+  // SHA-256 of the document, 32 bytes.
+  bytes digest = 4;
+}
+
+message PlatformAllow {
+  string host = 1;
+  uint32 port = 2;
+}
+
+enum EgressEnforcementState {
+  EGRESS_ENFORCEMENT_STATE_UNSPECIFIED = 0;
+  // The policy revision is enforced on a live stream.
+  EGRESS_ENFORCEMENT_STATE_ENFORCED = 1;
+  // The sandbox has no egress: its start-time self-check failed, or the
+  // assigned document did not reproduce its digest. detail carries a fixed
+  // code (for example "self_check_failed", "policy_digest_mismatch").
+  EGRESS_ENFORCEMENT_STATE_FAILED_CLOSED = 2;
+  // The Pod's stream ended and no replacement has been admitted.
+  EGRESS_ENFORCEMENT_STATE_DISCONNECTED = 3;
+}
+
+message ReportEnforcementRequest {
+  string pod_uid = 1;
+  string pod_name = 2;
+  EgressEnforcementState state = 3;
+  // Set when state is ENFORCED: the revision and digest in force.
+  uint32 revision = 4;
+  bytes digest = 5;
+  // A fixed code for FAILED_CLOSED, for operators. Never shown to the guest.
+  string detail = 6;
+}
+
+message ReportEnforcementResponse {}
+
+message ReportRecordsRequest {
+  string pod_uid = 1;
+  string pod_name = 2;
+  repeated EgressRecord records = 3;
+}
+
+message ReportRecordsResponse {}
+
+// One folded egress record (codewire-egress-policy record.rs). The reason is
+// the raw one; only the owner's log reads it.
+message EgressRecord {
+  oneof destination {
+    string name = 1;
+    string address_only = 2;
+  }
+  // The address of the latest observation, when it had one.
+  string address = 3;
+  EgressTransport transport = 4;
+  // 0 for DNS.
+  uint32 port = 5;
+  // Empty for a pass; otherwise RefusalReason::code().
+  string refusal = 6;
+  // The policy reference, as EgressPolicyRevision.reference names it.
+  string policy_reference = 7;
+  uint32 policy_revision = 8;
+  bytes policy_digest = 9;
+  uint64 first_seen_unix_ms = 10;
+  uint64 last_seen_unix_ms = 11;
+  uint64 count = 12;
+}
+
+enum EgressTransport {
+  EGRESS_TRANSPORT_UNSPECIFIED = 0;
+  EGRESS_TRANSPORT_DNS = 1;
+  EGRESS_TRANSPORT_TCP = 2;
+  EGRESS_TRANSPORT_UDP = 3;
+}

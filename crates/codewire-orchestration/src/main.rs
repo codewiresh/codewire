@@ -16,6 +16,7 @@
 //! distributed lock — one workflow per environment id serializes
 //! commands structurally.
 
+use codewire_orchestration::egress;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -778,8 +779,8 @@ async fn main() -> anyhow::Result<()> {
         .with_unary_connect_routes_internal_service(
             codewire_orchestration::environment_mesh::environment_mesh_router(pool.clone()),
             codewire_orchestration::environment_mesh::internal_service_layer(&cfg.session_secret)?,
-        )
-        .into_router();
+        );
+    let internal_app = egress::mount(internal_app, &api_state, &cfg.database_url)?;
 
     // The Transit canary costs OpenBao round trips, so a background loop
     // verifies it and `/readyz` reads the latest fail-closed verdict (#2430).

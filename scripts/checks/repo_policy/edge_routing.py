@@ -155,6 +155,8 @@ INTERNAL_CONNECT_SERVICES = {
     "codewire.internal.v1.EnvironmentMeshService": (
         "codewire_orchestration::environment_mesh::environment_mesh_router"
     ),
+    # cw-egress on each node asking which sandboxes it may serve (#4000).
+    "codewire.internal.v1.EgressService": "egress::mount(",
 }
 
 # The second closed listener class: every tenant workload can open TCP to it,
@@ -804,7 +806,8 @@ def assert_internal_connect_listener_exemption(
     if set(unrouted) != expected:
         fail(
             "unrouted listener map must contain exactly MeshAuthorizationService, "
-            "EnvironmentMeshService, WorkspaceBindingService and DerpAdmissionService"
+            "EnvironmentMeshService, EgressService, WorkspaceBindingService and "
+            "DerpAdmissionService"
         )
     assert_internal_connect_listener_boundary(INTERNAL_CONNECT_SERVICES, fail, reader)
     assert_workspace_binding_listener_boundary(fail, reader)
@@ -1319,6 +1322,16 @@ def internal_connect_listener_self_test() -> None:
             'let app = AppBuilder::new("codewire-orchestration")',
             'let app = AppBuilder::new("codewire-orchestration")\n'
             '        .with_connect_routes(codewire_orchestration::connect::mesh_authorization::router(pool.clone()))',
+        ),
+    )
+    expect_rejection(
+        "egress mounted on the public app",
+        "EgressService is prohibited from the public 8084 app",
+        replacement=(
+            "crates/codewire-orchestration/src/main.rs",
+            'let app = AppBuilder::new("codewire-orchestration")',
+            'let app = AppBuilder::new("codewire-orchestration")\n'
+            '        .with_connect_routes(egress::mount(app, &api_state, url)?)',
         ),
     )
     expect_rejection(

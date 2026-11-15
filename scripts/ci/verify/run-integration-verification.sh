@@ -1208,6 +1208,11 @@ database_lane_orchestration_workspaces() {
     cargo test --locked -p codewire-orchestration --lib \
       'api::network_policies::database_tests::' \
       -- --ignored --nocapture --test-threads=1
+  counted_suite "hosted egress assignments from the policy store" egress-assignments \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'egress::assignment::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
 
   counted_suite "host operations: one open operation, replay by session and observations" host-operations \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \

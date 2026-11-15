@@ -655,6 +655,37 @@ pub trait RuntimeAttestation: Send + Sync {
         identity: &codewire_server_core::pod_identity::VerifiedPodIdentity,
     ) -> anyhow::Result<Option<MemberFacts>>;
 
+    /// Authenticate cw-egress calling `EgressService` (#4000): the egress-node
+    /// audience, cw-egress's service account, and a Pod in `namespace`. The
+    /// caller then reads cw-egress's node from its live Pod.
+    async fn review_egress_node(
+        &self,
+        headers: &axum::http::HeaderMap,
+        namespace: &str,
+    ) -> Result<
+        codewire_server_core::pod_identity::VerifiedPodIdentity,
+        codewire_server_core::pod_identity::PodIdentityError,
+    >;
+
+    /// Authenticate a guest's egress token that cw-egress forwarded: the
+    /// egress audience and the sandbox service account, in `namespace`.
+    async fn review_egress_guest(
+        &self,
+        token: &str,
+        namespace: &str,
+    ) -> Result<
+        codewire_server_core::pod_identity::VerifiedPodIdentity,
+        codewire_server_core::pod_identity::PodIdentityError,
+    >;
+
+    /// The Pod of this name in `namespace`, any role; `None` when there is
+    /// none. The caller compares its UID.
+    async fn attested_pod(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<MemberFacts>>;
+
     /// The runtime of this name; `None` when there is none.
     async fn attested_runtime(
         &self,
