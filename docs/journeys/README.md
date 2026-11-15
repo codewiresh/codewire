@@ -55,7 +55,11 @@ rolled out.
 
 - A command, script or spec named here exists in this repository. Where
   nothing can drive a step yet, the file says "no command yet" and names the
-  issue. A gap is written down, never worked around.
+  issue. A gap is written down, never worked around. Policy holds the paths
+  to this: `python3 scripts/checks/repo_checks.py journey-paths` fails on a
+  repository path, in inline code or a code block, that is not in the tree,
+  and on a link to a file that does not exist. It does not check that a `cw`
+  command exists.
 - A journey is never weakened to pass. A proof through one entry point does
   not count for the others.
 - A proof on a stand-in (Kind for Dev, Dev for Production) lists what the
@@ -67,10 +71,9 @@ rolled out.
 
 These belong to #4356 and do not exist. Do not rely on them:
 
-- `covers:` lines that name the source paths a journey proves, and a policy
-  check that fails when a journey names a missing path. Until that check
-  exists, journey files carry no `covers:` lines. Only the dashboard specs
-  have them today (`docs/TESTING.md`).
+- `covers:` lines that name the source paths a journey proves. Journey
+  files carry none yet. Only the dashboard specs have them today
+  (`docs/TESTING.md`).
 - `scripts/dev/preflight.sh --explain` printing the journeys a change
   selects.
 

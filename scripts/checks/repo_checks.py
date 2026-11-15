@@ -8,6 +8,7 @@ from repo_policy.design_tokens import check_design_tokens
 from repo_policy.edge_routing import check_connect_edge_routing
 from repo_policy.hosted_overlay_contract import check_hosted_overlay_contract
 from repo_policy.idp_security import check_idp_signing_kek_isolation
+from repo_policy.journey_paths import check_journey_paths
 from repo_policy.kind_overlay_peers import check_kind_overlay_peers
 from repo_policy.kind_suite_rows import check_kind_suite_rows
 from repo_policy.ses_security import check_ses_sender_isolation
@@ -109,6 +110,9 @@ def main(argv: list[str] | None = None) -> int:
     kind_suite_rows_parser = subparsers.add_parser("kind-suite-rows")
     kind_suite_rows_parser.add_argument("--self-test", action="store_true")
     kind_suite_rows_parser.set_defaults(func=check_kind_suite_rows)
+    journey_paths_parser = subparsers.add_parser("journey-paths")
+    journey_paths_parser.add_argument("--self-test", action="store_true")
+    journey_paths_parser.set_defaults(func=check_journey_paths)
     os_splits_parser = subparsers.add_parser("os-splits")
     os_splits_parser.add_argument("--self-test", action="store_true")
     os_splits_parser.set_defaults(func=check_os_splits)
