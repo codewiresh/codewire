@@ -111,6 +111,8 @@ impl HandoffSocket {
                 Err(HandoffError::Malformed) => Err(protocol(ProtocolError::Header)),
                 Err(HandoffError::Version) => Err(protocol(ProtocolError::Version)),
                 Err(HandoffError::Descriptors) => Err(protocol(ProtocolError::Descriptor)),
+                // The tag is read by the front door process, before this.
+                Err(HandoffError::RoleTag) => Err(protocol(ProtocolError::Header)),
                 Err(HandoffError::Io | HandoffError::Poisoned | HandoffError::WouldBlock) => {
                     Err(io::Error::other("hand-off socket failed"))
                 }
