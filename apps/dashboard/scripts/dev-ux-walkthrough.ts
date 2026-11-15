@@ -393,6 +393,42 @@ async function createForm(page: Page, slug: string, userId: string, orgId: strin
     await expect(page.locator(".cw-preview-pattern")).toContainText("https://{label}-{sandbox-id-prefix}-");
     await expect(dialog(page, "Choose a GitHub repository")).toHaveCount(0);
   });
+  // Typing as the drawer opens stays in the field it started in (#4378). The
+  // drawer's focus waits for the first frame, which can come late on a busy
+  // page; a tab of its own holds the frames until typing is under way, so its
+  // frames and its tab-scoped draft never reach the rest of the walk.
+  await stage(`create-typing-${width}`, async () => {
+    const typing = await page.context().newPage();
+    try {
+      await typing.setViewportSize({ width, height: 900 });
+      await typing.addInitScript(() => {
+        const frame = window.requestAnimationFrame.bind(window);
+        const held: FrameRequestCallback[] = [];
+        window.requestAnimationFrame = (callback) => { held.push(callback); return 0; };
+        Object.assign(window, {
+          releaseFrames: () => new Promise<void>((resolve) => {
+            window.requestAnimationFrame = frame;
+            held.splice(0).forEach((callback) => frame(callback));
+            frame(() => frame(() => resolve()));
+          }),
+        });
+      });
+      await visit(typing, `/${slug}/new/`);
+      const name = typing.getByLabel("Name", { exact: true });
+      const repository = typing.getByLabel("Repository URL", { exact: true });
+      const named = await name.inputValue();
+      await repository.click();
+      await repository.press("ControlOrMeta+a");
+      await repository.pressSequentially("https://example.test/");
+      await typing.evaluate(() => (window as unknown as { releaseFrames: () => Promise<void> }).releaseFrames());
+      await repository.pressSequentially("owner/repo");
+      await expect(repository).toHaveValue("https://example.test/owner/repo");
+      await expect(repository).toBeFocused();
+      await expect(name).toHaveValue(named);
+    } finally {
+      await typing.close();
+    }
+  });
   await stage(`create-fit-${width}`, async () => {
     await fits(page, github);
     await fits(page, page.locator("#environment-create-card"));
@@ -862,6 +898,21 @@ export async function runDevUxWalkthrough(page: Page, options: {
     // output: earlier lines may have scrolled out of the visible rows.
     await expect(rows).toContainText("__UX_PREVIEW_ready__");
     await attachedTerminal(page, TERMINAL_ATTACH_MS);
+  });
+  // More actions lists Open in VS Code first, its icon saying it opens
+  // outside the page, with Resize and Delete; Refresh sandbox status is gone,
+  // since the page's status updates by itself (owner, 2026-11-13, #4542).
+  await stage("sandbox-menu", async () => {
+    const sandboxMenu = await workspaceMenu(page, "More actions");
+    const items = sandboxMenu.locator(":scope > .cw-menu-panel > .cw-menu-item:visible");
+    const open = sandboxMenu.getByRole("link", { name: "Open in VS Code", exact: true });
+    await expect(items.first()).toHaveText("Open in VS Code");
+    await expect(open).toHaveAttribute("href", /^vscode:\/\//);
+    await expect(open.locator('svg[aria-hidden="true"] use')).toHaveAttribute("href", /#icon-external$/);
+    await expect(button(sandboxMenu, "Resize")).toBeVisible();
+    await expect(button(sandboxMenu, "Delete")).toBeVisible();
+    await expect(page.getByRole("button", { name: /Refresh sandbox status/ })).toHaveCount(0);
+    await page.keyboard.press("Escape");
   });
   await stage("resize-dismissal", async () => {
     // The detail page shows the exact resources and the scheduled deletion
