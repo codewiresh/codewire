@@ -147,7 +147,7 @@ darwin_pin() {
 }
 
 check_darwin_cross() {
-  local zig_pin zigbuild_pin zig_version zigbuild_version
+  local zig_pin zigbuild_pin zig_path zig_version zigbuild_version
   zig_pin="$(darwin_pin DARWIN_CHECK_ZIG_VERSION)"
   zigbuild_pin="$(darwin_pin DARWIN_CHECK_ZIGBUILD_VERSION)"
   if [ -z "$zig_pin" ] || [ -z "$zigbuild_pin" ]; then
@@ -166,7 +166,10 @@ check_darwin_cross() {
       "cargo install --locked cargo-zigbuild@${zigbuild_pin}, and put \$HOME/.cargo/bin first on PATH"
     return
   fi
-  zig_version="$(zig version 2>/dev/null || true)"
+  # As check-darwin-cross.sh finds it: the pin's own install directory first.
+  zig_path="${HOME:-}/.local/opt/zig-$HOSTTYPE-linux-${zig_pin}/zig"
+  [ -n "${HOME:-}" ] && [ -x "$zig_path" ] || zig_path=zig
+  zig_version="$("$zig_path" version 2>/dev/null || true)"
   if [ "$zig_version" != "$zig_pin" ]; then
     problem "Zig ${zig_pin} is required on PATH (found '${zig_version:-none}')" \
       "install Zig ${zig_pin} and put it on PATH"

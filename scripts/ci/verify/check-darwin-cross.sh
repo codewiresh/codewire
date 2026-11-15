@@ -70,7 +70,15 @@ if [[ ${CARGO_ZIGBUILD_VERSION+x} && "$CARGO_ZIGBUILD_VERSION" != "$DARWIN_CHECK
   die "CARGO_ZIGBUILD_VERSION must match the checked-in $DARWIN_CHECK_ZIGBUILD_VERSION pin"
 fi
 
-zig_bin="$(type -P zig)" || die "install Zig $DARWIN_CHECK_ZIG_VERSION on PATH"
+# The pinned Zig is taken from its own install directory when it is there, so
+# a workstation whose `zig` on PATH is another version still runs this check:
+# on 2026-11-15 a shared link moved to 0.17.1 for another project and every
+# local run stopped at the version check. CI installs the pin on PATH, which
+# is the fallback. The version is checked below wherever the binary came from.
+zig_bin="${HOME:-}/.local/opt/zig-$HOSTTYPE-linux-$DARWIN_CHECK_ZIG_VERSION/zig"
+if [[ -z "${HOME:-}" || ! -x "$zig_bin" ]]; then
+  zig_bin="$(type -P zig)" || die "install Zig $DARWIN_CHECK_ZIG_VERSION on PATH"
+fi
 zigbuild_bin="$(type -P cargo-zigbuild)" || die "install cargo-zigbuild $DARWIN_CHECK_ZIGBUILD_VERSION on PATH"
 [[ "$zig_bin" == /* ]] || zig_bin="$PWD/$zig_bin"
 [[ "$zigbuild_bin" == /* ]] || zigbuild_bin="$PWD/$zigbuild_bin"

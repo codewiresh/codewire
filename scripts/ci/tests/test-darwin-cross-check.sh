@@ -53,7 +53,8 @@ elif tool == 'cargo-zigbuild' and arguments == ['--version']:
     sys.exit(int(os.environ.get('DARWIN_FIXTURE_ZIGBUILD_STATUS', '0')))
 elif tool == 'cargo-zigbuild':
     assert os.environ['CARGO_ZIGBUILD_PYTHON_PATH'] == '/usr/bin/false'
-    assert os.environ['CARGO_ZIGBUILD_ZIG_PATH'] == str(Path(sys.argv[0]).with_name('zig'))
+    assert os.environ['CARGO_ZIGBUILD_ZIG_PATH'] == os.environ.get(
+        'DARWIN_FIXTURE_EXPECT_ZIG', str(Path(sys.argv[0]).with_name('zig')))
     # Model only the selected compiler route; the real compilation is separate.
     os.environ['DARWIN_FIXTURE_PINNED_COMPILER'] = '1'
     os.execv(str(Path(sys.argv[0]).with_name('cargo')), ['cargo', *arguments])
@@ -149,6 +150,23 @@ else:
         for value in ('', '/synthetic/override'):
             _, result = run({override: value}, status=1)
             assert f'unset inherited {override}' in result.stderr
+
+    # The pinned Zig in its own install directory is used before `zig` on
+    # PATH, so a PATH that holds another version does not stop the check; its
+    # version is still checked.
+    import platform
+    pinned = root / '.local' / 'opt' / f'zig-{platform.machine()}-linux-0.15.2'
+    pinned.mkdir(parents=True)
+    pinned_zig = pinned / 'zig'
+    pinned_zig.write_text('#!/bin/sh\necho "${DARWIN_FIXTURE_PINNED_ZIG:-0.15.2}"\n')
+    pinned_zig.chmod(0o755)
+    run({'DARWIN_FIXTURE_ZIG': '0.17.1', 'DARWIN_FIXTURE_EXPECT_ZIG': str(pinned_zig)})
+    _, result = run({'DARWIN_FIXTURE_PINNED_ZIG': '0.17.1'}, status=1)
+    assert 'installed Zig must be 0.15.2' in result.stderr, result.stderr
+    shutil.rmtree(root / '.local')
+    # Without it, another version on PATH is refused as before.
+    _, result = run({'DARWIN_FIXTURE_ZIG': '0.17.1'}, status=1)
+    assert 'installed Zig must be 0.15.2' in result.stderr, result.stderr
 
     # Missing tools are modeled with a private PATH: no ambient installation
     # can turn a missing-tool fixture into a real compiler invocation.
