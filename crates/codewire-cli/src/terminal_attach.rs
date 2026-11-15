@@ -549,11 +549,15 @@ mod tests {
         let mut reader = pty.master.try_clone_reader().unwrap();
         let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = std::sync::Arc::clone(&output);
+        let (drained, output_ended) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut buffer = [0_u8; 4096];
             while let Ok(read @ 1..) = reader.read(&mut buffer) {
                 sink.lock().unwrap().extend_from_slice(&buffer[..read]);
             }
+            // The read ends once no process holds the terminal's other end:
+            // everything the child wrote has been copied.
+            let _ = drained.send(());
         });
         let mut writer = pty.master.take_writer().unwrap();
         writer.write_all(b"exit\r").unwrap();
@@ -570,11 +574,18 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(50));
         };
-        let text = String::from_utf8_lossy(&output.lock().unwrap()).into_owned();
         let Some(status) = status else {
             child.kill().unwrap();
+            let text = String::from_utf8_lossy(&output.lock().unwrap()).into_owned();
             panic!("the child waited for another key after its command ended:\n{text}");
         };
+        // The child's exit can be seen before its last lines are read from
+        // the terminal: on a loaded host the copy fell behind and the check
+        // missed RETURNED (#4694). Read to the end first; 30 s is a hang guard.
+        output_ended
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the terminal output did not end after the child exited");
+        let text = String::from_utf8_lossy(&output.lock().unwrap()).into_owned();
         assert!(status.success(), "{status}:\n{text}");
         assert!(text.contains("KEYS \"exit\\n\""), "{text}");
         assert!(text.contains("RETURNED"), "{text}");
