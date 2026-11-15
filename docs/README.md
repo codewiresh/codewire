@@ -39,6 +39,8 @@ directory each.
 
 - [dev/CLI-MANAGED-INSTALL.md](dev/CLI-MANAGED-INSTALL.md): installing and
   updating `cw`.
+- [dev/CW-RUNTIME-JOURNAL.md](dev/CW-RUNTIME-JOURNAL.md): updating the `cw`
+  a hosted sandbox runs, and how a request whose owner died is settled.
 - [dev/LINUX-LOCAL-VMS.md](dev/LINUX-LOCAL-VMS.md): local VMs on Linux.
 - [dev/MACOS-CLI.md](dev/MACOS-CLI.md): local VMs on macOS.
 - [dev/CLI-ORCHESTRATION.md](dev/CLI-ORCHESTRATION.md): durable sessions and

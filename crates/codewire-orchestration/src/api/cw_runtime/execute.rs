@@ -19,6 +19,17 @@ use crate::api::ApiState;
 
 const ROLE_TIMEOUT: Duration = Duration::from_secs(130);
 const OWNER_TIMEOUT: Duration = Duration::from_secs(600);
+/// Past this long after admission nothing can still act for a request. Its
+/// admission and its last settlement are each one bounded transaction, its
+/// owner stops at [`OWNER_TIMEOUT`], and the sandbox role it last started
+/// dies at the role's own alarm. A request still open this old was abandoned
+/// by an owner whose process died (#4518).
+pub(super) const ABANDONED_AFTER: Duration = Duration::from_secs(15 * 60);
+/// How long after a request ended unknown its Store says what its effect did.
+/// The owner ends a request unknown as soon as its dispatch fails or runs out
+/// of time, but the role it started can still select until its own alarm,
+/// 121 s after it started, which is inside the owner's wait for it (#4518).
+pub(super) const RESOLVABLE_AFTER: Duration = ROLE_TIMEOUT;
 const MAX_STDERR: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -12,6 +12,7 @@
 //! retry replays the same resumable logic the JetStream redelivery
 //! exercised before the cutover.
 
+pub mod abandoned_leases;
 pub mod activity_authority;
 pub mod agents;
 pub mod billing_sessions;

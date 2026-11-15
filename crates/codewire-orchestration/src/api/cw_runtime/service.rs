@@ -256,7 +256,10 @@ async fn mutation(
     // cannot strand a returned fresh owner or recreate a lost capability.
     tokio::spawn(async move {
         let result = async {
-            match journal.admit(&captured, &user, intent.mutation).await? {
+            match journal
+                .admit(&captured, &user, intent.mutation, selection)
+                .await?
+            {
                 Admission::Existing(request) => Ok(*request),
                 Admission::Owned { request, owner } => {
                     execute::run(PlatformBackend {

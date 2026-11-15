@@ -49,6 +49,7 @@ mod tests {
     mod account_suspension;
     mod billing_rate_cards;
     mod confidential_activation_slots;
+    mod cw_runtime_resolution;
     mod default_access_profile;
     mod environment_error_code;
     mod environment_mesh;
@@ -86,9 +87,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced) and 0002 to 0027.
+    // (which equals the 41-migration history it replaced) and 0002 to 0028.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "61c8b49c3bf18a96f706a0c09d714d18dcbbfd612a409c145d35822456f95497";
+        "dd340b239a6d7fa22a51479842166239d6efb26b6c5aaa803f0218a778029ebc";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -163,6 +164,8 @@ mod tests {
 
     // SHA-384 of 0027_account_suspension.sql (#3297).
     const APPLIED_ACCOUNT_SUSPENSION_CHECKSUM: &str = "1d65c097962b0485945992adfa2bb69e53886b2195359748805e894a37192d1bcc7659ab74d2019845b128b1b0e5dbf4";
+    // SHA-384 of 0028_cw_runtime_resolution.sql (#4518).
+    const APPLIED_CW_RUNTIME_RESOLUTION_CHECKSUM: &str = "a82fc1081ebe3b471b501e4bc796e5b24049538d1786d1bd4c38416f90760d1e3ab62c4b190b33f75d03ab2eb62f377c";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1271,6 +1274,7 @@ mod tests {
             (25, APPLIED_NETWORK_POLICIES_CHECKSUM),
             (26, APPLIED_HOST_OPERATIONS_CHECKSUM),
             (27, APPLIED_ACCOUNT_SUSPENSION_CHECKSUM),
+            (28, APPLIED_CW_RUNTIME_RESOLUTION_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1301,10 +1305,10 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 27
+                first.len() == 28
                     && first.iter().map(|migration| migration.0).eq([
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-                        22, 23, 24, 25, 26, 27
+                        22, 23, 24, 25, 26, 27, 28
                     ])
                     && first.iter().all(|migration| migration.2)
             );

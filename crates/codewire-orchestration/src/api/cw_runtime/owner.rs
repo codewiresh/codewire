@@ -5,6 +5,9 @@
 //! a request, retrying admission, losing a COMMIT response, or observing a
 //! matching Store digest never recreates one. The later adapter must keep its
 //! captured channel and perform at most the closed effect named by that permit.
+//!
+//! What the journal promises, its bounds, and how an abandoned or unknown
+//! request is settled and resolved: `docs/dev/CW-RUNTIME-JOURNAL.md`.
 
 use std::future::Future;
 use std::time::Duration;
@@ -14,7 +17,8 @@ use codewire_server_core::AppResult;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org_deletion::{
     EnvironmentRuntimeLeaseSettlement, acquire_environment_runtime_mutation_lease_in,
-    bound_environment_runtime_transaction, settle_environment_runtime_mutation_lease_in,
+    bound_environment_runtime_transaction, resolve_environment_runtime_mutation_lease_in,
+    settle_environment_runtime_mutation_lease_in,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -26,6 +30,8 @@ use super::model::{
     MAX_JSON_BYTES, RuntimeAction, RuntimeEffect, RuntimeMutation, RuntimePhase, bounded_json,
     conflict, fingerprint, invalid_request, not_found, unavailable,
 };
+use super::resolve::resolution;
+use super::wire::ObservedSelection;
 use crate::api::environments::lock_cw_runtime_operator_in;
 use crate::confidential_storage::FeatureFlags;
 use crate::worker::workspace_binding::live_cw_runtime_binding;
@@ -34,12 +40,14 @@ use crate::worker::workspace_binding::live_cw_runtime_binding;
 #[path = "database_tests.rs"]
 mod database_tests;
 
-const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(20);
+pub(super) const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone)]
 pub struct RuntimeJournal {
     pool: PgPool,
     flags: FeatureFlags,
+    /// [`super::execute::RESOLVABLE_AFTER`]; tests shorten it.
+    resolvable_after: Duration,
 }
 
 /// Value-blind, nonsecret observation. Ownership and future dispatch permits
@@ -225,21 +233,36 @@ impl SavedRequest {
 
 impl RuntimeJournal {
     pub fn new(pool: PgPool, flags: FeatureFlags) -> Self {
-        Self { pool, flags }
+        Self {
+            pool,
+            flags,
+            resolvable_after: super::execute::RESOLVABLE_AFTER,
+        }
+    }
+
+    #[cfg(test)]
+    fn resolvable_after(mut self, after: Duration) -> Self {
+        self.resolvable_after = after;
+        self
     }
 
     /// Use only the row already admitted with an actual Pod probe and captured
     /// Pod channel. The transaction rechecks that entire row under its locks.
-    pub async fn admit(
+    /// `observed` is the Store's selection, read through `captured` just
+    /// before: it can resolve an earlier request of this environment that
+    /// ended unknown, which would otherwise refuse this one (#4518).
+    pub(super) async fn admit(
         &self,
         captured: &CapturedPlatformCwRuntime,
         user: &AuthUser,
         mutation: RuntimeMutation,
+        observed: ObservedSelection,
     ) -> AppResult<Admission> {
         self.admit_facts(
             CapturedBindingFacts::from(&captured.row),
             user.clone(),
             mutation,
+            Some(observed),
         )
         .await
     }
@@ -249,6 +272,7 @@ impl RuntimeJournal {
         binding: CapturedBindingFacts,
         user: AuthUser,
         mutation: RuntimeMutation,
+        observed: Option<ObservedSelection>,
     ) -> AppResult<Admission> {
         mutation.validate()?;
         binding.validate()?;
@@ -256,7 +280,9 @@ impl RuntimeJournal {
         let journal = self.clone();
         owned(async move {
             let mut tx = journal.pool.begin().await.map_err(|_| unavailable())?;
-            let result = journal.admit_in(&mut tx, &binding, &user, &mutation).await;
+            let result = journal
+                .admit_in(&mut tx, &binding, &user, &mutation, observed.as_ref())
+                .await;
             match result {
                 Ok(admission) => {
                     // On an ambiguous commit, return no ownership capability.
@@ -279,6 +305,7 @@ impl RuntimeJournal {
         binding: &CapturedBindingFacts,
         user: &AuthUser,
         mutation: &RuntimeMutation,
+        observed: Option<&ObservedSelection>,
     ) -> AppResult<Admission> {
         let (org, env) = (&binding.organization_id, &binding.environment_id);
         lock_cw_runtime_operator_in(tx, user, org, env, self.flags).await?;
@@ -300,17 +327,14 @@ impl RuntimeJournal {
             return Ok(Admission::Existing(Box::new(saved.decode()?)));
         }
         lock_binding_in(tx, binding).await?;
-        let unresolved: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM environment_cw_runtime_requests WHERE environment_id=$1 \
-             AND phase IN ('admitted','issued','acknowledged','unknown'))",
+        resolve_unknown_in(
+            tx,
+            env,
+            mutation.request_id,
+            observed,
+            self.resolvable_after,
         )
-        .bind(env)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|_| unavailable())?;
-        if unresolved {
-            return Err(conflict());
-        }
+        .await?;
         let lease = acquire_environment_runtime_mutation_lease_in(tx, org, env).await?;
         let request_json = serde_json::from_slice::<serde_json::Value>(&bounded_json(mutation)?)
             .map_err(|_| invalid_request())?;
@@ -504,42 +528,242 @@ impl RuntimeJournal {
         owned(async move {
             let mut tx = journal.pool.begin().await.map_err(|_| unavailable())?;
             bound_environment_runtime_transaction(&mut tx).await?;
-            let saved = load_in(&mut tx, owner.request_id, true).await?.ok_or_else(conflict)?;
+            let saved = load_in(&mut tx, owner.request_id, true)
+                .await?
+                .ok_or_else(conflict)?;
             saved.require_owner(&owner)?;
             let request = saved.decode()?;
-            let (phase, code, lease_settlement) = match settlement {
-                Settlement::Succeeded => {
-                    if request.phase != RuntimePhase::Acknowledged || request.effect != Some(RuntimeEffect::Cleanup) {
-                        return Err(conflict());
-                    }
-                    ("succeeded", None, EnvironmentRuntimeLeaseSettlement::Known)
-                }
-                Settlement::Cancelled => {
-                    if !matches!(request.phase, RuntimePhase::Admitted | RuntimePhase::Acknowledged) {
-                        return Err(conflict());
-                    }
-                    ("failed", Some(KnownFailure::CancelledBeforeDispatch.code()), EnvironmentRuntimeLeaseSettlement::Known)
-                }
-                Settlement::Refused { checkpoint, effect, failure } => {
-                    require_issued(&request, checkpoint, effect)?;
-                    ("failed", Some(failure.code()), EnvironmentRuntimeLeaseSettlement::Known)
-                }
-                Settlement::Unknown { checkpoint, effect } => {
-                    require_issued(&request, checkpoint, effect)?;
-                    ("unknown", Some("cw_runtime_dispatch_unknown"), EnvironmentRuntimeLeaseSettlement::Unknown)
-                }
-            };
-            let saved: SavedRequest = sqlx::query_as(
-                "UPDATE environment_cw_runtime_requests SET phase=$2,error_code=$3,\
-                 terminal_at=clock_timestamp(),updated_at=clock_timestamp() WHERE request_id=$1 RETURNING *",
-            ).bind(owner.request_id).bind(phase).bind(code).fetch_one(&mut *tx).await.map_err(|_| unavailable())?;
-            settle_environment_runtime_mutation_lease_in(&mut tx, &saved.mutation_lease_id,
-                &saved.organization_id, &saved.environment_id, lease_settlement).await?;
-            let result = saved.decode()?;
+            let result = settle_in(&mut tx, &saved, &request, settlement).await?;
             tx.commit().await.map_err(|_| unavailable())?;
             Ok(result)
-        }).await
+        })
+        .await
     }
+
+    /// Settles requests whose owner can no longer act: admitted at least
+    /// `quiescent` ago and still open, because the process that owned them
+    /// died (#4518). Nothing else would ever settle them. An admitted or
+    /// acknowledged request has no effect in flight, so it fails as cancelled
+    /// before dispatch; an issued one ends unknown, as a lost receipt does.
+    /// Neither issues anything. Returns how many it settled, at most `limit`.
+    pub async fn settle_abandoned(&self, quiescent: Duration, limit: i64) -> AppResult<usize> {
+        let candidates: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT request_id FROM environment_cw_runtime_requests \
+             WHERE phase IN ('admitted','issued','acknowledged') \
+               AND admitted_at < clock_timestamp() - make_interval(secs => $1) \
+             ORDER BY admitted_at, request_id LIMIT $2",
+        )
+        .bind(quiescent.as_secs_f64())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| unavailable())?;
+        let mut settled = 0;
+        for request_id in candidates {
+            match self.settle_one_abandoned(request_id, quiescent).await {
+                Ok(true) => settled += 1,
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    %request_id,
+                    error = %error,
+                    "cw runtime: an abandoned request could not be settled"
+                ),
+            }
+        }
+        Ok(settled)
+    }
+
+    async fn settle_one_abandoned(&self, request_id: Uuid, quiescent: Duration) -> AppResult<bool> {
+        let journal = self.clone();
+        owned(async move {
+            let mut tx = journal.pool.begin().await.map_err(|_| unavailable())?;
+            bound_environment_runtime_transaction(&mut tx).await?;
+            // Under the row lock it is still open and still that old; an owner
+            // that settled it meanwhile wins.
+            let abandoned: Option<SavedRequest> = sqlx::query_as(
+                "SELECT * FROM environment_cw_runtime_requests WHERE request_id=$1 \
+                 AND phase IN ('admitted','issued','acknowledged') \
+                 AND admitted_at < clock_timestamp() - make_interval(secs => $2) FOR UPDATE",
+            )
+            .bind(request_id)
+            .bind(quiescent.as_secs_f64())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| unavailable())?;
+            let Some(saved) = abandoned else {
+                return Ok(false);
+            };
+            let request = saved.decode()?;
+            let settlement = match request.phase {
+                RuntimePhase::Issued => Settlement::Unknown {
+                    checkpoint: request.checkpoint,
+                    effect: request.effect.ok_or_else(unavailable)?,
+                },
+                _ => Settlement::Cancelled,
+            };
+            settle_in(&mut tx, &saved, &request, settlement).await?;
+            tx.commit().await.map_err(|_| unavailable())?;
+            tracing::info!(
+                %request_id,
+                phase = ?request.phase,
+                "cw runtime: settled a request its owner abandoned"
+            );
+            Ok(true)
+        })
+        .await
+    }
+}
+
+/// Requests whose owner died: past [`super::execute::ABANDONED_AFTER`], an
+/// open request has no one left to act for it.
+#[async_trait::async_trait]
+impl crate::worker::abandoned_leases::AbandonedLeases for RuntimeJournal {
+    fn kind(&self) -> &'static str {
+        "cw_runtime"
+    }
+
+    async fn sweep(&self, limit: i64) -> AppResult<usize> {
+        self.settle_abandoned(super::execute::ABANDONED_AFTER, limit)
+            .await
+    }
+}
+
+/// Moves `saved`, locked in `tx`, to the terminal phase `settlement` names,
+/// and settles its lease in the same transaction.
+async fn settle_in(
+    tx: &mut Transaction<'_, Postgres>,
+    saved: &SavedRequest,
+    request: &RuntimeRequest,
+    settlement: Settlement,
+) -> AppResult<RuntimeRequest> {
+    let (phase, code, lease_settlement) = match settlement {
+        Settlement::Succeeded => {
+            if request.phase != RuntimePhase::Acknowledged
+                || request.effect != Some(RuntimeEffect::Cleanup)
+            {
+                return Err(conflict());
+            }
+            ("succeeded", None, EnvironmentRuntimeLeaseSettlement::Known)
+        }
+        Settlement::Cancelled => {
+            if !matches!(
+                request.phase,
+                RuntimePhase::Admitted | RuntimePhase::Acknowledged
+            ) {
+                return Err(conflict());
+            }
+            (
+                "failed",
+                Some(KnownFailure::CancelledBeforeDispatch.code()),
+                EnvironmentRuntimeLeaseSettlement::Known,
+            )
+        }
+        Settlement::Refused {
+            checkpoint,
+            effect,
+            failure,
+        } => {
+            require_issued(request, checkpoint, effect)?;
+            (
+                "failed",
+                Some(failure.code()),
+                EnvironmentRuntimeLeaseSettlement::Known,
+            )
+        }
+        Settlement::Unknown { checkpoint, effect } => {
+            require_issued(request, checkpoint, effect)?;
+            (
+                "unknown",
+                Some("cw_runtime_dispatch_unknown"),
+                EnvironmentRuntimeLeaseSettlement::Unknown,
+            )
+        }
+    };
+    let settled: SavedRequest = sqlx::query_as(
+        "UPDATE environment_cw_runtime_requests SET phase=$2,error_code=$3,\
+         terminal_at=clock_timestamp(),updated_at=clock_timestamp() WHERE request_id=$1 RETURNING *",
+    ).bind(saved.request_id).bind(phase).bind(code).fetch_one(&mut **tx).await.map_err(|_| unavailable())?;
+    settle_environment_runtime_mutation_lease_in(
+        tx,
+        &settled.mutation_lease_id,
+        &settled.organization_id,
+        &settled.environment_id,
+        lease_settlement,
+    )
+    .await?;
+    settled.decode()
+}
+
+/// Clears this environment's one unresolved slot for a new admission, or
+/// refuses it. Only a request that ended unknown at least `resolvable_after`
+/// ago can be cleared, once nothing it started can still select, and only by
+/// the Store observed now at the selection before or after its effect
+/// (#4518). Its resolution is added to its evidence, and its lease resolved,
+/// in the admitting transaction.
+async fn resolve_unknown_in(
+    tx: &mut Transaction<'_, Postgres>,
+    env: &str,
+    by: Uuid,
+    observed: Option<&ObservedSelection>,
+    resolvable_after: Duration,
+) -> AppResult<()> {
+    let unresolved: Option<SavedRequest> = sqlx::query_as(
+        "SELECT * FROM environment_cw_runtime_requests WHERE environment_id=$1 \
+         AND resolved_at IS NULL AND phase IN ('admitted','issued','acknowledged','unknown') \
+         FOR UPDATE",
+    )
+    .bind(env)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| unavailable())?;
+    let Some(saved) = unresolved else {
+        return Ok(());
+    };
+    // Under the row lock: it ended unknown long enough ago.
+    let quiet: bool = sqlx::query_scalar(
+        "SELECT COALESCE(phase='unknown' \
+           AND terminal_at < clock_timestamp() - make_interval(secs => $2), false) \
+         FROM environment_cw_runtime_requests WHERE request_id=$1",
+    )
+    .bind(saved.request_id)
+    .bind(resolvable_after.as_secs_f64())
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|_| unavailable())?;
+    if !quiet {
+        return Err(conflict());
+    }
+    let request = saved.decode()?;
+    let observed = observed.ok_or_else(conflict)?;
+    let resolved = resolution(&request, observed).ok_or_else(conflict)?;
+    let selection = serde_json::from_slice::<serde_json::Value>(&bounded_json(observed)?)
+        .map_err(|_| invalid_request())?;
+    sqlx::query(
+        "UPDATE environment_cw_runtime_requests SET resolved_at=clock_timestamp(),resolution=$2,\
+         resolved_by_request_id=$3,resolution_selection=$4,updated_at=clock_timestamp() \
+         WHERE request_id=$1",
+    )
+    .bind(saved.request_id)
+    .bind(resolved.as_str())
+    .bind(by)
+    .bind(selection)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| unavailable())?;
+    resolve_environment_runtime_mutation_lease_in(
+        tx,
+        &saved.mutation_lease_id,
+        &saved.organization_id,
+        &saved.environment_id,
+    )
+    .await?;
+    tracing::info!(
+        request_id = %saved.request_id,
+        resolved_by = %by,
+        resolution = resolved.as_str(),
+        "cw runtime: resolved a request that ended unknown"
+    );
+    Ok(())
 }
 
 enum Settlement {

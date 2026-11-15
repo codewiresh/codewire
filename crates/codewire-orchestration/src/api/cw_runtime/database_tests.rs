@@ -87,7 +87,7 @@ impl Fixture {
     async fn admit(&self, mutation: RuntimeMutation) -> Result<(RuntimeRequest, RequestOwner)> {
         owned_admission(
             self.journal
-                .admit_facts(self.facts.clone(), self.user.clone(), mutation)
+                .admit_facts(self.facts.clone(), self.user.clone(), mutation, None)
                 .await?,
         )
     }
@@ -256,7 +256,7 @@ database_case!(
         let (request, _) = f.admit(intent.clone()).await?;
         let admission = f
             .journal
-            .admit_facts(f.facts.clone(), f.user.clone(), intent)
+            .admit_facts(f.facts.clone(), f.user.clone(), intent, None)
             .await?;
         ensure!(matches!(admission, Admission::Existing(ref saved) if **saved == request));
         ensure!(f.counts().await? == (1, 1));
@@ -273,7 +273,7 @@ database_case!(
         different.action = RuntimeAction::Rollback;
         ensure!(
             f.journal
-                .admit_facts(f.facts.clone(), f.user.clone(), different)
+                .admit_facts(f.facts.clone(), f.user.clone(), different, None)
                 .await
                 .is_err()
         );
@@ -281,7 +281,7 @@ database_case!(
         different.target_identity = identity('c');
         ensure!(
             f.journal
-                .admit_facts(f.facts.clone(), f.user.clone(), different)
+                .admit_facts(f.facts.clone(), f.user.clone(), different, None)
                 .await
                 .is_err()
         );
@@ -292,7 +292,7 @@ database_case!(
         };
         ensure!(
             f.journal
-                .admit_facts(f.facts.clone(), key, intent)
+                .admit_facts(f.facts.clone(), key, intent, None)
                 .await
                 .is_err()
         );
@@ -311,9 +311,9 @@ database_case!(
         };
         let (a, b) = tokio::join!(
             f.journal
-                .admit_facts(f.facts.clone(), f.user.clone(), update),
+                .admit_facts(f.facts.clone(), f.user.clone(), update, None),
             f.journal
-                .admit_facts(f.facts.clone(), f.user.clone(), rollback)
+                .admit_facts(f.facts.clone(), f.user.clone(), rollback, None)
         );
         ensure!(a.is_ok() != b.is_ok());
         ensure!(f.counts().await? == (1, 1));
@@ -335,7 +335,7 @@ database_case!(
         };
         ensure!(
             f.journal
-                .admit_facts(f.facts.clone(), stale, mutation())
+                .admit_facts(f.facts.clone(), stale, mutation(), None)
                 .await
                 .is_err()
         );
@@ -350,7 +350,7 @@ database_case!(db_current_operator_grant_and_tenant_are_required, f, {
         .await?;
     ensure!(
         f.journal
-            .admit_facts(f.facts.clone(), f.user.clone(), mutation())
+            .admit_facts(f.facts.clone(), f.user.clone(), mutation(), None)
             .await
             .is_err()
     );
@@ -364,7 +364,7 @@ database_case!(db_current_operator_grant_and_tenant_are_required, f, {
     .await?;
     ensure!(
         f.journal
-            .admit_facts(f.facts.clone(), f.user.clone(), mutation())
+            .admit_facts(f.facts.clone(), f.user.clone(), mutation(), None)
             .await
             .is_err()
     );
@@ -379,7 +379,7 @@ database_case!(db_current_operator_grant_and_tenant_are_required, f, {
     };
     ensure!(
         f.journal
-            .admit_facts(f.facts.clone(), wrong_key, mutation())
+            .admit_facts(f.facts.clone(), wrong_key, mutation(), None)
             .await
             .is_err()
     );
@@ -397,7 +397,7 @@ database_case!(
             .await?;
         ensure!(
             f.journal
-                .admit_facts(f.facts.clone(), f.user.clone(), mutation())
+                .admit_facts(f.facts.clone(), f.user.clone(), mutation(), None)
                 .await
                 .is_err()
         );
@@ -422,7 +422,7 @@ database_case!(db_confidential_policy_follows_the_organization_opt_in, f, {
     };
     ensure!(
         f.journal
-            .admit_facts(facts.clone(), admin, mutation())
+            .admit_facts(facts.clone(), admin, mutation(), None)
             .await
             .is_err()
     );
@@ -434,7 +434,7 @@ database_case!(db_confidential_policy_follows_the_organization_opt_in, f, {
     let disabled = RuntimeJournal::new(f.pool.clone(), FeatureFlags { enabled: false });
     ensure!(
         disabled
-            .admit_facts(facts.clone(), f.user.clone(), mutation())
+            .admit_facts(facts.clone(), f.user.clone(), mutation(), None)
             .await
             .is_err()
     );
@@ -446,7 +446,7 @@ database_case!(db_confidential_policy_follows_the_organization_opt_in, f, {
     };
     ensure!(
         f.journal
-            .admit_facts(facts.clone(), other_key, mutation())
+            .admit_facts(facts.clone(), other_key, mutation(), None)
             .await
             .is_err()
     );
@@ -457,7 +457,7 @@ database_case!(db_confidential_policy_follows_the_organization_opt_in, f, {
         via_api_key: true,
         ..f.user.clone()
     };
-    owned_admission(f.journal.admit_facts(facts, key, mutation()).await?)?;
+    owned_admission(f.journal.admit_facts(facts, key, mutation(), None).await?)?;
 });
 
 async fn finish_update(f: &Fixture, owner: &RequestOwner) -> Result<()> {
@@ -853,7 +853,7 @@ database_case!(db_replacement_pod_cannot_retarget_the_saved_owner, f, {
     let next = read_facts(&f.pool).await?;
     ensure!(
         f.journal
-            .admit_facts(next, f.user.clone(), mutation())
+            .admit_facts(next, f.user.clone(), mutation(), None)
             .await
             .is_err()
     );
@@ -871,7 +871,7 @@ database_case!(
             sqlx::query(statement).bind(ENV).execute(&f.pool).await?;
             ensure!(
                 f.journal
-                    .admit_facts(f.facts.clone(), f.user.clone(), mutation())
+                    .admit_facts(f.facts.clone(), f.user.clone(), mutation(), None)
                     .await
                     .is_err()
             );
@@ -946,7 +946,7 @@ database_case!(
         );
         ensure!(
             f.journal
-                .admit_facts(f.facts.clone(), f.user.clone(), mutation())
+                .admit_facts(f.facts.clone(), f.user.clone(), mutation(), None)
                 .await
                 .is_err()
         );
@@ -978,7 +978,7 @@ database_case!(
         drop(issued); // The future sender died before any effect/ACK fixture call.
         let recovered = RuntimeJournal::new(f.pool.clone(), flags());
         let retry = recovered
-            .admit_facts(f.facts.clone(), f.user.clone(), intent)
+            .admit_facts(f.facts.clone(), f.user.clone(), intent, None)
             .await?;
         ensure!(matches!(retry, Admission::Existing(ref r) if r.phase == RuntimePhase::Issued));
         ensure!(
@@ -1016,7 +1016,7 @@ database_case!(
         let mut tx = f.pool.begin().await?;
         let admitted = f
             .journal
-            .admit_in(&mut tx, &f.facts, &f.user, &mutation())
+            .admit_in(&mut tx, &f.facts, &f.user, &mutation(), None)
             .await?;
         ensure!(matches!(admitted, Admission::Owned { .. }));
         tx.rollback().await?;
@@ -1173,7 +1173,7 @@ database_case!(
         let (journal, user, facts) = (f.journal.clone(), f.user.clone(), f.facts.clone());
         let task = tokio::spawn(async move {
             let result = journal
-                .admit_in(&mut admission, &facts, &user, &mutation())
+                .admit_in(&mut admission, &facts, &user, &mutation(), None)
                 .await;
             admission.rollback().await?;
             Ok::<_, anyhow::Error>(result.is_err())
@@ -1193,7 +1193,7 @@ database_case!(
         let blocker = backend_pid(&mut admission).await?;
         let (_, owner) = owned_admission(
             f.journal
-                .admit_in(&mut admission, &f.facts, &f.user, &mutation())
+                .admit_in(&mut admission, &f.facts, &f.user, &mutation(), None)
                 .await?,
         )?;
         let mut revocation = f.pool.begin().await?;
@@ -1236,7 +1236,7 @@ database_case!(db_disable_wins_the_enabled_user_lock_before_admission, f, {
     let (journal, facts, user) = (f.journal.clone(), f.facts.clone(), f.user.clone());
     let task = tokio::spawn(async move {
         let denied = journal
-            .admit_in(&mut admission, &facts, &user, &mutation())
+            .admit_in(&mut admission, &facts, &user, &mutation(), None)
             .await
             .is_err();
         admission.rollback().await?;
@@ -1327,7 +1327,8 @@ database_case!(
             f.user.clone(),
             intent.clone(),
         );
-        let caller = tokio::spawn(async move { journal.admit_facts(facts, user, request).await });
+        let caller =
+            tokio::spawn(async move { journal.admit_facts(facts, user, request, None).await });
         wait_blocked_query(
             &f.pool,
             "SELECT org_id,created_by,isolation_tier FROM environments",
@@ -1349,7 +1350,7 @@ database_case!(
         .await??;
         ensure!(matches!(
             f.journal
-                .admit_facts(f.facts.clone(), f.user.clone(), intent)
+                .admit_facts(f.facts.clone(), f.user.clone(), intent, None)
                 .await?,
             Admission::Existing(_)
         ));
@@ -1389,3 +1390,259 @@ fn model_decimal_generation_and_intent_bounds_are_closed() -> Result<()> {
     ensure!(invalid.validate().is_err());
     Ok(())
 }
+
+async fn lease_of(f: &Fixture, request: Uuid) -> Result<(String, Option<String>)> {
+    Ok(sqlx::query_as(
+        "SELECT l.state,l.recovery_code FROM organization_mutation_leases l \
+         JOIN environment_cw_runtime_requests r ON r.mutation_lease_id=l.id WHERE r.request_id=$1",
+    )
+    .bind(request)
+    .fetch_one(&f.pool)
+    .await?)
+}
+
+async fn resolution_of(f: &Fixture, request: Uuid) -> Result<(Option<String>, Option<Uuid>)> {
+    Ok(sqlx::query_as(
+        "SELECT resolution,resolved_by_request_id FROM environment_cw_runtime_requests \
+         WHERE request_id=$1",
+    )
+    .bind(request)
+    .fetch_one(&f.pool)
+    .await?)
+}
+
+/// The Store observed with `current` selected at `generation`.
+fn observed(generation: u64, current: char, previous: Option<char>) -> ObservedSelection {
+    ObservedSelection {
+        generation,
+        current: Some(identity(current)),
+        previous: previous.map(identity),
+        pending: false,
+        consistent: true,
+        retained_count: 1 + usize::from(previous.is_some()),
+    }
+}
+
+database_case!(db_abandoned_requests_settle_only_once_old_enough, f, {
+    use crate::worker::abandoned_leases::AbandonedLeases as _;
+
+    let (_, admitted) = f.admit(mutation()).await?;
+    // The sweep's own bound leaves a request this young alone.
+    ensure!(f.journal.sweep(32).await? == 0);
+    ensure!(
+        f.journal
+            .settle_abandoned(Duration::from_secs(3600), 32)
+            .await?
+            == 0
+    );
+    ensure!(f.observe(admitted.request_id).await?.phase == RuntimePhase::Admitted);
+    ensure!(lease_of(&f, admitted.request_id).await?.0 == "active");
+
+    ensure!(f.journal.settle_abandoned(Duration::ZERO, 32).await? == 1);
+    let settled = f.observe(admitted.request_id).await?;
+    ensure!(
+        settled.phase == RuntimePhase::Failed
+            && settled.error_code.as_deref() == Some("cw_runtime_cancelled_before_dispatch")
+    );
+    ensure!(lease_of(&f, admitted.request_id).await? == ("released".into(), None));
+    // A settled request is not swept again, and its owner can issue nothing.
+    ensure!(f.journal.settle_abandoned(Duration::ZERO, 32).await? == 0);
+    ensure!(
+        f.journal
+            .issue(&admitted, &f.user, 0, RuntimeEffect::Staging)
+            .await
+            .is_err()
+    );
+});
+
+database_case!(
+    db_an_abandoned_acknowledged_request_keeps_its_acknowledgements,
+    f,
+    {
+        let (_, owner) = f.admit(mutation()).await?;
+        let stage = f
+            .journal
+            .issue(&owner, &f.user, 0, RuntimeEffect::Staging)
+            .await?;
+        f.journal
+            .acknowledge(
+                &stage,
+                EffectReceipt::Staged {
+                    sha256: "b".repeat(64),
+                    size: 64,
+                },
+            )
+            .await?;
+        ensure!(f.journal.settle_abandoned(Duration::ZERO, 32).await? == 1);
+        let settled = f.observe(owner.request_id).await?;
+        ensure!(
+            settled.phase == RuntimePhase::Failed
+                && settled.acknowledgements.len() == 1
+                && settled.error_code.as_deref() == Some("cw_runtime_cancelled_before_dispatch")
+        );
+        ensure!(lease_of(&f, owner.request_id).await? == ("released".into(), None));
+    }
+);
+
+database_case!(
+    db_an_abandoned_issued_request_ends_unknown_as_a_lost_receipt_does,
+    f,
+    {
+        let (_, owner) = f.admit(mutation()).await?;
+        let stage = f
+            .journal
+            .issue(&owner, &f.user, 0, RuntimeEffect::Staging)
+            .await?;
+        ensure!(f.journal.settle_abandoned(Duration::ZERO, 32).await? == 1);
+        let settled = f.observe(owner.request_id).await?;
+        ensure!(
+            settled.phase == RuntimePhase::Unknown
+                && settled.error_code.as_deref() == Some("cw_runtime_dispatch_unknown")
+        );
+        // No longer active: liveness may replace the sandbox and destroy may
+        // prove it absent.
+        ensure!(
+            lease_of(&f, owner.request_id).await?
+                == (
+                    "resolution_required".into(),
+                    Some("cw_runtime_dispatch_unknown".into())
+                )
+        );
+        // The receipt that never came cannot arrive late.
+        ensure!(
+            f.journal
+                .acknowledge(
+                    &stage,
+                    EffectReceipt::Staged {
+                        sha256: "b".repeat(64),
+                        size: 64,
+                    },
+                )
+                .await
+                .is_err()
+        );
+    }
+);
+
+database_case!(
+    db_an_update_resolves_an_unknown_request_it_observes_unchanged,
+    f,
+    {
+        let (_, lost) = f.admit(mutation()).await?;
+        let stage = f
+            .journal
+            .issue(&lost, &f.user, 0, RuntimeEffect::Staging)
+            .await?;
+        f.journal.mark_unknown(&stage).await?;
+        // Unresolved, it refuses the next update unless the Store is observed.
+        ensure!(
+            f.journal
+                .admit_facts(f.facts.clone(), f.user.clone(), mutation(), None)
+                .await
+                .is_err()
+        );
+        // Staging selects nothing; only the selection it was admitted against
+        // resolves it.
+        ensure!(
+            f.journal
+                .admit_facts(
+                    f.facts.clone(),
+                    f.user.clone(),
+                    mutation(),
+                    Some(observed(2, 'b', Some('a')))
+                )
+                .await
+                .is_err()
+        );
+        ensure!(resolution_of(&f, lost.request_id).await? == (None, None));
+
+        let next = mutation();
+        // Its role may still select until its alarm: the Store says nothing yet.
+        ensure!(
+            f.journal
+                .admit_facts(
+                    f.facts.clone(),
+                    f.user.clone(),
+                    mutation(),
+                    Some(observed(1, 'a', None)),
+                )
+                .await
+                .is_err()
+        );
+        ensure!(resolution_of(&f, lost.request_id).await? == (None, None));
+
+        let quiet = f.journal.clone().resolvable_after(Duration::ZERO);
+        let next_id = next.request_id;
+        owned_admission(
+            quiet
+                .admit_facts(
+                    f.facts.clone(),
+                    f.user.clone(),
+                    next,
+                    Some(observed(1, 'a', None)),
+                )
+                .await?,
+        )?;
+        ensure!(
+            resolution_of(&f, lost.request_id).await? == (Some("unchanged".into()), Some(next_id))
+        );
+        ensure!(
+            lease_of(&f, lost.request_id).await?
+                == (
+                    "resolved".into(),
+                    Some("cw_runtime_dispatch_unknown".into())
+                )
+        );
+        // The original evidence is unchanged.
+        let kept = f.observe(lost.request_id).await?;
+        ensure!(kept.phase == RuntimePhase::Unknown && kept.effect == Some(RuntimeEffect::Staging));
+        ensure!(f.observe(next_id).await?.phase == RuntimePhase::Admitted);
+    }
+);
+
+database_case!(
+    db_an_update_resolves_an_unknown_update_it_observes_applied,
+    f,
+    {
+        let (_, lost) = f.admit(mutation()).await?;
+        let stage = f
+            .journal
+            .issue(&lost, &f.user, 0, RuntimeEffect::Staging)
+            .await?;
+        f.journal
+            .acknowledge(
+                &stage,
+                EffectReceipt::Staged {
+                    sha256: "b".repeat(64),
+                    size: 64,
+                },
+            )
+            .await?;
+        let update = f
+            .journal
+            .issue(&lost, &f.user, 1, RuntimeEffect::Update)
+            .await?;
+        f.journal.mark_unknown(&update).await?;
+        // Admitted against generation 1 with a current; the update selects b.
+        let mut next = mutation();
+        next.expected_store_generation = 2;
+        next.expected_current_sha256 = Some("b".repeat(64));
+        next.expected_previous_sha256 = Some("a".repeat(64));
+        next.target_identity = identity('c');
+        let next_id = next.request_id;
+        let quiet = f.journal.clone().resolvable_after(Duration::ZERO);
+        owned_admission(
+            quiet
+                .admit_facts(
+                    f.facts.clone(),
+                    f.user.clone(),
+                    next,
+                    Some(observed(2, 'b', Some('a'))),
+                )
+                .await?,
+        )?;
+        ensure!(
+            resolution_of(&f, lost.request_id).await? == (Some("applied".into()), Some(next_id))
+        );
+    }
+);

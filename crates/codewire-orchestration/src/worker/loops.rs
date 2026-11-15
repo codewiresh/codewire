@@ -131,6 +131,15 @@ pub fn start_loops(
                     super::credential_relay::credential_relay_loop(ctx, leadership).await;
                 });
             }
+            // #4518: settles environment runtime requests whose owner died,
+            // so their leases stop holding the environment.
+            "abandoned-leases" => {
+                let ctx = ctx.clone();
+                let leadership = leadership.clone();
+                tokio::spawn(async move {
+                    super::abandoned_leases::abandoned_leases_loop(ctx, leadership).await;
+                });
+            }
             // Not leader-gated: every orchestration Pod adds the image set it
             // renders, so a rolling deploy's new Pods warm their release
             // before the old leader steps down.

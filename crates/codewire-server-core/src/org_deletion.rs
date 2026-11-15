@@ -328,6 +328,42 @@ pub async fn settle_environment_runtime_mutation_lease_in(
     load_mutation_lease(tx, lease_id).await
 }
 
+/// Resolve the exact environment-scoped runtime lease of a dispatch that
+/// settled as unknown, in the same transaction as the journal evidence that
+/// resolves it: the Store observed at the selection before or after the
+/// dispatch (#4518). A lease environment destruction already resolved stays
+/// resolved.
+pub async fn resolve_environment_runtime_mutation_lease_in(
+    tx: &mut Transaction<'_, Postgres>,
+    lease_id: &str,
+    organization_id: &str,
+    environment_id: &str,
+) -> Result<OrganizationMutationLease, AppError> {
+    bound_environment_runtime_transaction(tx).await?;
+    let lease = lock_mutation_lease(tx, lease_id).await?;
+    if lease.organization_id != organization_id
+        || lease.environment_id.as_deref() != Some(environment_id)
+        || lease.mutation_class != OrganizationMutationClass::EnvironmentRuntimeDispatch.as_str()
+        || lease.recovery_code.as_deref() != Some("cw_runtime_dispatch_unknown")
+    {
+        return Err(mutation_lease_conflict("runtime lease identity changed"));
+    }
+    if lease.state == "resolution_required" {
+        sqlx::query(
+            "UPDATE organization_mutation_leases SET state='resolved', resolved_at=NOW(), \
+             updated_at=NOW() WHERE id=$1 AND state='resolution_required'",
+        )
+        .bind(lease_id)
+        .execute(&mut **tx)
+        .await?;
+    } else if lease.state != "resolved" {
+        return Err(mutation_lease_conflict(
+            "runtime lease requires reconciliation",
+        ));
+    }
+    load_mutation_lease(tx, lease_id).await
+}
+
 /// Record a known mutation outcome. Rows are retained as value-blind
 /// evidence; release changes state instead of deleting the lease.
 pub async fn release_organization_mutation_lease(

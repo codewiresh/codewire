@@ -10,6 +10,7 @@ mod execute;
 mod intake;
 pub mod model;
 pub mod owner;
+mod resolve;
 pub mod service;
 #[cfg(test)]
 mod service_test_support;
