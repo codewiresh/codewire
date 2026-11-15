@@ -798,6 +798,7 @@ run_ci_script_tests() {
   python3 -B scripts/ci/tests/test-kind-build-artifacts.py
   scripts/ci/tests/test-preflight-openbao-native-secrets.sh
   scripts/ci/tests/test-sync-local-secrets.sh
+  scripts/ci/tests/test-kind-stripe-test-keys.sh
   scripts/ci/tests/test-kind-runtime-images.sh
   scripts/ci/tests/test-kind-watch-github-app.sh
   scripts/ci/tests/test-source-approval-workflow.sh

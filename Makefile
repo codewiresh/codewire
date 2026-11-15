@@ -1,5 +1,5 @@
 .PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-list kind-down kind-deploy kind-trust-roots kind-db-reset kind-db-restore kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-watch kind-status design-system design-check e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind seed-test-user seed-e2e-users build build-web clean wasm build-daemon build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
-.PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system macos-local-runtime scan-supply-chain verify-dashboard-image sync-local-secrets accept-secrets-credentials
+.PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system macos-local-runtime scan-supply-chain verify-dashboard-image sync-local-secrets kind-stripe-test-keys kind-stripe-test-keys-remove accept-secrets-credentials
 
 # The older codewire/default-namespace topology has its own fixed endpoints.
 # Reject named selection before its build prerequisites or runtime mutations.
@@ -71,6 +71,7 @@ help:
 	@echo "  make kind-forwards-cleanup - Stop only helper-owned local kind forwards"
 	@echo "  make kind-clean-runtime - Delete orphaned local env workloads from kind"
 	@echo "  make sync-local-secrets - Opaquely sync local AI credentials into Kind"
+	@echo "  make kind-stripe-test-keys - Give Kind's billing Dev's Stripe test keys (remove: kind-stripe-test-keys-remove)"
 	@echo "  make kind-billing-listen - Start stripe listen, patch kind webhook secret, restart billing"
 	@echo ""
 	@echo "iOS:"
@@ -522,6 +523,14 @@ rollout-local-runtime:
 
 sync-local-secrets:
 	@KUBE_CONTEXT="$(KUBE_CONTEXT)" ./scripts/dev/kind/sync-local-secrets.sh
+
+# Dev's Stripe test-mode keys into a local Kind cluster's billing, for a card
+# form walk with Stripe's test cards (#4750); remove right after the walk.
+kind-stripe-test-keys:
+	./scripts/dev/kind/kind-stripe-test-keys.sh apply
+
+kind-stripe-test-keys-remove:
+	./scripts/dev/kind/kind-stripe-test-keys.sh remove
 
 prune-local-legacy-runtime:
 	-$(KUBECTL) -n default delete deployment/codewire-server service/codewire-server deployment/codewire-docs service/docs deployment/nats service/nats serviceaccount/codewire-server secret/codewire-server-token --ignore-not-found
