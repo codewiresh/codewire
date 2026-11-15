@@ -136,6 +136,16 @@ async function inspect(page: Page, marketing: boolean) {
 // round trip per press in both schemes, against a 60 s limit.
 const tabLimit = 400;
 const tabBatch = 20;
+// The walk's time follows its work, not the clock: each press that returns
+// gives the time it took back to the test's limit, so a loaded runner's slow
+// round trips do not run the test out, while a press that hangs never returns
+// and still fails at the test's own limit (#4763). The walk itself stays
+// bounded by tabLimit and its end conditions; the time given back stops at
+// five minutes in all, and each batch records what it gave as an annotation.
+// The walk first reserves one hang guard for the press in flight, so that a
+// slow page load before it cannot leave a press too little time to return.
+const walkExtensionCap = 300_000;
+const pressHangGuard = 30_000;
 
 async function focusGaps(page: Page, walked?: string[]): Promise<{ gaps: string[]; order: string[] }> {
   // Let the page's own first-frame work run before walking: an open drawer
@@ -173,16 +183,34 @@ async function focusGaps(page: Page, walked?: string[]): Promise<{ gaps: string[
   // The walk ends when focus leaves the page after its last control, comes
   // back to the first one, or enters a terminal, or when a whole batch finds
   // nothing to focus. Presses after that only revisit what is recorded.
-  const ended = () => page.evaluate(() => {
+  const state = () => page.evaluate(() => {
     const { order } = (window as unknown as { __designFocus: Focus }).__designFocus;
     const left = !document.activeElement || document.activeElement === document.body;
-    return order.length === 0 || left || order.slice(1).includes(order[0])
+    const ended = order.length === 0 || left || order.slice(1).includes(order[0])
       || order.some((element) => element.closest(".xterm") !== null);
+    return { ended, reached: new Set(order).size };
   });
   let cycled = walked !== undefined;
+  let extended = 0;
+  if (!cycled) test.info().setTimeout(test.info().timeout + pressHangGuard);
   for (let pressed = 0; pressed < tabLimit && !cycled; ) {
-    for (let batch = 0; batch < tabBatch && pressed < tabLimit; batch += 1, pressed += 1) await page.keyboard.press("Tab");
-    cycled = await ended();
+    let given = 0;
+    for (let batch = 0; batch < tabBatch && pressed < tabLimit; batch += 1, pressed += 1) {
+      const started = Date.now();
+      await page.keyboard.press("Tab");
+      const elapsed = Math.min(Date.now() - started, walkExtensionCap - extended);
+      if (elapsed > 0) {
+        extended += elapsed;
+        given += elapsed;
+        test.info().setTimeout(test.info().timeout + elapsed);
+      }
+    }
+    const now = await state();
+    cycled = now.ended;
+    test.info().annotations.push({
+      type: "focus-walk-extension",
+      description: `${now.reached} controls after ${pressed} presses: +${given} ms (${extended} ms in all)`,
+    });
   }
   const result = await page.evaluate((walked) => {
     type Look = { outline: string; shadow: string };
