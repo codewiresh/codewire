@@ -458,7 +458,11 @@ async fn pending_start_without_ack_remains_ambiguous_at_bounded_deadline() {
     assert!(ack.is_closed());
 }
 
-#[tokio::test]
+// On the paused clock the relay's finalizer deadline starts at `origin`, as
+// the timeline below assumes. On real time it started when the relay was
+// first polled, and a host that delayed that past 40 ms let the exit at 140 ms
+// land inside the budget (#4707).
+#[tokio::test(start_paused = true)]
 async fn pending_start_and_final_drain_share_one_original_deadline() {
     let daemon = daemon();
     let (browser, mut input, mut output, _) = browser();
