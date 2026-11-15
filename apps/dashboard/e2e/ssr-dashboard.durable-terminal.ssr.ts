@@ -1869,7 +1869,7 @@ test("a failed setup opens terminals under its banner, and setup holding the San
   state.setupComplete = false;
   state.setupFailed = true;
   const text = "Setup failed at Running install command: npm ci exited 1";
-  state.notice = { kind: "banner", text, tone: "danger", action: "", label: "", dismissible: false, graphic: "" };
+  state.notice = { kind: "banner", text, tone: "danger", action: "retry-setup", label: "Retry setup", dismissible: false, graphic: "" };
   await openFixture(page);
   // The page opens its terminal as it does for a completed setup.
   await automaticTerminal(page, state);
@@ -1878,14 +1878,28 @@ test("a failed setup opens terminals under its banner, and setup holding the San
   await expect(notice).toHaveAttribute("data-kind", "banner");
   await expect(notice).toHaveAttribute("data-tone", "danger");
   await expect(notice.locator("[data-sandbox-notice-text]")).toHaveText(text);
+  await expect(notice.getByRole("button", { name: "Retry setup" })).toBeVisible();
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
   await artifactScreenshot(page, "failed-setup-terminal.png");
-  // A Retry holds setup's lease again: the failure is no longer recorded and
-  // new terminals wait, as they do while setup runs.
+  // A Retry holds setup's lease again: the failure is no longer recorded, the
+  // open terminal waits with its session kept, and new terminals wait, as
+  // they do while a first setup runs.
+  const launches = state.launches;
+  const opened = state.connections.length;
+  const session = state.connections[opened - 1].url.searchParams.get("session_id");
   state.setupFailed = false;
   state.notice = null;
   await checkReadinessNow(page);
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
+  await expect(page.locator("[data-terminal-connection]")).toContainText("setup is not complete");
+  // The Retry's setup completes: the same session re-attaches, and nothing launches.
+  state.setupComplete = true;
+  await checkReadinessNow(page);
+  await expect.poll(() => state.connections.length).toBe(opened + 1);
+  expect(state.connections[opened].url.searchParams.get("session_id")).toBe(session);
+  await expectAttached(page);
+  expect(state.launches).toBe(launches);
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
 });
 
 test("a Sandbox still being created says its terminals open when ready", async ({ page }) => {

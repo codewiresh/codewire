@@ -19,6 +19,7 @@ Updated 2026-11-14.
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14 | not yet observed |
+| `sandbox-setup-retry` | cw-snapshots | not yet observed | not yet observed |
 | `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-14 (#4460) | not yet observed |
 | `sandbox-cp-resume` | cw-workspace-mount | observed 2026-11-13 (#4373) | not yet observed; v0.4.17 lacks it |
 | `sandbox-cp-download` | cw-workspace-mount | observed 2026-11-13 (#4394) | not yet observed |
@@ -266,6 +267,27 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished).
     start took 8 s and `cw ls` showed `running`; the marker written before
     the stop was read back unchanged. Evidence: the pull
     request that added this section.
+
+## `sandbox-setup-retry`: a failed setup, fixed in a shell and retried
+
+Issue: #4767.
+
+- **Entry points:**
+  - the dashboard's Sandbox page: the failure banner, its terminal and **Retry setup**;
+  - `cw shell`, `cw run` and `cw retry SANDBOX`, which cw-cli owns.
+- **States to exercise:**
+  - a create whose install command fails;
+  - a fix made in its terminal, then Retry setup;
+  - a setup that failed before or at the clone, whose Retry asks first.
+- **Driving it:** create a Sandbox with an install command that fails until a file exists, for example `test -f /workspace/ok`. Open its terminal, run `touch /workspace/ok`, and press Retry setup.
+- **Proof:**
+  - **After the failure:** the page shows the banner "Setup failed at Running install command: …" over an open terminal.
+  - **After Retry:** the list, headed "Retrying setup", shows the steps before install as done without running them, and install runs again. The Sandbox then becomes ready, and the banner is gone.
+  - **The clone case:** a Retry that would clone again opens "Retry cloning?" before it runs.
+- **Gotchas:**
+  - A Retry runs the failed step's own command again: install and startup scripts should be safe to rerun.
+  - New terminals wait while the Retry's setup runs, as they do during the first setup.
+- **Observed:** not yet.
 
 ## `sandbox-cp-upload`: copy a file into a sandbox
 

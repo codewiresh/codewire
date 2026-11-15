@@ -396,6 +396,38 @@ pub(crate) struct TerminalTemplate<'a> {
     pub(crate) page: &'a TerminalPageView,
     pub(crate) csrf_token: &'a str,
     pub(crate) style_nonce: &'a str,
+    /// A Retry setup was refused until its reclone is confirmed, so the page
+    /// opens that confirmation (#4767).
+    pub(crate) confirm_reclone: bool,
+}
+
+impl<'a> TerminalTemplate<'a> {
+    pub(crate) fn new(
+        view: &'a DashboardView,
+        organization: &'a OrganizationContext,
+        page: &'a TerminalPageView,
+        csrf_token: &'a str,
+        style_nonce: &'a str,
+    ) -> Self {
+        Self {
+            view,
+            organization,
+            page,
+            csrf_token,
+            style_nonce,
+            confirm_reclone: false,
+        }
+    }
+
+    /// A page as a test renders it, with a fixed token and nonce.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        view: &'a DashboardView,
+        organization: &'a OrganizationContext,
+        page: &'a TerminalPageView,
+    ) -> Self {
+        Self::new(view, organization, page, "csrf", "nonce")
+    }
 }
 
 impl TerminalTemplate<'_> {

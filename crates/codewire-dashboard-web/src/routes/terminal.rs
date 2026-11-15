@@ -26,6 +26,9 @@ pub(super) struct TerminalQuery {
     message: String,
     #[serde(default)]
     error: String,
+    /// `reclone` after a Retry setup that must confirm its reclone (#4767).
+    #[serde(default)]
+    confirm: String,
 }
 
 pub(super) async fn page(
@@ -92,11 +95,15 @@ pub(super) async fn page(
     with_csrf_cookie(
         render_terminal_page(
             TerminalTemplate {
-                view: &dashboard,
-                organization: &organization,
-                page: &view,
-                csrf_token: &token,
-                style_nonce: style_nonce.as_str(),
+                confirm_reclone: query.confirm == "reclone"
+                    && !view.environment.setup_failure.is_empty(),
+                ..TerminalTemplate::new(
+                    &dashboard,
+                    &organization,
+                    &view,
+                    &token,
+                    style_nonce.as_str(),
+                )
             },
             &view.websocket_origin,
             &style_nonce,
@@ -195,11 +202,14 @@ mod tests {
             assert!(template.contains(&format!("data-dialog-open=\"sandbox-{name}\"")));
             assert!(template.contains(&format!("data-dialog id=\"sandbox-{name}\"")));
         }
+        // Retry setup's reclone confirmation opens itself after the server
+        // asks for it (#4767).
+        assert!(template.contains("data-dialog id=\"setup-reclone\""));
         assert_eq!(
             template
                 .matches("data-dialog-close autofocus>Cancel")
                 .count(),
-            2
+            3
         );
         assert_eq!(
             template
@@ -207,9 +217,10 @@ mod tests {
                 .count(),
             4
         );
-        // Start, the status panel's Start, Stop and Delete.
+        // Start, the status panel's Start, Stop and Delete; Retry setup and
+        // its reclone confirmation return to the detail page by themselves.
         for name in ["list_search", "list_state"] {
-            assert_eq!(template.matches(&format!("name=\"{name}\"")).count(), 4);
+            assert_eq!(template.matches(&format!("name=\"{name}\"")).count(), 6);
         }
         assert!(
             template

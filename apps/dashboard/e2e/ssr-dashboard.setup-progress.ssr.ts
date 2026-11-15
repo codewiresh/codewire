@@ -9,10 +9,10 @@ const environment = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 const eventsPath = `**/fixture-org/${environment}/_events/setup-progress*`;
 const id = (n: number) => n.toString(16).padStart(32, "0");
 
-const fixtureUrl = () => {
+const fixtureUrl = (fixture = "setup-progress") => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system for setup progress fixture checks");
-  return `${origin}/reference/fixtures/setup-progress.html`;
+  return `${origin}/reference/fixtures/${fixture}.html`;
 };
 
 type Stage = { phase: string; status: string; label: string; repoIndex?: number; repoCount?: number;
@@ -155,6 +155,43 @@ test("a restart after a failed setup follows no stream, says nothing complete, a
   await expect(setup).toBeHidden();
   await expect(page.locator("[data-setup-announce]")).not.toContainText("Setup complete");
   expect(resumes).toHaveLength(0);
+});
+
+test("a failed setup's list follows a Retry from the failed step (#4767)", async ({ page }) => {
+  // The page was rendered with a recorded failure, so its list waits for a Retry.
+  const urls: string[] = [];
+  page.on("request", (request) => { if (request.url().includes("/_events/setup-progress")) urls.push(request.url()); });
+  await streams(page, [
+    // The failed run, which the page holds.
+    frame(1, { phase: "health_check", status: "completed", label: "Checking sidecar readiness", durationMs: 1200 })
+      + frame(2, { phase: "install", status: "started", label: "Running install command" })
+      + frame(3, { phase: "install", status: "failed", label: "workspace exec exited 1" })
+      + end("failed"),
+    // The Retry's run, which resumes at install.
+    frame(4, { phase: "install", status: "started", label: "Running install command" })
+      + frame(5, { phase: "install", status: "completed", label: "Running install command", durationMs: 900 })
+      + frame(6, { phase: "complete", status: "completed", label: "" })
+      + end("completed"),
+  ]);
+  await page.goto(fixtureUrl("setup-retry"));
+  const setup = page.locator("[data-setup-progress]");
+  await expect(setup).toBeHidden();
+  const stages = setup.locator("[data-setup-stages] > .cw-setup-stage");
+  await expect(stages).toHaveCount(2);
+  await expect(stages.nth(1)).toHaveAttribute("data-state", "failed");
+  // The Retry's setup claims the Sandbox: the list follows its run.
+  await status(page, { available: true, running: true, setupComplete: false, setupFailed: false, setupRunning: true });
+  // terminal-readiness shows the list once the notice says setup; this page
+  // has only the list's script.
+  await expect(setup.locator("h2")).toHaveText("Retrying setup");
+  await expect(stages.nth(1)).toHaveAttribute("data-state", "completed");
+  // The step before the failed one is not run again, and shows done at once.
+  await expect(stages).toHaveCount(2);
+  await expect(stages.nth(0)).toHaveAttribute("data-state", "completed");
+  await expect(stages.nth(0)).toHaveAttribute("data-instant", "");
+  expect(urls).toHaveLength(2);
+  expect(urls[0]).not.toContain("run=");
+  expect(urls[1]).toContain("run=next&since=2026-10-06T10%3A00%3A00.000Z");
 });
 
 test("a failed stage is announced and stream text is never markup", async ({ page }) => {

@@ -125,6 +125,26 @@ Rules:
   failed step and clears the owner in one transaction. Terminal sessions are
   admitted only while no owner holds the lease, so a failed setup opens them
   and a setup that takes the lease again closes new ones (#4767).
+- Retry setup (`EnvironmentService.RetryEnvironmentSetup`) runs the setup
+  activity again through the environment workflow's `retry_setup` command,
+  on a running Sandbox with a recorded failure and no owner. The run resumes
+  from the recorded checkpoint, so no completed step runs again.
+  - Only a resumable setup run's claim clears `setup_error`, in the claiming
+    write, so a retry whose command is lost leaves the failure recorded. The
+    post-start mutation that every start runs claims the lease without
+    clearing it, so a stop and start keeps the failure and its terminals.
+  - A retry that would run the clone step is refused (`reclone_unconfirmed`)
+    until the caller confirms it, because the clone deletes each repository's
+    directory first.
+  - It takes the same access as Start: the creator, an organization owner or
+    admin, or an `operator` grant. Operators can already run commands in the
+    Sandbox, so the clone's deletion gives them nothing they lacked.
+  - The command sits behind the `retry-setup-4767` workflow patch. The SDK
+    records a patch's answer once per workflow, so a workflow that skipped a
+    `retry_setup` before the patch ignores every later one while the RPC
+    returns Ok. Environment workflows never continue-as-new, so that lasts
+    until the Sandbox is destroyed. It affects only a Sandbox whose Retry was
+    signalled during the rollout.
 - `AuthorityLost` propagates through every setup path. It is never turned
   into a warning or followed by advancing to the next setup phase.
 

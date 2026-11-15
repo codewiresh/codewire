@@ -256,7 +256,14 @@ impl SetupPhaseAuthority {
         }
         match owner {
             None => {
-                write_claimed(&mut tx, &self.environment_id, identity, phase).await?;
+                write_claimed(
+                    &mut tx,
+                    &self.environment_id,
+                    identity,
+                    phase,
+                    !allow_setup_complete,
+                )
+                .await?;
                 tx.commit().await?;
                 Ok(PhasePreparation::Ready(PhaseAcquire::Acquired))
             }
@@ -273,7 +280,14 @@ impl SetupPhaseAuthority {
             },
             Some(owner) if takeover_allowed(identity, &owner.identity) => match owner.status {
                 SetupLeaseStatus::Claimed => {
-                    write_claimed(&mut tx, &self.environment_id, identity, phase).await?;
+                    write_claimed(
+                        &mut tx,
+                        &self.environment_id,
+                        identity,
+                        phase,
+                        !allow_setup_complete,
+                    )
+                    .await?;
                     tx.commit().await?;
                     Ok(PhasePreparation::Ready(PhaseAcquire::Acquired))
                 }
@@ -349,7 +363,16 @@ impl SetupPhaseAuthority {
             tx.commit().await?;
             return Err(AuthorityLost.into());
         }
-        write_claimed(&mut tx, &self.environment_id, identity, old_owner.phase).await?;
+        // A setup run cleared any failure when it first claimed; a recovered
+        // post-start mutation keeps one (#4767).
+        write_claimed(
+            &mut tx,
+            &self.environment_id,
+            identity,
+            old_owner.phase,
+            false,
+        )
+        .await?;
         tx.commit().await?;
         Ok(PhaseAcquire::Acquired)
     }
@@ -926,15 +949,24 @@ async fn clear_owner(
     Ok(())
 }
 
+/// Claims the phase for `identity`. A recorded failure is cleared in the same
+/// write: setup owns the Sandbox again, as a Retry means (#4767), and a Retry
+/// whose setup never claims leaves the failure recorded.
+/// Claim the lease. A resumable setup run's claim also clears a recorded
+/// failure: from here the Sandbox is setting up again (#4767). A post-start
+/// mutation runs on every start and keeps it, or a start would erase why
+/// setup failed and leave the Sandbox admitting no session.
 async fn write_claimed(
     tx: &mut Transaction<'_, Postgres>,
     environment_id: &str,
     identity: &SetupActivityIdentity,
     phase: i32,
+    clears_failure: bool,
 ) -> anyhow::Result<()> {
     let result = sqlx::query(
         "UPDATE sandbox_environment_backend
-            SET setup_owner_generation = $1,
+            SET setup_error = CASE WHEN $6 THEN NULL ELSE setup_error END,
+                setup_owner_generation = $1,
                 setup_owner_activity_id = $2,
                 setup_owner_attempt = $3,
                 setup_owner_phase = $4,
@@ -947,6 +979,7 @@ async fn write_claimed(
     .bind(identity.attempt)
     .bind(phase)
     .bind(environment_id)
+    .bind(clears_failure)
     .execute(&mut **tx)
     .await?;
     if result.rows_affected() != 1 {
@@ -1315,5 +1348,129 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    /// A Retry of a failed setup (#4767): the failure stays recorded until a
+    /// new activity claims the failed phase, and that claim clears it, so the
+    /// Sandbox reads as setting up again. The checkpoint does not move.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_a_start_keeps_a_recorded_failure_and_a_retry_claim_clears_it() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("ignored DB test requires TEST_DATABASE_URL");
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let user_id = format!("usr_setup_retry_{suffix}");
+        let org_id = format!("org_setup_retry_{suffix}");
+        let preset_id = format!("pre_setup_retry_{suffix}");
+        let environment_id = format!("env_setup_retry_{suffix}");
+        let spec = "'{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb";
+        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+            .bind(&user_id)
+            .bind(format!("{suffix}@setup-retry.invalid"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, 'Setup retry test', $2, $3)")
+            .bind(&org_id)
+            .bind(format!("setup-retry-{suffix}"))
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(&format!(
+            "INSERT INTO environment_presets (id, org_id, name, slug, project_spec) \
+             VALUES ($1, $2, 'Setup retry test', $3, {spec})"
+        ))
+        .bind(&preset_id)
+        .bind(&org_id)
+        .bind(format!("setup-retry-{suffix}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(&format!(
+            "INSERT INTO environments (id, org_id, created_by, type, state, desired_state, preset_id, project_spec) \
+             VALUES ($1, $2, $3, 'sandbox', 'running', 'started', $4, {spec})"
+        ))
+        .bind(&environment_id)
+        .bind(&org_id)
+        .bind(&user_id)
+        .bind(&preset_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sandbox_environment_backend (environment_id, namespace, setup_phase) \
+             VALUES ($1, 'setup-retry-test', 3)",
+        )
+        .bind(&environment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let generation = ActivityAuthority::claim(&pool, &environment_id, "run-setup", 10)
+            .await
+            .unwrap();
+        let authority = ActivityAuthority::capture(&pool, &environment_id, generation)
+            .await
+            .unwrap();
+        let read = || async {
+            sqlx::query_as::<_, (i32, Option<String>, Option<String>)>(
+                "SELECT setup_phase, setup_error, setup_owner_status \
+                   FROM sandbox_environment_backend WHERE environment_id = $1",
+            )
+            .bind(&environment_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+
+        // The first setup fails at the install checkpoint.
+        let first =
+            SetupPhaseAuthority::new(authority.clone(), identity(generation, "setup", 1)).unwrap();
+        assert_eq!(
+            first.prepare_phase(3).await.unwrap(),
+            PhasePreparation::Ready(PhaseAcquire::Acquired)
+        );
+        first.set_error(3, "install: exited 1").await.unwrap();
+        assert_eq!(read().await, (3, Some("install: exited 1".into()), None));
+
+        // A stop then start runs the post-start mutation, which claims and
+        // releases the lease. The failure stays recorded and nothing owns
+        // setup, which is what session admission admits.
+        let start =
+            SetupPhaseAuthority::new(authority.clone(), identity(generation, "start", 1)).unwrap();
+        assert_eq!(
+            start.prepare_post_start_mutation(3).await.unwrap(),
+            PhasePreparation::Ready(PhaseAcquire::Acquired)
+        );
+        assert_eq!(
+            read().await,
+            (3, Some("install: exited 1".into()), Some("claimed".into()))
+        );
+        start.complete_post_start_mutation(3).await.unwrap();
+        assert_eq!(read().await, (3, Some("install: exited 1".into()), None));
+
+        // The Retry's setup claims the same checkpoint and clears the failure.
+        let retry =
+            SetupPhaseAuthority::new(authority, identity(generation, "retry-setup", 1)).unwrap();
+        assert_eq!(
+            retry.prepare_phase(3).await.unwrap(),
+            PhasePreparation::Ready(PhaseAcquire::Acquired)
+        );
+        assert_eq!(read().await, (3, None, Some("claimed".into())));
+
+        for (table, column, id) in [
+            ("environments", "id", &environment_id),
+            ("environment_presets", "id", &preset_id),
+            ("organizations", "id", &org_id),
+            ("users", "id", &user_id),
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE {column} = $1"))
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
     }
 }

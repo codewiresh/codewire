@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse, GetEnvironmentProjectSpecRequest, GetEnvironmentProjectSpecResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
+from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse, GetEnvironmentProjectSpecRequest, GetEnvironmentProjectSpecResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, RetryEnvironmentSetupRequest, RetryEnvironmentSetupResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -93,6 +93,9 @@ class EnvironmentService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def repair_environment_daemon(self, request: RepairEnvironmentDaemonRequest, ctx: RequestContext[RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse]) -> RepairEnvironmentDaemonResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def retry_environment_setup(self, request: RetryEnvironmentSetupRequest, ctx: RequestContext[RetryEnvironmentSetupRequest, RetryEnvironmentSetupResponse]) -> RetryEnvironmentSetupResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def list_environment_access(self, request: ListEnvironmentAccessRequest, ctx: RequestContext[ListEnvironmentAccessRequest, ListEnvironmentAccessResponse]) -> ListEnvironmentAccessResponse:
@@ -323,6 +326,16 @@ class EnvironmentServiceASGIApplication(ConnectASGIApplication[EnvironmentServic
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.repair_environment_daemon,
+                ),
+                "/codewire.v1.EnvironmentService/RetryEnvironmentSetup": Endpoint.unary(
+                    method=MethodInfo(
+                        name="RetryEnvironmentSetup",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=RetryEnvironmentSetupRequest,
+                        output=RetryEnvironmentSetupResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.retry_environment_setup,
                 ),
                 "/codewire.v1.EnvironmentService/ListEnvironmentAccess": Endpoint.unary(
                     method=MethodInfo(
@@ -828,6 +841,26 @@ class EnvironmentServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def retry_environment_setup(
+        self,
+        request: RetryEnvironmentSetupRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> RetryEnvironmentSetupResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="RetryEnvironmentSetup",
+                service_name="codewire.v1.EnvironmentService",
+                input=RetryEnvironmentSetupRequest,
+                output=RetryEnvironmentSetupResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def list_environment_access(
         self,
         request: ListEnvironmentAccessRequest,
@@ -989,6 +1022,9 @@ class EnvironmentServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def repair_environment_daemon(self, request: RepairEnvironmentDaemonRequest, ctx: RequestContext[RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse]) -> RepairEnvironmentDaemonResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def retry_environment_setup(self, request: RetryEnvironmentSetupRequest, ctx: RequestContext[RetryEnvironmentSetupRequest, RetryEnvironmentSetupResponse]) -> RetryEnvironmentSetupResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def list_environment_access(self, request: ListEnvironmentAccessRequest, ctx: RequestContext[ListEnvironmentAccessRequest, ListEnvironmentAccessResponse]) -> ListEnvironmentAccessResponse:
@@ -1217,6 +1253,16 @@ class EnvironmentServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.repair_environment_daemon,
+                ),
+                "/codewire.v1.EnvironmentService/RetryEnvironmentSetup": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="RetryEnvironmentSetup",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=RetryEnvironmentSetupRequest,
+                        output=RetryEnvironmentSetupResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.retry_environment_setup,
                 ),
                 "/codewire.v1.EnvironmentService/ListEnvironmentAccess": EndpointSync.unary(
                     method=MethodInfo(
@@ -1697,6 +1743,25 @@ class EnvironmentServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.EnvironmentService",
                 input=RepairEnvironmentDaemonRequest,
                 output=RepairEnvironmentDaemonResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def retry_environment_setup(
+        self,
+        request: RetryEnvironmentSetupRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> RetryEnvironmentSetupResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="RetryEnvironmentSetup",
+                service_name="codewire.v1.EnvironmentService",
+                input=RetryEnvironmentSetupRequest,
+                output=RetryEnvironmentSetupResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

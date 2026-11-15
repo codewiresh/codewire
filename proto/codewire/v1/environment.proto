@@ -61,6 +61,9 @@ service EnvironmentService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
   rpc RepairEnvironmentDaemon(RepairEnvironmentDaemonRequest) returns (RepairEnvironmentDaemonResponse);
+  // Runs a running Sandbox's failed project setup again, from the step it
+  // failed at; steps that completed are not run again (#4767).
+  rpc RetryEnvironmentSetup(RetryEnvironmentSetupRequest) returns (RetryEnvironmentSetupResponse);
   rpc ListEnvironmentAccess(ListEnvironmentAccessRequest) returns (ListEnvironmentAccessResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
@@ -772,3 +775,14 @@ message RepairEnvironmentDaemonResponse {
   EnvironmentDaemonStatus status = 1;
   string replaced_pod_name = 2;
 }
+
+message RetryEnvironmentSetupRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  // Required when this retry would run the repository clone again: it
+  // deletes each repository's directory, with any edits made there, before
+  // cloning it. Without it such a retry is refused, naming those directories.
+  bool confirm_reclone = 3;
+}
+
+message RetryEnvironmentSetupResponse {}

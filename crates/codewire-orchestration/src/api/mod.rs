@@ -14,6 +14,7 @@ pub mod env_access;
 pub mod environment_daemon;
 pub mod environment_project_spec;
 pub mod environment_resize;
+pub mod environment_setup_retry;
 pub mod environment_sources;
 pub mod environments;
 pub mod feedback;

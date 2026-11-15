@@ -8,6 +8,11 @@
 // Sandbox" row until project setup begins, then the setup stages. A restart,
 // whose setup finished on an earlier run, shows only that row and follows no
 // stream, so an earlier run is never replayed.
+//
+// A Sandbox whose setup failed keeps the list hidden under its failure banner
+// (#4767). It holds the failed run's steps, and once a Retry's setup runs it
+// follows that run, which resumes at the failed step: the steps before it
+// stay done and the failed one runs again.
 (() => {
   "use strict";
   const section = document.querySelector("[data-setup-progress]");
@@ -61,6 +66,8 @@
   let done = false;
   let startRow = null;
   const starting = section.hasAttribute("data-setup-starting");
+  const retrying = section.hasAttribute("data-setup-retry");
+  let resumed = false;
   // The running step is announced to screen readers only: the list shows it.
   // Failures and stream trouble stay in the visible status line.
   const say = (text) => { if (announce instanceof HTMLElement) announce.textContent = text; };
@@ -212,6 +219,11 @@
   }
 
   // A running step's time counts up on this browser's clock.
+  // The page's clock: it redraws elapsed times and fetches nothing.
+  function startClock() {
+    if (timer === null) timer = setInterval(tick, 500);
+  }
+
   function tick() {
     for (const stage of [startRow, ...stages.values()]) {
       if (stage?.item.dataset.state === "running") stage.detail.textContent = seconds(Math.max(0, Date.now() - stage.local));
@@ -319,16 +331,21 @@
 
   function followStream() {
     if (source || ended) return;
-    // A starting page asks only for this start's run, never one that ended.
+    // A starting page, and a Retry, ask only for the run after the page
+    // rendered, never one that ended before it.
     const since = section.dataset.setupSince || "";
-    const run = starting ? `?run=next${since ? `&since=${encodeURIComponent(since)}` : ""}` : "";
+    const run = starting || resumed ? `?run=next${since ? `&since=${encodeURIComponent(since)}` : ""}` : "";
     source = new EventSource(`/${encodeURIComponent(slug)}/${environmentId}/_events/setup-progress${run}`);
     source.addEventListener("stage", (message) => {
       let event;
       try { event = JSON.parse(message.data); } catch { return; }
       if (valid(event)) show(event);
     });
-    source.addEventListener("end", () => { source?.close(); });
+    source.addEventListener("end", () => {
+      source?.close();
+      // The failed run's steps are in; a Retry follows the next run.
+      if (retrying && !resumed) source = null;
+    });
     // This account already follows as many live logs as orchestration allows.
     source.addEventListener("busy", () => {
       finish();
@@ -344,7 +361,7 @@
   }
 
   firstSeen = Date.now();
-  timer = setInterval(tick, 500);
+  startClock();
   if (starting) {
     startRow = item(STARTING);
     startRow.item.dataset.state = "running";
@@ -357,6 +374,23 @@
   document.addEventListener("codewire:sandbox-status", (message) => {
     const detail = message.detail;
     if (detail?.environmentId !== environmentId || ended) return;
+    // A Retry's setup owns the Sandbox: follow its run under a new heading.
+    if (retrying && !resumed && detail.setupRunning === true) {
+      resumed = true;
+      const heading = section.querySelector("h2");
+      if (heading) heading.textContent = "Retrying setup";
+      if (failure instanceof HTMLElement) failure.hidden = true;
+      status.textContent = "";
+      for (const stage of stages.values()) {
+        if (stage.item.dataset.state === "completed") stage.item.dataset.instant = "";
+      }
+      source?.close();
+      source = null;
+      firstSeen = Date.now();
+      startClock();
+      followStream();
+      return;
+    }
     // A start whose setup already completed or failed on an earlier run is a
     // restart: it runs no setup and follows no stream (#4767). A first start
     // follows setup once it begins.
@@ -364,7 +398,7 @@
     if (detail.running === true) settleStart();
     // A failed setup leaves the Sandbox usable: the failure becomes a banner
     // over its terminals, and the list stops here (#4767).
-    if (detail.running === true && detail.setupFailed === true) {
+    if (!retrying && detail.running === true && detail.setupFailed === true) {
       finish();
       section.hidden = true;
       return;

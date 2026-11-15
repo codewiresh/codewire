@@ -1776,7 +1776,7 @@ fn deletion_feedback_path(path: &str, environment_id: &str) -> String {
     target
 }
 
-fn lifecycle_feedback_path(path: &str, message: &str, error: &str) -> String {
+pub(super) fn lifecycle_feedback_path(path: &str, message: &str, error: &str) -> String {
     // The path is constructed above, never supplied as a browser return URL.
     let mut target = Url::parse(&format!("https://codewire.invalid{path}"))
         .expect("server-owned lifecycle path");
@@ -2385,7 +2385,7 @@ fn allowlisted_state(value: &str) -> &'static str {
     SandboxListContext::state(value)
 }
 
-fn mutation_error(error: &ConnectError) -> &'static str {
+pub(super) fn mutation_error(error: &ConnectError) -> &'static str {
     match error.code {
         // No compute credit left (#3381) is a precondition with its reason.
         ErrorCode::FailedPrecondition
@@ -3370,15 +3370,9 @@ mod tests {
             message: String::new(),
             error: String::new(),
         };
-        crate::templates::TerminalTemplate {
-            view: &view,
-            organization,
-            page: &terminal_page,
-            csrf_token: "csrf",
-            style_nonce: "nonce",
-        }
-        .render()
-        .unwrap()
+        crate::templates::TerminalTemplate::for_test(&view, organization, &terminal_page)
+            .render()
+            .unwrap()
     }
 
     fn resize_ids(html: &str) -> Vec<&str> {
@@ -3520,7 +3514,7 @@ mod tests {
 
     /// A recorded setup failure stays on the page after a reload, without
     /// script, escaped like any other text: a banner over the terminals,
-    /// which open under it, with no step list (#4767).
+    /// which open under it, with Retry setup (#4767).
     #[test]
     fn a_failed_setup_keeps_its_banner_after_a_reload() {
         const FAILED: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
@@ -3536,7 +3530,9 @@ mod tests {
         assert!(page.contains(
             "data-sandbox-notice-text>Setup failed at Cloning repositories: exited 128 &#60;b&#62;x&#60;/b&#62;</p>"
         ));
-        assert!(!page.contains("data-setup-progress"));
+        assert!(page.contains("data-sandbox-notice-action=\"retry-setup\">Retry setup</button>"));
+        // The step list waits, hidden, for a Retry to follow.
+        assert!(page.contains(" hidden data-setup-progress data-setup-retry data-setup-since="));
     }
 
     /// #3772: the reason the API wrote is on the Sandbox page, said once, and
@@ -3734,7 +3730,7 @@ mod tests {
         }
         assert_eq!(
             crate::assets::TERMINAL_READINESS_SCRIPT_PATH,
-            "/assets/codewire/terminal-readiness-v6.js"
+            "/assets/codewire/terminal-readiness-v7.js"
         );
         assert_eq!(
             page_error("setup-running"),

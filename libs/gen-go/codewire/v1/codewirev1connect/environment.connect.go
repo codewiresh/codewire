@@ -93,6 +93,9 @@ const (
 	// EnvironmentServiceRepairEnvironmentDaemonProcedure is the fully-qualified name of the
 	// EnvironmentService's RepairEnvironmentDaemon RPC.
 	EnvironmentServiceRepairEnvironmentDaemonProcedure = "/codewire.v1.EnvironmentService/RepairEnvironmentDaemon"
+	// EnvironmentServiceRetryEnvironmentSetupProcedure is the fully-qualified name of the
+	// EnvironmentService's RetryEnvironmentSetup RPC.
+	EnvironmentServiceRetryEnvironmentSetupProcedure = "/codewire.v1.EnvironmentService/RetryEnvironmentSetup"
 	// EnvironmentServiceListEnvironmentAccessProcedure is the fully-qualified name of the
 	// EnvironmentService's ListEnvironmentAccess RPC.
 	EnvironmentServiceListEnvironmentAccessProcedure = "/codewire.v1.EnvironmentService/ListEnvironmentAccess"
@@ -142,6 +145,9 @@ type EnvironmentServiceClient interface {
 	GetEnvironmentDaemonStatus(context.Context, *connect.Request[v1.GetEnvironmentDaemonStatusRequest]) (*connect.Response[v1.GetEnvironmentDaemonStatusResponse], error)
 	StreamEnvironmentDaemonLogs(context.Context, *connect.Request[v1.StreamEnvironmentDaemonLogsRequest]) (*connect.ServerStreamForClient[v1.StreamEnvironmentDaemonLogsResponse], error)
 	RepairEnvironmentDaemon(context.Context, *connect.Request[v1.RepairEnvironmentDaemonRequest]) (*connect.Response[v1.RepairEnvironmentDaemonResponse], error)
+	// Runs a running Sandbox's failed project setup again, from the step it
+	// failed at; steps that completed are not run again (#4767).
+	RetryEnvironmentSetup(context.Context, *connect.Request[v1.RetryEnvironmentSetupRequest]) (*connect.Response[v1.RetryEnvironmentSetupResponse], error)
 	ListEnvironmentAccess(context.Context, *connect.Request[v1.ListEnvironmentAccessRequest]) (*connect.Response[v1.ListEnvironmentAccessResponse], error)
 	GrantEnvironmentAccess(context.Context, *connect.Request[v1.GrantEnvironmentAccessRequest]) (*connect.Response[v1.GrantEnvironmentAccessResponse], error)
 	RevokeEnvironmentAccess(context.Context, *connect.Request[v1.RevokeEnvironmentAccessRequest]) (*connect.Response[v1.RevokeEnvironmentAccessResponse], error)
@@ -289,6 +295,12 @@ func NewEnvironmentServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(environmentServiceMethods.ByName("RepairEnvironmentDaemon")),
 			connect.WithClientOptions(opts...),
 		),
+		retryEnvironmentSetup: connect.NewClient[v1.RetryEnvironmentSetupRequest, v1.RetryEnvironmentSetupResponse](
+			httpClient,
+			baseURL+EnvironmentServiceRetryEnvironmentSetupProcedure,
+			connect.WithSchema(environmentServiceMethods.ByName("RetryEnvironmentSetup")),
+			connect.WithClientOptions(opts...),
+		),
 		listEnvironmentAccess: connect.NewClient[v1.ListEnvironmentAccessRequest, v1.ListEnvironmentAccessResponse](
 			httpClient,
 			baseURL+EnvironmentServiceListEnvironmentAccessProcedure,
@@ -346,6 +358,7 @@ type environmentServiceClient struct {
 	getEnvironmentDaemonStatus    *connect.Client[v1.GetEnvironmentDaemonStatusRequest, v1.GetEnvironmentDaemonStatusResponse]
 	streamEnvironmentDaemonLogs   *connect.Client[v1.StreamEnvironmentDaemonLogsRequest, v1.StreamEnvironmentDaemonLogsResponse]
 	repairEnvironmentDaemon       *connect.Client[v1.RepairEnvironmentDaemonRequest, v1.RepairEnvironmentDaemonResponse]
+	retryEnvironmentSetup         *connect.Client[v1.RetryEnvironmentSetupRequest, v1.RetryEnvironmentSetupResponse]
 	listEnvironmentAccess         *connect.Client[v1.ListEnvironmentAccessRequest, v1.ListEnvironmentAccessResponse]
 	grantEnvironmentAccess        *connect.Client[v1.GrantEnvironmentAccessRequest, v1.GrantEnvironmentAccessResponse]
 	revokeEnvironmentAccess       *connect.Client[v1.RevokeEnvironmentAccessRequest, v1.RevokeEnvironmentAccessResponse]
@@ -453,6 +466,11 @@ func (c *environmentServiceClient) RepairEnvironmentDaemon(ctx context.Context, 
 	return c.repairEnvironmentDaemon.CallUnary(ctx, req)
 }
 
+// RetryEnvironmentSetup calls codewire.v1.EnvironmentService.RetryEnvironmentSetup.
+func (c *environmentServiceClient) RetryEnvironmentSetup(ctx context.Context, req *connect.Request[v1.RetryEnvironmentSetupRequest]) (*connect.Response[v1.RetryEnvironmentSetupResponse], error) {
+	return c.retryEnvironmentSetup.CallUnary(ctx, req)
+}
+
 // ListEnvironmentAccess calls codewire.v1.EnvironmentService.ListEnvironmentAccess.
 func (c *environmentServiceClient) ListEnvironmentAccess(ctx context.Context, req *connect.Request[v1.ListEnvironmentAccessRequest]) (*connect.Response[v1.ListEnvironmentAccessResponse], error) {
 	return c.listEnvironmentAccess.CallUnary(ctx, req)
@@ -510,6 +528,9 @@ type EnvironmentServiceHandler interface {
 	GetEnvironmentDaemonStatus(context.Context, *connect.Request[v1.GetEnvironmentDaemonStatusRequest]) (*connect.Response[v1.GetEnvironmentDaemonStatusResponse], error)
 	StreamEnvironmentDaemonLogs(context.Context, *connect.Request[v1.StreamEnvironmentDaemonLogsRequest], *connect.ServerStream[v1.StreamEnvironmentDaemonLogsResponse]) error
 	RepairEnvironmentDaemon(context.Context, *connect.Request[v1.RepairEnvironmentDaemonRequest]) (*connect.Response[v1.RepairEnvironmentDaemonResponse], error)
+	// Runs a running Sandbox's failed project setup again, from the step it
+	// failed at; steps that completed are not run again (#4767).
+	RetryEnvironmentSetup(context.Context, *connect.Request[v1.RetryEnvironmentSetupRequest]) (*connect.Response[v1.RetryEnvironmentSetupResponse], error)
 	ListEnvironmentAccess(context.Context, *connect.Request[v1.ListEnvironmentAccessRequest]) (*connect.Response[v1.ListEnvironmentAccessResponse], error)
 	GrantEnvironmentAccess(context.Context, *connect.Request[v1.GrantEnvironmentAccessRequest]) (*connect.Response[v1.GrantEnvironmentAccessResponse], error)
 	RevokeEnvironmentAccess(context.Context, *connect.Request[v1.RevokeEnvironmentAccessRequest]) (*connect.Response[v1.RevokeEnvironmentAccessResponse], error)
@@ -653,6 +674,12 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 		connect.WithSchema(environmentServiceMethods.ByName("RepairEnvironmentDaemon")),
 		connect.WithHandlerOptions(opts...),
 	)
+	environmentServiceRetryEnvironmentSetupHandler := connect.NewUnaryHandler(
+		EnvironmentServiceRetryEnvironmentSetupProcedure,
+		svc.RetryEnvironmentSetup,
+		connect.WithSchema(environmentServiceMethods.ByName("RetryEnvironmentSetup")),
+		connect.WithHandlerOptions(opts...),
+	)
 	environmentServiceListEnvironmentAccessHandler := connect.NewUnaryHandler(
 		EnvironmentServiceListEnvironmentAccessProcedure,
 		svc.ListEnvironmentAccess,
@@ -727,6 +754,8 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 			environmentServiceStreamEnvironmentDaemonLogsHandler.ServeHTTP(w, r)
 		case EnvironmentServiceRepairEnvironmentDaemonProcedure:
 			environmentServiceRepairEnvironmentDaemonHandler.ServeHTTP(w, r)
+		case EnvironmentServiceRetryEnvironmentSetupProcedure:
+			environmentServiceRetryEnvironmentSetupHandler.ServeHTTP(w, r)
 		case EnvironmentServiceListEnvironmentAccessProcedure:
 			environmentServiceListEnvironmentAccessHandler.ServeHTTP(w, r)
 		case EnvironmentServiceGrantEnvironmentAccessProcedure:
@@ -824,6 +853,10 @@ func (UnimplementedEnvironmentServiceHandler) StreamEnvironmentDaemonLogs(contex
 
 func (UnimplementedEnvironmentServiceHandler) RepairEnvironmentDaemon(context.Context, *connect.Request[v1.RepairEnvironmentDaemonRequest]) (*connect.Response[v1.RepairEnvironmentDaemonResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.RepairEnvironmentDaemon is not implemented"))
+}
+
+func (UnimplementedEnvironmentServiceHandler) RetryEnvironmentSetup(context.Context, *connect.Request[v1.RetryEnvironmentSetupRequest]) (*connect.Response[v1.RetryEnvironmentSetupResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.RetryEnvironmentSetup is not implemented"))
 }
 
 func (UnimplementedEnvironmentServiceHandler) ListEnvironmentAccess(context.Context, *connect.Request[v1.ListEnvironmentAccessRequest]) (*connect.Response[v1.ListEnvironmentAccessResponse], error) {

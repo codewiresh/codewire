@@ -1066,3 +1066,17 @@ class RepairEnvironmentDaemonResponse(_message.Message):
     status: EnvironmentDaemonStatus
     replaced_pod_name: str
     def __init__(self, status: _Optional[_Union[EnvironmentDaemonStatus, _Mapping]] = ..., replaced_pod_name: _Optional[str] = ...) -> None: ...
+
+class RetryEnvironmentSetupRequest(_message.Message):
+    __slots__ = ("org_id", "environment_id", "confirm_reclone")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    CONFIRM_RECLONE_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    environment_id: str
+    confirm_reclone: bool
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., confirm_reclone: _Optional[bool] = ...) -> None: ...
+
+class RetryEnvironmentSetupResponse(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...

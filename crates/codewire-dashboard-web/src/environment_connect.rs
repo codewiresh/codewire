@@ -53,7 +53,7 @@ fn client_config(state: &AppState, timeout: Duration) -> ClientConfig {
     ClientConfig::new(state.api_origin.clone()).with_default_timeout(timeout)
 }
 
-fn environment_client(
+pub(crate) fn environment_client(
     state: &AppState,
     cookie: HeaderValue,
 ) -> EnvironmentServiceClient<BrowserTransport> {

@@ -70,7 +70,7 @@
   // A banner sits above whatever still shows below it; a message is centred
   // where nothing runs; setup lists its steps there.
   const noticeActions = { "": [""], start: ["Start", "Start again"], retry: ["Try again"], delete: ["Delete"],
-    refresh: ["Refresh status"] };
+    refresh: ["Refresh status"], "retry-setup": ["Retry setup"] };
   function validNotice(value) {
     return P.closed(value, ["kind", "text", "tone", "action", "label", "dismissible", "graphic"])
       && ["none", "banner", "message", "setup"].includes(value.kind)

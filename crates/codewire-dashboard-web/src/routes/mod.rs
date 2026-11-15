@@ -27,6 +27,7 @@ mod sandbox_resize;
 mod secrets_presets;
 mod settings;
 mod setup_progress;
+mod setup_retry;
 mod sign_in_methods;
 mod snapshots;
 mod terminal;
@@ -381,6 +382,10 @@ pub(crate) fn router() -> Router<AppState> {
             post(environments::start),
         )
         .route("/{slug}/_actions/sandboxes/stop", post(environments::stop))
+        .route(
+            "/{slug}/_actions/sandboxes/retry-setup",
+            post(setup_retry::retry_setup),
+        )
         .route(
             "/{slug}/_actions/sandboxes/sources",
             post(environments::update_sources),

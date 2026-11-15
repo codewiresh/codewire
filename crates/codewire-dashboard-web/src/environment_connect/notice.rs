@@ -14,7 +14,8 @@ pub(crate) struct SandboxNotice {
     pub(crate) text: String,
     /// `neutral`, `info`, `warning` or `danger`.
     pub(crate) tone: &'static str,
-    /// `start`, `retry` (a start after a refusal), `delete`, `refresh`, or none.
+    /// `start`, `retry` (a start after a refusal), `retry-setup` (#4767),
+    /// `delete`, `refresh`, or none.
     pub(crate) action: &'static str,
     /// The action's button text; empty with no action.
     pub(crate) label: &'static str,
@@ -133,10 +134,12 @@ pub(crate) fn sandbox_notice(row: &EnvironmentRow) -> SandboxNotice {
         ("destroying" | "destroyed", _) => SandboxNotice::none(),
         ("running", _) if !row.confidential_actions_allowed => SandboxNotice::none(),
         // A failed setup leaves the Sandbox usable: the failure stays above
-        // the terminals, which open so a person can fix it (#4767).
-        ("running", _) if !row.setup_failure.is_empty() => {
-            SandboxNotice::banner(row.setup_failure.clone(), "danger")
-        }
+        // the terminals, which open so a person can fix it, then retry (#4767).
+        ("running", _) if !row.setup_failure.is_empty() => SandboxNotice::banner(
+            row.setup_failure.clone(),
+            "danger",
+        )
+        .offering(true, "retry-setup", "Retry setup"),
         ("running", _) if row.setup_running => {
             SandboxNotice::banner(SETTING_UP.to_owned(), "neutral").kind("setup")
         }
@@ -228,13 +231,15 @@ mod tests {
                 failed.kind,
                 failed.tone,
                 failed.text.as_str(),
-                failed.action
+                failed.action,
+                failed.label
             ),
             (
                 "banner",
                 "danger",
                 "Setup failed at Running install command: npm ci exited 1",
-                ""
+                "retry-setup",
+                "Retry setup"
             )
         );
         let long = sandbox_notice(&running(false, &"x".repeat(400)));

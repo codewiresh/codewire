@@ -227,7 +227,10 @@ fn connect_code_for(status: StatusCode, reason: Option<&str>) -> ConnectCode {
             | "organization_not_available"
             | "organization_not_selected"
             | "email_not_verified"
-            | "last_owner",
+            | "last_owner"
+            // A setup retry that would delete repository directories until
+            // the caller confirms it (#4767).
+            | "reclone_unconfirmed",
         ) => {
             return ConnectCode::FailedPrecondition;
         }
@@ -551,6 +554,26 @@ mod tests {
         assert_eq!(rendered.code, ConnectCode::FailedPrecondition);
         assert_eq!(rendered.message, "GitHub not connected");
         assert!(rendered.details.is_empty());
+    }
+
+    /// Retry setup's clone confirmation (#4767): the dashboard and `cw` ask
+    /// before a retry deletes repository directories only on this code and
+    /// reason, so a rename sends the person to a generic error instead.
+    #[test]
+    fn a_reclone_refusal_is_a_failed_precondition_named_for_its_confirmation() {
+        let rendered = ConnectError::from_app_error(
+            &coded(
+                StatusCode::CONFLICT,
+                "reclone_unconfirmed",
+                "retrying setup clones the repositories again; confirm to retry",
+            ),
+            None,
+        );
+        assert_eq!(rendered.code, ConnectCode::FailedPrecondition);
+        let Some(ConnectErrorDetail::ErrorInfo(info)) = rendered.details.first() else {
+            panic!("expected ErrorInfo detail, got {:?}", rendered.details);
+        };
+        assert_eq!(info.reason, "RECLONE_UNCONFIRMED");
     }
 
     /// D3 conversion cases: root, nested, array index, plus edges.
