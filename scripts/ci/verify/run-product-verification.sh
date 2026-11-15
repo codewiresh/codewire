@@ -1699,6 +1699,7 @@ run_release() {
   scripts/ci/tests/test-verify-release-tag-ref.sh
   scripts/ci/tests/test-verify-release-tag-receipt.sh
   scripts/ci/tests/test-require-production-accepted.sh
+  scripts/ci/tests/test-wait-for-production-accepted.sh
   scripts/ci/tests/test-deploy-prod-helpers.sh
   scripts/ci/tests/test-find-pending-release.sh
   python3 -B scripts/ci/tests/test-release-turn.py

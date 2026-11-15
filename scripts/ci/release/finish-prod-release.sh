@@ -6,9 +6,11 @@
 #
 #   1. join and verify the base and workspace indexes, or reuse the published
 #      ones (join-release-support-image.sh), and publish both to Harbor;
-#   2. mirror them to GHCR, which never gates the release;
-#   3. dispatch the signed tag to codewire/deploy promote-prod and wait for
-#      Production to accept it (dispatch-deploy-prod.sh).
+#   2. dispatch the signed tag to codewire/deploy promote-prod and wait for
+#      Production to accept it (dispatch-deploy-prod.sh);
+#   3. mirror them to GHCR, which never gates the release. Production pulls
+#      from Harbor, so the mirror follows delivery instead of delaying it;
+#      cli-release waits for this whole run, mirror included (#4492).
 #
 # Environment: RELEASE_TAG, SOURCE_SHA, CODEWIRE_SOURCE_DIR (the release
 # checkout), CODEWIRE_IMAGE_REGISTRY, BUILD_SUPPORT_PAIR (true or false), and
@@ -76,11 +78,11 @@ for image in base workspace; do
     "$(<"$work/$image.ref")" "$registry/codewire/$image" "$source_sha" "$tag"
 done
 
+"$ROOT/scripts/ci/deploy/dispatch-deploy-prod.sh" "$tag"
+
 # Harbor serves every consumer; the public GHCR copy never gates release.
 for image in base workspace; do
   "$ROOT/scripts/ci/images/publish-image-to-ghcr.sh" \
     "$(<"$work/$image.ref")" "ghcr.io/codewiresh/$image" "$source_sha" "$tag" ||
     printf '::warning::the %s GHCR mirror failed; Harbor holds the release\n' "$image"
 done
-
-"$ROOT/scripts/ci/deploy/dispatch-deploy-prod.sh" "$tag"

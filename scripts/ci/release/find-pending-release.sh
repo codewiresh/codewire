@@ -16,9 +16,10 @@
 #     before the tag is named, so a failed release is never retried by the
 #     schedule. When the run the newest marker names ended without success,
 #     the schedule fails loudly with the dispatch that recovers it (#4444);
-#     a dispatch marks the tag too, so its outcome is the one that counts;
-#   - for cli-release only, Production has accepted it, so the CLI follows
-#     Production.
+#     a dispatch marks the tag too, so its outcome is the one that counts.
+# cli-release picks a release up as deploy-prod does and builds it while
+# Production is delivered; each of its signing jobs first waits for
+# Production to accept the release (wait-for-production-accepted.sh, #4492).
 # Tags that are not signed by the release tagger are ignored, so an unsigned
 # tag cannot stand in a release's way. Release selection then verifies the tag
 # fully from main's code. This job holds only the job token and runs before
@@ -209,15 +210,6 @@ if [[ -n "$previous" ]]; then
       exit 0
       ;;
   esac
-fi
-
-if [[ "$workflow" == cli-release ]]; then
-  if ! GITEA_TOKEN="$release_token" "$(dirname "$0")/require-production-accepted.sh" \
-      "$tag" "$tag_object" "$tag_commit" >"$release_tmp/production.log" 2>&1; then
-    printf 'nothing pending yet: Production has not accepted %s\n' "$tag"
-    emit ''
-    exit 0
-  fi
 fi
 
 mark pending 'picked up by run'

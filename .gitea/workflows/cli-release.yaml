@@ -177,7 +177,7 @@ jobs:
           #   RELEASE_REQUIRES_KIND in the receipt says so (waived, owner,
           #   2026-10-25, #3013): the receipt's source evidence;
           # - Dev acceptance: promote-prod, which dispatch-deploy-prod.sh waits
-          #   for and cli-release requires.
+          #   for and every cli-release signing job waits for.
           python3 scripts/ci/images/workspace-image-pin.py check --release --commit "$source_sha"
           receipt="$(PREFLIGHT_RELEASE_TAG_REF="refs/tags/${selected_tag}" \
             PREFLIGHT_RELEASE_TAG_OBJECT_SHA="$remote_object_sha" \
@@ -186,9 +186,6 @@ jobs:
           printf '%s\n' "$receipt"
           grep -Fxq 'release_tag_receipt=accepted' <<<"$receipt"
           grep -Fxq 'release_tag_scope=source-evidence' <<<"$receipt"
-          # One version for web and CLI: a CLI ships only after Production
-          # accepted the same release.
-          scripts/ci/release/require-production-accepted.sh "$selected_tag" "$remote_object_sha" "$source_sha"
           printf 'release_tag=%s\n' "$selected_tag" >> "$GITHUB_OUTPUT"
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
           printf 'tag_object_sha=%s\n' "$remote_object_sha" >> "$GITHUB_OUTPUT"
@@ -352,13 +349,27 @@ jobs:
     needs: [release-selection, build-helper-darwin]
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
-    timeout-minutes: 45
+    # Up to 310 minutes waiting for Production, then 15 of its own (signing and
+    # notarizing took 39 s for v0.4.19); the runner caps a job at 330.
+    timeout-minutes: 325
     outputs:
       signed_sha256: ${{ steps.sign.outputs.signed_sha256 }}
       notary_submission_id: ${{ steps.sign.outputs.notary_submission_id }}
       sign_runner: ${{ steps.sign.outputs.sign_runner }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # One version for web and CLI: the CLI builds while deploy-prod delivers
+      # the tag, and nothing is signed, notarized or published before
+      # Production accepted the same release (#4492).
+      - name: Wait for Production to accept this release
+        if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+          GITEA_TOKEN: ${{ github.token }}
+        run: scripts/ci/release/wait-for-production-accepted.sh "$RELEASE_TAG" "$TAG_OBJECT_SHA" "$SOURCE_SHA"
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: needs.build-helper-darwin.outputs.unsigned_sha256 != ''
@@ -648,10 +659,24 @@ jobs:
     needs: [release-selection, build-darwin]
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
+    # Up to 310 minutes waiting for Production, then 15 of its own (2.5 minutes
+    # for v0.4.19); the runner caps a job at 330.
+    timeout-minutes: 325
     outputs:
       darwin_sums_sha256: ${{ steps.sign.outputs.darwin_sums_sha256 }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # One version for web and CLI: the CLI builds while deploy-prod delivers
+      # the tag, and nothing is signed, notarized or published before
+      # Production accepted the same release (#4492).
+      - name: Wait for Production to accept this release
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+          GITEA_TOKEN: ${{ github.token }}
+        run: scripts/ci/release/wait-for-production-accepted.sh "$RELEASE_TAG" "$TAG_OBJECT_SHA" "$SOURCE_SHA"
 
       - name: Receive the macOS pair
         uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
@@ -1021,8 +1046,22 @@ jobs:
     needs: [release-selection, pack-runtime, build-release]
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     enable-openid-connect: true
+    # Up to 310 minutes waiting for Production, then 20 of its own (5.2 minutes
+    # for v0.4.19); the runner caps a job at 330.
+    timeout-minutes: 330
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # One version for web and CLI: the CLI builds while deploy-prod delivers
+      # the tag, and nothing is signed, notarized or published before
+      # Production accepted the same release (#4492).
+      - name: Wait for Production to accept this release
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
+          GITEA_TOKEN: ${{ github.token }}
+        run: scripts/ci/release/wait-for-production-accepted.sh "$RELEASE_TAG" "$TAG_OBJECT_SHA" "$SOURCE_SHA"
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

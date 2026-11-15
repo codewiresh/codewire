@@ -23,7 +23,8 @@ export GIT_CONFIG_GLOBAL="$TMP/gitconfig" GIT_CONFIG_NOSYSTEM=1
 mkdir -p "$TMP/tree/scripts/ci/release" "$TMP/bin"
 cp "$ROOT/scripts/ci/release/find-pending-release.sh" "$ROOT/scripts/ci/release/require-current-release.sh" \
   "$ROOT/scripts/ci/release/release-tags.sh" "$TMP/tree/scripts/ci/release/"
-# The Production gate: FIXTURE_PRODUCTION=accepted or not.
+# The Production gate, which the pickup must never ask: cli-release builds
+# while Production is delivered, and its signing jobs wait instead (#4492).
 cat >"$TMP/tree/scripts/ci/release/require-production-accepted.sh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$FIXTURE_DIR/gate.log"
@@ -323,15 +324,13 @@ grep -Fq 'release_tag=v0.4.1' "$fixture/unmarked.github" && fail 'an unmarked pi
 if FIXTURE_VERIFY_STATUS=500 find_release no-verify deploy-prod schedule; then
   fail 'unreadable verification was taken as no release'
 fi
-# cli-release follows Production: it picks up a tag only once Production
-# accepted that tag object and commit, and then publishes and moves stable.
-FIXTURE_PRODUCTION=not find_release cli-waits cli-release schedule || fail "cli waits: $(cat "$fixture/cli-waits.out")"
-output_is cli-waits release_tag= r2_publication=none r2_promote_channel=none
-unmarked cli-waits
-find_release cli cli-release schedule || fail "cli: $(cat "$fixture/cli.out")"
+# cli-release picks a tag up as deploy-prod does, before Production accepted
+# it, and publishes immutably and moves stable. It builds while Production is
+# delivered; its signing jobs wait for Production (#4492), so the pickup never
+# asks whether Production accepted the release.
+FIXTURE_PRODUCTION=not find_release cli cli-release schedule || fail "cli: $(cat "$fixture/cli.out")"
 output_is cli release_tag=v0.4.1 r2_publication=immutable r2_promote_channel=stable
-grep -Fxq "v0.4.1 $(git -C "$work" rev-parse v0.4.1) $COMMIT" "$fixture/gate.log" ||
-  fail "the Production gate was asked about: $(cat "$fixture/gate.log")"
+[ ! -s "$fixture/gate.log" ] || fail "the pickup asked the Production gate: $(cat "$fixture/gate.log")"
 marked cli pending 'release/cli-release v0.4.1'
 
 # --- require-current-release.sh ---------------------------------------------

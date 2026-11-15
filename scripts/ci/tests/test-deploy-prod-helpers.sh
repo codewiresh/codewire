@@ -50,7 +50,7 @@ printf "provenance %s %s\n" "$1" "${CODEWIRE_PROVENANCE_REVISION:-}" >>"'"$TMP"'
 printf "source_sha=%s\ncandidate_ref=registry.example.invalid/codewire/%s@sha256:%064d\n" "${FIXTURE_JOIN_SOURCE:-$CODEWIRE_SOURCE_SHA}" "$1" 2 >>"$GITHUB_OUTPUT"'
 stub scripts/ci/images/publish-image-to-harbor.sh '[ "${FIXTURE_HARBOR:-ok}" = ok ]'
 stub scripts/ci/images/publish-image-to-ghcr.sh '[ "${FIXTURE_GHCR:-ok}" = ok ]'
-stub scripts/ci/deploy/dispatch-deploy-prod.sh ''
+stub scripts/ci/deploy/dispatch-deploy-prod.sh '[ "${FIXTURE_DISPATCH:-ok}" = ok ]'
 
 reset() {
   rm -f "$log" "$TMP/order.log" "$TMP/joins.log" "$TMP/origins.log" "$TMP/provenance.log"
@@ -117,7 +117,7 @@ readonly D1 D2 D3 D4
 # A reused pair: no digests, joined, published, mirrored, then delivered.
 reset
 finish BUILD_SUPPORT_PAIR=false || fail "a reused pair did not finish: $(cat "$TMP/finish.out")"
-[ "$(calls)" = 'join-release-support-image.sh join-release-support-image.sh publish-image-to-harbor.sh publish-image-to-harbor.sh publish-image-to-ghcr.sh publish-image-to-ghcr.sh dispatch-deploy-prod.sh ' ] ||
+[ "$(calls)" = 'join-release-support-image.sh join-release-support-image.sh publish-image-to-harbor.sh publish-image-to-harbor.sh dispatch-deploy-prod.sh publish-image-to-ghcr.sh publish-image-to-ghcr.sh ' ] ||
   fail "a reused pair finished in another order: $(calls)"
 grep -Fxq 'join base pair=false amd64= arm64=' "$TMP/joins.log" || fail 'a reused base was joined with digests'
 grep -Fxq 'join workspace pair=false amd64= arm64=' "$TMP/joins.log" || fail 'a reused workspace was joined with digests'
@@ -159,6 +159,11 @@ reset
 FIXTURE_GHCR=fail finish BUILD_SUPPORT_PAIR=false || fail "a GHCR failure stopped the release: $(cat "$TMP/finish.out")"
 grep -Fq 'GHCR mirror failed; Harbor holds the release' "$TMP/finish.out" || fail 'a GHCR failure was not warned'
 grep -Fxq 'dispatch-deploy-prod.sh v1.2.3' "$log" || fail 'a GHCR failure stopped the delivery'
+# The GHCR mirror follows delivery: a release Production did not accept is
+# not mirrored, and the failure is the run's (#4492).
+reset
+if FIXTURE_DISPATCH=fail finish BUILD_SUPPORT_PAIR=false; then fail 'a failed delivery passed'; fi
+grep -q 'publish-image-to-ghcr' "$log" && fail 'a release Production did not accept was mirrored to GHCR'
 # A failed Harbor publication stops the release before it is delivered.
 reset
 if FIXTURE_HARBOR=fail finish BUILD_SUPPORT_PAIR=false; then fail 'a failed Harbor publication was delivered'; fi

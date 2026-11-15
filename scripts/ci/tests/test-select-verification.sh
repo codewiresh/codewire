@@ -943,6 +943,8 @@ run_paths_case release pull_request refs/pull/3/head false \
   scripts/ci/release/confirm-release-checkout.sh \
   scripts/ci/release/require-production-accepted.sh \
   scripts/ci/tests/test-require-production-accepted.sh \
+  scripts/ci/release/wait-for-production-accepted.sh \
+  scripts/ci/tests/test-wait-for-production-accepted.sh \
   scripts/ci/release/alias-release-images.sh \
   scripts/ci/release/finish-prod-release.sh \
   scripts/ci/release/find-pending-release.sh \

@@ -516,8 +516,7 @@ assert_confirmed_checkouts "$deploy_workflow" 4
 assert_confirmed_checkouts "$cli_workflow" 9
 # Release selection composes its proofs in order (#2892): the tag's own
 # signature, the workspace image pin, then the receipt's source evidence,
-# whose accepted answer and scope are both required; cli-release then waits
-# for Production to accept the same release.
+# whose accepted answer and scope are both required.
 assert_composed_selection() {
   python3 -I - "$1" "$2" <<'PY'
 import sys
@@ -534,8 +533,10 @@ order = [
     "grep -Fxq 'release_tag_receipt=accepted' <<<\"$receipt\"\n",
     "grep -Fxq 'release_tag_scope=source-evidence' <<<\"$receipt\"\n",
 ]
-if sys.argv[2] == "cli":
-    order.append('scripts/ci/release/require-production-accepted.sh "$selected_tag" "$remote_object_sha" "$source_sha"\n')
+# cli-release's selection no longer waits for Production: its signing jobs
+# do (wait-for-production-accepted.sh, test-cli-release-workflow.py, #4492).
+if "require-production-accepted.sh" in step:
+    sys.exit("release selection waits for Production; the signing jobs do")
 order.append("printf 'release_tag=%s\\n' \"$selected_tag\" >> \"$GITHUB_OUTPUT\"\n")
 position = 0
 for line in order:
@@ -648,7 +649,7 @@ for mutation in "s|    - cron: '\*/5 \* \* \* \*'|    - cron: '0 * * * *'|" \
   fi
 done
 for mutation in 's/--source-evidence)"/)"/' "/release_tag_scope=source-evidence/d" \
-    '/workspace-image-pin.py check --release/d' '/require-production-accepted.sh/d'; do
+    '/workspace-image-pin.py check --release/d'; do
   sed "$mutation" "$cli_workflow" >"$fixture/composed-cli-release.yaml"
   if assert_composed_selection "$fixture/composed-cli-release.yaml" cli 2>/dev/null; then
     printf 'release workflow fixture accepted selection without: %s\n' "$mutation" >&2

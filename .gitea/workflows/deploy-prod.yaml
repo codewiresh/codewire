@@ -273,7 +273,23 @@ jobs:
             "$CODEWIRE_IMAGE_REGISTRY/codewire/mesh" \
             "$SOURCE_SHA" "$RELEASE_TAG"
 
+      - name: Publish the reused support pair and deliver the release to Production
+        if: ${{ steps.pair.outputs.build == 'false' }}
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
+          CODEWIRE_SOURCE_DIR: .release-source
+          BUILD_SUPPORT_PAIR: 'false'
+          # The commit the reused pair was built from: the source, or the
+          # earlier commit main aliased it from (#3504), which the pair step
+          # proved has the same base and workspace inputs.
+          SUPPORT_PROVENANCE_REVISION: ${{ steps.pair.outputs.provenance_revision }}
+        run: scripts/ci/release/finish-prod-release.sh
+
       # Harbor serves every consumer; the public GHCR copy never gates release.
+      # With a reused support pair it runs once Production accepted the
+      # release, off delivery's path; with a built pair, while the pair builds.
+      # cli-release still waits for it: it waits for this run to succeed (#4492).
       - name: Mirror the runtime release to GHCR without gating release
         continue-on-error: true
         env:
@@ -301,19 +317,6 @@ jobs:
             "${{ steps.alias.outputs.mesh_candidate_ref }}" \
             ghcr.io/codewiresh/mesh \
             "$SOURCE_SHA" "$RELEASE_TAG"
-
-      - name: Publish the reused support pair and deliver the release to Production
-        if: ${{ steps.pair.outputs.build == 'false' }}
-        env:
-          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
-          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-          CODEWIRE_SOURCE_DIR: .release-source
-          BUILD_SUPPORT_PAIR: 'false'
-          # The commit the reused pair was built from: the source, or the
-          # earlier commit main aliased it from (#3504), which the pair step
-          # proved has the same base and workspace inputs.
-          SUPPORT_PROVENANCE_REVISION: ${{ steps.pair.outputs.provenance_revision }}
-        run: scripts/ci/release/finish-prod-release.sh
 
   build-support-amd64:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.

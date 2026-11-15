@@ -123,11 +123,11 @@ for expected in \
   grep -Fxq -- "$expected" "$FINISH" || fail "the finishing script omits: $expected"
 done
 finish_order="$(grep -nE '^[^#]*(join workspace|publish-image-to-harbor|publish-image-to-ghcr|dispatch-deploy-prod)' "$FINISH" | cut -d: -f1 | tr '\n' ' ')"
-read -r join_line harbor_line ghcr_line dispatch_line <<<"$finish_order"
-[[ "$join_line" -lt "$harbor_line" && "$harbor_line" -lt "$ghcr_line" && "$ghcr_line" -lt "$dispatch_line" ]] ||
-  fail "the finishing script does not join, publish, mirror and then dispatch"
-[[ "$(tail -1 "$FINISH")" == '"$ROOT/scripts/ci/deploy/dispatch-deploy-prod.sh" "$tag"' ]] ||
-  fail "the finishing script does work after the dispatch"
+read -r join_line harbor_line dispatch_line ghcr_line <<<"$finish_order"
+[[ "$join_line" -lt "$harbor_line" && "$harbor_line" -lt "$dispatch_line" && "$dispatch_line" -lt "$ghcr_line" ]] ||
+  fail "the finishing script does not join, publish, dispatch and then mirror (#4492)"
+[[ "$(grep -n . "$FINISH" | tail -1 | cut -d: -f1)" -gt "$ghcr_line" && "$(tail -1 "$FINISH")" == 'done' ]] ||
+  fail "the finishing script does work other than the mirror after the dispatch"
 if grep -Fq 'build-support-platform.sh' "$FINISH"; then
   fail "the finishing script rebuilds a platform"
 fi
@@ -145,9 +145,14 @@ done
 [[ "$(grep -c 'SUPPORT_PROVENANCE_REVISION' "$WORKFLOW")" -eq 1 ]] ||
   fail 'a support pair other than the reused one takes another commit'"'"'s provenance'
 grep -q 'DIGEST' <<<"$reused" && fail 'the reused-pair finish takes platform digests'
-[[ "$(grep -n 'run: scripts/ci/release/finish-prod-release.sh' <<<"$publish_job" | cut -d: -f1)" -gt \
+# Production pulls from Harbor, so the runtime GHCR mirror follows the
+# reused-pair delivery instead of delaying it (#4492).
+[[ "$(grep -n 'run: scripts/ci/release/finish-prod-release.sh' <<<"$publish_job" | cut -d: -f1)" -lt \
    "$(grep -n 'Mirror the runtime release to GHCR' <<<"$publish_job" | cut -d: -f1)" ]] ||
-  fail "a reused pair finishes before the runtime release is published"
+  fail "the runtime GHCR mirror delays a reused pair's delivery"
+[[ "$(grep -n 'Validate and publish the production bundle to Harbor' <<<"$publish_job" | cut -d: -f1)" -lt \
+   "$(grep -n 'run: scripts/ci/release/finish-prod-release.sh' <<<"$publish_job" | cut -d: -f1)" ]] ||
+  fail "a reused pair finishes before the runtime release is in Harbor"
 # shellcheck disable=SC2016
 grep -Fq '        run: scripts/ci/images/release-support-pair-state.sh "$SOURCE_SHA"' <<<"$publish_job" ||
   fail "the release support pair is not selected from what main published"

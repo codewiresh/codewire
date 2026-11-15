@@ -295,6 +295,19 @@ def add_cancel(text, job, condition="${{ failure() }}"):
     return text[:start] + text[start:end].rstrip("\n") + step + text[end:]
 
 
+PRODUCTION_WAIT = "Wait for Production to accept this release"
+PRODUCTION_WAIT_RUN = ' scripts/ci/release/wait-for-production-accepted.sh "$RELEASE_TAG" "$TAG_OBJECT_SHA" "$SOURCE_SHA"'
+PRODUCTION_WAIT_ENV = (
+    "        env:\n"
+    "          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}\n"
+    "          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}\n"
+    "          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}\n"
+    "          GITEA_TOKEN: ${{ github.token }}\n"
+)
+HELPER_SIGNED_IF = "needs.build-helper-darwin.outputs.unsigned_sha256 != ''"
+PRODUCTION_WAIT_STEP = "      - name: Wait for Production to accept this release\n"
+
+
 def check(text, ci_text):
     errors = []
     # Forgejo runners set no RUNNER_NAME: a step that requires it fails the
@@ -553,6 +566,45 @@ def check(text, ci_text):
          and "          include-hidden-files: true\n" in verifier_upload,
          "the hidden verifier directory is not uploaded (the upload action skips hidden paths)")
 
+    # cli-release builds while deploy-prod delivers the tag, and nothing is
+    # signed, notarized or published before Production accepted the release
+    # (#4492): each signing job's first step after main's checkout waits for
+    # it, unconditionally but for the helper's own condition. Selection no
+    # longer waits.
+    for job, condition in (("sign-helper", [HELPER_SIGNED_IF]), ("sign-darwin", []),
+                           ("package-release", [])):
+        job_steps = steps(jobs(text).get(job, ""))
+        names = [name for name, _ in job_steps]
+        gate = dict(job_steps).get(PRODUCTION_WAIT, "")
+        need(len(names) > 1 and names[0].startswith("noel/actions-checkout@") and names[1] == PRODUCTION_WAIT,
+             f"{job} does not wait for Production before anything else")
+        need(re.findall(r"^        run:(.*)$", gate, re.M) == [PRODUCTION_WAIT_RUN],
+             f"{job}'s Production wait is not exactly the blocking wait")
+        need(PRODUCTION_WAIT_ENV in gate, f"{job}'s Production wait does not name the selected release")
+        need("continue-on-error" not in gate, f"{job}'s Production wait can fail and go on")
+        need(re.findall(r"^        if: (.*)$", gate, re.M) == condition,
+             f"{job}'s Production wait has another condition")
+    need("require-production-accepted.sh" not in jobs(text).get("release-selection", ""),
+         "release selection still waits for Production, so the CLI cannot build beside it")
+    # The wait outlasts deploy-prod's longest delivery, and each signing job
+    # outlasts its wait, so a release Production accepts late still ships.
+    wait = re.search(r'PRODUCTION_WAIT_SECONDS:-([0-9]+)',
+                     (ROOT / "scripts/ci/release/wait-for-production-accepted.sh").read_text())
+    wait_minutes = int(wait.group(1)) // 60 if wait else 0
+    deploy = jobs((ROOT / ".gitea/workflows/deploy-prod.yaml").read_text())
+
+    def limit(block):
+        found = re.search(r"^    timeout-minutes: ([0-9]+)$", block, re.M)
+        return int(found.group(1)) if found else 0
+
+    longest = (limit(deploy.get("release-selection", "")) + limit(deploy.get("publish-release", ""))
+               + max(limit(deploy.get("build-support-amd64", "")), limit(deploy.get("build-support-arm64", "")))
+               + limit(deploy.get("finish-built-release", "")))
+    need(longest > 0 and wait_minutes > longest,
+         f"the Production wait ({wait_minutes} min) ends before deploy-prod's longest delivery ({longest} min)")
+    for job in ("sign-helper", "sign-darwin", "package-release"):
+        need(limit(jobs(text).get(job, "")) >= wait_minutes + 15,
+             f"{job} ends before its Production wait can")
     need("    needs: [release-selection, pack-runtime, build-release]" in package,
          "signing does not need a successful build")
     need("    enable-openid-connect: true" in package, "publication job lacks its OIDC exchange")
@@ -950,6 +1002,35 @@ MUTATIONS = {
     "offered check continues on error": lambda t: t.replace(
         "      - name: Confirm cw upgrade offers this release\n",
         "      - name: Confirm cw upgrade offers this release\n        continue-on-error: true\n", 1),
+    **{f"no Production wait in {job}": (lambda job: lambda t: in_job(
+        t, job, PRODUCTION_WAIT_STEP, "      - name: Note the release\n"))(job)
+       for job in ("sign-helper", "sign-darwin", "package-release")},
+    **{f"Production wait continues on error in {job}": (lambda job: lambda t: in_job(
+        t, job, PRODUCTION_WAIT_STEP, PRODUCTION_WAIT_STEP + "        continue-on-error: true\n"))(job)
+       for job in ("sign-helper", "sign-darwin", "package-release")},
+    "Production wait ignored": lambda t: in_job(
+        t, "sign-darwin", '"$TAG_OBJECT_SHA" "$SOURCE_SHA"\n', '"$TAG_OBJECT_SHA" "$SOURCE_SHA" || true\n'),
+    "Production wait conditional": lambda t: in_job(
+        t, "package-release", PRODUCTION_WAIT_STEP,
+        PRODUCTION_WAIT_STEP + "        if: ${{ needs.pending.outputs.r2_publication == 'immutable' }}\n"),
+    "Production wait after receiving the macOS pair": lambda t: (lambda job: (lambda start, end: (
+        lambda gate, rest: rest[:rest.index("      - name: Verify the received macOS pair is the built pair\n")]
+        + gate + rest[rest.index("      - name: Verify the received macOS pair is the built pair\n"):])(
+        job[start:end], job[:start] + job[end:]))(
+        job.index(PRODUCTION_WAIT_STEP), job.index("\n      - ", job.index(PRODUCTION_WAIT_STEP) + 1) + 1))(t),
+    "Production wait for another release": lambda t: in_job(
+        t, "package-release", "          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}\n",
+        "          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.source_sha }}\n"),
+    "selection waits for Production again": lambda t: t.replace(
+        "          printf 'release_tag=%s\\n' \"$selected_tag\" >> \"$GITHUB_OUTPUT\"\n",
+        '          scripts/ci/release/require-production-accepted.sh "$selected_tag" "$remote_object_sha" "$source_sha"\n'
+        "          printf 'release_tag=%s\\n' \"$selected_tag\" >> \"$GITHUB_OUTPUT\"\n", 1),
+    "helper signing ends before its wait can": lambda t: in_job(
+        t, "sign-helper", "    timeout-minutes: 325\n", "    timeout-minutes: 45\n"),
+    "publication ends before its wait can": lambda t: in_job(
+        t, "package-release", "    timeout-minutes: 330\n", "    timeout-minutes: 60\n"),
+    "macOS signing ends before its wait can": lambda t: in_job(
+        t, "sign-darwin", "    timeout-minutes: 325\n", "    timeout-minutes: 60\n"),
     # The offered check is the file's last step, so move_step cannot cut it.
     "offered check before publication": lambda t: (lambda step: t.replace(step, "", 1).replace(
         "      - name: Publish signed release assets\n", step + "      - name: Publish signed release assets\n", 1))(
