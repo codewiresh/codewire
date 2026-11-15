@@ -127,18 +127,36 @@ class PrAdmission(unittest.TestCase):
         self.assertEqual(self.decide(state, 10)[0], gate.ADMITTED)
 
     def test_too_many_waiting_gates_overflow_rather_than_fill_the_light_runner(self) -> None:
-        # Six gates already wait ahead: a seventh would crowd the light
-        # runner's 24 slots that the admitted runs need, so it starts over the limit.
+        # Seven gates wait: one more than the light runner holds beside the
+        # admitted runs' jobs, so one starts over the limit. It is the oldest:
+        # letting the newest in made the first six wait while later pushes
+        # passed them (2026-11-15: two hours, 12 runs admitted).
         self.assertEqual(gate.WAITING_LIMIT, 6)
         state = ({run_id: "admitted" for run_id in range(1, 7)}
                  | {run_id: "waiting" for run_id in range(10, 16)} | {30: "waiting"})
-        verdict, reason = self.decide(state, 30)
+        verdict, reason = self.decide(state, 10)
         self.assertEqual(verdict, gate.OVERFLOW)
-        self.assertIn("6 gates already wait ahead", reason)
-        result, log = self.wait([state], 30)
+        self.assertIn("7 gates wait and the light runner holds 6", reason)
+        result, log = self.wait([state], 10)
         self.assertEqual(result, gate.OVERFLOW)
         self.assertIn("::warning::PR admission overflow", log)
-        self.assertEqual(self.decide(state, 15)[0], gate.WAIT)
+        for later in (11, 15, 30):
+            self.assertEqual(self.decide(state, later)[0], gate.WAIT, later)
+        # Nine wait: the three oldest start, and exactly six stay.
+        nine = state | {31: "waiting", 32: "queued"}
+        verdicts_by_run = {run_id: self.decide(nine, run_id)[0] for run_id in nine if run_id >= 10}
+        self.assertEqual([run_id for run_id, verdict in verdicts_by_run.items() if verdict == gate.OVERFLOW],
+                         [10, 11, 12])
+        self.assertEqual(sum(verdict == gate.WAIT for verdict in verdicts_by_run.values()), 6)
+        # The newest arrival waits its turn once an older gate has started.
+        self.assertEqual(self.wait([state, {run_id: gate_state for run_id, gate_state in state.items()
+                                            if run_id != 10} | {10: "admitted"}], 30,
+                                   wait_seconds=60)[0], gate.DEADLINE)
+        # A gate that never leaves (its runner died) costs one place, not the
+        # release: with 10 stuck among seven, 11 waits, and starts when an
+        # eighth arrives.
+        self.assertEqual(self.decide(state, 11)[0], gate.WAIT)
+        self.assertEqual(self.decide(state | {31: "waiting"}, 11)[0], gate.OVERFLOW)
 
     def test_one_unreadable_run_holds_a_slot_and_never_opens_the_gate(self) -> None:
         # Two gates in one run, a run deleted mid-poll: its jobs cannot be read.
