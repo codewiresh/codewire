@@ -10,8 +10,9 @@
 #   workstation-cpu.sh build [--first] -- COMMAND...
 #                                  wait in line for a build slot, then run
 #                                  COMMAND in cwvmtest.slice; for compiles and
-#                                  test runs. --first goes to the head of the
-#                                  line: for a check a merge or a fix waits on
+#                                  test runs. --first takes its place as if it
+#                                  had arrived 30 minutes ago: for a check a
+#                                  merge or a fix waits on
 #   workstation-cpu.sh reset       remove every limit this script set
 #
 # A weight shares CPU only when cores are contended; a ceiling caps a group
@@ -46,6 +47,8 @@ readonly DESKTOP_USER_UNITS="app.slice session.slice"
 # `build` holds one for its command; `run` takes none, so local VMs and dev
 # servers that live for hours never hold up a compile.
 readonly BUILD_SLOTS=3
+# How far ahead of its arrival a --first build takes its place in the line.
+readonly FIRST_AHEAD_SECONDS="${CODEWIRE_CPU_FIRST_AHEAD_SECONDS:-1800}"
 # One lock and one holder line per slot, and the log of every job's wait and
 # run time; tests point it at a fixture.
 BUILD_SLOT_DIR="${CODEWIRE_CPU_SLOT_DIR:-$HOME/.cache/codewire-build-slots}"
@@ -226,7 +229,11 @@ queue_head() {
 # build [--first] COMMAND...: hold one build slot for COMMAND and run it in
 # the slice. Waiters are served in arrival order: on 2026-11-15, with 36 jobs
 # waiting for 3 slots and each one racing for a freed slot, one job waited 40
-# minutes while later arrivals ran. --first joins at the head of the line.
+# minutes while later arrivals ran. --first takes its place as if it had
+# arrived FIRST_AHEAD_SECONDS ago: it passes whoever has waited less than that
+# and nobody who has waited longer. Ahead of everyone, it starved the plain
+# line: later the same day the head of the line had waited 85 minutes while
+# --first builds were most of what was served.
 # It waits as long as it takes and says every minute whom it waits for; the
 # caller's own timeout bounds it. The slot is this process's lock, so it is
 # free again however this process ends, and COMMAND does not inherit it: a
@@ -238,10 +245,25 @@ build() {
   [ "${1:-}" != -- ] || shift
   [ "$#" -ge 1 ] || usage
   [ -z "${CODEWIRE_CPU_SLOT:-}" ] || exec "$@"
-  local slot fd ticket started=$SECONDS waited=0 report=0 ran child status=0
+  local slot fd ticket first_ahead started=$SECONDS waited=0 report=0 ran child status=0
   mkdir -p "$BUILD_SLOT_DIR/queue"
-  # 19 digits of arrival time, so tickets sort by it; --first sorts before all.
-  if $first; then ticket=0000000000000000000; else ticket="$(date +%s%N)"; fi
+  # 19 digits of arrival time, so tickets sort by it.
+  ticket="$(date +%s%N)"
+  if $first; then
+    # A word would count as 0 and a huge number would wrap to a name that
+    # sorts ahead of everyone, so the bound is a plain number of seconds, at
+    # most a day.
+    case "$FIRST_AHEAD_SECONDS" in
+      '' | *[!0-9]* | ??????*) first_ahead=bad ;;
+      *) first_ahead=$((10#$FIRST_AHEAD_SECONDS)) ;;
+    esac
+    if [ "$first_ahead" = bad ] || [ "$first_ahead" -gt 86400 ]; then
+      echo "codewire-cpu: CODEWIRE_CPU_FIRST_AHEAD_SECONDS must be a number of seconds, at most 86400: $FIRST_AHEAD_SECONDS" >&2
+      exit 2
+    fi
+    ticket=$((ticket - first_ahead * 1000000000))
+  fi
+  ticket="$(printf '%019d' "$ticket")"
   ticket="$BUILD_SLOT_DIR/queue/$ticket-$$"
   # A waiter that is told to stop takes its ticket with it, and exits with the
   # signal's own status; one that is killed outright leaves its ticket for

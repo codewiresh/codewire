@@ -450,6 +450,52 @@ if command -v flock >/dev/null 2>&1; then
   [ "$(tr '\n' ' ' <"$TMP/order")" = 'first early late ' ] ||
     fail "builds were not served --first, then in arrival order: $(tr '\n' ' ' <"$TMP/order")"
   [ "$(find "$slots/queue" -type f | wc -l)" -eq 0 ] || fail 'a served build left its ticket in the queue'
+  # --first is bounded: it takes its place as if it had arrived a set time
+  # ago, so it passes only those who have waited less than that. With the
+  # time set to nothing it passes nobody: the two already in line run first.
+  # The holder is started as a command, not through build_slot: in the
+  # background a function is a subshell, and stopping it would leave the build.
+  env -u CODEWIRE_CPU_SLOT CODEWIRE_CPU_SLOT_DIR="$slots" CODEWIRE_CPU_SLOT_ONLY=1 \
+    "$ROOT/scripts/dev/workstation-cpu.sh" build -- sleep 300 &
+  holders[1]=$!
+  for _ in $(seq 1 600); do # a hang guard, not a time budget
+    ! flock -n "$slots/1.lock" true && ! flock -n "$slots/2.lock" true && ! flock -n "$slots/3.lock" true && break
+    sleep 0.1
+  done
+  : >"$TMP/order"
+  build_slot sh -c "echo early >>'$TMP/order'" &
+  early=$!
+  for _ in $(seq 1 600); do [ "$(find "$slots/queue" -type f | wc -l)" -eq 1 ] && break; sleep 0.1; done
+  build_slot sh -c "echo late >>'$TMP/order'" &
+  late=$!
+  for _ in $(seq 1 600); do [ "$(find "$slots/queue" -type f | wc -l)" -eq 2 ] && break; sleep 0.1; done
+  env -u CODEWIRE_CPU_SLOT CODEWIRE_CPU_SLOT_DIR="$slots" CODEWIRE_CPU_SLOT_ONLY=1 \
+    CODEWIRE_CPU_FIRST_AHEAD_SECONDS=0 \
+    "$ROOT/scripts/dev/workstation-cpu.sh" build --first -- sh -c "echo first >>'$TMP/order'" &
+  urgent=$!
+  for _ in $(seq 1 600); do [ "$(find "$slots/queue" -type f | wc -l)" -eq 3 ] && break; sleep 0.1; done
+  [ ! -s "$TMP/order" ] || fail "a waiter ran while every slot was held: $(cat "$TMP/order")"
+  kill -TERM "${holders[1]}"
+  wait "${holders[1]}" 2>/dev/null || true
+  wait "$urgent" "$early" "$late" || fail 'a queued build failed'
+  [ "$(tr '\n' ' ' <"$TMP/order")" = 'early late first ' ] ||
+    fail "a --first build passed builds that had waited longer than its bound: $(tr '\n' ' ' <"$TMP/order")"
+  # The bound is a plain number of seconds, at most a day: a word would count
+  # as nothing, and a huge number would wrap and sort ahead of everyone.
+  for bad in soon -5 1e3 999999 99999999999999999999; do
+    if env -u CODEWIRE_CPU_SLOT CODEWIRE_CPU_SLOT_DIR="$slots" CODEWIRE_CPU_SLOT_ONLY=1 \
+      CODEWIRE_CPU_FIRST_AHEAD_SECONDS="$bad" \
+      "$ROOT/scripts/dev/workstation-cpu.sh" build --first -- true 2>"$TMP/bound.err"; then
+      fail "a --first build accepted the bound $bad"
+    fi
+    grep -Fq "must be a number of seconds, at most 86400: $bad" "$TMP/bound.err" ||
+      fail "a refused bound was not named: $(cat "$TMP/bound.err")"
+  done
+  [ "$(find "$slots/queue" -type f | wc -l)" -eq 0 ] || fail 'a refused --first build left a ticket in the queue'
+  [ "$(env -u CODEWIRE_CPU_SLOT CODEWIRE_CPU_SLOT_DIR="$slots" CODEWIRE_CPU_SLOT_ONLY=1 \
+    CODEWIRE_CPU_FIRST_AHEAD_SECONDS=0090 "$ROOT/scripts/dev/workstation-cpu.sh" build --first -- echo ok)" = ok ] ||
+    fail 'a bound written with leading zeros was refused'
+  [ "$(find "$slots/queue" -type f | wc -l)" -eq 0 ] || fail 'a served build left its ticket in the queue'
   # A head that can never take its turn must not stop every build. A waiter
   # killed outright leaves a ticket, and so does one whose process ID was
   # reused (this test's own ID, with another start time): the next waiter
