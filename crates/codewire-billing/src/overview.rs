@@ -292,6 +292,7 @@ async fn credit_overview(
     pool: &PgPool,
     org_id: &str,
     month_start: DateTime<Utc>,
+    enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
 ) -> AppResult<CreditOverview> {
     type Row = (String, i64, i64, i64, i64, bool, i32, Option<DateTime<Utc>>);
     let row: Row = sqlx::query_as(
@@ -312,6 +313,7 @@ async fn credit_overview(
     .await?
     .ok_or_else(|| AppError::NotFound("organization not found".into()))?;
     let (rate_card, cpu, memory, disk, balance, enabled, cents, exhausted_at) = row;
+    let unmetered = rate_card == crate::credit::UNLIMITED_RATE_CARD;
     let month = crate::usage_cost::month_usage_nano_eur(pool, org_id, month_start).await?;
     Ok(CreditOverview {
         balance_nano_eur: balance,
@@ -320,12 +322,35 @@ async fn credit_overview(
             memory_per_gib_hour: memory,
             disk_per_gib_hour: disk,
         },
-        unmetered: rate_card == crate::credit::UNLIMITED_RATE_CARD,
+        unmetered,
         auto_top_up_enabled: enabled,
         auto_top_up_cents: cents,
-        exhausted_at: exhausted_at.map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        exhausted_at: out_of_credit_since(
+            enforcement,
+            unmetered,
+            balance,
+            exhausted_at,
+            Utc::now(),
+        )
+        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
         month_usage_nano_eur: month,
     })
+}
+
+/// When the organization ran out of credit, as the console shows it: from the
+/// live balance, as orchestration admits creates and starts. Settlement
+/// marks `credit_exhausted_at` only on its next minute's tick, so the mark
+/// alone said "out of credit" for up to a minute after credit came back, and
+/// nothing for up to a minute after it ran out (#4758). Until the mark is
+/// set, the time is now.
+fn out_of_credit_since(
+    enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
+    unmetered: bool,
+    balance_nano_eur: i64,
+    marked_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    (enforcement.is_on() && !unmetered && balance_nano_eur <= 0).then(|| marked_at.unwrap_or(now))
 }
 
 /// The smallest and largest automatic top-up: EUR 5 and EUR 1,000.
@@ -432,7 +457,7 @@ pub async fn billing_overview(
         .single()
         .expect("first of month is always valid");
     let usage = usage_sums(pool, org_id, month_start).await?;
-    let credit = credit_overview(pool, org_id, month_start).await?;
+    let credit = credit_overview(pool, org_id, month_start, state.credit_enforcement).await?;
 
     let (trial_days, extra_seat_cents) = lookup_settings(pool).await?;
 
@@ -770,5 +795,34 @@ mod tests {
             coalesce_plan_display_name(&["Custom", "Starter", "x"]),
             "Custom"
         );
+    }
+
+    #[test]
+    fn out_of_credit_follows_the_live_balance_not_the_minute_mark() {
+        use codewire_server_core::credit_enforcement::CreditEnforcement::{Off, On};
+        let now = DateTime::parse_from_rfc3339("2026-11-14T20:17:30Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let marked = now - chrono::Duration::seconds(40);
+        // Credit came back, the mark not yet cleared (Dev, 2026-11-14:
+        // +€2 at 20:17:25, cleared at 20:17:58): not out of credit.
+        assert_eq!(
+            out_of_credit_since(On, false, 2_000_000_000, Some(marked), now),
+            None
+        );
+        // Ran out, the mark not yet set: out of credit from now.
+        assert_eq!(
+            out_of_credit_since(On, false, -1_090_000_000, None, now),
+            Some(now)
+        );
+        assert_eq!(out_of_credit_since(On, false, 0, None, now), Some(now));
+        // Marked: the time it ran out, for "running ones stop at".
+        assert_eq!(
+            out_of_credit_since(On, false, 0, Some(marked), now),
+            Some(marked)
+        );
+        // Never while credit isn't enforced, or on the Unlimited card.
+        assert_eq!(out_of_credit_since(Off, false, -1, Some(marked), now), None);
+        assert_eq!(out_of_credit_since(On, true, -1, Some(marked), now), None);
     }
 }

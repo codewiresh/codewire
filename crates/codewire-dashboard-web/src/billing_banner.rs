@@ -27,8 +27,9 @@ pub(crate) struct CreditFacts {
     pub(crate) cpu_nano_eur_per_vcpu_hour: i64,
     pub(crate) memory_nano_eur_per_gib_hour: i64,
     pub(crate) disk_nano_eur_per_gib_hour: i64,
-    /// When the organization ran out, in Unix seconds. Billing sets it only
-    /// while it enforces credit, so it means creates and starts are refused.
+    /// When the organization ran out, in Unix seconds. Billing reports it
+    /// from the live balance, and only while it enforces credit, so it means
+    /// creates and starts are refused.
     pub(crate) exhausted_at: Option<i64>,
 }
 
@@ -43,14 +44,21 @@ impl CreditFacts {
         self.metered() && self.balance_nano_eur > 0 && !(self.has_card && self.auto_top_up)
     }
 
+    /// When the organization ran out, while it is out: billing's report,
+    /// unless the balance shows credit came back since (#4758). A positive
+    /// balance is never out of credit, as orchestration admits creates on it.
+    fn out_of_credit_since(&self) -> Option<i64> {
+        self.exhausted_at.filter(|_| self.balance_nano_eur <= 0)
+    }
+
     /// The banner needs the organization's Sandboxes only when it may show.
     pub(crate) fn banner_needs_sandboxes(&self) -> bool {
-        self.exhausted_at.is_some() || self.can_run_low()
+        self.out_of_credit_since().is_some() || self.can_run_low()
     }
 
     /// Create Sandbox in the cloud is refused: the organization ran out.
     pub(crate) fn create_refusal(&self) -> Option<CreditRefusal> {
-        self.exhausted_at.map(|_| CreditRefusal {
+        self.out_of_credit_since().map(|_| CreditRefusal {
             has_card: self.has_card,
         })
     }
@@ -127,7 +135,7 @@ pub(crate) fn billing_banner(
             url: viewer.billing_url.to_owned(),
         })
     };
-    if let Some(exhausted_at) = facts.exhausted_at {
+    if let Some(exhausted_at) = facts.out_of_credit_since() {
         let any_running = sandboxes.is_some_and(|loads| loads.iter().any(|load| load.running));
         let text = if any_running {
             format!(
@@ -335,14 +343,23 @@ mod tests {
     }
 
     #[test]
-    fn out_of_credit_comes_before_low_credit() {
-        // A balance that would read as low still reports the refusal.
-        let both = CreditFacts {
-            balance_nano_eur: HOURLY,
-            exhausted_at: Some(NOW),
+    fn credit_back_above_zero_is_not_out_of_credit_before_billing_clears_its_mark() {
+        // #4754: billing clears credit_exhausted_at only on its next minute's
+        // tick, but creates are admitted on the live balance at once. On Dev
+        // the owner added €2 and still saw "Out of credit" for 33 s.
+        let credited = CreditFacts {
+            balance_nano_eur: 2_000_000_000,
+            has_card: true,
+            auto_top_up: false,
+            exhausted_at: Some(NOW - 60),
             ..facts()
         };
-        assert_eq!(banner(&both, &[standard(true)]).unwrap().tone, "danger");
+        assert_eq!(credited.create_refusal(), None);
+        assert!(
+            banner(&credited, &[standard(true)]).is_none_or(|view| view.tone != "danger"),
+            "{:?}",
+            banner(&credited, &[standard(true)])
+        );
     }
 
     #[test]
@@ -468,6 +485,7 @@ mod tests {
     fn the_banner_reads_sandboxes_only_when_it_may_show() {
         assert!(facts().banner_needs_sandboxes());
         let out = CreditFacts {
+            balance_nano_eur: 0,
             exhausted_at: Some(NOW),
             ..facts()
         };
@@ -495,14 +513,16 @@ mod tests {
     }
 
     #[test]
-    fn create_is_refused_only_while_billing_records_the_organization_out_of_credit() {
+    fn create_is_refused_only_while_billing_reports_the_organization_out_of_credit() {
         assert_eq!(facts().create_refusal(), None);
+        // Billing reports nothing where it doesn't enforce credit.
         let broke = CreditFacts {
             balance_nano_eur: -5,
             ..facts()
         };
         assert_eq!(broke.create_refusal(), None);
         let out = CreditFacts {
+            balance_nano_eur: 0,
             exhausted_at: Some(NOW),
             ..facts()
         };
