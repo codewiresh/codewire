@@ -4841,6 +4841,13 @@ async fn email_password_flow_against_postgres() {
         "{}",
         sent[0].html
     );
+    assert!(
+        sent[0]
+            .html
+            .contains("You can add a password in your account settings after you sign in."),
+        "{}",
+        sent[0].html
+    );
     assert!(!sent[0].html.contains("reset-password"), "no reset link");
     let reset_tokens: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM verifications WHERE identifier = $1 AND purpose = 'password_reset'",

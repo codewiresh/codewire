@@ -117,6 +117,7 @@ pub(super) async fn settings(
         &query.sign_in_method,
         &query.provider,
     );
+    super::sign_in_methods::apply_dialog(&mut page.settings.sign_in_methods, &query.dialog);
     render_account(&state, &page, StatusCode::OK)
 }
 

@@ -24,6 +24,7 @@ struct Answers {
     identities: Option<serde_json::Value>,
     link: (StatusCode, serde_json::Value),
     unlink: (StatusCode, serde_json::Value),
+    add: (StatusCode, serde_json::Value),
 }
 
 impl Default for Answers {
@@ -35,6 +36,7 @@ impl Default for Answers {
             })),
             link: (StatusCode::OK, serde_json::json!({ "location": AUTHORIZE })),
             unlink: (StatusCode::OK, serde_json::json!({ "provider": "github" })),
+            add: (StatusCode::OK, serde_json::json!({ "added": true })),
         }
     }
 }
@@ -132,6 +134,10 @@ async fn upstream(answers: Answers) -> (TestServer, Calls) {
                 }
                 "/api/auth/oauth/identities/unlink" => {
                     let (status, body) = answers.unlink;
+                    (status, Json(body)).into_response()
+                }
+                "/api/auth/password/add" => {
+                    let (status, body) = answers.add;
                     (status, Json(body)).into_response()
                 }
                 path if path.ends_with("/ListOrganizations") => {
@@ -348,7 +354,9 @@ fn idp_mutations(calls: &Calls) -> Vec<(String, Option<String>, serde_json::Valu
         .lock()
         .unwrap()
         .iter()
-        .filter(|(path, _, _)| path.starts_with("/api/auth/oauth/identities/"))
+        .filter(|(path, _, _)| {
+            path.starts_with("/api/auth/oauth/identities/") || path == "/api/auth/password/add"
+        })
         .cloned()
         .collect()
 }
@@ -497,4 +505,230 @@ async fn disconnect_reports_each_outcome_on_the_card() {
         assert_eq!(mutations[0].0, "/api/auth/oauth/identities/unlink");
         assert_eq!(mutations[0].1.as_deref(), Some(ORIGIN));
     }
+}
+
+/// A GitHub-only account (#4528).
+fn provider_only() -> Answers {
+    Answers {
+        identities: Some(serde_json::json!({
+            "account_id": ACCOUNT, "providers": ["github"], "password": false,
+            "identities": [{ "provider": "github", "account": "octocat", "linked_at": "2026-11-12T09:30:00Z" }]
+        })),
+        ..Answers::default()
+    }
+}
+
+/// The Add a password dialog's markup, if the page has one.
+fn add_dialog(body: &str) -> Option<&str> {
+    let start = body
+        .find("<dialog class=\"cw-dialog cw-credential-dialog\" data-dialog id=\"add-password\"")?;
+    let end = body[start..].find("</dialog>").unwrap();
+    Some(&body[start..start + end])
+}
+
+const ADD_PASSWORD: &str = "/settings/_actions/sign-in-methods/add-password";
+
+#[tokio::test]
+async fn only_an_account_without_a_password_is_offered_one() {
+    let page = account_page(provider_only(), "").await;
+    assert!(card(&page.body).contains(
+        "data-dialog-open=\"add-password\" aria-haspopup=\"dialog\" aria-controls=\"add-password\">Add a password</button>"
+    ));
+    let dialog = add_dialog(&page.body).expect("the dialog");
+    assert!(!dialog.contains("data-dialog-auto-open"));
+    assert!(dialog.contains(&format!("action=\"{ADD_PASSWORD}\"")));
+    assert!(dialog.contains(&format!(
+        "<input type=\"hidden\" name=\"account_id\" value=\"{ACCOUNT}\">"
+    )));
+    assert!(
+        dialog.contains("name=\"new_password\" type=\"password\" autocomplete=\"new-password\"")
+    );
+    assert!(dialog.contains("name=\"confirm_password\" type=\"password\""));
+    // The synthetic account has a second factor, so its code is asked for.
+    assert!(dialog.contains("name=\"code\" autocomplete=\"one-time-code\""));
+    assert!(dialog.contains("signed in within the last 10 minutes"));
+
+    // `?dialog=add-password`, from signing in again, opens it.
+    let page = account_page(provider_only(), "?dialog=add-password").await;
+    assert!(
+        add_dialog(&page.body)
+            .unwrap()
+            .contains("data-dialog-auto-open")
+    );
+
+    // An account with a password, or a card that couldn't be read, gets none.
+    for answers in [
+        Answers::default(),
+        Answers {
+            identities: None,
+            ..Answers::default()
+        },
+    ] {
+        let page = account_page(answers, "?dialog=add-password").await;
+        assert!(add_dialog(&page.body).is_none());
+        assert!(!card(&page.body).contains("Add a password"));
+    }
+}
+
+#[tokio::test]
+async fn adding_a_password_sends_it_to_the_idp_once_and_reports_it() {
+    let csrf = crate::security::new_csrf_token();
+    let form = [
+        ("_csrf", csrf.as_str()),
+        ("account_id", ACCOUNT),
+        ("new_password", "Added!Pass1234"),
+        ("confirm_password", "Added!Pass1234"),
+        ("code", " 123456 "),
+    ];
+    let (page, calls) = submit(ADD_PASSWORD, authority(&csrf), &form, provider_only()).await;
+    assert_eq!(page.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        page.headers[header::LOCATION],
+        "/settings/?sign_in_method=password_added#sign-in-methods"
+    );
+    assert_eq!(page.headers[header::CACHE_CONTROL], "no-store");
+    let mutations = idp_mutations(&calls);
+    assert_eq!(mutations.len(), 1);
+    assert_eq!(mutations[0].1.as_deref(), Some(ORIGIN));
+    assert_eq!(
+        mutations[0].2,
+        serde_json::json!({ "account_id": ACCOUNT, "new_password": "Added!Pass1234", "code": "123456" })
+    );
+
+    for (add, code) in [
+        (
+            (
+                StatusCode::FORBIDDEN,
+                serde_json::json!({ "code": "reauthentication_required" }),
+            ),
+            "password_reauthenticate",
+        ),
+        (
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                serde_json::json!({ "code": "code_rejected" }),
+            ),
+            "password_code",
+        ),
+        (
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                serde_json::json!({ "code": "account_locked" }),
+            ),
+            "password_locked",
+        ),
+        (
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({ "code": "password_exists" }),
+            ),
+            "password_exists",
+        ),
+        (
+            (
+                StatusCode::FORBIDDEN,
+                serde_json::json!({ "code": "email_unverified" }),
+            ),
+            "password_unverified",
+        ),
+        (
+            (
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({ "detail": "<b>upstream</b>" }),
+            ),
+            "password_rules",
+        ),
+        (
+            (StatusCode::BAD_GATEWAY, serde_json::json!({})),
+            "password_outcome_unknown",
+        ),
+        // A 200 that doesn't say it was added is not an acknowledgement.
+        (
+            (StatusCode::OK, serde_json::json!({ "added": false })),
+            "password_outcome_unknown",
+        ),
+    ] {
+        let answers = Answers {
+            add,
+            ..provider_only()
+        };
+        let (page, calls) = submit(ADD_PASSWORD, authority(&csrf), &form, answers).await;
+        assert_eq!(
+            page.headers[header::LOCATION],
+            format!("/settings/?sign_in_method={code}#sign-in-methods").as_str()
+        );
+        assert_eq!(idp_mutations(&calls).len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_bad_form_or_request_never_reaches_the_idp() {
+    let csrf = crate::security::new_csrf_token();
+    let form = |password: &'static str, confirm: &'static str| {
+        vec![
+            ("_csrf", csrf.clone()),
+            ("account_id", ACCOUNT.to_owned()),
+            ("new_password", password.to_owned()),
+            ("confirm_password", confirm.to_owned()),
+        ]
+    };
+    let as_pairs = |form: &Vec<(&'static str, String)>| {
+        form.iter()
+            .map(|(key, value)| (*key, value.clone()))
+            .collect::<Vec<_>>()
+    };
+    for (fields, code) in [
+        (
+            form("Added!Pass1234", "Added!Pass1235"),
+            "password_mismatch",
+        ),
+        (form("short", "short"), "password_rules"),
+    ] {
+        let fields = as_pairs(&fields);
+        let fields: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let (page, calls) = submit(ADD_PASSWORD, authority(&csrf), &fields, provider_only()).await;
+        assert_eq!(
+            page.headers[header::LOCATION],
+            format!("/settings/?sign_in_method={code}#sign-in-methods").as_str()
+        );
+        assert!(idp_mutations(&calls).is_empty(), "{code}");
+    }
+
+    let good = as_pairs(&form("Added!Pass1234", "Added!Pass1234"));
+    let good: Vec<(&str, &str)> = good.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    // Another Origin, another CSRF token, and another account.
+    let mut foreign = authority(&csrf);
+    foreign.insert(header::ORIGIN, "https://evil.example".parse().unwrap());
+    let (page, calls) = submit(ADD_PASSWORD, foreign, &good, provider_only()).await;
+    assert_eq!(page.status, StatusCode::FORBIDDEN);
+    assert!(idp_mutations(&calls).is_empty());
+    let other = crate::security::new_csrf_token();
+    let (page, calls) = submit(ADD_PASSWORD, authority(&other), &good, provider_only()).await;
+    assert_eq!(page.status, StatusCode::FORBIDDEN);
+    assert!(idp_mutations(&calls).is_empty());
+    let mut elsewhere = good.clone();
+    elsewhere[1] = ("account_id", "another-account");
+    let (page, calls) = submit(ADD_PASSWORD, authority(&csrf), &elsewhere, provider_only()).await;
+    assert_eq!(page.status, StatusCode::SEE_OTHER);
+    assert!(idp_mutations(&calls).is_empty());
+}
+
+#[tokio::test]
+async fn refusals_reopen_the_dialog_with_fixed_copy() {
+    let page = account_page(provider_only(), "?sign_in_method=password_reauthenticate").await;
+    let dialog = add_dialog(&page.body).unwrap();
+    assert!(dialog.contains("data-dialog-auto-open"));
+    assert!(dialog.contains(
+        "For your security, sign in again, then add your password within 10 minutes. <a href=\"/login?return_to=%2Fsettings%2F%3Fdialog%3Dadd-password\">Sign in again</a>"
+    ));
+    let page = account_page(provider_only(), "?sign_in_method=password_code").await;
+    let dialog = add_dialog(&page.body).unwrap();
+    assert!(dialog.contains("That code didn&#39;t match. Nothing changed."));
+    assert!(!dialog.contains("Sign in again</a>"));
+
+    // Added: the card now reads the password as set and says so.
+    let page = account_page(Answers::default(), "?sign_in_method=password_added").await;
+    assert!(card(&page.body).contains(
+        "<p class=\"cw-alert cw-alert--success\" role=\"status\">Password added. You can now sign in with your email address and this password.</p>"
+    ));
 }

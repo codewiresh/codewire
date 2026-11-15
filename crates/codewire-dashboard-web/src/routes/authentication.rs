@@ -1404,21 +1404,31 @@ fn invalid_reset_link() -> Response {
 }
 
 fn validate_new_password(form: &AuthFormSubmission) -> String {
-    if form.password != form.confirm_password {
-        return "Passwords do not match.".to_owned();
+    new_password_error(&form.password, &form.confirm_password)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// What's wrong with a new password and its confirmation, if anything.
+pub(super) fn new_password_error(password: &str, confirm: &str) -> Option<&'static str> {
+    if password != confirm {
+        return Some(PASSWORDS_DIFFER);
     }
-    let password = form.password.as_bytes();
+    let password = password.as_bytes();
     if password.len() < 12
         || !password.iter().any(u8::is_ascii_uppercase)
         || !password.iter().any(u8::is_ascii_lowercase)
         || !password.iter().any(u8::is_ascii_digit)
         || !password.iter().any(|byte| !byte.is_ascii_alphanumeric())
     {
-        return "Use at least 12 characters with uppercase, lowercase, a number, and a symbol."
-            .to_owned();
+        return Some(PASSWORD_RULES);
     }
-    String::new()
+    None
 }
+
+pub(super) const PASSWORDS_DIFFER: &str = "Passwords do not match.";
+pub(super) const PASSWORD_RULES: &str =
+    "Use at least 12 characters with uppercase, lowercase, a number, and a symbol.";
 
 fn completion_target(auth_request_id: &str, return_to: &str) -> String {
     let auth_request_id = clean_auth_request_id(auth_request_id);

@@ -250,7 +250,8 @@ pub(crate) fn verification_email(verify_url: &str) -> Email {
 }
 
 /// What "Forgot password" sends an account that has no password (#4528): how it
-/// signs in, and no link that could set one.
+/// signs in, where it can add a password once signed in, and no link that
+/// could set one.
 async fn send_provider_sign_in_email(
     email: &EmailClient,
     to: &str,
@@ -271,6 +272,7 @@ fn provider_sign_in_email(providers: &[&'static str], login_url: &str) -> Email 
     .paragraph(format!(
         "Someone asked to reset the password for the Codewire account with this address. This account doesn't use a password: you sign in with {providers}."
     ))
+    .paragraph("You can add a password in your account settings after you sign in.")
     .button("Go to sign in", login_url)
     .note("If this wasn't you, you can ignore this email. Nothing has changed.")
     .reason(
@@ -1003,6 +1005,10 @@ mod tests {
                 ),
             ),
         ];
+        emails.push((
+            "idp-password-added",
+            crate::password_add::password_added_email(&["GitHub"], settings),
+        ));
         emails.extend(crate::two_factor::notice_previews(
             "https://codewire.sh/forgot-password",
         ));

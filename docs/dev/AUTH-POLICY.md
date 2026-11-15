@@ -136,6 +136,20 @@ trip; the configuration is in [../CONFIGURATION.md](../CONFIGURATION.md).
   password or another configured provider to remain. Both are audited
   (`user.oauth.linked`, `user.oauth.unlinked`) and the account's address is
   told.
+- An account with no password asked to reset one gets no reset link: the
+  email says how it signs in and that it can add a password in Settings once
+  signed in (#4528). A reset link proves only that someone reads the mailbox,
+  so it never adds a password.
+- A signed-in account with no password may add one from Settings
+  (`POST /api/auth/password/add`, owner 2026-11-13 on #4528), under the
+  account controls' boundary (session cookie only, exact Origin, an
+  `account_id` echo). Its address must be verified, the browser session must
+  have signed in within the last 10 minutes (else `reauthentication_required`),
+  and an account with a second factor gives a fresh authenticator code or an
+  unused recovery code, whose failures count toward the lockout. The password
+  row and its audit (`user.password.added`, with the proof) commit together;
+  sessions stay, and the account's address is told. Changing an existing
+  password stays the reset flow.
 
 ## Invite-only sign-up
 

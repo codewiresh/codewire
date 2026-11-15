@@ -1658,7 +1658,7 @@ service_build_idp() {
   if selected service_idp; then
     cargo_ci test --locked --profile ci -p codewire-idp --test db_flow \
       --test session_inventory --test two_factor_replacement --test rewrap_cli \
-      --test oauth_sign_in --test invitation_email --test signup_limit --no-run
+      --test oauth_sign_in --test invitation_email --test password_add --test signup_limit --no-run
   fi
 }
 service_build_coordinator() {
@@ -1801,6 +1801,19 @@ run_idp_invitation_email() {
   assert_passed_count "idp invitation email" "$logfile" 7
 }
 
+# Adding a password to a GitHub- or Google-only account (#4528).
+run_idp_password_add() {
+  local logfile="$RUN_DIR/idp-password-add.log"
+  DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo_ci test --profile ci -p codewire-idp --test password_add -- --nocapture \
+    | tee "$logfile"
+  if grep -q 'DATABASE_URL unset' "$logfile"; then
+    echo "::error::idp password add DB tests skipped"
+    return 1
+  fi
+  assert_passed_count "idp password add" "$logfile" 3
+}
+
 # The sign-up limits (#3297). It owns the signup:all and signup_address
 # counters while it runs, so it runs alone, after the suites that sign up.
 run_idp_signup_limit() {
@@ -1822,6 +1835,7 @@ run_idp() {
   run_idp_rewrap_cli
   run_idp_oauth_sign_in
   run_idp_invitation_email
+  run_idp_password_add
   run_idp_signup_limit
 }
 
@@ -2462,7 +2476,7 @@ run_nats() {
 readonly SERVICE_CONTROL_LANES=(
   idp-two-factor # idp two-factor replacement
   idp-flow       # idp JWKS readiness and db_flow
-  idp-sessions   # idp session inventory, the signing-key rewrap CLI, OAuth sign-in, invitation email
+  idp-sessions   # idp session inventory, the signing-key rewrap CLI, OAuth sign-in, invitation email, password add
   connect-auth   # the Connect auth matrix
   billing        # the billing wire contract, then its Temporal workflow
   coordinator    # the coordinator protocol auth matrix and wire contract
@@ -2477,6 +2491,7 @@ run_service_lane() {
       run_idp_rewrap_cli
       run_idp_oauth_sign_in
       run_idp_invitation_email
+      run_idp_password_add
       run_idp_signup_limit
       ;;
     connect-auth) run_connect_auth_matrix ;;

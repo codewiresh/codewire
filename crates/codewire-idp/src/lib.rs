@@ -32,6 +32,7 @@ pub mod jwk;
 pub mod jwk_envelope;
 pub mod keys;
 pub mod oauth;
+pub mod password_add;
 pub mod provisioning;
 pub mod service;
 mod signup_limit;

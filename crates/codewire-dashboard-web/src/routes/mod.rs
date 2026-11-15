@@ -535,6 +535,10 @@ pub(crate) fn router() -> Router<AppState> {
             post(sign_in_methods::disconnect_action).layer(DefaultBodyLimit::max(2048)),
         )
         .route(
+            "/settings/_actions/sign-in-methods/add-password",
+            post(sign_in_methods::add_password_action).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
             "/settings/_actions/sign-out",
             post(authentication::sign_out_action),
         )

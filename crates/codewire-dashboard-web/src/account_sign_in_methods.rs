@@ -245,6 +245,99 @@ pub(crate) async fn unlink(
     Ok(())
 }
 
+/// Why the IdP didn't add a password (#4528). Only its fixed codes are read.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AddFailure {
+    Unauthorized,
+    /// The session signed in more than 10 minutes ago.
+    Reauthenticate,
+    Unverified,
+    Exists,
+    CodeRejected,
+    Locked,
+    /// The IdP refused the password itself.
+    Refused,
+    Forbidden,
+    /// Nothing says whether it was added; the card shows what is set.
+    Unavailable,
+}
+
+fn add_failure(status: StatusCode, code: Option<&str>) -> AddFailure {
+    match (status, code) {
+        (StatusCode::UNAUTHORIZED, _) => AddFailure::Unauthorized,
+        (StatusCode::FORBIDDEN, Some("reauthentication_required")) => AddFailure::Reauthenticate,
+        (StatusCode::FORBIDDEN, Some("email_unverified")) => AddFailure::Unverified,
+        (StatusCode::FORBIDDEN, _) => AddFailure::Forbidden,
+        (StatusCode::CONFLICT, Some("password_exists")) => AddFailure::Exists,
+        (StatusCode::UNPROCESSABLE_ENTITY, Some("code_rejected")) => AddFailure::CodeRejected,
+        (StatusCode::TOO_MANY_REQUESTS, _) => AddFailure::Locked,
+        (StatusCode::BAD_REQUEST, _) => AddFailure::Refused,
+        _ => AddFailure::Unavailable,
+    }
+}
+
+/// Add a password to `account_id`, the signed-in account, with a fresh code
+/// from its second factor when one is enrolled.
+pub(crate) async fn add_password(
+    state: &AppState,
+    cookie: HeaderValue,
+    account_id: &str,
+    new_password: &str,
+    code: &str,
+) -> Result<(), AddFailure> {
+    // No Debug: the password and code are secrets.
+    #[derive(Serialize)]
+    struct Request<'a> {
+        account_id: &'a str,
+        new_password: &'a str,
+        code: &'a str,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Added {
+        added: bool,
+    }
+    #[derive(Deserialize)]
+    struct Refusal {
+        code: Option<String>,
+    }
+    if !valid_id(account_id) {
+        return Err(AddFailure::Forbidden);
+    }
+    let origin = reqwest::Url::parse(&state.public_origin)
+        .map_err(|_| AddFailure::Unavailable)?
+        .origin()
+        .ascii_serialization();
+    let response = state
+        .account_http
+        .post(format!(
+            "{}/api/auth/password/add",
+            state.identity_origin_string
+        ))
+        .header(header::COOKIE, cookie)
+        .header(header::ORIGIN, origin)
+        .json(&Request {
+            account_id,
+            new_password,
+            code,
+        })
+        .send()
+        .await
+        .map_err(|_| AddFailure::Unavailable)?;
+    let status = response.status();
+    if status == StatusCode::OK {
+        return match bounded_json::<Added>(response).await {
+            Some(Added { added: true }) => Ok(()),
+            _ => Err(AddFailure::Unavailable),
+        };
+    }
+    let refusal = bounded_json::<Refusal>(response).await;
+    Err(add_failure(
+        status,
+        refusal.as_ref().and_then(|refusal| refusal.code.as_deref()),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +384,44 @@ mod tests {
             HeaderValue::from_static("codewire_oauth_state=def; Path=/; HttpOnly"),
         );
         assert!(state_cookie(&headers).is_none());
+    }
+
+    #[test]
+    fn only_the_idps_fixed_codes_name_a_password_refusal() {
+        for (status, code, failure) in [
+            (StatusCode::UNAUTHORIZED, None, AddFailure::Unauthorized),
+            (
+                StatusCode::FORBIDDEN,
+                Some("reauthentication_required"),
+                AddFailure::Reauthenticate,
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                Some("email_unverified"),
+                AddFailure::Unverified,
+            ),
+            (StatusCode::FORBIDDEN, Some("other"), AddFailure::Forbidden),
+            (
+                StatusCode::CONFLICT,
+                Some("password_exists"),
+                AddFailure::Exists,
+            ),
+            (StatusCode::CONFLICT, None, AddFailure::Unavailable),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Some("code_rejected"),
+                AddFailure::CodeRejected,
+            ),
+            (StatusCode::TOO_MANY_REQUESTS, None, AddFailure::Locked),
+            (StatusCode::BAD_REQUEST, None, AddFailure::Refused),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                None,
+                AddFailure::Unavailable,
+            ),
+        ] {
+            assert_eq!(add_failure(status, code), failure, "{status} {code:?}");
+        }
     }
 
     #[test]

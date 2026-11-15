@@ -408,6 +408,11 @@ pub(crate) struct SignInMethodsView {
     pub(crate) providers: Vec<SignInProviderView>,
     pub(crate) message: String,
     pub(crate) error: String,
+    /// The Add a password dialog opens with the page (#4528).
+    pub(crate) add_password_open: bool,
+    pub(crate) add_password_error: String,
+    /// The dialog's error is that this session must sign in again.
+    pub(crate) reauthenticate: bool,
 }
 
 pub(crate) struct SignInProviderView {

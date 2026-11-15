@@ -255,6 +255,12 @@ async fn serve() -> anyhow::Result<()> {
         cfg.session_secret.clone(),
         secure,
         idp_cfg.frontend_url.clone(),
+        email.clone(),
+    );
+    let password_add = codewire_idp::password_add::password_add_router(
+        pool.clone(),
+        cfg.session_secret.clone(),
+        idp_cfg.frontend_url.clone(),
         email,
     );
 
@@ -270,7 +276,8 @@ async fn serve() -> anyhow::Result<()> {
         .merge(access_admin)
         .merge(account_admin_delete)
         .merge(two_factor)
-        .merge(two_factor_replacement);
+        .merge(two_factor_replacement)
+        .merge(password_add);
 
     let metrics_bind = metrics_addr(std::env::var(METRICS_ADDR_ENV).ok().as_deref())?;
     let metrics = codewire_server_core::metrics::router("codewire-idp");

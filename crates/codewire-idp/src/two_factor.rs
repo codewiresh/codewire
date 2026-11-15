@@ -31,6 +31,7 @@ use crate::auth_session::{
     user_response,
 };
 
+pub(crate) mod code;
 mod replacement;
 
 #[cfg(test)]
@@ -543,7 +544,7 @@ async fn token_subject(
     .map_err(AppError::from)
 }
 
-async fn record_failed_attempt(
+pub(crate) async fn record_failed_attempt(
     tx: &mut Transaction<'_, Postgres>,
     user_id: &str,
 ) -> Result<bool, AppError> {
@@ -570,7 +571,7 @@ async fn record_failed_attempt(
     Ok(attempts >= MAX_FAILED_ATTEMPTS)
 }
 
-async fn reset_failed_attempts(
+pub(crate) async fn reset_failed_attempts(
     tx: &mut Transaction<'_, Postgres>,
     user_id: &str,
 ) -> Result<(), AppError> {

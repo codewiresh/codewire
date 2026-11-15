@@ -149,6 +149,18 @@ CSRF checks.
   404 when that provider is not connected. The account row stays locked to
   the commit, so two disconnects cannot each leave the other as the last way
   in.
+- `POST /api/auth/password/add` (`account_id`, `new_password`, `code`) adds a
+  password to an account that has none (#4528). It needs a verified address,
+  a browser session that signed in within the last 10 minutes, and, with a
+  second factor enrolled, a fresh authenticator code or an unused recovery
+  code. It answers `{"added": true}`, or a fixed code: 403
+  `reauthentication_required` or `email_unverified`, 409 `password_exists`,
+  422 `code_rejected`, 429 `account_locked`. The card's Add a password dialog
+  checks the two passwords match and meet the rules before it asks, lands on
+  `/settings/?sign_in_method=password_<outcome>#sign-in-methods`, and reopens
+  the dialog on a refusal; `reauthentication_required` links to `/login`,
+  returning to the open dialog. The password row and `user.password.added`
+  commit together, sessions stay, and the account's address is told.
 
 The Account Access admin page lists each account's linked identities:
 provider, account when known, subject and when it was linked.
