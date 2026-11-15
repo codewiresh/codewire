@@ -56,6 +56,8 @@
     "/healthz",
     "/healthz/stripe-webhook-delivery",
     "/healthz/stripe-webhook-endpoint",
+    "/orgs/{org_id}/.well-known/openid-configuration",
+    "/orgs/{org_id}/jwks.json",
     "/readyz"
   ],
   "required_server_fragments": {

@@ -374,6 +374,56 @@ Every Codewire service the browser calls is served from the dashboard's own orig
 | `CODEWIRE_HOSTED_EGRESS_ENABLED` | No | `true` serves `EgressService` on orchestration's internal listener (8088): cw-egress on each node admits a broker-mode sandbox's egress stream there and receives the sandbox's policy. Unset means off, and nothing serves it. Requires `CODEWIRE_EGRESS_PLATFORM_ALLOWS`. **Production keeps it off until hosted egress has been observed working on Dev** (#4000). Any value other than `true` or `false` stops orchestration at startup. | `true` |
 | `CODEWIRE_EGRESS_PLATFORM_ALLOWS` | With `CODEWIRE_HOSTED_EGRESS_ENABLED` | Comma-separated `host:port` destinations every broker-mode sandbox may reach whatever its network policy: the control plane, DERP and Mesh origins its daemon depends on. A user's policy cannot add or deny one. Hosts are names, not addresses. While the switch is on, a malformed entry or an empty list stops orchestration at startup; while it is off the list is not read. | `control.example.com:443,derp.example.com:443` |
 
+## Sandbox identity
+
+Orchestration can publish each organization's sandbox identity issuer:
+`{issuer base}/orgs/<org id>`, with OIDC discovery at
+`…/.well-known/openid-configuration` and its keys at `…/jwks.json`. It serves
+them on a listener of its own, and nothing else answers there. The signing key
+is an OpenBao transit key (`ecdsa-p256`, never exportable) that orchestration
+can only read through its own Kubernetes-auth role. The feature is off unless
+switched on, and switching it on needs every value below; a missing or
+malformed one stops orchestration at startup. Nothing mints tokens yet.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `CODEWIRE_IDENTITY_ENABLED` | No | `true` serves the issuer; unset, empty or `false` serves nothing and binds no identity port. Any other value stops orchestration at startup. | `true` |
+| `CODEWIRE_IDENTITY_ISSUER_BASE` | When enabled | The `https` URL every issuer starts with: a DNS host name, an optional port and path, no credentials, query, fragment or trailing slash, and never an IP address. Issuers and key URLs are built from it alone, never from a request's headers. The listener serves `/orgs/…` paths, so a base with a path needs the TLS front to strip it. | `https://identity.example.com` |
+| `CODEWIRE_IDENTITY_SIGNER` | When enabled | Where the signing key lives. Only `openbao-transit` exists; there is no default. | `openbao-transit` |
+| `ORCHESTRATION_IDENTITY_PORT` | No | The identity listener's TCP port. Unset or empty means `8089`. | `8089` |
+| `SANDBOX_IDENTITY_BAO_ADDR` | When enabled | The OpenBao origin: `https`, or `http` only to `127.0.0.1` or a `.svc.cluster.local` host. | `https://openbao.example.com` |
+| `SANDBOX_IDENTITY_BAO_EXPECTED_CLUSTER_ID` | When enabled | The OpenBao cluster ID every call checks first, so a misrouted address is refused before login. | `b7c2…` |
+| `SANDBOX_IDENTITY_BAO_AUTH_MOUNT` | When enabled | The Kubernetes auth mount the Pod logs in through. | `kubernetes` |
+| `SANDBOX_IDENTITY_BAO_ROLE` | When enabled | The role: the signer role for orchestration, the rotator role for the rotation job. | `sandbox-identity-signer` |
+| `SANDBOX_IDENTITY_BAO_AUDIENCE` | When enabled | The OpenBao audience of the Pod-bound token the Pod logs in with. | `openbao-sandbox-identity` |
+| `SANDBOX_IDENTITY_BAO_TRANSIT_MOUNT` | When enabled | The environment's own transit mount, which holds the key `sandbox-identity`. | `codewire-identity` |
+
+The listener also needs the Pod's identity (`POD_NAMESPACE`,
+`POD_SERVICE_ACCOUNT_NAME`, `POD_NAME`, `POD_UID`) and
+`OPENBAO_KUBERNETES_API_AUDIENCE`, as the other OpenBao clients do.
+
+Its responses:
+
+- **Success** carries `Cache-Control: public, max-age=300`. Every error is
+  `no-store`, so the TLS-terminating edge must respect the origin's
+  `Cache-Control`, and key its cache on the path alone.
+- **Not found (404):** any other path, method or query string, and any org that
+  doesn't exist, is being deleted, or isn't spelled exactly as stored. Nothing
+  redirects.
+- **Unavailable (503):** a key set that can't be read.
+
+The key's versions rotate through `codewire-orchestration identity rotate`,
+run daily under the rotator role:
+
+1. A new version is published 24 hours before it signs.
+2. Signing moves to it, and the version it replaces stays published for 24
+   hours more.
+3. The job adds a version when the signing one is 30 days old.
+
+The job refuses to change a key whose configuration has drifted from its pins
+(exportable, plaintext backup, deletion allowed, or automatic rotation), and
+fails so the drift is seen.
+
 ## Tailnet relay
 
 The coordinator advertises the deployment's DERP relay to every `cw` client

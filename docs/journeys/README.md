@@ -21,6 +21,7 @@ runs the same commands and holds the result to the same standard.
 | [hosts.md](hosts.md) | Hosts (#3609): enroll a computer, keep its agent connected through proxies, logouts and reboots, the Hosts page, and environments created on a host |
 | [snapshots-and-forks.md](snapshots-and-forks.md) | Disk snapshots and forks: capture, list, inspect and remove a snapshot, and create sandboxes from it, in the cloud and on a local VM (#3046, #4370) |
 | [feedback.md](feedback.md) | Feedback (#4061): `cw feedback` signed in and anonymous, the stored row, the hourly limits and the admin page |
+| [sandbox-identity.md](sandbox-identity.md) | Sandbox identity (#4661): each organization's OIDC issuer, its keys and their rotation, and later the tokens sandboxes present to Kubernetes, OpenBao and cloud verifiers |
 
 ## What a journey file holds
 

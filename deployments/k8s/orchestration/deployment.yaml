@@ -56,6 +56,10 @@ spec:
             # Pods, under its own connection and request limits.
             - containerPort: 8087
               name: workspace-bind
+            # The sandbox identity issuer's public discovery documents and key
+            # sets, served only while CODEWIRE_IDENTITY_ENABLED is set.
+            - containerPort: 8089
+              name: identity
           envFrom:
             - configMapRef:
                 name: codewire-config

@@ -26,6 +26,8 @@ use anyhow::Context;
 use axum::middleware;
 use codewire_orchestration::confidential_storage::{ConfidentialStorageManager, FeatureFlags};
 use codewire_orchestration::drain::{DRAIN_WINDOW, Drain};
+use codewire_orchestration::identity::config::{IDENTITY_PORT, ORCHESTRATION_IDENTITY_PORT_ENV};
+use codewire_orchestration::identity::{IdentityConfig, IdentitySettings};
 use codewire_orchestration::runtime::kubernetes::KubernetesDriver;
 use codewire_orchestration::worker::{self, cloudflare::CloudflareClient};
 use codewire_server_core::{AppBuilder, ServiceConfig};
@@ -360,11 +362,32 @@ fn listener_bind_addr(
     Ok(SocketAddr::new(public_bind_addr.ip(), port))
 }
 
+/// The sandbox identity issuer's settings and listener address; `None` unless
+/// identity is enabled. Fail closed: an invalid configuration never starts.
+fn identity_issuer(
+    public_bind_addr: SocketAddr,
+) -> anyhow::Result<Option<(Box<IdentitySettings>, SocketAddr)>> {
+    let IdentityConfig::Enabled(settings) = IdentityConfig::from_env()? else {
+        return Ok(None);
+    };
+    let addr = listener_bind_addr(
+        public_bind_addr,
+        ORCHESTRATION_IDENTITY_PORT_ENV,
+        std::env::var(ORCHESTRATION_IDENTITY_PORT_ENV)
+            .ok()
+            .as_deref(),
+        IDENTITY_PORT,
+    )?;
+    Ok(Some((settings, addr)))
+}
+
 struct Listeners {
     public: TcpListener,
     /// The TLS internal listener; `None` when no internal API is served.
     internal: Option<TcpListener>,
     workspace_binding: TcpListener,
+    /// The sandbox identity listener; `None` unless identity is enabled.
+    identity: Option<TcpListener>,
 }
 
 /// Bind every orchestration listener before any one serves. If a later port
@@ -374,6 +397,7 @@ async fn bind_listeners(
     public_bind_addr: SocketAddr,
     internal_bind_addr: Option<SocketAddr>,
     workspace_binding_bind_addr: SocketAddr,
+    identity_bind_addr: Option<SocketAddr>,
 ) -> anyhow::Result<Listeners> {
     let public = TcpListener::bind(public_bind_addr)
         .await
@@ -391,16 +415,26 @@ async fn bind_listeners(
         .with_context(|| {
             format!("bind workspace-binding orchestration listener {workspace_binding_bind_addr}")
         })?;
+    let identity = match identity_bind_addr {
+        Some(addr) => Some(
+            TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("bind sandbox identity listener {addr}"))?,
+        ),
+        None => None,
+    };
     tracing::info!(
         %public_bind_addr,
         ?internal_bind_addr,
         %workspace_binding_bind_addr,
+        ?identity_bind_addr,
         "orchestration listeners bound"
     );
     Ok(Listeners {
         public,
         internal,
         workspace_binding,
+        identity,
     })
 }
 
@@ -416,8 +450,59 @@ fn require_runtime_images() -> anyhow::Result<()> {
     }
 }
 
+/// Where the Temporal worker and the trigger client connect. The worker is
+/// mandatory: it is the only env lifecycle execution path. A missing
+/// TEMPORAL_HOST_PORT is fatal (mirroring Go's requiresTemporal handling)
+/// rather than silently degrading.
+struct TemporalSettings {
+    host_port: String,
+    namespace: String,
+    task_queue: String,
+}
+
+impl TemporalSettings {
+    fn from_env() -> anyhow::Result<Self> {
+        let host_port = std::env::var("TEMPORAL_HOST_PORT")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "codewire-orchestration requires TEMPORAL_HOST_PORT (NATS is retired)"
+                )
+            })?;
+        let namespace = std::env::var("TEMPORAL_NAMESPACE").unwrap_or_else(|_| "default".into());
+        let task_queue = std::env::var("TEMPORAL_TASK_QUEUE")
+            .unwrap_or_else(|_| codewire_orchestration::temporal::DEFAULT_TASK_QUEUE.into());
+        Ok(Self {
+            host_port,
+            namespace,
+            task_queue,
+        })
+    }
+
+    /// The trigger client (reconciler enqueues + the #38 API write
+    /// endpoints) SignalWithStarts the environment workflow. Connection
+    /// failure is fatal — there is no fallback path.
+    async fn connect_trigger(
+        &self,
+    ) -> anyhow::Result<Arc<codewire_orchestration::temporal::TemporalTrigger>> {
+        Ok(Arc::new(
+            codewire_orchestration::temporal::TemporalTrigger::connect(
+                &self.host_port,
+                &self.namespace,
+                &self.task_queue,
+            )
+            .await?,
+        ))
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if codewire_orchestration::identity::rotate_requested(std::env::args().skip(1))? {
+        return codewire_orchestration::identity::rotate_command().await;
+    }
     let cfg = ServiceConfig::from_env("orchestration")?;
     let tracing_guard = codewire_server_core::obs::init_with_traces(&cfg)?;
     require_runtime_images()?;
@@ -459,10 +544,12 @@ async fn main() -> anyhow::Result<()> {
             )
         })
         .transpose()?;
+    let identity = identity_issuer(cfg.bind_addr)?;
     let listeners = bind_listeners(
         cfg.bind_addr,
         internal_bind_addr,
         workspace_binding_bind_addr,
+        identity.as_ref().map(|(_, addr)| *addr),
     )
     .await?;
 
@@ -475,31 +562,13 @@ async fn main() -> anyhow::Result<()> {
 
     let loops = env_list("WORKER_LOOPS");
 
-    // The Temporal worker is mandatory: it is the only env lifecycle
-    // execution path. A missing TEMPORAL_HOST_PORT is fatal (mirroring
-    // Go's requiresTemporal handling) rather than silently degrading.
-    let host_port = std::env::var("TEMPORAL_HOST_PORT")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!("codewire-orchestration requires TEMPORAL_HOST_PORT (NATS is retired)")
-        })?;
-    let namespace = std::env::var("TEMPORAL_NAMESPACE").unwrap_or_else(|_| "default".into());
-    let task_queue = std::env::var("TEMPORAL_TASK_QUEUE")
-        .unwrap_or_else(|_| codewire_orchestration::temporal::DEFAULT_TASK_QUEUE.into());
-
-    // The trigger client (reconciler enqueues + the #38 API write
-    // endpoints) SignalWithStarts the environment workflow. Connection
-    // failure is fatal — there is no fallback path.
-    let temporal_trigger = Arc::new(
-        codewire_orchestration::temporal::TemporalTrigger::connect(
-            &host_port,
-            &namespace,
-            &task_queue,
-        )
-        .await?,
-    );
+    let temporal = TemporalSettings::from_env()?;
+    let temporal_trigger = temporal.connect_trigger().await?;
+    let TemporalSettings {
+        host_port,
+        namespace,
+        task_queue,
+    } = temporal;
 
     // Ambient kube client (in-cluster or KUBECONFIG). Unavailable
     // mirrors the Go worker with a nil sandbox backend: setup health
@@ -513,6 +582,15 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     };
+    let identity_app = identity
+        .map(|(settings, _)| {
+            codewire_orchestration::identity::discovery_router(
+                &settings,
+                kube.clone(),
+                &cfg.database_url,
+            )
+        })
+        .transpose()?;
     let confidential_storage = ConfidentialStorageManager::from_env(
         pool.clone(),
         confidential_storage_flags,
@@ -945,6 +1023,7 @@ async fn main() -> anyhow::Result<()> {
                 None => Ok(()),
             }
         },
+        codewire_orchestration::identity::serve(identity_app, listeners.identity),
     );
     // Flush queued spans before the process exits.
     tracing_guard.shutdown().await;
@@ -1012,10 +1091,10 @@ mod tests {
     /// Every listener but `busy` binds; startup must fail and release them.
     async fn assert_listener_setup_fails_closed(busy: usize) {
         let blocker = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut addrs = free_addrs::<3>().await;
+        let mut addrs = free_addrs::<4>().await;
         addrs[busy] = blocker.local_addr().unwrap();
         assert!(
-            bind_listeners(addrs[0], Some(addrs[1]), addrs[2])
+            bind_listeners(addrs[0], Some(addrs[1]), addrs[2], Some(addrs[3]))
                 .await
                 .is_err()
         );
@@ -1045,10 +1124,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn listener_setup_fails_closed_when_identity_port_is_busy() {
+        assert_listener_setup_fails_closed(3).await;
+    }
+
+    #[tokio::test]
     async fn without_an_internal_identity_no_internal_listener_binds() {
         let [public, binding] = free_addrs::<2>().await;
-        let listeners = bind_listeners(public, None, binding).await.unwrap();
+        let listeners = bind_listeners(public, None, binding, None).await.unwrap();
         assert!(listeners.internal.is_none());
+        assert!(
+            listeners.identity.is_none(),
+            "identity is off unless enabled"
+        );
     }
 
     #[test]
