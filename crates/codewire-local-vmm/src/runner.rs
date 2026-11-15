@@ -28,7 +28,7 @@ use zeroize::Zeroizing;
 
 use crate::artifact::{AdmittedArtifacts, ArtifactError, ArtifactLock};
 #[cfg(target_os = "linux")]
-use crate::ch_api::{ChApiClient, ChApiError, VmInfo};
+use crate::ch_api::{ChApiClient, ChApiError};
 #[cfg(target_os = "linux")]
 use crate::cloud_hypervisor::{
     CloudHypervisorConfig, CloudHypervisorConfigError, CommandSpec, VirtioFsConfig,
@@ -97,12 +97,19 @@ mod egress_spawn;
 mod inherited;
 
 use inherited::{INHERITED_SOURCE_FLOOR, duplicate_inherited_descriptor, raise_open_file_limit};
+#[cfg(target_os = "linux")]
+mod cw_runtime_disk;
 mod host_port_forward;
+mod stage_times;
+#[cfg(target_os = "linux")]
+use cw_runtime_disk::validate_live_cw_runtime_disk;
 #[cfg(target_os = "macos")]
 mod vz_launch;
+
 #[cfg(target_os = "linux")]
 pub use checkpoint::{RestoreBoot, RestoreReport};
 use host_port_forward::HostPortForwarder;
+pub(crate) use stage_times::GuestStageTimes;
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 // Guest cleanup can drain daemon, workspace, Docker and network for five
@@ -111,7 +118,7 @@ const GUEST_POWEROFF_TIMEOUT: Duration = Duration::from_secs(30);
 const GUEST_POWEROFF_DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const SIGNAL_STOP_TIMEOUT: Duration = Duration::from_secs(2);
-const NETWORK_WORKER_RETRY_DELAY: Duration = Duration::from_millis(50);
+pub(crate) const NETWORK_WORKER_RETRY_DELAY: Duration = Duration::from_millis(50);
 const NETWORK_WORKER_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const EGRESS_BROKER_READY_TIMEOUT: Duration =
     EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT.saturating_add(Duration::from_secs(5));
@@ -607,6 +614,7 @@ impl CloudHypervisorRunner {
         let (child, process) = startup.disarm();
 
         Ok(RunningVm {
+            stage_times: GuestStageTimes::default(),
             // Evaluated before the request moves.
             host_ports: prepared.request.host_ports.clone(),
             request: prepared.request,
@@ -1160,6 +1168,8 @@ pub struct RunningVm {
     /// What the guest reported when this boot resumed from a VM checkpoint.
     #[cfg(target_os = "linux")]
     restored: Option<RestoreReport>,
+    /// When the host first received each guest boot stage (#4242).
+    stage_times: GuestStageTimes,
     /// The runner's end of a schema 3 helper's control channel, held for the
     /// VM's life: when it closes, the helper stops its VM (#4654).
     #[cfg(target_os = "macos")]
@@ -1188,6 +1198,15 @@ impl fmt::Debug for RunningVm {
 }
 
 impl RunningVm {
+    /// When the host first received each guest boot stage (#4242).
+    pub(crate) fn stage_times(&self) -> &GuestStageTimes {
+        &self.stage_times
+    }
+
+    pub(crate) fn stage_times_mut(&mut self) -> &mut GuestStageTimes {
+        &mut self.stage_times
+    }
+
     pub fn vm_id(&self) -> Uuid {
         self.request.vm_id
     }
@@ -1373,6 +1392,7 @@ impl RunningVm {
                 self.request.generation,
                 deadline,
                 NetworkProgressGoal::Terminal,
+                None,
             )
             .await
             {
@@ -1585,10 +1605,14 @@ impl RunningVm {
                 self.request.generation,
                 deadline,
                 NetworkProgressGoal::NetworkReady,
+                Some(&mut self.stage_times),
             )
             .await
             {
-                Ok(stage) if !stage.is_failure() => return Ok(()),
+                Ok(stage) if !stage.is_failure() => {
+                    self.stage_times.mark_guest_ready();
+                    return Ok(());
+                }
                 Ok(stage) => return Err(guest_readiness_failure(stage)),
                 Err(NetworkProgressAttemptError::Retry)
                     if tokio::time::Instant::now() < deadline =>
@@ -1889,6 +1913,7 @@ async fn wait_for_network_progress_attempt(
     generation: u64,
     deadline: tokio::time::Instant,
     goal: NetworkProgressGoal,
+    mut times: Option<&mut GuestStageTimes>,
 ) -> Result<GuestBootStage, NetworkProgressAttemptError> {
     let connected = tokio::time::timeout_at(
         deadline,
@@ -1942,6 +1967,9 @@ async fn wait_for_network_progress_attempt(
         }
         sequence = frame.sequence;
         stage = Some(frame.stage);
+        if let Some(times) = times.as_deref_mut() {
+            times.record(frame.stage);
+        }
         if frame.stage.is_failure()
             || match goal {
                 NetworkProgressGoal::NetworkReady => {
@@ -4623,62 +4651,6 @@ fn validate_seed_file(path: &Path, catalog_generation: Option<&str>) -> Result<(
 }
 
 #[cfg(target_os = "linux")]
-fn validate_live_cw_runtime_disk(
-    info: &VmInfo,
-    expected: &AdmittedCwRuntimeDisk,
-) -> Result<(), RunnerError> {
-    use codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_DISK_SERIAL;
-    let disks = info
-        .additional
-        .get("config")
-        .and_then(|config| config.get("disks"))
-        .and_then(serde_json::Value::as_array)
-        .ok_or(RunnerError::CwRuntimeDiskChanged)?;
-    let path = expected
-        .path
-        .to_str()
-        .ok_or(RunnerError::CwRuntimeDiskChanged)?;
-    let mut matches = 0;
-    for disk in disks {
-        let candidate = disk.get("id").and_then(serde_json::Value::as_str) == Some("cw-runtime")
-            || disk.get("serial").and_then(serde_json::Value::as_str)
-                == Some(CW_RUNTIME_DISK_SERIAL)
-            || disk.get("path").and_then(serde_json::Value::as_str) == Some(path);
-        if !candidate {
-            continue;
-        }
-        matches += 1;
-        if disk.get("id").and_then(serde_json::Value::as_str) != Some("cw-runtime")
-            || disk.get("serial").and_then(serde_json::Value::as_str)
-                != Some(CW_RUNTIME_DISK_SERIAL)
-            || disk.get("path").and_then(serde_json::Value::as_str) != Some(path)
-            || disk.get("readonly").and_then(serde_json::Value::as_bool) != Some(true)
-            || disk.get("direct").and_then(serde_json::Value::as_bool) != Some(false)
-            || disk
-                .get("backing_files")
-                .and_then(serde_json::Value::as_bool)
-                != Some(false)
-            || disk.get("vhost_user").and_then(serde_json::Value::as_bool) != Some(false)
-            || disk.get("sparse").and_then(serde_json::Value::as_bool) != Some(false)
-            || !disk
-                .get("image_type")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| value.eq_ignore_ascii_case("raw"))
-            || !disk
-                .get("lock_granularity")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| value.eq_ignore_ascii_case("full"))
-        {
-            return Err(RunnerError::CwRuntimeDiskChanged);
-        }
-    }
-    if matches != 1 {
-        return Err(RunnerError::CwRuntimeDiskChanged);
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
 fn cloud_hypervisor_process(
     command: &CommandSpec,
     working_directory: &Path,
@@ -5800,6 +5772,7 @@ mod tests {
                 9,
                 tokio::time::Instant::now() + HANG_GUARD,
                 NetworkProgressGoal::NetworkReady,
+                None,
             )
             .await
             .unwrap(),
@@ -5834,6 +5807,7 @@ mod tests {
                 9,
                 tokio::time::Instant::now() + HANG_GUARD,
                 NetworkProgressGoal::Terminal,
+                None,
             )
             .await,
             Ok(GuestBootStage::WorkspaceFailed)
@@ -5878,6 +5852,7 @@ mod tests {
                 9,
                 tokio::time::Instant::now() + HANG_GUARD,
                 NetworkProgressGoal::NetworkReady,
+                None,
             )
             .await
             .unwrap();

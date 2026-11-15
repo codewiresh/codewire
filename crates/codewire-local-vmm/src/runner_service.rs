@@ -80,6 +80,9 @@ pub struct RunnerEntrypointConfig {
 
 #[cfg(target_os = "linux")]
 mod checkpoint;
+mod stage_log;
+
+use stage_log::guest_stage_name;
 
 #[derive(Clone)]
 pub struct RunnerClient {
@@ -1399,7 +1402,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             None,
             running.cw_runtime_catalog_generation(),
         )?;
-        let network_ms = elapsed_ms(network_started);
+        let (guest_boot_ms, network_ms) = stage_log::network_wait(network_started, &running);
         let guest_started = std::time::Instant::now();
         if let Err(failure) =
             wait_for_guest_daemon(&mut running, daemon_ready_timeout, &self.events).await
@@ -1473,17 +1476,17 @@ impl EnvironmentRunnerService for RunnerRpc {
             return Err(error);
         }
         let guest_ms = elapsed_ms(guest_started);
-        diagnostic_log::record(
+        stage_log::vm_started(
             self.log.as_deref(),
-            "vm_started",
-            &[
-                ("environment", LogField::Id(environment_id)),
-                ("generation", LogField::Count(request.generation)),
-                ("elapsed_ms", LogField::Count(elapsed_ms(started))),
-                ("launch_ms", LogField::Count(launch_ms)),
-                ("network_ms", LogField::Count(network_ms)),
-                ("guest_ms", LogField::Count(guest_ms)),
-            ],
+            (environment_id, request.generation),
+            started,
+            stage_log::StartTimes {
+                launch_ms,
+                guest_boot_ms,
+                network_ms,
+                guest_ms,
+            },
+            state.running.as_ref(),
         );
         Ok(Response::new(state.info()))
     }
@@ -2249,6 +2252,7 @@ async fn wait_for_guest_daemon(
                         running.cw_runtime_catalog_generation(),
                         ).map_err(|status| ("event_publish", status))?;
                         guest_stage = Some(progress.stage);
+                        running.stage_times_mut().record(progress.stage);
                         if progress.stage.is_failure() {
                             return Err((
                                 guest_failure_detail(progress.stage),
@@ -2373,31 +2377,6 @@ fn guest_failure_detail(stage: GuestBootStage) -> &'static str {
         GuestBootStage::SetupFailed => GUEST_SETUP_FAILED,
         GuestBootStage::DockerToolingMissing => GUEST_DOCKER_TOOLING_MISSING,
         _ => GUEST_WORKSPACE_FAILED,
-    }
-}
-
-/// The closed log name of a guest boot stage.
-fn guest_stage_name(stage: GuestBootStage) -> &'static str {
-    match stage {
-        GuestBootStage::StateMounted => "state_mounted",
-        GuestBootStage::CgroupsReady => "cgroups_ready",
-        GuestBootStage::DisksAdmitted => "disks_admitted",
-        GuestBootStage::RootMounted => "root_mounted",
-        GuestBootStage::SetupHeaderReady => "setup_header_ready",
-        GuestBootStage::SetupContentReady => "setup_content_ready",
-        GuestBootStage::RootLayersReady => "root_layers_ready",
-        GuestBootStage::WorkspacePlanReady => "workspace_plan_ready",
-        GuestBootStage::OwnershipReady => "ownership_ready",
-        GuestBootStage::ContainerControlReady => "container_control_ready",
-        GuestBootStage::RootGenerationReady => "root_generation_ready",
-        GuestBootStage::PersistentLayoutReady => "persistent_layout_ready",
-        GuestBootStage::RuncLaunching => "runc_launching",
-        GuestBootStage::RuncRunning => "runc_running",
-        GuestBootStage::WorkspaceRunning => "workspace_running",
-        GuestBootStage::DaemonStarted => "daemon_started",
-        GuestBootStage::SetupFailed => "setup_failed",
-        GuestBootStage::WorkspaceFailed => "workspace_failed",
-        GuestBootStage::DockerToolingMissing => "docker_tooling_missing",
     }
 }
 

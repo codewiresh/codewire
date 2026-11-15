@@ -135,6 +135,7 @@ impl CloudHypervisorRunner {
             hybrid,
             network_worker: None,
             host_port_listeners: prepared.host_port_listeners,
+            stage_times: GuestStageTimes::default(),
             _control: control,
             _lock: prepared.lock,
         })
