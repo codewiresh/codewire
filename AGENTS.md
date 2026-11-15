@@ -190,6 +190,19 @@ is the home of the CLI presentation rules: streams and terminal capabilities,
 status glyphs and colour, help layout, results and next steps, errors, empty
 and first-run states, prompts and tables (owner, 2026-11-13; cited on #3013).
 
+## Code comments
+
+Write a comment only for what the code cannot say: why it is this way (a
+workaround, a measured limit, an ordering or guard that looks unnecessary), an
+invariant or contract a caller relies on, or a pointer to the spec or issue
+that holds the reasoning. Never comment what the next line does, or the
+change's history (`added for #N`, `now uses X`); that belongs in the commit
+message and the PR. No commented-out code. A change that makes a comment false
+fixes or deletes it in the same change; a stale comment is a review finding.
+Trim comments in code you are already changing, never in a repository-wide
+sweep. Public items keep their rustdoc; `// SAFETY:` and `let _ =` comments
+follow the `codewire-rust` skill (owner, 2026-11-15; cited on #3013).
+
 ## Rust
 
 The `codewire-rust` skill (`.agents/skills/codewire-rust/SKILL.md`) is the
