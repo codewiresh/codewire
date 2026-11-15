@@ -817,6 +817,8 @@ pub(crate) struct DashboardView {
     pub(crate) provisioned_disk_gb: i64,
     /// This browser collapsed the desktop sidebar to its rail.
     pub(crate) sidebar_collapsed: bool,
+    /// The header's Support link (`mailto:`); empty hides the button.
+    pub(crate) support_mailto: String,
 }
 
 impl DashboardView {

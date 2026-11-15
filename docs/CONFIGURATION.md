@@ -348,6 +348,14 @@ The admin capacity page shows, per runtime node, what is reserved and used and h
 |---|---|---|---|
 | `CODEWIRE_CAPACITY_PROMETHEUS_URL` | No | The Prometheus that scrapes this cluster: an `http` or `https` URL with no credentials, query or fragment. Unset or empty means reservations and usage are not available on the page. Any other form stops orchestration at startup. | `http://prometheus.monitoring.svc:9090` |
 
+## Support address
+
+The dashboard header's Support button writes an email to this address with the subject "[Support]".
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `CODEWIRE_SUPPORT_EMAIL` | No | The address the dashboard's Support button writes to. Unset or empty hides the button. Any value that is not one email address stops the dashboard at startup. | `support@example.com` |
+
 ## Browser origins
 
 Every Codewire service the browser calls is served from the dashboard's own origin, so by default no service answers cross-origin (CORS) requests at all.

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="/assets/codewire/theme-v1.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Feedback · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/dashboard-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/billing-admin-v1.css">
+    <script src="/assets/codewire/dashboard-v1.js" defer></script>
+  </head>
+  <body class="cw-body" data-route="admin">
+    <div class="cw-app" data-dashboard-app data-mobile-open="false" data-sidebar-collapsed="{{ view.sidebar_collapsed }}">
+      <aside class="cw-sidebar-slot">{% include "sidebar.html" %}</aside>
+      <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button><a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span class="cw-sr-only">Codewire</span></a></header>
+      <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+      <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
+      <main class="cw-main">{% let crumb_scope = "admin" %}{% let crumb_page = "feedback" %}{% include "console-header.html" %}<div class="cw-main-inner"><div class="cw-page cw-admin-stack">
+        <header class="cw-admin-heading"><div><h1 class="cw-page-title">Feedback</h1><p>What people sent with <code>cw feedback</code>, newest first. Only platform admins see it.</p></div></header>
+        <form class="cw-filter-form" method="get" action="/admin/feedback/">
+          {% if view.has_selected_organization %}<input type="hidden" name="org" value="{{ view.selected_organization_slug }}">{% endif %}
+          <label class="cw-field"><span>Sender</span><select class="cw-select" name="sender"><option value="">Everyone</option><option value="signed-in"{% if filter == FeedbackFilter::SignedIn %} selected{% endif %}>Signed in</option><option value="anonymous"{% if filter == FeedbackFilter::Anonymous %} selected{% endif %}>Anonymous</option></select></label>
+          <button class="cw-button cw-button--outline" type="submit">Filter</button>
+        </form>
+        <section class="cw-card" aria-labelledby="feedback-list-title"><h2 id="feedback-list-title" class="cw-sr-only">Feedback received</h2><div class="cw-card-body">
+          {% if rows.is_empty() %}<p class="cw-muted">{% if later_page %}No older feedback.{% else %}{% match filter %}{% when FeedbackFilter::All %}No feedback yet. It appears here when someone runs <code>cw feedback</code>.{% when FeedbackFilter::SignedIn %}No signed-in feedback yet.{% when FeedbackFilter::Anonymous %}No anonymous feedback yet.{% endmatch %}{% endif %}</p>{% else %}
+          <ol class="cw-row-list">
+            {% for row in rows %}<li><article class="cw-feedback" aria-labelledby="feedback-{{ loop.index }}-sender">
+              <header class="cw-feedback-header">{% match row.sender %}{% when FeedbackSenderView::Anonymous %}<h3 id="feedback-{{ loop.index }}-sender">Anonymous</h3>{% when FeedbackSenderView::SignedIn { label, mailto, account_url, organization: _ } %}<div class="cw-feedback-sender"><h3 id="feedback-{{ loop.index }}-sender">{% if let Some(mailto) = mailto %}<a href="{{ mailto }}">{{ label }}</a>{% else %}{{ label }}{% endif %}</h3><a href="{{ account_url }}">View account<span class="cw-sr-only"> of {{ label }}</span></a></div>{% endmatch %}<p class="cw-muted">{% if let Some(organization) = row.sender.organization() %}{{ organization }} · {% endif %}{% if row.received_at.is_empty() %}{{ row.received }}{% else %}<time datetime="{{ row.received_at }}">{{ row.received }}</time>{% endif %}</p></header>
+              <p class="cw-feedback-message">{{ row.message }}</p>
+              <dl class="cw-feedback-facts"><div><dt>CLI</dt><dd>{{ row.cli_version }}</dd></div><div><dt>Platform</dt><dd>{{ row.platform }}</dd></div>{% if !row.placement.is_empty() %}<div><dt>Placement</dt><dd>{{ row.placement }}</dd></div>{% endif %}{% if let Some(environment_id) = row.environment_id %}<div><dt>Sandbox</dt><dd><code>{{ environment_id }}</code></dd></div>{% endif %}</dl>
+            </article></li>{% endfor %}
+          </ol>{% endif %}
+        </div></section>
+        {% if !first_page_url.is_empty() || !next_page_url.is_empty() %}<nav class="cw-pagination" aria-label="Feedback pages">{% if !first_page_url.is_empty() %}<a class="cw-button cw-button--outline" href="{{ first_page_url }}">Newest</a>{% endif %}{% if !next_page_url.is_empty() %}<a class="cw-button cw-button--outline" href="{{ next_page_url }}">Older</a>{% endif %}</nav>{% endif %}
+      </div></div></main>
+    </div>
+  </body>
+</html>

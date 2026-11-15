@@ -137,13 +137,14 @@ test.describe.serial("rounded management interface", () => {
     }
   });
 
-  test("renders admin audit and catalog surfaces in the selected context", async ({
+  test("renders admin audit, feedback and catalog surfaces in the selected context", async ({
     page,
     isMobile,
   }) => {
     await loginAsAdmin(page);
     for (const [path, heading, snapshot] of [
       ["/admin/audit/", "Audit Log", "management-admin-audit"],
+      ["/admin/feedback/", "Feedback", "management-admin-feedback"],
       ["/admin/billing/", "Billing Catalog", "management-admin-billing"],
     ] as const) {
       const contextQuery = path === "/admin/audit/"

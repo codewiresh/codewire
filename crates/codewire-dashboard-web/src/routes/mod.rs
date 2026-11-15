@@ -121,7 +121,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/admin", get(slash_redirect))
         .route("/admin/", get(admin::overview))
         .route("/admin/accounts", get(slash_redirect))
-        .route("/admin/accounts/", get(admin::accounts))
+        .route("/admin/accounts/", get(admin::account_list::list))
         .route(
             "/admin/accounts/_actions/enabled",
             post(admin::set_account_enabled),
@@ -170,6 +170,8 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route("/admin/audit", get(slash_redirect))
         .route("/admin/audit/", get(admin::audit))
+        .route("/admin/feedback", get(slash_redirect))
+        .route("/admin/feedback/", get(admin::feedback::list))
         .route("/admin/billing", get(slash_redirect))
         .route("/admin/billing/", get(admin::billing))
         .route(

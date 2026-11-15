@@ -21,8 +21,8 @@
         {% if !message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ message }}</p>{% endif %}
         {% if !error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ error }}</p>{% endif %}
         <section class="cw-card" aria-labelledby="account-access-heading">
-          <header class="cw-card-header"><div><h2 id="account-access-heading">Accounts</h2><p>{{ accounts.len() }} accounts</p></div></header>
-          {% if accounts.is_empty() %}<div class="cw-card-body"><p class="cw-muted">No accounts are waiting for review.</p></div>{% else %}
+          <header class="cw-card-header"><div><h2 id="account-access-heading">Accounts</h2>{% if one_account %}<p>One account. <a href="/admin/accounts/">Show all accounts</a></p>{% else %}<p>{{ accounts.len() }} accounts</p>{% endif %}</div></header>
+          {% if accounts.is_empty() %}<div class="cw-card-body"><p class="cw-muted">{% if one_account %}No account has this ID; it may have been deleted.{% else %}No accounts are waiting for review.{% endif %}</p></div>{% else %}
           <div class="cw-table-wrap"><table class="cw-table cw-access-table"><thead><tr><th scope="col">Account</th><th scope="col">Request</th><th scope="col">Email</th><th scope="col">Sign-in providers</th><th scope="col">Created</th><th scope="col">Access</th></tr></thead><tbody>
             {% for account in accounts %}<tr>
               <td><strong>{{ account.name }}</strong><span class="cw-access-email">{{ account.email }}</span></td>

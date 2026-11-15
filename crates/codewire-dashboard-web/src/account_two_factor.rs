@@ -487,6 +487,7 @@ mod tests {
             turnstile_site_key: String::new(),
             github_app_slug: String::new(),
             github_app_client_id: String::new(),
+            support_email: None,
         });
         let cookie = HeaderValue::from_static("codewire.session_token=synthetic");
         let start_with = |n| {
@@ -600,6 +601,7 @@ mod tests {
             turnstile_site_key: String::new(),
             github_app_slug: String::new(),
             github_app_client_id: String::new(),
+            support_email: None,
         });
         let cookie = HeaderValue::from_static("codewire.session_token=synthetic");
         for (password, proof) in [
@@ -658,6 +660,7 @@ mod tests {
             turnstile_site_key: String::new(),
             github_app_slug: String::new(),
             github_app_client_id: String::new(),
+            support_email: None,
         });
         let built = request(
             &state,

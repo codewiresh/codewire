@@ -4,18 +4,21 @@ use axum::http::HeaderValue;
 use codewire_admin_proto::codewire::admin::v1::{
     AdjustOrganizationCreditRequest, AdminServiceClient, BillingCatalogServiceClient,
     ClearOrganizationEnvironmentQuotaRequest, CreatePlanRequest, CreatePriceRequest,
-    EnvironmentQuota, GetCatalogRequest, GetDefaultEnvironmentQuotaRequest,
-    GetOrganizationOverviewRequest, GetStatsRequest, ListAuditLogsRequest,
-    ListConfidentialOrganizationsRequest, ListOrganizationsRequest,
-    ListSubscriptionMigrationsRequest, PlanSpec, PreviewSubscriptionMigrationRequest,
-    RunSubscriptionMigrationRequest, SetDefaultEnvironmentQuotaRequest,
-    SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationDedicatedCpuRequest,
-    SetOrganizationEnvironmentQuotaRequest, SetOrganizationRateCardRequest, SetPlanArchivedRequest,
-    SetPriceArchivedRequest, UpdatePlanRequest, UpdatePriceRequest, UpdateSettingRequest,
+    EnvironmentQuota, FeedbackEntry, FeedbackSender, GetCatalogRequest,
+    GetDefaultEnvironmentQuotaRequest, GetOrganizationOverviewRequest, GetStatsRequest,
+    ListAuditLogsRequest, ListConfidentialOrganizationsRequest, ListFeedbackRequest,
+    ListOrganizationsRequest, ListSubscriptionMigrationsRequest, PlanSpec,
+    PreviewSubscriptionMigrationRequest, RunSubscriptionMigrationRequest,
+    SetDefaultEnvironmentQuotaRequest, SetOrganizationConfidentialEnvironmentsRequest,
+    SetOrganizationDedicatedCpuRequest, SetOrganizationEnvironmentQuotaRequest,
+    SetOrganizationRateCardRequest, SetPlanArchivedRequest, SetPriceArchivedRequest,
+    UpdatePlanRequest, UpdatePriceRequest, UpdateSettingRequest,
 };
 use connectrpc::{ConnectError, client::ClientConfig};
 
-use crate::{state::AppState, time_display::calendar_datetime, transport::BrowserTransport};
+use crate::{
+    mailto::mailto, state::AppState, time_display::calendar_datetime, transport::BrowserTransport,
+};
 
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -38,6 +41,61 @@ pub(crate) struct AuditLogRow {
     pub(crate) severity_tone: &'static str,
     pub(crate) metadata: String,
     pub(crate) has_metadata: bool,
+}
+
+/// Whose feedback the admin feedback list shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum FeedbackFilter {
+    #[default]
+    All,
+    SignedIn,
+    Anonymous,
+}
+
+/// Who sent one piece of `cw feedback`.
+#[derive(Debug)]
+pub(crate) enum FeedbackSenderView {
+    Anonymous,
+    SignedIn {
+        /// The account's email, or its ID when the email could not be read.
+        label: String,
+        /// A `mailto:` link with a reply subject, when the email is known.
+        mailto: Option<String>,
+        /// The admin Accounts page narrowed to this account.
+        account_url: String,
+        /// The organization the sender named, if it still exists.
+        organization: Option<String>,
+    },
+}
+
+impl FeedbackSenderView {
+    pub(crate) fn organization(&self) -> Option<&str> {
+        match self {
+            Self::Anonymous => None,
+            Self::SignedIn { organization, .. } => organization.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct FeedbackRow {
+    pub(crate) received: String,
+    /// RFC 3339, for the `<time>` element.
+    pub(crate) received_at: String,
+    pub(crate) sender: FeedbackSenderView,
+    pub(crate) message: String,
+    pub(crate) cli_version: String,
+    pub(crate) platform: String,
+    /// "Local" or "Cloud"; empty when the CLI did not know.
+    pub(crate) placement: &'static str,
+    pub(crate) environment_id: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct FeedbackPage {
+    pub(crate) rows: Vec<FeedbackRow>,
+    /// Empty on the last page.
+    pub(crate) next_page_token: String,
 }
 
 #[derive(Clone, Debug)]
@@ -360,6 +418,73 @@ pub(crate) async fn audit_logs(
             }
         })
         .collect())
+}
+
+pub(crate) async fn feedback(
+    state: &AppState,
+    cookie: HeaderValue,
+    page_token: String,
+    filter: FeedbackFilter,
+) -> Result<FeedbackPage, ConnectError> {
+    let sender = match filter {
+        FeedbackFilter::All => FeedbackSender::FEEDBACK_SENDER_UNSPECIFIED,
+        FeedbackFilter::SignedIn => FeedbackSender::FEEDBACK_SENDER_SIGNED_IN,
+        FeedbackFilter::Anonymous => FeedbackSender::FEEDBACK_SENDER_ANONYMOUS,
+    };
+    let response = admin_client(state, cookie)
+        .list_feedback(ListFeedbackRequest {
+            limit: 50,
+            page_token,
+            sender: sender.into(),
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    Ok(FeedbackPage {
+        rows: response.feedback.into_iter().map(feedback_row).collect(),
+        next_page_token: response.next_page_token,
+    })
+}
+
+fn feedback_row(entry: FeedbackEntry) -> FeedbackRow {
+    let created_at = entry.created_at.into_option();
+    let sender = match entry.user_id {
+        None => FeedbackSenderView::Anonymous,
+        Some(user_id) => FeedbackSenderView::SignedIn {
+            mailto: entry
+                .user_email
+                .as_deref()
+                .map(|email| mailto(email, "Re: your Codewire feedback")),
+            account_url: format!(
+                "/admin/accounts/?{}",
+                url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("account", &user_id)
+                    .finish()
+            ),
+            label: entry.user_email.unwrap_or(user_id),
+            organization: entry.organization_name.or(entry.organization_id),
+        },
+    };
+    FeedbackRow {
+        received: created_at
+            .as_ref()
+            .map(|value| calendar_datetime(value.seconds))
+            .unwrap_or_else(|| "Unknown time".to_owned()),
+        received_at: created_at
+            .and_then(|value| chrono::DateTime::from_timestamp(value.seconds, 0))
+            .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .unwrap_or_default(),
+        sender,
+        message: bounded(entry.message, 10_240),
+        cli_version: entry.cli_version,
+        platform: format!("{} {}", entry.os, entry.arch),
+        placement: match entry.placement.as_str() {
+            "local" => "Local",
+            "cloud" => "Cloud",
+            _ => "",
+        },
+        environment_id: entry.environment_id,
+    }
 }
 
 pub(crate) async fn catalog(

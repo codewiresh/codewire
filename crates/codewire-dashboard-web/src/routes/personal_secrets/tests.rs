@@ -154,6 +154,7 @@ async fn fixture() -> (AppState, Source, tokio::task::JoinHandle<()>) {
         turnstile_site_key: String::new(),
         github_app_slug: String::new(),
         github_app_client_id: String::new(),
+        support_email: None,
     });
     (state, source, server)
 }

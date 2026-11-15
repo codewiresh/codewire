@@ -11,23 +11,26 @@ use crate::{
     admin_connect::{self, CatalogPlanView, PlanMutation, PriceMutation, QuotaMutation},
     auth::{authenticated_identity, enforce_two_factor},
     error::WebError,
-    raw_auth::{append_session_cookies, get_json, post_json},
+    raw_auth::post_json,
     response::{error_page, login_redirect, redirect, render_page, two_factor_redirect},
     routes::{
         dashboard::{dashboard_shell_view_from_identity, select_shell_organization},
         organization_governance::valid_identifier,
     },
     security::{
-        canonical_cookie, csrf_cookie, new_csrf_token, page_csrf_token, request_has_same_origin,
-        valid_csrf_token, with_csrf_cookie,
+        canonical_cookie, csrf_cookie, page_csrf_token, request_has_same_origin, valid_csrf_token,
+        with_csrf_cookie,
     },
     state::AppState,
     templates::{
-        AdminAccountsTemplate, AdminAuditTemplate, AdminBillingTemplate, AdminOrganizationTemplate,
+        AdminAuditTemplate, AdminBillingTemplate, AdminOrganizationTemplate,
         AdminOrganizationsTemplate, AdminOverviewTemplate,
     },
     view::{AccountAccessView, DashboardView, LinkedIdentityView},
 };
+
+pub(super) mod account_list;
+pub(super) mod feedback;
 
 const ADMIN_PATH: &str = "/admin/";
 const ACCOUNTS_PATH: &str = "/admin/accounts/";
@@ -43,6 +46,9 @@ pub(super) struct AdminQuery {
     message: String,
     #[serde(default)]
     error: String,
+    /// On Accounts, show only this account, as a feedback row links to it.
+    #[serde(default)]
+    account: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -275,59 +281,6 @@ pub(super) async fn overview(
         }),
         Err(error) => admin_connect_error(error, &continuation, &headers),
     }
-}
-
-pub(super) async fn accounts(
-    State(state): State<AppState>,
-    Query(query): Query<AdminQuery>,
-    headers: HeaderMap,
-) -> Response {
-    let continuation = ACCOUNTS_PATH.to_owned();
-    let (dashboard, cookie) = match admin_context(&state, &headers, &continuation, &query.org).await
-    {
-        Ok(context) => context,
-        Err(response) => return response,
-    };
-    let identity =
-        match get_json::<AccountAccessListResponse>(&state, "/api/admin/accounts", cookie).await {
-            Ok(identity) => identity,
-            Err(()) => return error_page(WebError::IdentityUnavailable),
-        };
-    if identity.status == StatusCode::UNAUTHORIZED {
-        return login_redirect(&continuation, &headers);
-    }
-    if identity.status == StatusCode::FORBIDDEN {
-        return error_page(WebError::Forbidden);
-    }
-    if !identity.status.is_success() {
-        return error_page(WebError::IdentityUnavailable);
-    }
-    let Some(body) = identity.body.as_ref() else {
-        return error_page(WebError::IdentityUnavailable);
-    };
-    let accounts = body
-        .accounts
-        .iter()
-        .map(account_access_view)
-        .collect::<Vec<_>>();
-    // A session the IdP changed gets a new token, and the forms render with
-    // the token the browser keeps.
-    let token = if identity.changes_session() {
-        new_csrf_token()
-    } else {
-        page_csrf_token(&headers)
-    };
-    let response = with_csrf_cookie(
-        render_page(AdminAccountsTemplate {
-            view: &dashboard,
-            accounts: &accounts,
-            csrf_token: &token,
-            message: account_message(&query.message),
-            error: account_error(&query.error),
-        }),
-        csrf_cookie(&state.public_origin, &token),
-    );
-    append_session_cookies(response, &identity)
 }
 
 pub(super) async fn set_account_enabled(

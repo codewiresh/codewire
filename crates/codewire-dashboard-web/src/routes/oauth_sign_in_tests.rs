@@ -51,6 +51,7 @@ fn config(identity: &str, turnstile_site_key: &str) -> crate::Config {
         turnstile_site_key: turnstile_site_key.into(),
         github_app_slug: String::new(),
         github_app_client_id: String::new(),
+        support_email: None,
     }
 }
 

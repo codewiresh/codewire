@@ -6,13 +6,14 @@ use connectrpc::ConnectError;
 use crate::{
     admin_connect::{
         AdminApiKeyRow, AdminMemberRow, AdminOrganizationRow, AdminOrganizationView,
-        AdminSubscriptionRow, AuditLogRow, QuotaLimitView, QuotaView,
+        AdminSubscriptionRow, AuditLogRow, FeedbackFilter, FeedbackRow, FeedbackSenderView,
+        QuotaLimitView, QuotaView,
     },
     response::{HTMX_REQUEST, login_redirect, safe_auth_continuation, two_factor_redirect},
     templates::{
-        AdminAccountsTemplate, AdminAuditTemplate, AdminOrganizationTemplate,
-        AdminOrganizationsTemplate, OrganizationFormTemplate, OrganizationListTemplate,
-        SetupTwoFactorTemplate, TwoFactorRecoveryTemplate,
+        AdminAccountsTemplate, AdminAuditTemplate, AdminFeedbackTemplate,
+        AdminOrganizationTemplate, AdminOrganizationsTemplate, OrganizationFormTemplate,
+        OrganizationListTemplate, SetupTwoFactorTemplate, TwoFactorRecoveryTemplate,
     },
     transport::browser_headers,
     view::{
@@ -85,6 +86,7 @@ fn admin_audit_template_escapes_sensitive_upstream_fields() {
         provisioned_memory_mb: 0,
         provisioned_disk_gb: 0,
         sidebar_collapsed: false,
+        support_mailto: String::new(),
     };
     let logs = vec![AuditLogRow {
         occurred: "Just now".into(),
@@ -115,6 +117,140 @@ fn admin_audit_template_escapes_sensitive_upstream_fields() {
     assert!(!body.contains("<unsafe admin>"));
     assert!(!body.contains("</pre><script>"));
     assert!(body.contains("&lt;script&gt;") || body.contains("&#60;script&#62;"));
+}
+
+#[test]
+fn admin_feedback_shows_each_sender_and_escapes_what_they_sent() {
+    let view = DashboardView::default();
+    let rows = vec![
+        FeedbackRow {
+            received: "November 14, 2026, 17:02 UTC".into(),
+            received_at: "2026-11-14T17:02:09Z".into(),
+            sender: FeedbackSenderView::SignedIn {
+                label: "<owner@example.test>".into(),
+                mailto: Some(
+                    "mailto:%3Cowner@example.test%3E?subject=Re%3A%20your%20Codewire%20feedback"
+                        .into(),
+                ),
+                account_url: "/admin/accounts/?account=user-1".into(),
+                organization: Some("Acme <Labs>".into()),
+            },
+            message: "first line\n</p><script>alert('feedback')</script>".into(),
+            cli_version: "0.9.1".into(),
+            platform: "linux x86_64".into(),
+            placement: "Cloud",
+            environment_id: Some("env-123".into()),
+        },
+        FeedbackRow {
+            received: "November 14, 2026, 16:40 UTC".into(),
+            received_at: "2026-11-14T16:40:00Z".into(),
+            sender: FeedbackSenderView::Anonymous,
+            message: "anonymous note".into(),
+            cli_version: "0.9.0".into(),
+            platform: "macos aarch64".into(),
+            placement: "",
+            environment_id: None,
+        },
+    ];
+    let body = AdminFeedbackTemplate {
+        view: &view,
+        rows: &rows,
+        filter: FeedbackFilter::Anonymous,
+        later_page: true,
+        first_page_url: "/admin/feedback/?sender=anonymous",
+        next_page_url: "/admin/feedback/?sender=anonymous&page=1.a",
+    }
+    .render()
+    .expect("render admin feedback page");
+
+    assert!(!body.contains("<script>alert"));
+    assert!(!body.contains("<owner@example.test>"));
+    assert!(!body.contains("Acme <Labs>"));
+    assert_eq!(body.matches("<article class=\"cw-feedback\"").count(), 2);
+    assert!(body.contains(">Anonymous</h3>"));
+    assert!(body.contains(
+        "<a href=\"mailto:%3Cowner@example.test%3E?subject=Re%3A%20your%20Codewire%20feedback\">&#60;owner@example.test&#62;</a></h3>"
+    ) || body.contains(
+        "<a href=\"mailto:%3Cowner@example.test%3E?subject=Re%3A%20your%20Codewire%20feedback\">&lt;owner@example.test&gt;</a></h3>"
+    ));
+    assert_eq!(body.matches("View account").count(), 1);
+    assert!(body.contains("href=\"/admin/accounts/?account=user-1\">View account"));
+    assert_eq!(body.matches("mailto:").count(), 1);
+    assert!(
+        body.contains(
+            "<time datetime=\"2026-11-14T17:02:09Z\">November 14, 2026, 17:02 UTC</time>"
+        )
+    );
+    assert!(body.contains("<dt>Placement</dt><dd>Cloud</dd>"));
+    assert_eq!(body.matches("<dt>Placement</dt>").count(), 1);
+    assert_eq!(body.matches("<dt>Sandbox</dt>").count(), 1);
+    assert!(body.contains("<option value=\"anonymous\" selected>"));
+    assert!(body.contains(">Newest</a>"));
+    assert!(
+        body.contains("href=\"/admin/feedback/?sender=anonymous&amp;page=1.a\">Older</a>")
+            || body.contains("href=\"/admin/feedback/?sender=anonymous&#38;page=1.a\">Older</a>")
+    );
+
+    for (filter, later_page, empty) in [
+        (FeedbackFilter::All, false, "No feedback yet."),
+        (
+            FeedbackFilter::SignedIn,
+            false,
+            "No signed-in feedback yet.",
+        ),
+        (
+            FeedbackFilter::Anonymous,
+            false,
+            "No anonymous feedback yet.",
+        ),
+        (FeedbackFilter::All, true, "No older feedback."),
+    ] {
+        let body = AdminFeedbackTemplate {
+            view: &view,
+            rows: &[],
+            filter,
+            later_page,
+            first_page_url: "",
+            next_page_url: "",
+        }
+        .render()
+        .expect("render empty admin feedback page");
+        assert!(body.contains(empty), "{empty}");
+        assert!(!body.contains("cw-pagination"));
+    }
+}
+
+/// The header's Support button writes to the configured support address
+/// with a "[Support]" subject, in this tab; without an address it is gone.
+#[test]
+fn the_support_button_follows_the_configured_address() {
+    for (support_mailto, shown) in [
+        ("mailto:support@codewire.sh?subject=%5BSupport%5D", true),
+        ("", false),
+    ] {
+        let view = DashboardView {
+            support_mailto: support_mailto.to_owned(),
+            ..Default::default()
+        };
+        let body = AdminFeedbackTemplate {
+            view: &view,
+            rows: &[],
+            filter: FeedbackFilter::All,
+            later_page: false,
+            first_page_url: "",
+            next_page_url: "",
+        }
+        .render()
+        .expect("render a page with the console header");
+        assert_eq!(
+            body.contains(
+                "<a class=\"cw-button cw-button--outline cw-button--small\" href=\"mailto:support@codewire.sh?subject=%5BSupport%5D\">Support</a>"
+            ),
+            shown
+        );
+        assert_eq!(body.contains(">Support</a>"), shown);
+        assert!(!body.contains("target=\"_blank\" rel=\"noopener\"><span>Support"));
+    }
 }
 
 /// Both copies of the Sandbox rail (desktop sidebar and mobile drawer) wait
@@ -158,6 +294,7 @@ fn the_shell_renders_the_collapsed_sidebar_and_both_sidebar_buttons() {
     for collapsed in [false, true] {
         let view = DashboardView {
             sidebar_collapsed: collapsed,
+            support_mailto: String::new(),
             ..Default::default()
         };
         let body = AdminAuditTemplate {
@@ -208,6 +345,7 @@ fn admin_accounts_template_escapes_access_request_fields() {
         provisioned_memory_mb: 0,
         provisioned_disk_gb: 0,
         sidebar_collapsed: false,
+        support_mailto: String::new(),
     };
     let accounts = vec![AccountAccessView {
         id: "user-safe".into(),
@@ -228,6 +366,7 @@ fn admin_accounts_template_escapes_access_request_fields() {
     let body = AdminAccountsTemplate {
         view: &view,
         accounts: &accounts,
+        one_account: false,
         csrf_token: "csrf-safe",
         message: "",
         error: "",
@@ -273,6 +412,7 @@ fn only_an_unverified_account_offers_to_resend_its_verification_email() {
         provisioned_memory_mb: 0,
         provisioned_disk_gb: 0,
         sidebar_collapsed: false,
+        support_mailto: String::new(),
     };
     let account = |id: &str, email_verified: bool| AccountAccessView {
         id: id.into(),
@@ -292,6 +432,7 @@ fn only_an_unverified_account_offers_to_resend_its_verification_email() {
     let body = AdminAccountsTemplate {
         view: &view,
         accounts: &accounts,
+        one_account: false,
         csrf_token: "csrf-marker",
         message: "",
         error: "",

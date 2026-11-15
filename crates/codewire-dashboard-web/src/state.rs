@@ -16,6 +16,8 @@ pub(crate) struct AppState {
     pub(crate) turnstile_site_key: String,
     pub(crate) github_app_slug: String,
     pub(crate) github_app_client_id: String,
+    /// The header's Support link; empty hides it.
+    pub(crate) support_mailto: String,
     pub(crate) http: reqwest::Client,
     pub(crate) credential_http: reqwest::Client,
     pub(crate) session_http: reqwest::Client,
@@ -45,6 +47,11 @@ impl AppState {
             confidential_storage_enabled: config.confidential_storage_enabled,
             turnstile_site_key: config.turnstile_site_key,
             github_app_slug: config.github_app_slug,
+            support_mailto: config
+                .support_email
+                .as_deref()
+                .map(|address| crate::mailto::mailto(address, "[Support]"))
+                .unwrap_or_default(),
             github_app_client_id: config.github_app_client_id,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))

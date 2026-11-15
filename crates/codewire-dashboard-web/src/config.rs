@@ -49,6 +49,10 @@ pub struct Config {
     /// credential-service, never the dashboard or browser.
     pub(crate) github_app_slug: String,
     pub(crate) github_app_client_id: String,
+    /// Where the header's Support button writes to, from
+    /// `CODEWIRE_SUPPORT_EMAIL`; unset hides the button, since a self-hosted
+    /// deployment without its own support address has nowhere to send it.
+    pub(crate) support_email: Option<String>,
 }
 
 impl Config {
@@ -104,6 +108,13 @@ impl Config {
             Err(env::VarError::NotPresent) => String::new(),
             Err(env::VarError::NotUnicode(_)) => bail!("GITHUB_APP_CLIENT_ID must be valid UTF-8"),
         };
+        let support_email = match env::var("CODEWIRE_SUPPORT_EMAIL") {
+            Ok(value) => parse_support_email(&value)?,
+            Err(env::VarError::NotPresent) => None,
+            Err(env::VarError::NotUnicode(_)) => {
+                bail!("CODEWIRE_SUPPORT_EMAIL must be valid UTF-8")
+            }
+        };
 
         Ok(Self {
             listen_addr,
@@ -119,8 +130,27 @@ impl Config {
             turnstile_site_key,
             github_app_slug,
             github_app_client_id,
+            support_email,
         })
     }
+}
+
+/// An email address, or `None` for an empty value.
+fn parse_support_email(value: &str) -> anyhow::Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let valid = value.len() <= 254
+        && value
+            .split_once('@')
+            .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
+        && value.matches('@').count() == 1
+        && value.chars().all(|c| c.is_ascii_graphic());
+    if !valid {
+        bail!("CODEWIRE_SUPPORT_EMAIL must be one email address, such as support@example.com");
+    }
+    Ok(Some(value.to_owned()))
 }
 
 fn parse_github_app_client_id(value: String) -> anyhow::Result<String> {
@@ -193,6 +223,27 @@ fn parse_origin(label: &str, raw: String) -> anyhow::Result<(http::Uri, String)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_support_email_is_one_address_or_nothing() {
+        assert_eq!(
+            parse_support_email(" support@codewire.sh ")
+                .unwrap()
+                .as_deref(),
+            Some("support@codewire.sh")
+        );
+        assert_eq!(parse_support_email("").unwrap(), None);
+        for invalid in [
+            "support",
+            "@codewire.sh",
+            "a@b",
+            "a@b@c.sh",
+            "a b@c.sh",
+            "a@c.sh,b@c.sh\n",
+        ] {
+            assert!(parse_support_email(invalid).is_err(), "{invalid}");
+        }
+    }
 
     #[test]
     fn runtime_modes_are_explicit_and_fail_closed() {

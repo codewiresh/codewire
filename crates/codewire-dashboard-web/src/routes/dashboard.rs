@@ -148,6 +148,7 @@ pub(super) async fn dashboard_view(
         provisioned_memory_mb: 0,
         provisioned_disk_gb: 0,
         sidebar_collapsed: sidebar_collapsed(headers),
+        support_mailto: state.support_mailto.clone(),
     })
 }
 
@@ -163,6 +164,7 @@ pub(super) async fn dashboard_shell_view(
     let identity = identity?;
     enforce_two_factor(&identity)?;
     Ok(shell_from_organizations(
+        state,
         headers,
         &identity,
         organizations?,
@@ -201,6 +203,7 @@ pub(super) async fn dashboard_shell_view_from_identity(
 ) -> Result<DashboardView, WebError> {
     let organizations = organizations(state, cookie).await?;
     Ok(shell_from_organizations(
+        state,
         headers,
         identity,
         organizations,
@@ -209,6 +212,7 @@ pub(super) async fn dashboard_shell_view_from_identity(
 }
 
 fn shell_from_organizations(
+    state: &AppState,
     headers: &HeaderMap,
     identity: &IdentityUser,
     organizations: Vec<OrganizationRow>,
@@ -241,6 +245,7 @@ fn shell_from_organizations(
         provisioned_memory_mb: 0,
         provisioned_disk_gb: 0,
         sidebar_collapsed: sidebar_collapsed(headers),
+        support_mailto: state.support_mailto.clone(),
     }
 }
 
@@ -336,7 +341,7 @@ pub(super) async fn personal_settings_shell_view_from_organizations(
     organizations: Vec<OrganizationRow>,
     unavailable: bool,
 ) -> Result<DashboardView, WebError> {
-    let mut view = shell_from_organizations(headers, identity, organizations, unavailable);
+    let mut view = shell_from_organizations(state, headers, identity, organizations, unavailable);
     // Missing or inaccessible context is discarded without resolving any
     // organization that was not returned for this exact authenticated caller.
     let Some(organization) = view

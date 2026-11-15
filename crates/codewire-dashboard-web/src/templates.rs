@@ -3,7 +3,7 @@ use askama::Template;
 use crate::account_home::Balance;
 use crate::admin_connect::{
     AdminCatalogView, AdminOrganizationRow, AdminOrganizationView, AdminStatsView, AuditLogRow,
-    QuotaView,
+    FeedbackFilter, FeedbackRow, FeedbackSenderView, QuotaView,
 };
 use crate::billing_banner::BillingBannerView;
 use crate::billing_connect::BillingPageView;
@@ -87,6 +87,8 @@ pub(crate) struct AdminOrganizationTemplate<'a> {
 pub(crate) struct AdminAccountsTemplate<'a> {
     pub(crate) view: &'a DashboardView,
     pub(crate) accounts: &'a [AccountAccessView],
+    /// Narrowed to one account, as from a feedback row.
+    pub(crate) one_account: bool,
     pub(crate) csrf_token: &'a str,
     pub(crate) message: &'a str,
     pub(crate) error: &'a str,
@@ -105,6 +107,18 @@ pub(crate) struct AdminAuditTemplate<'a> {
     pub(crate) has_next: bool,
     pub(crate) previous_url: &'a str,
     pub(crate) next_url: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "admin-feedback.html")]
+pub(crate) struct AdminFeedbackTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) rows: &'a [FeedbackRow],
+    pub(crate) filter: FeedbackFilter,
+    /// Showing a page after the first, so an empty one is not "no feedback yet".
+    pub(crate) later_page: bool,
+    pub(crate) first_page_url: &'a str,
+    pub(crate) next_page_url: &'a str,
 }
 
 #[derive(Template)]

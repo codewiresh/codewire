@@ -1,3 +1,3 @@
 <div class="cw-console-account">
-  <a class="cw-button cw-button--outline cw-button--small" href="/docs" target="_blank" rel="noopener"><span>Support</span><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-external"/></svg></a>
+  {% if !view.support_mailto.is_empty() %}<a class="cw-button cw-button--outline cw-button--small" href="{{ view.support_mailto }}">Support</a>{% endif %}
 </div>

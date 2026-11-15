@@ -56,6 +56,7 @@ fn config(upstream: &str) -> crate::Config {
         turnstile_site_key: String::new(),
         github_app_slug: String::new(),
         github_app_client_id: String::new(),
+        support_email: None,
     }
 }
 
@@ -342,4 +343,52 @@ async fn an_empty_organization_gets_the_start_panel_and_its_refresh_changes_noth
     assert_eq!(status, StatusCode::OK, "{calls:?}");
     assert!(html.contains("No Sandboxes found"), "{html}");
     assert_eq!(count(&calls, "/GetBillingOverview"), 0, "{calls:?}");
+}
+
+/// Only platform admins read feedback: a signed-in member who isn't one is
+/// sent away before the admin RPC is ever called (#4061).
+#[tokio::test]
+async fn a_member_who_is_not_an_admin_never_reaches_feedback() {
+    // Admin pages check the session before reading organizations, so this
+    // upstream answers each call at once rather than in pairs.
+    let calls = Calls::default();
+    let captured = calls.clone();
+    let upstream = serve(Router::new().fallback(any(move |request: axum::extract::Request| {
+        let calls = captured.clone();
+        async move {
+            let path = request.uri().path().to_owned();
+            calls.lock().unwrap().push(path.clone());
+            if path == "/api/auth/get-session" {
+                return Json(serde_json::json!({"user": {"id": "synthetic-account", "email": "synthetic@example.test", "two_factor_enabled": true}})).into_response();
+            }
+            if path.ends_with("/ListOrganizations") {
+                let bytes = ListOrganizationsResponse::default().encode_to_vec();
+                return ([(header::CONTENT_TYPE, "application/proto")], bytes).into_response();
+            }
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+    })))
+    .await;
+    let dashboard = serve(crate::app(config(&upstream.origin))).await;
+    let response = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
+        .build()
+        .unwrap()
+        .get(format!("{}/admin/feedback/", dashboard.origin))
+        .headers(session())
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_redirection(), "{}", response.status());
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/dashboard/")
+    );
+    let calls = calls.lock().unwrap().clone();
+    assert_eq!(count(&calls, "/api/auth/get-session"), 1, "{calls:?}");
+    assert_eq!(count(&calls, "/ListFeedback"), 0, "{calls:?}");
 }

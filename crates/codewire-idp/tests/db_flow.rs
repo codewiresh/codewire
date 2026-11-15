@@ -3661,6 +3661,20 @@ async fn invite_only_sign_up_without_mail_vouches_by_invitation_against_postgres
     assert_eq!(carol_row["vouchedBy"], "admin");
     assert!(carol_row["joinedVia"].is_null());
 
+    // An admin page links to one account; the list narrows to it (#4061).
+    let (st, body, _) = sess_req(
+        &access,
+        "GET",
+        &format!("/api/admin/accounts?account={carol}"),
+        Some("sess_owner_invite_only"),
+        "",
+    )
+    .await;
+    assert_eq!(st, 200, "one account: {body}");
+    let accounts = body["accounts"].as_array().unwrap();
+    assert_eq!(accounts.len(), 1, "{body}");
+    assert_eq!(accounts[0]["email"], "carol@example.test");
+
     // With IDP_SIGNUP_REASON=required a sign-up without an invite says why;
     // an invited one is never asked.
     let policy = |reason: Option<&str>| {

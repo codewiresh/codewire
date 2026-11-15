@@ -1,6 +1,6 @@
 //! Global-administrator account access review endpoints.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware;
 use axum::routing::{get, post};
@@ -105,8 +105,16 @@ struct LockedAccount {
     access_reason: Option<String>,
 }
 
+/// `account` narrows the list to that one account, for an admin page that
+/// links to it, such as a feedback row's sender (#4061).
+#[derive(Debug, Default, Deserialize)]
+struct AccountListQuery {
+    account: Option<String>,
+}
+
 async fn list_accounts(
     State(state): State<AccessAdminState>,
+    Query(query): Query<AccountListQuery>,
     actor: AuthUser,
 ) -> Result<Json<AccountAccessList>, AppError> {
     actor.require_global_admin()?;
@@ -120,13 +128,14 @@ async fn list_accounts(
                   COALESCE(created_at, NOW()::timestamp) AS created_at,
                   email_vouched_by AS vouched_by
            FROM users
-           WHERE id <> $1
+           WHERE id <> $1 AND ($2::text IS NULL OR id = $2)
            ORDER BY enabled ASC,
                     (access_reason IS NOT NULL) DESC,
                     created_at DESC NULLS LAST
            LIMIT 500"#,
     )
     .bind(DELETED_USER_ID)
+    .bind(query.account)
     .fetch_all(&state.pool)
     .await
     .map_err(|error| {

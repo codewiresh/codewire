@@ -1096,6 +1096,7 @@ mod tests {
             provisioned_memory_mb: 0,
             provisioned_disk_gb: 0,
             sidebar_collapsed: false,
+            support_mailto: String::new(),
         }
     }
 

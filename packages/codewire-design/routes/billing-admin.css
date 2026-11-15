@@ -37,6 +37,18 @@ dl.cw-stat-grid { margin: 0; }
 .cw-filter-form .cw-field:first-child { width: min(var(--control-width), 100%); }
 .cw-filter-form .cw-field:nth-child(2) { width: var(--control-width-sm); }
 .cw-pagination { display: flex; justify-content: flex-end; gap: var(--space-2); }
+/* Feedback: one record per row, the sender as its heading, the message as sent (line breaks kept) and what the CLI attached under it. */
+.cw-feedback { display: grid; gap: var(--space-2); min-width: 0; }
+.cw-feedback-header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-1) var(--space-3); }
+.cw-feedback-sender { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-3); min-width: 0; }
+.cw-feedback-sender a { color: var(--accent-text); text-decoration: underline; text-decoration-color: var(--accent-muted); text-underline-offset: 0.2em; }
+.cw-feedback-sender > a { font-size: var(--text-small); }
+.cw-feedback-header h3 { margin: 0; overflow-wrap: anywhere; font-size: var(--text-body); font-weight: var(--weight-medium); }
+.cw-feedback-header p { margin: 0; font-size: var(--text-small); }
+.cw-feedback-message { max-width: var(--measure); margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cw-feedback-facts { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); margin: 0; color: var(--fg-tertiary); font-size: var(--text-small); }
+.cw-feedback-facts div { display: flex; gap: var(--space-1); min-width: 0; }
+.cw-feedback-facts dd { margin: 0; overflow-wrap: anywhere; color: var(--fg-secondary); }
 .cw-audit-details pre { width: min(var(--dialog-width), 75vw); max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .cw-admin-section { display: grid; gap: var(--space-4); }

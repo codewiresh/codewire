@@ -148,6 +148,7 @@ mod tests {
             turnstile_site_key: String::new(),
             github_app_slug: String::new(),
             github_app_client_id: String::new(),
+            support_email: None,
         }
     }
 
@@ -225,6 +226,7 @@ mod tests {
             turnstile_site_key: String::new(),
             github_app_slug: String::new(),
             github_app_client_id: String::new(),
+            support_email: None,
         });
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
