@@ -375,14 +375,14 @@ enum Command {
     #[command(about = "Send feedback to the Codewire team", long_about = FEEDBACK_LONG_ABOUT)]
     Feedback(FeedbackArgs),
     #[command(
-        about = "Let this computer provide VMs for your organization (a host)",
+        about = "Let this computer provide VMs for your organization (a host; preview)",
         long_about = HOST_LONG_ABOUT
     )]
     Host {
         #[command(subcommand)]
         command: HostCommand,
     },
-    #[command(about = "List your organization's hosts")]
+    #[command(about = "List your organization's hosts (preview)")]
     Hosts(HostsArgs),
     #[command(
         about = "Select the current environment; without ENV, choose from a list",

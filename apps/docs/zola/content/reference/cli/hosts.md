@@ -16,6 +16,10 @@ VMs from it (`cw host provide`) and grant it to other members
 (`cw host grant`). Creating environments on a host is coming; for now a host
 enrolls, connects and shows its state.
 
+Hosts are a preview and still being built, and the host commands say so: some
+host features don't work yet. The line goes to standard error, only at a
+terminal, so pipes, logs and `-o json` output never see it.
+
 [Hosts](@/environments/hosts.md) explains how a host connects and who may use
 it.
 

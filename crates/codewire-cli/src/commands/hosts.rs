@@ -40,7 +40,39 @@ const KEY_RETRY: Duration = Duration::from_secs(30);
 /// The longest wait between reconnects.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
-pub(crate) const HOST_LONG_ABOUT: &str =
+/// What every host command says while hosts are unfinished (owner,
+/// 2026-11-13, #3609: no switch, but say plainly that it may not work).
+macro_rules! host_preview {
+    () => {
+        "Hosts are a preview and still being built: some host features don't work yet."
+    };
+}
+
+/// Says that hosts are a preview: one attention line on stderr, only at a
+/// terminal, so pipes, logs, CI and JSON never see it. It is shown with every
+/// host command rather than once a day, and has no off switch, because the
+/// owner chose to say it wherever host features are used (2026-11-13, #3609).
+fn preview_notice() {
+    let facts = crate::output::TerminalFacts::probe();
+    if facts.stderr_tty {
+        let caps = crate::output::Capabilities::detect(
+            crate::output::OutputMode::Text,
+            &facts,
+            &crate::config::OsEnv,
+        );
+        eprintln!("{}", preview_line(caps.stderr_style()));
+    }
+}
+
+fn preview_line(style: crate::output::Style) -> String {
+    format!(
+        "{} {}",
+        style.status(crate::output::Status::Attention),
+        host_preview!()
+    )
+}
+
+pub(crate) const HOST_LONG_ABOUT: &str = concat!(
     "Let this computer provide VMs for your organization's environments.
 
 A host here is a computer that runs Codewire VMs. It is not a trusted host
@@ -62,7 +94,11 @@ grant it. The host key stays in the OS keyring (Secret Service, Keychain). If
 the keyring is locked, for example after a reboot with nobody logged in, the
 agent waits and `cw host status` says so. A Linux computer with no Secret
 Service, such as a server, keeps the key in a file only you can read instead;
-`cw host enroll --key-store file` chooses that on any Linux computer.";
+`cw host enroll --key-store file` chooses that on any Linux computer.
+
+",
+    host_preview!()
+);
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum HostCommand {
@@ -514,6 +550,7 @@ pub(crate) async fn handle_hosts_command(globals: &Globals, args: HostsArgs) -> 
         );
         return Ok(());
     }
+    preview_notice();
     if hosts.is_empty() {
         println!("No hosts in this organization. Run `cw host enroll` on a computer to add one.");
         return Ok(());
@@ -669,6 +706,7 @@ async fn enroll(globals: &Globals, args: HostEnrollArgs) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&host_json(&host))?);
         return Ok(());
     }
+    preview_notice();
     println!(
         "Enrolled this computer as host `{}` ({}).",
         host.name, host.id
@@ -718,6 +756,7 @@ async fn status(globals: &Globals, args: HostOutputArgs) -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    preview_notice();
     println!("Host:      {} ({})", host.name, host.id);
     println!("Server:    {}", enrollment.server_url);
     println!(
@@ -803,6 +842,7 @@ async fn provide(globals: &Globals, args: HostProvideArgs) -> anyhow::Result<()>
     if matches!(args.output, OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(&host_json(&host))?);
     } else if host.provide {
+        preview_notice();
         println!("Host `{}` provides VMs: {}.", host.name, limits_text(&host));
     } else {
         println!("Host `{}` no longer offers VMs.", host.name);
@@ -1199,6 +1239,18 @@ pub(crate) mod service;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_preview_line_is_one_attention_line() {
+        use crate::output::{Charset, Style};
+        assert_eq!(
+            preview_line(Style::new(false, Charset::Unicode)),
+            "! Hosts are a preview and still being built: some host features don't work yet."
+        );
+        assert!(preview_line(Style::new(false, Charset::Ascii)).starts_with("! Hosts"));
+        assert!(!preview_line(Style::new(false, Charset::Unicode)).contains('\x1b'));
+        assert!(preview_line(Style::new(true, Charset::Unicode)).starts_with("\x1b[33m!"));
+    }
 
     #[test]
     fn computer_names_become_host_names() {
