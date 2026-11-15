@@ -179,14 +179,8 @@ pub async fn preview_proxy_middleware(
             Err(response) if response.status() == StatusCode::UNAUTHORIZED => {
                 // Only an actual top-level browser navigation starts sign-in.
                 // API requests, POST bodies and upgrade handshakes fail closed.
-                if method != axum::http::Method::GET
-                    || headers.contains_key(header::UPGRADE)
-                    || headers.get("sec-fetch-mode").and_then(|v| v.to_str().ok())
-                        != Some("navigate")
-                    || headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok())
-                        != Some("document")
-                {
-                    return response;
+                if !browser::top_level_navigation(&method, &headers) {
+                    return preview_sign_in_required();
                 }
                 return match authorization::start(
                     &authorization::PreviewContext::from(&state),
@@ -685,16 +679,27 @@ fn preview_error(status: StatusCode, message: &'static str) -> Response {
     response
 }
 
+/// A signed-out request that isn't a browser navigation: it says how to
+/// authenticate, with the challenge a 401 carries (RFC 9110 §11.6.1).
+fn preview_sign_in_required() -> Response {
+    let mut response = preview_error(
+        StatusCode::UNAUTHORIZED,
+        "sign-in required: open this preview in a browser, or send a Codewire API key as Authorization: Bearer cw_...",
+    );
+    response.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static(r#"Bearer realm="Codewire preview""#),
+    );
+    authorization::no_store(response)
+}
+
 fn preview_forbidden(
     context: &authorization::PreviewContext<'_>,
     method: &axum::http::Method,
     headers: &HeaderMap,
     message: &'static str,
 ) -> Response {
-    if *method == axum::http::Method::GET
-        && headers.get("sec-fetch-mode").and_then(|v| v.to_str().ok()) == Some("navigate")
-        && headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("document")
-    {
+    if browser::top_level_navigation(method, headers) {
         authorization::denied_page(context)
     } else {
         preview_error(StatusCode::FORBIDDEN, message)
@@ -723,6 +728,27 @@ mod tests {
     use super::*;
     use futures_util::StreamExt;
     use tokio_stream::wrappers::ReceiverStream;
+
+    #[tokio::test]
+    async fn a_signed_out_request_is_told_how_to_sign_in() {
+        let response = preview_sign_in_required();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers()[header::WWW_AUTHENTICATE],
+            r#"Bearer realm="Codewire preview""#
+        );
+        assert_eq!(
+            response.headers()[PREVIEW_SERVICE_HEADER],
+            PREVIEW_SERVICE_NAME
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("open this preview in a browser"), "{body}");
+        assert!(body.contains("Authorization: Bearer"), "{body}");
+    }
 
     #[tokio::test]
     async fn workload_redirect_is_returned_not_followed_and_stays_private() {

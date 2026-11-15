@@ -1,7 +1,7 @@
 ---
 title: Ports and preview URLs
 description: Publish an application port as an HTTPS preview URL on the platform, or on 127.0.0.1 and an HTTPS hostname for a local VM.
-updated: 2026-11-14
+updated: 2026-11-15
 weight: 5
 aliases: ["/guides/previews", "/concepts/preview-environments"]
 ---
@@ -61,10 +61,14 @@ Port 2222 is reserved for the environment's SSH server. The dashboard's
 exact URL with **Open** and **Copy**.
 
 A `creator` or `org_members` preview asks a signed-out browser to sign in,
-then returns it to the page. The application never sees Codewire's cookies or
-headers, and a Codewire credential sent to the preview is stripped before the
-request reaches the application; the application's own cookies and `Basic`
-authentication pass through.
+then returns it to the page. A script gets `401` instead; it reaches the
+preview with a Codewire [API key](@/organizations/api-keys.md) of an account
+that may open it, sent as `Authorization: Bearer cw_…`.
+
+The application never sees Codewire's cookies or headers, and a Codewire
+credential sent to the preview is stripped before the request reaches the
+application; the application's own cookies and `Basic` authentication pass
+through.
 
 A preset or `codewire.yaml` can declare previews so that every environment
 created from it gets them:

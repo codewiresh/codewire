@@ -77,8 +77,10 @@ be framed by another preview or called cross-origin with its grant; use a
 public preview or a bearer credential for that. Older browsers without it
 (Safari before 16.4) send no Origin on image, script or frame loads, so there
 a grant still accompanies those. Private previews refuse service-worker
-scripts: a worker could read the sign-in callback's one-use code. Non-navigation unauthenticated requests fail rather than entering
-sign-in.
+scripts: a worker could read the sign-in callback's one-use code. Non-navigation unauthenticated requests never enter
+sign-in: they get `401` with `WWW-Authenticate: Bearer realm="Codewire
+preview"` and a body saying to open the preview in a browser or send a
+Codewire API key.
 
 Codewire cookies and reserved Codewire headers never reach the application.
 The proxy removes the Bearer credential it authenticated a request with, and

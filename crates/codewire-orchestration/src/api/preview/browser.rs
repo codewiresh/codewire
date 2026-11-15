@@ -246,10 +246,22 @@ pub(super) fn verify_confirmation(
 /// stop another preview from sending this browser's grant with a script,
 /// image, frame or credentialed fetch of its own; Fetch Metadata can. Unsafe
 /// methods also need this preview's exact Origin.
+/// A browser loading a page into a tab or window, by its Fetch Metadata.
+fn document_navigation(headers: &HeaderMap) -> bool {
+    let fetch = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    fetch("sec-fetch-mode") == Some("navigate") && fetch("sec-fetch-dest") == Some("document")
+}
+
+/// A top-level browser page load: the only request that may be sent to sign
+/// in or shown an HTML page. API calls, frames, other methods and upgrade
+/// handshakes get a status and a line of text.
+pub(super) fn top_level_navigation(method: &Method, headers: &HeaderMap) -> bool {
+    *method == Method::GET && !headers.contains_key(header::UPGRADE) && document_navigation(headers)
+}
+
 pub(super) fn safe_cookie_request(method: &Method, headers: &HeaderMap, origin: &str) -> bool {
     let fetch = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
-    let navigation =
-        fetch("sec-fetch-mode") == Some("navigate") && fetch("sec-fetch-dest") == Some("document");
+    let navigation = document_navigation(headers);
     let site = match fetch("sec-fetch-site") {
         Some("same-origin" | "none") => true,
         Some(_) => navigation,
@@ -545,6 +557,45 @@ mod tests {
             &headers,
             "https://preview.test"
         ));
+    }
+
+    #[test]
+    fn only_a_top_level_page_load_is_a_navigation() {
+        let headers = |pairs: &[(&'static str, &'static str)]| {
+            let mut headers = HeaderMap::new();
+            for (name, value) in pairs {
+                headers.insert(*name, HeaderValue::from_static(value));
+            }
+            headers
+        };
+        let page = [
+            ("sec-fetch-mode", "navigate"),
+            ("sec-fetch-dest", "document"),
+        ];
+        assert!(top_level_navigation(&Method::GET, &headers(&page)));
+        for (method, request) in [
+            (Method::GET, headers(&[])),
+            (
+                Method::GET,
+                headers(&[("sec-fetch-mode", "navigate"), ("sec-fetch-dest", "iframe")]),
+            ),
+            (
+                Method::GET,
+                headers(&[("sec-fetch-mode", "cors"), ("sec-fetch-dest", "empty")]),
+            ),
+            (
+                Method::GET,
+                headers(&[page[0], page[1], ("upgrade", "websocket")]),
+            ),
+            (Method::HEAD, headers(&page)),
+            (Method::POST, headers(&page)),
+            (Method::OPTIONS, headers(&page)),
+        ] {
+            assert!(
+                !top_level_navigation(&method, &request),
+                "{method} {request:?}"
+            );
+        }
     }
 
     #[test]

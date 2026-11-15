@@ -10,7 +10,7 @@ both placements. The format is in [README.md](README.md).
 
 ## Where the walk stands
 
-Updated 2026-11-13.
+Updated 2026-11-14.
 
 | ID | Issue | Linux local VM | macOS local VM | Dev | Production |
 | --- | --- | --- | --- | --- | --- |
@@ -101,7 +101,8 @@ Issue: #4357. Code: `crates/codewire-orchestration/src/api/preview.rs`.
   ACCESS`; the **Ports** dialog on the dashboard's Sandbox page; `ports:` in
   `codewire.yaml`.
 - **States to exercise:** a server on `127.0.0.1` only, a server on
-  `0.0.0.0`, and a port with nothing listening.
+  `0.0.0.0`, a port with nothing listening, and a `creator` preview opened
+  signed out, from a browser (#4700) and from `curl`.
 - **Driving it:**
 
   ```sh
@@ -114,14 +115,28 @@ Issue: #4357. Code: `crates/codewire-orchestration/src/api/preview.rs`.
   cw ports preview-walk
   ```
 
-  Open each printed URL in a browser signed in as the creator.
-- **Proof:** both URLs show the directory listing the server serves. A 502
-  "preview backend unreachable" for the loopback server is the failure.
+  Open each printed URL in a browser signed in as the creator. Then open
+  one in a signed-out browser, sign in as the creator, and run
+  `curl -i URL` with no credential.
+- **Proof:**
+  - Both URLs show the directory listing the server serves. A 502
+    "preview backend unreachable" for the loopback server is the failure.
+  - The signed-out browser reaches "Sign in to view preview", and after
+    signing in it is back on the preview.
+  - `curl` gets `401` with `WWW-Authenticate: Bearer realm="Codewire
+    preview"` and a body saying to open the preview in a browser or send a
+    Codewire API key. A bare `{"error":"unauthorized"}` is the failure.
 - **Gotchas:** the public docs' preview example binds `0.0.0.0`
   (`use-cases/preview-environments.md`), which passes and hides the loopback
   case.
-- **Observed:** not yet observed. #4357 reports, from reading the code, that
-  the loopback server answers 502 because the proxy dials the Pod's address.
+- **Observed:**
+  - Not yet observed for the loopback server. #4357 reports, from reading
+    the code, that it answers 502 because the proxy dials the Pod's address.
+  - Signed out, on Dev source 14fb7f56a, 2026-11-14 (#4700): a headless
+    Chromium went from the preview to the authorize step to
+    "Sign in to view preview", and `curl` got a bare `401` with
+    `{"error":"unauthorized"}`. Signing in and returning is not yet
+    observed.
 
 ## `local-https-hostnames`: an HTTPS hostname per labelled port on a local VM
 
