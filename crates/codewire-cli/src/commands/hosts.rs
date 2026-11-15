@@ -34,7 +34,6 @@ pub(crate) const HOST_CAPABILITY_VERSION: u32 = 1;
 /// This computer's enrollment, beside the platform config.
 const ENROLLMENT_FILE: &str = "host.json";
 /// What the running agent last reported, for `cw host status`.
-const AGENT_STATUS_FILE: &str = "host-agent.json";
 /// How long the agent waits before retrying a locked keyring.
 const KEY_RETRY: Duration = Duration::from_secs(30);
 /// The longest wait between reconnects.
@@ -242,18 +241,6 @@ pub(crate) struct Enrollment {
     pub key_store: KeyStore,
 }
 
-/// What the running agent last reported.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AgentStatus {
-    pub pid: u32,
-    /// `attaching`, `attached`, `waiting_for_key`, `reconnecting`,
-    /// `unrecognised`, `revoked` or `stopped`.
-    pub state: String,
-    pub detail: String,
-    pub since: String,
-}
-
 // ── Pure helpers ──────────────────────────────────────────────────────────
 
 /// The same rule as the server: a DNS label.
@@ -439,27 +426,14 @@ fn ensure_private_dir(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn write_agent_status(dir: &Path, state: &str, detail: impl Into<String>) {
-    let status = AgentStatus {
-        pid: std::process::id(),
-        state: state.into(),
-        detail: detail.into(),
-        since: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-    };
-    // The status file is a convenience for `cw host status`; failing to
-    // write it never stops the agent.
-    let _ = super::host::write_private_json(&dir.join(AGENT_STATUS_FILE), &status);
-}
-
-fn read_agent_status(dir: &Path) -> Option<AgentStatus> {
-    serde_json::from_slice(&fs::read(dir.join(AGENT_STATUS_FILE)).ok()?).ok()
-}
-
 fn process_alive(pid: u32) -> bool {
     // Signal 0 checks existence without sending anything.
     rustix::process::Pid::from_raw(pid as i32)
         .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
 }
+
+mod agent_status;
+use agent_status::{AGENT_STATUS_FILE, read_agent_status, write_agent_status};
 
 // ── The key ───────────────────────────────────────────────────────────────
 
