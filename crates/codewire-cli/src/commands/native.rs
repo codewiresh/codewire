@@ -731,19 +731,13 @@ pub(crate) async fn create_native_environment(
             environment
         }
         Err(status) => {
-            let stage = progress.fail_with_code(
-                codewire_local_vmm::supervisor_client::operation_error_code(&status),
-            );
+            let (stage, error) =
+                lifecycle::wait_failure(&progress, "creation", &request.name, status);
             // The supervisor's reason already says whether the failed
             // environment was kept.
-            return Err(lifecycle::lifecycle_failure(
-                "create",
-                &request.name,
-                stage,
-                native_status(status),
-                false,
-            )
-            .await);
+            return Err(
+                lifecycle::lifecycle_failure("create", &request.name, stage, error, false).await,
+            );
         }
     };
     sources::validate_created_environment(&environment, &request)?;
@@ -1953,12 +1947,7 @@ async fn run_native_start(
                 progress.complete();
                 Ok(environment)
             }
-            Err(status) => Err((
-                progress.fail_with_code(
-                    codewire_local_vmm::supervisor_client::operation_error_code(&status),
-                ),
-                native_status(status),
-            )),
+            Err(status) => Err(lifecycle::wait_failure(progress, "start", name, status)),
         },
     )
 }

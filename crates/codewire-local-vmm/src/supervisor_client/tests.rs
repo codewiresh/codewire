@@ -790,10 +790,38 @@ async fn stream_failures_and_invalid_phases_do_not_become_success() {
             .unwrap_err();
         assert_eq!(error.code(), expected_code);
         assert!(error.message().contains(&initial.operation_id));
+        // The supervisor answered: the outcome is known (#4418).
+        assert!(!operation_watch_lost_contact(&error));
         assert_eq!(
             server.calls(),
             ["info", "watch:f30e0037-c1b1-46d0-8d8d-cd512049a002"]
         );
+        drop(client);
+        server.finish().await;
+    }
+}
+
+/// #4418: a watch the supervisor refuses is its answer, not lost contact;
+/// a broken connection the client may not reconnect is.
+#[tokio::test]
+async fn only_a_watch_that_loses_the_supervisor_is_lost_contact() {
+    for (code, lost) in [
+        (tonic::Code::NotFound, false),
+        (tonic::Code::PermissionDenied, false),
+        (tonic::Code::InvalidArgument, false),
+        (tonic::Code::Unavailable, true),
+    ] {
+        let server = TestServer::start(valid_info, vec![WatchReply::Failure(code)]);
+        let mut client = bounded(NativeSupervisorClient::connect(&server.socket))
+            .await
+            .unwrap();
+        let initial = operation(v1::OperationPhase::Intent);
+        let error = bounded(client.follow_operation(initial.clone(), &mut |_| {}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), code);
+        assert!(error.message().contains(&initial.operation_id));
+        assert_eq!(operation_watch_lost_contact(&error), lost, "{code:?}");
         drop(client);
         server.finish().await;
     }
@@ -859,6 +887,7 @@ async fn linux_watch_reconnect_is_bounded_to_three_attempts() {
             .await
             .unwrap_err();
     assert_eq!(error.code(), tonic::Code::Unavailable);
+    assert!(operation_watch_lost_contact(&error));
     assert!(started.elapsed() >= Duration::from_millis(300));
     let calls = server.calls();
     assert_eq!(
@@ -944,6 +973,7 @@ async fn watch_reconnect_refuses_replacement_and_preserves_original_operation_wi
     let error = bounded(follower).await.unwrap().unwrap_err();
     assert_eq!(error.code(), tonic::Code::Unavailable);
     assert!(error.message().contains(&expected_id));
+    assert!(operation_watch_lost_contact(&error));
     assert_eq!(
         *original_calls.lock().unwrap(),
         ["info", &format!("watch:{expected_id}")]

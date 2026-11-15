@@ -103,6 +103,19 @@ impl NativeProgress {
         self.fail()
     }
 
+    /// Removes the live row without a failure mark and returns the open
+    /// stage's label, for a wait that lost contact with the local runtime:
+    /// the operation may still finish, so the stage did not fail (#4418).
+    pub(crate) fn lose(&self) -> Option<&'static str> {
+        let stage = self
+            .current
+            .lock()
+            .ok()
+            .and_then(|current| current.map(|(_, label)| label));
+        self.clear();
+        stage
+    }
+
     /// Ends the open stage with a failure line and returns its label, or
     /// `None` when no stage was open.
     pub(crate) fn fail(&self) -> Option<&'static str> {

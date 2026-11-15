@@ -10,6 +10,7 @@ mod collection_roots;
 mod local_https;
 mod metadata;
 mod network_policies;
+mod operation_log;
 mod retained_images;
 mod runtime;
 mod snapshots;
@@ -86,7 +87,7 @@ use crate::state::{
     cleanup_unreferenced_root_generations, deletion_tree_location, move_stopped_vm_to_trash,
 };
 pub use crate::supervisor_client::NativeSupervisorClient;
-use crate::supervisor_client::{SupervisorClientError, operation_watch_failure};
+use crate::supervisor_client::{SupervisorClientError, operation_watch_lost};
 #[cfg(test)]
 use crate::supervisor_client::{operation_outcome, operation_terminal, read_selector};
 use crate::supervisor_config::NATIVE_SUPERVISOR_PROTOCOL_VERSION;
@@ -447,7 +448,7 @@ impl NativeSupervisorClient {
         operation_id: &str,
     ) -> Result<(), Status> {
         if !self.reconnect_enabled {
-            return Err(operation_watch_failure(
+            return Err(operation_watch_lost(
                 operation_id,
                 Status::unavailable("local supervisor reconnect is unavailable"),
             ));
@@ -460,7 +461,7 @@ impl NativeSupervisorClient {
         )
         .await
         .map_err(|_| {
-            operation_watch_failure(
+            operation_watch_lost(
                 operation_id,
                 Status::unavailable("reconnect to local supervisor failed"),
             )
@@ -1293,6 +1294,9 @@ impl Supervisor {
             self.drainable()?;
             let operation_id = operation.operation_id;
             let recovering = !self.core().admitted_here.contains_key(&operation_id);
+            if recovering {
+                self.core().log_operation_resumed(&operation);
+            }
             let result = self.run_operation(operation, recovering).await;
             self.core().admitted_here.remove(&operation_id);
             result?;

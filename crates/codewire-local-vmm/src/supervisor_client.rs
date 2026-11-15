@@ -1042,8 +1042,11 @@ impl NativeSupervisorClient {
                 }
                 Err(error) => error,
             };
-            if !watch_failure_is_reconnectable(&failure) || reconnects >= 3 {
+            if !watch_failure_is_reconnectable(&failure) {
                 return Err(operation_watch_failure(&operation_id, failure));
+            }
+            if reconnects >= 3 {
+                return Err(operation_watch_lost(&operation_id, failure));
             }
             reconnects += 1;
             self.reconnect_after_watch_failure(&operation_id).await?;
@@ -1051,11 +1054,37 @@ impl NativeSupervisorClient {
     }
 }
 
+/// A wait the supervisor answered without a terminal result: an invalid
+/// phase, or a code no reconnect changes, such as `NotFound`.
 pub(crate) fn operation_watch_failure(operation_id: &str, failure: Status) -> Status {
     Status::new(
         failure.code(),
         format!("local lifecycle operation {operation_id} watch failed before a terminal result"),
     )
+}
+
+/// Set on [`operation_watch_lost`] only.
+const OPERATION_WATCH_LOST_METADATA: &str = "codewire-operation-watch-lost";
+
+/// A wait that lost the supervisor before the operation finished: the
+/// connection kept failing after its reconnects, or no reconnect was
+/// possible. The supervisor journals the operation and the next one resumes
+/// it, so its outcome is unknown and it may still finish (#4418).
+pub(crate) fn operation_watch_lost(operation_id: &str, failure: Status) -> Status {
+    let mut status = operation_watch_failure(operation_id, failure);
+    status.metadata_mut().insert(
+        OPERATION_WATCH_LOST_METADATA,
+        tonic::metadata::MetadataValue::from_static("1"),
+    );
+    status
+}
+
+/// Whether `status` is a wait that lost the supervisor before the operation
+/// finished, rather than an answer from it (#4418).
+pub fn operation_watch_lost_contact(status: &Status) -> bool {
+    status
+        .metadata()
+        .contains_key(OPERATION_WATCH_LOST_METADATA)
 }
 
 fn watch_failure_is_reconnectable(status: &Status) -> bool {

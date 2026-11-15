@@ -163,9 +163,62 @@ async fn secret_project_name(
     }
 }
 
+/// A lifecycle wait that lost contact with the local runtime before its
+/// operation finished, as when the supervisor exits during an image pull
+/// (#4418). The supervisor journals the operation and the next one resumes
+/// it, so this never says the operation failed.
+#[derive(Debug)]
+pub(super) struct LostContact(String);
+
+impl std::fmt::Display for LostContact {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for LostContact {}
+
+/// The error for a lost wait on `name`'s `noun` (`creation`, `start`), at
+/// `stage` when one was showing, with `cw --local info NAME` as its next
+/// step.
+pub(super) fn lost_contact(noun: &str, name: &str, stage: Option<&str>) -> anyhow::Error {
+    let during = stage
+        .map(|stage| format!(" during {stage:?}"))
+        .unwrap_or_default();
+    crate::error_report::with_next_step(
+        anyhow::Error::new(LostContact(format!(
+            "lost contact with the local runtime{during} before the {noun} of {name} \
+             finished; it may still finish"
+        ))),
+        environment_command(VmLocation::Local, "info", name),
+    )
+}
+
+/// A create or start wait that ended without success, as the stage to
+/// report and the error. A wait that lost the supervisor (#4418) clears the
+/// open step and names no stage, since the operation may still finish; a
+/// failed operation marks its step failed with the supervisor's reason.
+pub(super) fn wait_failure(
+    progress: &NativeProgress,
+    noun: &str,
+    name: &str,
+    status: tonic::Status,
+) -> (Option<&'static str>, anyhow::Error) {
+    use codewire_local_vmm::supervisor_client::{
+        operation_error_code, operation_watch_lost_contact,
+    };
+
+    if operation_watch_lost_contact(&status) {
+        return (None, lost_contact(noun, name, progress.lose()));
+    }
+    let stage = progress.fail_with_code(operation_error_code(&status));
+    (stage, native_status(status))
+}
+
 /// A lifecycle call that failed after its progress began: the stage it
 /// stopped at, the supervisor's reason, and, for an environment that
-/// existed before the call, its state afterwards and where to look.
+/// existed before the call, its state afterwards and where to look. A lost
+/// wait ([`LostContact`]) says what it knows on its own.
 pub(super) async fn lifecycle_failure(
     verb: &str,
     name: &str,
@@ -173,6 +226,9 @@ pub(super) async fn lifecycle_failure(
     error: anyhow::Error,
     inspect: bool,
 ) -> anyhow::Error {
+    if error.is::<LostContact>() {
+        return error;
+    }
     let head = match stage {
         Some(stage) => format!("{verb} {name} failed at {stage:?}"),
         None => format!("{verb} {name} failed"),
@@ -662,6 +718,32 @@ pub(crate) struct NativeCreated {
 mod tests {
     use super::*;
     use crate::output::{Charset, Style};
+
+    #[tokio::test]
+    async fn a_lost_wait_says_the_operation_may_still_finish() {
+        let lost = lost_contact("creation", "dev", Some("Pulling the image"));
+        assert_eq!(
+            lost.downcast_ref::<LostContact>().unwrap().to_string(),
+            "lost contact with the local runtime during \"Pulling the image\" before the \
+             creation of dev finished; it may still finish"
+        );
+        assert_eq!(
+            lost.downcast_ref::<crate::error_report::NextStep>()
+                .unwrap()
+                .to_string(),
+            "cw --local info dev"
+        );
+        // It is reported as it is, never as "create dev failed at ..." (#4418).
+        let reported = lifecycle_failure("create", "dev", None, lost, false).await;
+        assert!(reported.is::<LostContact>());
+        assert!(!format!("{reported:#}").contains("failed"));
+        let start = lost_contact("start", "dev", None);
+        assert_eq!(
+            start.downcast_ref::<LostContact>().unwrap().to_string(),
+            "lost contact with the local runtime before the start of dev finished; it may still \
+             finish"
+        );
+    }
 
     const PLAIN: Style = Style::new(false, Charset::Unicode);
     const PROFILE_ID: &str = "856b6b9e-a520-48c7-aab1-8ac915465f28";

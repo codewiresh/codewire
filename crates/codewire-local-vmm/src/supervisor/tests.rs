@@ -5257,18 +5257,37 @@ fn retried_create_keeps_the_first_journaled_environment_id() {
 
 #[test]
 fn operation_watch_failure_preserves_code_and_safe_operation_identity() {
+    use crate::supervisor_client::{
+        operation_watch_failure, operation_watch_lost, operation_watch_lost_contact,
+    };
+
     let operation_id = Uuid::new_v4().to_string();
-    let failure = operation_watch_failure(
+    let answered = operation_watch_failure(
+        &operation_id,
+        Status::not_found("raw transport detail must not be reflected"),
+    );
+    let lost = operation_watch_lost(
         &operation_id,
         Status::cancelled("raw transport detail must not be reflected"),
     );
 
-    assert_eq!(failure.code(), tonic::Code::Cancelled);
-    assert_eq!(
-        failure.message(),
-        format!("local lifecycle operation {operation_id} watch failed before a terminal result")
-    );
-    assert!(!failure.message().contains("raw transport detail"));
+    for (failure, code) in [
+        (&answered, tonic::Code::NotFound),
+        (&lost, tonic::Code::Cancelled),
+    ] {
+        assert_eq!(failure.code(), code);
+        assert_eq!(
+            failure.message(),
+            format!(
+                "local lifecycle operation {operation_id} watch failed before a terminal result"
+            )
+        );
+        assert!(!failure.message().contains("raw transport detail"));
+    }
+    // Only a wait that lost the supervisor is marked, so the CLI says the
+    // operation may still finish for that alone (#4418).
+    assert!(!operation_watch_lost_contact(&answered));
+    assert!(operation_watch_lost_contact(&lost));
 }
 
 #[tokio::test]
@@ -8682,6 +8701,45 @@ async fn effect_timing_log_names_the_effect_and_its_duration_only() {
 }
 
 #[tokio::test]
+async fn a_resumed_operation_is_logged_with_the_effect_it_resumes_at() {
+    let environment = project_environment();
+    let environment_id = environment.id;
+    let (_parent, mut core) = test_supervisor_core(environment);
+    core.log = Some(Arc::new(
+        DiagnosticLog::adopt(
+            diagnostic_log::open_child_log(&core.root, diagnostic_log::SUPERVISOR_LOG).unwrap(),
+        )
+        .unwrap(),
+    ));
+    let operation = begin_and_advance_test_operation(
+        &core.store,
+        environment_id,
+        OperationKind::Start,
+        &serde_json::json!({ "name": "dev" }),
+        4,
+    );
+    core.log_operation_resumed(&operation);
+
+    let log = fs::read_to_string(
+        core.root
+            .path()
+            .join(diagnostic_log::LOG_DIRECTORY)
+            .join(diagnostic_log::SUPERVISOR_LOG),
+    )
+    .unwrap();
+    let line = log.lines().next().unwrap();
+    assert!(
+        line.ends_with(&format!(
+            " event=operation_resumed kind=start operation={} effect=start_vm \
+                 environment={environment_id}",
+            operation.operation_id
+        )),
+        "{line}"
+    );
+    assert_eq!(log.lines().count(), 1);
+}
+
+#[tokio::test]
 async fn operation_failure_log_names_effect_and_cause_but_never_error_text() {
     const CANARY: &str = "synthetic-application-secret-value-must-not-be-logged";
     let environment = project_environment();
@@ -8840,6 +8898,10 @@ async fn create_failure_code_survives_replay_storage_and_public_operation_withou
         assert_eq!(public.stage, v1::OperationStage::Failed as i32);
         let failure = operation_outcome(public).unwrap_err();
         assert_eq!(failure.code(), tonic::Code::FailedPrecondition);
+        // A failed operation is not a lost wait.
+        assert!(!crate::supervisor_client::operation_watch_lost_contact(
+            &failure
+        ));
         assert!(
             failure
                 .message()
