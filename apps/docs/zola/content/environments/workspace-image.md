@@ -1,7 +1,7 @@
 ---
 title: The workspace image
 description: "What the Codewire workspace image holds: Ubuntu, language toolchains, Docker, Git, GitHub CLI and the coding agents, and how to add more."
-updated: 2026-11-12
+updated: 2026-11-15
 weight: 3
 ---
 
@@ -11,7 +11,7 @@ It is Ubuntu with the common toolchains, Docker and the coding agents already
 installed, so most projects need only their own dependencies.
 
 The list below is from a real run on a local VM created by `cw` v0.4.1.
-Versions move with each release; check yours with `cw run --in ENV -- TOOL --version`.
+Versions move with each release; check yours with `cw run --in ENV TOOL --version`.
 
 ```sh
 cw run --in wsimg --name probe --no-tty -- sh -lc '. /etc/os-release; echo "OS: $PRETTY_NAME"

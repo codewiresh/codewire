@@ -22,7 +22,9 @@ pub(crate) async fn handle_exec_command(globals: &Globals, args: ExecArgs) -> an
         "`cw exec` needs a command: `cw exec --in ENV COMMAND`"
     );
     let env = parse_env_overrides(&args.env)?;
-    let target = resolve_environment_session_target(globals, args.environment.as_deref()).await?;
+    let target = resolve_environment_session_target(globals, args.environment.as_deref())
+        .await
+        .map_err(crate::command_line::name_hint)?;
     let code = match target {
         #[cfg(unix)]
         EnvironmentSessionTarget::Host { environment, .. } => {

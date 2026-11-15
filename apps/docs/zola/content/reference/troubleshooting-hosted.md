@@ -1,7 +1,7 @@
 ---
 title: Troubleshooting hosted sandboxes
 description: Find out why a hosted sandbox failed to create, start or connect, why a preview or a conversation does not respond, and how to recover.
-updated: 2026-11-08
+updated: 2026-11-15
 weight: 7
 ---
 
@@ -61,7 +61,7 @@ See [SSH and VS Code](@/access/ssh-and-vscode.md).
 ## A preview URL does not answer
 
 - The sandbox must be running, and something must listen on the port inside
-  it: `cw run --in ENV -- ss -ltn` lists the listeners.
+  it: `cw run --in ENV ss -ltn` lists the listeners.
 - A server that exited does not answer; `cw logs ENV --session server` shows
   why it stopped.
 - A `creator` or `org_members` preview asks you to sign in first; open it in

@@ -161,10 +161,10 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished).
 - **Driving it:**
 
   ```sh
-  cw exec --in walk -- sh -c 'echo marker-1 > /workspace/marker && cat /workspace/marker'
-  cw exec --in walk -- sh -c 'exit 7'; echo $?
-  printf 'from stdin\n' | cw exec --in walk -- cat
-  cw run --in walk --name job -- sh -c 'echo run-output-1; echo run-output-2'
+  cw exec --in walk sh -c 'echo marker-1 > /workspace/marker && cat /workspace/marker'
+  cw exec --in walk sh -c 'exit 7'; echo $?
+  printf 'from stdin\n' | cw exec --in walk cat
+  cw run --in walk --name job sh -c 'echo run-output-1; echo run-output-2'
   cw ls walk
   cw logs walk --session job
   ```
@@ -242,12 +242,12 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished).
 - **Driving it:**
 
   ```sh
-  cw exec --in walk -- sh -c 'echo marker-1 > /workspace/marker'
+  cw exec --in walk sh -c 'echo marker-1 > /workspace/marker'
   cw --cloud stop walk
   cw --cloud ls
   cw --cloud start walk
   cw --cloud ls
-  cw exec --in walk -- cat /workspace/marker
+  cw exec --in walk cat /workspace/marker
   ```
 
 - **Proof:**

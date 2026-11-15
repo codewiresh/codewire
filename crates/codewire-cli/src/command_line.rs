@@ -15,6 +15,7 @@
 //! to the program.
 
 use std::ffi::OsString;
+use std::sync::{Mutex, PoisonError};
 
 use clap::CommandFactory as _;
 
@@ -27,6 +28,63 @@ const AGENTS: &[&str] = &["claude", "codex"];
 const MISPLACED: &[&str] = &[
     "--in", "--name", "--parent", "--detach", "--local", "--cloud",
 ];
+
+/// The environment one word before `--` named, and the command after it, as
+/// written, so a word that names no environment can give both readings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NamedEnvironment {
+    subcommand: String,
+    name: String,
+    command: Vec<String>,
+}
+
+static NAMED: Mutex<Option<NamedEnvironment>> = Mutex::new(None);
+
+/// `error`, or, when it says that the environment a word before `--` named
+/// doesn't exist, that word's two readings (#4701): `cw exec ls -- -la` used
+/// to run `ls`.
+pub(crate) fn name_hint(error: anyhow::Error) -> anyhow::Error {
+    let named = NAMED.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    match named {
+        Some(named) => hint_for(error, &named),
+        None => error,
+    }
+}
+
+/// `run`'s result, with [`name_hint`] applied to its failure.
+pub(crate) async fn name_hint_after(
+    run: impl std::future::Future<Output = anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    run.await.map_err(name_hint)
+}
+
+fn hint_for(error: anyhow::Error, named: &NamedEnvironment) -> anyhow::Error {
+    let text = format!("{error:#}");
+    let not_found = ["not found", "no environment is named", "matches"]
+        .iter()
+        .any(|said| text.contains(said));
+    if !not_found || !text.contains(&format!("{:?}", named.name)) {
+        return error;
+    }
+    let NamedEnvironment {
+        subcommand,
+        name,
+        command,
+    } = named;
+    // The simplest line that runs it: `cw` puts the separator before the
+    // command itself, so one is written only when a later word is one of
+    // `cw`'s own options and would otherwise be read as cw's.
+    let escape = command.iter().any(|word| misplaced(&OsString::from(word)));
+    let mut written = format!("cw {subcommand} --in ENV");
+    if escape {
+        written.push_str(" --");
+    }
+    for word in std::iter::once(name).chain(command) {
+        written.push(' ');
+        written.push_str(word);
+    }
+    anyhow::anyhow!("no environment named {name}; to run {name}, write `{written}`")
+}
 
 /// `args` with `--` before a run's command, or the refusal of an option of
 /// cw's written after the command. Anything else is returned unchanged for
@@ -49,6 +107,25 @@ pub(crate) fn separate_command(args: Vec<OsString>) -> anyhow::Result<Vec<OsStri
     let first = args[start].to_string_lossy();
     if name == "run" && AGENTS.contains(&first.as_ref()) {
         return Ok(args);
+    }
+    // `cw exec NAME -- COMMAND`, as `cw ports NAME` and `cw stop NAME` take
+    // their environment: one word before an explicit `--` names the
+    // environment, unless `--in` already does (#4701).
+    let named_in = args[index + 1..start]
+        .iter()
+        .any(|arg| arg == "--in" || arg.to_string_lossy().starts_with("--in="));
+    if !named_in && args.get(start + 1).is_some_and(|arg| arg == "--") {
+        *NAMED.lock().unwrap_or_else(PoisonError::into_inner) = Some(NamedEnvironment {
+            subcommand: name.clone(),
+            name: first.into_owned(),
+            command: args[start + 2..]
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect(),
+        });
+        let mut named = args;
+        named.insert(start, OsString::from("--in"));
+        return Ok(named);
     }
     if let Some(at) = (start..args.len())
         .take_while(|&at| args[at] != "--")
@@ -232,6 +309,106 @@ mod tests {
         ] {
             assert_eq!(separated(line).as_deref(), Ok(expected), "{line}");
         }
+    }
+
+    /// `cw exec NAME -- COMMAND` and `cw run NAME -- COMMAND` name the
+    /// environment as `--in NAME` does (#4701).
+    #[test]
+    fn one_word_before_an_explicit_separator_names_the_environment() {
+        for (line, expected) in [
+            (
+                "cw exec walk -- cat /etc/hostname",
+                "cw exec --in walk -- cat /etc/hostname",
+            ),
+            ("cw run walk -- npm test", "cw run --in walk -- npm test"),
+            (
+                "cw --cloud exec -t walk -- htop",
+                "cw --cloud exec -t --in walk -- htop",
+            ),
+            // Today's meaning of a single-word command with its own
+            // arguments after `--`: the word names the environment.
+            ("cw exec ls -- -la", "cw exec --in ls -- -la"),
+            // `--in` already names it: the word is the command's.
+            (
+                "cw exec --in walk ls -- -la",
+                "cw exec --in walk -- ls -- -la",
+            ),
+            (
+                "cw exec --in=walk ls -- -la",
+                "cw exec --in=walk -- ls -- -la",
+            ),
+            // No explicit separator: the words are the command, as before.
+            ("cw exec walk cat x", "cw exec -- walk cat x"),
+        ] {
+            assert_eq!(separated(line).as_deref(), Ok(expected), "{line}");
+        }
+    }
+
+    /// A word before `--` that names no environment says both readings, so
+    /// `cw exec ls -- -la`, which used to run `ls`, is clear (#4701).
+    #[test]
+    fn a_word_that_names_no_environment_gives_both_readings() {
+        let named = NamedEnvironment {
+            subcommand: "exec".to_owned(),
+            name: "ls".to_owned(),
+            command: vec!["-la".to_owned()],
+        };
+        assert_eq!(
+            hint_for(
+                anyhow::anyhow!("platform environment \"ls\" not found"),
+                &named
+            )
+            .to_string(),
+            "no environment named ls; to run ls, write `cw exec --in ENV ls -la`"
+        );
+        assert_eq!(
+            hint_for(
+                anyhow::anyhow!("no environment is named \"ls\" (`cw ls` lists them)"),
+                &named
+            )
+            .to_string(),
+            "no environment named ls; to run ls, write `cw exec --in ENV ls -la`"
+        );
+        let make = NamedEnvironment {
+            subcommand: "run".to_owned(),
+            name: "make".to_owned(),
+            command: vec!["-j4".to_owned()],
+        };
+        assert_eq!(
+            hint_for(
+                anyhow::anyhow!("platform environment \"make\" not found"),
+                &make
+            )
+            .to_string(),
+            "no environment named make; to run make, write `cw run --in ENV make -j4`"
+        );
+        // A later word that is one of cw's own options keeps one separator.
+        let grep = NamedEnvironment {
+            subcommand: "exec".to_owned(),
+            name: "grep".to_owned(),
+            command: vec!["--name".to_owned(), "x".to_owned()],
+        };
+        assert_eq!(
+            hint_for(
+                anyhow::anyhow!("platform environment \"grep\" not found"),
+                &grep
+            )
+            .to_string(),
+            "no environment named grep; to run grep, write `cw exec --in ENV -- grep --name x`"
+        );
+        // Any other failure, or one about another environment, is left alone.
+        assert_eq!(
+            hint_for(anyhow::anyhow!("permission denied"), &named).to_string(),
+            "permission denied"
+        );
+        assert_eq!(
+            hint_for(
+                anyhow::anyhow!("platform environment \"web\" not found"),
+                &named
+            )
+            .to_string(),
+            "platform environment \"web\" not found"
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ pub(crate) async fn handle_environment_run_command(
     args: EnvironmentRunArgs,
 ) -> anyhow::Result<()> {
     let named = args.environment.clone();
-    match launch_run(globals, args, None).await {
+    match crate::command_line::name_hint_after(launch_run(globals, args, None)).await {
         Err(error) => {
             Err(crate::commands::explain_not_running(globals, named.as_deref(), error).await)
         }
