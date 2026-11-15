@@ -108,13 +108,16 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished).
   Without `--no-wait`, the same create stays in the foreground until the
   platform ends it.
 - **Proof:**
-  - the waiting create exits 1 within about two minutes and prints the
-    reason, here that the image could not be pulled;
+  - the waiting create exits 1 within about two minutes. Its failed step is
+    "Starting the sandbox", and the reason is one short sentence with the
+    cause, HTTP status and exit code where known and what to do next, here
+    that the image could not be pulled. It has no runtime text in it;
   - `cw ls` shows the row as `failed`, with how long ago, and a line under
     the table that begins "walk was not created:" and gives the reason;
   - the JSON entry has `"state": "failed"` and a `failed` object with `code`
     `container_start_failed`, the reason and the time;
-  - `cw info walk` shows `State: failed` and the whole reason;
+  - `cw info walk` shows `State: failed` and the reason, and no
+    `Recoverable` line;
   - `cw rm walk` exits 0 and says the environment was already removed;
   - `cw start walk` answers "not found": a failed create is no target for
     any command but `info` and `rm`;
@@ -129,7 +132,11 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished).
   - A `cw` older than the change (v0.4.17 and older) never asks for failed
     creates, so its `cw ls` does not show the row. That is the old client,
     not a failure of the server.
-  - The reason is the container runtime's own text and can be long (#4483).
+  - A server older than #4483 puts the runtime's own text in the reason. An
+    older `cw` names the wait that was open, such as "Waiting for SSH
+    access", as the failed step.
+  - The runtime's own text is only in the server's log, which a user cannot
+    read. An operator finds it there by the environment's ID.
 - **Observed:**
   - Dev, 2026-11-14 (cw-cleanup): Dev ran source b98e0702d, which includes
     #4497; the server answered the new list request, which only that source

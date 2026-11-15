@@ -346,6 +346,15 @@ pub(crate) fn delete_was_scheduled(error: &anyhow::Error) -> bool {
     error_has_reason(error, "deletion_pending")
 }
 
+/// The `Recoverable` line of `cw info`. A failed create has none: it is
+/// already removed, and there is nothing to recover (#4483).
+pub(crate) fn recoverable_line(environment: &Environment) -> String {
+    if environment.failed_create() {
+        return String::new();
+    }
+    format!("Recoverable:   {}\n", environment.recoverable)
+}
+
 /// `cw rm` on a cloud environment: the delete, then one read of what it
 /// did. A refusal (protection, access) or a failed request is an error.
 pub(crate) async fn remove_cloud_environment(

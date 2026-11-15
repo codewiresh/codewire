@@ -207,10 +207,19 @@ pub(crate) struct StageFailure {
     /// The label of the stage that failed, from its `started` row.
     pub(crate) stage: String,
     pub(crate) message: String,
+    /// The platform ended the create because a container could not start.
+    /// `message` is then the whole message for the user (#4483).
+    pub(crate) sandbox_start: bool,
 }
+
+/// The stage a container that could not start fails.
+const SANDBOX_START_LABEL: &str = "Starting the sandbox";
 
 impl StageFailure {
     pub(crate) fn into_error(self, environment_id: &str) -> anyhow::Error {
+        if self.sandbox_start && !self.message.is_empty() {
+            return anyhow::anyhow!("{}", self.message);
+        }
         let detail = if self.message.is_empty() || self.message == self.stage {
             String::new()
         } else {
@@ -471,6 +480,19 @@ impl<W: Write> StartProgress<W> {
                         )?;
                     }
                     _ => {
+                        // A container that could not start fails the sandbox's
+                        // start, whichever wait was open when it was seen.
+                        let sandbox_start = event
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.get("kind"))
+                            .and_then(|kind| kind.as_str())
+                            == Some("container_start_failed");
+                        let stage_label = if sandbox_start {
+                            Some(SANDBOX_START_LABEL.to_owned())
+                        } else {
+                            stage_label
+                        };
                         let text = labelled(stage_label.as_deref(), &message, &label);
                         self.status.record(
                             depth,
@@ -482,6 +504,7 @@ impl<W: Write> StartProgress<W> {
                             phase: event.phase.clone(),
                             stage: stage_label.unwrap_or_else(|| humanize_phase(&event.phase)),
                             message,
+                            sandbox_start,
                         });
                     }
                 }

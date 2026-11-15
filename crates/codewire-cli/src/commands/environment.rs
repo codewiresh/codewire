@@ -4050,7 +4050,7 @@ pub(crate) fn format_env_info_text(environment: &Environment) -> String {
         };
         output.push_str(&format!("{label}{error_reason}\n"));
     }
-    output.push_str(&format!("Recoverable:   {}\n", environment.recoverable));
+    output.push_str(&lifecycle::recoverable_line(environment));
     output.push_str(&format!(
         "TotalRunning:  {}s\n",
         environment.total_running_seconds

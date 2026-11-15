@@ -305,8 +305,11 @@ async fn db_the_next_start_clears_only_the_no_capacity_message() -> Result<()> {
     db.finish(result).await
 }
 
+const RUNTIME_TOKEN: &str = concat!("ey", "Jabc.def.ghi");
+
 /// How a create whose workspace container cannot start ends (#4431): once,
-/// with its code and the kubelet's words, on the way to the normal destroy.
+/// with its code and one short sentence, on the way to the normal destroy. What
+/// the runtime wrote, here a request's token, is stored nowhere (#4483).
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn db_a_container_start_failure_ends_a_create_once() -> Result<()> {
@@ -317,10 +320,15 @@ async fn db_a_container_start_failure_ends_a_create_once() -> Result<()> {
         let svc = Service::for_pool(pool.clone());
         let failure = crate::sandbox::client::ContainerStartFailed {
             container: "workspace".into(),
+            image: "example/app:1".into(),
             reason: "StartError".into(),
-            message: "exit code 128: no space left on device".into(),
+            // The form Go prints a request's header map in.
+            message: format!(
+                "exit code 128: map[Authorization:[Bearer {RUNTIME_TOKEN}]]: no space left on device"
+            ),
+            exit_code: Some(128),
         };
-        let message = container_start_failure_message(&failure);
+        let message = start_failure_text::summary(&failure);
 
         for (index, state) in ["pending", "creating"].iter().enumerate() {
             let id = format!("5b2d9c41-7f36-4a1e-8d53-6c9f0a1b2e{index:02}");
@@ -349,10 +357,20 @@ async fn db_a_container_start_failure_ends_a_create_once() -> Result<()> {
             );
             ensure!(
                 reason
-                    == "The sandbox could not start: container workspace could not start: \
-                        StartError: exit code 128: no space left on device.",
+                    == "The container `workspace` could not start: its node is out of disk space. Try again.",
                 "{state}: {reason}"
             );
+            for stored in [
+                "SELECT row_to_json(e)::text FROM environments e WHERE id = $1",
+                "SELECT coalesce(string_agg(row_to_json(l)::text, ' '), '') \
+                 FROM environment_logs l WHERE environment_id = $1",
+            ] {
+                let stored: String = sqlx::query_scalar(stored).bind(&id).fetch_one(pool).await?;
+                ensure!(
+                    !stored.contains(RUNTIME_TOKEN) && !stored.contains("Bearer"),
+                    "{state}: the runtime's text was stored"
+                );
+            }
             let logged: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM environment_logs \
                  WHERE environment_id = $1 AND phase = 'lifecycle_container_start_failed'",

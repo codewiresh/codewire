@@ -1140,11 +1140,14 @@ fn format_environment_inventory_at(
     } else {
         &first.entry.name
     };
-    out.push_str(&format!(
-        "\n{} Sessions: cw ls {}\n",
-        style.status(Status::Next),
-        terminal_text(target)
-    ));
+    // A failed create has no sessions, so a list of nothing else has no hint.
+    if first.entry.failed.is_none() {
+        out.push_str(&format!(
+            "\n{} Sessions: cw ls {}\n",
+            style.status(Status::Next),
+            terminal_text(target)
+        ));
+    }
     out
 }
 
@@ -1938,6 +1941,8 @@ mod tests {
             now,
         );
         assert!(long.contains(&format!("{}…\n", "x".repeat(FAILED_REASON_LISTED_CHARS))));
+        // A failed create has no sessions: a list of nothing else offers none.
+        assert!(!long.contains("Sessions:"), "{long}");
     }
 
     #[test]

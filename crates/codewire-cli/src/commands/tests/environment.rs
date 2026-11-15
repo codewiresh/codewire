@@ -2643,6 +2643,11 @@ fn a_failed_create_is_kept_only_for_a_caller_that_asks() {
     assert!(!removed.failed_create() && !running.failed_create());
     assert_eq!(env_state_label(&failed), "failed");
     assert_eq!(env_state_label(&removed), "destroyed");
+    // `cw info` offers no recovery for something already removed (#4483).
+    let info = format_env_info_text(&failed);
+    assert!(info.contains("ErrorReason:   The sandbox could not start: ErrImagePull\n"));
+    assert!(!info.contains("Recoverable:"), "{info}");
+    assert!(format_env_info_text(&running).contains("Recoverable:"));
 
     let mut ran = failed.clone();
     ran.started_at = Some("2026-11-13T10:00:00Z".into());

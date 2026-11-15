@@ -405,9 +405,11 @@ async fn a_container_that_cannot_start_ends_both_waits_within_seconds() {
     let error = client.wait_for_ready(ENV, LONG_WAIT).await.unwrap_err();
     let failure = error.downcast_ref::<ContainerStartFailed>().unwrap();
     assert_eq!(
-        failure.to_string(),
-        "container workspace could not start: StartError: exit code 128: \
-         failed to create containerd task: no space left on device"
+        (failure.reason.as_str(), failure.message.as_str()),
+        (
+            "StartError",
+            "exit code 128: failed to create containerd task: no space left on device"
+        )
     );
     let waited = started.elapsed();
     assert!(

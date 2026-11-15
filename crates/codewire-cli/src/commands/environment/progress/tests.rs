@@ -917,6 +917,7 @@ fn a_failed_row_names_its_stage_and_becomes_the_command_error() {
             phase: "install".to_owned(),
             stage: "Running install command".to_owned(),
             message: "npm ci exploded".to_owned(),
+            sandbox_start: false,
         }
     );
     assert_eq!(
@@ -932,11 +933,55 @@ fn a_failed_row_names_its_stage_and_becomes_the_command_error() {
         phase: "gateway_ready".to_owned(),
         stage: "Gateway ready".to_owned(),
         message: String::new(),
+        sandbox_start: false,
     };
     assert_eq!(
         unlabelled.into_error("env-2").to_string(),
         "environment env-2 failed at stage \"Gateway ready\" (see `cw logs env-2 --setup`)"
     );
+}
+
+/// A container that could not start fails the sandbox's start, whichever
+/// wait was open when the platform saw it, and the command's error is the
+/// platform's short message (#4483).
+#[test]
+fn a_container_that_could_not_start_fails_the_sandbox_start_not_the_open_wait() {
+    let t0 = Instant::now();
+    let mut view = plain_view(t0);
+    view.apply(
+        &row(
+            "a",
+            "access_ready",
+            "started",
+            "Waiting for SSH access",
+            "2026-11-14T10:00:00Z",
+            None,
+        ),
+        t0,
+    )
+    .unwrap();
+    let told = "The image `example/missing:1` could not be pulled: not found.";
+    let failure = view
+        .apply(
+            &row(
+                "b",
+                "access_ready",
+                "failed",
+                told,
+                "2026-11-14T10:01:12Z",
+                Some(serde_json::json!({"kind": "container_start_failed"})),
+            ),
+            t0,
+        )
+        .unwrap()
+        .expect("failed row");
+    assert_eq!(failure.stage, "Starting the sandbox");
+    assert!(failure.sandbox_start);
+    assert_eq!(
+        output(view),
+        format!("  ◐ Waiting for SSH access\n  ✗ Starting the sandbox: {told}  1m 12s\n")
+    );
+    assert_eq!(failure.into_error("env-1").to_string(), told);
 }
 
 #[test]

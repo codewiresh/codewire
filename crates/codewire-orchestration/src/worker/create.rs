@@ -47,6 +47,7 @@ use crate::sandbox::{
 use crate::start_metrics::{self, CreateMilestone, StartPath, StartProfile, StartStage};
 
 mod pool_route;
+mod start_failure_text;
 mod warm_bridge;
 
 #[cfg(test)]
@@ -1486,7 +1487,7 @@ async fn run_environment_create(
                             &e,
                             crate::lifecycle::NoCapacityRefusal::for_create(env.never_ran),
                         ),
-                        duration_meta(started),
+                        start_failure_text::log_meta(&e, duration_meta(started)),
                     )
                     .await?;
                     if let Some(refusal) = no_capacity_refusal(&e) {
@@ -1935,7 +1936,7 @@ async fn run_environment_create(
                                 &e,
                                 crate::lifecycle::NoCapacityRefusal::for_create(env.never_ran),
                             ),
-                            gateway_meta,
+                            start_failure_text::log_meta(&e, gateway_meta),
                         )
                         .await?;
                         if let Some(refusal) = no_capacity_refusal(&e) {
@@ -3201,22 +3202,6 @@ pub(super) fn container_start_failure(error: &anyhow::Error) -> Option<&Containe
     })
 }
 
-/// What the user reads when their create ends because a container could not
-/// start. It carries the kubelet's reason and message, which say whether the
-/// image is at fault (a pull that fails, a command that does not exist) or the
-/// node (no space, a runtime error), bounded so one long runtime message
-/// cannot fill the column.
-pub(super) fn container_start_failure_message(failure: &ContainerStartFailed) -> String {
-    const MAX_CHARS: usize = 600;
-    let text = format!("The sandbox could not start: {failure}.");
-    if text.chars().count() <= MAX_CHARS {
-        return text;
-    }
-    let mut bounded: String = text.chars().take(MAX_CHARS - 1).collect();
-    bounded.push('…');
-    bounded
-}
-
 /// End a create whose workspace container cannot start, in place of an error
 /// that would retry into the same failed Pod: this activity finishes, and the
 /// reconcile it queues does the normal destroy, which releases the claim and
@@ -3229,7 +3214,8 @@ pub(super) async fn fail_create_for_container_start(
     failure: &ContainerStartFailed,
 ) -> anyhow::Result<()> {
     authority.ensure().await?;
-    let message = container_start_failure_message(failure);
+    let message = start_failure_text::summary(failure);
+    start_failure_text::log(env_id, failure);
     if !svc
         .fail_create_for_container_start(env_id, &message, CREATE_MUTATION_STATES)
         .await?
@@ -3258,7 +3244,7 @@ pub(super) fn wait_failure_log(
         return outcome.message.to_owned();
     }
     match container_start_failure(error) {
-        Some(failure) => container_start_failure_message(failure),
+        Some(failure) => start_failure_text::summary(failure),
         None => format!("{error:#}"),
     }
 }
@@ -3482,39 +3468,41 @@ mod tests {
     }
 
     #[test]
-    fn a_container_start_failure_is_found_and_told_in_the_kubelets_words() {
+    fn a_container_start_failure_is_found_and_told_in_one_short_sentence() {
         let failed = || ContainerStartFailed {
             container: "workspace".into(),
+            image: "example/missing:tag".into(),
             reason: "ImagePullBackOff".into(),
-            message: "Back-off pulling image \"example/missing:tag\"".into(),
+            message: "Back-off pulling image \"example/missing:tag\": not found".into(),
+            exit_code: None,
         };
-        let told = "The sandbox could not start: container workspace could not start: \
-                    ImagePullBackOff: Back-off pulling image \"example/missing:tag\".";
+        let told = "The image `example/missing:tag` could not be pulled: not found. Check the image name and tag.";
+        let timed = Some(serde_json::json!({"duration_ms": 7}));
         for error in [
             anyhow::Error::from(failed()),
             ReadinessWaitFailed(failed().into()).into(),
         ] {
             assert_eq!(container_start_failure(&error), Some(&failed()));
             // The environment's log line is the user's message, as its
-            // `error_reason` is.
+            // `error_reason` is, and its metadata names what failed.
             assert_eq!(
                 wait_failure_log(&error, crate::lifecycle::NoCapacityRefusal::CREATE),
                 told
             );
+            assert_eq!(
+                start_failure_text::log_meta(&error, timed.clone()),
+                Some(serde_json::json!({"duration_ms": 7, "kind": "container_start_failed"}))
+            );
+            assert_eq!(
+                start_failure_text::log_meta(&error, None),
+                Some(serde_json::json!({"kind": "container_start_failed"}))
+            );
         }
-        assert_eq!(container_start_failure_message(&failed()), told);
-        assert!(container_start_failure(&anyhow::anyhow!("timeout waiting")).is_none());
+        let timeout = anyhow::anyhow!("timeout waiting");
+        assert!(container_start_failure(&timeout).is_none());
+        assert_eq!(start_failure_text::log_meta(&timeout, timed.clone()), timed);
         // A refusal for lack of room is not a container failure.
         assert!(container_start_failure(&NoCapacity("full".into()).into()).is_none());
-
-        // One long runtime message cannot fill the column.
-        let long = ContainerStartFailed {
-            message: "é".repeat(2_000),
-            ..failed()
-        };
-        let bounded = container_start_failure_message(&long);
-        assert_eq!(bounded.chars().count(), 600);
-        assert!(bounded.ends_with('…'));
     }
 
     fn identity_mode_env() -> EnvironmentRow {

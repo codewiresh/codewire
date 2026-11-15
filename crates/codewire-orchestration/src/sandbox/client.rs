@@ -334,33 +334,6 @@ pub const CONTAINER_START_FAILURE_GRACE: Duration = Duration::from_secs(15);
 /// How often [`SandboxClient::refused_for_start_failure`] reads the Pod.
 const START_FAILURE_POLL: Duration = Duration::from_secs(2);
 
-/// A container of the workspace Pod could not start, and stayed that way for
-/// its grace. More waiting cannot make the claim Ready. `reason` and `message`
-/// are the kubelet's own, so they say whether the image or the node is at
-/// fault.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ContainerStartFailed {
-    pub container: String,
-    pub reason: String,
-    pub message: String,
-}
-
-impl std::fmt::Display for ContainerStartFailed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "container {} could not start: {}",
-            self.container, self.reason
-        )?;
-        if !self.message.is_empty() {
-            write!(f, ": {}", self.message)?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for ContainerStartFailed {}
-
 impl std::fmt::Display for PodResizeInfeasible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -428,6 +401,10 @@ const DEFAULT_DIRECT_UDP_LB_PORT_END: u16 = 60999;
 
 #[path = "client/snapshots.rs"]
 mod snapshots;
+#[path = "client/start_failure.rs"]
+mod start_failure;
+pub use start_failure::ContainerStartFailed;
+use start_failure::{StartFailureKind, container_start_failure};
 #[path = "client/workspace_binding.rs"]
 mod workspace_binding;
 pub(crate) use workspace_binding::sandbox_name_hash;
@@ -5251,116 +5228,6 @@ fn terminal_pod_failure_reason(pod: &Pod) -> Option<(String, String)> {
         })
 }
 
-/// Which grace a container start failure gets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StartFailureKind {
-    /// The image cannot be pulled; the kubelet keeps retrying.
-    ImagePull,
-    /// The container cannot be created, run or started, or the Pod is over.
-    Start,
-}
-
-impl StartFailureKind {
-    fn grace(self) -> Duration {
-        match self {
-            Self::ImagePull => IMAGE_PULL_FAILURE_GRACE,
-            Self::Start => CONTAINER_START_FAILURE_GRACE,
-        }
-    }
-}
-
-/// The first container of `pod` that cannot start, and how (#4431). It reads
-/// only the container statuses the kubelet writes:
-///
-/// - a Pod that is over (`Failed` or `Succeeded`) before its claim was Ready;
-/// - a waiting reason of [`TERMINAL_WAITING_REASONS`], where the two image
-///   pull reasons get the longer grace;
-/// - `CrashLoopBackOff`, with the last termination as its message;
-/// - a container that terminated with a non-zero exit, such as `StartError`,
-///   which a Pod that is still `Running` shows when another container runs.
-///
-/// A container that is waiting to be created or initialized
-/// (`ContainerCreating`, `PodInitializing`) is healthy, and so is one that
-/// exited zero.
-fn container_start_failure(pod: &Pod) -> Option<(StartFailureKind, ContainerStartFailed)> {
-    if let Some((reason, message)) = terminal_pod_failure_reason(pod)
-        && pod
-            .status
-            .as_ref()
-            .and_then(|status| status.phase.as_deref())
-            .is_some_and(|phase| matches!(phase, "Failed" | "Succeeded"))
-    {
-        return Some((
-            StartFailureKind::Start,
-            ContainerStartFailed {
-                container: "workspace Pod".to_string(),
-                reason,
-                message,
-            },
-        ));
-    }
-    let status = pod.status.as_ref()?;
-    status
-        .init_container_statuses
-        .as_deref()
-        .into_iter()
-        .flatten()
-        .chain(status.container_statuses.as_deref().into_iter().flatten())
-        .find_map(|container| {
-            let state = container.state.as_ref()?;
-            let failed = |reason: &str, message: String| ContainerStartFailed {
-                container: container.name.clone(),
-                reason: reason.to_string(),
-                message,
-            };
-            if let Some(waiting) = state.waiting.as_ref() {
-                let reason = waiting.reason.as_deref().unwrap_or_default();
-                let message = waiting.message.clone().unwrap_or_default();
-                if matches!(reason, "ImagePullBackOff" | "ErrImagePull") {
-                    return Some((StartFailureKind::ImagePull, failed(reason, message)));
-                }
-                if TERMINAL_WAITING_REASONS.contains(&reason) {
-                    return Some((StartFailureKind::Start, failed(reason, message)));
-                }
-                if reason == "CrashLoopBackOff" {
-                    let last = container
-                        .last_state
-                        .as_ref()
-                        .and_then(|last| last.terminated.as_ref())
-                        .map(termination_detail)
-                        .unwrap_or(message);
-                    return Some((StartFailureKind::Start, failed(reason, last)));
-                }
-                return None;
-            }
-            let terminated = state.terminated.as_ref().filter(|t| t.exit_code != 0)?;
-            let reason = terminated
-                .reason
-                .as_deref()
-                .filter(|reason| !reason.is_empty())
-                .unwrap_or("Error");
-            Some((
-                StartFailureKind::Start,
-                failed(reason, termination_detail(terminated)),
-            ))
-        })
-}
-
-/// How a container ended: its exit code, then the runtime's message when it
-/// left one (for a failed start, the reason the container could not be made).
-fn termination_detail(terminated: &k8s_openapi::api::core::v1::ContainerStateTerminated) -> String {
-    let exit = format!("exit code {}", terminated.exit_code);
-    match terminated
-        .message
-        .as_deref()
-        .map(str::trim)
-        .filter(|message| !message.is_empty())
-    {
-        Some(message) => format!("{exit}: {message}"),
-        None => exit,
-    }
-}
-
 /// Each init and regular container that terminated, as
 /// `name exited CODE (REASON, signal N)`, joined by `; `.
 fn terminated_containers(status: &k8s_openapi::api::core::v1::PodStatus) -> String {
@@ -6795,19 +6662,14 @@ mod tests {
     fn a_container_start_failure_reads_whether_the_image_or_the_node_failed() {
         let failed = ContainerStartFailed {
             container: "workspace".into(),
+            image: "example/app:1".into(),
             reason: "StartError".into(),
             message: "exit code 128: no space left on device".into(),
+            exit_code: Some(128),
         };
+        // The error's own text leaves the runtime's message out.
         assert_eq!(
             failed.to_string(),
-            "container workspace could not start: StartError: exit code 128: no space left on device"
-        );
-        let bare = ContainerStartFailed {
-            message: String::new(),
-            ..failed
-        };
-        assert_eq!(
-            bare.to_string(),
             "container workspace could not start: StartError"
         );
     }
