@@ -119,12 +119,13 @@ provider requests, so the VM never holds it.
 ```sh
 # Store a credential. API keys are read from stdin, never from arguments.
 cw credentials --local connect codex --name my-codex      # Codex sign-in with a device code
+cw credentials --local connect claude --name my-claude    # Claude sign-in: open the link, paste the code back
 printf '%s' "$OPENAI_API_KEY" | cw credentials --local add openai --name my-openai
 printf '%s' "$ANTHROPIC_API_KEY" | cw credentials --local add anthropic --name my-anthropic
 
 # Put it in a profile. The codex slot takes a Codex sign-in or an OpenAI API key.
 cw credentials --local --profile work set codex my-codex
-cw credentials --local --profile work set anthropic my-anthropic
+cw credentials --local --profile work set anthropic my-anthropic   # or my-claude, the sign-in
 
 # Create the VM with that profile, then start agents in it.
 cw create --local --name team --profile local:work --path .

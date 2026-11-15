@@ -34,10 +34,6 @@ pub(super) async fn complete(
 ) -> anyhow::Result<()> {
     if placement == StoragePlacement::Local {
         anyhow::ensure!(
-            !matches!(&args.command, CredentialsCommand::Connect(a) if matches!(a.provider, Some(CredentialConnectProviderArg::Claude))),
-            "Claude sign-ins are stored only in your Codewire account; use --cloud"
-        );
-        anyhow::ensure!(
             !matches!(&args.command, CredentialsCommand::Add(a) if a.provider.as_deref() == Some("claude-subscription")),
             "Claude subscription tokens are stored only in your Codewire account; use --cloud"
         );
@@ -92,7 +88,7 @@ pub(super) async fn complete(
         CredentialsCommand::Connect(a) => {
             a.guided = was_missing || storage_missing;
             if a.provider.is_none() {
-                let mut providers = vec![
+                let providers = [
                     (
                         CredentialConnectProviderArg::Codex,
                         "Codex",
@@ -103,14 +99,12 @@ pub(super) async fn complete(
                         "GitHub",
                         "Device sign-in",
                     ),
-                ];
-                if placement == StoragePlacement::Platform {
-                    providers.push((
+                    (
                         CredentialConnectProviderArg::Claude,
                         "Claude",
                         "Browser sign-in",
-                    ));
-                }
+                    ),
+                ];
                 let choices = providers
                     .iter()
                     .map(|(_, label, detail)| Choice::new(*label, *detail))
@@ -369,44 +363,38 @@ async fn enroll_for_profile(
                 })
             }
         }
-        "anthropic" if placement == StoragePlacement::Platform => {
-            let action = guided::choose(
-                "Connect Anthropic access",
-                &[
-                    Choice::new("Claude sign-in", "Browser sign-in"),
-                    Choice::new(
-                        "Claude subscription token",
-                        "Paste a token from claude setup-token",
-                    ),
-                    Choice::new("Anthropic API key", "Paste an API key"),
-                ],
-            )?;
-            if action == 0 {
-                CredentialsCommand::Connect(CredentialConnectArgs {
-                    provider: Some(CredentialConnectProviderArg::Claude),
+        "anthropic" => {
+            // The Claude sign-in in both placements; the subscription token
+            // is still a cloud credential only (#4714).
+            let mut options = vec![(Some(CredentialConnectProviderArg::Claude), "anthropic")];
+            let mut labels = vec![Choice::new("Claude sign-in", "Browser sign-in")];
+            if placement == StoragePlacement::Platform {
+                options.push((None, "claude-subscription"));
+                labels.push(Choice::new(
+                    "Claude subscription token",
+                    "Paste a token from claude setup-token",
+                ));
+            }
+            options.push((None, "anthropic"));
+            labels.push(Choice::new("Anthropic API key", "Paste an API key"));
+            match options[guided::choose("Connect Anthropic access", &labels)?] {
+                (Some(provider), _) => CredentialsCommand::Connect(CredentialConnectArgs {
+                    provider: Some(provider),
                     name: None,
                     yes: false,
                     guided: false,
-                })
-            } else {
-                CredentialsCommand::Add(CredentialAddArgs {
-                    provider: Some(
-                        if action == 1 {
-                            "claude-subscription"
-                        } else {
-                            "anthropic"
-                        }
-                        .into(),
-                    ),
+                }),
+                (None, provider) => CredentialsCommand::Add(CredentialAddArgs {
+                    provider: Some(provider.into()),
                     name: None,
                     account_hint: None,
                     expires_at: None,
                     key_file: None,
                     guided: false,
-                })
+                }),
             }
         }
-        "openai" | "anthropic" => CredentialsCommand::Add(CredentialAddArgs {
+        "openai" => CredentialsCommand::Add(CredentialAddArgs {
             provider: Some(slot.into()),
             name: None,
             account_hint: None,

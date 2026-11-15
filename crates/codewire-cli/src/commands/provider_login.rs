@@ -1,4 +1,5 @@
-//! Codewire's own provider device logins for `cw credentials --local connect`.
+//! Codewire's own provider logins for `cw credentials --local connect`: the
+//! Codex and GitHub device logins and the Claude sign-in.
 //!
 //! No provider CLI runs. This process speaks the provider's OAuth device flow
 //! over a pinned provider transport, and the issued tokens go straight to the
@@ -15,6 +16,9 @@ use codewire_access::HttpProvider;
 use codewire_credential_broker::ProviderHttpsTransport;
 #[cfg(feature = "local-broker-synthetic-smoke")]
 use codewire_credential_broker::SyntheticOpenAiSmokeTransport;
+use codewire_credential_broker::provider_oauth::claude::{
+    CLAUDE_SIGN_IN_CODE_INVALID, CLAUDE_SIGN_IN_EXPIRED, ClaudeSignIn, ClaudeSignInError,
+};
 use codewire_credential_broker::provider_oauth::codex::CodexDeviceLogin;
 #[cfg(test)]
 use codewire_credential_broker::provider_oauth::github::GitHubDeviceLoginConfig;
@@ -23,7 +27,7 @@ use codewire_credential_broker::provider_oauth::github::{
 };
 use codewire_credential_broker::provider_oauth::{DeviceChallenge, DeviceLoginError};
 use codewire_credential_broker::{
-    BrokerUpstreamTransport, CodexOAuthImport, GitHubAppAuthorizationImport,
+    BrokerUpstreamTransport, ClaudeOAuthImport, CodexOAuthImport, GitHubAppAuthorizationImport,
 };
 
 use super::credential_input::CODEX_DEVICE_AUTHORIZATION_GUIDANCE;
@@ -45,6 +49,40 @@ pub(crate) async fn github_device_login() -> anyhow::Result<GitHubAppAuthorizati
         .await
         .context("resolve the GitHub login endpoint")?;
     github_device_login_with(codewire_github_app(), upstream, cancelled()).await
+}
+
+/// Sign in to Claude for Claude Code: the same sign-in the platform service
+/// runs, here in the host CLI, which alone holds this sign-in's verifier.
+/// The person opens the authorize page and pastes back the code Claude shows.
+pub(crate) async fn claude_sign_in() -> anyhow::Result<ClaudeOAuthImport> {
+    let upstream = resolve(HttpProvider::ClaudeSignInEnrollment)
+        .await
+        .context("resolve the Claude sign-in endpoint")?;
+    let login = ClaudeSignIn::new(upstream);
+    let started = login.start().map_err(claude_sign_in_error)?;
+    let pasted = super::login_screen::claude_sign_in_code(started.authorize_url())?;
+    let pasted = std::str::from_utf8(pasted.expose_secret())
+        .map_err(|_| anyhow::anyhow!(CLAUDE_SIGN_IN_CODE_INVALID))?;
+    tokio::select! {
+        biased;
+        () = cancelled() => anyhow::bail!(CANCELLED),
+        result = login.complete(started.handle(), pasted) => {
+            result.map_err(claude_sign_in_error)
+        }
+    }
+}
+
+/// The same words the platform service uses for the same outcome.
+fn claude_sign_in_error(error: ClaudeSignInError) -> anyhow::Error {
+    match error {
+        ClaudeSignInError::InvalidCode => anyhow::anyhow!(CLAUDE_SIGN_IN_CODE_INVALID),
+        ClaudeSignInError::Expired => anyhow::anyhow!(CLAUDE_SIGN_IN_EXPIRED),
+        error @ (ClaudeSignInError::Denied
+        | ClaudeSignInError::Unavailable
+        | ClaudeSignInError::InvalidResponse) => {
+            anyhow::Error::new(error).context("complete the Claude sign-in")
+        }
+    }
 }
 
 async fn codex_device_login_with(

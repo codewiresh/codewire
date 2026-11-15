@@ -56,7 +56,12 @@ async fn handle_local_with_receipt(
     operation: CredentialOperation,
     execution: &mut super::credential_input::CredentialExecution,
 ) -> anyhow::Result<()> {
-    let mut client = connect_local_credential_authority().await?;
+    let mut client = match authority_feature_needed(&operation) {
+        Some((feature, needed_for)) => {
+            super::connect_local_credential_authority_serving(feature, needed_for).await?
+        }
+        None => connect_local_credential_authority().await?,
+    };
     let command = match operation {
         CredentialOperation::Profile(command) => {
             return profile_command(&mut client, command).await;
@@ -98,6 +103,25 @@ async fn handle_local_with_receipt(
     }
 }
 
+/// The authority feature a command needs before it asks a provider anything.
+/// A Claude sign-in needs an authority that can store it, settled before the
+/// browser step, so a sign-in is never spent on one that would refuse it.
+fn authority_feature_needed(
+    operation: &CredentialOperation,
+) -> Option<(codewire_local_credentials::AuthorityFeature, &'static str)> {
+    matches!(
+        operation,
+        CredentialOperation::Credential(CredentialsCommand::Connect(CredentialConnectArgs {
+            provider: Some(CredentialConnectProviderArg::Claude),
+            ..
+        }))
+    )
+    .then_some((
+        codewire_local_credentials::AuthorityFeature::ClaudeSignIn,
+        "a Claude sign-in",
+    ))
+}
+
 fn remember_local(
     record: &CredentialRecord,
     execution: &mut super::credential_input::CredentialExecution,
@@ -118,10 +142,32 @@ async fn connect_credential(
     match args.provider.context("credential provider is required")? {
         CredentialConnectProviderArg::Codex => connect_codex(client, args, execution).await,
         CredentialConnectProviderArg::Github => connect_github(client, args, execution).await,
-        CredentialConnectProviderArg::Claude => anyhow::bail!(
-            "Claude sign-ins are stored only on the Codewire platform; connect one with --cloud"
-        ),
+        CredentialConnectProviderArg::Claude => connect_claude(client, args, execution).await,
     }
+}
+
+async fn connect_claude(
+    client: &mut LocalCredentialClient,
+    args: CredentialConnectArgs,
+    execution: &mut super::credential_input::CredentialExecution,
+) -> anyhow::Result<()> {
+    let Some(target) = prepare_oauth_connection(client, &args, "anthropic").await? else {
+        anyhow::ensure!(!args.guided, "canceled; no credential was changed");
+        return Ok(());
+    };
+    let (bundle, account_hint) = super::provider_login::claude_sign_in().await?.into_parts();
+    let mut bytes = bundle.into_bytes();
+    let material = ProtectedValue::new(std::mem::take(&mut *bytes))
+        .context("prepare protected Claude sign-in")?;
+    let record = publish_oauth_connection(client, target, material, account_hint)
+        .await
+        .map_err(|status| local_connect_publish_error("Claude", &status))?;
+    remember_local(&record, execution);
+    eprintln!(
+        "Local Claude sign-in {:?} connected ({}).",
+        record.metadata.display_name, record.metadata.id
+    );
+    Ok(())
 }
 
 async fn connect_codex(
@@ -141,9 +187,7 @@ async fn connect_codex(
         .context("prepare protected Codex credential")?;
     let record = publish_oauth_connection(client, target, material, account_hint)
         .await
-        .context(
-            "local Codex storage acknowledgement is unknown; inspect the credential list before retrying",
-        )?;
+        .map_err(|status| local_connect_publish_error("Codex", &status))?;
     remember_local(&record, execution);
     eprintln!(
         "Local Codex credential {:?} connected ({}).",
@@ -182,9 +226,7 @@ async fn connect_github(
         .context("prepare protected GitHub credential")?;
     let record = publish_oauth_connection(client, target, material, account_hint)
         .await
-        .context(
-            "local GitHub storage acknowledgement is unknown; inspect the credential list before retrying",
-        )?;
+        .map_err(|status| local_connect_publish_error("GitHub", &status))?;
     remember_local(&record, execution);
     eprintln!(
         "Local GitHub credential {:?} connected ({}).",
@@ -329,8 +371,57 @@ fn github_reach_summary(
 
 struct OAuthConnectionTarget {
     provider: ProviderId,
+    authentication_kind: CredentialAuthKind,
     display_name: String,
     existing: Option<CredentialRecord>,
+}
+
+/// The kind a provider's `connect` stores: a Claude sign-in for Anthropic,
+/// an OAuth login for every other provider.
+fn connected_kind(provider: &ProviderId) -> CredentialAuthKind {
+    if provider.as_str() == "anthropic" {
+        CredentialAuthKind::ClaudeSignIn
+    } else {
+        CredentialAuthKind::OAuth
+    }
+}
+
+/// What a local connect says when the store answers its save (#4826): a
+/// refusal is definite and saved nothing; only a failure after the request may
+/// have reached the store leaves the outcome unknown. The store's RPC code and
+/// framing never reach the person.
+fn local_connect_publish_error(provider: &str, status: &tonic::Status) -> anyhow::Error {
+    use tonic::Code;
+    let next = "cw credentials --local list";
+    let error = match status.code() {
+        Code::Unavailable
+        | Code::DeadlineExceeded
+        | Code::Cancelled
+        | Code::Unknown
+        | Code::Internal
+        | Code::Aborted
+        | Code::DataLoss
+        | Code::Ok => anyhow::anyhow!(
+            "the local credential store didn't confirm saving your {provider} sign-in, so it may or may not be saved; check the list before connecting again"
+        ),
+        Code::AlreadyExists => anyhow::anyhow!(
+            "a local credential with that name already exists, so your {provider} sign-in wasn't saved; choose another --name"
+        ),
+        Code::NotFound => anyhow::anyhow!(
+            "the local credential to reconnect is gone, so your {provider} sign-in wasn't saved; connect it again under a new name"
+        ),
+        Code::InvalidArgument
+        | Code::FailedPrecondition
+        | Code::OutOfRange
+        | Code::Unimplemented
+        | Code::PermissionDenied
+        | Code::Unauthenticated
+        | Code::ResourceExhausted => anyhow::anyhow!(
+            "the local credential store refused your {provider} sign-in, so nothing was saved: {}",
+            status.message()
+        ),
+    };
+    crate::error_report::with_next_step(error, next)
 }
 
 async fn prepare_oauth_connection(
@@ -368,6 +459,7 @@ fn select_oauth_connection_target(
     provider: &str,
 ) -> anyhow::Result<OAuthConnectionTarget> {
     let provider = ProviderId::parse(provider)?;
+    let authentication_kind = connected_kind(&provider);
     // GitHub is one connection per store: reconnect it in place whatever name
     // was supplied, keeping its identity and name. Only create when absent.
     if provider.as_str() == "github" {
@@ -383,6 +475,7 @@ fn select_oauth_connection_target(
             record.metadata.validate()?;
             return Ok(OAuthConnectionTarget {
                 provider,
+                authentication_kind,
                 display_name: record.metadata.display_name.clone(),
                 existing: Some(record.clone()),
             });
@@ -402,13 +495,14 @@ fn select_oauth_connection_target(
     if let Some(record) = &existing {
         anyhow::ensure!(
             record.metadata.provider == provider
-                && record.metadata.authentication_kind == CredentialAuthKind::OAuth,
+                && record.metadata.authentication_kind == authentication_kind,
             "local credential {display_name:?} belongs to a different provider or authentication kind; use a distinct name"
         );
         record.metadata.validate()?;
     }
     Ok(OAuthConnectionTarget {
         provider,
+        authentication_kind,
         display_name: display_name.to_owned(),
         existing,
     })
@@ -464,7 +558,7 @@ async fn publish_oauth_connection(
             .add_credential(
                 NewCredential {
                     provider: target.provider,
-                    authentication_kind: CredentialAuthKind::OAuth,
+                    authentication_kind: target.authentication_kind,
                     display_name: target.display_name,
                     account_hint,
                     expires_at_unix: None,
@@ -1374,6 +1468,116 @@ mod tests {
                 .err()
                 .unwrap();
         assert!(error.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn connecting_claude_targets_a_claude_sign_in_and_reconnects_only_one() {
+        let target = select_oauth_connection_target(Vec::new(), "claude", "anthropic").unwrap();
+        assert_eq!(target.authentication_kind, CredentialAuthKind::ClaudeSignIn);
+        assert!(target.existing.is_none());
+        let mut sign_in = credential();
+        sign_in.metadata.provider = ProviderId::parse("anthropic").unwrap();
+        sign_in.metadata.authentication_kind = CredentialAuthKind::ClaudeSignIn;
+        let target =
+            select_oauth_connection_target(vec![sign_in.clone()], "WORK-OPENAI", "anthropic")
+                .unwrap();
+        assert_eq!(target.existing, Some(sign_in.clone()));
+        // An Anthropic API key under that name is never replaced by a sign-in.
+        let mut api_key = sign_in;
+        api_key.metadata.authentication_kind = CredentialAuthKind::ApiKey;
+        assert!(select_oauth_connection_target(vec![api_key], "work-openai", "anthropic").is_err());
+    }
+
+    #[test]
+    fn a_claude_sign_in_needs_an_authority_that_stores_one_before_the_browser_step() {
+        use codewire_local_credentials::AuthorityFeature;
+        let connect = |provider| {
+            CredentialOperation::Credential(CredentialsCommand::Connect(CredentialConnectArgs {
+                provider: Some(provider),
+                name: Some("work".into()),
+                yes: false,
+                guided: false,
+            }))
+        };
+        let (feature, _) = authority_feature_needed(&connect(CredentialConnectProviderArg::Claude))
+            .expect("a Claude sign-in names the feature it needs");
+        assert_eq!(feature, AuthorityFeature::ClaudeSignIn);
+        // The v0.4.18 authority (protocol 16) is older and must not be asked.
+        assert!(!feature.served_by(16));
+        for provider in [
+            CredentialConnectProviderArg::Codex,
+            CredentialConnectProviderArg::Github,
+        ] {
+            assert_eq!(authority_feature_needed(&connect(provider)), None);
+        }
+    }
+
+    #[test]
+    fn a_local_connect_refusal_says_nothing_was_saved_without_rpc_text() {
+        let refused = local_connect_publish_error(
+            "Claude",
+            &tonic::Status::failed_precondition("the store cannot hold this credential"),
+        );
+        let text = format!("{refused:#}");
+        assert!(
+            text.contains("refused your Claude sign-in, so nothing was saved"),
+            "{text}"
+        );
+        assert!(
+            text.contains("the store cannot hold this credential"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("code:") && !text.contains("unknown"),
+            "{text}"
+        );
+        // A locked keychain is the authority's own, definite refusal.
+        let locked = local_connect_publish_error(
+            "Claude",
+            &tonic::Status::failed_precondition(
+                "local protected storage is locked or inaccessible; unlock it and retry",
+            ),
+        );
+        let text = format!("{locked:#}");
+        assert!(
+            text.contains("refused your Claude sign-in, so nothing was saved"),
+            "{text}"
+        );
+        assert!(
+            text.contains("locked or inaccessible; unlock it and retry"),
+            "{text}"
+        );
+        // Unavailable is never definite: a timeout, a storage fault after the
+        // commit, or a lost connection may each follow a save that landed.
+        let mut refused_connection = tonic::Status::unavailable("gone");
+        refused_connection.set_source(std::sync::Arc::new(std::io::Error::other(
+            "connection refused",
+        )));
+        for status in [
+            refused_connection,
+            tonic::Status::unavailable("local protected storage did not respond in time"),
+            tonic::Status::unavailable("local credential authority storage is unavailable"),
+            tonic::Status::deadline_exceeded("deadline"),
+            tonic::Status::cancelled("cancelled"),
+        ] {
+            let text = format!("{:#}", local_connect_publish_error("Codex", &status));
+            assert!(text.contains("may or may not be saved"), "{text}");
+            assert!(
+                !text.contains("code:") && !text.contains("nothing was saved"),
+                "{text}"
+            );
+        }
+        let uncertain =
+            local_connect_publish_error("Codex", &tonic::Status::deadline_exceeded("x"));
+        for error in [refused, locked, uncertain] {
+            assert_eq!(
+                error
+                    .downcast_ref::<crate::error_report::NextStep>()
+                    .map(ToString::to_string)
+                    .as_deref(),
+                Some("cw credentials --local list")
+            );
+        }
     }
 
     #[test]

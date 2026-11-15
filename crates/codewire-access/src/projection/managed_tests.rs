@@ -1328,3 +1328,41 @@ fn a_launch_without_a_usable_github_connection_omits_only_the_github_client() {
     );
     assert!(sign_in.without_github().anthropic_sign_in());
 }
+
+#[test]
+fn the_anthropic_credential_kind_fixes_claude_codes_form() {
+    let selected = clients(&["anthropic"]);
+    assert_eq!(
+        selected.with_anthropic_kind(CredentialAuthKind::ApiKey),
+        Ok(selected)
+    );
+    assert_eq!(
+        selected.with_anthropic_kind(CredentialAuthKind::OAuth),
+        selected.with_anthropic_subscription_token()
+    );
+    assert_eq!(
+        selected.with_anthropic_kind(CredentialAuthKind::ClaudeSignIn),
+        selected.with_anthropic_sign_in()
+    );
+    for kind in [
+        CredentialAuthKind::AccessToken,
+        CredentialAuthKind::GitHubApp,
+        CredentialAuthKind::SshKey,
+    ] {
+        assert_eq!(
+            selected.with_anthropic_kind(kind),
+            Err(ProjectionError::InvalidManagedClientSelection)
+        );
+    }
+    // Without the Anthropic client, only the default form is a no-op.
+    let codex = clients(&["codex"]);
+    assert_eq!(
+        codex.with_anthropic_kind(CredentialAuthKind::ApiKey),
+        Ok(codex)
+    );
+    assert!(
+        codex
+            .with_anthropic_kind(CredentialAuthKind::ClaudeSignIn)
+            .is_err()
+    );
+}

@@ -23,8 +23,9 @@ use codewire_local_credentials::{
     LocalRepositorySpawnError,
 };
 use codewire_local_credentials::{
-    AuthorityProtectedStore, AuthorityRuntimeConfig, AuthorityRuntimeError, LocalCredentialClient,
-    LocalCredentialError, serve_os_local_credential_authority_with_process_spawners,
+    AuthorityFeature, AuthorityProtectedStore, AuthorityRuntimeConfig, AuthorityRuntimeError,
+    LocalCredentialClient, LocalCredentialError,
+    serve_os_local_credential_authority_with_process_spawners,
 };
 use codewire_protected_store::{ProtectedStoreBackend, ProtectedStoreError};
 
@@ -191,6 +192,40 @@ async fn connect_configured_authority(
     anyhow::ensure!(
         running_store(&client).as_ref() == Some(store),
         "local credential authority did not switch its store to {store}"
+    );
+    Ok(client)
+}
+
+/// The local credential authority, one that serves `feature`. An authority
+/// older than this cw keeps serving after an update while a local VM may run;
+/// once none does it is replaced here, as a boot command replaces it, before
+/// the command asks anything of a provider. While one may run, the command
+/// stops and says what to do, so no provider sign-in is spent on a store that
+/// would refuse it.
+pub(crate) async fn connect_local_credential_authority_serving(
+    feature: AuthorityFeature,
+    needed_for: &str,
+) -> anyhow::Result<LocalCredentialClient> {
+    let client = connect_local_credential_authority().await?;
+    if feature.served_by(client.info().protocol_version) {
+        return Ok(client);
+    }
+    drop(client);
+    replace_older_local_credential_authority(async {
+        let config = super::native_runtime_config()?;
+        let mut supervisor =
+            codewire_local_vmm::supervisor::NativeSupervisorClient::connect_or_start(&config)
+                .await
+                .context("ask the local VM supervisor which VMs run")?;
+        codewire_local_vmm::supervisor_upgrade::may_replace_older_authority(&mut supervisor)
+            .await
+            .map_err(anyhow::Error::from)
+    })
+    .await?;
+    let client = connect_local_credential_authority().await?;
+    anyhow::ensure!(
+        feature.served_by(client.info().protocol_version),
+        "your local credentials are still kept by the cw you updated from, which can't store {needed_for}; it switches to this cw once no local VM runs: stop them (`cw --local stop NAME`), then run this again"
     );
     Ok(client)
 }

@@ -1610,9 +1610,10 @@ fn unsupported_authentication_kind_is_rejected_before_protected_store_access() {
 
 /// The shared catalog admits Anthropic OAuth for the platform's Claude
 /// subscription token; the local authority still refuses it before any
-/// protected-store access.
+/// protected-store access. A Claude sign-in is stored locally as in the cloud
+/// (#4714).
 #[test]
-fn a_claude_subscription_token_is_refused_by_the_local_authority() {
+fn the_local_authority_stores_a_claude_sign_in_but_not_yet_a_subscription_token() {
     let temp = TempDir::new().expect("temporary directory");
     let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
     let catalog = codewire_access::builtin_provider_catalog();
@@ -1636,19 +1637,6 @@ fn a_claude_subscription_token_is_refused_by_the_local_authority() {
             }
         ))
     );
-    // A Claude sign-in is a platform credential too.
-    let mut sign_in = new_credential("claude-sign-in");
-    sign_in.provider = provider("anthropic");
-    sign_in.authentication_kind = CredentialAuthKind::ClaudeSignIn;
-    assert_eq!(
-        authority.add_credential(sign_in, material(b"synthetic-local-sign-in")),
-        Err(LocalCredentialError::Access(
-            AccessError::UnsupportedAuthenticationKind {
-                provider: provider("anthropic"),
-                kind: CredentialAuthKind::ClaudeSignIn,
-            }
-        ))
-    );
     assert_eq!(store.entry_count(), 0);
     assert!(
         authority
@@ -1656,6 +1644,19 @@ fn a_claude_subscription_token_is_refused_by_the_local_authority() {
             .expect("list credentials")
             .is_empty()
     );
+    let mut sign_in = new_credential("claude-sign-in");
+    sign_in.provider = provider("anthropic");
+    sign_in.authentication_kind = CredentialAuthKind::ClaudeSignIn;
+    let stored = authority
+        .add_credential(sign_in, material(b"synthetic-local-sign-in"))
+        .expect("local Claude sign-in");
+    assert_eq!(stored.metadata.provider, provider("anthropic"));
+    assert_eq!(
+        stored.metadata.authentication_kind,
+        CredentialAuthKind::ClaudeSignIn
+    );
+    assert!(stored.metadata.is_refreshable_login());
+    assert_eq!(store.entry_count(), 1);
     // An Anthropic API key remains a local credential.
     let mut api_key = new_credential("anthropic-api-key");
     api_key.provider = provider("anthropic");
@@ -3744,4 +3745,58 @@ fn environment_grant(permit: &CredentialRefreshPermit) -> &DerivedGrant {
         CredentialRefreshPermit::Environment(permit) => &permit.grant,
         CredentialRefreshPermit::Repository(_) => panic!("expected an environment refresh"),
     }
+}
+
+/// What the local authority stores is part of its protocol: an older
+/// authority still serving after an update refuses anything newer. Changing
+/// this set means bumping `AUTHORITY_PROTOCOL_VERSION` with its
+/// `AUTHORITY_PROTOCOL_CHANGES` row and an `AuthorityFeature` the CLI checks
+/// before a provider sign-in (#4714: a Claude sign-in at protocol 17).
+#[test]
+fn the_credential_kinds_the_local_authority_stores_are_pinned_to_its_protocol() {
+    let catalog = codewire_access::builtin_provider_catalog();
+    let mut admitted = BTreeSet::new();
+    for name in ["openai", "anthropic", "github", "ssh"] {
+        for kind in [
+            CredentialAuthKind::OAuth,
+            CredentialAuthKind::ApiKey,
+            CredentialAuthKind::AccessToken,
+            CredentialAuthKind::GitHubApp,
+            CredentialAuthKind::SshKey,
+            CredentialAuthKind::ClaudeSignIn,
+        ] {
+            let temp = TempDir::new().expect("temporary directory");
+            let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+            let authority =
+                LocalCredentialAuthority::open(&authority_root(&temp), store, catalog.clone())
+                    .expect("open authority");
+            let mut input = new_credential("pinned");
+            input.provider = provider(name);
+            input.authentication_kind = kind;
+            input.account_hint = None;
+            // Stored means saved. SSH identities are enrolled through their
+            // own generate and import paths, never this one.
+            if authority
+                .add_credential(input, material(b"synthetic-pinned"))
+                .is_ok()
+            {
+                admitted.insert((name, format!("{kind:?}")));
+            }
+        }
+    }
+    let expected: BTreeSet<(&str, String)> = [
+        ("openai", "OAuth"),
+        ("openai", "ApiKey"),
+        ("anthropic", "ApiKey"),
+        ("anthropic", "ClaudeSignIn"),
+        ("github", "OAuth"),
+    ]
+    .into_iter()
+    .map(|(provider, kind)| (provider, kind.to_owned()))
+    .collect();
+    assert_eq!(
+        admitted, expected,
+        "bump the authority protocol with this set"
+    );
+    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 17);
 }

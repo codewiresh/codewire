@@ -435,7 +435,7 @@ impl PlatformCredentialStore {
         value: &ProtectedValue,
         expires_at_unix: u64,
     ) -> Result<PreparedCredentialReplacement, Error> {
-        if !is_subscription_token(&expected.metadata) {
+        if !expected.metadata.is_claude_subscription_token() {
             return Err(Error::UnsupportedCredential);
         }
         if expected.metadata.owner != *owner || !owner.may_hold(CredentialAuthKind::OAuth) {
@@ -560,7 +560,7 @@ impl PlatformCredentialStore {
             require_oauth_refresh(&current)?;
         }
         if next.metadata.authentication_kind == CredentialAuthKind::ApiKey
-            || is_subscription_token(&next.metadata)
+            || next.metadata.is_claude_subscription_token()
         {
             // A valid future expiry at preparation may elapse while waiting
             // for publication locks. Runtime use still rechecks wall expiry;
@@ -1133,21 +1133,10 @@ pub(crate) fn compare_version(
     }
 }
 
-/// A Claude subscription token: the Anthropic provider's OAuth kind.
-pub(crate) fn is_subscription_token(metadata: &CredentialMetadata) -> bool {
-    metadata.provider.as_str() == "anthropic"
-        && metadata.authentication_kind == CredentialAuthKind::OAuth
-}
-
 pub(crate) fn require_oauth_refresh(record: &CredentialRecord) -> Result<(), Error> {
     // A Claude subscription token has no refresh; only its owner replaces it.
     // A Claude sign-in is its own kind and rotates like any OAuth login.
-    let refreshable = match record.metadata.authentication_kind {
-        CredentialAuthKind::OAuth => !is_subscription_token(&record.metadata),
-        CredentialAuthKind::ClaudeSignIn => record.metadata.provider.as_str() == "anthropic",
-        _ => false,
-    };
-    if !refreshable {
+    if !record.metadata.is_refreshable_login() {
         return Err(Error::UnsupportedCredential);
     }
     record.active(unix_now()?)

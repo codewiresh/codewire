@@ -181,6 +181,24 @@ impl CredentialMetadata {
         }
         Ok(())
     }
+
+    /// A Claude subscription token (`claude setup-token`): the Anthropic
+    /// provider's OAuth kind, pasted by its owner and never refreshed.
+    pub fn is_claude_subscription_token(&self) -> bool {
+        self.provider.as_str() == "anthropic"
+            && self.authentication_kind == CredentialAuthKind::OAuth
+    }
+
+    /// A provider login whose material rotates through a refresh: an OAuth
+    /// login other than a Claude subscription token, or a Claude sign-in.
+    /// Every store refreshes exactly these.
+    pub fn is_refreshable_login(&self) -> bool {
+        match self.authentication_kind {
+            CredentialAuthKind::OAuth => !self.is_claude_subscription_token(),
+            CredentialAuthKind::ClaudeSignIn => self.provider.as_str() == "anthropic",
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

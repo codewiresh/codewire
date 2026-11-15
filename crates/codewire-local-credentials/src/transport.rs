@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 16;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 17;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -30,10 +30,16 @@ pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
 /// Every protocol in (minimum, current] needs a row, so a bump says what an
 /// older authority lacks; its test enforces that.
 #[cfg(test)]
-const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[(
-    16,
-    "EvaluateEnvironmentGrants answers a platform environment's GitHub question (#2850)",
-)];
+const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
+    (
+        16,
+        "EvaluateEnvironmentGrants answers a platform environment's GitHub question (#2850)",
+    ),
+    (
+        17,
+        "admits and leases a Claude sign-in, and EvaluateEnvironmentGrants names the Anthropic grant's kind (#4714)",
+    ),
+];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
 /// An authority capability newer than the minimum protocol.
@@ -43,15 +49,19 @@ pub enum AuthorityFeature {
     /// environment's creator has GitHub connected. An older authority ignores
     /// the field and evaluates a local binding instead.
     PlatformGithub,
+    /// A Claude sign-in: stored, leased as Claude Code's login and named in
+    /// the Anthropic grant. An older authority refuses to store one.
+    ClaudeSignIn,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 1] = [Self::PlatformGithub];
+    pub const ALL: [Self; 2] = [Self::PlatformGithub, Self::ClaudeSignIn];
 
     /// The protocol that introduced it.
     pub const fn since(self) -> u32 {
         match self {
             Self::PlatformGithub => 16,
+            Self::ClaudeSignIn => 17,
         }
     }
 

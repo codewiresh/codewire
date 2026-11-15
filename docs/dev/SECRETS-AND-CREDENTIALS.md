@@ -1116,8 +1116,9 @@ The broker delivers the Claude login under the same conditions, with the
 Anthropic slot in place of the Codex slot: a hosted Sandbox, or the creator's
 own local VM through its platform delegation as above; an Anthropic selection
 from the creator's own personal platform profile (for a hosted Sandbox, one
-whose personal-owner consent the creator confirmed; a local profile has no
-Claude sign-in); the Anthropic grant's dedicated `claude-login` permission;
+whose personal-owner consent the creator confirmed) or, for a local VM, from
+its selected local profile as for Codex (#4714); the Anthropic grant's
+dedicated `claude-login` permission;
 and the creator's own Active Claude sign-in, never an Anthropic API key, a
 Claude subscription token (`claude setup-token`) or one that needs Reconnect.
 It refreshes, checks and seals exactly as for Codex, through the sign-in's own
@@ -1320,8 +1321,11 @@ platform broker. The VM's guest daemon (root) writes Codex's login in
 Codewire's native Codex home and Claude Code's in the workload user's
 `~/.claude/.credentials.json`, giving every file it creates to that user
 before anything is written, and only ever reading or replacing that user's
-files. A local profile serves only the owner's own Codex sign-in: it has no
-Claude sign-in.
+files. A local profile serves the store owner's own Codex sign-in and Claude
+sign-in: the local authority admits each only as the owner's Active login in
+its slot (Codex, Anthropic) of the VM's selected local profile, and the local
+broker checks the same again before leasing it
+(`codewire-local-credentials` `broker_channel/login.rs`).
 
 The workspace daemon writer follows these rules for
 the files it owns:

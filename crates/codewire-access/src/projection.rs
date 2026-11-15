@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 
+use crate::CredentialAuthKind;
+
 const CODEX_PROVIDER_ID: &str = "codewire_openai";
 const CODEX_OPENAI_API_PROVIDER_ID: &str = "codewire_openai_api";
 const MIN_UNPRIVILEGED_PORT: u16 = 1024;
@@ -338,6 +340,21 @@ impl ManagedCredentialClients {
     /// Whether the Anthropic client uses its sign-in form.
     pub fn anthropic_sign_in(self) -> bool {
         self.0 & ANTHROPIC_SIGN_IN_BIT != 0
+    }
+
+    /// The same selection with its Anthropic client in the form the Anthropic
+    /// slot's credential kind fixes: an API key keeps the default, a Claude
+    /// subscription token (the provider's OAuth kind) its token form, a
+    /// Claude sign-in its sign-in form. Any other kind cannot fill the slot.
+    pub fn with_anthropic_kind(self, kind: CredentialAuthKind) -> Result<Self, ProjectionError> {
+        match kind {
+            CredentialAuthKind::ApiKey => Ok(self),
+            CredentialAuthKind::OAuth => self.with_anthropic_subscription_token(),
+            CredentialAuthKind::ClaudeSignIn => self.with_anthropic_sign_in(),
+            CredentialAuthKind::AccessToken
+            | CredentialAuthKind::GitHubApp
+            | CredentialAuthKind::SshKey => Err(ProjectionError::InvalidManagedClientSelection),
+        }
     }
 
     /// One of 64 canonical tokens for private bootstrap metadata. Empty

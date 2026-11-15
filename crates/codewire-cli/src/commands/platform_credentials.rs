@@ -5,8 +5,8 @@ use codewire_client::{self as rpc, CodewireClient};
 use super::credential_input::{
     CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE, CLAUDE_SUBSCRIPTION_TOKEN_PROMPT,
     CODEX_DEVICE_AUTHORIZATION_GUIDANCE, ParsedCredentialSelector, SSH_PUBLIC_KEY_GITHUB_HINT,
-    parse_credential_selector, prompt_claude_code, prompt_credential_material,
-    prompt_named_material, read_ssh_import, validate_ssh_generation, validate_ssh_import,
+    parse_credential_selector, prompt_credential_material, prompt_named_material, read_ssh_import,
+    validate_ssh_generation, validate_ssh_import,
 };
 use super::login_screen;
 use super::*;
@@ -551,19 +551,9 @@ async fn find_named(
 /// A device flow's challenge (Codex, GitHub): the link screen, then the code
 /// to enter on the provider's page.
 fn display_challenge(provider: &str, url: &str, code: &str) -> bool {
-    show_sign_in_link(url);
+    login_screen::open_sign_in_link(url);
     eprint!("{}", login_screen::device_code_lines(provider, code));
     true
-}
-
-/// The link screen, then the browser at a terminal. The link is on its own
-/// line first, so it works when no browser opens; the browser is started
-/// fully detached, so nothing it prints reaches a prompt.
-fn show_sign_in_link(url: &str) {
-    login_screen::show_link(url);
-    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
-        let _ = super::platform_commands::open_browser(url);
-    }
 }
 
 /// The account a connected credential names: its account hint (an email or
@@ -579,7 +569,8 @@ fn signed_in_account(credential: &rpc::Credential) -> &str {
 
 /// Start a Claude sign-in, show where to sign in, and read the code Claude
 /// shows from a no-echo prompt or stdin, never argv, as `code#state` (see
-/// [`prompt_claude_code`]). The returned handle stays in this process.
+/// [`login_screen::claude_sign_in_code`]). The returned handle stays in this
+/// process.
 async fn start_claude_sign_in(
     client: &CodewireClient,
 ) -> anyhow::Result<(String, codewire_protected_store::ProtectedValue)> {
@@ -594,9 +585,7 @@ async fn start_claude_sign_in(
             && !started.sign_in.is_empty(),
         "platform returned an invalid Claude sign-in"
     );
-    show_sign_in_link(&started.authorize_url);
-    eprintln!();
-    let pasted = prompt_claude_code()?;
+    let pasted = login_screen::claude_sign_in_code(&started.authorize_url)?;
     Ok((started.sign_in, pasted))
 }
 

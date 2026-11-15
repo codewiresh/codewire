@@ -44,8 +44,11 @@ use crate::{
 };
 
 mod delegation;
+mod login;
 mod projection;
 mod ssh;
+
+use login::local_login_refused;
 
 /// Projections run one at a time. A concurrent launch waits for the permit
 /// until its own deadline, which its context already bounds, rather than
@@ -328,8 +331,8 @@ where
         };
         // The Codex and Claude login permissions name the listed direct
         // delivery exceptions: neither is ever leased as an ordinary provider
-        // operation, and the Codex login only through
-        // [`Self::lease_codex_login`].
+        // operation, only through [`Self::lease_codex_login`] and
+        // [`Self::lease_claude_login`].
         if requested_permission == codewire_access::codex_login_permission()
             || requested_permission == codewire_access::claude_login_permission()
         {
@@ -337,31 +340,6 @@ where
         }
         self.lease_admitted(request_id, capability_slot, requested_permission)
             .await
-    }
-
-    /// Lease the Codex login for the one listed direct delivery exception
-    /// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions"):
-    /// the host owner's own Active Codex ChatGPT login in the Codex slot of
-    /// the VM's selected profile. The authority admits it only then
-    /// ([`local_codex_login_admissible`]); this side checks the same again.
-    pub async fn lease_codex_login(
-        &mut self,
-        request_id: Uuid,
-    ) -> Result<CredentialOperationLease, BrokerLeaseChannelError> {
-        if request_id.is_nil() {
-            return Err(BrokerLeaseChannelError::InvalidRequest);
-        }
-        let lease = self
-            .lease_admitted(
-                request_id,
-                CapabilitySlot::codex(),
-                codewire_access::codex_login_permission(),
-            )
-            .await?;
-        if !local_codex_login_admissible(&lease.credential.metadata, &lease.grant) {
-            return Err(BrokerLeaseChannelError::Denied);
-        }
-        Ok(lease)
     }
 
     async fn lease_admitted(
@@ -1227,12 +1205,11 @@ where
         };
         let (admission, placeholder) = match admission {
             Ok((admission, placeholder)) => {
-                let login_refused = admission.permission
-                    == codewire_access::codex_login_permission()
-                    && !local_codex_login_admissible(
-                        &admission.credential.metadata,
-                        &admission.grant,
-                    );
+                let login_refused = local_login_refused(
+                    &admission.permission,
+                    &admission.credential.metadata,
+                    &admission.grant,
+                );
                 if deny_generic_ssh_lease(&admission.credential.metadata).is_err() || login_refused
                 {
                     self.audit
@@ -1584,26 +1561,6 @@ fn map_server_error(error: LocalCredentialError) -> Status {
         }
         _ => Status::unavailable("credential broker lease authority is unavailable"),
     }
-}
-
-/// The one listed direct delivery exception on a local VM
-/// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions"): the
-/// host owner's own Active Codex ChatGPT login, an OpenAI OAuth credential in
-/// the Codex slot of the VM's selected local profile. Never an API key; a
-/// local store holds no organization credential, and its one owner is the
-/// VM's creator.
-pub(crate) fn local_codex_login_admissible(
-    credential: &codewire_access::CredentialMetadata,
-    grant: &codewire_access::DerivedGrant,
-) -> bool {
-    grant.capability_slot == CapabilitySlot::codex()
-        && grant.profile.is_some()
-        && grant.credential_id == credential.id
-        && credential.provider.as_str() == "openai"
-        && credential.authentication_kind == codewire_access::CredentialAuthKind::OAuth
-        && credential.status == codewire_access::CredentialStatus::Active
-        && credential.placement == codewire_access::Placement::Local
-        && matches!(credential.owner, codewire_access::Owner::User(_))
 }
 
 #[cfg(test)]
@@ -2156,7 +2113,7 @@ mod tests {
             permissions: BTreeSet::new(),
         };
         let active = credential(CredentialAuthKind::OAuth, CredentialStatus::Active);
-        assert!(local_codex_login_admissible(
+        assert!(login::local_codex_login_admissible(
             &active,
             &grant(CapabilitySlot::codex(), true)
         ));
@@ -2200,7 +2157,7 @@ mod tests {
             ),
         ] {
             assert!(
-                !local_codex_login_admissible(&credential, &grant),
+                !login::local_codex_login_admissible(&credential, &grant),
                 "{credential:?}"
             );
         }

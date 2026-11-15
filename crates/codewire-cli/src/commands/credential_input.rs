@@ -459,7 +459,7 @@ fn reject_unknown_selector_prefix(selector: &str, kind: &str) -> anyhow::Result<
 }
 
 /// What `connect claude` says before it prints Claude's sign-in link.
-pub(super) const CLAUDE_SIGN_IN_GUIDANCE: &str = "Sign in to Claude in your browser with the account whose Claude Pro, Max, Team or Enterprise plan you want to use, then paste the code Claude shows. Platform only.";
+pub(super) const CLAUDE_SIGN_IN_GUIDANCE: &str = "Sign in to Claude in your browser with the account whose Claude Pro, Max, Team or Enterprise plan you want to use, then paste the code Claude shows.";
 
 /// A pasted value that is not Claude's `code#state`; one retry follows at a
 /// terminal.

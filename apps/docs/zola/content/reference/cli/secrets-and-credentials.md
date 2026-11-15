@@ -1,7 +1,7 @@
 ---
 title: Secrets and credentials
 description: cw secrets for application secrets and cw credentials for provider credentials and profiles.
-updated: 2026-11-07
+updated: 2026-11-15
 weight: 5
 aliases: ["/cli/secrets-and-credentials"]
 ---
@@ -103,7 +103,7 @@ cw credentials --cloud generate ssh --name NAME [--expires-at UNIX_SECONDS]
 | --- | --- |
 | `codex` | ChatGPT device-code sign-in; enable device code authorization in ChatGPT's Security settings first |
 | `github` | Device-code sign-in to the Codewire GitHub App; prints the installation link |
-| `claude` | Browser sign-in to Claude, paste the code shown; platform only |
+| `claude` | Browser sign-in to Claude, paste the code shown |
 | `openai`, `anthropic` | API key from stdin |
 | `claude-subscription` | token from `claude setup-token`, from stdin; platform only; one-year expiry recorded |
 | `ssh` | an Ed25519 key `cw` generates (public key printed), or an imported OpenSSH key file |

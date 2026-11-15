@@ -3102,7 +3102,7 @@ pub(crate) fn runtime_artifact_paths() -> anyhow::Result<(PathBuf, PathBuf)> {
     Ok((artifact_root, artifact_lock))
 }
 
-fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
+pub(crate) fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
     let root = absolute_override(NATIVE_STATE_ROOT_ENV)?

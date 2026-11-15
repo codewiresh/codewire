@@ -1,7 +1,7 @@
 ---
 title: Credentials
 description: Connect Codex, add OpenAI and Anthropic keys, a Claude subscription token or sign-in, SSH keys and GitHub, then build the credential profile an environment uses.
-updated: 2026-11-08
+updated: 2026-11-15
 weight: 1
 aliases: ["/guides/credentials"]
 ---
@@ -58,8 +58,9 @@ instead of your plan name and `/usage` is unavailable. Replace it with
 `cw credentials --cloud rotate work-claude` or **Replace token** in the
 dashboard.
 
-**Sign-in**: `cw credentials --cloud connect claude --name claude-login` opens
-Claude's authorization page and asks you to paste the code Claude shows. A
+**Sign-in**: `cw credentials connect claude --name claude-login` opens
+Claude's authorization page and asks you to paste the code Claude shows, the
+same with `--cloud` and `--local`. A
 sign-in carries your plan, so `/usage` and plan features work in the sandbox;
 the access token is delivered to the sandbox as Claude Code's own login file.
 See the [security model](@/reference/security.md).
@@ -140,7 +141,7 @@ Revocation in Codewire does not log the identity out at the provider.
 
 A local VM uses `local:NAME` or `platform:NAME` profiles. The local store needs
 a running, unlocked Secret Service on Linux; on macOS it is the Keychain.
-`cw credentials --local connect codex` and `connect github` run the same
-device logins as the platform from the `cw` process; Claude subscription
-tokens and sign-ins are platform-only. When you create a local VM with a
+`cw credentials --local connect codex`, `connect github` and `connect claude`
+run the same sign-ins as the platform from the `cw` process; Claude
+subscription tokens are still platform-only. When you create a local VM with a
 profile that has no SSH key, `cw` asks whether to add one.

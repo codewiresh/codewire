@@ -1093,3 +1093,29 @@ fn a_platform_environment_without_a_profile_uses_the_creators_authorized_github(
         derive_account_github_grant(&platform(vec![active.id]), &revoked, &catalog, 1).is_err()
     );
 }
+
+#[test]
+fn every_store_refreshes_exactly_the_provider_logins_that_rotate() {
+    let with = |provider: &str, kind: CredentialAuthKind| CredentialMetadata {
+        provider: provider_id(provider),
+        authentication_kind: kind,
+        ..credential("c", Owner::User(owner_id("owner")))
+    };
+    // A Codex or GitHub login and a Claude sign-in rotate their material.
+    assert!(with("openai", CredentialAuthKind::OAuth).is_refreshable_login());
+    assert!(with("github", CredentialAuthKind::OAuth).is_refreshable_login());
+    assert!(with("anthropic", CredentialAuthKind::ClaudeSignIn).is_refreshable_login());
+    // A `claude setup-token` token is pasted and replaced, never refreshed.
+    let token = with("anthropic", CredentialAuthKind::OAuth);
+    assert!(token.is_claude_subscription_token());
+    assert!(!token.is_refreshable_login());
+    assert!(!with("anthropic", CredentialAuthKind::ClaudeSignIn).is_claude_subscription_token());
+    for kind in [
+        CredentialAuthKind::ApiKey,
+        CredentialAuthKind::AccessToken,
+        CredentialAuthKind::GitHubApp,
+        CredentialAuthKind::SshKey,
+    ] {
+        assert!(!with("anthropic", kind).is_refreshable_login(), "{kind:?}");
+    }
+}

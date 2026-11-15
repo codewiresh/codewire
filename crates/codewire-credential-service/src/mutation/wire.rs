@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
 use codewire_access::{CredentialAuthKind, CredentialMetadata, CredentialStatus};
+use codewire_credential_broker::provider_oauth::claude::{
+    CLAUDE_SIGN_IN_CODE_INVALID, CLAUDE_SIGN_IN_EXPIRED,
+};
 use codewire_protected_store::ProtectedValue;
 use codewire_proto::codewire::v1::{self as proto, CredentialMutationService};
 use codewire_server_core::auth::CredentialMutationAuthority;
@@ -449,14 +452,10 @@ fn error(error: Error) -> connectrpc::ConnectError {
             ConnectCode::Unknown,
             "credential mutation may have completed; inspect current metadata before retrying",
         ),
-        Error::ClaudeSignInCodeInvalid => (
-            ConnectCode::InvalidArgument,
-            "the pasted code is not from this Claude sign-in; paste the whole code#state Claude shows, or start again",
-        ),
-        Error::ClaudeSignInExpired => (
-            ConnectCode::FailedPrecondition,
-            "the Claude sign-in expired; start a new one",
-        ),
+        Error::ClaudeSignInCodeInvalid => {
+            (ConnectCode::InvalidArgument, CLAUDE_SIGN_IN_CODE_INVALID)
+        }
+        Error::ClaudeSignInExpired => (ConnectCode::FailedPrecondition, CLAUDE_SIGN_IN_EXPIRED),
     };
     // Closed classifications only: provider stderr, material, SQL and source
     // errors are never retained in the service error or its public detail.

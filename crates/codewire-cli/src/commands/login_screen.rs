@@ -1,4 +1,4 @@
-//! The screens `credentials --cloud connect` shows while a person signs in
+//! The screens `credentials connect` shows while a person signs in
 //! to a provider in their browser, laid out like Claude Code's own login:
 //! the sign-in link on its own line (copied to the clipboard with OSC 52 at a
 //! terminal), then a hidden paste prompt or a device code, then the account
@@ -51,6 +51,28 @@ pub(super) fn success_screen(account: &str) -> String {
 /// The OSC 52 sequence that asks the terminal to put `text` on the clipboard.
 pub(super) fn osc52_copy(text: &str) -> String {
     format!("\x1b]52;c;{}\x07", BASE64.encode(text))
+}
+
+/// The link screen, then the browser at a terminal. The link is on its own
+/// line first, so it works when no browser opens; the browser is started
+/// fully detached, so nothing it prints reaches a prompt.
+pub(super) fn open_sign_in_link(url: &str) {
+    show_link(url);
+    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+        // The link above is the way there when no browser starts.
+        let _ = super::platform_commands::open_browser(url);
+    }
+}
+
+/// The Claude sign-in page, in both placements: the authorize link, then
+/// the code Claude shows, read as `code#state` from a no-echo prompt or
+/// stdin, never argv ([`super::credential_input::prompt_claude_code`]).
+pub(super) fn claude_sign_in_code(
+    authorize_url: &str,
+) -> anyhow::Result<codewire_protected_store::ProtectedValue> {
+    open_sign_in_link(authorize_url);
+    eprintln!();
+    super::credential_input::prompt_claude_code()
 }
 
 /// Show the link screen on stderr, after copying the link with OSC 52 when

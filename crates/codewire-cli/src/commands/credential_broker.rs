@@ -265,7 +265,7 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     // Both brokers serve the Codex and Claude logins, the listed direct
     // delivery exceptions (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct
     // delivery exceptions"). The local broker serves the owner's own Codex
-    // sign-in; a local profile has no Claude sign-in. For a platform profile
+    // sign-in and Claude sign-in from a local profile. For a platform profile
     // the relay passes each request through the host authority's delegation,
     // which admits the login and its answer both ways, to the platform broker,
     // which decides it for the delegation's creator. A refusal answers DENIED or UNAVAILABLE without ending the

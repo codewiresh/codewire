@@ -92,6 +92,11 @@ const MAX_CODE_BYTES: usize = 1024;
 const MAX_PASTE_BYTES: usize = 4096;
 const MAX_PROFILE_TEXT_BYTES: usize = 256;
 
+/// What to tell the person who pasted a code that is not from this sign-in.
+pub const CLAUDE_SIGN_IN_CODE_INVALID: &str = "the pasted code is not from this Claude sign-in; paste the whole code#state Claude shows, or start again";
+/// What to tell the person whose sign-in expired before they pasted the code.
+pub const CLAUDE_SIGN_IN_EXPIRED: &str = "the Claude sign-in expired; start a new one";
+
 /// Typed sign-in outcomes. None carries provider text, the code or a token.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum ClaudeSignInError {

@@ -452,8 +452,9 @@ the host by the repository executor. For a platform profile the broker runs as
 a relay that reads no store and dials no provider: the host opens an
 owner-authenticated delegation to the platform broker, which performs the
 provider operations, and no platform provider material is copied to the host
-or the VM. A local profile holds a Codex sign-in but no Claude sign-in; a
-Claude sign-in reaches a local VM only through a platform profile. The `open`
+or the VM. A local profile holds the owner's Codex sign-in and Claude
+sign-in as a platform profile does; a Claude subscription token is still a
+platform credential only. The `open`
 egress policy still lets the guest open TCP 443 to a provider directly, so the
 broker keeps the credential out of the workload but does not enforce provider
 mediation.

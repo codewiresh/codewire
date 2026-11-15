@@ -81,6 +81,7 @@ const REPOSITORY_STREAM_CHUNK_BYTES: usize = 48 * 1024;
 const MAX_SSH_ENROLLMENT_WORKERS: u32 = 8;
 const SSH_ENROLLMENT_DEADLINE: Duration = Duration::from_secs(30);
 
+mod grants;
 mod repository;
 pub(crate) use repository::REPOSITORY_PREPARATION_TIMEOUT;
 use repository::{PreparedRepository, RepositoryProcessManager, cleanup_repository_ssh_runtimes};
@@ -1934,19 +1935,16 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
                 )
                 .await?;
             return Ok(Response::new(v1::EvaluateEnvironmentGrantsResponse {
-                grants: Vec::new(),
                 platform_github_connected: connected,
+                ..Default::default()
             }));
         }
         let authority = Arc::clone(&self.authority);
-        let grants = run_blocking(move || {
-            authority.evaluate_environment_grants(&environment_id, request.environment_generation)
+        run_blocking(move || {
+            grants::local_grants(&authority, &environment_id, request.environment_generation)
         })
-        .await?;
-        Ok(Response::new(v1::EvaluateEnvironmentGrantsResponse {
-            grants: grants.into_iter().map(derived_grant_to_proto).collect(),
-            platform_github_connected: false,
-        }))
+        .await
+        .map(Response::new)
     }
 
     async fn ensure_environment_broker(
@@ -2565,7 +2563,7 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         // provider/profile diagnostic needed to repair a rejected selection.
         LocalCredentialError::Access(error) => Status::failed_precondition(error.to_string()),
         LocalCredentialError::ProtectedStore(ProtectedStoreError::AccessDenied) => {
-            Status::unavailable(
+            Status::failed_precondition(
                 "local protected storage is locked or inaccessible; unlock it and retry",
             )
         }

@@ -1954,23 +1954,23 @@ impl Supervisor {
         // authority grants it to profiles that include GitHub while it is
         // active. Configure git for it exactly then, so a missing connection
         // never routes GitHub remotes to a route that cannot serve them.
-        let github = authority
-            .environment_grant_slots(&expected.environment_id, generation)
+        let grants = authority
+            .environment_grants(&expected.environment_id, generation)
             .await
-            .map_err(credential_control_error)?
-            .contains("github");
-        // Local profiles never hold a Claude subscription token or sign-in:
-        // the local authority refuses Anthropic OAuth, so slot names fix every
-        // form here. A platform profile pins its form with its slots
-        // (sources::platform::managed_clients).
+            .map_err(credential_control_error)?;
+        // The Anthropic grant's kind fixes Claude Code's form, as on a platform.
         let clients = codewire_access::ManagedCredentialClients::from_profile_slots(
             revision
                 .profile
                 .entries
                 .keys()
                 .map(|slot| slot.as_str())
-                .chain(github.then_some("github")),
+                .chain(grants.slots.contains("github").then_some("github")),
         )
+        .and_then(|clients| match grants.anthropic_kind {
+            Some(kind) => clients.with_anthropic_kind(kind),
+            None => Ok(clients),
+        })
         .map_err(|_| SupervisorError::EnvironmentAccessUnavailable)?;
         clients
             .check_collisions(project.environment.keys().map(String::as_str))

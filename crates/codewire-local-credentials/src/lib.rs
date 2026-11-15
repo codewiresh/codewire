@@ -39,8 +39,8 @@ pub use broker_process::{
     LocalBrokerProcessSpawner, LocalBrokerSpawnError,
 };
 pub use client::{
-    AuthorityInfo, LocalCredentialClient, LocalCredentialControlClient, PreparedGitRepository,
-    SpawnedAuthority,
+    AuthorityInfo, EnvironmentGrants, LocalCredentialClient, LocalCredentialControlClient,
+    PreparedGitRepository, SpawnedAuthority,
 };
 pub use platform::{
     PlatformCredentialBinding, PlatformCredentialConnector, PlatformCredentialInput,
@@ -754,14 +754,13 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
                 .ok_or_else(|| AccessError::ProviderUnavailable {
                     provider: input.provider.clone(),
                 })?;
-        // A Claude subscription token (Anthropic OAuth) and a Claude sign-in
-        // are platform credentials only, whatever the shared catalog admits.
-        // The native client projection has neither form.
-        // TODO(native-claude-subscription-form): admit them locally once native
-        // VMs project Claude Code's subscription mode.
+        // A Claude sign-in is admitted as in the cloud (#4714). A Claude
+        // subscription token (Anthropic OAuth) is still a platform credential
+        // only: a local VM does not yet project its token form.
+        // TODO(native-claude-subscription-form): admit it with that form.
         if !provider.supports_authentication_kind(input.authentication_kind)
             || (input.provider.as_str() == "anthropic"
-                && input.authentication_kind != CredentialAuthKind::ApiKey)
+                && input.authentication_kind == CredentialAuthKind::OAuth)
         {
             return Err(AccessError::UnsupportedAuthenticationKind {
                 provider: input.provider,
@@ -1214,8 +1213,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
                 expected_grant.credential_revocation_generation =
                     admission.grant.credential_revocation_generation;
                 if !refresh_grant_matches(&admission.grant, &expected_grant)?
-                    || admission.credential.metadata.authentication_kind
-                        != CredentialAuthKind::OAuth
+                    || !admission.credential.metadata.is_refreshable_login()
                 {
                     return Err(LocalCredentialError::StaleCredentialRefresh);
                 }
@@ -3031,7 +3029,7 @@ fn validate_refresh_current(
     current: &InternalCredentialRecord,
     marker: &CredentialRefreshJournal,
 ) -> Result<(), LocalCredentialError> {
-    if current.public.metadata.authentication_kind != CredentialAuthKind::OAuth
+    if !current.public.metadata.is_refreshable_login()
         || current.public.metadata.status != CredentialStatus::Active
         || current.public.metadata.id != *marker.permit.credential_id()
         || current.public.metadata.revocation_generation
@@ -3225,7 +3223,7 @@ fn reconcile_ready_journal<S: ProtectedStore>(
                     .material_generation
                     .checked_add(1)
                     .ok_or(LocalCredentialError::CorruptMetadata)?;
-                if credential.public.metadata.authentication_kind != CredentialAuthKind::OAuth
+                if !credential.public.metadata.is_refreshable_login()
                     || marker.permit.next_material_generation() != expected_generation
                     || marker.permit.current_material_generation() != credential.material_generation
                 {
@@ -3280,7 +3278,7 @@ fn promote_oauth_refresh<S: ProtectedStore>(
     current: &InternalCredentialRecord,
     journal: &ProtectedEntryJournal,
 ) -> Result<(), LocalCredentialError> {
-    if current.public.metadata.authentication_kind != CredentialAuthKind::OAuth
+    if !current.public.metadata.is_refreshable_login()
         || current.public.metadata.status != CredentialStatus::Active
         || journal.operation != JournalOperation::RollbackWrite
     {
