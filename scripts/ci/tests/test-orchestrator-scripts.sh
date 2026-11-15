@@ -215,12 +215,109 @@ git -C "$deploy" push -q origin main
 deploy_main="$(git -C "$deploy" rev-parse HEAD)"
 
 settled() { (cd "$codewire" && "$SCRIPTS/dev-settled.sh" "$deploy" "$@") >"$work/out" 2>&1; }
-reset_fake
-printf '{"runs":[]}' >"$FAKE/runs-promote-dev.yaml.json"
+no_deliveries() {
+  reset_fake
+  local workflow
+  for workflow in promote-dev deploy-dev ci; do printf '{"runs":[]}' >"$FAKE/runs-$workflow.yaml.json"; done
+}
+# A codewire deploy-dev run's jobs, each given as "STATUS" in workflow order.
+delivery_run() { # ID SELECTION TURN SERVICES DAEMON PUBLISH DEFERRED HAND_ON
+  local names=('Deploy selection' 'Dev delivery turn' 'Build and push the service runtime images'
+    'Build and push the daemon runtime image' 'Publish the exact runtime image set'
+    'Deferred to the delivery in flight' 'Hand the Dev delivery turn on')
+  local id="$1" jobs='' i=0
+  shift
+  for status in "$@"; do
+    jobs+="${jobs:+,}{\"name\":\"${names[$i]}\",\"status\":\"$status\"}"
+    i=$((i + 1))
+  done
+  printf '{"run":{"id":%s},"jobs":[%s]}' "$id" "$jobs" >"$FAKE/run-$id.json"
+}
+active() { # WORKFLOW ID [SHA] [REF]
+  printf '{"runs":[{"id":%s,"head_sha":"%s","ref":"%s"}]}' "$2" "${3:-$codewire_main}" "${4:-main}" \
+    >"$FAKE/runs-$1.yaml.json"
+}
+reasons() { grep -c '^not settled: ' "$work/out"; }
+
+no_deliveries
 settled || fail "dev-settled refused a settled Dev: $(cat "$work/out")"
-printf '{"runs":[{"id":5}]}' >"$FAKE/runs-promote-dev.yaml.json"
+grep -q '^settled: ' "$work/out" || fail 'dev-settled did not say settled'
+active promote-dev 5
 settled && fail 'dev-settled passed while promote-dev runs'
-printf '{"runs":[]}' >"$FAKE/runs-promote-dev.yaml.json"
+grep -q '^not settled: promote-dev run 5 is running$' "$work/out" || fail "dev-settled did not name the promote-dev run: $(cat "$work/out")"
+
+# deploy-dev: a run waiting for its turn, building or publishing is in flight;
+# one that builds nothing, or that only hands the turn on, is not.
+no_deliveries; active deploy-dev 60
+delivery_run 60 success running blocked blocked blocked blocked blocked
+settled && fail 'dev-settled passed while a deploy-dev run waits for its turn'
+grep -q '^not settled: deploy-dev run 60 (.*) is running at "Dev delivery turn"$' "$work/out" ||
+  fail "dev-settled did not name where deploy-dev waits: $(cat "$work/out")"
+delivery_run 60 success success success success running skipped blocked
+settled && fail 'dev-settled passed while a deploy-dev run publishes'
+grep -q 'at "Publish the exact runtime image set"' "$work/out" || fail 'dev-settled did not name the publish job'
+delivery_run 60 success success skipped skipped skipped running blocked
+settled || fail "dev-settled counted a deferred deploy-dev run as in flight: $(cat "$work/out")"
+delivery_run 60 success success skipped skipped skipped skipped skipped
+settled || fail "dev-settled counted a deploy-dev run that delivers nothing as in flight: $(cat "$work/out")"
+delivery_run 60 success success success success success skipped waiting
+settled || fail "dev-settled counted a delivery that only hands the turn on as in flight: $(cat "$work/out")"
+active deploy-dev 60 "$codewire_main" topic
+delivery_run 60 success running blocked blocked blocked blocked blocked
+settled || fail "dev-settled counted a deploy-dev run off main: $(cat "$work/out")"
+
+# Main CI: in flight when its commit's delivery built, or is building, and its
+# publish waits on this verdict; not when that delivery builds nothing, or the
+# commit has none.
+no_deliveries; active ci 70
+printf '{"runs":[{"id":61,"ref":"main"}]}' >"$FAKE/runs-deploy-dev.yaml-$codewire_main.json"
+delivery_run 61 success success success success success skipped success
+settled && fail 'dev-settled passed while main CI decides a built delivery'
+grep -q '^not settled: main CI run 70 (.*) is running, and deploy-dev run 61 waits on its verdict$' "$work/out" ||
+  fail "dev-settled did not name the main CI run a delivery waits on: $(cat "$work/out")"
+delivery_run 61 success success skipped skipped skipped success skipped
+settled || fail "dev-settled counted main CI for a deferred delivery: $(cat "$work/out")"
+printf '{"runs":[]}' >"$FAKE/runs-deploy-dev.yaml-$codewire_main.json"
+settled || fail "dev-settled counted main CI for a commit with no delivery: $(cat "$work/out")"
+
+# Every reason is its own line, and an unreadable run cannot tell.
+no_deliveries; active promote-dev 5; active deploy-dev 60
+delivery_run 60 success running blocked blocked blocked blocked blocked
+settled && fail 'dev-settled passed with two deliveries in flight'
+[[ "$(reasons)" == 2 ]] || fail "dev-settled did not give one line per reason: $(cat "$work/out")"
+rm "$FAKE/run-60.json"
+status=0; settled || status=$?
+[[ "$status" == 2 ]] || fail "dev-settled did not say it cannot tell when a deploy-dev run is unreadable (exit $status)"
+grep -q '^unknown: cannot read deploy-dev run 60' "$work/out" || fail 'dev-settled gave no reason for an unreadable run'
+
+# Main CI is listed by push event, so pull-request runs never crowd a main run
+# off the page; a full page of any list cannot tell.
+no_deliveries
+settled || fail "dev-settled refused a settled Dev: $(cat "$work/out")"
+grep -Eq 'actions runs list -R origin -L [0-9]+ --workflow ci.yaml --event push ' "$FAKE/calls" ||
+  fail 'dev-settled listed main CI without --event push'
+page="$(jq -cn '{runs: [range(20) | {id: (100 + .), head_sha: "x", ref: "pull/1/head"}]}')"
+for workflow in promote-dev deploy-dev ci; do
+  no_deliveries
+  printf '%s' "$page" >"$FAKE/runs-$workflow.yaml.json"
+  status=0; settled || status=$?
+  [[ "$status" == 2 ]] || fail "dev-settled did not say it cannot tell with a full page of $workflow runs (exit $status)"
+  grep -q "^unknown: 20 or more running $workflow.yaml runs, more than one page" "$work/out" ||
+    fail "dev-settled gave no reason for a full page of $workflow runs: $(cat "$work/out")"
+done
+no_deliveries; active ci 70
+printf '%s' "$page" >"$FAKE/runs-deploy-dev.yaml-$codewire_main.json"
+status=0; settled || status=$?
+[[ "$status" == 2 ]] || fail "dev-settled did not say it cannot tell with a full page of one commit's deploy-dev runs (exit $status)"
+
+# The job names it reads are deploy-dev.yaml's.
+for job in 'Build and push the service runtime images' 'Build and push the daemon runtime image' \
+    'Publish the exact runtime image set' 'Hand the Dev delivery turn on'; do
+  grep -Fq "    name: $job" "$ROOT/.gitea/workflows/deploy-dev.yaml" || fail "deploy-dev.yaml has no job named $job"
+  grep -Fq "$job" "$SCRIPTS/dev-settled.sh" || fail "dev-settled does not read the job $job"
+done
+
+no_deliveries
 cat >"$work/bin/fake-kube" <<'EOF'
 #!/usr/bin/env bash
 [[ "$1" == kubectl ]] || exit 1
