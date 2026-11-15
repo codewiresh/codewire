@@ -39,16 +39,13 @@
 //! The fixture `tests/fixtures/environment-log-clone-progress-v1.json` in this
 //! crate is the reference stream for this contract.
 //!
+//! The rows, the facts they carry and the resuming follower are the client
+//! core's (`codewire_client::environment_setup`, #3825); this module renders
+//! them and words them.
+//!
 //! # The daemon status setup read (#3684)
 //!
-//! Setup reads the workspace daemon's status in-cluster beside its health
-//! check and reports it, before `complete`, as one row:
-//!
-//! - `phase`: `daemon_ready`; `status`: `completed`.
-//! - `metadata.state`: the state token `cw daemon status` prints (`ready`,
-//!   `starting`, `upgrade_required`, `unsupported`, `unhealthy`,
-//!   `unspecified`); `metadata.message`: the daemon's message.
-//!
+//! The `daemon_ready` row is described in `codewire_client::environment_setup`.
 //! `cw create` judges it with the rule it applies to the API's answer:
 //! `ready` ends the create at `complete`, and a refused state fails it with
 //! the same message. A daemon still starting, or a server that writes no such
@@ -60,102 +57,26 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use codewire_client::environment_setup::{
+    self as setup, FollowError, Interruption, LogStreamError, ServerStep, SetupObserver,
+    daemon_ready_row, metadata_count, reported_duration_ms, repository_scope, stage_key,
+};
 use serde_json::Value;
-use tokio::sync::mpsc;
-use tokio::time::MissedTickBehavior;
 
 use std::sync::{Arc, Mutex};
 
-use crate::environment_client::{
-    EnvironmentClient, EnvironmentLogStreamEvent, EnvironmentLogStreamFailure, LogStreamRecovery,
+pub(crate) use codewire_client::environment_setup::{
+    EnvironmentLogFeed, FollowPolicy, LogFeedConnection,
 };
+
+use crate::environment_client::{EnvironmentClient, log_stream_error};
 use crate::output::{Capabilities, Motion, OutputMode, Status, StatusLine};
 use crate::presentation::{Environment, EnvironmentDaemonStatus, EnvironmentLog};
 
-/// The server sends a heartbeat every 15 seconds; three missed heartbeats
-/// mean the connection is gone even when the transport has not noticed.
-const LOG_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
-/// Consecutive failed connections before giving up. Any row or heartbeat
-/// resets the count.
-const LOG_STREAM_MAX_RECONNECTS: u32 = 5;
-const LOG_STREAM_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
-const LOG_STREAM_MAX_BACKOFF: Duration = Duration::from_secs(8);
-/// The slowest the live row redraws; the spinner sets the actual pace.
-const LIVE_TICK: Duration = Duration::from_secs(1);
 const SETUP_GUARD_INTERVAL: Duration = Duration::from_secs(5);
 const DAEMON_STAGE_KEY: &str = "cli:daemon_ready";
 const DAEMON_WAIT_LABEL: &str = "Waiting for the workspace daemon";
 const DAEMON_READY_LABEL: &str = "Workspace daemon ready";
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct FollowPolicy {
-    pub(crate) idle_timeout: Duration,
-    pub(crate) max_reconnects: u32,
-    pub(crate) initial_backoff: Duration,
-    pub(crate) max_backoff: Duration,
-    pub(crate) tick: Duration,
-}
-
-impl Default for FollowPolicy {
-    fn default() -> Self {
-        Self {
-            idle_timeout: LOG_STREAM_IDLE_TIMEOUT,
-            max_reconnects: LOG_STREAM_MAX_RECONNECTS,
-            initial_backoff: LOG_STREAM_INITIAL_BACKOFF,
-            max_backoff: LOG_STREAM_MAX_BACKOFF,
-            tick: LIVE_TICK,
-        }
-    }
-}
-
-impl FollowPolicy {
-    fn backoff(&self, attempt: u32) -> Duration {
-        let factor = 1u32 << attempt.saturating_sub(1).min(16);
-        self.initial_backoff
-            .saturating_mul(factor)
-            .min(self.max_backoff)
-    }
-}
-
-/// One item received on a log feed connection. A closed channel means the
-/// server ended the stream.
-pub(crate) enum LogFeedEvent {
-    Log(EnvironmentLog),
-    Heartbeat,
-    Failed(EnvironmentLogStreamFailure),
-}
-
-/// One open follow connection. Dropping it stops the connection.
-pub(crate) struct LogFeedConnection {
-    events: mpsc::UnboundedReceiver<LogFeedEvent>,
-    task: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl LogFeedConnection {
-    pub(crate) fn new(
-        events: mpsc::UnboundedReceiver<LogFeedEvent>,
-        task: Option<tokio::task::JoinHandle<()>>,
-    ) -> Self {
-        Self { events, task }
-    }
-
-    async fn next(&mut self) -> Option<LogFeedEvent> {
-        self.events.recv().await
-    }
-}
-
-impl Drop for LogFeedConnection {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
-    }
-}
-
-/// Opens following log connections that resume strictly after a row id.
-pub(crate) trait EnvironmentLogFeed {
-    fn open(&self, after_log_id: Option<String>) -> LogFeedConnection;
-}
 
 pub(crate) struct PlatformLogFeed<'a> {
     pub(crate) client: &'a EnvironmentClient,
@@ -165,41 +86,18 @@ pub(crate) struct PlatformLogFeed<'a> {
 
 impl EnvironmentLogFeed for PlatformLogFeed<'_> {
     fn open(&self, after_log_id: Option<String>) -> LogFeedConnection {
-        let (sender, events) = mpsc::unbounded_channel();
-        let client = self.client.clone();
-        let org_id = self.org_id.to_owned();
-        let environment_id = self.environment_id.to_owned();
-        let task = tokio::spawn(async move {
-            let result = client
-                .follow_environment_log_stream(
-                    &org_id,
-                    &environment_id,
-                    after_log_id.as_deref(),
-                    |event| {
-                        let event = match event {
-                            EnvironmentLogStreamEvent::Log(log) => LogFeedEvent::Log(log),
-                            EnvironmentLogStreamEvent::Heartbeat => LogFeedEvent::Heartbeat,
-                        };
-                        sender.send(event).is_ok()
-                    },
-                )
-                .await;
-            if let Err(failure) = result {
-                let _ = sender.send(LogFeedEvent::Failed(failure));
-            }
-        });
-        LogFeedConnection::new(events, Some(task))
+        setup::PlatformLogFeed::new(
+            self.client.codewire().clone(),
+            self.org_id,
+            self.environment_id,
+        )
+        .open(after_log_id)
     }
 }
 
-/// How a followed log stream ended.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum FollowEnd {
-    /// The `complete` row arrived: setup finished.
-    Complete,
-    /// A `failed` row arrived.
-    Failed(StageFailure),
-}
+/// How a followed log stream ended: the `complete` row, or a `failed` row's
+/// stage.
+pub(crate) type FollowEnd = setup::FollowEnd<StageFailure>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StageFailure {
@@ -644,79 +542,66 @@ where
     F: EnvironmentLogFeed,
     W: Write,
 {
-    let mut failures = 0u32;
-    loop {
-        let mut connection = feed.open(cursor.clone());
-        let idle = tokio::time::sleep(policy.idle_timeout);
-        tokio::pin!(idle);
-        view.redraw(Instant::now())?;
-        let tick = view.tick_interval().map(|tick| tick.min(policy.tick));
-        let mut ticker = tokio::time::interval(tick.unwrap_or(policy.tick));
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut healthy = false;
-        let reason = loop {
-            tokio::select! {
-                event = connection.next() => match event {
-                    Some(LogFeedEvent::Log(log)) => {
-                        idle.as_mut().reset(tokio::time::Instant::now() + policy.idle_timeout);
-                        healthy = true;
-                        failures = 0;
-                        *cursor = Some(log.id.clone());
-                        if let Some(failure) = view.apply(&log, Instant::now())? {
-                            return Ok(FollowEnd::Failed(failure));
-                        }
-                        if log.phase == "complete" {
-                            return Ok(FollowEnd::Complete);
-                        }
-                    }
-                    Some(LogFeedEvent::Heartbeat) => {
-                        idle.as_mut().reset(tokio::time::Instant::now() + policy.idle_timeout);
-                        healthy = true;
-                        failures = 0;
-                    }
-                    Some(LogFeedEvent::Failed(failure)) => match failure.recovery {
-                        LogStreamRecovery::Fatal => {
-                            return Err(failure.error.context("follow environment logs"));
-                        }
-                        // The call deadline rotated a connection that was
-                        // delivering heartbeats: resume without a notice.
-                        LogStreamRecovery::Resume if healthy => break None,
-                        LogStreamRecovery::Resume | LogStreamRecovery::Retry => {
-                            break Some(format!("{:#}", failure.error));
-                        }
-                    },
-                    None => break Some("the stream closed before setup finished".to_owned()),
-                },
-                () = &mut idle => {
-                    break Some(format!(
-                        "no heartbeat for {}",
-                        format_duration(policy.idle_timeout, false)
-                    ));
-                }
-                _ = ticker.tick(), if tick.is_some() => view.redraw(Instant::now())?,
-            }
-        };
-        drop(connection);
-        let Some(reason) = reason else {
-            continue;
-        };
-        failures += 1;
-        if failures > policy.max_reconnects {
-            anyhow::bail!(
-                "lost the environment log stream after {} reconnect attempts: {reason}",
-                policy.max_reconnects
-            );
+    setup::follow_setup(feed, view, cursor, policy)
+        .await
+        .map_err(|error| match error {
+            FollowError::Fatal(error) => log_stream_error(error).context("follow environment logs"),
+            FollowError::Lost {
+                max_reconnects,
+                last,
+            } => anyhow::anyhow!(
+                "lost the environment log stream after {max_reconnects} reconnect attempts: {}",
+                interruption_reason(&last)
+            ),
+            FollowError::Observer(error) => error.into(),
+        })
+}
+
+/// Why a connection was resumed, as the CLI says it.
+fn interruption_reason(interruption: &Interruption) -> String {
+    match interruption {
+        Interruption::Stream(LogStreamError::Client(error)) => {
+            format!(
+                "{:#}",
+                log_stream_error(LogStreamError::Client(error.clone()))
+            )
         }
-        view.note(&format!(
-            "Log stream interrupted ({reason}); resuming, attempt {failures} of {}",
-            policy.max_reconnects
-        ))?;
-        wait_with_ticks(
-            view,
-            policy.tick,
-            tokio::time::sleep(policy.backoff(failures)),
-        )
-        .await?;
+        Interruption::Stream(LogStreamError::Decode(error)) => error.to_string(),
+        Interruption::Closed => "the stream closed before setup finished".to_owned(),
+        Interruption::Silent(idle) => format!("no heartbeat for {}", format_duration(*idle, false)),
+    }
+}
+
+impl<W: Write> SetupObserver for StartProgress<W> {
+    type Failure = StageFailure;
+    type Error = std::io::Error;
+
+    fn row(
+        &mut self,
+        row: &EnvironmentLog,
+        received: Instant,
+    ) -> std::io::Result<Option<StageFailure>> {
+        self.apply(row, received)
+    }
+
+    fn interrupted(
+        &mut self,
+        interruption: &Interruption,
+        attempt: u32,
+        max_reconnects: u32,
+    ) -> std::io::Result<()> {
+        self.note(&format!(
+            "Log stream interrupted ({}); resuming, attempt {attempt} of {max_reconnects}",
+            interruption_reason(interruption)
+        ))
+    }
+
+    fn redraw(&mut self, now: Instant) -> std::io::Result<()> {
+        StartProgress::redraw(self, now)
+    }
+
+    fn tick_interval(&self) -> Option<Duration> {
+        StartProgress::tick_interval(self)
     }
 }
 
@@ -730,19 +615,7 @@ pub(crate) async fn wait_with_ticks<W, T>(
 where
     W: Write,
 {
-    tokio::pin!(future);
-    view.redraw(Instant::now())?;
-    let Some(tick) = view.tick_interval() else {
-        return Ok(future.await);
-    };
-    let mut ticker = tokio::time::interval(tick.min(max_tick));
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            output = &mut future => return Ok(output),
-            _ = ticker.tick() => view.redraw(Instant::now())?,
-        }
-    }
+    Ok(setup::wait_with_ticks(view, max_tick, future).await?)
 }
 
 /// `cw create`: every setup stage through `complete`, then daemon
@@ -802,21 +675,12 @@ where
     await_daemon_ready(view, policy, daemon_ready()).await
 }
 
-/// The daemon status in a setup `daemon_ready` row (#3684), whose metadata
-/// carries the CLI's state token and the daemon's message.
+/// The daemon status in a setup `daemon_ready` row (#3684), as the readiness
+/// rule reads it.
 fn daemon_ready_status(event: &EnvironmentLog) -> Option<EnvironmentDaemonStatus> {
-    if event.phase != "daemon_ready" {
-        return None;
-    }
-    let metadata = event.metadata.as_ref()?;
-    let state = metadata.get("state")?.as_str()?;
-    Some(EnvironmentDaemonStatus {
-        state: state.to_owned(),
-        message: metadata
-            .get("message")
-            .and_then(|message| message.as_str())
-            .unwrap_or_default()
-            .to_owned(),
+    daemon_ready_row(event).map(|row| EnvironmentDaemonStatus {
+        state: row.state.token().to_owned(),
+        message: row.message,
         ..Default::default()
     })
 }
@@ -1084,23 +948,13 @@ pub(crate) fn last_log_id(logs: &[EnvironmentLog]) -> Option<String> {
     logs.last().map(|log| log.id.clone())
 }
 
-/// The server's own steps, which mean nothing to someone waiting for an
-/// environment (#4596), with the stage a user would call them: checking its
-/// sidecars and daemon, and its namespace, binding the workspace, recording
-/// the backend, state transitions and timestamps, marking the environment
-/// running and queueing setup. `cw logs` shows them as they are.
+/// The stage a user would call one of the server's own steps (#4596); `cw
+/// logs` shows them as they are.
 fn server_step(phase: &str) -> Option<&'static str> {
-    match phase {
-        "health_check" | "daemon_ready" => Some("Waiting for the workspace daemon"),
-        "ensure_namespace"
-        | "workspace_bind"
-        | "store_backend"
-        | "lifecycle_transition"
-        | "lifecycle_checkpoint"
-        | "mark_running"
-        | "publish_setup" => Some("Preparing the sandbox"),
-        _ => None,
-    }
+    setup::server_step(phase).map(|step| match step {
+        ServerStep::DaemonWait => "Waiting for the workspace daemon",
+        ServerStep::SandboxPrep => "Preparing the sandbox",
+    })
 }
 
 /// Renders stored rows as plain lines, styled as `caps` allows but never
@@ -1188,26 +1042,6 @@ pub(crate) fn format_clone_progress(
     }
 }
 
-/// A non-negative whole number from row metadata. Metadata crosses Connect
-/// as `google.protobuf.Struct`, whose numbers are doubles, so `3` arrives as
-/// `3.0`.
-fn metadata_count(value: &Value) -> Option<u64> {
-    value.as_u64().or_else(|| {
-        value
-            .as_f64()
-            .filter(|number| number.is_finite() && *number >= 0.0 && number.fract() == 0.0)
-            .filter(|number| *number < u64::MAX as f64)
-            .map(|number| number as u64)
-    })
-}
-
-/// `repo_index` when the row is scoped to one repository.
-fn repository_scope(metadata: Option<&Value>) -> Option<u64> {
-    metadata
-        .and_then(|metadata| metadata.get("repo_index"))
-        .and_then(metadata_count)
-}
-
 /// Heads the Pod start timing rows (`pod_scheduled` and the rest).
 /// Heads the Pod start timing rows (`pod_scheduled` and the rest). A warm
 /// pool member booted before this create claimed it, so its start is not
@@ -1254,13 +1088,6 @@ fn pod_timing_depth(phase: &str) -> usize {
     }
 }
 
-fn stage_key(phase: &str, repository: Option<u64>) -> String {
-    match repository {
-        Some(index) => format!("{phase}#{index}"),
-        None => phase.to_owned(),
-    }
-}
-
 /// The row's label. The server substitutes the raw phase name for an unknown
 /// phase with no message, so that case is humanized here.
 fn display_label(event: &EnvironmentLog) -> String {
@@ -1284,12 +1111,7 @@ fn labelled(stage: Option<&str>, message: &str, fallback: &str) -> String {
 /// Stage duration from `duration_ms` metadata, else from the `started` row's
 /// server timestamp.
 fn stage_elapsed(event: &EnvironmentLog, stage: Option<&OpenStage>) -> Option<String> {
-    if let Some(millis) = event
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("duration_ms"))
-        .and_then(metadata_count)
-    {
+    if let Some(millis) = reported_duration_ms(event.metadata.as_ref()) {
         return Some(format_duration(Duration::from_millis(millis), true));
     }
     let started = stage?.started_at?;

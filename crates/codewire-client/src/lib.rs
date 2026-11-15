@@ -11,6 +11,7 @@ mod coordinator;
 mod credential_delegation;
 mod credentials;
 pub mod cw_runtime;
+pub mod environment_setup;
 mod error;
 mod feedback;
 #[cfg(feature = "tailnet-session")]

@@ -3,7 +3,12 @@ use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
 use std::sync::Mutex;
 
+use codewire_client::environment_setup::{
+    EnvironmentLogStreamFailure, LogFeedEvent, LogStreamError, LogStreamRecovery,
+};
+use codewire_client::{ClientError, ErrorCode};
 use serde_json::json;
+use tokio::sync::mpsc;
 
 use super::*;
 use crate::config::MapEnv;
@@ -197,7 +202,7 @@ impl EnvironmentLogFeed for ScriptedFeed {
 
 fn failure(message: &str, recovery: LogStreamRecovery) -> LogFeedEvent {
     LogFeedEvent::Failed(EnvironmentLogStreamFailure {
-        error: anyhow::anyhow!(message.to_owned()),
+        error: LogStreamError::Client(ClientError::new(ErrorCode::Unavailable, message)),
         recovery,
     })
 }

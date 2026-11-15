@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use codewire_client::environment_setup::{LogStreamError, log_row_from_stream};
 use codewire_client::{self as rpc, ClientError, CodewireClient, ErrorCode};
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +32,11 @@ impl EnvironmentClient {
         Ok(Self {
             inner: connect_client(config)?,
         })
+    }
+
+    /// The shared client, for the setup log feed the client core runs.
+    pub(crate) fn codewire(&self) -> &CodewireClient {
+        &self.inner
     }
 
     /// A create or start failure as the CLI shows it. A credit refusal
@@ -999,61 +1005,6 @@ impl EnvironmentClient {
         Ok(logs)
     }
 
-    /// Opens one following `StreamLogs` connection that resumes strictly
-    /// after `after_log_id` (the server's composite cursor). Heartbeats are
-    /// surfaced so the caller can detect a silent connection; returning `false`
-    /// from `on_event` closes the stream.
-    pub async fn follow_environment_log_stream<F>(
-        &self,
-        org_id: &str,
-        environment_id: &str,
-        after_log_id: Option<&str>,
-        mut on_event: F,
-    ) -> Result<(), EnvironmentLogStreamFailure>
-    where
-        F: FnMut(EnvironmentLogStreamEvent) -> bool,
-    {
-        let mut conversion_error = None;
-        let result = self
-            .inner
-            .stream_logs(
-                rpc::StreamLogsRequest {
-                    org_id: org_id.to_string(),
-                    environment_id: environment_id.to_string(),
-                    follow: true,
-                    after_log_id: after_log_id.unwrap_or_default().to_string(),
-                    ..Default::default()
-                },
-                |message| match message.event {
-                    Some(rpc::stream_logs_response::Event::Log(log)) => {
-                        match legacy_environment_log(*log) {
-                            Ok(log) => on_event(EnvironmentLogStreamEvent::Log(log)),
-                            Err(error) => {
-                                conversion_error = Some(error);
-                                false
-                            }
-                        }
-                    }
-                    Some(rpc::stream_logs_response::Event::Heartbeat(_)) => {
-                        on_event(EnvironmentLogStreamEvent::Heartbeat)
-                    }
-                    None => true,
-                },
-            )
-            .await;
-        if let Some(error) = conversion_error {
-            // The same row would fail again after a reconnect.
-            return Err(EnvironmentLogStreamFailure {
-                error,
-                recovery: LogStreamRecovery::Fatal,
-            });
-        }
-        result.map_err(|error| EnvironmentLogStreamFailure {
-            recovery: log_stream_recovery(error.code()),
-            error: display_client_error(error),
-        })
-    }
-
     /// Uploads `chunks` as they are read, and returns the size the server
     /// stored (#3968).
     pub async fn upload_environment_file(
@@ -1258,43 +1209,11 @@ fn refused_organization(
     })
 }
 
-/// One event from a following environment-log stream.
-#[derive(Clone, Debug, PartialEq)]
-pub enum EnvironmentLogStreamEvent {
-    Log(EnvironmentLog),
-    Heartbeat,
-}
-
-/// Why one environment-log stream connection ended early.
-#[derive(Debug)]
-pub struct EnvironmentLogStreamFailure {
-    pub error: anyhow::Error,
-    pub recovery: LogStreamRecovery,
-}
-
-/// How a follower recovers from an ended log stream connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LogStreamRecovery {
-    /// The client's whole-call deadline, which also bounds streams, ended the
-    /// connection. Resume at once.
-    Resume,
-    /// A transient failure. Resume after a backoff, within a bounded budget.
-    Retry,
-    /// Reconnecting cannot help: authorization, a missing environment, a
-    /// rejected request, or a row this client cannot decode.
-    Fatal,
-}
-
-pub(crate) fn log_stream_recovery(code: ErrorCode) -> LogStreamRecovery {
-    match code {
-        ErrorCode::DeadlineExceeded => LogStreamRecovery::Resume,
-        ErrorCode::Unauthenticated
-        | ErrorCode::PermissionDenied
-        | ErrorCode::NotFound
-        | ErrorCode::InvalidArgument
-        | ErrorCode::FailedPrecondition
-        | ErrorCode::Unimplemented => LogStreamRecovery::Fatal,
-        _ => LogStreamRecovery::Retry,
+/// A log stream failure as the CLI shows it.
+pub(crate) fn log_stream_error(error: LogStreamError) -> anyhow::Error {
+    match error {
+        LogStreamError::Client(error) => display_client_error(error),
+        LogStreamError::Decode(error) => error.into(),
     }
 }
 
@@ -1428,30 +1347,7 @@ fn proto_create_environment_request(
 }
 
 fn legacy_stream_log(message: rpc::StreamLogsResponse) -> anyhow::Result<Option<EnvironmentLog>> {
-    match message.event {
-        Some(rpc::stream_logs_response::Event::Log(log)) => legacy_environment_log(*log).map(Some),
-        Some(rpc::stream_logs_response::Event::Heartbeat(_)) | None => Ok(None),
-    }
-}
-
-fn legacy_environment_log(value: rpc::EnvironmentLog) -> anyhow::Result<EnvironmentLog> {
-    Ok(EnvironmentLog {
-        id: value.id,
-        environment_id: value.environment_id,
-        phase: value.phase,
-        status: value.status,
-        message: value.message,
-        metadata: value
-            .metadata
-            .into_option()
-            .map(serde_json::to_value)
-            .transpose()?,
-        created_at: value
-            .created_at
-            .into_option()
-            .map(timestamp_to_rfc3339)
-            .unwrap_or_default(),
-    })
+    Ok(log_row_from_stream(message)?)
 }
 
 fn legacy_prepare_complete(
@@ -1955,6 +1851,7 @@ mod tests {
     use std::time::Duration;
 
     use buffa::Message as _;
+    use codewire_client::environment_setup::{EnvironmentLogStreamEvent, LogStreamRecovery};
     use wiremock::matchers::{body_bytes, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2737,6 +2634,7 @@ credentials: {profile: platform:user/work}
 
         let mut events = Vec::new();
         test_client(&server)
+            .codewire()
             .follow_environment_log_stream("org_test", "env_test", Some("log_2"), |event| {
                 events.push(event);
                 true
@@ -2829,6 +2727,7 @@ credentials: {profile: platform:user/work}
             )
             .await;
             let failure = test_client(&server)
+                .codewire()
                 .follow_environment_log_stream("org_test", "env_test", None, |_| true)
                 .await
                 .unwrap_err();

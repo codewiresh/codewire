@@ -385,18 +385,8 @@ pub struct GrantEnvironmentAccessRequest {
     pub permission: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
-#[serde(default)]
-pub struct EnvironmentLog {
-    pub id: String,
-    pub environment_id: String,
-    pub phase: String,
-    pub status: String,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
-    pub created_at: String,
-}
+/// One `environment_logs` row; the client core owns its shape (#3825).
+pub use codewire_client::environment_setup::EnvironmentLogRow as EnvironmentLog;
 
 #[cfg(test)]
 mod tests {
