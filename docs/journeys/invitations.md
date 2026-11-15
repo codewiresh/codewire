@@ -10,11 +10,14 @@ feature on Production. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-14. Invite, email, accept and remove are observed on Dev
+Updated 2026-11-15. Invite, email, accept and remove are observed on Dev
 (source 6c3651dcf). On Production (v0.4.18, source a9dd8b270), the
 invitation and its email's send are observed; the email's arrival is
 observed on Dev only. The account's hourly limit is observed on Dev and on
-Production (v0.4.19, source 92672c5c4); the other limits are not.
+Production (v0.4.19, source 92672c5c4). The organization's hourly limit,
+and the dashboard's refusal for both, are observed on Dev (source
+e8e593b86). The pending cap and the unverified-inviter refusal are observed
+on Kind (source 35bacfcbb).
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -23,8 +26,8 @@ Production (v0.4.19, source 92672c5c4); the other limits are not.
 | `invite-accept` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
 | `invite-remove` | observed 2026-11-13 on 6c3651dcf (#3840) | not yet observed |
 | `org-leave` | not yet observed | not yet observed |
-| `invite-limits` | the account's hourly limit observed 2026-11-14 on 09c05f268 (#4457); the rest not yet observed | the account's hourly limit observed 2026-11-14 on 92672c5c4 (#4457); the rest not yet observed |
-| `invite-unverified` | not yet observed | not yet observed |
+| `invite-limits` | the account's hourly limit observed 2026-11-14 on 09c05f268; the organization's limit and the dashboard refusal observed 2026-11-15 on e8e593b86 (#4457); the pending cap observed on Kind only, 2026-11-15 on 35bacfcbb (#4457) | the account's hourly limit observed 2026-11-14 on 92672c5c4 (#4457); the rest not yet observed |
+| `invite-unverified` | observed on Kind only, 2026-11-15 on 35bacfcbb (#4457) | not yet observed |
 
 ## Before the walk
 
@@ -265,7 +268,9 @@ invitations.
 - **Entry points:** `cw org invite`; **Send Invite** on the Members page.
 - **States to exercise:**
   - the 31st invitation in an hour from one account;
+  - the 61st invitation in an hour from one organization's admins;
   - the 201st pending invitation in one organization;
+  - each refusal on the dashboard as well as in `cw`;
   - normal use under the limits is unaffected;
   - a refused invitation is not saved and sends no email.
 - **Driving it:** as the inviter, in an organization made for the walk:
@@ -277,28 +282,44 @@ invitations.
   done
   ```
 
+  For the organization's limit, a second admin sends 30 the same way, and
+  the next invitation from either is refused. On Dev the second admin is the
+  synthetic invitee, invited as admin for the walk and removed afterwards.
+  On the dashboard, enter a simulator address on the Members page and press
+  **Send Invite** past each limit.
+
 - **Proof:** the 31st invitation exits non-zero with "invitation limit
   reached: one account can send at most 30 invitations an hour; try again
   after" and a time in UTC; the Members page shows 30 pending invitations,
-  not 31. The pending cap says "an organization can hold at most 200 pending
+  not 31. The organization's limit says "invitation limit reached: an
+  organization can send at most 60 invitations an hour; try again after"
+  and a time. The organization's limit is checked first, so once the
+  organization has sent 60, the next invitation from any admin gets this
+  sentence. The Members page shows the same sentence, with its first letter
+  capitalized and a full stop, above the form, and no new pending row.
+  The pending cap says "an organization can hold at most 200 pending
   invitations; revoke one or wait for one to expire" and when the next one
   expires.
 - **Gotchas:**
   - The mail provider's simulator addresses take the 30 emails without
     reaching a person or counting as a bounce. Never use real or made-up
     domains for this.
-  - The dashboard refuses at the same limit, but its Members page says only
-    "The invitation could not be sent. Please try again." for every refusal
-    it does not recognise. The limit's own sentence on the dashboard waits
-    on a dashboard change for #4457; until then the dashboard proves the
-    refusal, not its wording.
+  - The dashboard's limit sentences are #4517's. A dashboard older than
+    source `43e718411` says only "The invitation could not be sent. Please
+    try again." for these refusals.
+  - The dashboard needs a signed-in session for an admin. An
+    organization-bound API key does not give one. On Dev the synthetic
+    invitee, as admin, has a session.
   - The count lasts an hour, and deleting the organization does not reset
     it. The walk's account cannot invite for the rest of that hour.
   - A revoked invitation still counts toward its hour. An account that
     already sent some is refused that many invitations sooner, and the
     refusal names the time the oldest one leaves the hour.
-  - Reaching the pending cap takes 200 invitations, more than one account's
-    hourly limit allows; it needs several inviters or several hours.
+  - Reaching the pending cap takes 200 invitations. With the organization's
+    limit of 60 an hour, that is more than three hours of real invitations.
+    Walk it on Kind, whose database is disposable, by inserting 199 pending
+    invitations into the walk's organization. Never seed Dev's or
+    Production's database.
   - A synthetic identity that signs in with an organization-bound API key
     cannot make an organization for the walk. It walks in its own, and the
     walk's invitations count toward that organization's hour too.
@@ -311,9 +332,22 @@ invitations.
     after, the organization held 30 pending invitations and none for the
     31st address; 30 emails were recorded as sent and none for the 31st
     address. All 30 were then revoked.
-  - The pending cap of 200: not walked. The database tests in
-    `crates/codewire-orchestration/src/api/organizations/invitation_limit_database_tests.rs`
-    cover it.
+  - The pending cap of 200, Kind, 2026-11-15, the retained profile
+    `cw-abuse-review` on source `35bacfcbb` with its owner's uncommitted
+    patches, none of which touches invitations; the profile's own `cw`; as
+    `e2e-owner` in an organization made for the walk (#4457):
+    - 199 pending invitations were inserted into Kind's database.
+    - The 200th, by `cw org invite`, was accepted.
+    - The 201st exited 1 with "invite: invitation limit reached: an
+      organization can hold at most 200 pending invitations; revoke one or
+      wait for one to expire (the next expires Nov 22 11:44 UTC)".
+    - The 202nd, by **Send Invite**, answered HTTP 422 with the same
+      sentence, capitalized, with a full stop.
+    - Neither refused address had an invitation or an email row. The
+      organization was then deleted.
+    - On Dev or Production: not yet observed. The database tests in
+      `crates/codewire-orchestration/src/api/organizations/invitation_limit_database_tests.rs`
+      also cover it.
   - Production, 2026-11-14, v0.4.19 (source `92672c5c4`), `cw` v0.4.17, as
     the Production smoke identity in its own organization (#4457): the
     account had sent one invitation at 18:43 UTC, since revoked.
@@ -324,23 +358,61 @@ invitations.
     invitation's hour ended. The organization then held 29 invitations from
     the walk and none for the 30th address. All 29 were revoked by ID.
     Whether an email was recorded for the refused address was not read.
-  - The organization's limit of 60 an hour, and the refusal on the
-    dashboard: not yet observed on Dev or Production.
+  - Dev, 2026-11-15, Dev running source `e8e593b86`, `cw` v0.4.19, in
+    `codewire-dev-smoke`, with the Dev smoke identity and the synthetic
+    invitee (joined as admin for the walk) as inviters (#4457). An earlier
+    attempt had used one invitation of the organization's hour.
+    - The invitee sent 30 with `cw`, all accepted.
+    - Its next invitation, by **Send Invite** on the Members page, answered
+      HTTP 422 with "Invitation limit reached: one account can send at
+      most 30 invitations an hour; try again after Nov 15 12:30 UTC.".
+    - The smoke identity then sent 28, all accepted, bringing the
+      organization's hour to 60. Its next `cw org invite` exited 1 with
+      "invite: invitation limit reached: an organization can send at most
+      60 invitations an hour; try again after Nov 15 12:25 UTC".
+    - The invitee's **Send Invite** then showed the same organization
+      sentence.
+    - None of the three refused addresses was saved in any state, and
+      Dev's database held no email row for them. All 58 accepted
+      invitations had email rows marked sent.
+    - All 58 were revoked by ID, and the invitee was removed.
+    - The dashboard was driven by its own form, as a browser without
+      scripts submits it, not in a rendered browser.
+  - The organization's limit on Production: not yet observed. A second
+    inviter there falls outside the Production smoke identity's own
+    organization.
+  - The dashboard refusal on Production: not yet observed.
 
 ## `invite-unverified`: an unverified inviter is refused
 
 - **Entry points:** `cw org invite`; **Send Invite** on the Members page.
-- **States to exercise:** an inviter who signed up with email and password
-  and has not verified the address; the same inviter after verifying.
+- **States to exercise:** a signed-in owner whose address is not verified;
+  the same owner after verifying.
 - **Driving it:** as an unverified owner, run `cw org invite` as in
-  `invite-send`.
+  `invite-send`, and press **Send Invite** on the Members page.
 - **Proof:** the CLI exits non-zero with "verify your email address before
-  inviting members"; the dashboard refuses too (with the generic sentence
-  described under `invite-limits`); no invitation is saved and no email is
+  inviting members"; the Members page says "Verify your email address
+  before inviting members." (#4517); no invitation is saved and no email is
   sent. After verifying, the same invitation succeeds.
-- **Gotchas:** accounts made through GitHub or Google sign-in are verified
-  at sign-up, and so are the synthetic Dev identities. This state needs a
-  new email and password account. Sign-up asks for a human check, and no
-  checked-in helper makes an unverified account, so the walk needs a
-  person's browser sign-up or a reviewed helper.
-- **Observed:** not yet observed.
+- **Gotchas:**
+  - Since #4481 an unverified address cannot sign in on a server with
+    mail, so a fresh sign-up never reaches this state. It is reached by an
+    account from before #4481 that still holds a session or key. Walk it
+    on Kind by setting a signed-in account's `email_verified` to false in
+    Kind's disposable database, and back to true afterwards.
+  - On a server without mail, accounts are vouched for instead of
+    verified, and this check refuses them too, the admin included. That is
+    a bug, #4805.
+- **Observed:**
+  - Kind, 2026-11-15, the retained profile `cw-abuse-review` on source
+    `35bacfcbb` (as under `invite-limits`), as `e2e-owner` with its `cw` and
+    dashboard sessions kept (#4457). The account was flipped with `UPDATE
+    users SET email_verified = false`.
+    - `cw org invite` exited 1 with "invite: verify your email address
+      before inviting members".
+    - **Send Invite** answered HTTP 422 with "Verify your email address
+      before inviting members.".
+    - Neither refused address had an invitation or an email row.
+    - After `email_verified` was set back to true, the same `cw org invite`
+      was accepted.
+  - Dev and Production: not yet observed.
