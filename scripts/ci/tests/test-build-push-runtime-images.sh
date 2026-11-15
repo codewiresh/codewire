@@ -126,8 +126,21 @@ printf '%s|%s|%s|%s|%s|%s|%s\n' \
   "${CODEWIRE_CARGO_BUILD_JOBS:-default}" >>"$BUILD_LOG"
 printf 'candidate_ref=registry.example.invalid/codewire/%s@sha256:%064d\n' \
   "$name" 0 >>"$GITHUB_OUTPUT"
+# What a real build leaves in the shared cw image work.
+mkdir -p "$CODEWIRE_CW_IMAGE_WORK/cw-producer.fixture/build"
+printf 'built\n' >"$CODEWIRE_CW_IMAGE_WORK/cw-producer.fixture/build/$name.tar"
 SH
 chmod 0755 "$fixture/scripts/ci/images/build-push-image.sh"
+
+# Every file the runtime builder shreds on exit, by path.
+real_shred="$(command -v shred)"
+shred_log="$work/shred.log"
+cat >"$fixture/bin/shred" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$@" >>"$shred_log"
+exec "$real_shred" "\$@"
+SH
+chmod 0755 "$fixture/bin/shred"
 
 head_sha=0123456789abcdef0123456789abcdef01234567
 
@@ -157,7 +170,14 @@ run_group() {
 output="$work/output"
 docker_log="$work/docker.log"
 build_log="$work/build.log"
-run_group services "$output" "$docker_log" "$build_log" 42
+run_group services "$output" "$docker_log" "$build_log" 42 2>"$work/services.stderr"
+# The exit cleanup removes the builds' outputs without shredding them, shreds
+# the rest, leaves nothing behind and says how long each part took.
+! grep -Fq '/cw-images/' "$shred_log" || fail "the exit cleanup shredded build outputs: $(grep -F '/cw-images/' "$shred_log" | head -n 3)"
+[ -s "$shred_log" ] || fail 'the exit cleanup shredded nothing, so the fixture left no credential file to prove it still does'
+[ -z "$(find "$fixture/tmp" -mindepth 1 -print -quit)" ] || fail 'the exit cleanup left files in the runner temp directory'
+grep -Eq '^runtime image cleanup: builder [0-9]+s, build outputs [0-9]+s, credentials [0-9]+s$' "$work/services.stderr" ||
+  fail "the exit cleanup did not report its timings: $(cat "$work/services.stderr")"
 [[ "$(wc -l <"$output" | tr -d ' ')" -eq 8 ]] ||
   fail "service half did not emit exactly eight runtime outputs"
 [[ "$(wc -l <"$build_log" | tr -d ' ')" -eq 4 ]] ||

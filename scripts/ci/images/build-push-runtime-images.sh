@@ -78,11 +78,23 @@ docker_config="$work/docker-config"
 buildkit_config="$work/buildkitd.toml"
 builder="codewire-runtime-${runtime_group}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${BASHPID}"
 
+# The cw image work holds what the builds produced, never a credential, and it
+# is by far the largest thing here. Shredding it with everything else kept
+# this job silent for 0.9 to 6.3 minutes after its last line (deliveries
+# 50466, 50419, 50005). It is removed; the registry credentials, the Docker
+# config and the BuildKit keys are still shredded. The timings go to the log,
+# so the next delivery shows where the tail went.
 cleanup() {
+  local started=$SECONDS builder_seconds outputs_seconds
   DOCKER_CONFIG="$docker_config" docker buildx rm --force "$builder" \
     >/dev/null 2>&1 || true
+  builder_seconds=$((SECONDS - started))
+  rm -rf -- "$work/cw-images"
+  outputs_seconds=$((SECONDS - started - builder_seconds))
   find "$work" -type f -exec shred -u {} + 2>/dev/null || true
   rm -rf "$work"
+  printf 'runtime image cleanup: builder %ss, build outputs %ss, credentials %ss\n' \
+    "$builder_seconds" "$outputs_seconds" "$((SECONDS - started - builder_seconds - outputs_seconds))" >&2
 }
 trap cleanup EXIT
 

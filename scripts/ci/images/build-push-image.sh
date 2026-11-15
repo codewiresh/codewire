@@ -310,6 +310,12 @@ cleanup() {
     DOCKER_CONFIG="$docker_config" docker buildx rm --force "$buildx_builder" \
       >/dev/null 2>&1 || true
   fi
+  # This run's own cw image work holds build outputs, never a credential:
+  # remove it instead of shredding it (build-push-runtime-images.sh has the
+  # measurement). One a caller passed in is the caller's to remove.
+  if [ "$cw_image_work" = "$work/cw-images" ]; then
+    rm -rf -- "$cw_image_work"
+  fi
   find "$work" -type f -exec shred -u {} + 2>/dev/null || true
   rm -rf "$work"
 }
