@@ -341,7 +341,7 @@ impl Provider {
     ///
     /// The presented refresh token is **rotated**: it is atomically consumed
     /// and a new one is issued, so a replayed refresh token fails with
-    /// `invalid_grant` (threat T9). An optional `scope` may only *narrow* the
+    /// `invalid_grant` (threat T4). An optional `scope` may only *narrow* the
     /// originally granted scopes (RFC 6749 §6); a request for any scope the
     /// original grant lacked is `invalid_scope`.
     pub async fn exchange_refresh_token(

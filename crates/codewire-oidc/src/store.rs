@@ -45,7 +45,7 @@ pub trait AuthorizationStore: Send + Sync {
 ///
 /// Codes and refresh tokens are **single-use**: `consume_*` must atomically
 /// fetch-and-invalidate so a replayed code/token cannot be exchanged twice
-/// (threat T6/T9). Access tokens are opaque (not JWTs); `get_access` is how
+/// (threats T3 and T4). Access tokens are opaque (not JWTs); `get_access` is how
 /// the userinfo/introspection paths resolve them.
 #[async_trait]
 pub trait TokenStore: Send + Sync {

@@ -59,6 +59,7 @@ directory each.
 - [dev/CONNECT-ERROR-MODEL.md](dev/CONNECT-ERROR-MODEL.md): the decisions behind the Connect error contract.
 - [dev/CONNECT-SERVER.md](dev/CONNECT-SERVER.md): the decisions behind the shared Connect serving stack.
 - [dev/ORCHESTRATION-FENCING.md](dev/ORCHESTRATION-FENCING.md): how orchestration keeps a stale worker from writing.
+- [dev/OIDC-PROVIDER-THREAT-MODEL.md](dev/OIDC-PROVIDER-THREAT-MODEL.md): the threats the OIDC provider is designed against, the mitigation for each, and what is not in place yet.
 - [dev/CI-CONFIGURATION.md](dev/CI-CONFIGURATION.md): the Forgejo settings
   and Actions variables a site that runs Codewire's CI sets.
 - [dev/BROWSER-TERMINALS.md](dev/BROWSER-TERMINALS.md) and
