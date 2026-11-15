@@ -80,8 +80,12 @@ async fn runc_projection_has_only_metadata_in_spec_and_exact_socket_cleanup() {
         prepared.launch.as_ref().unwrap().override_names,
         std::collections::BTreeSet::from(["PUBLIC".into()]),
     );
-    prepared.spawned();
+    // After the spawn the child owns the spec: dropping the launch leaves it
+    // for the helper, and only the cleanup guard removes it (#4651).
+    let cleanup = prepared.spawned();
     drop(prepared);
+    assert!(spec.exists());
+    drop(cleanup);
     assert!(!spec.exists());
     assert!(!socket.exists());
 }

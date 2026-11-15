@@ -108,11 +108,9 @@ async fn run_exec_session(
     // gone can end everything it started that did not detach itself.
     cmd.process_group(0);
 
-    let mut child = match cmd.spawn() {
-        Ok(child) => {
-            prepared.spawned();
-            child
-        }
+    // Held until this session ends, after the child (#4651).
+    let (mut child, _spec_cleanup) = match cmd.spawn() {
+        Ok(child) => (child, prepared.spawned()),
         Err(err) => {
             send_exec_startup_failure(&tx, err.to_string()).await;
             return;
@@ -287,11 +285,9 @@ async fn run_pty_session<S>(
     };
     let builder = prepared.pty_command();
 
-    let child = match pair.slave.spawn_command(builder) {
-        Ok(child) => {
-            prepared.spawned();
-            child
-        }
+    // Held until this session ends, after the child (#4651).
+    let (child, _spec_cleanup) = match pair.slave.spawn_command(builder) {
+        Ok(child) => (child, prepared.spawned()),
         Err(err) => {
             send_pty_startup_failure(&tx, err.to_string()).await;
             return;

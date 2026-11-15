@@ -2718,11 +2718,9 @@ impl SessionEngine {
                 .await;
         }
 
-        let mut child = match process.spawn() {
-            Ok(child) => {
-                prepared.spawned();
-                child
-            }
+        // The child owns its runc spec; the monitor keeps its cleanup until exit (#4651).
+        let (mut child, spec_cleanup) = match process.spawn() {
+            Ok(child) => (child, prepared.spawned()),
             Err(error) => {
                 return self
                     .record_unspawned_failure(handle, format!("launch session process: {error}"))
@@ -2856,6 +2854,7 @@ impl SessionEngine {
         let inner = Arc::downgrade(&self.inner);
         let session_id = snapshot.session_id.clone();
         let task = tokio::spawn(async move {
+            let _spec_cleanup = spec_cleanup;
             let _ = start_rx.await;
             monitor_process(ProcessMonitor {
                 inner,
@@ -2938,11 +2937,9 @@ impl SessionEngine {
                 .await;
         }
 
-        let child = match pair.slave.spawn_command(command) {
-            Ok(child) => {
-                prepared.spawned();
-                child
-            }
+        // The child owns its runc spec; the monitor keeps its cleanup until exit (#4651).
+        let (child, spec_cleanup) = match pair.slave.spawn_command(command) {
+            Ok(child) => (child, prepared.spawned()),
             Err(error) => {
                 return self
                     .record_unspawned_failure(
@@ -3110,6 +3107,7 @@ impl SessionEngine {
                 io_cancel,
             };
             let task = tokio::spawn(async move {
+                let _spec_cleanup = spec_cleanup;
                 let _ = start_rx.await;
                 monitor_host_pty_process(monitor).await;
             });
@@ -3152,6 +3150,7 @@ impl SessionEngine {
         let inner = Arc::downgrade(&self.inner);
         let session_id = snapshot.session_id.clone();
         let task = tokio::spawn(async move {
+            let _spec_cleanup = spec_cleanup;
             let _ = start_rx.await;
             monitor_pty_process(PtyProcessMonitor {
                 inner,
@@ -5261,6 +5260,82 @@ mod tests {
         let engine = SessionEngine::new(&config, CredentialBridge::new(None));
         engine.ensure_initialized().await.unwrap();
         (temp, engine)
+    }
+
+    /// #4651: a launch with nothing projected has no rendezvous, so nothing
+    /// waits for the runc helper to open its process specification. The
+    /// launch must still leave the spec in place until the child is done:
+    /// here the helper waits a second before it looks, as a slow guest does
+    /// right after a checkpoint fork, and still finds it.
+    #[tokio::test]
+    async fn a_launch_keeps_its_runc_spec_until_the_helper_has_read_it() {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        let temp = tempfile::tempdir().unwrap();
+        let processes = temp.path().join("exec");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&processes)
+            .unwrap();
+        let marker = temp.path().join("helper-saw");
+        // Stands in for the guest probe's `runc-exec`: argument 3 is the spec.
+        let helper = temp.path().join("helper");
+        std::fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\nsleep 1\nif [ -f \"$3\" ]; then rm -f \"$3\"; echo present > {m}; else echo missing > {m}; fi\n",
+                m = marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = Config {
+            listen_addr: "unused:0".into(),
+            workspace_root: temp.path().to_owned(),
+            home_root: temp.path().to_owned(),
+            mount_roots: Vec::new(),
+            auth_token: crate::DaemonAuthToken::new("synthetic-runc-spec-test").unwrap(),
+            process_execution: ProcessExecution::Runc(crate::execution::RuncExecution {
+                helper_path: helper,
+                process_directory: processes.clone(),
+                container_id: "workspace".into(),
+                process_wrapper: vec!["/bin/sh".into(), "-c".into()],
+                default_shell: "/bin/sh".into(),
+                base_environment: Vec::new(),
+                uid: rustix::process::geteuid().as_raw(),
+                gid: rustix::process::getegid().as_raw(),
+                additional_gids: Vec::new(),
+                network_namespace: "/proc/self/ns/net".into(),
+            }),
+            credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            host: None,
+            launch_projection: None,
+            session_working_dir: None,
+        };
+        let engine = SessionEngine::new(&config, CredentialBridge::new(None));
+        engine.ensure_initialized().await.unwrap();
+        engine
+            .launch(v1::LaunchSessionRequest {
+                command: vec!["true".into()],
+                working_dir: "/".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // A hang guard, not a speed expectation.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let saw = loop {
+            if let Ok(saw) = std::fs::read_to_string(&marker) {
+                break saw;
+            }
+            assert!(std::time::Instant::now() < deadline, "the helper never ran");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert_eq!(
+            saw.trim(),
+            "present",
+            "the spec was gone before the helper read it"
+        );
     }
 
     fn true_request(working_dir: &Path) -> v1::LaunchSessionRequest {

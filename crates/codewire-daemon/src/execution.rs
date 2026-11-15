@@ -233,9 +233,16 @@ impl PreparedProcess {
         command
     }
 
-    /// The helper opens/unlinks the spec. Retain its unique cleanup path until
-    /// this owner drops, including cancellation before the helper first runs.
-    pub fn spawned(&mut self) {}
+    /// The child now owns the spec: the helper opens and unlinks it. The
+    /// returned guard removes it only once the caller drops it, so a caller
+    /// must keep it until the child has exited, not merely until the launch
+    /// returns (#4651). A launch with no rendezvous never waits for the
+    /// helper, so dropping it earlier can remove the spec before the helper
+    /// opens it. Before this call, this owner's drop removes the spec.
+    #[must_use = "keep the guard until the child exits, or its runc spec may vanish first"]
+    pub fn spawned(&mut self) -> ProcessSpecCleanup {
+        ProcessSpecCleanup(self.pending_process_spec.take())
+    }
 
     /// Whether the launcher was told to execute (#2769). After that, a
     /// failure or cancellation is never a denial: the program may have
@@ -253,6 +260,19 @@ impl PreparedProcess {
                 .await?;
         }
         Ok(())
+    }
+}
+
+/// Removes a launched child's private runc process specification when dropped,
+/// if the helper hasn't already unlinked it (#4651).
+#[derive(Debug, Default)]
+pub struct ProcessSpecCleanup(Option<PathBuf>);
+
+impl Drop for ProcessSpecCleanup {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = fs::remove_file(path); // Already gone once the helper unlinked it.
+        }
     }
 }
 
