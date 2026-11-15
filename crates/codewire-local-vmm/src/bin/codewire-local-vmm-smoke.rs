@@ -227,9 +227,11 @@ mod linux {
                     .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
                 }
                 "__native-egress-broker" => {
+                    // The smoke environment binds nothing for interception.
                     codewire_local_vmm::egress_broker::run_inherited_egress_broker(
                         environment_id,
                         generation,
+                        false,
                     )
                     .await
                     .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)

@@ -54,6 +54,54 @@ async fn frames_round_trip_and_a_wrong_digest_or_unknown_frame_is_refused() {
 }
 
 #[tokio::test]
+async fn interception_frames_round_trip_and_bad_ones_are_refused() {
+    use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
+    let set = InterceptSet::new([
+        InterceptBinding::new("api.anthropic.com", 443).unwrap(),
+        InterceptBinding::new("github.com", 443).unwrap(),
+    ])
+    .unwrap();
+    let frame = encode_intercept_frame(&set).unwrap();
+    assert!(matches!(
+        read_control_frame(&mut frame.as_slice()).await.unwrap(),
+        ControlFrame::ReplaceIntercepts(read) if read == set
+    ));
+    let empty = encode_intercept_frame(&InterceptSet::default()).unwrap();
+    assert!(matches!(
+        read_control_frame(&mut empty.as_slice()).await.unwrap(),
+        ControlFrame::ReplaceIntercepts(read) if read.is_empty()
+    ));
+
+    let mut version = frame.clone();
+    version[4] = 2;
+    assert!(read_control_frame(&mut version.as_slice()).await.is_err());
+    let mut too_many = frame[..5].to_vec();
+    too_many.push(33);
+    assert!(read_control_frame(&mut too_many.as_slice()).await.is_err());
+    let truncated = &frame[..frame.len() - 1];
+    assert!(read_control_frame(&mut &truncated[..]).await.is_err());
+    // A name the binding would canonicalize differently was not sent by us.
+    let mut upper = frame.clone();
+    upper[7] = b'A';
+    assert!(read_control_frame(&mut upper.as_slice()).await.is_err());
+    // A repeated binding is refused, not silently collapsed.
+    let one = InterceptSet::new([InterceptBinding::new("github.com", 443).unwrap()]).unwrap();
+    let single = encode_intercept_frame(&one).unwrap();
+    let mut repeated = single[..5].to_vec();
+    repeated.push(2);
+    repeated.extend_from_slice(&single[6..]);
+    repeated.extend_from_slice(&single[6..]);
+    assert!(read_control_frame(&mut repeated.as_slice()).await.is_err());
+    // A protected name cannot be bound.
+    let mut protected = frame[..5].to_vec();
+    protected.push(1);
+    protected.push(9);
+    protected.extend_from_slice(b"localhost");
+    protected.extend_from_slice(&443_u16.to_be_bytes());
+    assert!(read_control_frame(&mut protected.as_slice()).await.is_err());
+}
+
+#[tokio::test]
 async fn the_runner_waits_for_each_acknowledgement_and_carries_host_addresses() {
     let (runner, mut broker) = tokio::io::duplex(1 << 20);
     let (address_updates, address_receiver) = mpsc::channel(4);

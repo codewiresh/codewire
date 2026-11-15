@@ -3,12 +3,15 @@
 //! The runner sends host address frames (`CWHA`, [`crate::host_addresses`])
 //! and policy replacements (`CWPR`: the canonical document and its digest).
 //! The broker answers each replacement with one acknowledgement (`CWPA`)
-//! carrying the digest it enforces from then on. Anything malformed ends the
-//! channel, and the broker fails closed with it.
+//! carrying the digest it enforces from then on. Interception bindings
+//! (`CWIR`, #3999) replace the broker's set; a broker started with a
+//! front-door hand-off reads one right after the first host addresses.
+//! Anything malformed ends the channel, and the broker fails closed with it.
 
 use std::io;
 use std::time::Duration;
 
+use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet, MAX_INTERCEPT_BINDINGS};
 use codewire_egress_policy::{
     CompiledPolicy, MAX_POLICY_DOCUMENT_BYTES, PolicyDigest, PolicyDocument,
 };
@@ -21,6 +24,7 @@ use crate::host_addresses::{
 
 const POLICY_FRAME_MAGIC: [u8; 4] = *b"CWPR";
 const POLICY_ACK_MAGIC: [u8; 4] = *b"CWPA";
+const INTERCEPT_FRAME_MAGIC: [u8; 4] = *b"CWIR";
 const FRAME_VERSION: u8 = 1;
 const DIGEST_LEN: usize = 32;
 /// How long the runner waits for the broker to acknowledge a replacement.
@@ -31,6 +35,60 @@ pub(crate) const POLICY_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum ControlFrame {
     HostAddresses(HostAddressSet),
     ReplacePolicy(CompiledPolicy),
+    ReplaceIntercepts(InterceptSet),
+}
+
+/// An interception frame: magic, version, the binding count, then each
+/// binding's hostname length (one byte), hostname and big-endian port.
+/// A set or hostname too large for its one-byte count is refused.
+pub fn encode_intercept_frame(intercepts: &InterceptSet) -> io::Result<Vec<u8>> {
+    let too_large = || io::Error::new(io::ErrorKind::InvalidInput, "interception set too large");
+    let mut frame = vec![];
+    frame.extend_from_slice(&INTERCEPT_FRAME_MAGIC);
+    frame.push(FRAME_VERSION);
+    frame.push(u8::try_from(intercepts.len()).map_err(|_| too_large())?);
+    for binding in intercepts.bindings() {
+        let hostname = binding.hostname().as_bytes();
+        frame.push(u8::try_from(hostname.len()).map_err(|_| too_large())?);
+        frame.extend_from_slice(hostname);
+        frame.extend_from_slice(&binding.port().to_be_bytes());
+    }
+    Ok(frame)
+}
+
+async fn read_intercept_frame_after_magic<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> io::Result<InterceptSet> {
+    let mut header = [0_u8; 2];
+    reader.read_exact(&mut header).await?;
+    if header[0] != FRAME_VERSION {
+        return Err(invalid("interception frame has an unknown version"));
+    }
+    let count = usize::from(header[1]);
+    if count > MAX_INTERCEPT_BINDINGS {
+        return Err(invalid("interception frame exceeds its bound"));
+    }
+    let mut bindings = Vec::with_capacity(count);
+    for _ in 0..count {
+        let length = usize::from(reader.read_u8().await?);
+        let mut hostname = vec![0_u8; length];
+        reader.read_exact(&mut hostname).await?;
+        let port = reader.read_u16().await?;
+        let hostname = std::str::from_utf8(&hostname)
+            .map_err(|_| invalid("interception hostname is not text"))?;
+        let binding = InterceptBinding::new(hostname, port)
+            .map_err(|_| invalid("interception binding is invalid"))?;
+        // Only canonical names travel; anything else was not ours.
+        if binding.hostname() != hostname {
+            return Err(invalid("interception hostname is not canonical"));
+        }
+        bindings.push(binding);
+    }
+    let set = InterceptSet::new(bindings).map_err(|_| invalid("interception set is invalid"))?;
+    if set.len() != count {
+        return Err(invalid("interception frame repeats a binding"));
+    }
+    Ok(set)
 }
 
 fn invalid(reason: &str) -> io::Error {
@@ -68,6 +126,11 @@ pub async fn read_control_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Res
         return read_frame_after_magic(reader)
             .await
             .map(ControlFrame::HostAddresses);
+    }
+    if magic == INTERCEPT_FRAME_MAGIC {
+        return read_intercept_frame_after_magic(reader)
+            .await
+            .map(ControlFrame::ReplaceIntercepts);
     }
     if magic != POLICY_FRAME_MAGIC {
         return Err(invalid("control frame has an unknown header"));

@@ -334,6 +334,10 @@ pub(crate) struct NativeEgressBrokerArgs {
     pub(crate) environment_id: String,
     #[arg(long)]
     pub(crate) generation: u64,
+    /// Hand intercepted dials to the front door over the inherited
+    /// hand-off socket instead of refusing them (#3999).
+    #[arg(long)]
+    pub(crate) intercept_handoff: bool,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

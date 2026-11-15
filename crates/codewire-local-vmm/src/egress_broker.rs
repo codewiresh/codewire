@@ -5,6 +5,12 @@
 //! process capture, and then the authenticated admission session of the broker
 //! IPC. The other IPC sessions (#2638) are inherited at fixed descriptors. The
 //! process accepts no configuration from files or environment variables.
+//!
+//! Started with `--intercept-handoff`, it also inherits a
+//! `SOCK_STREAM` Unix socket to the environment's front door at
+//! [`EGRESS_BROKER_HANDOFF_FD`], reads its interception bindings from the
+//! control channel before it is ready, and hands every intercepted dial over
+//! instead of refusing it (#3999).
 
 use std::io::{self, Read as _, Write as _};
 use std::os::fd::{FromRawFd as _, RawFd};
@@ -25,8 +31,7 @@ use zeroize::Zeroizing;
 
 #[cfg(target_os = "linux")]
 use crate::linux::confinement::{
-    install_deny_all_filesystem_domain, install_inet_socket_only_syscalls, lock_process_privileges,
-    require_single_threaded_process,
+    install_deny_all_filesystem_domain, lock_process_privileges, require_single_threaded_process,
 };
 
 pub const EGRESS_BROKER_BOOTSTRAP_FD: RawFd = 4;
@@ -37,8 +42,13 @@ pub const EGRESS_BROKER_HOST_ADDRESSES_FD: RawFd = 5;
 pub const EGRESS_BROKER_FIRST_SESSION_FD: RawFd = 6;
 /// Inherited IPC sessions: every session but the bootstrap stream's.
 pub const EGRESS_BROKER_INHERITED_SESSIONS: usize = BROKER_IPC_SESSIONS - 1;
+/// The front-door hand-off socket, after the sessions (#3999).
+pub const EGRESS_BROKER_HANDOFF_FD: RawFd =
+    EGRESS_BROKER_FIRST_SESSION_FD + EGRESS_BROKER_INHERITED_SESSIONS as RawFd;
 pub const EGRESS_BROKER_PREPARED_MESSAGE: &[u8] = b"CWEBB1 prepared\n";
 pub const EGRESS_BROKER_CONFINE_MESSAGE: &[u8] = b"CWEBB1 confine\n";
+mod handoff;
+
 pub const EGRESS_BROKER_READY_MESSAGE: &[u8] = b"CWEBB1 ready\n";
 pub const EGRESS_BROKER_STATUS_MAX_BYTES: usize = 64;
 /// The fixed header: magic, identity, the policy's digest and the IPC key.
@@ -385,8 +395,13 @@ pub fn encode_egress_broker_bootstrap(
 pub async fn run_inherited_egress_broker(
     environment_id: Uuid,
     generation: u64,
+    intercept_handoff: bool,
 ) -> Result<(), EgressBrokerProcessError> {
     let mut bootstrap = inherited_std_unix_stream(EGRESS_BROKER_BOOTSTRAP_FD)?;
+    let handoff = intercept_handoff
+        .then(|| handoff::inherited_handoff(EGRESS_BROKER_HANDOFF_FD, environment_id))
+        .transpose()?;
+    let handing_off = handoff.is_some();
     let control = inherited_std_unix_stream(EGRESS_BROKER_HOST_ADDRESSES_FD)?;
     let sessions = (0..EGRESS_BROKER_INHERITED_SESSIONS)
         .map(|index| {
@@ -416,17 +431,21 @@ pub async fn run_inherited_egress_broker(
         bootstrap: decoded,
         policy,
     } = prepared;
-    let broker = Arc::new(PolicyEgressBroker::new(
-        policy,
-        RouteClass::General,
-        Arc::new(resolver),
-        Arc::new(SystemTcpConnector::new()),
-        Arc::new(SystemBrokerClock::new()),
+    let broker = Arc::new(handoff::with_handoff(
+        PolicyEgressBroker::new(
+            policy,
+            RouteClass::General,
+            Arc::new(resolver),
+            Arc::new(SystemTcpConnector::new()),
+            Arc::new(SystemBrokerClock::new()),
+        ),
+        handoff,
     ));
 
-    // The host's own addresses arrive before the broker can admit anything,
-    // and every later update replaces them (#2614).
-    let mut control = match receive_host_addresses(control, &broker).await {
+    // The host's own addresses, and the interception bindings when handing
+    // off, arrive before the broker can admit anything; every later update
+    // replaces them (#2614, #3999).
+    let mut control = match receive_startup_control(control, &broker, handing_off).await {
         Ok(control) => control,
         Err(error) => {
             let _ = write_status(&bootstrap, error.startup_failure().message());
@@ -457,10 +476,7 @@ pub async fn run_inherited_egress_broker(
         })
         .and_then(|()| {
             #[cfg(target_os = "linux")]
-            let installed = install_inet_socket_only_syscalls(
-                BROKER_DENIED_SYSCALLS,
-                BROKER_ARCH_DENIED_SYSCALLS,
-            );
+            let installed = handoff::install_broker_syscalls(handing_off);
             #[cfg(target_os = "macos")]
             let installed = install_inet_socket_only_syscalls();
             installed.map_err(|_| EgressBrokerProcessError::SyscallConfinement)
@@ -496,6 +512,10 @@ pub async fn run_inherited_egress_broker(
                 Ok(ControlFrame::HostAddresses(addresses)) => {
                     updated.set_host_addresses(addresses).await;
                 }
+                // Every flow whose outcome the new bindings change ends.
+                Ok(ControlFrame::ReplaceIntercepts(intercepts)) => {
+                    updated.replace_intercepts(intercepts).await;
+                }
                 // A new revision applies at once, and every flow it refuses
                 // ends before the runner hears it is enforced (#2537).
                 Ok(ControlFrame::ReplacePolicy(policy)) => {
@@ -516,6 +536,25 @@ pub async fn run_inherited_egress_broker(
         }
         _ = updates => Err(EgressBrokerProcessError::HostAddresses),
     }
+}
+
+/// The runner's control channel at startup: the host addresses, then the
+/// interception bindings when handing off.
+async fn receive_startup_control<R, C, K>(
+    control: StdUnixStream,
+    broker: &PolicyEgressBroker<R, C, K>,
+    handing_off: bool,
+) -> Result<tokio::net::UnixStream, EgressBrokerProcessError>
+where
+    R: codewire_egress_broker::DnsResolver,
+    C: codewire_egress_broker::TcpConnector,
+    K: codewire_egress_broker::BrokerClock,
+{
+    let mut control = receive_host_addresses(control, broker).await?;
+    if handing_off {
+        handoff::receive_intercepts(&mut control, broker).await?;
+    }
+    Ok(control)
 }
 
 async fn receive_host_addresses<R, C, K>(
@@ -913,13 +952,19 @@ mod tests {
             lock_process_privileges().unwrap();
             assert_eq!(unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) }, 0);
             install_deny_all_filesystem_domain().unwrap();
-            install_inet_socket_only_syscalls(BROKER_DENIED_SYSCALLS, BROKER_ARCH_DENIED_SYSCALLS)
-                .unwrap();
+            handoff::install_broker_syscalls(false).unwrap();
 
             let path_error = std::fs::File::open("/etc/passwd").unwrap_err();
             assert_eq!(path_error.raw_os_error(), Some(libc::EACCES));
             assert_eq!(
                 unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) },
+                -1
+            );
+            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+            // Without a hand-off, no pair either.
+            let mut pair = [-1; 2];
+            assert_eq!(
+                unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, pair.as_mut_ptr()) },
                 -1
             );
             assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
@@ -1015,6 +1060,78 @@ mod tests {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("egress_broker::tests::broker_confinement_denies_files_processes_and_non_inet_sockets")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    /// With a hand-off the filter admits `socketpair(AF_UNIX, SOCK_STREAM)`
+    /// and nothing else new: other pair shapes, Unix `socket()` and therefore
+    /// any Unix `connect` stay refused, and TCP sockets still work (#3999).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn handoff_confinement_admits_only_a_unix_stream_pair() {
+        const CHILD_MARKER: &str = "CODEWIRE_TEST_EGRESS_BROKER_HANDOFF_CONFINEMENT";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            lock_process_privileges().unwrap();
+            install_deny_all_filesystem_domain().unwrap();
+            handoff::install_broker_syscalls(true).unwrap();
+
+            let mut pair = [-1; 2];
+            assert_eq!(
+                unsafe {
+                    libc::socketpair(
+                        libc::AF_UNIX,
+                        libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                        0,
+                        pair.as_mut_ptr(),
+                    )
+                },
+                0,
+                "unix stream pair: {}",
+                io::Error::last_os_error()
+            );
+            unsafe {
+                libc::close(pair[0]);
+                libc::close(pair[1]);
+            }
+            for (family, socket_type) in [
+                (libc::AF_UNIX, libc::SOCK_DGRAM),
+                (libc::AF_UNIX, libc::SOCK_SEQPACKET),
+                (libc::AF_INET, libc::SOCK_STREAM),
+            ] {
+                assert_eq!(
+                    unsafe { libc::socketpair(family, socket_type, 0, pair.as_mut_ptr()) },
+                    -1
+                );
+                assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+            }
+            for socket_type in [libc::SOCK_STREAM, libc::SOCK_DGRAM, libc::SOCK_SEQPACKET] {
+                assert_eq!(unsafe { libc::socket(libc::AF_UNIX, socket_type, 0) }, -1);
+                assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+            }
+            let descriptor = unsafe {
+                libc::socket(
+                    libc::AF_INET,
+                    libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                    libc::IPPROTO_TCP,
+                )
+            };
+            assert!(
+                descriptor >= 0,
+                "inet socket: {}",
+                io::Error::last_os_error()
+            );
+            unsafe {
+                libc::close(descriptor);
+            }
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("egress_broker::tests::handoff_confinement_admits_only_a_unix_stream_pair")
             .arg("--nocapture")
             .env(CHILD_MARKER, "1")
             .status()

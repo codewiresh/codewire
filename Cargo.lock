@@ -1926,6 +1926,7 @@ name = "codewire-egress-policy"
 version = "0.1.0"
 dependencies = [
  "codewire-workspace-hack",
+ "rustix",
  "serde",
  "serde-saphyr",
  "serde_json",

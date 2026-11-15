@@ -112,9 +112,13 @@ pub(crate) async fn run_native_network_worker(args: NativeNetworkWorkerArgs) -> 
 pub(crate) async fn run_native_egress_broker(args: NativeEgressBrokerArgs) -> anyhow::Result<()> {
     let environment_id = Uuid::parse_str(&args.environment_id)
         .context("native egress broker environment ID is invalid")?;
-    codewire_local_vmm::egress_broker::run_inherited_egress_broker(environment_id, args.generation)
-        .await
-        .context("run native environment egress broker")
+    codewire_local_vmm::egress_broker::run_inherited_egress_broker(
+        environment_id,
+        args.generation,
+        args.intercept_handoff,
+    )
+    .await
+    .context("run native environment egress broker")
 }
 
 pub(crate) async fn run_native_mesh_transport(args: NativeMeshTransportArgs) -> anyhow::Result<()> {

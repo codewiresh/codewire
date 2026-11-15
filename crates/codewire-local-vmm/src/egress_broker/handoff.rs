@@ -1,0 +1,144 @@
+//! The broker process's side of the front-door hand-off (#3999): its
+//! inherited socket, its bindings at startup, and the syscall filter that
+//! admits the one socket pair a hand-off makes.
+
+use std::os::fd::{BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
+
+use codewire_egress_broker::handoff::StreamHandoff;
+use codewire_egress_broker::{BrokerClock, DnsResolver, PolicyEgressBroker, TcpConnector};
+use codewire_egress_policy::handoff::is_connected_unix_stream;
+use uuid::Uuid;
+
+use super::{ControlFrame, EgressBrokerProcessError, HANDSHAKE_TIMEOUT};
+
+/// The inherited front-door socket. It must be an open socket, a connected
+/// `AF_UNIX` `SOCK_STREAM` one, before the broker takes ownership of it; then
+/// it is marked close-on-exec. Anything else refuses to start.
+///
+/// macOS refuses interception, as before #4739: on a native macOS run the
+/// front door read end of file on an intercepted stream, and the cause is not
+/// yet found (#3999).
+pub(super) fn inherited_handoff(
+    descriptor: RawFd,
+    environment_id: Uuid,
+) -> Result<StreamHandoff, EgressBrokerProcessError> {
+    if cfg!(not(target_os = "linux")) {
+        return Err(EgressBrokerProcessError::InheritedDescriptor);
+    }
+    if !is_inherited_unix_stream(descriptor) {
+        return Err(EgressBrokerProcessError::InheritedDescriptor);
+    }
+    // SAFETY: the fixed descriptor is open (checked above), inherited for
+    // this purpose and owned exactly once, here.
+    let socket = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)
+        .map_err(|_| EgressBrokerProcessError::InheritedDescriptor)?;
+    let handoff = StreamHandoff::new(socket, environment_id.to_string())
+        .map_err(|_| EgressBrokerProcessError::InheritedDescriptor)?;
+    handoff
+        .send_role_tag()
+        .map_err(|_| EgressBrokerProcessError::InheritedDescriptor)?;
+    Ok(handoff)
+}
+
+fn is_inherited_unix_stream(descriptor: RawFd) -> bool {
+    // SAFETY: `borrow_raw` needs the descriptor to stay open for the borrow's
+    // life. The borrow lives only for this call, on the single thread that
+    // owns the inherited descriptors, and nothing closes it meanwhile. A
+    // descriptor that is closed or not a socket is no unsafety here: the
+    // syscalls fail with EBADF or ENOTSOCK and it is refused.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(descriptor) };
+    is_connected_unix_stream(borrowed)
+}
+
+/// The broker, handing intercepted dials to `handoff` when there is one.
+pub(super) fn with_handoff<R, C, K>(
+    broker: PolicyEgressBroker<R, C, K>,
+    handoff: Option<StreamHandoff>,
+) -> PolicyEgressBroker<R, C, K>
+where
+    R: DnsResolver,
+    C: TcpConnector,
+    K: BrokerClock,
+{
+    match handoff {
+        Some(handoff) => broker.with_intercept_handoff(std::sync::Arc::new(handoff)),
+        None => broker,
+    }
+}
+
+/// The interception bindings, which arrive on the control channel before the
+/// broker admits anything. A missing or late frame is a control-channel
+/// failure; any other frame is a protocol failure.
+pub(super) async fn receive_intercepts<R, C, K>(
+    control: &mut tokio::net::UnixStream,
+    broker: &PolicyEgressBroker<R, C, K>,
+) -> Result<(), EgressBrokerProcessError>
+where
+    R: DnsResolver,
+    C: TcpConnector,
+    K: BrokerClock,
+{
+    let frame = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        crate::broker_control::read_control_frame(control),
+    )
+    .await
+    .map_err(|_| EgressBrokerProcessError::HostAddresses)?
+    .map_err(|_| EgressBrokerProcessError::HostAddresses)?;
+    let ControlFrame::ReplaceIntercepts(intercepts) = frame else {
+        return Err(EgressBrokerProcessError::Protocol);
+    };
+    broker.replace_intercepts(intercepts).await;
+    Ok(())
+}
+
+/// The broker's syscall filter. A hand-off needs
+/// `socketpair(AF_UNIX, SOCK_STREAM)` and nothing more: the filter admits
+/// exactly that shape, and every other Unix socket stays refused.
+#[cfg(target_os = "linux")]
+pub(super) fn install_broker_syscalls(handing_off: bool) -> std::io::Result<()> {
+    use super::{BROKER_ARCH_DENIED_SYSCALLS, BROKER_DENIED_SYSCALLS};
+    use crate::linux::confinement::{
+        install_inet_and_unix_stream_pair_syscalls, install_inet_socket_only_syscalls,
+    };
+    if handing_off {
+        let denied: Vec<libc::c_long> = BROKER_DENIED_SYSCALLS
+            .iter()
+            .copied()
+            .filter(|syscall| *syscall != libc::SYS_socketpair)
+            .collect();
+        install_inet_and_unix_stream_pair_syscalls(&denied, BROKER_ARCH_DENIED_SYSCALLS)
+    } else {
+        install_inet_socket_only_syscalls(BROKER_DENIED_SYSCALLS, BROKER_ARCH_DENIED_SYSCALLS)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::os::fd::{AsRawFd, IntoRawFd};
+
+    use super::*;
+
+    const ENVIRONMENT: &str = "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11";
+
+    #[test]
+    fn only_a_connected_unix_stream_is_taken() {
+        let environment = Uuid::parse_str(ENVIRONMENT).unwrap();
+        let (broker, _front_door) = codewire_egress_policy::handoff::stream_pair().unwrap();
+        assert!(inherited_handoff(broker.into_raw_fd(), environment).is_ok());
+
+        // Refused and left open: the broker never owned it.
+        let file = std::fs::File::open("/dev/null").unwrap();
+        assert!(inherited_handoff(file.as_raw_fd(), environment).is_err());
+        let (datagram, _other) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        assert!(inherited_handoff(datagram.as_raw_fd(), environment).is_err());
+        // A number at the soft descriptor limit can't be open, so no other
+        // test thread can reuse it underneath this check.
+        let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile)
+            .current
+            .expect("a finite descriptor limit");
+        let unused = std::os::fd::RawFd::try_from(limit).unwrap_or(std::os::fd::RawFd::MAX);
+        assert!(!is_inherited_unix_stream(unused));
+    }
+}

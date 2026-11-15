@@ -448,7 +448,12 @@ fn connect_through_broker(
         .enable_time()
         .build()
         .unwrap();
-    runtime.block_on(async move { ipc_client(parent, sessions).connect_tcp(destination).await })
+    runtime.block_on(async move {
+        ipc_client(parent, sessions)
+            .connect_tcp(destination)
+            .await
+            .map(|connection| connection.into_fd())
+    })
 }
 
 /// #2614 against a real interface. Run it in a network namespace whose

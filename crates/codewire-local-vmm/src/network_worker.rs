@@ -570,11 +570,15 @@ impl EgressBroker for IpcEgressBroker {
 
     async fn connect_tcp(&self, flow: TcpFlow) -> io::Result<BoxedBrokerStream> {
         let destination = Self::admit_guest_flow(flow)?;
+        // The client admits a TCP stream to exactly `destination`, or, only on
+        // an intercepted reply, a Unix stream to the front door (#3999). Both
+        // carry the guest's bytes the same way.
         let descriptor = self
             .client
             .connect_tcp(destination)
             .await
-            .map_err(ipc_broker_error)?;
+            .map_err(ipc_broker_error)?
+            .into_fd();
         let stream = transferred_stream(descriptor)?;
         Ok(Box::pin(stream))
     }

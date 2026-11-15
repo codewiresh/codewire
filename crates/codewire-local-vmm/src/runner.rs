@@ -2,7 +2,7 @@ use codewire_egress_policy::CompiledPolicy;
 use std::fmt;
 use std::io::{self, Read as _};
 use std::net::{Ipv4Addr, TcpListener as StdTcpListener};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -93,6 +93,10 @@ use crate::state::{
 
 #[cfg(target_os = "linux")]
 mod checkpoint;
+mod egress_spawn;
+mod inherited;
+
+use inherited::{INHERITED_SOURCE_FLOOR, duplicate_inherited_descriptor, raise_open_file_limit};
 mod host_port_forward;
 #[cfg(target_os = "linux")]
 pub use checkpoint::{RestoreBoot, RestoreReport};
@@ -1622,6 +1626,9 @@ impl RunningVm {
                 mesh: self.request.mesh.as_ref(),
                 mesh_credential_roots,
                 policy: &self.request.network_policy,
+                // Nothing binds interception yet; the front-door wiring sets
+                // this (#3999).
+                intercepts: codewire_egress_policy::intercept::InterceptSet::default(),
             };
             match spawn_network_stack_processes(&launch, key, mode).await {
                 Ok(mut worker) => {
@@ -2124,6 +2131,10 @@ struct EgressBrokerProcess {
     /// Policy replacements for the control channel (#2537).
     policy_control:
         Option<tokio::sync::mpsc::Sender<crate::broker_control::PolicyReplacementRequest>>,
+    /// The front door's end of the hand-off socket (#3999), present only when
+    /// the broker was started with interception bindings. Whatever starts the
+    /// environment's front door takes it with [`Self::take_front_door_handoff`].
+    front_door_handoff: Option<std::os::fd::OwnedFd>,
 }
 
 /// Ends the host-address monitor with its broker.
@@ -2216,6 +2227,10 @@ struct NetworkStackLaunch<'a> {
     mesh_credential_roots: Option<(&'a Path, &'a Path)>,
     /// The policy the egress broker enforces and the worker binds.
     policy: &'a CompiledPolicy,
+    /// Interception bindings (#3999); empty means off. With any, the broker
+    /// gets a hand-off socket to the front door and these bindings before it
+    /// is ready.
+    intercepts: codewire_egress_policy::intercept::InterceptSet,
 }
 
 struct NetworkWorkerProcess {
@@ -2370,6 +2385,7 @@ impl EgressBrokerStartup {
                 .take()
                 .expect("admitted egress broker owns its process identity"),
             host_addresses: None,
+            front_door_handoff: None,
             policy_control: None,
         }
     }
@@ -3537,35 +3553,27 @@ async fn spawn_egress_broker_process(
     context: &NetworkStackLaunch<'_>,
 ) -> Result<EgressBrokerLaunch, RunnerError> {
     PrivateRoot::open(context.working_directory)?;
-    let (bootstrap_parent, bootstrap_child) =
-        StdUnixStream::pair().map_err(|_| RunnerError::EgressBrokerSpawn)?;
-    bootstrap_parent
-        .set_nonblocking(true)
-        .map_err(|_| RunnerError::EgressBrokerSpawn)?;
-    let mut bootstrap = tokio::net::UnixStream::from_std(bootstrap_parent)
-        .map_err(|_| RunnerError::EgressBrokerSpawn)?;
+    let egress_spawn::InheritedPair {
+        parent: mut bootstrap,
+        inherited: inherited_bootstrap,
+    } = egress_spawn::inherited_pair()?;
     let key = fresh_egress_broker_key();
     let bytes =
         encode_egress_broker_bootstrap(context.vm_id, context.generation, &key, context.policy)
             .map_err(|_| RunnerError::EgressBrokerBootstrap)?;
-    let inherited_bootstrap = duplicate_inherited_descriptor(bootstrap_child.as_raw_fd())
-        .map_err(|_| RunnerError::EgressBrokerSpawn)?;
     let bootstrap_fd = inherited_bootstrap.as_raw_fd();
     // The host's own addresses, which the broker refuses (#2614): sent before
     // it can admit anything, then kept current by the monitor.
-    let (control_parent, control_child) =
-        StdUnixStream::pair().map_err(|_| RunnerError::EgressBrokerSpawn)?;
-    control_parent
-        .set_nonblocking(true)
-        .map_err(|_| RunnerError::EgressBrokerSpawn)?;
-    let mut control = tokio::net::UnixStream::from_std(control_parent)
-        .map_err(|_| RunnerError::EgressBrokerSpawn)?;
+    let egress_spawn::InheritedPair {
+        parent: mut control,
+        inherited: inherited_control,
+    } = egress_spawn::inherited_pair()?;
     let (monitor, host_addresses) =
         HostAddressMonitor::start(SystemHostAddressSource::from_environment())
             .map_err(|_| RunnerError::EgressBrokerSpawn)?;
-    let inherited_control = duplicate_inherited_descriptor(control_child.as_raw_fd())
-        .map_err(|_| RunnerError::EgressBrokerSpawn)?;
     let control_fd = inherited_control.as_raw_fd();
+    let handoff = egress_spawn::BrokerHandoff::prepare(&context.intercepts)?;
+    let intercept_frame = egress_spawn::intercept_frame(&context.intercepts)?;
     // Every IPC session but the admission session, which is the bootstrap
     // stream (#2638): the broker inherits one end, the worker gets the other.
     let mut worker_endpoints = Vec::with_capacity(EGRESS_BROKER_INHERITED_SESSIONS);
@@ -3589,6 +3597,7 @@ async fn spawn_egress_broker_process(
             .zip(EGRESS_BROKER_FIRST_SESSION_FD..)
             .map(|(session, target)| (session.as_raw_fd(), target)),
     );
+    descriptors.extend(handoff.as_ref().map(egress_spawn::BrokerHandoff::inherited));
     let expected_parent = unsafe { libc::getpid() };
     let mut command = tokio::process::Command::new(context.executable);
     command
@@ -3602,6 +3611,9 @@ async fn spawn_egress_broker_process(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if handoff.is_some() {
+        command.arg("--intercept-handoff");
+    }
     unsafe {
         command.pre_exec(move || {
             raise_open_file_limit()?;
@@ -3612,12 +3624,11 @@ async fn spawn_egress_broker_process(
         .spawn()
         .map_err(|_| RunnerError::EgressBrokerSpawn)?;
     drop(inherited_bootstrap);
-    drop(bootstrap_child);
     drop(inherited_control);
-    drop(control_child);
     // Dropping the duplicates closes the broker's ends here; the child holds
     // its own copies.
     drop(inherited_sessions);
+    let front_door_handoff = handoff.map(egress_spawn::BrokerHandoff::into_front_door);
     let mut startup = EgressBrokerStartup::new(child);
     let Some(pid) = startup.child_mut().id() else {
         reap_failed_egress_broker_startup(&mut startup).await?;
@@ -3632,6 +3643,9 @@ async fn spawn_egress_broker_process(
         bootstrap.write_all(bytes.as_ref()).await?;
         bootstrap.flush().await?;
         control.write_all(&encode_frame(&host_addresses)).await?;
+        if let Some(frame) = intercept_frame.as_ref() {
+            control.write_all(frame).await?;
+        }
         control.flush().await
     })
     .await;
@@ -3738,6 +3752,7 @@ async fn spawn_egress_broker_process(
         }
     })));
     process.policy_control = Some(replace);
+    process.front_door_handoff = front_door_handoff;
     Ok(EgressBrokerLaunch {
         process,
         endpoints,
@@ -4120,48 +4135,6 @@ fn egress_broker_exit_error(status: std::process::ExitStatus) -> RunnerError {
             RunnerError::EgressBrokerBootstrap,
             RunnerError::EgressBrokerStartup,
         )
-}
-
-/// Inherited sources are duplicated at or above this descriptor, above every
-/// fixed target a child uses, so placing one never overwrites another.
-const INHERITED_SOURCE_FLOOR: RawFd = 64;
-const _: () = assert!(
-    EGRESS_BROKER_FIRST_SESSION_FD + EGRESS_BROKER_INHERITED_SESSIONS as RawFd
-        <= INHERITED_SOURCE_FLOOR
-);
-
-/// The soft open-file limit of the network worker and egress broker (#2638).
-/// The worker holds up to 256 guest connections, 64 inbound streams and every
-/// broker session; macOS starts processes at 256. Never above the hard limit.
-const NETWORK_ROLE_OPEN_FILE_LIMIT: libc::rlim_t = 1024;
-
-/// Raise the soft open-file limit to [`NETWORK_ROLE_OPEN_FILE_LIMIT`], or to
-/// the hard limit if that is lower. Runs in the child before exec.
-fn raise_open_file_limit() -> io::Result<()> {
-    let mut limit = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let wanted = NETWORK_ROLE_OPEN_FILE_LIMIT.min(limit.rlim_max);
-    if limit.rlim_cur < wanted {
-        limit.rlim_cur = wanted;
-        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(())
-}
-
-fn duplicate_inherited_descriptor(descriptor: i32) -> io::Result<OwnedFd> {
-    let duplicated =
-        unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, INHERITED_SOURCE_FLOOR) };
-    if duplicated == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
 }
 
 #[cfg(target_os = "linux")]
@@ -5630,6 +5603,7 @@ impl RunnerError {
 
 #[cfg(test)]
 mod tests {
+    use super::inherited::NETWORK_ROLE_OPEN_FILE_LIMIT;
     use super::*;
     use crate::guest_loopback::tests::in_process_daemon;
     use crate::host_port::tests::{free_loopback_port, once_released};
@@ -6180,6 +6154,7 @@ mod tests {
                 process: broker_process,
                 host_addresses: None,
                 policy_control: None,
+                front_door_handoff: None,
             }),
             ingress_control: None,
             mesh_ingress_key: None,

@@ -61,7 +61,7 @@ rand = { workspace = true }
 # with key encodings wiped on drop.
 rcgen = { version = "0.13", features = ["zeroize"] }
 reqwest = { workspace = true }
-rustix = { workspace = true }
+rustix = { workspace = true, features = ["net"] }
 rusqlite = { workspace = true }
 russh = { workspace = true }
 # The egress front door's Rustls: one ring provider, named explicitly.

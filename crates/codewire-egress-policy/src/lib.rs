@@ -15,6 +15,8 @@ use thiserror::Error;
 mod builtin;
 pub mod check;
 mod cidr;
+#[cfg(unix)]
+pub mod handoff;
 pub mod host_addresses;
 mod hostname;
 pub mod intercept;

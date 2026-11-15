@@ -41,8 +41,8 @@ use uuid::Uuid;
 use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{
-    BrokerAdapterFailure, BrokerClock, BrokerDnsResponse, BrokerError, DnsRecordFamily,
-    DnsResolver, PassedFlow, PolicyEgressBroker, TcpConnector,
+    BrokerAdapterFailure, BrokerClock, BrokerConnection, BrokerDnsResponse, BrokerError,
+    DnsRecordFamily, DnsResolver, PassedFlow, PolicyEgressBroker, TcpConnector,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -120,6 +120,8 @@ const STATUS_NO_DATA: u8 = 2;
 const STATUS_NAME_ERROR: u8 = 3;
 const STATUS_UNAVAILABLE: u8 = 4;
 const STATUS_MALFORMED: u8 = 5;
+/// The connection is a Unix stream to the front door, not a TCP dial (#3999).
+const STATUS_INTERCEPTED: u8 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BrokerIpcBinding {
@@ -348,6 +350,23 @@ impl Drop for CheckedOut<'_> {
 }
 
 /// The worker's end of every session to its broker.
+/// A connection the broker passed back for one `connect_tcp`.
+#[derive(Debug)]
+pub enum BrokerIpcConnection {
+    /// A TCP stream connected to exactly the requested destination.
+    Tcp(OwnedFd),
+    /// A Unix stream whose other end the front door holds (#3999).
+    Intercepted(OwnedFd),
+}
+
+impl BrokerIpcConnection {
+    pub fn into_fd(self) -> OwnedFd {
+        match self {
+            Self::Tcp(descriptor) | Self::Intercepted(descriptor) => descriptor,
+        }
+    }
+}
+
 pub struct BrokerIpcClient {
     admission: SessionPool,
     dns: SessionPool,
@@ -443,17 +462,23 @@ impl BrokerIpcClient {
         }
     }
 
-    pub async fn connect_tcp(&self, destination: SocketAddr) -> Result<OwnedFd, BrokerIpcError> {
+    pub async fn connect_tcp(
+        &self,
+        destination: SocketAddr,
+    ) -> Result<BrokerIpcConnection, BrokerIpcError> {
         let request = encode_tcp_request(OP_CONNECT_TCP, destination)?;
         let mut state = self.connect.checkout().await?;
         let deadline = Instant::now() + BROKER_IPC_TRANSACTION_TIMEOUT;
         let response = state.request(&request, deadline).await?;
-        match decode_empty_response(&response, OP_CONNECT_TCP) {
-            Ok(()) => {}
-            Err(error) if error.is_valid_remote_result() => return Err(error),
-            Err(error) => {
-                state.failed = true;
-                return Err(error);
+        let intercepted = response == [OP_CONNECT_TCP, STATUS_INTERCEPTED];
+        if !intercepted {
+            match decode_empty_response(&response, OP_CONNECT_TCP) {
+                Ok(()) => {}
+                Err(error) if error.is_valid_remote_result() => return Err(error),
+                Err(error) => {
+                    state.failed = true;
+                    return Err(error);
+                }
             }
         }
         // The descriptor is part of this operation, not the next frame. A
@@ -465,8 +490,17 @@ impl BrokerIpcClient {
         // The marker and its one descriptor are read: the session is in step
         // again, whatever the connection itself turns out to be.
         state.failed = false;
+        if intercepted {
+            return match admit_intercepted_descriptor(descriptor) {
+                Ok(descriptor) => Ok(BrokerIpcConnection::Intercepted(descriptor)),
+                Err(error) => {
+                    state.failed = true;
+                    Err(error)
+                }
+            };
+        }
         match admit_connected_descriptor(descriptor, destination) {
-            Ok(descriptor) => Ok(descriptor),
+            Ok(descriptor) => Ok(BrokerIpcConnection::Tcp(descriptor)),
             // The connection closed or reset after the broker's handshake:
             // this request fails, the session carries on (#2638).
             Err(BrokerIpcError::RemoteUnavailable) => Err(BrokerIpcError::RemoteUnavailable),
@@ -701,7 +735,7 @@ where
             BrokerRequest::ConnectTcp(destination) => {
                 match connect_and_record(&broker, destination).await {
                     Ok(connected) => {
-                        let payload = [OP_CONNECT_TCP, STATUS_OK];
+                        let payload = [OP_CONNECT_TCP, connected.status()];
                         write_frame(
                             &mut stream,
                             FRAME_KIND_RESPONSE,
@@ -711,7 +745,7 @@ where
                             &payload,
                         )
                         .await?;
-                        send_connected_descriptor(&stream, connected.as_fd()).await?;
+                        send_connected_descriptor(&stream, connected.descriptor()).await?;
                     }
                     Err(error) => {
                         let payload = [OP_CONNECT_TCP, status_for_broker_error(&error)];
@@ -846,22 +880,62 @@ fn encode_empty_broker_response(operation: u8, response: Result<(), BrokerError>
 async fn connect_and_record<R, C, K>(
     broker: &PolicyEgressBroker<R, C, K>,
     destination: SocketAddr,
-) -> Result<C::Stream, BrokerError>
+) -> Result<Passed<C::Stream>, BrokerError>
 where
     R: DnsResolver,
     C: TcpConnector,
     C::Stream: AsFd,
     K: BrokerClock,
 {
-    let (connected, admission) = broker.connect_tcp(destination).await?.into_parts();
-    let kept = connected
-        .as_fd()
-        .try_clone_to_owned()
-        .map_err(|_| BrokerError::Connector(BrokerAdapterFailure::Unavailable))?;
-    broker
-        .record_passed_flow(admission, Box::new(PassedSocket(kept)))
-        .await?;
-    Ok(connected)
+    let keep = |descriptor: BorrowedFd<'_>| {
+        descriptor
+            .try_clone_to_owned()
+            .map_err(|_| BrokerError::Connector(BrokerAdapterFailure::Unavailable))
+    };
+    match broker.connect_or_intercept(destination).await? {
+        BrokerConnection::Dialled(connection) => {
+            let revision = connection.intercept_revision();
+            let (connected, admission) = connection.into_parts();
+            let kept = keep(connected.as_fd())?;
+            broker
+                .record_passed_flow(admission, revision, Box::new(PassedSocket(kept)))
+                .await?;
+            Ok(Passed::Dialled(connected))
+        }
+        // Ending the worker's end of the pair ends the front door's too.
+        BrokerConnection::Intercepted {
+            stream,
+            interception,
+            revision,
+        } => {
+            let kept = keep(stream.as_fd())?;
+            broker
+                .record_intercepted_flow(interception, revision, Box::new(PassedSocket(kept)))
+                .await?;
+            Ok(Passed::Intercepted(stream))
+        }
+    }
+}
+
+enum Passed<S> {
+    Dialled(S),
+    Intercepted(OwnedFd),
+}
+
+impl<S: AsFd> Passed<S> {
+    fn status(&self) -> u8 {
+        match self {
+            Self::Dialled(_) => STATUS_OK,
+            Self::Intercepted(_) => STATUS_INTERCEPTED,
+        }
+    }
+
+    fn descriptor(&self) -> BorrowedFd<'_> {
+        match self {
+            Self::Dialled(stream) => stream.as_fd(),
+            Self::Intercepted(stream) => stream.as_fd(),
+        }
+    }
 }
 
 /// The broker's copy of a socket it passed to the worker. Ending it shuts the
@@ -888,7 +962,9 @@ impl PassedFlow for PassedSocket {
 fn status_for_broker_error(error: &BrokerError) -> u8 {
     match error {
         BrokerError::Denied(_) => STATUS_DENIED,
-        BrokerError::PolicyReplaced | BrokerError::TooManyPassedFlows => STATUS_UNAVAILABLE,
+        BrokerError::PolicyReplaced
+        | BrokerError::InterceptsReplaced
+        | BrokerError::TooManyPassedFlows => STATUS_UNAVAILABLE,
         BrokerError::Resolver(
             BrokerAdapterFailure::Unavailable | BrokerAdapterFailure::Timeout,
         )
@@ -1306,6 +1382,24 @@ fn admit_connected_descriptor(
     Ok(OwnedFd::from(connected))
 }
 
+/// Accept a received descriptor as the worker's end of an intercepted
+/// connection: a Unix stream socket and nothing else. Its peer is the front
+/// door, so there is no address to check.
+fn admit_intercepted_descriptor(descriptor: OwnedFd) -> Result<OwnedFd, BrokerIpcError> {
+    fcntl_setfd(&descriptor, FdFlags::CLOEXEC).map_err(|_| BrokerIpcError::DescriptorInvalid)?;
+    let stream = rustix::net::sockopt::socket_type(&descriptor)
+        .map_err(|_| BrokerIpcError::DescriptorInvalid)?
+        == SocketType::STREAM;
+    let unix = rustix::net::getsockname(&descriptor)
+        .map(|address| address.address_family() == rustix::net::AddressFamily::UNIX)
+        .unwrap_or(false);
+    if !stream || !unix {
+        return Err(BrokerIpcError::DescriptorInvalid);
+    }
+    rustix::io::ioctl_fionbio(&descriptor, true).map_err(|_| BrokerIpcError::DescriptorInvalid)?;
+    Ok(descriptor)
+}
+
 fn errno_to_io_error(error: rustix::io::Errno) -> io::Error {
     io::Error::from_raw_os_error(error.raw_os_error())
 }
@@ -1675,6 +1769,176 @@ rules:
         );
     }
 
+    /// A hand-off that fails (the front door's end is gone) refuses the
+    /// connect, and the broker never dials it instead.
+    #[tokio::test]
+    async fn a_failed_hand_off_refuses_the_connect_and_never_dials() {
+        use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
+
+        use crate::handoff::StreamHandoff;
+
+        let policy = named_policy();
+        let binding = binding(&policy);
+        let resolver = Arc::new(FakeResolver::new([positive(PUBLIC_V4, 60)]));
+        let connector = Arc::new(NoConnector::default());
+        let (broker_end, front_door_end) = codewire_egress_policy::handoff::stream_pair().unwrap();
+        drop(front_door_end);
+        let broker = PolicyEgressBroker::new(
+            policy,
+            RouteClass::General,
+            Arc::clone(&resolver),
+            Arc::clone(&connector),
+            Arc::new(FakeClock::default()),
+        )
+        .with_intercept_handoff(Arc::new(
+            StreamHandoff::new(broker_end, "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11".into()).unwrap(),
+        ));
+        broker
+            .replace_intercepts(
+                InterceptSet::new([InterceptBinding::new("allowed.example.com", 443).unwrap()])
+                    .unwrap(),
+            )
+            .await;
+        let broker = Arc::new(broker);
+        let (client_streams, server_streams) = session_pairs();
+        let _server = tokio::spawn(serve_broker_ipc(
+            server_streams,
+            binding,
+            key(),
+            Arc::clone(&broker),
+        ));
+        let client = client(client_streams, binding);
+        client
+            .resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4)
+            .await
+            .unwrap();
+        let destination = SocketAddr::new(PUBLIC_V4, 443);
+        client.authorize_tcp(destination).await.unwrap();
+        assert!(client.connect_tcp(destination).await.is_err());
+        assert!(client.connect_tcp(destination).await.is_err());
+        assert_eq!(connector.calls.load(Ordering::Relaxed), 0);
+    }
+
+    /// #3999 end to end: the worker's connect to a bound name reaches the
+    /// front door through the broker's hand-off, as a Unix stream that
+    /// carries bytes both ways, and the broker never dials it.
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "macOS reads end of file on the intercepted stream; interception is refused there until it is explained (#3999)"
+    )]
+    async fn an_intercepted_connect_reaches_the_front_door_and_carries_bytes_both_ways() {
+        use codewire_egress_policy::handoff::HandoffReceiver;
+        use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
+
+        use crate::handoff::StreamHandoff;
+
+        let policy = named_policy();
+        let binding = binding(&policy);
+        let resolver = Arc::new(FakeResolver::new([positive(PUBLIC_V4, 60)]));
+        let connector = Arc::new(NoConnector::default());
+        let (broker_end, front_door_end) = codewire_egress_policy::handoff::stream_pair().unwrap();
+        let broker = PolicyEgressBroker::new(
+            policy,
+            RouteClass::General,
+            Arc::clone(&resolver),
+            Arc::clone(&connector),
+            Arc::new(FakeClock::default()),
+        )
+        .with_intercept_handoff({
+            let handoff =
+                StreamHandoff::new(broker_end, "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11".into())
+                    .unwrap();
+            handoff.send_role_tag().unwrap();
+            Arc::new(handoff)
+        });
+        broker
+            .replace_intercepts(
+                InterceptSet::new([InterceptBinding::new("allowed.example.com", 443).unwrap()])
+                    .unwrap(),
+            )
+            .await;
+        let broker = Arc::new(broker);
+        let (client_streams, server_streams) = session_pairs();
+        let _server = tokio::spawn(serve_broker_ipc(
+            server_streams,
+            binding,
+            key(),
+            Arc::clone(&broker),
+        ));
+        let client = client(client_streams, binding);
+        client
+            .resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4)
+            .await
+            .unwrap();
+        let destination = SocketAddr::new(PUBLIC_V4, 443);
+        client.authorize_tcp(destination).await.unwrap();
+
+        let BrokerIpcConnection::Intercepted(worker) =
+            client.connect_tcp(destination).await.unwrap()
+        else {
+            panic!("an intercepted connect came back as a TCP dial");
+        };
+        assert_eq!(connector.calls.load(Ordering::Relaxed), 0);
+        let (header, front_door) = tokio::task::spawn_blocking(move || {
+            let mut receiver = HandoffReceiver::new(front_door_end).unwrap();
+            // The role tag comes first: exactly `H`, no descriptors.
+            let (tag, descriptors) = receiver.recv_frame(16, 4).unwrap();
+            assert_eq!(tag, [0x48]);
+            assert!(descriptors.is_empty());
+            receiver.recv_intercepted_stream()
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(header.hostname, "allowed.example.com");
+        assert_eq!(header.port, 443);
+        assert_eq!(IpAddr::V4(header.destination_ip), PUBLIC_V4);
+        assert_eq!(
+            header.environment_id,
+            "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11"
+        );
+        assert_eq!(header.stream_id, 1);
+
+        let mut worker = StdUnixStream::from(worker);
+        worker.set_nonblocking(false).unwrap();
+        let mut front_door = StdUnixStream::from(front_door);
+        worker.write_all(b"GET / HTTP/1.1").unwrap();
+        let mut request = [0_u8; 14];
+        front_door.read_exact(&mut request).unwrap();
+        assert_eq!(&request, b"GET / HTTP/1.1");
+        front_door.write_all(b"HTTP/1.1 200").unwrap();
+        let mut response = [0_u8; 12];
+        worker.read_exact(&mut response).unwrap();
+        assert_eq!(&response, b"HTTP/1.1 200");
+
+        // The broker recorded the flow; unbinding the name ends it for both.
+        assert_eq!(broker.passed_flows().await, 1);
+        broker.replace_intercepts(InterceptSet::default()).await;
+        let mut byte = [0_u8; 1];
+        assert_eq!(front_door.read(&mut byte).unwrap(), 0);
+        assert_eq!(broker.passed_flows().await, 0);
+    }
+
+    /// The client takes a Unix stream only on an intercepted reply: anything
+    /// else there is refused.
+    #[test]
+    fn an_intercepted_reply_admits_only_a_unix_stream() {
+        let (unix, _peer) = StdUnixStream::pair().unwrap();
+        assert!(admit_intercepted_descriptor(OwnedFd::from(unix)).is_ok());
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let tcp = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        assert_eq!(
+            admit_intercepted_descriptor(OwnedFd::from(tcp)).unwrap_err(),
+            BrokerIpcError::DescriptorInvalid
+        );
+        let datagram = std::os::unix::net::UnixDatagram::pair().unwrap().0;
+        assert_eq!(
+            admit_intercepted_descriptor(OwnedFd::from(datagram)).unwrap_err(),
+            BrokerIpcError::DescriptorInvalid
+        );
+    }
+
     /// A request cancelled mid-flight leaves its session out of step, so the
     /// session is retired, and the broker, finding it closed, ends every
     /// session: the environment fails closed rather than lose a session
@@ -1934,7 +2198,10 @@ rules:
                 .unwrap();
         });
         let client = client(client_streams, binding);
-        let descriptor = client.connect_tcp(destination).await.unwrap();
+        let BrokerIpcConnection::Tcp(descriptor) = client.connect_tcp(destination).await.unwrap()
+        else {
+            panic!("a dialled connection came back intercepted");
+        };
         drop(server_streams);
         assert!(
             rustix::io::fcntl_getfd(&descriptor)
