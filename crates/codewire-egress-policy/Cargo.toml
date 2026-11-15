@@ -15,7 +15,7 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["net"] }
+rustix = { workspace = true, features = ["event", "net"] }
 
 [dev-dependencies]
 codewire-workspace-hack.workspace = true

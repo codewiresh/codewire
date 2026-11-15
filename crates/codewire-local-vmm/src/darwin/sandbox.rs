@@ -259,6 +259,90 @@ mod tests {
         );
     }
 
+    /// #3999: the broker profile admits the front-door hand-off as the broker
+    /// makes it after confinement. A new socketpair's end goes to the front
+    /// door with its length-prefixed header over the held hand-off socket and
+    /// carries bytes both ways, and the front door's acknowledgement wakes a
+    /// reader on the broker's runtime. Named Unix sockets, TCP listeners and
+    /// files stay refused.
+    #[test]
+    fn egress_broker_profile_admits_the_front_door_hand_off() {
+        use std::os::fd::AsFd as _;
+
+        use codewire_egress_broker::handoff::HANDOFF_ACK_LEN;
+        use codewire_egress_policy::handoff::{
+            HANDOFF_VERSION, HandoffReceiver, HandoffSender, InterceptedStreamHeader, stream_pair,
+        };
+
+        const CHILD_MARKER: &str = "CODEWIRE_TEST_DARWIN_EGRESS_HANDOFF";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            // Made before confinement, as the broker makes them at startup.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+                .unwrap();
+            let (broker_end, front_door_end) = stream_pair().unwrap();
+            let readable = UnixStream::from(broker_end.try_clone().unwrap());
+            readable.set_nonblocking(true).unwrap();
+            let readable = runtime
+                .block_on(async { tokio::net::UnixStream::from_std(readable) })
+                .unwrap();
+            let mut sender = HandoffSender::new(broker_end.try_clone().unwrap()).unwrap();
+            let mut acknowledgements = HandoffReceiver::new(broker_end).unwrap();
+            let mut front_door = HandoffReceiver::new(front_door_end.try_clone().unwrap()).unwrap();
+            let mut acknowledging = HandoffSender::new(front_door_end).unwrap();
+            confine_egress_broker().unwrap();
+
+            let (worker, handed) = stream_pair().unwrap();
+            let header = InterceptedStreamHeader {
+                version: HANDOFF_VERSION,
+                hostname: "allowed.example.com".into(),
+                port: 443,
+                destination_ip: std::net::Ipv4Addr::new(192, 0, 2, 7),
+                stream_id: 1,
+                environment_id: "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11".into(),
+            };
+            sender
+                .send_intercepted_stream(&header, handed.as_fd())
+                .unwrap();
+            let (received_header, received) = front_door.recv_intercepted_stream().unwrap();
+            drop(handed);
+            assert_eq!(received_header, header);
+            let (mut worker, mut received) = (UnixStream::from(worker), UnixStream::from(received));
+            let mut byte = [0_u8; 1];
+            worker.write_all(b"w").unwrap();
+            received.read_exact(&mut byte).unwrap();
+            assert_eq!(&byte, b"w");
+            received.write_all(b"f").unwrap();
+            worker.read_exact(&mut byte).unwrap();
+            assert_eq!(&byte, b"f");
+
+            acknowledging
+                .send_frame(&header.stream_id.to_le_bytes(), &[])
+                .unwrap();
+            runtime.block_on(readable.readable()).unwrap();
+            let (body, descriptors) = acknowledgements.recv_frame(HANDOFF_ACK_LEN, 0).unwrap();
+            assert_eq!(body, header.stream_id.to_le_bytes());
+            assert!(descriptors.is_empty());
+
+            assert!(UnixStream::connect("/var/run/mDNSResponder").is_err());
+            assert!(std::net::TcpListener::bind("127.0.0.1:0").is_err());
+            let error = std::fs::File::open("/etc/hosts").unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+            return;
+        }
+        let status = crate::test_child(&mut std::process::Command::new(
+            std::env::current_exe().unwrap(),
+        ))
+        .arg("--exact")
+        .arg("darwin::sandbox::tests::egress_broker_profile_admits_the_front_door_hand_off")
+        .arg("--nocapture")
+        .env(CHILD_MARKER, "1")
+        .status()
+        .unwrap();
+        assert!(status.success());
+    }
+
     /// The Mesh transport profile admits TCP dials and direct UDP to any
     /// address and port, and unnamed socketpairs for Mesh streams, and
     /// refuses everything else.

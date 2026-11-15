@@ -13,11 +13,18 @@
 //! never answers on that socket: a failure is the front door closing its end.
 //!
 //! The first frame on the socket is a role tag, [`HANDOFF_ROLE_TAG`]: a body
-//! of exactly `b"H"` with no descriptors, sent by the broker as soon as it
-//! takes its end and before any intercepted stream. The front door reads it
-//! first, waits at most 2 s for it, and refuses the socket without it. (The
-//! credential socket is told apart by a raw `C` byte on the front door's
-//! side.)
+//! of exactly `b"H"` with no descriptors. The broker's `StreamHandoff::new`
+//! sends it, once, before any intercepted stream, so no caller can skip or
+//! repeat it. The front door reads it first with
+//! [`HandoffReceiver::expect_role_tag`] (at most 2 s) and refuses the socket
+//! without it; a second descriptor-less frame later is a protocol error.
+//! (The credential socket is told apart by a raw `C` byte on the front
+//! door's side.)
+//!
+//! A receiver that hits a protocol error is poisoned and shuts its socket
+//! down both ways, so the broker's next send fails at once (`Closed`) and
+//! its acknowledgement reader sees end of file, refusing every later
+//! intercept instead of leaving guest connections waiting.
 //!
 //! The header is a fixed little-endian layout, not protobuf, so the confined
 //! broker needs no generated code. It lives here, not in the broker, so the
@@ -75,6 +82,9 @@ pub enum HandoffError {
     /// An earlier failure left the stream out of step; it is unusable.
     #[error("the hand-off socket is unusable after an earlier failure")]
     Poisoned,
+    /// The first frame was not the role tag, or did not come in time.
+    #[error("the hand-off socket did not start with its role tag")]
+    RoleTag,
     #[error("the hand-off socket failed")]
     Io,
 }

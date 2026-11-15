@@ -14,17 +14,10 @@ use super::{ControlFrame, EgressBrokerProcessError, HANDSHAKE_TIMEOUT};
 /// The inherited front-door socket. It must be an open socket, a connected
 /// `AF_UNIX` `SOCK_STREAM` one, before the broker takes ownership of it; then
 /// it is marked close-on-exec. Anything else refuses to start.
-///
-/// macOS refuses interception, as before #4739: on a native macOS run the
-/// front door read end of file on an intercepted stream, and the cause is not
-/// yet found (#3999).
 pub(super) fn inherited_handoff(
     descriptor: RawFd,
     environment_id: Uuid,
 ) -> Result<StreamHandoff, EgressBrokerProcessError> {
-    if cfg!(not(target_os = "linux")) {
-        return Err(EgressBrokerProcessError::InheritedDescriptor);
-    }
     if !is_inherited_unix_stream(descriptor) {
         return Err(EgressBrokerProcessError::InheritedDescriptor);
     }
@@ -33,12 +26,8 @@ pub(super) fn inherited_handoff(
     let socket = unsafe { OwnedFd::from_raw_fd(descriptor) };
     rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)
         .map_err(|_| EgressBrokerProcessError::InheritedDescriptor)?;
-    let handoff = StreamHandoff::new(socket, environment_id.to_string())
-        .map_err(|_| EgressBrokerProcessError::InheritedDescriptor)?;
-    handoff
-        .send_role_tag()
-        .map_err(|_| EgressBrokerProcessError::InheritedDescriptor)?;
-    Ok(handoff)
+    StreamHandoff::new(socket, environment_id.to_string())
+        .map_err(|_| EgressBrokerProcessError::InheritedDescriptor)
 }
 
 fn is_inherited_unix_stream(descriptor: RawFd) -> bool {
@@ -114,7 +103,7 @@ pub(super) fn install_broker_syscalls(handing_off: bool) -> std::io::Result<()> 
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use std::os::fd::{AsRawFd, IntoRawFd};
 
@@ -122,8 +111,9 @@ mod tests {
 
     const ENVIRONMENT: &str = "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11";
 
-    #[test]
-    fn only_a_connected_unix_stream_is_taken() {
+    // The broker's hand-off reads acknowledgements on a runtime task (#3999).
+    #[tokio::test]
+    async fn only_a_connected_unix_stream_is_taken() {
         let environment = Uuid::parse_str(ENVIRONMENT).unwrap();
         let (broker, _front_door) = codewire_egress_policy::handoff::stream_pair().unwrap();
         assert!(inherited_handoff(broker.into_raw_fd(), environment).is_ok());

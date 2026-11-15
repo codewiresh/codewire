@@ -268,9 +268,11 @@ fn joined_frames_keep_their_own_descriptors() {
     let mut frame = prefix(&second).to_vec();
     frame.extend_from_slice(&second);
     send_raw(writer.as_fd(), &frame, &[two.as_fd()]);
-    drop((one, two));
     let (header_one, descriptor_one) = receiver.recv_intercepted_stream().unwrap();
     let (header_two, descriptor_two) = receiver.recv_intercepted_stream().unwrap();
+    // Dropped only once received: macOS can dispose of a socket whose last
+    // reference is in flight while other tests pass descriptors (#3999).
+    drop((one, two));
     assert_eq!((header_one.stream_id, header_two.stream_id), (7, 8));
     // Each header's descriptor is the one sent with it: a byte written to
     // each peer comes out of the matching descriptor.
@@ -286,14 +288,22 @@ fn joined_frames_keep_their_own_descriptors() {
 }
 
 #[test]
-fn a_frame_without_exactly_one_descriptor_is_refused_and_closed() {
+fn a_frame_without_a_descriptor_poisons_the_receiver() {
     let (mut sender, mut receiver) = ends();
     sender.send_frame(&header().encode().unwrap(), &[]).unwrap();
     assert_eq!(
         receiver.recv_intercepted_stream().unwrap_err(),
         HandoffError::Descriptors
     );
+    assert_eq!(
+        receiver.recv_intercepted_stream().unwrap_err(),
+        HandoffError::Poisoned
+    );
+}
 
+#[test]
+fn a_frame_with_two_descriptors_is_refused_and_closed() {
+    let (mut sender, mut receiver) = ends();
     let (one, keep_one) = StdUnixStream::pair().unwrap();
     let (two, keep_two) = StdUnixStream::pair().unwrap();
     sender
@@ -356,13 +366,18 @@ fn a_malformed_header_closes_its_descriptor_and_poisons_the_receiver() {
         HandoffError::Version
     );
     assert_closed(&keep);
-    let (good, _keep_good) = StdUnixStream::pair().unwrap();
-    sender
-        .send_intercepted_stream(&header(), good.as_fd())
-        .unwrap();
     assert_eq!(
         receiver.recv_intercepted_stream().unwrap_err(),
         HandoffError::Poisoned
+    );
+    // The poisoned receiver shut its socket down: the broker's next send is
+    // refused rather than queued.
+    let (good, _keep_good) = StdUnixStream::pair().unwrap();
+    assert_eq!(
+        sender
+            .send_intercepted_stream(&header(), good.as_fd())
+            .unwrap_err(),
+        HandoffError::Closed
     );
 }
 
@@ -507,3 +522,137 @@ fn a_short_write_poisons_the_sender_and_ends_the_stream() {
 
 // Every hand-off frame is small enough that ENOBUFS on it sent nothing.
 const _: () = assert!(HANDOFF_MAX_LEN + 2 < ENOBUFS_WHOLE_FRAME_LEN);
+
+fn tag_ends() -> (HandoffSender, HandoffReceiver) {
+    let (sender, receiver) = pair(true);
+    (
+        HandoffSender::new(sender).unwrap(),
+        HandoffReceiver::new(receiver).unwrap(),
+    )
+}
+
+const TAG_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// #3999: on a blocking socket too, the wait ends at its timeout. Measured
+/// on macOS 27.2.1, a blocking receive here once waited for an hour; the
+/// wait runs on its own thread, so a regression fails instead of hanging.
+#[test]
+fn a_missing_role_tag_times_out_on_a_blocking_socket_too() {
+    let (broker, front_door) = pair(false);
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut receiver = HandoffReceiver::new(front_door).unwrap();
+        let started = std::time::Instant::now();
+        let result = receiver.expect_role_tag(std::time::Duration::from_millis(200));
+        let _ = done.send((result, started.elapsed()));
+    });
+    let (result, elapsed) = finished
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the role-tag wait blocked past its timeout");
+    assert_eq!(result, Err(HandoffError::RoleTag));
+    assert!(elapsed < TAG_WAIT, "{elapsed:?}");
+    drop(broker);
+}
+
+#[test]
+fn the_role_tag_is_accepted_then_streams_follow() {
+    let (mut sender, mut receiver) = tag_ends();
+    sender.send_frame(HANDOFF_ROLE_TAG, &[]).unwrap();
+    receiver.expect_role_tag(TAG_WAIT).unwrap();
+    let (stream, _keep) = StdUnixStream::pair().unwrap();
+    sender
+        .send_intercepted_stream(&header(), stream.as_fd())
+        .unwrap();
+    assert_eq!(receiver.recv_intercepted_stream().unwrap().0, header());
+}
+
+#[test]
+fn a_missing_role_tag_times_out_and_poisons() {
+    let (_sender, mut receiver) = tag_ends();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        receiver
+            .expect_role_tag(std::time::Duration::from_millis(200))
+            .unwrap_err(),
+        HandoffError::RoleTag
+    );
+    assert!(started.elapsed() < TAG_WAIT);
+    assert_eq!(
+        receiver.recv_frame(FRAME_MAX_LEN, 0).unwrap_err(),
+        HandoffError::Poisoned
+    );
+}
+
+#[test]
+fn a_wrong_role_tag_poisons() {
+    let (mut sender, mut receiver) = tag_ends();
+    sender.send_frame(b"C", &[]).unwrap();
+    assert_eq!(
+        receiver.expect_role_tag(TAG_WAIT).unwrap_err(),
+        HandoffError::RoleTag
+    );
+}
+
+#[test]
+fn a_role_tag_with_a_descriptor_poisons_and_closes_it() {
+    let (mut sender, mut receiver) = tag_ends();
+    let (stream, keep) = StdUnixStream::pair().unwrap();
+    sender
+        .send_frame(HANDOFF_ROLE_TAG, &[stream.as_fd()])
+        .unwrap();
+    assert_eq!(
+        receiver.expect_role_tag(TAG_WAIT).unwrap_err(),
+        HandoffError::RoleTag
+    );
+    // Dropped only now: received, so neither kernel disposes of it in flight.
+    drop(stream);
+    assert_closed(&keep);
+}
+
+#[test]
+fn a_stream_frame_first_is_not_a_role_tag() {
+    let (mut sender, mut receiver) = tag_ends();
+    let (stream, _keep) = StdUnixStream::pair().unwrap();
+    sender
+        .send_intercepted_stream(&header(), stream.as_fd())
+        .unwrap();
+    assert_eq!(
+        receiver.expect_role_tag(TAG_WAIT).unwrap_err(),
+        HandoffError::RoleTag
+    );
+}
+
+#[test]
+fn a_repeated_role_tag_is_a_protocol_error() {
+    let (mut sender, mut receiver) = tag_ends();
+    sender.send_frame(HANDOFF_ROLE_TAG, &[]).unwrap();
+    sender.send_frame(HANDOFF_ROLE_TAG, &[]).unwrap();
+    receiver.expect_role_tag(TAG_WAIT).unwrap();
+    assert_eq!(
+        receiver.recv_intercepted_stream().unwrap_err(),
+        HandoffError::Descriptors
+    );
+    assert_eq!(
+        receiver.recv_intercepted_stream().unwrap_err(),
+        HandoffError::Poisoned
+    );
+}
+
+/// A poisoned receiver shuts its socket down, so the broker's next send is
+/// refused at once instead of queueing for nobody. The send is non-blocking,
+/// so a regression fails here rather than hanging.
+#[test]
+fn a_poisoned_receiver_makes_the_next_send_fail_at_once() {
+    let (mut sender, mut receiver) = tag_ends();
+    sender.send_frame(b"C", &[]).unwrap();
+    assert!(receiver.expect_role_tag(TAG_WAIT).is_err());
+    let (stream, _keep) = StdUnixStream::pair().unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        sender
+            .send_intercepted_stream(&header(), stream.as_fd())
+            .unwrap_err(),
+        HandoffError::Closed
+    );
+    assert!(started.elapsed() < TAG_WAIT);
+}

@@ -1782,6 +1782,10 @@ rules:
         let resolver = Arc::new(FakeResolver::new([positive(PUBLIC_V4, 60)]));
         let connector = Arc::new(NoConnector::default());
         let (broker_end, front_door_end) = codewire_egress_policy::handoff::stream_pair().unwrap();
+        // Built while the front door is there (construction sends the role
+        // tag), then the front door goes away.
+        let handoff =
+            StreamHandoff::new(broker_end, "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11".into()).unwrap();
         drop(front_door_end);
         let broker = PolicyEgressBroker::new(
             policy,
@@ -1790,9 +1794,7 @@ rules:
             Arc::clone(&connector),
             Arc::new(FakeClock::default()),
         )
-        .with_intercept_handoff(Arc::new(
-            StreamHandoff::new(broker_end, "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11".into()).unwrap(),
-        ));
+        .with_intercept_handoff(Arc::new(handoff));
         broker
             .replace_intercepts(
                 InterceptSet::new([InterceptBinding::new("allowed.example.com", 443).unwrap()])
@@ -1823,12 +1825,8 @@ rules:
     /// front door through the broker's hand-off, as a Unix stream that
     /// carries bytes both ways, and the broker never dials it.
     #[tokio::test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "macOS reads end of file on the intercepted stream; interception is refused there until it is explained (#3999)"
-    )]
     async fn an_intercepted_connect_reaches_the_front_door_and_carries_bytes_both_ways() {
-        use codewire_egress_policy::handoff::HandoffReceiver;
+        use codewire_egress_policy::handoff::{HandoffReceiver, HandoffSender};
         use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
 
         use crate::handoff::StreamHandoff;
@@ -1838,6 +1836,9 @@ rules:
         let resolver = Arc::new(FakeResolver::new([positive(PUBLIC_V4, 60)]));
         let connector = Arc::new(NoConnector::default());
         let (broker_end, front_door_end) = codewire_egress_policy::handoff::stream_pair().unwrap();
+        let handoff = Arc::new(
+            StreamHandoff::new(broker_end, "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11".into()).unwrap(),
+        );
         let broker = PolicyEgressBroker::new(
             policy,
             RouteClass::General,
@@ -1845,13 +1846,7 @@ rules:
             Arc::clone(&connector),
             Arc::new(FakeClock::default()),
         )
-        .with_intercept_handoff({
-            let handoff =
-                StreamHandoff::new(broker_end, "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11".into())
-                    .unwrap();
-            handoff.send_role_tag().unwrap();
-            Arc::new(handoff)
-        });
+        .with_intercept_handoff(Arc::clone(&handoff) as Arc<dyn crate::InterceptHandoff>);
         broker
             .replace_intercepts(
                 InterceptSet::new([InterceptBinding::new("allowed.example.com", 443).unwrap()])
@@ -1880,17 +1875,32 @@ rules:
             panic!("an intercepted connect came back as a TCP dial");
         };
         assert_eq!(connector.calls.load(Ordering::Relaxed), 0);
+        // The broker holds its copy of the front door's end until the front
+        // door acknowledges it (#3999).
+        assert_eq!(handoff.held_streams(), 1);
+        let acknowledging = front_door_end.try_clone().unwrap();
         let (header, front_door) = tokio::task::spawn_blocking(move || {
             let mut receiver = HandoffReceiver::new(front_door_end).unwrap();
             // The role tag comes first: exactly `H`, no descriptors.
             let (tag, descriptors) = receiver.recv_frame(16, 4).unwrap();
             assert_eq!(tag, [0x48]);
             assert!(descriptors.is_empty());
-            receiver.recv_intercepted_stream()
+            let received = receiver.recv_intercepted_stream().unwrap();
+            HandoffSender::new(acknowledging)
+                .unwrap()
+                .send_frame(&received.0.stream_id.to_le_bytes(), &[])
+                .unwrap();
+            received
         })
         .await
-        .unwrap()
         .unwrap();
+        timeout(Duration::from_secs(10), async {
+            while handoff.held_streams() != 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the acknowledged stream's copy is released");
         assert_eq!(header.hostname, "allowed.example.com");
         assert_eq!(header.port, 443);
         assert_eq!(IpAddr::V4(header.destination_ip), PUBLIC_V4);
@@ -1918,6 +1928,208 @@ rules:
         let mut byte = [0_u8; 1];
         assert_eq!(front_door.read(&mut byte).unwrap(), 0);
         assert_eq!(broker.passed_flows().await, 0);
+    }
+
+    /// A broker whose intercepts of allowed.example.com:443 go to a front
+    /// door at the returned end, and a client that has authorized that dial.
+    async fn intercepting_broker() -> (
+        Arc<crate::handoff::StreamHandoff>,
+        BrokerIpcClient,
+        OwnedFd,
+        SocketAddr,
+    ) {
+        use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
+
+        let policy = named_policy();
+        let binding = binding(&policy);
+        let (broker_end, front_door_end) = codewire_egress_policy::handoff::stream_pair().unwrap();
+        let handoff = Arc::new(
+            crate::handoff::StreamHandoff::new(
+                broker_end,
+                "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11".into(),
+            )
+            .unwrap(),
+        );
+        let broker = PolicyEgressBroker::new(
+            policy,
+            RouteClass::General,
+            Arc::new(FakeResolver::new([positive(PUBLIC_V4, 60)])),
+            Arc::new(NoConnector::default()),
+            Arc::new(FakeClock::default()),
+        )
+        .with_intercept_handoff(Arc::clone(&handoff) as Arc<dyn crate::InterceptHandoff>);
+        broker
+            .replace_intercepts(
+                InterceptSet::new([InterceptBinding::new("allowed.example.com", 443).unwrap()])
+                    .unwrap(),
+            )
+            .await;
+        let (client_streams, server_streams) = session_pairs();
+        tokio::spawn(serve_broker_ipc(
+            server_streams,
+            binding,
+            key(),
+            Arc::new(broker),
+        ));
+        let client = client(client_streams, binding);
+        client
+            .resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4)
+            .await
+            .unwrap();
+        let destination = SocketAddr::new(PUBLIC_V4, 443);
+        client.authorize_tcp(destination).await.unwrap();
+        (handoff, client, front_door_end, destination)
+    }
+
+    /// #3999: an acknowledgement for a stream the broker does not hold, or a
+    /// second one for the same stream, fails the hand-off: every held copy is
+    /// released and every later intercept is refused.
+    #[tokio::test]
+    async fn a_bad_acknowledgement_refuses_every_later_intercept() {
+        use codewire_egress_policy::handoff::{HandoffReceiver, HandoffSender};
+
+        for repeated in [false, true] {
+            let (handoff, client, front_door_end, destination) = intercepting_broker().await;
+            let BrokerIpcConnection::Intercepted(_worker) =
+                client.connect_tcp(destination).await.unwrap()
+            else {
+                panic!("an intercepted connect came back as a TCP dial");
+            };
+            let acknowledging = front_door_end.try_clone().unwrap();
+            let _front_door = tokio::task::spawn_blocking(move || {
+                let mut receiver = HandoffReceiver::new(front_door_end).unwrap();
+                receiver.recv_frame(16, 4).unwrap();
+                let (header, stream) = receiver.recv_intercepted_stream().unwrap();
+                let mut acknowledgements = HandoffSender::new(acknowledging).unwrap();
+                let stream_id = if repeated {
+                    acknowledgements
+                        .send_frame(&header.stream_id.to_le_bytes(), &[])
+                        .unwrap();
+                    header.stream_id
+                } else {
+                    header.stream_id + 100
+                };
+                acknowledgements
+                    .send_frame(&stream_id.to_le_bytes(), &[])
+                    .unwrap();
+                (receiver, stream)
+            })
+            .await
+            .unwrap();
+            timeout(Duration::from_secs(10), async {
+                while !handoff.has_failed() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("a bad acknowledgement fails the hand-off");
+            assert_eq!(handoff.held_streams(), 0, "repeated: {repeated}");
+            assert!(
+                client.connect_tcp(destination).await.is_err(),
+                "repeated: {repeated}"
+            );
+        }
+    }
+
+    /// #3999, measured on macOS 27.2.1: a front-door end whose only reference
+    /// was a descriptor in flight could be disposed of while other descriptors
+    /// were passed, and the front door read end of file. Every stream handed
+    /// off while unrelated descriptors are passed and dropped in flight
+    /// carries bytes both ways, and every held copy is released. Without the
+    /// held copy one round failed about half the time there, so the test
+    /// runs several.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_handed_off_stream_survives_descriptors_passed_and_dropped_alongside() {
+        for _ in 0..8 {
+            hand_off_streams_alongside_dropped_descriptors().await;
+        }
+    }
+
+    async fn hand_off_streams_alongside_dropped_descriptors() {
+        use std::sync::atomic::AtomicBool;
+
+        use codewire_egress_policy::handoff::{
+            HandoffError, HandoffReceiver, HandoffSender, stream_pair,
+        };
+
+        const STREAMS: usize = 32;
+        let (handoff, client, front_door_end, destination) = intercepting_broker().await;
+        let stop = Arc::new(AtomicBool::new(false));
+        let churn = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    // A descriptor in flight on a pair dropped before it is read.
+                    let (sending, _receiving) = stream_pair().unwrap();
+                    let (passed, _peer) = stream_pair().unwrap();
+                    let mut sender = HandoffSender::new(sending).unwrap();
+                    let _ = sender.send_frame(b"x", &[passed.as_fd()]);
+                }
+            })
+        };
+        let acknowledging = front_door_end.try_clone().unwrap();
+        let front_door = std::thread::spawn(move || {
+            let mut receiver = HandoffReceiver::new(front_door_end).unwrap();
+            let mut acknowledgements = HandoffSender::new(acknowledging).unwrap();
+            receiver.recv_frame(16, 4).unwrap();
+            let streams = (0..STREAMS)
+                .map(|_| {
+                    let (header, stream) = loop {
+                        match receiver.recv_intercepted_stream() {
+                            Ok(received) => break received,
+                            Err(HandoffError::WouldBlock) => {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            Err(error) => panic!("{error:?}"),
+                        }
+                    };
+                    acknowledgements
+                        .send_frame(&header.stream_id.to_le_bytes(), &[])
+                        .unwrap();
+                    stream
+                })
+                .collect::<Vec<_>>();
+            // The front door stays connected: closing its end fails the
+            // hand-off.
+            (streams, receiver, acknowledgements)
+        });
+        let mut workers = Vec::new();
+        for _ in 0..STREAMS {
+            let BrokerIpcConnection::Intercepted(worker) =
+                client.connect_tcp(destination).await.unwrap()
+            else {
+                panic!("an intercepted connect came back as a TCP dial");
+            };
+            workers.push(worker);
+        }
+        let (streams, _receiver, _acknowledgements) =
+            tokio::task::spawn_blocking(move || front_door.join().unwrap())
+                .await
+                .unwrap();
+        stop.store(true, Ordering::Relaxed);
+        churn.join().unwrap();
+        for (index, (worker, stream)) in workers.into_iter().zip(streams).enumerate() {
+            let tag = u8::try_from(index).unwrap();
+            let mut worker = StdUnixStream::from(worker);
+            worker.set_nonblocking(false).unwrap();
+            let mut stream = StdUnixStream::from(stream);
+            stream.set_nonblocking(false).unwrap();
+            let mut byte = [0_u8; 1];
+            worker.write_all(&[tag]).unwrap();
+            stream.read_exact(&mut byte).unwrap();
+            assert_eq!(byte, [tag], "stream {index} to the front door");
+            stream.write_all(&[!tag]).unwrap();
+            worker.read_exact(&mut byte).unwrap();
+            assert_eq!(byte, [!tag], "stream {index} back to the worker");
+        }
+        timeout(Duration::from_secs(10), async {
+            while handoff.held_streams() != 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("every acknowledged stream's copy is released");
+        assert!(!handoff.has_failed());
     }
 
     /// The client takes a Unix stream only on an intercepted reply: anything

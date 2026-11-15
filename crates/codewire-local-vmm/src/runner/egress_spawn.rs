@@ -47,11 +47,6 @@ impl BrokerHandoff {
         if intercepts.is_empty() {
             return Ok(None);
         }
-        // macOS refuses interception, as before #4739, until the end of file
-        // its native run saw on an intercepted stream is explained (#3999).
-        if cfg!(not(target_os = "linux")) {
-            return Err(RunnerError::EgressBrokerSpawn);
-        }
         let (broker, front_door) = codewire_egress_policy::handoff::stream_pair()
             .map_err(|_| RunnerError::EgressBrokerSpawn)?;
         let inherited = duplicate_inherited_descriptor(broker.as_raw_fd())
@@ -113,15 +108,6 @@ mod tests {
         assert!(intercept_frame(&empty).unwrap().is_none());
     }
 
-    #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn macos_refuses_a_bound_set() {
-        let set =
-            InterceptSet::new([InterceptBinding::new("api.anthropic.com", 443).unwrap()]).unwrap();
-        assert!(BrokerHandoff::prepare(&set).is_err());
-    }
-
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_bound_set_makes_a_stream_pair_and_a_bindings_frame() {
         let set =

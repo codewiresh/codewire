@@ -19,7 +19,9 @@ use rustix::net::{
     SendAncillaryBuffer, SendAncillaryMessage, SendFlags, SocketType, recvmsg, sendmsg,
 };
 
-use super::{HANDOFF_MAX_LEN, HandoffError, InterceptedStreamHeader};
+use std::time::{Duration, Instant};
+
+use super::{HANDOFF_MAX_LEN, HANDOFF_ROLE_TAG, HandoffError, InterceptedStreamHeader};
 
 /// The longest frame body the two-byte length can carry.
 pub const FRAME_MAX_LEN: usize = u16::MAX as usize;
@@ -47,6 +49,10 @@ const RECEIVE_FLAGS: RecvFlags = RecvFlags::empty();
 ///   [`ENOBUFS_WHOLE_FRAME_LEN`] bytes, which fits one socket buffer and so
 ///   goes in whole or not at all, it is `WouldBlock`; for a larger one it
 ///   poisons.
+/// - A closed peer is `Closed`: `EPIPE` or `ECONNRESET`, and on macOS
+///   `EINVAL` for a frame that carries descriptors. macOS refuses descriptors
+///   to a peer that has shut its receiving side down with `EINVAL`, and
+///   still takes plain bytes (measured on macOS 27.2.1, #3999).
 /// - A frame that went out only in part, a closed peer, or any other error
 ///   poisons it: the stream may be out of step, so it shuts down its writing
 ///   side (the front door reads end of file) and every later send fails with
@@ -138,6 +144,10 @@ impl HandoffSender {
                 Err(rustix::io::Errno::PIPE | rustix::io::Errno::CONNRESET) => {
                     break HandoffError::Closed;
                 }
+                #[cfg(target_os = "macos")]
+                Err(rustix::io::Errno::INVAL) if !descriptors.is_empty() => {
+                    break HandoffError::Closed;
+                }
                 Err(_) => break HandoffError::Io,
             }
         };
@@ -205,10 +215,19 @@ impl HandoffReceiver {
         max_len: usize,
         max_descriptors: usize,
     ) -> Result<(Vec<u8>, Vec<OwnedFd>), HandoffError> {
+        self.recv_frame_with(max_len, max_descriptors, RECEIVE_FLAGS)
+    }
+
+    fn recv_frame_with(
+        &mut self,
+        max_len: usize,
+        max_descriptors: usize,
+        flags: RecvFlags,
+    ) -> Result<(Vec<u8>, Vec<OwnedFd>), HandoffError> {
         if self.poisoned {
             return Err(HandoffError::Poisoned);
         }
-        match self.advance(max_len, max_descriptors) {
+        match self.advance(max_len, max_descriptors, flags) {
             Ok(()) => {
                 let partial = mem::take(&mut self.partial);
                 Ok((partial.body.unwrap_or_default(), partial.descriptors))
@@ -216,37 +235,101 @@ impl HandoffReceiver {
             Err(HandoffError::WouldBlock) => Err(HandoffError::WouldBlock),
             Err(HandoffError::Closed) => Err(HandoffError::Closed),
             Err(error) => {
-                self.partial = Partial::default();
-                self.poisoned = true;
+                self.poison();
                 Err(error)
             }
         }
     }
 
+    /// Reads the socket's first frame and requires it to be the role tag,
+    /// [`HANDOFF_ROLE_TAG`] with no descriptors, within `timeout`. Anything
+    /// else, or nothing in time, poisons the receiver: the peer is not the
+    /// broker, or not in step with it. Works on a blocking or non-blocking
+    /// socket and leaves its mode alone: each receive is `MSG_DONTWAIT`, and
+    /// it waits only in `poll`, never past `timeout`.
+    pub fn expect_role_tag(&mut self, timeout: Duration) -> Result<(), HandoffError> {
+        let deadline = Instant::now() + timeout;
+        let (body, descriptors) = loop {
+            match self.recv_frame_with(
+                HANDOFF_ROLE_TAG.len(),
+                0,
+                RECEIVE_FLAGS.union(RecvFlags::DONTWAIT),
+            ) {
+                Ok(frame) => break frame,
+                Err(HandoffError::WouldBlock) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() || !wait_readable(self.socket.as_fd(), left) {
+                        self.poison();
+                        return Err(HandoffError::RoleTag);
+                    }
+                }
+                Err(HandoffError::Poisoned) => return Err(HandoffError::Poisoned),
+                Err(HandoffError::Closed) => {
+                    self.poison();
+                    return Err(HandoffError::Closed);
+                }
+                Err(_) => {
+                    self.poison();
+                    return Err(HandoffError::RoleTag);
+                }
+            }
+        };
+        if body != HANDOFF_ROLE_TAG || !descriptors.is_empty() {
+            self.poison();
+            return Err(HandoffError::RoleTag);
+        }
+        Ok(())
+    }
+
+    /// Unusable for good. Every descriptor held is closed, and the socket is
+    /// shut down both ways, instead of the peer queueing work nobody will
+    /// read: the peer's next receive reads end of file, and its next send
+    /// fails with `Closed`. On macOS only a send carrying descriptors fails;
+    /// plain bytes still go through, so there end of file is the signal.
+    fn poison(&mut self) {
+        self.partial = Partial::default();
+        self.poisoned = true;
+        // Best effort: a peer already gone has nothing left to tell.
+        let _ = rustix::net::shutdown(&self.socket, rustix::net::Shutdown::Both);
+    }
+
     /// Receives one intercepted connection: exactly one descriptor, a
-    /// connected Unix stream, and a valid header. A frame with no descriptor,
-    /// or a descriptor that is not a connected Unix stream, is refused, its
-    /// descriptor closed, and the stream stays usable. A header that does not
-    /// decode, or more than one descriptor, is a protocol error: the broker
-    /// is a trusted peer and every received stream must have a known id, so
-    /// every descriptor is closed and the receiver is poisoned.
+    /// connected Unix stream, and a valid header. A descriptor that is not a
+    /// connected Unix stream is refused and closed, and this receiver stays
+    /// usable; a caller that trusts its peer, such as the front door, may
+    /// still end the whole hand-off over it.
+    /// A frame with no descriptor (a repeated role tag, say), more than one
+    /// descriptor, or a header that does not decode is a protocol error: the
+    /// broker is a trusted peer and every received stream must have a known
+    /// id, so every descriptor is closed and the receiver is poisoned.
     pub fn recv_intercepted_stream(
         &mut self,
     ) -> Result<(InterceptedStreamHeader, OwnedFd), HandoffError> {
         let (body, mut descriptors) = self.recv_frame(HANDOFF_MAX_LEN, 1)?;
-        if descriptors.len() != 1 || !is_connected_unix_stream(descriptors[0].as_fd()) {
+        if descriptors.is_empty() {
+            // The broker sends a frame without a descriptor only as the role
+            // tag, once, first: another one here is out of step.
+            self.poison();
+            return Err(HandoffError::Descriptors);
+        }
+        if !is_connected_unix_stream(descriptors[0].as_fd()) {
             return Err(HandoffError::Descriptors);
         }
         match InterceptedStreamHeader::decode(&body) {
             Ok(header) => Ok((header, descriptors.remove(0))),
             Err(error) => {
-                self.poisoned = true;
+                self.poison();
                 Err(error)
             }
         }
     }
 
-    fn advance(&mut self, max_len: usize, max_descriptors: usize) -> Result<(), HandoffError> {
+    fn advance(
+        &mut self,
+        max_len: usize,
+        max_descriptors: usize,
+        flags: RecvFlags,
+    ) -> Result<(), HandoffError> {
         while self.partial.prefix_read < 2 {
             let first = self.partial.prefix_read == 0;
             let at = self.partial.prefix_read;
@@ -254,6 +337,7 @@ impl HandoffReceiver {
                 self.socket.as_fd(),
                 &mut self.partial.prefix[at..],
                 first.then_some(&mut self.partial.descriptors),
+                flags,
             )?;
             if read == 0 {
                 return Err(if first && self.partial.descriptors.is_empty() {
@@ -277,6 +361,7 @@ impl HandoffReceiver {
                 self.socket.as_fd(),
                 &mut body[self.partial.body_read..],
                 None,
+                flags,
             )?;
             if read == 0 {
                 return Err(HandoffError::Io);
@@ -340,12 +425,13 @@ fn read_some(
     socket: BorrowedFd<'_>,
     buffer: &mut [u8],
     descriptors: Option<&mut Vec<OwnedFd>>,
+    flags: RecvFlags,
 ) -> Result<usize, HandoffError> {
     let mut vectors = [IoSliceMut::new(buffer)];
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(FRAME_MAX_DESCRIPTORS))];
     let mut ancillary = RecvAncillaryBuffer::new(&mut space);
     let message = loop {
-        match recvmsg(socket, &mut vectors, &mut ancillary, RECEIVE_FLAGS) {
+        match recvmsg(socket, &mut vectors, &mut ancillary, flags) {
             Ok(message) => break message,
             Err(rustix::io::Errno::INTR) => {}
             Err(error) if is_would_block(error) => return Err(HandoffError::WouldBlock),
@@ -374,4 +460,14 @@ fn read_some(
         None => {}
     }
     Ok(message.bytes)
+}
+
+/// Waits until `socket` is readable or has hung up, for at most `timeout`.
+fn wait_readable(socket: BorrowedFd<'_>, timeout: Duration) -> bool {
+    let mut fds = [rustix::event::PollFd::new(
+        &socket,
+        rustix::event::PollFlags::IN,
+    )];
+    let timeout = rustix::event::Timespec::try_from(timeout).ok();
+    matches!(rustix::event::poll(&mut fds, timeout.as_ref()), Ok(n) if n > 0)
 }
