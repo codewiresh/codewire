@@ -299,10 +299,10 @@ class MeasuresTest(unittest.TestCase):
         self.assertEqual(len(logs), 6)
         self.assertTrue(all(measures.PATHS["log"].fullmatch(path) for path in logs))
 
-    def receipt(self, run_id, source, created, stopped, smoke):
+    def receipt(self, run_id, source, created, stopped, smoke, deploy_run="5"):
         self.fake.run("workflow_dispatch", run_id, "dev-deployment-smoke-receipt.yaml", sha("9"), created,
                       stopped, "success" if smoke == "success" else "failure",
-                      {"inputs": {"source_sha": source, "smoke_status": smoke, "deploy_run_id": "5",
+                      {"inputs": {"source_sha": source, "smoke_status": smoke, "deploy_run_id": deploy_run,
                                   "deploy_commit": sha("8")}})
 
     def test_merge_to_dev_takes_the_first_passing_receipt_that_contains_the_merge(self):
@@ -348,6 +348,52 @@ class MeasuresTest(unittest.TestCase):
         summary = self.summary(self.rows())
         self.assertEqual(summary["speed"]["merge_to_dev"]["p50_s"], 660.0)
         self.assertEqual(summary["green"]["dev_smoke"]["results"], 0)
+
+    def smoke(self, rows):
+        smoke = self.summary(rows)["green"]["dev_smoke"]
+        return smoke["results"], smoke["passes"], smoke["rate"]
+
+    def test_receipts_for_one_deploy_run_and_source_are_one_smoke_result(self):
+        """The deploy run repeats a dispatch that timed out, though Forgejo accepted the first."""
+        commits = self.repo.commits
+        self.main_run(1, commits["A"], 0, 8, "success")
+        self.receipt(10, commits["C"], 18, 20, "success", deploy_run="7")
+        self.receipt(11, commits["C"], 19, 21, "success", deploy_run="7")
+        rows = self.rows()
+        receipts = [row for row in rows if row["kind"] == "dev_smoke_receipt"]
+        self.assertEqual([(row["run_id"], row["deploy_run_id"]) for row in receipts], [(10, "7"), (11, "7")])
+        self.assertEqual(self.smoke(rows), (1, 1, 1.0))
+        # The merge is still delivered by the first passing receipt.
+        [delivery] = [row for row in rows if row["kind"] == "merge_to_dev"]
+        self.assertEqual((delivery["receipt_run_id"], delivery["seconds"]), (10, 1200.0))
+        # Receipts that name no deploy run cannot be matched, so each counts.
+        for row in receipts:
+            row["deploy_run_id"] = None
+        self.assertEqual(self.smoke(rows), (2, 2, 1.0))
+
+    def test_receipts_that_disagree_count_once_as_the_worst_result(self):
+        commits = self.repo.commits
+        self.receipt(10, commits["B"], 15, 16, "success", deploy_run="7")
+        self.receipt(11, commits["B"], 16, 17, "failure", deploy_run="7")
+        self.receipt(12, commits["C"], 25, 26, "failure", deploy_run="8")
+        self.receipt(13, commits["C"], 26, 27, "success", deploy_run="8")
+        self.receipt(14, commits["D"], 35, 36, "success", deploy_run="9")
+        self.assertEqual(self.smoke(self.rows()), (3, 1, 0.3333))
+
+    def test_one_deploy_run_that_promoted_two_sources_is_two_smoke_results(self):
+        commits = self.repo.commits
+        self.receipt(10, commits["B"], 15, 16, "success", deploy_run="7")
+        self.receipt(11, commits["C"], 25, 26, "success", deploy_run="7")
+        self.assertEqual(self.smoke(self.rows()), (2, 2, 1.0))
+
+    def test_a_repeated_receipt_counts_for_the_window_of_the_first(self):
+        commits = self.repo.commits
+        self.receipt(10, commits["D"], 7 * 1440 - 1, 7 * 1440, "success", deploy_run="7")
+        self.receipt(11, commits["D"], 7 * 1440 + 1, 7 * 1440 + 2, "success", deploy_run="7")
+        # A repeat of a receipt created after the window is not this window's.
+        self.receipt(12, commits["C"], 7 * 1440 + 3, 7 * 1440 + 4, "success", deploy_run="8")
+        self.receipt(13, commits["C"], 7 * 1440 + 5, 7 * 1440 + 6, "success", deploy_run="8")
+        self.assertEqual(self.smoke(self.rows()), (1, 1, 1.0))
 
     def test_only_allowlisted_get_paths_are_read(self):
         self.pull_head(7, sha("1"), pushed=10, required_stop=14, approval_stop=11)

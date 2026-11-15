@@ -39,7 +39,8 @@ seconds), "failed" when Required verification did not pass, and "unverified"
 when it printed neither. Main CI speed and green count verified and failed
 runs; the rest are reported apart.
 - Green, Dev smoke: at least 95% of deploy-owned smoke results pass (#3132).
-  A failed promotion ran no smoke (#3820); it is counted apart.
+  A failed promotion ran no smoke (#3820); it is counted apart. Receipts for
+  the same deploy run and source are one result.
 """
 
 import argparse
@@ -70,6 +71,7 @@ MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_STEPS = 200
 TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,255}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+RUN_ID_RE = re.compile(r"^[1-9][0-9]{0,11}$")
 WORKFLOW_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}\.ya?ml$")
 REPO = r"(?:codewire/codewire)"
 EVENTS = r"(?:push|pull_request|pull_request_target|workflow_dispatch)"
@@ -485,6 +487,7 @@ def receipt_rows(forgejo: Forgejo, since: datetime, until: datetime) -> list[dic
         inputs = payload_of(run).get("inputs")
         inputs = inputs if isinstance(inputs, dict) else {}
         source = inputs.get("source_sha")
+        deploy_run = str(inputs.get("deploy_run_id"))
         smoke = inputs.get("smoke_status")
         status = run.get("status")
         rows.append({
@@ -492,6 +495,7 @@ def receipt_rows(forgejo: Forgejo, since: datetime, until: datetime) -> list[dic
             "created_at": iso(parse_time(run.get("created"))),
             "stopped_at": iso(parse_time(run.get("stopped"))), "status": status,
             "source_sha": source if isinstance(source, str) and SHA_RE.fullmatch(source) else None,
+            "deploy_run_id": deploy_run if RUN_ID_RE.fullmatch(deploy_run) else None,
             "smoke_status": smoke if smoke in {"success", "failure", "promotion_failure"} else None,
             # A receipt counts for the window it was created in; later ones
             # only settle deliveries of merges inside the window.
@@ -609,10 +613,27 @@ def summarize(rows: list[dict]) -> dict:
     delivered = [row["seconds"] for row in deliveries if row["outcome"] == "delivered" and row["seconds"] is not None]
     dev_p50 = percentile(delivered, 0.5)
 
-    receipts = [row for row in by_kind.get("dev_smoke_receipt", []) if row["in_window"]]
-    results = [row["smoke_status"] or ("success" if row["status"] == "success" else
-                                      "failure" if row["status"] == "failure" else None)
-               for row in receipts]
+    # One smoke result per deploy run and source. The deploy run repeats a
+    # receipt dispatch that timed out, and Forgejo may have accepted the first,
+    # so one delivery can leave several receipts. A receipt that names no
+    # deploy run or source counts alone.
+    smokes: dict[tuple, list[dict]] = {}
+    for row in by_kind.get("dev_smoke_receipt", []):
+        key = (row.get("deploy_run_id"), row["source_sha"])
+        smokes.setdefault(key if all(key) else (None, row["run_id"]), []).append(row)
+    # One deploy run reports one result for a source, so its receipts agree.
+    # If they ever do not, the worst result stands and the rate is not
+    # flattered: a failure, then a failed promotion, then unknown, and a
+    # success only when every receipt says so.
+    worst_first = ("failure", "promotion_failure", None, "success")
+    results = [
+        min((row["smoke_status"] or ("success" if row["status"] == "success" else
+                                     "failure" if row["status"] == "failure" else None)
+             for row in group), key=worst_first.index)
+        for group in smokes.values()
+        # The earliest receipt places the result in a window: that is when the
+        # delivery reported, and a repeat only arrives later.
+        if min(group, key=lambda row: parse_time(row["created_at"]))["in_window"]]
     smoke_passed = sum(result == "success" for result in results)
     smoke_total = sum(result in {"success", "failure"} for result in results)
     smoke_rate = rate(smoke_passed, smoke_total)
