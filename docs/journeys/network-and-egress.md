@@ -31,7 +31,7 @@ separately.
 | --- | --- | --- | --- | --- | --- |
 | `policy-select` | #2537 | not yet observed | not yet observed | n/a | n/a |
 | `policy-project-file` | #2537, #4835 | no command yet | no command yet | no command yet | no command yet |
-| `policy-hosted` | #4000, #4211 | n/a | n/a | no command yet | no command yet |
+| `policy-hosted` | #4000, #4211 | n/a | n/a | not yet observed | not yet observed |
 | `policy-protected` | #2537, #4000 | not yet observed | not yet observed | no command yet | no command yet |
 | `refusal-log` | #3999, #4000 | no command yet | no command yet | no command yet | no command yet |
 | `refusal-in-environment` | #4015 | no command yet | no command yet | no command yet | no command yet |
@@ -39,6 +39,10 @@ separately.
 | `agent-vm-interception` | #3999 (#4809, #4884, #4812, #4887) | no command yet | no command yet | n/a | n/a |
 | `agent-claude` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
 | `agent-codex` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
+| `agent-codex-websocket` | #3999 | no command yet | no command yet | n/a | n/a |
+| `agent-claude-websocket` | #3999 | no command yet | no command yet | n/a | n/a |
+| `agent-github` | #3999 | no command yet | no command yet | n/a | n/a |
+| `no-token-at-rest` | #3999 (#4897), #4001 | no command yet | no command yet | no command yet | no command yet |
 | `agent-own-key` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
 | `agent-fail-closed` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
 | `agent-switch-off` | #3999 | no command yet | no command yet | n/a | n/a |
@@ -129,7 +133,7 @@ Issue: #2537 step C, pull request #4835.
   - the file names one policy and `--policy` names another;
   - the file tries to define a rule (an `allow` key);
   - the file names a policy that does not exist;
-  - the same file given to `cw create --cloud`.
+  - the same file given to `cw --cloud create`.
 - **Driving it:** no command yet; the key lands with #4835. Then: create a VM
   from a directory whose `codewire.yaml` names `egress-walk-policy`, and read
   `cw info`.
@@ -150,26 +154,58 @@ Issue: #2537 step C, pull request #4835.
 
 Issue: #4000. The store and its API merged with #4211, behind a switch.
 
-- **Entry points:** `cw policy --cloud` and `--policy` on `cw create --cloud`
-  and `cw update`. No command yet; #4000 adds them. The dashboard has no page
-  for this yet.
+- **Entry points:** `cw --cloud policy create | list | allow | rm | check |
+  delete`, and `--policy` on `cw --cloud create` and `cw update`. `cw info`
+  shows the Sandbox's policy and revision. The dashboard has no page for
+  this yet.
 - **States to exercise:**
   - an organization policy created, edited and selected at create;
   - a running Sandbox moved to another policy;
   - a member of another organization trying to read or select it;
   - deleting a policy a Sandbox selects;
+  - a deployment with the store switched off;
+  - a Sandbox on `locked`, reached by its owner;
   - the default when nothing is selected (any TCP port through the broker,
     plus DNS; other UDP off unless the environment opts in).
-- **Driving it:** no command yet (#4000).
+- **Driving it,** as a member of an organization whose deployment has the
+  store switched on (Kind's overlay does; Dev once
+  `CODEWIRE_PLATFORM_NETWORK_POLICIES_ENABLED` is set):
+  1. `cw --cloud policy create walk-docs --allow docs.rs:443` makes revision
+     1 from `locked`, the default base. `cw --cloud policy ls`, and the same
+     with `--output json`, list it with its rules, revision and digest, as
+     `platform:walk-docs`.
+  2. `cw --cloud create --policy walk-docs --name policy-walk` selects it at
+     create. `cw info policy-walk` shows `NetworkPolicy: walk-docs, revision
+     1`. Until `hosted-enforcement` reports, it also says not enforced, and
+     the create prints one notice on stderr (never in `--output json`).
+  3. `cw --cloud policy allow walk-docs crates.io:443` makes revision 2.
+     `cw --cloud policy check walk-docs crates.io` says it is allowed, and
+     by which rule. `cw info policy-walk` shows revision 2 desired.
+  4. `cw update policy-walk --policy locked` moves the running Sandbox to a
+     built-in policy.
+  5. `cw --cloud policy delete walk-docs` while a Sandbox selects it is
+     refused, naming the Sandbox. After step 4 it deletes.
+  6. As a member of another organization: `cw --cloud policy ls` does not
+     list it, and `cw --cloud create --policy walk-docs` is refused as not
+     found.
+  7. A server with the store switched off answers each command in the
+     user's terms, not with an RPC error.
+  8. `cw --local policy ls` never shows `walk-docs`: the same name in both
+     stores is two policies.
 - **Proof:**
+  - steps 1 to 8 as written, with `--output json` where a step names it;
   - a destination the policy allows answers, and one it does not fails at
-    once;
+    once. This half is `hosted-enforcement`'s, once `cw-egress` enforces;
   - an edit reaches a running Sandbox with no restart and ends the
     connections the new revision refuses;
   - the status of `hosted-enforcement` shows the revision the Sandbox
     enforces;
   - another organization's member can neither read nor select the
-    policy.
+    policy;
+  - a Sandbox on `locked` stays reachable: its terminal, SSH and its page in
+    the dashboard keep working. Every connection the workload opens is
+    refused, except to the platform's own services: what the platform's
+    public gateway serves, and the relay (see `hosted-enforcement`).
 - **Gotchas:** a hosted policy is stored on the platform, a local one on the
   host. The same name in both is two policies.
 - **Observed:** not yet observed.
@@ -202,13 +238,14 @@ Issues: #2537, #4000.
 
 Issues: #3999 (local), #4000 (hosted).
 
-- **Entry points:** `cw policy log ENV` on the host; `cw policy --cloud log`
+- **Entry points:** `cw policy log ENV` on the host; `cw --cloud policy log`
   for a hosted Sandbox; one line in `cw info ENV`. No command yet for any of
   them.
 - **States to exercise:**
   - an environment that refused nothing (an empty log reads as empty);
   - one refusal of each kind: a name not allowed, a port not allowed, a
-    protected address, an expired name lease;
+    protected address, an expired name lease, and a connection to an
+    intercepted host whose front door is gone (`intercept_unavailable`);
   - the same destination refused many times (one line, a count);
   - a one-step allow from a log line.
 - **Driving it:** no command yet (#3999, #4000).
@@ -322,8 +359,13 @@ request adds.
     the VM reports started. If it cannot start, or the broker does not
     connect within the limit, the start fails with the reason; it never
     reports started with requests left hanging;
-  - a VM whose credentials come from the platform refuses to start with the
-    switch on, and says why, until that route carries interception;
+  - a VM whose credentials come from the platform starts without
+    interception: its recorded state reads interception off, and the
+    supervisor's log gives the reason (`skipped=platform_credentials`). Its
+    seed carries no authority and no placeholders, so the guest sets no
+    `NODE_EXTRA_CA_CERTS`, and its agents use today's routes. It never boots
+    trusting an authority that nothing serves. This holds until that route
+    carries interception (#3999);
   - **a restore with interception on at both ends is allowed, and the
     restored boot trusts its own new authority** (#4809, #4884). The trust
     files are replaced from the restored boot's seed before the workload
@@ -347,8 +389,13 @@ request adds.
     authority, and a running process cannot reload the one it trusts. Agents
     that were running at the checkpoint must be restarted after a restore
     before they reach an intercepted host again.
-  - macOS: until the front door has its sandbox profile there, a boot with
-    the switch on is refused, and says so.
+  - Known limit, tracked on #3999: `cw info` and the start output do not
+    say whether a VM's boot is intercepted. Only the recorded state and the
+    supervisor's log do.
+  - macOS: the front door confines itself with a Seatbelt profile that
+    denies everything (no file, no new socket, no process), where Linux
+    uses Landlock and seccomp (#4916). The walk is the same on both; a Mac
+    boot with the switch on is not yet observed.
 - **Observed:** not yet observed.
 
 ## `agent-claude`: Claude Code with stock settings and no token inside
@@ -396,11 +443,33 @@ is #4798.
     a snapshot, and not in the daemon's or the egress processes' logs;
   - the session keeps working past the real token's expiry;
   - after `cw credentials revoke`, the next model call fails and none
-    succeeds after it.
+    succeeds after it;
+  - the other person with a terminal in the environment can run a model
+    call, and it succeeds on the owner's plan. That person can read the
+    placeholder and nothing more: the real token is in no file, variable or
+    process they can reach. Both halves are recorded, so the consequence of
+    sharing is observed and not only stated
+    (`docs/dev/SECRETS-AND-CREDENTIALS.md`).
 - **Gotchas:**
   - A header that reads "Claude API", or a `/usage` that is unavailable,
     means the agent is not on this path. Do not record the model call alone
     as this step.
+  - With stock settings the pinned Claude Code sends the placeholder as a
+    Bearer token, at every start, to six paths on `api.anthropic.com`:
+    `/v1/messages`, `/api/oauth/profile`, `/api/claude_cli/bootstrap`,
+    `/api/claude_code_penguin_mode`, `/api/eval/sdk-<id>` and
+    `/api/event_logging/v2/batch`. The swap is by placeholder on any path
+    of that host, as today's route already is, so each is served with the
+    owner's credential as it would be with a real login. A 401 on one of
+    them, followed by a token refresh at every start, means that path was
+    not swapped: record it as a failure of this step.
+  - An `invalid_grant` answer from the token endpoint makes Claude Code
+    blank its own tokens (`accessToken` and `refreshToken` become empty,
+    `expiresAt` 0) and stop with "OAuth session expired and could not be
+    refreshed". A wrong `invalid_grant` therefore signs the user out inside
+    the environment until the daemon next writes the login. A 503 leaves the
+    file alone and the run continues. Observed on 2.1.308 against a fake
+    endpoint, 2026-11-15 (#3999).
   - The placeholder is not a secret, and it belongs to one environment.
     Copied into another environment it is forwarded untouched and the
     provider rejects it.
@@ -412,25 +481,271 @@ is #4798.
 
 ## `agent-codex`: Codex with stock settings and no token inside
 
-Issues: #3999, #4001.
+Issues: #3999 (local VMs; changes 8 and 11), #4001 (hosted Sandboxes).
 
-- **Entry points:** the owner's ChatGPT sign-in, connected with
-  `cw credentials connect codex`, selected in the profile. Then `codex`
-  inside the environment.
-- **States to exercise:** a model call; the plan and account display; an
-  account whose model traffic is routed to another origin; a token refresh; a
-  revoked credential.
-- **Driving it:** no command yet (#3999, #4001).
+- **Entry points:**
+  - the owner's ChatGPT sign-in, connected with `cw credentials --local connect
+    codex` for local VMs or `--cloud` for hosted Sandboxes;
+  - selected in the environment's credential profile's `codex` slot;
+  - then `codex` inside the environment.
+- **States to exercise:**
+  - a model call (`codex exec`);
+  - the TUI's `/status`: account, plan and limits;
+  - an account whose `accounts/check` names a routed origin under
+    `chatgpt.com`, and one naming an origin outside the list;
+  - a token refresh the broker makes, and one Codex starts itself. Until
+    change 7 of #3999 captures the provider's token endpoint, the second
+    sends the managed marker to the real endpoint and fails; the far-future
+    `exp` makes it rare;
+  - the credential revoked while Codex runs;
+  - a stopped and started environment, and a restored VM checkpoint.
+- **Driving it:** with interception on:
+
+  ```sh
+  cw --local exec --in egress-walk -- sh -c 'env | grep -c -E "^OPENAI_BASE_URL=" || true; grep -c -E "^\[model_providers" "${CODEX_HOME:-$HOME/.codex}/config.toml" 2>/dev/null || true'
+  cw --local exec --in egress-walk -- sh -c 'jq -r "[.auth_mode, (.tokens.access_token|startswith(\"cwp1_\")), .tokens.refresh_token] | @tsv" "${CODEX_HOME:-$HOME/.codex}/auth.json"'
+  cw --local exec --in egress-walk -- codex exec --skip-git-repo-check 'Reply with the single word ok.'
+  ```
+
+  Then start `codex` in a shell in the environment and run `/status`.
 - **Proof:**
-  - `OPENAI_BASE_URL` is not set, and Codex's configuration names no managed
-    provider;
-  - a model call answers, and Codex shows the owner's plan and account;
-  - Codex's login file holds placeholders in place of its tokens, with the
-    account's non-secret fields, and the real tokens appear nowhere in the
-    environment.
-- **Gotchas:** Codex takes the origin for model traffic from its
-  account-routing reply. A routed origin that the front door does not cover
-  fails closed, and the refusal log names it.
+  - the first command prints `0` twice: no `OPENAI_BASE_URL`, and no Codewire
+    model provider;
+  - the login file reads `chatgpt  true  <the managed marker>`. Its `id_token`
+    decodes to only the allow-listed claims: `email`, the account id, plan
+    type, user id and FedRAMP flag, the profile email, and `exp` 2099;
+  - the model call answers;
+  - `/status` shows the owner's account and plan, and limits once they load;
+  - a swapped reply from `chatgpt.com` keeps the account id. Codex finds its
+    workspace in `accounts/check` by that id, so `/status` and the model
+    call working show it was not redacted on this path;
+  - with a routed origin under `chatgpt.com`, the model call reaches it through
+    the front door, and nothing else is served on that name;
+  - with an origin outside the list, the model call fails, the refusal log
+    names the host once for the session, and no request carrying the
+    placeholder leaves for that host;
+  - the real access, refresh and ID tokens appear nowhere in the environment:
+    not on its disk, not in a checkpoint, a hosted volume or a snapshot, and
+    not in the daemon's or the egress processes' logs;
+  - Codex keeps working past the real token's expiry;
+  - after `cw credentials revoke`, the next call fails and none succeeds after
+    it.
+- **Gotchas:**
+  - In a local VM Codewire writes Codex's login into its own Codex home,
+    not `~/.codex`; a hosted Sandbox uses `~/.codex`. Read the files where
+    `CODEX_HOME` points, as the commands above do. A command that reads
+    `~/.codex` in a local VM prints nothing and looks like a pass.
+  - `CODEX_CA_CERTIFICATE` is set only with the Codex client selected and a CA
+    in the seed, and never over an image's own value (logged when skipped). A
+    CA added after boot isn't trusted by Codex until a restart.
+  - Every name under `chatgpt.com` on 443 is intercepted, because the egress
+    broker sees only host and port. Other traffic to those names follows the
+    network policy: a placeholder on a path the route does not serve is
+    refused, and a request without the placeholder passes untouched where a
+    rule allows the host. Not yet true: today a path the route does not
+    serve is refused whatever it carries (#4898), until the policy rule in
+    `agent-own-key` is built.
+  - Codex tries a WebSocket for the model call first. Until changes 9 and 10 it
+    falls back to HTTPS; a slow first answer is that fallback.
+  - The placeholder belongs to one environment: copied elsewhere, it is
+    forwarded untouched and rejected.
+- **Observed:** not yet observed. Offline evidence of the formats and paths is
+  on #3999 (2026-11-15).
+
+## `agent-codex-websocket`: Codex's socket across a refresh and a revocation
+
+Issues: #3999 (changes 9 and 10).
+
+- **Entry points:** none of its own. Codex opens the socket itself, for a
+  model call, in a local VM set up as in `agent-codex`.
+- **States to exercise:**
+  - a socket that stays open across a refresh;
+  - a socket closed by revocation;
+  - a reconnect after the close;
+  - with the switch off, no socket goes through the front door.
+- **Driving it:** with the interception switch on, Codex signed in with a
+  ChatGPT account, the VM holding only the placeholder login, and the front
+  door's credential session opened with `websocket.v1`:
+  1. In the VM, run `codex` with a prompt that streams for over a minute. It
+     opens `GET chatgpt.com/backend-api/codex/responses` with `Upgrade:
+     websocket`.
+  2. While it streams, make the broker refresh the sign-in. Driven through
+     change 7's token endpoint; no command yet, #3999 change 7.
+  3. Start a second long prompt, then revoke the Codex credential on the host.
+     Use `cw credentials revoke`.
+- **Proof:**
+  - (1) The front door's upgrade count rises by one, and the broker logs one
+    accepted socket for the `codex` slot.
+  - (2) The same socket keeps carrying bytes after the refresh, so the stream
+    didn't reconnect. The next new upgrade carries the refreshed token, shown
+    by the provider's 101.
+  - (3) The socket is reset within 30 s of the revocation, the broker logs the
+    re-lease refusal, and Codex's reconnect isn't served with a real token.
+  - Throughout, no real token is in the VM.
+- **Gotchas:**
+  - Codex falls back to HTTPS POST when the upgrade fails. A model call that
+    still works isn't proof of the WebSocket; read the upgrade count.
+  - The provider may close a socket itself when its token expires, which the
+    design lists as not yet known. A close before the refresh step means repeat
+    with a shorter prompt.
+- **Observed:** not yet observed.
+
+## `agent-claude-websocket`: Claude Code opens no WebSocket to its provider
+
+Issue: #3999.
+
+- **Entry points:** none of its own. This step records whether `claude`, in
+  an environment set up as in `agent-claude`, upgrades any connection to its
+  provider.
+- **States to exercise:** print mode with a refresh that succeeds, an API
+  401, a refused refresh and a refresh answered 503; interactive mode; a
+  long session; the voice and remote features.
+- **Driving it:** no command yet (#3999). A checked-in compatibility test
+  that drives the pinned Claude Code against a stand-in token endpoint and
+  API is to come with #4925.
+- **Proof:**
+  - no request carries `Upgrade: websocket` to `api.anthropic.com`,
+    `platform.claude.com` or `console.anthropic.com`. Model calls are `POST`
+    requests to the messages API, answered as an event stream;
+  - once it exists, the compatibility test fails, and names the host and
+    path, if a pin starts upgrading.
+- **Gotchas:** the WebSocket proof of the front door is
+  `agent-codex-websocket`. A pin of Claude Code that starts upgrading needs
+  its path added to the front door's list before it works.
+- **Observed:** not yet observed. Offline evidence is on #3999
+  (2026-11-15): against a stand-in, four `claude -p` runs of Claude Code
+  2.1.308, one for each print-mode state, opened no WebSocket.
+
+## `agent-github`: Git and `gh` reach GitHub by its own names, with no token
+inside
+
+Issue: #3999. Hosted Sandboxes follow with #4001.
+
+- **Entry points:** `git` and `gh` inside a local VM whose profile has a GitHub
+  connection, with agent interception switched on. Hosted sandboxes follow with
+  #4001.
+- **States to exercise:**
+  - an HTTPS remote, and an SSH-form remote on a profile without an SSH key and
+    on one with a key;
+  - a private clone, and a push larger than 4 MiB;
+  - `gh api user` and `gh pr list`;
+  - an anonymous clone of a public repository;
+  - the user's own token, on a path the routes serve and on one they don't;
+  - a placeholder-shaped value on a path the routes don't serve, Git LFS's
+    batch request among them;
+  - a request body over 4 MiB to `api.github.com`, with the placeholder and
+    with the user's own token;
+  - a VM whose profile has no GitHub connection;
+  - the `locked` network policy, and a policy with an allow rule for the
+    two GitHub hosts;
+  - the switch off, on the default policy and on `locked`.
+- **Driving it:** in the VM, with `OWNER/PRIVATE` a private repository the
+  connection can reach:
+
+  ```sh
+  git clone https://github.com/OWNER/PRIVATE.git && cd PRIVATE
+  git remote -v
+  head -c 6000000 /dev/urandom > blob && git add blob && git commit -qm walk && git push
+  git clone git@github.com:OWNER/PRIVATE.git ../ssh-form && git -C ../ssh-form remote -v
+  gh api user --jq .login
+  gh pr list
+  env -u GH_TOKEN git -c credential.helper= clone https://github.com/git/git.git ../public --depth 1
+  curl -sS -o /dev/null -w '%{http_code}\n' -H "Authorization: token $OWN_TOKEN" https://api.github.com/user
+  curl -sS -o /dev/null -w '%{http_code}\n' -H "Authorization: token $OWN_TOKEN" https://api.github.com/rate_limit
+  curl -sS -w '\n%{http_code}\n' -H "Authorization: token $GH_TOKEN" https://api.github.com/rate_limit
+  git lfs install --local && git lfs track '*.bin' && head -c 100 /dev/urandom > a.bin \
+    && git add .gitattributes a.bin && git commit -qm lfs && git push
+  ```
+
+  `curl` here needs `--cacert` with the bundle `GIT_SSL_CAINFO` names; the walk
+  says so where it uses it.
+- **Proof:**
+  - `git remote -v` prints each remote exactly as it was written, in both
+    clones;
+  - the private clone and the 6 MB push succeed, and the pushed commit is on
+    GitHub when read from outside the VM;
+  - the SSH-form clone works: over HTTPS with the managed credential on a
+    profile without a key, over SSH with the profile's key on one with a key;
+  - `gh api user` prints the connected account's login;
+  - the anonymous clone succeeds, and the credential broker's log shows no
+    lease for it;
+  - the user's own token gets GitHub's own answer on both paths (200), with no
+    lease;
+  - the placeholder on `/rate_limit` answers 403 with the refusal's code and no
+    lease, and the LFS push fails with the same refusal;
+  - a body over 4 MiB to `api.github.com` is answered 413 with the placeholder,
+    and is delivered whole with the user's own token;
+  - a search of the VM's disk, its processes' environments and its Git
+    configuration for the real token finds nothing; they hold only the
+    placeholder;
+  - in a VM with no GitHub connection the two hosts are not intercepted: the
+    certificate `github.com` presents is GitHub's own;
+  - on `locked`, or any policy with no rule that allows the two hosts,
+    nothing reaches GitHub from the VM: a request without the placeholder is
+    refused, and so is the managed credential's own clone, with a message
+    that names the network policy. Both are counted as refused
+    destinations. The grant cannot limit the credential to the
+    environment's own repositories, so it is not served at all there;
+  - with an allow rule for the two hosts, the private clone and push work
+    with the managed credential, and the user's own token is forwarded;
+  - with the switch off, on a policy that allows the two hosts, clone and
+    push work through the loopback rewrite, as before;
+  - with the switch off on `locked`, the same rule holds: nothing reaches
+    GitHub without a rule that allows it, the managed credential included.
+    Not yet observed, and not yet true: today the loopback route still
+    serves the managed credential there (#4926).
+- **Gotchas:**
+  - Git trusts the boot's CA through `GIT_SSL_CAINFO` and `gh` through
+    `SSL_CERT_FILE`, both set only when the GitHub hosts are bound and both
+    naming a bundle made at boot from the image's roots plus the CA. A root
+    added to the image's store after boot is not in it, so a tool that reads
+    `SSL_CERT_FILE` does not see that root until the next boot.
+  - A value of either variable that the image or project already sets is kept.
+    Git or `gh` then fails its TLS check against GitHub until that bundle
+    includes the CA; the boot log names the variable.
+  - The placeholder works only for Git's fetch and push requests and for the
+    API operations the GitHub route grants. Anywhere else on the two hosts it
+    is refused, whoever's placeholder it looks like. Git LFS is one such case.
+  - `git remote -v` on a profile without an SSH key still prints the SSH form;
+    only the transport changes.
+  - A VM restored from a checkpoint keeps the bindings of the boot it was
+    captured from.
+- **Observed:** not yet observed.
+
+## `no-token-at-rest`: no credential value is left on a disk, in a checkpoint or in a log
+
+Issues: #3999 (local VMs, #4897), #4001 (hosted Sandboxes).
+
+- **Entry points:** none for a user. A scan run by whoever walks this file,
+  over what a local VM writes.
+- **States to exercise:**
+  - a VM's disks, a VM checkpoint, and the supervisor's, the runner's, the
+    brokers' and the front door's logs, after an agent has run;
+  - synthetic values planted in the credential store, and controls planted
+    where a scan must find them;
+  - on macOS, disks and logs only: VM checkpoints are Linux-only.
+- **Driving it:** no command yet (#4897). The scan plants synthetic values
+  only. Searching for a real token would mean reading it, so for a real
+  sign-in `agent-claude` checks the other side: the login file holds a
+  `cwp1_` placeholder.
+- **Proof:**
+  - each synthetic value is found nowhere: not raw, not split across a block
+    or page, not as base64, hex or UTF-16, and not through an ext4 image's
+    filesystem;
+  - three controls written into the guest's home are found on its state
+    disk, raw and through the filesystem: plain, base64-only, and one split
+    across non-adjacent blocks;
+  - a control held only in a guest process's memory is found in the
+    checkpoint's memory;
+  - each log was read and is not empty;
+  - a finding names the value, the form, the file and the offset, never the
+    bytes.
+- **Gotchas:**
+  - A run needs about 40 GB free: a checkpoint holds all of the guest's
+    memory.
+  - Until the local placement gives Codex placeholders (#4002), the Codex
+    access token is in the guest by the listed exception, and the scan does
+    not look for it.
 - **Observed:** not yet observed.
 
 ## `agent-own-key`: a process with its own key is left alone
@@ -439,21 +754,37 @@ Issues: #3999, #4001.
 
 - **Entry points:** any program in the environment that calls an intercepted
   host with a key of the user's own.
-- **States to exercise:** a request carrying the user's own API key; one
-  carrying no credential; one carrying the placeholder together with another
-  credential header.
+- **States to exercise:**
+  - a request carrying the user's own API key;
+  - one carrying no credential;
+  - one carrying the placeholder together with another credential header;
+  - each of the first two on a policy that allows the host by rule, and on
+    `locked` or another policy that does not;
+  - the placeholder on a path the route does not serve, on `locked` and on
+    a policy that allows the host.
 - **Driving it:** no command yet (#3999, #4001).
 - **Proof:**
-  - the user's own key reaches the provider unchanged, and the assigned
-    credential is not used for that request;
-  - a request with no credential is forwarded as sent and gets the
-    provider's own 401;
+  - where the network policy allows the host, the user's own key reaches
+    the provider unchanged, and the assigned credential is not used for
+    that request;
+  - where the policy allows the host, a request with no credential is
+    forwarded as sent and gets the provider's own 401;
+  - where the policy does not allow the host, both are refused before
+    anything is sent, and the refusal log counts them like any name the
+    policy refuses. Only a request carrying this environment's placeholder
+    on a path its route serves is served there. Selecting a credential
+    never widens a network policy;
+  - the placeholder on a path the route does not serve is refused before
+    any lease, and counted, on `locked` and on every other policy;
   - the placeholder beside another credential header is refused by Codewire
     before it reaches the provider, with an error that says to send one
     credential.
-- **Gotchas:** only a request carrying this environment's placeholder is
-  swapped. The reply to any other request is passed back as the provider
-  sent it.
+- **Gotchas:**
+  - Only a request carrying this environment's placeholder is swapped. The
+    reply to any other request is passed back as the provider sent it.
+  - A deny rule on an intercepted host refuses everything to it, the
+    placeholder's own requests included. A policy that merely does not
+    list the host still serves the placeholder's requests.
 - **Observed:** not yet observed.
 
 ## `agent-fail-closed`: losing the front door never opens a direct path
@@ -469,6 +800,11 @@ Issues: #3999, #4001.
   - after either ends, a request to an intercepted host fails at once, and
     no connection leaves for that host from the egress broker;
   - other destinations keep following the network policy;
+  - a credential broker that restarts within a boot does not bring
+    interception back: requests to intercepted hosts keep failing, the
+    runner's log records the front door's exit, and a stop and start
+    restores it. The restarted broker refuses to deliver a login rather
+    than hand the VM the real one;
   - an environment whose front door cannot start does not start with
     interception half on: it reports the failure, and a stop and start
     restores it.
@@ -541,8 +877,18 @@ Issue: #4000.
   - a running Sandbox just moved to a new revision;
   - a Sandbox whose lockdown is not applied when it starts;
   - a Sandbox claimed from the warm pool;
-  - a new `cw-egress` version rolled out while a Sandbox holds open
-    connections.
+  - a Sandbox whose egress process on its node dies, or whose node's
+    `cw-egress` restarts;
+  - the control plane unavailable while a Sandbox runs;
+  - a user connecting to a Sandbox whose egress goes through the broker;
+  - a workload on `locked` calling the platform's own API;
+  - a Sandbox whose configuration lacks one of the daemon's in-cluster
+    addresses, or has one that is not an IP address and port;
+  - a new `cw-egress` version rolled out while one Sandbox has nothing
+    open, a second is in the middle of a long download, and a third has an
+    open terminal or SSH session;
+  - a Sandbox created, and one started, while that rollout is under way;
+  - a new `cw-egress` version that never becomes ready.
 - **Driving it:** no command yet (#4000).
 - **Proof:**
   - the status reads `NOT_ENFORCED` for the first state, `ENFORCED` with the
@@ -555,12 +901,67 @@ Issue: #4000.
   - a claimed warm Sandbox enforces the claimer's policy before the user can
     run anything in it; a claim that cannot confirm that within its limit
     fails, and never hands over an unrestricted Sandbox;
-  - a `cw-egress` rollout in the middle of a session resets each open
-    connection at most once, and the Sandbox's egress works on the new
-    version afterwards (#4000, item 5).
+  - while its egress path is down the Sandbox reaches nothing, by any
+    route; when the path is back it reconnects by itself and its status
+    reads `ENFORCED` again;
+  - a running Sandbox keeps its egress on its last policy through a
+    control-plane outage; one started or reconnecting during the outage has
+    no egress until it ends;
+  - the Sandbox Pod's own egress policy names only peers inside the
+    cluster, each by selector and port: the egress process on its node, the
+    binding, the UDP relay, the key broker for a confidential Sandbox, the
+    platform's public gateway and the DERP relay. It has no address range
+    and no rule for port 53, and the policy's test fails on any peer or port
+    outside that list;
+  - the daemon reaches the control plane, the tailnet coordinator, Mesh
+    (when the Sandbox has a Mesh URL) and the DERP relay with cluster DNS
+    closed, at the addresses in its configuration: the Sandbox connects,
+    and its terminal and SSH work. The control plane is reached through the
+    gateway's own listener, never behind it, and none of these goes through
+    the egress broker;
+  - with one of those addresses missing, or not an IP address and port, the
+    daemon refuses to start and names the variable. It never resolves the
+    URL's host instead;
+  - a user's connection to the Sandbox uses a direct path the client
+    starts, through the Sandbox's VIP, or the UDP relay. The Sandbox never
+    starts one: its own direct probes are dropped by the lockdown;
+  - in a `cw-egress` rollout (#4000, item 5) the Sandbox with nothing open
+    moves to the new version at once, and a connection it opens seconds
+    later succeeds: nothing of its own is reset;
+  - the long download carries on through the old version. Thirty minutes
+    after the old version was told to stop, the download is reset once, and
+    the Sandbox's egress works on the new version afterwards. No connection
+    is reset twice;
+  - the open terminal or SSH session carries on through its Sandbox's move
+    without a drop: it rides the daemon's path to the platform, which does
+    not pass through `cw-egress`;
+  - the Sandbox created and the one started during the rollout run on the
+    new version from their first connection;
+  - a version that never becomes ready moves no Sandbox, and no Sandbox
+    loses its egress;
+  - through every move the status reads `ENFORCED`, never `NOT_ENFORCED` or
+    `FAILED_CLOSED`, the refusal log keeps its counts, and `cw-egress`'s
+    log names the Sandboxes that moved idle and those cut at the deadline,
+    with a count of each.
 - **Gotchas:**
   - `NOT_ENFORCED` on a running Sandbox is a finding, not a default.
+  - A workload can use every path the daemon has. On `locked` it still
+    reaches what the platform's public gateway serves (the API, sign-in,
+    the dashboard, previews) and the relay. `locked` means the platform's
+    own services and nothing else; a walk that records "nothing can leave"
+    is wrong.
   - A status whose latest report is older than 15 minutes (three of
     cw-egress's 5-minute refreshes) reads `NOT_ENFORCED`; do not trust a
     cached `ENFORCED`.
+  - Connections to the platform's in-cluster address (the daemon's, and a
+    workload's that uses the same address) do not pass through `cw-egress`:
+    they do not count as open, and a move does not reset them. A Sandbox
+    whose only connections are those is idle and moves at once. A
+    connection to the platform's public name is an ordinary destination: the
+    policy judges it, and it counts as open.
+  - A Sandbox between versions has no egress through `cw-egress` for a
+    few seconds; its path to the platform's own services is unaffected. A
+    new connection made then is delayed, not refused; record the gap.
+  - The deadline takes 30 minutes to reach. A walk that shortens it says so,
+    and does not count as an observation of the deadline.
 - **Observed:** not yet observed.
