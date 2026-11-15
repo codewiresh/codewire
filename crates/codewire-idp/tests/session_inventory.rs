@@ -68,6 +68,7 @@ fn production_app(pool: PgPool) -> Router {
         codewire_email::EmailClient::disabled(),
         String::new(),
         String::new(),
+        "synthetic-client-address-key".to_owned(),
     )
 }
 

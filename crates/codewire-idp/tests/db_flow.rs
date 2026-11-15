@@ -3409,6 +3409,7 @@ fn invite_only_app(pool: &PgPool) -> axum::Router {
         codewire_email::EmailClient::disabled(),
         String::new(),
         String::new(),
+        "synthetic-client-address-key".to_owned(),
     )
 }
 
@@ -3676,6 +3677,7 @@ async fn invite_only_sign_up_without_mail_vouches_by_invitation_against_postgres
         codewire_email::EmailClient::disabled(),
         String::new(),
         String::new(),
+        "synthetic-client-address-key".to_owned(),
     );
     let (st, body, _) = invite_only_sign_up(&asks_reason, "dave@example.test", "").await;
     assert_eq!(st, 400, "no reason: {body}");
@@ -3706,6 +3708,7 @@ async fn invite_only_sign_up_without_mail_vouches_by_invitation_against_postgres
         codewire_email::EmailClient::disabled(),
         "synthetic-turnstile-secret".to_string(),
         String::new(),
+        "synthetic-client-address-key".to_owned(),
     );
     let (st, body, _) = invite_only_sign_up(&challenged, "frank@example.test", "").await;
     assert_eq!(st, 400, "uninvited: {body}");

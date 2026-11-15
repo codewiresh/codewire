@@ -182,7 +182,7 @@ async fn complete_signup(
     let (provider, identity) = pending_parts(&row)?;
 
     let enabled = admit(session, &identity, &request).await?;
-    if let Err(refused) = crate::signup_limit::take(&session.pool).await {
+    if let Err(refused) = crate::signup_limit::take(session, &headers).await {
         return Ok(refused.into_response());
     }
     let access_reason = request.reason.trim();

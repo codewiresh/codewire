@@ -177,6 +177,12 @@ async fn serve() -> anyhow::Result<()> {
     let secure = idp_cfg.frontend_url.starts_with("https");
     let signup_mode =
         codewire_idp::auth_session::signup_policy::mode_router(&idp_cfg.signup_invite_policy);
+    // Keys the client-address hashes the sign-up and OAuth start limits count.
+    let client_address_key = codewire_server_core::internal_hmac::derive_internal_hmac_secret(
+        &cfg.session_secret,
+        codewire_idp::client_address::CLIENT_ADDRESS_KEY_LABEL,
+    )
+    .map_err(|_| anyhow::anyhow!("the session secret for client-address hashes is not set"))?;
     let session_auth = codewire_idp::auth_session::router_with_signup_delivery(
         pool.clone(),
         secure,
@@ -185,6 +191,7 @@ async fn serve() -> anyhow::Result<()> {
         email.clone(),
         idp_cfg.turnstile_secret_key.clone(),
         idp_cfg.turnstile_bypass_email.clone(),
+        client_address_key.clone(),
     );
     // Sign in with GitHub or Google: off unless a provider's client pair is
     // configured; half a pair stops startup.
@@ -206,11 +213,7 @@ async fn serve() -> anyhow::Result<()> {
         idp_cfg.turnstile_secret_key.clone(),
         idp_cfg.turnstile_bypass_email.clone(),
         oauth_providers,
-        codewire_server_core::internal_hmac::derive_internal_hmac_secret(
-            &cfg.session_secret,
-            codewire_idp::oauth::CLIENT_ADDRESS_KEY_LABEL,
-        )
-        .map_err(|_| anyhow::anyhow!("the session secret for OAuth sign-in is not set"))?,
+        client_address_key,
     );
     let email_password = codewire_idp::email_password::router(
         pool.clone(),

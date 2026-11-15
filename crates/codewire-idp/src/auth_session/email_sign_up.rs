@@ -118,7 +118,7 @@ async fn admit(
     Ok(decided)
 }
 
-/// Whether this sign-up counts against the site-wide limit (#3297). On an
+/// Whether this sign-up counts against the sign-up limits (#3297). On an
 /// invite-only server an invitation bounds its own sign-up, so an invited
 /// sign-up doesn't count, and nothing uninvited can use up the allowance and
 /// lock invitees out. A token that names no live invitation is refused here,
@@ -149,7 +149,7 @@ pub(super) async fn sign_up(
 ) -> Result<Response, AppError> {
     let decided = admit(&state, &req).await?;
     if counts_against_signup_limit(&state, &req).await?
-        && let Err(refused) = crate::signup_limit::take(&state.pool).await
+        && let Err(refused) = crate::signup_limit::take(&state, &headers).await
     {
         return Ok(refused.into_response());
     }

@@ -51,7 +51,6 @@ pub use providers::{
     UpstreamResponse,
 };
 
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -107,9 +106,6 @@ const LINK_CONFIRM_TTL_SECS: i64 = 30 * 60;
 /// client could otherwise fill the table; a finished or abandoned round trip
 /// frees its place within ten minutes. Generous for a shared office address.
 const MAX_STARTS_PER_CLIENT: i64 = 30;
-/// The label the client-address hash key is derived under from the session
-/// secret, so the stored hash cannot be reversed by trying every address.
-pub const CLIENT_ADDRESS_KEY_LABEL: &str = "codewire/idp-oauth-client-address/v1";
 const MAX_AUTH_REQUEST_ID_BYTES: usize = 256;
 const MAX_RETURN_TO_BYTES: usize = 2048;
 const MAX_CODE_BYTES: usize = 2048;
@@ -255,8 +251,6 @@ struct OAuthState {
     session: SessionAuthState,
     providers: OAuthProviders,
     mailer: Arc<dyn LinkConfirmationMailer>,
-    /// Keys the client-address hash that bounds started sign-ins.
-    client_address_key: Arc<str>,
 }
 
 /// Sends the one-time link confirmation to a Codewire account's own address.
@@ -298,31 +292,6 @@ impl LinkConfirmationMailer for EmailLinkMailer {
     }
 }
 
-/// The keyed hash of the address an abuser controls as one unit: an IPv4
-/// address (also when IPv4-mapped) or an IPv6 /64, as the feedback limiter
-/// counts them. `None` when the edge named no address; those clients share
-/// one allowance.
-fn client_address_hash(key: &str, address: Option<IpAddr>) -> Option<String> {
-    use hmac::Mac as _;
-    let unit = match address? {
-        IpAddr::V4(v4) => v4.to_string(),
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => v4.to_string(),
-            None => {
-                let segments = v6.segments();
-                format!(
-                    "{:x}:{:x}:{:x}:{:x}::/64",
-                    segments[0], segments[1], segments[2], segments[3]
-                )
-            }
-        },
-    };
-    let mut mac =
-        hmac::Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
-    mac.update(unit.as_bytes());
-    Some(crate::auth_session::hex_lower(&mac.finalize().into_bytes()))
-}
-
 impl OAuthState {
     fn redirect_uri(&self, provider: Provider) -> String {
         format!(
@@ -357,10 +326,10 @@ pub fn router(
             email,
             human_verification,
             turnstile_bypass_email,
+            client_address_key,
         ),
         providers,
         mailer,
-        client_address_key: client_address_key.into(),
     })
 }
 
@@ -378,7 +347,6 @@ pub fn trusted_test_router(
         session: SessionAuthState::trusted_test(pool, secure, signup_invite_policy, frontend_url),
         providers,
         mailer,
-        client_address_key: "synthetic-oauth-client-address-key".into(),
     })
 }
 
@@ -561,8 +529,8 @@ async fn start(
         return login_with_refusal(Refusal::Unavailable, &target, Vec::new());
     };
 
-    let address = client_address_hash(
-        &state.client_address_key,
+    let address = crate::client_address::unit_hash(
+        &state.session.client_address_key,
         codewire_server_core::client_address::forwarded_client_ip(&headers),
     );
     let stored = async {

@@ -212,13 +212,33 @@ Issue: #3297 (items 7, 8, 11 and 14).
 - **States to exercise:**
   - sign-up on a surface with no Turnstile secret: refused, no account;
   - five wrong passwords lock the account for fifteen minutes;
-  - the edge rate limits on the sign-up and sign-in routes.
+  - the edge rate limits on the sign-up and sign-in routes;
+  - the IdP's sign-up limits: thirty sign-ups an hour from one client address
+    (`signup_address`) and a hundred across the site (`signup`), each an
+    admin's global value when one is set. A sign-up counts once it has
+    passed its own checks, Turnstile included, and before its account is
+    looked up, so one for an address that already has an account counts too.
 - **Driving it:**
   1. Five sign-ins with a wrong password for a walk account, then one with
      the right password: the sixth answers `429`.
-- **Proof:** the `429` on the right password, and no session.
+  2. From one address, thirty-one sign-ups on the sign-up page with a walk
+     account's own email, each passing Turnstile: the first thirty say the
+     account already exists, and the thirty-first is refused. The page shows
+     its generic "The request could not be completed" until #4695 words the
+     refusal. No account is created and no mail is sent.
+- **Proof:** the `429` on the right password, and no session. For the
+  sign-ups:
+  - the IdP's `sign-up refused by its rate limit` warning with
+    `limit=signup_address`;
+  - in `rate_limit`, one `signup_address:` key at 31 while `signup:all` rose
+    by 30, so the address count refused and the server-wide one had room;
+  - no other `signup_address:` key changed during the walk, so the count was
+    the walker's alone.
 - **Gotchas:** the lockout is per account. The edge rate limits have no
-  command yet (#3297).
+  command yet (#3297). Step 2 refuses every sign-up from the walking
+  machine's address for the rest of the hour, so walk it where no one else
+  signs up from that address. Keep its sign-ups under ten in any ten
+  seconds, or the edge's own limit blocks them before the IdP counts them.
 - **Observed:** not yet observed.
 
 ## `account-password-reset`: a forgotten password

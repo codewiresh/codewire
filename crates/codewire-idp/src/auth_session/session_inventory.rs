@@ -464,6 +464,7 @@ mod tests {
             codewire_email::EmailClient::disabled(),
             String::new(),
             String::new(),
+            "synthetic-client-address-key".to_owned(),
         );
         for (method, path, body) in [
             ("GET", "/api/auth/sessions?account_id=owner", "null"),

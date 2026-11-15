@@ -142,6 +142,44 @@ email before it can sign in (#4481).
 | `IDP_SIGNUP_REASON` | No | `required` asks a sign-up that waits for the admin what they want to build; the admin reads it on Admin → Account Access. Review mode always asks. | `required` |
 | `IDP_METRICS_ADDR` | No | Where the IdP serves `/metrics` on its own, default `0.0.0.0:8092`. The port Prometheus scrapes is named `http`; the API port is `api` (8091). A NetworkPolicy admits the metrics port from every source, because Prometheus runs on host networking, and the API port only from the edge and the dashboard. | `0.0.0.0:8092` |
 
+### Sign-up limits
+
+The IdP refuses a sign-up past either of two counts:
+- 30 an hour from one client address: an IPv4 address, or an IPv6 /64, which
+  lets an office or a class on one network sign up together;
+- 100 an hour across the server.
+
+A sign-up counts once it has passed its own checks (Turnstile and the
+reason) and before its account is looked up; an invited sign-up on an
+invite-only server doesn't count. The refusal is 429 `rate_limited` with
+`Retry-After`.
+
+**The client address** is the last `X-Forwarded-For` hop. Behind the bundled
+Caddy alone that is the visitor's address, because Caddy replaces any hop the
+client sent with the address it connected from. If another proxy sits in front
+of your edge, such as a CDN or a load balancer, the edge must still send the
+visitor's address as the last hop, not that proxy's. Otherwise every sign-up
+through the proxy counts against the proxy's few addresses and is refused
+after thirty. To check, read the IP Address of the newest `user.signup` or
+`user.signup.access_requested` row on Admin → Audit Log: it should be the
+address of whoever signed up. A sign-up with no `X-Forwarded-For` at all
+counts only against the server-wide limit.
+
+**A larger group behind one shared address**, such as a conference on one
+network, can reach the per-address count. There is no admin page for the
+counts yet. Until there is, raise one with SQL against the application
+database; the new value takes effect at once:
+
+```sql
+INSERT INTO rate_limit_settings (name, max_requests, updated_by)
+VALUES ('signup_address', 100, 'operator')
+ON CONFLICT (name) DO UPDATE
+   SET max_requests = EXCLUDED.max_requests, updated_by = EXCLUDED.updated_by,
+       updated_at = now();
+```
+
+`signup` is the server-wide count. Deleting the row returns the default.
+
 Setup makes the server's admin before anything else:
 
 ```sh

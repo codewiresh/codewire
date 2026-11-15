@@ -115,6 +115,9 @@ pub struct SessionAuthState {
     pub(crate) email: EmailClient,
     human_verification: HumanVerification,
     turnstile_bypass_email: String,
+    /// Keys the client-address hashes: the per-address sign-up limit and the
+    /// OAuth starts one client may hold ([`crate::client_address`]).
+    pub(crate) client_address_key: std::sync::Arc<str>,
     http: reqwest::Client,
 }
 
@@ -1332,6 +1335,7 @@ pub fn router_with_email(
     router_with_state(state)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn router_with_signup_delivery(
     pool: PgPool,
     secure: bool,
@@ -1340,6 +1344,7 @@ pub fn router_with_signup_delivery(
     email: EmailClient,
     turnstile_secret_key: String,
     turnstile_bypass_email: String,
+    client_address_key: String,
 ) -> Router {
     let human_verification = configured_human_verification(&frontend_url, turnstile_secret_key);
     router_with_state(SessionAuthState::new(
@@ -1350,6 +1355,7 @@ pub fn router_with_signup_delivery(
         email,
         human_verification,
         turnstile_bypass_email,
+        client_address_key,
     ))
 }
 
@@ -1372,6 +1378,7 @@ pub(crate) fn configured_human_verification(
 }
 
 impl SessionAuthState {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         pool: PgPool,
         secure: bool,
@@ -1380,6 +1387,7 @@ impl SessionAuthState {
         email: EmailClient,
         human_verification: HumanVerification,
         turnstile_bypass_email: String,
+        client_address_key: String,
     ) -> Self {
         Self {
             pool,
@@ -1389,6 +1397,7 @@ impl SessionAuthState {
             email,
             human_verification,
             turnstile_bypass_email,
+            client_address_key: client_address_key.into(),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
@@ -1411,6 +1420,7 @@ impl SessionAuthState {
             EmailClient::disabled(),
             HumanVerification::TrustedTest,
             String::new(),
+            "synthetic-client-address-key".to_owned(),
         )
     }
 }
@@ -1533,6 +1543,7 @@ mod tests {
             email: EmailClient::disabled(),
             human_verification: HumanVerification::Unavailable,
             turnstile_bypass_email: "codewire-e2e@example.test".into(),
+            client_address_key: "synthetic-client-address-key".into(),
             http: reqwest::Client::new(),
         };
 
@@ -1766,6 +1777,7 @@ mod tests {
             email: EmailClient::disabled(),
             human_verification: HumanVerification::TrustedTest,
             turnstile_bypass_email: String::new(),
+            client_address_key: "synthetic-client-address-key".into(),
             http: reqwest::Client::new(),
         };
         let mut headers = HeaderMap::new();

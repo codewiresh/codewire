@@ -20,6 +20,7 @@ pub mod account_admin_delete;
 pub mod admin_bootstrap;
 pub mod auth_requests;
 pub mod auth_session;
+pub mod client_address;
 pub mod clients;
 pub mod customizer;
 pub mod device_authorizations;

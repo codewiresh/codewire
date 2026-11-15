@@ -72,9 +72,8 @@ pub const ADMIN_ACCOUNT_DELETE: Limit = Limit {
     per_user: true,
 };
 
-/// Email and provider sign-ups across the whole site (#3297), counted before
-/// any other check. A per-address limit follows once nothing but the edge and
-/// the dashboard can write the counted address.
+/// Email and provider sign-ups across the whole site (#3297), counted after
+/// [`SIGNUP_ADDRESS`] and before any account is looked up.
 pub const SIGNUP: Limit = Limit {
     name: "signup",
     key_prefix: "signup",
@@ -83,8 +82,28 @@ pub const SIGNUP: Limit = Limit {
     per_user: false,
 };
 
+/// Email and provider sign-ups from one client address (#3297): an IPv4
+/// address or an IPv6 /64, counted under a keyed hash of it. Only the edge
+/// and the dashboard can reach the IdP to write the address it counts.
+/// Thirty an hour lets an office or a class on one network sign up together,
+/// which the owner called "totally possible" (2026-11-14, #3297), while one
+/// machine still can't create accounts without bound.
+pub const SIGNUP_ADDRESS: Limit = Limit {
+    name: "signup_address",
+    key_prefix: "signup_address",
+    window_secs: 3_600,
+    default_max: 30,
+    per_user: false,
+};
+
 /// Every named limit, in the order an admin sees them.
-pub const LIMITS: &[Limit] = &[SANDBOX_CREATE, SANDBOX_START, SNAPSHOT_CREATE, SIGNUP];
+pub const LIMITS: &[Limit] = &[
+    SANDBOX_CREATE,
+    SANDBOX_START,
+    SNAPSHOT_CREATE,
+    SIGNUP,
+    SIGNUP_ADDRESS,
+];
 
 /// What [`consume`] decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,6 +286,7 @@ mod tests {
         assert_eq!(SANDBOX_START.key("u1"), "env_start:u1");
         assert_eq!(SNAPSHOT_CREATE.key("u1"), "snapshot_create:u1");
         assert_eq!(SIGNUP.key("all"), "signup:all");
+        assert_eq!(SIGNUP_ADDRESS.key("ab12"), "signup_address:ab12");
         let mut names: Vec<_> = LIMITS.iter().map(|limit| limit.name).collect();
         names.sort_unstable();
         names.dedup();

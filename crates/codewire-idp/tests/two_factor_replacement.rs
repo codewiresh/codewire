@@ -99,6 +99,7 @@ fn apps(pool: &PgPool) -> Apps {
             codewire_email::EmailClient::disabled(),
             String::new(),
             String::new(),
+            "synthetic-client-address-key".to_owned(),
         )
         .layer(axum::Extension(SessionInventoryBounds {
             request: HANG,

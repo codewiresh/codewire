@@ -1781,8 +1781,8 @@ run_idp_invitation_email() {
   assert_passed_count "idp invitation email" "$logfile" 7
 }
 
-# The site-wide sign-up limit (#3297). It owns the signup:all counter while
-# it runs, so it runs alone, after the suites that sign up.
+# The sign-up limits (#3297). It owns the signup:all and signup_address
+# counters while it runs, so it runs alone, after the suites that sign up.
 run_idp_signup_limit() {
   local logfile="$RUN_DIR/idp-signup-limit.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
