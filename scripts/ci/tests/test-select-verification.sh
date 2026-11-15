@@ -1433,6 +1433,11 @@ run_present_paths_case database_test_coverage pull_request refs/pull/2755/head f
 run_paths_case temporal_service pull_request refs/pull/84/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal' \
   crates/codewire-orchestration/src/worker/create.rs
+# The dashboard's setup_progress tests include_str! the setup worker (#3772),
+# so a change to it alone also runs the dashboard tests.
+run_paths_case setup_worker_dashboard_contract pull_request refs/pull/4748/head false \
+  'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal web' \
+  crates/codewire-orchestration/src/worker/setup.rs
 run_paths_case temporal_fencing_kind_driver pull_request refs/pull/842/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/src/bin/temporal-fencing-smoke.rs

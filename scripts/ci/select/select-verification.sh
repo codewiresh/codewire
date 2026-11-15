@@ -1441,6 +1441,12 @@ if [ "$event_selected" = false ]; then
       packages/codewire-types/*)
         # Deletion-only tombstone; the earlier OpenAPI case rejects revival.
         ;;
+      crates/codewire-orchestration/src/worker/setup.rs)
+        # The dashboard's setup_progress tests include_str! this file to
+        # hold setup-progress.js's step list to the phases it writes (#3772).
+        # No path dependency links them, so name the dashboard tests here.
+        select_token web
+        ;;
       packages/*)
         select_token web
         recognized=true

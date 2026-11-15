@@ -17,9 +17,8 @@ fn a_stopped_sandbox_being_started_shows_the_starting_list() {
         },
     );
     assert!(page.contains("data-kind=\"setup\""));
-    assert!(page.contains(&format!(
-        "data-setup-progress data-setup-starting data-setup-environment-id=\"{STARTING}\""
-    )));
+    assert!(page.contains("data-setup-progress data-setup-starting data-setup-since=\""));
+    assert!(page.contains(&format!("data-setup-environment-id=\"{STARTING}\"")));
     // No banner and no centred repeat: the notice text stays hidden.
     assert!(!page.contains("data-kind=\"banner\""));
     // The window and bar wait for the script, so a page without it shows no

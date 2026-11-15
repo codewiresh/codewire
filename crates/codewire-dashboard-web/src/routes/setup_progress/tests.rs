@@ -33,6 +33,11 @@ fn response(row: &LogRow) -> StreamLogsResponse {
     if let Some(metadata) = &row.metadata {
         log.metadata = Some(serde_json::from_value(metadata.clone()).unwrap()).into();
     }
+    if let Ok(time) = DateTime::parse_from_rfc3339(&row.created_at) {
+        let stamp = log.created_at.get_or_insert_default();
+        stamp.seconds = time.timestamp();
+        stamp.nanos = time.timestamp_subsec_nanos() as i32;
+    }
     StreamLogsResponse {
         event: Some(Event::Log(Box::new(log))),
         ..Default::default()
@@ -348,9 +353,9 @@ fn a_starting_page_never_sees_a_run_that_already_ended() {
         row(1, "health_check", "started"),
         row(2, "health_check", "failed"),
     ];
-    assert!(current_run(&failed, Run::Next).is_empty());
+    assert!(current_run(&failed, Run::Next { since: None }).is_empty());
     let running = [row(3, "health_check", "started")];
-    assert_eq!(current_run(&running, Run::Next), &running);
+    assert_eq!(current_run(&running, Run::Next { since: None }), &running);
 }
 
 #[tokio::test]
@@ -366,11 +371,141 @@ async fn a_starting_page_skips_an_ended_run_and_follows_the_next() {
             Ok(response(&row(4, "complete", "completed"))),
         ],
     ];
-    let frames = relayed_run(&script, None, Run::Next).await;
+    let frames = relayed_run(&script, None, Run::Next { since: None }).await;
     assert_eq!(
         *script.opens.lock().unwrap(),
         vec![(String::new(), false), (id(2), true)]
     );
     assert_eq!(ids(&frames), vec![id(3), id(4)]);
     assert!(frames.last().unwrap().contains("\"outcome\":\"complete\""));
+}
+
+fn at(time: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(time)
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
+fn row_at(n: u32, phase: &str, status: &str, time: &str) -> LogRow {
+    LogRow {
+        created_at: time.into(),
+        ..row(n, phase, status)
+    }
+}
+
+#[tokio::test]
+async fn a_run_that_ended_after_the_page_rendered_is_this_starts_and_is_shown() {
+    // Setup failed within a moment of running, before the page connected.
+    let script = Script::default();
+    *script.answers.lock().unwrap() = vec![vec![
+        Ok(response(&row_at(
+            1,
+            "health_check",
+            "started",
+            "2026-10-06T10:00:05Z",
+        ))),
+        Ok(response(&row_at(
+            2,
+            "health_check",
+            "failed",
+            "2026-10-06T10:00:06Z",
+        ))),
+    ]];
+    let since = Some(at("2026-10-06T10:00:00Z"));
+    let frames = relayed_run(&script, None, Run::Next { since }).await;
+    assert_eq!(*script.opens.lock().unwrap(), vec![(String::new(), false)]);
+    assert_eq!(ids(&frames), vec![id(1), id(2)]);
+    assert_eq!(
+        frames.last().unwrap(),
+        "event: end\ndata: {\"outcome\":\"failed\"}\n\n"
+    );
+}
+
+#[tokio::test]
+async fn a_run_that_ended_before_the_page_rendered_is_skipped_and_this_one_followed() {
+    let script = Script::default();
+    *script.answers.lock().unwrap() = vec![
+        vec![Ok(response(&row_at(
+            1,
+            "health_check",
+            "failed",
+            "2026-10-06T09:59:00Z",
+        )))],
+        vec![Ok(response(&row_at(
+            2,
+            "complete",
+            "completed",
+            "2026-10-06T10:01:00Z",
+        )))],
+    ];
+    let since = Some(at("2026-10-06T10:00:00Z"));
+    let frames = relayed_run(&script, None, Run::Next { since }).await;
+    assert_eq!(
+        *script.opens.lock().unwrap(),
+        vec![(String::new(), false), (id(1), true)]
+    );
+    assert_eq!(ids(&frames), vec![id(2)]);
+}
+
+#[test]
+fn the_query_asks_for_the_current_run_unless_it_names_the_next() {
+    let query = |run: Option<&str>, since: Option<&str>| EventsQuery {
+        run: run.map(str::to_owned),
+        since: since.map(str::to_owned),
+    };
+    assert_eq!(query(None, None).run(), Run::Current);
+    assert_eq!(query(Some("other"), None).run(), Run::Current);
+    assert_eq!(
+        query(Some("next"), Some("2026-10-06T10:00:00.000Z")).run(),
+        Run::Next {
+            since: Some(at("2026-10-06T10:00:00Z"))
+        }
+    );
+    // A malformed time is no bound: any ended run is an earlier start's.
+    assert_eq!(
+        query(Some("next"), Some("yesterday")).run(),
+        Run::Next { since: None }
+    );
+}
+
+/// The page lists, as steps, exactly the phases orchestration's setup worker
+/// writes (#3772): a new setup phase must be named on the page, or named here
+/// as not a step, before it ships.
+#[test]
+fn the_page_lists_every_setup_phase_orchestration_writes() {
+    const WORKER: &str = include_str!("../../../../codewire-orchestration/src/worker/setup.rs");
+    const PAGE: &str = include_str!("../../../../../packages/codewire-design/setup-progress.js");
+    // Rows the worker writes that are not steps of their own.
+    const NOT_STEPS: [&str; 1] = ["daemon_ready"];
+
+    let mut written = std::collections::BTreeSet::new();
+    for call in ["emit_log(", "finish_phase("] {
+        for (start, _) in WORKER.match_indices(call) {
+            let args = &WORKER[start + call.len()..];
+            let args = &args[..args.find(')').unwrap_or(args.len())];
+            // The phase name is the first string literal after `phase,`.
+            if let Some(name) = args
+                .find("phase,")
+                .and_then(|at| args[at..].split('"').nth(1))
+            {
+                written.insert(name.to_owned());
+            }
+        }
+    }
+    let body = PAGE
+        .split("const SETUP_PHASES = new Map([")
+        .nth(1)
+        .and_then(|rest| rest.split("]);").next())
+        .expect("setup-progress.js defines SETUP_PHASES");
+    let listed: std::collections::BTreeSet<String> = body
+        .split("[\"")
+        .skip(1)
+        .filter_map(|entry| entry.split('"').next().map(str::to_owned))
+        .collect();
+    let steps: std::collections::BTreeSet<String> = written
+        .into_iter()
+        .filter(|phase| !NOT_STEPS.contains(&phase.as_str()))
+        .collect();
+    assert!(!steps.is_empty());
+    assert_eq!(listed, steps);
 }

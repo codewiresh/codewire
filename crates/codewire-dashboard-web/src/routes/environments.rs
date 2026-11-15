@@ -3367,7 +3367,6 @@ mod tests {
             list_context: SandboxListContext::default(),
             list_url: "/test/".into(),
             message: String::new(),
-            creation_notice: false,
             error: String::new(),
         };
         crate::templates::TerminalTemplate {
@@ -3732,7 +3731,7 @@ mod tests {
         }
         assert_eq!(
             crate::assets::TERMINAL_READINESS_SCRIPT_PATH,
-            "/assets/codewire/terminal-readiness-v4.js"
+            "/assets/codewire/terminal-readiness-v5.js"
         );
         assert_eq!(
             page_error("setup-running"),

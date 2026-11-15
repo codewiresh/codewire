@@ -172,9 +172,8 @@
   .cw-setup-bar > span { transition: none; }
 }
 /* While the list or a centred message shows, the page says that one thing:
-   no tab bar, no session line and no creation notice above it. */
+   no tab bar and no session line. */
 .cw-durable-terminal:has(> .cw-sandbox-notice:not([hidden], [data-kind="banner"])) > :is(.cw-terminal-tabs-bar, .cw-terminal-session-message, .cw-terminal-reload) { display: none; }
-.cw-workspace-main:has(.cw-sandbox-notice:not([hidden], [data-kind="banner"])) [data-sandbox-creation-notice] { display: none; }
 
 /* Output fills its cell edge to edge with one small inner gutter. */
 .cw-terminal-panels { min-height: 0; background: var(--bg-base); }

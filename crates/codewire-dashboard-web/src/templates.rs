@@ -384,6 +384,14 @@ pub(crate) struct TerminalTemplate<'a> {
     pub(crate) style_nonce: &'a str,
 }
 
+impl TerminalTemplate<'_> {
+    /// When this page was rendered, by the server's clock. A starting page's
+    /// setup stream skips only a run that ended before it (#3772).
+    pub(crate) fn rendered_at(&self) -> String {
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+}
+
 #[derive(Template)]
 #[template(path = "environment-ports.html")]
 pub(crate) struct EnvironmentPortsTemplate<'a> {

@@ -76,7 +76,7 @@ pub(super) async fn page(
                 return error_page(WebError::BrowserConfigurationUnavailable);
             }
         };
-    let (message, creation_notice) = detail_message(&query.message, environment.state);
+    let message = detail_message(&query.message);
     let view = TerminalPageView {
         account_id: identity.id,
         organization_id: organization.id.clone(),
@@ -85,7 +85,6 @@ pub(super) async fn page(
         list_url: list_context.list_url(&slug),
         list_context,
         message,
-        creation_notice,
         error: super::environments::page_error(&query.error).into(),
     };
     let token = page_csrf_token(&headers);
@@ -125,18 +124,17 @@ pub(crate) fn browser_websocket_origin(public_origin: &str, api_origin: &str) ->
     Some(api.as_str().trim_end_matches('/').to_owned())
 }
 
-/// The detail page's feedback, and whether it is the creation notice.
-/// "Sandbox creation started." is news only until the Sandbox runs, so a
-/// reload after that shows nothing; the page withdraws it live as well.
-fn detail_message(message: &str, environment_state: &str) -> (String, bool) {
-    let creation_notice = message == "environment-created";
-    if creation_notice && environment_state == "running" {
-        return (String::new(), false);
+/// The detail page's feedback. Create, Start and a managed restart lead into
+/// the step list, which says what is happening, so they add no alert (the
+/// owner, 2026-11-14: "I do not want another banner also that says sandbox
+/// start request received"). Alerts stay for what the list cannot show.
+fn detail_message(message: &str) -> String {
+    match message {
+        "environment-created" | "environment-started" | "environment-sources-restarting" => {
+            String::new()
+        }
+        other => super::environments::page_message(other).into(),
     }
-    (
-        super::environments::page_message(message).into(),
-        creation_notice,
-    )
 }
 
 pub(super) fn terminal_path(slug: &str, environment_id: &str) -> String {
@@ -169,22 +167,25 @@ mod tests {
     }
 
     #[test]
-    fn the_creation_notice_is_marked_and_withdrawn_once_the_sandbox_runs() {
+    fn actions_that_lead_into_the_step_list_add_no_alert() {
+        for message in [
+            "environment-created",
+            "environment-started",
+            "environment-sources-restarting",
+        ] {
+            assert_eq!(detail_message(message), "", "{message}");
+        }
+        // What the list cannot show keeps its alert.
         assert_eq!(
-            detail_message("environment-created", "creating"),
-            ("Sandbox creation started.".to_owned(), true)
+            detail_message("environment-stopping"),
+            "Sandbox stop requested."
         );
         assert_eq!(
-            detail_message("environment-created", "running"),
-            (String::new(), false)
+            detail_message("environment-sources-stored"),
+            "Sandbox sources saved. The Sandbox remains stopped."
         );
-        let (started, notice) = detail_message("environment-started", "running");
-        assert!(!started.is_empty());
-        assert!(!notice);
         let template = include_str!("../../templates/terminal.html");
-        assert!(template.contains(
-            "{% if page.creation_notice %} data-sandbox-creation-notice{% endif %}>{{ page.message }}</p>"
-        ));
+        assert!(!template.contains("data-sandbox-creation-notice"));
     }
 
     #[test]

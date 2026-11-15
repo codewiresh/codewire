@@ -25,13 +25,20 @@
   if (!(list instanceof HTMLOListElement) || !(status instanceof HTMLElement)) return;
   const MAX_STAGES = 64;
   const MAX_REPOSITORIES = 64;
-  // Orchestration's start phases. Until the page names them (the creation
-  // stages, a later slice of #3772), they are one "Starting the Sandbox" row.
-  const START_PHASES = new Set([
-    "reconcile_enqueue", "ensure_namespace", "store_backend", "create_claim", "wait_for_ready", "workspace_bind",
-    "access_ready", "pod_created", "pod_volume_provisioned", "pod_volume_bound", "pod_scheduled", "pod_sandbox_ready",
-    "pod_initialized", "pod_workspace_started", "pod_dind_started", "pod_running", "pod_containers_ready",
-    "mark_running", "daemon_ready", "file_ready", "publish_setup", "resume_workspace",
+  // The project-setup phases the list shows, named by the page (#3772). The
+  // dashboard's setup_progress tests hold this list to the phases
+  // orchestration's setup worker emits. Every
+  // other row in the stream (start, lifecycle and checkpoint marks) is part of
+  // "Starting the Sandbox" until the creation stages name them, so a phase not
+  // listed here never becomes a step.
+  const SETUP_PHASES = new Map([
+    ["health_check", "Checking sidecar readiness"],
+    ["configure_environment", "Configuring environment"],
+    ["git_clone", "Cloning repositories"],
+    ["install", "Running install command"],
+    ["startup_script", "Running startup script"],
+    ["agent_validation", "Checking agent tools"],
+    ["register_ports", "Registering ports"],
   ]);
   const STARTING = "Starting the Sandbox";
   const SETUP_GROUP = "Setting up your project";
@@ -126,7 +133,7 @@
       group.textContent = SETUP_GROUP;
       list.append(group);
     }
-    stage = item(event.label || sentence(event.phase));
+    stage = item(SETUP_PHASES.get(event.phase) ?? sentence(event.phase));
     stages.set(event.phase, stage);
     return stage;
   }
@@ -219,7 +226,6 @@
   }
 
   function show(event) {
-    if (START_PHASES.has(event.phase)) return;
     if (event.phase === "complete") {
       if (event.status === "completed" || event.status === "warning") {
         done = true;
@@ -235,6 +241,7 @@
       follow();
       return;
     }
+    if (!SETUP_PHASES.has(event.phase)) return;
     settleStart();
     const stage = stageFor(event);
     if (!stage) return;
@@ -313,7 +320,8 @@
   function followStream() {
     if (source || ended) return;
     // A starting page asks only for this start's run, never one that ended.
-    const run = starting ? "?run=next" : "";
+    const since = section.dataset.setupSince || "";
+    const run = starting ? `?run=next${since ? `&since=${encodeURIComponent(since)}` : ""}` : "";
     source = new EventSource(`/${encodeURIComponent(slug)}/${environmentId}/_events/setup-progress${run}`);
     source.addEventListener("stage", (message) => {
       let event;
@@ -353,6 +361,19 @@
     // it follows no stream. A first start follows setup once it begins.
     if (starting && !source && detail.setupComplete !== true) followStream();
     if (detail.running === true) settleStart();
+    // A running Sandbox whose setup failed says so from the recorded run, even
+    // when this page followed only the latest start and saw no failed row.
+    const recorded = detail.notice;
+    if (detail.running === true && detail.setupComplete !== true && recorded?.kind === "setup"
+      && recorded.tone === "danger" && failure instanceof HTMLElement && failure.hidden) {
+      failure.textContent = recorded.text;
+      failure.hidden = false;
+      status.textContent = "Setup stopped.";
+      say("Setup stopped.");
+      done = false;
+      halt();
+      follow();
+    }
     if (detail.running !== true || detail.setupComplete !== true || failure?.hidden === false) return;
     done = true;
     progress();

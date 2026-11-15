@@ -22,9 +22,10 @@
 //! connection lives at most [`STREAM_LIFETIME`]; the browser then reconnects
 //! and resumes.
 //!
-//! A page whose Sandbox is starting asks for `?run=next` (#3772): a run that
-//! already ended belongs to an earlier start, so it is not replayed and the
-//! connection waits for this start's rows.
+//! A page whose Sandbox is starting asks for `?run=next&since=<its render
+//! time>` (#3772): a run that ended before the page was rendered belongs to an
+//! earlier start, so it is not replayed and the connection waits for this
+//! start's rows. A run that ended since is this start's, and is shown.
 
 use std::{convert::Infallible, time::Duration};
 
@@ -201,29 +202,57 @@ pub(super) fn stage_event(row: &LogRow) -> Option<StageEvent> {
 }
 
 /// Which run a first connection shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Run {
     /// The run in progress, or the one that ended last.
-    #[default]
     Current,
-    /// Only a run that has not ended: a starting Sandbox's page.
-    Next,
+    /// A starting Sandbox's run: a run that ended before `since` (the page's
+    /// render time) is an earlier start's. Without `since`, any ended run is.
+    Next { since: Option<DateTime<Utc>> },
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct EventsQuery {
-    #[serde(default)]
-    run: Run,
+    run: Option<String>,
+    since: Option<String>,
+}
+
+impl EventsQuery {
+    /// An unknown run asks for the current one, as a page that sends nothing
+    /// does; a malformed `since` is no bound.
+    pub(super) fn run(&self) -> Run {
+        match self.run.as_deref() {
+            Some("next") => Run::Next {
+                since: self
+                    .since
+                    .as_deref()
+                    .and_then(|since| DateTime::parse_from_rfc3339(since).ok())
+                    .map(|since| since.with_timezone(&Utc)),
+            },
+            _ => Run::Current,
+        }
+    }
+}
+
+impl Run {
+    /// Whether a run that ended on `last` belongs to an earlier start.
+    fn earlier(self, last: &LogRow) -> bool {
+        match self {
+            Self::Current => false,
+            Self::Next { since: None } => true,
+            Self::Next { since: Some(since) } => DateTime::parse_from_rfc3339(&last.created_at)
+                .map_or(true, |ended| ended.with_timezone(&Utc) < since),
+        }
+    }
 }
 
 /// The rows of the current run in a full history: everything after the last
 /// terminal row, unless the history itself ends on a terminal row, in which
-/// case the run that row ended, or nothing for [`Run::Next`].
+/// case the run that row ended, or nothing when that run is an earlier
+/// start's ([`Run::Next`]).
 pub(super) fn current_run(rows: &[LogRow], run: Run) -> &[LogRow] {
     let ends_terminal = rows.last().is_some_and(LogRow::terminal);
-    if ends_terminal && run == Run::Next {
+    if ends_terminal && rows.last().is_some_and(|last| run.earlier(last)) {
         return &rows[rows.len()..];
     }
     let scan = if ends_terminal {
@@ -341,8 +370,9 @@ pub(super) async fn relay(
             }
             match history.last() {
                 // The last run already ended; there is nothing to follow,
-                // unless the page waits for the next run.
-                Some(row) if row.terminal() && run == Run::Current => return,
+                // unless it was an earlier start's and the page waits for this
+                // one.
+                Some(row) if row.terminal() && !run.earlier(row) => return,
                 Some(row) => row.id.clone(),
                 None => String::new(),
             }
@@ -408,12 +438,10 @@ pub(super) fn resume_cursor(headers: &HeaderMap) -> Result<Option<String>, ()> {
 pub(super) async fn events(
     State(state): State<AppState>,
     Path((slug, environment_id)): Path<(String, String)>,
-    query: Result<Query<EventsQuery>, axum::extract::rejection::QueryRejection>,
+    Query(query): Query<EventsQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let Ok(Query(EventsQuery { run })) = query else {
-        return status(StatusCode::BAD_REQUEST);
-    };
+    let run = query.run();
     if !codewire_server_core::organization_slug::valid_organization_slug(&slug)
         || !super::terminal::canonical_environment_id(&environment_id)
     {

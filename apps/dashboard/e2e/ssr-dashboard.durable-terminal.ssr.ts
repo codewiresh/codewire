@@ -1862,7 +1862,7 @@ test("initial terminal inventory waits until workspace setup finishes", async ({
   expect(state.stops).toBe(0);
 });
 
-test("a Sandbox still being created says its terminals open when ready, then withdraws the creation notice", async ({ page }) => {
+test("a Sandbox still being created says its terminals open when ready", async ({ page }) => {
   const state = await transport(page);
   state.running = false;
   state.setupComplete = false;
@@ -1871,17 +1871,7 @@ test("a Sandbox still being created says its terminals open when ready, then wit
     startEligible: false, stopEligible: false, deleteEligible: true, actionsAllowed: true, pending: true,
     deletionState: "unscheduled", shutdownAt: null };
   await openFixture(page);
-  // The page renders this notice after Create; the fixture shows a running Sandbox.
-  await page.locator(".cw-workspace-notices").evaluate((notices) => {
-    const notice = document.createElement("p");
-    notice.className = "cw-alert";
-    notice.setAttribute("role", "status");
-    notice.setAttribute("data-sandbox-creation-notice", "");
-    notice.textContent = "Sandbox creation started.";
-    notices.prepend(notice);
-  });
   await expect(page.locator("[data-terminal-empty]")).toHaveText("This Sandbox is starting. Terminals open when it is ready.");
-  await expect(page.locator("[data-sandbox-creation-notice]")).toBeVisible();
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
   // A starting Sandbox gets no list and no launch until it is ready.
   expect(state.lists).toBe(0);
@@ -1892,7 +1882,6 @@ test("a Sandbox still being created says its terminals open when ready, then wit
   await checkReadinessNow(page);
   await automaticTerminal(page, state);
   await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
-  await expect(page.locator("[data-sandbox-creation-notice]")).toBeHidden();
 });
 
 test("starting a stopped Sandbox enables terminals after its first ready status without reload", async ({ page }) => {

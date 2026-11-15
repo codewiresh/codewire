@@ -212,7 +212,8 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     // A starting Sandbox says one thing: the step list, with no creation
     // notice above it (#3772).
     await expect(page.getByRole("region", { name: "Starting your Sandbox", exact: true })).toBeVisible();
-    await expect(page.locator("[data-sandbox-creation-notice]")).toBeHidden();
+    // Create adds no alert above the list (the owner, 2026-11-14).
+    await expect(page.getByText("Sandbox creation started.", { exact: true })).toHaveCount(0);
     // The rest of this journey starts from the Sandboxes list.
     await page.goto(`${ssrUrl}/${slug}/`);
     // The live sidebar, with this Sandbox in its rail, keeps its marks on the
@@ -667,6 +668,8 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     const beforeStartDeadline = await sourceDeletionDeadline();
     await page.getByRole("button", { name: "Start", exact: true }).click();
     await expect(page).toHaveURL(`${ssrUrl}${filteredDetailPath}&message=environment-started`);
+    // Start leads into the step list and adds no alert of its own.
+    await expect(page.getByText("Sandbox start requested.", { exact: true })).toHaveCount(0);
     await waitForEnvironmentState(environmentId, ["running"], 300_000);
     await expect(page.locator("[data-sandbox-state]")).toContainText(/running/i, { timeout: 30_000 });
     await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled({ timeout: 300_000 });

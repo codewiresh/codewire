@@ -30,11 +30,12 @@ async function starting(page: Page) {
       const section = document.querySelector("[data-setup-progress]");
       if (!section) return;
       section.setAttribute("data-setup-starting", "");
+      section.setAttribute("data-setup-since", "2026-10-06T10:00:00.000Z");
       observer.disconnect();
     }).observe(document, { childList: true, subtree: true });
   });
 }
-const status = (page: Page, detail: Record<string, boolean>) => page.evaluate(([environmentId, value]) =>
+const status = (page: Page, detail: Record<string, unknown>) => page.evaluate(([environmentId, value]) =>
   document.dispatchEvent(new CustomEvent("codewire:sandbox-status", { detail: { environmentId, ...value } })), [environment, detail] as const);
 
 async function streams(page: Page, answers: string[]) {
@@ -93,8 +94,11 @@ test("a first start shows one starting row, never a start phase, then setup unde
   await starting(page);
   const resumes = await streams(page, [
     frame(1, { phase: "create_claim", status: "started", label: "Claiming workspace" })
-      + frame(2, { phase: "pod_scheduled", status: "completed", label: "Workspace pod scheduled", durationMs: 500 })
-      + frame(3, { phase: "health_check", status: "started", label: "Checking sidecar readiness" }),
+      + frame(2, { phase: "lifecycle_transition", status: "completed", label: "state transition pending -> creating" })
+      + frame(3, { phase: "pod_scheduled", status: "completed", label: "Workspace pod scheduled", durationMs: 500 })
+      + frame(4, { phase: "lifecycle_checkpoint", status: "completed", label: "started timestamp recorded" })
+      + frame(5, { phase: "publish_setup", status: "completed", label: "Starting setup" })
+      + frame(6, { phase: "health_check", status: "started", label: "Checking sidecar readiness" }),
   ]);
   await page.goto(fixtureUrl());
   const setup = page.getByRole("region", { name: "Starting your Sandbox" });
@@ -107,13 +111,17 @@ test("a first start shows one starting row, never a start phase, then setup unde
   const request = page.waitForRequest((candidate) => candidate.url().includes("/_events/setup-progress"));
   await status(page, { starting: true, setupComplete: false });
   // It asks only for this start's run, so an earlier, ended run never shows.
-  expect(new URL((await request).url()).search).toBe("?run=next");
+  // with the page's render time, so a run that ended since is still shown.
+  expect(new URL((await request).url()).search).toBe("?run=next&since=2026-10-06T10%3A00%3A00.000Z");
   await expect(stages).toHaveText([/^Starting the Sandbox/, /^Checking sidecar readiness/]);
   await expect(stages.nth(0)).toHaveAttribute("data-state", "completed");
   await expect(stages.nth(1)).toHaveAttribute("data-state", "running");
   await expect(setup.locator(".cw-setup-group")).toHaveText("Setting up your project");
-  await expect(setup).not.toContainText("Claiming workspace");
-  await expect(setup).not.toContainText("Workspace pod scheduled");
+  // Only project-setup phases become steps; start, lifecycle and checkpoint
+  // marks never do, and never finish the starting row early.
+  for (const text of ["Claiming workspace", "Workspace pod scheduled", "state transition", "started timestamp recorded", "Starting setup"]) {
+    await expect(setup).not.toContainText(text);
+  }
 });
 
 test("a restart shows the starting row, replays no earlier run, and closes once running", async ({ page }) => {
@@ -131,6 +139,24 @@ test("a restart shows the starting row, replays no earlier run, and closes once 
   await expect(setup).toBeHidden();
   expect(resumes).toHaveLength(0);
   await expect(page.getByText("an earlier run")).toHaveCount(0);
+});
+
+test("a running Sandbox whose setup failed on an earlier start shows that failure", async ({ page }) => {
+  await starting(page);
+  // This start's stream has nothing: the failure belongs to an earlier run.
+  await streams(page, [""]);
+  await page.goto(fixtureUrl());
+  const setup = page.getByRole("region", { name: "Starting your Sandbox" });
+  await status(page, { starting: true, setupComplete: false });
+  await status(page, { running: true, setupComplete: false, notice: {
+    kind: "setup", tone: "danger", text: "Setup failed: Running install command: exited 1",
+    action: "", label: "", dismissible: false, graphic: "" } });
+  await expect(setup.getByRole("alert")).toHaveText("Setup failed: Running install command: exited 1");
+  await expect(setup.locator("[data-setup-status]")).toHaveText("Setup stopped.");
+  const stages = setup.locator("[data-setup-stages] > .cw-setup-stage");
+  await expect(stages.nth(0)).toHaveAttribute("data-state", "completed");
+  // The failure keeps the list on screen; it does not close as setup would.
+  await expect(setup).toBeVisible();
 });
 
 test("a failed stage is announced and stream text is never markup", async ({ page }) => {
