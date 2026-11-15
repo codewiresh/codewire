@@ -1820,6 +1820,10 @@ run_paths_case runtime_dev_invitee pull_request refs/pull/1520/head false \
   scripts/runtime/dev/provision-dev-invitee-user.sh \
   scripts/runtime/dev/invitations-journey.sh \
   scripts/runtime/tests/test-provision-dev-invitee-user.sh
+run_paths_case runtime_dev_scratch_account pull_request refs/pull/4541/head false \
+  'policy dev_smoke_script_tests security security_dev_smoke_auth security_js' \
+  scripts/runtime/dev/provision-dev-scratch-account.sh \
+  scripts/runtime/tests/test-provision-dev-scratch-account.sh
 run_paths_case runtime_prod_auth pull_request refs/pull/1519/head false \
   'policy dev_smoke_script_tests security security_dev_smoke_auth security_js' \
   scripts/runtime/prod/provision-prod-smoke-user.sh \

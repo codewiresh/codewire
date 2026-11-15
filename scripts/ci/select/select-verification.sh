@@ -1977,6 +1977,7 @@ if [ "$event_selected" = false ]; then
         ;;
       scripts/runtime/dev/provision-dev-smoke-user.sh|\
       scripts/runtime/dev/provision-dev-invitee-user.sh|\
+      scripts/runtime/dev/provision-dev-scratch-account.sh|\
       scripts/runtime/dev/invitations-journey.sh|\
       scripts/runtime/dev/make-dev-acceptance-unlimited.sh|\
       scripts/runtime/dev/smoke-dev-commodity.sh|\
@@ -2009,6 +2010,7 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/prod/with-prod-smoke-auth.sh|\
       scripts/runtime/tests/test-provision-dev-smoke-user.sh|\
       scripts/runtime/tests/test-provision-dev-invitee-user.sh|\
+      scripts/runtime/tests/test-provision-dev-scratch-account.sh|\
       scripts/runtime/tests/test-make-dev-acceptance-unlimited.sh|\
       scripts/runtime/tests/test-provision-prod-smoke-user.sh|\
       scripts/runtime/tests/test-with-prod-smoke-auth.sh|\
@@ -2057,6 +2059,8 @@ if [ "$event_selected" = false ]; then
           scripts/runtime/dev/provision-dev-smoke-user.sh|\
           scripts/runtime/dev/provision-dev-invitee-user.sh|\
           scripts/runtime/tests/test-provision-dev-invitee-user.sh|\
+          scripts/runtime/dev/provision-dev-scratch-account.sh|\
+          scripts/runtime/tests/test-provision-dev-scratch-account.sh|\
           scripts/runtime/dev/with-dev-smoke-auth.sh|\
           scripts/runtime/prod/provision-prod-smoke-user.sh|\
           scripts/runtime/prod/with-prod-smoke-auth.sh|\
