@@ -79,6 +79,13 @@ const designFixtureProjects = [
 ];
 
 export default defineConfig({
+  // Under CI Playwright records the pull request's diff by itself, and to do
+  // so runs `git fetch origin <base> --depth=1`. That makes the job's whole
+  // checkout shallow at the base commit, and every later step that asks git
+  // for the merge base finds none: the docs date check failed that way for
+  // every pull request that ran the web and the docs lanes together (#4835,
+  // #4818, 2026-11-15). Nothing here reads that record.
+  captureGitInfo: { commit: false, diff: false },
   testDir: repoRoot,
   globalSetup: skipSharedSetup ? undefined : path.join(dashboardDir, "e2e/global-setup.ts"),
   fullyParallel: false,

@@ -178,6 +178,10 @@ grep -Fq 'const hostGpuIsolation = ["--disable-accelerated-video-decode", "--dis
 grep -Fq 'test("the browser draws without a host GPU driver"' "$ROOT/apps/dashboard/e2e/ssr-dashboard.design-system.ssr.ts" ||
   fail 'the host GPU isolation runtime check is missing'
 # Test browsers never carry the desktop session's display variables (#3019).
+# Playwright must not fetch the pull request's base at depth 1 under CI: that
+# leaves the job's checkout shallow, and later steps find no merge base (#4835).
+grep -Fq '  captureGitInfo: { commit: false, diff: false },' "$PLAYWRIGHT_CONFIG" ||
+  fail 'the Playwright config no longer turns off its own git capture, which makes the CI checkout shallow'
 grep -Fq 'const desktopVariables = new Set(["DISPLAY", "WAYLAND_DISPLAY"]);' "$PLAYWRIGHT_CONFIG" &&
   grep -Fq '      env: browserEnvironment,' "$PLAYWRIGHT_CONFIG" ||
   fail 'dashboard browser inherits the desktop display'
