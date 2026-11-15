@@ -87,8 +87,16 @@ grep -Fq 'needs to be updated but --locked was passed' "$work/out" ||
   fail 'the failure did not show cargo'\''s reason'
 rm "$work/stale"
 
+# By default the push check compiles nothing: a desktop change is formatted,
+# its lock is read, and the locked check is left to pull-request CI.
 push_check crates/codewire-desktop/src/main.rs ||
   { cat "$work/out" >&2; fail 'a desktop change failed with a fresh lock'; }
+grep -qx desktop-lock "$work/ran" || fail 'a desktop change did not read the desktop lock'
+if grep -qx desktop-check "$work/ran"; then fail 'a desktop change compiled the desktop in the push check'; fi
+grep -Fq 'left to pull-request CI: desktop-check' "$work/out" || fail 'the push did not say the desktop check is left to CI'
+# Asked to compile, it runs the locked check and does not read the lock twice.
+PREFLIGHT_PUSH_COMPILES=1 push_check crates/codewire-desktop/src/main.rs ||
+  { cat "$work/out" >&2; fail 'a compiling desktop change failed with a fresh lock'; }
 grep -qx desktop-check "$work/ran" || fail 'a desktop change did not run the desktop check'
 if grep -qx desktop-lock "$work/ran"; then
   fail 'a desktop change read the lock again beside its own locked check'

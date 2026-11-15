@@ -122,9 +122,19 @@ printf '// change\n' >> "$repo/crates/codewire-cli/src/lib.rs"
 git -C "$repo" -c commit.gpgsign=false commit -qam 'feat: change'
 output="$(push HEAD:refs/heads/feature)" || fail "a branch push failed: $output"
 assert_contains branch_push "$(cat "$log")" 'cargo fmt'
-assert_contains branch_push "$(cat "$log")" 'cargo clippy'
+# The push check is the fast one: it compiles nothing. Clippy and the unit
+# tests are pull-request CI's, and the push says so.
+assert_not_contains branch_push_fast "$(cat "$log")" 'cargo clippy'
+assert_not_contains branch_push_fast "$(cat "$log")" 'cargo test'
+assert_contains branch_push_fast "$output" 'left to pull-request CI: rust-clippy,rust-unit-tests-lib (PREFLIGHT_PUSH_COMPILES=1 runs them here)'
 output="$(push HEAD:refs/heads/feature-again)" || fail "a repeat push failed: $output"
 assert_contains repeat_push "$(cat "$log")" 'cargo fmt'
+# Asked to, it runs them here as well, and a failure there refuses the push.
+export PREFLIGHT_PUSH_COMPILES=1
+output="$(push HEAD:refs/heads/feature-compiled)" || fail "a compiling branch push failed: $output"
+assert_contains compiled_push "$(cat "$log")" 'cargo clippy'
+assert_contains compiled_push "$(cat "$log")" 'cargo test'
+assert_not_contains compiled_push "$output" 'left to pull-request CI'
 # A failing push check refuses the push.
 if output="$(PREFLIGHT_TEST_CARGO_FAIL=clippy push HEAD:refs/heads/broken)"; then
   fail 'a failing push check let the push through'
@@ -231,7 +241,8 @@ assert_contains all_failure "$output" 'preflight: Rust verification FAILED'
 # Preflight moves itself into the workstation CPU slice (#4126): from outside
 # it, never when already inside, never in CI, never for --explain, and a
 # failing helper leaves the run going.
-on_workstation() { env -u CI -u GITHUB_ACTIONS "$@"; }
+# Also outside any build slot this test itself may run in.
+on_workstation() { env -u CI -u GITHUB_ACTIONS -u CODEWIRE_CPU_SLOT "$@"; }
 : > "$cpu_log"
 output="$(cd "$repo" && on_workstation scripts/dev/preflight.sh --all 2>&1)" ||
   fail "preflight outside the slice failed: $output"
@@ -250,6 +261,8 @@ output="$(cd "$repo" && CPU_STUB_EXIT=1 on_workstation scripts/dev/preflight.sh 
   fail "a failing CPU helper failed preflight: $output"
 assert_contains slice_failure "$output" 'preflight: codewire-cpu run failed; running outside cwvmtest.slice'
 
+# The cases below are about a push that compiles (PREFLIGHT_PUSH_COMPILES=1,
+# set above and kept): its heavy steps and the lock or build slot they take.
 # Heavy push checks queue behind another heavy preflight on the workstation
 # (#4215): a push with a Rust change says whom it waits for, repeats it with
 # the time waited, and at its bound runs without the lock instead of failing;
@@ -285,6 +298,33 @@ if command -v flock >/dev/null 2>&1; then
   output="$(on_workstation git -C "$repo" push -q origin HEAD:refs/heads/unlocked 2>&1)" ||
     fail "a heavy push failed once the lock was free: $output"
   assert_contains lock_holder "$(cat "$PREFLIGHT_LOCK_FILE.holder")" 'push check rust-clippy in '
+
+  # Where the workstation has build slots, a heavy step takes a slot and never
+  # the lock: a push no longer waits behind one slow push check. The stub
+  # offers `build` and runs the command it is given; the lock is held again.
+  ( exec 9>>"$PREFLIGHT_LOCK_FILE"; flock 9; exec sleep 120 ) &
+  lock_holder=$!
+  for _ in $(seq 1 600); do flock -n "$PREFLIGHT_LOCK_FILE" true 2>/dev/null || break; sleep 0.1; done
+  cp "$TMP/bin/codewire-cpu" "$TMP/codewire-cpu.without-build"
+  cat > "$TMP/bin/codewire-cpu" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "$cpu_log"
+case "\${1:-}" in
+  build) shift; [ "\${1:-}" != -- ] || shift; CODEWIRE_CPU_SLOT=1 exec "\$@" ;;
+  '') echo 'usage: workstation-cpu.sh status | apply | run PID... | build -- COMMAND... | reset' >&2; exit 2 ;;
+esac
+exit "\${CPU_STUB_EXIT:-0}"
+EOF
+  : > "$cpu_log"
+  output="$(PREFLIGHT_LOCK_WAIT_SECONDS=30 PREFLIGHT_LOCK_REPORT_SECONDS=1 \
+    on_workstation git -C "$repo" push -q origin HEAD:refs/heads/slotted 2>&1)" ||
+    fail "a heavy push failed with build slots: $output"
+  assert_not_contains slot_no_lock "$output" 'is waiting for'
+  grep -q '^build -- cargo clippy ' "$cpu_log" ||
+    fail "a heavy push step did not run in a build slot: $(cat "$cpu_log")"
+  kill "$lock_holder" 2>/dev/null || true
+  wait "$lock_holder" 2>/dev/null || true
+  mv "$TMP/codewire-cpu.without-build" "$TMP/bin/codewire-cpu"
 else
   printf '[test-pre-push-worktree] note: no flock here; workstation lock cases skipped\n'
 fi
@@ -370,16 +410,89 @@ if command -v flock >/dev/null 2>&1; then
   build_slot sh -c 'echo ran' >"$TMP/fourth.out" 2>"$TMP/fourth.err" &
   fourth=$!
   for _ in $(seq 1 600); do # a hang guard, not a time budget
-    grep -q 'waited 0s for one of 3 build slots (1: pid ' "$TMP/fourth.err" && break
+    grep -Eq 'waited [0-9]+s for one of 3 build slots, 1 in line \(1: pid ' "$TMP/fourth.err" 2>/dev/null && break
     sleep 0.1
   done
-  grep -q 'waited 0s for one of 3 build slots (1: pid ' "$TMP/fourth.err" ||
+  # Any number of seconds: on a loaded runner the first report can come at 1s.
+  grep -Eq 'waited [0-9]+s for one of 3 build slots, 1 in line \(1: pid ' "$TMP/fourth.err" ||
     fail "a fourth build did not say whom it waits for: $(cat "$TMP/fourth.err")"
   [ ! -s "$TMP/fourth.out" ] || fail 'a fourth build ran beside three'
   kill -TERM "${holders[1]}"
   wait "${holders[1]}" 2>/dev/null || true
   wait "$fourth" || fail 'the waiting build failed once a slot was free'
   [ "$(cat "$TMP/fourth.out")" = ran ] || fail 'the waiting build did not run in the freed slot'
+  # Waiters are served in arrival order, and --first goes to the head: with
+  # two slots still held and the third taken again, a second waiter that
+  # arrives later runs after the first, and a --first waiter before both.
+  env -u CODEWIRE_CPU_SLOT CODEWIRE_CPU_SLOT_DIR="$slots" CODEWIRE_CPU_SLOT_ONLY=1 \
+    "$ROOT/scripts/dev/workstation-cpu.sh" build -- sleep 300 &
+  holders[1]=$!
+  for _ in $(seq 1 600); do # a hang guard, not a time budget
+    [ "$(cat "$slots"/[123].holder | grep -c 'sleep 300')" -eq 3 ] && ! flock -n "$slots/1.lock" true &&
+      ! flock -n "$slots/2.lock" true && ! flock -n "$slots/3.lock" true && break
+    sleep 0.1
+  done
+  : >"$TMP/order"
+  build_slot sh -c "echo early >>'$TMP/order'" &
+  early=$!
+  for _ in $(seq 1 600); do [ "$(find "$slots/queue" -type f | wc -l)" -eq 1 ] && break; sleep 0.1; done
+  build_slot sh -c "echo late >>'$TMP/order'" &
+  late=$!
+  for _ in $(seq 1 600); do [ "$(find "$slots/queue" -type f | wc -l)" -eq 2 ] && break; sleep 0.1; done
+  env -u CODEWIRE_CPU_SLOT CODEWIRE_CPU_SLOT_DIR="$slots" CODEWIRE_CPU_SLOT_ONLY=1 \
+    "$ROOT/scripts/dev/workstation-cpu.sh" build --first -- sh -c "echo first >>'$TMP/order'" &
+  urgent=$!
+  for _ in $(seq 1 600); do [ "$(find "$slots/queue" -type f | wc -l)" -eq 3 ] && break; sleep 0.1; done
+  [ ! -s "$TMP/order" ] || fail "a waiter ran while every slot was held: $(cat "$TMP/order")"
+  kill -TERM "${holders[1]}"
+  wait "${holders[1]}" 2>/dev/null || true
+  wait "$urgent" "$early" "$late" || fail 'a queued build failed'
+  [ "$(tr '\n' ' ' <"$TMP/order")" = 'first early late ' ] ||
+    fail "builds were not served --first, then in arrival order: $(tr '\n' ' ' <"$TMP/order")"
+  [ "$(find "$slots/queue" -type f | wc -l)" -eq 0 ] || fail 'a served build left its ticket in the queue'
+  # A head that can never take its turn must not stop every build. A waiter
+  # killed outright leaves a ticket, and so does one whose process ID was
+  # reused (this test's own ID, with another start time): the next waiter
+  # removes both and is served.
+  : >"$slots/queue/0000000000000000001-999999999"
+  echo 1 >"$slots/queue/0000000000000000002-$$"
+  [ "$(build_slot echo served)" = served ] || fail 'a dead waiter'"'"'s ticket blocked the queue'
+  [ "$(find "$slots/queue" -type f | wc -l)" -eq 0 ] || fail 'a dead or reused waiter'"'"'s ticket was kept'
+  # With every slot held: a waiter told to stop takes its ticket with it; a
+  # stopped waiter (Ctrl-Z) is passed over; a waiter whose ticket and queue
+  # were cleared away takes a new ticket and is still served.
+  # Started as a command, not through a function: in the background a function
+  # is a subshell, and a signal sent to it would not reach the build.
+  slot_waiter=(env -u CODEWIRE_CPU_SLOT CODEWIRE_CPU_SLOT_DIR="$slots" CODEWIRE_CPU_SLOT_ONLY=1
+    "$ROOT/scripts/dev/workstation-cpu.sh" build --)
+  in_line() { [ "$(find "$slots/queue" -type f 2>/dev/null | wc -l)" -eq "$1" ]; }
+  until_true() { for _ in $(seq 1 600); do "$@" && return 0; sleep 0.1; done; return 1; } # a hang guard
+  "${slot_waiter[@]}" sleep 300 &
+  holders[1]=$!
+  until_true eval '! flock -n "$slots/1.lock" true && ! flock -n "$slots/2.lock" true && ! flock -n "$slots/3.lock" true' ||
+    fail 'the three slots were not all held again'
+  "${slot_waiter[@]}" true &
+  quitter=$!
+  until_true in_line 1 || fail 'a waiter took no ticket'
+  kill -TERM "$quitter"
+  wait "$quitter" 2>/dev/null || true
+  until_true in_line 0 || fail 'a waiter told to stop left its ticket in the line'
+  "${slot_waiter[@]}" true &
+  stopped=$!
+  until_true in_line 1 || fail 'the waiter to be stopped took no ticket'
+  kill -STOP "$stopped"
+  "${slot_waiter[@]}" sh -c "echo behind >'$TMP/behind'" &
+  behind=$!
+  until_true in_line 2 || fail 'the waiter behind the stopped one took no ticket'
+  rm -rf "$slots/queue"
+  until_true in_line 1 || fail 'a waiter whose ticket was cleared away took no new one'
+  kill -TERM "${holders[1]}"
+  wait "${holders[1]}" 2>/dev/null || true
+  wait "$behind" || fail 'the waiter behind a stopped head failed'
+  [ "$(cat "$TMP/behind")" = behind ] || fail 'a stopped head blocked the waiter behind it'
+  kill -CONT "$stopped"
+  wait "$stopped" || fail 'a continued waiter was not served'
+  in_line 0 || fail 'a served waiter left its ticket in the line'
   kill -TERM "${holders[0]}" "${holders[2]}"
   wait "${holders[0]}" "${holders[2]}" 2>/dev/null || true
   for _ in $(seq 1 600); do # a hang guard, not a time budget

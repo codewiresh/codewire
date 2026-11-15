@@ -235,9 +235,12 @@ and the environment its reason names.
 After focused checks and diff review, commit the credible candidate and push
 it. The pre-push hook (`scripts/dev/pre-push.sh`, run by the shared dispatcher)
 runs `scripts/dev/preflight.sh --for-push` on every branch push: the
-environment precheck, `cargo fmt --check`, clippy and unit tests for the
-changed crates, and quick checks for changed file types (ShellCheck on changed
-scripts, proto lint and breaking diff, dashboard typecheck). It runs no
+environment precheck, `cargo fmt --check`, the desktop lock, and quick checks
+for changed file types (ShellCheck on changed scripts, proto lint and breaking
+diff, dashboard typecheck). It compiles nothing: clippy and the unit tests run
+in pull-request CI, on the runners, for every Rust change, and CI is the merge
+gate. `PREFLIGHT_PUSH_COMPILES=1 git push …` runs clippy and the changed
+crates' unit tests locally as well, in a build slot. It runs no
 verification family and records only its timings: each step, and the whole
 check as `total`, appends a line to `~/.cache/codewire-preflight-times.tsv`
 with the time, the step, pass or fail, the seconds it waited for the

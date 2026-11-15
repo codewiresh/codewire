@@ -21,9 +21,9 @@ cd "$ROOT"
 
 log() { printf '[push-check] %s\n' "$*"; }
 ran() { printf '%s\n' "$1" >>"$RAN"; }
-# Compiles and test runs wait their turn behind any other heavy preflight on
-# this workstation, so concurrent pushes queue instead of starving each
-# other's timing tests (#4215). Light checks never wait.
+# Where a workstation has no build slots, compiles and test runs wait their
+# turn behind any other heavy preflight, so concurrent pushes queue instead of
+# starving each other's timing tests (#4215). Light checks never wait.
 # shellcheck source=scripts/dev/preflight-lock.sh
 . "$ROOT/scripts/dev/preflight-lock.sh"
 
@@ -38,9 +38,12 @@ timed() {
     >>"$PREFLIGHT_TIMES_FILE"; } 2>/dev/null || true
 }
 
-# A compile or test run also takes one of the workstation's build slots, with
-# every other session's builds (cpu-slice.sh). Its wait for the slot counts as
-# run time here; codewire-cpu logs it apart, beside the slots.
+# A compile or test run takes one of the workstation's build slots, with every
+# other session's builds (cpu-slice.sh), and then needs no lock of its own:
+# the slots already bound how many heavy jobs run. The single lock held every
+# push behind one slow check (2026-11-15: waits of 300 to 601 s, where 600 is
+# the bound at which a push gave up waiting). A step's wait for its slot
+# counts as run time here; codewire-cpu logs it apart, beside the slots.
 # shellcheck source=scripts/dev/cpu-slice.sh
 . "$ROOT/scripts/dev/cpu-slice.sh"
 
@@ -50,8 +53,10 @@ step() {
   CPU_SLOT_PREFIX=()
   case "$name" in
     rust-clippy*|rust-unit-tests-*|desktop-check)
-      preflight_lock_acquire "push check $name" || exit 1
       cpu_slot_prefix
+      if [ "${#CPU_SLOT_PREFIX[@]}" -eq 0 ] && [ -z "${CODEWIRE_CPU_SLOT:-}" ]; then
+        preflight_lock_acquire "push check $name" || exit 1
+      fi
       ;;
   esac
   waited=$((SECONDS - started))
@@ -149,16 +154,29 @@ done
 if [ "${#packages[@]}" -gt 0 ] || [ "$rust_workspace" = true ]; then
   step rust-fmt cargo fmt --all --check
 fi
+# A push is never a long gate, and the push check is the fast one: it runs
+# what takes seconds. Clippy and the unit tests compile, and on a workstation
+# that many sessions share a compile waits its turn: on 2026-11-15 a step
+# waited 26 minutes at the median for a build slot and then ran for 8 to 11.
+# Pull-request CI runs both on the runners for every Rust change
+# (run-rust-checks.sh: clippy over the whole workspace; the Rust shards: the
+# changed packages' tests), and it is the merge gate. PREFLIGHT_PUSH_COMPILES=1
+# runs them here as well, for a change you want proven before it leaves.
+compiles="${PREFLIGHT_PUSH_COMPILES:-0}"
+left_to_ci=()
+compile_step() {
+  if [ "$compiles" = 1 ]; then step "$@"; else left_to_ci+=("$1"); fi
+}
 if [ "$rust_workspace" = true ]; then
-  step rust-clippy-workspace cargo clippy --locked --workspace --all-targets -- -D warnings
+  compile_step rust-clippy-workspace cargo clippy --locked --workspace --all-targets -- -D warnings
 elif [ "${#packages[@]}" -gt 0 ]; then
-  step rust-clippy cargo clippy --locked "${packages[@]}" --all-targets -- -D warnings
+  compile_step rust-clippy cargo clippy --locked "${packages[@]}" --all-targets -- -D warnings
 fi
 if [ "${#lib_packages[@]}" -gt 0 ]; then
-  step rust-unit-tests-lib cargo test --locked "${lib_packages[@]}" --lib
+  compile_step rust-unit-tests-lib cargo test --locked "${lib_packages[@]}" --lib
 fi
 if [ "${#bin_packages[@]}" -gt 0 ]; then
-  step rust-unit-tests-bin cargo test --locked "${bin_packages[@]}" --bins
+  compile_step rust-unit-tests-bin cargo test --locked "${bin_packages[@]}" --bins
 fi
 desktop_manifest=crates/codewire-desktop/Cargo.toml
 # The desktop is its own workspace with its own lock, and it uses workspace
@@ -171,7 +189,10 @@ desktop_lock() {
 }
 if [ "$detached_desktop" = true ]; then
   step desktop-fmt cargo fmt --manifest-path "$desktop_manifest" --check
-  step desktop-check cargo check --locked --manifest-path "$desktop_manifest"
+  compile_step desktop-check cargo check --locked --manifest-path "$desktop_manifest"
+  # The locked check reads the desktop's lock; without it the lock is still
+  # read here, so a stale one fails the push, in seconds.
+  [ "$compiles" = 1 ] || step desktop-lock desktop_lock
 elif [ "${#packages[@]}" -gt 0 ] || [ "$rust_workspace" = true ]; then
   step desktop-lock desktop_lock
 fi
@@ -229,4 +250,7 @@ if [ "$dashboard_changed" = true ]; then
 fi
 
 timed total pass "$waited_total" "$((SECONDS - waited_total))"
+if [ "${#left_to_ci[@]}" -gt 0 ]; then
+  log "left to pull-request CI: $(IFS=,; echo "${left_to_ci[*]}") (PREFLIGHT_PUSH_COMPILES=1 runs them here)"
+fi
 log "passed: $(paste -sd, "$RAN")"

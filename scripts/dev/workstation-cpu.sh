@@ -7,9 +7,11 @@
 #   workstation-cpu.sh apply       set the standing limits below
 #   workstation-cpu.sh run PID...  move processes, and every child they start
 #                                  later, into cwvmtest.slice, then apply
-#   workstation-cpu.sh build -- COMMAND...
-#                                  wait for a build slot, then run COMMAND in
-#                                  cwvmtest.slice; for compiles and test runs
+#   workstation-cpu.sh build [--first] -- COMMAND...
+#                                  wait in line for a build slot, then run
+#                                  COMMAND in cwvmtest.slice; for compiles and
+#                                  test runs. --first goes to the head of the
+#                                  line: for a check a merge or a fix waits on
 #   workstation-cpu.sh reset       remove every limit this script set
 #
 # A weight shares CPU only when cores are contended; a ceiling caps a group
@@ -49,7 +51,8 @@ readonly BUILD_SLOTS=3
 BUILD_SLOT_DIR="${CODEWIRE_CPU_SLOT_DIR:-$HOME/.cache/codewire-build-slots}"
 
 usage() {
-  echo "usage: workstation-cpu.sh status | apply | run PID... | build -- COMMAND... | reset" >&2
+  # cpu-slice.sh finds `build` by the words "build -- COMMAND"; keep them.
+  echo "usage: workstation-cpu.sh status | apply | run PID... | build -- COMMAND... | build --first -- COMMAND... | reset" >&2
   exit 2
 }
 
@@ -185,31 +188,87 @@ slot_holders() {
   echo "$out"
 }
 
-# build COMMAND...: hold one build slot for COMMAND and run it in the slice.
+# process_start PID prints the process's state and its start time (fields 3
+# and 22 of /proc/PID/stat, read past the command name, which may hold spaces
+# and brackets), or nothing when there is no such process.
+process_start() {
+  local stat
+  stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
+  # shellcheck disable=SC2086 # split the fields after the command name
+  set -- ${stat##*) }
+  echo "$1 ${20}"
+}
+
+# queue_head prints the ticket of the waiter whose turn it is: the oldest
+# ticket whose waiter can take a slot. A ticket is named for its arrival time
+# and its waiter's process and holds that process's start time, so the names
+# sort in arrival order and a reused process ID does not pass for the waiter.
+# Only the head may take a slot, so a head that can never take its turn would
+# stop every build on the workstation:
+# - a ticket whose waiter has gone (killed, or its ID reused) is removed here;
+# - a stopped waiter (Ctrl-Z) keeps its ticket and is passed over until it
+#   continues.
+queue_head() {
+  local ticket state start
+  for ticket in "$BUILD_SLOT_DIR"/queue/*; do
+    [ -e "$ticket" ] || continue
+    read -r state start < <(process_start "${ticket##*-}") || true
+    if [ -z "${start:-}" ] || [ "$start" != "$(cat "$ticket" 2>/dev/null)" ]; then
+      rm -f "$ticket"
+      continue
+    fi
+    [ "$state" != T ] || continue
+    echo "$ticket"
+    return
+  done
+}
+
+# build [--first] COMMAND...: hold one build slot for COMMAND and run it in
+# the slice. Waiters are served in arrival order: on 2026-11-15, with 36 jobs
+# waiting for 3 slots and each one racing for a freed slot, one job waited 40
+# minutes while later arrivals ran. --first joins at the head of the line.
 # It waits as long as it takes and says every minute whom it waits for; the
 # caller's own timeout bounds it. The slot is this process's lock, so it is
 # free again however this process ends, and COMMAND does not inherit it: a
 # daemon COMMAND leaves behind (a compiler cache server) can't keep the slot.
 # A command started from inside a slot runs in that slot.
 build() {
+  local first=false
+  if [ "${1:-}" = --first ]; then first=true; shift; fi
   [ "${1:-}" != -- ] || shift
   [ "$#" -ge 1 ] || usage
   [ -z "${CODEWIRE_CPU_SLOT:-}" ] || exec "$@"
-  local slot fd started=$SECONDS waited=0 report=0 ran child status=0
-  mkdir -p "$BUILD_SLOT_DIR"
+  local slot fd ticket started=$SECONDS waited=0 report=0 ran child status=0
+  mkdir -p "$BUILD_SLOT_DIR/queue"
+  # 19 digits of arrival time, so tickets sort by it; --first sorts before all.
+  if $first; then ticket=0000000000000000000; else ticket="$(date +%s%N)"; fi
+  ticket="$BUILD_SLOT_DIR/queue/$ticket-$$"
+  # A waiter that is told to stop takes its ticket with it; one that is killed
+  # outright leaves it for queue_head to remove.
+  trap 'rm -f "$ticket"' EXIT
+  trap 'exit 143' TERM INT HUP
   while :; do
-    for slot in $(seq 1 "$BUILD_SLOTS"); do
-      exec {fd}>>"$BUILD_SLOT_DIR/$slot.lock"
-      ! flock -n "$fd" || break 2
-      exec {fd}>&-
-    done
+    # The queue, or this ticket, may have been cleared away while waiting.
+    if [ ! -e "$ticket" ]; then
+      mkdir -p "$BUILD_SLOT_DIR/queue"
+      process_start "$$" | cut -d' ' -f2 >"$ticket"
+    fi
+    if [ "$(queue_head)" = "$ticket" ]; then
+      for slot in $(seq 1 "$BUILD_SLOTS"); do
+        exec {fd}>>"$BUILD_SLOT_DIR/$slot.lock"
+        ! flock -n "$fd" || break 2
+        exec {fd}>&-
+      done
+    fi
     waited=$((SECONDS - started))
     if [ "$waited" -ge "$report" ]; then
-      echo "codewire-cpu: waited ${waited}s for one of $BUILD_SLOTS build slots ($(slot_holders))" >&2
+      echo "codewire-cpu: waited ${waited}s for one of $BUILD_SLOTS build slots, $(find "$BUILD_SLOT_DIR/queue" -type f 2>/dev/null | wc -l) in line ($(slot_holders))" >&2
       report=$((waited + 60))
     fi
     sleep 2
   done
+  rm -f "$ticket"
+  trap - EXIT TERM INT HUP
   waited=$((SECONDS - started))
   printf 'pid %s since %s in %s: %s\n' "$$" "$(date -u +%H:%M:%SZ)" "$(pwd -P)" "$*" \
     >"$BUILD_SLOT_DIR/$slot.holder"
@@ -288,6 +347,7 @@ status() {
       "$(ceiling "${paths[$i]}")" "$((before[i] * 100000 / (end - start)))%" "${labels[$i]}"
   done
   printf '\nbuild slots (%s): %s\n' "$BUILD_SLOTS" "$(slot_holders)"
+  printf 'waiting in line: %s\n' "$(find "$BUILD_SLOT_DIR/queue" -type f 2>/dev/null | wc -l)"
   label="$(outside_slots "$uid")"
   if [ -n "$label" ]; then
     printf 'heavy jobs outside a build slot (start them with `build --`):\n%s\n' "$label"
