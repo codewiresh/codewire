@@ -397,17 +397,26 @@ over a vsock port to the host, where the confined network worker
 (`cw __native-network-worker`, on `crates/codewire-netstack`) terminates the
 guest's TCP and DNS and has no dial authority of its own. The egress broker
 (`cw __native-egress-broker`, on `crates/codewire-egress-broker`) dials on the
-guest's behalf under the built-in `open` policy of
-`crates/codewire-egress-policy` (deny first; DNS on 53 and TCP to ports 22, 80
-and 443 of public addresses). Loopback, private, link-local and metadata
-ranges, the host's own interface addresses and the public address the host is
-seen from are always refused, with an immediate reset. There is no way to
-select another policy for a local VM today. Both processes run under Landlock
-and seccomp on Linux and under Seatbelt on macOS; losing either fails the
-environment closed (`error`), and a stop and start restores egress. Published
-ports listen on `127.0.0.1` only. A local VM joins Codewire Mesh only when a
-network is selected at creation; the host owns the Mesh identity and the VM
-sees only admitted streams for its declared ports.
+guest's behalf under the VM's selected network policy, from
+`crates/codewire-egress-policy`. The default is the built-in `open` (deny
+first; DNS on 53 and TCP to ports 22, 80 and 443 of public addresses).
+`cw create --local --policy REF` and `cw update ENV --policy REF` select
+another, built-in or named, and an edit to a selected policy applies to the
+running VMs that select it (#3378, #3386). Loopback, private, link-local and
+metadata ranges, the host's own interface addresses and the public address the
+host is seen from are always refused under every policy, with an immediate
+reset. Both processes run under Landlock and seccomp on Linux and under
+Seatbelt on macOS; losing either fails the environment closed (`error`), and a
+stop and start restores egress. Published ports listen on `127.0.0.1` only. A
+local VM joins Codewire Mesh only when a network is selected at creation; the
+host owns the Mesh identity and the VM sees only admitted streams for its
+declared ports.
+
+Target, not shipped (#3999): for an agent's provider hosts the broker hands
+the connection to a TLS front door, one process per VM, instead of dialling.
+The front door is confined to no filesystem, no new sockets and no process
+creation, and holds only the descriptors it inherits; Linux first, macOS to
+follow.
 
 A Mesh node is online only while it holds a live coordinator session that
 Mesh has heard from in the last 45 s. Every Mesh client pings every 15 s, so a
@@ -659,7 +668,8 @@ Egress admits the public Internet (the private, loopback, link-local and
 carrier-grade NAT ranges are excluded), cluster DNS, the ingress controller on
 80 and 443, STUN, the UDP relay and the confidential key broker where
 configured. There is no user-facing per-environment egress rule on the hosted
-platform. A local VM's egress is bounded by the `open` policy above.
+platform. A local VM's egress is bounded by its selected network policy,
+`open` by default, as above.
 Credential non-disclosure is not egress mediation: a sandbox can still open
 TCP 443 to a provider directly.
 

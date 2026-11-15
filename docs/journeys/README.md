@@ -23,6 +23,7 @@ runs the same commands and holds the result to the same standard.
 | [snapshots-and-forks.md](snapshots-and-forks.md) | Disk snapshots and forks: capture, list, inspect and remove a snapshot, and create sandboxes from it, in the cloud and on a local VM (#3046, #4370) |
 | [feedback.md](feedback.md) | Feedback (#4061): `cw feedback` signed in and anonymous, the stored row, the hourly limits and the admin page |
 | [sandbox-identity.md](sandbox-identity.md) | Sandbox identity (#4661): each organization's OIDC issuer, its keys and their rotation, and later the tokens sandboxes present to Kubernetes, OpenBao and cloud verifiers |
+| [network-and-egress.md](network-and-egress.md) | Network policies, refusals and agents through the front door (#3997): choosing what an environment may reach, the refusal log, and Claude Code and Codex with stock settings and no token inside. Written first; every step is not yet observed |
 
 ## What a journey file holds
 
