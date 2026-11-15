@@ -53,7 +53,9 @@ CLUSTER_ROLE_RULES = (
     '- apiGroups: - "" resources: - persistentvolumes verbs: - list '
     '- apiGroups: - storage.k8s.io resources: - storageclasses verbs: - get '
     '- apiGroups: - "" resources: - nodes verbs: - get - list '
-    '- apiGroups: - node.k8s.io resources: - runtimeclasses verbs: - get'
+    '- apiGroups: - node.k8s.io resources: - runtimeclasses verbs: - get '
+    # codewire#2238: the API servers' ready list, default/kubernetes only.
+    '- apiGroups: - discovery.k8s.io resourceNames: - kubernetes resources: - endpointslices verbs: - get'
 )
 # Every environment write, only in the shared Sandbox namespace.
 SANDBOX_ROLE_RULES = (
@@ -1509,6 +1511,16 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
             ("  - tokenreviews\n  verbs:\n  - create", "  - tokenreviews\n  - services\n  verbs:\n  - create"),
         ]:
             image_cache_rejected(f"cluster-wide {after.split()[-1]}", "ClusterRole", before, after, orchestration)
+        # codewire#2238: the API servers' ready list stays one named get.
+        # Rendered keys are sorted: resourceNames before resources.
+        endpoints = "  resourceNames:\n  - kubernetes\n  resources:\n  - endpointslices\n  verbs:\n  - get"
+        for name, after in [
+            ("list", endpoints + "\n  - list"),
+            ("watch", endpoints + "\n  - watch"),
+            ("another name", endpoints.replace("  - kubernetes\n", "  - kubernetes\n  - other\n")),
+            ("no name", "  resources:\n  - endpointslices\n  verbs:\n  - get"),
+        ]:
+            image_cache_rejected(f"cluster-wide EndpointSlice {name}", "ClusterRole", endpoints, after, orchestration)
         for before, after in [
             ("  - sandboxes\n  verbs:\n  - get", "  - sandboxes\n  verbs:\n  - create\n  - get"),
             ("  - pods\n  verbs:\n  - get\n  - list\n  - delete", "  - pods\n  verbs:\n  - get\n  - list\n  - delete\n  - create"),

@@ -2415,6 +2415,7 @@ dependencies = [
  "chrono",
  "codewire-daemon-proto",
  "codewire-proto",
+ "codewire-tls",
  "codewire-workspace-hack",
  "codewire-workspace-image",
  "connectrpc",

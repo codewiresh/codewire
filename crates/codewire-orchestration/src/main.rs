@@ -574,8 +574,16 @@ async fn main() -> anyhow::Result<()> {
     // mirrors the Go worker with a nil sandbox backend: setup health
     // checks pass and workspace execs fail warn-only.
     // Span-free connections (#3581): a request that opens a connection
-    // must not keep its span open for the connection's life.
-    let kube = match codewire_server_core::span_free::kube_client_default().await {
+    // must not keep its span open for the connection's life. New
+    // connections prefer the near API servers when configured (#2238); an
+    // invalid list stops startup rather than silently dropping the client.
+    let preferred_api_servers =
+        codewire_server_core::kube_api_dial::PreferredApiServers::from_env()?;
+    let kube = match codewire_server_core::span_free::kube_client_default_preferring(
+        preferred_api_servers,
+    )
+    .await
+    {
         Ok(c) => Some(c),
         Err(e) => {
             tracing::warn!(error = %e, "kube client unavailable; workspace exec disabled");

@@ -89,6 +89,8 @@ opentelemetry-otlp = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The near-API-server dialer's TLS tests serve a synthetic PKI (kube_api_dial).
+codewire-tls = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 # Connect mount integration tests: the generated probe-service trait/client

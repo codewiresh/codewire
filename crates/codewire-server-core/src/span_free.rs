@@ -9,6 +9,9 @@
 //! that is until the process exits, so the trace is never exported and the
 //! span chain stays in memory. [`DetachedExecutor`] spawns without the span.
 
+#[cfg(feature = "kubernetes-identity")]
+use crate::kube_api_dial::{PreferredApiServers, PreferredDialer};
+
 /// A hyper and tonic executor whose tasks start with no current span.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DetachedExecutor;
@@ -31,6 +34,33 @@ where
 /// token kubeconfigs have none.
 #[cfg(feature = "kubernetes-identity")]
 pub fn kube_client(config: kube::Config) -> kube::Result<kube::Client> {
+    kube_client_dialing(config, PreferredDialer::new(PreferredApiServers::default()))
+}
+
+/// [`kube_client`] for the ambient configuration whose new connections prefer
+/// the near API servers (`crate::kube_api_dial`). With none named it is
+/// [`kube_client_default`].
+#[cfg(feature = "kubernetes-identity")]
+pub async fn kube_client_default_preferring(
+    preferred: PreferredApiServers,
+) -> kube::Result<kube::Client> {
+    let config = kube::Config::infer()
+        .await
+        .map_err(kube::Error::InferConfig)?;
+    if preferred.is_empty() {
+        return kube_client(config);
+    }
+    let dialer = PreferredDialer::new(preferred);
+    let client = kube_client_dialing(config, dialer.clone())?;
+    tokio::spawn(dialer.keep_ready(client.clone()));
+    Ok(client)
+}
+
+#[cfg(feature = "kubernetes-identity")]
+pub(crate) fn kube_client_dialing(
+    mut config: kube::Config,
+    dialer: PreferredDialer,
+) -> kube::Result<kube::Client> {
     use std::time::Duration;
 
     use http::{Request, Response, header::HeaderMap};
@@ -48,13 +78,18 @@ pub fn kube_client(config: kube::Config) -> kube::Result<kube::Client> {
         });
     }
 
+    // A preferred server is connected to by its address, so TLS must verify
+    // the Service's name, not that address (#2238).
+    if !dialer.is_empty() && config.tls_server_name.is_none() {
+        config.tls_server_name = config.cluster_url.host().map(str::to_owned);
+    }
     let default_ns = config.default_namespace.clone();
     let auth_layer = config.auth_layer()?;
 
     let mut http = HttpConnector::new();
     http.enforce_http(false);
-    let mut connector =
-        hyper_timeout::TimeoutConnector::new(config.rustls_https_connector_with_connector(http)?);
+    let https = config.rustls_https_connector_with_connector(http)?;
+    let mut connector = hyper_timeout::TimeoutConnector::new(dialer.wrap(https));
     connector.set_connect_timeout(config.connect_timeout);
     connector.set_read_timeout(config.read_timeout);
     connector.set_write_timeout(config.write_timeout);

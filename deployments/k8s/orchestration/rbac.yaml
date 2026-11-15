@@ -58,6 +58,18 @@ rules:
   - apiGroups: ["node.k8s.io"]
     resources: ["runtimeclasses"]
     verbs: ["get"]
+  # The one namespaced kind here, by exception (#2238): new Kubernetes API
+  # connections prefer the near API servers, and only the API servers' own
+  # address list, default/kubernetes, says which are ready. Being in this
+  # ClusterRole, it allows get on an EndpointSlice named "kubernetes" in any
+  # namespace; only default holds one, it carries addresses only, and the code
+  # reads default/kubernetes alone. No list or watch, and no other name. A
+  # Role in default would be exact, but every overlay would then have to keep
+  # its namespace through the transformer, as sandbox-roles does.
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    resourceNames: ["kubernetes"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

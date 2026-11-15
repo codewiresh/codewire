@@ -432,6 +432,14 @@ cannot work. There is no default relay. Without `DERP_HOST` the coordinator
 refuses to start. That setting and the rest of the DERP, STUN and UDP relay
 configuration are in [dev/DERP-STUN.md](dev/DERP-STUN.md#key-config).
 
+## Kubernetes API
+
+In a cluster, orchestration reaches the Kubernetes API through the `kubernetes` Service, which spreads connections over every API server. Where some API servers are far from orchestration, every call through them pays that distance. Naming the near ones sends each new connection to the first of them that is ready, with the Service as the fallback. Only the address dialed changes: requests and TLS still use the Service's name, which every API server's certificate carries. `codewire_kube_api_connections_total{backend}` counts new connections by the server dialed.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `CODEWIRE_KUBE_API_PREFERRED_ADDRS` | No | Comma-separated `ip:port` addresses of the near API servers, in order of preference. A new connection dials the first one that the `default/kubernetes` EndpointSlice lists as ready and that answered its last dial within 2 s; a server that did not is skipped for 10 s. With none left, it dials the Service. Unset or empty dials the Service only. A name, a missing port or a repeated address stops orchestration at startup. | `192.0.2.12:6443,192.0.2.11:6443` |
+
 ## Tracing
 
 Orchestration (its API and its Temporal worker) and the dashboard server export
