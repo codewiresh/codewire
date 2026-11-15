@@ -477,7 +477,8 @@ impl CardSummary {
 
 impl StripeHandle {
     /// Mirrors `billing.EnsureCustomer`: reuse `stripe_customer_id` or
-    /// create the customer and persist the ID.
+    /// create the customer and persist the ID. A reused customer's email is
+    /// set to `owner_email`, the address Stripe sends receipts to.
     pub async fn ensure_customer(
         &self,
         pool: &PgPool,
@@ -496,6 +497,7 @@ impl StripeHandle {
         if let Some(Some(id)) = existing
             && !id.is_empty()
         {
+            self.sync_customer_email(&id, owner_email).await;
             return Ok(id);
         }
 
@@ -681,6 +683,35 @@ impl StripeHandle {
             .await
             .map_err(stripe_err)?;
         Ok(found.data.into_iter().map(|c| c.id.to_string()).collect())
+    }
+
+    /// Points the customer's email at the organization's current owner
+    /// before a purchase. Stripe sends its receipts there (#4816), and the
+    /// owner, or their address, may have changed since the customer was
+    /// created. It updates only an address that differs, so a purchase adds
+    /// no `customer.updated` event the delivery check would count. A failure
+    /// is logged, never fatal: a purchase is not refused over where its
+    /// receipt goes.
+    pub async fn sync_customer_email(&self, customer: &str, owner_email: &str) {
+        let result = match self.client() {
+            Ok(client) => match RetrieveCustomer::new(customer).send(client).await {
+                Ok(stripe_core::customer::RetrieveCustomerReturned::Customer(current))
+                    if current.email.as_deref() == Some(owner_email) =>
+                {
+                    Ok(())
+                }
+                _ => UpdateCustomer::new(customer)
+                    .email(owner_email)
+                    .send(client)
+                    .await
+                    .map(|_| ())
+                    .map_err(stripe_err),
+            },
+            Err(error) => Err(error),
+        };
+        if let Err(error) = result {
+            tracing::warn!(customer, %error, "could not update the Stripe customer's email");
+        }
     }
 
     /// Sets the sentinel's `codewire_probe` metadata to `probe`. Stripe

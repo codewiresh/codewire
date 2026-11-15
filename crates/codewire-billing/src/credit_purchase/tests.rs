@@ -16,6 +16,7 @@ use stripe_webhook::Webhook;
 use super::*;
 use crate::checkout_sessions::FrontendOrigin;
 use crate::email::EmailClient;
+use crate::receipts::ReceiptSender;
 use crate::stripe_client::StripeHandle;
 
 const WEBHOOK_SECRET: &str = "whsec_add_credit_synthetic";
@@ -301,6 +302,7 @@ impl Harness {
                 .with_webhook_secret(WEBHOOK_SECRET),
             email: EmailClient::disabled(),
             credit_enforcement: Default::default(),
+            receipts: Default::default(),
             frontend_origin: FrontendOrigin::parse("https://app.codewire.test").unwrap(),
         };
         Self {
@@ -904,7 +906,12 @@ async fn db_without_a_card_stripe_takes_the_card_and_the_payment_together() {
     let saved: Vec<Seen> = harness
         .seen()
         .into_iter()
-        .filter(|seen| seen.method == Method::POST && seen.path == "/v1/customers/cus_fake_new")
+        .filter(|seen| {
+            seen.method == Method::POST
+                && seen.path == "/v1/customers/cus_fake_new"
+                // Not the email sync before each purchase (#4816).
+                && !seen.form.contains_key("email")
+        })
         .collect();
     assert!(!saved.is_empty());
     assert!(saved.iter().all(|seen| {
@@ -1025,6 +1032,51 @@ async fn db_only_owners_and_admins_buy_credit_and_only_valid_amounts() {
     );
     assert_eq!(balance_cents(&pool, &owner).await, 100_500);
     for fixture in [stranger, member, owner] {
+        cleanup(&pool, fixture).await;
+    }
+}
+
+/// A paid invoice gets billing's receipt, or none once Stripe sends it
+/// (#4816).
+#[tokio::test]
+async fn db_a_paid_invoice_gets_billings_receipt_or_is_left_to_stripe() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    for sender in [ReceiptSender::Codewire, ReceiptSender::Stripe] {
+        let mut fixture = seed(&pool, "owner", true).await;
+        let mut harness = Harness::new(pool.clone(), true, Pay::Paid).await;
+        let (email, outbox) = EmailClient::recording();
+        harness.state.email = email;
+        harness.state.receipts = sender;
+        let invoice_id = format!("in_receipt_{}", &fixture.organization_id[14..]);
+        let paid = invoice(&invoice_id, "paid", &fixture.customer_id, 4_900, json!({}));
+        let event = fixture.event("receipt");
+        harness.deliver(&event, "invoice.paid", paid).await;
+
+        let owner: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+            .bind(&fixture.user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let receipt_sent: bool = sqlx::query_scalar(
+            "SELECT receipt_sent_at IS NOT NULL FROM stripe_invoices WHERE stripe_invoice_id = $1",
+        )
+        .bind(&invoice_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let recipients: Vec<String> = outbox.sent().into_iter().map(|sent| sent.to).collect();
+        match sender {
+            ReceiptSender::Codewire => {
+                assert_eq!(recipients, [owner]);
+                assert!(receipt_sent);
+            }
+            ReceiptSender::Stripe => {
+                assert!(recipients.is_empty(), "{recipients:?}");
+                assert!(!receipt_sent);
+            }
+        }
         cleanup(&pool, fixture).await;
     }
 }

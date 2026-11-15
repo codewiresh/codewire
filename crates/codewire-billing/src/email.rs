@@ -1,7 +1,8 @@
 //! Billing emails via the shared transactional-email provider.
 //!
 //! Owns payment receipt, payment-failed, credit, trial and account-deleted
-//! messages. Every email that asks the owner to pay or add credit links to
+//! messages. The payment receipt is sent only while billing, not Stripe,
+//! sends receipts (`CODEWIRE_BILLING_RECEIPTS`, #4816). Every email that asks the owner to pay or add credit links to
 //! the organization's Billing page on the configured frontend origin (#4553).
 
 use codewire_email::{Email, EmailClient as DeliveryEmailClient};
@@ -54,6 +55,19 @@ impl EmailClient {
             frontend_origin: FrontendOrigin::parse(TEST_ORIGIN)
                 .expect("the test frontend origin is valid"),
         }
+    }
+
+    /// A client that keeps what it sends, for tests; its links use a test
+    /// origin.
+    #[cfg(test)]
+    pub fn recording() -> (Self, codewire_email::Outbox) {
+        let (delivery, outbox) = DeliveryEmailClient::recording();
+        let client = Self {
+            delivery,
+            frontend_origin: FrontendOrigin::parse(TEST_ORIGIN)
+                .expect("the test frontend origin is valid"),
+        };
+        (client, outbox)
     }
 
     pub fn is_configured(&self) -> bool {

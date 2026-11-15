@@ -67,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
     .map_err(anyhow::Error::msg)?;
     let credit_enforcement =
         codewire_server_core::credit_enforcement::CreditEnforcement::from_env()?;
+    let receipts = codewire_billing::receipts::ReceiptSender::from_env()?;
 
     let state = BillingState {
         pool: pool.clone(),
@@ -76,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
         stripe: StripeHandle::from_env(),
         email: email.clone(),
         credit_enforcement,
+        receipts,
         frontend_origin,
     };
 

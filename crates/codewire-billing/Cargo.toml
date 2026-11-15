@@ -63,6 +63,8 @@ url = { workspace = true }
 futures = { workspace = true }
 
 [dev-dependencies]
+# Tests read what billing would have emailed.
+codewire-email = { workspace = true, features = ["test-support"] }
 # The wire contract drives generated BillingCatalogService clients over both
 # Connect codecs; production billing stays server-only.
 codewire-admin-proto = { workspace = true, features = ["client"] }

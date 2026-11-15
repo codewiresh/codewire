@@ -32,6 +32,7 @@ use sqlx::PgPool;
 use stripe_webhook::{Event, EventObject, Webhook, WebhookError};
 
 use crate::email::{EmailClient, ReceiptData};
+use crate::receipts::ReceiptSender;
 use crate::routes::BillingState;
 
 const MAX_BODY: usize = 65536;
@@ -869,7 +870,15 @@ async fn handle_invoice_paid(
     let invoice_id = inv.id.as_deref().unwrap_or_default();
     let org_id = resolve_invoice_org_id(pool, inv).await;
 
-    if state.email.is_configured() {
+    if state.receipts == ReceiptSender::Stripe {
+        // Stripe emails this receipt (#4816). receipt_sent_at stays NULL: it
+        // records only receipts billing sent, so NULL does not mean one is
+        // still owed.
+        tracing::info!(
+            invoice_id,
+            "Stripe sends this invoice's receipt; billing sends none"
+        );
+    } else if state.email.is_configured() {
         let receipt_sent: bool = sqlx::query_scalar(
             r#"SELECT receipt_sent_at IS NOT NULL FROM stripe_invoices WHERE stripe_invoice_id = $1"#,
         )
@@ -1246,6 +1255,7 @@ mod tests {
             stripe,
             email: EmailClient::disabled(),
             credit_enforcement: Default::default(),
+            receipts: Default::default(),
             frontend_origin: FrontendOrigin::parse("https://app.codewire.test").unwrap(),
         }
     }

@@ -26,6 +26,7 @@ pub mod webhook;
 
 pub mod org_billing;
 pub mod plans;
+pub mod receipts;
 pub mod routes;
 
 pub use routes::router;

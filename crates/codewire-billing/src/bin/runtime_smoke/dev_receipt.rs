@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use anyhow::ensure;
+use codewire_billing::receipts::{BILLING_RECEIPTS_ENV, ReceiptSender};
 use codewire_server_core::config::database_url_from_parts;
 use codewire_server_core::organization_slug::valid_organization_slug;
 use reqwest::{Client, StatusCode};
@@ -14,6 +15,8 @@ use super::{invoice_paid_event, required_env, stripe_signature};
 
 const DEV_BILLING_URL: &str = "http://codewire-billing.dev.svc.cluster.local:8081";
 const RECEIPT: &str = "billing-dev-receipt: one webhook accepted; receipt_sent_at absent-to-present; recipient and fixture linkage verified";
+/// While Stripe sends receipts (#4816), billing sends none for the invoice.
+const RECEIPT_LEFT_TO_STRIPE: &str = "billing-dev-receipt: one webhook accepted; receipt_sent_at stayed absent, Stripe sends it; recipient and fixture linkage verified";
 
 struct Config {
     database_url: String,
@@ -21,11 +24,15 @@ struct Config {
     user_id: String,
     email: String,
     attempt: Uuid,
+    /// Who sends the receipt, read from billing's own setting so the proof
+    /// and the service agree.
+    sender: ReceiptSender,
 }
 
 impl Config {
     fn from_reader(
         read: impl Fn(&str) -> anyhow::Result<String>,
+        receipts_setting: Option<&str>,
         database_url_override_present: bool,
     ) -> anyhow::Result<Self> {
         ensure!(
@@ -57,6 +64,7 @@ impl Config {
             email == email.trim() && email.contains('@') && !email.chars().any(char::is_whitespace),
             "explicit recipient required"
         );
+        let sender = ReceiptSender::parse(receipts_setting).map_err(anyhow::Error::msg)?;
         let raw_attempt = read("BILLING_RECEIPT_ATTEMPT_ID")?;
         let attempt = Uuid::parse_str(&raw_attempt)?;
         ensure!(
@@ -69,6 +77,7 @@ impl Config {
             user_id,
             email,
             attempt,
+            sender,
         })
     }
 }
@@ -150,7 +159,12 @@ async fn post_once(http: &Client, base: &str, secret: &str, payload: String) -> 
 pub(super) async fn run() -> anyhow::Result<()> {
     let database_url_override_present =
         std::env::var_os("DATABASE_URL").is_some_and(|value| !value.is_empty());
-    let config = Config::from_reader(required_env, database_url_override_present)?;
+    let receipts_setting = std::env::var(BILLING_RECEIPTS_ENV).ok();
+    let config = Config::from_reader(
+        required_env,
+        receipts_setting.as_deref(),
+        database_url_override_present,
+    )?;
     let fixture = Fixture::new(config.attempt);
     ensure!(
         valid_organization_slug(&fixture.slug),
@@ -212,7 +226,7 @@ pub(super) async fn run() -> anyhow::Result<()> {
             JOIN org_members m ON m.org_id = o.id
             JOIN users u ON u.id = m.user_id
             WHERE i.stripe_invoice_id = $1 AND i.org_id = $2
-              AND i.receipt_sent_at IS NOT NULL AND i.status = 'paid'
+              AND (i.receipt_sent_at IS NOT NULL) = $8 AND i.status = 'paid'
               AND i.amount_paid = 4900 AND i.currency = 'usd'
               AND o.stripe_customer_id = $3 AND o.created_by = $4
               AND m.id = $5 AND m.role = 'owner' AND u.id = $4 AND u.email = $6
@@ -231,6 +245,7 @@ pub(super) async fn run() -> anyhow::Result<()> {
     .bind(&fixture.member)
     .bind(&config.email)
     .bind(&fixture.event)
+    .bind(config.sender == ReceiptSender::Codewire)
     .fetch_one(&pool)
     .await?;
     ensure!(proven, "durable receipt proof missing");
@@ -238,7 +253,10 @@ pub(super) async fn run() -> anyhow::Result<()> {
     sqlx::query("SELECT 1")
         .execute(&mut *recipient_guard)
         .await?;
-    println!("{RECEIPT}");
+    match config.sender {
+        ReceiptSender::Codewire => println!("{RECEIPT}"),
+        ReceiptSender::Stripe => println!("{RECEIPT_LEFT_TO_STRIPE}"),
+    }
     recipient_guard.commit().await?;
     // Retain the complete synthetic fixture. Deleting the parent organization
     // could cascade through a concurrent product write that this harness does
@@ -329,7 +347,8 @@ mod tests {
                 "877b1810-bcb7-4e68-97df-cda73287ee3d",
             ),
         ]);
-        let parse = |values: &std::collections::HashMap<&str, &str>| {
+        let parse_with = |values: &std::collections::HashMap<&str, &str>,
+                          receipts: Option<&str>| {
             Config::from_reader(
                 |name| {
                     values
@@ -337,10 +356,21 @@ mod tests {
                         .map(|v| v.to_string())
                         .ok_or_else(|| anyhow::anyhow!("missing"))
                 },
+                receipts,
                 false,
             )
         };
+        let parse = |values: &std::collections::HashMap<&str, &str>| parse_with(values, None);
         assert!(parse(&inputs).is_ok());
+        // The proof follows billing's own receipts setting (#4816).
+        for (setting, sender) in [
+            (None, ReceiptSender::Codewire),
+            (Some("codewire"), ReceiptSender::Codewire),
+            (Some("stripe"), ReceiptSender::Stripe),
+        ] {
+            assert_eq!(parse_with(&inputs, setting).unwrap().sender, sender);
+        }
+        assert!(parse_with(&inputs, Some("ses")).is_err());
         for name in inputs.keys() {
             let mut missing = inputs.clone();
             missing.remove(name);
@@ -379,6 +409,7 @@ mod tests {
                         .map(|v| v.to_string())
                         .ok_or_else(|| anyhow::anyhow!("missing"))
                 },
+                None,
                 true,
             )
             .is_err()

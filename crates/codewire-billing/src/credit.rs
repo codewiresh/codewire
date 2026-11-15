@@ -470,6 +470,9 @@ pub async fn settle_organization(
         fail_top_up(pool, &top_up_id, None, "no_customer").await?;
         return Ok(Settlement::Exhausted);
     };
+    if let Some(owner) = crate::webhook::org_owner_email_by_id(pool, organization_id).await {
+        stripe.sync_customer_email(&customer, &owner).await;
+    }
     match stripe
         .charge_top_up(
             &customer,

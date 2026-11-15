@@ -251,6 +251,9 @@ async fn charge(
             code: "no_customer".to_owned(),
         });
     };
+    if let Some(owner) = crate::webhook::org_owner_email_by_id(pool, organization_id).await {
+        state.stripe.sync_customer_email(&customer, &owner).await;
+    }
     let charged = run_organization_billing_mutation(pool, organization_id, async {
         state
             .stripe

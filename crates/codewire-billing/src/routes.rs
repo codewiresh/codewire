@@ -20,6 +20,8 @@ pub struct BillingState {
     pub stripe: StripeHandle,
     pub email: EmailClient,
     pub credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
+    /// Who emails the receipt for a paid invoice (#4816).
+    pub receipts: crate::receipts::ReceiptSender,
     pub frontend_origin: FrontendOrigin,
 }
 
