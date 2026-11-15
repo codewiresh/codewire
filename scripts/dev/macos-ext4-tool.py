@@ -59,9 +59,12 @@ FORBIDDEN_DEFINES = (
     "ENABLE_NLS", "CONFIG_TESTIO_DEBUG", "CONFIG_DLOPEN_LIBARCHIVE",
 )
 # The programs the macOS local runtime ships (macos-local-runtime.py): make
-# directory and target. Build mode also builds the checker, resizer and
-# debugfs beside the formatter; probe mode exercises only mke2fs.
-TOOLS = (("misc", "mke2fs"), ("e2fsck", "e2fsck"), ("resize", "resize2fs"), ("debugfs", "debugfs"))
+# directory and target. Build mode also builds the checker, resizer, debugfs
+# and dumpe2fs (a disk snapshot's sign-in scrub, #4654) beside the formatter,
+# and has dumpe2fs read a probe image's block size; probe mode exercises only
+# mke2fs.
+TOOLS = (("misc", "mke2fs"), ("e2fsck", "e2fsck"), ("resize", "resize2fs"), ("debugfs", "debugfs"),
+         ("misc", "dumpe2fs"))
 CASES = ((256, "CWROOT"), (513, "CWSTATE"))
 # initialize.c removes an undersized final block group and retries. For the
 # fixed 513 MiB case its 256-block tail cannot fit the inode table + overhead.
@@ -248,6 +251,10 @@ def accept_result(result, cancel, deadline):
     result["status"] = "passed"
 
 
+def probe_image(probe_root, size_mib, label):
+    return probe_root / f"{label.lower()}-{size_mib}.raw"
+
+
 def format_empty(bundle, binary_sha, probe_root, size_mib, label, command):
     if (size_mib, label) not in CASES:
         raise ValueError("only the fixed empty-image probe cases are allowed")
@@ -258,7 +265,7 @@ def format_empty(bundle, binary_sha, probe_root, size_mib, label, command):
     filesystem_uuid = uuid.UUID(int=(1 << 120) + size_mib)
     with admitted_file(binary, binary_sha, 16 * 1024 * 1024, 0o500), \
             admitted_file(config, CONFIG_SHA256, len(CONFIG), 0o400):
-        path = probe_root / f"{label.lower()}-{size_mib}.raw"
+        path = probe_image(probe_root, size_mib, label)
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
             os.ftruncate(descriptor, size)
@@ -282,6 +289,19 @@ def format_empty(bundle, binary_sha, probe_root, size_mib, label, command):
             return observed
         finally:
             os.close(descriptor)
+
+
+def probe_dumpe2fs(bundle, checksum, image, command):
+    """The shipped dumpe2fs, which a disk snapshot's sign-in scrub reads (#4654),
+    reports a formatted probe image's 4096-byte blocks."""
+    private_directory(bundle)
+    binary = bundle / "dumpe2fs"
+    with admitted_file(binary, checksum, 16 * 1024 * 1024, 0o500):
+        report = command([str(binary), "-h", str(image)], image.parent,
+                         {"LC_ALL": "C", "PATH": str(bundle)}, 30)
+    if not re.search(r"^Block size:[ \t]+4096$", report, re.M):
+        raise ValueError("dumpe2fs did not report the probe image's 4096-byte blocks")
+    return 4096
 
 
 def copy_probe_binary(binary, checksum, destination):
@@ -400,6 +420,9 @@ def run(archive, output, probe_binary=None, binary_sha=None):
         result["images"] = [format_empty(output / "bundle", result["binary_sha256"],
                                          output / "probe", size, label, command)
                             for size, label in CASES]
+        if not probe_binary:
+            result["dumpe2fs_block_size"] = probe_dumpe2fs(
+                output / "bundle", tools["dumpe2fs"], probe_image(output / "probe", *CASES[0]), command)
         directory = os.open(output / "probe", os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)

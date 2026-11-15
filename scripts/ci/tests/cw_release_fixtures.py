@@ -155,7 +155,7 @@ def local_runtime(revision, version=VERSION):
                   "initramfs": spec("initramfs"),
                   "e2fsprogs": {name: spec(path) for name, path in (
                       ("mkfs_ext4", "mkfs.ext4"), ("e2fsck", "e2fsck"), ("resize2fs", "resize2fs"),
-                      ("debugfs", "debugfs"), ("mke2fs_conf", "mke2fs.conf"))},
+                      ("debugfs", "debugfs"), ("dumpe2fs", "dumpe2fs"), ("mke2fs_conf", "mke2fs.conf"))},
                   "git": {"git": spec("git"), "git_remote_https": spec("git-remote-https")}}
     linux_lock = {"schema_version": 1,
                   "cloud_hypervisor": spec("cloud-hypervisor", "x86_64", executable(

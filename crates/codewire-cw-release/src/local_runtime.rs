@@ -246,7 +246,19 @@ struct E2fsprogs {
     e2fsck: Spec,
     resize2fs: Spec,
     debugfs: Spec,
+    /// Absent from runtimes packed before the snapshot scrub's `dumpe2fs`
+    /// shipped (#4654). Never `null`, which the packer does not write.
+    #[serde(default, deserialize_with = "present")]
+    dumpe2fs: Option<Spec>,
     mke2fs_conf: Spec,
+}
+
+/// An optional member that, when present, is a value: a lock decodes only as
+/// the packer writes it.
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Spec>, D::Error> {
+    Spec::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -324,6 +336,7 @@ impl TargetLock {
                     &lock.git.git_remote_https,
                 ]
                 .into_iter()
+                .chain(lock.e2fsprogs.dumpe2fs.as_ref())
                 .map(|spec| {
                     (
                         spec.path.as_str(),

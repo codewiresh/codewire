@@ -115,7 +115,7 @@ class PackageTest(unittest.TestCase):
         linux = self.package("full", "x86_64-unknown-linux-musl aarch64-unknown-linux-gnu",
                              CW_RELEASE_IMPORT_DIR=str(self.base / "mac"))
         self.assertEqual(linux.returncode, 0, linux.stderr)
-        self.assertIn(f"cw-release: local runtime document_sha256={fx.digest(self.document)} blobs=21",
+        self.assertIn(f"cw-release: local runtime document_sha256={fx.digest(self.document)} blobs=22",
                       linux.stdout.splitlines())
         for target in ("x86_64-unknown-linux-musl", "aarch64-unknown-linux-gnu"):
             self.assertIn(f"cw-release: admitted target={target}", linux.stdout)
@@ -125,7 +125,7 @@ class PackageTest(unittest.TestCase):
                                    "--dist", str(self.base / "full"), "--unsigned"],
                                   capture_output=True, text=True)
         self.assertEqual(verified.returncode, 0, verified.stderr)
-        self.assertIn(f"cw-release: local runtime document_sha256={fx.digest(self.document)} blobs=21",
+        self.assertIn(f"cw-release: local runtime document_sha256={fx.digest(self.document)} blobs=22",
                       verified.stdout.splitlines())
         self.assertIn(f"cw-release: verified targets=4 version={fx.VERSION} runtime_equal=true signed=false",
                       verified.stdout.splitlines())

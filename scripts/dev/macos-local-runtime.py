@@ -51,8 +51,11 @@ OTOOL = "/usr/bin/otool"
 # A stock Mac has no e2fsprogs, so the runtime ships the pinned build that
 # scripts/dev/macos-ext4-tool.py makes on this Mac: (lock key, bundle file,
 # installed name). mke2fs installed as mkfs.ext4 formats ext4 by its name.
+# dumpe2fs serves a disk snapshot's sign-in scrub (#4654); cw still admits a
+# runtime packed before it shipped, but every runtime packed now has it.
 E2FSPROGS_TOOLS = (("mkfs_ext4", "mke2fs", "mkfs.ext4"), ("e2fsck", "e2fsck", "e2fsck"),
-                   ("resize2fs", "resize2fs", "resize2fs"), ("debugfs", "debugfs", "debugfs"))
+                   ("resize2fs", "resize2fs", "resize2fs"), ("debugfs", "debugfs", "debugfs"),
+                   ("dumpe2fs", "dumpe2fs", "dumpe2fs"))
 E2FSPROGS_CONFIG = ("mke2fs_conf", "mke2fs.conf", "mke2fs.conf")
 # macos-ext4-tool.py CONFIG_SHA256: every format uses exactly this mke2fs.conf.
 MKE2FS_CONFIG_SHA256 = "539290aab306f0bd03a6b49c90ec2852044150c35538c04e4e9bee016bd3d973"

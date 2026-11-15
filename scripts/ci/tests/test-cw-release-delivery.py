@@ -840,8 +840,10 @@ class LocalRuntimeTest(unittest.TestCase):
         # crates/codewire-cw-release/src/local_runtime/tests.rs decodes the same files.
         valid = (self.FIXTURES / "valid-macos-aarch64.json").read_bytes()
         self.assertEqual(len(release.local_runtime_blobs(valid)), 14)
+        with_dumpe2fs = (self.FIXTURES / "valid-macos-aarch64-dumpe2fs.json").read_bytes()
+        self.assertEqual(len(release.local_runtime_blobs(with_dumpe2fs)), 15)
         invalid = sorted(self.FIXTURES.glob("invalid-*.json"))
-        self.assertEqual(len(invalid), 21)
+        self.assertEqual(len(invalid), 23)
         for path in invalid:
             with self.subTest(fixture=path.name), self.assertRaises(release.ReleaseError):
                 release.local_runtime_blobs(path.read_bytes())
@@ -850,7 +852,7 @@ class LocalRuntimeTest(unittest.TestCase):
         result = release.verify_delivery(self.dist, self.signer.trust)
         document = release.local_runtime_paths(self.dist)[1].read_bytes()
         self.assertTrue(result["signed"])
-        self.assertEqual(result["local_runtime"], {"document_sha256": fx.digest(document), "blobs": 21})
+        self.assertEqual(result["local_runtime"], {"document_sha256": fx.digest(document), "blobs": 22})
         self.assertEqual(sorted(json.loads(document)["targets"]), ["linux-x86_64", "macos-aarch64"])
         for target in release.RELEASE_TARGETS:
             with self.subTest(target=target):
@@ -957,7 +959,7 @@ class LocalRuntimeTest(unittest.TestCase):
         output = self.base / "merged-runtime"
         merged, pinned = release.merge_local_runtimes(output, parts)
         self.assertEqual(merged, document)
-        self.assertEqual(len(pinned), 21)
+        self.assertEqual(len(pinned), 22)
         self.assertEqual(release.load_local_runtime_dir(output)[0], document)
         with self.assertRaisesRegex(release.ReleaseError, "in more than one input"):
             release.merge_local_runtimes(self.base / "merged-twice", [parts[0], parts[0]])

@@ -103,8 +103,8 @@ A local VM needs:
   every start, which that cw reports only as `create_failed`; a cw that
   includes #4478 starts it.
 - nothing installed for ext4 disks or Git workspaces. The runtime ships a
-  pinned e2fsprogs (`mkfs.ext4`, `e2fsck`, `resize2fs`, `debugfs` and
-  `mke2fs.conf`) and git 2.56.0 (`git` and its `git-remote-https` helper,
+  pinned e2fsprogs (`mkfs.ext4`, `e2fsck`, `resize2fs`, `debugfs`, `dumpe2fs`
+  and `mke2fs.conf`) and git 2.56.0 (`git` and its `git-remote-https` helper,
   linked only to stock system libraries), admitted with the runtime and
   re-hashed before each use. Git runs with no system or user configuration,
   helpers only from the runtime (`GIT_EXEC_PATH`) and no templates; the Xcode
@@ -437,8 +437,10 @@ Codewire guest root, beside the Darwin artifact lock that `cw` reads.
 1. On the Mac, build the pinned e2fsprogs the runtime ships. A stock Mac has
    none, and cw never uses Homebrew's. The tool needs the official 1.47.4
    source archive (it checks its SHA-256) and the Xcode Command Line Tools,
-   builds `mke2fs`, `e2fsck`, `resize2fs` and `debugfs` linked only to
-   libSystem, and formats probe images with the pinned `mke2fs.conf`:
+   builds `mke2fs`, `e2fsck`, `resize2fs`, `debugfs` and `dumpe2fs` linked
+   only to libSystem, and formats probe images with the pinned `mke2fs.conf`.
+   A bundle built before `dumpe2fs` shipped (#4654) lacks it, and the packer
+   refuses it; build a new one:
 
    ```sh
    curl -fsSLO https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.4/e2fsprogs-1.47.4.tar.gz

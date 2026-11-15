@@ -196,7 +196,7 @@ class FormatterContractTests(unittest.TestCase):
         self.assertEqual(result["binary_sha256"], self.checksum)
         self.assertEqual(result["configuration_sha256"], tool.CONFIG_SHA256)
         self.assertTrue({"source_url", "source_sha256", "version", "compiler",
-                         "config_h_sha256", "make_config_sha256"}.isdisjoint(result))
+                         "config_h_sha256", "make_config_sha256", "dumpe2fs_block_size"}.isdisjoint(result))
         self.assertEqual([item["argv"][0] for item in result["commands"]],
                          ["/usr/bin/sw_vers", "/usr/bin/otool", "/usr/bin/lipo", "/usr/bin/codesign"])
         self.assertTrue((self.root / "probe-only/producer-source.py").exists())
@@ -231,7 +231,8 @@ class FormatterContractTests(unittest.TestCase):
                 (cwd / "MCONFIG").write_text("LIBUUID = $(LIB)/libuuid.a\nLIBBLKID = $(LIB)/libblkid.a $(LIBUUID)\n")
             elif argv[:3] == ["/usr/bin/make", "-j4", "-C"] and tuple(argv[3:]) in tool.TOOLS:
                 directory, name = argv[3:]
-                (cwd / directory).mkdir()
+                # misc holds both mke2fs and dumpe2fs.
+                (cwd / directory).mkdir(exist_ok=True)
                 content_bytes = self.binary.read_bytes()
                 (cwd / directory / name).write_bytes(content_bytes if name == "mke2fs"
                                                      else content_bytes + name.encode())
@@ -247,15 +248,21 @@ class FormatterContractTests(unittest.TestCase):
                 mock.patch.object(tool, "SOURCE_SHA256", archive_hash), \
                 mock.patch.object(tool, "extract_source", side_effect=extract), \
                 mock.patch.object(tool.command_owner, "run_command", side_effect=command), \
-                mock.patch.object(tool, "format_empty", return_value={"synthetic": True}):
+                mock.patch.object(tool, "format_empty", return_value={"synthetic": True}), \
+                mock.patch.object(tool, "probe_dumpe2fs", return_value=4096) as probe:
             result = tool.run(archive, output)
+        probe.assert_called_once()
+        self.assertEqual(probe.call_args.args[:3], (output / "bundle", result["tools"]["dumpe2fs"],
+                                                    output / "probe" / "cwroot-256.raw"))
+        self.assertEqual(result["dumpe2fs_block_size"], 4096)
         self.assertEqual(result["mode"], "build-and-probe")
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["source_sha256"], archive_hash)
         self.assertEqual(result["version"], tool.VERSION)
         self.assertNotIn("input_binary", result)
         self.assertEqual(result["commands"][6]["argv"], ["/usr/bin/make", "-j4", "libs"])
-        self.assertEqual([item["argv"] for item in result["commands"][7:11]],
+        built = 7 + len(tool.TOOLS)
+        self.assertEqual([item["argv"] for item in result["commands"][7:built]],
                          [["/usr/bin/make", "-j4", "-C", directory, name] for directory, name in tool.TOOLS])
         self.assertEqual(list(result["tools"]), [name for _directory, name in tool.TOOLS])
         for name, checksum in result["tools"].items():
@@ -263,7 +270,7 @@ class FormatterContractTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(program.stat().st_mode), 0o500)
             self.assertEqual(hashlib.sha256(program.read_bytes()).hexdigest(), checksum)
         # Each shipped program is checked for libSystem-only, arm64 and its signature.
-        validations = [item["argv"][0] for item in result["commands"][11:]]
+        validations = [item["argv"][0] for item in result["commands"][built:]]
         self.assertEqual(validations, ["/usr/bin/otool", "/usr/bin/lipo", "/usr/bin/codesign"] * len(tool.TOOLS))
         self.assertEqual((output / "bundle/NOTICE").read_text(), "synthetic notice")
         self.assertEqual((output / "bundle/libuuid-COPYING").read_text(), "synthetic uuid license")
@@ -426,6 +433,32 @@ class FormatterContractTests(unittest.TestCase):
         self.assertEqual(env["MKE2FS_CONFIG"], str(self.bundle / "mke2fs.conf"))
         self.assertEqual(cwd, self.probe)
         self.assertEqual(timeout, 30)
+
+    def test_dumpe2fs_must_report_the_probe_images_4096_byte_blocks(self):
+        dumpe2fs = self.bundle / "dumpe2fs"
+        tool.write_new(dumpe2fs, b"synthetic dumpe2fs; never run", 0o500)
+        checksum = hashlib.sha256(dumpe2fs.read_bytes()).hexdigest()
+        image = self.probe / "cwroot-256.raw"
+        seen = []
+
+        def report(text):
+            def command(argv, cwd, env, timeout):
+                seen.append((argv, cwd, env, timeout))
+                return text
+            return command
+
+        self.assertEqual(tool.probe_dumpe2fs(self.bundle, checksum, image,
+                                             report("Block count: 65536\nBlock size:               4096\n")), 4096)
+        self.assertEqual(seen, [([str(dumpe2fs), "-h", str(image)], self.probe,
+                                 {"LC_ALL": "C", "PATH": str(self.bundle)}, 30)])
+        for text in ("Block size:               1024\n", "Block size: 40960\n", ""):
+            with self.subTest(report=text), self.assertRaisesRegex(ValueError, "4096-byte blocks"):
+                tool.probe_dumpe2fs(self.bundle, checksum, image, report(text))
+        # A dumpe2fs other than the one built is never run.
+        command = mock.Mock()
+        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+            tool.probe_dumpe2fs(self.bundle, "0" * 64, image, command)
+        command.assert_not_called()
 
     def test_failed_child_retains_only_the_new_owned_image(self):
         with self.assertRaisesRegex(RuntimeError, "synthetic failure"):

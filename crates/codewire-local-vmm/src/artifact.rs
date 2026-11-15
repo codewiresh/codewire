@@ -114,6 +114,11 @@ pub struct E2fsprogsSpec {
     pub e2fsck: ArtifactSpec,
     pub resize2fs: ArtifactSpec,
     pub debugfs: ArtifactSpec,
+    /// Lists each block group's free blocks and inodes for a disk snapshot's
+    /// sign-in scrub (#4654). A runtime packed before it shipped has none, and
+    /// its lock, so its generation, is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dumpe2fs: Option<ArtifactSpec>,
     pub mke2fs_conf: ArtifactSpec,
 }
 
@@ -143,6 +148,7 @@ pub struct AdmittedE2fsprogs {
     pub e2fsck: AdmittedArtifact,
     pub resize2fs: AdmittedArtifact,
     pub debugfs: AdmittedArtifact,
+    pub dumpe2fs: Option<AdmittedArtifact>,
     pub mke2fs_conf: AdmittedArtifact,
 }
 
@@ -290,15 +296,16 @@ impl AdmittedArtifacts {
         #[cfg(target_os = "macos")]
         {
             let tools = &self.e2fsprogs;
-            vec![
+            let mut executables = vec![
                 &self.vz_runner,
                 &tools.mkfs_ext4,
                 &tools.e2fsck,
                 &tools.resize2fs,
                 &tools.debugfs,
-                &self.git.git,
-                &self.git.git_remote_https,
-            ]
+            ];
+            executables.extend(&tools.dumpe2fs);
+            executables.extend([&self.git.git, &self.git.git_remote_https]);
+            executables
         }
     }
 
@@ -322,6 +329,7 @@ impl AdmittedArtifacts {
                 e2fsck: AdmittedArtifact::for_test("/unused/e2fsck"),
                 resize2fs: AdmittedArtifact::for_test("/unused/resize2fs"),
                 debugfs: AdmittedArtifact::for_test("/unused/debugfs"),
+                dumpe2fs: Some(AdmittedArtifact::for_test("/unused/dumpe2fs")),
                 mke2fs_conf: AdmittedArtifact::for_test("/unused/mke2fs.conf"),
             },
             #[cfg(target_os = "macos")]
@@ -527,15 +535,16 @@ impl ArtifactLock {
         #[cfg(target_os = "macos")]
         {
             let tools = &self.e2fsprogs;
-            vec![
+            let mut executables = vec![
                 &self.vz_runner,
                 &tools.mkfs_ext4,
                 &tools.e2fsck,
                 &tools.resize2fs,
                 &tools.debugfs,
-                &self.git.git,
-                &self.git.git_remote_https,
-            ]
+            ];
+            executables.extend(&tools.dumpe2fs);
+            executables.extend([&self.git.git, &self.git.git_remote_https]);
+            executables
         }
     }
 
@@ -598,6 +607,10 @@ impl ArtifactLock {
                     path: PathBuf::from("debugfs"),
                     ..vmm.clone()
                 },
+                dumpe2fs: Some(ArtifactSpec {
+                    path: PathBuf::from("dumpe2fs"),
+                    ..vmm.clone()
+                }),
                 mke2fs_conf: ArtifactSpec {
                     path: PathBuf::from("mke2fs.conf"),
                     ..initramfs.clone()
@@ -637,15 +650,16 @@ impl ArtifactLock {
         #[cfg(target_os = "macos")]
         {
             let tools = &mut self.e2fsprogs;
-            vec![
+            let mut executables = vec![
                 &mut self.vz_runner,
                 &mut tools.mkfs_ext4,
                 &mut tools.e2fsck,
                 &mut tools.resize2fs,
                 &mut tools.debugfs,
-                &mut self.git.git,
-                &mut self.git.git_remote_https,
-            ]
+            ];
+            executables.extend(&mut tools.dumpe2fs);
+            executables.extend([&mut self.git.git, &mut self.git.git_remote_https]);
+            executables
         }
     }
 
@@ -785,6 +799,12 @@ impl ArtifactLock {
             e2fsck: admit_macho(root, &self.e2fsprogs.e2fsck)?,
             resize2fs: admit_macho(root, &self.e2fsprogs.resize2fs)?,
             debugfs: admit_macho(root, &self.e2fsprogs.debugfs)?,
+            dumpe2fs: self
+                .e2fsprogs
+                .dumpe2fs
+                .as_ref()
+                .map(|spec| admit_macho(root, spec))
+                .transpose()?,
             mke2fs_conf: admit_one(root, &self.e2fsprogs.mke2fs_conf, false)?,
         };
         let git = AdmittedGit {
@@ -1500,6 +1520,51 @@ mod tests {
         assert!(!valid_arm64_macho_header(
             &header(0xfeed_facf, 0x0100_000c, 2)[..12]
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_runtime_packed_before_dumpe2fs_keeps_its_lock_bytes_and_generation() {
+        let current = ArtifactLock::for_test(
+            spec("codewire-vz-runner", b"helper"),
+            spec("kernel", b"kernel"),
+            spec("initramfs", b"initramfs"),
+        );
+        let mut older = current.clone();
+        older.e2fsprogs.dumpe2fs = None;
+
+        // An older lock names no dumpe2fs, decodes, and re-encodes to the same
+        // bytes, so its generation and the store's record of it still match.
+        let bytes = older.canonical_json().unwrap();
+        assert!(
+            !String::from_utf8(bytes.clone())
+                .unwrap()
+                .contains("dumpe2fs")
+        );
+        let decoded: ArtifactLock = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded, older);
+        assert_eq!(decoded.canonical_json().unwrap(), bytes);
+        assert_ne!(older.generation().unwrap(), current.generation().unwrap());
+
+        // dumpe2fs joins the executables after debugfs only when it is locked.
+        let names = |lock: &ArtifactLock| {
+            lock.executables()
+                .into_iter()
+                .map(|spec| spec.path.to_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let mut expected = vec![
+            "codewire-vz-runner",
+            "mkfs.ext4",
+            "e2fsck",
+            "resize2fs",
+            "debugfs",
+            "git",
+            "git-remote-https",
+        ];
+        assert_eq!(names(&older), expected);
+        expected.insert(5, "dumpe2fs");
+        assert_eq!(names(&current), expected);
     }
 
     #[cfg(target_os = "macos")]

@@ -442,9 +442,12 @@ class PackTests(unittest.TestCase):
     def test_an_unpinned_e2fsprogs_bundle_fails_before_effects(self):
         """Only the pinned, libSystem-only, signed arm64 build is shipped."""
         resize = self.e2fsprogs / "resize2fs"
+        dumpe2fs = self.e2fsprogs / "dumpe2fs"
         config = self.e2fsprogs / "mke2fs.conf"
         cases = (
             (lambda: resize.unlink(), lambda: resize.write_bytes(macho(b"resize2fs")), "is missing"),
+            # A bundle built before dumpe2fs shipped (#4654).
+            (lambda: dumpe2fs.unlink(), lambda: dumpe2fs.write_bytes(macho(b"dumpe2fs")), "is missing"),
             (lambda: resize.write_bytes(elf()), lambda: resize.write_bytes(macho(b"resize2fs")),
              "is not a thin arm64 Mach-O executable"),
             (lambda: self.tools.dependencies.update({str(resize): LIBSYSTEM + "\t/opt/homebrew/lib/libintl.8.dylib (x)\n"}),
@@ -713,10 +716,14 @@ class SourceContractTests(unittest.TestCase):
                                    r"\s*pub e2fsprogs: E2fsprogsSpec,")
         spec = re.search(r"pub struct E2fsprogsSpec \{(.*?)\}", artifact, re.DOTALL).group(1)
         tools = runtime.E2FSPROGS_TOOLS + (runtime.E2FSPROGS_CONFIG,)
-        self.assertEqual(re.findall(r"pub (\w+): ArtifactSpec,", spec), [key for key, _name, _installed in tools])
+        fields = re.findall(r"pub (\w+): (Option<)?ArtifactSpec>?,", spec)
+        self.assertEqual([key for key, _optional in fields], [key for key, _name, _installed in tools])
+        # Only dumpe2fs, which runtimes packed before #4654 lack, is optional.
+        self.assertEqual([key for key, optional in fields if optional], ["dumpe2fs"])
         # cw finds each shipped program by the name it is installed under.
         for key, _name, installed in runtime.E2FSPROGS_TOOLS:
-            self.assertIn('"%s" => &tools.%s,' % (installed, key), darwin)
+            lookup = "tools.%s.as_ref()?," if key == "dumpe2fs" else "&tools.%s,"
+            self.assertIn('"%s" => ' % installed + lookup % key, darwin)
         self.assertEqual(runtime.MKE2FS_CONFIG_SHA256, ext4_tool.CONFIG_SHA256)
         git_spec = re.search(r"pub struct GitSpec \{(.*?)\}", artifact, re.DOTALL).group(1)
         self.assertEqual(re.findall(r"pub (\w+): ArtifactSpec,", git_spec), [key for key, _name in runtime.GIT_TOOLS])

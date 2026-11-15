@@ -168,6 +168,41 @@ fn targets_and_lock_files_are_exact() {
 }
 
 #[test]
+fn a_macos_lock_names_dumpe2fs_or_predates_it() {
+    // published() is a runtime packed before dumpe2fs shipped (#4654).
+    let older = decode(&published()).unwrap();
+    let mut value = published();
+    value["targets"]["macos-aarch64"]["lock"]["e2fsprogs"]["dumpe2fs"] = spec("dumpe2fs", 11);
+    let current = decode(&value).unwrap();
+    assert_eq!(current.blobs().len(), older.blobs().len() + 1);
+    assert!(
+        current
+            .blobs()
+            .iter()
+            .any(|blob| blob.sha256 == digest(11) && blob.size == 1011)
+    );
+
+    // When it is named, it is checked like every other file in the lock.
+    for (field, changed) in [
+        ("architecture", json!("x86_64")),
+        ("path", json!("debugfs")),
+        ("sha256", json!("A".repeat(64))),
+        ("size", json!(0)),
+    ] {
+        let mut invalid = value.clone();
+        invalid["targets"]["macos-aarch64"]["lock"]["e2fsprogs"]["dumpe2fs"][field] = changed;
+        assert!(decode(&invalid).is_err(), "{field}");
+    }
+    let mut unknown = value.clone();
+    unknown["targets"]["macos-aarch64"]["lock"]["e2fsprogs"]["dumpe2fs"]["extra"] = json!(1);
+    assert!(decode(&unknown).is_err());
+    // The packer never writes it as null.
+    let mut null = value;
+    null["targets"]["macos-aarch64"]["lock"]["e2fsprogs"]["dumpe2fs"] = Value::Null;
+    assert!(decode(&null).is_err());
+}
+
+#[test]
 fn a_linux_lock_is_checked_by_its_target_architecture() {
     let linux = |arch: &str| {
         json!({
@@ -225,6 +260,10 @@ fn shared_fixtures_agree_with_the_release_scripts() {
     let valid =
         LocalRuntimeDocument::decode(include_bytes!("fixtures/valid-macos-aarch64.json")).unwrap();
     assert_eq!(valid.blobs().len(), 14);
+    let with_dumpe2fs =
+        LocalRuntimeDocument::decode(include_bytes!("fixtures/valid-macos-aarch64-dumpe2fs.json"))
+            .unwrap();
+    assert_eq!(with_dumpe2fs.blobs().len(), 15);
     let invalid: &[(&str, &[u8])] = &[
         (
             "invalid-blob-sizes-disagree.json",
@@ -253,6 +292,14 @@ fn shared_fixtures_agree_with_the_release_scripts() {
         (
             "invalid-lock-duplicate-path.json",
             include_bytes!("fixtures/invalid-lock-duplicate-path.json").as_slice(),
+        ),
+        (
+            "invalid-lock-dumpe2fs-architecture.json",
+            include_bytes!("fixtures/invalid-lock-dumpe2fs-architecture.json").as_slice(),
+        ),
+        (
+            "invalid-lock-dumpe2fs-null.json",
+            include_bytes!("fixtures/invalid-lock-dumpe2fs-null.json").as_slice(),
         ),
         (
             "invalid-lock-missing-git.json",
@@ -311,7 +358,7 @@ fn shared_fixtures_agree_with_the_release_scripts() {
             include_bytes!("fixtures/invalid-unknown-platform.json").as_slice(),
         ),
     ];
-    assert_eq!(invalid.len(), 21);
+    assert_eq!(invalid.len(), 23);
     for (name, bytes) in invalid {
         assert!(
             LocalRuntimeDocument::decode(bytes).is_err(),

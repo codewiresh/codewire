@@ -44,7 +44,9 @@ KERNEL_FILES = ("scripts/ci/release/build-runtime-kernel.sh", "scripts/ci/releas
 KERNEL_PINS = (("kernel_builder",), ("kernel_bc",), ("sources", "linux"))
 # Each part's producer files, the pins (paths into the pins file) it uses, the
 # files it outputs and which of them are executables. A kernel part also names
-# its architecture (build-linux-vmm-kernel.py --arch), part of its recipe.
+# its architecture (build-linux-vmm-kernel.py --arch), part of its recipe. A
+# recipe hashes the producers, not the outputs listed here, so a new output
+# comes with a change to its producer, as dumpe2fs did (#4654).
 PARTS = {
     "kernel-arm64": {
         "files": KERNEL_FILES + ("scripts/ci/verify/linux-vmm-kernel/arm64.config",),
@@ -70,8 +72,8 @@ PARTS = {
         "pins": (("sources", "e2fsprogs"),),
         # Exactly the files the runtime lock pins, so a record names only
         # blobs a release has published.
-        "outputs": ("mke2fs", "e2fsck", "resize2fs", "debugfs", "mke2fs.conf"),
-        "executables": ("mke2fs", "e2fsck", "resize2fs", "debugfs"),
+        "outputs": ("mke2fs", "e2fsck", "resize2fs", "debugfs", "dumpe2fs", "mke2fs.conf"),
+        "executables": ("mke2fs", "e2fsck", "resize2fs", "debugfs", "dumpe2fs"),
         "host": True,
     },
     "git-macos": {

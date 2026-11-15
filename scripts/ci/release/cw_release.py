@@ -641,14 +641,18 @@ def _runtime_lock_files(platform, lock):
         require(set(lock) == {"schema_version", "vz_runner", "e2fsprogs", "git", "kernel", "initramfs"}
                 and platform == "macos-aarch64", "local runtime lock is invalid")
         e2fsprogs, git = lock["e2fsprogs"], lock["git"]
-        require(isinstance(e2fsprogs, dict) and set(e2fsprogs) == {"mkfs_ext4", "e2fsck", "resize2fs", "debugfs",
-                                                                  "mke2fs_conf"}
+        # dumpe2fs is absent from a runtime packed before it shipped (#4654);
+        # spec() refuses a null, which the packer never writes.
+        tools = {"mkfs_ext4", "e2fsck", "resize2fs", "debugfs", "mke2fs_conf"}
+        require(isinstance(e2fsprogs, dict) and tools <= set(e2fsprogs) <= tools | {"dumpe2fs"}
                 and isinstance(git, dict) and set(git) == {"git", "git_remote_https"},
                 "local runtime lock is invalid")
         for value in (lock["vz_runner"], lock["kernel"], lock["initramfs"], e2fsprogs["mkfs_ext4"],
                       e2fsprogs["e2fsck"], e2fsprogs["resize2fs"], e2fsprogs["debugfs"],
                       e2fsprogs["mke2fs_conf"], git["git"], git["git_remote_https"]):
             spec(value)
+        if "dumpe2fs" in e2fsprogs:
+            spec(e2fsprogs["dumpe2fs"])
     else:
         require({"schema_version", "cloud_hypervisor", "kernel", "initramfs"} <= set(lock)
                 <= {"schema_version", "cloud_hypervisor", "virtiofsd", "kernel", "initramfs"},

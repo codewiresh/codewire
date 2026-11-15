@@ -78,6 +78,11 @@ mod test_runtime_tools {
                     e2fsck: admit("e2fsck", true),
                     resize2fs: admit("resize2fs", true),
                     debugfs: admit("debugfs", true),
+                    // A tools directory from before dumpe2fs shipped has none.
+                    dumpe2fs: Path::new(&source)
+                        .join("dumpe2fs")
+                        .is_file()
+                        .then(|| admit("dumpe2fs", true)),
                     mke2fs_conf: admit("mke2fs.conf", false),
                 },
                 &AdmittedGit {
@@ -107,7 +112,8 @@ pub(crate) fn git() -> Option<HostGit> {
 }
 
 /// The admitted runtime's e2fsprogs program, such as `mkfs.ext4`, re-hashed
-/// immediately before use; a changed file is never run.
+/// immediately before use; a changed file is never run. A runtime packed
+/// before `dumpe2fs` shipped has none.
 pub(crate) fn e2fsprogs(program: &str) -> Option<PathBuf> {
     let (tools, _) = runtime_tools()?;
     let tool = match program {
@@ -115,6 +121,7 @@ pub(crate) fn e2fsprogs(program: &str) -> Option<PathBuf> {
         "e2fsck" => &tools.e2fsck,
         "resize2fs" => &tools.resize2fs,
         "debugfs" => &tools.debugfs,
+        "dumpe2fs" => tools.dumpe2fs.as_ref()?,
         _ => return None,
     };
     tool.revalidate().ok()?;
