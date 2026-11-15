@@ -296,13 +296,13 @@ no_deliveries
 settled || fail "dev-settled refused a settled Dev: $(cat "$work/out")"
 grep -Eq 'actions runs list -R origin -L [0-9]+ --workflow ci.yaml --event push ' "$FAKE/calls" ||
   fail 'dev-settled listed main CI without --event push'
-page="$(jq -cn '{runs: [range(20) | {id: (100 + .), head_sha: "x", ref: "pull/1/head"}]}')"
+page="$(jq -cn '{runs: [range(50) | {id: (100 + .), head_sha: "x", ref: "pull/1/head"}]}')"
 for workflow in promote-dev deploy-dev ci; do
   no_deliveries
   printf '%s' "$page" >"$FAKE/runs-$workflow.yaml.json"
   status=0; settled || status=$?
   [[ "$status" == 2 ]] || fail "dev-settled did not say it cannot tell with a full page of $workflow runs (exit $status)"
-  grep -q "^unknown: 20 or more running $workflow.yaml runs, more than one page" "$work/out" ||
+  grep -q "^unknown: 50 or more running $workflow.yaml runs, more than one page" "$work/out" ||
     fail "dev-settled gave no reason for a full page of $workflow runs: $(cat "$work/out")"
 done
 no_deliveries; active ci 70
@@ -311,7 +311,8 @@ status=0; settled || status=$?
 [[ "$status" == 2 ]] || fail "dev-settled did not say it cannot tell with a full page of one commit's deploy-dev runs (exit $status)"
 
 # The job names it reads are deploy-dev.yaml's.
-for job in 'Build and push the service runtime images' 'Build and push the daemon runtime image' \
+for job in 'Deploy selection' 'Dev delivery turn' \
+    'Build and push the service runtime images' 'Build and push the daemon runtime image' \
     'Publish the exact runtime image set' 'Hand the Dev delivery turn on'; do
   grep -Fq "    name: $job" "$ROOT/.gitea/workflows/deploy-dev.yaml" || fail "deploy-dev.yaml has no job named $job"
   grep -Fq "$job" "$SCRIPTS/dev-settled.sh" || fail "dev-settled does not read the job $job"
@@ -330,9 +331,44 @@ settled --kube fake-kube || fail "dev-settled refused an applied, Ready Dev: $(c
 printf '{"status":{"lastAppliedRevision":"main@sha1:%s","conditions":[{"type":"Ready","status":"True"}]}}' \
   "$codewire_main" >"$FAKE/kustomization.json"
 settled --kube fake-kube && fail 'dev-settled passed while Flux had not applied deploy main'
-git -C "$codewire" commit -q --allow-empty -m 'feat: newer than Dev'
+
+# Dev's source may lag main by commits that need no Dev delivery: settled only
+# while every commit ahead has a deploy-dev run whose selection skipped the
+# delivery turn. A deferred delivery skips its builds too, but still delivers.
+git -C "$codewire" commit -q --allow-empty -m 'docs: newer than Dev'
 git -C "$codewire" push -q origin main
-settled && fail 'dev-settled passed while Dev runs an older source'
+docs_commit="$(git -C "$codewire" rev-parse HEAD)"
+no_deliveries
+printf '{"runs":[{"id":80,"ref":"main"}]}' >"$FAKE/runs-deploy-dev.yaml-$docs_commit.json"
+delivery_run 80 success skipped skipped skipped skipped skipped skipped
+settled || fail "dev-settled refused a Dev that lags main only by a commit needing no delivery: $(cat "$work/out")"
+grep -q "^settled: Dev source $codewire_main (main $docs_commit needs no Dev delivery since)" "$work/out" ||
+  fail "dev-settled did not say why the lag is settled: $(cat "$work/out")"
+behind="^not settled: Dev's source is $codewire_main, codewire main is $docs_commit\$"
+delivery_run 80 success success skipped skipped skipped success skipped
+status=0; settled || status=$?
+{ [[ "$status" == 1 ]] && grep -q "$behind" "$work/out"; } ||
+  fail "dev-settled passed while the commit ahead of Dev deferred its delivery: $(cat "$work/out")"
+printf '{"runs":[]}' >"$FAKE/runs-deploy-dev.yaml-$docs_commit.json"
+status=0; settled || status=$?
+{ [[ "$status" == 1 ]] && grep -q "$behind" "$work/out"; } ||
+  fail "dev-settled passed while a commit ahead of Dev had no deploy-dev run: $(cat "$work/out")"
+
+# A source that is not on main's history, or more commits ahead than it reads
+# one by one, is not settled, and the second reads none of them.
+git -C "$deploy" commit -q --allow-empty -m "deploy(dev): promote source $(printf 'f%.0s' {1..40})"
+git -C "$deploy" push -q origin main
+no_deliveries
+status=0; settled || status=$?
+[[ "$status" == 1 ]] || fail "dev-settled passed while Dev's source is not on main's history (exit $status)"
+git -C "$deploy" reset -q --hard HEAD~1
+git -C "$deploy" push -q -f origin main
+for i in $(seq 1 20); do git -C "$codewire" commit -q --allow-empty -m "docs: ahead $i"; done
+git -C "$codewire" push -q origin main
+no_deliveries
+status=0; settled || status=$?
+[[ "$status" == 1 ]] || fail "dev-settled passed with Dev 21 commits behind main (exit $status)"
+! grep -q -- '--head' "$FAKE/calls" || fail 'dev-settled read the commits ahead one by one past its limit'
 
 # deploy-update-merge: main merges into the branch (never a rebase), the merge
 # waits for both checks on the pushed head, and the worktree goes every time.
