@@ -20,6 +20,7 @@ use super::{
     timestamp_from_system_time,
 };
 use crate::config::{Config, DeclaredMount};
+use crate::execution::ProcessExecution;
 
 /// This thread's filesystem identity, switched to the workload user until
 /// dropped. `setfsuid` and `setfsgid` report the previous value and never an
@@ -123,6 +124,28 @@ impl WorkspaceRoot {
             return Err(FileError::MountUnavailable);
         }
         Ok(())
+    }
+
+    /// Cross from this root into the kept folder at `kept.relative`: open its
+    /// parent beneath this root, open the folder itself with one `openat` that
+    /// follows no link, and require the descriptor to be the root of exactly
+    /// the mount the table matched (#4139).
+    fn enter_kept(&self, kept: &KeptRoot) -> Result<Self> {
+        let leaf = kept.relative.file_name().ok_or(FileError::InvalidPath)?;
+        let parent = kept.relative.parent().unwrap_or_else(|| Path::new(""));
+        let parent = self.open_directory(parent)?;
+        let directory = openat(
+            parent.as_fd(),
+            leaf,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(confined_error)?;
+        let entered = Self {
+            directory: File::from(directory),
+        };
+        entered.verify_mount(Some(kept.mount_id))?;
+        Ok(entered)
     }
 
     fn open_directory(&self, relative: &Path) -> Result<File> {
@@ -286,6 +309,106 @@ fn unescape_mountinfo(field: &str) -> std::ffi::OsString {
     std::ffi::OsString::from_vec(out)
 }
 
+/// One line of `/proc/self/mountinfo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MountEntry {
+    id: u64,
+    device: (u32, u32),
+    root: PathBuf,
+    point: PathBuf,
+}
+
+/// Every line of this process's own mount table. A line that does not parse
+/// fails the request: a kept folder is recognised from this table, so a table
+/// read only in part recognises nothing (#4139).
+fn read_mount_table() -> Result<Vec<MountEntry>> {
+    parse_mount_table(&fs::read_to_string("/proc/self/mountinfo")?)
+}
+
+fn parse_mount_table(text: &str) -> Result<Vec<MountEntry>> {
+    text.lines()
+        .map(|line| parse_mount_line(line).ok_or(FileError::MountUnavailable))
+        .collect()
+}
+
+fn parse_mount_line(line: &str) -> Option<MountEntry> {
+    let mut fields = line.split(' ');
+    let id = fields.next()?.parse().ok()?;
+    let _parent: u64 = fields.next()?.parse().ok()?;
+    let (major, minor) = fields.next()?.split_once(':')?;
+    let device = (major.parse().ok()?, minor.parse().ok()?);
+    let root = PathBuf::from(unescape_mountinfo(fields.next()?));
+    let point = PathBuf::from(unescape_mountinfo(fields.next()?));
+    // Mount options, optional fields, then "-" before the filesystem type.
+    fields.any(|field| field == "-").then_some(MountEntry {
+        id,
+        device,
+        root,
+        point,
+    })
+}
+
+/// A folder kept on the VM's own disk below a root, and the ID of the mount
+/// that holds it now.
+#[derive(Debug, PartialEq, Eq)]
+struct KeptRoot {
+    relative: PathBuf,
+    mount_id: u64,
+}
+
+/// What lies between `root` and `root/relative`: nothing mounted, a kept
+/// folder, or some other mount.
+#[derive(Debug, PartialEq, Eq)]
+enum Crossing {
+    None,
+    Kept(KeptRoot),
+    Other(PathBuf),
+}
+
+/// The first mount between `root` and `root/relative`, read from the
+/// daemon's own mount table (#4139).
+///
+/// A kept folder is recognised by what it is, not from a list: the top mount
+/// at its path is a bind of `/vm-only/<the path's backing name>` on the state
+/// disk's device. A kept folder is bound again under a new mount ID whenever
+/// the host replaces it, so no ID can be pinned at start, as shares are.
+///
+/// The boundary this protects is the unprivileged workspace user against the
+/// root daemon as a confused deputy (cw-security's review on #4139). The
+/// daemon shares init's mount namespace; the workload's mounts stay in its
+/// own namespace and the backing root is root-only and outside its view, so
+/// the workload cannot make such a mount here. With Docker on, the workload
+/// can reach VM root and no in-guest check is a boundary; the host's is the
+/// share confinement, which this does not change.
+fn crossing(table: &[MountEntry], root: &Path, relative: &Path) -> Crossing {
+    let state = table
+        .iter()
+        .rev()
+        .find(|entry| entry.point == Path::new(super::STATE_MOUNT_POINT))
+        .map(|entry| entry.device);
+    let mut prefix = PathBuf::new();
+    for component in relative.components() {
+        prefix.push(component);
+        let point = root.join(&prefix);
+        let Some(top) = table.iter().rev().find(|entry| entry.point == point) else {
+            continue;
+        };
+        let backing = point.to_str().map(|guest| {
+            Path::new("/")
+                .join(super::VM_ONLY_BACKING_DIRECTORY)
+                .join(super::vm_only_backing_name(guest))
+        });
+        if state == Some(top.device) && backing.as_deref() == Some(top.root.as_path()) {
+            return Crossing::Kept(KeptRoot {
+                relative: prefix,
+                mount_id: top.id,
+            });
+        }
+        return Crossing::Other(point);
+    }
+    Crossing::None
+}
+
 impl WorkspacePath {
     fn resolve(config: &Config, raw: &str) -> Result<Self> {
         let display = resolve_workspace_path(config, raw)?;
@@ -294,6 +417,29 @@ impl WorkspacePath {
         let root = WorkspaceRoot::open(root_path)?;
         if let Some(declared) = declared {
             root.verify_mount(declared.mount_id)?;
+        }
+        // Only a local VM's guest keeps folders on its own disk (#4139).
+        if matches!(config.process_execution, ProcessExecution::Runc(_))
+            && root_path.starts_with(&config.workspace_root)
+        {
+            match crossing(&read_mount_table()?, root_path, relative) {
+                Crossing::None => {}
+                Crossing::Other(point) => return Err(FileError::NestedMount(point)),
+                // The folder and everything beneath it resolve from the
+                // folder's own root. The folder itself is that root, so it can
+                // be listed and stated but never replaced or removed.
+                Crossing::Kept(kept) => {
+                    let beneath = relative
+                        .strip_prefix(&kept.relative)
+                        .map_err(|_| FileError::InvalidPath)?
+                        .to_owned();
+                    return Ok(Self {
+                        root: root.enter_kept(&kept)?,
+                        relative: beneath,
+                        display,
+                    });
+                }
+            }
         }
         Ok(Self {
             root,
@@ -949,5 +1095,156 @@ mod tests {
             root.open_directory(Path::new("proc")),
             Err(FileError::TraversalDenied)
         ));
+    }
+
+    /// A mountinfo line: ID, parent, device, root, mount point, then the
+    /// rest a real line carries.
+    fn mount_line(id: u64, device: &str, root: &str, point: &str) -> String {
+        format!("{id} 1 {device} {root} {point} rw,nosuid shared:7 - ext4 /dev/vdb rw")
+    }
+
+    fn kept_backing(point: &str) -> String {
+        format!("/vm-only/{}", super::super::vm_only_backing_name(point))
+    }
+
+    fn table(lines: &[String]) -> Vec<MountEntry> {
+        parse_mount_table(&lines.join("\n")).unwrap()
+    }
+
+    #[test]
+    fn mount_table_lines_parse_with_escapes_and_a_bad_line_refuses_the_table() {
+        let parsed = table(&[mount_line(40, "253:1", "/a\\040b", "/workspace/my\\040app")]);
+        assert_eq!(
+            parsed,
+            vec![MountEntry {
+                id: 40,
+                device: (253, 1),
+                root: PathBuf::from("/a b"),
+                point: PathBuf::from("/workspace/my app"),
+            }]
+        );
+        for bad in [
+            "x 1 253:1 / /state rw - ext4 /dev/vdb rw",
+            "40 1 253 / /state rw - ext4 /dev/vdb rw",
+            "40 1 253:1 / /state rw shared:7",
+            "   ",
+        ] {
+            let text = format!("{}\n{bad}", mount_line(1, "0:1", "/", "/"));
+            assert!(
+                matches!(parse_mount_table(&text), Err(FileError::MountUnavailable)),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kept_folder_is_recognised_by_its_backing_on_the_state_disk() {
+        let point = "/workspace/app/node_modules";
+        let root = Path::new("/workspace/app");
+        let state = mount_line(30, "253:1", "/", "/state");
+        let share = mount_line(31, "0:40", "/", "/workspace/app");
+        let kept = mount_line(32, "253:1", &kept_backing(point), point);
+        let found = crossing(
+            &table(&[state.clone(), share.clone(), kept]),
+            root,
+            Path::new("node_modules/left-pad/index.js"),
+        );
+        assert_eq!(
+            found,
+            Crossing::Kept(KeptRoot {
+                relative: PathBuf::from("node_modules"),
+                mount_id: 32,
+            })
+        );
+        // Bound again after the host replaced the folder: the top mount, with
+        // its new ID, is the one that counts.
+        let first = mount_line(32, "253:1", &kept_backing(point), point);
+        let again = mount_line(57, "253:1", &kept_backing(point), point);
+        assert_eq!(
+            crossing(
+                &table(&[state.clone(), share.clone(), first, again]),
+                root,
+                Path::new("node_modules/x")
+            ),
+            Crossing::Kept(KeptRoot {
+                relative: PathBuf::from("node_modules"),
+                mount_id: 57,
+            })
+        );
+        // Nothing mounted below the root.
+        assert_eq!(
+            crossing(&table(&[state, share]), root, Path::new("src/main.rs")),
+            Crossing::None
+        );
+    }
+
+    #[test]
+    fn any_other_mount_is_refused_by_name() {
+        let point = "/workspace/app/node_modules";
+        let root = Path::new("/workspace/app");
+        let state = mount_line(30, "253:1", "/", "/state");
+        let other = |line: String, tables: &[String]| {
+            let mut lines = tables.to_vec();
+            lines.push(line);
+            crossing(&table(&lines), root, Path::new("node_modules/x"))
+        };
+        let refused = Crossing::Other(PathBuf::from(point));
+        // Another path's backing, the right backing on another device, a
+        // mount with no backing at all, and no state disk to compare with.
+        let wrong_hash = kept_backing("/workspace/app/target");
+        assert_eq!(
+            other(
+                mount_line(32, "253:1", &wrong_hash, point),
+                std::slice::from_ref(&state)
+            ),
+            refused
+        );
+        assert_eq!(
+            other(
+                mount_line(32, "0:99", &kept_backing(point), point),
+                std::slice::from_ref(&state)
+            ),
+            refused
+        );
+        assert_eq!(
+            other(
+                mount_line(32, "253:1", "/", point),
+                std::slice::from_ref(&state)
+            ),
+            refused
+        );
+        assert_eq!(
+            other(mount_line(32, "253:1", &kept_backing(point), point), &[]),
+            refused
+        );
+        // A backing moved to another path by a rename names the old path.
+        let moved = mount_line(32, "253:1", &kept_backing("/workspace/app/old"), point);
+        assert_eq!(other(moved, &[state]), refused);
+    }
+
+    #[test]
+    fn the_kept_folder_itself_can_be_listed_and_stated_but_never_replaced() {
+        // A request that names the kept folder itself resolves to the folder's
+        // own root with an empty relative path (#4139). Listing and stating it
+        // work; every operation that writes, creates, removes, renames or sets
+        // a stat needs a parent and a leaf, so none reaches the folder itself.
+        let temp = tempfile::tempdir().unwrap();
+        let root = WorkspaceRoot::open(&temp.path().canonicalize().unwrap()).unwrap();
+        let none = Path::new("");
+        assert!(root.open_directory(none).is_ok(), "list");
+        assert!(root.metadata_nofollow(none).unwrap().is_dir(), "stat");
+        assert!(matches!(
+            root.open_parent(none),
+            Err(FileError::InvalidPath)
+        ));
+        assert!(matches!(require_leaf(none), Err(FileError::InvalidPath)));
+        assert!(
+            root.open_regular(
+                none,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC,
+                Mode::from_raw_mode(0o644)
+            )
+            .is_err()
+        );
     }
 }

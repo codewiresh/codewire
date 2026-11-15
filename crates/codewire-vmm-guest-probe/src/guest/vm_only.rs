@@ -46,7 +46,6 @@ use rustix::fs::{
     StatVfsMountFlags, Timespec, Timestamps, UTIME_NOW,
 };
 use rustix::io::Errno as RustixErrno;
-use sha2::{Digest as _, Sha256};
 
 use crate::DirectShareMount;
 
@@ -432,12 +431,10 @@ fn report(destination: &str, path: &str, outcome: &Result<Outcome>) -> String {
 }
 
 /// The backing directory's name: the guest path it serves, hashed, so every
-/// name is one fixed-length component.
+/// name is one fixed-length component. The daemon recognises a kept folder by
+/// the same name (#4139), so both use its one definition.
 pub(super) fn backing_name(destination: &str, path: &str) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(format!("{destination}/{path}").as_bytes())
-    )
+    codewire_daemon::files::vm_only_backing_name(&format!("{destination}/{path}"))
 }
 
 /// Open the backing directory `name`, creating it for the workspace owner;
@@ -727,6 +724,24 @@ mod tests {
         assert_ne!(name, backing_name("/workspace/other", "node_modules"));
         assert_eq!(name, backing_name("/workspace/app", "node_modules"));
         assert_ne!(name, RETIRED_NAME);
+    }
+
+    #[test]
+    fn backing_names_and_root_are_the_daemons() {
+        // Folders kept on existing VM disks keep their backing across this
+        // change: the name is the same hash as before (#4139).
+        assert_eq!(
+            backing_name("/workspace/app", "node_modules"),
+            "642326bbc016d8c778c5db0d3eb0868590e5ac47f7c7896cc19b489e4973ed42"
+        );
+        assert_eq!(
+            VM_ONLY_ROOT_PATH,
+            format!(
+                "{}/{}",
+                codewire_daemon::files::STATE_MOUNT_POINT,
+                codewire_daemon::files::VM_ONLY_BACKING_DIRECTORY
+            )
+        );
     }
 
     #[test]

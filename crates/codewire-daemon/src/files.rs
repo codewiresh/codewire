@@ -22,6 +22,20 @@ pub use linux::{
     declared_mounts, list, mkdir, open_file, read, readlink, remove, rename, set_stat, stat, write,
 };
 
+/// Where a local VM's state disk is mounted, and the directory on it that backs
+/// every folder kept on the VM's own disk (`workspace.vm_only`, #4139).
+pub const STATE_MOUNT_POINT: &str = "/state";
+pub const VM_ONLY_BACKING_DIRECTORY: &str = "vm-only";
+
+/// The name of the state-disk directory that backs the kept folder at
+/// `guest_path`: the path hashed, so every name is one fixed-length component.
+/// The guest binds that directory over the folder, and the daemon recognises
+/// the folder by it, so both use this one definition.
+pub fn vm_only_backing_name(guest_path: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    format!("{:x}", Sha256::digest(guest_path.as_bytes()))
+}
+
 const GO_MODE_DIR: u32 = 1 << 31;
 const GO_MODE_SYMLINK: u32 = 1 << 27;
 const GO_MODE_DEVICE: u32 = 1 << 26;
@@ -39,6 +53,10 @@ pub enum FileError {
     MountUnavailable,
     #[error("path traversal through a symlink, magic link, or nested mount is denied")]
     TraversalDenied,
+    /// The path runs through a mount inside the workspace that is neither one
+    /// of its live shares nor a folder kept on the VM's disk (#4139).
+    #[error("{} is a separate mount that file operations do not enter", .0.display())]
+    NestedMount(PathBuf),
     #[error("operation requires a path below the workspace root")]
     InvalidPath,
     #[error("path is not a regular file")]

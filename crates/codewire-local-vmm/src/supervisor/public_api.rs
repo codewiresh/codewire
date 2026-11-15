@@ -31,6 +31,9 @@ use tonic::Request as TonicRequest;
 
 use super::*;
 
+mod file_errors;
+use file_errors::local_file_error;
+
 const PRIVATE_SUPERVISOR_ROUTE: &str = "/codewire.local.v1.LocalSupervisorService/{*method}";
 const PUBLIC_ENVIRONMENT_ROUTE: &str = "/codewire.v1.EnvironmentService/{*method}";
 const PUBLIC_SESSION_ROUTE: &str = "/codewire.v1.EnvironmentSessionService/{*method}";
@@ -1211,48 +1214,6 @@ fn local_exec_error(error: DaemonClientError) -> connectrpc::ConnectError {
         | DaemonClientError::MissingResponse(_)
         | DaemonClientError::InvalidFrame(_) => {
             connectrpc::ConnectError::internal("local environment command failed")
-        }
-    }
-}
-
-fn local_file_error(error: DaemonClientError) -> connectrpc::ConnectError {
-    match error {
-        DaemonClientError::Status(status) => match status.code() {
-            tonic::Code::NotFound => {
-                connectrpc::ConnectError::not_found("local file was not found")
-            }
-            tonic::Code::InvalidArgument | tonic::Code::PermissionDenied => {
-                connectrpc::ConnectError::invalid_argument("local file path is invalid or denied")
-            }
-            tonic::Code::AlreadyExists => {
-                connectrpc::ConnectError::already_exists("local file already exists")
-            }
-            tonic::Code::Unimplemented | tonic::Code::FailedPrecondition => {
-                connectrpc::ConnectError::failed_precondition(
-                    "local environment daemon does not support this file operation",
-                )
-            }
-            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Cancelled => {
-                connectrpc::ConnectError::unavailable("local file transport was lost")
-            }
-            _ => connectrpc::ConnectError::internal("local file request failed"),
-        },
-        DaemonClientError::NotReady { .. }
-        | DaemonClientError::MissingCapability { .. }
-        | DaemonClientError::IncompatibleProtocol { .. } => {
-            connectrpc::ConnectError::failed_precondition(
-                "local environment daemon is not ready for files",
-            )
-        }
-        DaemonClientError::Connect | DaemonClientError::RequestClosed => {
-            connectrpc::ConnectError::unavailable("local file transport was lost")
-        }
-        DaemonClientError::InvalidEndpoint
-        | DaemonClientError::InvalidCredential
-        | DaemonClientError::MissingResponse(_)
-        | DaemonClientError::InvalidFrame(_)
-        | DaemonClientError::Remote(_) => {
-            connectrpc::ConnectError::internal("local file request failed")
         }
     }
 }

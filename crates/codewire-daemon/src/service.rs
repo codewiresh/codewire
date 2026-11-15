@@ -1164,6 +1164,11 @@ fn ok_status() -> v1::OperationStatus {
     }
 }
 
+/// The fixed status message for a path through a mount file operations do not
+/// enter. A host matches it exactly and words its own reply, so no guest text
+/// reaches the user (#4139).
+pub const NESTED_MOUNT_STATUS: &str = "path crosses a separate mount inside the workspace";
+
 pub fn status_from_file_error(err: files::FileError) -> Status {
     match err {
         files::FileError::PathOutsideWorkspace
@@ -1175,6 +1180,7 @@ pub fn status_from_file_error(err: files::FileError) -> Status {
         | files::FileError::InvalidSize
         | files::FileError::IsDirectory => Status::invalid_argument(err.to_string()),
         files::FileError::TraversalDenied => Status::permission_denied(err.to_string()),
+        files::FileError::NestedMount(_) => Status::permission_denied(NESTED_MOUNT_STATUS),
         files::FileError::UntrustedRoot | files::FileError::MountUnavailable => {
             Status::failed_precondition(err.to_string())
         }

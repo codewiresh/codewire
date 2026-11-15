@@ -3613,6 +3613,65 @@ run_cw run --no-tty -- /bin/sh -lc \
 run_cw cp --local "$NAME:/workspace/cw-upload.bin" "$CW_DOWNLOAD"
 cmp "$CW_UPLOAD" "$CW_DOWNLOAD" || die 'cw binary file transfer changed content'
 
+# A folder kept on the VM's own disk: the default plain name node_modules is
+# kept at boot in the live folder, and cw cp reaches into it both ways (#4139).
+KEPT_GUEST=/workspace/w/node_modules
+copy_into_kept_folder() {
+  rm -f -- "$CW_DOWNLOAD"
+  run_cw cp --local "$CW_UPLOAD" "$NAME:$KEPT_GUEST/cw-kept.bin"
+  run_cw run --no-tty -- /bin/sh -lc \
+    "test \"\$(sha256sum $KEPT_GUEST/cw-kept.bin | cut -d' ' -f1)\" = '$CW_UPLOAD_SHA256'"
+  [[ ! -e "$WORKSPACE/node_modules/cw-kept.bin" ]] ||
+    die 'a file copied into a kept folder reached the host folder'
+  run_cw cp --local "$NAME:$KEPT_GUEST/cw-kept.bin" "$CW_DOWNLOAD"
+  cmp "$CW_UPLOAD" "$CW_DOWNLOAD" || die 'cw cp out of a kept folder changed content'
+}
+copy_into_kept_folder
+# A link inside the kept folder that points outside it is still refused.
+run_cw run --no-tty -- ln -s /etc/hostname "$KEPT_GUEST/cw-outside"
+run_cw_expect_failure cp --local "$NAME:$KEPT_GUEST/cw-outside" "$SMOKE_ROOT/cw-outside"
+[[ ! -e "$SMOKE_ROOT/cw-outside" ]] || die 'a refused copy out of a kept folder wrote a file'
+# The host replaces the folder; the guest binds it again under a new mount
+# (the backing on the VM's disk keeps its files), and cw cp reaches it there.
+kept_mount_id() {
+  # shellcheck disable=SC2016 # The awk program runs in the guest.
+  cw_isolated run --no-tty -- awk -v p="$KEPT_GUEST" '$5 == p { id = $1 } END { print id }' \
+    /proc/self/mountinfo 2>/dev/null | tail -n 1
+}
+kept_before="$(kept_mount_id)"
+[[ -n "$kept_before" ]] || die 'the kept folder is not a mount in the guest'
+rm -rf -- "$WORKSPACE/node_modules"
+kept_again=0
+for _ in $(seq 1 60); do
+  kept_now="$(kept_mount_id)"
+  if [[ -n "$kept_now" && "$kept_now" != "$kept_before" ]]; then
+    kept_again=1
+    break
+  fi
+  sleep 1
+done
+[[ "$kept_again" == 1 ]] || die 'the kept folder was not bound again after the host removed it'
+copy_into_kept_folder
+# The workload holds every mount below /workspace as a slave of init's and
+# shares no peer group with it, so nothing it mounts reaches the daemon's
+# namespace (cw-security's review on #4139).
+# shellcheck disable=SC2016 # The awk program runs in the guest.
+run_cw run --no-tty -- awk '
+  $5 ~ /^\/workspace(\/|$)/ {
+    master = 0; shared = 0
+    for (i = 7; i <= NF && $i != "-"; i++) {
+      if ($i ~ /^master:/) master = 1
+      if ($i ~ /^shared:/) shared = 1
+    }
+    # /workspace itself is the private bind of the container; every share
+    # and kept folder below it is a slave of the guest init. None is shared.
+    if (shared || ($5 != "/workspace" && !master)) { print "not-a-slave " $5; bad = 1 }
+    seen++
+  }
+  END { if (bad || !seen) exit 1; print "workload-mounts-slave-only " seen }' /proc/self/mountinfo
+rg -q '^workload-mounts-slave-only [0-9]+$' "$LAST_STDOUT" ||
+  die 'a workload mount below /workspace is not a slave of the guest init'
+
 # The declared port's server listens on the guest's loopback only, which a
 # host port reaches through the daemon (#4347); the dynamic one, below, on
 # every address.
