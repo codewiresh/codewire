@@ -2737,7 +2737,7 @@ pub(crate) fn env_create_request_from_source(
         project_spec.secrets.project = project.clone();
     }
     if let Some(user) = args.user_secrets {
-        project_spec.secrets.user = Some(sources::placement(user));
+        project_spec.secrets.user = Some(sources::cloud_user_secrets(user)?);
     }
     if args.org_secrets {
         project_spec.secrets.organization = true;

@@ -15,6 +15,36 @@ pub(super) fn placement(value: StoragePlacementArg) -> codewire_project::Storage
     }
 }
 
+/// `--user-secrets` for a cloud create (#4702): a cloud environment reads
+/// personal secrets from the platform, never from this computer.
+pub(super) fn cloud_user_secrets(
+    value: StoragePlacementArg,
+) -> anyhow::Result<codewire_project::StoragePlacement> {
+    anyhow::ensure!(
+        !matches!(value, StoragePlacementArg::Local),
+        "a cloud environment can't read personal secrets stored on this computer; keep them on the platform and pass --user-secrets platform"
+    );
+    Ok(placement(value))
+}
+
+/// Personal secrets belong to a person, and an organization API key has
+/// none: said before the create's plan, not after the server refuses it
+/// (#4702).
+const ORG_KEY_PERSONAL_SECRETS: &str = "personal application secrets need a personal sign-in, and an organization API key has none: run `cw login`, or pass --org-secrets for the organization's application secrets";
+
+/// Refuses personal secrets for a client signed in with an organization API
+/// key (#4702). It reads only the client's own token: no request is made.
+async fn refuse_org_key_personal_secrets(
+    client: &EnvironmentClient,
+    selection: &EnvironmentSourceSelection,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        selection.secrets.user.is_none() || !client.uses_organization_api_key().await?,
+        ORG_KEY_PERSONAL_SECRETS
+    );
+    Ok(())
+}
+
 /// A codewire.yaml selected for a cloud create.
 #[derive(Debug)]
 pub(super) struct PlatformDocument {
@@ -244,6 +274,10 @@ pub(super) async fn prepare_create_sources(
         credentials: request.project_spec.credentials.clone(),
         profile_revision: None,
     };
+    // First, before any name is resolved or the plan printed. It also runs
+    // before the default profile: an organization key has none, so that
+    // order changes nothing today; keep this check first if it moves.
+    refuse_org_key_personal_secrets(client, &selection).await?;
     // With no profile named and no --no-profile, the user's default profile.
     let from_default = select_default_profile(client, args.no_profile, &mut selection).await?;
     if selection.secrets.is_empty() && selection.credentials.is_none() {
@@ -400,12 +434,64 @@ pub(super) async fn update_platform_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use buffa::Message as _;
     use codewire_client as rpc;
     use wiremock::matchers::{body_bytes, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const DEFAULT: &str = "22222222-2222-4222-8222-222222222222";
+
+    /// A cloud create's personal secrets come from the platform, and only a
+    /// person's sign-in has them (#4702).
+    #[test]
+    fn personal_secrets_for_a_cloud_create_are_refused_in_plain_words() {
+        assert_eq!(
+            cloud_user_secrets(StoragePlacementArg::Platform).unwrap(),
+            codewire_project::StoragePlacement::Platform
+        );
+        let local = cloud_user_secrets(StoragePlacementArg::Local)
+            .unwrap_err()
+            .to_string();
+        assert!(local.ends_with("pass --user-secrets platform"), "{local}");
+        for message in [local.as_str(), ORG_KEY_PERSONAL_SECRETS] {
+            for internal in ["secrets.user", "placement", "account-global", "scoped"] {
+                assert!(!message.contains(internal), "{message}");
+            }
+        }
+        assert!(ORG_KEY_PERSONAL_SECRETS.contains("`cw login`"));
+        assert!(ORG_KEY_PERSONAL_SECRETS.contains("--org-secrets"));
+    }
+
+    /// The refusal's condition, not only its words: an organization key
+    /// with personal secrets is refused before any request, and a personal
+    /// sign-in, or no personal secrets, goes on (#4702).
+    #[tokio::test]
+    async fn an_organization_key_with_personal_secrets_is_refused_before_any_request() {
+        let server = MockServer::start().await;
+        let personal = EnvironmentSourceSelection {
+            secrets: codewire_project::SecretBindings {
+                user: Some(codewire_project::StoragePlacement::Platform),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let org_key = client_with_token(&server, "cw_synthetic-org-key");
+        let refused = refuse_org_key_personal_secrets(&org_key, &personal)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.to_string(), ORG_KEY_PERSONAL_SECRETS);
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        let person = client_with_token(&server, "synthetic-personal-token");
+        refuse_org_key_personal_secrets(&person, &personal)
+            .await
+            .unwrap();
+        refuse_org_key_personal_secrets(&org_key, &EnvironmentSourceSelection::default())
+            .await
+            .unwrap();
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
 
     fn profile_client(server: &MockServer) -> EnvironmentClient {
         client_with_token(server, "synthetic-default-profile-token")
