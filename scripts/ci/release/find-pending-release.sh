@@ -162,13 +162,14 @@ markers() {
   fail "$tag's commit has more statuses than this check reads"
 }
 
-# run_outcome ID: running, success or stopped, from the run's jobs; empty when
-# they cannot be read.
+# run_outcome ID: running, success or stopped, from the run's jobs, which
+# Forgejo lists as a bare array (an object's .jobs is read too, should a
+# version wrap them); empty when they cannot be read.
 run_outcome() {
   local status
   status="$(api GET "actions/runs/$1/jobs?page=1&limit=100" "$release_tmp/jobs.json")"
   [[ "$status" == 200 ]] || return 0
-  jq -r '(.jobs // []) as $jobs |
+  jq -r '(if type == "array" then . elif type == "object" then (.jobs // []) else [] end) as $jobs |
     if ($jobs | length) == 0 then empty
     elif any($jobs[]; .status == "waiting" or .status == "running" or .status == "blocked" or .status == "unknown") then "running"
     elif all($jobs[]; .status == "success" or .status == "skipped") then "success"

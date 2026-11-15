@@ -131,8 +131,13 @@ case "$method $path" in
     run="${path#actions/runs/}" run="${run%%/*}"
     [ "${FIXTURE_JOBS_STATUS:-200}" = 200 ] || { printf '%s' "$FIXTURE_JOBS_STATUS"; exit 0; }
     statuses="$(tr ';' '\n' <<<"${FIXTURE_RUN_JOBS:-}" | awk -F: -v run="$run" '$1 == run { print $2 }')"
-    jq -n --arg statuses "$statuses" '($statuses | split(",") | map(select(. != ""))) as $s |
-      {total_count: ($s | length), jobs: [$s | to_entries[] | {id: .key, status: .value}]}' >"$output"
+    # Forgejo lists a run's jobs as a bare array, as require-production-accepted.sh
+    # reads it, not as {jobs: [...]} (cli-release 51208 read v0.4.20's stopped
+    # delivery as nothing pending while the fixture had the wrong shape).
+    jq -n --arg statuses "$statuses" --arg wrapped "${FIXTURE_JOBS_WRAPPED:-}" '
+      ($statuses | split(",") | map(select(. != ""))) as $s |
+      [$s | to_entries[] | {id: .key, status: .value}] |
+      if $wrapped == "" then . else {total_count: length, jobs: .} end' >"$output"
     ;;
   POST\ statuses/*)
     printf '%s %s\n' "${path#statuses/}" "$body" >>"$FIXTURE_DIR/marks.log"
@@ -230,6 +235,12 @@ for case in 'running 0 success,running,blocked' 'delivered 0 success,skipped,suc
 done
 grep -Fxq '::error::v0.4.1 was picked up by deploy-prod, whose run ended without delivering it (picked up by run 70 (id 4070)); recover it with a dispatch of deploy-prod.yaml on main with release_tag=v0.4.1' \
   "$fixture/run-failed.out" || fail "a stopped delivery did not name its recovery: $(cat "$fixture/run-failed.out")"
+# Forgejo lists the jobs as a bare array; a {jobs: [...]} wrapping is read too,
+# so a stopped delivery never reads as nothing pending again.
+rc=0
+FIXTURE_JOBS_WRAPPED=1 FIXTURE_MARKER='release/deploy-prod v0.4.1' FIXTURE_RUN_JOBS='4070:success,cancelled' \
+  find_release run-wrapped deploy-prod schedule || rc=$?
+[ "$rc" = 1 ] || fail "a stopped delivery listed as {jobs: [...]} exited $rc: $(cat "$fixture/run-wrapped.out")"
 # cli-release's recovery also names its public publication.
 rc=0
 FIXTURE_MARKER='release/cli-release v0.4.1' FIXTURE_RUN_JOBS='4070:success,cancelled' find_release run-cli cli-release schedule || rc=$?
