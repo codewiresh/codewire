@@ -198,6 +198,19 @@ async function accountHome(page: Page, slug: string): Promise<void> {
   });
   await expect(card).toHaveCount(1);
   await expect(card.getByRole("link", { name: "Sandboxes", exact: true })).toHaveAttribute("href", `/${slug}/`);
+  // One organization's card spans the list; several share a grid on a wide
+  // screen and stack on a phone (#4464).
+  const list = overview.locator(".cw-org-overview");
+  const items = list.locator(":scope > li");
+  const listWidth = (await list.boundingBox())!.width;
+  const widths = await items.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().width));
+  // The columns the list lays out at this width: 1 up to 48rem (768 px), 2 above.
+  const columns = await list.evaluate((node) => getComputedStyle(node).gridTemplateColumns.trim().split(/\s+/).length);
+  expect(columns).toBe(page.viewportSize()!.width > 768 ? 2 : 1);
+  for (const width of widths) {
+    if (widths.length === 1 || columns === 1) expect(Math.abs(width - listWidth)).toBeLessThanOrEqual(1);
+    else expect(width).toBeLessThan(listWidth - 1);
+  }
   if (await card.locator("dl.cw-stat-grid").count()) {
     await expect(card.locator("dl.cw-stat-grid dt")).toHaveText(["Balance", "This month", "Running"]);
     // Two decimals, "< €0.01" under a cent, and ∞ (named Unlimited) for an Unlimited organization (#4464).
