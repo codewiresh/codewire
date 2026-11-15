@@ -176,3 +176,114 @@ async fn provider_sign_up_sends_only_the_edge_hop_and_nothing_without_one() {
         assert_eq!(forwarded_on(&calls, "/api/auth/oauth/signup/pending"), None);
     }
 }
+
+/// An identity service whose sign-ups are refused with `status`, `code` and,
+/// when given, `Retry-After`, as the IdP's sign-up limits refuse them.
+async fn refusing_identity(
+    status: StatusCode,
+    code: &str,
+    retry_after: Option<&str>,
+) -> TestServer {
+    let code = code.to_owned();
+    let retry_after = retry_after.map(str::to_owned);
+    serve(
+        Router::new().fallback(any(move |request: axum::extract::Request| {
+            let code = code.clone();
+            let retry_after = retry_after.clone();
+            async move {
+                if request.uri().path() == "/api/auth/oauth/signup/pending" {
+                    return Json(serde_json::json!({
+                        "provider": "github",
+                        "email": "synthetic@example.invalid",
+                    }))
+                    .into_response();
+                }
+                let body = Json(serde_json::json!({
+                    "code": code,
+                    "detail": "internal detail the page never shows",
+                }));
+                match retry_after {
+                    Some(seconds) => {
+                        (status, [(header::RETRY_AFTER, seconds)], body).into_response()
+                    }
+                    None => (status, body).into_response(),
+                }
+            }
+        })),
+    )
+    .await
+}
+
+/// The page a refused sign-up renders: its status and text.
+async fn page(
+    dashboard: &TestServer,
+    path: &str,
+    headers: HeaderMap,
+    form: &[(&str, &str)],
+) -> (StatusCode, String) {
+    let response = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
+        .build()
+        .unwrap()
+        .post(format!("{}{path}", dashboard.origin))
+        .headers(headers)
+        .form(form)
+        .send()
+        .await
+        .unwrap();
+    (response.status(), response.text().await.unwrap())
+}
+
+/// A sign-up the IdP's limits refused says what was limited and when to try
+/// again, from the refusal's code and `Retry-After`, never the IdP's detail;
+/// an unavailable limit says sign-up is unavailable, not that mail is late
+/// (#4695).
+#[tokio::test]
+async fn a_limited_sign_up_says_so_and_when_to_try_again() {
+    let cases = [
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            Some("690"),
+            "Too many sign-ups right now. Try again in 12 minutes.",
+        ),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            Some("1"),
+            "Too many sign-ups right now. Try again in a minute.",
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "rate_limit_unavailable",
+            None,
+            "Sign-up is temporarily unavailable. Try again in a few minutes.",
+        ),
+    ];
+    for (status, code, retry_after, expected) in cases {
+        let identity = refusing_identity(status, code, retry_after).await;
+        let dashboard = serve(crate::app(config(&identity.origin))).await;
+        let csrf = crate::security::new_csrf_token();
+        for (path, form, provider) in [
+            ("/signup/_actions/sign-up", sign_up_form(&csrf), false),
+            (
+                "/signup/complete/_actions/complete",
+                vec![("_csrf", csrf.as_str()), ("reason", "a synthetic sign-up")],
+                true,
+            ),
+        ] {
+            let (answered, body) = page(
+                &dashboard,
+                path,
+                browser(&csrf, Some(EDGE_HOP), provider),
+                &form,
+            )
+            .await;
+            assert_eq!(answered, status, "{path} {code}");
+            assert!(body.contains(expected), "{path} {code}: {body}");
+            assert!(!body.contains("internal detail"), "{path} {code}");
+            assert!(!body.contains("Wait a moment"), "{path} {code}");
+        }
+    }
+}

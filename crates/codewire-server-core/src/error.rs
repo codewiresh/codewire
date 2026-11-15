@@ -243,7 +243,6 @@ pub fn hint_for_code(code: &str) -> Option<&'static str> {
             "Reduce CPU/memory on active environments or ask for a higher limit"
         }
         "credit_exhausted" => "Add a card or credit on the organization's billing page",
-        "rate_limited" => "Wait a moment before creating more environments",
         "environment_protected" => "Unprotect with 'cw unprotect <name>' first",
         "organization_write_blocked" => {
             "Wait for organization deletion to finish or retry the failed deletion"
@@ -406,5 +405,9 @@ mod tests {
         ] {
             assert_eq!(hint_for_code(code), Some(hint), "{code}");
         }
+        // A rate_limited refusal's detail names what was limited and when to
+        // try again, for sign-ups, deletions, feedback and environments alike,
+        // so no one hint fits them all (#4695).
+        assert_eq!(hint_for_code("rate_limited"), None);
     }
 }

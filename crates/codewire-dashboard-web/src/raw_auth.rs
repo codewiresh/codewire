@@ -16,6 +16,9 @@ pub(crate) struct IdentityResponse<T> {
     pub(crate) error_code: Option<IdentityErrorCode>,
     /// The single-use token that comes with [`IdentityErrorCode::EmailUnverified`].
     pub(crate) resend_token: Option<String>,
+    /// Seconds until a [`IdentityErrorCode::RateLimited`] refusal resets, from
+    /// its `Retry-After`.
+    pub(crate) retry_after: Option<u64>,
     set_cookies: Vec<HeaderValue>,
 }
 
@@ -33,6 +36,10 @@ impl<T> IdentityResponse<T> {
 pub(crate) enum IdentityErrorCode {
     /// The right password for an account that never verified its email.
     EmailUnverified,
+    /// A rate limit refused the request; `Retry-After` says when it resets.
+    RateLimited,
+    /// The rate limit couldn't be read, so the request was refused (#3256).
+    RateLimitUnavailable,
 }
 
 #[derive(Deserialize)]
@@ -248,12 +255,18 @@ where
     }
     let status = response.status();
     let set_cookies = approved_session_cookies(response.headers());
+    let retry_after = response
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok());
     // Error bodies are deliberately discarded: they may contain internal
     // details and are never reflected into browser HTML. The exceptions are a
-    // code from the fixed list above and, with `email_unverified`, its hex
-    // resend token, which the IdP issues for the browser's resend button. Successful bodies are decoded directly into the
-    // route-owned contract type so this bridge does not need a dynamic JSON
-    // dependency or unbounded value tree.
+    // code from the fixed list above, with `email_unverified` its hex resend
+    // token, which the IdP issues for the browser's resend button, and with
+    // `rate_limited` the `Retry-After` seconds. Successful bodies are decoded
+    // directly into the route-owned contract type so this bridge does not need
+    // a dynamic JSON dependency or unbounded value tree.
     let (body, error_code, resend_token) = if status.is_success() {
         (
             Some(response.json::<O>().await.map_err(|_| ())?),
@@ -270,14 +283,24 @@ where
                 Some(IdentityErrorCode::EmailUnverified),
                 resend_token.and_then(identity_token),
             ),
+            Ok(IdentityErrorBody {
+                code:
+                    Some(
+                        code @ (IdentityErrorCode::RateLimited
+                        | IdentityErrorCode::RateLimitUnavailable),
+                    ),
+                ..
+            }) => (None, Some(code), None),
             _ => (None, None, None),
         }
     };
+    let retry_after = retry_after.filter(|_| error_code == Some(IdentityErrorCode::RateLimited));
     Ok(IdentityResponse {
         status,
         body,
         error_code,
         resend_token,
+        retry_after,
         set_cookies,
     })
 }
@@ -391,6 +414,7 @@ mod tests {
             body: None,
             error_code: None,
             resend_token: None,
+            retry_after: None,
             set_cookies,
         };
         let csrf_cookies = |response: &Response| {

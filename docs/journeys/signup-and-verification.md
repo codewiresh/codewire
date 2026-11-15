@@ -223,9 +223,9 @@ Issue: #3297 (items 7, 8, 11 and 14).
      the right password: the sixth answers `429`.
   2. From one address, thirty-one sign-ups on the sign-up page with a walk
      account's own email, each passing Turnstile: the first thirty say the
-     account already exists, and the thirty-first is refused. The page shows
-     its generic "The request could not be completed" until #4695 words the
-     refusal. No account is created and no mail is sent.
+     account already exists, and the thirty-first is refused with "Too many
+     sign-ups right now. Try again in N minutes." (#4695). No account is
+     created and no mail is sent.
 - **Proof:** the `429` on the right password, and no session. For the
   sign-ups:
   - the IdP's `sign-up refused by its rate limit` warning with

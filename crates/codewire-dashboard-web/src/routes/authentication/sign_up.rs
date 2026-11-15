@@ -4,7 +4,9 @@
 use codewire_server_core::client_address::forwarded_client_hop;
 
 use super::*;
-use crate::raw_auth::{SignupMode, post_json_for_client, signup_mode};
+use crate::raw_auth::{
+    IdentityErrorCode, IdentityResponse, SignupMode, post_json_for_client, signup_mode,
+};
 
 pub(in crate::routes) async fn signup(
     State(state): State<AppState>,
@@ -86,11 +88,7 @@ pub(in crate::routes) async fn signup_action(
             &state,
             &headers,
             identity.status,
-            signup_view(
-                query,
-                user_message(identity.status, "sign-up").to_owned(),
-                mode,
-            ),
+            signup_view(query, refusal_message(&identity, "sign-up"), mode),
         )
         .await;
     }
@@ -242,12 +240,33 @@ pub(in crate::routes) async fn signup_complete_action(
             } else {
                 status
             },
-            signup_complete_view(
-                &pending,
-                user_message(status, "oauth-sign-up").to_owned(),
-                mode,
-            ),
+            signup_complete_view(&pending, refusal_message(&identity, "oauth-sign-up"), mode),
         ),
+    }
+}
+
+/// What a refused sign-up says. One the sign-up limits refused names what was
+/// limited and when to try again (#4695); the IdP's own detail never reaches
+/// the page.
+fn refusal_message<T>(identity: &IdentityResponse<T>, operation: &'static str) -> String {
+    match identity.error_code {
+        Some(IdentityErrorCode::RateLimited) => limited_message(identity.retry_after),
+        Some(IdentityErrorCode::RateLimitUnavailable) => {
+            "Sign-up is temporarily unavailable. Try again in a few minutes.".to_owned()
+        }
+        _ => user_message(identity.status, operation).to_owned(),
+    }
+}
+
+/// "Too many sign-ups right now. Try again in 12 minutes.", from the
+/// refusal's `Retry-After` seconds, rounded up to whole minutes.
+fn limited_message(retry_after: Option<u64>) -> String {
+    match retry_after.map(|seconds| seconds.div_ceil(60).max(1)) {
+        Some(1) => "Too many sign-ups right now. Try again in a minute.".to_owned(),
+        Some(minutes) => {
+            format!("Too many sign-ups right now. Try again in {minutes} minutes.")
+        }
+        None => "Too many sign-ups right now. Try again later.".to_owned(),
     }
 }
 
