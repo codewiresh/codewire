@@ -246,6 +246,7 @@ async fn harness() -> Harness {
         )),
         derp_verify_addr: None,
         local_authorization: None,
+        nats: None,
     };
     let state = AppState::new(config, store.clone());
     let app = crate::server::router_from_state(state.clone());

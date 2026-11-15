@@ -3,7 +3,7 @@
   "schema_version": 1,
   "required_server_fragments": [
     "AppBuilder::new(\"mesh\")",
-    ".with_health()",
+    ".with_health_probe(move || {",
     ".with_connect_routes(crate::connect::router(state.clone()))",
     "crate::mesh_coordinate::router(state)",
     "ProtocolPolicy::ConnectAndGrpc"

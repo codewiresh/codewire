@@ -1667,6 +1667,15 @@ service_build_connectcore() {
     cargo_ci test --locked --profile ci -p codewire-server-core --test connect_auth --no-run
   fi
 }
+# Mesh's shared-registry tests, which run_nats runs against NATS (#3542). In
+# the binaries batch's folder, where its dependencies are already built: a
+# batch of its own took 122 s from an empty folder in run 48946, against 26 s
+# for the binaries batch.
+service_build_mesh() {
+  if selected service_nats; then
+    cargo_ci test --locked --profile ci -p codewire-mesh --lib --no-run
+  fi
+}
 # service_build_batches PLANE: the plane's batches, one per line. One after
 # another in one folder, the control plane took 371 s in main run 26920 (the
 # migration runner 89 s, the binaries 80, idp 74, coordinator 52, billing
@@ -1677,7 +1686,7 @@ service_build_connectcore() {
 service_build_batches() {
   case "$1" in
     control) printf '%s\n' 'binaries connectcore' idp coordinator billing ;;
-    runtime) printf '%s\n' 'binaries coordinator' ;;
+    runtime) printf '%s\n' 'binaries coordinator mesh' ;;
     *) echo "::error::unknown service plane: $1" >&2; return 2 ;;
   esac
 }
@@ -2419,6 +2428,12 @@ run_nats() {
     --lib generated_protocol_cross_replica_fanout_round_trips_over_nats \
     -- --ignored --nocapture | tee "$logfile"
   assert_passed_count "coordinator generated cross-replica smoke" "$logfile" 1
+  # Mesh replicas sharing their live registry through one KV bucket (#3542).
+  logfile="$RUN_DIR/mesh-shared-registry.log"
+  NATS_URL="$NATS_URL" cargo_ci test --profile ci -p codewire-mesh \
+    --lib mesh_coordinate::shared::tests::nats_tests -- --ignored --nocapture \
+    | tee "$logfile"
+  assert_passed_count "Mesh shared registry" "$logfile" 22
 }
 
 # The control plane's suites run in lanes when each can have its own

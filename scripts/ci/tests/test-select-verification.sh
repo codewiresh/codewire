@@ -1485,6 +1485,10 @@ run_paths_case temporal_shared_fixture pull_request refs/pull/841/head false \
 run_paths_case nats_service pull_request refs/pull/85/head false \
   'policy service_coordinator service_integration service_nats transport transport_pkg_codewire_coordinator' \
   crates/codewire-coordinator/src/nats.rs
+# The shared Mesh registry's two-replica tests run against NATS (#3542).
+run_paths_case mesh_shared_registry pull_request refs/pull/85/head false \
+  'policy service_integration service_nats transport transport_pkg_codewire_mesh' \
+  crates/codewire-mesh/src/mesh_coordinate/shared.rs
 run_paths_case retired_apikey_smoke pull_request refs/pull/86/head false \
   'policy security security_js' \
   scripts/runtime/tests/test-apikey-smoke.sh

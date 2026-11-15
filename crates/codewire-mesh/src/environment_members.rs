@@ -357,7 +357,18 @@ pub(crate) async fn recheck(state: &crate::server::AppState) {
             .remove_environment_node(network_id, node_name, environment_id)
             .await
         {
-            Ok(()) => state.mesh_coordinate.revoke_node(network_id, node_name),
+            Ok(()) => {
+                // The recheck covers this replica's own sessions, so the local
+                // end has already closed it, and this replica's writer deletes
+                // its record too.
+                if let Err(error) = state
+                    .mesh_coordinate
+                    .revoke_node(network_id, node_name)
+                    .await
+                {
+                    tracing::warn!(%error, "Mesh environment node revocation not shared");
+                }
+            }
             Err(error) => tracing::warn!(%error, "Mesh environment node removal failed"),
         }
     }

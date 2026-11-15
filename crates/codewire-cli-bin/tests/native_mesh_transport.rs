@@ -174,6 +174,7 @@ async fn start_fixture(with_stun: bool) -> Fixture {
             organization_id: ORGANIZATION_ID.to_owned(),
             api_key_hash: hash_api_key(API_KEY),
         }),
+        nats: None,
     };
     let app = codewire_mesh::router(config);
     let mesh_task = tokio::spawn(async move {

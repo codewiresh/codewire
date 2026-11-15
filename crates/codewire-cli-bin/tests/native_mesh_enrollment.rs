@@ -95,6 +95,7 @@ async fn start_mesh_fixture() -> MeshFixture {
             organization_id: ORGANIZATION_ID.to_owned(),
             api_key_hash: hash_api_key(API_KEY),
         }),
+        nats: None,
     });
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();

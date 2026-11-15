@@ -2093,7 +2093,8 @@ if [ "$event_selected" = false ]; then
         select_token service_temporal
         recognized=true
         ;;
-      crates/codewire-coordinator/src/nats*|crates/codewire-mesh/src/nats*)
+      crates/codewire-coordinator/src/nats*|crates/codewire-mesh/src/nats*|\
+        crates/codewire-mesh/src/mesh_coordinate.rs|crates/codewire-mesh/src/mesh_coordinate/*)
         select_token service_integration
         select_token service_nats
         recognized=true

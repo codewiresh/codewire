@@ -245,6 +245,29 @@ impl MeshProductService {
 
     /// Removes an environment's node row once orchestration says it is gone.
     /// The caller also closes any stream for it.
+    /// Whether the store still has this node, or for a dial session without
+    /// one this network, for the shared registry's recheck (#3542).
+    pub(crate) async fn session_still_registered(
+        &self,
+        network_id: &str,
+        node_name: Option<&str>,
+    ) -> AppResult<bool> {
+        Ok(match node_name {
+            Some(name) => self
+                .store
+                .node_get(network_id, name)
+                .await
+                .map_err(store_error)?
+                .is_some(),
+            None => self
+                .store
+                .network_organization_id(network_id)
+                .await
+                .map_err(store_error)?
+                .is_some(),
+        })
+    }
+
     pub(crate) async fn remove_environment_node(
         &self,
         network_id: &str,

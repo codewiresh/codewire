@@ -5,6 +5,8 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -16,11 +18,18 @@ use crate::mesh_authorization::MeshAuthorizationAdapter;
 use crate::product::MeshProductService;
 use crate::store::{SharedStore, store_from_config};
 
+/// How long a stopping replica that shares its registry stays up unready
+/// before it ends its sessions, so the load balancer has stopped sending it
+/// new ones (#3542).
+const DRAIN_WAIT: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) config: Config,
     pub(crate) product: MeshProductService,
     pub(crate) mesh_coordinate: crate::mesh_coordinate::MeshCoordinateState,
+    /// Set once the process is stopping: `/readyz` then fails.
+    pub(crate) draining: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -41,6 +50,7 @@ impl AppState {
             config,
             product,
             mesh_coordinate: crate::mesh_coordinate::MeshCoordinateState::new(),
+            draining: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -65,7 +75,14 @@ where
     let store = store_from_config(&config)
         .await
         .context("initialize codewire-mesh store")?;
-    let state = AppState::new(config, store);
+    let mut state = AppState::new(config, store);
+    // Mesh reaches NATS in the background: a NATS outage at startup leaves it
+    // serving its own sessions, never crash-looping (#3542).
+    let sharing = state
+        .config
+        .nats
+        .clone()
+        .map(|nats| state.mesh_coordinate.share_in_background(nats));
     // DERP's client admission lookup (#2844), on its own listener so no
     // ingress route reaches it.
     let derp_verify = match state.config.derp_verify_addr {
@@ -86,11 +103,31 @@ where
         .environment_members()
         .is_some()
         .then(|| crate::environment_members::spawn_recheck(state.clone()));
+    let store_recheck = state
+        .mesh_coordinate
+        .is_shared()
+        .then(|| crate::mesh_coordinate::spawn_store_recheck(state.clone()));
+    let coordinate = state.mesh_coordinate.clone();
+    let draining = state.draining.clone();
     let router = router_from_state(state);
+    // A replica sharing its registry turns unready, waits, then ends its
+    // sessions without deleting their records: each reconnects to another
+    // replica, and its partners see it updated, never removed (#3542).
+    let shutdown = async move {
+        shutdown.await;
+        if coordinate.is_shared() {
+            draining.store(true, Ordering::Release);
+            tokio::time::sleep(DRAIN_WAIT).await;
+            coordinate.drain().await;
+        }
+    };
     let result = axum::serve(http_listener, router)
         .with_graceful_shutdown(shutdown)
         .await
         .context("serve codewire-mesh HTTP");
+    for task in sharing.into_iter().chain(store_recheck) {
+        task.abort();
+    }
     if let Some(derp_verify) = derp_verify {
         derp_verify.abort();
     }
@@ -124,8 +161,12 @@ pub fn router_with_store_offline_after(
 }
 
 pub(crate) fn router_from_state(state: AppState) -> Router {
+    let draining = state.draining.clone();
     AppBuilder::new("mesh")
-        .with_health()
+        .with_health_probe(move || {
+            let ready = !draining.load(Ordering::Acquire);
+            async move { ready }
+        })
         .with_connect_routes(crate::connect::router(state.clone()))
         .with_connect_routes_and_protocol_policy(
             crate::mesh_coordinate::router(state),

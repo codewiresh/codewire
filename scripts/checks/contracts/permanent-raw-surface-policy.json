@@ -81,7 +81,7 @@
     ],
     "crates/codewire-mesh/src/server.rs": [
       "AppBuilder::new(\"mesh\")",
-      ".with_health()",
+      ".with_health_probe(move || {",
       ".with_connect_routes(crate::connect::router(state.clone()))"
     ]
   },

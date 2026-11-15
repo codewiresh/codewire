@@ -46,6 +46,7 @@ fn mesh_router(organization: &str, key: &str, address: std::net::SocketAddr) -> 
             organization_id: organization.into(),
             api_key_hash: hash_api_key(key),
         }),
+        nats: None,
     })
 }
 

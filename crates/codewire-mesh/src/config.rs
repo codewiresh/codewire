@@ -22,6 +22,11 @@ pub const MESH_AUTHORIZATION_TLS_ROOTS_FILE_ENV: &str =
     "CODEWIRE_MESH_AUTHORIZATION_TLS_ROOTS_FILE";
 pub const LOCAL_ORGANIZATION_ID_ENV: &str = "CODEWIRE_MESH_LOCAL_ORGANIZATION_ID";
 pub const LOCAL_API_KEY_HASH_ENV: &str = "CODEWIRE_MESH_LOCAL_API_KEY_HASH";
+/// NATS shared by Mesh replicas for their live registry (#3542). Unset runs
+/// one replica on its own registry.
+pub const NATS_URL_ENV: &str = "NATS_URL";
+pub const NATS_TOKEN_ENV: &str = "NATS_TOKEN";
+pub const NATS_KV_REPLICAS_ENV: &str = "NATS_KV_REPLICAS";
 
 const DEFAULT_STUN_PORT: u16 = 3478;
 const MAX_STUN_SERVERS: usize = 8;
@@ -87,6 +92,41 @@ impl fmt::Debug for LocalMeshAuthorizationConfig {
     }
 }
 
+/// The NATS server Mesh replicas share their live registry through (#3542).
+#[derive(Clone, PartialEq, Eq)]
+pub struct NatsConfig {
+    pub url: String,
+    token: Option<String>,
+    /// Replicas of the shared bucket: 1, 3 or 5.
+    pub kv_replicas: usize,
+}
+
+impl NatsConfig {
+    pub(crate) fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(url: &str) -> Self {
+        Self {
+            url: url.to_owned(),
+            token: None,
+            kv_replicas: 1,
+        }
+    }
+}
+
+impl fmt::Debug for NatsConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NatsConfig")
+            .field("url", &self.url)
+            .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .field("kv_replicas", &self.kv_replicas)
+            .finish()
+    }
+}
+
 /// One STUN-only node advertised beside the configured DERP relay.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StunServerConfig {
@@ -111,6 +151,8 @@ pub struct Config {
     /// Present for the explicit standalone-local identity. Hosted and local
     /// authorization configurations are mutually exclusive.
     pub local_authorization: Option<LocalMeshAuthorizationConfig>,
+    /// Present when replicas share their live registry through NATS.
+    pub nats: Option<NatsConfig>,
 }
 
 impl fmt::Debug for Config {
@@ -128,6 +170,7 @@ impl fmt::Debug for Config {
             )
             .field("mesh_authorization", &self.mesh_authorization)
             .field("local_authorization", &self.local_authorization)
+            .field("nats", &self.nats)
             .finish()
     }
 }
@@ -180,6 +223,20 @@ impl Config {
         if mesh_authorization.is_some() && local_authorization.is_some() {
             return Err(ConfigError::AmbiguousMeshAuthorization);
         }
+        let nats = trim(getenv(NATS_URL_ENV))
+            .map(|url| {
+                let kv_replicas = match trim(getenv(NATS_KV_REPLICAS_ENV)) {
+                    Some(raw) => codewire_server_core::nats::parse_kv_replicas(&raw)
+                        .map_err(|_| ConfigError::InvalidNatsKvReplicas(raw))?,
+                    None => codewire_server_core::nats::DEFAULT_KV_REPLICAS,
+                };
+                Ok(NatsConfig {
+                    url,
+                    token: trim(getenv(NATS_TOKEN_ENV)),
+                    kv_replicas,
+                })
+            })
+            .transpose()?;
 
         Ok(Self {
             bind_addr,
@@ -190,6 +247,7 @@ impl Config {
             database_url,
             mesh_authorization,
             local_authorization,
+            nats,
         })
     }
 }
@@ -228,6 +286,8 @@ pub enum ConfigError {
     HostedMeshAuthorizationRequired,
     #[error("hosted and standalone Mesh authorization configuration are mutually exclusive")]
     AmbiguousMeshAuthorization,
+    #[error("{NATS_KV_REPLICAS_ENV} must be 1, 3 or 5, not {0:?}")]
+    InvalidNatsKvReplicas(String),
 }
 
 #[derive(Default)]

@@ -843,6 +843,7 @@ async fn services(direct: bool) -> Services {
             organization_id: ORG.into(),
             api_key_hash: hash_api_key(API_KEY),
         }),
+        nats: None,
     };
     let app = codewire_mesh::router(config);
     let mesh = tokio::spawn(async move {

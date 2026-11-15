@@ -1222,7 +1222,8 @@ EXPECTED_SERVICES_RUNTIME_ARCHIVES='build --locked -p codewire-server-core --bin
 build --locked -p codewire-coordinator
 build --locked -p codewire-cli-bin --bin cw
 nextest archive --locked -p codewire-orchestration --features kind-e2e --test wire_contract --archive-file OUT/codewire-orchestration--features-kind-e2e.tar.zst
-nextest archive --locked -p codewire-coordinator --lib --archive-file OUT/codewire-coordinator.tar.zst'
+nextest archive --locked -p codewire-coordinator --lib --archive-file OUT/codewire-coordinator.tar.zst
+nextest archive --locked -p codewire-mesh --lib --archive-file OUT/codewire-mesh.tar.zst'
 archive_build_case runtime services-runtime-archives services_runtime 1 \
   '|valid:v3|service_orchestration|service_nats|service_temporal|complete|' ||
   { cat "$TMP/archive-build-runtime/log" >&2; echo 'the runtime-plane archive build failed' >&2; exit 1; }
@@ -1231,7 +1232,8 @@ archive_build_check runtime "$EXPECTED_SERVICES_RUNTIME_ARCHIVES" 'services_runt
   build --locked -p codewire-coordinator
   build --locked -p codewire-cli-bin --bin cw
   nextest archive --locked -p codewire-orchestration --features kind-e2e --test wire_contract --archive-file OUT/codewire-orchestration--features-kind-e2e.tar.zst
-  nextest archive --locked -p codewire-coordinator --lib --archive-file OUT/codewire-coordinator.tar.zst' 1
+  nextest archive --locked -p codewire-coordinator --lib --archive-file OUT/codewire-coordinator.tar.zst
+  nextest archive --locked -p codewire-mesh --lib --archive-file OUT/codewire-mesh.tar.zst' 1
 for binary in codewire-db-migrate cw; do
   [ -x "$TMP/archive-build-runtime/out/$binary" ] ||
     { echo "the runtime-plane archive build did not keep $binary" >&2; exit 1; }

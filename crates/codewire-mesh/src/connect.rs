@@ -280,7 +280,9 @@ async fn delete_mesh_network(
         .map_err(|e| rpc_app_error(&e, &ctx))?;
     state
         .mesh_coordinate
-        .revoke_network(request.network_id.trim());
+        .revoke_network(request.network_id.trim())
+        .await
+        .map_err(|error| coordination_unavailable(&error, &ctx))?;
     connectrpc::Response::ok(DeleteMeshNetworkResponse::default())
 }
 
@@ -331,8 +333,24 @@ async fn revoke_mesh_node(
         .map_err(|e| rpc_app_error(&e, &ctx))?;
     state
         .mesh_coordinate
-        .revoke_node(request.network_id.trim(), request.node_name.trim());
+        .revoke_node(request.network_id.trim(), request.node_name.trim())
+        .await
+        .map_err(|error| coordination_unavailable(&error, &ctx))?;
     connectrpc::Response::ok(RevokeMeshNodeResponse::default())
+}
+
+/// The store has committed the change, but the other Mesh replicas could not
+/// be told (#3542). Both steps are idempotent, so the caller's retry finishes
+/// the job.
+fn coordination_unavailable(
+    error: &crate::mesh_coordinate::shared::CoordinationError,
+    ctx: &RequestContext,
+) -> connectrpc::ConnectError {
+    tracing::warn!(%error, "Mesh could not tell the other replicas");
+    rpc_app_error(
+        &AppError::ServiceUnavailable("Mesh could not finish the change; try again".into()),
+        ctx,
+    )
 }
 
 async fn create_mesh_node_enrollment(
@@ -937,6 +955,7 @@ mod tests {
                 organization_id: ORG.to_string(),
                 api_key_hash: hash_api_key(API_KEY),
             }),
+            nats: None,
         }
     }
 

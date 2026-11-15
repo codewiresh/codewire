@@ -32,6 +32,10 @@ use crate::environment_members::EnvironmentMember;
 use crate::mesh_authorization::forwarded_mesh_credential;
 use crate::server::AppState;
 
+pub(crate) mod shared;
+
+use shared::net_key;
+
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
 /// A node whose session has sent nothing for this long lists offline
@@ -109,9 +113,30 @@ impl MeshCoordinatorService for MeshCoordinateService {
 pub(crate) struct MeshCoordinateState {
     inner: Arc<Mutex<Registry>>,
     offline_after: Duration,
+    /// The registry shared with the other replicas, once Mesh has reached
+    /// NATS (#3542). Without it this process's registry is the whole registry.
+    shared: Arc<std::sync::OnceLock<Arc<shared::Shared>>>,
+    /// Set when Mesh is configured to share its registry, reached or not.
+    shared_configured: bool,
 }
 
 impl MeshCoordinateState {
+    /// The registry. Every reader tolerates a half-applied change (an edge to
+    /// a peer that is gone, a peer without its edges), so a panic while it was
+    /// held must not take every later session down with it.
+    fn registry(&self) -> std::sync::MutexGuard<'_, Registry> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether the view of the other replicas may answer for them now.
+    fn view_current(&self) -> bool {
+        self.shared
+            .get()
+            .is_some_and(|shared| shared.view_current())
+    }
+
     pub(crate) fn new() -> Self {
         Self::offline_after(OFFLINE_AFTER)
     }
@@ -122,6 +147,8 @@ impl MeshCoordinateState {
         Self {
             inner: Arc::new(Mutex::new(Registry::default())),
             offline_after,
+            shared: Arc::new(std::sync::OnceLock::new()),
+            shared_configured: false,
         }
     }
 
@@ -134,66 +161,127 @@ impl MeshCoordinateState {
     }
 
     /// When the live session of this registered node last heard from it, or
-    /// `None` with no live session (#2697).
-    ///
-    /// The registry is this process's memory, which is complete while Mesh
-    /// runs one replica. With more, `ListNodes` on one replica cannot see
-    /// another's sessions, and liveness has to be written to the store.
+    /// `None` with no live session (#2697). A session on another replica
+    /// answers from its shared record, at most [`shared::REFRESH_INTERVAL`]
+    /// old (#3542).
     pub(crate) fn node_last_heard(
         &self,
         network_id: &str,
         node_name: &str,
     ) -> Option<DateTime<Utc>> {
         let peer_id = stable_peer_id(network_id, "peer", node_name);
-        let registry = self.inner.lock().unwrap();
+        let registry = self.registry();
         registry
             .peers
             .get(&peer_id)
             .filter(|peer| peer.network_id == network_id)
             .map(|peer| peer.last_heard)
+            .or_else(|| {
+                registry
+                    .remote
+                    .peers
+                    .get(&peer_id)
+                    .filter(|peer| peer.network_id == network_id)
+                    .map(|peer| peer.last_heard)
+            })
     }
 
     /// Whether a live session has sent a node with `key`: DERP serves only
-    /// such keys (#2844).
+    /// such keys (#2844). Another replica's session counts only while this
+    /// replica's view of the shared registry is current and its record is
+    /// fresh and not draining, so a key revoked while the view could not
+    /// follow is refused, never admitted (#3542).
     pub(crate) fn knows_key(&self, key: &codewire_tailnet::node::NodePublic) -> bool {
-        let registry = self.inner.lock().unwrap();
-        registry
+        let registry = self.registry();
+        let has_key = |node: Option<&Node>| node.is_some_and(|node| node.key == *key);
+        if registry
             .peers
             .values()
-            .any(|peer| peer.node.as_ref().is_some_and(|node| node.key == *key))
+            .any(|peer| has_key(peer.node.as_ref()))
+        {
+            return true;
+        }
+        let Some(shared) = self.shared.get().filter(|shared| shared.view_current()) else {
+            return false;
+        };
+        let (timing, now) = (shared.timing(), Utc::now());
+        registry.remote.peers.values().any(|peer| {
+            has_key(peer.node.as_ref())
+                && !peer.draining
+                && peer.fresh(&timing, now)
+                && !registry.remote.retired.contains(&net_key(&peer.network_id))
+        })
     }
 
     /// Drop active sessions and reject sessions authorized before deletion but
     /// not yet registered. The store permanently reserves this network name.
-    pub(crate) fn revoke_network(&self, network_id: &str) {
-        let mut registry = self.inner.lock().unwrap();
-        registry.retired_networks.insert(network_id.to_owned());
-        let removed = registry
-            .peers
-            .iter()
-            .filter_map(|(id, peer)| (peer.network_id == network_id).then_some(*id))
-            .collect::<HashSet<_>>();
-        for id in &removed {
-            if let Some(peer) = registry.peers.remove(id) {
-                peer.close.notify_one();
-            }
+    /// With a shared registry every replica does the same; `Err` means the
+    /// other replicas could not be told, and a retry finishes the job.
+    pub(crate) async fn revoke_network(
+        &self,
+        network_id: &str,
+    ) -> Result<(), shared::CoordinationError> {
+        self.retire_locally(network_id);
+        match self.shared.get() {
+            Some(shared) => shared.retire_network(network_id).await,
+            None if self.shared_configured => Err(shared::CoordinationError::NotConnected),
+            None => Ok(()),
         }
-        registry
-            .tunnels
-            .retain(|(dial, target)| !removed.contains(dial) && !removed.contains(target));
+    }
+
+    fn retire_locally(&self, network_id: &str) {
+        let (removed, edges) = {
+            let mut registry = self.registry();
+            registry.retired_networks.insert(network_id.to_owned());
+            let removed = registry
+                .peers
+                .iter()
+                .filter_map(|(id, peer)| (peer.network_id == network_id).then_some(*id))
+                .collect::<HashSet<_>>();
+            for id in &removed {
+                if let Some(peer) = registry.peers.remove(id) {
+                    peer.close.notify_one();
+                }
+            }
+            let edges = registry
+                .tunnels
+                .iter()
+                .filter(|(dial, target)| removed.contains(dial) || removed.contains(target))
+                .copied()
+                .collect::<Vec<_>>();
+            for edge in &edges {
+                registry.tunnels.remove(edge);
+            }
+            (removed, edges)
+        };
+        for peer_id in removed {
+            self.dirty_peer(peer_id, network_id);
+        }
+        self.dirty_edges(&edges, network_id);
     }
 
     /// Disconnect the active peer addressed by this exact registered node.
     /// A later connection needs a fresh one-use enrollment and is therefore a
-    /// separate authorization decision.
-    pub(crate) fn revoke_node(&self, network_id: &str, node_name: &str) {
+    /// separate authorization decision. With a shared registry the record is
+    /// deleted too, and the replica holding the session ends it; `Err` means
+    /// that delete failed, and a retry finishes the job.
+    pub(crate) async fn revoke_node(
+        &self,
+        network_id: &str,
+        node_name: &str,
+    ) -> Result<(), shared::CoordinationError> {
         let peer_id = stable_peer_id(network_id, "peer", node_name);
         self.end_session(peer_id, |peer| peer.network_id == network_id);
+        match self.shared.get() {
+            Some(shared) => shared.delete_peer(network_id, peer_id).await,
+            None if self.shared_configured => Err(shared::CoordinationError::NotConnected),
+            None => Ok(()),
+        }
     }
 
     /// The streams of hosted environment members, for the recheck.
     pub(crate) fn environment_sessions(&self) -> Vec<EnvironmentSessionRef> {
-        let registry = self.inner.lock().unwrap();
+        let registry = self.registry();
         registry
             .peers
             .iter()
@@ -216,7 +304,7 @@ impl MeshCoordinateState {
         session_id: Uuid,
         at: tokio::time::Instant,
     ) {
-        let mut registry = self.inner.lock().unwrap();
+        let mut registry = self.registry();
         if let Some(environment) = registry
             .peers
             .get_mut(&peer_id)
@@ -235,17 +323,23 @@ impl MeshCoordinateState {
     /// Removes the peer when `selected` holds, ends its stream, and tells its
     /// tunnel partners.
     fn end_session(&self, peer_id: Uuid, selected: impl FnOnce(&Peer) -> bool) {
-        let updates = {
-            let mut registry = self.inner.lock().unwrap();
+        let (network_id, updates, edges) = {
+            let mut registry = self.registry();
             if !registry.peers.get(&peer_id).is_some_and(selected) {
                 return;
             }
-            if let Some(peer) = registry.peers.remove(&peer_id) {
-                peer.close.notify_one();
-            }
-            remove_tunnels(&mut registry, peer_id)
+            let Some(peer) = registry.peers.remove(&peer_id) else {
+                return;
+            };
+            peer.close.notify_one();
+            let (updates, edges) = remove_tunnels(&mut registry, peer_id);
+            (peer.network_id, updates, edges)
         };
+        self.dirty_peer(peer_id, &network_id);
+        self.dirty_edges(&edges, &network_id);
         for tx in updates {
+            // A partner whose queue is full or gone is ending or behind; it
+            // learns of the removal from its next session's updates.
             let _ = tx.try_send(CoordinateEvent::Remove(peer_id));
         }
     }
@@ -258,6 +352,52 @@ struct Registry {
     /// most one; a peer at most [`MAX_PEER_SUBSCRIPTIONS`] (#3350).
     tunnels: HashSet<(Uuid, Uuid)>,
     retired_networks: HashSet<String>,
+    /// The other replicas' sessions and subscriptions (#3542).
+    remote: shared::Remote,
+}
+
+/// One end of a subscription, on this replica or another.
+struct Member<'a> {
+    network_id: &'a str,
+    node: Option<&'a Node>,
+    /// Present for a session on this replica, the only kind it can tell.
+    tx: Option<&'a mpsc::Sender<CoordinateEvent>>,
+    /// A stopping replica's session: its partners keep the node they have,
+    /// and nobody is sent it anew.
+    draining: bool,
+}
+
+impl Registry {
+    /// A member on this replica, or on another while `remote_current` (the
+    /// view is current) and its record is fresh and its network not retired:
+    /// the same gate DERP admission uses.
+    fn member(&self, peer_id: Uuid, remote_current: bool) -> Option<Member<'_>> {
+        if let Some(peer) = self.peers.get(&peer_id) {
+            return Some(Member {
+                network_id: &peer.network_id,
+                node: peer.node.as_ref(),
+                tx: Some(&peer.tx),
+                draining: false,
+            });
+        }
+        if !remote_current {
+            return None;
+        }
+        let now = Utc::now();
+        self.remote
+            .peers
+            .get(&peer_id)
+            .filter(|peer| {
+                peer.fresh(&self.remote.timing, now)
+                    && !self.remote.retired.contains(&net_key(&peer.network_id))
+            })
+            .map(|peer| Member {
+                network_id: &peer.network_id,
+                node: peer.node.as_ref(),
+                tx: None,
+                draining: peer.draining,
+            })
+    }
 }
 
 struct Peer {
@@ -271,6 +411,16 @@ struct Peer {
     close: Arc<Notify>,
     /// A hosted environment member and when orchestration last confirmed it.
     environment: Option<EnvironmentSession>,
+    /// The node this session speaks for; a dial session has none.
+    node_name: Option<String>,
+    /// When the session registered, on the monotonic clock: of two sessions
+    /// of one node the later registration is the newer, compared on the
+    /// NATS server's clock (#3542).
+    registered: tokio::time::Instant,
+    /// The revision of this session's shared record, once written (#3542).
+    revision: Option<u64>,
+    /// When the record was last written, or the session registered.
+    shared_at: tokio::time::Instant,
 }
 
 /// A hosted environment member's stream (#3350): the Pod and generation it
@@ -534,8 +684,49 @@ async fn run_session(
 }
 
 /// Records that this exact session received a message at `at`.
+/// Ends this replica's sessions whose node, or for a dial session whose
+/// network, the store no longer has, and deletes their records. A revocation
+/// whose shared delete was lost after the store committed is so cut off
+/// within one [`shared::REFRESH_INTERVAL`] (#3542). A store error ends
+/// nothing: the next pass asks again.
+pub(crate) async fn recheck_store(state: &AppState) {
+    for (peer_id, session_id, network_id, node_name) in state.mesh_coordinate.local_sessions() {
+        match state
+            .product
+            .session_still_registered(&network_id, node_name.as_deref())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(%peer_id, "Mesh ended a session the store no longer has");
+                state
+                    .mesh_coordinate
+                    .end_session(peer_id, |peer| peer.session_id == session_id);
+                if let Some(shared) = state.mesh_coordinate.shared.get()
+                    && let Err(error) = shared.delete_peer(&network_id, peer_id).await
+                {
+                    tracing::warn!(%error, "Mesh could not delete an ended session's record");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "Mesh could not recheck a session"),
+        }
+    }
+}
+
+/// Runs [`recheck_store`] every [`shared::REFRESH_INTERVAL`].
+pub(crate) fn spawn_store_recheck(state: AppState) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(shared::REFRESH_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            recheck_store(&state).await;
+        }
+    })
+}
+
 fn heard(state: &MeshCoordinateState, peer_id: Uuid, session_id: Uuid, at: DateTime<Utc>) {
-    let mut registry = state.inner.lock().unwrap();
+    let mut registry = state.registry();
     if let Some(peer) = registry
         .peers
         .get_mut(&peer_id)
@@ -552,8 +743,10 @@ fn register(
 ) -> Option<(Uuid, Arc<Notify>)> {
     let session_id = Uuid::new_v4();
     let close = Arc::new(Notify::new());
-    let mut registry = state.inner.lock().unwrap();
-    if registry.retired_networks.contains(&peer.network_id) {
+    let mut registry = state.registry();
+    if registry.retired_networks.contains(&peer.network_id)
+        || registry.remote.retired.contains(&net_key(&peer.network_id))
+    {
         return None;
     }
     let replaced = registry.peers.insert(
@@ -569,18 +762,24 @@ fn register(
                 member,
                 verified_at: tokio::time::Instant::now(),
             }),
+            node_name: peer.node_name.clone(),
+            registered: tokio::time::Instant::now(),
+            revision: None,
+            shared_at: tokio::time::Instant::now(),
         },
     );
+    drop(registry);
     // The node's newer session replaces an older one, which ends.
     if let Some(replaced) = replaced {
         replaced.close.notify_one();
     }
+    state.dirty_peer(peer.peer_id, &peer.network_id);
     Some((session_id, close))
 }
 
 fn deregister(state: &MeshCoordinateState, peer_id: Uuid, session_id: Uuid) {
-    let updates = {
-        let mut registry = state.inner.lock().unwrap();
+    let (network_id, updates, edges) = {
+        let mut registry = state.registry();
         if registry
             .peers
             .get(&peer_id)
@@ -588,17 +787,24 @@ fn deregister(state: &MeshCoordinateState, peer_id: Uuid, session_id: Uuid) {
         {
             return;
         }
-        registry.peers.remove(&peer_id);
-        remove_tunnels(&mut registry, peer_id)
+        let Some(peer) = registry.peers.remove(&peer_id) else {
+            return;
+        };
+        let (updates, edges) = remove_tunnels(&mut registry, peer_id);
+        (peer.network_id, updates, edges)
     };
+    state.dirty_peer(peer_id, &network_id);
+    state.dirty_edges(&edges, &network_id);
     for tx in updates {
+        // As in `end_session`: a partner that can't take it is ending or
+        // behind.
         let _ = tx.try_send(CoordinateEvent::Remove(peer_id));
     }
 }
 
 fn update_node(state: &MeshCoordinateState, peer_id: Uuid, session_id: Uuid, node: Node) {
     let updates = {
-        let mut registry = state.inner.lock().unwrap();
+        let mut registry = state.registry();
         let Some(peer) = registry.peers.get_mut(&peer_id) else {
             return;
         };
@@ -606,29 +812,46 @@ fn update_node(state: &MeshCoordinateState, peer_id: Uuid, session_id: Uuid, nod
             return;
         }
         peer.node = Some(node);
-        tunnel_updates(&registry, peer_id)
+        let network_id = peer.network_id.clone();
+        (
+            network_id,
+            tunnel_updates(&registry, peer_id, state.view_current()),
+        )
     };
-    send_updates(peer_id, updates);
+    state.dirty_peer(peer_id, &updates.0);
+    send_updates(peer_id, updates.1);
 }
 
 /// Removes every subscription edge touching `peer_id` and returns the other
-/// ends to tell.
-fn remove_tunnels(registry: &mut Registry, peer_id: Uuid) -> Vec<mpsc::Sender<CoordinateEvent>> {
-    let affected = registry
+/// ends on this replica to tell, and the removed edges this replica wrote.
+fn remove_tunnels(
+    registry: &mut Registry,
+    peer_id: Uuid,
+) -> (Vec<mpsc::Sender<CoordinateEvent>>, Vec<(Uuid, Uuid)>) {
+    let touches = |(dial, target): &(Uuid, Uuid)| *dial == peer_id || *target == peer_id;
+    let local = registry
         .tunnels
         .iter()
-        .filter(|(dial, target)| *dial == peer_id || *target == peer_id)
+        .filter(|edge| touches(edge))
+        .copied()
+        .collect::<Vec<_>>();
+    let remote = registry
+        .remote
+        .tunnels
+        .keys()
+        .filter(|edge| touches(edge))
         .copied()
         .collect::<Vec<_>>();
     let mut updates = Vec::new();
-    for (dial, target) in affected {
-        registry.tunnels.remove(&(dial, target));
-        let recipient = if dial == peer_id { target } else { dial };
+    for (dial, target) in local.iter().chain(&remote) {
+        registry.tunnels.remove(&(*dial, *target));
+        registry.remote.tunnels.remove(&(*dial, *target));
+        let recipient = if *dial == peer_id { *target } else { *dial };
         if let Some(peer) = registry.peers.get(&recipient) {
             updates.push(peer.tx.clone());
         }
     }
-    updates
+    (updates, local)
 }
 
 /// Subscriptions one peer session may hold: each is another member of its
@@ -656,17 +879,26 @@ fn add_tunnel(
     if dial_id == target_id {
         return Err(SubscribeError::Itself);
     }
-    let updates = {
-        let mut registry = state.inner.lock().unwrap();
-        let same_network = match (registry.peers.get(&dial_id), registry.peers.get(&target_id)) {
-            (Some(dial), Some(target)) => dial.network_id == target.network_id,
-            (Some(_), None) => true,
-            _ => false,
+    let (network_id, replaced, updates) = {
+        let mut registry = state.registry();
+        let network_id = match (
+            registry.peers.get(&dial_id),
+            registry.member(target_id, state.view_current()),
+        ) {
+            (Some(dial), Some(target)) if dial.network_id == target.network_id => {
+                dial.network_id.clone()
+            }
+            (Some(dial), None) => dial.network_id.clone(),
+            _ => return Ok(()),
         };
-        if !same_network {
-            return Ok(());
-        }
+        let mut replaced = Vec::new();
         if role == MeshCoordinateRole::Dial {
+            replaced = registry
+                .tunnels
+                .iter()
+                .filter(|(dial, target)| *dial == dial_id && *target != target_id)
+                .copied()
+                .collect();
             registry.tunnels.retain(|(dial, _)| *dial != dial_id);
         } else if !registry.tunnels.contains(&(dial_id, target_id))
             && registry
@@ -679,8 +911,14 @@ fn add_tunnel(
             return Err(SubscribeError::TooMany);
         }
         registry.tunnels.insert((dial_id, target_id));
-        tunnel_updates(&registry, dial_id)
+        (
+            network_id,
+            replaced,
+            tunnel_updates(&registry, dial_id, state.view_current()),
+        )
     };
+    state.dirty_edges(&replaced, &network_id);
+    state.dirty_edges(&[(dial_id, target_id)], &network_id);
     send_updates(dial_id, updates);
     Ok(())
 }
@@ -688,21 +926,29 @@ fn add_tunnel(
 fn tunnel_updates(
     registry: &Registry,
     changed: Uuid,
+    remote_current: bool,
 ) -> Vec<(mpsc::Sender<CoordinateEvent>, Vec<Node>)> {
     let mut updates = Vec::new();
-    for (dial_id, target_id) in &registry.tunnels {
+    for (dial_id, target_id) in registry
+        .tunnels
+        .iter()
+        .chain(registry.remote.tunnels.keys())
+    {
         if *dial_id != changed && *target_id != changed {
             continue;
         }
-        if let (Some(dial), Some(target)) =
-            (registry.peers.get(dial_id), registry.peers.get(target_id))
-            && dial.network_id == target.network_id
+        // Each replica tells only its own sessions; the other end's replica
+        // tells its own when it sees the same record.
+        if let (Some(dial), Some(target)) = (
+            registry.member(*dial_id, remote_current),
+            registry.member(*target_id, remote_current),
+        ) && dial.network_id == target.network_id
         {
-            if let Some(target_node) = target.node.clone() {
-                updates.push((dial.tx.clone(), vec![target_node]));
+            if let (Some(tx), Some(node), false) = (dial.tx, target.node, target.draining) {
+                updates.push((tx.clone(), vec![node.clone()]));
             }
-            if let Some(dial_node) = dial.node.clone() {
-                updates.push((target.tx.clone(), vec![dial_node]));
+            if let (Some(tx), Some(node), false) = (target.tx, dial.node, dial.draining) {
+                updates.push((tx.clone(), vec![node.clone()]));
             }
         }
     }
@@ -827,6 +1073,8 @@ fn derp_map_from_base_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod store;
     use codewire_proto::codewire::internal::v1::{
         MeshCoordinatorServiceClient, mesh_coordinator_service_coordinate_response,
     };
@@ -856,6 +1104,7 @@ mod tests {
                 organization_id: "org-test".to_owned(),
                 api_key_hash: codewire_server_core::auth::hash_api_key("cw_test"),
             }),
+            nats: None,
         }
     }
 
@@ -1080,7 +1329,7 @@ mod tests {
         };
         let (retained_tx, mut retained_rx) = mpsc::channel(4);
         assert!(register(&state, &retained, retained_tx).is_some());
-        state.revoke_network("deleted");
+        state.revoke_network("deleted").await.unwrap();
         assert!(rx.recv().await.is_none());
         assert!(matches!(
             retained_rx.try_recv(),

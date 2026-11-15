@@ -99,6 +99,20 @@ impl AppBuilder {
         self
     }
 
+    /// Adds health routes whose `/readyz` asks one caller-owned probe, with
+    /// no database.
+    pub fn with_health_probe<F, Fut>(mut self, probe: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = bool> + Send + 'static,
+    {
+        self.health = Some(HealthState {
+            pool: None,
+            readiness_probe: Some(ReadinessProbe::new(probe)),
+        });
+        self
+    }
+
     /// Adds health routes that probe the given database pool in
     /// `/readyz`.
     pub fn with_health_and_db(mut self, pool: sqlx::PgPool) -> Self {
