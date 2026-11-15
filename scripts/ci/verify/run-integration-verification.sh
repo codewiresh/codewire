@@ -836,6 +836,11 @@ database_lane_core() {
     cargo test -p codewire-billing --lib 'credit::tests::db_' \
       -- --nocapture
 
+  counted_suite "credit changes: a notice names its organization and settles it" credit-changes \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-billing --lib 'credit_changes::tests::db_' \
+      -- --nocapture
+
   counted_suite "billing settings audit" billing-settings-audit \
     DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-billing --lib 'catalog_admin::tests::db_' \

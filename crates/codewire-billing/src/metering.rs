@@ -86,54 +86,15 @@ pub fn start_loops(deps: Arc<MeteringDeps>, loops: &[String]) {
                     tracing::info!("credit metering: disabled (dry run)");
                     continue;
                 }
-                let deps = deps.clone();
-                let is_leader = is_leader.clone();
-                tokio::spawn(async move {
-                    interval_loop(
-                        crate::credit::CREDIT_METERING_INTERVAL,
-                        is_leader,
-                        move || {
-                            let deps = deps.clone();
-                            async move {
-                                match crate::credit::draw_due_usage(&deps.pool).await {
-                                    Ok(summary)
-                                        if summary.organizations > 0 || summary.failed > 0 =>
-                                    {
-                                        tracing::info!(
-                                            organizations = summary.organizations,
-                                            failed = summary.failed,
-                                            drawn_nano_eur = summary.drawn_nano_eur,
-                                            "credit metering: drew usage"
-                                        );
-                                    }
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        tracing::error!(error = %e, "credit metering: draw failed")
-                                    }
-                                }
-                                // Then top up, or record as exhausted, every
-                                // organization left without credit.
-                                if let Err(e) =
-                                    crate::credit::settle_due(&deps.pool, &deps.stripe, deps.credit_enforcement).await
-                                {
-                                    tracing::error!(error = %e, "credit metering: settlement failed");
-                                }
-                                // Then tell owners who ran low or ran out.
-                                if let Err(e) = crate::credit::send_credit_notices(
-                                    &deps.pool,
-                                    &deps.email,
-                                    deps.credit_enforcement,
-                                )
-                                .await
-                                {
-                                    tracing::error!(error = %e, "credit metering: notices failed");
-                                }
-                            }
-                        },
-                    )
-                    .await;
-                });
-                tracing::info!(interval = ?crate::credit::CREDIT_METERING_INTERVAL, "credit metering: started");
+                // One task draws, settles and sends notices, on the minute's
+                // tick and at once on a credit change, so two passes never
+                // overlap and no notice is sent twice (#4754).
+                tokio::spawn(crate::credit_changes::run(deps.clone(), is_leader.clone()));
+                tracing::info!(
+                    interval = ?crate::credit::CREDIT_METERING_INTERVAL,
+                    channel = crate::credit_changes::CHANNEL,
+                    "credit metering: started"
+                );
             }
             "env-overage-billing" => {
                 if deps.stripe.enabled().is_none() {

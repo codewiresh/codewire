@@ -49,6 +49,7 @@ mod tests {
     mod account_suspension;
     mod billing_rate_cards;
     mod confidential_activation_slots;
+    mod credit_changes;
     mod cw_runtime_resolution;
     mod default_access_profile;
     mod environment_error_code;
@@ -87,7 +88,7 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced) and 0002 to 0028.
+    // (which equals the 41-migration history it replaced) and 0002 to 0029.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
         "dd340b239a6d7fa22a51479842166239d6efb26b6c5aaa803f0218a778029ebc";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
@@ -161,6 +162,8 @@ mod tests {
 
     // SHA-384 of 0026_host_operations.sql (#3609).
     const APPLIED_HOST_OPERATIONS_CHECKSUM: &str = "232e295da610657e51ec588699ca5ab53b75d28b7a1536e25737bf11d4edb8eba80046e9f63299c6edf74fe424ff997b";
+    // SHA-384 of 0029_credit_changes.sql (#4754).
+    const APPLIED_CREDIT_CHANGES_CHECKSUM: &str = "5890781b448b2e68a80826bd5cb9e02e80032b0cd287aa430f85b80de81788a09b7fff259d557502f62f7c546f16ec1a";
 
     // SHA-384 of 0027_account_suspension.sql (#3297).
     const APPLIED_ACCOUNT_SUSPENSION_CHECKSUM: &str = "1d65c097962b0485945992adfa2bb69e53886b2195359748805e894a37192d1bcc7659ab74d2019845b128b1b0e5dbf4";
@@ -1275,6 +1278,7 @@ mod tests {
             (26, APPLIED_HOST_OPERATIONS_CHECKSUM),
             (27, APPLIED_ACCOUNT_SUSPENSION_CHECKSUM),
             (28, APPLIED_CW_RUNTIME_RESOLUTION_CHECKSUM),
+            (29, APPLIED_CREDIT_CHANGES_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1305,10 +1309,10 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 28
+                first.len() == 29
                     && first.iter().map(|migration| migration.0).eq([
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-                        22, 23, 24, 25, 26, 27, 28
+                        22, 23, 24, 25, 26, 27, 28, 29
                     ])
                     && first.iter().all(|migration| migration.2)
             );
