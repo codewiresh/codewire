@@ -1989,9 +1989,38 @@ run_paths_case workspace_agents_lock pull_request refs/pull/3274/head false \
 run_paths_case workspace_agents_lockfile_only pull_request refs/pull/3274/head false \
   'policy workspace_agents' \
   images/workspace/agents/package-lock.json
+# The check's own inputs select it in a general change too: the agent
+# manifest and lockfile, the login files recorded for the pinned agents, the
+# check and the Claude Code run inside it (#3999). A pin moved together with
+# its recorded version is not the lockfile-only class, and is the change the
+# check exists for.
 run_paths_case workspace_agents_with_license pull_request refs/pull/3274/head false \
-  'confidential_script_tests go_consumer_interop go_support policy release' \
+  'confidential_script_tests go_consumer_interop go_support policy release workspace_agents' \
   images/workspace/agents/package.json images/workspace/agents/LICENSE
+run_paths_case workspace_agents_lockfile_with_docs pull_request refs/pull/3274/head false \
+  'confidential_script_tests go_consumer_interop go_support policy release workspace_agents' \
+  images/workspace/agents/package-lock.json docs/dev/AGENT-WORKFLOW.md
+run_paths_case workspace_agents_pin_with_recorded_version pull_request refs/pull/3274/head false \
+  'confidential_script_tests go_consumer_interop go_support policy rust rust_pkg_codewire_credential_broker transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe release workspace_agents' \
+  images/workspace/agents/package.json images/workspace/agents/package-lock.json \
+  crates/codewire-daemon/fixtures/agent-formats/manifest.json
+run_paths_case workspace_agents_recorded_login_file pull_request refs/pull/3274/head false \
+  'policy rust rust_pkg_codewire_credential_broker transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe workspace_agents' \
+  crates/codewire-daemon/fixtures/agent-formats/claude-code.credentials.json
+run_paths_case workspace_agents_check_script pull_request refs/pull/3274/head false \
+  'policy security security_js workspace_agents' \
+  scripts/ci/verify/workspace-agents.sh
+run_paths_case workspace_agents_claude_login_run pull_request refs/pull/3274/head false \
+  'policy security security_js workspace_agents' \
+  scripts/ci/verify/claude-login-compat.py
+# Its neighbours do not: the agents' licence file, and the daemon code that
+# writes the login files, whose own tests hold them to the recorded formats.
+run_paths_case workspace_agents_not_for_the_license pull_request refs/pull/3274/head false \
+  'policy' \
+  images/workspace/agents/LICENSE
+run_paths_case workspace_agents_not_for_the_login_writer pull_request refs/pull/3274/head false \
+  'policy rust rust_pkg_codewire_credential_broker transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  crates/codewire-daemon/src/claude_home/login.rs
 run_paths_case workspace_image_pin_tool pull_request refs/pull/2255/head false \
   'deploy go_consumer_interop go_support policy release confidential_script_tests security security_js' \
   scripts/ci/images/workspace-image-pin.py
