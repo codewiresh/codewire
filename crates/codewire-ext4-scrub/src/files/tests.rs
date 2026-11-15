@@ -80,7 +80,9 @@ fn names(lookup: &Lookup) -> Vec<String> {
 }
 
 /// The system's e2fsprogs, except that each `rm` and every request session
-/// does nothing: a removal that can't be proven.
+/// does nothing: a removal that can't be proven. Like debugfs reading
+/// `-f -`, it reads every request it is sent before it exits; exiting first
+/// failed the writer with EPIPE instead of the proof failing (#4810).
 struct RemovalIgnored;
 
 impl Tools for RemovalIgnored {
@@ -95,12 +97,16 @@ impl Tools for RemovalIgnored {
         disk: &Path,
     ) -> io::Result<tokio::process::Command> {
         let ignored = |argument: &&str| argument.starts_with("rm ") || *argument == "-f";
-        let arguments = if leading_args.iter().any(ignored) {
-            vec!["-R", "stats"]
-        } else {
-            leading_args.to_vec()
-        };
-        SystemTools.command(program, &arguments, disk)
+        if !leading_args.iter().any(ignored) {
+            return SystemTools.command(program, leading_args, disk);
+        }
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .kill_on_drop(true)
+            .args(["-c", r#"cat >/dev/null && exec "$0" -R stats "$1""#])
+            .arg(program)
+            .arg(disk);
+        Ok(command)
     }
 }
 
