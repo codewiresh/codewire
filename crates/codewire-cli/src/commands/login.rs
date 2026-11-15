@@ -36,10 +36,24 @@ pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> 
         .http_client_builder()?
         .build()
         .context("build the HTTP client")?;
-    let client = OAuthClient::discover_with_http(&server_url, http)
-        .await
-        .map_err(|error| login_tls_hint(error, ca.is_some()))
-        .context("discover OAuth device flow")?;
+    // Say where before waiting, and wait a bounded time (#4598).
+    let host = server_host(&server_url);
+    eprintln!("Connecting to {host}…");
+    let client = match tokio::time::timeout(
+        LOGIN_REACH_TIMEOUT,
+        OAuthClient::discover_with_http(&server_url, http),
+    )
+    .await
+    {
+        Ok(Ok(client)) => client,
+        Ok(Err(error)) => return Err(login_reach_error(error, &host, ca.is_some())),
+        Err(_) => {
+            return Err(unreachable(
+                &host,
+                &format!("no answer within {} s", LOGIN_REACH_TIMEOUT.as_secs()),
+            ));
+        }
+    };
 
     let (credentials, user) = login_with_device(&client).await?;
     let bearer = credentials
@@ -143,6 +157,52 @@ fn report_pin(
 
 /// A certificate the server's host could not be verified with: say which
 /// option fixes it.
+/// How long `cw login` waits for the server's first answer.
+const LOGIN_REACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The host a server URL names, as messages say it.
+fn server_host(server_url: &str) -> String {
+    url::Url::parse(server_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| server_url.to_owned())
+}
+
+/// The server could not be reached: one sentence, and what to do (#4598).
+fn unreachable(host: &str, cause: &str) -> anyhow::Error {
+    crate::error_report::with_next_step(
+        anyhow::anyhow!("couldn't reach {host} ({cause})"),
+        "check your network, or name another server with `cw login --server URL`",
+    )
+}
+
+/// Why discovery failed, in the user's terms: a certificate it refused, a
+/// server it could not reach, or the server's own answer.
+fn login_reach_error(
+    error: codewire_client::AuthClientError,
+    host: &str,
+    pinned: bool,
+) -> anyhow::Error {
+    if let codewire_client::AuthClientError::Request(request) = &error
+        && !codewire_client::DeploymentCa::refused_certificate(request)
+        // Only a connection that never opened. A server that answered
+        // and then failed the request was reached (#4658 review).
+        && (request.is_connect() || request.is_timeout())
+    {
+        let cause = if request.is_timeout() {
+            "it didn't answer in time".to_owned()
+        } else {
+            let mut cause: &dyn std::error::Error = request;
+            while let Some(source) = cause.source() {
+                cause = source;
+            }
+            cause.to_string()
+        };
+        return unreachable(host, &cause);
+    }
+    login_tls_hint(error, pinned).context(format!("{host} didn't answer as a Codewire server"))
+}
+
 fn login_tls_hint(error: codewire_client::AuthClientError, pinned: bool) -> anyhow::Error {
     let certificate = matches!(&error, codewire_client::AuthClientError::Request(request)
         if codewire_client::DeploymentCa::refused_certificate(request));
@@ -153,5 +213,63 @@ fn login_tls_hint(error: codewire_client::AuthClientError, pinned: bool) -> anyh
         (true, true) => anyhow::Error::new(error)
             .context("the server's certificate is not signed by the CA given with --ca-file"),
         (false, _) => anyhow::Error::new(error),
+    }
+}
+
+#[cfg(test)]
+mod reach_tests {
+    use super::*;
+
+    #[test]
+    fn an_unreachable_server_is_one_sentence_with_what_to_do() {
+        // #4598: named before the wait, then one sentence and a next step.
+        assert_eq!(
+            server_host("https://codewire.example:8443/x"),
+            "codewire.example"
+        );
+        assert_eq!(server_host("not a url"), "not a url");
+        let error = unreachable("10.255.255.1", "no answer within 20 s");
+        assert_eq!(
+            format!("{error:#}"),
+            "check your network, or name another server with `cw login --server URL`: \
+             couldn't reach 10.255.255.1 (no answer within 20 s)"
+        );
+        assert_eq!(
+            error.to_string(),
+            "check your network, or name another server with `cw login --server URL`",
+            "the next step is the outer layer the printer lifts out"
+        );
+        assert_eq!(LOGIN_REACH_TIMEOUT.as_secs(), 20);
+    }
+
+    /// A refused port is unreachable; a server that accepts the connection
+    /// and then closes it was reached, so it is not called unreachable.
+    #[tokio::test]
+    async fn only_a_connection_that_never_opened_is_unreachable() {
+        let get = |port: u16| async move {
+            let error = reqwest::Client::new()
+                .get(format!("http://127.0.0.1:{port}/"))
+                .send()
+                .await
+                .unwrap_err();
+            login_reach_error(error.into(), "127.0.0.1", false).to_string()
+        };
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let refused_port = closed.local_addr().unwrap().port();
+        drop(closed);
+        assert!(
+            get(refused_port).await.starts_with("check your network"),
+            "a refused port is unreachable"
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hang_up = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        });
+        let answered = get(port).await;
+        hang_up.await.unwrap();
+        assert_eq!(answered, "127.0.0.1 didn't answer as a Codewire server");
     }
 }
