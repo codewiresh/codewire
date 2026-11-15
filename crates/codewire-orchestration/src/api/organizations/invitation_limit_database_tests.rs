@@ -1,7 +1,8 @@
-//! CreateInvitation's limits (#4457): an inviter must have a verified email;
-//! one account creates at most 30 invitations an hour across organizations,
-//! one organization at most 60 an hour and 200 pending. A refusal writes no
-//! invitation, queues no email and uses up no count.
+//! CreateInvitation's limits (#4457): an inviter's email must be verified, or
+//! vouched for on a server with no mail (#4805); one account creates at most
+//! 30 invitations an hour across organizations, one organization at most 60
+//! an hour and 200 pending. A refusal writes no invitation, queues no email
+//! and uses up no count.
 
 use codewire_server_core::connect_error::{ConnectCode, ConnectError};
 
@@ -207,6 +208,52 @@ async fn db_an_unverified_inviter_is_refused_and_nothing_is_written() {
         .unwrap();
     t.invite(&t.owner(), &t.org(), "a").await.unwrap();
     assert_eq!(t.written("a").await, (1, 1));
+
+    t.cleanup().await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_a_vouched_inviter_may_invite_and_takes_the_counts() {
+    // A server with no mail proves an address by a vouch instead of an email
+    // (#4121): setup's admin, an admin enabling the account, or an
+    // invitation's own link. Inviting reads that proof as accepting does
+    // (#4805). There an open or review sign-up is neither verified nor
+    // vouched, and its password signs in only once it is verified, so the
+    // refusal stays its answer.
+    let fixture = LeaseFixture::seed("synthetic-invitation-limits-vouched").await;
+    let t = Limits::new(&fixture).await;
+    for (taken, vouched_by) in (1..).zip(["bootstrap", "admin", "invitation"]) {
+        sqlx::query("UPDATE users SET email_verified = false, email_vouched_by = $2 WHERE id = $1")
+            .bind(t.owner())
+            .bind(vouched_by)
+            .execute(t.pool())
+            .await
+            .unwrap();
+        t.invite(&t.owner(), &t.org(), vouched_by)
+            .await
+            .unwrap_or_else(|error| panic!("vouched by {vouched_by}: {error:?}"));
+        assert_eq!(t.written(vouched_by).await, (1, 1), "{vouched_by}");
+        assert_eq!(t.count(&t.inviter_key(&t.owner())).await, Some(taken));
+        assert_eq!(t.count(&t.org_key(&t.org())).await, Some(taken));
+    }
+
+    sqlx::query("UPDATE users SET email_verified = false, email_vouched_by = NULL WHERE id = $1")
+        .bind(t.owner())
+        .execute(t.pool())
+        .await
+        .unwrap();
+    let refused = refusal(t.invite(&t.owner(), &t.org(), "neither").await);
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (
+            ConnectCode::FailedPrecondition,
+            "verify your email address before inviting members"
+        )
+    );
+    assert_eq!(t.written("neither").await, (0, 0));
+    assert_eq!(t.count(&t.inviter_key(&t.owner())).await, Some(3));
 
     t.cleanup().await;
     fixture.cleanup().await;

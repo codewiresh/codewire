@@ -14,7 +14,10 @@ use super::ApiState;
 use super::environments::{coded_owned, format_time};
 use super::secrets::{forbidden, log_audit};
 
+mod address_proof;
 mod invitation_limits;
+
+use address_proof::AddressProof;
 
 #[derive(Debug)]
 pub struct OrgMember {
@@ -1276,7 +1279,7 @@ const VOUCHED_LINK_HOURS: i64 = 24;
 /// claim computes the window in SQL, on the database's clock, as it checks
 /// `expires_at`.
 fn vouched_for_this_link(
-    caller: &CallerAddress,
+    caller: &AddressProof,
     key: &InvitationKey,
     claimed: &sqlx::postgres::PgRow,
 ) -> AppResult<bool> {
@@ -1292,46 +1295,21 @@ fn invitation_not_found() -> AppError {
     AppError::NotFound("invitation not found".into())
 }
 
-/// Whether the caller's address is the invitation's, and whether it is
-/// verified.
-struct CallerAddress {
-    matches: bool,
-    verified: bool,
-    /// The server's admin vouched for the address (`email_vouched_by`).
-    vouched: bool,
-}
-
-/// Reads the caller's address against an invitation's inside `tx` and holds
-/// the caller's row until it ends, so neither the address nor its
-/// verification can change before the membership it admits commits. The
-/// address is compared with SQL `lower()` on both sides, the rule
-/// ListMyInvitations uses, so the two always agree on which invitations are
-/// the caller's.
+/// Reads the caller's address against an invitation's inside `tx`
+/// ([`address_proof::read`]), holding the caller's row until the membership
+/// it admits commits.
 async fn caller_address(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: &str,
     invitation_email: &str,
-) -> AppResult<CallerAddress> {
-    let (matches, verified, vouched): (bool, bool, bool) = sqlx::query_as(
-        r#"SELECT lower(email) = lower($2), COALESCE(email_verified, false),
-                  email_vouched_by IS NOT NULL
-           FROM users
-           WHERE id = $1
-           FOR SHARE"#,
-    )
-    .bind(user_id)
-    .bind(invitation_email)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "organizations: load caller email failed");
-        AppError::InternalMsg("failed to load user".into())
-    })?;
-    Ok(CallerAddress {
-        matches,
-        verified,
-        vouched,
-    })
+) -> AppResult<AddressProof> {
+    address_proof::read(tx, user_id, Some(invitation_email))
+        .await
+        .and_then(|proof| proof.ok_or(sqlx::Error::RowNotFound))
+        .map_err(|e| {
+            tracing::error!(error = %e, "organizations: load caller email failed");
+            AppError::InternalMsg("failed to load user".into())
+        })
 }
 
 // ── Org list / create (#38) ──────────────────────────────────────────────

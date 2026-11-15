@@ -183,6 +183,8 @@ Email sign-up is one path for every `IDP_SIGNUP` mode
   once they have.
 - **Sign-in** needs a verified or vouched address. A waiting account is told
   it is disabled, not asked to verify an email that cannot be sent.
+- **Sending an invitation** needs the same proof as sign-in, a verified or
+  vouched address (#4805).
 - **Provider sign-up** is refused (`oauth_error=invite_only`). A provider is
   connected from Settings after signing up.
 - **The admin's account list** shows each address's vouch and, for a sign-up

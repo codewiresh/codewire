@@ -11,6 +11,7 @@ use codewire_server_core::{AppError, AppResult};
 use sqlx::PgConnection;
 
 use super::super::environments::coded_owned;
+use super::address_proof;
 
 /// Invitations one account may create in an hour, across all organizations.
 pub(super) const PER_INVITER_PER_HOUR: i32 = 30;
@@ -22,19 +23,19 @@ const WINDOW_MILLIS: i64 = 60 * 60 * 1000;
 /// The machine-readable code of a refusal past any of the three limits.
 const LIMIT_REACHED: &str = "invitation_limit_reached";
 
-/// Refuses an inviter whose email is not verified, then takes one invitation
+/// Refuses an inviter whose address is not proven, then takes one invitation
 /// from the organization's and the inviter's hourly counts, then checks the
 /// organization's pending invitations.
 pub(super) async fn check(conn: &mut PgConnection, user_id: &str, org_id: &str) -> AppResult<()> {
     // Owner, 2026-11-13 (#4457): unverified people cannot send invitations,
-    // as they cannot accept one.
-    let verified: Option<bool> =
-        sqlx::query_scalar("SELECT COALESCE(email_verified, false) FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(failed)?;
-    if verified != Some(true) {
+    // as they cannot accept one. A server with no mail proves an address by
+    // a vouch instead, which accepting honours too (#4805). The inviter's row
+    // is read shared, as accepting reads it, so the address cannot change
+    // before the invitation it allows commits.
+    let proof = address_proof::read(conn, user_id, None)
+        .await
+        .map_err(failed)?;
+    if !proof.is_some_and(|proof| proof.may_invite()) {
         return Err(coded_owned(
             StatusCode::BAD_REQUEST,
             "email_not_verified",
@@ -43,9 +44,10 @@ pub(super) async fn check(conn: &mut PgConnection, user_id: &str, org_id: &str) 
     }
 
     // The counts live in rate_limit rather than in org_invitations, which
-    // deleting an organization empties. Every transaction takes the
-    // organization's row before the inviter's, so two invitations cannot
-    // deadlock, and holding the organization's row until commit makes the
+    // deleting an organization empties. Every transaction takes its locks in
+    // one order, the inviter's users row (shared, above), then the
+    // organization's count, then the inviter's, so two invitations cannot
+    // deadlock. Holding the organization's count until commit makes the
     // pending count below see every invitation committed before this one.
     let now = Utc::now().timestamp_millis();
     take_one(

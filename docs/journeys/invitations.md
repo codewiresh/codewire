@@ -397,7 +397,8 @@ invitations.
 
 - **Entry points:** `cw org invite`; **Send Invite** on the Members page.
 - **States to exercise:** a signed-in owner whose address is not verified;
-  the same owner after verifying.
+  the same owner after verifying; on a server without mail, an owner whose
+  address is vouched for, who may invite (#4805).
 - **Driving it:** as an unverified owner, run `cw org invite` as in
   `invite-send`, and press **Send Invite** on the Members page.
 - **Proof:** the CLI exits non-zero with "verify your email address before
@@ -411,8 +412,8 @@ invitations.
     on Kind by setting a signed-in account's `email_verified` to false in
     Kind's disposable database, and back to true afterwards.
   - On a server without mail, accounts are vouched for instead of
-    verified, and this check refuses them too, the admin included. That is
-    a bug, #4805.
+    verified (#4121), and a vouched account, the admin included, may invite
+    as a verified one does (#4805).
 - **Observed:**
   - Kind, 2026-11-15, the retained profile `cw-abuse-review` on source
     `35bacfcbb` (as under `invite-limits`), as `e2e-owner` with its `cw` and
