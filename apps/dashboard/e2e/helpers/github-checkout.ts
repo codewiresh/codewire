@@ -219,6 +219,98 @@ export async function verifyGithubCheckout(page: Page, orgId: string, before: Gi
   expect(Buffer.from(result.stdout || "", "base64").toString()).toBe("github-checkout-verified\n");
 }
 
+type LargeTransfer = { operation: string; streamed: boolean; requestBytes: number; success: boolean };
+
+/** The fixture's large repository (#4280) and its streamed transfers so far. */
+async function githubLargeFixture() {
+  const context = process.env.PLAYWRIGHT_KUBE_CONTEXT;
+  if (process.env.PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE !== "1" || !context?.startsWith("kind-")) {
+    throw new Error("Large Git transfers require the explicit managed Kind fixture context");
+  }
+  // The ready line is logged once at start; read the whole bounded log.
+  const { stdout } = await execFileAsync("kubectl", [
+    "--context", context, "-n", "codewire-e2e", "logs",
+    "deployment/codewire-credential-service", "-c", "credential-service", "--limit-bytes=8388608",
+  ], { timeout: 15_000, maxBuffer: 16 * 1024 * 1024 });
+  let ready: { commit: string; mebibytes: number } | undefined;
+  const transfers: LargeTransfer[] = [];
+  for (const line of stdout.split("\n")) {
+    // The fixture's first event shares its line with the test harness's
+    // "test runtime::kind::serve_kind_credential_fixture ... " prefix.
+    const start = line.indexOf("{\"timestamp\"");
+    if (start < 0) continue;
+    const event = JSON.parse(line.slice(start));
+    if (event.target !== "codewire_kind_credential_fixture") continue;
+    const fields = event.fields ?? {};
+    if (fields.event === "github_git_large_ready") {
+      if (!/^[0-9a-f]{40}$/.test(fields.commit) || !Number.isSafeInteger(fields.mebibytes)) {
+        throw new Error("Invalid large Git fixture ready line");
+      }
+      ready = { commit: fields.commit, mebibytes: fields.mebibytes };
+    } else if (fields.event === "github_git_large_transfer") {
+      transfers.push({
+        operation: String(fields.operation), streamed: fields.streamed_body === true,
+        requestBytes: Number(fields.request_bytes), success: fields.success === true,
+      });
+    }
+  }
+  if (!ready) throw new Error("The Kind credential fixture has no large Git repository");
+  return { ...ready, transfers };
+}
+
+/**
+ * Stock Git in the checkout's Sandbox, through the managed GitHub route and
+ * the credential bridge (#4280): clones the large repository, whose pack is
+ * over the old 256 MiB response limit, verifies every blob against the
+ * fixture's commit, then pushes 20 MiB of incompressible bytes, over the old
+ * 4 MiB request limit. Both POSTs must have streamed their bodies.
+ */
+export async function verifyGithubLargeTransfers(page: Page, orgId: string) {
+  const [created] = await sql`
+    SELECT id FROM environments WHERE org_id = ${orgId} AND name = ${githubCheckoutName}
+  `;
+  expect(created?.id).toBeTruthy();
+  const before = await githubLargeFixture();
+  const branch = `large-push-${Date.now()}`;
+  const response = await page.request.post(`${serverUrl}/codewire.v1.ExecService/Exec`, {
+    timeout: 600_000,
+    data: {
+      orgId, environmentId: created.id, timeout: "570s",
+      command: ["sh", "-c", [
+        "set -eu",
+        "work=\"$(mktemp -d /workspace/large-transfer.XXXXXX)\"",
+        "cd \"$work\"",
+        "git clone --quiet https://github.com/synthetic-user/repository-large.git large",
+        "cd large",
+        `test "$(git rev-parse HEAD)" = '${before.commit}'`,
+        "git fsck --full --strict --no-dangling",
+        "for file in blob-*.bin; do test \"$(git hash-object \"$file\")\" = \"$(git rev-parse \"HEAD:$file\")\"; done",
+        `test "$(cat blob-*.bin | wc -c)" -eq ${before.mebibytes * 1024 * 1024}`,
+        "head -c 20971520 /dev/urandom > pushed.bin",
+        "git add pushed.bin",
+        "git -c user.name=E2E -c user.email=e2e@example.invalid commit --quiet --no-gpg-sign -m pushed",
+        `git push --quiet origin HEAD:refs/heads/${branch}`,
+        `test "$(git ls-remote origin refs/heads/${branch} | cut -f1)" = "$(git rev-parse HEAD)"`,
+        "cd /workspace",
+        "rm -rf \"$work\"",
+        "printf 'github-large-transfers-verified\\n'",
+      ].join("\n")],
+    },
+  });
+  expect(response.status()).toBe(200);
+  const result = await response.json();
+  const stderr = Buffer.from(result.stderr || "", "base64").toString();
+  expect(result.exitCode ?? 0, stderr).toBe(0);
+  expect(Buffer.from(result.stdout || "", "base64").toString()).toBe("github-large-transfers-verified\n");
+  const after = (await githubLargeFixture()).transfers.slice(before.transfers.length);
+  // The clone's and the push's POSTs streamed (not the 4 MiB whole-body
+  // fallback, which the guest would have refused with 413).
+  expect(after.filter((t) => t.operation === "large_upload_pack" && t.streamed && t.success).length)
+    .toBeGreaterThan(0);
+  expect(after.some((t) => t.operation === "large_receive_pack" && t.streamed && t.success
+    && t.requestBytes > 20 * 1024 * 1024)).toBe(true);
+}
+
 export async function destroyGithubCheckout(page: Page, orgId: string) {
   // Normal lifecycle even after a failed assertion; never remove finalizers,
   // forge runtime state or delete a bound profile before its sandbox is gone.

@@ -66,7 +66,9 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
     .map_err(|_| RuntimeError::Database)?;
     let result = async {
         config::assert_restricted_login(&pool).await?;
-        let git = git::Fixture::create(&config.runtime_directory).await
+        let large = git::large::Config::from_env()
+            .map_err(|_| RuntimeError::Configuration("Kind large Git fixture"))?;
+        let git = git::Fixture::create_with_large(&config.runtime_directory, large).await
             .map_err(|_| RuntimeError::Configuration("Kind Git fixture"))?;
         let provider = provider::SyntheticProvider::with_git(git.clone(), &config.public_origin);
         let github_app = GitHubAppAuthorizationConfig::new(

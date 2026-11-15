@@ -376,6 +376,28 @@ impl SyntheticProvider {
         ))
     }
 
+    async fn github_git_large(
+        &self,
+        method: &Method,
+        target: &url::Url,
+        headers: &HeaderMap,
+        body: Vec<u8>,
+        stream: Option<codewire_credential_broker::BrokerRequestBodyStream>,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        let fixture = self.1.as_ref().ok_or(BrokerUpstreamError::Protocol)?;
+        let (operation, body) = fixture
+            .execute_large(method, target, headers, body, stream)
+            .await?;
+        Ok(BrokerUpstreamResponse::new(
+            StatusCode::OK,
+            HeaderMap::from_iter([(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static(operation.media_type()),
+            )]),
+            body,
+        ))
+    }
+
     fn github_app_exchange(
         &self,
         headers: &HeaderMap,
@@ -1078,9 +1100,28 @@ impl BrokerUpstreamTransport for SyntheticProvider {
             // or secret-bearing accessor crosses the broker's boundary.
             return SyntheticOpenAiSmokeTransport.execute(request).await;
         }
-        let (method, target, headers, body) = request.into_parts();
+        let mut request = request;
+        let stream = request.take_body_stream();
+        let (method, target, headers, mut body) = request.into_parts();
         if headers.contains_key("proxy-authorization") || headers.contains_key("cookie") {
             return Err(BrokerUpstreamError::Protocol);
+        }
+        if target.as_str().starts_with(super::git::large::REPOSITORY) {
+            return self
+                .github_git_large(&method, &target, &headers, body, stream)
+                .await;
+        }
+        // A guest on a host that streams Git request bodies (#4280) streams
+        // the small repository's fetch too; it keeps its whole-body limit.
+        if let Some(mut stream) = stream {
+            use futures::StreamExt as _;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|_| BrokerUpstreamError::Protocol)?;
+                if body.len() + chunk.len() > super::git::WIRE_LIMIT {
+                    return Err(BrokerUpstreamError::ResourceLimit);
+                }
+                body.extend_from_slice(&chunk);
+            }
         }
         if method == Method::POST && target.as_str() == "https://github.com/login/device/code" {
             return github_device_code(&headers, &body);

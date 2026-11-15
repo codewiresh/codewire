@@ -226,5 +226,97 @@ async fn run_with_limit(
     Ok(output)
 }
 
+/// Run one child whose stdin is fed from `input` and whose stdout chunks go
+/// to `output` as they arrive, with no size limit: the large-transfer routes
+/// (#4280) are bounded by `limit` instead. stderr stays bounded. A closed
+/// `output` receiver fails the child, which is then killed and drained.
+pub(super) async fn run_streaming<S>(
+    command: &mut Command,
+    mut input: S,
+    output: tokio::sync::mpsc::Sender<Result<axum::body::Bytes, Error>>,
+    stop: &CancellationToken,
+    limit: Duration,
+) -> Result<(), Failure>
+where
+    S: futures::Stream<Item = Result<axum::body::Bytes, Error>> + Unpin,
+{
+    use futures::StreamExt as _;
+    if stop.is_cancelled() {
+        return Err(Failure::drained(Error::Protocol));
+    }
+    let mut child = OwnedChild::spawn(command).map_err(Failure::unproven)?;
+    let mut stdin = Some(
+        child
+            .child
+            .stdin
+            .take()
+            .ok_or_else(|| Failure::unproven(Error::Protocol))?,
+    );
+    let mut stdout = child
+        .child
+        .stdout
+        .take()
+        .ok_or_else(|| Failure::unproven(Error::Protocol))?;
+    let mut stderr = child
+        .child
+        .stderr
+        .take()
+        .ok_or_else(|| Failure::unproven(Error::Protocol))?;
+    let result = tokio::select! {
+        biased;
+        () = stop.cancelled() => Err(Error::Protocol),
+        result = tokio::time::timeout(limit, async {
+            tokio::try_join!(
+                child.exited(),
+                async {
+                    let mut stdin = stdin.take().ok_or(Error::Protocol)?;
+                    while let Some(chunk) = input.next().await {
+                        stdin.write_all(&chunk?).await.map_err(|_| Error::Protocol)?;
+                    }
+                    drop(stdin);
+                    Ok(())
+                },
+                async {
+                    let mut buffer = vec![0; 64 * 1024];
+                    loop {
+                        let read = stdout.read(&mut buffer).await.map_err(|_| Error::Protocol)?;
+                        if read == 0 {
+                            return Ok(());
+                        }
+                        output
+                            .send(Ok(axum::body::Bytes::copy_from_slice(&buffer[..read])))
+                            .await
+                            .map_err(|_| Error::Protocol)?;
+                    }
+                },
+                bounded_bytes(&mut stderr),
+            )?;
+            Ok(())
+        }) => result.unwrap_or(Err(Error::ResourceLimit)),
+    };
+    drop(stdin);
+    let status = child.finish().await.map_err(Failure::unproven)?;
+    tokio::time::timeout(DRAIN_LIMIT, async {
+        // Discard whatever the killed child left; its EOF proves the drain.
+        let mut sink = tokio::io::sink();
+        tokio::try_join!(
+            async {
+                tokio::io::copy(&mut stdout, &mut sink)
+                    .await
+                    .map_err(|_| Error::Protocol)
+            },
+            bounded_bytes(&mut stderr),
+        )
+    })
+    .await
+    .map_err(|_| Failure::unproven(Error::ResourceLimit))?
+    .map_err(Failure::unproven)?;
+    result.map_err(Failure::drained)?;
+    if !status.success() {
+        return Err(Failure::drained(Error::Protocol));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

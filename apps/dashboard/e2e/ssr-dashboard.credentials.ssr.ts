@@ -11,6 +11,7 @@ import { cleanupTestOrg, ensureTestOrg } from "./helpers/org";
 import {
   destroyGithubCheckout, githubCheckoutImage, githubCheckoutInstall, githubCheckoutName,
   githubConnectionMetadata, githubGitCounters, profileCurrentRevision, verifyGithubCheckout,
+  verifyGithubLargeTransfers,
 } from "./helpers/github-checkout";
 
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
@@ -428,6 +429,9 @@ test.describe("managed provider credential browser journey", () => {
       await page.getByRole("button", { name: "Create Sandbox", exact: true }).click();
       await expect(page).toHaveURL(new RegExp(`^${ssrUrl}/${slug}/[0-9a-f-]{36}/\\?message=environment-created$`));
       await verifyGithubCheckout(page, orgId, before);
+      // #4280: a clone over 256 MiB and a push over 4 MiB, streamed.
+      test.setTimeout(test.info().timeout + 600_000);
+      await verifyGithubLargeTransfers(page, orgId);
       await destroyGithubCheckout(page, orgId);
 
       // #2712: a reconnect whose installations still have the grant from

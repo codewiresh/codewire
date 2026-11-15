@@ -70,7 +70,9 @@ patch_kind_credential_container() {
               "CODEWIRE_KIND_CREDENTIAL_FIXTURE",
               "CODEWIRE_KIND_CREDENTIAL_TEST_KEK",
               "CREDENTIAL_PUBLIC_ORIGIN",
-              "CREDENTIAL_OAUTH_KEEPALIVE_ENABLED"
+              "CREDENTIAL_OAUTH_KEEPALIVE_ENABLED",
+              "CODEWIRE_KIND_GIT_LARGE_DIR",
+              "CODEWIRE_KIND_GIT_LARGE_MIB"
             ] | index($n) | not)) + $add)
         else . end)' |
     kubectl replace -f - >/dev/null

@@ -3,6 +3,7 @@
 //! or listener. Git receives only public repository data and bounded Git bytes,
 //! never the request's authorization or any enrollment/KEK material.
 
+pub(super) mod large;
 mod process;
 #[cfg(test)]
 mod tests;
@@ -27,7 +28,7 @@ use process::{IO_LIMIT, command, run};
 
 pub(super) const REVISION: &str = "78e440926ea15ee9644a69199694e39f6f06e3ce";
 const CONTENT: &[u8] = b"initial-private-checkout-synthetic-v1\n";
-const WIRE_LIMIT: usize = 4 * 1024 * 1024;
+pub(super) const WIRE_LIMIT: usize = 4 * 1024 * 1024;
 const ADVERTISEMENT: &str =
     "https://github.com/synthetic-user/repository-01.git/info/refs?service=git-upload-pack";
 const UPLOAD_PACK: &str = "https://github.com/synthetic-user/repository-01.git/git-upload-pack";
@@ -199,10 +200,25 @@ pub(super) struct Fixture {
     stop: CancellationToken,
     permits: Arc<Semaphore>,
     cleanup_failed: AtomicBool,
+    /// The large-transfer repository, when the harness selects one (#4280).
+    large: Option<large::Large>,
+    large_permits: Arc<Semaphore>,
 }
+
+/// A large-repository response: its operation and streamed body.
+pub(super) type LargeBody = std::pin::Pin<
+    Box<dyn futures::Stream<Item = Result<axum::body::Bytes, Error>> + Send + 'static>,
+>;
 
 impl Fixture {
     pub(super) async fn create(runtime: &Path) -> Result<Arc<Self>, Error> {
+        Self::create_with_large(runtime, None).await
+    }
+
+    pub(super) async fn create_with_large(
+        runtime: &Path,
+        large: Option<large::Config>,
+    ) -> Result<Arc<Self>, Error> {
         let mut directory = tempfile::Builder::new()
             .prefix("kind-git-fixture-")
             .permissions(std::fs::Permissions::from_mode(0o700))
@@ -221,6 +237,21 @@ impl Fixture {
             let _ = directory.keep();
             return Err(error.error);
         }
+        let large = match large {
+            None => None,
+            Some(config) => match large::prepare(&config, &stop).await {
+                Ok(large) => {
+                    tracing::info!(target: super::TARGET, event = "github_git_large_ready",
+                        commit = large.commit.as_str(), mebibytes = large.mebibytes,
+                        "github_git_large_ready");
+                    Some(large)
+                }
+                Err(error) => {
+                    let _ = directory.keep();
+                    return Err(error.error);
+                }
+            },
+        };
         Ok(Arc::new(Self {
             root,
             lifecycle: Mutex::new(Lifecycle {
@@ -231,6 +262,8 @@ impl Fixture {
             stop,
             permits: Arc::new(Semaphore::new(2)),
             cleanup_failed: AtomicBool::new(false),
+            large,
+            large_permits: Arc::new(Semaphore::new(2)),
         }))
     }
 
@@ -272,6 +305,82 @@ impl Fixture {
             self.cleanup_failed.store(true, Ordering::Release);
             Error::Protocol
         })?
+    }
+
+    /// Serve one large-repository request (#4280). Its body arrives whole or
+    /// as a stream, and its response streams back as `http-backend` writes
+    /// it, with no size limit; the transfer is bounded by time.
+    pub(super) async fn execute_large(
+        self: &Arc<Self>,
+        method: &Method,
+        target: &url::Url,
+        headers: &HeaderMap,
+        body: Vec<u8>,
+        stream: Option<codewire_credential_broker::BrokerRequestBodyStream>,
+    ) -> Result<(large::Operation, LargeBody), Error> {
+        use futures::StreamExt as _;
+        let large = self.large.as_ref().ok_or(Error::Protocol)?;
+        let streamed = stream.is_some();
+        let request = large::validate(method, target, headers, streamed || !body.is_empty())?;
+        let operation = request.operation;
+        let input: large::Input = match stream {
+            Some(stream) => Box::pin(stream.map(|chunk| chunk.map_err(|_| Error::Protocol))),
+            None if body.is_empty() => Box::pin(futures::stream::empty()),
+            None => Box::pin(futures::stream::iter([Ok(axum::body::Bytes::from(body))])),
+        };
+        let permit = self
+            .large_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::ResourceLimit)?;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        {
+            let lifecycle = self.lifecycle.lock().map_err(|_| Error::Protocol)?;
+            if !lifecycle.open {
+                return Err(Error::Protocol);
+            }
+            let fixture = self.clone();
+            let root = large.root.clone();
+            self.tasks.spawn(async move {
+                let _permit = permit;
+                let mut custody = TaskCustody {
+                    failed: &fixture.cleanup_failed,
+                    completed: false,
+                };
+                let counts = Arc::new(large::Counts::default());
+                let result = large::run_request(
+                    &root,
+                    &request,
+                    input,
+                    counts.clone(),
+                    sender.clone(),
+                    &fixture.stop,
+                )
+                .await;
+                if let Err(failure) = &result {
+                    if !failure.drained {
+                        fixture.cleanup_failed.store(true, Ordering::Release);
+                    }
+                    // Never wait on a consumer that stopped reading.
+                    let _ = sender.try_send(Err(failure.error));
+                }
+                tracing::info!(target: super::TARGET, event = "github_git_large_transfer",
+                    operation = operation.name(), streamed_body = streamed,
+                    request_bytes = counts.request.load(Ordering::Relaxed),
+                    success = result.is_ok(), "github_git_large_transfer");
+                custody.completed = true;
+            });
+        }
+        let first = large::read_header(operation, &mut receiver).await?;
+        let rest = futures::stream::unfold(receiver, |mut receiver| async move {
+            receiver.recv().await.map(|item| (item, receiver))
+        });
+        let body: LargeBody = if first.is_empty() {
+            Box::pin(rest)
+        } else {
+            Box::pin(futures::stream::iter([Ok(first)]).chain(rest))
+        };
+        Ok((operation, body))
     }
 
     async fn respond(&self, request: Request) -> Result<(Operation, Vec<u8>), Error> {

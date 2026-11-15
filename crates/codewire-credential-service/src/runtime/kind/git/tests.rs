@@ -5,6 +5,7 @@ use http::HeaderValue;
 use super::*;
 
 mod broker;
+mod large_transfer;
 
 fn authorization() -> HeaderValue {
     HeaderValue::from_str(&format!(
