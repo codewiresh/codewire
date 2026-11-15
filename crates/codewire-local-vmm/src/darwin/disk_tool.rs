@@ -6,9 +6,18 @@
 //! from inside the VM. Each runs under a deny-default Seatbelt profile that
 //! `/usr/bin/sandbox-exec` applies before it executes the tool: the same
 //! `sandbox_init` that confines the packet worker and egress broker, applied
-//! by a fresh single-threaded process, so nothing runs between fork and exec
-//! in the multithreaded supervisor. The profile names the tool and the disk
-//! by parameter, so no path is ever spliced into its text.
+//! by a fresh single-threaded process, so no confinement runs between fork and
+//! exec in the multithreaded process that spawns it. The profile names the
+//! tool and the disk by parameter, so no path is ever spliced into its text.
+//!
+//! The one thing that does run between fork and exec is the close-on-exec
+//! sweep every macOS runner spawn makes
+//! (`darwin::process::mark_inherited_descriptors_close_on_exec`, only
+//! `getdtablesize` and `fcntl`, both async-signal-safe). Darwin creates a
+//! socketpair and only then marks it close-on-exec, so without the sweep a
+//! tool spawned in between would inherit, for one, the runner's end of a VZ
+//! helper's control channel, and the helper would never see that channel
+//! close (cw-security, #4654).
 //!
 //! The tool may execute only itself, read and write only its one disk and
 //! `/dev/null`, and read the system libraries, dyld's shared cache, the root
@@ -66,6 +75,15 @@ pub(crate) fn command(
         .arg(&disk)
         // The profile cannot read the supervisor's working directory.
         .current_dir("/");
+    // SAFETY: the sweep makes only getdtablesize and fcntl calls, both
+    // async-signal-safe, between fork and exec. The spawn guard requires
+    // each preparation to run the sweep itself.
+    unsafe {
+        command.pre_exec(|| {
+            crate::darwin::process::mark_inherited_descriptors_close_on_exec();
+            Ok(())
+        });
+    }
     Ok(command)
 }
 

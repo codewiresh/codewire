@@ -6,7 +6,8 @@ import Foundation
 #endif
 
 private func usage() -> Never {
-  FileHandle.standardError.write(Data("usage: codewire-vz-runner vm --config FILE\n".utf8))
+  FileHandle.standardError.write(
+    Data("usage: codewire-vz-runner vm --config FILE | protocol\n".utf8))
   exit(2)
 }
 
@@ -30,6 +31,13 @@ private func runVM(configurationPath: String) throws -> Never {
 }
 
 let arguments = CommandLine.arguments
+// The newest configuration schema this helper accepts, for the runner's
+// admission probe (#4654). A helper from before schema 3 has no such command
+// and exits 2 with its usage, which the runner reads as schema 2.
+if arguments.count == 2, arguments[1] == "protocol" {
+  FileHandle.standardOutput.write(Data("\(VMConfiguration.schemaVersion)\n".utf8))
+  exit(0)
+}
 guard arguments.count == 4, arguments[1] == "vm", arguments[2] == "--config" else { usage() }
 do {
   try runVM(configurationPath: arguments[3])

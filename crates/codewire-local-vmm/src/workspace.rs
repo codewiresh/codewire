@@ -927,6 +927,7 @@ fn git_output(
         .ok_or(WorkspaceError::GitOutputTooLarge)? as u64;
     let git = host_git()?;
     let mut command = Command::new(&git.program);
+    crate::sweep_before_exec(&mut command);
     command
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
@@ -1907,7 +1908,7 @@ fn import_git_bundle(
     template: &Path,
 ) -> Result<(), WorkspaceError> {
     let git = host_git()?;
-    let initialized = Command::new(&git.program)
+    let initialized = crate::sweep_before_exec(&mut Command::new(&git.program))
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
@@ -1939,7 +1940,7 @@ fn import_git_bundle(
         return Err(WorkspaceError::GitCloneFailed);
     }
 
-    let fetched = Command::new(&git.program)
+    let fetched = crate::sweep_before_exec(&mut Command::new(&git.program))
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
@@ -1987,7 +1988,7 @@ fn git_clone_output(
     template: &Path,
 ) -> Result<Output, WorkspaceError> {
     let git = host_git()?;
-    Command::new(&git.program)
+    crate::sweep_before_exec(&mut Command::new(&git.program))
         .args(GIT_FOREGROUND_MAINTENANCE)
         .args([
             "-c",
@@ -2228,6 +2229,7 @@ fn bounded_staging_regular_bytes(root: &Path, maximum: u64) -> Result<u64, Works
 fn format_state_disk(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
     let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
     let mut command = Command::new(mkfs);
+    crate::sweep_before_exec(&mut command);
     command
         .args(crate::host::EXT4_FORMAT)
         .args([
@@ -2263,6 +2265,7 @@ fn format_state_disk(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> 
 fn format_empty_ext4(disk: &Path) -> Result<(), WorkspaceError> {
     let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
     let mut command = Command::new(mkfs);
+    crate::sweep_before_exec(&mut command);
     command
         .args(crate::host::EXT4_FORMAT)
         .args(["-q", "-F", "-m", "0"])

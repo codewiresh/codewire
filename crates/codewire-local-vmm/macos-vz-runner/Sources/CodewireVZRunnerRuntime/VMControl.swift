@@ -65,8 +65,10 @@ import Foundation
         return
       }
       let begun = DispatchTime.now()
+      states.began(request.operation)
       let finish = { (error: (any Error)?) in
         if let error {
+          self.states.failed()
           self.send(.failed(id: request.id, code: (error as? VZError)?.code.rawValue ?? 0))
         } else {
           self.states.completed(request.operation)

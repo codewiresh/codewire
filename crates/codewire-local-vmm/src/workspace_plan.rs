@@ -731,6 +731,7 @@ fn git_command(working_directory: &Path) -> Command {
         .as_ref()
         .map_or_else(|| PathBuf::from(MISSING_GIT), |git| git.program.clone());
     let mut command = Command::new(program);
+    crate::sweep_before_exec(command.as_std_mut());
     command
         .args([
             "-c",

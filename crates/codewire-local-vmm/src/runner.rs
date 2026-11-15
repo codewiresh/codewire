@@ -98,6 +98,8 @@ mod inherited;
 
 use inherited::{INHERITED_SOURCE_FLOOR, duplicate_inherited_descriptor, raise_open_file_limit};
 mod host_port_forward;
+#[cfg(target_os = "macos")]
+mod vz_launch;
 #[cfg(target_os = "linux")]
 pub use checkpoint::{RestoreBoot, RestoreReport};
 use host_port_forward::HostPortForwarder;
@@ -179,6 +181,10 @@ struct PreparedDirectShare {
 pub struct CloudHypervisorRunner {
     state_root: PrivateRoot,
     artifacts: AdmittedArtifacts,
+    /// The configuration schema the admitted VZ helper accepts, kept once
+    /// its probe answers (#4654).
+    #[cfg(target_os = "macos")]
+    vz_protocol: crate::vz::ProtocolCache,
 }
 
 impl fmt::Debug for CloudHypervisorRunner {
@@ -217,6 +223,8 @@ impl CloudHypervisorRunner {
         Ok(Self {
             state_root,
             artifacts,
+            #[cfg(target_os = "macos")]
+            vz_protocol: crate::vz::ProtocolCache::default(),
         })
     }
 
@@ -474,150 +482,6 @@ impl CloudHypervisorRunner {
             prepared.request.cw_runtime_catalog_generation.as_deref(),
         )?;
         self.launch(prepared).await
-    }
-
-    /// Launch the signed Virtualization.framework helper as this VM's VMM.
-    /// The helper inherits the open `vm.lock`, and stops its VM when this
-    /// runner exits. Readiness is its hybrid-vsock socket plus a live helper.
-    #[cfg(target_os = "macos")]
-    async fn launch(&self, prepared: PreparedVm) -> Result<RunningVm, RunnerError> {
-        let root_disk = root_disk_path(&prepared.paths, &prepared.request.root_generation)?;
-        // As Linux does before starting virtiofsd, require each share to be
-        // the admitted directory once more; the helper checks it again
-        // before and after VM start.
-        let shares = prepared
-            .direct_shares
-            .iter()
-            .map(|share| {
-                let current = share
-                    .request
-                    .reopen(&[])
-                    .map_err(|_| RunnerError::DirectShareChanged)?;
-                if current.identity() != share.admitted.identity()
-                    || current.path() != share.admitted.path()
-                {
-                    return Err(RunnerError::DirectShareChanged);
-                }
-                Ok(crate::vz::VzShare::new(
-                    share.request.mount.tag(),
-                    share.admitted.path(),
-                    share.request.mount.read_only(),
-                    share.admitted.identity(),
-                ))
-            })
-            .collect::<Result<Vec<_>, RunnerError>>()?;
-        let configuration = crate::vz::VzConfiguration::new(
-            self.artifacts.kernel.path(),
-            self.artifacts.initramfs.path(),
-            prepared.request.vcpus,
-            prepared.request.memory_mib,
-            crate::vz::VzDisks {
-                state: &prepared.paths.state_disk,
-                docker: prepared
-                    .docker_disk
-                    .as_ref()
-                    .map(|_| prepared.paths.docker_disk.as_path()),
-                root: &root_disk,
-                seed: &prepared.paths.seed_disk,
-                setup: prepared
-                    .setup_disk
-                    .as_ref()
-                    .map(|setup| setup.path.as_path()),
-                cw_runtime: prepared
-                    .cw_runtime_disk
-                    .as_ref()
-                    .map(|disk| disk.path.as_path()),
-            },
-            shares,
-            &prepared.paths.vsock_socket,
-        )
-        .encode()?;
-        prepared.paths.open_vm_root()?.atomic_replace(
-            Path::new(crate::vz::CONFIG_NAME),
-            &configuration,
-            0o600,
-        )?;
-        let executable = self.artifacts.vz_runner.path();
-        // Arm cancellation cleanup in the same synchronous span as spawn.
-        let vmm = crate::vz::spawn(
-            executable,
-            &prepared.paths.vm_dir.join(crate::vz::CONFIG_NAME),
-            &prepared.paths.vm_dir,
-            &prepared.lock,
-        )?;
-        let mut startup = StartupOwnership::new(vmm);
-        let pid = startup.child_mut().id().ok_or(RunnerError::Spawn)?;
-        let process = match LiveProcess::capture_child(pid, executable) {
-            Ok(process) => process,
-            Err(error) => {
-                startup.terminate_unadmitted(pid).await?;
-                return Err(error.into());
-            }
-        };
-        startup.admit(process);
-
-        // As on Linux, persist the helper's identity before any guest wait.
-        let mut state = PersistedVmState {
-            schema_version: PERSISTED_STATE_SCHEMA_VERSION,
-            vm_id: prepared.request.vm_id,
-            generation: prepared.request.generation,
-            vsock_cid: prepared.request.vsock_cid,
-            daemon_vsock_port: prepared.request.daemon_vsock_port,
-            phase: VmPhase::Starting,
-            process: startup.process().identity().clone(),
-            state_disk: prepared.state_disk.clone(),
-            docker_disk: prepared.docker_disk.clone(),
-            root_generation: Some(prepared.request.root_generation.clone()),
-            root_disk: Some(prepared.root_disk.clone()),
-            cw_runtime_disk: prepared.cw_runtime_disk.clone(),
-            api_socket: None,
-            vsock_socket: None,
-        };
-        if let Err(error) = state.write_atomic(&prepared.paths.state_file) {
-            startup.terminate_admitted().await?;
-            return Err(error.into());
-        }
-
-        let finalized = async {
-            let (hybrid, vsock_socket) = wait_for_vsock_endpoint(
-                &prepared.paths,
-                startup.process(),
-                prepared.request.daemon_vsock_port,
-            )
-            .await?;
-            prepared.paths.validate_diagnostics()?;
-            state.phase = VmPhase::Running;
-            state.vsock_socket = Some(vsock_socket);
-            state.write_atomic(&prepared.paths.state_file)?;
-            Ok::<_, RunnerError>(hybrid)
-        }
-        .await;
-        let hybrid = match finalized {
-            Ok(hybrid) => hybrid,
-            Err(error) => {
-                startup.terminate_admitted().await?;
-                return Err(error);
-            }
-        };
-        let (child, process) = startup.disarm();
-        Ok(RunningVm {
-            // Evaluated before the request moves.
-            host_ports: prepared.request.host_ports.clone(),
-            request: prepared.request,
-            paths: prepared.paths,
-            state_disk: prepared.state_disk,
-            docker_disk: prepared.docker_disk,
-            root_disk: prepared.root_disk,
-            setup_disk: prepared.setup_disk,
-            cw_runtime_disk: prepared.cw_runtime_disk,
-            token: prepared.token,
-            child,
-            process,
-            hybrid,
-            network_worker: None,
-            host_port_listeners: prepared.host_port_listeners,
-            _lock: prepared.lock,
-        })
     }
 
     #[cfg(target_os = "linux")]
@@ -1296,6 +1160,10 @@ pub struct RunningVm {
     /// What the guest reported when this boot resumed from a VM checkpoint.
     #[cfg(target_os = "linux")]
     restored: Option<RestoreReport>,
+    /// The runner's end of a schema 3 helper's control channel, held for the
+    /// VM's life: when it closes, the helper stops its VM (#4654).
+    #[cfg(target_os = "macos")]
+    _control: Option<crate::vz::VzControl>,
     _lock: VmLock,
 }
 
@@ -5301,6 +5169,15 @@ pub enum RunnerError {
     #[cfg(target_os = "macos")]
     #[error("macOS refused to start the VM (Virtualization.framework error {0})")]
     VmStartRefused(u8),
+    #[cfg(target_os = "macos")]
+    #[error("the VM helper's control channel failed: {0}")]
+    VzControl(&'static str),
+    #[cfg(target_os = "macos")]
+    #[error(
+        "this VM's kept machine identifier ({}) is unreadable; its VM checkpoints can only restore with it",
+        crate::vz::MACHINE_IDENTIFIER_NAME
+    )]
+    VzMachineIdentifier,
     #[error("cw runtime catalog attachment changed or its live disk is invalid")]
     CwRuntimeDiskChanged,
     #[error(transparent)]
@@ -5516,6 +5393,10 @@ impl RunnerError {
             Self::OrphanedVmm(_) => "orphaned_vmm",
             #[cfg(target_os = "macos")]
             Self::VmStartRefused(_) => "vm_start_refused",
+            #[cfg(target_os = "macos")]
+            Self::VzControl(_) => "vz_control",
+            #[cfg(target_os = "macos")]
+            Self::VzMachineIdentifier => "vz_machine_identifier",
             Self::CwRuntimeDiskChanged => "cw_runtime_disk_changed",
             Self::CwRuntime(_) => "cw_runtime",
             Self::InvalidRequest => "invalid_request",
@@ -5693,6 +5574,8 @@ mod tests {
         let runner = CloudHypervisorRunner {
             state_root: PrivateRoot::open(&state_path).unwrap(),
             artifacts: AdmittedArtifacts::for_test(artifact.clone(), artifact.clone(), artifact),
+            #[cfg(target_os = "macos")]
+            vz_protocol: crate::vz::ProtocolCache::default(),
         };
         (parent, runner)
     }

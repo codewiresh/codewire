@@ -24,8 +24,8 @@ int cw_vz_verify_shared_directory(const char *path, uint32_t device, uint64_t in
 
 // Product VM control channel (#4654). The runner passes one end of an unnamed
 // AF_UNIX stream socketpair as an inherited descriptor. Returns 0 when `fd`
-// is exactly that (a socket, SOCK_STREAM, AF_UNIX, no name) and marks it
-// close-on-exec; -1 for anything else, a closed number included.
+// is exactly that (a socket, SOCK_STREAM, AF_UNIX, no name, an unnamed peer)
+// and marks it close-on-exec; -1 for anything else, a closed number included.
 int cw_vz_check_control(int fd);
 // Read up to `size` control bytes. Ancillary data is never accepted: any
 // descriptors that arrive with it are closed and -2 is returned. Returns the

@@ -24,12 +24,14 @@ The sandbox profile embeds the two state paths as literals: `saveState` read and
 write, `restoreState` read only. So decoding refuses either path, never
 escaping it, unless it is absolute, normalized, strictly inside the VM's
 directory (the one holding the configuration file) and made only of
-`[A-Za-z0-9._/-]`. A restore path equal to the save path is refused too.
+`[A-Za-z0-9._/-]`. A restore path equal to the save path, or either path equal to
+one of the VM's disks, shares or its vsock socket, is refused too.
 
 The control channel is one end of an unnamed `AF_UNIX` stream socketpair that
 only the runner holds. Before confinement, the helper requires the descriptor
-to be exactly that: a socket, `SOCK_STREAM`, `AF_UNIX`, unnamed. Otherwise it
-exits 1 before the VM starts. Each message is one JSON line of at most 4 KiB:
+to be exactly that: a socket, `SOCK_STREAM`, `AF_UNIX`, unnamed, with an unnamed
+peer (a client of a named listener has an unnamed end but a named peer).
+Otherwise it exits 1 before the VM starts. Each message is one JSON line of at most 4 KiB:
 - a request is exactly `{"id": N, "op": "pause" | "save" | "resume" | "stop"}`,
   with no path, descriptor or size, and `save` always writes `saveState`;
 - each request gets one reply: `{"id","result":"done","ms"}`,
@@ -38,10 +40,20 @@ exits 1 before the VM starts. Each message is one JSON line of at most 4 KiB:
 - the one event is `{"event":"started","machineIdentifier"}`, sent once the VM
   runs: started, or restored and resumed.
 
-A capture is pause, save, resume, and stop is allowed from any state. EOF, a
+A capture is pause, save, resume, and stop is allowed from any state. One
+operation runs at a time: while the framework has not yet answered one, only
+`stop` is admitted. EOF, a
 malformed or over-long line, or any ancillary data stops the VM. Descriptors
 sent with ancillary data are closed unread. The exit statuses are unchanged; a
 refused restore exits like a refused start.
+
+`codewire-vz-runner protocol` prints the newest schema the helper accepts (`3`)
+and exits 0. The runner probes it once, and writes schema 3 only to a helper
+that answers 3. A helper from before schema 3 has no such command and exits 2
+with its usage, so a VM still pinned to an older runtime gets schema 2 and runs
+as before. The runner keeps each VM's machine identifier in `vz-machine-id`,
+beside `vz.json`, from the `started` event of its first schema 3 start, and
+passes it back at every later start.
 
 Each share is `{tag, path, readOnly, device, inode}`: the guest's virtio-fs tag
 `cw-direct-NN` in plan order (at most 16), the canonical directory the Rust

@@ -609,6 +609,8 @@ pub fn cleanup_trashed_vm(
     }
     #[cfg(target_os = "macos")]
     vm.remove_private_regular(Path::new(crate::vz::CONFIG_NAME), 0o600)?;
+    #[cfg(target_os = "macos")]
+    vm.remove_private_regular(Path::new(crate::vz::MACHINE_IDENTIFIER_NAME), 0o600)?;
     vm.remove_private_regular(Path::new("state.json"), 0o600)?;
     vm.remove_private_regular(Path::new("vm.lock"), 0o600)?;
     drop(vm);
@@ -744,11 +746,13 @@ pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError>
     ];
     #[cfg(target_os = "linux")]
     ensure_only_entries(vm.path(), &ENTRIES)?;
-    // Darwin also keeps the helper's configuration beside the state.
+    // Darwin also keeps the helper's configuration and the VM's machine
+    // identifier beside the state.
     #[cfg(target_os = "macos")]
     {
         let mut entries = ENTRIES.to_vec();
         entries.push(crate::vz::CONFIG_NAME);
+        entries.push(crate::vz::MACHINE_IDENTIFIER_NAME);
         ensure_only_entries(vm.path(), &entries)?;
     }
     if let Some(virtiofs) = optional_private_directory(vm, Path::new("fs"))? {
@@ -1022,7 +1026,7 @@ fn ensure_only_entries(path: &Path, allowed: &[&str]) -> Result<(), StateError> 
     Ok(())
 }
 
-fn path_error_is_not_found(error: &PathError) -> bool {
+pub(crate) fn path_error_is_not_found(error: &PathError) -> bool {
     match error {
         #[cfg(target_os = "linux")]
         PathError::Openat2 { source, .. } => *source == rustix::io::Errno::NOENT,

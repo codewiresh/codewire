@@ -79,6 +79,22 @@ extension CodewireVZRunnerTests {
             #"{"event":"started","machineIdentifier":"YnBsaXN0MDA="}"#.utf8 + [UInt8(ascii: "\n")]))
     }
 
+    /// cw-security's note on #4673: one operation at a time.
+    @Test
+    func testNothingButStopWhileAnOperationIsInFlight() {
+      var states = ControlStateMachine()
+      states.started()
+      states.began(.pause)
+      #expect(!states.admits(.pause) && !states.admits(.save) && !states.admits(.resume))
+      #expect(states.admits(.stop))
+      // The framework refused it: the VM is still running, and pause is admitted again.
+      states.failed()
+      #expect(states.state == .running && states.inFlight == nil && states.admits(.pause))
+      states.began(.pause)
+      states.completed(.pause)
+      #expect(states.state == .paused && states.inFlight == nil && states.admits(.save))
+    }
+
     @Test
     func testACaptureIsPauseSaveResumeAndStopEndsEverything() {
       var states = ControlStateMachine()

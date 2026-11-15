@@ -202,6 +202,15 @@ int cw_vz_check_control(int fd) {
     }
     // A socketpair end has no path; a bound socket names one.
     if (length > offsetof(struct sockaddr_un, sun_path) && address.sun_path[0] != '\0') { return -1; }
+    // Its peer is unnamed too: a client of a named listener has an unnamed
+    // local end but a named peer.
+    struct sockaddr_un peer;
+    socklen_t peer_length = sizeof(peer);
+    memset(&peer, 0, sizeof(peer));
+    if (getpeername(fd, (struct sockaddr *)&peer, &peer_length) != 0 || peer.sun_family != AF_UNIX) {
+        return -1;
+    }
+    if (peer_length > offsetof(struct sockaddr_un, sun_path) && peer.sun_path[0] != '\0') { return -1; }
     return set_cloexec(fd);
 }
 

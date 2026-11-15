@@ -95,12 +95,15 @@ pub(crate) use darwin as host;
 #[cfg(target_os = "linux")]
 pub(crate) use linux as host;
 
-/// Spawn a long-lived test child without descriptors that concurrent tests are
-/// still creating, so it cannot keep another test's socket or pipe open.
-/// Linux creates every descriptor close-on-exec in one call; Darwin needs the
-/// sweep its product spawns make.
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn test_child(command: &mut std::process::Command) -> &mut std::process::Command {
+/// Spawn without descriptors that other threads are still creating. Darwin
+/// creates sockets, pipes and accepted descriptors first and marks them
+/// close-on-exec in a second call, so a child spawned in between keeps one
+/// open; on macOS the child runs the close-on-exec sweep between fork and
+/// exec. Linux creates every descriptor close-on-exec in one call. Every spawn
+/// in this crate runs the sweep, through this or itself (`spawn_guard_tests`,
+/// #4654).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn sweep_before_exec(command: &mut std::process::Command) -> &mut std::process::Command {
     #[cfg(target_os = "macos")]
     // SAFETY: the sweep makes only getdtablesize and fcntl calls.
     unsafe {
@@ -110,6 +113,13 @@ pub(crate) fn test_child(command: &mut std::process::Command) -> &mut std::proce
         });
     }
     command
+}
+
+/// Spawn a long-lived test child without descriptors that concurrent tests are
+/// still creating, so it cannot keep another test's socket or pipe open.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn test_child(command: &mut std::process::Command) -> &mut std::process::Command {
+    sweep_before_exec(command)
 }
 
 /// Copy `source` to `destination`, an executable the test then runs, with a
@@ -256,6 +266,8 @@ mod skill_snapshot;
 mod snapshot_store;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod socket_dir;
+#[cfg(test)]
+mod spawn_guard_tests;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod state;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

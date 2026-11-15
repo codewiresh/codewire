@@ -231,6 +231,11 @@ public struct VMConfiguration: Codable, Equatable, Sendable {
         throw ConfigurationError.invalidStatePath
       }
     }
+    // Neither state file may alias a file the VM already uses.
+    let used = Set(disks.map(\.path) + shares.map(\.path) + [vsockSocket])
+    guard !used.contains(saveState), !used.contains(restoreState ?? "") else {
+      throw ConfigurationError.invalidStatePath
+    }
     if let machineIdentifier {
       guard let bytes = Data(base64Encoded: machineIdentifier), !bytes.isEmpty,
         bytes.count <= Self.maxMachineIdentifierBytes

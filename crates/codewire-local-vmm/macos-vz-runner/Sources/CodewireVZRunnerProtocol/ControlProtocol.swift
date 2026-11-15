@@ -103,6 +103,8 @@ public struct ControlStateMachine: Equatable, Sendable {
   }
 
   public private(set) var state: State = .starting
+  /// An operation the framework has not yet answered.
+  public private(set) var inFlight: ControlOperation?
 
   public init() {}
 
@@ -111,8 +113,9 @@ public struct ControlStateMachine: Equatable, Sendable {
     if state == .starting { state = .running }
   }
 
-  /// Whether `operation` may run now.
+  /// Whether `operation` may run now. While one is in flight, only stop is.
   public func admits(_ operation: ControlOperation) -> Bool {
+    if inFlight != nil && operation != .stop { return false }
     switch (operation, state) {
     case (.stop, .stopping): return false
     case (.stop, _): return true
@@ -122,8 +125,19 @@ public struct ControlStateMachine: Equatable, Sendable {
     }
   }
 
+  /// Record that `operation` was handed to the framework.
+  public mutating func began(_ operation: ControlOperation) {
+    inFlight = operation
+  }
+
+  /// Record that the framework refused the operation in flight.
+  public mutating func failed() {
+    inFlight = nil
+  }
+
   /// Record that `operation` finished successfully.
   public mutating func completed(_ operation: ControlOperation) {
+    inFlight = nil
     switch operation {
     case .pause: state = .paused
     case .save: break

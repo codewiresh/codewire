@@ -100,6 +100,14 @@
             _ = try Self.decode(Self.configuration(Self.checkpointing(restore: path)))
           }
         }
+        // cw-security's note on #4673: never a file the VM already uses.
+        let disk = "\(Self.directory)/disks/state.raw"
+        #expect(throws: ConfigurationError.invalidStatePath) {
+          _ = try Self.decode(Self.configuration(Self.checkpointing(save: disk)))
+        }
+        #expect(throws: ConfigurationError.invalidStatePath) {
+          _ = try Self.decode(Self.configuration(Self.checkpointing(restore: disk)))
+        }
         let same = "\(Self.directory)/checkpoints/vz-save"
         #expect(throws: ConfigurationError.invalidStatePath) {
           _ = try Self.decode(Self.configuration(Self.checkpointing(save: same, restore: same)))
@@ -176,6 +184,22 @@
         #expect(listener >= 0)
         defer { close(listener) }
         #expect(cw_vz_check_control(listener) == -1, "a named socket")
+        // A client of that named listener has an unnamed end but a named peer.
+        let client = socket(AF_UNIX, SOCK_STREAM, 0)
+        defer { close(client) }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let path = directory.appendingPathComponent("s").path
+        withUnsafeMutableBytes(of: &address.sun_path) { bytes in
+          _ = path.utf8CString.withUnsafeBytes { bytes.copyMemory(from: $0) }
+        }
+        let connected = withUnsafePointer(to: &address) {
+          $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(client, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+          }
+        }
+        #expect(connected == 0)
+        #expect(cw_vz_check_control(client) == -1, "a named listener's client")
 
         let closed = dup(pair[1])
         close(closed)
