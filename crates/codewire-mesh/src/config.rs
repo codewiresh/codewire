@@ -26,6 +26,9 @@ pub const LOCAL_API_KEY_HASH_ENV: &str = "CODEWIRE_MESH_LOCAL_API_KEY_HASH";
 /// one replica on its own registry.
 pub const NATS_URL_ENV: &str = "NATS_URL";
 pub const NATS_TOKEN_ENV: &str = "NATS_TOKEN";
+/// Mesh's own NATS user, set together; used instead of the token (#3542).
+pub const NATS_USER_ENV: &str = "NATS_USER";
+pub const NATS_PASSWORD_ENV: &str = "NATS_PASSWORD";
 pub const NATS_KV_REPLICAS_ENV: &str = "NATS_KV_REPLICAS";
 
 const DEFAULT_STUN_PORT: u16 = 3478;
@@ -97,6 +100,8 @@ impl fmt::Debug for LocalMeshAuthorizationConfig {
 pub struct NatsConfig {
     pub url: String,
     token: Option<String>,
+    /// Mesh's own NATS user and password, used instead of the token.
+    login: Option<(String, String)>,
     /// Replicas of the shared bucket: 1, 3 or 5.
     pub kv_replicas: usize,
 }
@@ -106,11 +111,18 @@ impl NatsConfig {
         self.token.as_deref()
     }
 
+    pub(crate) fn login(&self) -> Option<(&str, &str)> {
+        self.login
+            .as_ref()
+            .map(|(user, password)| (user.as_str(), password.as_str()))
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(url: &str) -> Self {
         Self {
             url: url.to_owned(),
             token: None,
+            login: None,
             kv_replicas: 1,
         }
     }
@@ -122,6 +134,10 @@ impl fmt::Debug for NatsConfig {
             .debug_struct("NatsConfig")
             .field("url", &self.url)
             .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .field(
+                "login",
+                &self.login.as_ref().map(|(user, _)| (user, "[redacted]")),
+            )
             .field("kv_replicas", &self.kv_replicas)
             .finish()
     }
@@ -230,9 +246,15 @@ impl Config {
                         .map_err(|_| ConfigError::InvalidNatsKvReplicas(raw))?,
                     None => codewire_server_core::nats::DEFAULT_KV_REPLICAS,
                 };
+                let login = match (trim(getenv(NATS_USER_ENV)), trim(getenv(NATS_PASSWORD_ENV))) {
+                    (Some(user), Some(password)) => Some((user, password)),
+                    (None, None) => None,
+                    _ => return Err(ConfigError::IncompleteNatsLogin),
+                };
                 Ok(NatsConfig {
                     url,
                     token: trim(getenv(NATS_TOKEN_ENV)),
+                    login,
                     kv_replicas,
                 })
             })
@@ -288,6 +310,8 @@ pub enum ConfigError {
     AmbiguousMeshAuthorization,
     #[error("{NATS_KV_REPLICAS_ENV} must be 1, 3 or 5, not {0:?}")]
     InvalidNatsKvReplicas(String),
+    #[error("{NATS_USER_ENV} and {NATS_PASSWORD_ENV} must be set together")]
+    IncompleteNatsLogin,
 }
 
 #[derive(Default)]
@@ -840,6 +864,28 @@ mod tests {
             .unwrap_err(),
             ConfigError::TooManyStunServers
         );
+    }
+
+    /// Mesh signs in to NATS as its own user, a user and password together
+    /// (#3542).
+    #[test]
+    fn a_nats_login_is_a_user_and_password_together() {
+        let with = |extra: &[(&'static str, &'static str)]| {
+            let mut all = vec![
+                (MESH_URL_ENV, "https://mesh.codewire.sh"),
+                (NATS_URL_ENV, "nats://nats:4222"),
+            ];
+            all.extend_from_slice(extra);
+            Config::from_sources(Vec::<String>::new(), env(&all))
+        };
+        let cfg = with(&[(NATS_USER_ENV, "mesh"), (NATS_PASSWORD_ENV, "secret")]).unwrap();
+        let nats = cfg.nats.unwrap();
+        assert_eq!(nats.login(), Some(("mesh", "secret")));
+        assert!(!format!("{nats:?}").contains("secret"));
+        assert!(with(&[]).unwrap().nats.unwrap().login().is_none());
+        for half in [(NATS_USER_ENV, "mesh"), (NATS_PASSWORD_ENV, "secret")] {
+            assert_eq!(with(&[half]).unwrap_err(), ConfigError::IncompleteNatsLogin);
+        }
     }
 
     #[test]

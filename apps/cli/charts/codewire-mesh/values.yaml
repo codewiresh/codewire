@@ -33,10 +33,25 @@ image:
 
 imagePullSecrets: []
 
-# Must stay 1 until replicas share the live registry (codewire#3542).
-# Mesh keeps no files: durable state is in the database, so it has no volume
-# and can run on any node.
+# More than 1 needs nats.url: replicas then share their live registry
+# through NATS, so any of them serves any session (codewire#3542). Mesh keeps
+# no files: durable state is in the database, so it has no volume and can run
+# on any node.
 replicaCount: 1
+
+# The NATS server replicas share their live registry through (codewire#3542).
+# Empty runs one replica on its own in-memory registry.
+nats:
+  url: ""
+  # Replicas of the shared bucket: 1, 3 or 5, at most the NATS cluster size.
+  kvReplicas: 1
+  # A Secret with keys user and password: Mesh's own NATS user, in its own
+  # NATS account. Required with url.
+  loginSecret: ""
+
+# STUN nodes Mesh advertises beside its DERP relay, as host or host:port
+# (CODEWIRE_MESH_STUN_SERVERS).
+stunServers: []
 
 # The size of the retired data volume's claim, kept unmounted where an older
 # release created one (templates/retained-data-pvc.yaml). Empty renders none.

@@ -473,10 +473,14 @@ impl Shared {
     }
 
     async fn open(nats: &crate::config::NatsConfig) -> Result<kv::Store, CoordinationError> {
-        let client = codewire_server_core::nats::connect(Some(&nats.url), nats.token())
-            .await
-            .map_err(|error| CoordinationError::Unavailable(error.into()))?
-            .ok_or(CoordinationError::NotConnected)?;
+        let client = codewire_server_core::nats::connect_with_login(
+            Some(&nats.url),
+            nats.login(),
+            nats.token(),
+        )
+        .await
+        .map_err(|error| CoordinationError::Unavailable(error.into()))?
+        .ok_or(CoordinationError::NotConnected)?;
         let js = async_nats::jetstream::new(client);
         let mut kv = codewire_server_core::nats::kv_bucket(&js, bucket_config(nats.kv_replicas))
             .await

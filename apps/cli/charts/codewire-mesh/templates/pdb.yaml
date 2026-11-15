@@ -1,0 +1,15 @@
+{{- if gt (int .Values.replicaCount) 1 }}
+# A voluntary disruption, such as a node drain, leaves one replica serving
+# (codewire#3542).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "codewire-mesh.fullname" . }}
+  labels:
+    {{- include "codewire-mesh.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "codewire-mesh.selectorLabels" . | nindent 6 }}
+{{- end }}

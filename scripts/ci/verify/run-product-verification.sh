@@ -1845,6 +1845,11 @@ run_deploy() {
     return 1
   fi
   grep -Fq 'type: Recreate' <<<"$default_mesh_render"
+  if grep -Fq 'kind: PodDisruptionBudget' <<<"$default_mesh_render" ||
+      grep -Fq 'name: NATS_URL' <<<"$default_mesh_render"; then
+    echo "::error::one Mesh replica without NATS rendered a budget or NATS"
+    return 1
+  fi
   local mesh_replicas_render
   if mesh_replicas_render="$(helm template codewire-mesh-replicas-canary \
       apps/cli/charts/codewire-mesh \
@@ -1853,7 +1858,39 @@ run_deploy() {
     return 1
   fi
   # Any other render failure would also land here: require the guard's own.
-  grep -Fq 'replicaCount must be 1' <<<"$mesh_replicas_render"
+  grep -Fq 'replicaCount above 1 requires nats.url' <<<"$mesh_replicas_render"
+  # With NATS, replicas share the registry: they roll one at a time, spread
+  # over nodes, keep one serving through a drain, and sign in as Mesh's own
+  # NATS user (codewire#3542).
+  local mesh_shared_render
+  mesh_shared_render="$(helm template codewire-mesh-shared-canary \
+    apps/cli/charts/codewire-mesh \
+    --set mesh.baseURL=https://mesh.test --set replicaCount=2 \
+    --set nats.url=nats://nats.test:4222 --set nats.kvReplicas=3 \
+    --set nats.loginSecret=synthetic-nats-login-canary)"
+  grep -Fq 'type: RollingUpdate' <<<"$mesh_shared_render"
+  grep -Fq 'maxUnavailable: 0' <<<"$mesh_shared_render"
+  grep -Fq 'kind: PodDisruptionBudget' <<<"$mesh_shared_render"
+  grep -Fq 'topologyKey: kubernetes.io/hostname' <<<"$mesh_shared_render"
+  grep -Fq 'path: /readyz' <<<"$mesh_shared_render"
+  grep -Fq 'value: "nats://nats.test:4222"' <<<"$mesh_shared_render"
+  grep -Fq 'value: "3"' <<<"$mesh_shared_render"
+  grep -Fq 'name: synthetic-nats-login-canary' <<<"$mesh_shared_render"
+  grep -Fq 'key: user' <<<"$mesh_shared_render"
+  grep -Fq 'key: password' <<<"$mesh_shared_render"
+  grep -Fq 'path: /healthz' <<<"$mesh_shared_render"
+  if grep -Fq 'type: Recreate' <<<"$mesh_shared_render"; then
+    echo "::error::Mesh replicas sharing NATS rendered a Recreate rollout"
+    return 1
+  fi
+  local mesh_nats_no_login_render
+  if mesh_nats_no_login_render="$(helm template codewire-mesh-no-login-canary \
+      apps/cli/charts/codewire-mesh \
+      --set mesh.baseURL=https://mesh.test --set nats.url=nats://nats.test:4222 2>&1)"; then
+    echo "::error::Mesh rendered NATS without its own login"
+    return 1
+  fi
+  grep -Fq 'nats.url requires nats.loginSecret' <<<"$mesh_nats_no_login_render"
   # Helm deletes what a chart stops rendering, and the clusters' deletion
   # guard refuses that for claims, namespaces, CRDs and CNPG clusters
   # (codewire#3542).

@@ -16,15 +16,28 @@ metadata:
 {{- if ne (not (empty .Values.meshAuthorization.url)) (not (empty .Values.meshAuthorization.tlsRootsConfigMap)) }}
 {{- fail "meshAuthorization.url and meshAuthorization.tlsRootsConfigMap must be set together" }}
 {{- end }}
-{{- if gt (int .Values.replicaCount) 1 }}
-{{- fail "replicaCount must be 1: each Mesh replica keeps its own in-memory registry, so a second one would split the network (codewire#3542)" }}
+{{- if and .Values.nats.url (not .Values.nats.loginSecret) }}
+{{- fail "nats.url requires nats.loginSecret: Mesh signs in to NATS only as its own user (codewire#3542)" }}
+{{- end }}
+{{- if and (gt (int .Values.replicaCount) 1) (not .Values.nats.url) }}
+{{- fail "replicaCount above 1 requires nats.url: without NATS each Mesh replica keeps its own in-memory registry, so a second one would split the network (codewire#3542)" }}
 {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if .Values.nats.url }}
+  # Replicas share the live registry through NATS: a new pod serves beside
+  # the old one, which drains its sessions to the others as it stops.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  {{- else }}
   # The live registry is in process memory, so two pods must never serve at
   # once: the old pod stops before the new one starts.
   strategy:
     type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "codewire-mesh.selectorLabels" . | nindent 6 }}
@@ -60,6 +73,28 @@ spec:
             {{- if .Values.mesh.derpVerifyPort }}
             - name: CODEWIRE_MESH_DERP_VERIFY_ADDR
               value: {{ printf "0.0.0.0:%v" .Values.mesh.derpVerifyPort | quote }}
+            {{- end }}
+            {{- with .Values.stunServers }}
+            - name: CODEWIRE_MESH_STUN_SERVERS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if .Values.nats.url }}
+            - name: NATS_URL
+              value: {{ .Values.nats.url | quote }}
+            - name: NATS_KV_REPLICAS
+              value: {{ .Values.nats.kvReplicas | quote }}
+            {{- with .Values.nats.loginSecret }}
+            - name: NATS_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: user
+            - name: NATS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: password
+            {{- end }}
             {{- end }}
             {{- if .Values.database.enabled }}
             - name: DATABASE_URL
@@ -100,9 +135,12 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 30
+          # /readyz fails only once the process is stopping, so a draining
+          # replica takes no new session. It never waits on NATS: through a
+          # NATS outage each replica stays ready and serves its own view.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -126,9 +164,22 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      {{- if .Values.affinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else if gt (int .Values.replicaCount) 1 }}
+      # Replicas prefer separate nodes, so a node drain or reboot leaves one
+      # serving; preferred, not required, so a short-handed cluster still
+      # schedules both.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "codewire-mesh.selectorLabels" . | nindent 20 }}
       {{- end }}
       {{- with .Values.tolerations }}
       tolerations:
