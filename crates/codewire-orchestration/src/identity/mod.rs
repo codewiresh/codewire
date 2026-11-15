@@ -97,7 +97,9 @@ pub async fn rotate_command() -> anyhow::Result<()> {
     let outcome = rotate::run(&client, chrono::Utc::now()).await?;
     println!(
         "sandbox identity key: version {} signs; retired below {}; rotated: {}",
-        outcome.signing_version,
+        outcome
+            .signing_version
+            .map_or_else(|| "none yet".to_owned(), |version| version.to_string()),
         outcome
             .retired_below
             .map_or_else(|| "nothing".to_owned(), |version| version.to_string()),

@@ -183,20 +183,25 @@ impl KeySet {
     }
 
     /// The version that signs at `now`: the newest one published for at
-    /// least [`PUBLICATION_OVERLAP`], or the oldest listed when none has been
-    /// yet (a new key's first version).
-    pub(crate) fn signing_version(&self, now: DateTime<Utc>) -> &KeyVersion {
-        let oldest = self.versions.values().next();
+    /// least [`PUBLICATION_OVERLAP`]. A new key has none until its first
+    /// version is 24 hours old, and signs nothing until then, so every
+    /// verifier has had the version before it sees a token signed with it.
+    pub(crate) fn signing_version(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<&KeyVersion, NotYetPublished> {
         self.versions
             .values()
             .rev()
             .find(|version| version.created_at + PUBLICATION_OVERLAP <= now)
-            .or(oldest)
-            .expect("KeySet::from_read admits only a non-empty set")
+            .ok_or(NotYetPublished)
     }
 
     pub(crate) fn rotation_plan(&self, now: DateTime<Utc>) -> RotationPlan {
-        let signing = self.signing_version(now);
+        // A new key's first version has nothing to retire and is not due.
+        let Ok(signing) = self.signing_version(now) else {
+            return RotationPlan::default();
+        };
         // The previous version stopped signing when this one turned 24 hours
         // old; it stays published 24 hours more.
         let previous_retired =
@@ -210,6 +215,12 @@ impl KeySet {
         }
     }
 }
+
+/// No version of the key has been published for [`PUBLICATION_OVERLAP`] yet,
+/// so nothing may sign. The message is fixed: it names no version or time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("no sandbox identity key version has been published for 24 hours yet")]
+pub(crate) struct NotYetPublished;
 
 /// The `kid` of a version. It names the key, never a location.
 pub(crate) fn key_id(version: u32) -> String {
@@ -365,11 +376,11 @@ pub(crate) mod tests {
         let set = key_set(key_read(&[(1, "2026-11-01T00:00:00Z"), (2, t0)], 1, 1)).unwrap();
 
         let before = at("2026-12-01T23:59:59Z");
-        assert_eq!(set.signing_version(before).version, 1);
+        assert_eq!(set.signing_version(before).unwrap().version, 1);
         assert_eq!(set.rotation_plan(before), RotationPlan::default());
 
         let switched = at("2026-12-02T00:00:00Z");
-        assert_eq!(set.signing_version(switched).version, 2);
+        assert_eq!(set.signing_version(switched).unwrap().version, 2);
         // v1's last tokens are still live: it stays published.
         assert_eq!(
             set.rotation_plan(at("2026-12-02T23:59:59Z")),
@@ -396,7 +407,7 @@ pub(crate) mod tests {
         ))
         .unwrap();
         let later = at("2026-12-04T00:00:00Z");
-        assert_eq!(set.signing_version(later).version, 2);
+        assert_eq!(set.signing_version(later).unwrap().version, 2);
         assert_eq!(set.jwks().keys.len(), 2);
         assert_eq!(set.rotation_plan(later).retire_below, Some(2));
     }
@@ -423,11 +434,42 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_new_keys_first_version_signs_at_once() {
+    fn a_new_key_signs_nothing_until_its_first_version_is_24_hours_old() {
         let set = key_set(key_read(&[(1, "2026-11-14T12:00:00Z")], 1, 0)).unwrap();
-        let now = at("2026-11-14T12:00:01Z");
-        assert_eq!(set.signing_version(now).version, 1);
-        assert_eq!(set.rotation_plan(now), RotationPlan::default());
+        for not_yet in [
+            "2026-11-14T12:00:00Z",
+            "2026-11-15T11:59:00Z",
+            "2026-11-15T11:59:59Z",
+        ] {
+            assert_eq!(
+                set.signing_version(at(not_yet)),
+                Err(NotYetPublished),
+                "{not_yet}"
+            );
+            assert_eq!(
+                set.rotation_plan(at(not_yet)),
+                RotationPlan::default(),
+                "{not_yet}"
+            );
+        }
+        assert_eq!(
+            set.signing_version(at("2026-11-15T12:00:00Z"))
+                .unwrap()
+                .version,
+            1
+        );
+        assert_eq!(
+            NotYetPublished.to_string(),
+            "no sandbox identity key version has been published for 24 hours yet"
+        );
+    }
+
+    #[test]
+    fn a_just_created_version_is_served_before_it_signs() {
+        let set = key_set(key_read(&[(1, "2026-11-14T12:00:00Z")], 1, 0)).unwrap();
+        assert!(set.signing_version(at("2026-11-14T12:00:00Z")).is_err());
+        let kids: Vec<_> = set.jwks().keys.into_iter().map(|key| key.kid).collect();
+        assert_eq!(kids, [key_id(1)]);
     }
 
     #[test]

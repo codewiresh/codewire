@@ -21,7 +21,8 @@ pub enum RotateError {
 /// What one run did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RotationOutcome {
-    pub signing_version: u32,
+    /// `None` until the key's first version is 24 hours old.
+    pub signing_version: Option<u32>,
     pub retired_below: Option<u32>,
     pub rotated: bool,
 }
@@ -68,7 +69,10 @@ pub async fn run(
         key.rotate().await?;
     }
     Ok(RotationOutcome {
-        signing_version: key_set.signing_version(now).version,
+        signing_version: key_set
+            .signing_version(now)
+            .ok()
+            .map(|version| version.version),
         retired_below: retire_below,
         rotated: rotate,
     })
@@ -133,7 +137,7 @@ mod tests {
         assert_eq!(
             outcome,
             RotationOutcome {
-                signing_version: 3,
+                signing_version: Some(3),
                 ..Default::default()
             }
         );
@@ -153,7 +157,7 @@ mod tests {
         assert_eq!(
             outcome,
             RotationOutcome {
-                signing_version: 2,
+                signing_version: Some(2),
                 retired_below: Some(2),
                 rotated: true
             }

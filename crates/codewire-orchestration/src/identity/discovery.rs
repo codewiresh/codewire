@@ -134,6 +134,8 @@ struct JwksCache {
 
 impl JwksCache {
     async fn jwks(&self) -> Option<Arc<[u8]>> {
+        // Held across the OpenBao read on purpose: a burst of requests costs
+        // one read, and the transit client's timeout bounds every wait.
         let mut current = self.current.lock().await;
         if let Some((read_at, body)) = current.as_ref()
             && read_at.elapsed() < KEY_SET_TTL

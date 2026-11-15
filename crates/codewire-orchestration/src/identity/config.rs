@@ -7,7 +7,7 @@ use std::fmt;
 use url::{Host, Url};
 
 use crate::openbao::{
-    parse_openbao_origin, required_env, valid_openbao_authority, valid_openbao_role,
+    parse_https_origin, required_env, valid_openbao_authority, valid_openbao_role,
     valid_openbao_segment,
 };
 
@@ -154,8 +154,10 @@ impl TransitKeyConfig {
     ) -> Result<Self, IdentityConfigError> {
         let required = |name: &'static str| lookup(name).ok_or(IdentityConfigError::Missing(name));
         let invalid = |error: anyhow::Error| IdentityConfigError::InvalidOpenBao(error.to_string());
+        // HTTPS only, in the cluster too: the login JWT, the token and the
+        // cluster ID check never travel in clear.
         let address =
-            parse_openbao_origin(BAO_ADDR_ENV, &required(BAO_ADDR_ENV)?).map_err(invalid)?;
+            parse_https_origin(BAO_ADDR_ENV, &required(BAO_ADDR_ENV)?).map_err(invalid)?;
         let config = Self {
             address,
             auth_mount: required(BAO_AUTH_MOUNT_ENV)?,
@@ -220,6 +222,29 @@ mod tests {
             parse(&env),
             Err(IdentityConfigError::InvalidSwitch)
         ));
+    }
+
+    #[test]
+    fn the_signer_and_rotator_reach_openbao_only_over_https() {
+        // Confidential storage still admits in-cluster HTTP; the issuer never.
+        for address in [
+            "http://openbao.openbao.svc.cluster.local:8200",
+            "http://127.0.0.1:8200",
+            "http://openbao.example.test",
+        ] {
+            let mut env = enabled_env();
+            env.insert(BAO_ADDR_ENV, address);
+            assert!(
+                matches!(parse(&env), Err(IdentityConfigError::InvalidOpenBao(_))),
+                "{address}"
+            );
+        }
+        let mut env = enabled_env();
+        env.insert(
+            BAO_ADDR_ENV,
+            "https://openbao.openbao.svc.cluster.local:8200",
+        );
+        assert!(matches!(parse(&env), Ok(IdentityConfig::Enabled(_))));
     }
 
     #[test]
