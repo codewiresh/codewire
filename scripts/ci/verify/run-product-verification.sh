@@ -1100,10 +1100,16 @@ run_web() {
 
 # The Zola docs site, built and checked (internal links, deterministic output,
 # routes and page contracts) by the dashboard image's own docs stage with its
-# checksum-pinned Zola. Nothing is exported; the image build is web's.
+# checksum-pinned Zola. Nothing is exported; the image build is web's. The
+# image has no Git history, so a pull request's page dates are checked here,
+# against the pages it changes.
 run_docs() {
   docker buildx build --file apps/dashboard/Dockerfile --target docs-builder \
     --output type=cacheonly .
+  if [ -n "${VERIFICATION_PR_BASE_SHA:-}" ]; then
+    python3 apps/docs/zola/tests/verify_site.py --site-root apps/docs/zola \
+      --dates-since "$VERIFICATION_PR_BASE_SHA"
+  fi
 }
 
 run_dashboard_image() {

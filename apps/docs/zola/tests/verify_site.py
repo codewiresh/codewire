@@ -5,8 +5,10 @@ import argparse
 import hashlib
 import json
 import re
+import subprocess
 import sys
 import tomllib
+from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse
@@ -380,9 +382,6 @@ def verify_updated_dates(routes: list[dict[str, str]], site_root: Path) -> None:
     carries no edit date, so such a page is not compared; the edit's own
     commit is, wherever the change still has it (its branch, before merge).
     """
-    import subprocess
-    from datetime import date
-
     for route in routes:
         source = route["source"]
         if source.endswith("_index.md"):
@@ -404,12 +403,56 @@ def verify_updated_dates(routes: list[dict[str, str]], site_root: Path) -> None:
             fail(f"{source} says updated {updated} but last changed {committed}; update the date")
 
 
+def verify_changed_dates(site_root: Path, base: str) -> int:
+    """Every page a change touches is dated no earlier than that change.
+
+    A pull request is compared with where it left `base`. For each page it
+    changes, the stated date may not be older than the author date of the
+    pull request's latest commit to it; a rebase keeps author dates. This runs
+    outside the image build, which has no history for
+    `verify_updated_dates` to compare with.
+    """
+    def git(*args: str) -> str:
+        result = subprocess.run(["git", *args], cwd=site_root, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            fail(f"git {' '.join(args)} failed: {result.stderr.strip()}")
+        return result.stdout.strip()
+
+    # A checkout too shallow to hold the merge base fails here, never skips.
+    merge_base = git("merge-base", base, "HEAD")
+    manifest = tomllib.loads((site_root / "routes.toml").read_text(encoding="utf-8"))
+    sources = {route["source"] for route in manifest.get("routes", []) if not route["source"].endswith("_index.md")}
+    changed = set(git("diff", "--relative", "--name-only", f"{merge_base}..HEAD", "--", "content").splitlines())
+    checked = sorted(changed & sources)
+    for source in checked:
+        updated = str(front_matter(site_root / source).get("updated", ""))
+        try:
+            stated = date.fromisoformat(updated)
+        except ValueError:
+            fail(f"{source} needs `updated: YYYY-MM-DD` in its front matter")
+        authored = git("log", "-1", "--format=%as", f"{merge_base}..HEAD", "--", source)
+        if authored and stated < date.fromisoformat(authored):
+            fail(f"{source} says updated {updated} but this change last edited it on {authored}; update the date")
+    return len(checked)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--site-root", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--dates-since",
+        metavar="BASE",
+        help="check only that the pages changed since BASE are dated no earlier than their change",
+    )
     args = parser.parse_args()
     site_root = args.site_root.resolve()
+    if args.dates_since:
+        checked = verify_changed_dates(site_root, args.dates_since)
+        print(f"verified the updated date of {checked} changed pages")
+        return 0
+    if args.output is None:
+        parser.error("--output is required unless --dates-since is given")
     output_root = args.output.resolve()
 
     verify_code_fences(site_root)
