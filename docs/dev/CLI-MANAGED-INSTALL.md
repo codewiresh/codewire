@@ -48,7 +48,12 @@ still `N`. Public fetching is implemented with the compiled release primary key;
 Unavailable assets or origin refuse before selection; `cw upgrade` without a
 source follows the stable channel (at a terminal it first asks, in a checklist,
 whether to select the newer CLI and whether to restart local VMs left on an
-older cw; a script gets the CLI alone). Local `--from`/`--sha256` updates and
+older cw; a script gets the CLI alone). After it selects a newer cw, a
+terminal stderr shows the Codewire wordmark (the cw mark below 80 columns)
+and a spark running down a wire from the old version to the new one, in
+24-bit colour when `COLORTERM` advertises it; `CODEWIRE_REDUCED_MOTION` draws
+the lit wire without the run, `NO_COLOR` drops the colour, and redirected
+output gets only the result line. Local `--from`/`--sha256` updates and
 retained rollback remain available. A synthetic test key is never production
 trust.
 

@@ -6,7 +6,9 @@
 //! work ([`StatusLine`] with [`Spinner`]), writes the durable lifecycle
 //! result ([`LifecycleSummary`]) and offers a searchable choice
 //! ([`Picker`], [`run_picker`]) or a multi-select checklist ([`Checklist`],
-//! [`run_checklist`]) on an interactive terminal.
+//! [`run_checklist`]) on an interactive terminal, and draws the wordmark and
+//! lights the wire from the previous cw to the new one after `cw upgrade`
+//! ([`play_upgrade_wire`]).
 //!
 //! Streams: progress and the interactive widgets draw on stderr; a
 //! summary's `render` is the durable result for stdout. Nothing here emits a
@@ -31,6 +33,8 @@ mod status_line;
 mod style;
 mod summary;
 mod text_input;
+mod upgrade_wire;
+mod wordmark;
 
 #[cfg(all(test, unix))]
 mod pty_tests;
@@ -51,4 +55,5 @@ pub(crate) use self::{
         SourceRef, VmLocation,
     },
     text_input::run_text_input,
+    upgrade_wire::play_upgrade_wire,
 };

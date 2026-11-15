@@ -85,6 +85,10 @@ pub(crate) struct Capabilities {
     pub(crate) motion: Motion,
     pub(crate) color_stdout: bool,
     pub(crate) color_stderr: bool,
+    /// The terminal advertises 24-bit colour (`COLORTERM` is `truecolor` or
+    /// `24bit`). Whether a stream is coloured at all still follows its own
+    /// flag above.
+    pub(crate) true_color: bool,
     pub(crate) charset: Charset,
     /// Text mode with stdin and stderr both terminals.
     pub(crate) interactive: bool,
@@ -104,6 +108,7 @@ impl Capabilities {
     ///   not `dumb` and `NO_COLOR` is unset or empty.
     /// - Live redraw only in text mode with stderr a terminal.
     /// - Reduced motion from [`REDUCED_MOTION_ENV`].
+    /// - 24-bit colour from `COLORTERM=truecolor` or `COLORTERM=24bit`.
     /// - ASCII only for `TERM=dumb` or an explicitly non-UTF-8 effective
     ///   locale (`LC_ALL`, then `LC_CTYPE`, then `LANG`; `C` and `POSIX`
     ///   count as non-UTF-8). An unset locale keeps Unicode.
@@ -122,6 +127,9 @@ impl Capabilities {
             (true, true) => Motion::Reduced,
             (true, false) => Motion::Animated,
         };
+        let true_color = env
+            .var("COLORTERM")
+            .is_some_and(|value| value == "truecolor" || value == "24bit");
         let charset = if dumb || !locale_is_utf8(env) {
             Charset::Ascii
         } else {
@@ -133,6 +141,7 @@ impl Capabilities {
             motion,
             color_stdout: color(facts.stdout_tty),
             color_stderr: color(facts.stderr_tty),
+            true_color,
             charset,
             interactive: text && facts.stdin_tty && facts.stderr_tty,
             columns: facts.columns.unwrap_or(DEFAULT_COLUMNS),
@@ -262,6 +271,16 @@ mod tests {
 
         let caps = text(ALL_TTY, &[("NO_COLOR", "")]);
         assert!(caps.color_stdout && caps.color_stderr);
+    }
+
+    #[test]
+    fn colorterm_advertises_true_colour() {
+        for value in ["truecolor", "24bit"] {
+            assert!(text(ALL_TTY, &[("COLORTERM", value)]).true_color, "{value}");
+        }
+        for vars in [&[][..], &[("COLORTERM", "")], &[("COLORTERM", "1")]] {
+            assert!(!text(ALL_TTY, vars).true_color, "{vars:?}");
+        }
     }
 
     #[test]

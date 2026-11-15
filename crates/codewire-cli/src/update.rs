@@ -972,6 +972,15 @@ fn print_selection(
             .ok()
             .map(|record| release_name(&record.package_version))
     });
+    if let (SelectionKind::Upgrade, true, Some(Some(from))) =
+        (report.kind, report.changed, previous.as_ref())
+    {
+        let to = release_name(report.package_version);
+        if plays_wire(from, &to) {
+            let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Text);
+            crate::output::play_upgrade_wire(&caps, from, &to);
+        }
+    }
     print!(
         "{}",
         render_selection(report, previous.as_ref().map(Option::as_deref))
@@ -980,6 +989,12 @@ fn print_selection(
         print!("{}", render_selection_details(report));
     }
     Ok(())
+}
+
+/// Whether an upgrade from `from` to `to` plays the wire: only to a newer
+/// release, never to an equal, older or incomparable one.
+fn plays_wire(from: &str, to: &str) -> bool {
+    codewire_cw_release::release::compare_versions(to, from) == Some(std::cmp::Ordering::Greater)
 }
 
 /// The default report of a selection: what changed, by release name, and how
@@ -993,11 +1008,10 @@ fn render_selection(report: &SelectionReport<'_>, previous: Option<Option<&str>>
         SelectionKind::Install => format!("Installed cw {version}.\n"),
         SelectionKind::Rollback => format!("Rolled back cw to {version}.\n"),
         SelectionKind::Upgrade => {
-            let older = previous.flatten().is_some_and(|previous| {
-                codewire_cw_release::release::compare_versions(&version, previous)
-                    == Some(std::cmp::Ordering::Less)
-            });
-            if older {
+            if previous
+                .flatten()
+                .is_some_and(|previous| downgrade(&version, previous))
+            {
                 format!("Downgraded cw to {version}.\n")
             } else {
                 format!("Upgraded cw to {version}.\n")
@@ -1019,6 +1033,12 @@ fn render_selection(report: &SelectionReport<'_>, previous: Option<Option<&str>>
         };
     }
     text
+}
+
+/// Whether selecting `version` over `previous` goes back to an older cw.
+fn downgrade(version: &str, previous: &str) -> bool {
+    codewire_cw_release::release::compare_versions(version, previous)
+        == Some(std::cmp::Ordering::Less)
 }
 
 /// `--verbose`: the selection's exact digest, entry, store and generation,
@@ -1233,6 +1253,18 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
+
+    /// The wire plays only for a newer release (#4586 review).
+    #[test]
+    fn the_wire_plays_only_to_a_newer_release() {
+        assert!(plays_wire("v0.4.18", "v0.4.19"));
+        assert!(!plays_wire("v0.4.19", "v0.4.19"), "the same release");
+        assert!(!plays_wire("v0.4.19", "v0.4.18"), "an older release");
+        assert!(
+            !plays_wire("v0.4.19", "unrecorded"),
+            "versions that can't be compared"
+        );
+    }
     use crate::build_record::tests::{decoded, executable, framed, host, host_target, json, write};
     use crate::{Cli, Command};
 
