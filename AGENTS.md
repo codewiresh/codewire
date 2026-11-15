@@ -85,6 +85,12 @@ CI are necessary evidence; they are never proof of behaviour.
   change; deploy into it.
 - Every workstream and handoff names a mandatory local acceptance journey; if
   it depends on tooling that does not exist yet, that tooling lands first.
+- The spec and the journey come first. When a decision changes what users see
+  or how a security boundary works, the first change updates its spec and its
+  journey in `docs/journeys/`, with the new steps marked "not yet observed".
+  Code comes after and cites the journey line it makes true; review refuses
+  code whose spec or journey doesn't already describe it (owner, 2026-11-15;
+  cited on #3013).
 - When a real provider step needs the owner, prepare everything else and ask
   once for exactly that step. Until the journey has run, report the change as
   "not yet observed working". Report merged, on Dev and live in Production
