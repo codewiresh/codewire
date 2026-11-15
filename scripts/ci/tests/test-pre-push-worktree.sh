@@ -296,7 +296,7 @@ grep -qx 'readonly SLICE=cwvmtest.slice' "$ROOT/scripts/dev/workstation-cpu.sh" 
 # Preflight exports CODEWIRE_CPU_SLICE once it has joined the slice, and this
 # test runs under preflight, so the probe starts without the caller's value.
 slice_probe() { # CGROUP_FILE SHELL_CODE, without CI, from the real helper
-  env -u CI -u GITHUB_ACTIONS -u CODEWIRE_CPU_SLICE CPU_SLICE_CGROUP_FILE="$1" \
+  env -u CI -u GITHUB_ACTIONS -u CODEWIRE_CPU_SLICE -u CODEWIRE_CPU_SLOT CPU_SLICE_CGROUP_FILE="$1" \
     bash -c ". '$ROOT/scripts/dev/cpu-slice.sh'; $2" 2>&1
 }
 : > "$cpu_log"
@@ -320,6 +320,79 @@ for builder in build-runtime-cw.sh build-runtime-guest-root.sh; do
 done
 grep -qx '  cpu_slice_enter build-local-runtime' "$ROOT/scripts/ci/release/build-local-runtime.sh" ||
   fail 'build-local-runtime.sh no longer enters the slice'
+
+# A heavy command asks for a build slot where codewire-cpu offers `build`, and
+# only there: not from an older install, not from inside a slot, not in CI.
+slot_prefix='cpu_slot_prefix; echo "prefix=${CPU_SLOT_PREFIX[*]-}"'
+slot_probe() { PATH="$TMP/slot-bin:/usr/bin:/bin" slice_probe "$TMP/cgroup-outside" "${1:-}$slot_prefix"; }
+[ "$(slice_probe "$TMP/cgroup-outside" "$slot_prefix")" = 'prefix=' ] ||
+  fail 'a codewire-cpu from before `build` was asked for a slot'
+mkdir "$TMP/slot-bin"
+ln -s "$ROOT/scripts/dev/workstation-cpu.sh" "$TMP/slot-bin/codewire-cpu"
+[ "$(slot_probe)" = 'prefix=codewire-cpu build --' ] || fail 'a heavy command would not wait for a build slot'
+[ "$(slot_probe 'CODEWIRE_CPU_SLOT=2; ')" = 'prefix=' ] || fail 'a command inside a slot would wait for a second one'
+[ "$(CI=true PATH="$TMP/slot-bin:/usr/bin:/bin" bash -c ". '$ROOT/scripts/dev/cpu-slice.sh'; $slot_prefix")" = 'prefix=' ] ||
+  fail 'a CI job would wait for a workstation build slot'
+grep -qF '"${docker_memory[@]}" ${CPU_SLICE_DOCKER_ARGS[@]+"${CPU_SLICE_DOCKER_ARGS[@]}"}' "$ROOT/scripts/ci/local/run-family.sh" ||
+  fail 'run-family.sh starts its step containers outside the slice'
+
+# The slots themselves: a job holds one for its command and no longer, a job
+# past the last slot waits and names the holders, and a freed slot runs it.
+if command -v flock >/dev/null 2>&1; then
+  slots="$TMP/build-slots"
+  build_slot() {
+    env -u CODEWIRE_CPU_SLOT CODEWIRE_CPU_SLOT_DIR="$slots" CODEWIRE_CPU_SLOT_ONLY=1 \
+      "$ROOT/scripts/dev/workstation-cpu.sh" build -- "$@"
+  }
+  [ "$(printf 'input\n' | build_slot sh -c 'cat; echo "slot=$CODEWIRE_CPU_SLOT"')" = $'input\nslot=1' ] ||
+    fail 'a build did not get its input and the first free slot'
+  status=0
+  build_slot sh -c 'exit 7' || status=$?
+  [ "$status" -eq 7 ] || fail "a build's exit status was $status, not its command's"
+  ignored="$(build_slot awk '/^SigIgn:/ {print $2}' /proc/self/status)"
+  [ "$(( 0x$ignored & 0x6 ))" -eq 0 ] ||
+    fail "a build's command ignores SIGINT or SIGQUIT (SigIgn $ignored), so a Ctrl-C would leave its children running"
+  build_slot sh -c 'sleep 300 >/dev/null 2>&1 &'
+  flock -n "$slots/1.lock" true || fail 'a process the command left behind kept its slot'
+  [ "$(CODEWIRE_CPU_SLOT=1 "$ROOT/scripts/dev/workstation-cpu.sh" build -- sh -c 'echo "$CODEWIRE_CPU_SLOT"')" = 1 ] ||
+    fail 'a command started inside a slot did not run in it'
+  holders=() # each is the build itself, not a subshell around it, so a signal reaches it
+  for _ in 1 2 3; do
+    env -u CODEWIRE_CPU_SLOT CODEWIRE_CPU_SLOT_DIR="$slots" CODEWIRE_CPU_SLOT_ONLY=1 \
+      "$ROOT/scripts/dev/workstation-cpu.sh" build -- sleep 300 &
+    holders+=("$!")
+  done
+  for _ in $(seq 1 600); do # a hang guard, not a time budget
+    [ "$(cat "$slots"/[123].holder 2>/dev/null | grep -c 'sleep 300')" -eq 3 ] && break
+    sleep 0.1
+  done
+  [ "$(cat "$slots"/[123].holder | grep -c 'sleep 300')" -eq 3 ] || fail 'three builds did not take the three slots'
+  build_slot sh -c 'echo ran' >"$TMP/fourth.out" 2>"$TMP/fourth.err" &
+  fourth=$!
+  for _ in $(seq 1 600); do # a hang guard, not a time budget
+    grep -q 'waited 0s for one of 3 build slots (1: pid ' "$TMP/fourth.err" && break
+    sleep 0.1
+  done
+  grep -q 'waited 0s for one of 3 build slots (1: pid ' "$TMP/fourth.err" ||
+    fail "a fourth build did not say whom it waits for: $(cat "$TMP/fourth.err")"
+  [ ! -s "$TMP/fourth.out" ] || fail 'a fourth build ran beside three'
+  kill -TERM "${holders[1]}"
+  wait "${holders[1]}" 2>/dev/null || true
+  wait "$fourth" || fail 'the waiting build failed once a slot was free'
+  [ "$(cat "$TMP/fourth.out")" = ran ] || fail 'the waiting build did not run in the freed slot'
+  kill -TERM "${holders[0]}" "${holders[2]}"
+  wait "${holders[0]}" "${holders[2]}" 2>/dev/null || true
+  for _ in $(seq 1 600); do # a hang guard, not a time budget
+    [ "$(cat "$slots"/[123].holder | grep -c 'sleep 300')" -eq 3 ] || break
+    flock -n "$slots/1.lock" true && flock -n "$slots/2.lock" true && flock -n "$slots/3.lock" true && break
+    sleep 0.1
+  done
+  flock -n "$slots/1.lock" true && flock -n "$slots/3.lock" true || fail 'a stopped build kept its slot'
+  grep -Eq "^[0-9T:Z-]+	[123]	[0-9]+	[0-9]+	0	.*	sh -c echo ran\$" "$slots/times.tsv" ||
+    fail "the waiting build's wait and run time were not logged: $(cat "$slots/times.tsv")"
+else
+  printf '[test-pre-push-worktree] note: no flock here; build slot cases skipped\n'
+fi
 printf '[test-pre-push-worktree] hook and preflight cases passed\n'
 
 # ---------------------------------------------------------------------------

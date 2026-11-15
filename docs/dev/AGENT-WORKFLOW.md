@@ -427,17 +427,36 @@ codewire-cpu reset    # remove them all, back to systemd's defaults
 `scripts/ci/release/build-local-runtime.sh` move themselves into the preflight
 and local VM slice (`cwvmtest.slice`) when they are not already in it, and the
 runtime builder containers they start join it with `--cgroup-parent`
-(`scripts/dev/cpu-slice.sh`, #4126). Start every other local VM run,
-load-sensitive test and long cargo run in the slice yourself, and record that
-in the evidence:
+(`scripts/dev/cpu-slice.sh`, #4126).
+
+Start every compile, test run and verification family through a build slot,
+and record that in the evidence:
 
 ```sh
-sh -c 'codewire-cpu run $$ && exec cargo test -p codewire-local-vmm' </dev/null
+codewire-cpu build -- cargo test -p codewire-local-vmm </dev/null
+```
+
+The workstation has three build slots. `build` waits for a free one, says
+every minute whom it waits for, then runs the command in the slice and frees
+the slot when the command ends. A fourth job queues instead of slowing the
+other three: with about 20 jobs sharing the slice on 2026-11-15, the load
+average passed 280 and a push check took 29 to 43 minutes. The push check's
+compile and test steps and `scripts/ci/local/run-family.sh` take a slot
+themselves, and a command started from inside a slot runs in that slot.
+`codewire-cpu status` lists the slots' holders and every cargo or family job
+that runs outside one. Each job's wait and run time is logged in
+`~/.cache/codewire-build-slots/times.tsv`.
+
+A local VM run or a dev server that lives for hours joins the slice without a
+slot, so it never holds up a compile:
+
+```sh
+sh -c 'codewire-cpu run $$ && exec scripts/dev/selfhost-vm.sh create STATE_DIR' </dev/null
 ```
 
 | Group | Weight | Ceiling |
 | --- | --- | --- |
-| Preflight and local VM runs (`cwvmtest.slice`, through `run`) | 200 | 12 cores, shared by every job in it; memory reclaimed above 88G |
+| Builds, preflight and local VM runs (`cwvmtest.slice`, through `build` and `run`) | 200 | 12 cores, shared by every job in it; memory reclaimed above 88G |
 | Each Docker image builder (`buildx_buildkit_*`) | default | 4 cores |
 | Remote login sessions, such as the tmux server background agents use | default | 3 cores |
 | The compositor's session, desktop apps (`app.slice`) and audio (`session.slice`) | 1000 | none |
@@ -453,9 +472,9 @@ together it never takes more than 12 of the 16 cores; heavy work left in
 The limits are runtime state. A reboot clears them, and the next `apply` or
 `run` sets them again, so a `reset` lasts until then. To change a value, edit
 the script and reinstall it; a one-off `systemctl set-property` is overwritten
-by the next `run`. Run at most three heavy jobs at once: one preflight run, one
-image or Kind build and one background build. More parallel work past that only
-adds contention.
+by the next `run`. The build slots keep compiles, test runs and verification
+families to three at once. An image or Kind build takes no slot; run at most
+one beside them.
 
 ## Local Kind cluster for manual testing
 

@@ -60,6 +60,20 @@ die() {
   exit 2
 }
 
+# One family is one heavy job. On a workstation it waits for a build slot and
+# runs in the CPU slice, and its step containers join the slice with it
+# (scripts/dev/cpu-slice.sh). --explain runs nothing, so it never waits.
+# shellcheck source=scripts/dev/cpu-slice.sh
+. "$REPO/scripts/dev/cpu-slice.sh"
+case " $* " in
+  *' --explain '*) ;;
+  *)
+    cpu_slot_prefix
+    [ "${#CPU_SLOT_PREFIX[@]}" -eq 0 ] || exec "${CPU_SLOT_PREFIX[@]}" "${BASH_SOURCE[0]}" "$@"
+    ;;
+esac
+cpu_slice_docker_args
+
 job='' placement=pr selection='' base='' commit=HEAD explain=false fetch=true
 infra="${CODEWIRE_INFRA_DIR:-}" infra_ref=origin/main cargo_cache='' timeout_scale=1
 while [ $# -gt 0 ]; do
@@ -182,7 +196,7 @@ run_phase() {
   local phase="$1" seconds="$2"
   container="run-family-$$-$phase"
   timeout --kill-after=30 "$seconds" docker run --rm --name "$container" --ulimit "nofile=$NOFILE:$NOFILE" \
-    "${options[@]}" "${docker_memory[@]}" \
+    "${options[@]}" "${docker_memory[@]}" ${CPU_SLICE_DOCKER_ARGS[@]+"${CPU_SLICE_DOCKER_ARGS[@]}"} \
     -v "$volume:/workspace" \
     -v "$common_dir:/run/run-family/source.git:ro" \
     -v "$TOOL_DIR:/run/run-family/tool:ro" \

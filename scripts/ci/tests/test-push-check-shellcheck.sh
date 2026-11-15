@@ -25,6 +25,10 @@ install -m 755 "$ROOT/scripts/dev/preflight-push.sh" "$repo/scripts/dev/prefligh
 # its own, never the workstation's.
 install -m 644 "$ROOT/scripts/dev/preflight-lock.sh" "$repo/scripts/dev/preflight-lock.sh"
 export PREFLIGHT_LOCK_FILE="$work/preflight.lock"
+# It also sources the CPU slice helper; the fixture counts as inside a build
+# slot, so its steps never queue for the workstation's.
+install -m 644 "$ROOT/scripts/dev/cpu-slice.sh" "$repo/scripts/dev/cpu-slice.sh"
+export CODEWIRE_CPU_SLOT=fixture
 install -m 644 "$ROOT/scripts/ci/verify/shellcheck-baseline.sh" \
   "$repo/scripts/ci/verify/shellcheck-baseline.sh"
 install -m 755 "$ROOT/scripts/ci/verify/check-shell-scripts.sh" \

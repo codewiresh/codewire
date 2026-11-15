@@ -38,16 +38,26 @@ timed() {
     >>"$PREFLIGHT_TIMES_FILE"; } 2>/dev/null || true
 }
 
+# A compile or test run also takes one of the workstation's build slots, with
+# every other session's builds (cpu-slice.sh). Its wait for the slot counts as
+# run time here; codewire-cpu logs it apart, beside the slots.
+# shellcheck source=scripts/dev/cpu-slice.sh
+. "$ROOT/scripts/dev/cpu-slice.sh"
+
 step() {
   local name="$1" started=$SECONDS waited status=0
   shift
+  CPU_SLOT_PREFIX=()
   case "$name" in
-    rust-clippy*|rust-unit-tests-*|desktop-check) preflight_lock_acquire "push check $name" || exit 1 ;;
+    rust-clippy*|rust-unit-tests-*|desktop-check)
+      preflight_lock_acquire "push check $name" || exit 1
+      cpu_slot_prefix
+      ;;
   esac
   waited=$((SECONDS - started))
   waited_total=$((waited_total + waited))
   log "${name}: start"
-  "$@" || status=$?
+  ${CPU_SLOT_PREFIX[@]+"${CPU_SLOT_PREFIX[@]}"} "$@" || status=$?
   if [ "$status" -ne 0 ]; then
     timed "$name" fail "$waited" "$((SECONDS - started - waited))"
     timed total fail "$waited_total" "$((SECONDS - waited_total))"

@@ -49,3 +49,20 @@ cpu_slice_docker_args() {
     CPU_SLICE_DOCKER_ARGS=(--cgroup-parent="$CPU_SLICE")
   fi
 }
+
+# cpu_slot_prefix: set CPU_SLOT_PREFIX to the words that make a heavy command
+# wait for one of the workstation's build slots and run in the slice
+# (`codewire-cpu build --`), or to nothing: in CI, from inside a slot, and
+# where codewire-cpu is missing or installed from before `build`. The slice
+# caps the cores heavy work takes; the slots cap how many jobs share them.
+cpu_slot_prefix() {
+  local usage
+  CPU_SLOT_PREFIX=()
+  ! cpu_slice_off || return 0
+  [ -z "${CODEWIRE_CPU_SLOT:-}" ] || return 0
+  command -v codewire-cpu >/dev/null 2>&1 || return 0
+  usage="$(codewire-cpu 2>&1 || true)"
+  case "$usage" in
+    *'build -- COMMAND'*) CPU_SLOT_PREFIX=(codewire-cpu build --) ;;
+  esac
+}

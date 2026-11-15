@@ -56,7 +56,7 @@ with Docker, from a clean checkout whose `HEAD` is that commit:
 export TMPDIR=~/.cache/<scratch>/tmp   # executable; /tmp may be noexec
 scripts/ci/release/build-local-runtime.sh linux --source-sha "$(git rev-parse HEAD)" \
   --version v0.1.0 --output ~/.cache/<scratch>/runtime
-sh -c 'codewire-cpu run $$ && exec cargo build -p codewire-cli-bin' </dev/null
+codewire-cpu build -- cargo build -p codewire-cli-bin </dev/null
 target/debug/cw setup --local --from ~/.cache/<scratch>/runtime/linux-x86_64
 ```
 

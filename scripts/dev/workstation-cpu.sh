@@ -7,6 +7,9 @@
 #   workstation-cpu.sh apply       set the standing limits below
 #   workstation-cpu.sh run PID...  move processes, and every child they start
 #                                  later, into cwvmtest.slice, then apply
+#   workstation-cpu.sh build -- COMMAND...
+#                                  wait for a build slot, then run COMMAND in
+#                                  cwvmtest.slice; for compiles and test runs
 #   workstation-cpu.sh reset       remove every limit this script set
 #
 # A weight shares CPU only when cores are contended; a ceiling caps a group
@@ -34,9 +37,19 @@ readonly DESKTOP_WEIGHT=1000
 # Everything users run, against system.slice (Docker, Kind, services) at 100.
 readonly USER_WEIGHT=400
 readonly DESKTOP_USER_UNITS="app.slice session.slice"
+# Heavy jobs (compiles, test runs, verification families) that run at once.
+# The slice's ceiling caps their cores, not their number: on 2026-11-15 about
+# 20 shared it, the load average passed 280 and a push check took 29 to 43
+# minutes. With a slot each, a job runs near full speed and the rest queue.
+# `build` holds one for its command; `run` takes none, so local VMs and dev
+# servers that live for hours never hold up a compile.
+readonly BUILD_SLOTS=3
+# One lock and one holder line per slot, and the log of every job's wait and
+# run time; tests point it at a fixture.
+BUILD_SLOT_DIR="${CODEWIRE_CPU_SLOT_DIR:-$HOME/.cache/codewire-build-slots}"
 
 usage() {
-  echo "usage: workstation-cpu.sh status | apply | run PID... | reset" >&2
+  echo "usage: workstation-cpu.sh status | apply | run PID... | build -- COMMAND... | reset" >&2
   exit 2
 }
 
@@ -159,6 +172,80 @@ run() {
   echo "moved $* into $SLICE (weight $SLICE_WEIGHT, ceiling $SLICE_CEILING, memory high $SLICE_MEMORY_HIGH)"
 }
 
+# slot_holders prints each slot's holder, or "free", on one line.
+slot_holders() {
+  local slot holder out=""
+  for slot in $(seq 1 "$BUILD_SLOTS"); do
+    holder="$(cat "$BUILD_SLOT_DIR/$slot.holder" 2>/dev/null || true)"
+    if [ ! -e "$BUILD_SLOT_DIR/$slot.lock" ] || flock -n "$BUILD_SLOT_DIR/$slot.lock" true 2>/dev/null; then
+      holder=free
+    fi
+    out+="${out:+; }$slot: ${holder:-held}"
+  done
+  echo "$out"
+}
+
+# build COMMAND...: hold one build slot for COMMAND and run it in the slice.
+# It waits as long as it takes and says every minute whom it waits for; the
+# caller's own timeout bounds it. The slot is this process's lock, so it is
+# free again however this process ends, and COMMAND does not inherit it: a
+# daemon COMMAND leaves behind (a compiler cache server) can't keep the slot.
+# A command started from inside a slot runs in that slot.
+build() {
+  [ "${1:-}" != -- ] || shift
+  [ "$#" -ge 1 ] || usage
+  [ -z "${CODEWIRE_CPU_SLOT:-}" ] || exec "$@"
+  local slot fd started=$SECONDS waited=0 report=0 ran child status=0
+  mkdir -p "$BUILD_SLOT_DIR"
+  while :; do
+    for slot in $(seq 1 "$BUILD_SLOTS"); do
+      exec {fd}>>"$BUILD_SLOT_DIR/$slot.lock"
+      ! flock -n "$fd" || break 2
+      exec {fd}>&-
+    done
+    waited=$((SECONDS - started))
+    if [ "$waited" -ge "$report" ]; then
+      echo "codewire-cpu: waited ${waited}s for one of $BUILD_SLOTS build slots ($(slot_holders))" >&2
+      report=$((waited + 60))
+    fi
+    sleep 2
+  done
+  waited=$((SECONDS - started))
+  printf 'pid %s since %s in %s: %s\n' "$$" "$(date -u +%H:%M:%SZ)" "$(pwd -P)" "$*" \
+    >"$BUILD_SLOT_DIR/$slot.holder"
+  # Tests keep the fixture out of systemd.
+  if [ -z "${CODEWIRE_CPU_SLOT_ONLY:-}" ] && ! grep -q "/$SLICE/" /proc/self/cgroup 2>/dev/null; then
+    "$0" run "$$" >/dev/null || echo "codewire-cpu: could not join $SLICE; running outside it" >&2
+  fi
+  export CODEWIRE_CPU_SLOT="$slot"
+  ran=$SECONDS
+  # Without job control bash starts a background command with SIGINT and
+  # SIGQUIT ignored, and its children inherit that: a Ctrl-C would stop cargo
+  # and leave rustc and the test binaries running after the slot is free.
+  env --default-signal=INT,QUIT "$@" <&0 {fd}>&- &
+  child=$!
+  trap 'kill -TERM "$child" 2>/dev/null' TERM INT HUP
+  while kill -0 "$child" 2>/dev/null; do
+    if wait "$child"; then status=0; else status=$?; fi
+  done
+  { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$slot" "$waited" \
+    "$((SECONDS - ran))" "$status" "$(pwd -P)" "$*" >>"$BUILD_SLOT_DIR/times.tsv"; } 2>/dev/null || true
+  exit "$status"
+}
+
+# outside_slots UID prints each cargo or verification-family job of UID's that
+# runs without a build slot: started with `run`, or with nothing at all.
+outside_slots() {
+  local pid parent
+  for pid in $(pgrep -u "$1" -x 'cargo(-[a-z0-9]+)?' 2>/dev/null; pgrep -u "$1" -f '^bash [^ ]*scripts/ci/local/run-family\.sh ' 2>/dev/null); do
+    parent="$(ps -o comm= -p "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" 2>/dev/null || true)"
+    case "$parent" in cargo | cargo-*) continue ;; esac
+    ! tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -q '^CODEWIRE_CPU_SLOT=' || continue
+    printf '  pid %-8s %s: %s\n' "$pid" "$(readlink "/proc/$pid/cwd" 2>/dev/null || echo '?')" \
+      "$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | cut -c1-100)"
+  done
+}
+
 # ceiling prints a cgroup's cpu.max as a share of one core, or "none".
 ceiling() {
   local quota period
@@ -200,12 +287,20 @@ status() {
     printf '%-27s %-7s %-8s %-6s %s\n' "${names[$i]}" "$(cat "${paths[$i]}/cpu.weight")" \
       "$(ceiling "${paths[$i]}")" "$((before[i] * 100000 / (end - start)))%" "${labels[$i]}"
   done
+  printf '\nbuild slots (%s): %s\n' "$BUILD_SLOTS" "$(slot_holders)"
+  label="$(outside_slots "$uid")"
+  if [ -n "$label" ]; then
+    printf 'heavy jobs outside a build slot (start them with `build --`):\n%s\n' "$label"
+  else
+    printf 'no cargo or verification-family job runs outside a build slot\n'
+  fi
 }
 
 case "${1:-}" in
   status) status "${SUDO_UID:-$(id -u)}" ;;
   apply) need_root "$@"; apply "$SUDO_UID" ;;
   run) need_root "$@"; shift; run "$SUDO_UID" "$@" ;;
+  build) shift; build "$@" ;;
   reset) need_root "$@"; reset "$SUDO_UID" ;;
   *) usage ;;
 esac
