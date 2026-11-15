@@ -8,6 +8,9 @@ mod console_client;
 mod credit_refusal;
 mod environment_client;
 mod error_report;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
 #[cfg(target_os = "linux")]
 mod hosted_access;
 #[cfg(unix)]

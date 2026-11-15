@@ -91,7 +91,14 @@ fn hint_for(error: anyhow::Error, named: &NamedEnvironment) -> anyhow::Error {
 /// clap to parse or refuse.
 pub(crate) fn separate_command(args: Vec<OsString>) -> anyhow::Result<Vec<OsString>> {
     let root = crate::Cli::command();
-    let Some((index, name)) = subcommand_at(&args, &root) else {
+    separate_command_with(args, &root)
+}
+
+pub(crate) fn separate_command_with(
+    args: Vec<OsString>,
+    root: &clap::Command,
+) -> anyhow::Result<Vec<OsString>> {
+    let Some((index, name)) = subcommand_at(&args, root) else {
         return Ok(args);
     };
     if !RUNS.contains(&name.as_str()) {
@@ -100,7 +107,7 @@ pub(crate) fn separate_command(args: Vec<OsString>) -> anyhow::Result<Vec<OsStri
     let Some(subcommand) = root.find_subcommand(&name) else {
         return Ok(args);
     };
-    let options = Options::of(&root).and(subcommand);
+    let options = Options::of(root).and(subcommand);
     let Some(start) = first_word(&args, index + 1, &options) else {
         return Ok(args);
     };

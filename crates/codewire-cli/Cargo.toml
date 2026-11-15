@@ -8,6 +8,8 @@ license.workspace = true
 description = "Rust landing zone for the Codewire cw CLI migration."
 
 [features]
+# Command-line entrypoint for the isolated cargo-fuzz workspace.
+fuzzing = []
 local-broker-synthetic-smoke = [
   "codewire-credential-broker/local-broker-synthetic-smoke",
   "codewire-local-vmm/synthetic-oci-input-smoke",

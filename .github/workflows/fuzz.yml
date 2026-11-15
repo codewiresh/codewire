@@ -28,12 +28,15 @@ jobs:
       fail-fast: false
       matrix:
         target:
+          - cli_arguments
           - disco_message
           - netstack_dns_question
           - netstack_ipv4_tcp
           - udp_relay_packet
     env:
-      FUZZ_TOOLCHAIN: nightly-2026-11-01
+      # 2026-10-24 regressed recursive enums through the async-drop query
+      # (rust-lang/rust#164977); the CLI reaches one through zvariant_utils.
+      FUZZ_TOOLCHAIN: nightly-2026-10-23
       CARGO_FUZZ_VERSION: 0.13.2
       TARGET: ${{ matrix.target }}
     steps:

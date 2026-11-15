@@ -5,13 +5,16 @@ targets for the parsers that read bytes Codewire does not control.
 
 | Target | Parser | Input comes from |
 |---|---|---|
+| `cli_arguments` | `cw run`/`cw exec` command boundary | the local caller's argument vector |
 | `disco_message` | `codewire_tailnet::disco::Message::parse` | a peer, after the disco box opens |
 | `udp_relay_packet` | `codewire_tailnet::udp_relay::decode_packet` | any host that can reach the UDP relay |
 | `netstack_ipv4_tcp` | `codewire_netstack::parse_canonical_ipv4_tcp_packet`, `parse_initial_ipv4_tcp_syn`, `build_ipv4_tcp_refusal` | the guest |
 | `netstack_dns_question` | `codewire_netstack::parse_ipv4_dns_question`, `build_ipv4_dns_response` | the guest |
 
-Each target asserts that its parser never panics, plus a property of what it
-accepts, written in the target's header comment.
+Each target asserts that its parser or preprocessor never panics, plus a
+property of what it accepts, written in the target's header comment. The CLI
+target preprocesses arguments without parsing or executing a command, loading
+configuration or reading credentials.
 
 ## How it runs
 
@@ -31,15 +34,15 @@ resolves to `main`'s version; only `libfuzzer-sys` and `arbitrary` are added.
 ## Run a target locally
 
 ```sh
-rustup toolchain install nightly-2026-11-01 --profile minimal
-cargo +nightly-2026-11-01 install cargo-fuzz --locked --version 0.13.2
+rustup toolchain install nightly-2026-10-23 --profile minimal
+cargo +nightly-2026-10-23 install cargo-fuzz --locked --version 0.13.2
 cp Cargo.lock fuzz/Cargo.lock
 cd fuzz
-cargo +nightly-2026-11-01 fuzz run -O disco_message -- -max_total_time=60
+cargo +nightly-2026-10-23 fuzz run -O disco_message -- -max_total_time=60
 ```
 
 To reproduce a crash from the job, download its artifact and pass the input
-file: `cargo +nightly-2026-11-01 fuzz run -O <target> <file>`. Fix the parser,
+file: `cargo +nightly-2026-10-23 fuzz run -O <target> <file>`. Fix the parser,
 then add the input as a regression test in the parser's crate.
 
 ## Add a target

@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 license = "AGPL-3.0-only"
-description = "cargo-fuzz targets for Codewire's parsers of untrusted network and guest input."
+description = "cargo-fuzz targets for Codewire's untrusted network, guest and command-line inputs."
 
 [package.metadata]
 cargo-fuzz = true
@@ -15,9 +15,17 @@ cargo-fuzz = true
 [workspace]
 
 [dependencies]
+codewire-cli = { path = "../crates/codewire-cli", features = ["fuzzing"] }
 codewire-netstack = { path = "../crates/codewire-netstack" }
 codewire-tailnet = { path = "../crates/codewire-tailnet" }
 libfuzzer-sys = "=0.4.13"
+
+[[bin]]
+name = "cli_arguments"
+path = "fuzz_targets/cli_arguments.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "disco_message"
