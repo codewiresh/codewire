@@ -11,8 +11,13 @@ starts again. With reduced motion the last screen shows at once.
 
 import argparse
 import json
+import re
 import sys
 from xml.sax.saxutils import escape
+
+# Terminal escapes, then the control characters XML 1.0 forbids; a tab stays.
+ESCAPE_SEQUENCE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 COLUMNS = 92
 ROWS = 22
@@ -51,6 +56,7 @@ def load(path: str, replacements: list[tuple[str, str]]) -> list[dict]:
         for raw in handle:
             event = json.loads(raw)
             text = event.get("cmd", event.get("out", ""))
+            text = CONTROL.sub("", ESCAPE_SEQUENCE.sub("", text))
             for old, new in replacements:
                 text = text.replace(old, new)
             # A progress line that a terminal redraws as its finished line.

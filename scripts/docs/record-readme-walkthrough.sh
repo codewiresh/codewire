@@ -94,7 +94,9 @@ end_web_session() {
   [[ "$session" == null ]]
 }
 
-# The local VM's processes are the ones started with this run's own state root.
+# A backstop after `cw --local rm`, for what a failed walk leaves running. It
+# stops only processes started with this run's own state root, so it never
+# touches another session's VMs.
 stop_local_processes() {
   local pid marker="CODEWIRE_NATIVE_STATE_ROOT=$WORK/local-state"
   local -a pids=()
@@ -294,12 +296,11 @@ local_walk() {
   step 'cw run --in hello --name web --detach -- python3 -m http.server 3000' \
     cw_as run --in hello --name web --detach -- python3 -m http.server 3000
   step 'cw ports hello --publish 3000' cw_as ports hello --publish 3000
-  fetch_page() {
-    local _
-    for _ in $(seq 1 10); do curl -sS --max-time 5 http://127.0.0.1:3000/ && return 0; sleep 1; done
-    return 1
-  }
-  step 'curl http://127.0.0.1:3000/' fetch_page
+  # The server takes a moment to start. Wait for it unrecorded, so the
+  # recording shows one curl, as a reader running the walk by hand would.
+  local _
+  for _ in $(seq 1 10); do curl -sf --max-time 5 -o /dev/null http://127.0.0.1:3000/ && break; sleep 1; done
+  step 'curl http://127.0.0.1:3000/' curl -sS --max-time 5 http://127.0.0.1:3000/
   step 'cw rm hello --yes' cw_as rm hello --yes
   grep -qF '"out": "<h1>Hello from a VM</h1>"' "$TRANSCRIPT" || die 'the server in the VM did not answer'
   render --title 'cw: a VM on your own machine'

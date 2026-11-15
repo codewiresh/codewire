@@ -13,7 +13,7 @@ Open source under AGPL-3.0-only.
 [Request an account](https://codewire.sh/signup) ·
 [Security](SECURITY.md)
 
-[![A terminal running the walk below: an SSH key and a secret are added, a sandbox is created, a server in it gets a preview URL, and the sandbox is stopped and removed](docs/assets/readme-walkthrough.svg)](docs/assets/readme-walkthrough.svg)
+[![A terminal running the walk below: an SSH key and a secret are added, a sandbox is created, a server in it gets a preview URL, and the sandbox is stopped and removed. Recorded on Codewire's test deployment](docs/assets/readme-walkthrough.svg)](docs/assets/readme-walkthrough.svg)
 
 ## Install
 
