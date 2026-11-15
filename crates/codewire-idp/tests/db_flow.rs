@@ -3050,6 +3050,9 @@ async fn session_auth_flow_against_postgres() {
 
     // 1. A wrong configured invite enters review and fails closed when review
     // email delivery is unavailable, before any user is inserted.
+    let unavailable = r#"codewire_idp_sign_up_refusals_total{reason="unavailable"} "#;
+    let attempts = "codewire_idp_sign_up_attempts_total ";
+    let (unavailable_before, attempts_before) = (metric(unavailable).await, metric(attempts).await);
     let (st, body, _) = sess_req(
         &undeliverable,
         "POST",
@@ -3061,6 +3064,8 @@ async fn session_auth_flow_against_postgres() {
     )
     .await;
     assert_eq!(st, 503, "review request without email delivery: {body}");
+    // A refused sign-up is exposed for the abuse alerts (#3297 item 13).
+    assert!(metric(unavailable).await >= unavailable_before + 1.0);
     let inserted: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE email=$1")
         .bind(email)
         .fetch_one(&pool)
@@ -3091,6 +3096,7 @@ async fn session_auth_flow_against_postgres() {
         body.get("accessPending").is_none(),
         "an invite skips review: {body}"
     );
+    assert!(metric(attempts).await >= attempts_before + 1.0);
     assert!(body.get("session").is_none() && cookie.is_none());
     let (enabled, sessions): (bool, i64) = sqlx::query_as(
         "SELECT u.enabled, (SELECT count(*) FROM sessions s WHERE s.user_id = u.id) \
@@ -3203,6 +3209,9 @@ async fn session_auth_flow_against_postgres() {
     assert!(body["session"].get("token").is_none());
 
     // 6. sign-in (wrong) → 401, then four more wrong → lockout (429).
+    let credentials = r#"codewire_idp_sign_in_failures_total{reason="credentials"} "#;
+    let locked = r#"codewire_idp_sign_in_failures_total{reason="locked"} "#;
+    let (credentials_before, locked_before) = (metric(credentials).await, metric(locked).await);
     let bad = format!(r#"{{"email":"{email}","password":"nope"}}"#);
     let (st, _b, _) = sess_req(&app, "POST", "/api/auth/sign-in", None, &bad).await;
     assert_eq!(st, 401);
@@ -3218,6 +3227,10 @@ async fn session_auth_flow_against_postgres() {
     )
     .await;
     assert_eq!(st, 429, "should be locked after 5 failures");
+    // Each failure is exposed for the abuse alerts (#3297 item 13). Tests
+    // beside this one only add, so these are lower bounds.
+    assert!(metric(credentials).await >= credentials_before + 5.0);
+    assert!(metric(locked).await >= locked_before + 1.0);
 
     // unlock so the sign-out path is reachable.
     sqlx::query("UPDATE users SET failed_login_attempts=0, locked_until=NULL WHERE email=$1")
@@ -5786,6 +5799,28 @@ fn current_totp_code(secret: &str, account_name: &str) -> String {
     .unwrap()
     .generate_current()
     .unwrap()
+}
+
+/// One series' value in the process's Prometheus exposition, read the way
+/// Prometheus reads it, or 0 before the series exists (#3297 item 13).
+async fn metric(series: &str) -> f64 {
+    use tower::ServiceExt;
+    let response = codewire_server_core::metrics::router("idp-test")
+        .oneshot(
+            axum::http::Request::get("/metrics")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 1 << 22)
+        .await
+        .unwrap();
+    String::from_utf8(body.to_vec())
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix(series)?.trim().parse().ok())
+        .unwrap_or(0.0)
 }
 
 async fn sess_req(

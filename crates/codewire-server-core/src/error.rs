@@ -117,7 +117,7 @@ impl AppError {
     // same single source the HTTP envelope uses
     // (docs/dev/CONNECT-ERROR-MODEL.md, D6: one error type, two renderers that
     // cannot disagree).
-    pub(crate) fn status(&self) -> StatusCode {
+    pub fn status(&self) -> StatusCode {
         match self {
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,

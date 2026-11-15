@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+mod abuse_metrics;
 pub mod access_admin;
 pub mod account_admin_delete;
 pub mod admin_bootstrap;

@@ -219,7 +219,10 @@ pub async fn take_for_user(
 ) -> Result<Decision, sqlx::Error> {
     let max = max_in_force(&mut *connection, limit, Some(user_id)).await?;
     let now = database_now(&mut *connection).await?;
-    consume(connection, &limit.key(user_id), limit.window_secs, max, now).await
+    counted(
+        limit,
+        consume(connection, &limit.key(user_id), limit.window_secs, max, now).await,
+    )
 }
 
 /// Counts one request against a limit with no per-user count, such as the
@@ -232,7 +235,10 @@ pub async fn take(
 ) -> Result<Decision, sqlx::Error> {
     let max = max_in_force(&mut *connection, limit, None).await?;
     let now = database_now(&mut *connection).await?;
-    consume(connection, &limit.key(subject), limit.window_secs, max, now).await
+    counted(
+        limit,
+        consume(connection, &limit.key(subject), limit.window_secs, max, now).await,
+    )
 }
 
 /// The database's current time: `clock_timestamp()`, which advances within a
@@ -245,14 +251,33 @@ pub async fn take_fixed_for_user(
     user_id: &str,
 ) -> Result<Decision, sqlx::Error> {
     let now = database_now(&mut *connection).await?;
-    consume(
-        connection,
-        &limit.key(user_id),
-        limit.window_secs,
-        limit.default_max,
-        now,
+    counted(
+        limit,
+        consume(
+            connection,
+            &limit.key(user_id),
+            limit.window_secs,
+            limit.default_max,
+            now,
+        )
+        .await,
     )
-    .await
+}
+
+/// Counts a refusal of `limit` in `codewire_rate_limit_refusals_total`, so an
+/// alert sees an account reach a cap (#3297 item 13).
+fn counted(
+    limit: &Limit,
+    decision: Result<Decision, sqlx::Error>,
+) -> Result<Decision, sqlx::Error> {
+    if let Ok(decision) = &decision
+        && !decision.allowed
+    {
+        crate::metrics::rate_limit_refusals()
+            .with_label_values(&[limit.name])
+            .inc();
+    }
+    decision
 }
 
 async fn database_now(connection: &mut PgConnection) -> Result<DateTime<Utc>, sqlx::Error> {

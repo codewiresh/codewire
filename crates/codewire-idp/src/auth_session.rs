@@ -935,8 +935,22 @@ async fn retry_pending_signup(
 
 // --- handlers ---
 
-/// `POST /api/auth/sign-in` (public).
+/// `POST /api/auth/sign-in` (public). A failure counts in
+/// `codewire_idp_sign_in_failures_total` for the abuse alerts (#3297).
 async fn sign_in(
+    state: State<SessionAuthState>,
+    headers: HeaderMap,
+    req: ValidatedJson<SignInRequest>,
+) -> Result<Response, AppError> {
+    let outcome = sign_in_checked(state, headers, req).await;
+    crate::abuse_metrics::sign_in_answered(match &outcome {
+        Ok(response) => response.status(),
+        Err(error) => error.status(),
+    });
+    outcome
+}
+
+async fn sign_in_checked(
     State(state): State<SessionAuthState>,
     headers: HeaderMap,
     ValidatedJson(req): ValidatedJson<SignInRequest>,

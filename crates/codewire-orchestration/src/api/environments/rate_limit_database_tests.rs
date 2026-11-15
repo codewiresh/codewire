@@ -152,8 +152,17 @@ async fn db_a_users_override_wins_over_the_global_count_and_the_default() -> any
             let decision = rate_limit::take_for_user(&mut connection, &limit, "limited").await?;
             anyhow::ensure!(decision.allowed, "request {request}");
         }
+        let refusals = || {
+            codewire_server_core::metrics::rate_limit_refusals()
+                .with_label_values(&["sandbox_create"])
+                .get()
+        };
+        let before = refusals();
         let refused = rate_limit::take_for_user(&mut connection, &limit, "limited").await?;
         anyhow::ensure!(!refused.allowed && refused.max == 2, "{refused:?}");
+        // The refusal is counted under the limit's name for the abuse alerts
+        // (#3297 item 13); the admitted requests above were not.
+        anyhow::ensure!(refusals() == before + 1, "{before} -> {}", refusals());
         Ok(())
     }
     .await;

@@ -64,8 +64,20 @@ fn reason_missing() -> AppError {
 /// The checks a sign-up passes before it writes anything: the email and
 /// password, Turnstile, the reason, and mail to verify with. Review and open
 /// decide admission here; an invite-only server reads its invitation in the
-/// sign-up's transaction, so its admission is `None` until then.
+/// sign-up's transaction, so its admission is `None` until then. A refusal
+/// counts in `codewire_idp_sign_up_refusals_total` (#3297).
 async fn admit(
+    state: &SessionAuthState,
+    req: &SignUpRequest,
+) -> Result<Option<Admission>, AppError> {
+    let outcome = admit_checks(state, req).await;
+    if let Err(error) = &outcome {
+        crate::abuse_metrics::sign_up_refused(error.status());
+    }
+    outcome
+}
+
+async fn admit_checks(
     state: &SessionAuthState,
     req: &SignUpRequest,
 ) -> Result<Option<Admission>, AppError> {

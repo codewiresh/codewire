@@ -142,8 +142,21 @@ async fn pending_signup(
 /// The same checks as email sign-up, before the pending row is used up, so a
 /// failed challenge or a missing reason can be corrected on the page. The
 /// provider proved the address, so open mode signs the account in at once.
-/// Says whether the account is admitted at once.
+/// Says whether the account is admitted at once. A refusal counts in
+/// `codewire_idp_sign_up_refusals_total` (#3297).
 async fn admit(
+    session: &SessionAuthState,
+    identity: &PendingIdentity,
+    request: &CompleteSignupRequest,
+) -> Result<bool, AppError> {
+    let outcome = admit_checks(session, identity, request).await;
+    if let Err(error) = &outcome {
+        crate::abuse_metrics::sign_up_refused(error.status());
+    }
+    outcome
+}
+
+async fn admit_checks(
     session: &SessionAuthState,
     identity: &PendingIdentity,
     request: &CompleteSignupRequest,

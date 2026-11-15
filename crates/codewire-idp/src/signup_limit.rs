@@ -56,7 +56,9 @@ pub(crate) async fn take(state: &SessionAuthState, headers: &HeaderMap) -> Resul
     if let Some(address) = address {
         count(&mut connection, &rate_limit::SIGNUP_ADDRESS, &address).await?;
     }
-    count(&mut connection, &rate_limit::SIGNUP, SITE).await
+    count(&mut connection, &rate_limit::SIGNUP, SITE).await?;
+    crate::abuse_metrics::sign_up_attempts().inc();
+    Ok(())
 }
 
 async fn count(
