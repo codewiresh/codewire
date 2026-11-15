@@ -19,7 +19,7 @@ fail() {
 [[ -f "$WORKFLOW" ]] || fail 'source-approval workflow is missing'
 grep -Fq "runs-on: ${RUNS_ON_UNTRUSTED_LIGHT}" "$WORKFLOW" ||
   fail 'the supply-chain scan does not use the credential-free validation profile'
-grep -Fq 'EXPECTED_SUPPLYCHAIN: 83fffe1ee4a44bb7ef2b5bdc8d6269775e6534a4' \
+grep -Fq 'EXPECTED_SUPPLYCHAIN: 47a53e3035dbbd040f3249bd2ac858617a7c8fd7' \
   "$WORKFLOW" || fail 'sealed Supplychain revision changed without review'
 grep -Fq 'Candidate files are scanned as data only' "$WORKFLOW" ||
   fail 'candidate-as-data boundary is undocumented'
@@ -322,9 +322,9 @@ chmod 600 "$unreadable/src/locked.txt"
 #     advisory (RUSTSEC-2021-0003, smallvec 1.6.0). The sealed revision must
 #     still report it for both lock files, because it gives osv-scanner an
 #     empty configuration of its own.
-#   - a token beside an allow marker. The sealed revision does not report
-#     it, which is why the guard above exists; that control flips when the
-#     scanner stops honouring the marker.
+#   - a token beside an allow marker. The sealed revision reports it,
+#     because it tells Gitleaks to ignore the marker; a Gitleaks that reads
+#     the marker does not.
 # Everything is offline: the advisory database is one record written here.
 expected_supplychain="$(sed -n 's/^ *EXPECTED_SUPPLYCHAIN: \([0-9a-f]\{40\}\)$/\1/p' "$WORKFLOW")"
 [[ "$expected_supplychain" =~ ^[0-9a-f]{40}$ ]] || fail 'the workflow names no sealed Supplychain revision'
@@ -437,23 +437,31 @@ found="$(jq -r --arg root "$suppressing/" \
 # The allow marker: a token Gitleaks reports, and the same token beside the
 # marker. The token is derived here; it is no credential and is never stored.
 token="ghp_$(printf 'codewire source-approval fixture' | sha256sum | cut -c1-36)"
+# supplychain exits 1 for findings, 2 for a usage error and 3 when it could
+# not scan, so only 1 means the token was reported.
 secrets_exit() { # TREE
   (cd "$1" && sealed secrets . >/dev/null 2>&1) && echo 0 || echo "$?"
 }
 plain="$(candidate_repository plain-token)"
 printf 'token = "%s"\n' "$token" >"$plain/config.py"
 track "$plain"
-[[ "$(secrets_exit "$plain")" != 0 ]] ||
-  fail 'the sealed secrets scan does not report the fixture token, so the marker case proves nothing'
+status="$(secrets_exit "$plain")"
+[[ "$status" == 1 ]] ||
+  fail "the sealed secrets scan exited $status, not 1, for the fixture token, so the marker case proves nothing"
 [[ "$(guard_exit "$plain")" == 0 ]] || fail 'the guard refused a tree without an allow marker'
 marked="$(candidate_repository marked-token)"
 printf 'token = "%s"  # %s\n' "$token" "$marker" >"$marked/config.py"
 track "$marked"
 [[ "$(guard_exit "$marked")" == 65 ]] || fail 'the guard admitted a token beside an allow marker'
-# Not yet closed in the scanner: beside the marker, the token is not reported.
-# When the sealed revision stops honouring the marker, this exit becomes
-# nonzero; change the expectation then, and keep the guard.
-[[ "$(secrets_exit "$marked")" == 0 ]] ||
-  fail 'the sealed secrets scan now reports a token beside the allow marker: update this control (#3991)'
+# Control: the marker does hide the token from a Gitleaks that reads it.
+gitleaks_exit() { # TREE
+  gitleaks dir --no-banner --redact --exit-code 23 "$1" >/dev/null 2>&1 && echo 0 || echo "$?"
+}
+[[ "$(gitleaks_exit "$plain")" == 23 && "$(gitleaks_exit "$marked")" == 0 ]] ||
+  fail 'the allow marker does not hide the fixture token from Gitleaks, so the marker case proves nothing'
+# The second layer: the sealed scanner reports the token beside the marker.
+status="$(secrets_exit "$marked")"
+[[ "$status" == 1 ]] ||
+  fail "the sealed secrets scan exited $status, not 1, for a token beside an allow marker (#3991)"
 
 printf '[test-source-approval-workflow] PASS\n'
