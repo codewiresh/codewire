@@ -168,9 +168,13 @@ Issue: #4481.
   2. Sign in again and press it again within five minutes. No second email
      arrives.
 - **Proof:** the number of emails received: one per address in any five
-  minutes.
+  minutes, and at most three verification emails to one address in an hour,
+  however they were asked for (#3297). A fourth is not sent; the page says
+  what it says when one is, and Admin → Audit Log shows `mail.throttled` for
+  the account.
 - **Gotchas:** the button carries a single-use, ten-minute token, never in a
-  URL; nobody can ask for a link by typing an address.
+  URL; nobody can ask for a link by typing an address. Repeating the same
+  sign-up also resends the link, and counts toward the three.
 - **Observed:** not yet observed.
 
 ## `signup-provider`: sign in with GitHub or Google
@@ -255,6 +259,8 @@ session; until it merges, leave that state out.
   - an address with a password account: one email, subject "Reset your
     Codewire password";
   - an address with no account: the same page, and no email;
+  - a fourth request for one address within an hour: the same page, and no
+    email (#3297); Admin → Audit Log shows `mail.throttled` for the account;
   - the link used a second time, and a link more than an hour old;
   - a new password that fails the rules (at least 12 characters, with an
     upper-case letter, a lower-case letter, a digit and a symbol);

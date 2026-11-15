@@ -12,6 +12,8 @@ use chrono::{Duration, NaiveDateTime, Utc};
 use codewire_email::{Email, EmailClient};
 use codewire_server_core::auth::{AuthState, AuthUser, require_session_auth};
 use codewire_server_core::{AppError, ValidatedJson};
+
+use crate::mail_limit::{self, Mail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -572,7 +574,8 @@ async fn forget_password(
             tracing::warn!(%user_id, "password reset requested for an account with no sign-in method");
         } else if !state.email.is_configured() {
             tracing::warn!(%user_id, "transactional email delivery is not configured, skipping provider sign-in email");
-        } else {
+        } else if mail_limit::may_send(&state.pool, Mail::PasswordReset, &req.email, user_id).await
+        {
             let login_url = format!("{}/login", state.frontend_url.trim_end_matches('/'));
             if let Err(e) =
                 send_provider_sign_in_email(&state.email, &req.email, &labels, &login_url).await
@@ -582,7 +585,11 @@ async fn forget_password(
         }
     }
 
-    if let Some((user_id, true, _)) = &account {
+    // Only a mail that would be sent counts against its recipient.
+    if let Some((user_id, true, _)) = &account
+        && (!state.email.is_configured()
+            || mail_limit::may_send(&state.pool, Mail::PasswordReset, &req.email, user_id).await)
+    {
         match create_verification(
             &state.pool,
             &req.email,
@@ -759,7 +766,11 @@ async fn resend_verification(
     .fetch_one(&mut *tx)
     .await
     .map_err(failed)?;
-    if recent {
+    if recent
+        || (state.email.is_configured()
+            && !mail_limit::may_send(&state.pool, Mail::Verification, &email, &claim.identifier)
+                .await)
+    {
         tx.commit().await.map_err(failed)?;
         return Ok((
             StatusCode::ACCEPTED,
@@ -827,6 +838,15 @@ async fn send_verification(
         return Ok(Json(SendVerificationResponse {
             sent: false,
             already_verified: true,
+        }));
+    }
+    // The account's owner asked, so the answer may say the link was held back.
+    if state.email.is_configured()
+        && !mail_limit::may_send(&state.pool, Mail::Verification, &row.email, &user.user_id).await
+    {
+        return Ok(Json(SendVerificationResponse {
+            sent: false,
+            already_verified: false,
         }));
     }
 

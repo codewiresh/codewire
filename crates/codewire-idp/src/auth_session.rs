@@ -843,7 +843,17 @@ async fn deliver_signup_verification(
         "{}/verify-email?token={token}",
         state.frontend_url.trim_end_matches('/')
     );
-    if let Err(error) = send_verification_email(&state.email, &user.email, &verify_url).await {
+    // Only a mail that would be sent counts against its recipient.
+    if (!state.email.is_configured()
+        || crate::mail_limit::may_send(
+            &state.pool,
+            crate::mail_limit::Mail::Verification,
+            &user.email,
+            &user.id,
+        )
+        .await)
+        && let Err(error) = send_verification_email(&state.email, &user.email, &verify_url).await
+    {
         tracing::error!(%error, user_id = %user.id, "failed to send signup verification email");
         return Err(AppError::ServiceUnavailable(
             "Your account was saved, but email delivery is temporarily unavailable. Try again shortly."

@@ -3001,6 +3001,7 @@ async fn session_auth_flow_against_postgres() {
     let pool = PgPool::connect(&url).await.expect("connect");
 
     let email = "sess-flow@example.com";
+    forget_mail_counts(&pool, &[email]).await;
     let pw = "Sup3rStrong!Pass";
     let invite_code = "synthetic-db-flow-invite";
     let cleanup = |p: PgPool| async move {
@@ -3794,6 +3795,7 @@ async fn email_sign_up_without_a_code_waits_in_review_and_is_admitted_when_open_
     };
     let pool = PgPool::connect(&url).await.expect("connect");
     let email = "open-mode@example.com";
+    forget_mail_counts(&pool, &[email]).await;
     let forget = || async {
         for statement in [
             "DELETE FROM verifications WHERE identifier = $1",
@@ -4295,6 +4297,15 @@ async fn email_password_flow_against_postgres() {
 
     let user = "u_email_password_e2e";
     let email = "email-password-e2e@example.com";
+    forget_mail_counts(
+        &pool,
+        &[
+            email,
+            "missing-email-password-e2e@example.com",
+            "provider-only-e2e@example.com",
+        ],
+    )
+    .await;
     let session = "sess_email_password_e2e_token";
     let new_pw = "N3wStrong!Password";
 
@@ -5300,6 +5311,7 @@ async fn two_factor_attempts_lock_account_against_postgres() {
     let pool = PgPool::connect(&url).await.expect("connect");
 
     let email = "twofactor-lockout-e2e@example.com";
+    forget_mail_counts(&pool, &[email]).await;
     let password = "Sup3rStrong!Pass";
     let session_secret = "two-factor-lockout-e2e-session-secret";
 
@@ -5799,6 +5811,22 @@ fn current_totp_code(secret: &str, account_name: &str) -> String {
     .unwrap()
     .generate_current()
     .unwrap()
+}
+
+/// Forgets the hourly mail counts of `emails` (#3297 item 11), so a test that
+/// mails fixed addresses mails them again when it is rerun within the hour.
+/// Only these addresses: a concurrent test's own counts are left alone.
+async fn forget_mail_counts(pool: &PgPool, emails: &[&str]) {
+    sqlx::query(
+        "DELETE FROM rate_limit WHERE key IN ( \
+           SELECT kind || encode(sha256(convert_to(lower(trim(email)), 'UTF8')), 'hex') \
+             FROM unnest($1::text[]) AS email, \
+                  unnest(ARRAY['mail_password_reset:', 'mail_verification:']) AS kind)",
+    )
+    .bind(emails)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 /// One series' value in the process's Prometheus exposition, read the way
@@ -6529,4 +6557,193 @@ async fn refresh_reuse(pool: PgPool) {
         remembered,
         "a never-expiring token's record has no bounded lifetime"
     );
+}
+
+/// Three password-reset and three verification emails an hour reach one
+/// address. Past that the IdP sends nothing, answers exactly as it does when
+/// it sends, and the account's audit log records `mail.throttled`, which is
+/// how an administrator sees it (#3297 item 11). The addresses are this run's
+/// own, so no other test shares their counts.
+#[tokio::test]
+async fn mail_to_one_address_stops_after_three_an_hour_and_the_audit_log_says_so() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping idp mail limit");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let reset_user = format!("u_mail_limit_reset_{nonce:x}");
+    let reset_email = format!("mail-limit-reset-{nonce:x}@example.test");
+    let signup_email = format!("mail-limit-signup-{nonce:x}@example.test");
+    let throttled = |user: String, mail: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM audit_logs WHERE user_id = $1 \
+                 AND action = 'mail.throttled' AND metadata->>'mail' = $2",
+            )
+            .bind(user)
+            .bind(mail)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    // A password reset: a password account asks four times.
+    sqlx::query(
+        "INSERT INTO users (id, email, name, email_verified, enabled) VALUES ($1, $2, 'Mail', true, true)",
+    )
+    .bind(&reset_user)
+    .bind(&reset_email)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO accounts (id, user_id, provider_id, account_id, password) \
+         VALUES ($1, $1, 'credential', $1, 'synthetic-unused-hash')",
+    )
+    .bind(&reset_user)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (mail, outbox) = codewire_email::EmailClient::recording();
+    let reset_app = codewire_idp::email_password::router(
+        pool.clone(),
+        "https://app.codewire.test".to_string(),
+        mail,
+        AuthState { pool: pool.clone() },
+    );
+    for _ in 0..4 {
+        let (st, body, _) = sess_req(
+            &reset_app,
+            "POST",
+            "/api/auth/forget-password",
+            None,
+            &format!(r#"{{"email":"{reset_email}"}}"#),
+        )
+        .await;
+        assert_eq!(st, 200, "{body}");
+        assert_eq!(body["sent"], true, "the same answer whether or not it sent");
+    }
+    let sent: Vec<_> = outbox
+        .sent()
+        .into_iter()
+        .map(|mail| (mail.to, mail.subject))
+        .collect();
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert_eq!(throttled(reset_user.clone(), "password_reset").await, 1);
+
+    // Verification: the same pending sign-up is repeated four times, each
+    // asking for its link again.
+    let (mail, outbox) = codewire_email::EmailClient::recording();
+    let signup_app = codewire_idp::auth_session::router_with_email(
+        pool.clone(),
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::default(),
+        "https://app.codewire.test".to_owned(),
+        mail,
+    );
+    for _ in 0..4 {
+        let (st, body, _) = sess_req(
+            &signup_app,
+            "POST",
+            "/api/auth/sign-up",
+            None,
+            &format!(
+                r#"{{"email":"{signup_email}","password":"CorrectHorse9#xy","name":"Mail","reason":"Synthetic mail limit"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(st, 202, "{body}");
+        assert_eq!(body["verificationPending"], true, "{body}");
+    }
+    let sent: Vec<_> = outbox
+        .sent()
+        .into_iter()
+        .map(|mail| (mail.to, mail.subject))
+        .collect();
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    let signup_user: String = sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
+        .bind(&signup_email)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(throttled(signup_user, "verification").await, 1);
+
+    // Signed in, an unverified account's owner asks for its link four times:
+    // three go, and the fourth answers that nothing was sent, since only the
+    // owner sees the answer.
+    let owner_user = format!("u_mail_limit_owner_{nonce:x}");
+    let owner_email = format!("mail-limit-owner-{nonce:x}@example.test");
+    sqlx::query(
+        "INSERT INTO users (id, email, name, email_verified, enabled) VALUES ($1, $2, 'Mail', false, true)",
+    )
+    .bind(&owner_user)
+    .bind(&owner_email)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let session = format!("sess_mail_limit_{nonce:x}");
+    sqlx::query(
+        "INSERT INTO sessions (id, user_id, token_hash, expires_at) \
+         VALUES ($1, $2, $3, NOW() + interval '1 hour')",
+    )
+    .bind(&session)
+    .bind(&owner_user)
+    .bind(hash_session_token(&session))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (mail, outbox) = codewire_email::EmailClient::recording();
+    let owner_app = codewire_idp::email_password::router(
+        pool.clone(),
+        "https://app.codewire.test".to_string(),
+        mail,
+        AuthState { pool: pool.clone() },
+    );
+    for n in 0..4 {
+        let (st, body, _) = sess_req(
+            &owner_app,
+            "POST",
+            "/api/auth/send-verification-email",
+            Some(&session),
+            "",
+        )
+        .await;
+        assert_eq!(st, 200, "{body}");
+        if n < 3 {
+            assert_eq!(body["sent"], true, "{body}");
+        } else {
+            // `sent` and `already_verified` are left out when false.
+            assert_eq!(body, serde_json::json!({}), "{body}");
+        }
+    }
+    assert_eq!(outbox.sent().len(), 3);
+    assert_eq!(throttled(owner_user, "verification").await, 1);
+
+    for (prefix, email) in [
+        ("mail_password_reset:", &reset_email),
+        ("mail_verification:", &signup_email),
+        ("mail_verification:", &owner_email),
+    ] {
+        sqlx::query(
+            "DELETE FROM rate_limit WHERE key = $1 || encode(sha256(convert_to(lower($2), 'UTF8')), 'hex')",
+        )
+        .bind(prefix)
+        .bind(email)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("DELETE FROM users WHERE email IN ($1, $2, $3)")
+        .bind(&reset_email)
+        .bind(&signup_email)
+        .bind(&owner_email)
+        .execute(&pool)
+        .await
+        .unwrap();
 }

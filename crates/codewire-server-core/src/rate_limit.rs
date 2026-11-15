@@ -96,6 +96,29 @@ pub const SIGNUP_ADDRESS: Limit = Limit {
     per_user: false,
 };
 
+/// Password-reset email to one address (#3297 item 11): the reset link, or,
+/// for an account that signs in only with GitHub or Google, how it signs in.
+/// Counted under a SHA-256 of the lowercased address, so a stranger can't
+/// mail-bomb an address through "Forgot password".
+pub const MAIL_PASSWORD_RESET: Limit = Limit {
+    name: "mail_password_reset",
+    key_prefix: "mail_password_reset",
+    window_secs: 3_600,
+    default_max: 3,
+    per_user: false,
+};
+
+/// Verification email to one address (#3297 item 11): sent at sign-up, again
+/// when the same sign-up is repeated, from the "Check your email" page, or when
+/// a signed-in account asks. Counted as [`MAIL_PASSWORD_RESET`] is.
+pub const MAIL_VERIFICATION: Limit = Limit {
+    name: "mail_verification",
+    key_prefix: "mail_verification",
+    window_secs: 3_600,
+    default_max: 3,
+    per_user: false,
+};
+
 /// Every named limit, in the order an admin sees them.
 pub const LIMITS: &[Limit] = &[
     SANDBOX_CREATE,
@@ -103,6 +126,8 @@ pub const LIMITS: &[Limit] = &[
     SNAPSHOT_CREATE,
     SIGNUP,
     SIGNUP_ADDRESS,
+    MAIL_PASSWORD_RESET,
+    MAIL_VERIFICATION,
 ];
 
 /// What [`consume`] decided.
@@ -312,6 +337,8 @@ mod tests {
         assert_eq!(SNAPSHOT_CREATE.key("u1"), "snapshot_create:u1");
         assert_eq!(SIGNUP.key("all"), "signup:all");
         assert_eq!(SIGNUP_ADDRESS.key("ab12"), "signup_address:ab12");
+        assert_eq!(MAIL_PASSWORD_RESET.key("ab"), "mail_password_reset:ab");
+        assert_eq!(MAIL_VERIFICATION.key("ab"), "mail_verification:ab");
         let mut names: Vec<_> = LIMITS.iter().map(|limit| limit.name).collect();
         names.sort_unstable();
         names.dedup();
