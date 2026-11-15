@@ -13,8 +13,7 @@ Open source under AGPL-3.0-only.
 [Request an account](https://codewire.sh/signup) ·
 [Security](SECURITY.md)
 
-<!-- Terminal recording of "Five minutes on the platform", about 25 seconds.
-     Its script is checked in beside it so it can be recorded again. -->
+[![A terminal running the walk below: an SSH key and a secret are added, a sandbox is created, a server in it gets a preview URL, and the sandbox is stopped and removed](docs/assets/readme-walkthrough.svg)](docs/assets/readme-walkthrough.svg)
 
 ## Install
 
@@ -37,15 +36,15 @@ A hosted sandbox needs a Codewire account
 cw setup                        # opens your browser; choose or create an organization
 
 # 2. Add a credential: an SSH key that never enters a sandbox
-cw credentials --cloud generate ssh --name my-key    # prints the public key for your Git host
-cw credentials --cloud --profile me set ssh my-key   # your first profile becomes your default
+cw credentials --cloud generate ssh --name my-key  # add its public key to your Git host
+cw credentials --cloud --profile me set ssh my-key # your first profile is your default
 
 # 3. Add a secret
-cw secrets --cloud --user set GREETING               # type the value; it is never shown again
+cw secrets --cloud --user set GREETING             # type the value; never shown again
 
 # 4. Launch a sandbox that uses both
 cw create --name hello --image workspace --user-secrets platform
-cw exec --in hello -- sh -c 'echo "$GREETING"'       # prints the value you typed
+cw exec --in hello -- sh -c 'echo "$GREETING"'     # prints the value you typed
 
 # 5. Run a server and open it
 cw run --in hello --name web --detach -- python3 -m http.server 3000
@@ -53,7 +52,7 @@ cw ports hello --publish 3000 --label web
 #   URL: https://web-02e72-{organization}.{preview domain}   (only you can open it)
 
 # 6. Stop it
-cw stop hello                   # frees the machine, keeps the disk; `cw start hello` resumes
+cw stop hello                   # frees the machine, keeps its disk; `cw start` resumes
 cw rm hello                     # deletes the sandbox and its disk
 ```
 
@@ -66,6 +65,8 @@ there as `$GREETING`. `--access org_members` or `--access public` on
 
 A local VM needs no account: an x86_64 Linux machine with KVM, or an Apple
 Silicon Mac on macOS 26 or later.
+
+[![A terminal running the walk below: the VM runtime is installed, a VM is created with this folder mounted, a server in it is opened on 127.0.0.1 and answers, and the VM is removed](docs/assets/readme-walkthrough-local.svg)](docs/assets/readme-walkthrough-local.svg)
 
 ```sh
 cw setup --local                               # downloads the VM runtime this cw pins

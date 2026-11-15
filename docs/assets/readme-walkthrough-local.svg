@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="808" height="504" viewBox="0 0 808 504" role="img" aria-label="cw: a VM on your own machine">
+<title>cw: a VM on your own machine</title>
+<style>
+.bg{fill:#0d1117} .bar{fill:#161b22} .t{fill:#8b949e;font:12px ui-sans-serif,system-ui,sans-serif}
+text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:14px;white-space:pre}
+.p{fill:#7ee787} .c{fill:#f0f6fc;font-weight:600} .o{fill:#c9d1d9}
+.l{opacity:0}
+@keyframes a0{0%{opacity:0}2.463%{opacity:1}100%{opacity:1}}.l0{animation:a0 24.36s step-end infinite}@keyframes a1{0%{opacity:0}4.055%{opacity:1}100%{opacity:1}}.l1{animation:a1 24.36s step-end infinite}@keyframes a2{0%{opacity:0}12.429%{opacity:1}100%{opacity:1}}.l2{animation:a2 24.36s step-end infinite}@keyframes a3{0%{opacity:0}16.123%{opacity:1}100%{opacity:1}}.l3{animation:a3 24.36s step-end infinite}@keyframes a4{0%{opacity:0}17.923%{opacity:1}100%{opacity:1}}.l4{animation:a4 24.36s step-end infinite}@keyframes a5{0%{opacity:0}18.088%{opacity:1}100%{opacity:1}}.l5{animation:a5 24.36s step-end infinite}@keyframes a6{0%{opacity:0}18.252%{opacity:1}100%{opacity:1}}.l6{animation:a6 24.36s step-end infinite}@keyframes a7{0%{opacity:0}18.416%{opacity:1}100%{opacity:1}}.l7{animation:a7 24.36s step-end infinite}@keyframes a8{0%{opacity:0}18.581%{opacity:1}100%{opacity:1}}.l8{animation:a8 24.36s step-end infinite}@keyframes a9{0%{opacity:0}18.745%{opacity:1}100%{opacity:1}}.l9{animation:a9 24.36s step-end infinite}@keyframes a10{0%{opacity:0}18.909%{opacity:1}100%{opacity:1}}.l10{animation:a10 24.36s step-end infinite}@keyframes a11{0%{opacity:0}18.909%{opacity:1}100%{opacity:1}}.l11{animation:a11 24.36s step-end infinite}@keyframes a12{0%{opacity:0}19.073%{opacity:1}100%{opacity:1}}.l12{animation:a12 24.36s step-end infinite}@keyframes a13{0%{opacity:0}19.238%{opacity:1}100%{opacity:1}}.l13{animation:a13 24.36s step-end infinite}@keyframes a14{0%{opacity:0}19.402%{opacity:1}100%{opacity:1}}.l14{animation:a14 24.36s step-end infinite}@keyframes a15{0%{opacity:0}19.566%{opacity:1}100%{opacity:1}}.l15{animation:a15 24.36s step-end infinite}@keyframes a16{0%{opacity:0}19.730%{opacity:1}100%{opacity:1}}.l16{animation:a16 24.36s step-end infinite}@keyframes a17{0%{opacity:0}19.895%{opacity:1}100%{opacity:1}}.l17{animation:a17 24.36s step-end infinite}@keyframes a18{0%{opacity:0}20.059%{opacity:1}100%{opacity:1}}.l18{animation:a18 24.36s step-end infinite}@keyframes a19{0%{opacity:0}20.252%{opacity:1}100%{opacity:1}}.l19{animation:a19 24.36s step-end infinite}@keyframes a20{0%{opacity:0}28.626%{opacity:1}100%{opacity:1}}.l20{animation:a20 24.36s step-end infinite}@keyframes a21{0%{opacity:0}28.790%{opacity:1}100%{opacity:1}}.l21{animation:a21 24.36s step-end infinite}@keyframes a22{0%{opacity:0}29.217%{opacity:1}100%{opacity:1}}.l22{animation:a22 24.36s step-end infinite}@keyframes a23{0%{opacity:0}37.591%{opacity:1}100%{opacity:1}}.l23{animation:a23 24.36s step-end infinite}@keyframes a24{0%{opacity:0}38.872%{opacity:1}100%{opacity:1}}.l24{animation:a24 24.36s step-end infinite}@keyframes a25{0%{opacity:0}47.247%{opacity:1}100%{opacity:1}}.l25{animation:a25 24.36s step-end infinite}@keyframes a26{0%{opacity:0}51.514%{opacity:1}100%{opacity:1}}.l26{animation:a26 24.36s step-end infinite}@keyframes a27{0%{opacity:0}51.679%{opacity:1}100%{opacity:1}}.l27{animation:a27 24.36s step-end infinite}@keyframes a28{0%{opacity:0}51.843%{opacity:1}100%{opacity:1}}.l28{animation:a28 24.36s step-end infinite}@keyframes a29{0%{opacity:0}52.007%{opacity:1}100%{opacity:1}}.l29{animation:a29 24.36s step-end infinite}@keyframes a30{0%{opacity:0}52.171%{opacity:1}100%{opacity:1}}.l30{animation:a30 24.36s step-end infinite}@keyframes a31{0%{opacity:0}52.336%{opacity:1}100%{opacity:1}}.l31{animation:a31 24.36s step-end infinite}@keyframes a32{0%{opacity:0}52.500%{opacity:1}100%{opacity:1}}.l32{animation:a32 24.36s step-end infinite}@keyframes a33{0%{opacity:0}52.664%{opacity:1}100%{opacity:1}}.l33{animation:a33 24.36s step-end infinite}@keyframes a34{0%{opacity:0}52.828%{opacity:1}100%{opacity:1}}.l34{animation:a34 24.36s step-end infinite}@keyframes a35{0%{opacity:0}56.523%{opacity:1}100%{opacity:1}}.l35{animation:a35 24.36s step-end infinite}@keyframes a36{0%{opacity:0}58.320%{opacity:1}100%{opacity:1}}.l36{animation:a36 24.36s step-end infinite}@keyframes a37{0%{opacity:0}58.484%{opacity:1}100%{opacity:1}}.l37{animation:a37 24.36s step-end infinite}@keyframes a38{0%{opacity:0}62.179%{opacity:1}100%{opacity:1}}.l38{animation:a38 24.36s step-end infinite}@keyframes a39{0%{opacity:0}63.781%{opacity:1}100%{opacity:1}}.l39{animation:a39 24.36s step-end infinite}@keyframes a40{0%{opacity:0}63.945%{opacity:1}100%{opacity:1}}.l40{animation:a40 24.36s step-end infinite}@keyframes a41{0%{opacity:0}63.945%{opacity:1}100%{opacity:1}}.l41{animation:a41 24.36s step-end infinite}@keyframes a42{0%{opacity:0}64.110%{opacity:1}100%{opacity:1}}.l42{animation:a42 24.36s step-end infinite}@keyframes a43{0%{opacity:0}64.274%{opacity:1}100%{opacity:1}}.l43{animation:a43 24.36s step-end infinite}@keyframes a44{0%{opacity:0}67.968%{opacity:1}100%{opacity:1}}.l44{animation:a44 24.36s step-end infinite}@keyframes a45{0%{opacity:0}69.459%{opacity:1}100%{opacity:1}}.l45{animation:a45 24.36s step-end infinite}@keyframes a46{0%{opacity:0}73.728%{opacity:1}100%{opacity:1}}.l46{animation:a46 24.36s step-end infinite}@keyframes a47{0%{opacity:0}77.422%{opacity:1}100%{opacity:1}}.l47{animation:a47 24.36s step-end infinite}@keyframes a48{0%{opacity:0}87.028%{opacity:1}100%{opacity:1}}.l48{animation:a48 24.36s step-end infinite}@keyframes a49{0%{opacity:0}87.192%{opacity:1}100%{opacity:1}}.l49{animation:a49 24.36s step-end infinite}@keyframes a50{0%{opacity:0}87.357%{opacity:1}100%{opacity:1}}.l50{animation:a50 24.36s step-end infinite}@keyframes a51{0%{opacity:0}87.521%{opacity:1}100%{opacity:1}}.l51{animation:a51 24.36s step-end infinite}@keyframes a52{0%{opacity:0}87.685%{opacity:1}100%{opacity:1}}.l52{animation:a52 24.36s step-end infinite}
+.s{animation:scroll 24.36s step-end infinite}
+@keyframes scroll{0.000%{transform:translateY(-0px)}29.217%{transform:translateY(-20px)}37.591%{transform:translateY(-40px)}38.872%{transform:translateY(-60px)}47.247%{transform:translateY(-80px)}51.514%{transform:translateY(-100px)}51.679%{transform:translateY(-120px)}51.843%{transform:translateY(-140px)}52.007%{transform:translateY(-160px)}52.171%{transform:translateY(-180px)}52.336%{transform:translateY(-200px)}52.500%{transform:translateY(-220px)}52.664%{transform:translateY(-240px)}52.828%{transform:translateY(-260px)}56.523%{transform:translateY(-280px)}58.320%{transform:translateY(-300px)}58.484%{transform:translateY(-320px)}62.179%{transform:translateY(-340px)}63.781%{transform:translateY(-360px)}63.945%{transform:translateY(-380px)}63.945%{transform:translateY(-400px)}64.110%{transform:translateY(-420px)}64.274%{transform:translateY(-440px)}67.968%{transform:translateY(-460px)}69.459%{transform:translateY(-480px)}73.728%{transform:translateY(-500px)}77.422%{transform:translateY(-520px)}87.028%{transform:translateY(-540px)}87.192%{transform:translateY(-560px)}87.357%{transform:translateY(-580px)}87.521%{transform:translateY(-600px)}87.685%{transform:translateY(-620px)}100%{transform:translateY(-620px)}}
+@media (prefers-reduced-motion:reduce){.l{animation:none;opacity:1}.s{animation:none;transform:translateY(-620px)}}
+</style>
+<rect class="bg" width="808" height="504" rx="8"/>
+<path class="bar" d="M8 0H800A8 8 0 0 1 808 8V32H0V8A8 8 0 0 1 8 0Z"/>
+<circle cx="16" cy="16.0" r="5.5" fill="#ff5f57"/><circle cx="34" cy="16.0" r="5.5" fill="#febc2e"/><circle cx="52" cy="16.0" r="5.5" fill="#28c840"/>
+<text class="t" x="404.0" y="20.0" text-anchor="middle">cw: a VM on your own machine</text>
+<svg x="16" y="48" width="776" height="440">
+<g class="s" xml:space="preserve">
+<text class="l l0" x="0" y="14"><tspan class="p">$ </tspan><tspan class="c">cw setup --local</tspan></text>
+<text class="l l1" x="0" y="34"><tspan class="o">Downloading the local VM runtime (6 files, 201 MiB)...</tspan></text>
+<text class="l l2" x="0" y="54"><tspan class="o">Local VM runtime installed (806faede047a).</tspan></text>
+<text class="l l3" x="0" y="74"><tspan class="p">$ </tspan><tspan class="c">cw create --local --name hello --path . --yes</tspan></text>
+<text class="l l4" x="0" y="94"><tspan class="o">Configuration: flags only, no codewire.yaml found; default workspace image</tspan></text>
+<text class="l l5" x="0" y="114"><tspan class="o">Workspace: mount ~/hello at /workspace/hello (live, read-write)</tspan></text>
+<text class="l l6" x="0" y="134"><tspan class="o">Kept in the VM: node_modules, target, .venv</tspan></text>
+<text class="l l7" x="0" y="154"><tspan class="o">  node_modules: node_modules is created empty</tspan></text>
+<text class="l l8" x="0" y="174"><tspan class="o">  target: target is created empty</tspan></text>
+<text class="l l9" x="0" y="194"><tspan class="o">  .venv: .venv is created empty</tspan></text>
+<text class="l l10" x="0" y="214"><tspan class="o">Folders that match later are kept from the next start; what is written into them before then</tspan></text>
+<text class="l l11" x="0" y="234"><tspan class="o"> stays on the host, hidden from the VM, so install again.</tspan></text>
+<text class="l l12" x="0" y="254"><tspan class="o">hello · local VM</tspan></text>
+<text class="l l13" x="0" y="274"><tspan class="o">  2 vCPU · 4 GiB RAM · 20 GiB disk</tspan></text>
+<text class="l l14" x="0" y="294"><tspan class="o"></tspan></text>
+<text class="l l15" x="0" y="314"><tspan class="o">  Credentials: none</tspan></text>
+<text class="l l16" x="0" y="334"><tspan class="o">  Secrets:     none</tspan></text>
+<text class="l l17" x="0" y="354"><tspan class="o">  Network:     not attached</tspan></text>
+<text class="l l18" x="0" y="374"><tspan class="o"></tspan></text>
+<text class="l l19" x="0" y="394"><tspan class="o">  ✓ Preparing sources  0.0s</tspan></text>
+<text class="l l20" x="0" y="414"><tspan class="o">  ✓ Checking the VM runtime  4.3s</tspan></text>
+<text class="l l21" x="0" y="434"><tspan class="o">  ✓ Checking credential access  0.0s</tspan></text>
+<text class="l l22" x="0" y="454"><tspan class="o">  ✓ Preparing the workspace disk  0.1s</tspan></text>
+<text class="l l23" x="0" y="474"><tspan class="o">  ✓ Preparing the image  1m 14s</tspan></text>
+<text class="l l24" x="0" y="494"><tspan class="o">  ✓ Starting the VM runner  0.3s</tspan></text>
+<text class="l l25" x="0" y="514"><tspan class="o">  ✓ Starting the VM  2m 17s</tspan></text>
+<text class="l l26" x="0" y="534"><tspan class="o">  ✓ Booting the workspace  1.0s</tspan></text>
+<text class="l l27" x="0" y="554"><tspan class="o">✓ Environment hello created · local VM</tspan></text>
+<text class="l l28" x="0" y="574"><tspan class="o">  2 vCPU · 4 GiB RAM · 20 GiB disk</tspan></text>
+<text class="l l29" x="0" y="594"><tspan class="o"></tspan></text>
+<text class="l l30" x="0" y="614"><tspan class="o">  Credentials: none</tspan></text>
+<text class="l l31" x="0" y="634"><tspan class="o">  Secrets:     none</tspan></text>
+<text class="l l32" x="0" y="654"><tspan class="o">  Network:     not attached</tspan></text>
+<text class="l l33" x="0" y="674"><tspan class="o"></tspan></text>
+<text class="l l34" x="0" y="694"><tspan class="o">→ cw --local shell hello</tspan></text>
+<text class="l l35" x="0" y="714"><tspan class="p">$ </tspan><tspan class="c">cw run --in hello --name web --detach -- python3 -m http.server 3000</tspan></text>
+<text class="l l36" x="0" y="734"><tspan class="o">✓ Started session hello/web · local VM</tspan></text>
+<text class="l l37" x="0" y="754"><tspan class="o">→ cw --local attach hello --session web</tspan></text>
+<text class="l l38" x="0" y="774"><tspan class="p">$ </tspan><tspan class="c">cw ports hello --publish 3000</tspan></text>
+<text class="l l39" x="0" y="794"><tspan class="o">Published http://127.0.0.1:3000 -&gt; hello:3000</tspan></text>
+<text class="l l40" x="0" y="814"><tspan class="o">Nothing in hello listens on 127.0.0.1:3000 yet; connections are refused until a server liste</tspan></text>
+<text class="l l41" x="0" y="834"><tspan class="o">ns there.</tspan></text>
+<text class="l l42" x="0" y="854"><tspan class="o">hello publishes:</tspan></text>
+<text class="l l43" x="0" y="874"><tspan class="o">  127.0.0.1:3000 -&gt; 3000</tspan></text>
+<text class="l l44" x="0" y="894"><tspan class="p">$ </tspan><tspan class="c">curl http://127.0.0.1:3000/</tspan></text>
+<text class="l l45" x="0" y="914"><tspan class="o">curl: (56) Recv failure: Connection reset by peer</tspan></text>
+<text class="l l46" x="0" y="934"><tspan class="o">&lt;h1&gt;Hello from a VM&lt;/h1&gt;</tspan></text>
+<text class="l l47" x="0" y="954"><tspan class="p">$ </tspan><tspan class="c">cw rm hello --yes</tspan></text>
+<text class="l l48" x="0" y="974"><tspan class="o">  ✓ Removing the environment  3.3s</tspan></text>
+<text class="l l49" x="0" y="994"><tspan class="o">✓ Environment hello removed</tspan></text>
+<text class="l l50" x="0" y="1014"><tspan class="o">  local VM · environment disk removed</tspan></text>
+<text class="l l51" x="0" y="1034"><tspan class="o"></tspan></text>
+<text class="l l52" x="0" y="1054"><tspan class="o">→ cw ls</tspan></text>
+</g>
+</svg>
+</svg>

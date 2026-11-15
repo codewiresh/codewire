@@ -53,8 +53,9 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
   `invite-email`.
 - The browser walk (the dashboard's invitation pages, and `invite-email`) uses
   e2e@codewire.sh as the invitee. It was created on Dev on 2026-11-13,
-  verified, with two-factor, and owns `codewire-dev-e2e`. Its sign-in moves
-  into OpenBao after the owner's enroll, which is pending.
+  verified, with two-factor, and owns `codewire-dev-e2e`. Its sign-in
+  (password and second factor) is in OpenBao at
+  `apps/codewire/dev/ci-browser-auth`, written 2026-11-13.
 - Record `cw version` with every observation. An observation on Dev counts
   only for the source Dev had rolled out.
 
