@@ -70,13 +70,17 @@ Four rules for a failure that resists (owner, 2026-11-12; cited on #3013):
 - After a diagnosis that took digging, propose the cheap, always-on signal
   that would have shown the cause at first look.
 
-A deadline in a test is a hang guard, not a speed expectation: at least 30 s,
-or the product's own bound when longer. Only a test about a timeout uses a
-short deadline, and only for the step it times. A busy runner exceeds tighter
-bounds (#4078: a 10 s clone, a 5 s wait, a 1 s `printf`). A flake gets its
-cause and a fix plus a regression proof, such as a reproduction under load,
-never a bare rerun. The fail-fast watcher's "Stop at the first failed job" log
-keeps a main job's failed first attempt.
+A deadline in a test bounds only an operation that can hang, and it is a hang
+guard, not a speed expectation: at least 30 s, or the product's own bound when
+longer. Local work that cannot block (process starts, file writes, hashing, a
+script over stubs) gets no wall-clock bound at all; a scripted fixture waits on
+its progress and fails only when progress stops, naming its last step (#4763,
+#4756). Only a test about a timeout uses a short deadline, and only for the
+step it times. A busy runner exceeds tighter bounds (#4078: a 10 s clone, a 5 s
+wait, a 1 s `printf`). A flake gets its cause and a fix plus a regression
+proof, such as a reproduction under load, never a bare rerun. The fail-fast
+watcher's "Stop at the first failed job" log keeps a main job's failed first
+attempt.
 
 ## Local verification
 

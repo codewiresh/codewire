@@ -7,10 +7,14 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
 import struct
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location("cw_image", Path(__file__).with_name("cw-runtime-image.py"))
 image = importlib.util.module_from_spec(spec)
@@ -295,6 +299,62 @@ class Admission(unittest.TestCase):
                 output.truncate(1025)
             with self.assertRaises(ValueError):
                 image.read_regular(task / "large", 1024)
+
+    def inputs(self, task):
+        """An image and a build descriptor, as each subcommand takes them."""
+        binary = task / "cw"
+        binary.write_bytes(self.cw)
+        binary.chmod(0o500)
+        descriptor = task / "artifact.json"
+        descriptor.write_bytes(image.encode({key: value for key, value in self.metadata.items() if key != "size"}
+                                            | {"path": str(binary)}))
+        descriptor.chmod(0o600)
+        archive, pin = self.package()
+        source = task / "cw.oci.tar"
+        source.write_bytes(archive)
+        source.chmod(0o400)
+        return {"build": ["build", "--artifact", str(descriptor)],
+                "unpack": ["unpack", "--image", str(source), "--index-sha256", pin],
+                "pack": ["pack", "--image", str(source), "--index-sha256", pin]}
+
+    def test_no_subcommand_bounds_its_work_by_wall_clock(self):
+        # Nothing here can block: no subprocess or network, and every input is
+        # a bounded regular file read without blocking (read_regular). A
+        # whole-process alarm only measured a loaded host's speed and failed
+        # correct runs (#4756). Each subcommand leaves the caller's SIGALRM
+        # handler and its unarmed timer as they were.
+        sentinel = lambda _signum, _frame: None
+        previous = signal.signal(signal.SIGALRM, sentinel)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        with tempfile.TemporaryDirectory() as task:
+            task = Path(task)
+            for name, arguments in self.inputs(task).items():
+                with self.subTest(name), mock.patch.object(sys, "argv",
+                                                           ["cw-runtime-image.py", *arguments, "--output", str(task / name)]):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        image.main()
+                    self.assertIs(signal.getsignal(signal.SIGALRM), sentinel)
+                    self.assertEqual(signal.alarm(0), 0)
+                    self.assertTrue((task / name).is_dir())
+
+    def test_each_subcommand_refuses_a_fifo_input_at_once(self):
+        # A FIFO is the one input that could block a read; every subcommand
+        # opens its input without blocking and refuses it before reading. The
+        # subprocess timeout is a hang guard only: a refusal takes milliseconds.
+        script = Path(__file__).with_name("cw-runtime-image.py")
+        with tempfile.TemporaryDirectory() as task:
+            task = Path(task)
+            commands = self.inputs(task)
+            fifo = task / "fifo"
+            os.mkfifo(fifo, 0o600)
+            for name, arguments in commands.items():
+                arguments = [str(fifo) if index == 2 else value for index, value in enumerate(arguments)]
+                with self.subTest(name):
+                    result = subprocess.run([sys.executable, str(script), *arguments, "--output", str(task / f"{name}-out")],
+                                            capture_output=True, text=True, timeout=120)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn("bounded regular file", result.stderr)
+                    self.assertFalse((task / f"{name}-out").exists())
 
 
 if __name__ == "__main__":

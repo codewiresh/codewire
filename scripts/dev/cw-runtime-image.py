@@ -19,7 +19,6 @@ import os
 from pathlib import Path
 import stat
 import struct
-import signal
 import sys
 import tarfile
 
@@ -327,10 +326,10 @@ def pack(image_path, index_sha256, output):
 
 
 def main():
-    def expired(_signum, _frame):
-        raise TimeoutError("cw image preparation exceeded its 60 second bound")
-    signal.signal(signal.SIGALRM, expired)
-    signal.alarm(60)
+    # No wall-clock bound: nothing here can block. There is no subprocess or
+    # network, and every input is a bounded regular file read without
+    # blocking (read_regular), so its size limits bound the work. A 60 s
+    # alarm only measured a loaded host and failed correct runs (#4756).
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     produce = sub.add_parser("build")
