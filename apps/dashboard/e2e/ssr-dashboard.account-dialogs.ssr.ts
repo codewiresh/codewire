@@ -244,3 +244,50 @@ test("Account deletion is a danger card, confirmed by typing the email, and refu
   await expect(blocked.getByRole("link", { name: "Acme Platform", exact: true })).toHaveAttribute("href", "/acme-platform/members/");
   await expect(page.locator('form[action="/settings/_actions/delete-account"]')).toHaveCount(0);
 });
+
+test("Organizations lists each membership, confirms Leave, explains the only owner, and says when there is nothing to list", { tag: "@mobile" }, async ({ page }) => {
+  test.skip(!process.env.CODEWIRE_DESIGN_ORIGIN, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
+  const posts: string[] = [];
+  await page.route("**/settings/_actions/organizations/leave", async (route) => {
+    posts.push(route.request().postData() || "");
+    await route.fulfill({ status: 200, contentType: "text/plain", body: "Synthetic leave" });
+  });
+
+  await page.goto(fixture("settings-account.html"));
+  const card = page.getByRole("region", { name: "Organizations", exact: true });
+  // The only owner's Leave is unavailable, and its accessible description
+  // says why (#4519).
+  const blocked = card.getByRole("button", { name: "Leave Codewire Owner's team", exact: true });
+  await expect(blocked).toBeDisabled();
+  await expect(blocked).toHaveAccessibleDescription("You're its only owner. Make someone else an owner first, or delete the organization.");
+
+  await card.getByRole("button", { name: "Leave Acme", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Leave Acme?", exact: true });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(posts).toEqual([]);
+  await card.getByRole("button", { name: "Leave Acme", exact: true }).click();
+  await dialog.getByRole("button", { name: "Leave organization", exact: true }).click();
+  await expect(page.getByText("Synthetic leave", { exact: true })).toBeVisible();
+  expect(posts).toHaveLength(1);
+  expect(Object.fromEntries(new URLSearchParams(posts[0]))).toEqual({ _csrf: "design-fixture-only", org_id: "org-acme" });
+
+  await page.goto(fixture("settings-account-organization-left.html"));
+  const left = page.getByRole("region", { name: "Organizations", exact: true });
+  await expect(left.getByRole("status")).toHaveText("You left the organization.");
+  await expect(left.getByRole("link", { name: "Acme", exact: true })).toHaveCount(0);
+
+  await page.goto(fixture("settings-account-organizations-empty.html"));
+  const empty = page.getByRole("region", { name: "Organizations", exact: true });
+  await expect(empty).toContainText("You're not in an organization yet.");
+  await expect(empty.getByRole("link", { name: "Create an organization", exact: true })).toHaveAttribute("href", "/organizations/new/");
+  await expect(empty.getByRole("link", { name: "See your invitations", exact: true })).toHaveAttribute("href", "/settings/invitations/");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
+  await page.goto(fixture("settings-account-organizations-unavailable.html"));
+  const unavailable = page.getByRole("region", { name: "Organizations", exact: true });
+  await expect(unavailable.getByRole("status")).toHaveText("Your organizations could not be loaded. Reload to try again.");
+  await expect(unavailable).not.toContainText("You're not in an organization yet.");
+  await expect(unavailable.getByRole("button", { name: /^Leave/ })).toHaveCount(0);
+});

@@ -930,6 +930,20 @@ pub(super) async fn mutation_cookie_with_continuation(
     csrf: &str,
     continuation: &str,
 ) -> Result<axum::http::HeaderValue, Response> {
+    mutation_identity(state, headers, csrf, continuation)
+        .await
+        .map(|(_, cookie)| cookie)
+}
+
+/// The mutation check, also returning who passed it, for actions on the
+/// caller's own account such as leaving an organization.
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
+pub(super) async fn mutation_identity(
+    state: &AppState,
+    headers: &HeaderMap,
+    csrf: &str,
+    continuation: &str,
+) -> Result<(IdentityUser, axum::http::HeaderValue), Response> {
     if !account_sessions::cookie_authority_is_unique(headers) {
         return Err(login_redirect(continuation, headers));
     }
@@ -948,7 +962,8 @@ pub(super) async fn mutation_cookie_with_continuation(
     // These actions mutate current-user resources. Optional navigation context
     // cannot grant authority and must not make a personal write depend on an
     // organization list or sandbox inventory being available.
-    canonical_cookie(headers).map_err(|()| login_redirect(continuation, headers))
+    let cookie = canonical_cookie(headers).map_err(|()| login_redirect(continuation, headers))?;
+    Ok((identity, cookie))
 }
 
 fn settings_redirect(code: &str, error: bool, headers: &HeaderMap) -> Response {
@@ -1072,22 +1087,13 @@ pub(super) async fn leave_organization_action(
     let Ok(Form(form)) = form else {
         return private(error_page(WebError::Forbidden));
     };
-    let identity = match authenticated_identity(&state, &headers).await {
-        Ok(identity) => identity,
-        Err(WebError::Unauthorized) => return private(login_redirect(SETTINGS_PATH, &headers)),
-        Err(error) => return private(error_page(error)),
-    };
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, SETTINGS_PATH).await {
-        Ok(cookie) => cookie,
-        Err(response) => return private(response),
-    };
-    let left = crate::organization_connect::remove_member(
-        &state,
-        cookie,
-        form.org_id,
-        identity.id.clone(),
-    )
-    .await;
+    let (identity, cookie) =
+        match mutation_identity(&state, &headers, &form.csrf, SETTINGS_PATH).await {
+            Ok(passed) => passed,
+            Err(response) => return private(response),
+        };
+    let left =
+        crate::organization_connect::remove_member(&state, cookie, form.org_id, identity.id).await;
     private(match leave_outcome(&left) {
         Some((code, error)) => organizations_redirect(code, error, &headers),
         None => login_redirect(SETTINGS_PATH, &headers),
@@ -1232,6 +1238,13 @@ mod tests {
         assert!(body.contains(
             "You're its only owner. Make someone else an owner first, or delete the organization."
         ));
+        // The disabled Leave names its organization and is described by the
+        // reason, so a screen reader hears why it cannot be used.
+        assert!(body.contains(
+            r#"disabled aria-describedby="leave-organization-solo-help"><span>Leave</span><span class="cw-sr-only"> SOLO</span>"#
+        ));
+        assert!(body.contains(r#"<p id="leave-organization-solo-help">You're its only owner."#));
+        assert!(body.contains(r#"<span>Leave</span><span class="cw-sr-only"> ACME</span>"#));
         assert!(!body.contains(r#"data-dialog-open="leave-organization-solo""#));
         assert!(!body.contains(r#"value="id-solo""#));
     }

@@ -269,3 +269,19 @@ pub(crate) fn role_name(value: i32) -> &'static str {
         _ => "Member",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::joined_date;
+
+    /// The account page's join date is a UTC calendar date without a
+    /// leading zero, and nothing when the server sent none (#4519).
+    #[test]
+    fn a_join_date_reads_as_a_utc_day_or_nothing() {
+        // 2026-11-13T23:59:59Z: still the 13th, in any viewer's zone.
+        assert_eq!(joined_date(Some(1_794_614_399)), "Nov 13, 2026");
+        assert_eq!(joined_date(Some(1_793_491_200)), "Nov 1, 2026");
+        assert_eq!(joined_date(None), "");
+        assert_eq!(joined_date(Some(i64::MAX)), "");
+    }
+}
