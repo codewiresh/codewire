@@ -471,12 +471,18 @@ if command -v flock >/dev/null 2>&1; then
   holders[1]=$!
   until_true eval '! flock -n "$slots/1.lock" true && ! flock -n "$slots/2.lock" true && ! flock -n "$slots/3.lock" true' ||
     fail 'the three slots were not all held again'
-  "${slot_waiter[@]}" true &
-  quitter=$!
-  until_true in_line 1 || fail 'a waiter took no ticket'
-  kill -TERM "$quitter"
-  wait "$quitter" 2>/dev/null || true
-  until_true in_line 0 || fail 'a waiter told to stop left its ticket in the line'
+  # Each signal ends the waiter with that signal's own status. A background
+  # command starts with SIGINT ignored, so the waiter is given it back.
+  for stop in TERM:143 INT:130 HUP:129; do
+    env --default-signal=INT "${slot_waiter[@]}" true &
+    quitter=$!
+    until_true in_line 1 || fail 'a waiter took no ticket'
+    kill "-${stop%%:*}" "$quitter"
+    if wait "$quitter" 2>/dev/null; then stopped_with=0; else stopped_with=$?; fi
+    [ "$stopped_with" -eq "${stop##*:}" ] ||
+      fail "a waiter stopped by ${stop%%:*} exited $stopped_with, not ${stop##*:}"
+    until_true in_line 0 || fail "a waiter stopped by ${stop%%:*} left its ticket or its draft in the line"
+  done
   "${slot_waiter[@]}" true &
   stopped=$!
   until_true in_line 1 || fail 'the waiter to be stopped took no ticket'

@@ -431,6 +431,19 @@ done
 if merge_pr 42 $'title\nbody' >/dev/null 2>&1; then
   fail 'multiline merge title was accepted'
 fi
+# The title becomes a commit on main for good, so a placeholder is refused,
+# with or without the pull request's number already on it (#4834 landed as "x").
+for placeholder in x 'x (#42)' wip fix tmp update 'fix it' averyveryverylongsingleword; do
+  if merge_pr 42 "$placeholder" >"$work/merge-title.out" 2>&1; then
+    fail "a placeholder merge title was accepted: $placeholder"
+  fi
+  grep -qF "\"${placeholder% (#42)}\" is not a commit title" "$work/merge-title.out" ||
+    fail "the refused title was not named: $(cat "$work/merge-title.out")"
+done
+[[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a refused merge title contacted the forge'
+# The shortest real title on main is not a placeholder.
+merge_pr 42 'style: rustfmt'
+rm "$MERGE_TEST_ARGS"
 git -C "$merge_repo" fetch -q origin refs/pull/43/head
 git -C "$merge_repo" merge-tree --write-tree main FETCH_HEAD >/dev/null ||
   fail 'the bare-name fixture does not merge cleanly, so it does not test the lock check'

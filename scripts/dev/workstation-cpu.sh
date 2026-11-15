@@ -243,15 +243,22 @@ build() {
   # 19 digits of arrival time, so tickets sort by it; --first sorts before all.
   if $first; then ticket=0000000000000000000; else ticket="$(date +%s%N)"; fi
   ticket="$BUILD_SLOT_DIR/queue/$ticket-$$"
-  # A waiter that is told to stop takes its ticket with it; one that is killed
-  # outright leaves it for queue_head to remove.
-  trap 'rm -f "$ticket"' EXIT
-  trap 'exit 143' TERM INT HUP
+  # A waiter that is told to stop takes its ticket with it, and exits with the
+  # signal's own status; one that is killed outright leaves its ticket for
+  # queue_head to remove.
+  trap 'rm -f "$ticket" "${ticket%/*}/.${ticket##*/}"' EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 129' HUP
   while :; do
-    # The queue, or this ticket, may have been cleared away while waiting.
+    # The queue, or this ticket, may have been cleared away while waiting. The
+    # ticket appears whole: queue_head removes one whose start time it cannot
+    # read, and an empty file would be one. Its draft's name starts with a
+    # dot, so queue_head's glob never sees it.
     if [ ! -e "$ticket" ]; then
       mkdir -p "$BUILD_SLOT_DIR/queue"
-      process_start "$$" | cut -d' ' -f2 >"$ticket"
+      process_start "$$" | cut -d' ' -f2 >"${ticket%/*}/.${ticket##*/}"
+      mv "${ticket%/*}/.${ticket##*/}" "$ticket"
     fi
     if [ "$(queue_head)" = "$ticket" ]; then
       for slot in $(seq 1 "$BUILD_SLOTS"); do
@@ -262,7 +269,7 @@ build() {
     fi
     waited=$((SECONDS - started))
     if [ "$waited" -ge "$report" ]; then
-      echo "codewire-cpu: waited ${waited}s for one of $BUILD_SLOTS build slots, $(find "$BUILD_SLOT_DIR/queue" -type f 2>/dev/null | wc -l) in line ($(slot_holders))" >&2
+      echo "codewire-cpu: waited ${waited}s for one of $BUILD_SLOTS build slots, $(find "$BUILD_SLOT_DIR/queue" -type f -name '[0-9]*' 2>/dev/null | wc -l) in line ($(slot_holders))" >&2
       report=$((waited + 60))
     fi
     sleep 2
@@ -347,7 +354,7 @@ status() {
       "$(ceiling "${paths[$i]}")" "$((before[i] * 100000 / (end - start)))%" "${labels[$i]}"
   done
   printf '\nbuild slots (%s): %s\n' "$BUILD_SLOTS" "$(slot_holders)"
-  printf 'waiting in line: %s\n' "$(find "$BUILD_SLOT_DIR/queue" -type f 2>/dev/null | wc -l)"
+  printf 'waiting in line: %s\n' "$(find "$BUILD_SLOT_DIR/queue" -type f -name '[0-9]*' 2>/dev/null | wc -l)"
   label="$(outside_slots "$uid")"
   if [ -n "$label" ]; then
     printf 'heavy jobs outside a build slot (start them with `build --`):\n%s\n' "$label"

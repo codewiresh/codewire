@@ -11,6 +11,17 @@ if [[ $# != 2 || ! "$1" =~ ^[1-9][0-9]*$ || -z "$2" || "$2" == *$'\n'* || "$2" =
   exit 2
 fi
 pr="$1" title="$2"
+# The title becomes a commit on main and on the public mirror, and it cannot be
+# changed afterwards. A placeholder is refused: #4834's pull request was
+# created with the title "x", and main carries "x (#4834)". Among main's last
+# 3,000 subjects the rule refuses only that one; the shortest real title is
+# "style: rustfmt", 14 characters and two words.
+subject="${title% (#"$pr")}"
+read -ra words <<<"$subject"
+if [[ ${#subject} -lt 10 || ${#words[@]} -lt 2 ]]; then
+  printf 'merge-pr.sh: "%s" is not a commit title: it needs at least 10 characters and two words\n' "$subject" >&2
+  exit 2
+fi
 [[ "$title" == *" (#$pr)" ]] || title="$title (#$pr)"
 
 # A pull request's CI checks its own head, so two valid Cargo lockfiles can

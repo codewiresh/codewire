@@ -3552,7 +3552,7 @@ policy_steps() {
 }
 [ -z "$(policy_function run_repo_rules | policy_steps | uniq -d)" ] \
   && [ -z "$(policy_function run_ci_script_tests | policy_steps | uniq -d)" ] \
-  && [ -z "$(comm -12 <(policy_function run_repo_rules | policy_steps) \
+  && [ -z "$(LC_ALL=C comm -12 <(policy_function run_repo_rules | policy_steps) \
       <(policy_function run_ci_script_tests | policy_steps))" ] || {
   echo 'a policy core step is repeated or belongs to both parts' >&2
   exit 1
