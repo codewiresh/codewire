@@ -415,13 +415,26 @@ async fn journal_then_observe(
             let request = create_request(operation.id, &operation.vm, create, spec, workspace)
                 .map_err(failed)?;
             client.ensure_runtime().await.map_err(failed)?;
-            client.create(request).await.map_err(ended)?;
+            created(client.create(request).await)?;
         }
         (None, Kind::Lifecycle(lifecycle, local_id)) => {
             apply(client, operation, *lifecycle, *local_id).await?
         }
     }
     observe(client, operation).await
+}
+
+/// How a create ends. A VM with this environment's name already exists only
+/// from an earlier create of it by this enrollment (a run started again,
+/// say), since the name carries both, so the create is satisfied and the VM
+/// is reported in whatever state it is in now: running, stopped, starting or
+/// in error. A second VM can't exist: the name is taken.
+fn created(result: Result<(), tonic::Status>) -> Result<(), Attempt> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(status) if status.code() == Code::AlreadyExists => Ok(()),
+        Err(status) => Err(ended(status)),
+    }
 }
 
 /// A journaled operation with this ID must be the same operation: its kind,

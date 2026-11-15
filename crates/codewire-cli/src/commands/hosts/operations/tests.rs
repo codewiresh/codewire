@@ -338,6 +338,9 @@ impl Supervisor for FakeSupervisor {
         &mut self,
         request: local::CreateEnvironmentRequest,
     ) -> Result<(), tonic::Status> {
+        if self.environments.contains_key(&request.name) {
+            return Err(tonic::Status::already_exists("the name is taken"));
+        }
         self.creates += 1;
         self.journal(&request.request_id, local::OperationKind::Create, LOCAL);
         let mut environment = local_environment(LOCAL, 1, local::EnvironmentState::Running);
@@ -470,4 +473,31 @@ async fn a_refused_create_prepares_nothing() {
         outcome => panic!("{outcome:?}"),
     }
     assert_eq!(supervisor.creates, 0);
+}
+
+#[tokio::test]
+async fn a_create_whose_vm_already_exists_is_answered_with_that_vm() {
+    let mut supervisor = FakeSupervisor::default();
+    let first =
+        finished(attempt_with(&mut supervisor, &parsed(host_create_operation(), "", 0)).await);
+    // A later create of the same environment, as a new operation (a run
+    // started again), finds the VM the first one made, stopped since.
+    let name = placement().vm_name(environment_id());
+    supervisor.environments.get_mut(&name).unwrap().state = local::EnvironmentState::Stopped as i32;
+    let again = Operation {
+        id: Uuid::new_v4(),
+        ..parsed(host_create_operation(), "", 0)
+    };
+    match finished(attempt_with(&mut supervisor, &again).await) {
+        Outcome::Done(observation) => {
+            assert_eq!(observation.local_environment_id, LOCAL);
+            assert_eq!(
+                observation.state.as_known(),
+                Some(HostEnvironmentState::HOST_ENVIRONMENT_STATE_STOPPED)
+            );
+        }
+        outcome => panic!("{outcome:?}"),
+    }
+    assert!(matches!(first, Outcome::Done(_)));
+    assert_eq!(supervisor.creates, 1, "no second VM");
 }
