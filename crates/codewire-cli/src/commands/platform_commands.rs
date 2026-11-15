@@ -2146,6 +2146,15 @@ pub(crate) const MANAGED_SSH_DIRECTIVES: &[(&str, &str)] = &[
     ("GSSAPIDelegateCredentials", "no"),
 ];
 
+/// What every Codewire host gets unless `--ssh-option` sets the same keyword.
+/// `cw shell --stdio` cannot tell a quiet session from a relay that died
+/// under it (a laptop that slept, a network that changed), so OpenSSH probes
+/// the environment every 30 s and ends the session when the fifth probe goes
+/// unanswered, about two and a half minutes, instead of hanging. Written after the user's
+/// options in each block, so the user's value comes first and wins.
+pub(crate) const DEFAULT_SSH_DIRECTIVES: &[(&str, &str)] =
+    &[("ServerAliveInterval", "30"), ("ServerAliveCountMax", "4")];
+
 /// Keywords `--ssh-option` may not set: the managed directives (which would be
 /// silently ignored after them), and those that would change the block's
 /// scope, which host key is checked, or which hop is trusted.
@@ -2259,13 +2268,19 @@ pub(crate) fn handle_config_ssh_command(args: SshSetupArgs) -> anyhow::Result<()
 }
 
 /// The managed section `cw setup` and `cw vscode` keep current in the
-/// default SSH config, running this `cw`.
+/// default SSH config, running this `cw`, with the options the user last
+/// gave `cw setup ssh`.
 pub(crate) fn install_default_managed_ssh_config() -> anyhow::Result<SshConfigOutcome> {
+    let file = SshConfigFile::resolve(None)?;
+    let ssh_options = file
+        .read()?
+        .map(|content| managed_ssh_user_options(&content))
+        .unwrap_or_default();
     install_managed_ssh_config(
-        SshConfigFile::resolve(None)?,
+        file,
         &SshConfigOptions {
             cw_command: ssh_cw_command(&current_cw_executable()?)?,
-            ssh_options: Vec::new(),
+            ssh_options,
         },
         false,
     )
@@ -2816,11 +2831,7 @@ pub(crate) fn ssh_config_block(options: &SshConfigOptions) -> anyhow::Result<Str
         );
         let keyword = ssh_option_keyword(option);
         anyhow::ensure!(
-            !MANAGED_SSH_DIRECTIVES
-                .iter()
-                .map(|(managed, _)| *managed)
-                .chain(RESERVED_SSH_OPTION_KEYWORDS.iter().copied())
-                .any(|reserved| reserved.eq_ignore_ascii_case(keyword)),
+            !ssh_option_is_reserved(keyword),
             "SSH option {keyword} is fixed by the managed Codewire block and cannot be overridden"
         );
         ssh_options.push(option);
@@ -2832,6 +2843,14 @@ pub(crate) fn ssh_config_block(options: &SshConfigOptions) -> anyhow::Result<Str
         }
         for option in &ssh_options {
             output.push_str(&format!("    {option}\n"));
+        }
+        for (keyword, value) in DEFAULT_SSH_DIRECTIVES {
+            if !ssh_options
+                .iter()
+                .any(|option| ssh_option_keyword(option).eq_ignore_ascii_case(keyword))
+            {
+                output.push_str(&format!("    {keyword} {value}\n"));
+            }
         }
     }
     // Restore the global scope so the user's entries after this block keep
@@ -2848,19 +2867,19 @@ fn ssh_option_keyword(option: &str) -> &str {
         .unwrap_or_default()
 }
 
-/// Whether `content` starts with a Codewire section whose host blocks are the
-/// current ones, in order, each carrying every managed directive running
-/// `cw_command`, and which ends with `Host *`.
-pub(crate) fn managed_ssh_section_is_current(content: &str, cw_command: &str) -> bool {
-    let content = content.trim_start_matches(['\n', '\r']);
-    let Some(rest) = content.strip_prefix(SSH_CONFIG_MARKER_START) else {
-        return false;
-    };
-    let Some(end) = rest.find(SSH_CONFIG_MARKER_END) else {
-        return false;
-    };
-    let section = &rest[..end];
-    // Each `Host` line opens a block that holds the lines up to the next one.
+/// Whether `--ssh-option` may not set `keyword`: a managed directive (which
+/// would be silently ignored after them) or a reserved keyword.
+fn ssh_option_is_reserved(keyword: &str) -> bool {
+    MANAGED_SSH_DIRECTIVES
+        .iter()
+        .map(|(managed, _)| *managed)
+        .chain(RESERVED_SSH_OPTION_KEYWORDS.iter().copied())
+        .any(|reserved| reserved.eq_ignore_ascii_case(keyword))
+}
+
+/// The host blocks of a Codewire section: each `Host` line opens a block that
+/// holds the lines up to the next one.
+fn ssh_section_blocks(section: &str) -> Vec<(&str, Vec<&str>)> {
     let mut blocks: Vec<(&str, Vec<&str>)> = Vec::new();
     for line in section.lines() {
         if let Some(host) = line.strip_prefix("Host ") {
@@ -2869,6 +2888,22 @@ pub(crate) fn managed_ssh_section_is_current(content: &str, cw_command: &str) ->
             lines.push(line);
         }
     }
+    blocks
+}
+
+/// Whether `content` starts with a Codewire section whose host blocks are the
+/// current ones, in order, each carrying every managed directive running
+/// `cw_command` and a value for every default one, and which ends with
+/// `Host *`.
+pub(crate) fn managed_ssh_section_is_current(content: &str, cw_command: &str) -> bool {
+    let content = content.trim_start_matches(['\n', '\r']);
+    let Some(rest) = content.strip_prefix(SSH_CONFIG_MARKER_START) else {
+        return false;
+    };
+    let Some(end) = rest.find(SSH_CONFIG_MARKER_END) else {
+        return false;
+    };
+    let blocks = ssh_section_blocks(&rest[..end]);
     let Some(((last, trailing), managed)) = blocks.split_last() else {
         return false;
     };
@@ -2881,8 +2916,41 @@ pub(crate) fn managed_ssh_section_is_current(content: &str, cw_command: &str) ->
                     && managed_ssh_directives(cw_command, placement_flag).all(|(keyword, value)| {
                         lines.contains(&format!("    {keyword} {value}").as_str())
                     })
+                    && DEFAULT_SSH_DIRECTIVES.iter().all(|(keyword, _)| {
+                        lines.iter().any(|line| {
+                            ssh_option_keyword(line.trim()).eq_ignore_ascii_case(keyword)
+                        })
+                    })
             },
         )
+}
+
+/// The options `cw setup ssh --ssh-option` wrote into `content`'s Codewire
+/// section, read from its first host block (every block carries the same
+/// ones), so `cw setup` and `cw vscode` keep them when they rewrite it. A
+/// default left as written, or a line the block would now refuse, is not one.
+pub(crate) fn managed_ssh_user_options(content: &str) -> Vec<String> {
+    let Some(section) = split_managed_ssh_sections(content)
+        .ok()
+        .and_then(|split| split.sections.into_iter().next())
+    else {
+        return Vec::new();
+    };
+    let Some((_, lines)) = ssh_section_blocks(&section).into_iter().next() else {
+        return Vec::new();
+    };
+    lines
+        .into_iter()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter(|line| {
+            !DEFAULT_SSH_DIRECTIVES
+                .iter()
+                .any(|(keyword, value)| *line == format!("{keyword} {value}"))
+        })
+        .filter(|line| !ssh_option_is_reserved(ssh_option_keyword(line)))
+        .map(str::to_string)
+        .collect()
 }
 
 /// Puts `managed` first in the file, replacing any earlier Codewire section

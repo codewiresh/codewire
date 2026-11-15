@@ -132,6 +132,8 @@ Host cw-local-*
     PubkeyAuthentication no
     GSSAPIAuthentication no
     GSSAPIDelegateCredentials no
+    ServerAliveInterval 30
+    ServerAliveCountMax 4
 Host cw-cloud-*
     ProxyCommand /opt/codewire/bin/cw --cloud shell --stdio %n
     User codewire
@@ -148,6 +150,8 @@ Host cw-cloud-*
     PubkeyAuthentication no
     GSSAPIAuthentication no
     GSSAPIDelegateCredentials no
+    ServerAliveInterval 30
+    ServerAliveCountMax 4
 Host *
 # ---- END CODEWIRE ----";
 
@@ -208,15 +212,73 @@ fn managed_ssh_block_replaces_an_old_first_use_block_and_goes_first() {
 
 #[test]
 fn managed_ssh_block_placement_is_idempotent() {
-    let options = ssh_test_options(&["ServerAliveInterval 30"]);
+    let options = ssh_test_options(&["ConnectTimeout 10"]);
     let block = ssh_config_block(&options).unwrap();
     let once = place_managed_ssh_section("Host other\n    User someone", &block).unwrap();
     let twice = place_managed_ssh_section(&once, &block).unwrap();
     assert_eq!(once, twice);
-    assert!(once.contains("    ServerAliveInterval 30\nHost *\n"));
     // A user option applies to both managed host blocks.
-    assert_eq!(once.matches("    ServerAliveInterval 30\n").count(), 2);
-    assert!(once.contains("    ServerAliveInterval 30\nHost cw-cloud-*\n"));
+    assert_eq!(once.matches("    ConnectTimeout 10\n").count(), 2);
+    assert!(once.contains("    ConnectTimeout 10\n    ServerAliveInterval 30\n"));
+}
+
+/// A session over a relay that died ends within about two and a half minutes, unless the
+/// user sets their own keepalive: OpenSSH keeps the first value, so theirs is
+/// written before the default, which is then left out.
+#[test]
+fn managed_ssh_block_keeps_sessions_alive_and_the_users_keepalive_wins() {
+    let block = ssh_config_block(&ssh_test_options(&[])).unwrap();
+    assert_eq!(block.matches("    ServerAliveInterval 30\n").count(), 2);
+    assert_eq!(block.matches("    ServerAliveCountMax 4\n").count(), 2);
+
+    let block = ssh_config_block(&ssh_test_options(&["serveraliveinterval=60"])).unwrap();
+    assert!(!block.contains("ServerAliveInterval 30"), "{block}");
+    assert_eq!(
+        block
+            .matches("    serveraliveinterval=60\n    ServerAliveCountMax 4\n")
+            .count(),
+        2
+    );
+    let block = ssh_config_block(&ssh_test_options(&["ServerAliveInterval 0"])).unwrap();
+    assert!(!block.contains("ServerAliveInterval 30"), "{block}");
+    assert!(managed_ssh_section_is_current(&block, TEST_CW));
+
+    // A section written before the keepalive is outdated.
+    let without = CURRENT_MANAGED_SSH_BLOCK
+        .replace("    ServerAliveInterval 30\n", "")
+        .replace("    ServerAliveCountMax 4\n", "");
+    assert!(!managed_ssh_section_is_current(&without, TEST_CW));
+}
+
+/// `cw setup` and `cw vscode` rewrite the section with the options the user
+/// gave `cw setup ssh`, not without them.
+#[test]
+fn managed_ssh_user_options_are_read_back_from_the_section() {
+    let block = ssh_config_block(&ssh_test_options(&[
+        "ServerAliveInterval 60",
+        "ConnectTimeout=10",
+    ]))
+    .unwrap();
+    let config = place_managed_ssh_section("Host other\n    User someone\n", &block).unwrap();
+    let options = managed_ssh_user_options(&config);
+    assert_eq!(options, ["ServerAliveInterval 60", "ConnectTimeout=10"]);
+    let options: Vec<&str> = options.iter().map(String::as_str).collect();
+    assert_eq!(ssh_config_block(&ssh_test_options(&options)).unwrap(), block);
+
+    assert!(managed_ssh_user_options(CURRENT_MANAGED_SSH_BLOCK).is_empty());
+    assert!(managed_ssh_user_options("Host other\n    User someone\n").is_empty());
+    // An older section's own directives are not the user's.
+    let old = [
+        SSH_CONFIG_MARKER_START,
+        "Host cw-*",
+        "    ProxyCommand cw shell --stdio %n",
+        "    StrictHostKeyChecking accept-new",
+        "    UserKnownHostsFile ~/.ssh/codewire_known_hosts",
+        "    User codewire",
+        SSH_CONFIG_MARKER_END,
+    ]
+    .join("\n");
+    assert!(managed_ssh_user_options(&old).is_empty());
 }
 
 #[test]
