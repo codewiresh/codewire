@@ -429,7 +429,43 @@ fn cookie_value(set_cookie: &str) -> String {
         .unwrap()
 }
 
-fn github(id: u64, email: &str, verified: bool) -> Answer {
+/// A GitHub account no other test uses. The tests run at once against one
+/// database, so an identity two tests share signs one of them in to the
+/// other's account (#4863): every identity is made here, never written out.
+#[derive(Clone, Copy)]
+struct GitHubId(u64);
+
+impl GitHubId {
+    fn new() -> Self {
+        Self(10_000_000_000 + u64::from(rand::random::<u32>()))
+    }
+
+    /// The account id Codewire stores for it.
+    fn subject(self) -> String {
+        self.0.to_string()
+    }
+
+    /// The login the fake provider gives it.
+    fn account(self) -> String {
+        format!("user{}", self.0)
+    }
+}
+
+/// A Google subject no other test uses, for the reason [`GitHubId`] gives.
+struct GoogleSub(String);
+
+impl GoogleSub {
+    fn new() -> Self {
+        Self(format!("google-sub-{:016x}", rand::random::<u64>()))
+    }
+
+    fn subject(&self) -> String {
+        self.0.clone()
+    }
+}
+
+fn github(id: GitHubId, email: &str, verified: bool) -> Answer {
+    let GitHubId(id) = id;
     Answer::GitHub {
         id,
         emails: json!([
@@ -439,20 +475,20 @@ fn github(id: u64, email: &str, verified: bool) -> Answer {
     }
 }
 
-fn google(started: &Started, sub: &str, email: &str) -> Value {
+fn google(started: &Started, sub: &GoogleSub, email: &str) -> Value {
     json!({
         "iss": "https://accounts.google.com",
         "aud": GOOGLE_CLIENT,
         "exp": chrono::Utc::now().timestamp() + 300,
         "nonce": started.params["nonce"],
-        "sub": sub,
+        "sub": sub.0,
         "email": email,
         "email_verified": true,
         "name": "Google Person",
     })
 }
 
-async fn cleanup(pool: &PgPool, emails: &[&str], subjects: &[&str]) {
+async fn cleanup(pool: &PgPool, emails: &[&str], subjects: &[String]) {
     sqlx::query(
         "DELETE FROM accounts WHERE provider_id IN ('github','google') AND account_id = ANY($1)",
     )
@@ -496,7 +532,15 @@ async fn insert_user(pool: &PgPool, id: &str, email: &str, verified: bool, enabl
     .unwrap();
 }
 
-async fn link(pool: &PgPool, user: &str, provider: &str, subject: &str) {
+async fn link_github(pool: &PgPool, user: &str, id: GitHubId) {
+    link(pool, user, "github", id.subject()).await;
+}
+
+async fn link_google(pool: &PgPool, user: &str, sub: &GoogleSub) {
+    link(pool, user, "google", sub.subject()).await;
+}
+
+async fn link(pool: &PgPool, user: &str, provider: &str, subject: String) {
     sqlx::query(
         "INSERT INTO accounts (id, user_id, provider_id, account_id) VALUES ($1, $2, $3, $4)",
     )
@@ -602,11 +646,12 @@ async fn new_identity_completes_sign_up_pending_review_without_an_invite() {
     let Some(h) = Harness::new(invite_policy()).await else {
         return;
     };
+    let github_id = GitHubId::new();
     let email = "oauth-pending@example.test";
-    cleanup(&h.pool, &[email], &["9100001"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
 
     let started = h.start("github", "?authRequestID=oidc-request-1").await;
-    h.answer(&started, "pending-code", github(9100001, email, true));
+    h.answer(&started, "pending-code", github(github_id, email, true));
     let reply = h.callback("github", &started, "pending-code").await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
     assert_eq!(reply.location.as_deref(), Some("/signup/complete"));
@@ -673,7 +718,7 @@ async fn new_identity_completes_sign_up_pending_review_without_an_invite() {
             .fetch_all(&h.pool)
             .await
             .unwrap();
-    assert_eq!(methods, [("github".to_owned(), "9100001".to_owned(), None)]);
+    assert_eq!(methods, [("github".to_owned(), github_id.subject(), None)]);
     assert_eq!(
         audit_count(&h.pool, &user_id, "user.signup.access_requested").await,
         1
@@ -692,12 +737,12 @@ async fn new_identity_completes_sign_up_pending_review_without_an_invite() {
 
     // Signing in again while access is pending meets the access gate.
     let started = h.start("github", "").await;
-    h.answer(&started, "pending-again", github(9100001, email, true));
+    h.answer(&started, "pending-again", github(github_id, email, true));
     h.callback("github", &started, "pending-again")
         .await
         .assert_refused("disabled");
     assert_eq!(sessions(&h.pool, &user_id).await, 0);
-    cleanup(&h.pool, &[email], &["9100001"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
 }
 
 #[tokio::test]
@@ -705,13 +750,14 @@ async fn new_identity_with_an_invite_signs_up_active_and_gets_a_session() {
     let Some(h) = Harness::new(invite_policy()).await else {
         return;
     };
+    let google_sub = GoogleSub::new();
     let email = "oauth-active@example.test";
-    cleanup(&h.pool, &[email], &["google-sub-active"]).await;
+    cleanup(&h.pool, &[email], &[google_sub.subject()]).await;
 
     let started = h
         .start("google", "?return_to=%2Fdevice%3Fuser_code%3DABCD-EFGH")
         .await;
-    let claims = google(&started, "google-sub-active", email);
+    let claims = google(&started, &google_sub, email);
     h.answer(&started, "active-code", Answer::Google { claims });
     let reply = h.callback("google", &started, "active-code").await;
     assert_eq!(reply.location.as_deref(), Some("/signup/complete"));
@@ -741,7 +787,7 @@ async fn new_identity_with_an_invite_signs_up_active_and_gets_a_session() {
     assert_eq!(name.as_deref(), Some("Google Person"));
     assert_eq!(sessions(&h.pool, &user_id).await, 1);
     assert_eq!(audit_count(&h.pool, &user_id, "user.signup").await, 1);
-    cleanup(&h.pool, &[email], &["google-sub-active"]).await;
+    cleanup(&h.pool, &[email], &[google_sub.subject()]).await;
 }
 
 #[tokio::test]
@@ -749,11 +795,12 @@ async fn an_open_server_signs_up_a_new_identity_active_without_an_invite_or_reas
     let Some(h) = Harness::new(invite_policy().with_mode(SignupMode::Open)).await else {
         return;
     };
+    let github_id = GitHubId::new();
     let email = "oauth-open@example.test";
-    cleanup(&h.pool, &[email], &["9100041"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
 
     let started = h.start("github", "").await;
-    h.answer(&started, "open-code", github(9100041, email, true));
+    h.answer(&started, "open-code", github(github_id, email, true));
     let reply = h.callback("github", &started, "open-code").await;
     assert_eq!(reply.location.as_deref(), Some("/signup/complete"));
     let handle = cookie_value(&reply.cookie("codewire_oauth_signup").unwrap());
@@ -781,7 +828,7 @@ async fn an_open_server_signs_up_a_new_identity_active_without_an_invite_or_reas
     assert!(reason.is_none());
     assert_eq!(sessions(&h.pool, &user_id).await, 1);
     assert_eq!(audit_count(&h.pool, &user_id, "user.signup").await, 1);
-    cleanup(&h.pool, &[email], &["9100041"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
 }
 
 #[tokio::test]
@@ -789,10 +836,11 @@ async fn a_linked_identity_signs_in_and_returns_to_its_target() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
     let email = "oauth-returning@example.test";
-    cleanup(&h.pool, &[email], &["9100002"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
     insert_user(&h.pool, "oauth-returning", email, false, true).await;
-    link(&h.pool, "oauth-returning", "github", "9100002").await;
+    link_github(&h.pool, "oauth-returning", github_id).await;
     sqlx::query("UPDATE users SET failed_login_attempts = 3 WHERE id = 'oauth-returning'")
         .execute(&h.pool)
         .await
@@ -805,7 +853,7 @@ async fn a_linked_identity_signs_in_and_returns_to_its_target() {
     h.answer(
         &started,
         "returning-code",
-        github(9100002, "other@example.test", true),
+        github(github_id, "other@example.test", true),
     );
     let reply = h.callback("github", &started, "returning-code").await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
@@ -848,7 +896,7 @@ async fn a_linked_identity_signs_in_and_returns_to_its_target() {
             .await
             .unwrap();
     assert_eq!(others, 0);
-    cleanup(&h.pool, &[email], &["9100002"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
 }
 
 #[tokio::test]
@@ -856,12 +904,14 @@ async fn google_links_a_gmail_or_hosted_domain_match_automatically() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let gmail_sub = GoogleSub::new();
+    let hosted_sub = GoogleSub::new();
     let gmail = "OAuth.Link@GMail.com";
     let hosted = "oauth-hosted@corp-oauth.example";
     cleanup(
         &h.pool,
         &[gmail, hosted],
-        &["google-sub-link", "google-sub-hd"],
+        &[gmail_sub.subject(), hosted_sub.subject()],
     )
     .await;
     insert_user(&h.pool, "oauth-link", gmail, true, true).await;
@@ -869,10 +919,10 @@ async fn google_links_a_gmail_or_hosted_domain_match_automatically() {
 
     for (user, subject, email, hd) in [
         // Google spells the address in lower case; it is the same account.
-        ("oauth-link", "google-sub-link", gmail.to_lowercase(), None),
+        ("oauth-link", &gmail_sub, gmail.to_lowercase(), None),
         (
             "oauth-hd",
-            "google-sub-hd",
+            &hosted_sub,
             hosted.to_owned(),
             Some("corp-oauth.example"),
         ),
@@ -882,7 +932,7 @@ async fn google_links_a_gmail_or_hosted_domain_match_automatically() {
         if let Some(hd) = hd {
             claims["hd"] = json!(hd);
         }
-        let code = format!("link-{subject}");
+        let code = format!("link-{}", subject.subject());
         h.answer(&started, &code, Answer::Google { claims });
         let reply = h.callback("google", &started, &code).await;
         assert_eq!(
@@ -895,7 +945,7 @@ async fn google_links_a_gmail_or_hosted_domain_match_automatically() {
         let linked: Vec<String> = sqlx::query_scalar(
             "SELECT user_id FROM accounts WHERE provider_id = 'google' AND account_id = $1",
         )
-        .bind(subject)
+        .bind(subject.subject())
         .fetch_all(&h.pool)
         .await
         .unwrap();
@@ -925,7 +975,7 @@ async fn google_links_a_gmail_or_hosted_domain_match_automatically() {
     cleanup(
         &h.pool,
         &[gmail, hosted],
-        &["google-sub-link", "google-sub-hd"],
+        &[gmail_sub.subject(), hosted_sub.subject()],
     )
     .await;
 }
@@ -977,16 +1027,17 @@ async fn a_github_email_match_is_linked_only_from_the_accounts_own_email() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
     let email = "oauth-github-confirm@example.test";
-    cleanup(&h.pool, &[email], &["9100031"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
     insert_user(&h.pool, "oauth-github-confirm", email, true, true).await;
 
     let started = h.start("github", "").await;
-    h.answer(&started, "confirm-code", github(9100031, email, true));
+    h.answer(&started, "confirm-code", github(github_id, email, true));
     let reply = h.callback("github", &started, "confirm-code").await;
     reply.assert_link_sent("github");
     assert_eq!(
-        link_rows(&h.pool, "github", "9100031").await,
+        link_rows(&h.pool, "github", &github_id.subject()).await,
         0,
         "nothing linked yet"
     );
@@ -1023,8 +1074,9 @@ async fn a_github_email_match_is_linked_only_from_the_accounts_own_email() {
     );
     assert_eq!(sessions(&h.pool, "oauth-github-confirm").await, 0);
     let owner: String = sqlx::query_scalar(
-        "SELECT user_id FROM accounts WHERE provider_id = 'github' AND account_id = '9100031'",
+        "SELECT user_id FROM accounts WHERE provider_id = 'github' AND account_id = $1",
     )
+    .bind(github_id.subject())
     .fetch_one(&h.pool)
     .await
     .unwrap();
@@ -1045,11 +1097,15 @@ async fn a_github_email_match_is_linked_only_from_the_accounts_own_email() {
 
     // Now GitHub signs in through the gates.
     let started = h.start("github", "").await;
-    h.answer(&started, "confirmed-sign-in", github(9100031, email, true));
+    h.answer(
+        &started,
+        "confirmed-sign-in",
+        github(github_id, email, true),
+    );
     let reply = h.callback("github", &started, "confirmed-sign-in").await;
     assert!(reply.cookie("codewire.session_token").is_some());
     assert_eq!(h.mail.count(), 1);
-    cleanup(&h.pool, &[email], &["9100031"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
 }
 
 #[tokio::test]
@@ -1057,20 +1113,21 @@ async fn a_confirmation_completes_only_in_the_browser_that_asked_for_it() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
     let email = "oauth-requester@example.test";
-    cleanup(&h.pool, &[email], &["9100035"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
     insert_user(&h.pool, "oauth-requester", email, true, true).await;
 
     let started = h.start("github", "").await;
-    h.answer(&started, "requester-code", github(9100035, email, true));
+    h.answer(&started, "requester-code", github(github_id, email, true));
     h.callback("github", &started, "requester-code")
         .await
         .assert_link_sent("github");
     let (_, _, token) = h.mail.last();
     // The email and the page name the provider account.
-    assert_eq!(h.mail.last_account(), "user9100035");
+    assert_eq!(h.mail.last_account(), github_id.account());
     let pending = h.pending_link(&token).await;
-    assert_eq!(pending.body["account"], "user9100035");
+    assert_eq!(pending.body["account"], github_id.account());
     // Only a hash of the requester secret is stored.
     let requester = h.requester.lock().unwrap().clone().expect("requester");
     let stored: String = sqlx::query_scalar(
@@ -1088,17 +1145,17 @@ async fn a_confirmation_completes_only_in_the_browser_that_asked_for_it() {
     for other in [None, Some("0".repeat(64)), Some("not-a-secret".to_owned())] {
         let refused = h.confirm_link_from(&token, other.as_deref()).await;
         assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED, "{other:?}");
-        assert_eq!(link_rows(&h.pool, "github", "9100035").await, 0);
+        assert_eq!(link_rows(&h.pool, "github", &github_id.subject()).await, 0);
         assert_eq!(h.pending_link(&token).await.status, StatusCode::OK);
     }
 
     // The browser that started the sign-in confirms.
     let confirmed = h.confirm_link(&token).await;
     assert_eq!(confirmed.status, StatusCode::OK);
-    assert_eq!(confirmed.body["account"], "user9100035");
-    assert_eq!(link_rows(&h.pool, "github", "9100035").await, 1);
+    assert_eq!(confirmed.body["account"], github_id.account());
+    assert_eq!(link_rows(&h.pool, "github", &github_id.subject()).await, 1);
     assert_eq!(sessions(&h.pool, "oauth-requester").await, 0);
-    cleanup(&h.pool, &[email], &["9100035"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
 }
 
 #[tokio::test]
@@ -1106,14 +1163,15 @@ async fn a_new_confirmation_replaces_the_old_and_an_expired_one_is_refused() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
     let email = "oauth-replace@example.test";
-    cleanup(&h.pool, &[email], &["9100032"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
     insert_user(&h.pool, "oauth-replace", email, true, true).await;
 
     let mut tokens = Vec::new();
     for code in ["replace-1", "replace-2"] {
         let started = h.start("github", "").await;
-        h.answer(&started, code, github(9100032, email, true));
+        h.answer(&started, code, github(github_id, email, true));
         h.callback("github", &started, code)
             .await
             .assert_link_sent("github");
@@ -1139,12 +1197,12 @@ async fn a_new_confirmation_replaces_the_old_and_an_expired_one_is_refused() {
         h.confirm_link(&tokens[1]).await.status,
         StatusCode::NOT_FOUND
     );
-    assert_eq!(link_rows(&h.pool, "github", "9100032").await, 0);
+    assert_eq!(link_rows(&h.pool, "github", &github_id.subject()).await, 0);
     // Unknown and malformed tokens get the same answer.
     for token in ["0".repeat(64), "not-a-token".to_owned()] {
         assert_eq!(h.confirm_link(&token).await.status, StatusCode::NOT_FOUND);
     }
-    cleanup(&h.pool, &[email], &["9100032"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
 }
 
 #[tokio::test]
@@ -1152,30 +1210,32 @@ async fn google_without_a_vouched_domain_is_confirmed_by_email() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let plain_sub = GoogleSub::new();
+    let wrong_domain_sub = GoogleSub::new();
     let email = "oauth-google-confirm@corp-other.example";
     cleanup(
         &h.pool,
         &[email],
-        &["google-sub-plain", "google-sub-wrong-hd"],
+        &[plain_sub.subject(), wrong_domain_sub.subject()],
     )
     .await;
     insert_user(&h.pool, "oauth-google-confirm", email, true, true).await;
 
     for (subject, hd) in [
-        ("google-sub-plain", None),
-        ("google-sub-wrong-hd", Some("another-domain.example")),
+        (&plain_sub, None),
+        (&wrong_domain_sub, Some("another-domain.example")),
     ] {
         let started = h.start("google", "").await;
         let mut claims = google(&started, subject, email);
         if let Some(hd) = hd {
             claims["hd"] = json!(hd);
         }
-        let code = format!("confirm-{subject}");
+        let code = format!("confirm-{}", subject.subject());
         h.answer(&started, &code, Answer::Google { claims });
         h.callback("google", &started, &code)
             .await
             .assert_link_sent("google");
-        assert_eq!(link_rows(&h.pool, "google", subject).await, 0);
+        assert_eq!(link_rows(&h.pool, "google", &subject.subject()).await, 0);
         let (to, provider, _) = h.mail.last();
         assert_eq!((to.as_str(), provider), (email, "google"));
         assert_eq!(h.mail.last_account(), email);
@@ -1183,13 +1243,16 @@ async fn google_without_a_vouched_domain_is_confirmed_by_email() {
     // The second replaced the first: one confirmation, for the last identity.
     let (_, _, token) = h.mail.last();
     assert_eq!(h.confirm_link(&token).await.status, StatusCode::OK);
-    assert_eq!(link_rows(&h.pool, "google", "google-sub-wrong-hd").await, 1);
-    assert_eq!(link_rows(&h.pool, "google", "google-sub-plain").await, 0);
+    assert_eq!(
+        link_rows(&h.pool, "google", &wrong_domain_sub.subject()).await,
+        1
+    );
+    assert_eq!(link_rows(&h.pool, "google", &plain_sub.subject()).await, 0);
     assert_eq!(sessions(&h.pool, "oauth-google-confirm").await, 0);
     cleanup(
         &h.pool,
         &[email],
-        &["google-sub-plain", "google-sub-wrong-hd"],
+        &[plain_sub.subject(), wrong_domain_sub.subject()],
     )
     .await;
 }
@@ -1199,13 +1262,20 @@ async fn a_confirmation_is_refused_when_the_account_changed_since() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
+    let other_github_id = GitHubId::new();
     let email = "oauth-changed@example.test";
-    cleanup(&h.pool, &[email], &["9100033", "9100034"]).await;
+    cleanup(
+        &h.pool,
+        &[email],
+        &[github_id.subject(), other_github_id.subject()],
+    )
+    .await;
     insert_user(&h.pool, "oauth-changed", email, true, true).await;
 
     // Disabled in between.
     let started = h.start("github", "").await;
-    h.answer(&started, "changed-1", github(9100033, email, true));
+    h.answer(&started, "changed-1", github(github_id, email, true));
     h.callback("github", &started, "changed-1")
         .await
         .assert_link_sent("github");
@@ -1215,7 +1285,7 @@ async fn a_confirmation_is_refused_when_the_account_changed_since() {
         .await
         .unwrap();
     assert_eq!(h.confirm_link(&token).await.status, StatusCode::FORBIDDEN);
-    assert_eq!(link_rows(&h.pool, "github", "9100033").await, 0);
+    assert_eq!(link_rows(&h.pool, "github", &github_id.subject()).await, 0);
     // Used up: enabling the account again does not revive it.
     sqlx::query("UPDATE users SET enabled = true WHERE id = 'oauth-changed'")
         .execute(&h.pool)
@@ -1225,7 +1295,7 @@ async fn a_confirmation_is_refused_when_the_account_changed_since() {
 
     // Locked in between.
     let started = h.start("github", "").await;
-    h.answer(&started, "changed-2", github(9100033, email, true));
+    h.answer(&started, "changed-2", github(github_id, email, true));
     h.callback("github", &started, "changed-2")
         .await
         .assert_link_sent("github");
@@ -1237,7 +1307,7 @@ async fn a_confirmation_is_refused_when_the_account_changed_since() {
     .await
     .unwrap();
     assert_eq!(h.confirm_link(&token).await.status, StatusCode::FORBIDDEN);
-    assert_eq!(link_rows(&h.pool, "github", "9100033").await, 0);
+    assert_eq!(link_rows(&h.pool, "github", &github_id.subject()).await, 0);
     sqlx::query("UPDATE users SET locked_until = NULL WHERE id = 'oauth-changed'")
         .execute(&h.pool)
         .await
@@ -1245,7 +1315,7 @@ async fn a_confirmation_is_refused_when_the_account_changed_since() {
 
     // The identity was linked to someone else in between.
     let started = h.start("github", "").await;
-    h.answer(&started, "changed-3", github(9100034, email, true));
+    h.answer(&started, "changed-3", github(other_github_id, email, true));
     h.callback("github", &started, "changed-3")
         .await
         .assert_link_sent("github");
@@ -1253,16 +1323,22 @@ async fn a_confirmation_is_refused_when_the_account_changed_since() {
     let other = "oauth-changed-other@example.test";
     cleanup(&h.pool, &[other], &[]).await;
     insert_user(&h.pool, "oauth-changed-other", other, true, true).await;
-    link(&h.pool, "oauth-changed-other", "github", "9100034").await;
+    link_github(&h.pool, "oauth-changed-other", other_github_id).await;
     assert_eq!(h.confirm_link(&token).await.status, StatusCode::CONFLICT);
     let owner: String = sqlx::query_scalar(
-        "SELECT user_id FROM accounts WHERE provider_id = 'github' AND account_id = '9100034'",
+        "SELECT user_id FROM accounts WHERE provider_id = 'github' AND account_id = $1",
     )
+    .bind(other_github_id.subject())
     .fetch_one(&h.pool)
     .await
     .unwrap();
     assert_eq!(owner, "oauth-changed-other");
-    cleanup(&h.pool, &[email, other], &["9100033", "9100034"]).await;
+    cleanup(
+        &h.pool,
+        &[email, other],
+        &[github_id.subject(), other_github_id.subject()],
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1327,11 +1403,12 @@ async fn an_invite_only_server_refuses_provider_sign_up() {
     else {
         return;
     };
+    let github_id = GitHubId::new();
     let email = "oauth-invite-only-new@example.test";
-    cleanup(&h.pool, &[email], &["9100031"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
 
     let started = h.start("github", "").await;
-    h.answer(&started, "invite-only-code", github(9100031, email, true));
+    h.answer(&started, "invite-only-code", github(github_id, email, true));
     h.callback("github", &started, "invite-only-code")
         .await
         .assert_refused("invite_only");
@@ -1343,15 +1420,59 @@ async fn an_invite_only_server_refuses_provider_sign_up() {
     assert_eq!(created, 0);
 }
 
+/// An identity already linked to an account signs in to it on an invite-only
+/// server too: that is a sign-in, not a sign-up. It is what the test above
+/// met when another test's link held the identity it reused (#4863), and it
+/// still makes no account for the address the provider reports.
+#[tokio::test]
+async fn an_invite_only_server_signs_in_an_identity_already_linked() {
+    let Some(h) =
+        Harness::new(SignupInvitePolicy::default().with_mode(SignupMode::InviteOnly)).await
+    else {
+        return;
+    };
+    let github_id = GitHubId::new();
+    let email = "oauth-invite-only-linked@example.test";
+    let reported = "oauth-invite-only-reported@example.test";
+    cleanup(&h.pool, &[email, reported], &[github_id.subject()]).await;
+    insert_user(&h.pool, "oauth-invite-only-linked", email, true, true).await;
+    link_github(&h.pool, "oauth-invite-only-linked", github_id).await;
+
+    let started = h.start("github", "").await;
+    h.answer(
+        &started,
+        "invite-only-linked-code",
+        github(github_id, reported, true),
+    );
+    let reply = h
+        .callback("github", &started, "invite-only-linked-code")
+        .await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        reply.location.as_deref(),
+        Some("/setup-2fa?return_to=%2Fdashboard%2F")
+    );
+    assert!(reply.cookie("codewire.session_token").is_some());
+    assert_eq!(sessions(&h.pool, "oauth-invite-only-linked").await, 1);
+    let created: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE email = $1")
+        .bind(reported)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(created, 0);
+    cleanup(&h.pool, &[email, reported], &[github_id.subject()]).await;
+}
+
 #[tokio::test]
 async fn a_vouched_address_is_never_linked_by_a_provider_that_owns_it() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let google_sub = GoogleSub::new();
     // Google vouches for a whole @gmail.com address, the case that links at
     // once when the account's address is verified.
     let email = "oauth-vouched-owner@gmail.com";
-    cleanup(&h.pool, &[email], &["google-sub-vouched"]).await;
+    cleanup(&h.pool, &[email], &[google_sub.subject()]).await;
     insert_user(&h.pool, "oauth-vouched-owner", email, false, true).await;
     sqlx::query(
         "UPDATE users SET email_vouched_by = 'invitation' WHERE id = 'oauth-vouched-owner'",
@@ -1361,7 +1482,7 @@ async fn a_vouched_address_is_never_linked_by_a_provider_that_owns_it() {
     .unwrap();
 
     let started = h.start("google", "").await;
-    let claims = google(&started, "google-sub-vouched", email);
+    let claims = google(&started, &google_sub, email);
     h.answer(&started, "vouched-code", Answer::Google { claims });
     h.callback("google", &started, "vouched-code")
         .await
@@ -1373,7 +1494,7 @@ async fn a_vouched_address_is_never_linked_by_a_provider_that_owns_it() {
             .unwrap();
     assert_eq!(linked, 0);
     assert_eq!(sessions(&h.pool, "oauth-vouched-owner").await, 0);
-    cleanup(&h.pool, &[email], &["google-sub-vouched"]).await;
+    cleanup(&h.pool, &[email], &[google_sub.subject()]).await;
 }
 
 #[tokio::test]
@@ -1381,12 +1502,13 @@ async fn an_unverified_codewire_email_is_never_linked() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
     let email = "oauth-unverified-owner@example.test";
-    cleanup(&h.pool, &[email], &["9100003"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
     insert_user(&h.pool, "oauth-unverified-owner", email, false, true).await;
 
     let started = h.start("github", "?authRequestID=oidc-request-2").await;
-    h.answer(&started, "takeover-code", github(9100003, email, true));
+    h.answer(&started, "takeover-code", github(github_id, email, true));
     let reply = h.callback("github", &started, "takeover-code").await;
     reply.assert_refused("link_required");
     assert_eq!(
@@ -1404,7 +1526,7 @@ async fn an_unverified_codewire_email_is_never_linked() {
     // An account that never verified its address gets no confirmation either:
     // whoever registered the address first would gain the identity.
     assert_eq!(h.mail.count(), 0);
-    cleanup(&h.pool, &[email], &["9100003"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
 }
 
 #[tokio::test]
@@ -1412,17 +1534,20 @@ async fn two_factor_is_still_asked_after_a_provider_sign_in() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
+    let other_github_id = GitHubId::new();
+    let google_sub = GoogleSub::new();
     let email = "oauth-2fa@example.test";
-    cleanup(&h.pool, &[email], &["9100004"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
     insert_user(&h.pool, "oauth-2fa", email, true, true).await;
     sqlx::query("UPDATE users SET two_factor_enabled = true WHERE id = 'oauth-2fa'")
         .execute(&h.pool)
         .await
         .unwrap();
-    link(&h.pool, "oauth-2fa", "github", "9100004").await;
+    link_github(&h.pool, "oauth-2fa", github_id).await;
 
     let started = h.start("github", "?authRequestID=oidc-request-3").await;
-    h.answer(&started, "2fa-code", github(9100004, email, true));
+    h.answer(&started, "2fa-code", github(github_id, email, true));
     let reply = h.callback("github", &started, "2fa-code").await;
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
     assert_eq!(
@@ -1457,35 +1582,42 @@ async fn two_factor_is_still_asked_after_a_provider_sign_in() {
     // for a Google-vouched address: the account's own address confirms it,
     // and nothing is linked until then.
     let gmail = "oauth-2fa-google@gmail.com";
-    cleanup(&h.pool, &[gmail], &["google-sub-2fa"]).await;
+    cleanup(&h.pool, &[gmail], &[google_sub.subject()]).await;
     insert_user(&h.pool, "oauth-2fa-google", gmail, true, true).await;
     sqlx::query("UPDATE users SET two_factor_enabled = true WHERE id = 'oauth-2fa-google'")
         .execute(&h.pool)
         .await
         .unwrap();
     let started = h.start("github", "").await;
-    h.answer(&started, "2fa-unlinked-code", github(9100024, email, true));
+    h.answer(
+        &started,
+        "2fa-unlinked-code",
+        github(other_github_id, email, true),
+    );
     h.callback("github", &started, "2fa-unlinked-code")
         .await
         .assert_link_sent("github");
-    assert_eq!(link_rows(&h.pool, "github", "9100024").await, 0);
+    assert_eq!(
+        link_rows(&h.pool, "github", &other_github_id.subject()).await,
+        0
+    );
     let started = h.start("google", "").await;
-    let claims = google(&started, "google-sub-2fa", gmail);
+    let claims = google(&started, &google_sub, gmail);
     h.answer(&started, "2fa-google-code", Answer::Google { claims });
     h.callback("google", &started, "2fa-google-code")
         .await
         .assert_link_sent("google");
-    assert_eq!(link_rows(&h.pool, "google", "google-sub-2fa").await, 0);
+    assert_eq!(link_rows(&h.pool, "google", &google_sub.subject()).await, 0);
     assert_eq!(h.mail.last().0, gmail);
 
     // Confirming links without a session; signing in with the provider
     // then asks for the second factor.
     let (_, _, token) = h.mail.last();
     assert_eq!(h.confirm_link(&token).await.status, StatusCode::OK);
-    assert_eq!(link_rows(&h.pool, "google", "google-sub-2fa").await, 1);
+    assert_eq!(link_rows(&h.pool, "google", &google_sub.subject()).await, 1);
     assert_eq!(sessions(&h.pool, "oauth-2fa-google").await, 0);
     let started = h.start("google", "").await;
-    let claims = google(&started, "google-sub-2fa", gmail);
+    let claims = google(&started, &google_sub, gmail);
     h.answer(&started, "2fa-google-sign-in", Answer::Google { claims });
     let reply = h.callback("google", &started, "2fa-google-sign-in").await;
     assert_eq!(reply.location.as_deref(), Some("/two-factor"));
@@ -1499,7 +1631,11 @@ async fn two_factor_is_still_asked_after_a_provider_sign_in() {
     cleanup(
         &h.pool,
         &[email, gmail],
-        &["9100004", "9100024", "google-sub-2fa"],
+        &[
+            github_id.subject(),
+            other_github_id.subject(),
+            google_sub.subject(),
+        ],
     )
     .await;
 }
@@ -1509,13 +1645,22 @@ async fn disabled_and_locked_accounts_are_refused() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let disabled_github = GitHubId::new();
+    let locked_github = GitHubId::new();
+    let unlinked_disabled_github = GitHubId::new();
+    let unlinked_locked_github = GitHubId::new();
     let disabled = "oauth-disabled@example.test";
     let locked = "oauth-locked@example.test";
-    cleanup(&h.pool, &[disabled, locked], &["9100005", "9100006"]).await;
+    cleanup(
+        &h.pool,
+        &[disabled, locked],
+        &[disabled_github.subject(), locked_github.subject()],
+    )
+    .await;
     insert_user(&h.pool, "oauth-disabled", disabled, true, false).await;
-    link(&h.pool, "oauth-disabled", "github", "9100005").await;
+    link_github(&h.pool, "oauth-disabled", disabled_github).await;
     insert_user(&h.pool, "oauth-locked", locked, true, true).await;
-    link(&h.pool, "oauth-locked", "github", "9100006").await;
+    link_github(&h.pool, "oauth-locked", locked_github).await;
     sqlx::query(
         "UPDATE users SET locked_until = NOW() + interval '10 minutes' WHERE id = 'oauth-locked'",
     )
@@ -1524,23 +1669,40 @@ async fn disabled_and_locked_accounts_are_refused() {
     .unwrap();
 
     let started = h.start("github", "").await;
-    h.answer(&started, "disabled-code", github(9100005, disabled, true));
+    h.answer(
+        &started,
+        "disabled-code",
+        github(disabled_github, disabled, true),
+    );
     h.callback("github", &started, "disabled-code")
         .await
         .assert_refused("disabled");
     assert_eq!(sessions(&h.pool, "oauth-disabled").await, 0);
 
     let started = h.start("github", "").await;
-    h.answer(&started, "locked-code", github(9100006, locked, true));
+    h.answer(&started, "locked-code", github(locked_github, locked, true));
     h.callback("github", &started, "locked-code")
         .await
         .assert_refused("locked");
     assert_eq!(sessions(&h.pool, "oauth-locked").await, 0);
-    cleanup(&h.pool, &[disabled, locked], &["9100005", "9100006"]).await;
+    cleanup(
+        &h.pool,
+        &[disabled, locked],
+        &[disabled_github.subject(), locked_github.subject()],
+    )
+    .await;
 
     // An unlinked identity whose verified email matches a disabled or locked
     // account is refused as that account would be, and is not linked to it.
-    cleanup(&h.pool, &[disabled, locked], &["9100015", "9100016"]).await;
+    cleanup(
+        &h.pool,
+        &[disabled, locked],
+        &[
+            unlinked_disabled_github.subject(),
+            unlinked_locked_github.subject(),
+        ],
+    )
+    .await;
     insert_user(&h.pool, "oauth-disabled", disabled, true, false).await;
     insert_user(&h.pool, "oauth-locked", locked, true, true).await;
     sqlx::query(
@@ -1550,8 +1712,18 @@ async fn disabled_and_locked_accounts_are_refused() {
     .await
     .unwrap();
     for (subject, email, code, refusal) in [
-        (9100015, disabled, "unlinked-disabled-code", "disabled"),
-        (9100016, locked, "unlinked-locked-code", "locked"),
+        (
+            unlinked_disabled_github,
+            disabled,
+            "unlinked-disabled-code",
+            "disabled",
+        ),
+        (
+            unlinked_locked_github,
+            locked,
+            "unlinked-locked-code",
+            "locked",
+        ),
     ] {
         let started = h.start("github", "").await;
         h.answer(&started, code, github(subject, email, true));
@@ -1561,14 +1733,22 @@ async fn disabled_and_locked_accounts_are_refused() {
         let links: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM accounts WHERE provider_id = 'github' AND account_id = $1",
         )
-        .bind(subject.to_string())
+        .bind(subject.subject())
         .fetch_one(&h.pool)
         .await
         .unwrap();
         assert_eq!(links, 0, "{refusal} account was linked");
     }
     assert_eq!(h.mail.count(), 0, "no confirmation for a refused account");
-    cleanup(&h.pool, &[disabled, locked], &["9100015", "9100016"]).await;
+    cleanup(
+        &h.pool,
+        &[disabled, locked],
+        &[
+            unlinked_disabled_github.subject(),
+            unlinked_locked_github.subject(),
+        ],
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1576,15 +1756,16 @@ async fn state_missing_mismatched_expired_or_replayed_is_refused() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
     let email = "oauth-state@example.test";
-    cleanup(&h.pool, &[email], &["9100007"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
     insert_user(&h.pool, "oauth-state", email, true, true).await;
-    link(&h.pool, "oauth-state", "github", "9100007").await;
+    link_github(&h.pool, "oauth-state", github_id).await;
     let exchanges = || *h.fake.exchanges.lock().unwrap();
 
     // Missing cookie: a callback from another browser.
     let started = h.start("github", "").await;
-    h.answer(&started, "state-code", github(9100007, email, true));
+    h.answer(&started, "state-code", github(github_id, email, true));
     let before = exchanges();
     h.request(
         "GET",
@@ -1636,7 +1817,7 @@ async fn state_missing_mismatched_expired_or_replayed_is_refused() {
     .execute(&h.pool)
     .await
     .unwrap();
-    h.answer(&expired, "expired-code", github(9100007, email, true));
+    h.answer(&expired, "expired-code", github(github_id, email, true));
     h.callback("github", &expired, "expired-code")
         .await
         .assert_refused("expired");
@@ -1644,10 +1825,10 @@ async fn state_missing_mismatched_expired_or_replayed_is_refused() {
 
     // Replayed: the first use signs in, the second finds no row.
     let replayed = h.start("github", "").await;
-    h.answer(&replayed, "replay-code", github(9100007, email, true));
+    h.answer(&replayed, "replay-code", github(github_id, email, true));
     let first = h.callback("github", &replayed, "replay-code").await;
     assert!(first.cookie("codewire.session_token").is_some());
-    h.answer(&replayed, "replay-code", github(9100007, email, true));
+    h.answer(&replayed, "replay-code", github(github_id, email, true));
     h.callback("github", &replayed, "replay-code")
         .await
         .assert_refused("expired");
@@ -1666,7 +1847,7 @@ async fn state_missing_mismatched_expired_or_replayed_is_refused() {
         .await
         .unwrap();
     assert_eq!(raw, 0);
-    cleanup(&h.pool, &[email], &["9100007"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
 }
 
 #[tokio::test]
@@ -1674,17 +1855,24 @@ async fn an_unverified_provider_email_is_refused() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
+    let google_sub = GoogleSub::new();
     let email = "oauth-provider-unverified@example.test";
-    cleanup(&h.pool, &[email], &["9100008", "google-sub-unverified"]).await;
+    cleanup(
+        &h.pool,
+        &[email],
+        &[github_id.subject(), google_sub.subject()],
+    )
+    .await;
 
     let started = h.start("github", "").await;
-    h.answer(&started, "unverified-code", github(9100008, email, false));
+    h.answer(&started, "unverified-code", github(github_id, email, false));
     h.callback("github", &started, "unverified-code")
         .await
         .assert_refused("unverified_email");
 
     let started = h.start("google", "").await;
-    let mut claims = google(&started, "google-sub-unverified", email);
+    let mut claims = google(&started, &google_sub, email);
     claims["email_verified"] = json!(false);
     h.answer(&started, "google-unverified", Answer::Google { claims });
     h.callback("google", &started, "google-unverified")
@@ -1712,8 +1900,9 @@ async fn a_google_nonce_or_audience_mismatch_is_refused() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let google_sub = GoogleSub::new();
     let email = "oauth-google-mismatch@example.test";
-    cleanup(&h.pool, &[email], &["google-sub-mismatch"]).await;
+    cleanup(&h.pool, &[email], &[google_sub.subject()]).await;
 
     for (field, value) in [
         ("nonce", json!("a-nonce-from-another-round-trip")),
@@ -1722,7 +1911,7 @@ async fn a_google_nonce_or_audience_mismatch_is_refused() {
         ("exp", json!(chrono::Utc::now().timestamp() - 600)),
     ] {
         let started = h.start("google", "").await;
-        let mut claims = google(&started, "google-sub-mismatch", email);
+        let mut claims = google(&started, &google_sub, email);
         claims[field] = value;
         let code = format!("mismatch-{field}");
         h.answer(&started, &code, Answer::Google { claims });
@@ -1949,9 +2138,16 @@ async fn connect_links_to_the_sessions_account_and_creates_no_session() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
+    let google_sub = GoogleSub::new();
     let email = "settings-connect@example.test";
     let google_email = "settings-connect-google@example.test";
-    cleanup(&h.pool, &[email], &["9200001", "settings-google-1"]).await;
+    cleanup(
+        &h.pool,
+        &[email],
+        &[github_id.subject(), google_sub.subject()],
+    )
+    .await;
     insert_user(&h.pool, "settings-connect", email, true, true).await;
     let session = browser_session(&h.pool, "settings-connect", true).await;
 
@@ -1968,7 +2164,7 @@ async fn connect_links_to_the_sessions_account_and_creates_no_session() {
     h.answer(
         &started,
         "connect-github",
-        github(9200001, "elsewhere@example.test", true),
+        github(github_id, "elsewhere@example.test", true),
     );
     h.link_callback("github", &started, "connect-github", Some(&session))
         .await
@@ -1979,7 +2175,7 @@ async fn connect_links_to_the_sessions_account_and_creates_no_session() {
         &started,
         "connect-google",
         Answer::Google {
-            claims: google(&started, "settings-google-1", google_email),
+            claims: google(&started, &google_sub, google_email),
         },
     );
     h.link_callback("google", &started, "connect-google", Some(&session))
@@ -1987,13 +2183,14 @@ async fn connect_links_to_the_sessions_account_and_creates_no_session() {
         .assert_settings("connected", "google");
 
     let owner: String = sqlx::query_scalar(
-        "SELECT user_id FROM accounts WHERE provider_id = 'github' AND account_id = '9200001'",
+        "SELECT user_id FROM accounts WHERE provider_id = 'github' AND account_id = $1",
     )
+    .bind(github_id.subject())
     .fetch_one(&h.pool)
     .await
     .unwrap();
     assert_eq!(owner, "settings-connect");
-    assert_eq!(link_rows(&h.pool, "google", "settings-google-1").await, 1);
+    assert_eq!(link_rows(&h.pool, "google", &google_sub.subject()).await, 1);
     assert_eq!(
         sessions(&h.pool, "settings-connect").await,
         1,
@@ -2010,9 +2207,9 @@ async fn connect_links_to_the_sessions_account_and_creates_no_session() {
     .fetch_one(&h.pool)
     .await
     .unwrap();
-    assert_eq!(audit["provider_subject"], "9200001");
+    assert_eq!(audit["provider_subject"], github_id.subject());
     assert_eq!(audit["provider_email"], "elsewhere@example.test");
-    assert_eq!(audit["provider_account"], "user9200001");
+    assert_eq!(audit["provider_account"], github_id.account());
     assert_eq!(audit["confirmed_by"], "session");
 
     // Settings names each identity as it was linked.
@@ -2020,7 +2217,7 @@ async fn connect_links_to_the_sessions_account_and_creates_no_session() {
     let identities = methods.body["identities"].as_array().unwrap();
     assert_eq!(identities.len(), 2);
     assert_eq!(identities[0]["provider"], "github");
-    assert_eq!(identities[0]["account"], "user9200001");
+    assert_eq!(identities[0]["account"], github_id.account());
     assert_eq!(identities[1]["provider"], "google");
     assert_eq!(identities[1]["account"], google_email);
     assert!(identities[0]["linked_at"].as_str().unwrap().ends_with('Z'));
@@ -2034,7 +2231,12 @@ async fn connect_links_to_the_sessions_account_and_creates_no_session() {
         .link_callback("github", &started, "connect-google", Some(&session))
         .await;
     replay.assert_refused("expired");
-    cleanup(&h.pool, &[email], &["9200001", "settings-google-1"]).await;
+    cleanup(
+        &h.pool,
+        &[email],
+        &[github_id.subject(), google_sub.subject()],
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -2105,9 +2307,10 @@ async fn a_link_callback_whose_session_changed_links_nothing() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
     let email = "settings-changed@example.test";
     let other_email = "settings-changed-other@example.test";
-    cleanup(&h.pool, &[email, other_email], &["9200011"]).await;
+    cleanup(&h.pool, &[email, other_email], &[github_id.subject()]).await;
     insert_user(&h.pool, "settings-changed", email, true, true).await;
     insert_user(&h.pool, "settings-changed-other", other_email, true, true).await;
     let session = browser_session(&h.pool, "settings-changed", true).await;
@@ -2122,7 +2325,7 @@ async fn a_link_callback_whose_session_changed_links_nothing() {
     ] {
         let started = h.link_start("github", "settings-changed", &session).await;
         let code = case.replace(' ', "-");
-        h.answer(&started, &code, github(9200011, email, true));
+        h.answer(&started, &code, github(github_id, email, true));
         if case == "expired" {
             sqlx::query(
                 "UPDATE sessions SET expires_at = NOW() - interval '1 minute' \
@@ -2136,7 +2339,11 @@ async fn a_link_callback_whose_session_changed_links_nothing() {
         h.link_callback("github", &started, &code, callback_session)
             .await
             .assert_settings("session_changed", "github");
-        assert_eq!(link_rows(&h.pool, "github", "9200011").await, 0, "{case}");
+        assert_eq!(
+            link_rows(&h.pool, "github", &github_id.subject()).await,
+            0,
+            "{case}"
+        );
     }
     assert_eq!(
         audit_count(&h.pool, "settings-changed", "user.oauth.linked").await,
@@ -2146,7 +2353,7 @@ async fn a_link_callback_whose_session_changed_links_nothing() {
         audit_count(&h.pool, "settings-changed-other", "user.oauth.linked").await,
         0
     );
-    cleanup(&h.pool, &[email, other_email], &["9200011"]).await;
+    cleanup(&h.pool, &[email, other_email], &[github_id.subject()]).await;
 }
 
 #[tokio::test]
@@ -2154,8 +2361,9 @@ async fn a_disabled_or_locked_account_links_nothing() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
     let email = "settings-refused@example.test";
-    cleanup(&h.pool, &[email], &["9200021"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
     insert_user(&h.pool, "settings-refused", email, true, true).await;
     // Disabling an account ends its sessions; a lockout keeps them.
     for (change, undo, refused) in [
@@ -2174,12 +2382,16 @@ async fn a_disabled_or_locked_account_links_nothing() {
         let session = browser_session(&h.pool, "settings-refused", true).await;
         // Disabled or locked between the start and the callback.
         let started = h.link_start("github", "settings-refused", &session).await;
-        h.answer(&started, "refused-code", github(9200021, email, true));
+        h.answer(&started, "refused-code", github(github_id, email, true));
         sqlx::query(change).execute(&h.pool).await.unwrap();
         h.link_callback("github", &started, "refused-code", Some(&session))
             .await
             .assert_settings("session_changed", "github");
-        assert_eq!(link_rows(&h.pool, "github", "9200021").await, 0, "{change}");
+        assert_eq!(
+            link_rows(&h.pool, "github", &github_id.subject()).await,
+            0,
+            "{change}"
+        );
         // Nor does a new link start.
         let reply = h
             .link_start_reply("github", "settings-refused", &session)
@@ -2191,7 +2403,7 @@ async fn a_disabled_or_locked_account_links_nothing() {
         audit_count(&h.pool, "settings-refused", "user.oauth.linked").await,
         0
     );
-    cleanup(&h.pool, &[email], &["9200021"]).await;
+    cleanup(&h.pool, &[email], &[github_id.subject()]).await;
 }
 
 #[tokio::test]
@@ -2199,22 +2411,24 @@ async fn an_identity_linked_to_another_account_is_refused() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
     let email = "settings-taken@example.test";
     let owner_email = "settings-taken-owner@example.test";
-    cleanup(&h.pool, &[email, owner_email], &["9200031"]).await;
+    cleanup(&h.pool, &[email, owner_email], &[github_id.subject()]).await;
     insert_user(&h.pool, "settings-taken", email, true, true).await;
     insert_user(&h.pool, "settings-taken-owner", owner_email, true, true).await;
-    link(&h.pool, "settings-taken-owner", "github", "9200031").await;
+    link_github(&h.pool, "settings-taken-owner", github_id).await;
     let session = browser_session(&h.pool, "settings-taken", true).await;
 
     let started = h.link_start("github", "settings-taken", &session).await;
-    h.answer(&started, "taken-code", github(9200031, owner_email, true));
+    h.answer(&started, "taken-code", github(github_id, owner_email, true));
     h.link_callback("github", &started, "taken-code", Some(&session))
         .await
         .assert_settings("taken", "github");
     let owner: String = sqlx::query_scalar(
-        "SELECT user_id FROM accounts WHERE provider_id = 'github' AND account_id = '9200031'",
+        "SELECT user_id FROM accounts WHERE provider_id = 'github' AND account_id = $1",
     )
+    .bind(github_id.subject())
     .fetch_one(&h.pool)
     .await
     .unwrap();
@@ -2237,7 +2451,7 @@ async fn an_identity_linked_to_another_account_is_refused() {
     )
     .await
     .assert_settings("cancelled", "github");
-    cleanup(&h.pool, &[email, owner_email], &["9200031"]).await;
+    cleanup(&h.pool, &[email, owner_email], &[github_id.subject()]).await;
 }
 
 #[tokio::test]
@@ -2245,22 +2459,29 @@ async fn disconnect_needs_another_way_to_sign_in() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
+    let other_github_id = GitHubId::new();
+    let google_sub = GoogleSub::new();
     let email = "settings-unlink@example.test";
     let only_email = "settings-unlink-only@example.test";
     cleanup(
         &h.pool,
         &[email, only_email],
-        &["9200041", "9200042", "settings-google-2"],
+        &[
+            github_id.subject(),
+            other_github_id.subject(),
+            google_sub.subject(),
+        ],
     )
     .await;
     insert_user(&h.pool, "settings-unlink", email, true, true).await;
-    link(&h.pool, "settings-unlink", "github", "9200041").await;
+    link_github(&h.pool, "settings-unlink", github_id).await;
     let session = browser_session(&h.pool, "settings-unlink", true).await;
 
     // A password remains.
     let reply = h.unlink("github", "settings-unlink", &session).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    assert_eq!(link_rows(&h.pool, "github", "9200041").await, 0);
+    assert_eq!(link_rows(&h.pool, "github", &github_id.subject()).await, 0);
     assert_eq!(
         audit_count(&h.pool, "settings-unlink", "user.oauth.unlinked").await,
         1
@@ -2274,28 +2495,25 @@ async fn disconnect_needs_another_way_to_sign_in() {
         .execute(&h.pool)
         .await
         .unwrap();
-    link(&h.pool, "settings-unlink-only", "github", "9200042").await;
+    link_github(&h.pool, "settings-unlink-only", other_github_id).await;
     let only = browser_session(&h.pool, "settings-unlink-only", true).await;
     let methods = h.methods("settings-unlink-only", &only).await;
     assert_eq!(methods.body["password"], false);
     let reply = h.unlink("github", "settings-unlink-only", &only).await;
     assert_eq!(reply.status, StatusCode::CONFLICT);
     assert_eq!(reply.body["code"], "oauth_last_sign_in_method");
-    assert_eq!(link_rows(&h.pool, "github", "9200042").await, 1);
+    assert_eq!(
+        link_rows(&h.pool, "github", &other_github_id.subject()).await,
+        1
+    );
 
     // With Google connected too, GitHub may go, and then Google may not.
-    link(
-        &h.pool,
-        "settings-unlink-only",
-        "google",
-        "settings-google-2",
-    )
-    .await;
+    link_google(&h.pool, "settings-unlink-only", &google_sub).await;
     let reply = h.unlink("github", "settings-unlink-only", &only).await;
     assert_eq!(reply.status, StatusCode::OK);
     let reply = h.unlink("google", "settings-unlink-only", &only).await;
     assert_eq!(reply.status, StatusCode::CONFLICT);
-    assert_eq!(link_rows(&h.pool, "google", "settings-google-2").await, 1);
+    assert_eq!(link_rows(&h.pool, "google", &google_sub.subject()).await, 1);
     assert_eq!(
         audit_count(&h.pool, "settings-unlink-only", "user.oauth.unlinked").await,
         1
@@ -2314,7 +2532,11 @@ async fn disconnect_needs_another_way_to_sign_in() {
     cleanup(
         &h.pool,
         &[email, only_email],
-        &["9200041", "9200042", "settings-google-2"],
+        &[
+            github_id.subject(),
+            other_github_id.subject(),
+            google_sub.subject(),
+        ],
     )
     .await;
 }
@@ -2324,9 +2546,10 @@ async fn the_admin_account_list_names_linked_identities() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let github_id = GitHubId::new();
     let email = "settings-admin-view@example.test";
     let admin_email = "settings-admin@example.test";
-    cleanup(&h.pool, &[email, admin_email], &["9200051"]).await;
+    cleanup(&h.pool, &[email, admin_email], &[github_id.subject()]).await;
     insert_user(&h.pool, "settings-admin-view", email, true, true).await;
     insert_user(&h.pool, "settings-admin", admin_email, true, true).await;
     sqlx::query("UPDATE users SET is_admin = true WHERE id = 'settings-admin'")
@@ -2337,7 +2560,7 @@ async fn the_admin_account_list_names_linked_identities() {
     let started = h
         .link_start("github", "settings-admin-view", &session)
         .await;
-    h.answer(&started, "admin-view", github(9200051, email, true));
+    h.answer(&started, "admin-view", github(github_id, email, true));
     h.link_callback("github", &started, "admin-view", Some(&session))
         .await
         .assert_settings("connected", "github");
@@ -2384,9 +2607,9 @@ async fn the_admin_account_list_names_linked_identities() {
     let identities = account["linkedIdentities"].as_array().unwrap();
     assert_eq!(identities.len(), 1);
     assert_eq!(identities[0]["provider"], "github");
-    assert_eq!(identities[0]["subject"], "9200051");
-    assert_eq!(identities[0]["account"], "user9200051");
+    assert_eq!(identities[0]["subject"], github_id.subject());
+    assert_eq!(identities[0]["account"], github_id.account());
     assert!(identities[0]["linkedAt"].is_string());
     assert!(identities[0].get("userId").is_none());
-    cleanup(&h.pool, &[email, admin_email], &["9200051"]).await;
+    cleanup(&h.pool, &[email, admin_email], &[github_id.subject()]).await;
 }
