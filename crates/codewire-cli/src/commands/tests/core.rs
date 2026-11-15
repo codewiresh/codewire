@@ -2421,6 +2421,59 @@ fn checkpoint_is_listed_with_restore_the_fork_and_its_host() {
     }
 }
 
+/// At a terminal, help's headings are bold and command and flag names are
+/// cyan, with descriptions plain; the same help without colour has no escape
+/// at all (#4578). clap's stream picks which one is written.
+#[test]
+fn help_is_styled_at_a_terminal_and_plain_text_otherwise() {
+    const BOLD: &str = "\x1b[1m";
+    const CYAN: &str = "\x1b[36m";
+    let root = crate::cli_command().render_help();
+    let styled = root.ansi().to_string();
+    assert!(styled.contains(&format!("{BOLD}Get started:")), "{styled}");
+    assert!(styled.contains(&format!("{BOLD}Options:")), "{styled}");
+    assert!(styled.contains(&format!("{BOLD}Usage:")), "{styled}");
+    let setup = styled
+        .lines()
+        .find(|line| line.contains("setup") && line.contains("Set up Codewire"))
+        .unwrap();
+    assert!(setup.starts_with(&format!("  {CYAN}setup")), "{setup:?}");
+    // The description stays plain, and the columns line up as without colour.
+    assert!(setup.ends_with("Set up Codewire, the local runtime, and SSH integration"));
+    let server = styled.lines().find(|line| line.contains("--server")).unwrap();
+    assert!(server.contains(&format!("{CYAN}-s")), "{server:?}");
+
+    let plain = root.to_string();
+    assert!(!plain.contains('\x1b'), "{plain}");
+    let strip = |text: &str| {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    };
+    assert_eq!(strip(&styled), plain);
+
+    // A command's own help carries the same styles.
+    let err = crate::cli_command()
+        .try_get_matches_from(["cw", "create", "--help"])
+        .unwrap_err();
+    let create = err.render();
+    let styled = create.ansi().to_string();
+    assert!(styled.contains(&format!("{BOLD}Usage:")), "{styled}");
+    assert!(styled.contains(&format!("{CYAN}--name")), "{styled}");
+    assert!(!create.to_string().contains('\x1b'));
+}
+
 /// ssh and the editor reach a stopped cloud environment only as a transport
 /// failure ("400 Bad Request"), so `cw` names the stop and its command (#4643).
 #[test]

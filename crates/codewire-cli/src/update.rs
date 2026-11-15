@@ -881,14 +881,21 @@ fn status(args: StoreArgs) -> anyhow::Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&status)?);
     } else {
-        print!("{}", render_status(&status));
+        let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Text);
+        print!("{}", render_status(&status, caps.stdout_style()));
     }
     Ok(())
 }
 
-fn render_status(status: &Status) -> String {
+/// The heading is bold at a terminal (#4578); the field lines stay plain for
+/// whoever reads them.
+fn render_status(status: &Status, style: crate::output::Style) -> String {
     let mut text = String::new();
-    let _ = writeln!(text, "Managed cw installation");
+    let _ = writeln!(
+        text,
+        "{}",
+        style.paint(crate::output::Role::Strong, "Managed cw installation")
+    );
     let _ = writeln!(text, "  entry:      {}", status.entry.display());
     let _ = writeln!(text, "  store:      {}", status.root.display());
     let _ = writeln!(text, "  platform:   {}", status.platform);
@@ -1897,7 +1904,16 @@ mod tests {
                 recorded: true,
             }],
         };
-        let text = render_status(&status);
+        let text = render_status(
+            &status,
+            crate::output::Style::new(false, crate::output::Charset::Unicode),
+        );
+        assert!(text.starts_with("Managed cw installation\n"));
+        let styled = render_status(
+            &status,
+            crate::output::Style::new(true, crate::output::Charset::Unicode),
+        );
+        assert!(styled.starts_with("\x1b[1mManaged cw installation\x1b[0m\n"));
         assert!(text.contains(&format!("current:    v0.3.0 ({sha256})")));
         assert!(text.contains("warning:    the entry is a link to /usr/bin/true"));
         assert!(text.contains(&format!("* {sha256} v0.3.0 (self-install)")));

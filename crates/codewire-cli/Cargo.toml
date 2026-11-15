@@ -23,7 +23,7 @@ base64 = { workspace = true }
 buffa = { workspace = true }
 buffa-types = { workspace = true }
 chrono = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["color"] }
 clap_complete = { workspace = true }
 codewire-access = { workspace = true }
 codewire-client = { workspace = true, features = ["tailnet-session"] }

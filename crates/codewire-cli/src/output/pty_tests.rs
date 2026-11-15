@@ -121,6 +121,11 @@ fn interactive_child_process() {
     let Some(widget) = std::env::var_os(CHILD_ENV) else {
         return;
     };
+    // Help needs no terminal state, and may run in a pipe.
+    if widget == "help" {
+        crate::cli_command().print_help().unwrap();
+        return;
+    }
     let before = stty_state();
     let caps = Capabilities::from_process(OutputMode::Text);
     let outcome = match widget.to_str() {
@@ -367,4 +372,99 @@ fn checklist_ctrl_c_cancels_and_restores_the_terminal() {
     let (result, text) = session.finish();
     assert_eq!(result, "Ok(Canceled) restored=true", "{text:?}");
     assert_erased(&text, CHECKLIST_TITLE);
+}
+
+/// `cw --help` as the child prints it through clap's own output stream, on a
+/// pseudo-terminal or into a pipe, with `env` added to a clean environment
+/// (#4578).
+fn help_output(env: &[(&str, &str)], terminal: bool) -> String {
+    const CLEARED: [&str; 5] = ["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "TERM", "CI"];
+    let args = [
+        "--exact",
+        CHILD_TEST,
+        "--nocapture",
+        "--test-threads=1",
+        "--quiet",
+        "--color=never",
+    ];
+    let exe = std::env::current_exe().unwrap();
+    if !terminal {
+        let mut command = Command::new(exe);
+        command
+            .args(args)
+            .env(CHILD_ENV, "help")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for name in CLEARED {
+            command.env_remove(name);
+        }
+        command.env("TERM", "xterm-256color");
+        command.envs(env.iter().copied());
+        let out = command.output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        return String::from_utf8_lossy(&out.stdout).into_owned();
+    }
+    let pty = native_pty_system()
+        .openpty(PtySize {
+            rows: 40,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("open a pseudo-terminal");
+    let mut command = CommandBuilder::new(exe);
+    command.args(args);
+    command.cwd(std::env::current_dir().unwrap());
+    command.env(CHILD_ENV, "help");
+    for name in CLEARED {
+        command.env_remove(name);
+    }
+    command.env("TERM", "xterm-256color");
+    command.env("LC_ALL", "C.UTF-8");
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let mut child = pty.slave.spawn_command(command).expect("start the child");
+    drop(pty.slave);
+    let mut reader = pty.master.try_clone_reader().unwrap();
+    // The read ends when the child's side of the terminal closes.
+    let reading = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        // EIO once the child has gone is the end of its output.
+        let _ = reader.read_to_end(&mut bytes);
+        bytes
+    });
+    let status = child.wait().unwrap();
+    let text = String::from_utf8_lossy(&reading.join().unwrap()).into_owned();
+    assert!(status.success(), "{status}:\n{text}");
+    text
+}
+
+/// Help is coloured on a real terminal, and has no escape at all in a pipe
+/// or wherever colour is off, whatever CLICOLOR or CI say (#4578).
+#[test]
+fn help_is_coloured_at_a_terminal_and_plain_in_a_pipe_or_with_colour_off() {
+    const ESC: char = '\x1b';
+    let at_terminal = help_output(&[], true);
+    assert!(at_terminal.contains(ESC), "a terminal:\n{at_terminal:?}");
+    for (case, env, terminal) in [
+        ("a pipe", &[][..], false),
+        (
+            "a pipe with CLICOLOR_FORCE",
+            &[("CLICOLOR_FORCE", "1")],
+            false,
+        ),
+        ("NO_COLOR at a terminal", &[("NO_COLOR", "1")], true),
+        (
+            "TERM=dumb with CLICOLOR",
+            &[("TERM", "dumb"), ("CLICOLOR", "1")],
+            true,
+        ),
+        ("TERM=dumb in CI", &[("TERM", "dumb"), ("CI", "1")], true),
+    ] {
+        let text = help_output(env, terminal);
+        assert!(text.contains("Get started:"), "{case}: no help:\n{text:?}");
+        assert!(!text.contains(ESC), "{case}:\n{text:?}");
+    }
 }

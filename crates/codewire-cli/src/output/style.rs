@@ -1,6 +1,6 @@
 //! Status glyphs, colour roles and width-safe styled lines.
 
-use super::caps::Charset;
+use super::caps::{Capabilities, Charset, OutputMode};
 use super::spinner;
 
 /// A status mark. Each glyph keeps its meaning without colour.
@@ -73,6 +73,46 @@ impl Role {
 }
 
 const RESET: &str = "\x1b[0m";
+
+/// `command` with the help styles below and the colour choice that goes
+/// with them (#4578).
+pub(crate) fn styled_help(command: clap::Command) -> clap::Command {
+    command.styles(help_styles()).color(help_color())
+}
+
+/// Whether clap colours its help and its parse errors. [`Capabilities`]
+/// decides, as for all of cw's output: only when both stdout and stderr may
+/// show colour (a terminal, `TERM` not `dumb`, `NO_COLOR` unset or empty).
+/// One choice covers help on stdout and errors on stderr, so it is never on
+/// for a pipe. `CLICOLOR` and `CLICOLOR_FORCE` don't change it.
+fn help_color() -> clap::ColorChoice {
+    let caps = Capabilities::from_process(OutputMode::Text);
+    if caps.stdout_style().color() && caps.stderr_style().color() {
+        clap::ColorChoice::Always
+    } else {
+        clap::ColorChoice::Never
+    }
+}
+
+/// Help and parser errors in the roles above (#4578): headings bold, command
+/// and flag names in the next-command colour, descriptions and placeholders
+/// plain. Rendered into the help always; [`help_color`] decides whether
+/// clap's stream writes them or drops them.
+pub(crate) fn help_styles() -> clap::builder::Styles {
+    use clap::builder::styling::{AnsiColor, Effects, Style as Ansi};
+    clap::builder::Styles::plain()
+        .header(Ansi::new().effects(Effects::BOLD))
+        .usage(Ansi::new().effects(Effects::BOLD))
+        .literal(AnsiColor::Cyan.on_default())
+        .placeholder(Ansi::new())
+        .error(AnsiColor::Red.on_default().effects(Effects::BOLD))
+        .valid(AnsiColor::Cyan.on_default())
+        .invalid(AnsiColor::Yellow.on_default())
+}
+
+/// The style for text written into help: always coloured, like
+/// [`help_styles`], and dropped by clap's stream where colour is off.
+pub(crate) const HELP: Style = Style::new(true, Charset::Unicode);
 
 /// Glyphs and colour for one output stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

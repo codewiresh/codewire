@@ -45,7 +45,7 @@ pub(crate) use self::{
     picker::{Picker, PickerOutcome, PickerRow, PickerStep, run_picker},
     spinner::{FRAME_INTERVAL, Spinner},
     status_line::StatusLine,
-    style::{Role, Status, Style},
+    style::{HELP, Role, Status, Style, styled_help},
     summary::{
         Allocation, LifecycleSummary, MeshPlacement, NetworkRef, Outcome, SourcePlacement,
         SourceRef, VmLocation,

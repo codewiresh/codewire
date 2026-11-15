@@ -287,14 +287,21 @@ fn cli_command_with(all: bool) -> clap::Command {
         .unwrap_or(0);
     let mut sections = String::new();
     let mut listed = std::collections::HashSet::new();
+    let style = output::HELP;
     let mut section =
         |heading: &str, names: &mut dyn Iterator<Item = &(String, String, String)>| {
             let mut body = String::new();
             for (_, label, about) in names {
-                body.push_str(&format!("  {label:<width$}  {about}\n"));
+                // Padded outside the colour, so the escapes don't count.
+                let pad = " ".repeat(width - label.len());
+                body.push_str(&format!(
+                    "  {}{pad}  {about}\n",
+                    style.paint(output::Role::Next, label)
+                ));
             }
             if !body.is_empty() {
-                sections.push_str(&format!("{heading}:\n{body}\n"));
+                let heading = style.paint(output::Role::Strong, &format!("{heading}:"));
+                sections.push_str(&format!("{heading}\n{body}\n"));
             }
         };
     for help_section in HELP_SECTIONS {
@@ -317,8 +324,9 @@ fn cli_command_with(all: bool) -> clap::Command {
     } else {
         "`cw help --all` lists every command; `cw help COMMAND` shows one command.\n\n"
     };
-    command.help_template(format!(
-        "{{before-help}}{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{sections}{more}Options:\n{{options}}{{after-help}}"
+    let options = style.paint(output::Role::Strong, "Options:");
+    output::styled_help(command).help_template(format!(
+        "{{before-help}}{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{sections}{more}{options}\n{{options}}{{after-help}}"
     ))
 }
 

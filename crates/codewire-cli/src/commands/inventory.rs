@@ -967,6 +967,63 @@ fn format_environment_inventory(
     format_environment_inventory_at(rows, placement, not_configured, style, chrono::Utc::now())
 }
 
+/// The table of `cw ls`: a header row, then one row per environment with
+/// its selection marker and its state in colour.
+fn inventory_table(rows: &[InventoryRow], cells: &[[String; 5]], style: Style) -> String {
+    let dim = |text: &str| style.paint(crate::output::Role::Dim, text);
+    let header = ["NAME", "LOCATION", "STATE", "SESSIONS", "NETWORK"].map(String::from);
+    let widths: [usize; 4] = std::array::from_fn(|column| {
+        std::iter::once(&header)
+            .chain(cells)
+            .map(|row| row[column].chars().count())
+            .max()
+            .unwrap_or(0)
+    });
+    let pad = |text: &str, width: usize| " ".repeat(width.saturating_sub(text.chars().count()));
+    let mut out = String::new();
+    // The header row is bold at a terminal (#4578); padding counts the plain
+    // text, so the columns line up either way.
+    let heading = |text: &str| style.paint(crate::output::Role::Strong, text);
+    let mut line = |marker: String, row: &[String; 5], state: String, header: bool| {
+        out.push_str(&marker);
+        out.push(' ');
+        for (column, width) in widths.iter().enumerate() {
+            let text = if header {
+                heading(&row[column])
+            } else if column == 2 {
+                state.clone()
+            } else {
+                row[column].clone()
+            };
+            out.push_str(&text);
+            out.push_str(&pad(&row[column], *width));
+            out.push_str("  ");
+        }
+        out.push_str(&if header {
+            heading(&row[4])
+        } else {
+            row[4].clone()
+        });
+        out.push('\n');
+    };
+    line(" ".to_owned(), &header, String::new(), true);
+    for (row, cells) in rows.iter().zip(cells) {
+        let marker = if row.entry.selected {
+            style.status(Status::Selected)
+        } else {
+            " ".to_owned()
+        };
+        let state = match row.entry.state.to_ascii_lowercase().as_str() {
+            "running" => style.paint(crate::output::Role::Success, &cells[2]),
+            "error" | "failed" | "orphaned" => style.paint(crate::output::Role::Failure, &cells[2]),
+            "starting" | "creating" | "stopping" => cells[2].clone(),
+            _ => dim(&cells[2]),
+        };
+        line(marker, cells, state, false);
+    }
+    out
+}
+
 /// [`format_environment_inventory`] with the time a failed create's age is
 /// measured from.
 fn format_environment_inventory_at(
@@ -1054,47 +1111,7 @@ fn format_environment_inventory_at(
             ]
         })
         .collect();
-    let header = ["NAME", "LOCATION", "STATE", "SESSIONS", "NETWORK"].map(String::from);
-    let widths: [usize; 4] = std::array::from_fn(|column| {
-        std::iter::once(&header)
-            .chain(&cells)
-            .map(|row| row[column].chars().count())
-            .max()
-            .unwrap_or(0)
-    });
-    let pad = |text: &str, width: usize| " ".repeat(width.saturating_sub(text.chars().count()));
-    let mut out = String::new();
-    let mut line = |marker: String, row: &[String; 5], state: String| {
-        out.push_str(&marker);
-        out.push(' ');
-        for (column, width) in widths.iter().enumerate() {
-            let text = if column == 2 {
-                state.clone()
-            } else {
-                row[column].clone()
-            };
-            out.push_str(&text);
-            out.push_str(&pad(&row[column], *width));
-            out.push_str("  ");
-        }
-        out.push_str(&row[4]);
-        out.push('\n');
-    };
-    line(" ".to_owned(), &header, header[2].clone());
-    for (row, cells) in rows.iter().zip(&cells) {
-        let marker = if row.entry.selected {
-            style.status(Status::Selected)
-        } else {
-            " ".to_owned()
-        };
-        let state = match row.entry.state.to_ascii_lowercase().as_str() {
-            "running" => style.paint(crate::output::Role::Success, &cells[2]),
-            "error" | "failed" | "orphaned" => style.paint(crate::output::Role::Failure, &cells[2]),
-            "starting" | "creating" | "stopping" => cells[2].clone(),
-            _ => dim(&cells[2]),
-        };
-        line(marker, cells, state);
-    }
+    let mut out = inventory_table(rows, &cells, style);
     let mut legend = Vec::new();
     if rows.iter().any(|row| row.entry.selected) {
         legend.push(format!(
@@ -1857,6 +1874,13 @@ mod tests {
         let colored =
             format_environment_inventory(&rows, None, &[], Style::new(true, Charset::Unicode));
         assert!(colored.contains("\x1b[36m›\x1b[0m app     local     \x1b[32mrunning\x1b[0m  1"));
+        // The header is bold at a terminal, padded as without colour (#4578).
+        assert!(
+            colored.starts_with(
+                "  \x1b[1mNAME\x1b[0m    \x1b[1mLOCATION\x1b[0m  \x1b[1mSTATE\x1b[0m    \x1b[1mSESSIONS\x1b[0m     \x1b[1mNETWORK\x1b[0m\n"
+            ),
+            "{colored:?}"
+        );
     }
 
     /// A create the platform ended is listed as failed with its age and its
