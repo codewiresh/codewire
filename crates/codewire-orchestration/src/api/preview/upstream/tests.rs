@@ -171,6 +171,36 @@ async fn a_daemon_that_forwards_is_recognised() {
     assert!(upstream.forwards(NAMESPACE, ENVIRONMENT).await);
 }
 
+#[tokio::test]
+async fn an_unreachable_daemon_is_asked_again_rather_than_remembered() {
+    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let channel = Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .unwrap()
+        .connect_lazy();
+    let upstream = PreviewUpstream::fixed(SessionClient::from_channel(channel, TOKEN).unwrap());
+    assert!(!upstream.forwards(NAMESPACE, ENVIRONMENT).await);
+    assert!(
+        upstream.support.lock().unwrap().is_empty(),
+        "an unreachable daemon's silence isn't cached as an answer"
+    );
+
+    // A daemon that answers is remembered.
+    let temp = tempfile::tempdir().unwrap();
+    let upstream = PreviewUpstream::fixed(in_process_daemon(temp.path()).await);
+    assert!(upstream.forwards(NAMESPACE, ENVIRONMENT).await);
+    assert_eq!(
+        upstream
+            .support
+            .lock()
+            .unwrap()
+            .get(ENVIRONMENT)
+            .map(|(supported, _)| *supported),
+        Some(true)
+    );
+}
+
 #[test]
 fn upstream_uris_name_the_environment_namespace_and_port() {
     let uri = PreviewUpstream::uri(NAMESPACE, ENVIRONMENT, 3000, "/a?b=c").unwrap();

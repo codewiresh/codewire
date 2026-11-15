@@ -149,9 +149,11 @@ impl PreviewUpstream {
         }
     }
 
-    /// Whether the environment's daemon offers `ForwardTcp`. An answer is
-    /// reused for a few minutes. A daemon that can't be asked counts as no,
-    /// so the proxy keeps the pod-address path it used before.
+    /// Whether the environment's daemon offers `ForwardTcp`. Only a daemon's
+    /// own answer is reused, for a few minutes: its capability list, or
+    /// `Unimplemented` from a daemon too old to have one. A daemon that can't
+    /// be reached, as while its sandbox starts, is asked again next time, and
+    /// meanwhile the proxy keeps the pod-address path.
     pub(super) async fn forwards(&self, namespace: &str, environment_id: &str) -> bool {
         if let Some((supported, at)) = self
             .support
@@ -165,12 +167,16 @@ impl PreviewUpstream {
         let Ok(client) = self.access.client(namespace, environment_id).await else {
             return false;
         };
-        let supported = client.get_capabilities(&[]).await.is_ok_and(|response| {
-            response
+        let supported = match client.get_capabilities(&[]).await {
+            Ok(response) => response
                 .capabilities
                 .iter()
-                .any(|capability| capability == DAEMON_CAPABILITY_FORWARD_TCP)
-        });
+                .any(|capability| capability == DAEMON_CAPABILITY_FORWARD_TCP),
+            Err(SessionClientError::Status(status)) if status.code() == Code::Unimplemented => {
+                false
+            }
+            Err(_) => return false,
+        };
         let mut support = self.support.lock().unwrap_or_else(PoisonError::into_inner);
         if support.len() >= SUPPORT_CACHE_MAX {
             support.clear();
