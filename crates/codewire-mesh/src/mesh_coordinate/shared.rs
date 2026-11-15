@@ -112,7 +112,7 @@ pub(crate) enum CoordinationError {
     #[error("the shared registry refused or timed out the change")]
     Unavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error(
-        "bucket {BUCKET} exists without delete markers; recreate it with this version's settings"
+        "bucket {BUCKET} exists without delete markers or with another max age; recreate it with this version's settings"
     )]
     BucketConfig,
     #[error("the watch of the shared registry ended")]
@@ -184,6 +184,10 @@ pub(crate) struct Shared {
     /// Drops every watched change while set: a watch that stalls.
     #[cfg(test)]
     watch_paused: AtomicBool,
+    /// How many of this replica's own heartbeats came back live, ignored or
+    /// not: a test's sentinel that the watch has caught up past a point.
+    #[cfg(test)]
+    live_heartbeats: std::sync::atomic::AtomicUsize,
 }
 
 /// What a replica tells its writer: write this local record now, or delete
@@ -203,6 +207,9 @@ pub(super) enum Dirty {
     /// A write that hangs until released, for tests.
     #[cfg(test)]
     Hold(tokio::sync::oneshot::Receiver<()>),
+    /// Answered once every change queued before it is written, for tests.
+    #[cfg(test)]
+    Flush(tokio::sync::oneshot::Sender<()>),
 }
 
 impl Dirty {
@@ -493,7 +500,10 @@ impl Shared {
             .info()
             .await
             .map_err(CoordinationError::unavailable)?;
-        if info.config.subject_delete_marker_ttl.is_none() {
+        // A bucket kept with another max_age expires records on another
+        // bound than the guard and admission assume.
+        if info.config.subject_delete_marker_ttl.is_none() || info.config.max_age != RECORD_MAX_AGE
+        {
             return Err(CoordinationError::BucketConfig);
         }
         Ok(kv)
@@ -527,6 +537,8 @@ impl Shared {
             no_beat_after_snapshot: AtomicBool::new(false),
             #[cfg(test)]
             watch_paused: AtomicBool::new(false),
+            #[cfg(test)]
+            live_heartbeats: std::sync::atomic::AtomicUsize::new(0),
         });
         {
             let mut registry = state.registry();
@@ -654,6 +666,8 @@ impl Shared {
     /// left with the estimate ahead. Replays never get here (see
     /// `watch_once`).
     pub(super) fn heard_self(&self, written: DateTime<Utc>) {
+        #[cfg(test)]
+        self.live_heartbeats.fetch_add(1, Ordering::AcqRel);
         #[cfg(test)]
         if self.ignore_heartbeats.load(Ordering::Acquire) {
             return;

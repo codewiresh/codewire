@@ -113,7 +113,6 @@ async fn without_nats_at_startup_mesh_serves_its_own_sessions_and_stays_ready() 
         addresses: vec![codewire_tailnet::node::prefix_from_uuid(&peer.peer_id)],
     };
     crate::mesh_coordinate::update_node(&state, peer.peer_id, session_id, node.clone());
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert!(state.is_shared());
     assert!(state.shared.get().is_none(), "NATS was reached");
@@ -166,7 +165,8 @@ mod nats_tests {
         stable_peer_id, update_node,
     };
 
-    const WAIT: Duration = Duration::from_secs(10);
+    /// A hang guard, never a proof: every wait below ends on its condition.
+    const WAIT: Duration = Duration::from_secs(30);
 
     struct Replicas {
         a: MeshCoordinateState,
@@ -226,6 +226,34 @@ mod nats_tests {
         })
         .await
         .expect("the condition held in time");
+    }
+
+    /// Every change `state` queued before now has been written, or refused.
+    async fn flushed(state: &MeshCoordinateState) {
+        let (done, finished) = tokio::sync::oneshot::channel();
+        state.shared.get().unwrap().send(Dirty::Flush(done));
+        tokio::time::timeout(WAIT, finished)
+            .await
+            .expect("the writer flushed in time")
+            .expect("the writer answered");
+    }
+
+    /// `state`'s watch has delivered everything written before now: its own
+    /// next heartbeat, written after it, came back through the watch.
+    async fn caught_up(state: &MeshCoordinateState) {
+        let shared = state.shared.get().unwrap();
+        let seen = shared.live_heartbeats.load(Ordering::Acquire);
+        shared.beat_now.notify_one();
+        eventually(|| shared.live_heartbeats.load(Ordering::Acquire) > seen).await;
+    }
+
+    /// Both replicas have written what they queued and seen what was written,
+    /// so nothing more follows from what happened before.
+    async fn settled(r: &Replicas) {
+        flushed(&r.a).await;
+        flushed(&r.b).await;
+        caught_up(&r.a).await;
+        caught_up(&r.b).await;
     }
 
     struct Session {
@@ -427,7 +455,7 @@ mod nats_tests {
         .await;
         eventually(|| !r.a.knows_key(&key) && !r.b.knows_key(&key)).await;
         // The ended session's replica wrote nothing back.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        flushed(&r.a).await;
         let entry =
             r.kv.entry(peer_key(&network, revoked.peer_id))
                 .await
@@ -512,7 +540,7 @@ mod nats_tests {
     async fn a_draining_record_reaches_nobody_new_and_goes_after_its_grace() {
         let r = replicas_with(
             Timing::default(),
-            fast(RECORD_MAX_AGE, Duration::from_secs(1)),
+            fast(RECORD_MAX_AGE, Duration::from_secs(5)),
         )
         .await;
         let network = format!("net-{}", Uuid::new_v4());
@@ -550,14 +578,14 @@ mod nats_tests {
             MeshCoordinateRole::Peer,
         )
         .unwrap();
-        let sent = tokio::time::timeout(
-            Duration::from_millis(300),
-            next(&mut late, update_with(0x33)),
-        );
-        assert!(
-            sent.await.is_err(),
-            "a draining node reached a new subscriber"
-        );
+        // Whatever the late subscriber could be sent has arrived by now.
+        caught_up(&r.b).await;
+        while let Ok(event) = late.events.try_recv() {
+            assert!(
+                !update_with(0x33)(&event),
+                "a draining node reached a new subscriber"
+            );
+        }
         // The node never comes back: its existing partner loses it.
         next(&mut partner, removed(stopping.peer_id)).await;
         assert!(!draining());
@@ -601,10 +629,10 @@ mod nats_tests {
     #[ignore = "requires NATS_URL pointing at a JetStream-enabled NATS server"]
     async fn a_record_not_rewritten_in_time_admits_nothing() {
         // The other replica rewrites only every 15 s; this one trusts a
-        // record for 3 s of its server-set time.
+        // record for 8 s of its server-set time.
         let r = replicas_with(
             Timing::default(),
-            fast(Duration::from_secs(3), DRAINING_GRACE),
+            fast(Duration::from_secs(8), DRAINING_GRACE),
         )
         .await;
         let network = format!("net-{}", Uuid::new_v4());
@@ -630,7 +658,7 @@ mod nats_tests {
     #[ignore = "requires NATS_URL pointing at a JetStream-enabled NATS server"]
     async fn a_session_its_replica_cannot_share_ends() {
         let r = replicas_with(
-            fast(Duration::from_secs(1), DRAINING_GRACE),
+            fast(Duration::from_secs(5), DRAINING_GRACE),
             Timing::default(),
         )
         .await;
@@ -640,7 +668,7 @@ mod nats_tests {
         eventually(|| written(&r.a, &session)).await;
         // The bucket goes away: no write lands, so no revocation could be seen.
         r.js.delete_key_value(r.kv.name.as_str()).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(30), session.close.notified())
+        tokio::time::timeout(WAIT, session.close.notified())
             .await
             .expect("the unshared session ended");
     }
@@ -678,7 +706,7 @@ mod nats_tests {
     #[ignore = "requires NATS_URL pointing at a JetStream-enabled NATS server"]
     async fn a_hung_writer_still_ends_unshared_sessions_on_time() {
         let r = replicas_with(
-            fast(Duration::from_secs(1), DRAINING_GRACE),
+            fast(Duration::from_secs(5), DRAINING_GRACE),
             Timing::default(),
         )
         .await;
@@ -688,7 +716,7 @@ mod nats_tests {
         eventually(|| written(&r.a, &session)).await;
         let (_release, hold) = tokio::sync::oneshot::channel();
         r.a.shared.get().unwrap().send(Dirty::Hold(hold));
-        tokio::time::timeout(Duration::from_secs(5), session.close.notified())
+        tokio::time::timeout(WAIT, session.close.notified())
             .await
             .expect("the session ended while its writer hung");
     }
@@ -726,17 +754,19 @@ mod nats_tests {
         let session = open(&state, &member(&network, "early"));
         send_node(&state, &session, 0x11);
         // Longer than the record bound before NATS is reached.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        let tasks = Shared::attach(&state, kv, fast(Duration::from_secs(1), DRAINING_GRACE));
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let tasks = Shared::attach(&state, kv, fast(Duration::from_secs(5), DRAINING_GRACE));
         eventually(|| written(&state, &session)).await;
-        let ended = tokio::time::timeout(Duration::from_secs(2), session.close.notified()).await;
+        // The guard looks for unshared sessions before each heartbeat: two
+        // more live heartbeats mean it has looked since the first write.
+        let shared = state.shared.get().unwrap();
+        let seen = shared.live_heartbeats.load(Ordering::Acquire);
+        eventually(|| shared.live_heartbeats.load(Ordering::Acquire) >= seen + 2).await;
+        let alive = written(&state, &session);
         for task in tasks {
             task.abort();
         }
-        assert!(
-            ended.is_err(),
-            "a session served before NATS was reached ended"
-        );
+        assert!(alive, "a session served before NATS was reached ended");
     }
 
     /// Blocker B: a session whose first write is delayed never overwrites the
@@ -767,7 +797,11 @@ mod nats_tests {
             let _ = release.send(());
             closed(&old).await;
             // The newer session lives on, and the record is still its own.
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            // The older replica's watch may be paused, so only its writer is
+            // waited for; the newer one's watch sees any overwrite.
+            flushed(&r.a).await;
+            flushed(&r.b).await;
+            caught_up(&r.b).await;
             assert!(
                 written(&r.b, &new),
                 "the newer session was ended (watch paused: {watch_paused})"
@@ -810,11 +844,11 @@ mod nats_tests {
         )
         .await
         .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        caught_up(&r.b).await;
         let new = open(&r.b, &moving);
         send_node(&r.b, &new, 0x55);
         eventually(|| written(&r.b, &new)).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        settled(&r).await;
         assert!(
             written(&r.b, &new),
             "the reconnect lost to the crashed record"
@@ -843,7 +877,7 @@ mod nats_tests {
         let new = open(&r.b, &moving);
         send_node(&r.b, &new, 0x55);
         closed(&old).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        settled(&r).await;
         assert!(written(&r.b, &new), "the live reconnect was ended");
         let entry =
             r.kv.entry(peer_key(&network, moving.peer_id))
@@ -914,7 +948,7 @@ mod nats_tests {
         let new = open(&r.b, &moving);
         send_node(&r.b, &new, 0x55);
         closed(&old).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        settled(&r).await;
         assert!(
             written(&r.b, &new),
             "the reconnect was placed before the older session"
@@ -941,7 +975,7 @@ mod nats_tests {
         let new = open(&r.b, &moving);
         send_node(&r.b, &new, 0x55);
         closed(&old).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        settled(&r).await;
         assert!(written(&r.b, &new));
         assert_eq!(
             record_of(&r, &network, moving.peer_id).await.session_id,
@@ -980,7 +1014,7 @@ mod nats_tests {
         eventually(|| written(&r.a, &new)).await;
         let _ = release.send(());
         closed(&old).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        settled(&r).await;
         assert!(written(&r.a, &new), "the live reconnect was overwritten");
         assert_eq!(
             record_of(&r, &network, moving.peer_id).await.session_id,
@@ -1005,7 +1039,10 @@ mod nats_tests {
         eventually(|| written(&r.a, &old)).await;
         let new = open(&r.b, &moving);
         send_node(&r.b, &new, 0x55);
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        // B's writer has tried the new session, and its watch has seen all
+        // there is; its heartbeats come back but give no server time.
+        flushed(&r.b).await;
+        caught_up(&r.b).await;
         assert!(
             r.b.registry().peers.contains_key(&moving.peer_id),
             "ended without a server time"

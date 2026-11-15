@@ -77,6 +77,10 @@ impl Writer {
                     // the sender, which ends the wait too).
                     let _ = release.await;
                 }
+                #[cfg(test)]
+                Dirty::Flush(done) => {
+                    let _ = done.send(());
+                }
                 dirty => {
                     if seen.insert(dirty.key()) {
                         self.apply(dirty).await;
@@ -126,7 +130,7 @@ impl Writer {
         match dirty {
             Dirty::Drain(_) => {}
             #[cfg(test)]
-            Dirty::Hold(_) => {}
+            Dirty::Hold(_) | Dirty::Flush(_) => {}
             Dirty::Peer {
                 peer_id,
                 network_id,
