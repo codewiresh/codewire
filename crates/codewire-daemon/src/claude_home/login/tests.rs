@@ -1226,3 +1226,55 @@ fn a_disk_reader_recognises_a_store_holding_codewires_login() {
     assert!(!is_codewire_leftover(".credentials.json", b"anything"));
     assert!(!is_codewire_leftover("other.new", b"anything"));
 }
+
+/// The login file as recorded for the pinned Claude Code, and what pins it
+/// (`fixtures/agent-formats/README.md`).
+const RECORDED_FORMAT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/agent-formats/claude-code.credentials.json"
+));
+const RECORDED_VERSIONS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/agent-formats/manifest.json"
+));
+const AGENT_PINS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../images/workspace/agents/package.json"
+));
+
+#[test]
+fn the_login_file_is_the_format_recorded_for_the_pinned_claude_code() {
+    let opened = opened(CREDENTIAL, GENERATION, ACCESS, EXPIRES);
+    let mut written = login_document(None, &opened.login).0.clone();
+    // The placeholder refresh token is new with every write: its form is
+    // fixed, its nonce is not.
+    let refresh = written[CLAUDE_LOGIN_KEY]["refreshToken"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let nonce = refresh
+        .strip_prefix(CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX)
+        .unwrap();
+    assert_eq!(nonce.len(), NONCE_LENGTH);
+    assert!(nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    written[CLAUDE_LOGIN_KEY]["refreshToken"] =
+        json!(format!("{CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX}<nonce>"));
+
+    let recorded: Value = serde_json::from_str(RECORDED_FORMAT).unwrap();
+    assert_eq!(
+        written, recorded,
+        "the login file Codewire writes differs from the one recorded for the pinned Claude Code"
+    );
+}
+
+#[test]
+fn the_recorded_format_is_for_the_claude_code_the_image_pins() {
+    let package = "@anthropic-ai/claude-code";
+    let pins: Value = serde_json::from_str(AGENT_PINS).unwrap();
+    let recorded: Value = serde_json::from_str(RECORDED_VERSIONS).unwrap();
+    assert!(recorded[package].is_string());
+    assert_eq!(
+        recorded[package], pins["dependencies"][package],
+        "the pinned {package} changed: check it still reads the recorded login file, then record its version in fixtures/agent-formats/manifest.json"
+    );
+}

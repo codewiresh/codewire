@@ -1,0 +1,11 @@
+{
+  "OPENAI_API_KEY": null,
+  "auth_mode": "chatgpt",
+  "last_refresh": "2026-10-03T04:50:07Z",
+  "tokens": {
+    "access_token": "<access_token: a JWT>",
+    "account_id": "codewire-synthetic-account",
+    "id_token": "<id_token: a JWT>",
+    "refresh_token": "codewire-managed-no-refresh-token"
+  }
+}

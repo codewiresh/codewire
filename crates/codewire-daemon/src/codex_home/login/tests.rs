@@ -1328,3 +1328,53 @@ fn a_disk_reader_recognises_exactly_codewire_auth_files() {
     assert!(!is_codewire_leftover("auth.json", &codewire));
     assert!(!is_codewire_leftover("history.new", b"anything"));
 }
+
+/// The login file as recorded for the pinned Codex, and what pins it
+/// (`fixtures/agent-formats/README.md`).
+const RECORDED_FORMAT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/agent-formats/codex.auth.json"
+));
+const RECORDED_VERSIONS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/agent-formats/manifest.json"
+));
+const AGENT_PINS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../images/workspace/agents/package.json"
+));
+
+#[test]
+fn the_login_file_is_the_format_recorded_for_the_pinned_codex() {
+    let opened = opened(CREDENTIAL, 1, T0 + 86_400);
+    let mut written = login_document(None, &opened.login).0.clone();
+    // The two tokens are the account's own JWTs: their form is fixed, their
+    // content is not.
+    for token in ["id_token", "access_token"] {
+        let dots = written["tokens"][token]
+            .as_str()
+            .unwrap()
+            .matches('.')
+            .count();
+        assert_eq!(dots, 2, "{token} is a JWT");
+        written["tokens"][token] = json!(format!("<{token}: a JWT>"));
+    }
+
+    let recorded: serde_json::Value = serde_json::from_str(RECORDED_FORMAT).unwrap();
+    assert_eq!(
+        written, recorded,
+        "the login file Codewire writes differs from the one recorded for the pinned Codex"
+    );
+}
+
+#[test]
+fn the_recorded_format_is_for_the_codex_the_image_pins() {
+    let package = "@openai/codex";
+    let pins: serde_json::Value = serde_json::from_str(AGENT_PINS).unwrap();
+    let recorded: serde_json::Value = serde_json::from_str(RECORDED_VERSIONS).unwrap();
+    assert!(recorded[package].is_string());
+    assert_eq!(
+        recorded[package], pins["dependencies"][package],
+        "the pinned {package} changed: check it still reads the recorded login file, then record its version in fixtures/agent-formats/manifest.json"
+    );
+}

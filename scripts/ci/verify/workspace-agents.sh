@@ -82,5 +82,19 @@ while read -r kind first second; do
   esac
 done <<<"$plan"
 
+# The agents' login file formats are recorded against exact versions (#3999):
+# a moved pin means the recorded formats must be checked against the new agent.
+python3 -I - "$AGENTS/package.json" "$ROOT/crates/codewire-daemon/fixtures/agent-formats/manifest.json" <<'PY' ||
+import json
+import sys
+
+pins = json.load(open(sys.argv[1]))["dependencies"]
+recorded = json.load(open(sys.argv[2]))
+moved = [f"{package} {pins.get(package)} (recorded: {version})" for package, version in sorted(recorded.items()) if pins.get(package) != version]
+if moved:
+    sys.exit("login file formats are recorded for other versions: " + "; ".join(moved))
+PY
+  die 'check each moved agent still reads its recorded login file, then record its version in crates/codewire-daemon/fixtures/agent-formats/manifest.json'
+
 "$ROOT/scripts/ci/tests/test-support-images-workflow.sh"
 echo 'workspace-agents: the lockfile installs and every agent starts at its pinned version'
