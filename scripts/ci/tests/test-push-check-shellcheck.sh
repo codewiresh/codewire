@@ -72,6 +72,21 @@ grep -Fq 'check-shell-scripts: ShellCheck findings differ from the reviewed base
   fail 'an unused variable did not fail as a ShellCheck finding'
 grep -Fq 'SC2034' "$work/out" || fail 'the failure did not name the finding'
 
+# Every push leaves its timings beside the lock: one line per step and one
+# for the whole check, pass or fail, with the seconds waited and run.
+times="$work/preflight-times.tsv"
+timed_line() {
+  grep -Eq "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z	$1	$2	[0-9]+	[0-9]+	$repo\$" "$times"
+}
+[ "$(grep -c . "$times")" -eq 6 ] ||
+  { cat "$times" >&2; fail 'two push checks did not log environment, shellcheck and total each'; }
+timed_line shellcheck pass || fail 'a passing step was not timed'
+timed_line total pass || fail 'a passing push check was not timed as a whole'
+timed_line shellcheck fail || fail 'a failing step was not timed'
+timed_line total fail || fail 'a failing push check was not timed as a whole'
+PREFLIGHT_TIMES_FILE="$work/no-such-directory/times.tsv" push_check scripts/fixture/caller.sh ||
+  { cat "$work/out" >&2; fail 'a timing log that cannot be written failed the push check'; }
+
 # A pull request checks only the scripts changed since its base (#3119 A7),
 # with the same rule; a base the checkout lacks checks every script.
 git_fixture() {

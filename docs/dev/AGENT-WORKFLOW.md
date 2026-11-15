@@ -238,8 +238,11 @@ runs `scripts/dev/preflight.sh --for-push` on every branch push: the
 environment precheck, `cargo fmt --check`, clippy and unit tests for the
 changed crates, and quick checks for changed file types (ShellCheck on changed
 scripts, proto lint and breaking diff, dashboard typecheck). It runs no
-verification family and records nothing. `main` takes changes only through
-pull requests; push one ref at a time.
+verification family and records only its timings: each step, and the whole
+check as `total`, appends a line to `~/.cache/codewire-preflight-times.tsv`
+with the time, the step, pass or fail, the seconds it waited for the
+workstation lock, the seconds it ran and the checkout (infra#1534). `main`
+takes changes only through pull requests; push one ref at a time.
 
 Pull-request CI is the merge gate (#3119 step 2). Each pull request merges
 alone, without a rebase unless it conflicts, when its required statuses are

@@ -27,18 +27,34 @@ ran() { printf '%s\n' "$1" >>"$RAN"; }
 # shellcheck source=scripts/dev/preflight-lock.sh
 . "$ROOT/scripts/dev/preflight-lock.sh"
 
+# How long a push waits and runs is measured on every push, not guessed: each
+# step, and the whole check as `total`, appends one line to a log beside the
+# lock (time, step, pass or fail, seconds waited for the lock, seconds run,
+# checkout). A log that cannot be written never fails a push.
+PREFLIGHT_TIMES_FILE="${PREFLIGHT_TIMES_FILE:-${PREFLIGHT_LOCK_FILE%.lock}-times.tsv}"
+waited_total=0
+timed() {
+  { printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "$3" "$4" "$ROOT" \
+    >>"$PREFLIGHT_TIMES_FILE"; } 2>/dev/null || true
+}
+
 step() {
-  local name="$1" started=$SECONDS status=0
+  local name="$1" started=$SECONDS waited status=0
   shift
   case "$name" in
     rust-clippy*|rust-unit-tests-*|desktop-check) preflight_lock_acquire "push check $name" || exit 1 ;;
   esac
+  waited=$((SECONDS - started))
+  waited_total=$((waited_total + waited))
   log "${name}: start"
   "$@" || status=$?
   if [ "$status" -ne 0 ]; then
+    timed "$name" fail "$waited" "$((SECONDS - started - waited))"
+    timed total fail "$waited_total" "$((SECONDS - waited_total))"
     printf 'preflight: push check %s FAILED (exit %s)\n' "$name" "$status" >&2
     exit 1
   fi
+  timed "$name" pass "$waited" "$((SECONDS - started - waited))"
   log "${name}: passed in $((SECONDS - started))s"
   ran "$name"
 }
@@ -202,4 +218,5 @@ if [ "$dashboard_changed" = true ]; then
   step dashboard-typecheck dashboard_typecheck
 fi
 
+timed total pass "$waited_total" "$((SECONDS - waited_total))"
 log "passed: $(paste -sd, "$RAN")"
