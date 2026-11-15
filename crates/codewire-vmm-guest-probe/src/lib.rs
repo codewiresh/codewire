@@ -5,7 +5,6 @@
 #![allow(clippy::undocumented_unsafe_blocks, clippy::unwrap_used)]
 
 mod checkpoint_protocol;
-mod network;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod direct_share;
@@ -64,7 +63,7 @@ pub const GUEST_CHECKPOINT_ABI_MARKER: &[u8] = b"\0CWCHECKPOINTABI\0hook=1\0";
 /// guest's clock to the host's (#4654). A host sends that ABI only to a guest
 /// whose init carries this.
 pub const GUEST_CHECKPOINT_THAW_CLOCK_MARKER: &[u8] = b"\0CWCHECKPOINTABI\0hook=2\0";
-pub use network::{
+pub use codewire_network_session::{
     GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN,
     NETWORK_HOST_HELLO_LEN, NETWORK_HOST_READY_LEN, NETWORK_HOST_READY_TIMEOUT_SECONDS,
     NETWORK_KEY_LEN, NETWORK_MAX_PACKET_BYTES, NetworkDirection, NetworkError, NetworkGuestAck,

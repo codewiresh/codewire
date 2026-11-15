@@ -2214,6 +2214,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-network-session"
+version = "0.1.0"
+dependencies = [
+ "codewire-workspace-hack",
+ "hmac 0.12.1",
+ "rustix",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "codewire-oidc"
 version = "0.1.0"
 dependencies = [
@@ -2541,6 +2556,7 @@ dependencies = [
  "codewire-access",
  "codewire-daemon",
  "codewire-daemon-proto",
+ "codewire-network-session",
  "codewire-project",
  "codewire-workload-secrets",
  "codewire-workspace-hack",

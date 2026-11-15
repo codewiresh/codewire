@@ -20,6 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 codewire-access = { workspace = true }
+codewire-network-session = { workspace = true }
 codewire-project = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

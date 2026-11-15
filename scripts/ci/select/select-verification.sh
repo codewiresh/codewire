@@ -1618,6 +1618,13 @@ if [ "$event_selected" = false ]; then
         select_token transport_pkg_codewire_local_vmm
         select_token transport_pkg_codewire_vmm_guest_probe
         ;;
+      crates/codewire-network-session/*)
+        # The guest and the host's egress worker run this one session
+        # protocol: prove both halves.
+        select_token transport
+        select_token transport_pkg_codewire_local_vmm
+        select_token transport_pkg_codewire_vmm_guest_probe
+        ;;
       crates/codewire-vmm-guest-probe/*)
         # The host runner consumes the guest seed/newc contract directly.
         select_token transport

@@ -36,6 +36,7 @@ members = [
     "crates/codewire-protected-store",
     "crates/codewire-mesh",
     "crates/codewire-netstack",
+    "crates/codewire-network-session",
     "crates/codewire-oidc",
     "crates/codewire-orchestration",
     "crates/codewire-proto",
@@ -91,6 +92,7 @@ codewire-egress-policy = { path = "crates/codewire-egress-policy" }
 codewire-ext4-scrub = { path = "crates/codewire-ext4-scrub" }
 codewire-email = { path = "crates/codewire-email" }
 codewire-netstack = { path = "crates/codewire-netstack" }
+codewire-network-session = { path = "crates/codewire-network-session" }
 codewire-tailnet = { path = "crates/codewire-tailnet" }
 codewire-workspace-access = { path = "crates/codewire-workspace-access" }
 codewire-tls = { path = "crates/codewire-tls" }

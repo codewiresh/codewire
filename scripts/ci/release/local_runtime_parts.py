@@ -113,6 +113,7 @@ RUNTIME_INPUTS = (
     "Cargo.lock",
     "rust-toolchain.toml",
     "crates/codewire-vmm-guest-probe/",
+    "crates/codewire-network-session/",
     "crates/codewire-local-vmm/macos-vz-runner/",
     "scripts/ci/verify/build-local-vmm-initramfs.sh",
     "scripts/ci/verify/build-linux-vmm-kernel.py",

@@ -1517,6 +1517,10 @@ run_paths_case rust_tailnet_relay pull_request refs/pull/9/head false \
 run_paths_case rust_netstack pull_request refs/pull/90/head false \
   'policy transport transport_pkg_codewire_netstack transport_pkg_codewire_tailnet' \
   crates/codewire-netstack/src/lib.rs
+# The shared network session proves both halves that run it.
+run_paths_case rust_network_session pull_request refs/pull/92/head false \
+  'policy rust rust_pkg_codewire_network_session transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  crates/codewire-network-session/src/lib.rs
 run_paths_case rust_derp pull_request refs/pull/91/head false \
   'policy transport transport_derp_contract transport_pkg_codewire_derp' \
   crates/codewire-derp/src/lib.rs

@@ -64,6 +64,7 @@ on:
       - 'crates/codewire-local-vmm/**'
       - 'crates/codewire-mesh/**'
       - 'crates/codewire-netstack/**'
+      - 'crates/codewire-network-session/**'
       - 'crates/codewire-platform-credentials/**'
       - 'crates/codewire-project/**'
       - 'crates/codewire-project-proto/**'

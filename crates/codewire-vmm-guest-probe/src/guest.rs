@@ -29,10 +29,7 @@ use tokio::net::{TcpListener, UnixStream as TokioUnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Semaphore;
 use tokio::sync::watch;
-use tokio::{
-    io::unix::AsyncFd,
-    io::{AsyncReadExt, AsyncWriteExt},
-};
+use tokio::{io::AsyncWriteExt, io::unix::AsyncFd};
 use tokio_stream::Stream;
 use tokio_vsock::{
     Incoming, VMADDR_CID_ANY, VMADDR_CID_HOST, VsockAddr, VsockListener, VsockStream,
@@ -42,12 +39,6 @@ use zeroize::Zeroizing;
 use crate::cw_runtime::{
     CW_RUNTIME_DISK_SERIAL, CW_RUNTIME_MAX_BYTES, CW_RUNTIME_MAX_CATALOG,
     CW_RUNTIME_MAX_PROVENANCE, CW_RUNTIME_ROOT, CW_RUNTIME_SOURCE, CwRuntimeCatalog,
-};
-use crate::network::{
-    GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_HOST_HELLO_LEN,
-    NETWORK_HOST_READY_LEN, NETWORK_HOST_READY_TIMEOUT_SECONDS, NETWORK_MAX_PACKET_BYTES,
-    NetworkGuestAck, NetworkHostHello, NetworkHostReady, NetworkKey, NetworkRole, NetworkSession,
-    encoded_network_frame_len,
 };
 use crate::setup_apply::{
     OCI_LOWER_ROOT_MODE, SetupApplyError, apply_setup_layers, verify_completed_setup_generation,
@@ -65,6 +56,10 @@ use crate::{
     SEED_LEN, SETUP_DISK_SERIAL, SETUP_HEADER_LEN, SKILL_SNAPSHOT_CONTENT_PATH,
     SKILL_SNAPSHOT_PLAN_PATH, STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding,
     SetupHeader, Sha256Value, SkillProjectionRoot, SkillSnapshotPlan,
+};
+use codewire_network_session::guest::GuestHandshakeError;
+use codewire_network_session::{
+    GUEST_NETWORK_VSOCK_PORT, NETWORK_HOST_READY_TIMEOUT_SECONDS, NetworkKey,
 };
 
 mod bootstrap;
@@ -832,7 +827,7 @@ pub async fn run_network_agent() -> Result<()> {
 
     loop {
         tokio::select! {
-            packet = read_tun_packet(&tun) => {
+            packet = codewire_network_session::guest::read_tun_packet(&tun) => {
                 // With no authenticated host, consuming and discarding the
                 // bounded packet is the fail-closed path. It also prevents a
                 // later worker from receiving pre-authentication traffic.
@@ -860,15 +855,14 @@ pub async fn run_network_agent() -> Result<()> {
                 }
                 let authenticated = tokio::time::timeout(
                     NETWORK_HANDSHAKE_TIMEOUT,
-                    authenticate_guest_network(stream, &key, vm_id, generation),
+                    codewire_network_session::guest::authenticate_guest(stream, &key, vm_id, generation),
                 )
                 .await;
                 let (stream, session) = match authenticated {
                     Ok(Ok(authenticated)) => authenticated,
                     Ok(Err(error)) => {
-                        let status = error.status();
-                        record_network_status(status)?;
-                        record_boot_stage(error.failure_stage())?;
+                        record_network_status(handshake_status(error))?;
+                        record_boot_stage(handshake_failure_stage(error))?;
                         bail!("guest network authentication failed");
                     }
                     Err(_) => {
@@ -884,7 +878,7 @@ pub async fn run_network_agent() -> Result<()> {
                 // A lost or malformed worker session never opens another
                 // route. Return to the host-only accept loop and drain/drop
                 // packets until a fresh authenticated worker arrives.
-                if bridge_guest_network(stream, session, Arc::clone(&tun))
+                if codewire_network_session::guest::bridge_guest(stream, session, Arc::clone(&tun), NETWORK_MTU)
                     .await
                     .is_err()
                 {
@@ -895,197 +889,27 @@ pub async fn run_network_agent() -> Result<()> {
     }
 }
 
-async fn authenticate_guest_network(
-    mut stream: VsockStream,
-    key: &NetworkKey,
-    vm_id: uuid::Uuid,
-    generation: u64,
-) -> Result<(VsockStream, NetworkSession), GuestNetworkHandshakeError> {
-    let mut hello = [0_u8; NETWORK_HOST_HELLO_LEN];
-    AsyncReadExt::read_exact(&mut stream, &mut hello)
-        .await
-        .map_err(|_| GuestNetworkHandshakeError::ReadHello)?;
-    let hello = NetworkHostHello::decode(&hello, key, vm_id, generation)
-        .map_err(|_| GuestNetworkHandshakeError::AuthenticateHello)?;
-    let acknowledgement = NetworkGuestAck::new(hello.nonce)
-        .map_err(|_| GuestNetworkHandshakeError::AuthenticateHello)?
-        .encode(key);
-    AsyncWriteExt::write_all(&mut stream, &acknowledgement)
-        .await
-        .map_err(|_| GuestNetworkHandshakeError::WriteAcknowledgement)?;
-    let mut ready = [0_u8; NETWORK_HOST_READY_LEN];
-    AsyncReadExt::read_exact(&mut stream, &mut ready)
-        .await
-        .map_err(|_| GuestNetworkHandshakeError::ReadReady)?;
-    NetworkHostReady::decode(&ready, key, &hello.nonce)
-        .map_err(|_| GuestNetworkHandshakeError::AuthenticateReady)?;
-    let session = NetworkSession::new(key, &hello.nonce, NetworkRole::Guest)
-        .map_err(|_| GuestNetworkHandshakeError::Session)?;
-    Ok((stream, session))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GuestNetworkHandshakeError {
-    ReadHello,
-    AuthenticateHello,
-    WriteAcknowledgement,
-    ReadReady,
-    AuthenticateReady,
-    Session,
-}
-
-impl GuestNetworkHandshakeError {
-    fn status(self) -> &'static str {
-        match self {
-            Self::ReadHello => "network-hello-read-failed",
-            Self::AuthenticateHello => "network-hello-auth-failed",
-            Self::WriteAcknowledgement => "network-ack-write-failed",
-            Self::ReadReady => "network-ready-read-failed",
-            Self::AuthenticateReady => "network-ready-auth-failed",
-            Self::Session => "network-session-failed",
-        }
-    }
-
-    fn failure_stage(self) -> &'static str {
-        match self {
-            Self::ReadHello => "workspace-net-hello-read-failed",
-            Self::AuthenticateHello => "workspace-net-hello-auth-failed",
-            Self::WriteAcknowledgement => "workspace-net-ack-write-failed",
-            Self::ReadReady => "workspace-net-ready-read-failed",
-            Self::AuthenticateReady => "workspace-net-ready-auth-failed",
-            Self::Session => "workspace-net-session-failed",
-        }
+/// The guest's network status for a failed handshake.
+fn handshake_status(error: GuestHandshakeError) -> &'static str {
+    match error {
+        GuestHandshakeError::ReadHello => "network-hello-read-failed",
+        GuestHandshakeError::AuthenticateHello => "network-hello-auth-failed",
+        GuestHandshakeError::WriteAcknowledgement => "network-ack-write-failed",
+        GuestHandshakeError::ReadReady => "network-ready-read-failed",
+        GuestHandshakeError::AuthenticateReady => "network-ready-auth-failed",
+        GuestHandshakeError::Session => "network-session-failed",
     }
 }
 
-async fn bridge_guest_network(
-    stream: VsockStream,
-    session: NetworkSession,
-    tun: Arc<AsyncFd<OwnedFd>>,
-) -> Result<()> {
-    let session = Arc::new(tokio::sync::Mutex::new(session));
-    let (mut stream_read, mut stream_write) = tokio::io::split(stream);
-    let outbound_session = Arc::clone(&session);
-    let outbound_tun = Arc::clone(&tun);
-    let outbound = async move {
-        loop {
-            let packet = read_tun_packet(&outbound_tun).await?;
-            if !canonical_ipv4_packet(&packet) {
-                continue;
-            }
-            let frame = outbound_session
-                .lock()
-                .await
-                .encode_packet(&packet)
-                .context("authenticate guest network outbound packet")?;
-            stream_write
-                .write_all(&frame)
-                .await
-                .context("write guest network packet frame")?;
-        }
-        #[allow(unreachable_code)]
-        Ok::<(), anyhow::Error>(())
-    };
-    let inbound_session = Arc::clone(&session);
-    let inbound = async move {
-        loop {
-            let mut header = [0_u8; NETWORK_FRAME_HEADER_LEN];
-            stream_read
-                .read_exact(&mut header)
-                .await
-                .context("read guest network frame header")?;
-            let frame_len =
-                encoded_network_frame_len(&header).context("bound guest network frame")?;
-            let mut frame = vec![0_u8; frame_len];
-            frame[..NETWORK_FRAME_HEADER_LEN].copy_from_slice(&header);
-            stream_read
-                .read_exact(&mut frame[NETWORK_FRAME_HEADER_LEN..])
-                .await
-                .context("read guest network frame payload")?;
-            let packet = inbound_session
-                .lock()
-                .await
-                .decode_packet(&frame)
-                .context("authenticate guest network inbound packet")?;
-            ensure!(
-                canonical_ipv4_packet(&packet),
-                "host supplied a non-canonical IPv4 packet"
-            );
-            write_tun_packet(&tun, &packet).await?;
-        }
-        #[allow(unreachable_code)]
-        Ok::<(), anyhow::Error>(())
-    };
-    tokio::try_join!(outbound, inbound)?;
-    Ok(())
-}
-
-fn canonical_ipv4_packet(packet: &[u8]) -> bool {
-    if !(20..=NETWORK_MTU).contains(&packet.len()) || packet[0] >> 4 != 4 {
-        return false;
-    }
-    let header_words = usize::from(packet[0] & 0x0f);
-    if header_words < 5
-        || header_words
-            .checked_mul(4)
-            .is_none_or(|length| length > packet.len())
-    {
-        return false;
-    }
-    usize::from(u16::from_be_bytes([packet[2], packet[3]])) == packet.len()
-}
-
-async fn read_tun_packet(tun: &AsyncFd<OwnedFd>) -> io::Result<Vec<u8>> {
-    let mut packet = vec![0_u8; NETWORK_MAX_PACKET_BYTES];
-    loop {
-        let mut ready = tun.readable().await?;
-        match ready.try_io(|descriptor| {
-            let length = unsafe {
-                libc::read(
-                    descriptor.get_ref().as_raw_fd(),
-                    packet.as_mut_ptr().cast(),
-                    packet.len(),
-                )
-            };
-            if length == -1 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(length as usize)
-            }
-        }) {
-            Ok(Ok(0)) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
-            Ok(Ok(length)) => {
-                packet.truncate(length);
-                return Ok(packet);
-            }
-            Ok(Err(error)) => return Err(error),
-            Err(_) => continue,
-        }
-    }
-}
-
-async fn write_tun_packet(tun: &AsyncFd<OwnedFd>, packet: &[u8]) -> io::Result<()> {
-    loop {
-        let mut ready = tun.writable().await?;
-        match ready.try_io(|descriptor| {
-            let length = unsafe {
-                libc::write(
-                    descriptor.get_ref().as_raw_fd(),
-                    packet.as_ptr().cast(),
-                    packet.len(),
-                )
-            };
-            if length == -1 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(length as usize)
-            }
-        }) {
-            Ok(Ok(length)) if length == packet.len() => return Ok(()),
-            Ok(Ok(_)) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
-            Ok(Err(error)) => return Err(error),
-            Err(_) => continue,
-        }
+/// The boot stage a failed handshake records.
+fn handshake_failure_stage(error: GuestHandshakeError) -> &'static str {
+    match error {
+        GuestHandshakeError::ReadHello => "workspace-net-hello-read-failed",
+        GuestHandshakeError::AuthenticateHello => "workspace-net-hello-auth-failed",
+        GuestHandshakeError::WriteAcknowledgement => "workspace-net-ack-write-failed",
+        GuestHandshakeError::ReadReady => "workspace-net-ready-read-failed",
+        GuestHandshakeError::AuthenticateReady => "workspace-net-ready-auth-failed",
+        GuestHandshakeError::Session => "workspace-net-session-failed",
     }
 }
 
@@ -8152,15 +7976,15 @@ mod tests {
             );
         }
         for failure in [
-            GuestNetworkHandshakeError::ReadHello,
-            GuestNetworkHandshakeError::AuthenticateHello,
-            GuestNetworkHandshakeError::WriteAcknowledgement,
-            GuestNetworkHandshakeError::ReadReady,
-            GuestNetworkHandshakeError::AuthenticateReady,
-            GuestNetworkHandshakeError::Session,
+            GuestHandshakeError::ReadHello,
+            GuestHandshakeError::AuthenticateHello,
+            GuestHandshakeError::WriteAcknowledgement,
+            GuestHandshakeError::ReadReady,
+            GuestHandshakeError::AuthenticateReady,
+            GuestHandshakeError::Session,
         ] {
-            assert!(NETWORK_STATUS_VALUES.contains(&failure.status()));
-            assert!(NETWORK_AGENT_FAILURE_STAGES.contains(&failure.failure_stage()));
+            assert!(NETWORK_STATUS_VALUES.contains(&handshake_status(failure)));
+            assert!(NETWORK_AGENT_FAILURE_STAGES.contains(&handshake_failure_stage(failure)));
         }
     }
 

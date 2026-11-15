@@ -1,0 +1,24 @@
+[package]
+name = "codewire-network-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-only"
+description = "The authenticated network session between an environment's guest and its host egress worker."
+
+[dependencies]
+hmac = { workspace = true }
+rustix = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net", "sync", "macros"] }
+uuid = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+codewire-workspace-hack.workspace = true
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

@@ -750,8 +750,6 @@ class EmbeddedSourceTest(unittest.TestCase):
     TEST_ONLY = {
         # codewire-server-core src/migrate.rs
         "crates/codewire-server-core/tests/data/application_schema_fingerprint.sql",
-        # codewire-vmm-guest-probe src/network.rs
-        "testdata/local-vm-network/protocol-v1.json",
         # codewire-local-vmm src/bin/codewire-local-codex-bridge-smoke.rs
         "scripts/ci/verify/stock-ssh-workload.sh",
         # codewire-local-vmm src/supervisor_store.rs
