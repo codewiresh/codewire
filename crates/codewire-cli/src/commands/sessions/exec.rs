@@ -44,13 +44,28 @@ pub(crate) async fn handle_exec_command(globals: &Globals, args: ExecArgs) -> an
             client,
             ..
         } => {
-            let tailnet = codewire_client::tailnet_session::EnvironmentTailnet::connect(
+            let connected = codewire_client::tailnet_session::EnvironmentTailnet::connect(
                 &client,
                 &org_id,
                 &environment_id,
             )
             .await
-            .context("reach the environment over its tailnet")?;
+            .context("reach the environment over its tailnet");
+            // A stopped environment fails here, on its missing host key; the
+            // state is asked only then (#4689).
+            let tailnet = match connected {
+                Ok(tailnet) => tailnet,
+                Err(error) => {
+                    return Err(crate::commands::explain_by_state(
+                        &client,
+                        &org_id,
+                        &environment_id,
+                        args.environment.as_deref(),
+                        error,
+                    )
+                    .await);
+                }
+            };
             tailnet
                 .wait_for_direct(codewire_client::hosted_shell::TAILNET_DIRECT_WAIT)
                 .await

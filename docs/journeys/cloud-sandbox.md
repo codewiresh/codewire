@@ -178,11 +178,12 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished).
 - **Gotchas:**
   - `cw`'s own options go before the command. After `--`, every word is the
     command's.
-  - `cw exec` in a stopped sandbox fails with a message about a missing SSH
-    host key for the sandbox's Pod. The refusal is right; the message does
-    not say that the sandbox is stopped (#4689). Seen with `cw` v0.4.17 and
-    with one built from `main` at 14fb7f56a.
 - **Observed:**
+  - Dev, 2026-11-15 (cw-cli), the stopped sandbox: with `cw` built from
+    #4689's branch at eff227270, `cw exec`, `cw run`, `cw shell`, `cw logs`,
+    `cw cp` and `cw vscode` each said "Cloud environment NAME is stopped",
+    then `→ cw --cloud start NAME` on its own line, and exited 1. After
+    `cw --cloud start`, `cw exec` ran. Evidence: #4820.
   - Dev, 2026-11-14 (cw-cleanup): surface and client as for
     `sandbox-create`. All four results under Proof were seen: the marker,
     exit status 7, the stdin line, and the two `cw run` lines again from

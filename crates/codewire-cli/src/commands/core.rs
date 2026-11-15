@@ -1,10 +1,10 @@
 use std::path::Path;
 
-use crate::commands::lifecycle_output::environment_command;
 use crate::commands::progress::terminal_text;
-use crate::output::VmLocation;
 
 use super::*;
+
+pub(crate) mod refusal;
 
 pub(crate) async fn handle_logout_command(globals: &Globals) -> anyhow::Result<()> {
     let env = OsEnv;
@@ -340,19 +340,81 @@ pub(crate) async fn handle_shell_stdio(
     piped
 }
 
+/// `error`, or, when the server refused it because the cloud environment
+/// isn't running, what state it is in and what to do (#4689). The state is
+/// asked only then, so a command that works makes no extra call.
+pub(crate) async fn explain_not_running(
+    globals: &Globals,
+    environment: Option<&str>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    if !refusal::is_refusal(&error) {
+        return error;
+    }
+    let found = async {
+        let env = OsEnv;
+        let paths = ResolvePaths::from_env(&env)?;
+        let platform = resolve_platform(globals, &paths, &env)?;
+        let orgs = organization_client(&platform)?.list_orgs().await?;
+        let org_id = resolve_org_id(&platform, &orgs, globals.org.as_deref())?;
+        let alias = environment.and_then(SshAlias::parse);
+        let environment_id = resolve_alias_or_selected(
+            &EnvironmentClient::new(&platform)?,
+            &org_id,
+            &paths.mesh_data_dir,
+            alias,
+        )
+        .await?;
+        anyhow::Ok((codewire_client(&platform)?, org_id, environment_id))
+    }
+    .await;
+    match found {
+        Ok((client, org_id, environment_id)) => {
+            explain_by_state(&client, &org_id, &environment_id, environment, error).await
+        }
+        Err(_) => match environment {
+            Some(name) => refusal::explain(error, name, None),
+            None => error,
+        },
+    }
+}
+
+/// `error` from reaching a cloud environment, or, when the environment is
+/// not running, what its state means and what to do, in the one wording
+/// [`refusal::state_error`] gives. A running environment, or one whose
+/// state can't be read, keeps `error`, unless the server had refused it as
+/// not running. `given` is the name the user typed, else the environment's.
+pub(crate) async fn explain_by_state(
+    client: &codewire_client::CodewireClient,
+    org_id: &str,
+    environment_id: &str,
+    given: Option<&str>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let answer =
+        codewire_client::hosted_shell::restart::ask_environment(client, org_id, environment_id)
+            .await;
+    let found = answer.as_ref().ok().map(|(environment, _)| {
+        (
+            given.unwrap_or(&environment.name),
+            environment.state.as_known(),
+        )
+    });
+    refusal::explain(error, given.unwrap_or(environment_id), found)
+}
+
 /// Refuses a cloud environment that is stopped, naming the command that
 /// starts it. Any other state is left to the connection.
 pub(crate) fn ensure_cloud_connectable(
     environment: &Environment,
     shown: &str,
 ) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !matches!(environment.state.as_str(), "stopped" | "stopping"),
-        "cloud environment {} is stopped; start it with `{}`",
-        terminal_text(shown),
-        environment_command(VmLocation::Cloud, "start", &terminal_text(shown))
-    );
-    Ok(())
+    let state = match environment.state.as_str() {
+        "stopped" => codewire_client::EnvironmentState::Stopped,
+        "stopping" => codewire_client::EnvironmentState::Stopping,
+        _ => return Ok(()),
+    };
+    refusal::state_error(&terminal_text(shown), Some(state)).map_or(Ok(()), Err)
 }
 
 /// `CW_DEBUG_TAILNET` timeline on stderr for `cw shell`: tailnet and client

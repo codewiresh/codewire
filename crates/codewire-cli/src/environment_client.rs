@@ -1227,7 +1227,7 @@ pub(crate) fn display_client_error(error: ClientError) -> anyhow::Error {
     if error.reason() == Some(credit_refusal::REASON) {
         return CreditExhausted::unnamed().into();
     }
-    error.into()
+    crate::commands::refusal::typed(error)
 }
 
 /// The membership `selector` names, by the server's create rule: an ID or

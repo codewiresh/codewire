@@ -25,9 +25,7 @@ impl fmt::Display for NextStep {
 
 impl std::error::Error for NextStep {}
 
-/// `error`, carrying `step` as its next step. `cw login`'s unreachable server
-/// (#4598) is its first caller.
-#[allow(dead_code)]
+/// `error`, carrying `step` as its next step.
 pub(crate) fn with_next_step(error: anyhow::Error, step: impl Into<String>) -> anyhow::Error {
     error.context(NextStep(step.into()))
 }

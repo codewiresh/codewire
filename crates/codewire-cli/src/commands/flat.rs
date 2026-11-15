@@ -205,7 +205,8 @@ pub(crate) async fn handle_logs(globals: &Globals, args: LogsArgs) -> anyhow::Re
     } = args;
     let environment = select_environment("logs", environment, in_environment, &retired_session)?;
     if !setup {
-        return handle_logs_command(
+        let named = environment.clone();
+        let result = handle_logs_command(
             globals,
             SessionLogs {
                 environment,
@@ -216,6 +217,10 @@ pub(crate) async fn handle_logs(globals: &Globals, args: LogsArgs) -> anyhow::Re
             },
         )
         .await;
+        return match result {
+            Err(error) => Err(explain_not_running(globals, named.as_deref(), error).await),
+            done => done,
+        };
     }
     anyhow::ensure!(
         globals.member.is_none(),

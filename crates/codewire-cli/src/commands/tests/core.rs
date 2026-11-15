@@ -2478,14 +2478,23 @@ fn help_is_styled_at_a_terminal_and_plain_text_otherwise() {
 /// failure ("400 Bad Request"), so `cw` names the stop and its command (#4643).
 #[test]
 fn a_stopped_cloud_environment_is_refused_with_the_command_that_starts_it() {
-    for state in ["stopped", "stopping"] {
+    let refused = |state| {
         let err = ensure_cloud_connectable(&test_environment("env-1", Some("walk"), state), "walk")
             .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "cloud environment walk is stopped; start it with `cw --cloud start walk`"
-        );
-    }
+        let step = err.downcast_ref::<crate::error_report::NextStep>();
+        (err.root_cause().to_string(), step.map(ToString::to_string))
+    };
+    assert_eq!(
+        refused("stopped"),
+        (
+            "cloud environment walk is stopped".to_owned(),
+            Some("cw --cloud start walk".to_owned())
+        )
+    );
+    assert_eq!(
+        refused("stopping").0,
+        "cloud environment walk is stopping; start it once it has stopped"
+    );
     for state in ["running", "starting", "creating"] {
         assert!(
             ensure_cloud_connectable(&test_environment("env-1", Some("walk"), state), "walk")
