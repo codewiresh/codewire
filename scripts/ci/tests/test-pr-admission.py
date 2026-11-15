@@ -136,18 +136,31 @@ class PrAdmission(unittest.TestCase):
                  | {run_id: "waiting" for run_id in range(10, 16)} | {30: "waiting"})
         verdict, reason = self.decide(state, 10)
         self.assertEqual(verdict, gate.OVERFLOW)
-        self.assertIn("7 gates wait and the light runner holds 6", reason)
+        self.assertIn("7 gates hold a light runner slot and it keeps 6", reason)
         result, log = self.wait([state], 10)
         self.assertEqual(result, gate.OVERFLOW)
         self.assertIn("::warning::PR admission overflow", log)
         for later in (11, 15, 30):
             self.assertEqual(self.decide(state, later)[0], gate.WAIT, later)
-        # Nine wait: the three oldest start, and exactly six stay.
-        nine = state | {31: "waiting", 32: "queued"}
+        # Nine hold a slot: the three oldest start, and exactly six stay.
+        nine = state | {31: "waiting", 32: "waiting"}
         verdicts_by_run = {run_id: self.decide(nine, run_id)[0] for run_id in nine if run_id >= 10}
         self.assertEqual([run_id for run_id, verdict in verdicts_by_run.items() if verdict == gate.OVERFLOW],
                          [10, 11, 12])
         self.assertEqual(sum(verdict == gate.WAIT for verdict in verdicts_by_run.values()), 6)
+        # A gate still queued for a runner holds no slot, so it never causes
+        # an overflow: three running gates wait with ten more queued behind
+        # them (2026-11-15: 11 of 16 waiting gates had not started, and
+        # counting them would have admitted ten more runs).
+        queued = ({run_id: "admitted" for run_id in range(1, 7)}
+                  | {10: "waiting", 11: "waiting", 12: "waiting"}
+                  | {run_id: "queued" for run_id in range(20, 30)})
+        for running in (10, 11, 12):
+            self.assertEqual(self.decide(queued, running)[0], gate.WAIT, running)
+        # It still keeps its place in line: a running gate does not start
+        # ahead of an older one that is only queued.
+        self.assertEqual(self.decide({1: "admitted", 2: "admitted", 3: "admitted", 4: "admitted", 5: "admitted",
+                                      8: "queued", 10: "waiting"}, 10)[0], gate.WAIT)
         # The newest arrival waits its turn once an older gate has started.
         self.assertEqual(self.wait([state, {run_id: gate_state for run_id, gate_state in state.items()
                                             if run_id != 10} | {10: "admitted"}], 30,

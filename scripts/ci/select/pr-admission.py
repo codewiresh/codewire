@@ -25,12 +25,16 @@ than ADMITTED_LIMIT.
 The gate may delay a run but never stops one, and never fails its job:
 - a push, a schedule or a dispatch is admitted at once, as is a closed pull
   request;
-- when more than WAITING_LIMIT gates wait, the oldest of them are admitted
-  with an overflow warning until WAITING_LIMIT are left, so waiting gates never
-  fill the light runner and starve the admitted runs' own light jobs. The
-  oldest, not the newest arrival: on 2026-11-15 the newest was the one let in,
-  so the first six gates waited two hours while every later push passed them
-  and 12 runs were admitted. Overflow admissions a day are the signal to watch;
+- when more than WAITING_LIMIT gates hold a light runner slot, the oldest of
+  them are admitted with an overflow warning until WAITING_LIMIT are left, so
+  waiting gates never fill the light runner and starve the admitted runs' own
+  light jobs. The oldest, not the newest arrival: on 2026-11-15 the newest was
+  the one let in, so the first six gates waited two hours while every later
+  push passed them and 12 runs were admitted. Only a gate that is running
+  holds a slot: one still queued for a runner holds nothing, and counting
+  those the same day would have admitted ten more runs while 11 of the 16
+  waiting gates had not started. Overflow admissions a day are the signal to
+  watch;
 - the run list unreadable for UNREADABLE_LIMIT polls in a row, or a wait past
   WAIT_SECONDS, admits it with a warning. The deadline is checked before every
   request, each at most 30 s, so a slow Forgejo never runs the gate past its
@@ -123,7 +127,7 @@ def decide(api, own_run_id: int, *, limit: int = ADMITTED_LIMIT,
         if deadline is not None and clock() >= deadline:
             raise DeadlineReached
     in_time()
-    admitted = waiting_ahead = waiting_behind = unreadable = 0
+    admitted = waiting_ahead = holding_ahead = holding_behind = unreadable = 0
     for run in unfinished_pull_request_runs(api):
         run_id = run["id"]
         if run_id == own_run_id:
@@ -140,8 +144,11 @@ def decide(api, own_run_id: int, *, limit: int = ADMITTED_LIMIT,
         elif gate in ("not-started", "running"):
             if run_id < own_run_id:
                 waiting_ahead += 1
-            else:
-                waiting_behind += 1
+            if gate == "running":
+                if run_id < own_run_id:
+                    holding_ahead += 1
+                else:
+                    holding_behind += 1
     ahead = admitted + waiting_ahead
     if unreadable:
         admitted_text = f"{admitted} pull request runs admitted ({unreadable} unreadable, counted as admitted)"
@@ -151,11 +158,12 @@ def decide(api, own_run_id: int, *, limit: int = ADMITTED_LIMIT,
         return ADMITTED, f"{admitted_text} and {waiting_ahead} waiting ahead, under {limit}"
     # Every gate reads the same line, so each knows whether it is one of the
     # oldest that must go: no gate decides for another, and a gate that never
-    # leaves (its runner died) costs one place, not the whole release.
-    waiting = waiting_ahead + 1 + waiting_behind
-    if waiting_ahead < waiting - waiting_limit:
-        return OVERFLOW, (f"{waiting} gates wait and the light runner holds {waiting_limit} beside the admitted "
-                          f"runs' own jobs; {waiting_ahead} wait ahead of this one, so it is among the oldest")
+    # leaves (its runner died) costs one place, not the whole release. This
+    # gate is running, so it holds a slot itself.
+    holding = holding_ahead + 1 + holding_behind
+    if holding_ahead < holding - waiting_limit:
+        return OVERFLOW, (f"{holding} gates hold a light runner slot and it keeps {waiting_limit} for them beside "
+                          f"the admitted runs' own jobs; {holding_ahead} are ahead of this one, so it is among the oldest")
     return WAIT, f"{admitted_text} and {waiting_ahead} waiting ahead; {limit} at once"
 
 
