@@ -667,6 +667,13 @@ async fn main() -> anyhow::Result<()> {
         pool.clone(),
         environment_logs.clone(),
     );
+    // One LISTEN connection serves every host session in this process.
+    let host_operation_signals =
+        codewire_orchestration::api::host_operation_signals::HostOperationSignals::new();
+    codewire_orchestration::api::host_operation_signals::spawn_host_operation_listener(
+        pool.clone(),
+        host_operation_signals.clone(),
+    );
     let api_state = codewire_orchestration::api::ApiState {
         credit_enforcement,
         pool: pool.clone(),
@@ -893,6 +900,7 @@ async fn main() -> anyhow::Result<()> {
             codewire_orchestration::connect::host_agent::router(
                 api_state.pool.clone(),
                 api_state.drain.clone(),
+                host_operation_signals,
             ),
             codewire_server_core::connect::ProtocolPolicy::ConnectAndGrpc,
         )

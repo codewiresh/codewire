@@ -19,8 +19,8 @@ use std::time::Duration;
 use codewire_daemon_bridge::drain::{Restart, end_at};
 use codewire_proto::codewire::v1::{
     AttachHostRequest, AttachHostResponse, HostAgentService, HostAttached, HostChallenge,
-    HostPlatform as ProtoHostPlatform, HostPong, HostRevoked, OpenHostTunnelRequest,
-    OpenHostTunnelResponse, attach_host_request, attach_host_response,
+    HostPlatform as ProtoHostPlatform, HostPong, HostRevoked, HostSuperseded,
+    OpenHostTunnelRequest, OpenHostTunnelResponse, attach_host_request, attach_host_response,
 };
 use connectrpc::{ConnectError, InboundStream, RequestContext, ServiceResult, ServiceStream};
 use futures::StreamExt as _;
@@ -28,12 +28,17 @@ use sqlx::PgPool;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::{Instant, sleep_until};
 
+use crate::api::host_operation_signals::{HostOperationSignal, HostOperationSignals};
 use crate::api::host_session::{
     AttachingHost, NONCE_BYTES, PING_INTERVAL_SECS, PROOF_TIMEOUT_SECS, RECHALLENGE_INTERVAL_SECS,
     attaching_host, heard_from, new_nonce, proves_key, record_hello,
 };
 use crate::api::hosts::{HostPlatform, OFFLINE_AFTER_SECS};
 use crate::drain::Drain;
+
+mod operations;
+
+use operations::{Heard, OPERATIONS_CAPABILITY, Relay};
 
 #[cfg(test)]
 mod database_tests;
@@ -68,8 +73,12 @@ impl Timing {
     };
 }
 
-pub fn router(pool: PgPool, drain: Drain) -> connectrpc::Router {
-    router_with(pool, Timing::DEFAULT, MAX_HANDSHAKES, drain)
+pub fn router(
+    pool: PgPool,
+    drain: Drain,
+    signals: Arc<HostOperationSignals>,
+) -> connectrpc::Router {
+    router_with(pool, Timing::DEFAULT, MAX_HANDSHAKES, drain, signals)
 }
 
 pub fn router_with(
@@ -77,12 +86,14 @@ pub fn router_with(
     timing: Timing,
     max_handshakes: usize,
     drain: Drain,
+    signals: Arc<HostOperationSignals>,
 ) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(HostAgentConnectService {
         pool,
         timing,
         handshakes: Arc::new(Semaphore::new(max_handshakes)),
         drain,
+        signals,
     }))
 }
 
@@ -94,9 +105,18 @@ struct HostAgentConnectService {
     /// The host re-attaches on its own, so its session ends as soon as this
     /// replica begins draining (#4426).
     drain: Drain,
+    /// Operations enqueued for hosts, from this process's one listener.
+    signals: Arc<HostOperationSignals>,
 }
 
 type Outbound = mpsc::Sender<Result<AttachHostResponse, ConnectError>>;
+
+/// What one session runs with.
+struct Session {
+    pool: PgPool,
+    timing: Timing,
+    signals: Arc<HostOperationSignals>,
+}
 
 #[allow(refining_impl_trait)]
 impl HostAgentService for HostAgentConnectService {
@@ -112,8 +132,11 @@ impl HostAgentService for HostAgentConnectService {
         // beside it rather than before it.
         let (tx, rx) = mpsc::channel(8);
         tokio::spawn(run_session(
-            self.pool.clone(),
-            self.timing,
+            Session {
+                pool: self.pool.clone(),
+                timing: self.timing,
+                signals: self.signals.clone(),
+            },
             permit,
             requests,
             tx,
@@ -165,13 +188,12 @@ fn out_of_order(expected: &str) -> ConnectError {
 }
 
 async fn run_session(
-    pool: PgPool,
-    timing: Timing,
+    session_context: Session,
     permit: OwnedSemaphorePermit,
     mut requests: InboundStream<AttachHostRequest>,
     tx: Outbound,
 ) {
-    let end = session(&pool, timing, permit, &mut requests, &tx).await;
+    let end = session(&session_context, permit, &mut requests, &tx).await;
     if let End::Refused(error) = end {
         let _ = tx.send(Err(error)).await;
     }
@@ -240,25 +262,50 @@ async fn revoked(tx: &Outbound) -> End {
 }
 
 async fn session(
-    pool: &PgPool,
-    timing: Timing,
+    context: &Session,
     permit: OwnedSemaphorePermit,
     requests: &mut InboundStream<AttachHostRequest>,
     tx: &Outbound,
 ) -> End {
-    match attached_session(pool, timing, permit, requests, tx).await {
+    match attached_session(context, permit, requests, tx).await {
         Ok(()) => End::Closed,
         Err(end) => end,
     }
 }
 
 async fn attached_session(
-    pool: &PgPool,
-    timing: Timing,
+    context: &Session,
     handshake_permit: OwnedSemaphorePermit,
     requests: &mut InboundStream<AttachHostRequest>,
     tx: &Outbound,
 ) -> Result<(), End> {
+    // Subscribed before anything is claimed, so no enqueue between the two
+    // is missed.
+    let signals = context.signals.subscribe();
+    let (host, session_generation) = admit(context, handshake_permit, requests, tx).await?;
+    let relay = hello(context, &host, session_generation, requests, tx).await?;
+    if let Some(relay) = &relay {
+        relay.send_outstanding(&context.pool, tx).await?;
+    }
+    Serving {
+        context,
+        host: &host,
+        relay: relay.as_ref(),
+        signals,
+    }
+    .serve(requests, tx)
+    .await
+}
+
+/// Opens the session: the host proves its key, takes the next session
+/// generation, and is told it attached.
+async fn admit(
+    context: &Session,
+    handshake_permit: OwnedSemaphorePermit,
+    requests: &mut InboundStream<AttachHostRequest>,
+    tx: &Outbound,
+) -> Result<(AttachingHost, i64), End> {
+    let (pool, timing) = (&context.pool, context.timing);
     let handshake = Instant::now() + timing.handshake;
     let host_id = match next_input(requests, handshake, "open").await? {
         attach_host_request::Input::Open(open) => open.host_id,
@@ -279,7 +326,18 @@ async fn attached_session(
     let Some(host) = host.filter(|_| proven) else {
         return Err(unrecognised().into());
     };
-    if host.revoked_at.is_some() || !heard_from(pool, &host.id).await.map_err(storage)? {
+    // Each attach takes the next generation, which supersedes every earlier
+    // session of the host. A revoked host takes none.
+    let session_generation = match host.revoked_at {
+        Some(_) => None,
+        None => crate::api::host_operations::begin_session(pool, &host.id)
+            .await
+            .map_err(storage)?,
+    };
+    let Some(session_generation) = session_generation else {
+        return Err(ConnectError::permission_denied("the host is revoked").into());
+    };
+    if !heard_from(pool, &host.id).await.map_err(storage)? {
         return Err(ConnectError::permission_denied("the host is revoked").into());
     }
     send(
@@ -289,17 +347,34 @@ async fn attached_session(
             offline_after_seconds: seconds(timing.offline_after),
             rechallenge_interval_seconds: seconds(timing.rechallenge),
             proof_timeout_seconds: seconds(timing.proof_timeout),
+            session_generation: u64::try_from(session_generation).unwrap_or_default(),
             ..Default::default()
         })),
     )
     .await?;
     drop(handshake_permit);
-    tracing::info!(host_id = %host.id, "host attached");
+    tracing::info!(host_id = %host.id, session_generation, "host attached");
+    Ok((host, session_generation))
+}
 
-    // The hello comes first, within a ping interval.
-    let silence = timing.offline_after;
-    let hello = match next_input(requests, Instant::now() + silence, "hello").await? {
-        attach_host_request::Input::Hello(hello) => hello,
+/// The hello, which comes first, within the offline window. A host of
+/// capability version 2 or later gets the session's operations.
+async fn hello(
+    context: &Session,
+    host: &AttachingHost,
+    session_generation: i64,
+    requests: &mut InboundStream<AttachHostRequest>,
+    tx: &Outbound,
+) -> Result<Option<Relay>, End> {
+    let pool = &context.pool;
+    let hello = match next_input(
+        requests,
+        Instant::now() + context.timing.offline_after,
+        "hello",
+    )
+    .await?
+    {
+        attach_host_request::Input::Hello(hello) => *hello,
         _ => return Err(out_of_order("hello").into()),
     };
     let platform = match hello.platform.as_known() {
@@ -324,44 +399,140 @@ async fn attached_session(
     {
         return Err(revoked(tx).await);
     }
+    if capability_version < OPERATIONS_CAPABILITY {
+        return Ok(None);
+    }
+    Ok(Some(
+        Relay::new(&host.id, session_generation)
+            .record_inventory(pool, hello.inventory)
+            .await?,
+    ))
+}
 
-    // Then pings, and a fresh proof every rechallenge interval. Pings keep
-    // coming while a challenge is open (one may already be on its way), and
-    // the proof may arrive among them. A host that falls silent for the
-    // offline window is ended; it reconnects.
-    let mut rechallenge = Instant::now() + timing.rechallenge;
-    let mut open_challenge: Option<([u8; NONCE_BYTES], Instant)> = None;
-    loop {
-        let silent = Instant::now() + silence;
-        let due = open_challenge.map_or(rechallenge, |(_, deadline)| deadline);
-        tokio::select! {
-            () = sleep_until(due) => {
-                if open_challenge.is_some() {
-                    return Err(ConnectError::deadline_exceeded("no proof in time").into());
+/// An attached session, after its hello.
+struct Serving<'a> {
+    context: &'a Session,
+    host: &'a AttachingHost,
+    /// For a host that runs operations.
+    relay: Option<&'a Relay>,
+    signals: tokio::sync::broadcast::Receiver<HostOperationSignal>,
+}
+
+impl Serving<'_> {
+    /// Pings, and a fresh proof every rechallenge interval. Pings keep
+    /// coming while a challenge is open (one may already be on its way), and
+    /// the proof may arrive among them. A host that falls silent for the
+    /// offline window is ended; it reconnects. Operations are claimed on
+    /// each signal for this host and on each ping that comes while no proof
+    /// is due.
+    async fn serve(
+        mut self,
+        requests: &mut InboundStream<AttachHostRequest>,
+        tx: &Outbound,
+    ) -> Result<(), End> {
+        let timing = self.context.timing;
+        let mut rechallenge = Instant::now() + timing.rechallenge;
+        let mut open_challenge: Option<([u8; NONCE_BYTES], Instant)> = None;
+        loop {
+            let silent = Instant::now() + timing.offline_after;
+            let due = open_challenge.map_or(rechallenge, |(_, deadline)| deadline);
+            tokio::select! {
+                () = sleep_until(due) => {
+                    if open_challenge.is_some() {
+                        return Err(ConnectError::deadline_exceeded("no proof in time").into());
+                    }
+                    let nonce = send_challenge(tx).await?;
+                    open_challenge = Some((nonce, Instant::now() + timing.proof_timeout));
                 }
-                let nonce = send_challenge(tx).await?;
-                open_challenge = Some((nonce, Instant::now() + timing.proof_timeout));
+                signal = self.signals.recv(), if self.relay.is_some() => {
+                    if self.signalled(signal) {
+                        self.claim(tx).await?;
+                    }
+                }
+                input = next_input(requests, silent, "ping") => match input? {
+                    attach_host_request::Input::Ping(_) => {
+                        self.heard(tx).await?;
+                        send(tx, attach_host_response::Output::Pong(Box::<HostPong>::default()))
+                            .await?;
+                        // While a proof is due, the next ping after it claims:
+                        // the proof window holds no optional work (#4684).
+                        if open_challenge.is_none() {
+                            self.claim(tx).await?;
+                        }
+                    }
+                    attach_host_request::Input::Proof(proof) => {
+                        let Some((nonce, _)) = open_challenge.take() else {
+                            return Err(out_of_order("ping").into());
+                        };
+                        check_proof(self.host, &nonce, &proof.signature)?;
+                        self.heard(tx).await?;
+                        rechallenge = Instant::now() + timing.rechallenge;
+                    }
+                    attach_host_request::Input::OperationResult(result) => {
+                        self.operations()?.record_result(&self.context.pool, *result).await?;
+                    }
+                    attach_host_request::Input::EnvironmentObserved(observation) => {
+                        self.operations()?.record_observed(&self.context.pool, *observation).await?;
+                    }
+                    // Advisory; only a result completes an operation.
+                    attach_host_request::Input::OperationProgress(_) => {
+                        self.operations()?;
+                    }
+                    _ => return Err(out_of_order("ping or proof").into()),
+                },
             }
-            input = next_input(requests, silent, "ping") => match input? {
-                attach_host_request::Input::Ping(_) => {
-                    if !heard_from(pool, &host.id).await.map_err(storage)? {
-                        return Err(revoked(tx).await);
-                    }
-                    send(tx, attach_host_response::Output::Pong(Box::<HostPong>::default()))
-                        .await?;
-                }
-                attach_host_request::Input::Proof(proof) => {
-                    let Some((nonce, _)) = open_challenge.take() else {
-                        return Err(out_of_order("ping").into());
-                    };
-                    check_proof(&host, &nonce, &proof.signature)?;
-                    if !heard_from(pool, &host.id).await.map_err(storage)? {
-                        return Err(revoked(tx).await);
-                    }
-                    rechallenge = Instant::now() + timing.rechallenge;
-                }
-                _ => return Err(out_of_order("ping or proof").into()),
-            },
+        }
+    }
+
+    /// The relay, for a message only a host that runs operations sends.
+    fn operations(&self) -> Result<&Relay, End> {
+        self.relay
+            .ok_or_else(|| out_of_order("ping or proof").into())
+    }
+
+    /// Whether a signal may mean an operation for this host.
+    fn signalled(
+        &self,
+        signal: Result<HostOperationSignal, tokio::sync::broadcast::error::RecvError>,
+    ) -> bool {
+        match signal {
+            Ok(HostOperationSignal::Host(host_id)) => *host_id == *self.host.id,
+            // Missed signals, or a lagging receiver: look anyway.
+            Ok(HostOperationSignal::Resync)
+            | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
+        }
+    }
+
+    async fn claim(&self, tx: &Outbound) -> Result<(), End> {
+        match self.relay {
+            Some(relay) => relay.claim_and_send(&self.context.pool, tx).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Records that the host was heard, or ends a session that was
+    /// superseded or whose host was revoked.
+    async fn heard(&self, tx: &Outbound) -> Result<(), End> {
+        let pool = &self.context.pool;
+        let heard = match self.relay {
+            Some(relay) => relay.heard_from(pool).await?,
+            None if heard_from(pool, &self.host.id).await.map_err(storage)? => Heard::Current,
+            None => Heard::Revoked,
+        };
+        match heard {
+            Heard::Current => Ok(()),
+            Heard::Revoked => Err(revoked(tx).await),
+            Heard::Superseded => {
+                // Ending anyway: a host that cannot be told still reconnects.
+                let _ = send(
+                    tx,
+                    attach_host_response::Output::Superseded(Box::<HostSuperseded>::default()),
+                )
+                .await;
+                tracing::info!(host_id = %self.host.id, "host session superseded");
+                Err(End::Closed)
+            }
         }
     }
 }

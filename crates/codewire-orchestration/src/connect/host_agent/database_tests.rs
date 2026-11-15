@@ -2,7 +2,10 @@
 //! both wire protocols (#3609, slice 1): a host that proves its key attaches
 //! and is online; an unknown host, a wrong key and a revoked host are refused;
 //! a host revoked while attached is told so; out-of-order messages, a wrong
-//! platform, a missed proof and silence each end the session.
+//! platform, a missed proof and silence each end the session. And slice 2:
+//! an operation reaches only the host's current session, a newer session
+//! supersedes an older one and takes its unanswered operations, and the
+//! host's answer is recorded.
 
 use std::time::Duration;
 
@@ -64,11 +67,14 @@ struct Served {
     url: String,
     client: reqwest::Client,
     stop: CancellationToken,
+    /// The process-wide `LISTEN host_operation`, as production runs it.
+    operation_listener: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for Served {
     fn drop(&mut self) {
         self.stop.cancel();
+        self.operation_listener.abort();
     }
 }
 
@@ -84,8 +90,13 @@ async fn serve_with(
 ) -> Result<Served> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
+    let signals = crate::api::host_operation_signals::HostOperationSignals::new();
+    let operation_listener = crate::api::host_operation_signals::spawn_host_operation_listener(
+        db.pool.clone(),
+        signals.clone(),
+    );
     let router = connect_router_with_protocol_policy(
-        router_with(db.pool.clone(), timing, max_handshakes, drain),
+        router_with(db.pool.clone(), timing, max_handshakes, drain, signals),
         ProtocolPolicy::ConnectAndGrpc,
     );
     let stop = CancellationToken::new();
@@ -102,6 +113,7 @@ async fn serve_with(
             .http2_prior_knowledge()
             .build()?,
         stop,
+        operation_listener,
     })
 }
 
@@ -224,12 +236,23 @@ async fn answer_challenge(stream: &mut HostStream, host_id: &str, key: &SigningK
     Ok(())
 }
 
-/// Opens, proves the key and says hello.
+/// Opens, proves the key and says hello as a host that runs operations.
 async fn attach(
     served: &Served,
     protocol: Protocol,
     host_id: &str,
     key: &SigningKey,
+) -> Result<HostStream> {
+    attach_as(served, protocol, host_id, key, 2).await
+}
+
+/// [`attach`], for a host of `capability_version`.
+async fn attach_as(
+    served: &Served,
+    protocol: Protocol,
+    host_id: &str,
+    key: &SigningKey,
+    capability_version: u32,
 ) -> Result<HostStream> {
     let mut stream = open_stream(served, protocol).await?;
     stream.send(open(host_id)).await?;
@@ -239,7 +262,10 @@ async fn attach(
     };
     ensure!(attached.ping_interval_seconds >= 1);
     stream
-        .send(hello(ProtoHostPlatform::HOST_PLATFORM_LINUX_X86_64_KVM, 2))
+        .send(hello(
+            ProtoHostPlatform::HOST_PLATFORM_LINUX_X86_64_KVM,
+            capability_version,
+        ))
         .await?;
     Ok(stream)
 }
@@ -655,6 +681,356 @@ async fn db_unproven_streams_are_bounded_and_attaching_frees_the_place() -> Resu
             output(&mut third).await?,
             attach_host_response::Output::Challenge(_)
         ));
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+// ── Slice 2: operations ───────────────────────────────────────────────────
+
+use codewire_proto::codewire::v1::{
+    HostEnvironmentObservation as ProtoObservation, HostEnvironmentState as ProtoState,
+    HostOperation as ProtoOperation, HostOperationResult, host_operation, host_operation_result,
+};
+
+use crate::api::host_operations::{
+    HostOperationKind, HostOperationState, NewHostOperation, enqueue,
+};
+
+// Environment IDs are UUIDs (`environments.id` defaults to one), as the
+// host contract requires.
+const ENVIRONMENT: &str = "5d0c1f3e-2a4b-4c6d-8e9f-0a1b2c3d4e5f";
+const LOCAL: &str = "9b2e7c1a-0d4f-4e8b-a6c3-5f1d2e3a4b5c";
+
+/// An environment placed on `host_id`.
+async fn placed_environment(db: &TestDatabase, host_id: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO environment_presets (id, org_id, name, build_status, project_spec) \
+         VALUES ('host-session-preset', $1, 'Preset', 'ready', '{}'::jsonb)",
+    )
+    .bind(ORG)
+    .execute(&db.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO environments (id, org_id, created_by, type, preset_id, project_spec, \
+         runtime_backend, host_id) \
+         VALUES ($1, $2, $3, 'sandbox', 'host-session-preset', '{}'::jsonb, 'host', $4)",
+    )
+    .bind(ENVIRONMENT)
+    .bind(ORG)
+    .bind(OWNER)
+    .bind(host_id)
+    .execute(&db.pool)
+    .await?;
+    Ok(())
+}
+
+/// Enqueues a stop of the environment, as the driver does, and returns the
+/// operation as the host must receive it.
+async fn enqueue_stop(db: &TestDatabase, host_id: &str) -> Result<ProtoOperation> {
+    let operation = ProtoOperation {
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        environment_id: ENVIRONMENT.into(),
+        local_environment_id: LOCAL.into(),
+        expected_generation: 1,
+        kind: Some(host_operation::Kind::Stop(Box::default())),
+        ..Default::default()
+    };
+    let payload = buffa::Message::encode_to_vec(&operation);
+    enqueue(
+        &db.pool,
+        &NewHostOperation {
+            operation_id: &operation.operation_id,
+            host_id,
+            environment_id: ENVIRONMENT,
+            expected_generation: 1,
+            kind: HostOperationKind::Stop,
+            payload: &payload,
+        },
+    )
+    .await?;
+    Ok(operation)
+}
+
+/// The next message that is not a pong.
+async fn next_but_pongs(stream: &mut HostStream) -> Result<attach_host_response::Output> {
+    loop {
+        match output(stream).await? {
+            attach_host_response::Output::Pong(_) => {}
+            other => return Ok(other),
+        }
+    }
+}
+
+async fn received_operation(stream: &mut HostStream) -> Result<ProtoOperation> {
+    match next_but_pongs(stream).await? {
+        attach_host_response::Output::Operation(operation) => Ok(*operation),
+        other => anyhow::bail!("expected an operation, got {other:?}"),
+    }
+}
+
+async fn operation_state(db: &TestDatabase, operation_id: &str) -> Result<HostOperationState> {
+    Ok(crate::api::host_operations::get(&db.pool, operation_id)
+        .await?
+        .context("the operation is stored")?
+        .state)
+}
+
+fn stopped(operation_id: &str) -> AttachHostRequest {
+    input(attach_host_request::Input::OperationResult(Box::new(
+        HostOperationResult {
+            operation_id: operation_id.into(),
+            outcome: Some(host_operation_result::Outcome::Done(Box::new(
+                ProtoObservation {
+                    environment_id: ENVIRONMENT.into(),
+                    local_environment_id: LOCAL.into(),
+                    generation: 1,
+                    state: ProtoState::HOST_ENVIRONMENT_STATE_STOPPED.into(),
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
+        },
+    )))
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_an_operation_reaches_the_attached_host_and_its_answer_is_recorded() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        setup(&db).await?;
+        let (id, key) = host(&db, "operations", 1).await?;
+        placed_environment(&db, &id).await?;
+        let served = serve(&db, Timing::DEFAULT).await?;
+        let mut stream = attach(&served, Protocol::Grpc, &id, &key).await?;
+        // Attached and idle: the enqueue's notification brings it, with no
+        // ping to wait for.
+        stream.send(ping()).await?;
+        ensure!(matches!(
+            output(&mut stream).await?,
+            attach_host_response::Output::Pong(_)
+        ));
+        let enqueued = enqueue_stop(&db, &id).await?;
+        let received = received_operation(&mut stream).await?;
+        ensure!(
+            received == enqueued,
+            "the host gets the stored operation as encoded"
+        );
+        ensure!(matches!(
+            operation_state(&db, &enqueued.operation_id).await?,
+            HostOperationState::Sent { .. }
+        ));
+
+        stream.send(stopped(&enqueued.operation_id)).await?;
+        stream.send(ping()).await?;
+        ensure!(matches!(
+            output(&mut stream).await?,
+            attach_host_response::Output::Pong(_)
+        ));
+        ensure!(
+            matches!(
+                operation_state(&db, &enqueued.operation_id).await?,
+                HostOperationState::Done { .. }
+            ),
+            "the answer completes the operation"
+        );
+        let (observation, _) =
+            crate::api::host_operations::latest_observation(&db.pool, &id, ENVIRONMENT)
+                .await?
+                .context("the result's observation is recorded")?;
+        ensure!(observation.local_environment_id.to_string() == LOCAL);
+        ensure!(observation.state == crate::api::host_operations::HostEnvironmentState::Stopped);
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_newer_session_supersedes_the_older_and_is_sent_its_unanswered_operations()
+-> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        setup(&db).await?;
+        let (id, key) = host(&db, "superseded", 1).await?;
+        placed_environment(&db, &id).await?;
+        let served = serve(&db, Timing::DEFAULT).await?;
+        let mut older = attach(&served, Protocol::Grpc, &id, &key).await?;
+        let enqueued = enqueue_stop(&db, &id).await?;
+        ensure!(received_operation(&mut older).await? == enqueued);
+
+        // The agent restarted while the old stream lingers.
+        let mut newer = attach(&served, Protocol::Grpc, &id, &key).await?;
+        ensure!(
+            received_operation(&mut newer).await? == enqueued,
+            "the newer session is sent what the older one did not answer"
+        );
+        older.send(ping()).await?;
+        ensure!(
+            matches!(
+                next(&mut older).await?,
+                Ok(AttachHostResponse {
+                    output: Some(attach_host_response::Output::Superseded(_)),
+                    ..
+                })
+            ),
+            "the older session is told it was superseded"
+        );
+
+        // Only the current session claims: a second operation goes to it.
+        newer.send(stopped(&enqueued.operation_id)).await?;
+        // Messages are handled in order: once this ping is answered, so is
+        // the operation, and the environment may take another.
+        newer.send(ping()).await?;
+        ensure!(matches!(
+            output(&mut newer).await?,
+            attach_host_response::Output::Pong(_)
+        ));
+        let second = enqueue_stop(&db, &id).await?;
+        ensure!(received_operation(&mut newer).await? == second);
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_host_that_runs_no_operations_is_sent_none() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        setup(&db).await?;
+        let (id, key) = host(&db, "liveness-only", 1).await?;
+        placed_environment(&db, &id).await?;
+        let served = serve(&db, Timing::DEFAULT).await?;
+        let mut stream = attach_as(&served, Protocol::Grpc, &id, &key, 1).await?;
+        let enqueued = enqueue_stop(&db, &id).await?;
+        for _ in 0..2 {
+            stream.send(ping()).await?;
+            ensure!(
+                matches!(
+                    output(&mut stream).await?,
+                    attach_host_response::Output::Pong(_)
+                ),
+                "only pongs"
+            );
+        }
+        ensure!(operation_state(&db, &enqueued.operation_id).await? == HostOperationState::Pending);
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// A report of `environment_id`, stopped.
+fn stopped_report(environment_id: &str) -> ProtoObservation {
+    ProtoObservation {
+        environment_id: environment_id.into(),
+        local_environment_id: LOCAL.into(),
+        generation: 1,
+        state: ProtoState::HOST_ENVIRONMENT_STATE_STOPPED.into(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_an_answer_about_another_environment_fails_its_operation() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        setup(&db).await?;
+        let (id, key) = host(&db, "wrong-answer", 1).await?;
+        placed_environment(&db, &id).await?;
+        let served = serve(&db, Timing::DEFAULT).await?;
+        let mut stream = attach(&served, Protocol::Grpc, &id, &key).await?;
+        let enqueued = enqueue_stop(&db, &id).await?;
+        received_operation(&mut stream).await?;
+
+        let other = uuid::Uuid::new_v4().to_string();
+        stream
+            .send(input(attach_host_request::Input::OperationResult(
+                Box::new(HostOperationResult {
+                    operation_id: enqueued.operation_id.clone(),
+                    outcome: Some(host_operation_result::Outcome::Done(Box::new(
+                        stopped_report(&other),
+                    ))),
+                    ..Default::default()
+                }),
+            )))
+            .await?;
+        stream.send(ping()).await?;
+        ensure!(
+            matches!(
+                output(&mut stream).await?,
+                attach_host_response::Output::Pong(_)
+            ),
+            "the session goes on"
+        );
+        ensure!(
+            matches!(
+                operation_state(&db, &enqueued.operation_id).await?,
+                HostOperationState::Failed { .. }
+            ),
+            "the answer fails the operation"
+        );
+        for environment in [ENVIRONMENT, other.as_str()] {
+            ensure!(
+                crate::api::host_operations::latest_observation(&db.pool, &id, environment)
+                    .await?
+                    .is_none(),
+                "the answer's report is not recorded"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_malformed_inventory_entry_is_skipped_and_the_host_attaches() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        setup(&db).await?;
+        let (id, key) = host(&db, "odd-inventory", 1).await?;
+        placed_environment(&db, &id).await?;
+        let served = serve(&db, Timing::DEFAULT).await?;
+        let mut stream = open_stream(&served, Protocol::Grpc).await?;
+        stream.send(open(&id)).await?;
+        answer_challenge(&mut stream, &id, &key).await?;
+        ensure!(matches!(
+            output(&mut stream).await?,
+            attach_host_response::Output::Attached(_)
+        ));
+        let mut malformed = stopped_report(ENVIRONMENT);
+        malformed.state = ProtoState::HOST_ENVIRONMENT_STATE_UNSPECIFIED.into();
+        stream
+            .send(input(attach_host_request::Input::Hello(Box::new(
+                HostHello {
+                    capability_version: 2,
+                    platform: ProtoHostPlatform::HOST_PLATFORM_LINUX_X86_64_KVM.into(),
+                    inventory: vec![malformed, stopped_report(ENVIRONMENT)],
+                    ..Default::default()
+                },
+            ))))
+            .await?;
+        stream.send(ping()).await?;
+        ensure!(
+            matches!(
+                output(&mut stream).await?,
+                attach_host_response::Output::Pong(_)
+            ),
+            "the host stays attached"
+        );
+        let (observation, _) =
+            crate::api::host_operations::latest_observation(&db.pool, &id, ENVIRONMENT)
+                .await?
+                .context("the well-formed entry is recorded")?;
+        ensure!(observation.state == crate::api::host_operations::HostEnvironmentState::Stopped);
         Ok(())
     }
     .await;

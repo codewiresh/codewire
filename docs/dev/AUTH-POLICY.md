@@ -464,8 +464,13 @@ method accepts a host key.
   host ID and the tunnel ID, within 10 seconds, once. A daemon tunnel's
   `ready` carries the running generation's daemon capability, which the
   control plane holds in memory for that tunnel only and never records.
-  Until slice 2's handlers land, no session sends an operation or asks for a
-  tunnel, and every tunnel is refused.
+  Until the tunnel handler lands, no session asks for a tunnel, and every
+  tunnel is refused.
+- **Operations** go only to a host that reports capability version 2 or
+  later, and only on its current session: claiming them and checking the
+  session generation are one statement. A host's answer to an operation is
+  recorded once, from any session of that host, and a malformed report ends
+  the session.
 - **Revocation** by the owner or an organization owner or admin is final. It
   refuses the next attach, and ends a live session at the host's next
   message.
