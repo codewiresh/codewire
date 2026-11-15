@@ -36,9 +36,13 @@ environment variables. A lost mutation reply requires an inventory refresh;
 New and Stop are not automatically retried.
 
 A fresh authenticated readiness read, not the server-rendered Running badge,
-enables terminal controls. Launch and Restart independently reject incomplete
-setup or an active setup owner before dispatch. Stop remains available for an
-existing shell while setup is incomplete.
+enables terminal controls. Launch and Restart are admitted once setup completed,
+or once it failed and recorded `setup_error` (#4767): a failed setup leaves the
+Sandbox usable, and a person needs a shell to fix what failed. The page shows
+the failure as a banner above the terminals. Launch and Restart independently
+reject setup that is still running and any active setup owner before dispatch,
+including a setup that runs again after a failure. Stop remains available for
+an existing shell while setup is incomplete.
 
 The `codewire.durable-terminal.v1` WebSocket is cookie-only, exact-Origin bound,
 and accepts closed `account_id`, `session_id`, `output_offset` coordinates.

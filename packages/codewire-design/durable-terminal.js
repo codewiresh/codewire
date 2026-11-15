@@ -102,11 +102,13 @@
     let runtimeAvailable = false;
     let runtimeRunning = false;
     let runtimeStarting = false;
-    let setupComplete = false;
+    // Setup completed, or failed with nothing owning the Sandbox: terminals
+    // open either way (#4767).
+    let setupSettled = false;
     let initialStatusReceived = false;
     let runtimeChecking = true;
     const runtimeControlReady = () => runtimeAvailable && runtimeRunning;
-    const runtimeReady = () => runtimeControlReady() && setupComplete;
+    const runtimeReady = () => runtimeControlReady() && setupSettled;
     // Known not ready: the status says the Sandbox is stopped or still setting
     // up. An unknown status, such as one failed poll, is not evidence of that,
     // so an open terminal keeps its socket and its input; the socket itself
@@ -185,7 +187,7 @@
     function updateControls() {
       const stateBlocked = !authorized || pending || uncertain || needsReload || suspended;
       const controlBlocked = stateBlocked || !runtimeControlReady();
-      const blocked = controlBlocked || !setupComplete;
+      const blocked = controlBlocked || !setupSettled;
       // An open terminal keeps typing and can disconnect through an unknown
       // status; only a Sandbox known not to be ready stops it.
       const openBlocked = stateBlocked || runtimeBlocked();
@@ -1142,7 +1144,7 @@
       runtimeChecking = !status.available && status.checking === true;
       runtimeRunning = status.running;
       runtimeStarting = status.starting === true;
-      setupComplete = status.setupComplete;
+      setupSettled = status.setupComplete || status.setupFailed === true;
       const ready = runtimeReady();
       root.dataset.terminalAvailable = String(runtimeAvailable);
       root.dataset.terminalRunning = String(runtimeRunning);

@@ -174,14 +174,30 @@ fn setup_readiness_is_required_only_before_launch_and_restart() {
     assert!(Acknowledgement::Launch.requires_setup_ready());
     assert!(Acknowledgement::Restart(SESSION_ID.into()).requires_setup_ready());
     assert!(!Acknowledgement::Stop(SESSION_ID.into()).requires_setup_ready());
-    assert!(require_setup_ready(Ok(Some((true, None)))).is_ok());
+    let setup = |complete: bool, owner: Option<&str>, error: Option<&str>| {
+        Some(SetupAdmission {
+            complete,
+            owner: owner.map(str::to_owned),
+            error: error.map(str::to_owned),
+        })
+    };
+    assert!(require_setup_ready(Ok(setup(true, None, None))).is_ok());
+    // #4767: a recorded failure with no setup owner opens sessions, so a
+    // person can fix what failed.
+    assert!(require_setup_ready(Ok(setup(false, None, Some("install: exited 1")))).is_ok());
     for setup in [
         None,
-        Some((false, None)),
-        Some((true, Some("claimed".into()))),
-        Some((true, Some("running".into()))),
-        Some((true, Some("reaping".into()))),
-        Some((true, Some(String::new()))),
+        setup(false, None, None),
+        setup(false, None, Some("  ")),
+        setup(true, Some("claimed"), None),
+        setup(true, Some("running"), None),
+        setup(true, Some("reaping"), None),
+        setup(true, Some(""), None),
+        // A Retry of setup holds the lease again: sessions wait for it,
+        // from its claim on.
+        setup(false, Some("claimed"), Some("install: exited 1")),
+        setup(false, Some("running"), Some("install: exited 1")),
+        setup(false, Some("reaping"), Some("install: exited 1")),
     ] {
         assert!(matches!(
             require_setup_ready(Ok(setup)),
@@ -326,14 +342,16 @@ impl Fixture {
 #[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
 async fn db_setup_readiness_rejects_launch_restart_without_dispatch_and_preserves_stop() {
     let fixture = Fixture::seed().await;
-    for (complete, owner) in [
-        (false, None),
-        (true, Some("claimed")),
-        (true, Some("running")),
-        (true, Some("reaping")),
+    for (complete, owner, error) in [
+        (false, None, None),
+        (true, Some("claimed"), None),
+        (true, Some("running"), None),
+        (true, Some("reaping"), None),
+        // #4767: a Retry of a failed setup holds the lease again.
+        (false, Some("running"), Some("install: exited 1")),
     ] {
         sqlx::query(
-            "UPDATE sandbox_environment_backend SET setup_complete = $2, \
+            "UPDATE sandbox_environment_backend SET setup_complete = $2, setup_error = $4, \
                setup_owner_generation = CASE WHEN $3::text IS NULL THEN NULL ELSE 1 END, \
                setup_owner_activity_id = CASE WHEN $3::text IS NULL THEN NULL ELSE 'synthetic-setup' END, \
                setup_owner_attempt = CASE WHEN $3::text IS NULL THEN NULL ELSE 1 END, \
@@ -342,7 +360,7 @@ async fn db_setup_readiness_rejects_launch_restart_without_dispatch_and_preserve
                setup_owner_pod_uid = CASE WHEN $3::text IN ('running', 'reaping') THEN 'synthetic-pod' ELSE NULL END \
              WHERE environment_id = $1",
         )
-        .bind(&fixture.id).bind(complete).bind(owner)
+        .bind(&fixture.id).bind(complete).bind(owner).bind(error)
         .execute(&fixture.pool).await.unwrap();
         assert_setup_rejects_without_dispatch(&fixture).await;
     }
@@ -353,8 +371,22 @@ async fn db_setup_readiness_rejects_launch_restart_without_dispatch_and_preserve
         .unwrap();
     assert_setup_rejects_without_dispatch(&fixture).await;
 
-    sqlx::query("INSERT INTO sandbox_environment_backend (environment_id, namespace, setup_complete) VALUES ($1, 'synthetic-session-admission', true)")
-        .bind(&fixture.id).execute(&fixture.pool).await.unwrap();
+    // A completed setup, and (#4767) a failed one whose owner released the
+    // lease, both admit sessions.
+    for (complete, error) in [(true, None), (false, Some("install: exited 1"))] {
+        sqlx::query("DELETE FROM sandbox_environment_backend WHERE environment_id = $1")
+            .bind(&fixture.id)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sandbox_environment_backend (environment_id, namespace, setup_complete, setup_error) VALUES ($1, 'synthetic-session-admission', $2, $3)")
+            .bind(&fixture.id).bind(complete).bind(error).execute(&fixture.pool).await.unwrap();
+        assert_setup_admits_with_one_dispatch(&fixture).await;
+    }
+    fixture.cleanup().await;
+}
+
+async fn assert_setup_admits_with_one_dispatch(fixture: &Fixture) {
     for acknowledgement in [
         Acknowledgement::Launch,
         Acknowledgement::Restart(SESSION_ID.into()),
@@ -382,7 +414,6 @@ async fn db_setup_readiness_rejects_launch_restart_without_dispatch_and_preserve
                 .is_empty()
         );
     }
-    fixture.cleanup().await;
 }
 
 async fn assert_setup_rejects_without_dispatch(fixture: &Fixture) {

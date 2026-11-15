@@ -27,6 +27,11 @@ struct Readiness {
     /// `setupRunning`.
     #[serde(skip_serializing_if = "Option::is_none")]
     notice: Option<environment_connect::SandboxNotice>,
+    /// Setup failed on this running Sandbox and nothing owns it now, so its
+    /// terminals open under the failure (#4767). Sent only on request, for
+    /// the same reason as `setupRunning`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    setup_failed: Option<bool>,
     detail: Detail,
 }
 
@@ -45,6 +50,8 @@ enum ReadinessFields {
     Setup,
     /// `fields=status` adds `setupRunning` and `notice` (#3772).
     Status,
+    /// `fields=terminals` adds those and `setupFailed` (#4767).
+    Terminals,
 }
 
 /// Lifecycle eligibility is presentation, never mutation authorization. Each
@@ -79,13 +86,18 @@ impl Readiness {
         row.desired_state = environment_connect::desired_state_name(desired_state);
         let actions = environment_connect::lifecycle_actions(&row);
         let allowed = row.confidential_actions_allowed;
-        let status = fields == Some(ReadinessFields::Status);
+        let status = matches!(
+            fields,
+            Some(ReadinessFields::Status | ReadinessFields::Terminals)
+        );
+        let terminals = fields == Some(ReadinessFields::Terminals);
         Self {
             environment_id: row.id.clone(),
             running: row.state == "running" && row.confidential_actions_allowed,
             setup_complete,
             setup_running: fields.is_some().then_some(row.setup_running),
             notice: status.then(|| row.notice()),
+            setup_failed: terminals.then_some(!row.setup_failure.is_empty()),
             detail: Detail {
                 state: row.state,
                 desired_state: row.desired_state,
@@ -473,6 +485,52 @@ mod tests {
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         for name in [header::LOCATION, header::SET_COOKIE, header::RETRY_AFTER] {
             assert!(!response.headers().contains_key(name));
+        }
+    }
+
+    /// Only a page that asks for `terminals` learns that setup failed, so
+    /// pages loaded before #4767 keep the shape they know; it is true only for
+    /// a running Sandbox whose setup recorded a failure.
+    #[test]
+    fn a_failed_setup_is_sent_only_to_a_page_that_asks_for_terminals() {
+        use axum::http::Uri;
+        let base = "https://dashboard.invalid/org/id/_fragments/terminal-readiness";
+        let query = Query::<ReadinessQuery>::try_from_uri(
+            &format!("{base}?fields=terminals").parse::<Uri>().unwrap(),
+        )
+        .map(|Query(query)| query.fields);
+        assert!(query.unwrap() == Some(ReadinessFields::Terminals));
+
+        let render = |setup_error: &str, fields: Option<ReadinessFields>| {
+            let row = environment_connect::environment_row(Environment {
+                id: "00000000-0000-4000-8000-000000000001".into(),
+                state: EnvironmentState::Running.into(),
+                setup_error: setup_error.into(),
+                ..Default::default()
+            });
+            serde_json::to_value(Readiness::new(
+                row,
+                false,
+                DesiredState::Started as i32,
+                fields,
+            ))
+            .unwrap()
+        };
+        let failed = render("install: exited 1", Some(ReadinessFields::Terminals));
+        assert_eq!(failed["setupFailed"], true);
+        assert_eq!(failed["setupComplete"], false);
+        assert_eq!(failed["notice"]["kind"], "banner");
+        assert_eq!(
+            render("", Some(ReadinessFields::Terminals))["setupFailed"],
+            false
+        );
+        for fields in [
+            None,
+            Some(ReadinessFields::Setup),
+            Some(ReadinessFields::Status),
+        ] {
+            let value = render("install: exited 1", fields);
+            assert!(value.get("setupFailed").is_none());
         }
     }
 }

@@ -999,9 +999,9 @@ pub(crate) struct EnvironmentRow {
     /// recorded a failure. Orchestration refuses Resize in this window, so
     /// Resize waits and says why. Presentation only, never authorization.
     pub(crate) setup_running: bool,
-    /// The recorded setup failure of a running Sandbox whose setup has not
-    /// completed, bounded for display; empty otherwise. The viewer already
-    /// receives it from GetEnvironment.
+    /// What the page says of a running Sandbox whose setup failed and has not
+    /// completed since, bounded for display; empty otherwise. Its terminals
+    /// open under it (#4767). The viewer already receives it from GetEnvironment.
     pub(crate) setup_failure: String,
     /// What the Sandbox's state says to its user beside the state: the reason
     /// the API wrote, bounded for display, such as a crash, a runtime being
@@ -1027,12 +1027,11 @@ pub(crate) struct EnvironmentRow {
 
 impl EnvironmentRow {
     /// A start is in flight or setup still owns this running Sandbox, so the
-    /// page follows its live setup stages. Presentation only.
+    /// page follows its live setup stages. A failed setup is a banner over
+    /// the terminal instead (#4767). Presentation only.
     pub(crate) fn setup_progress_visible(&self) -> bool {
         !self.deletion_started()
-            && (self.setup_running
-                || !self.setup_failure.is_empty()
-                || matches!(self.state, "pending" | "creating" | "starting"))
+            && (self.setup_running || matches!(self.state, "pending" | "creating" | "starting"))
     }
 
     /// The exact credential profile revision this Sandbox is bound to.

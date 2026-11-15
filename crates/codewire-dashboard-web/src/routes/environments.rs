@@ -3518,23 +3518,25 @@ mod tests {
         }
     }
 
-    /// A5c: a recorded setup failure keeps the Setup section and its alert
-    /// after a reload, without script, escaped like any other text.
+    /// A recorded setup failure stays on the page after a reload, without
+    /// script, escaped like any other text: a banner over the terminals,
+    /// which open under it, with no step list (#4767).
     #[test]
-    fn a_failed_setup_keeps_its_alert_after_a_reload() {
+    fn a_failed_setup_keeps_its_banner_after_a_reload() {
         const FAILED: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
         let organization = test_organization();
         let page = render_terminal(
             &organization,
             crate::view::EnvironmentRow {
-                setup_failure: "git clone: exited 128 <b>x</b>".into(),
+                setup_failure: "Setup failed at Cloning repositories: exited 128 <b>x</b>".into(),
                 ..resize_test_row(FAILED, 1_000, 2_048)
             },
         );
-        assert!(page.contains("data-setup-status>Setup stopped.</p>"));
+        assert!(page.contains("data-sandbox-notice data-kind=\"banner\" data-tone=\"danger\""));
         assert!(page.contains(
-            "<p class=\"cw-alert cw-alert--error\" role=\"alert\" data-setup-failure>Setup failed: git clone: exited 128 &#60;b&#62;x&#60;/b&#62;</p>"
+            "data-sandbox-notice-text>Setup failed at Cloning repositories: exited 128 &#60;b&#62;x&#60;/b&#62;</p>"
         ));
+        assert!(!page.contains("data-setup-progress"));
     }
 
     /// #3772: the reason the API wrote is on the Sandbox page, said once, and
@@ -3732,7 +3734,7 @@ mod tests {
         }
         assert_eq!(
             crate::assets::TERMINAL_READINESS_SCRIPT_PATH,
-            "/assets/codewire/terminal-readiness-v5.js"
+            "/assets/codewire/terminal-readiness-v6.js"
         );
         assert_eq!(
             page_error("setup-running"),

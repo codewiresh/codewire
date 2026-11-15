@@ -89,7 +89,7 @@
     // Ask for setupRunning and the status message explicitly: the server omits
     // them for pages that predate them, whose closed-shape check would
     // otherwise reject the response.
-    const url = `/${encodeURIComponent(slug)}/${environmentId}/_fragments/terminal-readiness?fields=status`;
+    const url = `/${encodeURIComponent(slug)}/${environmentId}/_fragments/terminal-readiness?fields=terminals`;
     const heading = document.querySelector("[data-sandbox-observation]");
     const observesDetail = heading?.dataset.sandboxEnvironmentId === environmentId;
     let submissionPending = false;
@@ -204,7 +204,7 @@
         const eligible = available && !submissionPending && !(resizeLocked && ["start", "stop", "delete", "resize"].includes(action))
           && ({ start: detail.startEligible, stop: detail.stopEligible,
           delete: detail.deleteEligible, resize: detail.actionsAllowed && !detail.pending && value.setupRunning !== true,
-          ports: detail.actionsAllowed, connect: value.running && value.setupComplete })[action] === true;
+          ports: detail.actionsAllowed, connect: value.running && (value.setupComplete || value.setupFailed === true) })[action] === true;
         if (control instanceof HTMLButtonElement) control.disabled = !eligible;
         if (control instanceof HTMLAnchorElement) {
           control.hidden = !eligible;
@@ -243,6 +243,9 @@
       document.dispatchEvent(new CustomEvent("codewire:sandbox-status", {
         detail: { environmentId, available, running: value?.running === true,
           setupComplete: value?.setupComplete === true, setupRunning: value?.setupRunning === true,
+          // Setup failed and nothing owns the Sandbox: terminals open under
+          // the failure (#4767).
+          setupFailed: value?.setupFailed === true,
           // Asked to run and on its way up, not stopped and not failed.
           starting: value?.running !== true && value?.detail?.desiredState === "started"
             && !["error", "build failed"].includes(value?.detail?.state),
@@ -308,10 +311,10 @@
         const value = JSON.parse(text);
         // A server from before setupRunning omits it; that reads as false, so
         // Resize behaves as before and the server's refusal covers setup.
-        if (!P.closed(value, ["environmentId", "running", "setupComplete", "detail"], ["setupRunning", "notice"])
+        if (!P.closed(value, ["environmentId", "running", "setupComplete", "detail"], ["setupRunning", "notice", "setupFailed"])
           || value.environmentId !== environmentId || typeof value.running !== "boolean"
           || typeof value.setupComplete !== "boolean"
-          || (Object.hasOwn(value, "setupRunning") && typeof value.setupRunning !== "boolean")
+          || ["setupRunning", "setupFailed"].some((key) => Object.hasOwn(value, key) && typeof value[key] !== "boolean")
           || (Object.hasOwn(value, "notice") && !validNotice(value.notice))
           || !validDetail(value.detail)) throw new Error("Invalid readiness");
         if (version === epoch && !paused && !document.hidden && root.isConnected) { settled = everSettled = true; report(true, value); }

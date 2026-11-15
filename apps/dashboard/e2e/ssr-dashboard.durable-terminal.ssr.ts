@@ -18,13 +18,15 @@ type Detail = { state: string; desiredState: string; tone: string; lastEvent: st
 async function transport(page: Page) {
   const state = { accountId: "account-a", sessions: [] as Session[], connections: [] as Connection[],
     launches: 0, stops: 0, lists: 0, launchFailure: "", stopFailure: "", listStatus: 200, listError: "sign-in-required", listGate: Promise.resolve(), launchGate: Promise.resolve(),
-    statusGate: Promise.resolve(), statusAvailable: true, running: true, setupComplete: true, detail: null as Detail | null };
+    statusGate: Promise.resolve(), statusAvailable: true, running: true, setupComplete: true, detail: null as Detail | null,
+    setupFailed: false, notice: null as Record<string, unknown> | null };
   // Only the opted-in readiness request is answered with setupRunning.
-  await page.route("**/_fragments/terminal-readiness?fields=status", async (route) => {
+  await page.route("**/_fragments/terminal-readiness?fields=terminals", async (route) => {
     await state.statusGate;
     await route.fulfill({ status: state.statusAvailable ? 200 : 503, json: {
       environmentId: environment, running: state.running, setupComplete: state.setupComplete,
-      setupRunning: state.running && !state.setupComplete,
+      setupRunning: state.running && !state.setupComplete && !state.setupFailed, setupFailed: state.setupFailed,
+      ...(state.notice ? { notice: state.notice } : {}),
       detail: state.detail ?? { state: state.running ? "running" : "stopped", desiredState: state.running ? "started" : "stopped",
         tone: state.running ? "success" : "neutral", lastEvent: "just now", resources: "1 vCPU · 2 GiB · 10 GiB",
         cpuMillicores: 1000, memoryMib: 2048, diskGib: 10, startEligible: !state.running, stopEligible: state.running,
@@ -1860,6 +1862,30 @@ test("initial terminal inventory waits until workspace setup finishes", async ({
   await automaticTerminal(page, state);
   expect(state.lists).toBe(1);
   expect(state.stops).toBe(0);
+});
+
+test("a failed setup opens terminals under its banner, and setup holding the Sandbox again closes new ones (#4767)", async ({ page }) => {
+  const state = await transport(page);
+  state.setupComplete = false;
+  state.setupFailed = true;
+  const text = "Setup failed at Running install command: npm ci exited 1";
+  state.notice = { kind: "banner", text, tone: "danger", action: "", label: "", dismissible: false, graphic: "" };
+  await openFixture(page);
+  // The page opens its terminal as it does for a completed setup.
+  await automaticTerminal(page, state);
+  const notice = page.locator("[data-sandbox-notice]");
+  await expect(notice).toBeVisible();
+  await expect(notice).toHaveAttribute("data-kind", "banner");
+  await expect(notice).toHaveAttribute("data-tone", "danger");
+  await expect(notice.locator("[data-sandbox-notice-text]")).toHaveText(text);
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeEnabled();
+  await artifactScreenshot(page, "failed-setup-terminal.png");
+  // A Retry holds setup's lease again: the failure is no longer recorded and
+  // new terminals wait, as they do while setup runs.
+  state.setupFailed = false;
+  state.notice = null;
+  await checkReadinessNow(page);
+  await expect(page.getByRole("button", { name: "New terminal", exact: true })).toBeDisabled();
 });
 
 test("a Sandbox still being created says its terminals open when ready", async ({ page }) => {

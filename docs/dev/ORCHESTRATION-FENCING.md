@@ -121,6 +121,10 @@ Rules:
   the bounded attach handshake.
 - Completing a setup phase writes its log and checkpoint, advances
   `setup_phase` and clears the owner in one transaction.
+- A failed setup phase records `setup_error`, keeps `setup_phase` on the
+  failed step and clears the owner in one transaction. Terminal sessions are
+  admitted only while no owner holds the lease, so a failed setup opens them
+  and a setup that takes the lease again closes new ones (#4767).
 - `AuthorityLost` propagates through every setup path. It is never turned
   into a warning or followed by advancing to the next setup phase.
 

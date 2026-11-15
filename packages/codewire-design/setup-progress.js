@@ -357,22 +357,17 @@
   document.addEventListener("codewire:sandbox-status", (message) => {
     const detail = message.detail;
     if (detail?.environmentId !== environmentId || ended) return;
-    // A start whose setup already finished on an earlier run is a restart:
-    // it follows no stream. A first start follows setup once it begins.
-    if (starting && !source && detail.setupComplete !== true) followStream();
+    // A start whose setup already completed or failed on an earlier run is a
+    // restart: it runs no setup and follows no stream (#4767). A first start
+    // follows setup once it begins.
+    if (starting && !source && detail.setupComplete !== true && detail.setupFailed !== true) followStream();
     if (detail.running === true) settleStart();
-    // A running Sandbox whose setup failed says so from the recorded run, even
-    // when this page followed only the latest start and saw no failed row.
-    const recorded = detail.notice;
-    if (detail.running === true && detail.setupComplete !== true && recorded?.kind === "setup"
-      && recorded.tone === "danger" && failure instanceof HTMLElement && failure.hidden) {
-      failure.textContent = recorded.text;
-      failure.hidden = false;
-      status.textContent = "Setup stopped.";
-      say("Setup stopped.");
-      done = false;
-      halt();
-      follow();
+    // A failed setup leaves the Sandbox usable: the failure becomes a banner
+    // over its terminals, and the list stops here (#4767).
+    if (detail.running === true && detail.setupFailed === true) {
+      finish();
+      section.hidden = true;
+      return;
     }
     if (detail.running !== true || detail.setupComplete !== true || failure?.hidden === false) return;
     done = true;

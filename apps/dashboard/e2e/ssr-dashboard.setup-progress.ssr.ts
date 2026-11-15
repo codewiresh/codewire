@@ -141,22 +141,20 @@ test("a restart shows the starting row, replays no earlier run, and closes once 
   await expect(page.getByText("an earlier run")).toHaveCount(0);
 });
 
-test("a running Sandbox whose setup failed on an earlier start shows that failure", async ({ page }) => {
+test("a restart after a failed setup follows no stream, says nothing complete, and closes when running (#4767)", async ({ page }) => {
   await starting(page);
-  // This start's stream has nothing: the failure belongs to an earlier run.
-  await streams(page, [""]);
+  const resumes = await streams(page, []);
   await page.goto(fixtureUrl());
   const setup = page.getByRole("region", { name: "Starting your Sandbox" });
-  await status(page, { starting: true, setupComplete: false });
-  await status(page, { running: true, setupComplete: false, notice: {
-    kind: "setup", tone: "danger", text: "Setup failed: Running install command: exited 1",
-    action: "", label: "", dismissible: false, graphic: "" } });
-  await expect(setup.getByRole("alert")).toHaveText("Setup failed: Running install command: exited 1");
-  await expect(setup.locator("[data-setup-status]")).toHaveText("Setup stopped.");
+  await status(page, { available: true, starting: true, setupComplete: false, setupFailed: true });
   const stages = setup.locator("[data-setup-stages] > .cw-setup-stage");
-  await expect(stages.nth(0)).toHaveAttribute("data-state", "completed");
-  // The failure keeps the list on screen; it does not close as setup would.
-  await expect(setup).toBeVisible();
+  await expect(stages).toHaveCount(1);
+  await expect(stages.nth(0)).toHaveAttribute("data-state", "running");
+  await status(page, { available: true, running: true, setupComplete: false, setupFailed: true });
+  // The failure is the banner over the terminals; this list just closes.
+  await expect(setup).toBeHidden();
+  await expect(page.locator("[data-setup-announce]")).not.toContainText("Setup complete");
+  expect(resumes).toHaveLength(0);
 });
 
 test("a failed stage is announced and stream text is never markup", async ({ page }) => {

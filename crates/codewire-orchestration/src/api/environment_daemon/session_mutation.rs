@@ -77,8 +77,9 @@ where
                 // before polling the mutating RPC. A running Pod may still be
                 // replaced by its setup owner. Stop remains available then.
                 if acknowledgement.requires_setup_ready() {
-                    let setup = sqlx::query_as::<_, (bool, Option<String>)>(
-                        "SELECT COALESCE(setup_complete, false), setup_owner_status \
+                    let setup = sqlx::query_as::<_, SetupAdmission>(
+                        "SELECT COALESCE(setup_complete, false) AS complete, \
+                                setup_owner_status AS owner, setup_error AS error \
                            FROM sandbox_environment_backend WHERE environment_id = $1",
                     )
                     .bind(&environment_id)
@@ -98,12 +99,36 @@ where
     .map_err(|_| uncertain_outcome())?
 }
 
+/// What session admission reads about the Sandbox's setup (#4767).
+#[derive(Debug, sqlx::FromRow)]
+struct SetupAdmission {
+    complete: bool,
+    owner: Option<String>,
+    error: Option<String>,
+}
+
+impl SetupAdmission {
+    /// Sessions open once setup completed, or once it failed and recorded
+    /// why: a failed setup leaves the Sandbox usable, and a person needs a
+    /// shell to fix what failed. Nothing launches while a setup owner holds
+    /// the lease, because its Pod recovery can suspend and resume the
+    /// Sandbox, which a Retry of setup takes again.
+    fn admits_sessions(&self) -> bool {
+        self.owner.is_none()
+            && (self.complete
+                || self
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| !error.trim().is_empty()))
+    }
+}
+
 async fn check_setup_readiness<F>(
     read: F,
     deadline: Duration,
 ) -> Result<(), OrganizationRuntimeMutationError>
 where
-    F: Future<Output = Result<Option<(bool, Option<String>)>, sqlx::Error>>,
+    F: Future<Output = Result<Option<SetupAdmission>, sqlx::Error>>,
 {
     // Expiring a local read cannot imply that the not-yet-polled mutation ran.
     let setup = tokio::time::timeout(deadline, read)
@@ -119,15 +144,11 @@ fn setup_readiness_error() -> OrganizationRuntimeMutationError {
 }
 
 fn require_setup_ready(
-    setup: Result<Option<(bool, Option<String>)>, sqlx::Error>,
+    setup: Result<Option<SetupAdmission>, sqlx::Error>,
 ) -> Result<(), OrganizationRuntimeMutationError> {
     let setup = setup.map_err(|_| setup_readiness_error())?;
     match setup {
-        Some((complete, owner))
-            if super::daemon_repair_setup_is_idle(complete, owner.as_deref()) =>
-        {
-            Ok(())
-        }
+        Some(setup) if setup.admits_sessions() => Ok(()),
         _ => Err(OrganizationRuntimeMutationError::Known(
             AppError::Precondition(
                 "environment setup is not ready; wait for setup to finish".into(),

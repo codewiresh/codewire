@@ -86,6 +86,8 @@
   let elapsed = 0;
   let playing = true;
   let mode = "journey";
+  // The step a played failure stops at, if any.
+  let failAt = -1;
 
   const setState = (item, state) => {
     if ((item.dataset.state || "") === state) return;
@@ -161,6 +163,7 @@
     mode = "journey";
     current = 0;
     elapsed = 0;
+    failAt = -1;
     // Restart every check's drawing.
     items.forEach(({ item }) => setState(item, ""));
     playing = true;
@@ -186,7 +189,15 @@
       mode = "journey";
       current = steps.length;
       render();
+    } else if (target === "fails") {
+      // Plays into the failure; the terminal then opens under it (#4767).
+      replay();
+      failAt = Math.max(0, steps.findIndex((step) => step.name === config.failedStep));
+      current = Math.max(0, failAt - 3);
+      render();
     } else if (target === "failed") {
+      failedOpen();
+    } else if (target === "failed-list") {
       setPill("running", "success");
       const at = Math.max(0, steps.findIndex((step) => step.name === config.failedStep));
       setNotice({ kind: "setup" });
@@ -217,11 +228,24 @@
     }
   }
 
+  // A failed setup leaves the Sandbox usable: the terminal opens under the
+  // failure (#4767).
+  function failedOpen() {
+    mode = "failed";
+    playing = false;
+    pauseButton.textContent = "Play";
+    setPill("running", "success");
+    showTerminal(true);
+    setNotice({ kind: "banner", tone: "danger", text: config.failedBanner });
+  }
+
   const jumps = [
     ["step:0", "Create accepted"],
     ...steps.map((step, index) => [`step:${index}`, `→ ${step.name}`]).slice(1),
     ["ready", "Ready terminal"],
-    ["failed", "A step failed"],
+    ["fails", "Setup fails (plays)"],
+    ["failed-list", "A step failed, in the list"],
+    ["failed", "Failed: terminal open"],
     ["no-capacity", "No capacity"],
     ["stopped", "Stopped"],
     ["crashed", "Crashed"],
@@ -249,6 +273,12 @@
   setInterval(() => {
     if (!playing || mode !== "journey" || current >= steps.length) return;
     elapsed += TICK * Number(speedSelect.value);
+    if (current === failAt && elapsed >= steps[current].seconds) {
+      playing = false;
+      jump("failed-list");
+      setTimeout(() => { if (mode === "failed-list") failedOpen(); }, 1500);
+      return;
+    }
     if (elapsed >= steps[current].seconds) {
       current += 1;
       elapsed = 0;

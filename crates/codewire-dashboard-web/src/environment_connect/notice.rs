@@ -77,6 +77,36 @@ pub(super) const PENDING: &str =
     "A Sandbox operation is pending. Waiting for the observed state to match its requested state.";
 pub(super) const NO_ROOM: &str = "No room to start this sandbox right now.";
 
+/// The prefix the setup worker (`worker/setup.rs`) puts before a failed
+/// step's error, and that step in the words of the page's step list. The
+/// recorded `setup_phase` cannot name the step: it is the last checkpoint,
+/// which steps with nothing to do never advance.
+const FAILED_STEPS: [(&str, &str); 4] = [
+    ("health check: ", "Checking sidecar readiness"),
+    ("git clone: ", "Cloning repositories"),
+    ("install: ", "Running install command"),
+    ("agent validation: ", "Checking agent tools"),
+];
+
+/// What the page says of a recorded setup failure: the step it failed at, as
+/// the step list names it, when the error names one, and the error without
+/// that prefix. Empty when no failure is recorded.
+pub(super) fn setup_failure(error: &str) -> String {
+    let error = display_line(error);
+    if error.is_empty() {
+        return error;
+    }
+    let text = FAILED_STEPS
+        .iter()
+        .find_map(|(prefix, label)| {
+            error
+                .strip_prefix(prefix)
+                .map(|rest| format!("Setup failed at {label}: {rest}"))
+        })
+        .unwrap_or_else(|| format!("Setup failed: {error}"));
+    text.chars().take(300).collect()
+}
+
 /// What the page says for a Sandbox's state. A reason the API wrote is said
 /// as written, except a refusal for capacity, which the page says in one line;
 /// otherwise the state is, and only an action the state allows is offered. A
@@ -102,16 +132,11 @@ pub(crate) fn sandbox_notice(row: &EnvironmentRow) -> SandboxNotice {
     match (row.state, row.status_code.as_str()) {
         ("destroying" | "destroyed", _) => SandboxNotice::none(),
         ("running", _) if !row.confidential_actions_allowed => SandboxNotice::none(),
-        // A setup that failed says so from its recorded run, so a page that
-        // followed only the latest start still shows why terminals stay shut.
-        ("running", _) if !row.setup_failure.is_empty() => SandboxNotice::banner(
-            format!("Setup failed: {}", row.setup_failure)
-                .chars()
-                .take(300)
-                .collect(),
-            "danger",
-        )
-        .kind("setup"),
+        // A failed setup leaves the Sandbox usable: the failure stays above
+        // the terminals, which open so a person can fix it (#4767).
+        ("running", _) if !row.setup_failure.is_empty() => {
+            SandboxNotice::banner(row.setup_failure.clone(), "danger")
+        }
         ("running", _) if row.setup_running => {
             SandboxNotice::banner(SETTING_UP.to_owned(), "neutral").kind("setup")
         }
@@ -196,22 +221,74 @@ mod tests {
     }
 
     #[test]
-    fn a_recorded_setup_failure_is_said_from_its_run() {
-        let failed = sandbox_notice(&running(false, "Running install command: exited 1"));
+    fn a_recorded_setup_failure_is_a_banner_naming_its_step() {
+        let failed = sandbox_notice(&running(false, "install: npm ci exited 1"));
         assert_eq!(
-            (failed.kind, failed.tone, failed.text.as_str()),
             (
-                "setup",
+                failed.kind,
+                failed.tone,
+                failed.text.as_str(),
+                failed.action
+            ),
+            (
+                "banner",
                 "danger",
-                "Setup failed: Running install command: exited 1"
+                "Setup failed at Running install command: npm ci exited 1",
+                ""
             )
         );
         let long = sandbox_notice(&running(false, &"x".repeat(400)));
         assert_eq!(long.text.chars().count(), 300);
+        assert!(running(false, "  ").setup_failure.is_empty());
         let setting_up = sandbox_notice(&running(true, ""));
         assert_eq!(
             (setting_up.kind, setting_up.tone, setting_up.text.as_str()),
             ("setup", "neutral", SETTING_UP)
         );
+    }
+
+    #[test]
+    fn a_failure_names_the_step_its_error_names() {
+        assert_eq!(
+            setup_failure("git clone: authentication failed"),
+            "Setup failed at Cloning repositories: authentication failed"
+        );
+        // Kind, 2026-11-15: an install failure in a Sandbox with no
+        // repositories, whose recorded phase still says the clone's.
+        assert_eq!(
+            setup_failure("install: workspace exec exited 1"),
+            "Setup failed at Running install command: workspace exec exited 1"
+        );
+        // An error that names no step is said as written.
+        assert_eq!(
+            setup_failure("ports: refused"),
+            "Setup failed: ports: refused"
+        );
+        assert_eq!(setup_failure(" \n"), "");
+    }
+
+    /// Each step is named as the page's step list names it, and each prefix
+    /// is one the worker writes.
+    #[test]
+    fn failed_steps_match_the_step_list_and_the_worker() {
+        const PAGE: &str = include_str!("../../../../packages/codewire-design/setup-progress.js");
+        const WORKER: &str = include_str!("../../../codewire-orchestration/src/worker/setup.rs");
+        let body = PAGE
+            .split("const SETUP_PHASES = new Map([")
+            .nth(1)
+            .and_then(|rest| rest.split("]);").next())
+            .expect("setup-progress.js defines SETUP_PHASES");
+        let labels: Vec<&str> = body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("[\""))
+            .filter_map(|entry| entry.split('"').nth(2))
+            .collect();
+        for (prefix, label) in FAILED_STEPS {
+            assert!(labels.contains(&label), "the step list has no {label:?}");
+            assert!(
+                WORKER.contains(&format!("anyhow::anyhow!(\"{prefix}{{e:#}}\")")),
+                "the setup worker no longer writes {prefix:?}"
+            );
+        }
     }
 }

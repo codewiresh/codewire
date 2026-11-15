@@ -929,7 +929,7 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
         && !environment.setup_complete
         && environment.setup_error.trim().is_empty();
     let setup_failure = if state == "running" && !environment.setup_complete {
-        display_line(&environment.setup_error)
+        notice::setup_failure(&environment.setup_error)
     } else {
         String::new()
     };
