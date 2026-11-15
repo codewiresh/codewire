@@ -15,13 +15,18 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::*;
+use crate::bridge::AdmittedCredentialBridge;
 use crate::bridge::{BrokerRequestExecutor as _, FrontDoorExecutor};
 use crate::http_test_support::Lease;
 use crate::{
     BrokerBridgeError, BrokerCredentialRefreshRequest, BrokerLeaseError, BrokerRefreshAdmission,
     BrokerRefreshError, BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse,
     CanonicalCodexOAuthBundle, CredentialBridgeResponseSink, CredentialBridgeTransport,
-    admit_credential_bridge, run_admitted_credential_bridge, run_admitted_front_door_bridge,
+    FrontDoorTransport, admit_credential_bridge, run_admitted_credential_bridge,
+    run_admitted_credential_bridges, run_admitted_front_door_bridge,
+};
+use codewire_credential_bridge::{
+    CredentialBridge, FrontDoorSessionError, serve_front_door_session,
 };
 
 type Payload = v1::credential_bridge_host_message::Payload;
@@ -814,7 +819,9 @@ async fn serve_on(
     let runner = tokio::spawn(async move {
         match entry {
             BridgeEntry::Loopback => run_admitted_credential_bridge(broker, admitted).await,
-            BridgeEntry::FrontDoor => run_admitted_front_door_bridge(broker, admitted).await,
+            BridgeEntry::FrontDoor => {
+                run_admitted_front_door_bridge(Arc::new(broker), admitted).await
+            }
         }
     });
     let mut frames = Vec::new();
@@ -886,7 +893,7 @@ async fn the_front_door_runner_serves_the_frames_a_loopback_session_refuses() {
 #[tokio::test]
 async fn a_front_door_session_denies_every_operation_but_an_http_request() {
     let recorded = Recorded::default();
-    let executor = FrontDoorExecutor(recorded.broker());
+    let executor = FrontDoorExecutor(Arc::new(recorded.broker()));
     assert!(matches!(
         executor
             .execute_ssh(
@@ -920,4 +927,191 @@ async fn a_front_door_session_denies_every_operation_but_an_http_request() {
     ));
     assert_eq!(recorded.leases(), 0);
     assert!(recorded.outbound().is_empty());
+}
+
+/// A loopback session the test drives by hand, admitted with its Ready.
+async fn loopback_session(
+    environment_id: Uuid,
+) -> (
+    AdmittedCredentialBridge<Session>,
+    mpsc::Sender<v1::CredentialBridgeGuestMessage>,
+    mpsc::Receiver<Payload>,
+) {
+    let (input_tx, input) = mpsc::channel(4);
+    let (output, output_rx) = mpsc::channel(8);
+    input_tx
+        .send(v1::CredentialBridgeGuestMessage {
+            payload: Some(v1::credential_bridge_guest_message::Payload::Ready(
+                v1::CredentialBridgeReady {
+                    protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                    environment_id: environment_id.to_string(),
+                    environment_generation: GENERATION,
+                },
+            )),
+        })
+        .await
+        .unwrap();
+    let admitted = admit_credential_bridge(Session { input, output }, environment_id, GENERATION)
+        .await
+        .unwrap();
+    (admitted, input_tx, output_rx)
+}
+
+/// One environment's two sessions on one broker: the loopback one driven by
+/// hand, and a front door's guest side serving on a real Unix socket pair.
+struct TwoSessions {
+    guest: CredentialBridge,
+    guest_task: tokio::task::JoinHandle<Result<(), FrontDoorSessionError>>,
+    loopback_input: mpsc::Sender<v1::CredentialBridgeGuestMessage>,
+    loopback_output: mpsc::Receiver<Payload>,
+    runner: tokio::task::JoinHandle<Result<(), BrokerBridgeError>>,
+}
+
+impl TwoSessions {
+    async fn start(recorded: &Recorded) -> Self {
+        let environment_id = Uuid::new_v4();
+        let (front_door_end, broker_end) = tokio::net::UnixStream::pair().unwrap();
+        let guest = CredentialBridge::new(environment_id, GENERATION).unwrap();
+        let serving = guest.clone();
+        let guest_task =
+            tokio::spawn(async move { serve_front_door_session(&serving, front_door_end).await });
+        let front_door = FrontDoorTransport::open(broker_end, environment_id, GENERATION)
+            .await
+            .unwrap();
+        let front_door = admit_credential_bridge(front_door, environment_id, GENERATION)
+            .await
+            .unwrap();
+        let (loopback, loopback_input, loopback_output) = loopback_session(environment_id).await;
+        let broker = recorded.broker();
+        let runner = tokio::spawn(async move {
+            run_admitted_credential_bridges(broker, loopback, front_door).await
+        });
+        Self {
+            guest,
+            guest_task,
+            loopback_input,
+            loopback_output,
+            runner,
+        }
+    }
+
+    async fn loopback_request(&mut self) -> Vec<Payload> {
+        self.loopback_input
+            .send(v1::CredentialBridgeGuestMessage {
+                payload: Some(v1::credential_bridge_guest_message::Payload::Request(
+                    cases()[1].request(""),
+                )),
+            })
+            .await
+            .unwrap();
+        let mut frames = Vec::new();
+        loop {
+            let frame = self.loopback_output.recv().await.unwrap();
+            let terminal = matches!(frame, Payload::ResponseEnd(_) | Payload::ResponseFailure(_));
+            frames.push(frame);
+            if terminal {
+                return frames;
+            }
+        }
+    }
+}
+
+/// An Anthropic request as the front door hands it to the bridge, carrying
+/// this environment's placeholder.
+fn intercepted_anthropic_request() -> http::Request<axum::body::Body> {
+    http::Request::post(format!(
+        "{}/v1/messages",
+        codewire_access::MANAGED_ANTHROPIC_API_PREFIX
+    ))
+    .header("content-type", "application/json")
+    .header("anthropic-version", "2023-06-01")
+    .header("x-api-key", OURS)
+    .body(axum::body::Body::from("{}"))
+    .unwrap()
+}
+
+/// A request the front door makes for its bound host crosses the session
+/// socket as bytes and is served on the front-door entry beside the loopback
+/// session on one broker: its placeholder is swapped for the leased key,
+/// which only the provider sees, and its answer returns.
+#[tokio::test]
+async fn a_front_door_request_crosses_its_socket_and_is_served_beside_the_loopback_session() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        ..Recorded::default()
+    };
+    let mut sessions = TwoSessions::start(&recorded).await;
+
+    let response = sessions
+        .guest
+        .respond_intercepted("api.anthropic.com", intercepted_anthropic_request())
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(recorded.leases(), 1);
+    let outbound = recorded.outbound();
+    assert_eq!(
+        header(&outbound[0], "x-api-key"),
+        [crate::http_test_support::TOKEN]
+    );
+    assert!(
+        outbound[0].2.iter().all(|(_, value)| !value
+            .windows(OURS.len())
+            .any(|window| window == OURS.as_bytes())),
+        "the placeholder never leaves"
+    );
+
+    let frames = sessions.loopback_request().await;
+    assert!(
+        matches!(frames.first(), Some(Payload::ResponseStart(start)) if start.status_code == 200),
+        "{frames:?}"
+    );
+    assert_eq!(recorded.leases(), 2);
+    assert_eq!(recorded.outbound().len(), 2);
+}
+
+/// The front-door entry still checks the host: one its slot's route never
+/// sends to is refused before any lease.
+#[tokio::test]
+async fn a_front_door_request_for_a_host_its_route_never_reaches_takes_no_lease() {
+    let recorded = Recorded::default();
+    let sessions = TwoSessions::start(&recorded).await;
+    let response = sessions
+        .guest
+        .respond_intercepted("api.openai.com", intercepted_anthropic_request())
+        .await;
+    assert_ne!(response.status(), StatusCode::OK);
+    assert_eq!(recorded.leases(), 0);
+    assert!(recorded.outbound().is_empty());
+}
+
+/// When the loopback session ends, the broker ends with the loopback
+/// session's own result: the front door's session is closed with it, and its
+/// guest side sees the end.
+#[tokio::test]
+async fn the_loopback_session_ending_ends_the_front_door_session() {
+    let recorded = Recorded::default();
+    let sessions = TwoSessions::start(&recorded).await;
+    drop(sessions.loopback_input);
+    assert_eq!(
+        sessions.runner.await.unwrap(),
+        Err(BrokerBridgeError::Unavailable)
+    );
+    assert_eq!(sessions.guest_task.await.unwrap(), Ok(()));
+}
+
+/// A front door that dies fails closed on its own; the environment's
+/// loopback session keeps being served.
+#[tokio::test]
+async fn a_front_door_that_dies_leaves_the_loopback_session_serving() {
+    let recorded = Recorded::default();
+    let mut sessions = TwoSessions::start(&recorded).await;
+    sessions.guest_task.abort();
+    assert!((&mut sessions.guest_task).await.unwrap_err().is_cancelled());
+
+    let frames = sessions.loopback_request().await;
+    assert!(
+        matches!(frames.first(), Some(Payload::ResponseStart(start)) if start.status_code == 200),
+        "{frames:?}"
+    );
+    assert!(!sessions.runner.is_finished());
 }

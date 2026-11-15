@@ -13,6 +13,9 @@ bytes = { workspace = true }
 codewire-access = { workspace = true }
 codewire-daemon-proto = { workspace = true }
 codewire-workload-secrets = { workspace = true }
+futures = { workspace = true }
+prost = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }

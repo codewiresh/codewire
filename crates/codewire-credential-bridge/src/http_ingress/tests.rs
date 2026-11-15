@@ -221,7 +221,7 @@ async fn explicit_openai_prefix_selects_only_its_distinct_api_key_slot() {
     let path = format!("{MANAGED_OPENAI_API_PREFIX}/responses");
     let bridge = crate::CredentialBridge::new(uuid::Uuid::new_v4(), 1).unwrap();
     let (frame, _) = bridge
-        .prepare_guest_request(request("POST", &path, None))
+        .prepare_guest_request(None, request("POST", &path, None))
         .await
         .ok()
         .unwrap();
@@ -230,7 +230,7 @@ async fn explicit_openai_prefix_selects_only_its_distinct_api_key_slot() {
     assert_eq!(frame.path, "/responses");
     assert!(frame.query.is_empty());
     let (codex, _) = bridge
-        .prepare_guest_request(request("POST", "/v1/responses", None))
+        .prepare_guest_request(None, request("POST", "/v1/responses", None))
         .await
         .ok()
         .unwrap();

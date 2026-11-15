@@ -10,8 +10,17 @@
 //! Paths are matched as received, never decoded or normalised. A path that
 //! could mean something else once a server decodes or resolves it is
 //! refused, because the route's own checks see only the rewritten path.
+//!
+//! [`EnvironmentFrontDoor`] is one environment's front door as its own
+//! process runs it: the streams the egress broker hands over, the TLS front
+//! door, this back end, and the bridge session to the credential broker.
 
 #![forbid(unsafe_code)]
+
+mod environment;
+pub mod handoff;
+
+pub use environment::{Ended, EnvironmentFrontDoor, INTERCEPT_PORT, StartError};
 
 use std::pin::Pin;
 use std::sync::{Mutex, PoisonError};
@@ -199,7 +208,8 @@ impl RouteTable {
     }
 }
 
-/// Hands front door requests to the credential bridge by a [`RouteTable`].
+/// Hands front door requests to the credential bridge by a [`RouteTable`],
+/// each naming the bound host it was intercepted for.
 pub struct CredentialRouteBackend {
     routes: RouteTable,
     bridge: CredentialBridge,
@@ -237,7 +247,7 @@ impl CredentialRouteBackend {
         parts.uri = uri;
         parts.headers = without_host(std::mem::take(&mut parts.headers));
         self.bridge
-            .respond(Request::from_parts(parts, Body::new(body)))
+            .respond_intercepted(host, Request::from_parts(parts, Body::new(body)))
             .await
             .map(|body| BoxBody::new(SyncBody(Mutex::new(body))))
     }

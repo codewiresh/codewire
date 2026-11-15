@@ -151,6 +151,7 @@ pub enum CredentialBrokerError {
 pub use bridge::{
     AdmittedCredentialBridge, BrokerBridgeError, CredentialBridgeRelayInput,
     CredentialBridgeRelayOutput, CredentialBridgeResponseSink, CredentialBridgeTransport,
-    admit_credential_bridge, run_admitted_credential_bridge, run_admitted_credential_bridge_relay,
-    run_admitted_front_door_bridge, run_credential_bridge,
+    FrontDoorResponseSink, FrontDoorTransport, admit_credential_bridge,
+    run_admitted_credential_bridge, run_admitted_credential_bridge_relay,
+    run_admitted_credential_bridges, run_admitted_front_door_bridge, run_credential_bridge,
 };

@@ -1,0 +1,305 @@
+//! A front-door session over one byte stream the supervisor made (#3999).
+//!
+//! The TLS front door runs outside the environment and speaks the guest side
+//! of the bridge; the credential broker speaks the host side. They share one
+//! Unix stream and nothing else, so there is no gRPC here: each message is a
+//! four-byte big-endian length and its protobuf encoding, at most
+//! [`CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES`]. The host writes Open first,
+//! listing [`CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR`]; the guest answers
+//! Ready and then serves exactly as over the daemon's RPC.
+//!
+//! Which entry a session has is decided by the broker from the socket it was
+//! handed, never from anything on this stream (`BridgeEntry`).
+
+use std::time::Duration;
+
+use bytes::{Buf as _, BufMut as _, BytesMut};
+use codewire_daemon_proto::codewire::bridge::v1;
+use codewire_daemon_proto::{
+    CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR, CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
+    CREDENTIAL_BRIDGE_MAX_CAPABILITIES, CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES,
+    CREDENTIAL_BRIDGE_PROTOCOL_VERSION, valid_credential_bridge_capability,
+};
+use prost::Message;
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt as _;
+use tonic::Status;
+
+use crate::{BridgeIdentity, CredentialBridge};
+
+/// How long the guest waits for the host's Open.
+pub const FRONT_DOOR_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Host messages queued for the writer: backpressure, never unbounded.
+const HOST_SEND_BUFFER: usize = 32;
+const LENGTH_BYTES: usize = 4;
+
+/// Why a front-door session ended or never started. Carries no peer input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum FrontDoorSessionError {
+    #[error("front-door session transport failed")]
+    Transport,
+    #[error("front-door session frame is invalid")]
+    InvalidFrame,
+    #[error("front-door session open is missing or invalid")]
+    InvalidOpen,
+    #[error("front-door session was refused by the bridge")]
+    Refused,
+}
+
+/// Serve the guest side of one front-door session on `stream` until either
+/// end closes it. The first frame must be an Open for `bridge`'s identity
+/// that lists [`CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR`].
+pub async fn serve_front_door_session<S>(
+    bridge: &CredentialBridge,
+    stream: S,
+) -> Result<(), FrontDoorSessionError>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (reader, mut writer) = tokio::io::split(stream);
+    let mut reader = FrameReader::new(reader);
+    let open = tokio::time::timeout(FRONT_DOOR_OPEN_TIMEOUT, reader.next())
+        .await
+        .map_err(|_| FrontDoorSessionError::InvalidOpen)??
+        .ok_or(FrontDoorSessionError::InvalidOpen)?;
+    let capabilities = admit_open(open, bridge.identity())?;
+    let (prepared, mut output) = bridge
+        .prepare_connection()
+        .map_err(|_| FrontDoorSessionError::Refused)?;
+    let input = futures::stream::unfold(reader, |mut reader| async move {
+        match reader.next::<v1::CredentialBridgeHostMessage>().await {
+            Ok(Some(message)) => Some((Ok(message), reader)),
+            Ok(None) => None,
+            Err(_) => Some((
+                Err(Status::unavailable("front-door session transport failed")),
+                reader,
+            )),
+        }
+    });
+    let connection = prepared
+        .activate_with_capabilities(input, &capabilities)
+        .await
+        .map_err(|_| FrontDoorSessionError::Refused)?;
+    let pump = async {
+        while let Some(frame) = output.next().await {
+            let frame = frame.map_err(|_| FrontDoorSessionError::Transport)?;
+            write_frame(&mut writer, &frame).await?;
+        }
+        Ok(())
+    };
+    tokio::select! {
+        () = connection.run() => Ok(()),
+        result = pump => result,
+    }
+}
+
+/// The capabilities of a valid front-door Open for `identity`.
+fn admit_open(
+    message: v1::CredentialBridgeHostMessage,
+    identity: BridgeIdentity,
+) -> Result<Vec<String>, FrontDoorSessionError> {
+    let Some(v1::credential_bridge_host_message::Payload::Open(open)) = message.payload else {
+        return Err(FrontDoorSessionError::InvalidOpen);
+    };
+    let admitted = open.protocol_version == CREDENTIAL_BRIDGE_PROTOCOL_VERSION
+        && open.environment_id == identity.environment_id.to_string()
+        && open.environment_generation == identity.environment_generation
+        && open.capabilities.len() <= CREDENTIAL_BRIDGE_MAX_CAPABILITIES
+        && open
+            .capabilities
+            .iter()
+            .all(|capability| valid_credential_bridge_capability(capability))
+        && open
+            .capabilities
+            .iter()
+            .any(|capability| capability == CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR);
+    if !admitted {
+        return Err(FrontDoorSessionError::InvalidOpen);
+    }
+    Ok(open.capabilities)
+}
+
+/// The host side of one front-door session, after its Open was written.
+pub struct FrontDoorHostSession {
+    reader: FrameReader<tokio::io::ReadHalf<Box<dyn SessionStream>>>,
+    sender: FrontDoorHostSender,
+    writer: tokio::task::JoinHandle<()>,
+}
+
+/// A byte stream a front-door session runs on.
+pub trait SessionStream: AsyncRead + AsyncWrite + Send + Unpin + 'static {}
+
+impl<T> SessionStream for T where T: AsyncRead + AsyncWrite + Send + Unpin + 'static {}
+
+/// Sends host messages on a [`FrontDoorHostSession`], in order. Each message
+/// is queued whole, so a send dropped before it completes writes nothing.
+#[derive(Clone)]
+pub struct FrontDoorHostSender(mpsc::Sender<v1::CredentialBridgeHostMessage>);
+
+impl FrontDoorHostSession {
+    /// Write the Open for `identity`, listing
+    /// [`CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR`] and streamed request
+    /// bodies, since intercepted uploads are the large ones. Ready is not
+    /// read here: the caller admits it as it admits any bridge's first frame.
+    pub async fn open<S: SessionStream>(
+        stream: S,
+        identity: BridgeIdentity,
+    ) -> Result<Self, FrontDoorSessionError> {
+        let stream: Box<dyn SessionStream> = Box::new(stream);
+        let (reader, mut writer) = tokio::io::split(stream);
+        let open = v1::CredentialBridgeHostMessage {
+            payload: Some(v1::credential_bridge_host_message::Payload::Open(
+                v1::CredentialBridgeOpen {
+                    protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                    environment_id: identity.environment_id.to_string(),
+                    environment_generation: identity.environment_generation,
+                    capabilities: vec![
+                        CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR.to_owned(),
+                        CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM.to_owned(),
+                    ],
+                },
+            )),
+        };
+        write_frame(&mut writer, &open).await?;
+        let (sender, mut queued) = mpsc::channel(HOST_SEND_BUFFER);
+        let writer = tokio::spawn(async move {
+            while let Some(message) = queued.recv().await {
+                if write_frame(&mut writer, &message).await.is_err() {
+                    // Dropping the queue fails every later send.
+                    return;
+                }
+            }
+        });
+        Ok(Self {
+            reader: FrameReader::new(reader),
+            sender: FrontDoorHostSender(sender),
+            writer,
+        })
+    }
+
+    pub fn sender(&self) -> FrontDoorHostSender {
+        self.sender.clone()
+    }
+
+    /// The next guest message, or `None` when the guest closed the stream.
+    /// Cancellation-safe: bytes already read stay buffered.
+    pub async fn receive(
+        &mut self,
+    ) -> Result<Option<v1::CredentialBridgeGuestMessage>, FrontDoorSessionError> {
+        self.reader.next().await
+    }
+}
+
+impl Drop for FrontDoorHostSession {
+    fn drop(&mut self) {
+        self.writer.abort();
+    }
+}
+
+impl FrontDoorHostSender {
+    /// Queue one message. Open is refused: only [`FrontDoorHostSession::open`]
+    /// writes it, first.
+    pub async fn send(
+        &self,
+        message: v1::CredentialBridgeHostMessage,
+    ) -> Result<(), FrontDoorSessionError> {
+        if matches!(
+            message.payload,
+            None | Some(v1::credential_bridge_host_message::Payload::Open(_))
+        ) {
+            return Err(FrontDoorSessionError::InvalidFrame);
+        }
+        self.0
+            .send(message)
+            .await
+            .map_err(|_| FrontDoorSessionError::Transport)
+    }
+}
+
+/// Reads length-prefixed messages, keeping a partial one buffered across
+/// cancelled reads.
+struct FrameReader<R> {
+    inner: R,
+    buffer: BytesMut,
+}
+
+impl<R: AsyncRead + Unpin> FrameReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            buffer: BytesMut::new(),
+        }
+    }
+
+    async fn next<M: Message + Default>(&mut self) -> Result<Option<M>, FrontDoorSessionError> {
+        loop {
+            if let Some(length) = self.complete_frame()? {
+                self.buffer.advance(LENGTH_BYTES);
+                let frame = self.buffer.split_to(length);
+                return M::decode(frame)
+                    .map(Some)
+                    .map_err(|_| FrontDoorSessionError::InvalidFrame);
+            }
+            let read = self
+                .inner
+                .read_buf(&mut self.buffer)
+                .await
+                .map_err(|_| FrontDoorSessionError::Transport)?;
+            if read == 0 {
+                return if self.buffer.is_empty() {
+                    Ok(None)
+                } else {
+                    Err(FrontDoorSessionError::InvalidFrame)
+                };
+            }
+        }
+    }
+
+    /// The length of the buffered frame when all of it is buffered. A length
+    /// over the bound is refused before its bytes are read.
+    fn complete_frame(&mut self) -> Result<Option<usize>, FrontDoorSessionError> {
+        let Some(prefix) = self.buffer.first_chunk::<LENGTH_BYTES>() else {
+            return Ok(None);
+        };
+        let length = usize::try_from(u32::from_be_bytes(*prefix))
+            .map_err(|_| FrontDoorSessionError::InvalidFrame)?;
+        if length > CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES {
+            return Err(FrontDoorSessionError::InvalidFrame);
+        }
+        let total = LENGTH_BYTES + length;
+        if self.buffer.len() >= total {
+            return Ok(Some(length));
+        }
+        self.buffer.reserve(total - self.buffer.len());
+        Ok(None)
+    }
+}
+
+async fn write_frame<W, M>(writer: &mut W, message: &M) -> Result<(), FrontDoorSessionError>
+where
+    W: AsyncWrite + Unpin,
+    M: Message,
+{
+    let length = message.encoded_len();
+    if length > CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES {
+        return Err(FrontDoorSessionError::InvalidFrame);
+    }
+    let prefix = u32::try_from(length).map_err(|_| FrontDoorSessionError::InvalidFrame)?;
+    let mut frame = BytesMut::with_capacity(LENGTH_BYTES + length);
+    frame.put_u32(prefix);
+    message
+        .encode(&mut frame)
+        .map_err(|_| FrontDoorSessionError::InvalidFrame)?;
+    writer
+        .write_all(&frame)
+        .await
+        .map_err(|_| FrontDoorSessionError::Transport)?;
+    writer
+        .flush()
+        .await
+        .map_err(|_| FrontDoorSessionError::Transport)
+}
+
+#[cfg(test)]
+mod tests;

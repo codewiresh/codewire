@@ -27,9 +27,17 @@ use crate::{
     BrokerUpstreamTransport, OpenAiBroker, timing,
 };
 
+mod front_door;
 mod relay;
 mod request_body;
 mod ssh;
+
+#[cfg(test)]
+pub(crate) use front_door::FrontDoorExecutor;
+pub use front_door::{
+    FrontDoorResponseSink, FrontDoorTransport, run_admitted_credential_bridges,
+    run_admitted_front_door_bridge,
+};
 
 pub use relay::{
     CredentialBridgeRelayInput, CredentialBridgeRelayOutput, run_admitted_credential_bridge_relay,
@@ -463,48 +471,6 @@ where
 {
     let broker = Arc::new(broker);
     run_managed_bridge(broker, bridge.bridge).await
-}
-
-/// [`run_admitted_credential_bridge`] for a front-door session
-/// (`BridgeEntry::FrontDoor`). Only the host process that accepted this
-/// session from its own front door outside the environment may call it, never
-/// for a session a peer inside an environment opened. Each request must name
-/// a host its route sends to and is then served as on a loopback session; no
-/// other operation is served. Nothing in production calls this yet.
-pub async fn run_admitted_front_door_bridge<P, U, B>(
-    broker: OpenAiBroker<P, U>,
-    bridge: AdmittedCredentialBridge<B>,
-) -> Result<(), BrokerBridgeError>
-where
-    P: BrokerLeaseProvider + 'static,
-    U: BrokerUpstreamTransport + 'static,
-    B: CredentialBridgeTransport,
-{
-    let broker = Arc::new(FrontDoorExecutor(broker));
-    run_managed_bridge(broker, bridge.bridge).await
-}
-
-/// A front-door session's executor: its HTTP requests take the front-door
-/// validation. SSH, projections and logins keep the trait's denial, since
-/// only a daemon inside an environment asks for them.
-pub(crate) struct FrontDoorExecutor<P, U>(pub(crate) OpenAiBroker<P, U>);
-
-#[async_trait]
-impl<P, U> BrokerRequestExecutor for FrontDoorExecutor<P, U>
-where
-    P: BrokerLeaseProvider + 'static,
-    U: BrokerUpstreamTransport + 'static,
-{
-    async fn execute_request(
-        &self,
-        request: v1::CredentialBridgeRequest,
-    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
-        self.0.execute_front_door(request).await
-    }
-
-    async fn wait_for_active_operations(&self) -> Result<(), BrokerRequestError> {
-        self.0.wait_for_active_operations().await
-    }
 }
 
 #[cfg(test)]

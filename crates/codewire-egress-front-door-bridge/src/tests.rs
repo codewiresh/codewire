@@ -314,12 +314,16 @@ async fn each_default_route_reaches_the_bridge_as_its_loopback_form_does() {
         );
 
         let mut loopback = through_loopback(&mut host, build(loopback_uri, LOOPBACK)).await;
-        // The loopback form differs only in its request id and in the Host
-        // naming the loopback ingress, which the broker drops.
+        // The loopback form differs only in its request id, in the Host
+        // naming the loopback ingress, which the broker drops, and in naming
+        // no intercepted host.
         assert_eq!(loopback.headers[0].name, "host");
         assert_eq!(loopback.headers[0].value, LOOPBACK.as_bytes());
         loopback.headers.remove(0);
         loopback.request_id.clone_from(&seen.request_id);
+        assert_eq!(seen.intercepted_host, bound);
+        assert_eq!(loopback.intercepted_host, "");
+        loopback.intercepted_host.clone_from(&seen.intercepted_host);
         assert_eq!(seen, loopback, "{bound}{uri}");
     }
 }

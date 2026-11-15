@@ -27,6 +27,18 @@ where
         self.execute_on(BridgeEntry::FrontDoor, request, None).await
     }
 
+    /// [`Self::execute_front_door`] for a request whose body streams: only a
+    /// GitHub Git POST, which the swap rule refuses until the GitHub route
+    /// has one.
+    pub(crate) async fn execute_front_door_streamed(
+        &self,
+        request: v1::CredentialBridgeRequest,
+        body: BrokerRequestBodyStream,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        self.execute_on(BridgeEntry::FrontDoor, request, Some(body))
+            .await
+    }
+
     pub(super) async fn execute_on(
         &self,
         entry: BridgeEntry,

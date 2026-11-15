@@ -38,6 +38,11 @@ use tokio_stream::{Stream, StreamExt};
 use tonic::Status;
 use uuid::Uuid;
 
+mod front_door_session;
+pub use front_door_session::{
+    FRONT_DOOR_OPEN_TIMEOUT, FrontDoorHostSender, FrontDoorHostSession, FrontDoorSessionError,
+    SessionStream, serve_front_door_session,
+};
 mod http_ingress;
 pub use http_ingress::{
     ClassifiedHttpRequest, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX,
@@ -411,7 +416,22 @@ impl CredentialBridge {
     /// streamed request bodies; otherwise its whole body, at most 4 MiB, goes
     /// in the request frame and a larger one is refused with 413.
     pub async fn respond(&self, request: Request<Body>) -> Response<Body> {
-        match self.prepare_guest_request(request).await {
+        self.respond_for(None, request).await
+    }
+
+    /// [`Self::respond`] for a request a TLS front door outside the
+    /// environment intercepted for `host`. Only a front-door session's host
+    /// accepts the host it names; a loopback session refuses the request.
+    pub async fn respond_intercepted(&self, host: &str, request: Request<Body>) -> Response<Body> {
+        self.respond_for(Some(host), request).await
+    }
+
+    async fn respond_for(
+        &self,
+        intercepted_host: Option<&str>,
+        request: Request<Body>,
+    ) -> Response<Body> {
+        match self.prepare_guest_request(intercepted_host, request).await {
             Ok((request, body)) => match self.submit(request, body).await {
                 Ok(response) => {
                     let mut built = Response::builder().status(response.start.status);
@@ -754,6 +774,7 @@ impl CredentialBridge {
     /// headers are read here; a whole body is collected up to 4 MiB.
     async fn prepare_guest_request(
         &self,
+        intercepted_host: Option<&str>,
         request: Request<Body>,
     ) -> Result<(v1::CredentialBridgeRequest, Option<Body>), BodyRefusal> {
         let classified = classify_http_request(request.method(), request.uri(), request.headers())?;
@@ -769,7 +790,7 @@ impl CredentialBridge {
             headers: headers_to_proto(request.headers()).map_err(|_| StatusCode::BAD_REQUEST)?,
             body: Vec::new(),
             // Only a front-door session names the host it intercepted.
-            intercepted_host: String::new(),
+            intercepted_host: intercepted_host.unwrap_or_default().to_owned(),
             streamed_body: false,
         };
         if streams {

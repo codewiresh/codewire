@@ -17,8 +17,11 @@ codewire-egress-policy = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
+rustix = { workspace = true, features = ["net"] }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 codewire-daemon-proto = { workspace = true }
