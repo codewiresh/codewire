@@ -29,15 +29,10 @@ use ed25519_dalek::{Signer as _, SigningKey};
 
 use super::*;
 
-/// The host capability this `cw` offers. Slice 1 carries liveness only.
-pub(crate) const HOST_CAPABILITY_VERSION: u32 = 1;
+/// The host capability this `cw` offers: 2 runs lifecycle operations.
+pub(crate) const HOST_CAPABILITY_VERSION: u32 = 2;
 /// This computer's enrollment, beside the platform config.
 const ENROLLMENT_FILE: &str = "host.json";
-/// What the running agent last reported, for `cw host status`.
-/// How long the agent waits before retrying a locked keyring.
-const KEY_RETRY: Duration = Duration::from_secs(30);
-/// The longest wait between reconnects.
-const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 /// What every host command says while hosts are unfinished (owner,
 /// 2026-11-13, #3609: no switch, but say plainly that it may not work).
@@ -561,7 +556,7 @@ pub(crate) async fn handle_host_command(
 ) -> anyhow::Result<()> {
     match command {
         HostCommand::Enroll(args) => enroll(globals, args).await,
-        HostCommand::Run => run(globals).await,
+        HostCommand::Run => agent::run(globals).await,
         HostCommand::Status(args) => status(globals, args).await,
         HostCommand::Provide(args) => provide(globals, args).await,
         HostCommand::Grant(args) => grant(globals, args, true).await,
@@ -984,227 +979,10 @@ async fn leave(globals: &Globals, args: HostLeaveArgs) -> anyhow::Result<()> {
     }
     Ok(())
 }
-
 // ── The agent ─────────────────────────────────────────────────────────────
 
-/// How long the agent waits before trying again when Codewire does not
-/// recognise the host: long, because it rarely heals, but not forever,
-/// because a server-side fault would otherwise strand every host.
-const UNRECOGNISED_RETRY: Duration = Duration::from_secs(300);
-
-/// Why one session ended.
-enum SessionEnd {
-    /// The host was revoked: stop for good.
-    Final(String),
-    /// Try again after a pause. `attached` says the session had attached,
-    /// so the pause starts short again.
-    Retry { reason: String, attached: bool },
-    /// Codewire does not recognise the host or its key: try again, rarely.
-    Unrecognised(String),
-    /// Ctrl-C or SIGTERM.
-    Stopped,
-}
-
-/// Resolves when the agent is asked to stop: Ctrl-C at a terminal, or
-/// SIGTERM from a service manager (`systemctl stop`, `launchctl bootout`).
-struct StopSignal(tokio::sync::watch::Receiver<bool>);
-
-impl StopSignal {
-    fn listen() -> anyhow::Result<Self> {
-        let (stop, stopped) = tokio::sync::watch::channel(false);
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .context("listen for SIGTERM")?;
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = terminate.recv() => {}
-            }
-            let _ = stop.send(true);
-        });
-        Ok(Self(stopped))
-    }
-
-    async fn requested(&mut self) {
-        let _ = self.0.wait_for(|stop| *stop).await;
-    }
-}
-
-async fn run(_globals: &Globals) -> anyhow::Result<()> {
-    let dir = config_dir()?;
-    let enrollment = enrolled(&dir)?;
-    let platform = this_platform()?;
-    let agent = HostAgentClient::new(config::host_client_config(
-        &enrollment.server_url,
-        &dir,
-        enrollment.deployment_ca.as_ref(),
-    )?)?;
-    eprintln!(
-        "Host agent for `{}` ({}) on {}. Ctrl-C stops it.",
-        enrollment.name, enrollment.host_id, enrollment.server_url
-    );
-    let key_store = HostKeyStore::open(&dir, enrollment.key_store)
-        .map_err(|error| key_store_error(enrollment.key_store, error))?;
-    let mut stop = StopSignal::listen()?;
-    let mut backoff = Duration::from_secs(1);
-    loop {
-        // The key is read for each session, so unlocking the keyring is
-        // noticed without a restart.
-        let key = match read_key(&key_store, &enrollment.key_entry).await {
-            Ok(Some(key)) => Arc::new(key),
-            Ok(None) => {
-                write_agent_status(&dir, "stopped", "the host key is missing");
-                anyhow::bail!(
-                    "this computer's host key is missing from {}; run `cw host leave` and `cw host enroll` again",
-                    key_store_text(&dir, enrollment.key_store)
-                );
-            }
-            Err(error) => {
-                let detail = match (enrollment.key_store, error) {
-                    (KeyStore::Keyring, ProtectedStoreError::AccessDenied) => {
-                        "waiting for a login to unlock the OS keyring that holds the host key"
-                            .to_owned()
-                    }
-                    (KeyStore::Keyring, other) => format!("the OS keyring is unavailable: {other}"),
-                    (KeyStore::File, other) => {
-                        format!("the host key file could not be read: {other}")
-                    }
-                };
-                write_agent_status(&dir, "waiting_for_key", &detail);
-                eprintln!("{detail}; retrying in {}s", KEY_RETRY.as_secs());
-                if wait_or_stop(KEY_RETRY, &mut stop).await {
-                    break;
-                }
-                continue;
-            }
-        };
-        write_agent_status(&dir, "attaching", "");
-        match session(&agent, &enrollment, platform, &key, &dir, &mut stop).await {
-            SessionEnd::Stopped => break,
-            SessionEnd::Final(reason) => {
-                write_agent_status(&dir, "revoked", &reason);
-                eprintln!("{reason}");
-                return Ok(());
-            }
-            SessionEnd::Unrecognised(reason) => {
-                write_agent_status(&dir, "unrecognised", &reason);
-                eprintln!(
-                    "{reason}; trying again in {}s",
-                    UNRECOGNISED_RETRY.as_secs()
-                );
-                if wait_or_stop(UNRECOGNISED_RETRY, &mut stop).await {
-                    break;
-                }
-            }
-            SessionEnd::Retry { reason, attached } => {
-                // A session that attached starts the pause short again.
-                if attached {
-                    backoff = Duration::from_secs(1);
-                }
-                write_agent_status(&dir, "reconnecting", &reason);
-                eprintln!("{reason}; reconnecting in {}s", backoff.as_secs());
-                if wait_or_stop(backoff, &mut stop).await {
-                    break;
-                }
-                backoff = (backoff * 2).min(MAX_BACKOFF);
-            }
-        }
-    }
-    write_agent_status(&dir, "stopped", "");
-    Ok(())
-}
-
-/// Waits, or returns true when asked to stop.
-async fn wait_or_stop(duration: Duration, stop: &mut StopSignal) -> bool {
-    tokio::select! {
-        () = tokio::time::sleep(duration) => false,
-        () = stop.requested() => true,
-    }
-}
-
-fn ended(error: ClientError) -> SessionEnd {
-    match error.code() {
-        ErrorCode::PermissionDenied => SessionEnd::Final(
-            "this host is revoked; it cannot attach again (`cw host leave` to clean up)".into(),
-        ),
-        ErrorCode::Unauthenticated => SessionEnd::Unrecognised(
-            "Codewire does not recognise this host or its key; if it was removed, run `cw host leave` and `cw host enroll` again"
-                .into(),
-        ),
-        _ => SessionEnd::Retry {
-            reason: format!("the session ended: {}", error.message()),
-            attached: false,
-        },
-    }
-}
-
-async fn session(
-    agent: &HostAgentClient,
-    enrollment: &Enrollment,
-    platform: HostPlatform,
-    key: &Arc<SigningKey>,
-    dir: &Path,
-    stop: &mut StopSignal,
-) -> SessionEnd {
-    let sign = |statement: &[u8]| key.sign(statement).to_bytes().to_vec();
-    let attached = tokio::select! {
-        attached = agent.attach(&enrollment.host_id, platform, HOST_CAPABILITY_VERSION, sign) => attached,
-        () = stop.requested() => return SessionEnd::Stopped,
-    };
-    let mut host = match attached {
-        Ok(host) => host,
-        Err(error) => return ended(error),
-    };
-    write_agent_status(dir, "attached", "");
-    eprintln!("Attached: this host is online.");
-    let ping_every = Duration::from_secs(u64::from(host.attached.ping_interval_seconds.max(1)));
-    let mut pings = tokio::time::interval_at(tokio::time::Instant::now() + ping_every, ping_every);
-    loop {
-        tokio::select! {
-            _ = pings.tick() => {
-                if let Err(error) = host.ping().await {
-                    return attached_end(ended(error));
-                }
-            }
-            event = host.next_event() => match event {
-                Ok(HostEvent::Pong) => {}
-                Ok(HostEvent::Challenge(nonce)) => {
-                    if let Err(error) = host.prove(&nonce, sign).await {
-                        return attached_end(ended(error));
-                    }
-                }
-                Ok(HostEvent::Revoked) => {
-                    return SessionEnd::Final("this host was revoked; the agent stops".into());
-                }
-                Ok(HostEvent::Superseded) => {
-                    return attached_end(SessionEnd::Retry {
-                        reason: "another agent for this host attached".into(),
-                        attached: false,
-                    });
-                }
-                Ok(HostEvent::Ended) => {
-                    return attached_end(SessionEnd::Retry {
-                        reason: "the session ended".into(),
-                        attached: false,
-                    });
-                }
-                Err(error) => return attached_end(ended(error)),
-            },
-            () = stop.requested() => return SessionEnd::Stopped,
-        }
-    }
-}
-
-/// Marks a retry after an attached session, so the pause starts short again.
-fn attached_end(end: SessionEnd) -> SessionEnd {
-    match end {
-        SessionEnd::Retry { reason, .. } => SessionEnd::Retry {
-            reason,
-            attached: true,
-        },
-        other => other,
-    }
-}
+mod agent;
+mod operations;
 
 // ── The service ───────────────────────────────────────────────────────────
 

@@ -11,9 +11,11 @@ use std::sync::Arc;
 
 pub use codewire_proto::codewire::v1::{
     AttachHostRequest, AttachHostResponse, EnrollHostRequest, GetHostRequest, GrantHostRequest,
-    Host, HostAttached, HostLimits, HostPlatform, HostState, LeaveHostRequest, ListHostsRequest,
-    RevokeHostGrantRequest, RevokeHostRequest, UpdateHostProvideRequest, attach_host_request,
-    attach_host_response, grant_host_request, revoke_host_grant_request,
+    Host, HostAttached, HostCreate, HostEnvironmentObservation, HostEnvironmentState, HostLimits,
+    HostOperation, HostOperationFailure, HostOperationResult, HostPlatform, HostStaleGeneration,
+    HostState, LeaveHostRequest, ListHostsRequest, RevokeHostGrantRequest, RevokeHostRequest,
+    UpdateHostProvideRequest, attach_host_request, attach_host_response, grant_host_request,
+    host_operation, host_operation_result, revoke_host_grant_request,
 };
 use codewire_proto::codewire::v1::{
     AttachHostResponseView, HostAgentServiceClient, HostServiceClient,
@@ -162,6 +164,9 @@ pub enum HostEvent {
     Revoked,
     /// Another session for this host attached, and this one is over.
     Superseded,
+    /// Run this lifecycle operation and answer with
+    /// [`AttachedHost::send_result`].
+    Operation(Box<HostOperation>),
     /// The stream ended without an error.
     Ended,
 }
@@ -215,12 +220,14 @@ impl HostAgentClient {
     }
 
     /// Opens a session for `host_id`, proves the key with `sign`, and says
-    /// hello. `sign` returns the Ed25519 signature of the bytes it is given.
+    /// hello with the environments the host has. `sign` returns the Ed25519
+    /// signature of the bytes it is given.
     pub async fn attach(
         &self,
         host_id: &str,
         platform: HostPlatform,
         capability_version: u32,
+        inventory: Vec<HostEnvironmentObservation>,
         sign: impl Fn(&[u8]) -> Vec<u8>,
     ) -> Result<AttachedHost, ClientError> {
         let mut stream = self
@@ -261,6 +268,7 @@ impl HostAgentClient {
                 HostHello {
                     capability_version,
                     platform: platform.into(),
+                    inventory,
                     ..Default::default()
                 },
             ))))
@@ -291,6 +299,29 @@ impl AttachedHost {
             .map_err(ClientError::from)
     }
 
+    /// Reports how an operation ended.
+    pub async fn send_result(&mut self, result: HostOperationResult) -> Result<(), ClientError> {
+        self.stream
+            .send(input(attach_host_request::Input::OperationResult(
+                Box::new(result),
+            )))
+            .await
+            .map_err(ClientError::from)
+    }
+
+    /// Reports an environment's state.
+    pub async fn send_observed(
+        &mut self,
+        observation: HostEnvironmentObservation,
+    ) -> Result<(), ClientError> {
+        self.stream
+            .send(input(attach_host_request::Input::EnvironmentObserved(
+                Box::new(observation),
+            )))
+            .await
+            .map_err(ClientError::from)
+    }
+
     /// Answers a challenge with `sign`'s signature of its statement.
     pub async fn prove(
         &mut self,
@@ -316,10 +347,10 @@ impl AttachedHost {
             Some(attach_host_response::Output::Attached(_)) => {
                 return Err(unexpected("attached again"));
             }
-            // Sent only to a host of capability version 2 or later.
-            Some(attach_host_response::Output::Operation(_)) => {
-                return Err(unexpected("an operation"));
+            Some(attach_host_response::Output::Operation(operation)) => {
+                HostEvent::Operation(operation)
             }
+            // Not sent until this client can open tunnels.
             Some(attach_host_response::Output::OpenTunnel(_)) => {
                 return Err(unexpected("a tunnel"));
             }

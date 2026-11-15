@@ -26,6 +26,7 @@ use uuid::Uuid;
 use super::*;
 use crate::commands::progress::terminal_text;
 
+pub(crate) mod host_create;
 mod host_support;
 mod lifecycle;
 mod local_https;
@@ -46,6 +47,8 @@ const NATIVE_STATE_ROOT_ENV: &str = "CODEWIRE_NATIVE_STATE_ROOT";
 const NATIVE_ARTIFACT_ROOT_ENV: &str = "CODEWIRE_NATIVE_ARTIFACT_ROOT";
 const NATIVE_ARTIFACT_LOCK_ENV: &str = "CODEWIRE_NATIVE_ARTIFACT_LOCK";
 const DEFAULT_NATIVE_VCPUS: u32 = 2;
+/// The kept-empty directory an empty workspace copies, in the data directory.
+const NATIVE_EMPTY_WORKSPACE: &str = "native-empty-workspace";
 const DEFAULT_NATIVE_MEMORY_MIB: u32 = 4 * 1024;
 const DEFAULT_NATIVE_DISK_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const DEFAULT_NATIVE_DOCKER_DISK_BYTES: u64 = codewire_local_vmm::state::DEFAULT_DOCKER_DISK_BYTES;
@@ -555,7 +558,7 @@ pub(crate) async fn create_native_environment(
         &source_path,
         &mut project,
         path_mode,
-        Some(&paths.mesh_data_dir.join("native-empty-workspace")),
+        Some(&paths.mesh_data_dir.join(NATIVE_EMPTY_WORKSPACE)),
         native_runtime_supports_mounts(),
     )?;
     anchor_workspace(&mut workspace, &source, implicit);
@@ -2788,7 +2791,7 @@ async fn native_boot_client() -> anyhow::Result<NativeSupervisorClient> {
 }
 
 /// [`native_boot_client`] without the restart offer, for the restart itself.
-async fn native_boot_client_here() -> anyhow::Result<NativeSupervisorClient> {
+pub(crate) async fn native_boot_client_here() -> anyhow::Result<NativeSupervisorClient> {
     let config = native_runtime_config()?;
     let mut client = connect_native_after_authority_admission(
         || async { admit_existing_local_credential_authority().await },
@@ -3319,7 +3322,7 @@ fn report_runtime_install(outcome: codewire_local_vmm::runtime_install::InstallO
 /// Before a local VM starts, install the runtime this cw pins when it is
 /// missing, incomplete or another cw's (#2539, #2582). Running VMs keep the
 /// generation they started with.
-async fn ensure_pinned_runtime() -> anyhow::Result<()> {
+pub(crate) async fn ensure_pinned_runtime() -> anyhow::Result<()> {
     let config = native_runtime_config()?;
     let paths = codewire_local_vmm::runtime_install::RuntimePaths {
         artifact_root: config.artifact_root,
@@ -3573,21 +3576,7 @@ fn native_codewire_yaml(
 fn native_unsupported_project_fields(
     document: &codewire_project::ProjectDocument,
 ) -> Vec<&'static str> {
-    let spec = &document.spec;
-    let mut unsupported = Vec::new();
-    if !spec.preset.is_empty() {
-        unsupported.push("preset");
-    }
-    if spec.repositories.is_empty()
-        && document.local.mounts.is_empty()
-        && spec.working_directory != "/workspace"
-    {
-        unsupported.push("working_directory");
-    }
-    if spec.agents.install == Some(true) {
-        unsupported.push("agents");
-    }
-    unsupported
+    host_create::unsupported_project_fields(&document.spec, !document.local.mounts.is_empty())
 }
 
 fn apply_native_setup_overrides(
@@ -3907,7 +3896,7 @@ fn native_disk_from_gib(disk_gib: u64) -> anyhow::Result<u64> {
     parse_native_disk(&format!("{disk_gib}Gi"))
 }
 
-fn canonical_native_project_intent(
+pub(crate) fn canonical_native_project_intent(
     mut spec: codewire_project::ProjectSpec,
     vcpus: u32,
     memory_mib: u32,
