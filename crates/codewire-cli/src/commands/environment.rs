@@ -3303,7 +3303,7 @@ pub(crate) async fn follow_environment_logs(
         org_id,
         environment_id,
     };
-    let mut view = StartProgress::new(
+    let mut view = StartProgress::for_logs(
         std::io::stderr(),
         &progress::text_progress_capabilities(),
         Instant::now(),

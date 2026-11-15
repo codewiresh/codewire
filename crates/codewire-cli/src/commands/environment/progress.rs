@@ -278,6 +278,12 @@ pub(crate) struct StartProgress<W: Write> {
     pod_breakdown: Option<String>,
     /// The daemon status setup read in-cluster: its latest `daemon_ready` row.
     daemon: Option<EnvironmentDaemonStatus>,
+    /// Whether the server's own bookkeeping rows are shown: `cw logs` shows
+    /// every row, a create or start only the stages a user follows (#4596).
+    bookkeeping: bool,
+    /// A hidden step that ended well, so the next hidden step with the same
+    /// name carries on its clock instead of starting again at 0 s.
+    last_hidden: Option<OpenStage>,
 }
 
 impl<W: Write> StartProgress<W> {
@@ -305,7 +311,22 @@ impl<W: Write> StartProgress<W> {
             open: Vec::new(),
             pod_breakdown: None,
             daemon: None,
+            bookkeeping: false,
+            last_hidden: None,
         }
+    }
+
+    /// The view both `cw logs` paths render with: every server step as it
+    /// is, where a create or start shows only the stages a user follows.
+    pub(crate) fn for_logs(
+        out: W,
+        caps: &Capabilities,
+        began: Instant,
+        idle_label: &'static str,
+    ) -> Self {
+        let mut view = Self::new(out, caps, began, idle_label);
+        view.bookkeeping = true;
+        view
     }
 
     /// How often [`StartProgress::redraw`] should run: `None` when nothing
@@ -324,6 +345,15 @@ impl<W: Write> StartProgress<W> {
         if let Some(daemon) = daemon_ready_status(event) {
             self.daemon = Some(daemon);
         }
+        // A create's progress names what the user waits for. The server's
+        // own steps stay open under a stage in user terms, so a wait or a
+        // failure in one is named, but print no line of their own unless
+        // they report a problem; `cw logs` shows them as they are.
+        let hidden = if self.bookkeeping {
+            None
+        } else {
+            server_step(&event.phase)
+        };
         let repo = repository_scope(event.metadata.as_ref());
         let key = stage_key(&event.phase, repo);
         let pod_timing = pod_timing_uid(event);
@@ -332,7 +362,10 @@ impl<W: Write> StartProgress<W> {
         } else {
             usize::from(repo.is_some())
         };
-        let label = display_label(event);
+        let label = hidden.map_or_else(|| display_label(event), str::to_owned);
+        if hidden.is_none() {
+            self.last_hidden = None;
+        }
         let mut failure = None;
         // Pod start timing is measured after access is ready, and its time
         // is part of "SSH access ready", so it sits under a header of its
@@ -346,17 +379,26 @@ impl<W: Write> StartProgress<W> {
         }
         match event.status.as_str() {
             "started" => {
-                if !self.live {
+                // Piped, the one long hidden wait says so once, so a create
+                // isn't silent through it.
+                if !self.live && (hidden.is_none() || event.phase == "health_check") {
                     self.status
                         .record(depth, Some(Status::Active), &label, None)?;
                 }
+                let resumed = self
+                    .last_hidden
+                    .take()
+                    .filter(|previous| hidden.is_some() && previous.label == label);
                 self.open.retain(|stage| stage.key != key);
                 self.open.push(OpenStage {
                     key,
                     label,
                     depth,
-                    started_at: parse_log_time(&event.created_at),
-                    anchor: received,
+                    started_at: resumed.as_ref().map_or_else(
+                        || parse_log_time(&event.created_at),
+                        |previous| previous.started_at,
+                    ),
+                    anchor: resumed.map_or(received, |previous| previous.anchor),
                     detail: None,
                 });
             }
@@ -386,7 +428,7 @@ impl<W: Write> StartProgress<W> {
                         }
                     };
                     self.open[index].detail = detail;
-                } else {
+                } else if hidden.is_none() {
                     // Progress lines always sit under the stage they report on.
                     let text = match detail {
                         Some(detail) => format!("{stage_label}: {detail}"),
@@ -402,9 +444,15 @@ impl<W: Write> StartProgress<W> {
                     .rposition(|stage| stage.key == key)
                     .map(|index| self.open.remove(index));
                 let elapsed = stage_elapsed(event, stage.as_ref());
-                let stage_label = stage.as_ref().map(|stage| stage.label.clone());
+                // A hidden step's warning or failure names its stage in user
+                // terms even when no row opened it.
+                let stage_label = stage
+                    .as_ref()
+                    .map(|stage| stage.label.clone())
+                    .or_else(|| hidden.map(str::to_owned));
                 let message = terminal_text(&event.message);
                 match event.status.as_str() {
+                    "completed" if hidden.is_some() => self.last_hidden = stage,
                     "completed" => {
                         self.status.record(
                             depth,
@@ -438,6 +486,7 @@ impl<W: Write> StartProgress<W> {
                     }
                 }
             }
+            _ if hidden.is_some() => {}
             _ => self.status.record(depth, None, &label, None)?,
         }
         if event.phase == "complete" {
@@ -1012,6 +1061,25 @@ pub(crate) fn last_log_id(logs: &[EnvironmentLog]) -> Option<String> {
     logs.last().map(|log| log.id.clone())
 }
 
+/// The server's own steps, which mean nothing to someone waiting for an
+/// environment (#4596), with the stage a user would call them: checking its
+/// sidecars and daemon, and its namespace, binding the workspace, recording
+/// the backend, state transitions and timestamps, marking the environment
+/// running and queueing setup. `cw logs` shows them as they are.
+fn server_step(phase: &str) -> Option<&'static str> {
+    match phase {
+        "health_check" | "daemon_ready" => Some("Waiting for the workspace daemon"),
+        "ensure_namespace"
+        | "workspace_bind"
+        | "store_backend"
+        | "lifecycle_transition"
+        | "lifecycle_checkpoint"
+        | "mark_running"
+        | "publish_setup" => Some("Preparing the sandbox"),
+        _ => None,
+    }
+}
+
 /// Renders stored rows as plain lines, styled as `caps` allows but never
 /// as a live row.
 pub(crate) fn format_environment_logs_plain(
@@ -1021,7 +1089,7 @@ pub(crate) fn format_environment_logs_plain(
     let now = Instant::now();
     let captured = CapturedOutput::default();
     {
-        let mut view = StartProgress::new(captured.clone(), &without_live_row(*caps), now, "");
+        let mut view = StartProgress::for_logs(captured.clone(), &without_live_row(*caps), now, "");
         for log in logs {
             // Writing to memory cannot fail.
             let _ = view.apply(log, now);

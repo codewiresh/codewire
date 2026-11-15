@@ -217,6 +217,352 @@ fn fast_policy() -> FollowPolicy {
 }
 
 #[test]
+fn a_create_shows_its_stages_and_leaves_the_servers_bookkeeping_to_cw_logs() {
+    // #4596: the rows a v0.4.18 cloud create printed.
+    let step = |id: &str, phase: &str, message: &str| {
+        row(
+            id,
+            phase,
+            "completed",
+            message,
+            "2026-09-29T10:00:01Z",
+            None,
+        )
+    };
+    let rows = [
+        step("0", "ensure_namespace", "Creating namespace"),
+        row(
+            "1",
+            "create_claim",
+            "started",
+            "Creating sandbox",
+            "2026-09-29T10:00:00Z",
+            None,
+        ),
+        row(
+            "2",
+            "create_claim",
+            "completed",
+            "Creating sandbox",
+            "2026-09-29T10:00:01Z",
+            None,
+        ),
+        row(
+            "3",
+            "store_backend",
+            "completed",
+            "Storing backend info",
+            "2026-09-29T10:00:01Z",
+            None,
+        ),
+        row(
+            "4",
+            "lifecycle_transition",
+            "completed",
+            "state transition creating -> running",
+            "2026-09-29T10:00:01Z",
+            None,
+        ),
+        row(
+            "5",
+            "lifecycle_checkpoint",
+            "completed",
+            "started timestamp recorded",
+            "2026-09-29T10:00:01Z",
+            None,
+        ),
+        row(
+            "6",
+            "mark_running",
+            "completed",
+            "Marking running",
+            "2026-09-29T10:00:01Z",
+            None,
+        ),
+        row(
+            "7",
+            "publish_setup",
+            "completed",
+            "Starting setup",
+            "2026-09-29T10:00:01Z",
+            None,
+        ),
+        step("10", "workspace_bind", "Binding workspace"),
+        step("11", "wait_for_ready", "Waiting for sandbox ready"),
+        step("12", "access_ready", "SSH access ready"),
+        step("13", "daemon_ready", "Workspace daemon ready"),
+        step("14", "health_check", "Checking sidecar readiness"),
+        step("15", "configure_environment", "Configuring environment"),
+        complete_row("8"),
+    ];
+    let began = Instant::now();
+    let mut view = plain_view(began);
+    for log in &rows {
+        view.progress.apply(log, began).unwrap();
+    }
+    let shown = output(view);
+    // The stage list a create shows: only stages a user understands.
+    let stages: Vec<&str> = shown
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("✓ "))
+        .map(|line| line.split("  ").next().unwrap_or(line))
+        .collect();
+    assert_eq!(
+        stages,
+        [
+            "Creating sandbox",
+            "Waiting for sandbox ready",
+            "SSH access ready",
+            "Configuring environment",
+            "Setup complete",
+        ],
+        "{shown}"
+    );
+    for internal in [
+        "Creating namespace",
+        "Binding workspace",
+        "Workspace daemon ready",
+        "Checking sidecar readiness",
+        "Storing backend info",
+        "state transition",
+        "started timestamp recorded",
+        "Marking running",
+        "Starting setup",
+    ] {
+        assert!(!shown.contains(internal), "{internal} shown:\n{shown}");
+    }
+    // `cw logs` keeps every row.
+    let logs = stored(&rows);
+    for kept in [
+        "state transition creating -> running",
+        "Creating namespace",
+        "Checking sidecar readiness",
+    ] {
+        assert!(logs.contains(kept), "{kept} missing from cw logs:\n{logs}");
+    }
+    // A bookkeeping row that reports a problem is still shown.
+    let mut view = plain_view(began);
+    view.progress
+        .apply(
+            &row(
+                "9",
+                "store_backend",
+                "failed",
+                "backend refused",
+                "2026-09-29T10:00:02Z",
+                None,
+            ),
+            began,
+        )
+        .unwrap();
+    assert!(output(view).contains("backend refused"));
+}
+
+/// A hidden server step stays the open stage under a name in user terms
+/// (#4596 review): a long wait in it names it, at a terminal and piped, but
+/// it prints no line of its own when it ends well.
+#[test]
+fn a_hidden_step_is_the_open_stage_in_user_terms_with_no_line_of_its_own() {
+    let t0 = Instant::now();
+    let started = row(
+        "1",
+        "health_check",
+        "started",
+        "Checking sidecar readiness",
+        "2026-09-29T10:00:00Z",
+        None,
+    );
+    let done = row(
+        "2",
+        "health_check",
+        "completed",
+        "Checking sidecar readiness",
+        "2026-09-29T10:03:00Z",
+        None,
+    );
+
+    let mut live = live_view(t0);
+    live.apply(&started, t0).unwrap();
+    live.redraw(t0 + Duration::from_secs(160)).unwrap();
+    live.apply(&done, t0 + Duration::from_secs(180)).unwrap();
+    live.finish().unwrap();
+    let rendered = output(live);
+    assert!(
+        rendered.contains("Waiting for the workspace daemon"),
+        "the live row names the wait:\n{rendered:?}"
+    );
+    assert!(
+        rendered.contains("2m 40s"),
+        "the wait's time:\n{rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Checking sidecar readiness"),
+        "{rendered:?}"
+    );
+    assert!(
+        !permanent_lines(&rendered)
+            .iter()
+            .any(|line| line.contains("Waiting for the workspace daemon")),
+        "no permanent line for a hidden step that ended well:\n{rendered:?}"
+    );
+
+    let mut plain = plain_view(t0);
+    plain.apply(&started, t0).unwrap();
+    plain.apply(&done, t0).unwrap();
+    assert_eq!(
+        output(plain),
+        "  ◐ Waiting for the workspace daemon\n",
+        "piped, the sidecar wait says so once and nothing more"
+    );
+
+    // `cw start`: the sidecar check hands over to the daemon check under the
+    // same name, and the clock carries on instead of starting again.
+    let mut live = live_view(t0);
+    live.apply(&started, t0).unwrap();
+    live.apply(&done, t0 + Duration::from_secs(60)).unwrap();
+    live.apply(
+        &row(
+            "3",
+            "daemon_ready",
+            "started",
+            "Workspace daemon",
+            "2026-09-29T10:01:00Z",
+            None,
+        ),
+        t0 + Duration::from_secs(60),
+    )
+    .unwrap();
+    live.redraw(t0 + Duration::from_secs(100)).unwrap();
+    let rendered = output(live);
+    assert!(rendered.contains("1m 40s"), "{rendered:?}");
+}
+
+/// A hidden step that warns or fails, by a row or by the stream ending in
+/// it, is named in user terms, never as the server's internal step.
+#[test]
+fn a_hidden_step_that_warns_or_fails_is_named_in_user_terms() {
+    let t0 = Instant::now();
+    let mut view = plain_view(t0);
+    view.apply(
+        &row(
+            "1",
+            "store_backend",
+            "warning",
+            "slow backend",
+            "2026-09-29T10:00:00Z",
+            None,
+        ),
+        t0,
+    )
+    .unwrap();
+    view.apply(
+        &row(
+            "2",
+            "health_check",
+            "started",
+            "Checking sidecar readiness",
+            "2026-09-29T10:00:00Z",
+            None,
+        ),
+        t0,
+    )
+    .unwrap();
+    let failure = view
+        .apply(
+            &row(
+                "3",
+                "health_check",
+                "failed",
+                "sidecars not ready",
+                "2026-09-29T10:00:05Z",
+                None,
+            ),
+            t0,
+        )
+        .unwrap()
+        .expect("a failed row is a failure");
+    assert_eq!(failure.stage, "Waiting for the workspace daemon");
+    let shown = output(view);
+    assert!(
+        shown.contains("! Preparing the sandbox: slow backend"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("✗ Waiting for the workspace daemon: sidecars not ready"),
+        "{shown}"
+    );
+    for internal in [
+        "Store backend",
+        "Health check",
+        "Checking sidecar readiness",
+    ] {
+        assert!(!shown.contains(internal), "{internal} shown:\n{shown}");
+    }
+
+    // The stream ends, or a guard stops, during a hidden step with no
+    // `failed` row: the open stage is still named in user terms.
+    let mut view = plain_view(t0);
+    view.apply(
+        &row(
+            "4",
+            "daemon_ready",
+            "started",
+            "Workspace daemon",
+            "2026-09-29T10:00:00Z",
+            None,
+        ),
+        t0,
+    )
+    .unwrap();
+    assert_eq!(
+        view.fail_open_stage(None, t0).unwrap().as_deref(),
+        Some("Waiting for the workspace daemon")
+    );
+}
+
+/// `cw logs ENV --setup --follow` keeps every server step as it is, as the
+/// stored rendering does.
+#[test]
+fn followed_logs_keep_every_server_step() {
+    let t0 = Instant::now();
+    let out = CapturedOutput::default();
+    let mut view =
+        StartProgress::for_logs(out.clone(), &caps(TerminalFacts::default(), &[]), t0, "");
+    for log in [
+        row(
+            "1",
+            "health_check",
+            "started",
+            "Checking sidecar readiness",
+            "2026-09-29T10:00:00Z",
+            None,
+        ),
+        row(
+            "2",
+            "health_check",
+            "completed",
+            "Checking sidecar readiness",
+            "2026-09-29T10:00:01Z",
+            None,
+        ),
+        row(
+            "3",
+            "store_backend",
+            "completed",
+            "Storing backend info",
+            "2026-09-29T10:00:01Z",
+            None,
+        ),
+    ] {
+        view.apply(&log, t0).unwrap();
+    }
+    drop(view);
+    let shown = out.text();
+    assert!(shown.contains("✓ Checking sidecar readiness"), "{shown}");
+    assert!(shown.contains("✓ Storing backend info"), "{shown}");
+}
+
+#[test]
 fn clone_progress_fixture_renders_every_stage_with_elapsed_time() {
     assert_eq!(
         stored(&fixture_rows()),
@@ -254,10 +600,7 @@ fn clone_progress_fixture_updates_one_live_line_on_a_terminal() {
     assert_eq!(
         permanent_lines(&rendered),
         [
-            "  ✓ Creating namespace  0s",
             "  ✓ Creating sandbox  21s",
-            "  ✓ Storing backend info",
-            "  ✓ Checking sidecar readiness  0.2s",
             "    ✓ Cloned repository 1 of 2  3s",
             "    ✓ Cloned repository 2 of 2  2s",
             "  ✓ Cloning repositories  5s",
@@ -1473,7 +1816,6 @@ fn pod_start_timing_header_is_drawn_once_per_pod_on_a_terminal() {
             "    ✓ Workspace pod scheduled  4.0s",
             "    ✓ Workspace containers started  5.0s",
             "    ✓ Workspace containers ready  2.0s",
-            "  ✓ Marking running",
             "  · SSH access ready included:",
             "    ✓ Workspace pod scheduled  1.0s",
         ]
