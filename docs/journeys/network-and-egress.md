@@ -442,6 +442,12 @@ is #4798.
     environment: not on its disk, not in a VM checkpoint, a hosted volume or
     a snapshot, and not in the daemon's or the egress processes' logs;
   - the session keeps working past the real token's expiry;
+  - the agent's own token refresh never reaches the provider with Codewire's
+    values. Its `POST platform.claude.com/v1/oauth/token`, carrying
+    Codewire's managed refresh token, is answered by Codewire. Afterwards
+    the login file holds the same placeholder access token, a new managed
+    refresh token and the sign-in's own scopes, and the broker sent no
+    request carrying a Codewire value to the provider (#3999 plan change 7);
   - after `cw credentials revoke`, the next model call fails and none
     succeeds after it;
   - the other person with a terminal in the environment can run a model

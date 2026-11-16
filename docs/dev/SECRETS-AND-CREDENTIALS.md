@@ -91,6 +91,30 @@ is now their one home, and `AGENTS.md` points here.
   describe what ships. The change that turns a behaviour on rewrites the rule
   it replaces in the same change; never describe the front door as on before
   that.
+  - **The agent's own token refresh** (#3999 plan change 7). When the
+    environment's Anthropic slot holds a Claude sign-in, the front door also
+    terminates Claude's token host, `platform.claude.com`. On it, only
+    `POST /v1/oauth/token` carrying Codewire's managed refresh token is
+    answered by Codewire. Every other request there that carries no Codewire
+    value follows the network policy and is forwarded untouched. A refresh
+    carrying Codewire's managed refresh token
+    (`codewire-managed-no-refresh-token-` and 32 hex characters) never
+    reaches the provider. The broker answers it with the environment's
+    placeholder access token (the same one every time), a new managed
+    refresh token, a far-future expiry and exactly the stored sign-in's
+    granted scopes. Before answering, it refreshes the stored sign-in itself,
+    outside the environment, through its usual refresh journal, if that
+    sign-in is near expiry. A refresh token that isn't Codewire's (the
+    user's own `claude /login`) carries no Codewire value, so it follows
+    the network policy, as every such request on an intercepted host does
+    (#3999; `agent-own-key`): it's forwarded untouched where the policy
+    allows the host, and refused otherwise. That's the rule. Until the
+    egress broker's signed policy decision exists, the forward is
+    unconditional. A request carrying
+    a placeholder or managed value anywhere else is refused, never
+    forwarded. A sign-in that can't be used is answered `invalid_grant`,
+    and a passing failure `temporarily_unavailable`, so a short outage
+    doesn't make the agent drop its login.
 - A hosted platform broker bridge epoch may reuse one authority decision (its
   runtime session and derived grants, never material) for at most 60 seconds,
   and releases nothing under an older one. Only epoch admission creates it, and
