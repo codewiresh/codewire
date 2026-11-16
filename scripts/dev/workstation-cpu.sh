@@ -15,6 +15,9 @@
 #                                  merge or a fix waits on
 #   workstation-cpu.sh reset       remove every limit this script set
 #
+# `build` and `run` refuse to start, with status 75, while the filesystem that
+# holds the job's target directory has less than DISK_FLOOR_GB free.
+#
 # A weight shares CPU only when cores are contended; a ceiling caps a group
 # even when cores are idle. The limits are runtime state: a reboot clears them,
 # and the next `apply` or `run` sets them again. Change a value here, not with
@@ -52,6 +55,14 @@ readonly FIRST_AHEAD_SECONDS="${CODEWIRE_CPU_FIRST_AHEAD_SECONDS:-1800}"
 # One lock and one holder line per slot, and the log of every job's wait and
 # run time; tests point it at a fixture.
 BUILD_SLOT_DIR="${CODEWIRE_CPU_SLOT_DIR:-$HOME/.cache/codewire-build-slots}"
+# The least free space, in GB, a build or a local VM may start with. On
+# 2026-11-15 the workstation's disk filled at about 19:16Z: the 1Password app
+# stopped, and with it every SSH push, fetch and kube-access, while builds kept
+# starting onto the full disk. Measured on the filesystem that holds the
+# build's target directory.
+readonly DISK_FLOOR_GB="${CODEWIRE_CPU_DISK_FLOOR_GB:-60}"
+# The exit status of a refusal for want of space: try again once it is freed.
+readonly DISK_REFUSED=75
 
 usage() {
   # cpu-slice.sh finds `build` by the words "build -- COMMAND"; keep them.
@@ -69,6 +80,34 @@ need_root() {
 
 user_systemctl() {
   systemctl --user -M "$SUDO_USER@" "$@"
+}
+
+# disk_check exits with DISK_REFUSED, saying how much is free, when the
+# filesystem that holds this job's target directory has less than
+# DISK_FLOOR_GB free. A target directory that doesn't exist yet is measured at
+# its nearest existing parent. Unreadable free space refuses too: a build
+# started blind is what filled the disk.
+disk_check() {
+  local path="${CODEWIRE_CPU_DISK_PATH:-${CARGO_TARGET_DIR:-$PWD}}" floor free mount
+  # A word would count as 0 and switch the floor off.
+  case "$DISK_FLOOR_GB" in
+    '' | *[!0-9]* | ????????*) floor=bad ;;
+    *) floor=$((10#$DISK_FLOOR_GB)) ;;
+  esac
+  if [ "$floor" = bad ]; then
+    echo "codewire-cpu: CODEWIRE_CPU_DISK_FLOOR_GB must be a whole number of GB, at most 7 digits: $DISK_FLOOR_GB" >&2
+    exit 2
+  fi
+  case "$path" in /*) ;; *) path="$PWD/$path" ;; esac
+  while [ ! -e "$path" ] && [ "$path" != / ]; do path="$(dirname "$path")"; done
+  read -r free mount < <(df -B1G --output=avail,target "$path" 2>/dev/null | tail -n 1) || true
+  if ! [[ "${free:-}" =~ ^[0-9]+$ ]]; then
+    echo "codewire-cpu: could not read the free space for $path; refusing to start" >&2
+    exit "$DISK_REFUSED"
+  fi
+  [ "$free" -lt "$floor" ] || return 0
+  echo "codewire-cpu: only $free GB free on $mount (for $path), below the floor of $floor GB; free space first, for example cargo clean in idle worktrees' target directories, then retry" >&2
+  exit "$DISK_REFUSED"
 }
 
 # sessions prints "<scope> <desktop|remote|other>" for each of UID's sessions.
@@ -165,6 +204,7 @@ reset() {
 run() {
   local uid=$1 pid owner
   shift
+  [ "${1:-}" != --in-build ] || shift
   [ "$#" -ge 1 ] || usage
   for pid in "$@"; do
     [[ "$pid" =~ ^[0-9]+$ ]] && [ -d "/proc/$pid" ] || { echo "workstation-cpu: no such process $pid" >&2; exit 1; }
@@ -263,6 +303,9 @@ build() {
     fi
     ticket=$((ticket - first_ahead * 1000000000))
   fi
+  # Once on joining, so a job on a full disk doesn't wait for nothing, and
+  # again when served, which may be 40 minutes later. --first is no exception.
+  disk_check
   ticket="$(printf '%019d' "$ticket")"
   ticket="$BUILD_SLOT_DIR/queue/$ticket-$$"
   # A waiter that is told to stop takes its ticket with it, and exits with the
@@ -298,12 +341,14 @@ build() {
   done
   rm -f "$ticket"
   trap - EXIT TERM INT HUP
+  # Refusing here frees the slot: it is this process's lock.
+  disk_check
   waited=$((SECONDS - started))
   printf 'pid %s since %s in %s: %s\n' "$$" "$(date -u +%H:%M:%SZ)" "$(pwd -P)" "$*" \
     >"$BUILD_SLOT_DIR/$slot.holder"
   # Tests keep the fixture out of systemd.
   if [ -z "${CODEWIRE_CPU_SLOT_ONLY:-}" ] && ! grep -q "/$SLICE/" /proc/self/cgroup 2>/dev/null; then
-    "$0" run "$$" >/dev/null || echo "codewire-cpu: could not join $SLICE; running outside it" >&2
+    "$0" run --in-build "$$" >/dev/null || echo "codewire-cpu: could not join $SLICE; running outside it" >&2
   fi
   export CODEWIRE_CPU_SLOT="$slot"
   ran=$SECONDS
@@ -398,7 +443,10 @@ status() {
 case "${1:-}" in
   status) status "${SUDO_UID:-$(id -u)}" ;;
   apply) need_root "$@"; apply "$SUDO_UID" ;;
-  run) need_root "$@"; shift; run "$SUDO_UID" "$@" ;;
+  # Checked once, before sudo, as the user with the user's environment: the
+  # sudo re-run strips CODEWIRE_CPU_DISK_FLOOR_GB and CARGO_TARGET_DIR, so it
+  # must not check again. build has just checked for its own.
+  run) [ "${2:-}" = --in-build ] || [ "$(id -u)" -eq 0 ] || disk_check; need_root "$@"; shift; run "$SUDO_UID" "$@" ;;
   build) shift; build "$@" ;;
   reset) need_root "$@"; reset "$SUDO_UID" ;;
   *) usage ;;

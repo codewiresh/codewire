@@ -457,6 +457,16 @@ slot, so it never holds up a compile:
 sh -c 'codewire-cpu run $$ && exec scripts/dev/selfhost-vm.sh create STATE_DIR' </dev/null
 ```
 
+Neither starts on a nearly full disk. `build` and `run` refuse, with status 75,
+while the filesystem that holds the job's target directory (`CARGO_TARGET_DIR`,
+else the current directory) has less than **60 GB** free, and say how much is
+free. A build checks when it joins the line and again when it is served, and
+`--first` is no exception. On 2026-11-15 the disk filled: the 1Password app
+stopped, taking every push, fetch and `kube-access` with it, while builds kept
+starting. Free space first, for example `cargo clean` in your own idle
+worktrees, then retry. `CODEWIRE_CPU_DISK_FLOOR_GB` sets another floor for one
+command.
+
 | Group | Weight | Ceiling |
 | --- | --- | --- |
 | Builds, preflight and local VM runs (`cwvmtest.slice`, through `build` and `run`) | 200 | 12 cores, shared by every job in it; memory reclaimed above 88G |

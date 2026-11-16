@@ -407,6 +407,9 @@ grep -qF '"${docker_memory[@]}" ${CPU_SLICE_DOCKER_ARGS[@]+"${CPU_SLICE_DOCKER_A
 # The slots themselves: a job holds one for its command and no longer, a job
 # past the last slot waits and names the holders, and a freed slot runs it.
 if command -v flock >/dev/null 2>&1; then
+  # These cases are about slots, not space: a CI runner's workspace can have
+  # less free than the workstation's floor. The disk cases below set their own.
+  export CODEWIRE_CPU_DISK_FLOOR_GB=0
   slots="$TMP/build-slots"
   build_slot() {
     env -u CODEWIRE_CPU_SLOT CODEWIRE_CPU_SLOT_DIR="$slots" CODEWIRE_CPU_SLOT_ONLY=1 \
@@ -546,6 +549,50 @@ if command -v flock >/dev/null 2>&1; then
     CODEWIRE_CPU_FIRST_AHEAD_SECONDS=0090 "$ROOT/scripts/dev/workstation-cpu.sh" build --first -- echo ok)" = ok ] ||
     fail 'a bound written with leading zeros was refused'
   [ "$(find "$slots/queue" -type f | wc -l)" -eq 0 ] || fail 'a served build left its ticket in the queue'
+  # A build or a VM never starts on a nearly full disk (2026-11-15: the disk
+  # filled and took 1Password, and with it every push, down). A floor no disk
+  # can meet refuses, with status 75, the free space and the remedy, and
+  # leaves no ticket; --first is refused the same way. A target directory that
+  # doesn't exist yet is measured at its nearest existing parent.
+  disk_slot() {
+    env -u CODEWIRE_CPU_SLOT CODEWIRE_CPU_SLOT_DIR="$slots" CODEWIRE_CPU_SLOT_ONLY=1 \
+      CODEWIRE_CPU_DISK_PATH="$TMP/not-yet/target" "$ROOT/scripts/dev/workstation-cpu.sh" "$@"
+  }
+  for first in '' --first; do
+    status=0
+    CODEWIRE_CPU_DISK_FLOOR_GB=9999999 disk_slot build $first -- touch "$TMP/ran-on-full-disk" \
+      2>"$TMP/disk.err" || status=$?
+    [ "$status" -eq 75 ] || fail "a build ${first:+($first) }below the disk floor exited $status, not 75"
+    [ ! -e "$TMP/ran-on-full-disk" ] || fail "a build ${first:+($first) }ran below the disk floor"
+    grep -Eq "only [0-9]+ GB free on .* \\(for $TMP\\), below the floor of 9999999 GB; .*cargo clean" "$TMP/disk.err" ||
+      fail "a refused build did not say what is free and what to do: $(cat "$TMP/disk.err")"
+  done
+  [ "$(find "$slots/queue" -type f | wc -l)" -eq 0 ] || fail 'a build refused for disk space left a ticket in the queue'
+  [ "$(CODEWIRE_CPU_DISK_FLOOR_GB=0 disk_slot build -- echo ok)" = ok ] || fail 'a build above the disk floor was refused'
+  # The floor is a whole number of GB: a word or a sign would switch it off.
+  for bad in plenty -1 1.5 99999999; do
+    status=0
+    CODEWIRE_CPU_DISK_FLOOR_GB="$bad" disk_slot build -- true 2>"$TMP/disk.err" || status=$?
+    [ "$status" -eq 2 ] || fail "the disk floor $bad was accepted (status $status)"
+    grep -Fq "must be a whole number of GB, at most 7 digits: $bad" "$TMP/disk.err" ||
+      fail "a refused disk floor was not named: $(cat "$TMP/disk.err")"
+  done
+  # run checks once, as the user, before it asks for sudo, so a local VM never
+  # starts on a full disk either. The sudo re-run (root, environment stripped)
+  # must not check again, and build's own run skips it, having just checked.
+  status=0
+  CODEWIRE_CPU_DISK_FLOOR_GB=9999999 disk_slot run "$$" 2>"$TMP/disk.err" || status=$?
+  if [ "$(id -u)" -ne 0 ]; then
+    [ "$status" -eq 75 ] && grep -Fq 'below the floor of 9999999 GB' "$TMP/disk.err" ||
+      fail "run below the disk floor was not refused before sudo (status $status): $(cat "$TMP/disk.err")"
+  else
+    # As root (CI's container) this is the sudo re-run's position: no disk
+    # check, straight on to need_root, which wants a sudo caller.
+    ! grep -Fq 'below the floor' "$TMP/disk.err" && grep -Fq 'run it as the workstation user' "$TMP/disk.err" ||
+      fail "run as root checked the disk floor again (status $status): $(cat "$TMP/disk.err")"
+  fi
+  grep -Fq '"$0" run --in-build "$$"' "$ROOT/scripts/dev/workstation-cpu.sh" ||
+    fail "build's own run no longer skips the second disk check"
   # A head that can never take its turn must not stop every build. A waiter
   # killed outright leaves a ticket, and so does one whose process ID was
   # reused (this test's own ID, with another start time): the next waiter
