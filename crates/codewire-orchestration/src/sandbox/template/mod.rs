@@ -14,6 +14,13 @@ use super::{EXTENSIONS_API_VERSION, LABEL_ENV_ID, LABEL_TYPE};
 mod credentials;
 mod dind;
 mod encoding;
+mod hosted_egress;
+/// The hosted-egress TUN init container, which runs as root from the support
+/// image; the bind's isolation check admits it only while hosted egress is on.
+pub(crate) use hosted_egress::{
+    TUN_INIT_COMMAND as HOSTED_EGRESS_TUN_COMMAND,
+    TUN_INIT_CONTAINER as HOSTED_EGRESS_TUN_CONTAINER,
+};
 mod naming;
 mod network;
 mod runtime_policy;
@@ -303,6 +310,50 @@ pub struct TemplateOpts {
     pub kata_coco_test_resource_uri: String,
     pub kata_coco_test_resource_path: String,
     pub debug_tailnet: bool,
+    /// Set when hosted egress is on (#4000): the workspace's traffic leaves
+    /// through a TUN to the cw-egress on its node, and the template renders
+    /// the broker label, the egress token, the TUN init container and the
+    /// netstack resolver.
+    pub hosted_egress: Option<HostedEgressTemplate>,
+}
+
+/// What a broker-mode workspace needs to reach cw-egress and its binding
+/// without cluster DNS, which the infra#1822 fence denies from the first
+/// packet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostedEgressTemplate {
+    /// `codewire-egress`'s ClusterIP and port.
+    pub stream_addr: String,
+    /// The workspace-binding Service's ClusterIP and port; the binding URL
+    /// keeps its name for TLS.
+    pub binding_addr: String,
+    /// The infra#1822 fence revision the cluster runs, from deployment
+    /// configuration, stamped on the Pod as `codewire.sh/egress-fence-revision`.
+    pub fence_revision: String,
+    /// The platform's public gateway, which serves the control plane, the
+    /// tailnet coordinator and Mesh. A broker-mode workspace reaches it inside
+    /// the cluster, never through the broker (#4000, 2026-11-15).
+    pub gateway: GatewayPeer,
+    /// The DERP Pods' TLS port; the coordinator's DERP map carries the
+    /// in-cluster address.
+    pub derp_tls_port: u16,
+}
+
+/// The public gateway's proxy Pods: selected by the gateway that owns them,
+/// on the port they listen on, so the policy names the gateway and nothing
+/// behind it. The two selector keys are the labels the cluster's gateway
+/// controller puts on the proxy Pods it creates
+/// (`gateway.envoyproxy.io/owning-gateway-name` and `-namespace`); another
+/// controller needs its own keys here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GatewayPeer {
+    /// The proxy Pods' namespace.
+    pub namespace: String,
+    /// The owning Gateway's name and namespace.
+    pub gateway_name: String,
+    pub gateway_namespace: String,
+    /// The proxies' listener port, after Service translation.
+    pub port: u16,
 }
 
 impl fmt::Debug for TemplateOpts {
@@ -449,6 +500,22 @@ impl TemplateOpts {
         runtime_policy::workspace_storage_class(self)
     }
 
+    /// Hosted egress renders a privileged TUN init container, which is root
+    /// only inside a guest VM, so it is refused on any other runtime.
+    pub fn validate_hosted_egress(&self) -> anyhow::Result<()> {
+        if self.hosted_egress.is_some() {
+            let profile = self.runtime_profile_spec().profile;
+            anyhow::ensure!(
+                matches!(
+                    profile.as_str(),
+                    RUNTIME_PROFILE_COMMODITY | RUNTIME_PROFILE_CONFIDENTIAL
+                ),
+                "hosted egress runs only on a VM runtime profile, not {profile:?}"
+            );
+        }
+        Ok(())
+    }
+
     pub fn validate_confidential_storage_manifest(&self) -> anyhow::Result<()> {
         let needs_manifest = self.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL
             && self.disk_gib > 0;
@@ -500,5 +567,7 @@ include!("tests.rs");
 mod bridge_tests;
 #[cfg(test)]
 mod docker_data_tests;
+#[cfg(test)]
+mod hosted_egress_tests;
 #[cfg(test)]
 mod mount_workspace_tests;

@@ -570,6 +570,7 @@ pub fn validate_pool_template_opts(opts: &TemplateOpts) -> anyhow::Result<()> {
         opts.runtime_profile_spec().profile != RUNTIME_PROFILE_CONFIDENTIAL,
         "confidential workspaces are never pooled"
     );
+    opts.validate_hosted_egress()?;
     // The template admits orchestration to a member's 7777 and 2222 from
     // birth (codewire#3626). That is safe only while nothing in an unbound
     // member listens: a pool runs the canonical first-party image under the

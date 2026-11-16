@@ -4,6 +4,7 @@ use serde_json::{Map, Value, json};
 
 use super::credentials;
 use super::encoding::kata_policy_init_data_annotation;
+use super::hosted_egress;
 use super::naming::{workspace_daemon_service_name, workspace_selector, workspace_template_labels};
 use super::network::{identity_free_workspace_egress_rules, identity_free_workspace_ingress_rules};
 use super::runtime_policy::{
@@ -275,12 +276,30 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
         );
     }
 
+    if let Some(egress) = &opts.hosted_egress {
+        annotations.insert(
+            hosted_egress::FENCE_REVISION_ANNOTATION.into(),
+            egress.fence_revision.clone().into(),
+        );
+    }
+
     let mut labels = workspace_template_labels();
     if runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL {
         labels
             .as_object_mut()
             .expect("workspace labels object")
             .insert("codewire.sh/isolation-tier".into(), "confidential".into());
+    }
+    if opts.hosted_egress.is_some() {
+        // From creation, so the infra#1822 fence holds from the first packet,
+        // init containers and warm members included (#4000).
+        labels
+            .as_object_mut()
+            .expect("workspace labels object")
+            .insert(
+                crate::egress::admission::EGRESS_MODE_LABEL.into(),
+                crate::egress::admission::EGRESS_MODE_BROKER.into(),
+            );
     }
     let mut spec = Map::new();
     spec.insert(
@@ -402,6 +421,9 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         // The bound daemon expands its managed clients into child
         // environments from the bind response; nothing is rendered here.
     }
+    if let Some(egress) = &opts.hosted_egress {
+        hosted_egress::mount_workspace(ws, &mut volumes, egress);
+    }
     // Workspace container only; never DinD or an init container.
     volumes.push(workspace_binding_token_volume());
     ws["volumeMounts"]
@@ -460,7 +482,11 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             "fsGroupChangePolicy": "OnRootMismatch",
         }),
     );
-    spec.insert("dnsPolicy".into(), "ClusterFirst".into());
+    if opts.hosted_egress.is_some() {
+        hosted_egress::resolver(&mut spec);
+    } else {
+        spec.insert("dnsPolicy".into(), "ClusterFirst".into());
+    }
 
     if !runtime_spec.runtime_class_name.is_empty() {
         spec.insert(
@@ -561,6 +587,9 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     }
     if !daemon_image_volume {
         init_containers.push(daemon_init_container(support_image, &runtime_spec.profile));
+    }
+    if opts.hosted_egress.is_some() {
+        init_containers.push(hosted_egress::tun_init_container(support_image));
     }
     if block {
         init_containers.push(workspace_flush_container(support_image));

@@ -232,6 +232,18 @@ fn single_source(object: &Value) -> Option<(&str, &Value)> {
     }
 }
 
+/// The hosted-egress TUN init as rendered: the support image's own `cw` with
+/// its one command, nothing appended to it and nothing mounted over it.
+fn tun_init_pinned(container: &Value) -> bool {
+    container.get("command")
+        == Some(&serde_json::json!(
+            crate::sandbox::template::HOSTED_EGRESS_TUN_COMMAND
+        ))
+        && ["args", "env", "envFrom", "volumeMounts", "volumeDevices"]
+            .iter()
+            .all(|key| absent_or_empty(container.get(*key)))
+}
+
 /// Program #2238 C3, cw-confidential's #3628 PR 5c condition 3: the
 /// isolation of a pool-born member, checked over its own Pod spec on its
 /// first bind whatever the driver says of its pool. Every property here is
@@ -241,9 +253,15 @@ pub(crate) fn pool_member_isolated(
     spec: &Value,
     opts: &crate::sandbox::template::TemplateOpts,
 ) -> Result<(), String> {
-    use codewire_daemon_proto::CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE;
+    use codewire_daemon_proto::{CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE, EGRESS_TOKEN_AUDIENCE};
 
+    // Hosted egress (#4000) adds the egress token and the TUN init container,
+    // and nothing else; neither is admitted while it is off.
+    let hosted_egress = opts.hosted_egress.is_some();
     let profile = opts.runtime_profile_spec();
+    if opts.validate_hosted_egress().is_err() {
+        return Err("/runtimeClassName".to_owned());
+    }
     // 1. The VM runtime of the pool's own profile, never a confidential one.
     if profile.profile == crate::sandbox::template::RUNTIME_PROFILE_CONFIDENTIAL
         || spec
@@ -315,7 +333,9 @@ pub(crate) fn pool_member_isolated(
                                 token.get("audience").and_then(Value::as_str),
                                 Some(WORKSPACE_BINDING_TOKEN_AUDIENCE)
                                     | Some(CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE)
-                            ) =>
+                            ) || (hosted_egress
+                                && token.get("audience").and_then(Value::as_str)
+                                    == Some(EGRESS_TOKEN_AUDIENCE)) =>
                         {
                             token_volumes.extend(name);
                         }
@@ -350,6 +370,11 @@ pub(crate) fn pool_member_isolated(
             let root_image = match name {
                 "dind" => Some(crate::sandbox::template::dind_image(opts)),
                 name if ROOT_CONTAINERS.contains(&name) => Some(support_image),
+                crate::sandbox::template::HOSTED_EGRESS_TUN_CONTAINER
+                    if hosted_egress && field == "initContainers" && tun_init_pinned(container) =>
+                {
+                    Some(support_image)
+                }
                 _ => None,
             };
             if root && (root_image.is_none() || image != root_image) {

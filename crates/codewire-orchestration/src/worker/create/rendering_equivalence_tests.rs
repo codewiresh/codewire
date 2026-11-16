@@ -185,6 +185,9 @@ fn before_shape_template_opts(
         image_command,
         support_image: cfg.daemon_image.clone(),
         dind_image: cfg.dind_image.clone(),
+        // Hosted egress (#4000): rendered once the setting and the two
+        // Services' cluster addresses are read; off until then.
+        hosted_egress: None,
         runtime_profile: runtime_spec.profile.clone(),
         docker_mode: runtime_spec.docker_mode.clone(),
         credential_runtime: cfg.credential_runtime.clone(),

@@ -10,7 +10,10 @@ use super::naming::{
     workspace_daemon_network_policy_name, workspace_selector,
 };
 use super::runtime_policy::RUNTIME_PROFILE_CONFIDENTIAL;
-use super::{APP_PREVIEW_MAX_PORT, APP_PREVIEW_MIN_PORT, TemplateOpts, WORKSPACE_DAEMON_PORT};
+use super::{
+    APP_PREVIEW_MAX_PORT, APP_PREVIEW_MIN_PORT, HostedEgressTemplate, TemplateOpts,
+    WORKSPACE_DAEMON_PORT,
+};
 
 /// Private, loopback, link-local and carrier-grade NAT ranges: every cluster
 /// and Pod network a Codewire cluster uses. The world is everything else.
@@ -58,7 +61,56 @@ fn workspace_tailnet_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
     egress
 }
 
+/// Broker mode (#4000 P5, infra#1822): a workspace reaches only these peers,
+/// each by selector and its one port, with no address range and no DNS.
+/// Everything else it sends leaves through cw-egress. The netstack resolves
+/// names, and P6's self-check requires a query to cluster DNS to fail. The
+/// same list serves identity-free warm members and bound workspaces, since
+/// NetworkPolicies add up and either one could otherwise open the world.
+fn broker_egress_rules(opts: &TemplateOpts, egress: &HostedEgressTemplate) -> Vec<Value> {
+    let server = |component: &str| {
+        json!({
+            "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": opts.server_namespace } },
+            "podSelector": { "matchLabels": {
+                "app.kubernetes.io/name": "codewire",
+                "app.kubernetes.io/component": component,
+            } },
+        })
+    };
+    let port =
+        |protocol: &str, port: u16| json!([{ "protocol": protocol, "port": i64::from(port) }]);
+    let gateway = &egress.gateway;
+    let mut rules = vec![
+        json!({ "to": [server("egress")], "ports": port("TCP", codewire_daemon_proto::EGRESS_STREAM_PORT) }),
+        json!({ "to": [server("orchestration")], "ports": port("TCP", codewire_daemon_proto::WORKSPACE_BINDING_PORT) }),
+        json!({ "to": [server("derp")], "ports": port("TCP", egress.derp_tls_port) }),
+        json!({
+            "to": [{
+                "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": gateway.namespace } },
+                "podSelector": { "matchLabels": {
+                    "gateway.envoyproxy.io/owning-gateway-name": gateway.gateway_name,
+                    "gateway.envoyproxy.io/owning-gateway-namespace": gateway.gateway_namespace,
+                } },
+            }],
+            "ports": port("TCP", gateway.port),
+        }),
+    ];
+    if opts.udp_relay_allocator_egress_enabled || !opts.udp_relay_allocator_url.trim().is_empty() {
+        rules.push(json!({
+            "to": [server("udp-relay")],
+            "ports": port("UDP", codewire_daemon_proto::UDP_RELAY_DATA_PORT),
+        }));
+    }
+    if let Some(rule) = confidential_kbs_egress_rule(opts) {
+        rules.push(rule);
+    }
+    rules
+}
+
 pub(super) fn workspace_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
+    if let Some(egress) = &opts.hosted_egress {
+        return broker_egress_rules(opts, egress);
+    }
     let mut egress = vec![
         json!({
             "to": [
@@ -115,6 +167,9 @@ fn ingress_controller_egress_rule(opts: &TemplateOpts) -> Value {
 /// namespace, and the daemon's tailnet reach, so a warm member's tailnet peer
 /// starts at bind without waiting for its environment's own policy.
 pub(super) fn identity_free_workspace_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
+    if let Some(egress) = &opts.hosted_egress {
+        return broker_egress_rules(opts, egress);
+    }
     let mut egress = vec![
         json!({
             "to": [

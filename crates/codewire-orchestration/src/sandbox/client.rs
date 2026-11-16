@@ -4920,6 +4920,7 @@ impl SandboxClient {
     #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %opts.environment_id))]
     pub async fn ensure_sandbox_template(&self, opts: &TemplateOpts) -> anyhow::Result<()> {
         opts.validate_confidential_storage_manifest()?;
+        opts.validate_hosted_egress()?;
         let name = &opts.name;
         let templates = self.templates();
         let rendered = render_sandbox_template(&self.namespace, opts);
@@ -5846,6 +5847,7 @@ impl MeasuredPodTemplate {
             "a measured Pod template needs a confidential identity-free rendering"
         );
         opts.validate_confidential_storage_manifest()?;
+        opts.validate_hosted_egress()?;
         let rendered = render_sandbox_template(namespace, opts);
         let spec = rendered
             .pointer("/spec/podTemplate/spec")

@@ -782,3 +782,108 @@ fn a_pool_member_is_isolated_exactly_as_its_rendering() {
         Err("/runtimeClassName".to_owned())
     );
 }
+
+/// #4000: a broker-mode pool member, rendered as its pool stores it, is
+/// isolated. Its TUN init container and egress token are admitted only while
+/// hosted egress is on, the TUN container only as root from the support image,
+/// and the egress token only into the workspace container.
+#[test]
+fn a_broker_mode_pool_member_is_admitted_only_with_hosted_egress() {
+    use crate::sandbox::template::{
+        GatewayPeer, HOSTED_EGRESS_TUN_CONTAINER, HostedEgressTemplate, render_sandbox_template,
+    };
+    use crate::worker::workspace_binding::checks::pool_member_isolated;
+    use serde_json::json;
+
+    let (_, mut wanted) = golden_member(false);
+    wanted.hosted_egress = Some(HostedEgressTemplate {
+        stream_addr: "10.44.0.89:8089".into(),
+        binding_addr: "10.44.0.87:8087".into(),
+        fence_revision: "2".into(),
+        gateway: GatewayPeer {
+            namespace: "gateway-proxies".into(),
+            gateway_name: "public".into(),
+            gateway_namespace: "gateway".into(),
+            port: 10443,
+        },
+        derp_tls_port: 8443,
+    });
+    let template = render_sandbox_template("dev-sandboxes", &wanted);
+    let mut spec = template["spec"]["podTemplate"]["spec"].clone();
+    spec["volumes"].as_array_mut().unwrap().push(json!({
+        "name": "workspace",
+        "persistentVolumeClaim": { "claimName": "workspace-sandbox-a" },
+    }));
+    assert_eq!(pool_member_isolated(&spec, &wanted), Ok(()));
+
+    // The same member against a rendering without hosted egress: its egress
+    // token is the first thing refused.
+    let off = TemplateOpts {
+        hosted_egress: None,
+        ..wanted.clone()
+    };
+    let refused = pool_member_isolated(&spec, &off).unwrap_err();
+    assert!(refused.starts_with("/volumes/"), "{refused}");
+
+    // The TUN container runs as root only from the support image.
+    let tun = container_index(&spec, "initContainers", HOSTED_EGRESS_TUN_CONTAINER);
+    let mut other_image = spec.clone();
+    other_image["initContainers"][tun]["image"] = json!("registry.example.invalid/other:tag");
+    assert_eq!(
+        pool_member_isolated(&other_image, &wanted),
+        Err(format!("/initContainers/{tun}/securityContext"))
+    );
+    // ...with its one command, nothing appended, and nothing mounted over the
+    // image's own `cw`, such as the daemon volume the workspace can write.
+    for (key, value) in [
+        (
+            "command",
+            json!(["/codewire/bin/cw", "__hosted-egress-tun"]),
+        ),
+        ("args", json!(["--owner-uid", "0"])),
+        (
+            "volumeMounts",
+            json!([{ "name": "codewire-bin", "mountPath": "/usr/local/bin" }]),
+        ),
+        ("env", json!([{ "name": "LD_PRELOAD", "value": "/x.so" }])),
+    ] {
+        let mut changed = spec.clone();
+        changed["initContainers"][tun][key] = value;
+        assert_eq!(
+            pool_member_isolated(&changed, &wanted),
+            Err(format!("/initContainers/{tun}/securityContext")),
+            "{key}"
+        );
+    }
+    // ...and only as an init container.
+    let mut moved = spec.clone();
+    let container = moved["initContainers"].as_array_mut().unwrap().remove(tun);
+    let position = moved["containers"].as_array().unwrap().len();
+    moved["containers"].as_array_mut().unwrap().push(container);
+    assert_eq!(
+        pool_member_isolated(&moved, &wanted),
+        Err(format!("/containers/{position}/securityContext"))
+    );
+    // Hosted egress on a runtime that is not a VM is refused outright.
+    let runc = TemplateOpts {
+        runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_RUNC.into(),
+        ..wanted.clone()
+    };
+    assert_eq!(
+        pool_member_isolated(&spec, &runc),
+        Err("/runtimeClassName".to_owned())
+    );
+
+    // The egress token reaches the workspace container only.
+    let dind = container_index(&spec, "containers", "dind");
+    let mut leaked = spec.clone();
+    let mounts = leaked["containers"][dind]["volumeMounts"]
+        .as_array_mut()
+        .unwrap();
+    let position = mounts.len();
+    mounts.push(json!({ "name": "workspace-egress-identity", "mountPath": "/t" }));
+    assert_eq!(
+        pool_member_isolated(&leaked, &wanted),
+        Err(format!("/containers/{dind}/volumeMounts/{position}"))
+    );
+}
