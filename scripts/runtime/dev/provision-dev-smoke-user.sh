@@ -25,8 +25,6 @@ readonly ACCEPTANCE_ORG_SLUG="codewire-dev-e2e"
 OPENBAO_PATH="$SMOKE_OPENBAO_PATH"
 RATE_CARD="unlimited"
 CREATE_DOCUMENT=false
-PLAN_KEY_GIVEN=false
-[[ -z "${SMOKE_PLAN_KEY:-}" ]] || PLAN_KEY_GIVEN=true
 
 KUBE_CONTEXT="${KUBE_CONTEXT:-}"
 KUBE_NAMESPACE="${KUBE_NAMESPACE:-dev}"
@@ -40,7 +38,6 @@ SMOKE_NAME="${SMOKE_NAME:-Codewire Dev Smoke}"
 SMOKE_ORG_NAME="${SMOKE_ORG_NAME:-Codewire Dev Smoke}"
 SMOKE_ORG_SLUG="${SMOKE_ORG_SLUG:-$SMOKE_DEFAULT_ORG_SLUG}"
 SMOKE_KEY_NAME="${SMOKE_KEY_NAME:-runtime-dev-commodity-smoke}"
-SMOKE_PLAN_KEY="${SMOKE_PLAN_KEY:-unlimited}"
 CW_BIN="${CW_BIN:-$ROOT/target/debug/cw}"
 
 TMPDIR_SMOKE=""
@@ -80,14 +77,12 @@ Options:
   --org-name NAME           Smoke organization name
   --org-slug SLUG           Smoke organization slug
   --key-name NAME           Smoke API key name
-  --plan-key KEY            Billing plan used by the smoke org (unlimited only)
   --openbao-path PATH       OpenBao document holding the identity's API key,
                             apps/codewire/dev/<slug>
                             (default: apps/codewire/dev/ci-smoke)
-  --rate-card CARD          unlimited (default): billing-exempt organization on
-                            the unlimited plan, for the smoke identity only;
-                            regular: an ordinary Dev organization (plan none,
-                            not exempt), for the billing-rehearsal identity
+  --rate-card CARD          unlimited (default): no charge and no quota, for
+                            the smoke identity only; regular: an ordinary Dev
+                            organization, for the billing-rehearsal identity
   --create-document         Create the OpenBao document; refused when it
                             exists. Without it a missing document is refused.
   --context NAME            Optional Kubernetes context inside scoped kube-access
@@ -165,7 +160,6 @@ while (($# > 0)); do
     --org-name) [[ $# -ge 2 ]] || die '--org-name requires a value'; SMOKE_ORG_NAME="$2"; shift 2 ;;
     --org-slug) [[ $# -ge 2 ]] || die '--org-slug requires a value'; SMOKE_ORG_SLUG="$2"; shift 2 ;;
     --key-name) [[ $# -ge 2 ]] || die '--key-name requires a value'; SMOKE_KEY_NAME="$2"; shift 2 ;;
-    --plan-key) [[ $# -ge 2 ]] || die '--plan-key requires a value'; SMOKE_PLAN_KEY="$2"; PLAN_KEY_GIVEN=true; shift 2 ;;
     --openbao-path) [[ $# -ge 2 ]] || die '--openbao-path requires a value'; OPENBAO_PATH="$2"; shift 2 ;;
     --rate-card) [[ $# -ge 2 ]] || die '--rate-card requires a value'; RATE_CARD="$2"; shift 2 ;;
     --create-document) CREATE_DOCUMENT=true; shift ;;
@@ -184,8 +178,6 @@ case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
   die 'smoke organization slug has an invalid shape'
 [[ "$SMOKE_KEY_NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] ||
   die 'smoke key name has an invalid shape'
-[[ "$SMOKE_PLAN_KEY" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] ||
-  die 'smoke plan key has an invalid shape'
 [[ "$OPENBAO_PATH" =~ ^apps/codewire/dev/[a-z0-9]+(-[a-z0-9]+)*$ ]] ||
   die 'OpenBao path must be apps/codewire/dev/<lowercase-slug>'
 readonly OPENBAO_PATH CREATE_DOCUMENT
@@ -196,8 +188,6 @@ esac
 [[ "${SMOKE_EMAIL,,}" != "$ACCEPTANCE_EMAIL" && "$SMOKE_ORG_SLUG" != "$ACCEPTANCE_ORG_SLUG" ]] ||
   die 'the browser acceptance account is never provisioned by this script'
 if [[ "$RATE_CARD" == regular ]]; then
-  [[ "$PLAN_KEY_GIVEN" == false ]] ||
-    die '--plan-key applies only to --rate-card unlimited'
   [[ "$OPENBAO_PATH" != "$SMOKE_OPENBAO_PATH" && "${SMOKE_EMAIL,,}" != "$SMOKE_DEFAULT_EMAIL" &&
     "$SMOKE_ORG_SLUG" != "$SMOKE_DEFAULT_ORG_SLUG" ]] ||
     die 'the Dev smoke identity stays unlimited; --rate-card regular is for another identity'
@@ -290,45 +280,6 @@ read_openbao_document() {
     die "canonical Dev document $OPENBAO_PATH does not exist; pass --create-document only for a new identity"
 }
 
-# The staging statement's billing CTEs. Both variants end in org_billing with
-# exactly one row, so the organization upsert never depends on the
-# confidential-plan upsert when the rate card is regular, and the regular
-# statement neither sends nor reads a plan key.
-stage_billing_sql() {
-  if [[ "$RATE_CARD" == unlimited ]]; then
-    cat <<'SQL'
-), confidential_plan AS (
-  INSERT INTO billing_catalog_plans (
-    resource_type, plan_key, display_name, price_cents, max_concurrent_ws,
-    is_admin_only, cpu_overage_cents, mem_overage_cents, disk_overage_cents,
-    created_at, updated_at
-  )
-  SELECT 'confidential_sandbox', :'plan_key'::text, 'Dev smoke confidential sandbox', 0,
-    1, true, 5.04, 1.62, 0.01, NOW(), NOW()
-  ON CONFLICT (resource_type, plan_key) DO UPDATE SET
-    display_name = EXCLUDED.display_name, price_cents = EXCLUDED.price_cents,
-    max_concurrent_ws = EXCLUDED.max_concurrent_ws, is_admin_only = EXCLUDED.is_admin_only,
-    cpu_overage_cents = EXCLUDED.cpu_overage_cents,
-    mem_overage_cents = EXCLUDED.mem_overage_cents,
-    disk_overage_cents = EXCLUDED.disk_overage_cents,
-    archived_at = NULL, updated_at = NOW()
-  RETURNING plan_key
-), org_billing AS (
-  SELECT confidential_plan.plan_key::text AS billing_plan,
-    'active'::text AS billing_status, true AS billing_exempt,
-    'unlimited'::text AS rate_card
-  FROM confidential_plan
-SQL
-  else
-    cat <<'SQL'
-), org_billing AS (
-  -- billing rehearsal: what an ordinary Dev organization has
-  SELECT 'none'::text AS billing_plan, 'none'::text AS billing_status,
-    false AS billing_exempt, 'regular'::text AS rate_card
-SQL
-  fi
-}
-
 rollback_candidate() {
   [[ "$CANDIDATE_HASH" =~ ^[0-9a-f]{64}$ ]] || return 0
   {
@@ -384,8 +335,8 @@ STAGE_VARS=(
   --set "org_name=$SMOKE_ORG_NAME"
   --set "org_slug=$SMOKE_ORG_SLUG"
   --set "key_name=$SMOKE_KEY_NAME"
+  --set "rate_card=$RATE_CARD"
 )
-[[ "$RATE_CARD" != unlimited ]] || STAGE_VARS+=(--set "plan_key=$SMOKE_PLAN_KEY")
 {
   cat <<'SQL'
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
@@ -393,29 +344,20 @@ BEGIN;
 WITH input AS (
   SELECT :'smoke_email'::text AS smoke_email, :'smoke_name'::text AS smoke_name,
     :'org_name'::text AS org_name, :'org_slug'::text AS org_slug,
-    :'key_name'::text AS key_name
+    :'key_name'::text AS key_name, :'rate_card'::text AS rate_card
 ), smoke_user AS (
   INSERT INTO users (id, email, email_verified, name, created_at, updated_at)
   SELECT encode(public.gen_random_bytes(16), 'hex'), smoke_email, true, smoke_name, NOW(), NOW()
   FROM input
   ON CONFLICT (email) DO UPDATE SET email_verified = true, name = EXCLUDED.name, updated_at = NOW()
   RETURNING id
-SQL
-  stage_billing_sql
-  cat <<'SQL'
 ), smoke_org AS (
-  INSERT INTO organizations (
-    id, name, slug, created_by, billing_plan, billing_status, billing_exempt,
-    rate_card, created_at, updated_at
-  )
+  INSERT INTO organizations (id, name, slug, created_by, rate_card, created_at, updated_at)
   SELECT encode(public.gen_random_bytes(16), 'hex'), org_name, org_slug,
-    smoke_user.id, org_billing.billing_plan, org_billing.billing_status,
-    org_billing.billing_exempt, org_billing.rate_card, NOW(), NOW()
-  FROM input, smoke_user, org_billing
+    smoke_user.id, rate_card, NOW(), NOW()
+  FROM input, smoke_user
   ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name,
-    billing_plan = EXCLUDED.billing_plan, billing_status = EXCLUDED.billing_status,
-    billing_exempt = EXCLUDED.billing_exempt, rate_card = EXCLUDED.rate_card,
-    updated_at = NOW()
+    rate_card = EXCLUDED.rate_card, updated_at = NOW()
   RETURNING id
 ), prune_memberships AS (
   DELETE FROM org_members m USING smoke_user, smoke_org

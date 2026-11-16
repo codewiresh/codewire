@@ -312,8 +312,7 @@ CASE_DOCUMENT=absent CASE_OPENBAO_PATH="$REHEARSAL_PATH" CASE_ORG_SLUG="$REHEARS
   "$created_disabled" "${REHEARSAL_ARGS[@]}" --create-document
 
 # Refusals that touch neither OpenBao nor the database.
-run_refusal plan_key_regular '--plan-key applies only to --rate-card unlimited' \
-  "${REHEARSAL_ARGS[@]}" --plan-key unlimited
+run_refusal plan_key_retired 'unknown option: --plan-key' --plan-key unlimited
 run_refusal rate_card_unknown '--rate-card must be unlimited or regular' --rate-card discounted
 run_refusal smoke_regular 'the Dev smoke identity stays unlimited' --rate-card regular \
   --openbao-path "$REHEARSAL_PATH"
@@ -354,34 +353,24 @@ grep -F 'api_keys.created_at < candidate_key.created_at' \
   fail 'finalization can disable keys created by a concurrent rotation'
 grep -F 'final database state assertion' "$TEST_TMP/success/state/psql.sql" >/dev/null ||
   fail 'final database state is not verified in a separate statement'
-# The default staging statement is the smoke identity's: the confidential-plan
-# upsert and an unlimited, billing-exempt organization.
-success_sql="$TEST_TMP/success/state/psql.sql"
-for expected in 'INSERT INTO billing_catalog_plans' "'active'::text AS billing_status" \
-  'true AS billing_exempt' "'unlimited'::text AS rate_card" "SELECT 'confidential_sandbox', :'plan_key'::text"; do
-  grep -F "$expected" "$success_sql" >/dev/null ||
-    fail "default staging statement lost: $expected"
-done
-grep -F -- '--set plan_key=unlimited' "$TEST_TMP/success/state/psql.args" >/dev/null ||
-  fail 'default staging statement lost its plan key'
-
-# The regular staging statement: no confidential-plan upsert, no plan key, and
-# an ordinary organization (plan none, status none, not exempt, regular).
-for name in rehearsal_create rehearsal_rotate; do
-  rehearsal_sql="$TEST_TMP/$name/state/psql.sql"
-  for unexpected in billing_catalog_plans confidential_plan plan_key "'unlimited'" \
-    'true AS billing_exempt' "'active'"; do
-    if grep -F "$unexpected" "$rehearsal_sql" >/dev/null; then
-      fail "$name staging statement contains $unexpected"
+# The organization's billing is its rate card alone (#3381): the staging
+# statement never touches the retired plan catalog or plan columns, and the
+# smoke identity is staged on Unlimited.
+for name in success rehearsal_create rehearsal_rotate; do
+  for retired in billing_catalog_plans billing_plan billing_status billing_exempt plan_key; do
+    if grep -F "$retired" "$TEST_TMP/$name/state/psql.sql" "$TEST_TMP/$name/state/psql.args" >/dev/null; then
+      fail "$name staging statement names the retired $retired"
     fi
   done
-  for expected in "'none'::text AS billing_plan" "'none'::text AS billing_status" \
-    'false AS billing_exempt' "'regular'::text AS rate_card" 'FROM input, smoke_user, org_billing'; do
-    grep -F "$expected" "$rehearsal_sql" >/dev/null || fail "$name staging statement lacks $expected"
-  done
-  if grep -F 'plan_key' "$TEST_TMP/$name/state/psql.args" >/dev/null; then
-    fail "$name sent a plan key"
-  fi
+  grep -F 'rate_card = EXCLUDED.rate_card' "$TEST_TMP/$name/state/psql.sql" >/dev/null ||
+    fail "$name staging statement does not set the rate card"
+done
+grep -F -- '--set rate_card=unlimited' "$TEST_TMP/success/state/psql.args" >/dev/null ||
+  fail 'the smoke identity was not staged on the unlimited rate card'
+
+for name in rehearsal_create rehearsal_rotate; do
+  grep -F -- '--set rate_card=regular' "$TEST_TMP/$name/state/psql.args" >/dev/null ||
+    fail "$name was not staged on the regular rate card"
   grep -F -- "--set org_slug=$REHEARSAL_SLUG" "$TEST_TMP/$name/state/psql.args" >/dev/null ||
     fail "$name did not stage the rehearsal organization"
   jq -e --arg email "$REHEARSAL_EMAIL" '.data.data.userEmail == $email' \

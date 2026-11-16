@@ -21,8 +21,8 @@ usage() {
 Usage:
   scripts/runtime/dev/make-dev-acceptance-unlimited.sh [options]
 
-Puts the Dev browser acceptance organization on the unlimited rate card and
-marks it billing-exempt, then reads the result back. The organization is
+Puts the Dev browser acceptance organization on the unlimited rate card,
+then reads the result back. The organization is
 named by its slug and must be owned by the expected account; anything else
 changes nothing.
 
@@ -96,15 +96,15 @@ WITH target AS (
    FOR UPDATE OF o
 ), updated AS (
   UPDATE organizations o
-     SET rate_card = 'unlimited', billing_exempt = true, updated_at = NOW()
+     SET rate_card = 'unlimited', updated_at = NOW()
     FROM target
-   WHERE o.id = target.id AND (o.rate_card <> 'unlimited' OR NOT o.billing_exempt)
+   WHERE o.id = target.id AND o.rate_card <> 'unlimited'
   RETURNING o.id, target.previous
 ), audited AS (
   INSERT INTO audit_logs (id, timestamp, action, user_id, metadata, severity)
   SELECT gen_random_uuid()::text, NOW(), 'dev.acceptance.rate_card', NULL,
          jsonb_build_object('organization_id', updated.id, 'previous', updated.previous,
-                            'rate_card', 'unlimited', 'billing_exempt', true,
+                            'rate_card', 'unlimited',
                             'by', 'scripts/runtime/dev/make-dev-acceptance-unlimited.sh'),
          'warn'
     FROM updated
@@ -120,12 +120,12 @@ IFS='|' read -r org_id previous audited <<<"$result"
 [[ "$org_id" =~ ^[0-9a-f]{32}$ ]] || die 'the database returned an unexpected organization ID'
 
 state="$(run_psql --set "org_id=$org_id" <<'SQL'
-SELECT rate_card || '|' || billing_exempt::text FROM organizations WHERE id = :'org_id';
+SELECT rate_card FROM organizations WHERE id = :'org_id';
 SQL
 )"
-[[ "$state" == 'unlimited|true' ]] || die "organization ${org_id} reads back as ${state}, not unlimited"
+[[ "$state" == unlimited ]] || die "organization ${org_id} reads back as ${state}, not unlimited"
 if [[ "$audited" == 1 ]]; then
-  log "organization ${org_id}: ${previous} -> unlimited, billing-exempt (audited)"
+  log "organization ${org_id}: ${previous} -> unlimited (audited)"
 else
   log "organization ${org_id} was already unlimited; nothing changed"
 fi

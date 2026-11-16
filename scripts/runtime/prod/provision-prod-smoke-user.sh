@@ -23,7 +23,6 @@ SMOKE_NAME="${SMOKE_NAME:-Codewire Prod Smoke}"
 SMOKE_ORG_NAME="${SMOKE_ORG_NAME:-Codewire Prod Smoke}"
 SMOKE_ORG_SLUG="${SMOKE_ORG_SLUG:-codewire-prod-smoke}"
 SMOKE_KEY_NAME="${SMOKE_KEY_NAME:-runtime-prod-smoke}"
-SMOKE_PLAN_KEY="${SMOKE_PLAN_KEY:-unlimited}"
 CW_BIN="${CW_BIN:-$ROOT/target/debug/cw}"
 CONFIRMED_CLUSTER=""
 
@@ -43,8 +42,8 @@ document apps/codewire/prod/ci-smoke, proves it through an isolated Codewire
 client against https://codewire.sh, and only then disables older keys of the
 same user. The first run creates the document; later runs rotate it.
 
-The organization uses the existing admin-only sandbox plan and is billing
-exempt. The script writes no billing catalog row, extension or schema object.
+The organization is on the Unlimited rate card: no charge and no quota. The
+script writes no billing row, extension or schema object.
 
 Options:
   --confirm-production NAME Required; must be the cluster kube-access is using
@@ -53,7 +52,6 @@ Options:
   --org-name NAME           Smoke organization name
   --org-slug SLUG           Smoke organization slug
   --key-name NAME           Smoke API key name
-  --plan-key KEY            Existing sandbox plan used by the smoke org
   -h, --help                Show this help
 
 Safety:
@@ -101,7 +99,6 @@ while (($# > 0)); do
     --org-name) [[ $# -ge 2 ]] || die '--org-name requires a value'; SMOKE_ORG_NAME="$2"; shift 2 ;;
     --org-slug) [[ $# -ge 2 ]] || die '--org-slug requires a value'; SMOKE_ORG_SLUG="$2"; shift 2 ;;
     --key-name) [[ $# -ge 2 ]] || die '--key-name requires a value'; SMOKE_KEY_NAME="$2"; shift 2 ;;
-    --plan-key) [[ $# -ge 2 ]] || die '--plan-key requires a value'; SMOKE_PLAN_KEY="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
@@ -121,8 +118,6 @@ case "$-" in *x*) die 'shell tracing is enabled; rerun without set -x' ;; esac
   die 'smoke organization slug has an invalid shape'
 [[ "$SMOKE_KEY_NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] ||
   die 'smoke key name has an invalid shape'
-[[ "$SMOKE_PLAN_KEY" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] ||
-  die 'smoke plan key has an invalid shape'
 for command in awk bao find jq kubectl mktemp rg rm rmdir sha256sum stat; do
   require_cmd "$command"
 done
@@ -268,14 +263,6 @@ if [[ "$DOCUMENT_STATE" == present ]]; then
 else
   log 'no canonical document yet; this run creates it'
 fi
-run_psql --set "plan_key=$SMOKE_PLAN_KEY" >"$DB_RESULT" <<'SQL'
-SELECT COUNT(*) FROM billing_catalog_plans
-WHERE resource_type = 'sandbox' AND plan_key = :'plan_key'
-  AND is_admin_only AND archived_at IS NULL;
-SQL
-[[ "$(<"$DB_RESULT")" == 1 ]] ||
-  die 'the smoke plan is not an active admin-only sandbox plan; no catalog row is written'
-
 log 'creating one candidate key while retaining every currently active key'
 run_psql \
   --set "smoke_email=$SMOKE_EMAIL" \
@@ -283,13 +270,12 @@ run_psql \
   --set "org_name=$SMOKE_ORG_NAME" \
   --set "org_slug=$SMOKE_ORG_SLUG" \
   --set "key_name=$SMOKE_KEY_NAME" \
-  --set "plan_key=$SMOKE_PLAN_KEY" \
   >"$KEY_FILE" 2>"$DB_RESULT" <<'SQL' ||
 BEGIN;
 WITH input AS (
   SELECT :'smoke_email'::text AS smoke_email, :'smoke_name'::text AS smoke_name,
     :'org_name'::text AS org_name, :'org_slug'::text AS org_slug,
-    :'key_name'::text AS key_name, :'plan_key'::text AS plan_key
+    :'key_name'::text AS key_name
 ), smoke_user AS (
   INSERT INTO users (id, email, email_verified, name, is_admin, enabled, created_at, updated_at)
   SELECT encode(public.gen_random_bytes(16), 'hex'), smoke_email, true, smoke_name, false, true, NOW(), NOW()
@@ -298,17 +284,12 @@ WITH input AS (
     is_admin = false, enabled = true, updated_at = NOW()
   RETURNING id
 ), smoke_org AS (
-  INSERT INTO organizations (
-    id, name, slug, created_by, billing_plan, billing_status, billing_exempt,
-    rate_card, created_at, updated_at
-  )
+  INSERT INTO organizations (id, name, slug, created_by, rate_card, created_at, updated_at)
   SELECT encode(public.gen_random_bytes(16), 'hex'), org_name, org_slug,
-    smoke_user.id, input.plan_key, 'active', true, 'unlimited', NOW(), NOW()
+    smoke_user.id, 'unlimited', NOW(), NOW()
   FROM input, smoke_user
   ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name,
-    billing_plan = EXCLUDED.billing_plan, billing_status = EXCLUDED.billing_status,
-    billing_exempt = EXCLUDED.billing_exempt, rate_card = EXCLUDED.rate_card,
-    updated_at = NOW()
+    rate_card = EXCLUDED.rate_card, updated_at = NOW()
   WHERE organizations.created_by = EXCLUDED.created_by
   RETURNING id
 ), prune_memberships AS (
@@ -419,7 +400,7 @@ SQL
 WITH smoke_user AS (
   SELECT id FROM users WHERE email = :'smoke_email' AND NOT COALESCE(is_admin, false) AND enabled
 ), smoke_org AS (
-  SELECT id FROM organizations WHERE slug = :'org_slug' AND billing_exempt
+  SELECT id FROM organizations WHERE slug = :'org_slug' AND rate_card = 'unlimited'
 )
 SELECT
   (SELECT COUNT(*) FROM api_keys, smoke_user, smoke_org

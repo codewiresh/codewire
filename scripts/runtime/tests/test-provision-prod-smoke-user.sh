@@ -57,10 +57,7 @@ fi
 sql="$(sed -n '1,$p')"
 printf '%s\n-- statement boundary --\n' "$sql" >>"$MOCK_STATE/psql.sql"
 active="$(<"$MOCK_STATE/active-keys")"
-if grep -F 'FROM billing_catalog_plans' <<<"$sql" >/dev/null; then
-  printf 'db-plan\n' >>"$MOCK_STATE/events"
-  if [[ "$MOCK_MODE" == missing_plan ]]; then printf '0\n'; else printf '1\n'; fi
-elif grep -F 'raw_key.value' <<<"$sql" >/dev/null; then
+if grep -F 'raw_key.value' <<<"$sql" >/dev/null; then
   printf 'db-stage\n' >>"$MOCK_STATE/events"
   if [[ "$MOCK_MODE" == foreign_slug ]]; then
     printf 'ERROR:  division by zero\n' >&2
@@ -231,7 +228,7 @@ run_case() {
   fi
 }
 
-pre=$'primary-lookup\nbao-get\ndb-plan'
+pre=$'primary-lookup\nbao-get'
 success_events="$pre"$'\ndb-stage\nbao-put\nbao-get\nprobe\nbao-get\ndb-finalize\ndb-verify\nbao-get'
 run_case success success "$success_events"
 run_case interrupted success "$success_events"
@@ -239,7 +236,6 @@ run_case first_run success "$success_events"
 run_case unconfirmed failure '' 'Production provisioning requires --confirm-production to name the cluster kube-access is using'
 run_case wrong_cluster failure '' 'scoped kube-access does not target example-prod'
 run_case two_primaries failure 'primary-lookup' 'Production database does not have exactly one running primary'
-run_case missing_plan failure "$pre" 'the smoke plan is not an active admin-only sandbox plan'
 run_case foreign_slug failure "$pre"$'\ndb-stage' \
   'candidate creation failed and was rolled back'
 run_case cas_failure failure "$pre"$'\ndb-stage\nbao-put\ndb-rollback' \
@@ -295,9 +291,13 @@ grep -F 'is_admin = false, enabled = true' "$sql" >/dev/null ||
   fail 'a repaired smoke user could keep admin rights or stay disabled'
 grep -F 'WHERE organizations.created_by = EXCLUDED.created_by' "$sql" >/dev/null ||
   fail 'the smoke organization upsert can take over another user'"'"'s organization'
-if grep -E -i 'CREATE EXTENSION|INSERT INTO billing_catalog_plans|confidential_sandbox' "$sql" >/dev/null; then
-  fail 'Production provisioning writes an extension or billing catalog row'
+if grep -E -i 'CREATE EXTENSION|billing_catalog|billing_plan|billing_status|billing_exempt' "$sql" >/dev/null; then
+  fail 'Production provisioning writes an extension or reads the retired plan model (#3381)'
 fi
+grep -F "smoke_user.id, 'unlimited', NOW(), NOW()" "$sql" >/dev/null ||
+  fail 'the smoke organization is not created on the unlimited rate card'
+grep -F "AND rate_card = 'unlimited'" "$sql" >/dev/null ||
+  fail 'the final state does not check the unlimited rate card'
 # Without kube-access's production class nothing runs, whatever was typed:
 # the class missing, Dev's, the system cluster's or an unknown one.
 for class in unset dev system other; do
