@@ -1,5 +1,8 @@
 //! One caller-owned connection from authorization through publication.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use codewire_access::{
     CredentialAuthKind, CredentialId, CredentialMetadata, CredentialStatus, ProviderId,
 };
@@ -9,9 +12,17 @@ use codewire_platform_credentials::{
 use codewire_protected_store::ProtectedValue;
 use sqlx::{Acquire, PgConnection, Postgres, Transaction};
 use tokio::time::Instant;
+use uuid::Uuid;
 
 use super::enrollment::{Completed, Outcome};
 use super::{EnrollmentTarget, Error, Scope, Shared, authority_error, store_error};
+
+/// The refresh fence a provider revocation relies on (#4717): `held` says
+/// whether the revoke's own transaction still found it.
+pub(super) struct RevokeFence {
+    pub(super) attempt_id: Uuid,
+    pub(super) held: Arc<AtomicBool>,
+}
 
 pub(super) struct Publication<T> {
     pub outcome: Outcome,
@@ -30,6 +41,7 @@ enum Mutation {
     Revoke {
         id: CredentialId,
         revision: u64,
+        fence: Option<RevokeFence>,
     },
     Delete {
         id: CredentialId,
@@ -43,9 +55,41 @@ pub(super) async fn enroll(
     completed: &mut Completed,
     target: EnrollmentTarget,
 ) -> Publication<CredentialMetadata> {
+    let (material, account_hint) = match completed.take_material() {
+        Ok(taken) => taken,
+        Err(error) => {
+            return Publication {
+                outcome: Outcome::NotPublished,
+                result: Err(error),
+            };
+        }
+    };
+    let publication =
+        enroll_material(shared, scope, completed, target, &material, account_hint).await;
+    // The provider approved a sign-in Codewire did not store: ask it to
+    // revoke it (#4904). An unknown outcome may have stored it.
+    if revokes_unstored(publication.outcome) {
+        super::provider_revocation::revoke_unstored(shared, completed.provider(), material);
+    }
+    publication
+}
+
+/// Only a publication that definitely did not happen leaves the sign-in
+/// unstored; an unknown one may have stored it.
+pub(super) fn revokes_unstored(outcome: Outcome) -> bool {
+    matches!(outcome, Outcome::NotPublished)
+}
+
+async fn enroll_material(
+    shared: &Shared,
+    scope: &Scope,
+    completed: &Completed,
+    target: EnrollmentTarget,
+    material: &ProtectedValue,
+    account_hint: Option<String>,
+) -> Publication<CredentialMetadata> {
     let prepared = async {
         scope.check()?;
-        let (material, account_hint) = completed.take_material()?;
         let target = match target {
             EnrollmentTarget::CreateGithubAccount => {
                 if completed.provider() != "github" {
@@ -71,7 +115,7 @@ pub(super) async fn enroll(
                     .wait(
                         shared
                             .store
-                            .prepare_creation(&scope.owner, registration, &material),
+                            .prepare_creation(&scope.owner, registration, material),
                     )
                     .await?
                     .map_err(store_error)?;
@@ -82,7 +126,7 @@ pub(super) async fn enroll(
                     .wait(shared.store.prepare_replacement(
                         &scope.owner,
                         &expected,
-                        &material,
+                        material,
                         account_hint,
                     ))
                     .await?
@@ -295,7 +339,27 @@ pub(super) async fn lifecycle(
     let mutation = if delete {
         Mutation::Delete { id, revision }
     } else {
-        Mutation::Revoke { id, revision }
+        Mutation::Revoke {
+            id,
+            revision,
+            fence: None,
+        }
+    };
+    publish(shared, scope, mutation).await.result
+}
+
+/// A revoke whose provider ask relies on `fence`.
+pub(super) async fn fenced_revoke(
+    shared: &Shared,
+    scope: &Scope,
+    id: CredentialId,
+    revision: u64,
+    fence: Option<RevokeFence>,
+) -> Result<Option<CredentialMetadata>, Error> {
+    let mutation = Mutation::Revoke {
+        id,
+        revision,
+        fence,
     };
     publish(shared, scope, mutation).await.result
 }
@@ -454,7 +518,11 @@ async fn apply(
             .await
             .map(|record| Some(record.metadata))
             .map_err(store_error),
-        Mutation::Revoke { id, revision } => {
+        Mutation::Revoke {
+            id,
+            revision,
+            fence,
+        } => {
             let record = shared
                 .store
                 .record_for_update_in(tx, &scope.owner, &id)
@@ -462,6 +530,16 @@ async fn apply(
                 .map_err(store_error)?;
             if record.metadata.revocation_generation != revision {
                 return Err(Error::StaleRevision);
+            }
+            // Under the row lock every refresh transition also takes, so the
+            // answer holds until this transaction commits.
+            if let Some(fence) = &fence {
+                let held = shared
+                    .store
+                    .holds_revocation_fence_in(tx, &id, fence.attempt_id)
+                    .await
+                    .map_err(store_error)?;
+                fence.held.store(held, Ordering::SeqCst);
             }
             shared
                 .store

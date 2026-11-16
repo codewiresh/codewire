@@ -610,11 +610,19 @@ impl Harness {
     pub async fn with_provider_revocation(
         status: http::StatusCode,
     ) -> Result<(Self, Arc<RevocationProvider>)> {
+        Self::with_provider_revocation_bounded(status, HANG_GUARD).await
+    }
+
+    /// As [`Self::with_provider_revocation`], with mutations bounded by
+    /// `bound`, for a test of a revoke that does not commit.
+    pub async fn with_provider_revocation_bounded(
+        status: http::StatusCode,
+        bound: Duration,
+    ) -> Result<(Self, Arc<RevocationProvider>)> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let provider = Arc::new(RevocationProvider::answering(status));
-        let harness =
-            Self::build(Some(listener), address, HANG_GUARD, Some(provider.clone())).await?;
+        let harness = Self::build(Some(listener), address, bound, Some(provider.clone())).await?;
         Ok((harness, provider))
     }
 

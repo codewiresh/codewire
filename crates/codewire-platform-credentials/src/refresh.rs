@@ -41,6 +41,17 @@ pub enum OAuthRefreshState {
     Cancelled,
 }
 
+/// What a revoke may ask its provider about, from the journal (#4717).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RevocationFence {
+    /// No exchange had started, and none can begin until the revoke commits
+    /// or `cancel_oauth_refresh` cancels this attempt.
+    Fenced { attempt_id: Uuid },
+    /// An exchange may already have rotated the stored token, so a
+    /// provider's answer about it would not be about the live token.
+    RotationPossible,
+}
+
 /// Material-free discovery for a trusted placement authority on any replica.
 /// Neither an attempt ID nor a live deadline reconstructs a provider-send
 /// permit. Live flags describe only the corresponding Reserved/Started phase
@@ -566,6 +577,66 @@ impl PlatformCredentialStore {
         }
         tx.commit().await.map_err(database_error)?;
         Ok(())
+    }
+
+    /// Fence the journal before a revoke reads the token it asks the provider
+    /// to revoke (#4717). Only a never-started reservation is replaced: no
+    /// provider request was sent for it, and its start is then refused. While
+    /// the fence holds no refresh can begin, so the token read is the live
+    /// one. The revoke's commit deletes the fence; a revoke that does not
+    /// commit cancels it, and an unstarted reservation lapses in 60 s anyway.
+    pub async fn fence_oauth_refresh_for_revocation(
+        &self,
+        owner: &Owner,
+        id: &CredentialId,
+        expected: CredentialVersion,
+    ) -> Result<RevocationFence, Error> {
+        let identity = Identity::new(owner, id, expected, Uuid::new_v4())?;
+        let mut tx = self.pool().begin().await.map_err(database_error)?;
+        let current = lock_record(self, &mut tx, &identity).await?;
+        compare_version(&current, expected)?;
+        if let Some(previous) = load_attempt(&mut tx, id).await? {
+            match previous.state()? {
+                OAuthRefreshState::Reserved
+                | OAuthRefreshState::Committed
+                | OAuthRefreshState::Cancelled => {}
+                OAuthRefreshState::Started
+                | OAuthRefreshState::Staged
+                | OAuthRefreshState::Unknown => {
+                    tx.commit().await.map_err(database_error)?;
+                    return Ok(RevocationFence::RotationPossible);
+                }
+            }
+            delete_refresh_attempt(&mut tx, id).await?;
+        }
+        sqlx::query("INSERT INTO platform_credential_refresh_attempts \
+            (credential_id,attempt_id,expected_revocation_generation,expected_material_generation,state,reserved_until) \
+            VALUES ($1,$2,$3,$4,'reserved',clock_timestamp()+interval '60 seconds')")
+            .bind(id.as_str()).bind(identity.attempt_id)
+            .bind(generation(expected.revocation_generation)?).bind(generation(expected.material_generation)?)
+            .execute(&mut *tx).await.map_err(database_error)?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(RevocationFence::Fenced {
+            attempt_id: identity.attempt_id,
+        })
+    }
+
+    /// Within a revoke's transaction, once the credential's row is locked:
+    /// whether `attempt_id`'s fence is still the journal's attempt (#4717).
+    /// A fence that lapsed and was replaced no longer kept refreshes out
+    /// since the revoke read the token, so the provider must not be asked.
+    pub async fn holds_revocation_fence_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: &CredentialId,
+        attempt_id: Uuid,
+    ) -> Result<bool, Error> {
+        Ok(match load_attempt(tx, id).await? {
+            Some(attempt) => {
+                attempt.attempt_id == attempt_id && attempt.state()? == OAuthRefreshState::Reserved
+            }
+            None => false,
+        })
     }
 
     /// Consume the exact process-local send-owner permit after an unsuccessful

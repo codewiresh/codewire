@@ -94,6 +94,8 @@ struct Shared {
     /// Bounds a mutation and every publication: [`MUTATION_TIMEOUT`] in the
     /// product.
     mutation_timeout: Duration,
+    /// The owner's workers, for work that outlives its request (#4904).
+    workers: TaskTracker,
 }
 
 pub use provider_revocation::RevocationTransports;
@@ -119,6 +121,7 @@ impl CredentialMutationOwner {
         github_login: Option<GitHubDeviceLogin>,
         github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
     ) -> Self {
+        let workers = TaskTracker::new();
         Self {
             shared: Arc::new(Shared {
                 pool,
@@ -129,10 +132,11 @@ impl CredentialMutationOwner {
                 github_app_authorization,
                 revocation: None,
                 mutation_timeout: MUTATION_TIMEOUT,
+                workers: workers.clone(),
             }),
             accepting: Mutex::new(true),
             capacity: Arc::new(Semaphore::new(MAX_OPERATIONS)),
-            workers: TaskTracker::new(),
+            workers,
             stop: CancellationToken::new(),
         }
     }

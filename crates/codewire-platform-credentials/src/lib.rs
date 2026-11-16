@@ -58,7 +58,7 @@ pub use model::{CredentialRecord, CredentialRegistration, CredentialVersion};
 pub use profiles::{PlatformAccessProfileStore, PlatformBindingMetadata, PlatformProfileError};
 pub use refresh::{
     OAuthKeepAliveCandidate, OAuthKeepAliveForm, OAuthRefreshAttemptInfo, OAuthRefreshState,
-    PreparedOAuthRefresh, PreparedOAuthRefreshResult, StartedOAuthRefresh,
+    PreparedOAuthRefresh, PreparedOAuthRefreshResult, RevocationFence, StartedOAuthRefresh,
 };
 pub use store::{
     CredentialMetadataReader, OwnedCredentials, PlatformCredentialStore,
