@@ -172,7 +172,31 @@ pub async fn finalize_organization_billing(
     for lease in &leases {
         resolve_organization_mutation_lease(pool, &lease.id).await?;
     }
-    complete_phase(pool, input).await?;
+    // No session is open and no billing mutation is pending, so the balance
+    // is final once the last usage is drawn (#4823).
+    crate::credit::draw_organization(pool, &input.organization_id)
+        .await
+        .map_err(AppError::Internal)?;
+    // The forfeit and the phase's completion commit together, under the
+    // organization's row lock: a credit entry racing them waits, then is
+    // refused by the ledger's deletion fence (migration 0031), so nothing
+    // lands after the final balance is read. It must be FOR UPDATE: the
+    // fence takes FOR KEY SHARE, which a NO KEY UPDATE lock would not wait
+    // for.
+    let mut transaction = pool.begin().await.map_err(AppError::from)?;
+    sqlx::query("SELECT 1 FROM organizations WHERE id = $1 FOR UPDATE")
+        .bind(&input.organization_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AppError::from)?;
+    record_forfeit(
+        &mut *transaction,
+        input,
+        phase.stripe_customer_id.as_deref(),
+    )
+    .await?;
+    complete_phase(&mut *transaction, input).await?;
+    transaction.commit().await.map_err(AppError::from)?;
     completed_result(pool, input).await
 }
 
@@ -407,6 +431,40 @@ async fn expire_checkout_sessions(
     Ok(())
 }
 
+/// Records the credit the organization had left as forfeited at deletion
+/// (#4823; owner, 2026-11-15: support refunds it by hand). One entry per
+/// deletion operation: a retry finds the balance already zero, and the key
+/// would refuse a second entry anyway. The entry names who deleted the
+/// organization and its Stripe customer, and the ledger outlives the
+/// organization (migration 0031).
+async fn record_forfeit(
+    executor: impl sqlx::PgExecutor<'_>,
+    input: &OrganizationBillingTeardownInput,
+    stripe_customer_id: Option<&str>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"INSERT INTO billing_credit_ledger
+               (organization_id, entry_kind, amount_nano_eur, idempotency_key,
+                actor_user_id, provider_object_id, reason)
+           SELECT b.organization_id, 'forfeited', -b.balance_nano_eur, $2,
+                  operation.requested_by, NULLIF($3, ''), 'forfeited at deletion'
+           FROM billing_credit_balances b
+           JOIN organization_deletion_operations operation
+             ON operation.id = $4 AND operation.organization_id = b.organization_id
+           WHERE b.organization_id = $1 AND b.balance_nano_eur > 0
+           FOR UPDATE OF b
+           ON CONFLICT (organization_id, idempotency_key) DO NOTHING"#,
+    )
+    .bind(&input.organization_id)
+    .bind(format!("forfeited-at-deletion:{}", input.operation_id))
+    .bind(stripe_customer_id.unwrap_or_default())
+    .bind(&input.operation_id)
+    .execute(executor)
+    .await
+    .map_err(AppError::from)?;
+    Ok(())
+}
+
 async fn captured_subscription_ids(
     pool: &PgPool,
     input: &OrganizationBillingTeardownInput,
@@ -510,7 +568,7 @@ async fn mark_phase_timestamp(
 }
 
 async fn complete_phase(
-    pool: &PgPool,
+    executor: impl sqlx::PgExecutor<'_>,
     input: &OrganizationBillingTeardownInput,
 ) -> Result<(), AppError> {
     let result = sqlx::query(
@@ -530,7 +588,7 @@ async fn complete_phase(
     .bind(&input.operation_id)
     .bind(&input.organization_id)
     .bind(input.generation)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(AppError::from)?;
     if result.rows_affected() != 1 {
@@ -1065,6 +1123,121 @@ mod tests {
         assert!((usage.0 - (10.0 / 60.0)).abs() < 0.01);
         assert!((usage.1 - (10.0 / 60.0)).abs() < 0.01);
         assert!((usage.2 - (20.0 / 60.0)).abs() < 0.01);
+
+        cleanup(&pool, &fixture).await;
+    }
+
+    /// #4823: the phase draws the last usage, then forfeits exactly what is
+    /// left, once, naming who deleted the organization; a retry adds nothing.
+    #[tokio::test]
+    async fn db_leftover_credit_is_forfeited_once_after_the_last_draw() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let fixture = seed(&pool, None, None, false).await;
+        sqlx::query(
+            r#"INSERT INTO billing_credit_ledger
+                   (organization_id, entry_kind, amount_nano_eur, idempotency_key)
+               VALUES ($1, 'grant', 12400000000, 'forfeit-test-grant')"#,
+        )
+        .bind(&fixture.organization_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for _ in 0..2 {
+            let result =
+                finalize_organization_billing(&pool, &StripeHandle::default(), &input(&fixture))
+                    .await
+                    .unwrap();
+            assert_eq!(result.state, "completed");
+        }
+        let entries: Vec<(String, i64, Option<String>, Option<String>)> = sqlx::query_as(
+            r#"SELECT entry_kind, amount_nano_eur, actor_user_id, reason
+               FROM billing_credit_ledger WHERE organization_id = $1 ORDER BY id"#,
+        )
+        .bind(&fixture.organization_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let kinds: Vec<&str> = entries.iter().map(|entry| entry.0.as_str()).collect();
+        assert_eq!(kinds, ["grant", "usage", "forfeited"], "{entries:?}");
+        let (_, forfeited, actor, reason) = &entries[2];
+        assert_eq!(
+            *forfeited,
+            -(entries[0].1 + entries[1].1),
+            "the forfeit is exactly what was left after the last usage"
+        );
+        assert!(*forfeited < 0);
+        assert_eq!(actor.as_deref(), Some(fixture.owner_id.as_str()));
+        assert_eq!(reason.as_deref(), Some("forfeited at deletion"));
+        let balance: i64 = sqlx::query_scalar(
+            "SELECT balance_nano_eur FROM billing_credit_balances WHERE organization_id = $1",
+        )
+        .bind(&fixture.organization_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(balance, 0);
+        assert!(
+            late_grant_is_refused(&pool, &fixture).await,
+            "an entry landed after the forfeit"
+        );
+
+        cleanup(&pool, &fixture).await;
+    }
+
+    /// Whether a grant for the organization is now refused by the ledger's
+    /// deletion fence (migration 0031).
+    async fn late_grant_is_refused(pool: &PgPool, fixture: &Fixture) -> bool {
+        let late = sqlx::query(
+            r#"INSERT INTO billing_credit_ledger
+                   (organization_id, entry_kind, amount_nano_eur, idempotency_key)
+               VALUES ($1, 'grant', 1000000000, 'late-grant')"#,
+        )
+        .bind(&fixture.organization_id)
+        .execute(pool)
+        .await;
+        matches!(late, Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23514"))
+    }
+
+    /// #4823, cw-review: an organization with no credit left gets no
+    /// forfeit, but its credit is just as final once the billing phase is
+    /// complete, so a late top-up can't land and then vanish with it.
+    #[tokio::test]
+    async fn db_credit_is_final_once_the_phase_completes_even_with_nothing_left() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let fixture = seed(&pool, None, None, false).await;
+        assert!(
+            !late_grant_is_refused(&pool, &fixture).await,
+            "credit is open before the phase"
+        );
+        sqlx::query(
+            "INSERT INTO billing_credit_ledger \
+                 (organization_id, entry_kind, amount_nano_eur, idempotency_key, actor_user_id, reason) \
+             VALUES ($1, 'adjustment', -1000000000, 'spend-it', $2, 'test: spend the grant')",
+        )
+        .bind(&fixture.organization_id)
+        .bind(&fixture.owner_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        finalize_organization_billing(&pool, &StripeHandle::default(), &input(&fixture))
+            .await
+            .unwrap();
+        let forfeits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM billing_credit_ledger \
+             WHERE organization_id = $1 AND entry_kind = 'forfeited'",
+        )
+        .bind(&fixture.organization_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(forfeits, 0, "nothing was left to forfeit");
+        assert!(late_grant_is_refused(&pool, &fixture).await);
 
         cleanup(&pool, &fixture).await;
     }

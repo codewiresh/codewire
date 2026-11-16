@@ -1893,7 +1893,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "api_keys:no_action",
             "billing_card_grants:set_null",
             "billing_credit_balances:cascade",
-            "billing_credit_ledger:cascade",
+            // The ledger outlives its organization (0031, #4823).
             "billing_external_operations:cascade",
             "billing_top_ups:cascade",
             "environment_presets:no_action",
