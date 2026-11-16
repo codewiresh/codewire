@@ -1108,6 +1108,39 @@ inside an opaque encoding would not be caught, in a header or in a body. GitHub
 keeps its closed families and exact operations, since `git` and `gh` go through
 its signer and executor.
 
+### Per-environment placeholders (#3999)
+
+When a local VM's agent hosts go through the TLS front door, which is off by
+default, the guest holds a per-environment placeholder for each credential in
+place of the fixed `codewire-managed`. Nothing delivers one to a guest yet;
+these pieces are in place for the boot seed that will:
+
+- **The value.** `cwp1_` and 43 base64url characters, an HMAC over the
+  environment, the selected binding's profile revision, the slot and the
+  credential, under a key the credential authority keeps in its protected
+  store. It is derived and never stored. No environment can read the key, so
+  an environment cannot compute another environment's placeholder. A
+  placeholder grants nothing by itself; it only names, to that environment's
+  own broker, the credential it stands for.
+- **What changes it.** The binding's profile revision, not the VM
+  generation. A VM checkpoint restored in place boots a new generation with
+  the same binding, so its running agents keep their placeholder. A fork is
+  another environment and gets new placeholders. Any rebind to another
+  revision or credential changes them.
+- **Who can ask for one.** The authority's
+  `GetEnvironmentCredentialPlaceholders` call returns, for each requested
+  slot the environment's selected binding grants, the placeholder that
+  generation's leases carry. It returns none for an ungranted slot, refuses a
+  binding that is no longer the environment's, and logs nothing. It is served
+  on the authority's owner-only socket, for the local supervisor.
+- **What the guest will get.** With interception on, the Anthropic projection
+  carries no `ANTHROPIC_BASE_URL`, so Claude Code talks to the real
+  `api.anthropic.com` through the front door. `ANTHROPIC_AUTH_TOKEN` (API key)
+  or `CLAUDE_CODE_OAUTH_TOKEN` (subscription token) carries the placeholder;
+  the sign-in form projects no variable. `ANTHROPIC_API_KEY` is never set,
+  because the swap rule refuses a placeholder sent beside a second credential
+  header. Without interception, the projection is exactly the one above.
+
 ### Hosted front-door session (not yet served)
 
 `EgressService.FrontDoorSession` is specified, but not served yet: it answers

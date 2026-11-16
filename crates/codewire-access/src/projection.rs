@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::CredentialAuthKind;
+use crate::CredentialPlaceholder;
 
 const CODEX_PROVIDER_ID: &str = "codewire_openai";
 const CODEX_OPENAI_API_PROVIDER_ID: &str = "codewire_openai_api";
@@ -655,6 +656,42 @@ pub struct ManagedCredentialClientProjection {
     /// The file the placement writes as [`GH_CONFIG_FILE_NAME`] in the
     /// projected `GH_CONFIG_DIR`, while the GitHub client is selected.
     pub gh: Option<GhConfigProjection>,
+}
+
+impl ManagedCredentialClientProjection {
+    /// This projection for an environment whose agent hosts the TLS front
+    /// door intercepts (#3999), where `clients` is the selection it was made
+    /// from. Claude Code then talks to the real Anthropic API through the
+    /// front door, so the managed base URL is not projected, and its bearer
+    /// is `anthropic`, this environment's placeholder for the selected
+    /// Anthropic credential, which the broker swaps for the credential. The
+    /// sign-in form projects no variable: its login carries the placeholder.
+    /// Without a placeholder no Anthropic bearer is projected at all, so the
+    /// fixed managed value never reaches the real host. Nothing else changes.
+    pub fn intercepted(
+        mut self,
+        clients: ManagedCredentialClients,
+        anthropic: Option<&CredentialPlaceholder>,
+    ) -> Self {
+        if !clients.contains(ManagedCredentialClient::Anthropic) {
+            return self;
+        }
+        self.environment.remove("ANTHROPIC_BASE_URL");
+        for name in ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] {
+            if self.environment.contains_key(name) {
+                match anthropic {
+                    Some(placeholder) => {
+                        self.environment
+                            .insert(name.into(), placeholder.as_str().into());
+                    }
+                    None => {
+                        self.environment.remove(name);
+                    }
+                }
+            }
+        }
+        self
+    }
 }
 
 /// Deterministic machine-owned `gh` configuration: where the managed ingress

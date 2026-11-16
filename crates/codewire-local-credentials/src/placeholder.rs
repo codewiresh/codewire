@@ -1,11 +1,12 @@
-//! Each environment generation's credential placeholders (#3999).
+//! Each environment binding's credential placeholders (#3999).
 //!
 //! A placeholder is derived, never stored: [`CredentialPlaceholder::derive`]
 //! under one 32-byte key the authority keeps as an entry of its protected
 //! store, beside credential material and never in its metadata database.
-//! Every generation's placeholders, old or new, are the same after the
-//! authority restarts, and nothing an environment can read is an input to
-//! the key.
+//! Every binding's placeholders are the same after the authority restarts,
+//! and nothing an environment can read is an input to the key. They follow
+//! the binding's profile revision, not the VM generation, so a VM checkpoint
+//! restored in place keeps them (see `codewire_access`'s placeholder docs).
 //!
 //! The key belongs to one authority root. Its entry is named by the root's
 //! ID, a random value the root's metadata keeps, because an operating-system
@@ -19,19 +20,20 @@
 //! loaded. A lease never reads or writes the store for it: a lease derives
 //! its placeholder from a key already loaded, and one admitted before that,
 //! or while the key cannot be loaded, carries none and is otherwise the
-//! same. Nothing compares a placeholder yet, and a placeholder never decides
-//! whether a lease is admitted.
+//! same. The broker's swap rule compares a front-door request's placeholder
+//! with its lease's (#4722); a placeholder never decides whether a lease is
+//! admitted.
 //!
 //! A key that is lost, or replaced because its entry is corrupt, changes
-//! every placeholder the root derives, for every generation. That is safe:
+//! every placeholder the root derives, for every binding. That is safe:
 //! a placeholder only names a credential to the broker that compares it, so
 //! a stale one matches nothing and fails closed.
 
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use codewire_access::{
-    CapabilitySlot, CredentialId, CredentialPlaceholder, EnvironmentAccessBinding, EnvironmentId,
-    PLACEHOLDER_KEY_BYTES, PlaceholderKey,
+    CapabilitySlot, CredentialId, CredentialPlaceholder, DerivedGrant, EnvironmentAccessBinding,
+    EnvironmentId, PLACEHOLDER_KEY_BYTES, PlaceholderKey,
 };
 use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStoreError, ProtectedValue,
@@ -110,6 +112,13 @@ fn placeholder_key_entry_for(authority_id: &str) -> Result<ProtectedEntryId, Loc
         .map_err(|_| LocalCredentialError::CorruptMetadata)
 }
 
+/// The derivation's revision input for `grant`: its binding's profile
+/// revision, or zero for a grant no profile selects. Never the VM
+/// generation, so a VM checkpoint restored in place keeps its placeholders.
+fn binding_revision(grant: &DerivedGrant) -> u64 {
+    grant.profile.as_ref().map_or(0, |profile| profile.revision)
+}
+
 /// A lease's admission and the placeholder it carries, when there is one.
 type LeaseAdmission = (CredentialOperationAdmission, Option<CredentialPlaceholder>);
 
@@ -150,7 +159,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         credential_id: &CredentialId,
         selected: Option<&EnvironmentAccessBinding>,
     ) -> Result<CredentialPlaceholder, LocalCredentialError> {
-        let entry = {
+        let (entry, revision) = {
             let connection = self.connection()?;
             check_selected_environment_binding(&connection, environment_id, selected)?;
             let (grant, record) = self.admit_environment_slot_at(
@@ -164,7 +173,10 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             if grant.credential_id != *credential_id {
                 return Err(LocalCredentialError::CredentialOperationLeaseDenied);
             }
-            placeholder_key_entry(&connection)?
+            (
+                placeholder_key_entry(&connection)?,
+                binding_revision(&grant),
+            )
         };
         // The database is released first: loading may wait on the store, and
         // a lease needs the database but never the store for its placeholder.
@@ -172,10 +184,47 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         Ok(CredentialPlaceholder::derive(
             key,
             environment_id,
-            environment_generation,
+            revision,
             slot,
             credential_id,
         ))
+    }
+
+    /// This environment's placeholders for each of `slots` its `selected`
+    /// binding grants at `environment_generation`, in `slots` order: what a
+    /// boot that intercepts its agent hosts puts in its seed (#3999). A slot
+    /// without a grant has none. Each goes through
+    /// [`Self::environment_credential_placeholder`], so it is exactly what
+    /// that generation's leases carry. Call it on a blocking thread.
+    pub fn environment_slot_placeholders(
+        &self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+        selected: &EnvironmentAccessBinding,
+        slots: &[CapabilitySlot],
+    ) -> Result<Vec<(CapabilitySlot, CredentialPlaceholder)>, LocalCredentialError> {
+        // The binding is checked first, whatever the slots: a stale binding
+        // or an empty request is refused, never answered with no values.
+        let grants = self.evaluate_selected_environment_grants(
+            environment_id,
+            environment_generation,
+            Some(selected),
+        )?;
+        let mut placeholders = Vec::new();
+        for slot in slots {
+            let Some(grant) = grants.iter().find(|grant| grant.capability_slot == *slot) else {
+                continue;
+            };
+            let placeholder = self.environment_credential_placeholder(
+                environment_id,
+                environment_generation,
+                slot,
+                &grant.credential_id,
+                Some(selected),
+            )?;
+            placeholders.push((slot.clone(), placeholder));
+        }
+        Ok(placeholders)
     }
 
     /// [`Self::admit_environment_credential_operation`] and the admitted
@@ -213,7 +262,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             CredentialPlaceholder::derive(
                 key,
                 &request.environment_id,
-                request.environment_generation,
+                binding_revision(&admission.grant),
                 &request.capability_slot,
                 &admission.grant.credential_id,
             )

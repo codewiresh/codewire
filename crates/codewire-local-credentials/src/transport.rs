@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 18;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 19;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -43,6 +43,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         18,
         "keeps a default profile: SetDefaultAccessProfile, is_default on every profile read, and the default cannot be deleted (#4717)",
     ),
+    (
+        19,
+        "GetEnvironmentCredentialPlaceholders gives a boot its credential placeholders, and placeholders derive from the binding's profile revision (#3999)",
+    ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
@@ -59,13 +63,18 @@ pub enum AuthorityFeature {
     /// The store's default profile: set, read and kept from deletion. An
     /// older authority has no default.
     DefaultProfile,
+    /// `GetEnvironmentCredentialPlaceholders`, for a boot that intercepts its
+    /// agent hosts. An older authority has no such call, and derives its
+    /// leases' placeholders from the VM generation.
+    CredentialPlaceholders,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::PlatformGithub,
         Self::ClaudeSignIn,
         Self::DefaultProfile,
+        Self::CredentialPlaceholders,
     ];
 
     /// The protocol that introduced it.
@@ -74,6 +83,7 @@ impl AuthorityFeature {
             Self::PlatformGithub => 16,
             Self::ClaudeSignIn => 17,
             Self::DefaultProfile => 18,
+            Self::CredentialPlaceholders => 19,
         }
     }
 

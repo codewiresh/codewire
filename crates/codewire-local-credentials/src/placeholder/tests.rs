@@ -268,6 +268,16 @@ fn request(
 }
 
 impl Fixture {
+    /// The environment's binding revision: the derivation's input, never the
+    /// VM generation a lease names.
+    fn binding_revision(&self) -> u64 {
+        self.authority
+            .get_environment_access_binding(&self.environment)
+            .unwrap()
+            .binding
+            .profile_revision
+    }
+
     fn lease(
         &self,
         environment_id: &EnvironmentId,
@@ -390,37 +400,66 @@ fn a_lease_carries_the_unleased_placeholder_once_the_key_is_loaded() {
     );
 }
 
+/// A placeholder follows the environment's binding, not its VM generation
+/// (#3999): a VM checkpoint restored in place boots a new generation with the
+/// same binding and keeps it. Another slot, another environment, a profile
+/// revision bump and another credential each give a different one.
 #[test]
-fn each_environment_generation_slot_and_credential_has_its_own_placeholder() {
+fn a_placeholder_follows_the_binding_not_the_vm_generation() {
     let fixture = fixture();
     let environment = &fixture.environment;
     let base = fixture
         .unleased(environment, 7, &codex(), &fixture.first)
         .unwrap();
-    let other_slot = fixture.leased(environment, 7, openai());
-    let other_environment = fixture.leased(&fixture.other_environment, 7, codex());
-    let next_generation = fixture.leased(environment, 8, codex());
-    // An older generation stays derivable, leased and unleased, after a newer
-    // one, and its placeholder is what it was.
-    assert!(fixture.leased(environment, 7, codex()).ct_eq(&base));
+    // A restore in place: a new VM generation, the same binding.
+    assert!(fixture.leased(environment, 8, codex()).ct_eq(&base));
     assert!(
         fixture
-            .unleased(environment, 7, &codex(), &fixture.first)
+            .unleased(environment, 8, &codex(), &fixture.first)
             .unwrap()
             .ct_eq(&base)
     );
-    let (profile_id, revision) = &fixture.second_profile;
+    let other_slot = fixture.leased(environment, 7, openai());
+    let other_environment = fixture.leased(&fixture.other_environment, 7, codex());
+
+    // The same profile at its next revision, selecting the same credential.
     let binding = fixture
         .authority
         .get_environment_access_binding(environment)
         .unwrap()
         .binding;
+    let bumped = fixture
+        .authority
+        .update_profile(
+            &binding.profile_id,
+            binding.profile_revision,
+            BTreeMap::from([
+                (codex(), fixture.first.clone()),
+                (openai(), fixture.first.clone()),
+            ]),
+        )
+        .unwrap()
+        .profile;
     fixture
         .authority
         .replace_environment_access_binding(
             environment,
             &binding.profile_id,
             binding.profile_revision,
+            binding.profile_id.clone(),
+            bumped.revision,
+        )
+        .unwrap();
+    let next_revision = fixture.leased(environment, 8, codex());
+
+    // Another credential: the profile that selects `second`.
+    let (profile_id, revision) = &fixture.second_profile;
+    fixture
+        .authority
+        .replace_environment_access_binding(
+            environment,
+            &binding.profile_id,
+            bumped.revision,
             profile_id.clone(),
             *revision,
         )
@@ -437,7 +476,7 @@ fn each_environment_generation_slot_and_credential_has_its_own_placeholder() {
         &base,
         &other_slot,
         &other_environment,
-        &next_generation,
+        &next_revision,
         &other_credential,
     ];
     for (index, left) in all.iter().enumerate() {
@@ -445,13 +484,6 @@ fn each_environment_generation_slot_and_credential_has_its_own_placeholder() {
             assert!(!left.ct_eq(right));
         }
     }
-    // The older generation's lease now names the newly bound credential.
-    assert!(
-        fixture
-            .unleased(environment, 7, &codex(), &fixture.second)
-            .unwrap()
-            .ct_eq(&fixture.leased(environment, 7, codex()))
-    );
     assert_eq!(fixture.store.key_entry(|key| key.writes), 1);
 }
 
@@ -505,7 +537,7 @@ fn a_stored_key_is_used_as_it_is() {
     let expected = CredentialPlaceholder::derive(
         &PlaceholderKey::from_slice(&key_bytes).unwrap(),
         &fixture.environment,
-        7,
+        fixture.binding_revision(),
         &codex(),
         &fixture.first,
     );
@@ -544,7 +576,7 @@ fn a_corrupt_key_is_replaced_like_an_absent_one() {
         let expected = CredentialPlaceholder::derive(
             &PlaceholderKey::from_slice(&replaced).unwrap(),
             &fixture.environment,
-            7,
+            fixture.binding_revision(),
             &codex(),
             &fixture.first,
         );
@@ -1120,4 +1152,62 @@ async fn a_lease_with_an_unreadable_placeholder_succeeds_and_carries_none() {
         assert_eq!(lease.credential.metadata.id, fixture.first);
         assert!(lease.with_material(|material| material == b"synthetic-first"));
     }
+}
+
+/// A boot's seed placeholders are exactly its leases': one for each
+/// requested slot the selected binding grants, in request order, and none
+/// for a slot it does not grant. A binding that is no longer the
+/// environment's is refused, as its leases would be.
+#[test]
+fn a_boots_slot_placeholders_are_its_leases_and_only_for_granted_slots() {
+    let fixture = fixture();
+    let environment = &fixture.environment;
+    let selected = fixture
+        .authority
+        .get_environment_access_binding(environment)
+        .unwrap()
+        .binding;
+    let anthropic = CapabilitySlot::parse("anthropic").unwrap();
+    let placeholders = fixture
+        .authority
+        .environment_slot_placeholders(environment, 7, &selected, &[openai(), anthropic, codex()])
+        .unwrap();
+    let slots: Vec<_> = placeholders.iter().map(|(slot, _)| slot.clone()).collect();
+    assert_eq!(slots, [openai(), codex()]);
+    assert!(
+        placeholders[0]
+            .1
+            .ct_eq(&fixture.leased(environment, 7, openai()))
+    );
+    assert!(
+        placeholders[1]
+            .1
+            .ct_eq(&fixture.leased(environment, 7, codex()))
+    );
+
+    let (profile_id, revision) = &fixture.second_profile;
+    let stale = EnvironmentAccessBinding {
+        profile_id: profile_id.clone(),
+        profile_revision: *revision,
+        ..selected.clone()
+    };
+    let anthropic = CapabilitySlot::parse("anthropic").unwrap();
+    // Refused whatever is asked: a granted slot, only ungranted slots, or none.
+    for slots in [vec![codex()], vec![anthropic], Vec::new()] {
+        assert!(
+            fixture
+                .authority
+                .environment_slot_placeholders(environment, 7, &stale, &slots)
+                .is_err(),
+            "{slots:?}"
+        );
+    }
+    // The current binding with no granted slot asked for is no values.
+    assert!(
+        fixture
+            .authority
+            .environment_slot_placeholders(environment, 7, &selected, &[])
+            .unwrap()
+            .is_empty()
+    );
 }

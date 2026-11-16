@@ -1329,6 +1329,97 @@ fn a_launch_without_a_usable_github_connection_omits_only_the_github_client() {
     assert!(sign_in.without_github().anthropic_sign_in());
 }
 
+/// A well-formed placeholder: the tag and 43 base64url characters whose last
+/// one leaves no stray bits.
+fn placeholder() -> CredentialPlaceholder {
+    CredentialPlaceholder::parse(&format!("cwp1_{}A", "B".repeat(42))).unwrap()
+}
+
+/// Intercepted, each Anthropic form drops the managed base URL; the API-key
+/// and subscription-token forms carry the placeholder as their one bearer,
+/// and nothing projects `ANTHROPIC_API_KEY`, which would be a second
+/// credential header.
+#[test]
+fn intercepted_anthropic_forms_carry_the_placeholder_and_no_managed_base() {
+    let placeholder = placeholder();
+    let api_key = clients(&["anthropic"]);
+    let subscription = api_key.with_anthropic_subscription_token().unwrap();
+    let sign_in = api_key.with_anthropic_sign_in().unwrap();
+    for (selected, bearer) in [
+        (api_key, Some("ANTHROPIC_AUTH_TOKEN")),
+        (subscription, Some("CLAUDE_CODE_OAUTH_TOKEN")),
+        (sign_in, None),
+    ] {
+        for placement in [
+            ManagedCredentialClientPlacement::Native,
+            ManagedCredentialClientPlacement::Platform,
+        ] {
+            let environment = selected
+                .for_placement(placement)
+                .intercepted(selected, Some(&placeholder))
+                .environment;
+            assert!(!environment.contains_key("ANTHROPIC_BASE_URL"));
+            assert!(!environment.contains_key("ANTHROPIC_API_KEY"));
+            let bearers: Vec<_> = ["ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]
+                .into_iter()
+                .filter(|name| environment.contains_key(*name))
+                .collect();
+            assert_eq!(bearers, bearer.into_iter().collect::<Vec<_>>());
+            if let Some(name) = bearer {
+                assert_eq!(environment[name], placeholder.as_str());
+            }
+        }
+    }
+}
+
+/// Intercepted without a placeholder, no Anthropic bearer is projected, so
+/// the fixed managed value is never sent to the real host.
+#[test]
+fn intercepted_without_a_placeholder_projects_no_anthropic_bearer() {
+    let selected = clients(&["anthropic"]);
+    let environment = selected
+        .for_placement(ManagedCredentialClientPlacement::Native)
+        .intercepted(selected, None)
+        .environment;
+    for name in [
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ] {
+        assert!(!environment.contains_key(name), "{name}");
+    }
+}
+
+/// Everything but the Anthropic names is exactly the projection without
+/// interception, and a selection without Anthropic is unchanged.
+#[test]
+fn interception_changes_only_the_anthropic_names() {
+    let placeholder = placeholder();
+    for selected in [
+        clients(&["codex", "openai", "anthropic", "ssh"]),
+        clients(&["codex", "openai", "ssh"]),
+    ] {
+        let plain = selected.for_placement(ManagedCredentialClientPlacement::Native);
+        let intercepted = plain.clone().intercepted(selected, Some(&placeholder));
+        let others = |projection: &ManagedCredentialClientProjection| {
+            projection
+                .environment
+                .iter()
+                .filter(|(name, _)| {
+                    !name.starts_with("ANTHROPIC_") && *name != "CLAUDE_CODE_OAUTH_TOKEN"
+                })
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(others(&intercepted), others(&plain));
+        assert_eq!(intercepted.codex, plain.codex);
+        assert_eq!(intercepted.gh, plain.gh);
+        if !selected.contains(ManagedCredentialClient::Anthropic) {
+            assert_eq!(intercepted, plain);
+        }
+    }
+}
+
 #[test]
 fn the_anthropic_credential_kind_fixes_claude_codes_form() {
     let selected = clients(&["anthropic"]);

@@ -45,9 +45,8 @@ use crate::transport::{
 use crate::{
     AccessProfileRecord, AccessProfileRevisionRecord, AuthorityProtectedStore, CredentialRecord,
     EnvironmentAccessBindingRecord, EnvironmentBrokerRuntime, LocalBrokerProcessConfig,
-    LocalBrokerProcessSpawner, LocalCredentialAuthority, LocalCredentialError, LocalSecretProject,
-    NewCredential, RepositoryCredentialLeaseRequest, ResolvedWorkloadSecretMetadata,
-    WorkloadSecretMetadata, WorkloadSecretSelection, WorkloadSecretSource,
+    LocalBrokerProcessSpawner, LocalCredentialAuthority, LocalCredentialError, NewCredential,
+    RepositoryCredentialLeaseRequest,
 };
 
 const MAX_RPC_MESSAGE_BYTES: usize = MAX_PROTECTED_VALUE_BYTES + 64 * 1024;
@@ -82,8 +81,10 @@ const MAX_SSH_ENROLLMENT_WORKERS: u32 = 8;
 const SSH_ENROLLMENT_DEADLINE: Duration = Duration::from_secs(30);
 
 mod grants;
+mod placeholders;
 mod profiles;
 mod repository;
+mod workload_secrets;
 
 use profiles::{
     environment_binding_to_proto, profile_entries, profile_record_to_proto,
@@ -91,6 +92,10 @@ use profiles::{
 };
 pub(crate) use repository::REPOSITORY_PREPARATION_TIMEOUT;
 use repository::{PreparedRepository, RepositoryProcessManager, cleanup_repository_ssh_runtimes};
+use workload_secrets::{
+    resolved_secret_to_proto, secret_project_to_proto, workload_secret_selection_from_proto,
+    workload_secret_to_proto,
+};
 
 struct AuthorityRpc<S: ProtectedStore> {
     authority: Arc<LocalCredentialAuthority<S>>,
@@ -1963,6 +1968,18 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         .map(Response::new)
     }
 
+    async fn get_environment_credential_placeholders(
+        &self,
+        request: Request<v1::GetEnvironmentCredentialPlaceholdersRequest>,
+    ) -> Result<Response<v1::GetEnvironmentCredentialPlaceholdersResponse>, Status> {
+        placeholders::environment_credential_placeholders(
+            Arc::clone(&self.authority),
+            request.into_inner(),
+        )
+        .await
+        .map(Response::new)
+    }
+
     async fn ensure_environment_broker(
         &self,
         request: Request<v1::EnsureEnvironmentBrokerRequest>,
@@ -2238,69 +2255,6 @@ fn local_secret_project_id(value: &str) -> Result<Uuid, Status> {
         ));
     }
     Ok(id)
-}
-
-fn secret_project_to_proto(project: LocalSecretProject) -> v1::LocalSecretProject {
-    v1::LocalSecretProject {
-        id: project.id.to_string(),
-        name: project.name,
-        secret_count: project.secret_count,
-        created_at_unix_ms: project.created_at_unix_ms,
-        updated_at_unix_ms: project.updated_at_unix_ms,
-    }
-}
-
-fn workload_secret_to_proto(secret: WorkloadSecretMetadata) -> v1::WorkloadSecretMetadata {
-    v1::WorkloadSecretMetadata {
-        key: secret.key,
-        created_at_unix_ms: secret.created_at_unix_ms,
-        updated_at_unix_ms: secret.updated_at_unix_ms,
-        protected_store_cleanup_pending: secret.protected_store_cleanup_pending,
-    }
-}
-
-fn workload_secret_source_to_proto(source: WorkloadSecretSource) -> v1::WorkloadSecretSource {
-    match source {
-        WorkloadSecretSource::Organization => v1::WorkloadSecretSource::Organization,
-        WorkloadSecretSource::Project => v1::WorkloadSecretSource::Project,
-        WorkloadSecretSource::User => v1::WorkloadSecretSource::User,
-        WorkloadSecretSource::ExplicitEnvironment => v1::WorkloadSecretSource::ExplicitEnvironment,
-    }
-}
-
-fn resolved_secret_to_proto(
-    secret: ResolvedWorkloadSecretMetadata,
-) -> v1::ResolvedWorkloadSecretMetadata {
-    v1::ResolvedWorkloadSecretMetadata {
-        key: secret.key,
-        source: workload_secret_source_to_proto(secret.source) as i32,
-        overridden_sources: secret
-            .overridden_sources
-            .into_iter()
-            .map(|source| workload_secret_source_to_proto(source) as i32)
-            .collect(),
-    }
-}
-
-fn workload_secret_selection_from_proto(
-    selection: v1::WorkloadSecretSelection,
-) -> Result<WorkloadSecretSelection, Status> {
-    let explicit_environment_keys = selection
-        .explicit_environment_keys
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if explicit_environment_keys.len() != selection.explicit_environment_keys.len() {
-        return Err(Status::invalid_argument(
-            "duplicate explicit environment key",
-        ));
-    }
-    Ok(WorkloadSecretSelection {
-        organization: selection.organization,
-        project: selection.project,
-        user: selection.user,
-        explicit_environment_keys,
-    })
 }
 
 fn environment_broker_runtime_to_proto(

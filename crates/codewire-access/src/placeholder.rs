@@ -2,13 +2,21 @@
 //!
 //! An environment is given a placeholder in place of each credential its
 //! profile selects. The value is derived, never stored: an HMAC over the
-//! environment, its generation, the slot and the credential, under a key the
-//! credential authority keeps in its protected store. No environment can read
-//! that key; any process of the authority's own OS user that can read the
-//! store can. So a placeholder differs for every one of them, the authority
-//! can compute it again for any generation, and an environment cannot compute
-//! any other environment's. A placeholder grants nothing by itself; it only
-//! names, to that environment's own broker, the credential it stands for.
+//! environment, its binding's profile revision, the slot and the credential,
+//! under a key the credential authority keeps in its protected store. No
+//! environment can read that key; any process of the authority's own OS user
+//! that can read the store can. So a placeholder differs for every one of
+//! them, the authority can compute it again at any time, and an environment
+//! cannot compute any other environment's. A placeholder grants nothing by
+//! itself; it only names, to that environment's own broker, the credential it
+//! stands for.
+//!
+//! The revision input is the binding's, not the VM generation (#3999,
+//! deliberately changed from #4308): a VM checkpoint restored in place boots
+//! a new generation with the same binding, so its running agents keep their
+//! placeholder and keep working. A fork is another environment, so it gets
+//! new placeholders and its agents start again: that isolation comes from the
+//! environment ID. Any rebind to another revision or credential changes it.
 
 use std::fmt;
 
@@ -33,7 +41,7 @@ pub const CREDENTIAL_PLACEHOLDER_LENGTH: usize =
 /// The key's length.
 pub const PLACEHOLDER_KEY_BYTES: usize = 32;
 /// HMAC input prefix that keeps this derivation apart from any other use of
-/// the key. The environment, a zero byte, the generation, the slot, a zero
+/// the key. The environment, a zero byte, the profile revision, the slot, a zero
 /// byte and the credential ID follow it.
 const DERIVATION_DOMAIN: &[u8] = b"codewire.credential-placeholder/v1\0";
 
@@ -73,16 +81,19 @@ impl fmt::Debug for PlaceholderKey {
 pub struct CredentialPlaceholder(String);
 
 impl CredentialPlaceholder {
-    /// The placeholder for `credential_id` in `slot` of one environment
-    /// generation: HMAC-SHA256 keyed by `key` over
+    /// The placeholder for `credential_id` in `slot` of one environment at
+    /// one binding: HMAC-SHA256 keyed by `key` over
     /// `codewire.credential-placeholder/v1\0`, the environment ID, a zero
-    /// byte, the generation as eight big-endian bytes, the slot, a zero byte
-    /// and the credential ID. No identifier can contain a zero byte and the
-    /// generation has a fixed width, so the input is unambiguous.
+    /// byte, `binding_revision` as eight big-endian bytes, the slot, a zero
+    /// byte and the credential ID. No identifier can contain a zero byte and
+    /// the revision has a fixed width, so the input is unambiguous.
+    /// `binding_revision` is the selected binding's profile revision, zero
+    /// for a grant no profile selects; never the VM generation (see the
+    /// module documentation).
     pub fn derive(
         key: &PlaceholderKey,
         environment_id: &EnvironmentId,
-        environment_generation: u64,
+        binding_revision: u64,
         slot: &CapabilitySlot,
         credential_id: &CredentialId,
     ) -> Self {
@@ -90,7 +101,7 @@ impl CredentialPlaceholder {
         mac.update(DERIVATION_DOMAIN);
         mac.update(environment_id.as_str().as_bytes());
         mac.update(&[0]);
-        mac.update(&environment_generation.to_be_bytes());
+        mac.update(&binding_revision.to_be_bytes());
         mac.update(slot.as_str().as_bytes());
         mac.update(&[0]);
         mac.update(credential_id.as_str().as_bytes());
