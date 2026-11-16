@@ -132,6 +132,14 @@ spec:
                 configMapKeyRef:
                   name: codewire-image-registries
                   key: CODEWIRE_APPROVED_IMAGE_REGISTRIES
+            # cw-egress (#4000): off until hosted egress is observed working
+            # on Dev. The warm-pool template admission policy reads the same
+            # ConfigMap, so a template's arm follows this switch.
+            - name: CODEWIRE_HOSTED_EGRESS_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-hosted-egress
+                  key: CODEWIRE_HOSTED_EGRESS_ENABLED
           resources:
             requests:
               cpu: 100m

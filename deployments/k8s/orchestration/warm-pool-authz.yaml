@@ -103,8 +103,17 @@ metadata:
   labels:
     app.kubernetes.io/name: codewire
     app.kubernetes.io/component: orchestration
+  # Removing this policy would admit any pool template, so a source change
+  # that drops it never prunes it.
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   failurePolicy: Fail
+  # The hosted-egress switch and its broker peers (codewire-hosted-egress,
+  # hosted-egress.yaml), which orchestration's environment also reads.
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
   matchConstraints:
     matchPolicy: Equivalent
     resourceRules:
@@ -300,6 +309,75 @@ spec:
         fi
         echo "codewire mount-workspace: mounted the $volume workspace volume (formatted=$fresh e2fsck_ms=$check_ms total_ms=$((($(date +%s%N) - began) / 1000000)))"
         '''
+    # Hosted egress (codewire#4000; private-docs designs/hosted-egress.md,
+    # "Warm-pool template admission"). The deployment decides, never the
+    # template: the switch is the codewire-hosted-egress ConfigMap that
+    # orchestration's environment also reads, and orchestration cannot write
+    # it. On, only broker-mode templates are admitted; off, none is. No state
+    # admits both, so a template that drops the label never falls back to
+    # the world egress below.
+    - name: hostedEgress
+      expression: >-
+        has(params.data) && 'CODEWIRE_HOSTED_EGRESS_ENABLED' in params.data &&
+        params.data['CODEWIRE_HOSTED_EGRESS_ENABLED'] == 'true'
+    - name: egressLabelled
+      expression: >-
+        has(object.spec.podTemplate.metadata) && has(object.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/egress' in object.spec.podTemplate.metadata.labels
+    - name: broker
+      expression: >-
+        variables.egressLabelled &&
+        object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'
+    - name: brokerEnvironment
+      expression: "['CODEWIRE_EGRESS_STREAM_ADDR', 'CODEWIRE_WORKSPACE_BINDING_ADDR']"
+    - name: brokerAudiences
+      expression: "['codewire.internal.egress.v1']"
+    # Of those, the ones every broker-mode workspace must set: without the
+    # stream address the daemon serves without its self-check (cw-security).
+    - name: brokerRequiredEnvironment
+      expression: "['CODEWIRE_EGRESS_STREAM_ADDR', 'CODEWIRE_WORKSPACE_BINDING_ADDR']"
+    # The VM RuntimeClasses the privileged TUN init may run under: it is root
+    # only inside a guest. Unlike runtimeClasses, no overlay patches this.
+    - name: vmRuntimeClasses
+      expression: "['commodity', 'commodity-32g']"
+    # The daemon image's repository, from the deployment, as a list of at
+    # most one. A value that is not a registry path, the empty base value
+    # included, leaves it empty, which admits no TUN image.
+    - name: daemonRepositories
+      expression: >-
+        has(params.data) && 'CODEWIRE_HOSTED_EGRESS_DAEMON_REPOSITORY' in params.data &&
+        params.data['CODEWIRE_HOSTED_EGRESS_DAEMON_REPOSITORY'].matches('^[a-z0-9]+([.-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$') ?
+        [string(params.data['CODEWIRE_HOSTED_EGRESS_DAEMON_REPOSITORY'])] : []
+    # A broker peer, as one list of strings: its namespace, its ports
+    # (PROTOCOL/port, comma-separated), then each Pod label as key=value.
+    # Neither a label key nor a label value can hold '=', and the first two
+    # entries never do, so a selector with as many labels as the peer, each
+    # key=value among the peer's, has exactly the peer's labels.
+    #
+    # The public gateway's proxies, from the deployment: their namespace,
+    # the gateway controller's two owner labels and the listener port. A
+    # missing field leaves no gateway peer.
+    - name: gatewayPeers
+      expression: >-
+        has(params.data) &&
+        ['CODEWIRE_HOSTED_EGRESS_GATEWAY_NAMESPACE', 'CODEWIRE_HOSTED_EGRESS_GATEWAY_NAME',
+        'CODEWIRE_HOSTED_EGRESS_GATEWAY_OWNER_NAMESPACE', 'CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT'].all(k,
+        k in params.data && size(params.data[k]) > 0) ?
+        [[string(params.data['CODEWIRE_HOSTED_EGRESS_GATEWAY_NAMESPACE']),
+        'TCP/' + string(params.data['CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT']),
+        'gateway.envoyproxy.io/owning-gateway-name=' + string(params.data['CODEWIRE_HOSTED_EGRESS_GATEWAY_NAME']),
+        'gateway.envoyproxy.io/owning-gateway-namespace=' + string(params.data['CODEWIRE_HOSTED_EGRESS_GATEWAY_OWNER_NAMESPACE'])]] : []
+    # Every peer a broker-mode template may name
+    # (crates/codewire-orchestration/src/sandbox/template/network.rs,
+    # broker_egress_rules). Pools are never confidential, so the KBS is
+    # never one.
+    - name: brokerEgressPeers
+      expression: >-
+        [[variables.serverNamespace, 'TCP/8089', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=egress'],
+        [variables.serverNamespace, 'TCP/8087', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=orchestration'],
+        [variables.serverNamespace, 'TCP/8443', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=derp'],
+        [variables.serverNamespace, 'UDP/41641', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=udp-relay']] +
+        variables.gatewayPeers
   validations:
     - expression: >-
         request.name.matches('^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$') &&
@@ -334,8 +412,10 @@ spec:
         dyn(e.valueFrom).all(k, k == 'fieldRef') &&
         dyn(e.valueFrom.fieldRef).all(k, k in ['fieldPath', 'apiVersion']) &&
         e.valueFrom.fieldRef.fieldPath == 'metadata.uid' &&
-        (!has(e.valueFrom.fieldRef.apiVersion) || e.valueFrom.fieldRef.apiVersion == 'v1'))))))
-      message: a warm-pool template sets only the identity-free workspace and DinD variables, takes no environment source and reads only its own Pod UID
+        (!has(e.valueFrom.fieldRef.apiVersion) || e.valueFrom.fieldRef.apiVersion == 'v1'))) ||
+        variables.hostedEgress && c.name == 'workspace' && e.name in variables.brokerEnvironment &&
+        dyn(e).all(k, k in ['name', 'value']) && has(e.value))))
+      message: a warm-pool template sets only the identity-free workspace and DinD variables (and, with hosted egress on, the workspace's two broker addresses), takes no environment source and reads only its own Pod UID
     - expression: >-
         variables.pod.containers.exists_one(c, c.name == 'workspace') &&
         variables.pod.containers.all(c, c.name != 'workspace' ||
@@ -353,8 +433,10 @@ spec:
         v.configMap.items[0].key == 'ca.crt' && v.configMap.items[0].path == 'ca.crt')) &&
         (!has(v.projected) || (has(v.projected.sources) && v.projected.sources.all(s,
         dyn(s).all(k, k == 'serviceAccountToken') &&
-        has(s.serviceAccountToken.audience) && s.serviceAccountToken.audience in variables.audiences))))
-      message: a warm-pool template mounts only images, emptyDirs, the public roots ConfigMaps (only their ca.crt) and workspace-audience projected tokens
+        has(s.serviceAccountToken.audience) && s.serviceAccountToken.audience in variables.audiences ||
+        variables.hostedEgress && dyn(s).all(k, k == 'serviceAccountToken') &&
+        has(s.serviceAccountToken.audience) && s.serviceAccountToken.audience in variables.brokerAudiences))))
+      message: a warm-pool template mounts only images, emptyDirs, the public roots ConfigMaps (only their ca.crt) and workspace-audience projected tokens (and, with hosted egress on, the egress token)
     - expression: >-
         has(variables.pod.serviceAccountName) &&
         variables.pod.serviceAccountName == 'codewire-sandbox' &&
@@ -443,6 +525,7 @@ spec:
     # peers. Anything else (a bare 0.0.0.0/0, a private range, another
     # Service, a wider port) is refused.
     - expression: >-
+        variables.hostedEgress ||
         has(object.spec.networkPolicy) &&
         dyn(object.spec.networkPolicy).all(k, k in ['ingress', 'egress']) &&
         has(object.spec.networkPolicy.egress) &&
@@ -463,6 +546,114 @@ spec:
         (has(t.podSelector) ? t.podSelector.matchLabels.map(k, k + '=' + t.podSelector.matchLabels[k])[0] : '') +
         '|' + p.protocol + '/' + string(p.port)) in variables.egressPeers)))))
       message: warm-pool egress is Codewire's allowlist only, the world outside every private range plus the named in-cluster peers and ports
+    # Hosted egress (codewire#4000): the switch, not the template, picks the
+    # arm. On, every template is broker-mode; off, none carries the egress
+    # label.
+    - expression: >-
+        variables.hostedEgress ? variables.broker : !variables.egressLabelled
+      message: with hosted egress on, every warm-pool template is broker-mode (codewire.sh/egress=broker); with it off, none carries the egress label
+    # A broker-mode workspace always has its stream and binding addresses,
+    # so its daemon gates serving on the self-check.
+    - expression: >-
+        !variables.hostedEgress ||
+        variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) &&
+        variables.brokerRequiredEnvironment.all(n, c.env.exists(e, e.name == n && has(e.value) && size(e.value) > 0)))
+      message: with hosted egress on, the workspace container sets the egress stream and workspace binding addresses
+    # The broker arm's resolver: the netstack (the TUN's gateway, NETSTACK_RESOLVER
+    # in hosted_egress.rs) is the Pod's only nameserver, with no search list
+    # or options. The fence and the lockdown also refuse cluster DNS, so this
+    # keeps a broker Pod from even trying it.
+    - expression: >-
+        !variables.hostedEgress ||
+        has(variables.pod.dnsPolicy) && variables.pod.dnsPolicy == 'None' &&
+        has(variables.pod.dnsConfig) && dyn(variables.pod.dnsConfig).all(k, k in ['nameservers', 'searches']) &&
+        has(variables.pod.dnsConfig.nameservers) && variables.pod.dnsConfig.nameservers == ['192.0.2.1'] &&
+        (!has(variables.pod.dnsConfig.searches) || size(variables.pod.dnsConfig.searches) == 0)
+      message: with hosted egress on, the netstack resolver 192.0.2.1 is a warm-pool template's only nameserver, with no search list or options
+    # The broker arm's egress: no address range and no world rule. Each peer
+    # is exactly one broker peer (one namespace and the whole Pod label map,
+    # so neither an extra label nor a missing Pod selector passes) on only
+    # that peer's ports. Which container mounts the egress token is checked
+    # at first bind (pool_member_isolated), not here.
+    - expression: >-
+        !variables.hostedEgress ||
+        has(object.spec.networkPolicy) &&
+        dyn(object.spec.networkPolicy).all(k, k in ['ingress', 'egress']) &&
+        has(object.spec.networkPolicy.egress) &&
+        object.spec.networkPolicy.egress.all(r, dyn(r).all(k, k in ['to', 'ports']) &&
+        has(r.to) && size(r.to) > 0 && has(r.ports) && size(r.ports) > 0 &&
+        r.to.all(t, dyn(t).all(k, k in ['namespaceSelector', 'podSelector']) &&
+        has(t.namespaceSelector) && dyn(t.namespaceSelector).all(k, k == 'matchLabels') &&
+        has(t.namespaceSelector.matchLabels) && size(t.namespaceSelector.matchLabels) == 1 &&
+        'kubernetes.io/metadata.name' in t.namespaceSelector.matchLabels &&
+        has(t.podSelector) && dyn(t.podSelector).all(k, k == 'matchLabels') &&
+        has(t.podSelector.matchLabels) &&
+        variables.brokerEgressPeers.exists(b,
+        b[0] == t.namespaceSelector.matchLabels['kubernetes.io/metadata.name'] &&
+        size(t.podSelector.matchLabels) == size(b) - 2 &&
+        t.podSelector.matchLabels.all(k, (k + '=' + t.podSelector.matchLabels[k]) in b) &&
+        r.ports.all(p, dyn(p).all(k, k in ['port', 'protocol']) && has(p.port) && has(p.protocol) &&
+        type(p.port) == int && (p.protocol + '/' + string(p.port)) in b[1].split(',')))))
+      message: with hosted egress on, warm-pool egress names only the broker peers, each by its namespace and exact Pod labels on its own ports, with no address range
+    # The broker arm's privilege (cw-network and cw-security, 2026-11-16).
+    # The Pod runs as the workspace user and group, with no extra groups or
+    # sysctls, so a container that sets no securityContext is never root.
+    # Root only for the pinned TUN init; mount-workspace, an init container
+    # that runs and exits before it; and dind, from the official DinD image.
+    # Neither root init container is a sidecar. No container adds a
+    # capability to the runtime's default set, and none sets
+    # allowPrivilegeEscalation: true. What this does not stop: a container
+    # that leaves escalation at its default can still reach in-guest root
+    # through a setuid binary such as sudo, which workspaces keep. That
+    # widens nothing (cw-security, 2026-11-16): the in-guest routing is how
+    # traffic reaches the broker, not the boundary; the lockdown outside the
+    # guest is, and the daemon's self-check verifies the routing each time.
+    - expression: >-
+        !variables.hostedEgress ||
+        has(variables.pod.securityContext) &&
+        has(variables.pod.securityContext.runAsUser) && variables.pod.securityContext.runAsUser == 1000 &&
+        has(variables.pod.securityContext.runAsGroup) && variables.pod.securityContext.runAsGroup == 1000 &&
+        (!has(variables.pod.securityContext.supplementalGroups) || size(variables.pod.securityContext.supplementalGroups) == 0) &&
+        (!has(variables.pod.securityContext.sysctls) || size(variables.pod.securityContext.sysctls) == 0) &&
+        variables.containers.all(c, !has(c.securityContext) ||
+        (!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) ||
+        size(c.securityContext.capabilities.add) == 0) &&
+        (!has(c.securityContext.allowPrivilegeEscalation) || !c.securityContext.allowPrivilegeEscalation)) &&
+        (!has(variables.pod.initContainers) ||
+        variables.pod.initContainers.all(c, !has(c.securityContext) ||
+        !(has(c.securityContext.privileged) && c.securityContext.privileged ||
+        has(c.securityContext.runAsUser) && c.securityContext.runAsUser == 0 ||
+        has(c.securityContext.runAsGroup) && c.securityContext.runAsGroup == 0) ||
+        c.name == 'hosted-egress-tun' && !has(c.restartPolicy) ||
+        c.name == 'mount-workspace' && !has(c.restartPolicy) &&
+        variables.pod.initContainers.map(i, i.name).indexOf('mount-workspace') <
+        variables.pod.initContainers.map(i, i.name).indexOf('hosted-egress-tun'))) &&
+        variables.pod.containers.all(c, !has(c.securityContext) ||
+        !(has(c.securityContext.privileged) && c.securityContext.privileged ||
+        has(c.securityContext.runAsUser) && c.securityContext.runAsUser == 0 ||
+        has(c.securityContext.runAsGroup) && c.securityContext.runAsGroup == 0) ||
+        c.name == 'dind' && c.image.matches('^docker[.]io/library/docker:[0-9][0-9.]*-dind@sha256:[0-9a-f]{64}$'))
+      message: with hosted egress on, the Pod runs as 1000:1000 with no extra groups or sysctls; only hosted-egress-tun and mount-workspace (init containers, not sidecars, mount-workspace before the TUN init) and dind (the official DinD image) run as root; and no container adds a capability or sets allowPrivilegeEscalation true
+    # The privileged TUN init (codewire#4955): never a regular container; an
+    # init container only with the switch on, under a VM runtime class, with
+    # exactly its command and nothing added, from the daemon image the
+    # deployment names, the same image the codewire-bin volume mounts. Every
+    # broker-mode template has it.
+    - expression: >-
+        variables.pod.containers.all(c, c.name != 'hosted-egress-tun') &&
+        (!has(variables.pod.initContainers) ||
+        variables.pod.initContainers.all(c, c.name != 'hosted-egress-tun' ||
+        (variables.hostedEgress &&
+        has(variables.pod.runtimeClassName) && variables.pod.runtimeClassName in variables.vmRuntimeClasses &&
+        has(c.command) && c.command == ['/usr/local/bin/cw', '__hosted-egress-tun', '--owner-uid', '1000'] &&
+        !has(c.args) && !has(c.env) && !has(c.envFrom) && !has(c.volumeMounts) && !has(c.volumeDevices) &&
+        c.image.matches('^[^@ ]+@sha256:[0-9a-f]{64}$') &&
+        c.image.split('@')[0] in variables.daemonRepositories &&
+        variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) &&
+        has(v.image.reference) && v.image.reference == c.image)))) &&
+        (!variables.hostedEgress || has(variables.pod.initContainers) &&
+        variables.pod.initContainers.exists(c, c.name == 'hosted-egress-tun'))
+      message: hosted-egress-tun runs only as an init container with hosted egress on, under a VM runtime class, exactly its command with nothing added, from the deployment's daemon image; every broker-mode template has it
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -471,9 +662,18 @@ metadata:
   labels:
     app.kubernetes.io/name: codewire
     app.kubernetes.io/component: orchestration
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   policyName: codewire-orchestration-warm-pool-template
   validationActions: [Deny]
+  # The hosted-egress switch, from the namespace orchestration runs in.
+  # Kustomize writes that namespace (kustomizeconfig.yaml); a missing
+  # ConfigMap denies every pool template.
+  paramRef:
+    name: codewire-hosted-egress
+    namespace: prod
+    parameterNotFoundAction: Deny
   # No mutable namespace selector: orchestration can update namespace labels.
   # The identity match bounds the policy; it follows the writer everywhere.
 ---

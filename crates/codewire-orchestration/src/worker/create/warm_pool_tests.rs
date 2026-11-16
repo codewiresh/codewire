@@ -347,6 +347,176 @@ fn every_warm_pool_runs_only_the_canonical_image_and_the_platform_keepalive() {
     }
 }
 
+/// Hosted egress as a Dev-shaped deployment sets it (#4000), with neutral
+/// gateway names; the broker golden and the admission proof use these values.
+fn broker_egress() -> crate::sandbox::template::HostedEgressTemplate {
+    crate::sandbox::template::HostedEgressTemplate {
+        stream_addr: "10.44.0.89:8089".into(),
+        binding_addr: "10.44.0.87:8087".into(),
+        fence_revision: "2".into(),
+        gateway: crate::sandbox::template::GatewayPeer {
+            namespace: "gateway-proxies".into(),
+            gateway_name: "public".into(),
+            gateway_namespace: "gateway".into(),
+            port: 10443,
+        },
+        derp_tls_port: 8443,
+    }
+}
+
+/// The broker-mode pool template (#4000 P5): what the warm-pool template
+/// admission policy's broker arm admits. The scratch Kind proof of that
+/// policy applies this file.
+#[test]
+fn a_broker_mode_warm_pool_matches_its_golden_file() {
+    let cfg = dev_cfg();
+    let mut opts = shape_template_opts(
+        &cfg,
+        SYNTHETIC_WORKSPACE_IMAGE,
+        &standard_runtime_profile_spec(&cfg),
+        shapes()[0],
+    );
+    opts.hosted_egress = Some(broker_egress());
+    let objects = render_warm_pool(&cfg.sandbox_namespace, &opts, 2, false).unwrap();
+    crate::test_golden::assert_golden(
+        "warm-pool-broker-sandboxtemplate.golden.json",
+        &objects.template,
+    );
+}
+
+/// The template admission policy's broker arm (#4000) names exactly what the
+/// broker rendering adds: its two workspace variables, the egress token's
+/// audience, the TUN init's command and every egress peer with its Pod labels
+/// and port. A renderer change on either side fails here before a cluster
+/// denies every broker pool.
+#[test]
+fn the_admission_policy_names_the_broker_rendering() {
+    let manifests = concat!(env!("CARGO_MANIFEST_DIR"), "/../../");
+    let policy = std::fs::read_to_string(format!(
+        "{manifests}deployments/k8s/orchestration/warm-pool-authz.yaml"
+    ))
+    .unwrap();
+    let literal = |name: &str| {
+        policy
+            .split_once(&format!("- name: {name}\n"))
+            .and_then(|(_, rest)| rest.lines().next())
+            .and_then(|line| line.trim().strip_prefix("expression: "))
+            .map(cel_names)
+            .unwrap_or_else(|| panic!("the template policy names {name}"))
+    };
+    let cfg = dev_cfg();
+    let mut opts = shape_template_opts(
+        &cfg,
+        SYNTHETIC_WORKSPACE_IMAGE,
+        &standard_runtime_profile_spec(&cfg),
+        shapes()[0],
+    );
+    let server = opts.server_namespace.clone();
+    let today = render_warm_pool(&cfg.sandbox_namespace, &opts, 2, false).unwrap();
+    opts.hosted_egress = Some(broker_egress());
+    let broker = render_warm_pool(&cfg.sandbox_namespace, &opts, 2, false).unwrap();
+    let pod = |template: &Value| template["spec"]["podTemplate"]["spec"].clone();
+    let workspace_env = |template: &Value| -> Vec<String> {
+        pod(template)["containers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|container| container["name"] == "workspace")
+            .flat_map(|container| container["env"].as_array().cloned().unwrap_or_default())
+            .map(|variable| variable["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let before = workspace_env(&today.template);
+    let added: Vec<String> = workspace_env(&broker.template)
+        .into_iter()
+        .filter(|name| !before.contains(name))
+        .collect();
+    assert_eq!(literal("brokerEnvironment"), added);
+    assert_eq!(
+        literal("brokerAudiences"),
+        [codewire_daemon_proto::EGRESS_TOKEN_AUDIENCE]
+    );
+    assert!(policy.contains(&format!(
+        "c.command == [{}]",
+        crate::sandbox::template::HOSTED_EGRESS_TUN_COMMAND
+            .iter()
+            .map(|part| format!("'{part}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )));
+    assert!(policy.contains(&format!(
+        "c.name != '{}'",
+        crate::sandbox::template::HOSTED_EGRESS_TUN_CONTAINER
+    )));
+    // The netstack is the only nameserver, as rendered.
+    let dns = &pod(&broker.template)["dnsConfig"];
+    assert_eq!(pod(&broker.template)["dnsPolicy"], "None");
+    assert_eq!(dns["searches"], serde_json::json!([]));
+    assert!(policy.contains(&format!(
+        "variables.pod.dnsConfig.nameservers == ['{}']",
+        dns["nameservers"][0].as_str().unwrap()
+    )));
+    assert_eq!(dns["nameservers"].as_array().unwrap().len(), 1);
+    // Each rendered egress peer is one line of the policy's peer list: its
+    // port and each of its Pod labels, and no other label.
+    let rules = broker.template["spec"]["networkPolicy"]["egress"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(!rules.is_empty());
+    for rule in &rules {
+        for peer in rule["to"].as_array().unwrap() {
+            let namespace = peer["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
+                .as_str()
+                .unwrap();
+            let labels = peer["podSelector"]["matchLabels"].as_object().unwrap();
+            for port in rule["ports"].as_array().unwrap() {
+                let port = format!("'{}/{}'", port["protocol"].as_str().unwrap(), port["port"]);
+                let line = if namespace == server {
+                    policy
+                        .lines()
+                        .find(|line| {
+                            line.contains("[variables.serverNamespace, ") && line.contains(&port)
+                        })
+                        .unwrap_or_else(|| panic!("the policy has no server peer on {port}"))
+                        .to_owned()
+                } else {
+                    // The gateway's proxies come from the deployment's param.
+                    assert_eq!(namespace, "gateway-proxies");
+                    assert_eq!(port, "'TCP/10443'");
+                    continue;
+                };
+                assert_eq!(line.matches("=").count(), labels.len(), "{line}");
+                for (key, value) in labels {
+                    assert!(
+                        line.contains(&format!("'{key}={}'", value.as_str().unwrap())),
+                        "{line} lacks {key}"
+                    );
+                }
+            }
+        }
+    }
+    // The gateway peer's two label keys are the renderer's.
+    let gateway = rules
+        .iter()
+        .flat_map(|rule| rule["to"].as_array().unwrap().clone())
+        .find(|peer| {
+            peer["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
+                == "gateway-proxies"
+        })
+        .expect("the gateway peer");
+    for key in gateway["podSelector"]["matchLabels"]
+        .as_object()
+        .unwrap()
+        .keys()
+    {
+        assert!(
+            policy.contains(&format!("'{key}=' + string(params.data[")),
+            "{key}"
+        );
+    }
+}
+
 #[test]
 fn warm_pool_matches_golden_files() {
     let cfg = dev_cfg();
@@ -763,25 +933,12 @@ fn a_pool_member_is_isolated_exactly_as_its_rendering() {
 /// and the egress token only into the workspace container.
 #[test]
 fn a_broker_mode_pool_member_is_admitted_only_with_hosted_egress() {
-    use crate::sandbox::template::{
-        GatewayPeer, HOSTED_EGRESS_TUN_CONTAINER, HostedEgressTemplate, render_sandbox_template,
-    };
+    use crate::sandbox::template::{HOSTED_EGRESS_TUN_CONTAINER, render_sandbox_template};
     use crate::worker::workspace_binding::checks::pool_member_isolated;
     use serde_json::json;
 
     let (_, mut wanted) = golden_member();
-    wanted.hosted_egress = Some(HostedEgressTemplate {
-        stream_addr: "10.44.0.89:8089".into(),
-        binding_addr: "10.44.0.87:8087".into(),
-        fence_revision: "2".into(),
-        gateway: GatewayPeer {
-            namespace: "gateway-proxies".into(),
-            gateway_name: "public".into(),
-            gateway_namespace: "gateway".into(),
-            port: 10443,
-        },
-        derp_tls_port: 8443,
-    });
+    wanted.hosted_egress = Some(broker_egress());
     let template = render_sandbox_template("dev-sandboxes", &wanted);
     let mut spec = template["spec"]["podTemplate"]["spec"].clone();
     spec["volumes"].as_array_mut().unwrap().push(json!({

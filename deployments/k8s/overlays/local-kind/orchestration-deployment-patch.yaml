@@ -50,6 +50,12 @@
         configMapKeyRef:
           name: codewire-image-registries
           key: CODEWIRE_APPROVED_IMAGE_REGISTRIES
+    # The warm-pool template admission policy reads the same ConfigMap.
+    - name: CODEWIRE_HOSTED_EGRESS_ENABLED
+      valueFrom:
+        configMapKeyRef:
+          name: codewire-hosted-egress
+          key: CODEWIRE_HOSTED_EGRESS_ENABLED
     - name: OTEL_EXPORTER_OTLP_ENDPOINT
       value: ""
     # Mount the Connect conformance probe (connect-rpc/03 D8)

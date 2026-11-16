@@ -275,6 +275,92 @@ WARM_POOL_EXTRA_ROOTS_CONFIGMAPS = {"tests/e2e/kind": ["codewire-coordinator-ext
 # members as for environments, so a member renders exactly as the environment
 # that adopts it (#3852).
 WARM_POOL_EXTRA_ENVIRONMENT = {"tests/e2e/kind": ["CODEWIRE_CODEX_LOGIN_CHECK_PERIOD_SECONDS"]}
+# codewire#4000: the template policy's hosted-egress switch, the
+# codewire-hosted-egress ConfigMap that orchestration's environment also
+# reads (private-docs designs/hosted-egress.md, "Warm-pool template
+# admission"). On, only broker-mode templates are admitted; off, only today's.
+# Every target here ships it off; only the deploy repository turns it on.
+HOSTED_EGRESS_CONFIGMAP = "codewire-hosted-egress"
+HOSTED_EGRESS_SWITCH = "CODEWIRE_HOSTED_EGRESS_ENABLED"
+HOSTED_EGRESS_KEYS = (
+    HOSTED_EGRESS_SWITCH, "CODEWIRE_HOSTED_EGRESS_DAEMON_REPOSITORY", "CODEWIRE_HOSTED_EGRESS_GATEWAY_NAMESPACE",
+    "CODEWIRE_HOSTED_EGRESS_GATEWAY_NAME", "CODEWIRE_HOSTED_EGRESS_GATEWAY_OWNER_NAMESPACE",
+    "CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT",
+)
+HOSTED_EGRESS_BROKER_ENVIRONMENT = ("CODEWIRE_EGRESS_STREAM_ADDR", "CODEWIRE_WORKSPACE_BINDING_ADDR")
+HOSTED_EGRESS_BROKER_AUDIENCES = ("codewire.internal.egress.v1",)
+# The broker variables every broker-mode workspace must set (cw-security).
+HOSTED_EGRESS_BROKER_REQUIRED_ENVIRONMENT = ("CODEWIRE_EGRESS_STREAM_ADDR", "CODEWIRE_WORKSPACE_BINDING_ADDR")
+# The VM classes the privileged TUN init may run under, on every target: Kind
+# adds diagnostic runtimes to runtimeClasses, never to these.
+HOSTED_EGRESS_VM_RUNTIME_CLASSES = ("commodity", "commodity-32g")
+HOSTED_EGRESS_TUN_COMMAND = "['/usr/local/bin/cw', '__hosted-egress-tun', '--owner-uid', '1000']"
+HOSTED_EGRESS_FRAGMENTS = [
+    "paramKind: apiVersion: v1 kind: ConfigMap",
+    f"'{HOSTED_EGRESS_SWITCH}' in params.data && params.data['{HOSTED_EGRESS_SWITCH}'] == 'true'",
+    "'codewire.sh/egress' in object.spec.podTemplate.metadata.labels",
+    "object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'",
+    # The switch, not the template, picks the arm.
+    "variables.hostedEgress ? variables.broker : !variables.egressLabelled",
+    "variables.hostedEgress || has(object.spec.networkPolicy) && dyn(object.spec.networkPolicy).all(k, k in ['ingress', 'egress'])",
+    # The broker variables and audience, only with the switch on.
+    "variables.hostedEgress && c.name == 'workspace' && e.name in variables.brokerEnvironment && "
+    "dyn(e).all(k, k in ['name', 'value']) && has(e.value)",
+    "variables.hostedEgress && dyn(s).all(k, k == 'serviceAccountToken') && "
+    "has(s.serviceAccountToken.audience) && s.serviceAccountToken.audience in variables.brokerAudiences",
+    # The broker arm's egress: each peer exactly one broker peer.
+    "!variables.hostedEgress || has(object.spec.networkPolicy) && dyn(object.spec.networkPolicy).all(k, k in ['ingress', 'egress'])",
+    "has(r.to) && size(r.to) > 0 && has(r.ports) && size(r.ports) > 0 && r.to.all(t, dyn(t).all(k, k in ['namespaceSelector', 'podSelector'])",
+    "has(t.podSelector) && dyn(t.podSelector).all(k, k == 'matchLabels') && has(t.podSelector.matchLabels) && "
+    "variables.brokerEgressPeers.exists(b, b[0] == t.namespaceSelector.matchLabels['kubernetes.io/metadata.name'] && "
+    "size(t.podSelector.matchLabels) == size(b) - 2 && "
+    "t.podSelector.matchLabels.all(k, (k + '=' + t.podSelector.matchLabels[k]) in b)",
+    "type(p.port) == int && (p.protocol + '/' + string(p.port)) in b[1].split(',')",
+    "[[variables.serverNamespace, 'TCP/8089', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=egress'], "
+    "[variables.serverNamespace, 'TCP/8087', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=orchestration'], "
+    "[variables.serverNamespace, 'TCP/8443', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=derp'], "
+    "[variables.serverNamespace, 'UDP/41641', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=udp-relay']] "
+    "+ variables.gatewayPeers",
+    # The TUN init: an init container only, switch on, a VM class, exactly
+    # its command with nothing added, from the deployment's daemon image.
+    "variables.pod.containers.all(c, c.name != 'hosted-egress-tun')",
+    "(variables.hostedEgress && has(variables.pod.runtimeClassName) && "
+    "variables.pod.runtimeClassName in variables.vmRuntimeClasses && "
+    f"has(c.command) && c.command == {HOSTED_EGRESS_TUN_COMMAND} && "
+    "!has(c.args) && !has(c.env) && !has(c.envFrom) && !has(c.volumeMounts) && !has(c.volumeDevices) && "
+    "c.image.matches('^[^@ ]+@sha256:[0-9a-f]{64}$') && "
+    "c.image.split('@')[0] in variables.daemonRepositories && "
+    "variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) && has(v.image.reference) && "
+    "v.image.reference == c.image))))",
+    # The broker arm's privilege: root only for the TUN init, mount-workspace
+    # ordered before it, and dind from the official DinD image; no added
+    # capability or escalation anywhere.
+    "variables.pod.initContainers.map(i, i.name).indexOf('mount-workspace') < "
+    "variables.pod.initContainers.map(i, i.name).indexOf('hosted-egress-tun')",
+    "size(c.securityContext.capabilities.add) == 0",
+    # Neither root init container is a sidecar, and a broker template has the TUN init.
+    "c.name == 'hosted-egress-tun' && !has(c.restartPolicy) || c.name == 'mount-workspace' && !has(c.restartPolicy) &&",
+    "(!variables.hostedEgress || has(variables.pod.initContainers) && "
+    "variables.pod.initContainers.exists(c, c.name == 'hosted-egress-tun'))",
+    # A broker-mode workspace always has its stream and binding addresses.
+    "variables.brokerRequiredEnvironment.all(n, c.env.exists(e, e.name == n && has(e.value) && size(e.value) > 0))",
+    # The netstack is the only resolver.
+    "has(variables.pod.dnsPolicy) && variables.pod.dnsPolicy == 'None' && has(variables.pod.dnsConfig) && "
+    "dyn(variables.pod.dnsConfig).all(k, k in ['nameservers', 'searches']) && has(variables.pod.dnsConfig.nameservers) && "
+    "variables.pod.dnsConfig.nameservers == ['192.0.2.1'] && "
+    "(!has(variables.pod.dnsConfig.searches) || size(variables.pod.dnsConfig.searches) == 0)",
+    "has(variables.pod.securityContext.runAsUser) && variables.pod.securityContext.runAsUser == 1000 && "
+    "has(variables.pod.securityContext.runAsGroup) && variables.pod.securityContext.runAsGroup == 1000",
+    "(!has(variables.pod.securityContext.supplementalGroups) || size(variables.pod.securityContext.supplementalGroups) == 0)",
+    "(!has(c.securityContext.allowPrivilegeEscalation) || !c.securityContext.allowPrivilegeEscalation)",
+    "c.name == 'dind' && c.image.matches('^docker[.]io/library/docker:[0-9][0-9.]*-dind@sha256:[0-9a-f]{64}$')",
+    # An empty or malformed repository admits no TUN image.
+    "params.data['CODEWIRE_HOSTED_EGRESS_DAEMON_REPOSITORY'].matches("
+    "'^[a-z0-9]+([.-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$') ? "
+    "[string(params.data['CODEWIRE_HOSTED_EGRESS_DAEMON_REPOSITORY'])] : []",
+]
+# Verbs that create, change or remove a ConfigMap.
+CONFIGMAP_WRITE_VERBS = {"create", "update", "patch", "delete", "deletecollection", "*"}
 
 
 def cel_list(values: tuple[str, ...] | list[str]) -> str:
@@ -381,6 +467,7 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             "variables.serverNamespace + '|app.kubernetes.io/component=orchestration|TCP/8087'",
             "variables.serverNamespace + '|app.kubernetes.io/component=udp-relay|UDP/41641']",
             "'10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16'",
+            *HOSTED_EGRESS_FRAGMENTS,
         ],
         WARM_POOL_MEMBER_POLICY: [
             "apiGroups: - agents.x-k8s.io apiVersions: - v1beta1 operations: - CREATE - UPDATE resources: - sandboxes",
@@ -422,6 +509,17 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
                 if not found or found.group(1) != cel_list(roots):
                     output.append(f"{label}: {policy_name} roots ConfigMaps must be exactly {cel_list(roots)}, third: "
                                   f"{found.group(1) if found else None}")
+                # The broker arm's literals are the same on every target.
+                for name, values in [("brokerEnvironment", HOSTED_EGRESS_BROKER_ENVIRONMENT),
+                                     ("brokerRequiredEnvironment", HOSTED_EGRESS_BROKER_REQUIRED_ENVIRONMENT),
+                                     ("brokerAudiences", HOSTED_EGRESS_BROKER_AUDIENCES),
+                                     ("vmRuntimeClasses", HOSTED_EGRESS_VM_RUNTIME_CLASSES)]:
+                    found = re.search(rf"- expression: '?(\[[^\]]*\])'? name: {name} ", normalized)
+                    if not found or found.group(1) != cel_list(values):
+                        output.append(f"{label}: {policy_name} {name} must be exactly {cel_list(values)}: "
+                                      f"{found.group(1) if found else None}")
+                if not prune_protected(policy):
+                    output.append(f"{label}: {policy_name} must never be pruned")
                 # Only the Kind e2e overlay adds its test knob's variable (#3852).
                 environment = [*WARM_POOL_ENVIRONMENT, *WARM_POOL_EXTRA_ENVIRONMENT.get(target["path"], [])]
                 found = re.search(r"- expression: '?(\[[^\]]*\])'? name: environment ", normalized)
@@ -430,8 +528,99 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
                                   f"{found.group(1) if found else None}")
         if binding:
             expected = compact(f"spec: policyName: {policy_name} validationActions: - Deny")
+            if policy_name == WARM_POOL_TEMPLATE_POLICY:
+                expected = compact(
+                    f"spec: paramRef: name: {HOSTED_EGRESS_CONFIGMAP} namespace: {target['subject_namespace']} "
+                    f"parameterNotFoundAction: Deny policyName: {policy_name} validationActions: - Deny"
+                )
+                if not prune_protected(binding):
+                    output.append(f"{label}: {policy_name} binding must never be pruned")
             if metadata_field(binding, "namespace") is not None or compact(top_level_block(binding, "spec")) != expected:
                 output.append(f"{label}: {policy_name} must deny by identity without mutable namespace selectors")
+    assert_hosted_egress_param(resources, target, label, output)
+    output.extend(orchestration_configmap_writes(resources, label))
+
+
+def prune_protected(document: str) -> bool:
+    return "kustomize.toolkit.fluxcd.io/prune: disabled" in compact(top_level_block(document, "metadata"))
+
+
+def assert_hosted_egress_param(resources: list[str], target: dict[str, str], label: str, output: list[str]) -> None:
+    """codewire#4000: one switch for orchestration and the template policy,
+    in orchestration's namespace, never pruned, and off on every target here."""
+    param = exactly_one(resources, "ConfigMap", HOSTED_EGRESS_CONFIGMAP, label, output)
+    if param:
+        if metadata_field(param, "namespace") != target["subject_namespace"]:
+            output.append(f"{label}: {HOSTED_EGRESS_CONFIGMAP} must be in orchestration's namespace")
+        if not prune_protected(param):
+            output.append(f"{label}: {HOSTED_EGRESS_CONFIGMAP} must never be pruned")
+        data = top_level_block(param, "data")
+        keys = re.findall(r"^  ([A-Z0-9_]+):", data, re.MULTILINE)
+        if sorted(keys) != sorted(HOSTED_EGRESS_KEYS):
+            output.append(f"{label}: {HOSTED_EGRESS_CONFIGMAP} must carry exactly {sorted(HOSTED_EGRESS_KEYS)}: {sorted(keys)}")
+        if not re.search(rf"^  {HOSTED_EGRESS_SWITCH}: ['\"]?false['\"]?$", data, re.MULTILINE):
+            output.append(f"{label}: {HOSTED_EGRESS_CONFIGMAP} ships hosted egress off")
+    deployment = exactly_one(resources, "Deployment", "codewire-orchestration", label, output)
+    if deployment and compact(
+        f"- name: {HOSTED_EGRESS_SWITCH} valueFrom: configMapKeyRef: key: {HOSTED_EGRESS_SWITCH} name: {HOSTED_EGRESS_CONFIGMAP}"
+    ) not in compact(deployment):
+        output.append(f"{label}: orchestration must read {HOSTED_EGRESS_SWITCH} from {HOSTED_EGRESS_CONFIGMAP}")
+    for config in resources_by_kind_and_name(resources, "ConfigMap", "codewire-config") + [
+        resource for resource in resources
+        if top_level_field(resource, "kind") == "ConfigMap" and (metadata_field(resource, "name") or "").startswith("codewire-config-")
+    ]:
+        if re.search(rf"^  {HOSTED_EGRESS_SWITCH}:", top_level_block(config, "data"), re.MULTILINE):
+            output.append(f"{label}: {HOSTED_EGRESS_SWITCH} has one source, {HOSTED_EGRESS_CONFIGMAP}")
+
+
+def rule_lists(rule: str) -> dict[str, list[str]]:
+    """One rendered RBAC rule's lists (apiGroups, resources, verbs, ...)."""
+    lists: dict[str, list[str]] = {}
+    key = ""
+    for line in rule.split("\n"):
+        field = re.match(r"^(?:- |  )([A-Za-z]+):\s*(\[\])?$", line)
+        if field:
+            key = field.group(1)
+            lists[key] = []
+            continue
+        item = re.match(r"^  - ['\"]?([^'\"]*)['\"]?$", line)
+        if item and key:
+            lists[key].append(item.group(1))
+    return lists
+
+
+def orchestration_configmap_writes(resources: list[str], label: str) -> list[str]:
+    """codewire#4000 (cw-security): the hosted-egress switch is only as
+    strong as orchestration's inability to write it. No Role or ClusterRole
+    bound to orchestration's service account, the only one its TokenRequest
+    grant mints for, or to a group holding every service account, may create,
+    change or remove a ConfigMap, by name or by wildcard."""
+    holders = re.compile(
+        r"^- kind: ServiceAccount\n  name: codewire-orchestration$"
+        r"|^- apiGroup: rbac.authorization.k8s.io\n  kind: Group\n  name: system:(serviceaccounts(:[^\n]+)?|authenticated)$",
+        re.MULTILINE,
+    )
+    bound: set[tuple[str, str, str | None]] = set()
+    for resource in resources:
+        kind = top_level_field(resource, "kind")
+        if kind not in ("RoleBinding", "ClusterRoleBinding") or not holders.search(top_level_block(resource, "subjects")):
+            continue
+        reference = re.search(r"kind: (Role|ClusterRole) name: (\S+)", compact(top_level_block(resource, "roleRef")))
+        if reference:
+            namespace = metadata_field(resource, "namespace") if reference.group(1) == "Role" else None
+            bound.add((reference.group(1), reference.group(2), namespace))
+    output = []
+    for kind, name, namespace in sorted(bound, key=str):
+        for role in resources_by_kind_and_name(resources, kind, name):
+            if namespace is not None and metadata_field(role, "namespace") != namespace:
+                continue
+            for rule in re.split(r"^(?=- )", top_level_block(role, "rules"), flags=re.MULTILINE):
+                lists = rule_lists(rule)
+                if (set(lists.get("apiGroups", [])) & {"", "*"} and set(lists.get("resources", [])) & {"configmaps", "*"}
+                        and set(lists.get("verbs", [])) & CONFIGMAP_WRITE_VERBS):
+                    output.append(f"{label}: {kind}/{name} lets orchestration write ConfigMaps, "
+                                  f"which would let it flip {HOSTED_EGRESS_CONFIGMAP}: {compact(rule)}")
+    return output
 
 
 WORKSPACE_BINDING_INGRESS = "codewire-orchestration-workspace-binding"
@@ -1364,6 +1553,99 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
                 if not (top_level_field(resource, "kind") or "").startswith("ValidatingAdmissionPolicy")
             ],
         )
+
+        # codewire#4000: the hosted-egress switch and its ConfigMap.
+        def edited(kind: str, name: str, before: str, after: str) -> Callable[[list[str]], list[str]]:
+            # Rendered CEL wraps wherever its line fills, so a space in
+            # `before` matches any run of whitespace, line breaks included.
+            pattern = re.compile(r"\s+".join(re.escape(part) for part in before.split()))
+
+            def mutate(resources: list[str]) -> list[str]:
+                changed = [
+                    pattern.sub(lambda _: after, resource, count=1)
+                    if top_level_field(resource, "kind") == kind and metadata_field(resource, "name") == name
+                    else resource
+                    for resource in resources
+                ]
+                if changed == resources:
+                    raise RuntimeError(f"self-test edit of {kind}/{name} matched nothing: {before!r}")
+                return changed
+            return mutate
+
+        configmap_writer = (
+            "apiVersion: rbac.authorization.k8s.io/v1\nkind: {kind}\nmetadata:\n  name: cw-selftest-configmaps\n"
+            "{namespace}rules:\n- apiGroups:\n  - \"\"\n  resources:\n  - {resource}\n  verbs:\n  - {verb}\n"
+        )
+        writer_binding = (
+            "apiVersion: rbac.authorization.k8s.io/v1\nkind: {kind}\nmetadata:\n  name: cw-selftest-configmaps\n"
+            "{namespace}roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: {role_kind}\n  name: cw-selftest-configmaps\n"
+            "subjects:\n{subject}"
+        )
+        orchestration_subject = "- kind: ServiceAccount\n  name: codewire-orchestration\n  namespace: prod\n"
+        group_subject = "- apiGroup: rbac.authorization.k8s.io\n  kind: Group\n  name: system:serviceaccounts\n"
+        for writer_label, role_kind, binding_kind, resource, verb, subject in [
+            ("a Role that updates ConfigMaps", "Role", "RoleBinding", "configmaps", "update", orchestration_subject),
+            ("a ClusterRole that patches every resource", "ClusterRole", "ClusterRoleBinding", "'*'", "patch", orchestration_subject),
+            ("a ClusterRole that creates ConfigMaps", "ClusterRole", "RoleBinding", "configmaps", "create", orchestration_subject),
+            ("a group grant to every service account", "ClusterRole", "ClusterRoleBinding", "configmaps", "'*'", group_subject),
+        ]:
+            namespace = "  namespace: prod\n" if role_kind == "Role" else ""
+            binding_namespace = "  namespace: prod\n" if binding_kind == "RoleBinding" else ""
+            expect_rejected(
+                f"hosted egress: {writer_label}",
+                lambda resources, role_kind=role_kind, binding_kind=binding_kind, resource=resource, verb=verb,
+                subject=subject, namespace=namespace, binding_namespace=binding_namespace: resources + [
+                    configmap_writer.format(kind=role_kind, namespace=namespace, resource=resource, verb=verb),
+                    writer_binding.format(kind=binding_kind, namespace=binding_namespace, role_kind=role_kind, subject=subject),
+                ],
+            )
+        for param_label, mutate in [
+            ("switched on", edited("ConfigMap", HOSTED_EGRESS_CONFIGMAP, f'{HOSTED_EGRESS_SWITCH}: "false"', f'{HOSTED_EGRESS_SWITCH}: "true"')),
+            ("pruneable", edited("ConfigMap", HOSTED_EGRESS_CONFIGMAP, "kustomize.toolkit.fluxcd.io/prune: disabled", "codewire.sh/x: y")),
+            ("another namespace", edited("ConfigMap", HOSTED_EGRESS_CONFIGMAP, "  namespace: prod", "  namespace: prod-sandboxes")),
+            ("an extra key", edited("ConfigMap", HOSTED_EGRESS_CONFIGMAP, "data:\n", "data:\n  CODEWIRE_HOSTED_EGRESS_PLATFORM_ALLOW: x\n")),
+            ("a binding without the param", edited("ValidatingAdmissionPolicyBinding", WARM_POOL_TEMPLATE_POLICY,
+                                                   f"  paramRef:\n    name: {HOSTED_EGRESS_CONFIGMAP}\n    namespace: prod\n"
+                                                   "    parameterNotFoundAction: Deny\n", "")),
+            ("a binding that admits without the param", edited("ValidatingAdmissionPolicyBinding", WARM_POOL_TEMPLATE_POLICY,
+                                                                "parameterNotFoundAction: Deny", "parameterNotFoundAction: Allow")),
+            ("a pruneable policy", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                          "kustomize.toolkit.fluxcd.io/prune: disabled", "codewire.sh/x: y")),
+            ("the template picking its own arm", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                        "variables.hostedEgress ? variables.broker : !variables.egressLabelled", "true")),
+            ("the TUN init as a regular container", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                           "variables.pod.containers.all(c, c.name != 'hosted-egress-tun') &&", "")),
+            ("a broker peer with any labels", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                     "size(t.podSelector.matchLabels) == size(b) - 2 &&", "")),
+            ("the TUN init on any runtime", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                   "variables.pod.runtimeClassName in variables.vmRuntimeClasses", "true")),
+            ("a diagnostic VM class", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                             "'[''commodity'', ''commodity-32g'']'\n    name: vmRuntimeClasses",
+                                             "'[''commodity'', ''commodity-32g'', ''runc'']'\n    name: vmRuntimeClasses")),
+            # Rendered single-quoted: apostrophes double.
+            ("mount-workspace after the TUN init", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                          "i.name).indexOf(''mount-workspace'') <", "i.name).indexOf(''mount-workspace'') >")),
+            ("any root regular container", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                  "c.name == ''dind'' && c.image.matches(", "true || c.image.matches(")),
+            ("a root Pod user", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                       "variables.pod.securityContext.runAsUser == 1000 &&", "true &&")),
+            ("a root sidecar", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                      "c.name == ''hosted-egress-tun'' && !has(c.restartPolicy) ||",
+                                      "c.name == ''hosted-egress-tun'' ||")),
+            ("a broker template without the TUN init", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                              # This rule renders unquoted, so its apostrophes stay single.
+                                                              "variables.pod.initContainers.exists(c, c.name == 'hosted-egress-tun'))",
+                                                              "true)")),
+            ("optional broker addresses", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                 "variables.brokerRequiredEnvironment.all(n,", "[].all(n,")),
+            ("cluster DNS", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                   "variables.pod.dnsPolicy == ''None'' &&", "true &&")),
+            ("added capabilities", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                          "|| size(c.securityContext.capabilities.add) == 0)", "|| true)")),
+            ("orchestration reading the switch elsewhere", edited("Deployment", "codewire-orchestration",
+                                                                  f"name: {HOSTED_EGRESS_CONFIGMAP}", "name: codewire-config")),
+        ]:
+            expect_rejected(f"hosted egress: {param_label}", mutate)
         def image_cache_rejected(label: str, kind: str, before: str, after: str, name: str = IMAGE_CACHE_ROLE) -> None:
             # Rendered CEL folds across lines at spaces, and single-quoted
             # YAML scalars double embedded apostrophes; match either spelling.
