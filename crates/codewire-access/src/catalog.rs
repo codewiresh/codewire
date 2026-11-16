@@ -257,6 +257,8 @@ mod tests {
         assert!(HttpProvider::parse("github-app-authorization").is_none());
         assert!(HttpProvider::parse("codex-device-enrollment").is_none());
         assert!(HttpProvider::parse("claude-sign-in-enrollment").is_none());
+        assert!(HttpProvider::parse("codex-token-revocation").is_none());
+        assert!(HttpProvider::parse("github-app-token-revocation").is_none());
         assert!(
             HttpProvider::ClaudeSignInEnrollment
                 .reserved_environment_keys()

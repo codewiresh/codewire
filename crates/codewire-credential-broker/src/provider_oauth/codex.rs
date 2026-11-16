@@ -16,12 +16,13 @@ use zeroize::Zeroizing;
 
 use super::{
     CODEX_DEVICE_REDIRECT_URL, CODEX_DEVICE_TOKEN_PATH, CODEX_DEVICE_USERCODE_PATH,
-    CODEX_DEVICE_VERIFICATION_URL, CODEX_OAUTH_CLIENT_ID, DEFAULT_POLL_INTERVAL, DeviceChallenge,
-    DeviceLoginError, OPENAI_AUTH_HOST, OPENAI_TOKEN_URL, PollStep, Secret, call, decode_json,
-    poll_until_done,
+    CODEX_DEVICE_VERIFICATION_URL, CODEX_OAUTH_CLIENT_ID, CODEX_TOKEN_REVOCATION_PATH,
+    DEFAULT_POLL_INTERVAL, DeviceChallenge, DeviceLoginError, OPENAI_AUTH_HOST, OPENAI_TOKEN_URL,
+    PollStep, ProviderRevocation, RevocationFailure, Secret, call, decode_json, poll_until_done,
+    revoke_request,
 };
 use crate::BrokerUpstreamTransport;
-use crate::codex_oauth::{CodexOAuthImport, import_codex_tokens};
+use crate::codex_oauth::{CodexOAuthCredential, CodexOAuthImport, import_codex_tokens};
 
 /// The Codex CLI gives up after fifteen minutes; OpenAI names no other bound.
 const CODE_LIFETIME: Duration = Duration::from_secs(15 * 60);
@@ -226,6 +227,53 @@ impl CodexDeviceLogin {
         check_status(status)?;
         decode_json(&body)
     }
+}
+
+/// Revokes the refresh token in a stored Codex OAuth bundle (see
+/// [`revoke_refresh_token`]). The token never leaves this crate.
+pub async fn revoke_stored(
+    upstream: &Arc<dyn BrokerUpstreamTransport>,
+    material: &[u8],
+) -> ProviderRevocation {
+    match CodexOAuthCredential::parse(material) {
+        Ok(credential) => revoke_refresh_token(upstream, credential.refresh_token()).await,
+        Err(_) => ProviderRevocation::Failed(RevocationFailure::Unreadable),
+    }
+}
+
+/// Revokes a Codex refresh token at OpenAI's revocation endpoint (RFC 7009
+/// section 2.1) as the Codex public client, over a transport that admits only
+/// that endpoint. RFC 7009 has the server answer 200 for a token it revoked
+/// and for one it no longer knows, so 200 is `Confirmed` either way; the
+/// RFC asks it to end the access tokens issued with the refresh token too.
+/// The caller has already revoked the credential in Codewire, and zeroes the
+/// token as soon as this returns.
+pub(crate) async fn revoke_refresh_token(
+    upstream: &Arc<dyn BrokerUpstreamTransport>,
+    refresh_token: &str,
+) -> ProviderRevocation {
+    let body = Zeroizing::new({
+        let mut form = url::form_urlencoded::Serializer::new(String::new());
+        form.append_pair("token", refresh_token);
+        form.append_pair("token_type_hint", "refresh_token");
+        form.append_pair("client_id", CODEX_OAUTH_CLIENT_ID);
+        form.finish().into_bytes()
+    });
+    revoke_request(
+        upstream,
+        Method::POST,
+        &endpoint(CODEX_TOKEN_REVOCATION_PATH),
+        HeaderMap::from_iter([
+            (header::ACCEPT, HeaderValue::from_static("application/json")),
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/x-www-form-urlencoded"),
+            ),
+        ]),
+        body,
+        StatusCode::OK,
+    )
+    .await
 }
 
 fn endpoint(path: &str) -> String {

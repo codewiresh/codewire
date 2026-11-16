@@ -41,7 +41,7 @@ use crate::{
 pub mod repositories;
 
 const TOKEN: &str = "GITHUB_OAUTH_TOKEN";
-const API_VERSION: &str = "2022-11-28";
+pub(crate) const API_VERSION: &str = "2022-11-28";
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
 const REQUEST_HEADERS: &[&str] = &[

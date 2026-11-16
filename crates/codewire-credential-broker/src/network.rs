@@ -12,8 +12,9 @@ use reqwest::redirect::Policy;
 
 use crate::provider_oauth::claude::{CLAUDE_PROFILE_PATH, CLAUDE_TOKEN_HOST, CLAUDE_TOKEN_PATH};
 use crate::provider_oauth::{
-    CODEX_DEVICE_TOKEN_PATH, CODEX_DEVICE_USERCODE_PATH, GITHUB_ACCESS_TOKEN_PATH,
-    GITHUB_DEVICE_CODE_PATH, OPENAI_AUTH_HOST, OPENAI_TOKEN_PATH,
+    CODEX_DEVICE_TOKEN_PATH, CODEX_DEVICE_USERCODE_PATH, CODEX_TOKEN_REVOCATION_PATH,
+    GITHUB_ACCESS_TOKEN_PATH, GITHUB_API_HOST, GITHUB_DEVICE_CODE_PATH, OPENAI_AUTH_HOST,
+    OPENAI_TOKEN_PATH,
 };
 use crate::refresh_failure::TransportFailure;
 use crate::{
@@ -23,7 +24,6 @@ use crate::{
 const OPENAI_HOST: &str = "api.openai.com";
 const CHATGPT_HOST: &str = "chatgpt.com";
 const ANTHROPIC_HOST: &str = "api.anthropic.com";
-const GITHUB_API_HOST: &str = "api.github.com";
 const GITHUB_GIT_HOST: &str = "github.com";
 const OPENAI_PORT: u16 = 443;
 /// Transparent routes' pinned base paths (#2536); Anthropic's is its origin.
@@ -305,7 +305,9 @@ fn selected_hosts(
         .flat_map(|provider| match provider {
             HttpProvider::OpenAiApiKey => &[OPENAI_HOST][..],
             HttpProvider::CodexOAuth => &[CHATGPT_HOST, OPENAI_AUTH_HOST][..],
-            HttpProvider::CodexDeviceEnrollment => &[OPENAI_AUTH_HOST][..],
+            HttpProvider::CodexDeviceEnrollment | HttpProvider::CodexTokenRevocation => {
+                &[OPENAI_AUTH_HOST][..]
+            }
             HttpProvider::AnthropicApiKey | HttpProvider::AnthropicSubscriptionToken => {
                 &[ANTHROPIC_HOST][..]
             }
@@ -315,6 +317,7 @@ fn selected_hosts(
             HttpProvider::ClaudeSignInEnrollment => &[ANTHROPIC_HOST, CLAUDE_TOKEN_HOST][..],
             HttpProvider::GitHubOAuth => &[GITHUB_API_HOST, GITHUB_GIT_HOST][..],
             HttpProvider::GitHubAppAuthorization => &[GITHUB_API_HOST, GITHUB_GIT_HOST][..],
+            HttpProvider::GitHubAppTokenRevocation => &[GITHUB_API_HOST][..],
         })
         .copied()
         .collect())
@@ -347,7 +350,9 @@ fn validate_target(
                             CODEX_DEVICE_USERCODE_PATH
                                 | CODEX_DEVICE_TOKEN_PATH
                                 | OPENAI_TOKEN_PATH
-                        )))
+                        ))
+                    || (selected.contains(&HttpProvider::CodexTokenRevocation)
+                        && target.path() == CODEX_TOKEN_REVOCATION_PATH))
         }
         Some(ANTHROPIC_HOST) => {
             ((selected.contains(&HttpProvider::AnthropicApiKey)
@@ -381,6 +386,10 @@ fn validate_target(
                     && method == Method::GET
                     && matches!(target.path(), "/user" | "/user/installations")
                     && github_app_query(target.path(), target.query()))
+                || (selected.contains(&HttpProvider::GitHubAppTokenRevocation)
+                    && method == Method::DELETE
+                    && github_app_token_path(target.path())
+                    && target.query().is_none())
         }
         Some(GITHUB_GIT_HOST) => {
             (selected.contains(&HttpProvider::GitHubOAuth)
@@ -419,6 +428,20 @@ fn transparent_method(method: &Method) -> bool {
         *method,
         Method::GET | Method::HEAD | Method::POST | Method::PUT | Method::PATCH | Method::DELETE
     )
+}
+
+/// `/applications/{client_id}/token`, GitHub's revocation of one App
+/// user's token, for a client id of the characters GitHub issues.
+fn github_app_token_path(path: &str) -> bool {
+    path.strip_prefix("/applications/")
+        .and_then(|rest| rest.strip_suffix("/token"))
+        .is_some_and(|client_id| {
+            !client_id.is_empty()
+                && client_id.len() <= 64
+                && client_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.')
+        })
 }
 
 fn github_app_query(path: &str, query: Option<&str>) -> bool {
@@ -928,6 +951,131 @@ mod tests {
     fn response_admission_transport_accepts_absent_or_single_identity_encoding() {
         for headers in accepted_encodings() {
             assert_eq!(validate_response_headers(&headers), Ok(()), "{headers:?}");
+        }
+    }
+
+    #[test]
+    fn codex_token_revocation_transport_has_only_the_revocation_route() {
+        let selected = BTreeSet::from([HttpProvider::CodexTokenRevocation]);
+        assert_eq!(
+            selected_hosts(&selected).unwrap(),
+            BTreeSet::from(["auth.openai.com"])
+        );
+        let revoke = url::Url::parse("https://auth.openai.com/api/accounts/oauth/revoke").unwrap();
+        assert!(validate_target(&revoke, &Method::POST, &selected).is_ok());
+        for method in [Method::GET, Method::PUT, Method::DELETE] {
+            assert_eq!(
+                validate_target(&revoke, &method, &selected),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{method}"
+            );
+        }
+        for target in [
+            "https://auth.openai.com/api/accounts/oauth/revoke?token=synthetic",
+            "https://auth.openai.com/api/accounts/oauth/revoke#fragment",
+            "https://auth.openai.com/api/accounts/oauth/revoke/",
+            "https://auth.openai.com/oauth/revoke",
+            "https://auth.openai.com/oauth/token",
+            "https://auth.openai.com/api/accounts/deviceauth/usercode",
+            "http://auth.openai.com/api/accounts/oauth/revoke",
+            "https://auth.openai.com:8443/api/accounts/oauth/revoke",
+            "https://chatgpt.com/backend-api/codex/responses",
+        ] {
+            assert_eq!(
+                validate_target(&url::Url::parse(target).unwrap(), &Method::POST, &selected),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{target}"
+            );
+        }
+        // The Codex bridge's refresh and the device login never reach it.
+        for other in [
+            HttpProvider::CodexOAuth,
+            HttpProvider::CodexDeviceEnrollment,
+        ] {
+            assert_eq!(
+                validate_target(&revoke, &Method::POST, &BTreeSet::from([other])),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{other:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_guest_families_reach_neither_revocation_route() {
+        // Every family a Sandbox profile can select: the platform bridge's set.
+        let guest = BTreeSet::from([
+            HttpProvider::OpenAiApiKey,
+            HttpProvider::CodexOAuth,
+            HttpProvider::AnthropicApiKey,
+            HttpProvider::AnthropicSubscriptionToken,
+            HttpProvider::AnthropicClaudeSignIn,
+            HttpProvider::GitHubOAuth,
+        ]);
+        for (method, target) in [
+            (
+                Method::POST,
+                "https://auth.openai.com/api/accounts/oauth/revoke",
+            ),
+            (
+                Method::DELETE,
+                "https://api.github.com/applications/Iv23lif1VpZftJWtcQCL/token",
+            ),
+        ] {
+            assert_eq!(
+                validate_target(&url::Url::parse(target).unwrap(), &method, &guest),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn github_app_token_revocation_transport_has_only_the_revocation_route() {
+        let selected = BTreeSet::from([HttpProvider::GitHubAppTokenRevocation]);
+        assert_eq!(
+            selected_hosts(&selected).unwrap(),
+            BTreeSet::from(["api.github.com"])
+        );
+        let revoke =
+            url::Url::parse("https://api.github.com/applications/Iv23lif1VpZftJWtcQCL/token")
+                .unwrap();
+        assert!(validate_target(&revoke, &Method::DELETE, &selected).is_ok());
+        for method in [Method::GET, Method::POST, Method::PATCH] {
+            assert_eq!(
+                validate_target(&revoke, &method, &selected),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{method}"
+            );
+        }
+        for target in [
+            "https://api.github.com/applications/Iv23lif1VpZftJWtcQCL/token?page=1",
+            "https://api.github.com/applications/Iv23lif1VpZftJWtcQCL/grant",
+            "https://api.github.com/applications/Iv23lif1VpZftJWtcQCL/token/",
+            "https://api.github.com/applications//token",
+            "https://api.github.com/applications/a%2Fb/token",
+            "https://api.github.com/user",
+            "https://github.com/applications/Iv23lif1VpZftJWtcQCL/token",
+        ] {
+            assert_eq!(
+                validate_target(
+                    &url::Url::parse(target).unwrap(),
+                    &Method::DELETE,
+                    &selected
+                ),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{target}"
+            );
+        }
+        // Neither the agent's GitHub route nor the App's sign-in reaches it.
+        for other in [
+            HttpProvider::GitHubOAuth,
+            HttpProvider::GitHubAppAuthorization,
+        ] {
+            assert_eq!(
+                validate_target(&revoke, &Method::DELETE, &BTreeSet::from([other])),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{other:?}"
+            );
         }
     }
 

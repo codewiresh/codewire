@@ -7,14 +7,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use http::{HeaderMap, HeaderValue, Method, header};
-use serde::Deserialize;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::{
     DEFAULT_POLL_INTERVAL, DeviceChallenge, DeviceLoginError, GITHUB_ACCESS_TOKEN_PATH,
-    GITHUB_DEVICE_CODE_PATH, GITHUB_DEVICE_VERIFICATION_URL, GITHUB_HOST, PollStep, Secret, call,
-    decode_json, poll_until_done,
+    GITHUB_API_HOST, GITHUB_DEVICE_CODE_PATH, GITHUB_DEVICE_VERIFICATION_URL, GITHUB_HOST,
+    PollStep, ProviderRevocation, RevocationFailure, Secret, call, decode_json, poll_until_done,
+    revoke_request,
 };
 use crate::BrokerUpstreamTransport;
 use crate::github_app::{
@@ -257,4 +260,57 @@ fn device_error(error: GitHubAppAuthorizationError) -> DeviceLoginError {
         | GitHubAppAuthorizationError::InvalidAuthorizationCode
         | GitHubAppAuthorizationError::InvalidResponse => DeviceLoginError::InvalidResponse,
     }
+}
+
+/// Revokes one user's token for the App at GitHub
+/// (`DELETE /applications/{client_id}/token`), which ends that authorization.
+/// Only the App's client secret may ask, so only the platform does (#4717
+/// C6); a local placement holds no App secret. GitHub answers 204 when it
+/// revoked the token. The transport must admit only this request for this
+/// App.
+pub(crate) async fn revoke_app_token(
+    upstream: &Arc<dyn BrokerUpstreamTransport>,
+    client_id: &str,
+    client_secret: &str,
+    access_token: &str,
+) -> ProviderRevocation {
+    let pair = Zeroizing::new(format!("{client_id}:{client_secret}"));
+    let encoded = Zeroizing::new(STANDARD.encode(pair.as_bytes()));
+    let basic = Zeroizing::new(format!("Basic {}", encoded.as_str()));
+    let Ok(mut authorization) = HeaderValue::from_str(&basic) else {
+        return ProviderRevocation::Failed(RevocationFailure::Unavailable);
+    };
+    authorization.set_sensitive(true);
+    let Ok(body) = serde_json::to_vec(&RevokeRequest { access_token }) else {
+        return ProviderRevocation::Failed(RevocationFailure::Unavailable);
+    };
+    revoke_request(
+        upstream,
+        Method::DELETE,
+        &format!("https://{GITHUB_API_HOST}/applications/{client_id}/token"),
+        HeaderMap::from_iter([
+            (
+                header::ACCEPT,
+                HeaderValue::from_static("application/vnd.github+json"),
+            ),
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            ),
+            (header::USER_AGENT, HeaderValue::from_static(USER_AGENT)),
+            (
+                HeaderName::from_static("x-github-api-version"),
+                HeaderValue::from_static(crate::github::API_VERSION),
+            ),
+            (header::AUTHORIZATION, authorization),
+        ]),
+        Zeroizing::new(body),
+        StatusCode::NO_CONTENT,
+    )
+    .await
+}
+
+#[derive(Serialize)]
+struct RevokeRequest<'a> {
+    access_token: &'a str,
 }

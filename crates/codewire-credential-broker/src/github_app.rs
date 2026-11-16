@@ -37,7 +37,8 @@ const MIN_REFRESH_TOKEN_LIFETIME_SECONDS: u64 = 60;
 const MAX_REFRESH_TOKEN_LIFETIME_SECONDS: u64 = 366 * 24 * 60 * 60;
 
 /// Deliberately non-Debug configuration for one registered GitHub App.
-/// `client_secret` is only ever used to build the fixed token-exchange body.
+/// `client_secret` is only ever used to build the fixed token-exchange body
+/// and the Basic authorization of a token revocation.
 pub struct GitHubAppAuthorizationConfig {
     client_id: String,
     client_secret: Zeroizing<String>,
@@ -65,6 +66,29 @@ impl GitHubAppAuthorizationConfig {
             app_slug,
             callback_url,
         })
+    }
+
+    /// Revokes the user's token in a stored App bundle at GitHub when its
+    /// credential is deleted (#4717 C6); the token never leaves this crate,
+    /// over a transport that admits only that request
+    /// (`HttpProvider::GitHubAppTokenRevocation`).
+    pub async fn revoke_user_token(
+        &self,
+        upstream: &std::sync::Arc<dyn crate::BrokerUpstreamTransport>,
+        bundle: &GitHubAppUserOAuthBundle,
+    ) -> crate::provider_oauth::ProviderRevocation {
+        let Ok(access_token) = bundle.access_token() else {
+            return crate::provider_oauth::ProviderRevocation::Failed(
+                crate::provider_oauth::RevocationFailure::Unreadable,
+            );
+        };
+        crate::provider_oauth::github::revoke_app_token(
+            upstream,
+            &self.client_id,
+            &self.client_secret,
+            &access_token,
+        )
+        .await
     }
 
     /// The same App's public identity for its device login, which needs no
@@ -478,6 +502,23 @@ impl GitHubAppAuthorizationOwner {
         Self {
             client: AppClient::Public(config),
             upstream,
+        }
+    }
+
+    /// Revokes the user's token in `bundle` at GitHub with this App's secret
+    /// (#4717 C6), over `revocation`, a transport admitting only that request.
+    /// `None` for a public client: it holds no secret, so GitHub cannot be
+    /// asked, and the caller says where the person revokes it instead.
+    pub async fn revoke_user_token(
+        &self,
+        revocation: &Arc<dyn BrokerUpstreamTransport>,
+        bundle: &GitHubAppUserOAuthBundle,
+    ) -> Option<crate::provider_oauth::ProviderRevocation> {
+        match &self.client {
+            AppClient::Confidential(config) => {
+                Some(config.revoke_user_token(revocation, bundle).await)
+            }
+            AppClient::Public(_) => None,
         }
     }
 
@@ -1604,6 +1645,47 @@ mod tests {
                 "{code}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn only_the_confidential_client_revokes_a_user_token_at_github() {
+        let provider = Arc::new(ExpiringProvider::default());
+        let owner = GitHubAppAuthorizationOwner::new(config(), provider.clone());
+        let mut imported = owner
+            .complete(Zeroizing::new(b"synthetic-code-123".to_vec()))
+            .await
+            .unwrap();
+        let (material, _) = imported.take_import().unwrap();
+        let bundle = GitHubAppUserOAuthBundle::parse(&material).unwrap();
+        let revocation = Arc::new(crate::provider_oauth::test_support::ScriptedProvider::default());
+        revocation.answer_bytes(StatusCode::NO_CONTENT, Vec::new());
+        let upstream: Arc<dyn BrokerUpstreamTransport> = revocation.clone();
+        assert_eq!(
+            owner.revoke_user_token(&upstream, &bundle).await,
+            Some(crate::provider_oauth::ProviderRevocation::Confirmed)
+        );
+        {
+            let sent = revocation.sent();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(
+                sent[0].target,
+                "https://api.github.com/applications/Iv1.syntheticclient/token"
+            );
+            assert_eq!(
+                sent[0].json(),
+                serde_json::json!({ "access_token": "ghu_synthetic_user_token_1234567890" })
+            );
+        }
+        let public = GitHubAppAuthorizationOwner::public_client(
+            config().device_login_config().unwrap(),
+            provider,
+        );
+        assert_eq!(public.revoke_user_token(&upstream, &bundle).await, None);
+        assert_eq!(
+            revocation.sent().len(),
+            1,
+            "a public client asks GitHub nothing"
+        );
     }
 
     #[tokio::test]

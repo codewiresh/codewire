@@ -35,11 +35,15 @@ pub(crate) const OPENAI_TOKEN_PATH: &str = "/oauth/token";
 pub(crate) const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 pub(crate) const CODEX_DEVICE_USERCODE_PATH: &str = "/api/accounts/deviceauth/usercode";
 pub(crate) const CODEX_DEVICE_TOKEN_PATH: &str = "/api/accounts/deviceauth/token";
+/// The `revocation_endpoint` OpenAI's issuer publishes (RFC 7009), open to
+/// public clients (`none` authentication).
+pub(crate) const CODEX_TOKEN_REVOCATION_PATH: &str = "/api/accounts/oauth/revoke";
 /// Where the user approves a Codex device login.
 const CODEX_DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
 const CODEX_DEVICE_REDIRECT_URL: &str = "https://auth.openai.com/deviceauth/callback";
 
 const GITHUB_HOST: &str = "github.com";
+pub(crate) const GITHUB_API_HOST: &str = "api.github.com";
 pub(crate) const GITHUB_DEVICE_CODE_PATH: &str = "/login/device/code";
 pub(crate) const GITHUB_ACCESS_TOKEN_PATH: &str = "/login/oauth/access_token";
 /// Where the user approves a GitHub device login.
@@ -216,6 +220,74 @@ where
     }
 }
 
+/// What a provider answered when Codewire asked it to revoke a token. Only
+/// `Confirmed` means the provider ended the token; anything else is reported
+/// as not revoked there (#4717 C6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderRevocation {
+    Confirmed,
+    Failed(RevocationFailure),
+}
+
+/// Why a revocation was not confirmed. A class and a status only: the
+/// provider's own text is never kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum RevocationFailure {
+    #[error("the provider could not be reached")]
+    Unavailable,
+    #[error("the provider refused it (HTTP {0})")]
+    Refused(u16),
+    /// The stored material held no token Codewire could send.
+    #[error("the stored token could not be read")]
+    Unreadable,
+}
+
+impl ProviderRevocation {
+    /// The outcome of one revocation request: `confirmed` is the provider's
+    /// own success status; a server error, a rate limit or no answer at all is
+    /// `Unavailable`; any other status is refused.
+    pub(crate) fn from_answer(
+        answer: Result<(StatusCode, Zeroizing<Vec<u8>>), DeviceLoginError>,
+        confirmed: StatusCode,
+    ) -> Self {
+        match answer {
+            Ok((status, _)) if status == confirmed => Self::Confirmed,
+            Ok((status, _))
+                if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS =>
+            {
+                Self::Failed(RevocationFailure::Unavailable)
+            }
+            Ok((status, _)) => Self::Failed(RevocationFailure::Refused(status.as_u16())),
+            Err(_) => Self::Failed(RevocationFailure::Unavailable),
+        }
+    }
+}
+
+/// How long a provider has to answer a revocation (#4717): well inside a
+/// delete's own wait. No answer in time is `Unavailable`.
+const REVOCATION_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Send one revocation request and report the provider's answer within
+/// [`REVOCATION_TIMEOUT`]; `confirmed` is the provider's own success status.
+pub(crate) async fn revoke_request(
+    upstream: &Arc<dyn BrokerUpstreamTransport>,
+    method: Method,
+    target: &str,
+    headers: HeaderMap,
+    body: Zeroizing<Vec<u8>>,
+    confirmed: StatusCode,
+) -> ProviderRevocation {
+    match tokio::time::timeout(
+        REVOCATION_TIMEOUT,
+        call(upstream, method, target, headers, body),
+    )
+    .await
+    {
+        Ok(answer) => ProviderRevocation::from_answer(answer, confirmed),
+        Err(_) => ProviderRevocation::Failed(RevocationFailure::Unavailable),
+    }
+}
+
 /// Send one request to an exact provider URL and read its status and a body
 /// of at most [`MAX_RESPONSE_BYTES`] into zeroizing memory, all within
 /// [`REQUEST_TIMEOUT`].
@@ -266,3 +338,6 @@ pub(crate) mod test_support;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod revocation_tests;

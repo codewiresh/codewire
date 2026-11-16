@@ -320,6 +320,17 @@ pub enum HttpProvider {
     /// route; the Anthropic route keeps `AnthropicClaudeSignIn`.
     #[serde(skip)]
     ClaudeSignInEnrollment,
+    /// Revoking a Codex refresh token at OpenAI's RFC 7009 endpoint when its
+    /// credential is deleted (#4717 C6): that one request only. Never
+    /// profile-selected and never a Sandbox route.
+    #[serde(skip)]
+    CodexTokenRevocation,
+    /// Revoking a user's token for the Codewire GitHub App with the App's
+    /// secret, when its credential is deleted (#4717 C6): that one request
+    /// only, and only where the secret is held. Never profile-selected and
+    /// never a Sandbox route.
+    #[serde(skip)]
+    GitHubAppTokenRevocation,
 }
 
 impl HttpProvider {
@@ -347,7 +358,9 @@ impl HttpProvider {
             ],
             Self::GitHubAppAuthorization
             | Self::CodexDeviceEnrollment
-            | Self::ClaudeSignInEnrollment => &[],
+            | Self::ClaudeSignInEnrollment
+            | Self::CodexTokenRevocation
+            | Self::GitHubAppTokenRevocation => &[],
         }
     }
 
@@ -363,6 +376,8 @@ impl HttpProvider {
             Self::GitHubAppAuthorization => "github-app-authorization",
             Self::CodexDeviceEnrollment => "codex-device-enrollment",
             Self::ClaudeSignInEnrollment => "claude-sign-in-enrollment",
+            Self::CodexTokenRevocation => "codex-token-revocation",
+            Self::GitHubAppTokenRevocation => "github-app-token-revocation",
         }
     }
 
