@@ -121,6 +121,8 @@ pub(crate) struct OrgDeleteArgs {
     pub(super) id_or_slug: String,
     #[arg(long, help = "Skip confirmation prompt")]
     pub(super) yes: bool,
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text, help = "Output format; json needs --yes")]
+    pub(super) output: OutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -275,42 +277,70 @@ async fn delete_org(
         .find(|org| org.id == org_id)
         .map(|org| org.name.as_str())
         .unwrap_or(id_or_slug);
+    let json = matches!(args.output, OutputFormat::Json);
+    anyhow::ensure!(
+        !json || args.yes,
+        "`--output json` never asks, so deleting {org_name:?} that way needs --yes"
+    );
+    if !json {
+        eprintln!("{ORG_DELETE_IS_PERMANENT}");
+    }
     if !args.yes {
         confirm_delete("organization", org_name)?;
     }
-    match client.delete_org(&org_id).await.context("delete org")? {
-        OrganizationDeletionStart::Accepted(operation) => {
-            eprintln!(
-                "{}",
-                organization_deletion_started_message(&operation.operation_id)
-            );
-            match client
-                .wait_for_org_deletion(&org_id, &operation.operation_id)
-                .await
-                .context("observe organization deletion")?
-            {
-                OrganizationDeletionOutcome::Completed => {
-                    eprintln!("Organization deleted.");
-                }
-                OrganizationDeletionOutcome::Failed {
-                    operation_id,
-                    failure_code,
-                } => {
-                    anyhow::bail!(
-                        "organization deletion {operation_id} failed ({failure_code}); the organization is retained for retry"
-                    );
-                }
-                OrganizationDeletionOutcome::PollingStopped { operation_id } => {
-                    eprintln!(
-                        "{}",
-                        organization_deletion_polling_stopped_message(&operation_id)
-                    );
-                }
+    let OrganizationDeletionStart::Accepted(operation) =
+        client.delete_org(&org_id).await.context("delete org")?;
+    if !json {
+        eprintln!(
+            "{}",
+            organization_deletion_started_message(&operation.operation_id)
+        );
+    }
+    let state = match client
+        .wait_for_org_deletion(&org_id, &operation.operation_id)
+        .await
+        .context("observe organization deletion")?
+    {
+        OrganizationDeletionOutcome::Completed => {
+            if !json {
+                eprintln!("Organization deleted.");
             }
+            "deleted"
         }
+        OrganizationDeletionOutcome::Failed {
+            operation_id,
+            failure_code,
+        } => {
+            anyhow::bail!(
+                "organization deletion {operation_id} failed ({failure_code}); the organization is retained for retry"
+            );
+        }
+        OrganizationDeletionOutcome::PollingStopped { operation_id } => {
+            if !json {
+                eprintln!(
+                    "{}",
+                    organization_deletion_polling_stopped_message(&operation_id)
+                );
+            }
+            "deleting"
+        }
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "organization_id": org_id,
+                "operation_id": operation.operation_id,
+                "state": state,
+            }))?
+        );
     }
     Ok(())
 }
+
+/// What `cw org delete` says before it asks (#4823; owner, 2026-11-15:
+/// say that deletion is permanent, not what it costs).
+const ORG_DELETE_IS_PERMANENT: &str = "Deleting this organization permanently removes it and all its resources. This can't be undone.";
 
 async fn invite(
     client: &OrganizationClient,

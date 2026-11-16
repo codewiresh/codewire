@@ -771,7 +771,6 @@ pub(super) async fn delete_account_page(
                 detail: count(organization.member_count, "member", "members"),
             })
             .collect(),
-        forfeited_credit: euros(plan.forfeited_credit_nano_eur),
         error: approved_delete_account_error(&query.error).to_owned(),
     };
     private(with_csrf_cookie(
@@ -900,15 +899,6 @@ fn article(role: &str) -> String {
         "owner" | "admin" => format!("an {role}"),
         role => format!("a {role}"),
     }
-}
-
-/// Nano-euros as euros and cents, empty when there is nothing to forfeit.
-fn euros(nano_eur: i64) -> String {
-    let cents = nano_eur / 10_000_000;
-    if cents <= 0 {
-        return String::new();
-    }
-    format!("€{}.{:02}", cents / 100, cents % 100)
 }
 
 #[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
@@ -1713,6 +1703,34 @@ mod tests {
         assert!(body.contains("href=\"/settings/delete-account/\""));
     }
 
+    /// #4823: with no organization going with the account, the warning says
+    /// only that the account goes; organizations it only leaves stay.
+    #[test]
+    fn the_delete_account_page_without_owned_organizations_says_only_the_account_goes() {
+        let page = AccountDeletionPageView {
+            account_id: "synthetic-account".into(),
+            email: "a@example.test".into(),
+            email_pattern: exact_pattern("a@example.test"),
+            csrf_token: "csrf".into(),
+            shared: vec![deletion_organization(
+                "Team",
+                "/team/",
+                "You are a member; the organization stays",
+            )],
+            ..Default::default()
+        };
+        let body = AccountDeletionTemplate {
+            view: &dashboard_view(),
+            page: &page,
+        }
+        .render()
+        .expect("render delete account");
+        assert!(
+            body.contains("Deleting your account permanently removes it. This can't be undone.")
+        );
+        assert!(!body.contains("Deleted with your account&quot; and all"));
+    }
+
     #[test]
     fn the_delete_account_page_lists_what_goes_and_needs_the_typed_email() {
         let page = AccountDeletionPageView {
@@ -1730,7 +1748,6 @@ mod tests {
                 "/team/",
                 "You are a member; the organization stays",
             )],
-            forfeited_credit: euros(12_340_000_000),
             ..Default::default()
         };
         let body = AccountDeletionTemplate {
@@ -1743,7 +1760,7 @@ mod tests {
             "Solo",
             "2 environments deleted with it",
             "Team",
-            "The remaining credit of €12.34 is forfeited.",
+            "Deleting your account permanently removes it, the organizations under &quot;Deleted with your account&quot; and all their resources. This can't be undone.",
             "action=\"/settings/_actions/delete-account\"",
             "name=\"_csrf\" value=\"csrf\"",
             "name=\"account_id\" value=\"synthetic-account\"",
@@ -1783,10 +1800,6 @@ mod tests {
             exact_pattern("plain-name_1@example.test"),
             "plain-name_1@example\\.test"
         );
-        assert_eq!(euros(0), "");
-        assert_eq!(euros(9_999_999), "");
-        assert_eq!(euros(10_000_000), "€0.01");
-        assert_eq!(euros(50_000_000_000), "€50.00");
         assert_eq!(count(1, "member", "members"), "1 member");
         assert_eq!(article("owner"), "an owner");
         assert_eq!(article("member"), "a member");

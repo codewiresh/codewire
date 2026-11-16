@@ -458,8 +458,6 @@ pub(crate) struct AccountDeletionPageView {
     pub(crate) personal: Vec<AccountDeletionOrganizationView>,
     pub(crate) shared: Vec<AccountDeletionOrganizationView>,
     pub(crate) blocking: Vec<AccountDeletionOrganizationView>,
-    /// The personal organizations' remaining credit, empty when there is none.
-    pub(crate) forfeited_credit: String,
     pub(crate) error: String,
 }
 

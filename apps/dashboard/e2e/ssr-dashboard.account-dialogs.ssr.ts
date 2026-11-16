@@ -215,7 +215,7 @@ test("Account deletion is a danger card, confirmed by typing the email, and refu
   const confirm = page.getByRole("region", { name: "Delete your account", exact: true });
   await expect(confirm).toContainText("Owner's sandbox lab");
   await expect(confirm).toContainText("You leave");
-  await expect(confirm).toContainText("The remaining credit of €37.50 is forfeited.");
+  await expect(confirm).toContainText('Deleting your account permanently removes it, the organizations under "Deleted with your account" and all their resources. This can\'t be undone.');
   const email = confirm.getByLabel("Type owner@example.test to confirm");
   const submit = confirm.getByRole("button", { name: "Delete account", exact: true });
   const opacity = () => submit.evaluate((button) => Number(getComputedStyle(button).opacity));

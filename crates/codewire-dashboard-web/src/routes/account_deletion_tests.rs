@@ -234,7 +234,7 @@ async fn the_page_lists_what_goes_and_asks_for_the_typed_email() {
     for text in [
         "Solo Lab",
         "2 environments deleted with it",
-        "The remaining credit of €37.50 is forfeited.",
+        "Deleting your account permanently removes it, the organizations under &quot;Deleted with your account&quot; and all their resources. This can't be undone.",
         "pattern=\"synthetic\\.owner@example\\.test\"",
         "action=\"/settings/_actions/delete-account\"",
     ] {
