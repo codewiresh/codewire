@@ -68,6 +68,14 @@ it again and record it in this file.
   or ChatGPT sign-in, connected by the owner. Prepare everything else first
   and ask once for that step. Never print, copy or record a token; the proofs
   below read shapes and labels, not values.
+- Record the agent's own version with every agent observation. An
+  environment runs the agents' newest release, not the image's version
+  (#4946): on first real use the image's `claude` installs Claude Code's own
+  self-updating build in the home, and `PATH` prefers it from then on. The
+  image's version (`images/workspace/agents/package.json`) is where an
+  environment starts, and the fallback when that install cannot run. Until
+  that first use, `claude --version` answers from the image's copy; after
+  it, from the build that runs. `cw doctor` does not show either yet (#4946).
 - Use names that mark the walk (`egress-walk`, `egress-walk-policy`) and
   remove them at the end.
 
@@ -497,7 +505,7 @@ is #4798.
   - A header that reads "Claude API", or a `/usage` that is unavailable,
     means the agent is not on this path. Do not record the model call alone
     as this step.
-  - With stock settings the pinned Claude Code sends the placeholder as a
+  - With stock settings Claude Code sends the placeholder as a
     Bearer token, at every start, to six paths on `api.anthropic.com`:
     `/v1/messages`, `/api/oauth/profile`, `/api/claude_cli/bootstrap`,
     `/api/claude_code_penguin_mode`, `/api/eval/sdk-<id>` and
@@ -505,7 +513,17 @@ is #4798.
     of that host, as today's route already is, so each is served with the
     owner's credential as it would be with a real login. A 401 on one of
     them, followed by a token refresh at every start, means that path was
-    not swapped: record it as a failure of this step.
+    not swapped: record it as a failure of this step. Observed against a
+    stand-in on 2.1.308, the image's version, and on 2.1.325, the newest
+    release on 2026-11-15; between them only a request that carries no
+    credential changed (#4946).
+  - A release that starts using a host Codewire does not bind sends the
+    placeholder to the provider as it is. The user sees the agent's own
+    401 and its request to sign in again. The fix is Codewire's, and until
+    it ships the user can update or roll back the agent themselves. The
+    compatibility test names the new host when it runs against that
+    release; its scheduled run against the newest release is to come
+    (#4946), read by the CI sweep and looked at within one working day.
   - An `invalid_grant` answer from the token endpoint makes Claude Code
     blank its own tokens (`accessToken` and `refreshToken` become empty,
     `expiresAt` 0) and stop with "OAuth session expired and could not be
@@ -644,20 +662,24 @@ Issue: #3999.
   401, a refused refresh and a refresh answered 503; interactive mode; a
   long session; the voice and remote features.
 - **Driving it:** no command yet (#3999). A checked-in compatibility test
-  that drives the pinned Claude Code against a stand-in token endpoint and
-  API is to come with #4925.
+  that drives Claude Code against a stand-in token endpoint and API is to
+  come with #4925. It takes the agent by path, so it runs against the
+  image's version and against the newest release, which is the one an
+  environment runs (#4946).
 - **Proof:**
   - no request carries `Upgrade: websocket` to `api.anthropic.com`,
     `platform.claude.com` or `console.anthropic.com`. Model calls are `POST`
     requests to the messages API, answered as an event stream;
   - once it exists, the compatibility test fails, and names the host and
-    path, if a pin starts upgrading.
+    path, if a release starts upgrading.
 - **Gotchas:** the WebSocket proof of the front door is
-  `agent-codex-websocket`. A pin of Claude Code that starts upgrading needs
-  its path added to the front door's list before it works.
+  `agent-codex-websocket`. A release of Claude Code that starts upgrading
+  needs its path added to the front door's list before it works, and an
+  environment takes that release by itself.
 - **Observed:** not yet observed. Offline evidence is on #3999
   (2026-11-15): against a stand-in, four `claude -p` runs of Claude Code
-  2.1.308, one for each print-mode state, opened no WebSocket.
+  2.1.308, one for each print-mode state, opened no WebSocket; nor did the
+  same four of 2.1.325 (#4946).
 
 ## `agent-github`: Git and `gh` reach GitHub by its own names, with no token
 inside

@@ -288,6 +288,17 @@ support pair), `images/cw-runtime` the `cw` runtime pack that runs inside a
 local VM, and the daemon (support) image carries `cw` for hosted sandboxes.
 `crates/codewire-workspace-image` holds the published workspace image pin.
 
+The workspace image carries the coding agents at the versions in
+`images/workspace/agents`, installed from one reviewed lockfile into a
+read-only tree outside the home. Those versions are where an environment
+starts, and the fallback. An environment runs the agents' newest release
+(#4946): on first use the image's `claude` installs Claude Code's own
+self-updating build in the home, the other agents' upgrades land in the home
+too, and `PATH` prefers the home's copies, in a local VM and a hosted sandbox
+alike. The Claude Code build an environment runs is fetched from its vendor at
+first use and updates itself, and is not covered by Codewire's lockfile,
+licence or advisory checks.
+
 ## 4. Hosted sandboxes
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the Kubernetes shape in
@@ -421,7 +432,11 @@ Target, not shipped (#3999): for an agent's provider hosts the broker hands
 the connection to a TLS front door, one process per VM, instead of dialling.
 The front door is confined to no filesystem, no new sockets and no process
 creation, and holds only the descriptors it inherits; Linux first, macOS to
-follow.
+follow. What an agent sends to its provider is not documented and changes
+between releases, so a compatibility test runs the real Claude Code against a
+stand-in provider (#4925): for the image's version when that version or a
+login file Codewire writes changes, and on a schedule for the newest release,
+which is the one environments run (#4946).
 
 A Mesh node is online only while it holds a live coordinator session that
 Mesh has heard from in the last 45 s. Every Mesh client pings every 15 s, so a
