@@ -55,13 +55,17 @@ jobs:
   pending:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Find the release to deliver
-    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    # The trusted light runner, with the job token alone: on the untrusted one
+    # the release's first job queued 18 minutes behind gates on 2026-11-15 (#5009).
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     # A dispatch may wait for a release in flight (release-turn.py).
     timeout-minutes: 190
     outputs:
       release_tag: ${{ steps.find.outputs.release_tag }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       # One delivery at a time, with no queue of runs that find nothing: a
       # scheduled run that finds another run looking or delivering ends here,
@@ -95,6 +99,7 @@ jobs:
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Refuse release control outside protected main
@@ -188,6 +193,7 @@ jobs:
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -339,6 +345,8 @@ jobs:
       CODEWIRE_IN_JOB_BUILD: ${{ (inputs.in_job_build == true || inputs.in_job_build == 'true') && '1' || '0' }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -399,6 +407,8 @@ jobs:
       CODEWIRE_APT_SNAPSHOT_MIRROR: http://10.47.0.10:8080
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -438,6 +448,8 @@ jobs:
     if: ${{ always() && needs.release-selection.result == 'success' && needs.publish-release.result == 'success' && needs.publish-release.outputs.build == 'true' && needs.build-support-amd64.result == 'success' && needs.build-support-arm64.result == 'success' }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

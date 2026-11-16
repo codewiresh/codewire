@@ -514,6 +514,49 @@ PY
 }
 assert_confirmed_checkouts "$deploy_workflow" 4
 assert_confirmed_checkouts "$cli_workflow" 9
+# One release run runs one main commit (#5009): every checkout is either main
+# pinned to the run's own commit, so a merge to main mid-release changes none
+# of its scripts, or the selected tag into .release-source, the only build
+# source. A checkout with no ref takes main as it is when that job starts.
+assert_pinned_checkouts() {
+  python3 -I - "$1" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1]).read()
+steps = re.split(r"\n(?=      - )", text.split("\njobs:\n", 1)[1])
+tag = "refs/tags/${{ needs.release-selection.outputs.release_tag }}"
+bad = []
+for step in steps:
+    if not re.match(r"      - uses: noel/actions-checkout@[0-9a-f]{40}\n", step + "\n"):
+        continue
+    refs = re.findall(r"^          ref: (.*)$", step, re.M)
+    paths = re.findall(r"^          path: (.*)$", step, re.M)
+    if refs == ["${{ github.sha }}"] and not paths:
+        continue
+    if refs == [tag] and paths == [".release-source"]:
+        continue
+    bad.append(step.splitlines()[0] + f" ref={refs} path={paths}")
+if bad:
+    sys.exit("a release checkout is neither the run's main commit nor the selected tag: " + "; ".join(bad))
+PY
+}
+assert_pinned_checkouts "$deploy_workflow"
+assert_pinned_checkouts "$cli_workflow"
+for workflow in "$deploy_workflow" "$cli_workflow"; do
+  for mutation in \
+      '0,/^          ref: \${{ github.sha }}$/{/^          ref: \${{ github.sha }}$/d}' \
+      '0,/^          ref: \${{ github.sha }}$/{s/^          ref: \${{ github.sha }}$/          ref: main/}' \
+      '0,/^          ref: refs\/tags\//{s/^          ref: refs\/tags\/.*$/          ref: refs\/heads\/main/}'; do
+    sed "$mutation" "$workflow" >"$fixture/unpinned.yaml"
+    cmp -s "$workflow" "$fixture/unpinned.yaml" &&
+      { printf 'pinned checkout mutation did not apply: %s\n' "$mutation" >&2; exit 1; }
+    if assert_pinned_checkouts "$fixture/unpinned.yaml" 2>/dev/null; then
+      printf 'release workflow fixture accepted a checkout off the run commit or tag: %s\n' "$mutation" >&2
+      exit 1
+    fi
+  done
+done
 # Release selection composes its proofs in order (#2892): the tag's own
 # signature, the workspace image pin, then the receipt's source evidence,
 # whose accepted answer and scope are both required.
@@ -551,18 +594,19 @@ PY
 assert_composed_selection "$deploy_workflow" deploy
 assert_composed_selection "$cli_workflow" cli
 # The scheduled pickup (#2892, Forgejo's security guidance): the pending job
-# holds only the job token; release selection verifies the tag from main's
+# holds only the job token, on the trusted light runner so the release's first
+# job doesn't queue behind the untrusted runner's gates (#5009); release selection verifies the tag from main's
 # checkout before anything checks out or runs tag content, and no credential
 # step runs before that; tag values reach scripts only through env; a release
 # is never cancelled mid-flight.
 assert_scheduled_pickup() {
-  python3 -I - "$1" "$2" "$3" "$RUNS_ON_UNTRUSTED_LIGHT" <<'PY'
+  python3 -I - "$1" "$2" "$3" "$RUNS_ON_UNTRUSTED_LIGHT" "$RUNS_ON_TRUSTED_LIGHT" <<'PY'
 import re
 import sys
 
 import yaml
 
-path, workflow, cron, untrusted_light = sys.argv[1:]
+path, workflow, cron, untrusted_light, trusted_light = sys.argv[1:]
 text = open(path).read()
 document = yaml.safe_load(text)
 on = document.get("on", document.get(True))
@@ -577,10 +621,11 @@ jobs = document["jobs"]
 if list(jobs)[:2] != ["pending", "release-selection"]:
     sys.exit(f"{workflow} does not start with pending, then release selection")
 pending = jobs["pending"]
-if pending.get("runs-on") != untrusted_light or pending.get("needs"):
-    sys.exit("the pending job is not the first, unprivileged job")
+if pending.get("runs-on") != trusted_light or pending.get("needs") or pending.get("enable-openid-connect"):
+    sys.exit("the pending job is not the first job, on the trusted light runner with the job token alone")
 steps = pending["steps"]
-if len(steps) != 3 or "with" in steps[0] or not steps[0]["uses"].startswith("noel/actions-checkout@"):
+if (len(steps) != 3 or steps[0].get("with") != {"ref": "${{ github.sha }}"}
+        or not steps[0]["uses"].startswith("noel/actions-checkout@")):
     sys.exit("the pending job does more than check out main, take its release turn and find the release")
 # One delivery at a time without a queue (release-turn.py; owner, 2026-11-12):
 # the turn reads run state with the job token alone, and the finder runs only
@@ -602,7 +647,7 @@ if selection.get("needs") != ["pending"] or selection.get("if") != "${{ needs.pe
 if selection.get("runs-on") != untrusted_light:
     sys.exit("release selection is not unprivileged")
 for step in selection["steps"]:
-    if "uses" in step and "with" in step and "ref" in step["with"]:
+    if "uses" in step and "with" in step and step["with"].get("ref", "${{ github.sha }}") != "${{ github.sha }}":
         sys.exit("release selection checks out tag content")
     if re.search(r"fetch-openbao|fetch-forgejo|ACTIONS_ID_TOKEN|bao ", step.get("run", "")):
         sys.exit("release selection runs a credential step")
@@ -635,7 +680,7 @@ for mutation in "s|    - cron: '\*/5 \* \* \* \*'|    - cron: '0 * * * *'|" \
     '/^concurrency:$/,/^$/d' \
     "/        if: \${{ steps.turn.outputs.turn == 'go' }}/d" \
     's|release-turn.py deploy-prod|release-turn.py cli-release|' \
-    '/^  pending:/,/^  release-selection:/{s|CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT|CODEWIRE_CI_RUNNER_TRUSTED_LIGHT|g}' \
+    '/^  pending:/,/^  release-selection:/{s|CODEWIRE_CI_RUNNER_TRUSTED_LIGHT|CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT|g}' \
     "s|    if: \${{ needs.pending.outputs.release_tag != '' }}|    if: true|" \
     's|          source_sha="\$remote_peeled_sha"|          source_sha="$remote_peeled_sha"; scripts/ci/setup/fetch-openbao-harbor-credentials.sh --pull u p|' \
     '/^  release-selection:/,/^  publish-release:/{s|^          fetch-depth: 0$|          fetch-depth: 0\n          ref: refs/tags/v0.0.1|}' \

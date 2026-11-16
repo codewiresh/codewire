@@ -76,7 +76,9 @@ jobs:
   pending:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Find the release to deliver
-    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    # The trusted light runner, with the job token alone: on the untrusted one
+    # the release's first job queued 18 minutes behind gates on 2026-11-15 (#5009).
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
     # A dispatch may wait for a release in flight (release-turn.py).
     timeout-minutes: 190
     outputs:
@@ -85,6 +87,8 @@ jobs:
       r2_promote_channel: ${{ steps.find.outputs.r2_promote_channel }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       # One delivery at a time, with no queue of runs that find nothing: a
       # scheduled run that finds another run looking or delivering ends here,
@@ -124,6 +128,7 @@ jobs:
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Refuse release control outside protected main
@@ -213,6 +218,8 @@ jobs:
       linux_sha256: ${{ steps.build.outputs.linux_sha256 }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -293,6 +300,8 @@ jobs:
       build_runner: ${{ steps.build.outputs.build_runner }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -358,6 +367,8 @@ jobs:
       sign_runner: ${{ steps.sign.outputs.sign_runner }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       # One version for web and CLI: the CLI builds while deploy-prod delivers
       # the tag, and nothing is signed, notarized or published before
@@ -467,6 +478,8 @@ jobs:
       document_sha256: ${{ steps.runtime.outputs.document_sha256 }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -584,6 +597,8 @@ jobs:
       darwin_sums_sha256: ${{ steps.build.outputs.darwin_sums_sha256 }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -666,6 +681,8 @@ jobs:
       darwin_sums_sha256: ${{ steps.sign.outputs.darwin_sums_sha256 }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       # One version for web and CLI: the CLI builds while deploy-prod delivers
       # the tag, and nothing is signed, notarized or published before
@@ -761,6 +778,8 @@ jobs:
       cw_sha256: ${{ steps.build.outputs.cw_sha256 }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -835,6 +854,8 @@ jobs:
       cw_sha256: ${{ steps.build.outputs.cw_sha256 }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -899,6 +920,8 @@ jobs:
       verifier_sha256: ${{ steps.verifier.outputs.verifier_sha256 }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -1051,6 +1074,8 @@ jobs:
     timeout-minutes: 330
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
 
       # One version for web and CLI: the CLI builds while deploy-prod delivers
       # the tag, and nothing is signed, notarized or published before
