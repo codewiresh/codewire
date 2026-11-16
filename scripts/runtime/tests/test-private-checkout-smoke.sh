@@ -91,17 +91,17 @@ cw() {
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
     '--cloud ls --output json'|'credentials --cloud list --output json') printf '[]\n' ;;
-    'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
+    'credentials --cloud profiles list --output json') printf '[{"name":"lasting","is_default":true}]\n' ;;
     'credentials --cloud generate ssh --name '*) [[ "$6" == "$PROVIDER_SSH_CREDENTIAL_NAME" ]] ;;
     'credentials --cloud get '*" --output json")
       jq -n --arg id "$KEY_ID" --arg name "$PROVIDER_SSH_CREDENTIAL_NAME" --arg key "$PUBLIC_KEY" \
-        '[{id:$id,name:$name,provider:"ssh",status:"CREDENTIAL_STATUS_ACTIVE",
-          authenticationKind:"CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY",sshPublicKey:{openssh:$key}}]' ;;
+        '[{id:$id,name:$name,provider:"ssh",status:"active",
+          authentication_kind:"ssh_key",ssh_public_key:{openssh:$key}}]' ;;
     'credentials --cloud --profile '*" set ssh "*) [[ "$7" == "id:$KEY_ID" ]] ;;
     'credentials --cloud --profile '*" get --output json")
       local key="$KEY_ID"; [[ "$FAILURE" != wrong-key ]] || key="$VM_ID"
       jq -n --arg id "$PROFILE_ID" --arg name "$PROVIDER_SSH_PROFILE_NAME" --arg key "$key" \
-        '[{id:$id,name:$name,revision:"1",entries:[{capabilitySlot:"ssh",credentialId:$key}]}]' ;;
+        '[{id:$id,name:$name,revision:1,entries:{ssh:$key},github_connection:true}]' ;;
     'ls --local --output json')
       if [[ -e "$TMPDIR_SMOKE/created" ]]; then
         jq -n --arg id "$VM_ID" --arg name "$SMOKE_NAME" '[{id:$id,name:$name,state:"running"}]'

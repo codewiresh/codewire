@@ -395,7 +395,7 @@ cw_with_timeout() {
       [[ "$4" == "id:$KEY_ID" && -e "$TMPDIR_SMOKE/ready" ]] || fail 'revoke identity/order'
       touch "$TMPDIR_SMOKE/revoked"
       if [[ "$FAILURE" == bad-revoke ]]; then printf '[]\n'; else
-        jq -n --arg id "$KEY_ID" '[{id:$id,status:"CREDENTIAL_STATUS_REVOKED",revocationGeneration:"2"}]'
+        jq -n --arg id "$KEY_ID" '[{id:$id,status:"revoked",revocation_generation:2}]'
       fi ;;
     'cp --local '*)
       [[ -e "$TMPDIR_SMOKE/revoked" && "$4" == "$SMOKE_NAME:/workspace/.cw-ssh-smoke/revoked-trigger" ]] || fail 'wrong local trigger'

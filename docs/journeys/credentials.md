@@ -151,8 +151,9 @@ Issues: #4714 (local), #2559 (cloud).
   saying what to do. A missing or locked keychain is checked there too once
   the store probe lands (#4717, track A3); until then it is refused after
   the sign-in, and nothing is saved.
-- **List:** kind `claude_sign_in` locally, `CREDENTIAL_AUTHENTICATION_KIND_CLAUDE_SIGN_IN`
-  in the cloud, with the Claude account's email as the hint.
+- **List:** KIND `Claude (sign-in)` in both placements, and
+  `"authentication_kind": "claude_sign_in"` in both placements' JSON, with
+  the Claude account's email as its `account_hint`.
 - **Profile:** `set anthropic NAME`.
 - **Use:** in the environment, `~/.claude/.credentials.json` holds
   `claudeAiOauth` with the plan's `subscriptionType`, exactly Claude Code's

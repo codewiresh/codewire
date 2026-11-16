@@ -54,7 +54,7 @@ provider_ssh_metadata_id() {
 # already has a default, so it never becomes the default and cleanup can delete
 # it and then its credential. FILE is the account's profile list.
 provider_account_has_default_profile() {
-  jq -e 'type == "array" and any(.[]; .isDefault == true)' "$1" >/dev/null
+  jq -e 'type == "array" and any(.[]; .is_default == true)' "$1" >/dev/null
 }
 
 prepare_provider_ssh_identity() {
@@ -91,9 +91,9 @@ prepare_provider_ssh_identity() {
   PROVIDER_SSH_CREDENTIAL_ID="$(provider_ssh_metadata_id "$TMPDIR_SMOKE/provider-ssh-credential.json" "$PROVIDER_SSH_CREDENTIAL_NAME")" ||
     die 'generated SSH identity was not acknowledged exactly'
   public_key="$(jq -er 'select(length == 1) | .[0] |
-    select(.provider == "ssh" and .status == "CREDENTIAL_STATUS_ACTIVE" and
-      .authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY") |
-    .sshPublicKey.openssh | select(test("^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$"))' \
+    select(.provider == "ssh" and .status == "active" and
+      .authentication_kind == "ssh_key") |
+    .ssh_public_key.openssh | select(test("^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$"))' \
     "$TMPDIR_SMOKE/provider-ssh-credential.json")" || die 'generated SSH public metadata is invalid'
   cw_with_timeout 30 credentials --cloud --profile "$PROVIDER_SSH_PROFILE_NAME" set ssh "id:$PROVIDER_SSH_CREDENTIAL_ID" \
     >"$TMPDIR_SMOKE/provider-ssh-profile-set.out" 2>"$TMPDIR_SMOKE/provider-ssh-profile-set.err" ||
@@ -102,15 +102,15 @@ prepare_provider_ssh_identity() {
     >"$TMPDIR_SMOKE/provider-ssh-profile.json" || die 'created profile metadata is unavailable'
   PROVIDER_SSH_PROFILE_ID="$(provider_ssh_metadata_id "$TMPDIR_SMOKE/provider-ssh-profile.json" "$PROVIDER_SSH_PROFILE_NAME")" ||
     die 'created profile identity was not acknowledged exactly'
-  jq -e --arg id "$PROVIDER_SSH_CREDENTIAL_ID" 'length == 1 and .[0].revision == "1" and
-    .[0].entries == [{capabilitySlot:"ssh",credentialId:$id}]' \
+  jq -e --arg id "$PROVIDER_SSH_CREDENTIAL_ID" 'length == 1 and .[0].revision == 1 and
+    .[0].entries == {ssh:$id} and .[0].github_connection == true' \
     "$TMPDIR_SMOKE/provider-ssh-profile.json" >/dev/null || die 'created SSH profile does not select exactly the generated identity'
 }
 
 prepare_provider_ssh() {
   local public_key encoded_fixture encoded_key install startup
   prepare_provider_ssh_identity
-  public_key="$(jq -er '.[0].sshPublicKey.openssh' "$TMPDIR_SMOKE/provider-ssh-credential.json")"
+  public_key="$(jq -er '.[0].ssh_public_key.openssh' "$TMPDIR_SMOKE/provider-ssh-credential.json")"
 
   # Both embedded inputs are public: the checked-in fixture and selected public
   # key. The fixture generates its synthetic server host key inside the guest.
@@ -173,7 +173,7 @@ run_provider_ssh_smoke() {
   cw_with_timeout 30 credentials --cloud revoke "id:$PROVIDER_SSH_CREDENTIAL_ID" --output json \
     >"$TMPDIR_SMOKE/provider-ssh-revoked.json" || die 'cannot revoke the exact synthetic SSH credential'
   jq -e --arg id "$PROVIDER_SSH_CREDENTIAL_ID" 'length == 1 and .[0].id == $id and
-    .[0].status == "CREDENTIAL_STATUS_REVOKED" and .[0].revocationGeneration == "2"' \
+    .[0].status == "revoked" and .[0].revocation_generation == 2' \
     "$TMPDIR_SMOKE/provider-ssh-revoked.json" >/dev/null || die 'SSH revocation acknowledgement drifted'
   printf 'revoked\n' >"$TMPDIR_SMOKE/provider-ssh-revoked-trigger"
   cw_with_timeout 30 --cloud cp "$TMPDIR_SMOKE/provider-ssh-revoked-trigger" \
@@ -269,9 +269,9 @@ cleanup_provider_ssh_credential() {
         >"$TMPDIR_SMOKE/provider-ssh-cleanup-credential.json" 2>/dev/null || return 1
       jq -e --arg id "$PROVIDER_SSH_CREDENTIAL_ID" --arg name "$PROVIDER_SSH_CREDENTIAL_NAME" \
         'type == "array" and length == 1 and .[0].id == $id and .[0].name == $name and
-          (.[0].status == "CREDENTIAL_STATUS_ACTIVE" or .[0].status == "CREDENTIAL_STATUS_REVOKED")' \
+          (.[0].status == "active" or .[0].status == "revoked")' \
         "$TMPDIR_SMOKE/provider-ssh-cleanup-credential.json" >/dev/null || return 1
-      if ! jq -e 'length == 1 and .[0].status == "CREDENTIAL_STATUS_REVOKED"' \
+      if ! jq -e 'length == 1 and .[0].status == "revoked"' \
           "$TMPDIR_SMOKE/provider-ssh-cleanup-credential.json" >/dev/null; then
         cw_with_timeout 30 credentials --cloud revoke "id:$PROVIDER_SSH_CREDENTIAL_ID" \
           >"$TMPDIR_SMOKE/provider-ssh-cleanup-revoke.out" 2>&1 || rc=1

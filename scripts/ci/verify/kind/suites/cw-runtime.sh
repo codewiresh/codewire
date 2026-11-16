@@ -202,8 +202,8 @@ cw_runtime_add_managed_credentials() {
     kind_credential_cli credentials --cloud add anthropic --name "$anthropic_name"
   kind_credential_cli credentials --cloud get "$anthropic_name" --output json | jq -e \
     --arg name "$anthropic_name" 'length == 1 and .[0].name == $name
-      and .[0].provider == "anthropic" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"
-      and .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
+      and .[0].provider == "anthropic" and .[0].status == "active"
+      and .[0].authentication_kind == "api_key"' >/dev/null
   ensure_kind_credential_default_profile openai "$credential_name"
   kind_credential_cli credentials --cloud --profile "$profile_name" set openai "$credential_name"
   kind_credential_cli credentials --cloud --profile "$profile_name" set anthropic "$anthropic_name"
@@ -644,10 +644,10 @@ run_admitted_cw_runtime_journey() {
   fi
   kind_credential_cli credentials --cloud get "$credential_name" --output json | jq -e \
     --arg name "$credential_name" 'length == 1 and .[0].name == $name
-      and .[0].provider == "openai" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"' >/dev/null
+      and .[0].provider == "openai" and .[0].status == "active"' >/dev/null
   if [ "$managed" = 1 ]; then
     kind_credential_cli credentials --cloud get "$credential_name" --output json | jq -e \
-      'length == 1 and .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' >/dev/null
+      'length == 1 and .[0].authentication_kind == "api_key"' >/dev/null
   fi
   environment="$(kind_credential_cli --cloud create --name "$profile_name" --no-profile \
     --image "$workspace_image" --cpu 500m --memory 2Gi --disk 2Gi --ttl 1h \

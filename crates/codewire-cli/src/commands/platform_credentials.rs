@@ -76,7 +76,7 @@ async fn handle_with_receipt(
         }
         CredentialsCommand::List(args) => {
             let credentials = list_all(client).await?;
-            print(&credentials, args.output)?;
+            print_listing(client, &credentials, args.output).await?;
             report_live_github_status(client, &credentials, args.output).await;
             Ok(())
         }
@@ -88,7 +88,7 @@ async fn handle_with_receipt(
                     .context("get requires a credential selector")?,
             )
             .await?;
-            print(std::slice::from_ref(&credential), args.output)?;
+            print_listing(client, std::slice::from_ref(&credential), args.output).await?;
             report_live_github_status(client, std::slice::from_ref(&credential), args.output).await;
             Ok(())
         }
@@ -132,7 +132,10 @@ async fn handle_with_receipt(
                 expected_revocation_generation: current.revocation_generation,
                 ..Default::default()
             }).await.context("delete exact revoked platform credential revision; inspect metadata before retrying an uncertain result")?;
-            eprintln!("Platform credential {:?} deleted.", current.name);
+            eprintln!(
+                "{}",
+                super::credentials::output::deleted("cloud", &current.name)
+            );
             Ok(())
         }
         CredentialsCommand::Add(args) => {
@@ -142,7 +145,7 @@ async fn handle_with_receipt(
                 // reading the explicitly selected private file or passphrase.
                 anyhow::ensure!(
                     find_named(client, &name).await?.is_none(),
-                    "credential name already exists"
+                    super::credentials::output::refusal::name_in_use("cloud", &name)
                 );
                 let mut input = read_ssh_import(&args)?;
                 let response = client.add_ssh_credential(rpc::AddSshCredentialRequest {
@@ -167,7 +170,7 @@ async fn handle_with_receipt(
                 // asking for the token.
                 anyhow::ensure!(
                     find_named(client, &name).await?.is_none(),
-                    "credential name already exists; replace its token with `credentials rotate`"
+                    super::credentials::output::refusal::name_in_use("cloud", &name)
                 );
                 eprintln!("{CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE}");
                 let token = prompt_named_material(CLAUDE_SUBSCRIPTION_TOKEN_PROMPT)?;
@@ -267,11 +270,6 @@ fn is_subscription_token(credential: &rpc::Credential) -> bool {
         && credential.authentication_kind == rpc::CredentialAuthenticationKind::Oauth
 }
 
-fn is_claude_sign_in(credential: &rpc::Credential) -> bool {
-    credential.provider == "anthropic"
-        && credential.authentication_kind == rpc::CredentialAuthenticationKind::ClaudeSignIn
-}
-
 fn validate_subscription_token_arguments(args: &CredentialAddArgs) -> anyhow::Result<String> {
     anyhow::ensure!(
         args.key_file.is_none(),
@@ -279,7 +277,7 @@ fn validate_subscription_token_arguments(args: &CredentialAddArgs) -> anyhow::Re
     );
     anyhow::ensure!(
         args.account_hint.is_none(),
-        "Claude subscription tokens do not use --account-hint"
+        super::credentials::output::refusal::ACCOUNT_HINT
     );
     anyhow::ensure!(
         args.expires_at.is_none(),
@@ -346,10 +344,13 @@ fn rotation_metadata(
     current: &rpc::Credential,
     expiry: Option<u64>,
 ) -> anyhow::Result<rpc::Credential> {
+    if current.authentication_kind == rpc::CredentialAuthenticationKind::SshKey {
+        anyhow::bail!(super::credentials::output::refusal::ROTATE_SSH);
+    }
     anyhow::ensure!(
         matches!(current.provider.as_str(), "openai" | "anthropic")
             && current.authentication_kind == rpc::CredentialAuthenticationKind::ApiKey,
-        "rotate supports OpenAI/Anthropic API keys and Claude subscription tokens; use connect to reconnect OAuth or generate/add for a new SSH identity"
+        super::credentials::output::refusal::ROTATE_CONNECTED
     );
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -370,13 +371,12 @@ fn rotation_metadata(
 }
 
 fn rotation_notice(current: &rpc::Credential, expiry: Option<u64>) -> String {
-    let deadline = expiry.map_or_else(
-        || "clears the hard expiry".to_owned(),
-        |expiry| format!("sets the hard expiry to Unix timestamp {expiry}"),
-    );
-    format!(
-        "Rotating platform API key {:?} ({}, revision {}) sets its status to Active (including if revoked) and {deadline}. Enter the replacement key to proceed.",
-        current.name, current.id, current.revocation_generation
+    super::credentials::output::rotation_notice(
+        "cloud",
+        &current.name,
+        &current.id,
+        current.revocation_generation,
+        expiry,
     )
 }
 
@@ -389,7 +389,7 @@ fn validate_update_ack(expected: &rpc::Credential, actual: &rpc::Credential) -> 
 }
 
 /// Every credential of the signed-in user, across pages.
-async fn list_all(client: &CodewireClient) -> anyhow::Result<Vec<rpc::Credential>> {
+pub(super) async fn list_all(client: &CodewireClient) -> anyhow::Result<Vec<rpc::Credential>> {
     let mut credentials = Vec::new();
     let mut cursors = BTreeSet::new();
     let mut page_token = String::new();
@@ -488,7 +488,7 @@ impl ConnectStore for CloudConnectStore<'_> {
             name: record.name.clone(),
             id: record.id.clone(),
             revision: record.revocation_generation,
-            status: text_status(record, now)?,
+            status: super::credentials::output::CredentialView::cloud(record)?.status_at(now),
         })
     }
 
@@ -724,7 +724,9 @@ fn validate_key_arguments(args: &CredentialAddArgs) -> anyhow::Result<()> {
     );
     anyhow::ensure!(
         matches!(args.provider.as_deref(), Some("openai" | "anthropic")),
-        "API-key enrollment supports openai or anthropic; use add claude-subscription for a Claude subscription token or connect for OAuth"
+        super::credentials::output::refusal::add_unsupported(
+            args.provider.as_deref().unwrap_or("that provider")
+        )
     );
     trimmed_required(
         args.name
@@ -734,7 +736,7 @@ fn validate_key_arguments(args: &CredentialAddArgs) -> anyhow::Result<()> {
     )?;
     anyhow::ensure!(
         args.account_hint.is_none(),
-        "platform API keys do not use --account-hint"
+        super::credentials::output::refusal::ACCOUNT_HINT
     );
     Ok(())
 }
@@ -751,12 +753,24 @@ pub(super) async fn resolve(
             rpc::get_credential_request::Selector::Name(name.to_owned())
         }
     };
+    let name = match &selector {
+        rpc::get_credential_request::Selector::Name(name) => Some(name.clone()),
+        _ => None,
+    };
     client
         .get_credential(rpc::GetCredentialRequest {
             selector: Some(selector),
             ..Default::default()
         })
-        .await?
+        .await
+        .map_err(|error| match name {
+            Some(name) if error.code() == rpc::ErrorCode::NotFound => {
+                anyhow::anyhow!(super::credentials::output::refusal::not_found(
+                    "cloud", &name
+                ))
+            }
+            _ => error.into(),
+        })?
         .credential
         .into_option()
         .context("platform omitted credential metadata")
@@ -815,6 +829,12 @@ async fn report_live_github_status(
 }
 
 fn print(credentials: &[rpc::Credential], output: OutputFormat) -> anyhow::Result<()> {
+    validate_ssh_metadata(credentials)?;
+    super::credentials::output::print_cloud_credentials(credentials, None, output)
+}
+
+/// An SSH credential's metadata is consistent and carries a valid public key.
+fn validate_ssh_metadata(credentials: &[rpc::Credential]) -> anyhow::Result<()> {
     for credential in credentials {
         if credential.provider == "ssh"
             || credential.authentication_kind == rpc::CredentialAuthenticationKind::SshKey
@@ -837,70 +857,22 @@ fn print(credentials: &[rpc::Credential], output: OutputFormat) -> anyhow::Resul
             .validate()?;
         }
     }
-    match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(credentials)?),
-        OutputFormat::Text => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs();
-            for credential in credentials {
-                let status = text_status(credential, now)?;
-                let provider = if is_subscription_token(credential) {
-                    "anthropic (Claude subscription token)"
-                } else if is_claude_sign_in(credential) {
-                    "anthropic (Claude sign-in)"
-                } else {
-                    credential.provider.as_str()
-                };
-                println!(
-                    "{}  {:?}  {}  {}  revision {}",
-                    credential.id,
-                    credential.name,
-                    provider,
-                    status,
-                    credential.revocation_generation
-                );
-                if let Some(expiry) = credential.expires_at_unix.and_then(expiry_date) {
-                    println!("  expires {expiry}");
-                }
-                if let Some(key) = credential.ssh_public_key.as_option() {
-                    println!("  {}\n  {}", key.openssh, key.fingerprint);
-                }
-            }
-        }
-    }
     Ok(())
 }
 
-/// The status `list` and `get` print. The broker withholds a credential past
-/// its recorded hard expiry whatever its stored status, so an Active one past
-/// that moment reads expired.
-fn text_status(credential: &rpc::Credential, now: u64) -> anyhow::Result<&'static str> {
-    Ok(if credential.status == rpc::CredentialStatus::Active {
-        if credential
-            .expires_at_unix
-            .is_some_and(|expiry| expiry <= now)
-        {
-            "expired"
-        } else {
-            "active"
-        }
-    } else if credential.status == rpc::CredentialStatus::Revoked {
-        "revoked"
-    } else if credential.status == rpc::CredentialStatus::Expired {
-        "expired"
-    } else if credential.status == rpc::CredentialStatus::RefreshFailed {
-        "refresh_failed"
-    } else {
-        anyhow::bail!("platform returned an unsupported credential status")
-    })
-}
-
-/// A recorded hard expiry as a UTC date and time.
-fn expiry_date(expiry: u64) -> Option<String> {
-    let expiry = i64::try_from(expiry).ok()?;
-    chrono::DateTime::<chrono::Utc>::from_timestamp(expiry, 0)
-        .map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string())
+/// A listing of cloud credentials, with the profiles that use them.
+async fn print_listing(
+    client: &CodewireClient,
+    credentials: &[rpc::Credential],
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    validate_ssh_metadata(credentials)?;
+    let profiles = super::platform_profiles::list_profiles(client).await?;
+    super::credentials::output::print_cloud_credentials(
+        credentials,
+        Some(&super::credentials::output::cloud_uses(&profiles)),
+        output,
+    )
 }
 
 #[cfg(test)]
@@ -975,7 +947,7 @@ mod tests {
         }
         assert!(rotation_notice(&current, None).contains("including if revoked"));
         assert!(rotation_notice(&current, None).contains("clears the hard expiry"));
-        assert!(rotation_notice(&current, Some(4_000_000_000)).contains("4000000000"));
+        assert!(rotation_notice(&current, Some(4_000_000_000)).contains("2096-10-02 07:06 UTC"));
         let mut wrong = expected.clone();
         wrong.id = "different-identity".into();
         assert!(validate_update_ack(&expected, &wrong).is_err());
@@ -1013,26 +985,6 @@ mod tests {
         // An API-key add never accepts the subscription provider word.
         assert!(validate_key_arguments(&args(None, None, false)).is_err());
         assert!(CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE.contains("claude setup-token"));
-    }
-
-    #[test]
-    fn listed_status_reads_expired_past_the_recorded_expiry_with_a_date() {
-        let mut credential = metadata(rpc::CredentialStatus::Active);
-        credential.provider = "anthropic".into();
-        credential.authentication_kind = rpc::CredentialAuthenticationKind::Oauth.into();
-        credential.expires_at_unix = Some(1_800_000_000);
-        assert_eq!(text_status(&credential, 1_799_999_999).unwrap(), "active");
-        assert_eq!(text_status(&credential, 1_800_000_000).unwrap(), "expired");
-        credential.status = rpc::CredentialStatus::Revoked.into();
-        assert_eq!(text_status(&credential, 1_900_000_000).unwrap(), "revoked");
-        credential.expires_at_unix = None;
-        credential.status = rpc::CredentialStatus::Active.into();
-        assert_eq!(text_status(&credential, u64::MAX).unwrap(), "active");
-        assert_eq!(
-            expiry_date(1_800_000_000).as_deref(),
-            Some("2027-01-15 08:00 UTC")
-        );
-        assert_eq!(expiry_date(u64::MAX), None);
     }
 
     #[tokio::test]
@@ -1351,7 +1303,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("rotate supports OpenAI/Anthropic API keys")
+                .contains("comes from a provider sign-in, so it isn't pasted")
         );
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
         server.verify().await;

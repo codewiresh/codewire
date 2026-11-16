@@ -1596,9 +1596,9 @@ kind_credential_cli() {
       printf '[{"id":"org_contract_1","role":"member"},{"id":"org_contract_2","role":"owner"}]\\n' ;;
     'org current') printf 'ID: org_contract_1\\n' ;;
     'credentials --cloud get'*)
-      printf '[{"name":"%%s","provider":"openai","status":"CREDENTIAL_STATUS_ACTIVE"}]\\n' "$4" ;;
+      printf '[{"name":"%%s","provider":"openai","status":"active"}]\\n' "$4" ;;
     'credentials --cloud profiles list --output json')
-      printf '[{"name":"kind-default","isDefault":true}]\\n' ;;
+      printf '[{"name":"kind-default","is_default":true}]\\n' ;;
     '--cloud create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
     '--cloud update'*) printf '{"operation_generation":1}\\n' ;;
     *) return 0 ;;
@@ -1640,7 +1640,7 @@ ensure_kind_credential_default_profile codex kind-codex-1
         # #3550: a user's first profile becomes the default, which cannot be
         # deleted, so no stage's own profile may become it.
         listed = ["credentials --cloud profiles list --output json"]
-        result = self.default_profile('[{"name":"other","isDefault":true},{"name":"kind-x"}]')
+        result = self.default_profile('[{"name":"other","is_default":true},{"name":"kind-x"}]')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr.splitlines(), listed)
         self.assertEqual(result.stdout, "")
@@ -1649,7 +1649,7 @@ ensure_kind_credential_default_profile codex kind-codex-1
             "credentials --cloud profiles default kind-default",
             "credentials --cloud --profile kind-default unset codex",
         ]
-        for listing in ("[]", '[{"name":"kind-x","isDefault":false}]'):
+        for listing in ("[]", '[{"name":"kind-x","is_default":false}]'):
             with self.subTest(listing=listing):
                 result = self.default_profile(listing)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -1680,9 +1680,9 @@ kind_credential_cli() {
       printf '[{"id":"org_contract_1","role":"member"},{"id":"org_contract_2","role":"owner"}]\\n' ;;
     'org current') printf 'ID: org_contract_1\\n' ;;
     'credentials --cloud get'*)
-      printf '[{"name":"%%s","provider":"openai","status":"CREDENTIAL_STATUS_ACTIVE"}]\\n' "$4" ;;
+      printf '[{"name":"%%s","provider":"openai","status":"active"}]\\n' "$4" ;;
     'credentials --cloud profiles list --output json')
-      printf '[{"name":"kind-default","isDefault":true}]\\n' ;;
+      printf '[{"name":"kind-default","is_default":true}]\\n' ;;
     '--cloud create'*) printf '{"id":"%%s"}\\n' '%(env)s' ;;
     '--cloud update'*) printf '{"operation_generation":1}\\n' ;;
     *) return 0 ;;
@@ -3144,10 +3144,10 @@ kind_credential_claude_run env-1 {driver} {form} {outcome}
 TOKEN_GET_STUB = r"""
 kind_credential_cli() {{
   [ "$*" = "credentials --cloud get claude --output json" ] || return 99
-  jq -nc --arg status {status} --arg revision {revision} --argjson left {left} '[{{
+  jq -nc --arg status {status} --argjson revision {revision} --argjson left {left} '[{{
     name: "claude", provider: "anthropic", status: $status,
-    authenticationKind: "CREDENTIAL_AUTHENTICATION_KIND_OAUTH",
-    revocationGeneration: $revision, expiresAtUnix: ((now | floor) + $left | tostring)}}]'
+    authentication_kind: "oauth",
+    revocation_generation: $revision, expires_at_unix: ((now | floor) + $left)}}]'
 }}
 assert_kind_credential_claude_token claude 2
 """
@@ -3304,12 +3304,12 @@ kind_credential_claude_stage workspace-pod
                 self.assertEqual(result.returncode == 0, valid, result.stderr)
 
     def test_token_metadata_is_active_at_the_expected_revision_one_year_out(self):
-        def get(status="CREDENTIAL_STATUS_ACTIVE", revision="2", left=365 * 86400 - 60):
+        def get(status="active", revision="2", left=365 * 86400 - 60):
             return self.shell(TOKEN_GET_STUB.format(status=status, revision=revision,
                                                     left=left))
         result = get()
         self.assertEqual(result.returncode, 0, result.stderr)
-        for result in (get(status="CREDENTIAL_STATUS_REFRESH_FAILED"), get(revision="3"),
+        for result in (get(status="refresh_failed"), get(revision="3"),
                        get(left=100 * 86400)):
             self.assertEqual(result.returncode, 1)
             self.assertIn("is not Active at revision 2", result.stderr)

@@ -85,18 +85,18 @@ identity_journey() (
     printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
     case "$*" in
       'credentials --cloud list --output json') printf '[]\n' ;;
-      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","is_default":true}]\n' ;;
       'credentials --cloud add openai --name dev-openai-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
         printf 'owner-visible-hidden-prompt\n' ;;
       'credentials --cloud get dev-openai-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output json')
         jq -n --arg id "$CREDENTIAL_ID" '[{id:$id,name:"dev-openai-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          provider:"openai",status:"CREDENTIAL_STATUS_ACTIVE",
-          authenticationKind:"CREDENTIAL_AUTHENTICATION_KIND_API_KEY"}]' ;;
+          provider:"openai",status:"active",
+          authentication_kind:"api_key"}]' ;;
       'credentials --cloud --profile dev-openai-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa set openai id:'*) ;;
       'credentials --cloud --profile dev-openai-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa get --output json')
         jq -n --arg id "$PROFILE_ID" --arg key "$CREDENTIAL_ID" '[{id:$id,
-          name:"dev-openai-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",revision:"1",
-          entries:[{capabilitySlot:"openai",credentialId:$key}]}]' ;;
+          name:"dev-openai-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",revision:1,
+          entries:{openai:$key},github_connection:true}]' ;;
       *) fail "unexpected identity command: $*" ;;
     esac
   }
@@ -121,7 +121,7 @@ enrollment_cancelled() (
     printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
     case "$*" in
       'credentials --cloud list --output json') printf '[]\n' ;;
-      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","is_default":true}]\n' ;;
       'credentials --cloud add openai --name dev-openai-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') return 130 ;;
       *) fail "command continued after cancelled enrollment: $*" ;;
     esac
@@ -139,7 +139,7 @@ name_collision() (
     case "$*" in
       'credentials --cloud list --output json')
         printf '[{"name":"dev-openai-cccccccccccccccccccccccccccccccc"}]\n' ;;
-      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","is_default":true}]\n' ;;
       *) fail "collision permitted a mutation: $*" ;;
     esac
   }
@@ -192,12 +192,12 @@ cleanup_cw() {
         jq -n --arg id "$id" '[{id:$id,name:"owned-openai"}]'
       fi ;;
     'credentials --cloud get '*" --output json")
-      local id="$CREDENTIAL_ID" status=CREDENTIAL_STATUS_ACTIVE kind=CREDENTIAL_AUTHENTICATION_KIND_API_KEY
+      local id="$CREDENTIAL_ID" status=active kind=api_key
       [[ "$FAILURE" != get-rebound ]] || id="$PROFILE_ID"
-      [[ "$FAILURE" != wrong-kind ]] || kind=CREDENTIAL_AUTHENTICATION_KIND_OAUTH
-      [[ "$FAILURE" != already-revoked ]] || status=CREDENTIAL_STATUS_REVOKED
+      [[ "$FAILURE" != wrong-kind ]] || kind=oauth
+      [[ "$FAILURE" != already-revoked ]] || status=revoked
       jq -n --arg id "$id" --arg status "$status" --arg kind "$kind" '[{id:$id,name:"owned-openai",
-        provider:"openai",authenticationKind:$kind,status:$status}]' ;;
+        provider:"openai",authentication_kind:$kind,status:$status}]' ;;
     'credentials --cloud revoke '*)
       [[ "$4" == "id:$CREDENTIAL_ID" ]] || fail 'unowned credential revocation'
       touch "$TMPDIR_SMOKE/credential-revoked" ;;

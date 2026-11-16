@@ -99,30 +99,14 @@ fn selected_storage(
     }
 }
 
-/// Each store a list reads, with the heading it is listed under (#4594): this
-/// computer's, where local storage runs here, then the account's.
-pub(crate) fn store_headings() -> Vec<(StoragePlacement, String)> {
+/// Each store a list reads (#4594): this computer's, where local storage
+/// runs here, then the account's.
+pub(crate) fn list_placements() -> Vec<StoragePlacement> {
     let mut stores = Vec::new();
     if cfg!(any(target_os = "linux", target_os = "macos")) {
-        let backend = ResolvePaths::from_env(&OsEnv)
-            .map_err(anyhow::Error::from)
-            .and_then(|paths| {
-                super::credential_input::configured_local_credential_store(&paths.mesh_data_dir)
-            })
-            .map_err(|error| error.to_string());
-        let detail = match backend {
-            Ok(backend) => backend_label(backend).to_owned(),
-            Err(error) => format!("unavailable: {error}"),
-        };
-        stores.push((
-            StoragePlacement::Local,
-            format!("{} ({detail})", local_label()),
-        ));
+        stores.push(StoragePlacement::Local);
     }
-    stores.push((
-        StoragePlacement::Platform,
-        "In your Codewire account (protected cloud storage)".to_owned(),
-    ));
+    stores.push(StoragePlacement::Platform);
     stores
 }
 

@@ -258,7 +258,7 @@ checkout_main() {
   mkdir -m 0700 "$CHECKOUT_WORKSPACE"
   CHECKOUT_STATE="$TMPDIR_SMOKE/hosted-checkout-fixture"
   prepare_provider_ssh_identity
-  jq -er '.[0].sshPublicKey.openssh' "$TMPDIR_SMOKE/provider-ssh-credential.json" \
+  jq -er '.[0].ssh_public_key.openssh' "$TMPDIR_SMOKE/provider-ssh-credential.json" \
     >"$TMPDIR_SMOKE/checkout-selected.pub"
   CHECKOUT_FIXTURE_STARTED=1
   checkout_fixture_start

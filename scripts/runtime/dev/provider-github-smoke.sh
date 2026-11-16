@@ -41,9 +41,9 @@ prepare_provider_github_identity() {
     die 'created GitHub identity was not acknowledged exactly'
   jq -e --arg id "$PROVIDER_GITHUB_CREDENTIAL_ID" --arg name "$PROVIDER_GITHUB_CREDENTIAL_NAME" '
     type == "array" and length == 1 and .[0].id == $id and .[0].name == $name and
-    .[0].provider == "github" and .[0].status == "CREDENTIAL_STATUS_ACTIVE" and
-    .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_OAUTH" and
-    (.[0].accountHint | type == "string" and test("^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"))
+    .[0].provider == "github" and .[0].status == "active" and
+    .[0].authentication_kind == "oauth" and
+    (.[0].account_hint | type == "string" and test("^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"))
   ' "$TMPDIR_SMOKE/provider-github-credential.json" >/dev/null || die 'created GitHub public metadata is invalid'
   cw_with_timeout 30 credentials --cloud --profile "$PROVIDER_GITHUB_PROFILE_NAME" \
     set github "id:$PROVIDER_GITHUB_CREDENTIAL_ID" \
@@ -54,8 +54,8 @@ prepare_provider_github_identity() {
   PROVIDER_GITHUB_PROFILE_ID="$(provider_ssh_metadata_id \
     "$TMPDIR_SMOKE/provider-github-profile.json" "$PROVIDER_GITHUB_PROFILE_NAME")" ||
     die 'created GitHub profile was not acknowledged exactly'
-  jq -e --arg id "$PROVIDER_GITHUB_CREDENTIAL_ID" 'length == 1 and .[0].revision == "1" and
-    .[0].entries == [{capabilitySlot:"github",credentialId:$id}]' \
+  jq -e --arg id "$PROVIDER_GITHUB_CREDENTIAL_ID" 'length == 1 and .[0].revision == 1 and
+    .[0].entries == {github:$id}' \
     "$TMPDIR_SMOKE/provider-github-profile.json" >/dev/null ||
     die 'created GitHub profile does not select exactly the created identity'
 }
@@ -64,7 +64,7 @@ prepare_provider_github() {
   local encoded_workload encoded_login install
   prepare_provider_github_identity
   encoded_workload="$(base64 -w0 "$ROOT/scripts/runtime/dev/provider-github-workload.py")"
-  encoded_login="$(jq -jr '.[0].accountHint' "$TMPDIR_SMOKE/provider-github-credential.json" | base64 -w0)"
+  encoded_login="$(jq -jr '.[0].account_hint' "$TMPDIR_SMOKE/provider-github-credential.json" | base64 -w0)"
   install="set -eu; test ! -e /workspace/.cw-provider-github; mkdir -m 700 /workspace/.cw-provider-github; printf %s '$encoded_workload' | base64 -d > '$PROVIDER_GITHUB_SCRIPT'; printf %s '$encoded_login' | base64 -d > /workspace/.cw-provider-github/expected-login; chmod 0500 '$PROVIDER_GITHUB_SCRIPT'; chmod 0400 /workspace/.cw-provider-github/expected-login"
   PROVIDER_GITHUB_DOCUMENT="$TMPDIR_SMOKE/provider-github-codewire.json"
   jq -n --arg profile "platform:id:$PROVIDER_GITHUB_PROFILE_ID" --arg install "$install" '
@@ -143,10 +143,10 @@ cleanup_provider_github_credential() {
       jq -e --arg id "$PROVIDER_GITHUB_CREDENTIAL_ID" --arg name "$PROVIDER_GITHUB_CREDENTIAL_NAME" '
         type == "array" and length == 1 and .[0].id == $id and .[0].name == $name and
         .[0].provider == "github" and
-        .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_OAUTH" and
-        (.[0].status == "CREDENTIAL_STATUS_ACTIVE" or .[0].status == "CREDENTIAL_STATUS_REVOKED")
+        .[0].authentication_kind == "oauth" and
+        (.[0].status == "active" or .[0].status == "revoked")
       ' "$TMPDIR_SMOKE/provider-github-cleanup-credential.json" >/dev/null || return 1
-      if ! jq -e 'length == 1 and .[0].status == "CREDENTIAL_STATUS_REVOKED"' \
+      if ! jq -e 'length == 1 and .[0].status == "revoked"' \
           "$TMPDIR_SMOKE/provider-github-cleanup-credential.json" >/dev/null; then
         cw_with_timeout 30 credentials --cloud revoke "id:$PROVIDER_GITHUB_CREDENTIAL_ID" \
           >"$TMPDIR_SMOKE/provider-github-cleanup-revoke.out" 2>&1 || rc=1

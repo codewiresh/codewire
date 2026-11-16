@@ -3538,8 +3538,8 @@ python3 -B "$ROOT/scripts/ci/tests/test-kind-cw-runtime.py"
       'org current') printf 'ID: org_contract_1\n' ;;
       'credentials --cloud add '*) cat >/dev/null ;;
       'credentials --cloud get '*)
-        printf '[{"name":"%s","provider":"anthropic","status":"CREDENTIAL_STATUS_ACTIVE","authenticationKind":"CREDENTIAL_AUTHENTICATION_KIND_API_KEY"}]\n' "$4" ;;
-      'credentials --cloud profiles list --output json') printf '[{"name":"kind-default","isDefault":true}]\n' ;;
+        printf '[{"name":"%s","provider":"anthropic","status":"active","authentication_kind":"api_key"}]\n' "$4" ;;
+      'credentials --cloud profiles list --output json') printf '[{"name":"kind-default","is_default":true}]\n' ;;
       '--cloud create '*) printf '{"id":"00000000-0000-4000-8000-0000000000cc"}\n' ;;
       '--cloud rm '*) return 1 ;;
     esac

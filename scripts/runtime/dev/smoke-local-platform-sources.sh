@@ -533,7 +533,7 @@ local_platform_ssh_revoke() {
   cw_with_timeout 30 credentials --cloud revoke "id:$PROVIDER_SSH_CREDENTIAL_ID" --output json \
     >"$TMPDIR_SMOKE/local-revoked.json" || die 'cannot revoke the owned platform SSH identity'
   jq -e --arg id "$PROVIDER_SSH_CREDENTIAL_ID" 'length == 1 and .[0].id == $id and
-    .[0].status == "CREDENTIAL_STATUS_REVOKED" and .[0].revocationGeneration == "2"' \
+    .[0].status == "revoked" and .[0].revocation_generation == 2' \
     "$TMPDIR_SMOKE/local-revoked.json" >/dev/null || die 'platform revocation acknowledgement drifted'
   printf 'revoked\n' >"$TMPDIR_SMOKE/local-revoked-trigger"
   cw_with_timeout 30 cp --local "$TMPDIR_SMOKE/local-revoked-trigger" \

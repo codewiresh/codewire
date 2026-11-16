@@ -63,7 +63,7 @@ cw() {
       [[ "$4" == "id:$KEY_ID" ]] || fail 'different credential revoked'
       touch "$TMPDIR_SMOKE/revoked"
       if [[ "$FAILURE" == bad-revoke ]]; then printf '[]\n'; else
-        jq -n --arg id "$KEY_ID" '[{id:$id,status:"CREDENTIAL_STATUS_REVOKED",revocationGeneration:"2"}]'
+        jq -n --arg id "$KEY_ID" '[{id:$id,status:"revoked",revocation_generation:2}]'
       fi ;;
     '--cloud cp '*)
       [[ -e "$TMPDIR_SMOKE/revoked" && "$4" == "$ENV_ID:/workspace/.cw-ssh-smoke/revoked-trigger" ]] ||
@@ -139,9 +139,9 @@ fi
 pass
 # A disposable profile is made only beside an existing default, which it can
 # never become (#3550); every provider smoke shares this check.
-printf '[{"name":"lasting","isDefault":true},{"name":"other"}]\n' >"$TEST_ROOT/profiles.json"
+printf '[{"name":"lasting","is_default":true},{"name":"other"}]\n' >"$TEST_ROOT/profiles.json"
 provider_account_has_default_profile "$TEST_ROOT/profiles.json" || fail 'an existing default profile was not found'
-for listing in '[]' '[{"name":"other","isDefault":false}]' '[{"name":"other"}]' '{}' ''; do
+for listing in '[]' '[{"name":"other","is_default":false}]' '[{"name":"other"}]' '{}' ''; do
   printf '%s\n' "$listing" >"$TEST_ROOT/profiles.json"
   if provider_account_has_default_profile "$TEST_ROOT/profiles.json" 2>/dev/null; then
     fail "a profile list without a default was accepted: $listing"
@@ -174,9 +174,9 @@ cw() {
         jq -n --arg id "$id" '[{id:$id,name:"owned-key"}]'
       fi ;;
     'credentials --cloud get '*" --output json")
-      local id="$KEY_ID" status=CREDENTIAL_STATUS_ACTIVE
+      local id="$KEY_ID" status=active
       [[ "$FAILURE" != key-get-rebound ]] || id="$PROFILE_ID"
-      [[ "$FAILURE" != already-revoked ]] || status=CREDENTIAL_STATUS_REVOKED
+      [[ "$FAILURE" != already-revoked ]] || status=revoked
       jq -n --arg id "$id" --arg status "$status" '[{id:$id,name:"owned-key",status:$status}]' ;;
     'credentials --cloud revoke '*)
       [[ "$4" == "id:$KEY_ID" ]] || fail 'unowned key revocation'

@@ -40,8 +40,8 @@ prepare_provider_anthropic_identity() {
     die 'created Anthropic identity was not acknowledged exactly'
   jq -e --arg id "$PROVIDER_ANTHROPIC_CREDENTIAL_ID" --arg name "$PROVIDER_ANTHROPIC_CREDENTIAL_NAME" '
     type == "array" and length == 1 and .[0].id == $id and .[0].name == $name and
-    .[0].provider == "anthropic" and .[0].status == "CREDENTIAL_STATUS_ACTIVE" and
-    .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"
+    .[0].provider == "anthropic" and .[0].status == "active" and
+    .[0].authentication_kind == "api_key"
   ' "$TMPDIR_SMOKE/provider-anthropic-credential.json" >/dev/null || die 'created Anthropic public metadata is invalid'
   cw_with_timeout 30 credentials --cloud --profile "$PROVIDER_ANTHROPIC_PROFILE_NAME" \
     set anthropic "id:$PROVIDER_ANTHROPIC_CREDENTIAL_ID" \
@@ -52,8 +52,8 @@ prepare_provider_anthropic_identity() {
   PROVIDER_ANTHROPIC_PROFILE_ID="$(provider_ssh_metadata_id \
     "$TMPDIR_SMOKE/provider-anthropic-profile.json" "$PROVIDER_ANTHROPIC_PROFILE_NAME")" ||
     die 'created Anthropic profile was not acknowledged exactly'
-  jq -e --arg id "$PROVIDER_ANTHROPIC_CREDENTIAL_ID" 'length == 1 and .[0].revision == "1" and
-    .[0].entries == [{capabilitySlot:"anthropic",credentialId:$id}]' \
+  jq -e --arg id "$PROVIDER_ANTHROPIC_CREDENTIAL_ID" 'length == 1 and .[0].revision == 1 and
+    .[0].entries == {anthropic:$id} and .[0].github_connection == true' \
     "$TMPDIR_SMOKE/provider-anthropic-profile.json" >/dev/null ||
     die 'created Anthropic profile does not select exactly the created identity'
 }
@@ -145,10 +145,10 @@ cleanup_provider_anthropic_credential() {
       jq -e --arg id "$PROVIDER_ANTHROPIC_CREDENTIAL_ID" --arg name "$PROVIDER_ANTHROPIC_CREDENTIAL_NAME" '
         type == "array" and length == 1 and .[0].id == $id and .[0].name == $name and
         .[0].provider == "anthropic" and
-        .[0].authenticationKind == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY" and
-        (.[0].status == "CREDENTIAL_STATUS_ACTIVE" or .[0].status == "CREDENTIAL_STATUS_REVOKED")
+        .[0].authentication_kind == "api_key" and
+        (.[0].status == "active" or .[0].status == "revoked")
       ' "$TMPDIR_SMOKE/provider-anthropic-cleanup-credential.json" >/dev/null || return 1
-      if ! jq -e 'length == 1 and .[0].status == "CREDENTIAL_STATUS_REVOKED"' \
+      if ! jq -e 'length == 1 and .[0].status == "revoked"' \
           "$TMPDIR_SMOKE/provider-anthropic-cleanup-credential.json" >/dev/null; then
         cw_with_timeout 30 credentials --cloud revoke "id:$PROVIDER_ANTHROPIC_CREDENTIAL_ID" \
           >"$TMPDIR_SMOKE/provider-anthropic-cleanup-revoke.out" 2>&1 || rc=1

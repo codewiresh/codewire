@@ -84,18 +84,18 @@ identity_journey() (
     printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
     case "$*" in
       'credentials --cloud list --output json') printf '[]\n' ;;
-      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","is_default":true}]\n' ;;
       'credentials --cloud add anthropic --name dev-anthropic-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
         printf 'owner-visible-hidden-prompt\n' ;;
       'credentials --cloud get dev-anthropic-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output json')
         jq -n --arg id "$CREDENTIAL_ID" '[{id:$id,name:"dev-anthropic-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          provider:"anthropic",status:"CREDENTIAL_STATUS_ACTIVE",
-          authenticationKind:"CREDENTIAL_AUTHENTICATION_KIND_API_KEY"}]' ;;
+          provider:"anthropic",status:"active",
+          authentication_kind:"api_key"}]' ;;
       'credentials --cloud --profile dev-anthropic-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa set anthropic id:'*) ;;
       'credentials --cloud --profile dev-anthropic-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa get --output json')
         jq -n --arg id "$PROFILE_ID" --arg key "$CREDENTIAL_ID" '[{id:$id,
-          name:"dev-anthropic-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",revision:"1",
-          entries:[{capabilitySlot:"anthropic",credentialId:$key}]}]' ;;
+          name:"dev-anthropic-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",revision:1,
+          entries:{anthropic:$key},github_connection:true}]' ;;
       *) fail "unexpected identity command: $*" ;;
     esac
   }
@@ -120,7 +120,7 @@ enrollment_cancelled() (
     printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
     case "$*" in
       'credentials --cloud list --output json') printf '[]\n' ;;
-      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","is_default":true}]\n' ;;
       'credentials --cloud add anthropic --name dev-anthropic-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') return 130 ;;
       *) fail "command continued after cancelled enrollment: $*" ;;
     esac
@@ -138,7 +138,7 @@ name_collision() (
     case "$*" in
       'credentials --cloud list --output json')
         printf '[{"name":"dev-anthropic-cccccccccccccccccccccccccccccccc"}]\n' ;;
-      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","is_default":true}]\n' ;;
       *) fail "collision permitted a mutation: $*" ;;
     esac
   }
@@ -191,12 +191,12 @@ cleanup_cw() {
         jq -n --arg id "$id" '[{id:$id,name:"owned-anthropic"}]'
       fi ;;
     'credentials --cloud get '*" --output json")
-      local id="$CREDENTIAL_ID" status=CREDENTIAL_STATUS_ACTIVE kind=CREDENTIAL_AUTHENTICATION_KIND_API_KEY
+      local id="$CREDENTIAL_ID" status=active kind=api_key
       [[ "$FAILURE" != get-rebound ]] || id="$PROFILE_ID"
-      [[ "$FAILURE" != wrong-kind ]] || kind=CREDENTIAL_AUTHENTICATION_KIND_OAUTH
-      [[ "$FAILURE" != already-revoked ]] || status=CREDENTIAL_STATUS_REVOKED
+      [[ "$FAILURE" != wrong-kind ]] || kind=oauth
+      [[ "$FAILURE" != already-revoked ]] || status=revoked
       jq -n --arg id "$id" --arg status "$status" --arg kind "$kind" '[{id:$id,name:"owned-anthropic",
-        provider:"anthropic",authenticationKind:$kind,status:$status}]' ;;
+        provider:"anthropic",authentication_kind:$kind,status:$status}]' ;;
     'credentials --cloud revoke '*)
       [[ "$4" == "id:$CREDENTIAL_ID" ]] || fail 'unowned credential revocation'
       touch "$TMPDIR_SMOKE/credential-revoked" ;;

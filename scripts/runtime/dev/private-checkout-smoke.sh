@@ -37,7 +37,7 @@ private_checkout_ready() {
 
 private_checkout_start() {
   CHECKOUT_FIXTURE_DIR="$LP_RUNTIME/checkout-fixture"
-  jq -er '.[0].sshPublicKey.openssh' "$TMPDIR_SMOKE/provider-ssh-credential.json" \
+  jq -er '.[0].ssh_public_key.openssh' "$TMPDIR_SMOKE/provider-ssh-credential.json" \
     >"$LP_RUNTIME/checkout-selected.pub"
   env -i PATH=/usr/bin:/bin HOME=/nonexistent LC_ALL=C \
     "$LOCAL_PLATFORM_CHECKOUT_FIXTURE_BIN" --public-key-file "$LP_RUNTIME/checkout-selected.pub" \

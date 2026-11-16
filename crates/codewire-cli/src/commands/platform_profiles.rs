@@ -53,12 +53,21 @@ async fn handle_profile(
 ) -> anyhow::Result<()> {
     match command {
         CredentialProfileCommand::List(args) => {
-            print_profiles(&default_first(list_profiles(client).await?), args.output)
+            print_profiles(
+                client,
+                &default_first(list_profiles(client).await?),
+                args.output,
+            )
+            .await
         }
-        CredentialProfileCommand::Get(args) => print_profiles(
-            &[resolve_profile(client, &args.profile, args.revision).await?],
-            args.output,
-        ),
+        CredentialProfileCommand::Get(args) => {
+            print_profiles(
+                client,
+                &[resolve_profile(client, &args.profile, args.revision).await?],
+                args.output,
+            )
+            .await
+        }
         CredentialProfileCommand::Set(args) => {
             let selector = profile_set_credential(&args)?;
             let credential = super::platform_credentials::resolve(client, selector).await?;
@@ -70,6 +79,7 @@ async fn handle_profile(
             )?
             .to_string();
             let (profile, name) = profile_for_set(client, &args.profile).await?;
+            let held = credential.name.clone();
             let entry = rpc::AccessProfileEntry {
                 capability_slot: slot.clone(),
                 credential_id: credential.id,
@@ -80,7 +90,8 @@ async fn handle_profile(
                     .entries
                     .retain(|entry| entry.capability_slot != slot);
                 profile.entries.push(entry);
-                update_profile(client, profile).await
+                let done = super::credentials::output::profile_now_holds(&profile.name, &held);
+                update_profile(client, profile, &done).await
             } else {
                 // No empty revision is published first. A failed/uncertain
                 // create is not retried as update or treated as success.
@@ -89,13 +100,14 @@ async fn handle_profile(
                     entries: vec![entry],
                     ..Default::default()
                 }).await.context("create platform profile with its first selection; inspect before retrying an uncertain result")?;
-                print_profiles(
-                    &[response
-                        .access_profile
-                        .into_option()
-                        .context("platform returned no profile")?],
-                    OutputFormat::Text,
-                )
+                let created = response
+                    .access_profile
+                    .into_option()
+                    .context("platform returned no profile")?;
+                super::credentials::output::print_done(
+                    &super::credentials::output::profile_created(&created.name, &held),
+                );
+                Ok(())
             }
         }
         CredentialProfileCommand::Unset(args) if args.slot == "github" => {
@@ -109,9 +121,16 @@ async fn handle_profile(
                 .retain(|entry| entry.capability_slot != args.slot);
             anyhow::ensure!(
                 profile.entries.len() != before,
-                "platform profile does not select that capability slot"
+                super::credentials::output::refusal::slot_not_selected(
+                    "cloud",
+                    &profile.name,
+                    &args.slot
+                )
             );
-            update_profile(client, profile).await
+            {
+                let done = super::credentials::output::profile_removed(&profile.name, &args.slot);
+                update_profile(client, profile, &done).await
+            }
         }
         CredentialProfileCommand::Delete(args) => {
             let profile = resolve_profile(client, &args.profile, None).await?;
@@ -121,7 +140,7 @@ async fn handle_profile(
             );
             if !args.yes
                 && !prompt_confirm_default_no(&format!(
-                    "Delete platform user profile {:?} ({}) at revision {}?",
+                    "Delete cloud credential profile {:?} ({}) at revision {}?",
                     profile.name, profile.id, profile.revision
                 ))?
             {
@@ -135,7 +154,10 @@ async fn handle_profile(
                     ..Default::default()
                 })
                 .await?;
-            eprintln!("Platform access profile deleted.");
+            eprintln!(
+                "{}",
+                super::credentials::output::profile_deleted("cloud", &profile.name)
+            );
             Ok(())
         }
         CredentialProfileCommand::Default(args) => {
@@ -275,7 +297,9 @@ async fn resolve_profile(
         rpc::get_access_profile_request::Selector::Name(name) => {
             let profiles = list_profiles(client).await?;
             optional_profile_by_name(&profiles, &name)?
-                .context("platform profile name was not found")?
+                .with_context(|| {
+                    super::credentials::output::refusal::profile_not_found("cloud", &name)
+                })?
                 .id
                 .clone()
         }
@@ -313,6 +337,7 @@ async fn get_exact_profile(
 async fn update_profile(
     client: &CodewireClient,
     profile: rpc::AccessProfile,
+    done: &str,
 ) -> anyhow::Result<()> {
     // Exactly one read/modify/CAS attempt; preserve every other selected slot.
     // A conflict is returned, never refetched and silently overwritten.
@@ -324,13 +349,12 @@ async fn update_profile(
             ..Default::default()
         })
         .await?;
-    print_profiles(
-        &[response
-            .access_profile
-            .into_option()
-            .context("platform returned no profile")?],
-        OutputFormat::Text,
-    )
+    response
+        .access_profile
+        .into_option()
+        .context("platform returned no profile")?;
+    super::credentials::output::print_done(done);
+    Ok(())
 }
 
 /// The default profile first; the rest keep the platform's order.
@@ -347,27 +371,17 @@ pub(super) fn default_delete_refusal(name: &str, placement: &str) -> String {
     )
 }
 
-fn print_profiles(profiles: &[rpc::AccessProfile], output: OutputFormat) -> anyhow::Result<()> {
-    match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(profiles)?),
-        OutputFormat::Text => {
-            for profile in profiles {
-                println!(
-                    "{}\tplatform:user/{}\trevision {}{}",
-                    profile.id,
-                    profile.name,
-                    profile.revision,
-                    if profile.is_default { "\tdefault" } else { "" }
-                );
-                for entry in &profile.entries {
-                    println!("  {}\t{}", entry.capability_slot, entry.credential_id);
-                }
-                // Every personal profile includes the account's GitHub connection.
-                println!("  github\taccount connection");
-            }
-        }
-    }
-    Ok(())
+async fn print_profiles(
+    client: &CodewireClient,
+    profiles: &[rpc::AccessProfile],
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    let credentials = super::platform_credentials::list_all(client).await?;
+    super::credentials::output::print_cloud_profiles(
+        profiles,
+        &super::credentials::output::cloud_names(&credentials),
+        output,
+    )
 }
 
 #[cfg(test)]

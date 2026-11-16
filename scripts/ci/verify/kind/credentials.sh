@@ -1215,7 +1215,7 @@ KIND_CREDENTIAL_DEFAULT_PROFILE=kind-default
 ensure_kind_credential_default_profile() {
   local slot="$1" credential="$2" profiles status=0
   profiles="$(kind_credential_cli credentials --cloud profiles list --output json)" || return $?
-  jq -e 'if type == "array" then any(.[]; .isDefault == true) else error("expected a profile list") end' \
+  jq -e 'if type == "array" then any(.[]; .is_default == true) else error("expected a profile list") end' \
     <<<"$profiles" >/dev/null || status=$?
   case "$status" in
     0) return 0 ;;
@@ -1360,7 +1360,7 @@ kind_credential_native_smoke() (
   kind_credential_cli credentials --cloud connect codex --name "$credential_name"
   kind_credential_cli credentials --cloud get "$credential_name" --output json | jq -e \
     --arg name "$credential_name" 'length == 1 and .[0].name == $name
-      and .[0].provider == "openai" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"' >/dev/null
+      and .[0].provider == "openai" and .[0].status == "active"' >/dev/null
   ensure_kind_credential_default_profile codex "$credential_name"
   # The first explicit identity selection creates the named profile atomically.
   stage_profiles="$profile_name"
@@ -1724,11 +1724,11 @@ assert_kind_credential_claude_token() {
   [[ "$revision" =~ ^[1-9][0-9]*$ ]] || return 1
   kind_credential_cli credentials --cloud get "$name" --output json | jq -e \
     --arg name "$name" --arg revision "$revision" '.[0] as $c
-      | ((($c.expiresAtUnix // $c.expires_at_unix) | tonumber) - (now | floor)) as $left
+      | ($c.expires_at_unix - (now | floor)) as $left
       | length == 1 and $c.name == $name and $c.provider == "anthropic"
-        and $c.status == "CREDENTIAL_STATUS_ACTIVE"
-        and ($c.authenticationKind // $c.authentication_kind) == "CREDENTIAL_AUTHENTICATION_KIND_OAUTH"
-        and (($c.revocationGeneration // $c.revocation_generation) | tostring) == $revision
+        and $c.status == "active"
+        and $c.authentication_kind == "oauth"
+        and ($c.revocation_generation | tostring) == $revision
         and $left > 364 * 86400 and $left <= 365 * 86400' >/dev/null || {
     echo "::error::Claude subscription token ${name} is not Active at revision ${revision}" >&2
     return 1
@@ -1777,8 +1777,8 @@ kind_credential_claude_session() (
     kind_credential_cli credentials --cloud add claude-subscription --name "$token_name"
   kind_credential_cli credentials --cloud get "$key_name" --output json | jq -e \
     --arg name "$key_name" '.[0] as $c | length == 1 and $c.name == $name
-      and $c.provider == "anthropic" and $c.status == "CREDENTIAL_STATUS_ACTIVE"
-      and ($c.authenticationKind // $c.authentication_kind) == "CREDENTIAL_AUTHENTICATION_KIND_API_KEY"' \
+      and $c.provider == "anthropic" and $c.status == "active"
+      and $c.authentication_kind == "api_key"' \
     >/dev/null
   # The subscription token is the provider's OAuth kind with a hard expiry one
   # year after it was added.
@@ -1908,12 +1908,12 @@ assert_kind_credential_claude_sign_in() {
   [[ "$minimum" =~ ^[1-9][0-9]*$ ]] || return 1
   kind_credential_cli credentials --cloud get "$name" --output json | jq -er \
     --arg name "$name" --argjson minimum "$minimum" '.[0] as $c
-      | (($c.revocationGeneration // $c.revocation_generation) | tonumber) as $revision
+      | $c.revocation_generation as $revision
       | if length == 1 and $c.name == $name and $c.provider == "anthropic"
-          and $c.status == "CREDENTIAL_STATUS_ACTIVE"
-          and ($c.authenticationKind // $c.authentication_kind) == "CREDENTIAL_AUTHENTICATION_KIND_CLAUDE_SIGN_IN"
-          and ($c.accountHint // $c.account_hint) == "kind-claude@example.test"
-          and ($c.expiresAtUnix // $c.expires_at_unix) == null
+          and $c.status == "active"
+          and $c.authentication_kind == "claude_sign_in"
+          and $c.account_hint == "kind-claude@example.test"
+          and $c.expires_at_unix == null
           and $revision >= $minimum
         then $revision else error("unexpected Claude sign-in metadata") end' || {
     echo "::error::Claude sign-in ${name} is not an Active sign-in at revision ${minimum} or later" >&2

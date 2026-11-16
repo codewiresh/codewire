@@ -82,28 +82,28 @@ identity_journey() (
     printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
     case "$*" in
       'credentials --cloud list --output json') printf '[]\n' ;;
-      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","is_default":true}]\n' ;;
       'credentials --cloud connect github --name dev-github-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
         printf 'owner-visible-device-prompt\n' ;;
       'credentials --cloud get dev-github-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output json')
         jq -n --arg id "$CREDENTIAL_ID" '[{id:$id,name:"dev-github-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          provider:"github",status:"CREDENTIAL_STATUS_ACTIVE",
-          authenticationKind:"CREDENTIAL_AUTHENTICATION_KIND_OAUTH",accountHint:"fixture-owner"}]' |
+          provider:"github",status:"active",
+          authentication_kind:"oauth",account_hint:"fixture-owner"}]' |
           jq --arg failure "${IDENTITY_FAILURE:-}" '
-            if $failure == "missing-hint" then del(.[0].accountHint)
-            elif $failure == "hostile-hint" then .[0].accountHint="PRIVATE_CANARY\n"
+            if $failure == "missing-hint" then del(.[0].account_hint)
+            elif $failure == "hostile-hint" then .[0].account_hint="PRIVATE_CANARY\n"
             elif $failure == "wrong-provider" then .[0].provider="openai"
-            elif $failure == "wrong-kind" then .[0].authenticationKind="CREDENTIAL_AUTHENTICATION_KIND_API_KEY"
+            elif $failure == "wrong-kind" then .[0].authentication_kind="api_key"
             elif $failure == "duplicate" then . + . else . end' ;;
       'credentials --cloud --profile dev-github-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa set github id:'*) ;;
       'credentials --cloud --profile dev-github-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa get --output json')
         jq -n --arg id "$PROFILE_ID" --arg key "$CREDENTIAL_ID" '[{id:$id,
-          name:"dev-github-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",revision:"1",
-          entries:[{capabilitySlot:"github",credentialId:$key}]}]' |
+          name:"dev-github-profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",revision:1,
+          entries:{github:$key}}]' |
           jq --arg failure "${IDENTITY_FAILURE:-}" '
-            if $failure == "wrong-revision" then .[0].revision="2"
-            elif $failure == "extra-slot" then .[0].entries += [{capabilitySlot:"openai",credentialId:"unowned"}]
-            elif $failure == "wrong-credential" then .[0].entries[0].credentialId="unowned"
+            if $failure == "wrong-revision" then .[0].revision=2
+            elif $failure == "extra-slot" then .[0].entries += {openai:"unowned"}
+            elif $failure == "wrong-credential" then .[0].entries.github="unowned"
             else . end' ;;
       *) fail "unexpected identity command: $*" ;;
     esac
@@ -134,7 +134,7 @@ enrollment_cancelled() (
     printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
     case "$*" in
       'credentials --cloud list --output json') printf '[]\n' ;;
-      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","is_default":true}]\n' ;;
       'credentials --cloud connect github --name dev-github-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') return 130 ;;
       *) fail "command continued after cancelled enrollment: $*" ;;
     esac
@@ -152,7 +152,7 @@ name_collision() (
     case "$*" in
       'credentials --cloud list --output json')
         printf '[{"name":"dev-github-cccccccccccccccccccccccccccccccc"}]\n' ;;
-      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","is_default":true}]\n' ;;
       *) fail "collision permitted a mutation: $*" ;;
     esac
   }
@@ -206,12 +206,12 @@ cleanup_cw() {
         jq -n --arg id "$id" '[{id:$id,name:"owned-github"}]'
       fi ;;
     'credentials --cloud get '*" --output json")
-      local id="$CREDENTIAL_ID" status=CREDENTIAL_STATUS_ACTIVE kind=CREDENTIAL_AUTHENTICATION_KIND_OAUTH
+      local id="$CREDENTIAL_ID" status=active kind=oauth
       [[ "$FAILURE" != get-rebound ]] || id="$PROFILE_ID"
-      [[ "$FAILURE" != wrong-kind ]] || kind=CREDENTIAL_AUTHENTICATION_KIND_API_KEY
-      [[ "$FAILURE" != already-revoked ]] || status=CREDENTIAL_STATUS_REVOKED
+      [[ "$FAILURE" != wrong-kind ]] || kind=api_key
+      [[ "$FAILURE" != already-revoked ]] || status=revoked
       jq -n --arg id "$id" --arg status "$status" --arg kind "$kind" '[{id:$id,name:"owned-github",
-        provider:"github",authenticationKind:$kind,status:$status}]' ;;
+        provider:"github",authentication_kind:$kind,status:$status}]' ;;
     'credentials --cloud revoke '*)
       [[ "$4" == "id:$CREDENTIAL_ID" ]] || fail 'unowned credential revocation'
       touch "$TMPDIR_SMOKE/credential-revoked" ;;
@@ -282,7 +282,7 @@ uncertain_enrollment() (
   tr() { printf 'dddddddddddddddddddddddddddddddd\n'; }
   cw() {
     case "$*" in
-      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","isDefault":true}]\n' ;;
+      'credentials --cloud profiles list --output json') printf '[{"name":"lasting","is_default":true}]\n' ;;
       'credentials --cloud list --output json')
         if [[ -e "$TMPDIR_SMOKE/committed" && ! -e "$TMPDIR_SMOKE/credential-deleted" ]]; then
           jq -n --arg id "$CREDENTIAL_ID" --arg name "$PROVIDER_GITHUB_CREDENTIAL_NAME" '[{id:$id,name:$name}]'
@@ -291,7 +291,7 @@ uncertain_enrollment() (
         touch "$TMPDIR_SMOKE/committed"; return 124 ;;
       'credentials --cloud get '*)
         jq -n --arg id "$CREDENTIAL_ID" --arg name "$PROVIDER_GITHUB_CREDENTIAL_NAME" '[{id:$id,name:$name,provider:"github",
-          authenticationKind:"CREDENTIAL_AUTHENTICATION_KIND_OAUTH",status:"CREDENTIAL_STATUS_ACTIVE"}]' ;;
+          authentication_kind:"oauth",status:"active"}]' ;;
       'credentials --cloud revoke '*)
         [[ "$4" == "id:$CREDENTIAL_ID" ]] || fail 'uncertain enrollment revoked another identity'
         touch "$TMPDIR_SMOKE/credential-revoked" ;;

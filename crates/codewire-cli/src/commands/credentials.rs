@@ -1,22 +1,24 @@
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::io::IsTerminal as _;
 
 use anyhow::Context as _;
 #[cfg(test)]
-use codewire_access::{AccessProfileId, CredentialId};
+use codewire_access::{AccessProfileId, CredentialId, Owner};
 use codewire_access::{
-    AccessProfileName, CapabilitySlot, CredentialAuthKind, CredentialStatus, Owner, ProviderId,
+    AccessProfileName, CapabilitySlot, CredentialAuthKind, CredentialStatus, ProviderId,
     builtin_provider_catalog,
 };
 use codewire_local_credentials::{
-    AccessProfileRecord, AccessProfileRevisionRecord, CredentialRecord, LocalCredentialClient,
-    NewCredential,
+    AccessProfileRecord, CredentialRecord, LocalCredentialClient, NewCredential,
 };
 #[cfg(test)]
 use codewire_protected_store::MAX_PROTECTED_VALUE_BYTES;
+#[cfg(test)]
 use codewire_protected_store::ProtectedStorePersistence;
 use codewire_protected_store::ProtectedValue;
-use serde::Serialize;
+
+pub(in crate::commands) mod output;
 
 #[cfg(test)]
 use super::CredentialsArgs;
@@ -46,6 +48,7 @@ use super::{
     CredentialRotateArgs, CredentialSelectorArgs, CredentialsCommand, OutputFormat,
     connect_local_credential_authority, prompt_confirm_default_no, trimmed_required,
 };
+use output::{authentication_kind_label, status_label};
 
 pub(crate) async fn handle_local_credentials_command(
     operation: CredentialOperation,
@@ -670,7 +673,7 @@ async fn add_credential(
                 .await?
                 .iter()
                 .any(|record| record.metadata.display_name.eq_ignore_ascii_case(&name)),
-            "credential name already exists"
+            output::refusal::name_in_use("local", &name)
         );
         let input = read_ssh_import(&args)?;
         let record = client.add_ssh_credential(name, input.private_key, input.passphrase, args.expires_at).await
@@ -701,21 +704,27 @@ async fn add_credential(
         );
     }
 
+    anyhow::ensure!(args.account_hint.is_none(), output::refusal::ACCOUNT_HINT);
+    let display_name = trimmed_required(
+        args.name
+            .as_deref()
+            .context("credential name is required")?,
+        "credential name",
+    )?
+    .to_owned();
+    // The name is checked before the key is asked for, as in the cloud.
+    anyhow::ensure!(
+        !client.list_credentials().await?.iter().any(|record| record
+            .metadata
+            .display_name
+            .eq_ignore_ascii_case(&display_name)),
+        output::refusal::name_in_use("local", &display_name)
+    );
     let input = NewCredential {
         provider,
         authentication_kind,
-        display_name: trimmed_required(
-            args.name
-                .as_deref()
-                .context("credential name is required")?,
-            "credential name",
-        )?
-        .to_owned(),
-        account_hint: args
-            .account_hint
-            .as_deref()
-            .map(|value| trimmed_required(value, "account hint").map(str::to_owned))
-            .transpose()?,
+        display_name,
+        account_hint: None,
         expires_at_unix: args.expires_at,
     };
     let material = prompt_credential_material(input.provider.as_str(), input.authentication_kind)?;
@@ -724,11 +733,7 @@ async fn add_credential(
         .await
         .context("add local credential")?;
     remember_local(&record, execution);
-    eprintln!(
-        "Local credential {:?} added ({}).",
-        record.metadata.display_name, record.metadata.id
-    );
-    Ok(())
+    print_credentials(&[record], OutputFormat::Text)
 }
 
 async fn list_credentials(
@@ -739,7 +744,7 @@ async fn list_credentials(
         .list_credentials()
         .await
         .context("list local credentials")?;
-    print_credentials(&records, args.output)
+    print_listing(client, &records, args.output).await
 }
 
 async fn get_credential(
@@ -747,7 +752,7 @@ async fn get_credential(
     args: CredentialSelectorArgs,
 ) -> anyhow::Result<()> {
     let record = resolve_credential(client, &args.credential).await?;
-    print_credentials(&[record], args.output)
+    print_listing(client, &[record], args.output).await
 }
 
 async fn rename_credential(
@@ -760,11 +765,7 @@ async fn rename_credential(
         .rename_credential(&record.metadata.id, name)
         .await
         .context("rename local credential")?;
-    eprintln!(
-        "Local credential renamed to {:?}.",
-        renamed.metadata.display_name
-    );
-    Ok(())
+    print_credentials(&[renamed], OutputFormat::Text)
 }
 
 async fn rotate_credential(
@@ -773,16 +774,21 @@ async fn rotate_credential(
 ) -> anyhow::Result<()> {
     let record = resolve_credential(client, &args.credential).await?;
     if record.metadata.authentication_kind == CredentialAuthKind::SshKey {
-        anyhow::bail!(
-            "enroll a new SSH identity with generate ssh or add ssh, then select it in the credential profile; private keys cannot use raw rotation"
-        );
+        anyhow::bail!(output::refusal::ROTATE_SSH);
     }
     if !manually_supplied_credential_kind(record.metadata.authentication_kind) {
-        anyhow::bail!(
-            "a {} credential can't be pasted; reconnect it with `cw credentials connect` and its --name",
-            authentication_kind_label(record.metadata.authentication_kind)
-        );
+        anyhow::bail!(output::refusal::ROTATE_CONNECTED);
     }
+    eprintln!(
+        "{}",
+        output::rotation_notice(
+            "local",
+            &record.metadata.display_name,
+            &record.metadata.id.to_string(),
+            record.metadata.revocation_generation,
+            args.expires_at,
+        )
+    );
     let material = prompt_credential_material(
         record.metadata.provider.as_str(),
         record.metadata.authentication_kind,
@@ -797,11 +803,7 @@ async fn rotate_credential(
         )
         .await
         .context("rotate local credential")?;
-    eprintln!(
-        "Local credential {:?} rotated to generation {}.",
-        rotated.metadata.display_name, rotated.metadata.revocation_generation
-    );
-    Ok(())
+    print_credentials(&[rotated], OutputFormat::Text)
 }
 
 async fn revoke_credential(
@@ -841,8 +843,8 @@ async fn delete_credential(
         .await
         .context("delete local credential")?;
     eprintln!(
-        "Local credential {:?} deleted.",
-        record.metadata.display_name
+        "{}",
+        output::deleted("local", &record.metadata.display_name)
     );
     Ok(())
 }
@@ -962,7 +964,7 @@ async fn profile_command(
                 .list_profiles()
                 .await
                 .context("list local access profiles")?;
-            print_profiles(&records, args.output)
+            print_profiles(client, &records, args.output).await
         }
         CredentialProfileCommand::Get(args) => {
             let record = resolve_profile(client, &args.profile).await?;
@@ -971,9 +973,9 @@ async fn profile_command(
                     .get_profile_revision(&record.profile.id, revision)
                     .await
                     .context("get exact local profile revision")?;
-                print_profile_revisions(&[revision], args.output)
+                print_profile_revisions(client, &[revision], args.output).await
             } else {
-                print_profiles(&[record], args.output)
+                print_profiles(client, &[record], args.output).await
             }
         }
         CredentialProfileCommand::Set(args) => set_profile_entry(client, args).await,
@@ -987,7 +989,7 @@ async fn profile_command(
                 .list_profile_revisions(&profile.profile.id)
                 .await
                 .context("list local access profile revisions")?;
-            print_profile_revisions(&revisions, args.output)
+            print_profile_revisions(client, &revisions, args.output).await
         }
         CredentialProfileCommand::Delete(args) => delete_profile(client, args).await,
         CredentialProfileCommand::Default(args) => {
@@ -1036,11 +1038,13 @@ async fn set_profile_entry(
         None => client.create_profile(&name.context("new profiles require a name")?, &entries)
             .await.context("create local profile with its first selection; inspect before retrying an uncertain result")?,
     };
-    eprintln!(
-        "Local access profile {:?} updated to revision {}.",
-        updated.profile.name.to_string(),
-        updated.profile.revision
-    );
+    let profile = updated.profile.name.to_string();
+    let held = &credential.metadata.display_name;
+    output::print_done(&if created {
+        output::profile_created(&profile, held)
+    } else {
+        output::profile_now_holds(&profile, held)
+    });
     if created && updated.is_default {
         eprintln!("{}", now_default_message(&updated.profile.name.to_string()));
     }
@@ -1092,20 +1096,20 @@ async fn unset_profile_entry(
         .context("unknown provider; use codex, openai, github, anthropic or ssh")?;
     let mut entries = profile.profile.entries.clone();
     if entries.remove(&slot).is_none() {
-        anyhow::bail!(
-            "local access profile {:?} has no credential for {slot}",
-            profile.profile.name.to_string()
-        );
+        anyhow::bail!(output::refusal::slot_not_selected(
+            "local",
+            &profile.profile.name.to_string(),
+            slot.as_str()
+        ));
     }
     let updated = client
         .update_profile(&profile.profile.id, profile.profile.revision, &entries)
         .await
         .context("update local access profile")?;
-    eprintln!(
-        "Local access profile {:?} updated to revision {}.",
-        updated.profile.name.to_string(),
-        updated.profile.revision
-    );
+    output::print_done(&output::profile_removed(
+        &updated.profile.name.to_string(),
+        slot.as_str(),
+    ));
     Ok(())
 }
 
@@ -1123,7 +1127,7 @@ async fn delete_profile(
     );
     if !args.yes
         && !prompt_confirm_default_no(&format!(
-            "Delete local access profile {:?}?",
+            "Delete local credential profile {:?}?",
             record.profile.name.to_string()
         ))?
     {
@@ -1135,8 +1139,8 @@ async fn delete_profile(
         .await
         .context("delete local access profile")?;
     eprintln!(
-        "Local access profile {:?} deleted.",
-        record.profile.name.to_string()
+        "{}",
+        output::profile_deleted("local", &record.profile.name.to_string())
     );
     Ok(())
 }
@@ -1192,7 +1196,7 @@ fn select_credential_by_name(
         .filter(|record| record.metadata.display_name.eq_ignore_ascii_case(name));
     let record = matches
         .next()
-        .ok_or_else(|| anyhow::anyhow!("local credential name {name:?} was not found"))?;
+        .ok_or_else(|| anyhow::anyhow!(output::refusal::not_found("local", name)))?;
     if matches.next().is_some() {
         anyhow::bail!("local credential name {name:?} is ambiguous");
     }
@@ -1205,7 +1209,7 @@ fn select_profile_by_name(
 ) -> anyhow::Result<AccessProfileRecord> {
     optional_profile_by_name(records, name)?
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("local access profile name {name:?} was not found"))
+        .ok_or_else(|| anyhow::anyhow!(output::refusal::profile_not_found("local", name)))
 }
 
 fn optional_profile_by_name<'a>(
@@ -1228,10 +1232,7 @@ fn api_key_enrollment_kind(provider: &str) -> anyhow::Result<CredentialAuthKind>
         "claude-subscription" => anyhow::bail!(
             "Claude subscription tokens are stored only on the Codewire platform; add one with --cloud"
         ),
-        "codex" | "github" => {
-            anyhow::bail!("use connect {provider} --name NAME for OAuth credentials")
-        }
-        _ => anyhow::bail!("provider {provider} does not support API-key enrollment"),
+        _ => anyhow::bail!(output::refusal::add_unsupported(provider)),
     }
 }
 
@@ -1242,225 +1243,47 @@ fn manually_supplied_credential_kind(value: CredentialAuthKind) -> bool {
     )
 }
 
-fn authentication_kind_label(value: CredentialAuthKind) -> &'static str {
-    match value {
-        CredentialAuthKind::OAuth => "oauth",
-        CredentialAuthKind::ApiKey => "api_key",
-        CredentialAuthKind::AccessToken => "access_token",
-        CredentialAuthKind::GitHubApp => "github_app",
-        CredentialAuthKind::SshKey => "ssh_key",
-        CredentialAuthKind::ClaudeSignIn => "claude_sign_in",
-    }
-}
-
-fn status_label(value: CredentialStatus) -> &'static str {
-    match value {
-        CredentialStatus::Active => "active",
-        CredentialStatus::Expired => "expired",
-        CredentialStatus::RefreshFailed => "refresh_failed",
-        CredentialStatus::Revoked => "revoked",
-    }
-}
-
-fn persistence_label(value: ProtectedStorePersistence) -> &'static str {
-    match value {
-        ProtectedStorePersistence::OperatingSystem => "operating_system",
-        ProtectedStorePersistence::ProcessLifetime => "process_lifetime",
-    }
-}
-
-fn owner_label(value: &Owner) -> String {
-    match value {
-        Owner::User(id) => format!("user/{id}"),
-        Owner::Organization(id) => format!("organization/{id}"),
-    }
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct CredentialView {
-    id: String,
-    placement: &'static str,
-    owner: String,
-    provider: String,
-    authentication_kind: &'static str,
-    name: String,
-    account_hint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ssh_public_key: Option<codewire_access::SshPublicKeyMetadata>,
-    status: &'static str,
-    expires_at_unix: Option<u64>,
-    revocation_generation: u64,
-    protected_store_persistence: &'static str,
-    cleanup_pending: bool,
-    created_at_unix_ms: u64,
-    updated_at_unix_ms: u64,
-}
-
-impl From<&CredentialRecord> for CredentialView {
-    fn from(record: &CredentialRecord) -> Self {
-        Self {
-            id: record.metadata.id.to_string(),
-            placement: "local",
-            owner: owner_label(&record.metadata.owner),
-            provider: record.metadata.provider.to_string(),
-            authentication_kind: authentication_kind_label(record.metadata.authentication_kind),
-            name: record.metadata.display_name.clone(),
-            account_hint: record.metadata.account_hint.clone(),
-            ssh_public_key: record.metadata.ssh_public_key.clone(),
-            status: status_label(record.metadata.status),
-            expires_at_unix: record.metadata.expires_at_unix,
-            revocation_generation: record.metadata.revocation_generation,
-            protected_store_persistence: persistence_label(record.persistence),
-            cleanup_pending: record.protected_store_cleanup_pending,
-            created_at_unix_ms: record.created_at_unix_ms,
-            updated_at_unix_ms: record.updated_at_unix_ms,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-struct AccessProfileView {
-    id: String,
-    placement: &'static str,
-    owner: String,
-    name: String,
-    revision: u64,
-    entries: BTreeMap<String, String>,
-    profile_created_at_unix_ms: u64,
-    revision_created_at_unix_ms: u64,
-    /// The store's default profile, as the cloud marks its own (#4717).
-    is_default: bool,
-}
-
-impl AccessProfileView {
-    fn current(record: &AccessProfileRecord) -> Self {
-        Self::new(
-            &record.profile,
-            record.created_at_unix_ms,
-            record.updated_at_unix_ms,
-            record.is_default,
-        )
-    }
-
-    fn revision(record: &AccessProfileRevisionRecord) -> Self {
-        Self::new(
-            &record.profile,
-            record.profile_created_at_unix_ms,
-            record.revision_created_at_unix_ms,
-            record.is_default,
-        )
-    }
-
-    fn new(
-        profile: &codewire_access::AccessProfile,
-        profile_created_at_unix_ms: u64,
-        revision_created_at_unix_ms: u64,
-        is_default: bool,
-    ) -> Self {
-        Self {
-            id: profile.id.to_string(),
-            placement: "local",
-            owner: owner_label(&profile.owner),
-            name: profile.name.to_string(),
-            revision: profile.revision,
-            entries: profile
-                .entries
-                .iter()
-                .map(|(slot, credential)| (slot.to_string(), credential.to_string()))
-                .collect(),
-            profile_created_at_unix_ms,
-            revision_created_at_unix_ms,
-            is_default,
-        }
-    }
-}
-
+/// Print local credentials, as a command's result.
 fn print_credentials(records: &[CredentialRecord], output: OutputFormat) -> anyhow::Result<()> {
-    let views = records.iter().map(CredentialView::from).collect::<Vec<_>>();
-    match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&views)?),
-        OutputFormat::Text => print!("{}", format_credentials_text(&views)),
-    }
-    Ok(())
+    output::print_local_credentials(records, None, output)
 }
 
-/// Profiles with the default first, as the cloud lists them.
-fn print_profiles(records: &[AccessProfileRecord], output: OutputFormat) -> anyhow::Result<()> {
-    let mut views = records
-        .iter()
-        .map(AccessProfileView::current)
-        .collect::<Vec<_>>();
-    views.sort_by_key(|view| !view.is_default);
-    print_profile_views(&views, output)
-}
-
-fn print_profile_revisions(
-    records: &[AccessProfileRevisionRecord],
+/// Print a listing of local credentials, with the profiles that use them.
+async fn print_listing(
+    client: &mut LocalCredentialClient,
+    records: &[CredentialRecord],
     output: OutputFormat,
 ) -> anyhow::Result<()> {
-    let views = records
-        .iter()
-        .map(AccessProfileView::revision)
-        .collect::<Vec<_>>();
-    print_profile_views(&views, output)
+    let profiles = client
+        .list_profiles()
+        .await
+        .context("list local credential profiles")?;
+    output::print_local_credentials(records, Some(&output::local_uses(&profiles)), output)
 }
 
-fn print_profile_views(views: &[AccessProfileView], output: OutputFormat) -> anyhow::Result<()> {
-    match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(views)?),
-        OutputFormat::Text => print!("{}", format_profiles_text(views)),
-    }
-    Ok(())
+/// Print local profiles with their credentials by name.
+async fn print_profiles(
+    client: &mut LocalCredentialClient,
+    records: &[AccessProfileRecord],
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    let credentials = client
+        .list_credentials()
+        .await
+        .context("list local credentials")?;
+    output::print_local_profiles(records, &output::local_names(&credentials), output)
 }
 
-fn format_credentials_text(records: &[CredentialView]) -> String {
-    let mut output = format!(
-        "{:<36} {:<10} {:<18} {:<16} {:<24} {:<24} {:<16} {:<18} GENERATION\n",
-        "ID", "PLACEMENT", "PROVIDER", "KIND", "NAME", "HINT", "STATUS", "STORE"
-    );
-    for record in records {
-        output.push_str(&format!(
-            "{:<36} {:<10} {:<18} {:<16} {:<24} {:<24} {:<16} {:<18} {}\n",
-            record.id,
-            record.placement,
-            record.provider,
-            record.authentication_kind,
-            record.name,
-            record.account_hint.as_deref().unwrap_or("-"),
-            record.status,
-            record.protected_store_persistence,
-            record.revocation_generation
-        ));
-        if let Some(key) = &record.ssh_public_key {
-            output.push_str(&format!("  {}\n  {}\n", key.openssh, key.fingerprint));
-        }
-    }
-    output
-}
-
-fn format_profiles_text(records: &[AccessProfileView]) -> String {
-    let mut output = format!(
-        "{:<36} {:<10} {:<24} {:<10} ENTRIES\n",
-        "ID", "PLACEMENT", "NAME", "REVISION"
-    );
-    for record in records {
-        let entries = record
-            .entries
-            .iter()
-            .map(|(slot, credential)| format!("{slot}={credential}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        output.push_str(&format!(
-            "{:<36} {:<10} {:<24} {:<10} {}{}\n",
-            record.id,
-            record.placement,
-            record.name,
-            record.revision,
-            entries,
-            if record.is_default { "\tdefault" } else { "" }
-        ));
-    }
-    output
+async fn print_profile_revisions(
+    client: &mut LocalCredentialClient,
+    records: &[codewire_local_credentials::AccessProfileRevisionRecord],
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    let credentials = client
+        .list_credentials()
+        .await
+        .context("list local credentials")?;
+    output::print_local_profile_revisions(records, &output::local_names(&credentials), output)
 }
 
 #[cfg(test)]
@@ -2597,19 +2420,14 @@ mod tests {
 
     #[test]
     fn metadata_output_has_no_material_or_internal_store_reference() {
-        let view = CredentialView::from(&credential());
+        let view = output::CredentialView::from(&credential());
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("work-openai"));
+        assert!(json.contains(r#""placement":"local""#));
+        assert!(json.contains("operating_system"));
         assert!(!json.contains("synthetic"));
         assert!(!json.contains("entry_id"));
         assert!(!json.contains("material"));
-
-        let text = format_credentials_text(&[view]);
-        assert!(text.contains("PLACEMENT"));
-        assert!(text.contains("work-openai"));
-        assert!(text.contains("work@example.test"));
-        assert!(text.contains("operating_system"));
-        assert!(!text.contains("account_hint"));
     }
 
     #[test]
@@ -2719,12 +2537,9 @@ mod tests {
         // The Claude sign-in authority (protocol 17) has no default.
         assert!(!feature.served_by(17));
 
-        let mut marked = AccessProfileView::current(&profile_with(
-            "33333333-3333-4333-8333-333333333333",
-            "work",
-        ));
+        let mut marked = profile_with("33333333-3333-4333-8333-333333333333", "work");
         marked.is_default = true;
-        let text = format_profiles_text(&[marked]);
-        assert!(text.lines().nth(1).unwrap().ends_with("\tdefault"));
+        let view = output::AccessProfileView::current(&marked);
+        assert_eq!(serde_json::to_value(&view).unwrap()["is_default"], true);
     }
 }

@@ -137,27 +137,28 @@ async fn list_every_store(
 ) -> anyhow::Result<()> {
     let mut read = 0;
     let mut failed = false;
-    for (index, (placement, heading)) in super::storage_placement::store_headings()
+    for (index, placement) in super::storage_placement::list_placements()
         .into_iter()
         .enumerate()
     {
         if index > 0 {
             println!();
         }
-        println!("{heading}");
+        let word = if placement == StoragePlacement::Platform {
+            "cloud"
+        } else {
+            "local"
+        };
+        println!("{}", super::credentials::output::heading(word));
         let operation = resolve_credential_operation(profile.clone(), list(), placement)?;
         match execute_credential_operation(globals, operation, placement).await {
             Ok(_) => read += 1,
             Err(error) => {
                 if signed_out(&error) {
-                    // The words of `cw ls` and `cw org list` (#4589).
-                    println!(
-                        "  {} (`{}`)",
-                        super::NOT_SIGNED_IN,
-                        super::NOT_SIGNED_IN_NEXT
-                    );
+                    // The approved screen 7 (#4717).
+                    println!("Not signed in\n→ {}", super::NOT_SIGNED_IN_NEXT);
                 } else {
-                    println!("  could not be read: {error:#}");
+                    println!("Could not be read: {error:#}");
                     failed = true;
                 }
             }
@@ -830,7 +831,7 @@ pub(super) fn validate_ssh_import(args: &super::CredentialAddArgs) -> anyhow::Re
     );
     anyhow::ensure!(
         args.account_hint.is_none(),
-        "SSH credentials do not use --account-hint"
+        super::credentials::output::refusal::ACCOUNT_HINT
     );
     anyhow::ensure!(
         args.key_file
@@ -998,18 +999,14 @@ mod tests {
         assert!(list_command(&parse(&["cw", "credentials", "list"])).is_some());
         assert!(list_command(&parse(&["cw", "credentials", "profiles", "list"])).is_some());
         assert!(list_command(&parse(&["cw", "credentials", "get", "work"])).is_none());
-        let stores = crate::commands::storage_placement::store_headings();
-        let placements: Vec<_> = stores.iter().map(|(placement, _)| *placement).collect();
+        let placements = crate::commands::storage_placement::list_placements();
         if cfg!(any(target_os = "linux", target_os = "macos")) {
             assert_eq!(
                 placements,
                 [StoragePlacement::Local, StoragePlacement::Platform]
             );
         }
-        assert_eq!(
-            stores.last().unwrap().1,
-            "In your Codewire account (protected cloud storage)"
-        );
+        assert_eq!(placements.last(), Some(&StoragePlacement::Platform));
         assert!(signed_out(&anyhow::Error::new(
             crate::config::ConfigError::NoPlatformToken { cause: None }
         )));

@@ -407,8 +407,9 @@ Claude Code's public OAuth client. Unlike a subscription token it carries the
 `user:profile` scope and a refresh token, and Codewire reads the account's
 plan (Max, Pro, Team or Enterprise) and rate-limit tier from Claude's OAuth
 profile. It is its own credential kind for the Anthropic slot,
-`CREDENTIAL_AUTHENTICATION_KIND_CLAUDE_SIGN_IN`; a profile's one Anthropic slot
-holds an API key, a subscription token or a sign-in. Sign-ins are platform
+`claude_sign_in` in `cw credentials --output json`
+(`CREDENTIAL_AUTHENTICATION_KIND_CLAUDE_SIGN_IN` in the API); a profile's one
+Anthropic slot holds an API key, a subscription token or a sign-in. Sign-ins are platform
 credentials only; `--local` refuses them.
 
 ```sh

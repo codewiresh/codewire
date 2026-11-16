@@ -559,7 +559,7 @@ pub(crate) struct CredentialAddArgs {
     pub(crate) provider: Option<String>,
     #[arg(long, value_name = "NAME")]
     pub(crate) name: Option<String>,
-    #[arg(long, value_name = "HINT")]
+    #[arg(long, value_name = "HINT", hide = true)]
     pub(crate) account_hint: Option<String>,
     #[arg(long, value_name = "UNIX_SECONDS")]
     pub(crate) expires_at: Option<u64>,
