@@ -842,6 +842,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/select/last-scheduled-run.py|\
       scripts/ci/tests/test-last-scheduled-run.py|\
       scripts/ci/tests/test-ci-done-measures.py|\
+      scripts/ci/verify/scan-credential-canaries.py|\
+      scripts/ci/tests/test-scan-credential-canaries.py|\
       scripts/docs/render-terminal-svg.py|\
       scripts/ci/tests/test-render-terminal-svg.py|\
       scripts/ci/receipts/emit-verification-receipt.py|\

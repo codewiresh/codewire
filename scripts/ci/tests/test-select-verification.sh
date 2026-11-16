@@ -1107,6 +1107,10 @@ run_paths_case ci_done_measures pull_request refs/pull/3144/head false \
   .gitea/workflows/ci-done-measures.yaml \
   scripts/ci/measure/ci-done-measures \
   scripts/ci/tests/test-ci-done-measures.py
+run_paths_case credential_canary_scanner pull_request refs/pull/3999/head false \
+  'policy security security_js' \
+  scripts/ci/verify/scan-credential-canaries.py \
+  scripts/ci/tests/test-scan-credential-canaries.py
 run_paths_case readme_recording_renderer pull_request refs/pull/4942/head false \
   'policy security security_js' \
   scripts/docs/render-terminal-svg.py \

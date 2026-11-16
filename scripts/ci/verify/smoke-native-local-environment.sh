@@ -27,6 +27,8 @@ ADVANCED_ARTIFACT_ROOT=''
 ADVANCED_ARTIFACT_LOCK=''
 SMOKE_PARENT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 SMOKE_ROOT=''
+CANARY_SPILL=''
+declare -A CANARY_VALUES=()
 SMOKE_HOME=''
 STATE_ROOT=''
 WORKSPACE=''
@@ -199,6 +201,14 @@ OAuth identities, OpenAI and Anthropic API keys, and one generated SSH identity
 through the public commands;
 it never contacts any provider or reads the desktop session keyring or an
 ambient provider home.
+Each synthetic value carries its own randomness. Before and after deletion,
+and in a VM checkpoint taken after the protected routes have served, every
+file the smoke wrote is searched for each value, with
+scan-credential-canaries.py: raw, as 16-byte windows for values split across
+blocks or pages, in its encoded forms, and through each ext4 image's
+filesystem. Three controls written into the guest's home (plain, across a block
+boundary, and base64-only) must be found in the state disk and in the
+checkpoint, or the scan fails.
 It also selects synthetic local personal and project application scopes for
 install, startup, managed exec, and PTY sessions; replaces and clears them
 through confirmed source updates; and proves installed-root, workspace, and
@@ -509,6 +519,10 @@ fi
 SMOKE_ROOT="$(mktemp -d "$SMOKE_PARENT/.cwn.XXXXXX")"
 chmod 0700 "$SMOKE_ROOT"
 SMOKE_ROOT="$(realpath -e -- "$SMOKE_ROOT")"
+# Where the canary scan reads ext4 images' files: outside the smoke root, so a
+# value it copies out is never scanned as if the smoke had left it there.
+CANARY_SPILL="$(mktemp -d "$SMOKE_PARENT/.cwn-spill.XXXXXX")"
+chmod 0700 "$CANARY_SPILL"
 SMOKE_HOME="$SMOKE_ROOT/h"
 STATE_ROOT="$SMOKE_ROOT/s"
 WORKSPACE="$SMOKE_ROOT/w"
@@ -2487,79 +2501,142 @@ terminate_exact_credential_authority() {
   [[ ! -e "$CREDENTIAL_SOCKET_DIR/authority.sock" ]]
 }
 
-scan_for_credential_canary() {
+# A synthetic value: PREFIX and 32 hex characters of its own randomness, the
+# shape the synthetic provider accepts, so each 16-byte window the canary scan
+# searches for belongs to one value.
+mint_canary() {
+  local random
+  random="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+  [[ "$random" =~ ^[0-9a-f]{32}$ ]] || die 'minting a canary failed'
+  printf '%s%s' "$1" "$random"
+}
+
+# Scans everything the smoke wrote (HOME, the native state root with its VM
+# disks, checkpoints and logs, the credential root and the private keyring) for
+# CANARY_VALUES, with scan-credential-canaries.py, reading each ext4 image
+# through its filesystem too. Findings name the value, form, file and offset,
+# never the bytes. After LABEL, the arguments are:
+#   NAME            a synthetic value that must be found nowhere;
+#   --raw NAME RE   a control that must be found in the raw bytes of a file
+#                   whose path matches the extended regular expression RE;
+#   --fs NAME RE    a control that must be found through the filesystem of an
+#                   ext4 image whose path matches RE;
+#   --log RE        a file whose path matches RE must have been read, and must
+#                   not be empty: a log can carry no control, so the scan
+#                   proves it read each one.
+# A missing control or log fails the scan, as a finding does: either way the
+# scan would otherwise prove nothing.
+scan_for_credential_canaries() {
   local label="$1"
-  local canary="$2"
+  shift
+  local -a absent=() raw=() fs=() logs=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --raw) raw+=("$2" "$3"); shift 3 ;;
+      --fs) fs+=("$2" "$3"); shift 3 ;;
+      --log) logs+=("$2"); shift 2 ;;
+      *) absent+=("$1"); shift ;;
+    esac
+  done
   local report="$SMOKE_ROOT/canary-scan-$label.report"
-  if ! printf '%s' "$canary" | /usr/bin/python3 -c '
-import errno
-import os
-import stat
-import sys
-
-needle = sys.stdin.buffer.read()
-root = os.fsencode(sys.argv[1])
-if len(needle) < 16 or not os.path.isabs(root):
-    raise SystemExit(2)
-
-def allocated_ranges(descriptor, size):
-    if not hasattr(os, "SEEK_DATA"):
-        yield 0, size
-        return
-    offset = 0
-    while offset < size:
-        try:
-            data = os.lseek(descriptor, offset, os.SEEK_DATA)
-        except OSError as error:
-            if error.errno == errno.ENXIO:
-                return
-            if error.errno in (errno.EINVAL, errno.ENOTSUP):
-                yield 0, size
-                return
-            raise
-        hole = os.lseek(descriptor, data, os.SEEK_HOLE)
-        yield data, min(hole, size)
-        offset = max(hole, data + 1)
-
-def contains(descriptor, start, end):
-    carry = b""
-    offset = start
-    while offset < end:
-        chunk = os.pread(descriptor, min(1024 * 1024, end - offset), offset)
-        if not chunk:
-            return False
-        combined = carry + chunk
-        if needle in combined:
-            return True
-        carry = combined[-(len(needle) - 1):]
-        offset += len(chunk)
-    return False
-
-found = []
-for directory, directories, files in os.walk(root, followlinks=False):
-    directories[:] = [
-        name for name in directories
-        if not os.path.islink(os.path.join(directory, name))
-    ]
-    for name in files:
-        path = os.path.join(directory, name)
-        metadata = os.stat(path, follow_symlinks=False)
-        if not stat.S_ISREG(metadata.st_mode):
-            continue
-        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-        try:
-            if any(contains(descriptor, start, end) for start, end in allocated_ranges(descriptor, metadata.st_size)):
-                found.append(os.fsdecode(os.path.relpath(path, root)))
-        finally:
-            os.close(descriptor)
-for path in found:
-    print(path)
-raise SystemExit(1 if found else 0)
-' "$SMOKE_ROOT" >"$report"; then
-    tail -n 20 "$report" >&2
-    die "synthetic $label canary entered durable smoke state"
+  local scanned="$SMOKE_ROOT/canary-scan-$label.scanned"
+  local debugfs name
+  debugfs="$(realpath -e /usr/sbin/debugfs 2>/dev/null || realpath -e /usr/bin/debugfs)" ||
+    die 'the canary scan needs debugfs from e2fsprogs'
+  local -A named=()
+  for name in "${absent[@]}"; do named[$name]=1; done
+  for ((index = 0; index < ${#raw[@]}; index += 2)); do named[${raw[index]}]=1; done
+  for ((index = 0; index < ${#fs[@]}; index += 2)); do named[${fs[index]}]=1; done
+  for name in "${!named[@]}"; do
+    [[ -n "${CANARY_VALUES[$name]:-}" ]] || die "no canary named $name"
+  done
+  if ! for name in "${!named[@]}"; do
+      printf '%s\t%s\n' "$name" "${CANARY_VALUES[$name]}"
+    done | /usr/bin/python3 -I "$SOURCE_ROOT/scripts/ci/verify/scan-credential-canaries.py" \
+      --debugfs "$debugfs" --spill "$CANARY_SPILL" --scanned "$scanned" "$SMOKE_ROOT" >"$report"; then
+    die "$label: the canary scan failed"
   fi
-  [[ ! -s "$report" ]] || die "$label canary scanner emitted unexpected output"
+  local form path offset leaked=0
+  while IFS=$'\t' read -r name form path offset; do
+    if [[ " ${absent[*]} " == *" $name "* ]]; then
+      log "$label: synthetic $name found as $form in ${path#"$SMOKE_ROOT"/} at offset $offset"
+      leaked=1
+    fi
+  done <"$report"
+  [[ "$leaked" -eq 0 ]] || die "$label: a synthetic credential value entered durable smoke state"
+  for ((index = 0; index < ${#raw[@]}; index += 2)); do
+    awk -F '\t' -v name="${raw[index]}" -v where="${raw[index + 1]}" \
+      '$1 == name && $3 !~ /:\// && $3 ~ where { found = 1 } END { exit !found }' "$report" ||
+      die "$label: control ${raw[index]} was not found in the raw bytes of ${raw[index + 1]}"
+  done
+  for ((index = 0; index < ${#fs[@]}; index += 2)); do
+    awk -F '\t' -v name="${fs[index]}" -v where="${fs[index + 1]}" \
+      '$1 == name && $3 ~ (where ":/") { found = 1 } END { exit !found }' "$report" ||
+      die "$label: control ${fs[index]} was not found through the filesystem of ${fs[index + 1]}"
+  done
+  for name in "${logs[@]}"; do
+    awk -F '\t' -v where="$name" '$1 !~ /:\// && $1 ~ where && $2 > 0 { found = 1 } END { exit !found }' \
+      "$scanned" || die "$label: no non-empty log matching $name was scanned"
+  done
+}
+
+# The guest's home is on its state disk. Three controls go there: one as it is;
+# one cut by a 4 KiB block boundary 22 bytes in, inside the first of the two
+# 16-byte windows the scan searches for, written in two parts with small files
+# between them so that ext4 gives its two blocks no adjacent places; and one
+# stored only base64-encoded. The cut control enters the guest only
+# base64-encoded, so no whole copy of it exists anywhere: the scan can find it
+# in the raw disk only through its second window. A fourth control is held only
+# in a guest process's memory, for the VM checkpoint. A scan that misses any
+# proves nothing.
+write_canary_controls() {
+  CANARY_VALUES[control-home]="$(mint_canary cwleakhome)"
+  CANARY_VALUES[control-boundary]="$(mint_canary cwleakboundary)"
+  CANARY_VALUES[control-base64]="$(mint_canary cwleakbase64)"
+  CANARY_VALUES[control-memory]="$(mint_canary cwleakmemory)"
+  local encoded boundary
+  encoded="$(printf '%s' "${CANARY_VALUES[control-base64]}" | base64 -w0)"
+  boundary="$(printf '%s' "${CANARY_VALUES[control-boundary]}" | base64 -w0)"
+  # shellcheck disable=SC2016 # Expanded by the guest shell.
+  run_cw run --no-tty -- /bin/sh -c '
+set -eu
+mkdir -p "$HOME/.leak-scan"
+printf "%s" "$1" >"$HOME/.leak-scan/home"
+{ head -c 4074 /dev/zero | tr "\0" x; printf "%s" "$2" | base64 -d | head -c 22; } >"$HOME/.leak-scan/boundary"
+sync
+for filler in 1 2 3 4; do head -c 4096 /dev/zero >"$HOME/.leak-scan/between-$filler"; sync; done
+printf "%s" "$2" | base64 -d | tail -c +23 >>"$HOME/.leak-scan/boundary"
+printf "%s" "$3" >"$HOME/.leak-scan/encoded"
+sync
+' leak-scan "${CANARY_VALUES[control-home]}" "$boundary" "$encoded"
+  # shellcheck disable=SC2016 # Expanded by the guest shell.
+  run_cw run --detach --no-tty --name leak-scan-memory -- /bin/sh -c '
+held="$1"
+while :; do sleep 60; done
+' leak-scan "${CANARY_VALUES[control-memory]}"
+}
+
+# The boundary control proves the window search only if its two blocks are not
+# adjacent in the image, which the debugfs block list shows, and if the raw disk
+# never holds its first window whole: then the second window found it.
+assert_boundary_control_split() {
+  local report="$SMOKE_ROOT/canary-scan-before-delete.report" found image inner debugfs
+  found="$(awk -F '\t' '$1 == "control-boundary" && $3 ~ /\/vms\/[^\/]+\/disks\/state[.]raw:\/.*\/[.]leak-scan\/boundary$/ {
+    print $3; exit }' "$report")"
+  [[ -n "$found" ]] || die 'the boundary control has no path in the state disk'
+  image="${found%%:/*}"
+  inner="/${found#*:/}"
+  debugfs="$(realpath -e /usr/sbin/debugfs 2>/dev/null || realpath -e /usr/bin/debugfs)"
+  "$debugfs" -c -R "blocks $inner" "$image" 2>/dev/null | awk '
+    { for (field = 1; field <= NF; field++) block[count++] = $field }
+    END { exit !(count >= 2 && block[1] != block[0] + 1) }' ||
+    die 'the boundary control was stored in adjacent blocks; its split is unproven'
+  awk -F '\t' -v image="$image" '$1 == "control-boundary" && $3 == image && $2 == "raw/0" { found = 1 }
+    END { exit found }' "$report" ||
+    die 'the boundary control was found whole in the raw disk; its split is unproven'
+  awk -F '\t' -v image="$image" '$1 == "control-boundary" && $3 == image && $2 == "raw/1" { found = 1 }
+    END { exit !found }' "$report" ||
+    die 'the boundary control was not found through its second window'
 }
 
 # The live packet worker, general egress broker and runner have just served the
@@ -2925,6 +3002,11 @@ cleanup() {
   local cleanup_status=0
   local diagnostic_runner_pid=''
   trap - EXIT HUP INT TERM
+  # The canary scan empties it after each image; remove it whatever happened.
+  if [[ -n "$CANARY_SPILL" && -d "$CANARY_SPILL" ]]; then
+    chmod -R u+w -- "$CANARY_SPILL" 2>/dev/null || true
+    rm -rf -- "$CANARY_SPILL" || cleanup_status=1
+  fi
   ALLOW_REGISTRY_EGRESS=0
   CW_COMMAND_TIMEOUT_SECONDS=180
   local probe_pid
@@ -3057,12 +3139,12 @@ jq -e --arg network "$MESH_NETWORK" --arg mesh_url "http://127.0.0.1:$MESH_PORT"
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   log 'starting a private D-Bus and Secret Service instance'
   start_isolated_keyring
-  CREDENTIAL_CANARY="cwlocalbroker$(tr -d '-' </proc/sys/kernel/random/boot_id)"
-  CREDENTIAL_REFRESH_CANARY="cwlocalrefresh$(tr -d '-' </proc/sys/kernel/random/boot_id)"
-  GITHUB_CREDENTIAL_CANARY="ghu_cwlocalgithub$(tr -d '-' </proc/sys/kernel/random/boot_id)"
-  OPENAI_CREDENTIAL_CANARY="cwlocalopenai$(tr -d '-' </proc/sys/kernel/random/boot_id)"
-  ANTHROPIC_CREDENTIAL_CANARY="cwlocalanthropic$(tr -d '-' </proc/sys/kernel/random/boot_id)"
-  WORKLOAD_SECRET_CANARY="cwworkload$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  CREDENTIAL_CANARY="$(mint_canary cwlocalbroker)"
+  CREDENTIAL_REFRESH_CANARY="$(mint_canary cwlocalrefresh)"
+  GITHUB_CREDENTIAL_CANARY="$(mint_canary ghu_cwlocalgithub)"
+  OPENAI_CREDENTIAL_CANARY="$(mint_canary cwlocalopenai)"
+  ANTHROPIC_CREDENTIAL_CANARY="$(mint_canary cwlocalanthropic)"
+  WORKLOAD_SECRET_CANARY="$(mint_canary cwworkload)"
   [[ ${#CREDENTIAL_CANARY} -ge 16 && ${#CREDENTIAL_CANARY} -le 256 &&
      "$CREDENTIAL_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
     die 'generated credential canary is invalid'
@@ -3081,6 +3163,14 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   [[ ${#WORKLOAD_SECRET_CANARY} -ge 16 && ${#WORKLOAD_SECRET_CANARY} -le 256 &&
      "$WORKLOAD_SECRET_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
     die 'generated workload-secret canary is invalid'
+  CANARY_VALUES=(
+    [access-token]="$CREDENTIAL_CANARY"
+    [refresh-token]="$CREDENTIAL_REFRESH_CANARY"
+    [github-token]="$GITHUB_CREDENTIAL_CANARY"
+    [openai-key]="$OPENAI_CREDENTIAL_CANARY"
+    [anthropic-key]="$ANTHROPIC_CREDENTIAL_CANARY"
+    [workload-secret]="$WORKLOAD_SECRET_CANARY"
+  )
   log 'enrolling synthetic protected Codex/GitHub OAuth, OpenAI/Anthropic API-key, and generated SSH credentials through public commands'
   run_cw_connect_synthetic_codex
   run_cw_connect_synthetic_github
@@ -3197,7 +3287,8 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   # GitHub is the one account connection, automatically included in grants;
   # it cannot be selected or stored as a profile entry.
   run_cw_expect_failure credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set github "id:$GITHUB_CREDENTIAL_ID"
-  rg -qF 'every profile includes your one GitHub connection' "$LAST_STDERR" ||
+  # cw capitalises the first letter of an error it reports.
+  rg -qiF 'every profile includes your one GitHub connection' "$LAST_STDERR" ||
     die 'profile GitHub selection did not refuse with singleton connection guidance'
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
   jq -e --arg credential "$CREDENTIAL_ID" '
@@ -3401,6 +3492,8 @@ run_cw run --no-tty -- /bin/sh -lc \
   die 'direct-share symlink access mutated unselected host content'
 
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  log 'writing the canary scan controls into the guest'
+  write_canary_controls
   if [[ "$BROKER_RENEWAL_OBSERVATION" -eq 1 ]]; then
     run_broker_renewal_observation
     if [[ "$NETWORK_QUALIFICATION" -eq 1 ]]; then
@@ -3421,6 +3514,20 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     log 'checking protected injection, redaction, denial, broker recovery, revocation, and audit'
     run_managed_credential_broker_smoke
     scan_serving_processes_for_credential_canaries
+    # A VM checkpoint holds the guest's whole memory and a copy of its disks.
+    # The Codex access token is in the guest by the listed direct delivery
+    # exception (docs/dev/SECRETS-AND-CREDENTIALS.md), so it is not scanned
+    # for here.
+    log 'checkpointing the VM and scanning the checkpoint for synthetic credential values'
+    run_cw checkpoint create "$NAME" --name leak-scan --output json
+    scan_for_credential_canaries checkpoint \
+      refresh-token github-token openai-key anthropic-key workload-secret \
+      --raw control-memory '/(checkpoints|snapshots)/.*/memory-ranges$' \
+      --raw control-home '/(checkpoints|snapshots)/.*/state[.]raw$' \
+      --fs control-home '/(checkpoints|snapshots)/.*/state[.]raw' \
+      --fs control-boundary '/(checkpoints|snapshots)/.*/state[.]raw' \
+      --fs control-base64 '/(checkpoints|snapshots)/.*/state[.]raw'
+    run_cw checkpoint rm leak-scan --output json
     run_cw credentials --local get "id:$CREDENTIAL_ID" --output json
     jq -e '
       length == 1 and
@@ -3488,11 +3595,16 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   # environment's persistent Codex home is the listed direct delivery exception
   # (docs/dev/SECRETS-AND-CREDENTIALS.md). The refresh token never leaves the
   # broker, and the disk's deletion below is scanned for both.
-  scan_for_credential_canary before-delete-refresh-token "$CREDENTIAL_REFRESH_CANARY"
-  scan_for_credential_canary before-delete-github-token "$GITHUB_CREDENTIAL_CANARY"
-  scan_for_credential_canary before-delete-openai-key "$OPENAI_CREDENTIAL_CANARY"
-  scan_for_credential_canary before-delete-anthropic-key "$ANTHROPIC_CREDENTIAL_CANARY"
-  scan_for_credential_canary before-delete-workload-secret "$WORKLOAD_SECRET_CANARY"
+  scan_for_credential_canaries before-delete \
+    refresh-token github-token openai-key anthropic-key workload-secret \
+    --raw control-home '/vms/[^/]+/disks/state[.]raw$' \
+    --raw control-boundary '/vms/[^/]+/disks/state[.]raw$' \
+    --raw control-base64 '/vms/[^/]+/disks/state[.]raw$' \
+    --fs control-home '/vms/[^/]+/disks/state[.]raw' \
+    --fs control-boundary '/vms/[^/]+/disks/state[.]raw' \
+    --fs control-base64 '/vms/[^/]+/disks/state[.]raw' \
+    --log '/logs/supervisor[.]log$' --log '/logs/runner-[^/]+[.]log$' --log '/logs/brokers[.]log$'
+  assert_boundary_control_split
 
   log 'deleting the environment, credentials, and protected-store entries; the default profile stays'
   run_cw rm --local "$NAME" --yes
@@ -3578,18 +3690,15 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     >/dev/null 2>"$SMOKE_ROOT/deleted-ssh-keyring-entry.stderr"; then
     die 'synthetic SSH protected-store entry remained after credential deletion'
   fi
-  scan_for_credential_canary after-delete-access-token "$CREDENTIAL_CANARY"
-  scan_for_credential_canary after-delete-refresh-token "$CREDENTIAL_REFRESH_CANARY"
-  scan_for_credential_canary after-delete-github-token "$GITHUB_CREDENTIAL_CANARY"
-  scan_for_credential_canary after-delete-openai-key "$OPENAI_CREDENTIAL_CANARY"
-  scan_for_credential_canary after-delete-anthropic-key "$ANTHROPIC_CREDENTIAL_CANARY"
-  scan_for_credential_canary after-delete-workload-secret "$WORKLOAD_SECRET_CANARY"
+  scan_for_credential_canaries after-delete \
+    access-token refresh-token github-token openai-key anthropic-key workload-secret
   unset CREDENTIAL_CANARY
   unset CREDENTIAL_REFRESH_CANARY
   unset GITHUB_CREDENTIAL_CANARY
   unset OPENAI_CREDENTIAL_CANARY
   unset ANTHROPIC_CREDENTIAL_CANARY
   unset WORKLOAD_SECRET_CANARY
+  CANARY_VALUES=()
   unset SSH_PUBLIC_KEY SSH_PUBLIC_KEY_FINGERPRINT
   unset APP_SECRET_CANARY_A APP_SECRET_CANARY_B
   unset APP_SECRET_USER_ONLY_CANARY APP_SECRET_USER_COLLISION_CANARY
@@ -4075,7 +4184,7 @@ rg -qF '/workspace/github' "$PTY_LOG" ||
 log 'checking nonzero status and saved session output'
 run_cw_expect_failure run --no-tty -- /bin/sh -lc 'printf saved-nonzero; exit 42'
 rg -qF 'saved-nonzero' "$LAST_STDOUT" || die 'nonzero session output was not returned'
-rg -qF 'session exited with code 42' "$LAST_STDERR" || die 'guest exit code 42 was not propagated'
+rg -qiF 'session exited with code 42' "$LAST_STDERR" || die 'guest exit code 42 was not propagated'
 run_cw ls "$NAME" --output json
 SESSION_ID="$(jq -er '
   .[] |
