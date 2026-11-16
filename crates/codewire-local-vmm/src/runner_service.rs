@@ -1788,6 +1788,15 @@ impl EnvironmentRunnerService for RunnerRpc {
             .get(environment_id, request.generation)
             .map(Response::new)
     }
+
+    /// No boot mints secrets yet (#3999), so every request gets the answer
+    /// for a boot that does not intercept.
+    async fn get_boot_secrets(
+        &self,
+        _request: Request<v1::GetBootSecretsRequest>,
+    ) -> Result<Response<v1::GetBootSecretsResponse>, Status> {
+        Err(Status::failed_precondition("no boot secrets"))
+    }
 }
 
 fn parse_environment_id(value: &str) -> Result<Uuid, Status> {

@@ -2091,6 +2091,14 @@ mod tests {
             self.reads.fetch_add(1, Ordering::SeqCst);
             Ok(Response::new(self.info.lock().unwrap().clone()))
         }
+        async fn get_boot_secrets(
+            &self,
+            _: Request<v1::GetBootSecretsRequest>,
+        ) -> Result<Response<v1::GetBootSecretsResponse>, Status> {
+            // As a boot that does not intercept answers.
+            Err(Status::failed_precondition("no boot secrets"))
+        }
+
         async fn get_generation_daemon_access(
             &self,
             request: Request<v1::GetGenerationDaemonAccessRequest>,

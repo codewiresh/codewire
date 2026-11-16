@@ -8,7 +8,10 @@ fn main() {
     println!("cargo:rerun-if-changed={}", control_proto.display());
 
     require_compiled(
-        tonic_prost_build::configure().compile_protos(&[control_proto], &[proto_root]),
+        tonic_prost_build::configure()
+            // prost ignores `debug_redact`; src/control.rs redacts these.
+            .skip_debug([".codewire.local.v1.BootSecret"])
+            .compile_protos(&[control_proto], &[proto_root]),
         "compile private local runtime protobuf types",
     );
 }

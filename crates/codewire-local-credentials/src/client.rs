@@ -1197,6 +1197,7 @@ impl LocalCredentialControlClient {
                     profile_revision: binding.profile_revision,
                 }),
                 network_policy_allows_github: Some(network_policy_allows_github),
+                boot_secrets: Vec::new(),
             })
             .await?
             .into_inner();

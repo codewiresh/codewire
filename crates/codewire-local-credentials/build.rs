@@ -22,6 +22,7 @@ fn main() {
             ".codewire.local.credentials.v1.RotateCredentialMaterialRequest",
             ".codewire.local.credentials.v1.SetUserWorkloadSecretRequest",
             ".codewire.local.credentials.v1.SetProjectWorkloadSecretRequest",
+            ".codewire.local.credentials.v1.BrokerBootSecret",
         ])
         .compile_protos(
             &[authority_proto],

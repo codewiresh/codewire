@@ -87,9 +87,35 @@ impl Drop for v1::SetProjectWorkloadSecretRequest {
     }
 }
 
+impl std::fmt::Debug for v1::BrokerBootSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrokerBootSecret")
+            .field("purpose", &self.purpose)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{v1, zeroize_workload_secret_value};
+
+    #[test]
+    fn an_ensure_request_debugs_without_its_boot_secrets() {
+        let request = v1::EnsureEnvironmentBrokerRequest {
+            boot_secrets: vec![v1::BrokerBootSecret {
+                purpose: v1::BrokerBootSecretPurpose::FrontDoorPairing as i32,
+                value: b"boot-secret-canary".to_vec(),
+            }],
+            ..Default::default()
+        };
+        let debug = format!("{request:?}");
+        assert!(debug.contains("[REDACTED]"), "{debug}");
+        for needle in ["boot-secret-canary", "98, 111, 111, 116"] {
+            assert!(!debug.contains(needle), "{debug}");
+        }
+    }
 
     #[allow(drop_bounds)]
     fn assert_explicit_drop<T: Drop>() {}

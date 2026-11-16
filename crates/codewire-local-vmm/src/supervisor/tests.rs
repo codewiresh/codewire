@@ -1071,6 +1071,13 @@ impl crate::control::v1::environment_runner_service_server::EnvironmentRunnerSer
         self.unexpected_use()
     }
 
+    async fn get_boot_secrets(
+        &self,
+        _request: Request<v1::GetBootSecretsRequest>,
+    ) -> Result<Response<v1::GetBootSecretsResponse>, Status> {
+        self.unexpected_use()
+    }
+
     async fn checkpoint_vm(
         &self,
         _request: Request<v1::CheckpointVmRequest>,

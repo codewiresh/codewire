@@ -471,6 +471,10 @@ service EnvironmentRunnerService {
   // Owner-only startup seam. Never waits on the main runner state mutex and
   // never admits a different or dead generation. Normal access stays Ready-only.
   rpc GetGenerationDaemonAccess(GetGenerationDaemonAccessRequest) returns (DaemonAccess);
+  // The current generation's secrets (#3999), for an intercepting boot only,
+  // from the same owner-only seam. Any other request gets nothing at all.
+  // Never part of a status or debug answer.
+  rpc GetBootSecrets(GetBootSecretsRequest) returns (GetBootSecretsResponse);
   // Runner protocol 10 (#3046 R4): freeze the running generation's
   // workload, pause the VM, write its memory and device state, clone its
   // disks, resume and thaw, into vms/<id>/checkpoints/out-<operation_id>.
@@ -1200,6 +1204,29 @@ message GetDaemonAccessRequest {}
 message GetGenerationDaemonAccessRequest {
   string environment_id = 1;
   uint64 generation = 2;
+}
+
+message GetBootSecretsRequest {
+  string environment_id = 1;
+  uint64 generation = 2;
+}
+
+message GetBootSecretsResponse {
+  repeated BootSecret secrets = 1;
+}
+
+// One per-boot secret (#3999): 32 random bytes the runner mints for an
+// intercepting boot, in memory only.
+message BootSecret {
+  BootSecretPurpose purpose = 1;
+  bytes value = 2 [debug_redact = true];
+}
+
+enum BootSecretPurpose {
+  BOOT_SECRET_PURPOSE_UNSPECIFIED = 0;
+  // Presented on the runner's pairing socket by each of the generation's
+  // credential brokers.
+  BOOT_SECRET_PURPOSE_FRONT_DOOR_PAIRING = 1;
 }
 
 // Retained images (protocol 21, #4262): after its last environment is
