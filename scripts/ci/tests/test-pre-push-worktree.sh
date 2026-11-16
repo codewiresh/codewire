@@ -221,6 +221,34 @@ git -C "$repo" cat-file tag v9.9.3-signed | sed 's/^tag v9.9.3-signed$/tag v9.9.
   > "$TMP/altered-tag"
 git -C "$repo" update-ref refs/tags/v9.9.3 "$(git -C "$repo" mktag < "$TMP/altered-tag")"
 assert_tag_push_refused altered_tag v9.9.3 'release tag signature does not verify'
+
+# A Go module version tag under libs/ (#3512) needs only to be annotated and
+# on the remote's main: no signature, no release checks, no push check.
+module_tag() { # TAG COMMIT
+  git -C "$repo" -c tag.gpgsign=false tag -a -m "module $1" "$1" "$2"
+}
+module_tag libs/gen-go/v0.1.0 HEAD
+output="$(push refs/tags/libs/gen-go/v0.1.0)" || fail "module_tag_on_main: refused: $output"
+if grep -q -E '^cargo |verify-release-support-pair' "$log"; then
+  fail 'module_tag_on_main: a module tag push ran the push check or the release checks'
+fi
+# A version already on the remote is never moved, even by a forced push.
+git -C "$repo" -c tag.gpgsign=false tag -f -a -m 'module moved' libs/gen-go/v0.1.0 "$seed" >/dev/null
+if output="$(cd "$repo" && : > "$log" && git push -q -f origin refs/tags/libs/gen-go/v0.1.0 2>&1)"; then
+  fail "module_tag_moved: a forced move was accepted: $output"
+fi
+assert_contains module_tag_moved "$output" 'libs/gen-go/v0.1.0 is already on origin; a Go module version is never moved'
+module_tag libs/sdk-go/v0.1.0 "$seed"
+output="$(push refs/tags/libs/sdk-go/v0.1.0)" || fail "module_tag_earlier_main: refused: $output"
+module_tag libs/sdk-go/v0.0.9 "$side"
+if output="$(push refs/tags/libs/sdk-go/v0.0.9)"; then fail "module_tag_off_main: accepted: $output"; fi
+assert_contains module_tag_off_main "$output" "libs/sdk-go/v0.0.9 names $(git -C "$repo" rev-parse "$side"), which is not on origin's main"
+git -C "$repo" tag libs/gen-go/v0.0.8 HEAD
+if output="$(push refs/tags/libs/gen-go/v0.0.8)"; then fail "module_tag_lightweight: accepted: $output"; fi
+assert_contains module_tag_lightweight "$output" 'libs/gen-go/v0.0.8 is not an annotated tag'
+module_tag libs/other/v1.0.0 HEAD
+if output="$(push refs/tags/libs/other/v1.0.0)"; then fail "module_tag_other_library: accepted: $output"; fi
+assert_contains module_tag_other_library "$output" 'is not checked out here'
 remove_signing_keys
 unset GNUPGHOME
 trap 'chmod -R u+w "$TMP" 2>/dev/null || true; rm -rf "$TMP"' EXIT
