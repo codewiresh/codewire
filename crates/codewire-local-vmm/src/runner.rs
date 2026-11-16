@@ -101,6 +101,7 @@ use inherited::{INHERITED_SOURCE_FLOOR, duplicate_inherited_descriptor, raise_op
 mod cw_runtime_disk;
 mod host_port_forward;
 mod stage_times;
+mod worker_descriptors;
 #[cfg(target_os = "linux")]
 use cw_runtime_disk::validate_live_cw_runtime_disk;
 #[cfg(target_os = "macos")]
@@ -110,6 +111,7 @@ mod vz_launch;
 pub use checkpoint::{RestoreBoot, RestoreReport};
 use host_port_forward::HostPortForwarder;
 pub(crate) use stage_times::GuestStageTimes;
+use worker_descriptors::pass_to_worker;
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 // Guest cleanup can drain daemon, workspace, Docker and network for five
@@ -3673,7 +3675,7 @@ async fn spawn_network_worker_process(
         .map_err(|_| RunnerError::NetworkWorkerSpawn)?;
     let product_worker = matches!(&attachment, WorkerBrokerAttachment::Product { .. });
     let mesh_ingress_key = product_worker.then(fresh_mesh_ingress_control_key);
-    let (bytes, mut broker_endpoints) = match attachment {
+    let (bytes, broker_endpoints) = match attachment {
         WorkerBrokerAttachment::Product {
             endpoints,
             key: broker_key,
@@ -3789,30 +3791,16 @@ async fn spawn_network_worker_process(
     };
     startup.admit(process);
 
-    if let Some(endpoints) = broker_endpoints.as_ref() {
-        // One message per session, in session order.
-        for endpoint in endpoints {
-            if let Err(error) = transfer_worker_descriptor(
-                &bootstrap,
-                endpoint.as_raw_fd(),
-                context.deadline,
-                send_worker_broker_descriptor,
-            )
-            .await
-            {
-                reap_failed_network_worker_startup(&mut startup).await?;
-                return Err(error);
-            }
-        }
-        drop(broker_endpoints.take());
-
-        let status = match read_worker_status_frame(&mut bootstrap, context.deadline).await {
-            Ok(status) => status,
-            Err(error) => {
-                let error = classify_network_worker_startup_error(&mut startup, error).await?;
-                return Err(error);
-            }
-        };
+    if let Some(endpoints) = broker_endpoints {
+        // One message per session, in session order, answered together.
+        let status = pass_to_worker(
+            &mut startup,
+            &mut bootstrap,
+            endpoints,
+            context.deadline,
+            send_worker_broker_descriptor,
+        )
+        .await?;
         if status.as_slice() != WORKER_BROKER_READY_MESSAGE {
             if let Some(NetworkWorkerStartupStatus::Failed(failure)) =
                 decode_worker_startup_status(&status)
@@ -3865,29 +3853,14 @@ async fn spawn_network_worker_process(
             return Err(RunnerError::NetworkWorkerBootstrap);
         }
     };
-    let descriptor_transfer = transfer_worker_descriptor(
-        &bootstrap,
-        network.as_raw_fd(),
+    let status = pass_to_worker(
+        &mut startup,
+        &mut bootstrap,
+        vec![network],
         context.deadline,
         send_worker_network_descriptor,
     )
-    .await;
-    drop(network);
-    match descriptor_transfer {
-        Ok(()) => {}
-        Err(error) => {
-            reap_failed_network_worker_startup(&mut startup).await?;
-            return Err(error);
-        }
-    }
-
-    let status = match read_worker_status_frame(&mut bootstrap, context.deadline).await {
-        Ok(status) => status,
-        Err(error) => {
-            let error = classify_network_worker_startup_error(&mut startup, error).await?;
-            return Err(error);
-        }
-    };
+    .await?;
     match decode_worker_startup_status(&status) {
         Some(NetworkWorkerStartupStatus::Ready) => {}
         Some(NetworkWorkerStartupStatus::Failed(failure)) => {
