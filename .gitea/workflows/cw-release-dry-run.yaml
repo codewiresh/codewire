@@ -692,7 +692,8 @@ jobs:
       # An advisory step's failure shows as a success; say it on the run.
       - name: Say that an advisory Mac check failed
         if: steps.superseded.outputs.superseded == 'false' && (steps.helper-tests.outcome == 'failure' || steps.walk.outcome == 'failure')
-        run: echo '::warning::AN ADVISORY MAC CHECK FAILED (the VZ helper tests or the local VM walk; #4506 makes them blocking). Read its step above.'
+        run: |
+          echo '::warning::AN ADVISORY MAC CHECK FAILED (the VZ helper tests or the local VM walk; #4506 makes them blocking). Read its step above.'
 
       - name: Say that no runtime was walked
         if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime != 'true'

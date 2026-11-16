@@ -44,13 +44,19 @@ depend on what it delivers:
   trusted runner, in a workflow that only a push to main or a tag, a dispatch
   or a schedule starts: never a pull request; workflow-wide OIDC likewise;
 - ci.yaml runs Kind on the workspace image kind/common.sh approves, so that
-  digest has one owner.
+  digest has one owner;
+- every `run:` script the runner hands to bash parses (`bash -n`). A plain
+  YAML scalar ends at " #", so a one-line `run:` with " #" in it reaches bash
+  cut short; only a failed advisory check ran such a step, and it failed the
+  release dry run (run 55092).
 
 Each property rejects a mutation of the real workflows (MUTATIONS and
 WORKFLOW_MUTATIONS below).
 """
 
+import functools
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -486,10 +492,37 @@ def action_pin_errors(texts):
             for action, refs in pins.items() if len(refs) > 1]
 
 
+@functools.cache
+def bash_syntax_error(script):
+    """bash -n's complaint about SCRIPT, or an empty string."""
+    result = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True, check=False)
+    return result.stderr.strip() if result.returncode else ""
+
+
+def run_syntax_errors(name, text):
+    """Each bash `run:` script of NAME that does not parse."""
+    workflow = load(text)
+    errors = []
+    default = ((workflow.get("defaults") or {}).get("run") or {}).get("shell")
+    for job_name, job in (workflow.get("jobs") or {}).items():
+        job_default = ((job.get("defaults") or {}).get("run") or {}).get("shell") or default
+        for index, step in enumerate(job.get("steps") or []):
+            shell = step.get("shell") or job_default or "bash"
+            if "run" not in step or not re.fullmatch(r"(bash|sh)\b.*", str(shell)):
+                continue
+            script = step["run"]
+            # YAML reads a bare `run: true` as a boolean; the runner runs `true`.
+            script = str(script).lower() if isinstance(script, bool) else str(script)
+            error = bash_syntax_error(script)
+            if error:
+                errors.append(f"{name}: {job_name} step {step.get('name', index)!r} does not parse: {error}")
+    return errors
+
+
 def all_workflow_errors(texts, common_text=None):
     errors = []
     for name, text in sorted(texts.items()):
-        errors += workflow_errors(name, text)
+        errors += workflow_errors(name, text) + run_syntax_errors(name, text)
     common_text = KIND_COMMON.read_text() if common_text is None else common_text
     return errors + action_pin_errors(texts) + kind_image_errors(texts.get("ci.yaml", ""), common_text)
 
@@ -614,6 +647,12 @@ WORKFLOW_MUTATIONS = {
     # (infra#1534); a pull request's must never reach it.
     "a pull request's verdict runs on the trusted light runner": ("ci.yaml", lambda t: in_job(
         t, REQUIRED, f"    runs-on: {runners.LIGHT}\n", f"    runs-on: {runners.TRUSTED_LIGHT}\n")),
+    "a one-line run: is cut short by a YAML comment": ("cw-release-dry-run.yaml", lambda t: t.replace(
+        "        run: |\n          echo '::warning::AN ADVISORY MAC CHECK FAILED",
+        "        run: echo '::warning::AN ADVISORY MAC CHECK FAILED", 1)),
+    "a run: script leaves a quote open": ("deploy-prod.yaml", lambda t: t.replace(
+        "        run: scripts/ci/release/finish-prod-release.sh\n",
+        "        run: scripts/ci/release/finish-prod-release.sh \"$RELEASE_TAG\n", 1)),
     "the Dev delivery turn outlasts its light runner's limit": ("deploy-dev.yaml", lambda t: in_job(
         t, "dev-delivery-turn", "timeout-minutes: 25", "timeout-minutes: 90")),
     "a light job leans on the runner's cap": ("ci.yaml", lambda t: in_job(
