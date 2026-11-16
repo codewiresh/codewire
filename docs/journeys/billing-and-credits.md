@@ -20,6 +20,7 @@ the first Production release after codewire/deploy#245.
 | `billing-receipt` | not yet observed | not yet observed |
 | `billing-costs` | observed 2026-11-13 (#3954) | not yet observed |
 | `billing-zero-refusal` | observed 2026-11-11 and 2026-11-13 (#3381) | not yet observed |
+| `billing-admin-adjust` | not yet observed | not yet observed |
 | `billing-notice` | sent once observed 2026-11-13 (#4087); failure backoff not observed | not yet observed |
 | `billing-stripe-delivery` | observed 2026-10-24 (#3263) | endpoint created 2026-10-24; delivery not yet observed |
 
@@ -207,3 +208,36 @@ the first Production release after codewire/deploy#245.
     sentinel customer exists, which infra's
     `openbao-codewire-prod-stripe-delivery-sentinel apply` creates for
     Production. Not yet observed.
+
+## 9. `billing-admin-adjust`: an adjustment that would leave a negative balance asks first
+
+Issue: #4754.
+
+- **Entry points:** the admin organization page, **Rate card and credit**,
+  **Adjust credit**; `AdjustOrganizationCredit` on the admin API.
+- **States to exercise:**
+  - a grant, and a removal that leaves the balance at €0 or above: applied at
+    once, as today;
+  - a removal that would leave the balance below €0, with automatic top-up on
+    and a card: nothing changes yet. The page asks, naming the result and its
+    effect. Proposed wording, for the owner's look with #4754's low-balance
+    copy: "This leaves the balance at −€1.14. Automatic top-up is on, so
+    Visa •••• 4242 is charged €20 within seconds.";
+  - the same with top-up off, or with no card: "This leaves the balance at
+    −€1.14. New Sandboxes and starts are refused, and running Sandboxes
+    stop after 24 hours; their storage is kept.";
+  - confirming applies it, once; going back changes nothing;
+  - the balance moving between the question and the answer: the answer
+    confirms the result it was shown, and a different result asks again.
+- **Driving it:** on Kind (`make kind-seed-login`), as a platform admin, open
+  the e2e owner's organization page. Grant €5, then remove €6 with top-up on
+  and with it off.
+- **Proof:**
+  - nothing is written until a negative result is confirmed: the credit
+    entries table and the audit log gain one entry, with its reason, only
+    after **Confirm**;
+  - the API refuses an unconfirmed negative result
+    (`FailedPrecondition`), so no client can skip the question;
+  - after a confirmed negative result with top-up on, the card is charged
+    within seconds (#4777), and the Billing page shows the charge.
+- **Observed:** not yet observed.
