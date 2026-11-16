@@ -793,6 +793,13 @@ jobs:
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
 
+      # Nothing new starts once a check of this run has failed (infra#1632).
+      - name: Stop if a check of this run has already failed
+        if: ${{ github.event_name == 'pull_request' && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py --at-start
+
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         run: scripts/ci/setup/assert-ci-runner-image.sh
@@ -876,6 +883,13 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
+
+      # Nothing new starts once a check of this run has failed (infra#1632).
+      - name: Stop if a check of this run has already failed
+        if: ${{ github.event_name == 'pull_request' && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py --at-start
 
       # On a main push or a pull request in a metal guest, start from that
       # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
@@ -995,6 +1009,13 @@ jobs:
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
 
+      # Nothing new starts once a check of this run has failed (infra#1632).
+      - name: Stop if a check of this run has already failed
+        if: ${{ github.event_name == 'pull_request' && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py --at-start
+
       # On a main push or a pull request in a metal guest, start from that
       # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
       - name: Select the warm Rust cache
@@ -1105,6 +1126,13 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
+
+      # Nothing new starts once a check of this run has failed (infra#1632).
+      - name: Stop if a check of this run has already failed
+        if: ${{ github.event_name == 'pull_request' && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py --at-start
 
       # On a main push or a pull request in a metal guest, start from that
       # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
@@ -1259,6 +1287,13 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
+
+      # Nothing new starts once a check of this run has failed (infra#1632).
+      - name: Stop if a check of this run has already failed
+        if: ${{ github.event_name == 'pull_request' && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py --at-start
 
       # On a main push or a pull request in a metal guest, start from that
       # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
@@ -1446,6 +1481,13 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
+
+      # Nothing new starts once a check of this run has failed (infra#1632).
+      - name: Stop if a check of this run has already failed
+        if: ${{ github.event_name == 'pull_request' && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py --at-start
 
       # On a main push or a pull request in a metal guest, start from that
       # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
@@ -1635,6 +1677,13 @@ jobs:
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
 
+      # Nothing new starts once a check of this run has failed (infra#1632).
+      - name: Stop if a check of this run has already failed
+        if: ${{ github.event_name == 'pull_request' && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py --at-start
+
       # On a main push or a pull request in a metal guest, start from that
       # guest's warm Rust cache (infra#1534); anywhere else this changes nothing.
       - name: Select the warm Rust cache
@@ -1809,6 +1858,13 @@ jobs:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
           persist-credentials: false
 
+      # Nothing new starts once a check of this run has failed (infra#1632).
+      - name: Stop if a check of this run has already failed
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py --at-start
+
       - name: Verify sealed producer tools and isolated Buildx load
         run: |
           scripts/ci/setup/assert-ci-runner-image.sh
@@ -1859,6 +1915,13 @@ jobs:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
           persist-credentials: false
 
+      # Nothing new starts once a check of this run has failed (infra#1632).
+      - name: Stop if a check of this run has already failed
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py --at-start
+
       - name: Verify sealed producer tools
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
@@ -1908,6 +1971,13 @@ jobs:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
           persist-credentials: false
 
+      # Nothing new starts once a check of this run has failed (infra#1632).
+      - name: Stop if a check of this run has already failed
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py --at-start
+
       - name: Verify sealed producer tools
         run: scripts/ci/setup/assert-ci-runner-image.sh
 
@@ -1955,6 +2025,13 @@ jobs:
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
           persist-credentials: false
+
+      # Nothing new starts once a check of this run has failed (infra#1632).
+      - name: Stop if a check of this run has already failed
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py --at-start
 
       - name: Verify sealed producer tools
         run: scripts/ci/setup/assert-ci-runner-image.sh
@@ -2058,6 +2135,13 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
+
+      # Nothing new starts once a check of this run has failed (infra#1632).
+      - name: Stop if a check of this run has already failed
+        if: ${{ github.event_name == 'pull_request' && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: python3 -I -B scripts/ci/select/fail-fast-watch.py --at-start
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
@@ -2286,16 +2370,21 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/receipts/emit-verification-receipt.py
 
-  # A pull request's run stops at its first failed job (infra#1632); main runs
-  # every job. This watcher, which nothing needs, cancels the run once another
-  # job has ended in failure: Forgejo's run cancel stops only unfinished jobs,
-  # so the failed one keeps its result and log (#3126, #3119 A17), and
-  # Required verification ends cancelled, which still blocks the merge.
   # Any failed check stops the run (owner, 2026-10-25: "Again, if any of these
-  # things fail, then we just stop everything"). On a pull request the first
-  # failure cancels the run; on a push to main a test job that failed on its
-  # first attempt is rerun once at once, and any other failure cancels it
-  # (scripts/ci/select/fail-fast-watch.py). A light runner stops a task after
+  # things fail, then we just stop everything"; infra#1632).
+  # On a pull request nothing new starts after a failure: each costly job
+  # begins with "Stop if a check of this run has already failed"
+  # (fail-fast-watch.py --at-start) and ends there, naming the check that
+  # failed first. No job waits for it. A watcher job per run did this by
+  # cancelling until 2026-11-16: on 2026-11-15 the watchers held 6,450
+  # slot-minutes of the light runner to save about 110 job-minutes, all of it
+  # work that had not started (infra#1534, codewire#3013).
+  # On a push to main this watcher, which nothing needs, still acts on the
+  # first failure: a test job that failed on its first attempt is rerun once
+  # at once, and any other failure cancels the run. Forgejo's run cancel stops
+  # only unfinished jobs, so the failed one keeps its result and log (#3126,
+  # #3119 A17), and Required verification ends cancelled, which still blocks
+  # Dev delivery. A light runner stops a task after
   # 25 minutes, so the watch is a chain of links of 22 minutes each, every
   # link starting when the one before reaches its deadline: 88 minutes in all.
   fail-fast:
@@ -2306,7 +2395,7 @@ jobs:
     # quietly at 22 minutes (fail-fast-watch.py DEADLINE_SECONDS).
     timeout-minutes: 24
     needs: [verification-selection]
-    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed' || github.event_name == 'push' && github.ref == 'refs/heads/main') && needs.verification-selection.result == 'success' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.verification-selection.result == 'success' }}
     outputs:
       continue: ${{ steps.watch.outputs.continue }}
     steps:
@@ -2328,7 +2417,7 @@ jobs:
     # quietly at 22 minutes (fail-fast-watch.py DEADLINE_SECONDS).
     timeout-minutes: 24
     needs: [verification-selection, fail-fast]
-    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed' || github.event_name == 'push' && github.ref == 'refs/heads/main') && needs.verification-selection.result == 'success' && needs.fail-fast.outputs.continue == 'true' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.verification-selection.result == 'success' && needs.fail-fast.outputs.continue == 'true' }}
     outputs:
       continue: ${{ steps.watch.outputs.continue }}
     steps:
@@ -2350,7 +2439,7 @@ jobs:
     # quietly at 22 minutes (fail-fast-watch.py DEADLINE_SECONDS).
     timeout-minutes: 24
     needs: [verification-selection, fail-fast-2]
-    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed' || github.event_name == 'push' && github.ref == 'refs/heads/main') && needs.verification-selection.result == 'success' && needs.fail-fast-2.outputs.continue == 'true' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.verification-selection.result == 'success' && needs.fail-fast-2.outputs.continue == 'true' }}
     outputs:
       continue: ${{ steps.watch.outputs.continue }}
     steps:
@@ -2372,7 +2461,7 @@ jobs:
     # quietly at 22 minutes (fail-fast-watch.py DEADLINE_SECONDS).
     timeout-minutes: 24
     needs: [verification-selection, fail-fast-3]
-    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed' || github.event_name == 'push' && github.ref == 'refs/heads/main') && needs.verification-selection.result == 'success' && needs.fail-fast-3.outputs.continue == 'true' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.verification-selection.result == 'success' && needs.fail-fast-3.outputs.continue == 'true' }}
     outputs:
       continue: ${{ steps.watch.outputs.continue }}
     steps:

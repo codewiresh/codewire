@@ -258,7 +258,12 @@ for name, job in jobs.items():
         continue
     wired.add(name)
     index = names.index("Select the warm Rust cache")
-    checkout = steps[index - 1]
+    # On a pull request a costly job first asks whether a check of its run has
+    # already failed (fail-fast-watch.py --at-start); the checkout comes before.
+    before = index - 1
+    if steps[before].get("name") == "Stop if a check of this run has already failed":
+        before -= 1
+    checkout = steps[before]
     assert str(checkout.get("uses", "")).startswith("noel/actions-checkout@"), name
     # A job that compiles once on the build runner (infra#1632) uses the warm
     # cache only where it still compiles: a main push.

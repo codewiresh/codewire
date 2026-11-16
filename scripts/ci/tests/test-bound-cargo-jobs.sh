@@ -94,9 +94,11 @@ for name in sized:
     if "BUILD_ONCE" in (job.get("env") or {}):
         gate = gate[:-len(" }}")] + " && env.BUILD_ONCE != 'true' }}"
     assert step.get("if") == gate, name
-    # Only the checkout and the warm cache selection come before it.
+    # Only the checkout, the pull request's question whether a check of its
+    # run has already failed, and the warm cache selection come before it.
     for earlier in steps[checkout + 1:index]:
-        assert earlier.get("name") == "Select the warm Rust cache", (name, earlier.get("name"))
+        assert earlier.get("name") in ("Stop if a check of this run has already failed",
+                                       "Select the warm Rust cache"), (name, earlier.get("name"))
 for name, job in jobs.items():
     if name not in sized:
         assert "Bound cargo jobs by memory" not in [s.get("name") for s in job.get("steps") or []], name

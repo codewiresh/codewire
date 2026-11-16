@@ -5061,6 +5061,9 @@ WORK = {
 }
 SUPPORT = {
     "Reuse exact PR-head content verification",
+    # A guard: on a pull request a costly job ends at its start once a check
+    # of its run has failed (fail-fast-watch.py --at-start, infra#1632).
+    "Stop if a check of this run has already failed",
     "Service control-plane integration not selected", "Service runtime-plane integration not selected",
     "Resolve service control-plane scope",
     "Resolve service runtime-plane scope",

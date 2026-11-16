@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """A CI run stops at its first failed job (infra#1632; owner, 2026-10-25).
 
-Recorded-response tests of scripts/ci/select/fail-fast-watch.py and the chain
-of ci.yaml jobs that run it. It cancels the run only after another job has
+Recorded-response tests of scripts/ci/select/fail-fast-watch.py and the
+ci.yaml jobs that run it. On a pull request nothing new starts after a failure:
+each costly job asks at its start, is stopped only for a check whose latest
+attempt ended in failure, and can never cancel or rerun anything. On a push to
+main the chain of watcher jobs acts. It cancels the run only after another job has
 ended in failure (never from inside a failing job, so that job keeps its
 result and log, #3126), counts only each job's latest attempt, and stops
 quietly when every check finished. On a push to main a test job's first
@@ -37,8 +40,11 @@ SPEC.loader.exec_module(watcher)
 RUN = 77
 
 
-def job(job_id: int, name: str, status: str, attempt: int = 1) -> dict:
-    return {"id": job_id, "run_id": RUN, "name": name, "status": status, "attempt": attempt}
+def job(job_id: int, name: str, status: str, attempt: int = 1, ended: str | None = None) -> dict:
+    record = {"id": job_id, "run_id": RUN, "name": name, "status": status, "attempt": attempt}
+    if ended:
+        record["completed_at"] = ended
+    return record
 
 
 def base(policy: str = "running", rust: str = "running", **extra) -> list[dict]:
@@ -312,6 +318,120 @@ class WatchTests(unittest.TestCase):
                 self.assertEqual(output.read(), expected)
 
 
+class AtStartTests(unittest.TestCase):
+    """A pull request's costly job asks once, before it does anything."""
+
+    def ask(self, api: FakeForgejo) -> tuple[str, str]:
+        lines: list[str] = []
+        return watcher.at_start(api, RUN, log=lines.append), "\n".join(lines)
+
+    def test_a_job_starts_while_no_check_has_failed(self) -> None:
+        for jobs in (base(), base(policy="success", rust="skipped"), base(policy="cancelled"),
+                     base(policy="waiting", rust="blocked")):
+            with self.subTest(jobs=[j["status"] for j in jobs]):
+                api = FakeForgejo([jobs])
+                self.assertEqual(self.ask(api)[0], "go")
+                self.assertEqual((api.served, api.posts), (1, []))
+
+    def test_a_job_does_not_start_after_a_failure_and_names_the_first(self) -> None:
+        jobs = base(policy="running", more=[
+            job(6, "Standard verification", "failure", ended="2026-11-16T10:02:00Z"),
+            job(7, "Build test archives", "failure", ended="2026-11-16T10:09:00Z"),
+            job(8, "Database verification", "failure"),
+        ])
+        api = FakeForgejo([jobs])
+        result, log = self.ask(api)
+        self.assertEqual(result, "stop")
+        # The earliest to end is the cause; the others were stopped the same
+        # way or failed later, and one without an end time sorts last.
+        self.assertIn("::error::not started: Standard verification failed first in this run", log)
+        self.assertIn("also failed by now: Build test archives, Database verification", log)
+        self.assertIn("fix Standard verification", log)
+        # It ends its own job and nothing else: no cancel, no rerun.
+        self.assertEqual(api.posts, [])
+
+    def test_only_a_check_s_latest_attempt_counts(self) -> None:
+        # A whole-run rerun gives every job a new attempt; the failure that
+        # caused the rerun must not stop the jobs of the rerun.
+        jobs = [j for j in base() if j["name"] != "Policy verification"] + [
+            job(2, "Policy verification", "failure", attempt=1, ended="2026-11-16T10:02:00Z"),
+            job(9, "Policy verification", "running", attempt=2)]
+        self.assertEqual(self.ask(FakeForgejo([jobs]))[0], "go")
+
+    def test_a_green_run_cannot_be_stopped_by_what_is_not_a_check(self) -> None:
+        # The aggregate, the selection and a watcher are not checks. On
+        # 2026-11-15 a watcher that died made a fully green run read failure
+        # (run 52591); asking at the start must never do that.
+        jobs = [job(1, "Verification selection", "failure"), job(4, "Required verification", "failure"),
+                job(5, watcher.WATCHER_JOB, "failure"), job(10, f"{watcher.WATCHER_JOB} (2)", "failure"),
+                job(2, "Policy verification", "success"), job(3, "Rust / transport packages", "running")]
+        self.assertEqual(self.ask(FakeForgejo([jobs]))[0], "go")
+
+    def test_anything_unreadable_starts_the_job(self) -> None:
+        for answer in (watcher.verdicts.Unproven("forgejo-api-unavailable"),
+                       # A job entry that is not an object, and an error that is
+                       # not the API's own (codewire#5024 review).
+                       ["not-an-object", 7, None],
+                       RuntimeError("anything at all")):
+            with self.subTest(answer=str(answer)[:40]):
+                api = FakeForgejo([answer])
+                result, log = self.ask(api)
+                self.assertEqual((result, api.posts), ("go", []))
+                # Either it could not read the answer, or the answer holds no
+                # failed check: both start the job.
+                self.assertIn("starting", log)
+                # Asked once: a job never waits on the API.
+                self.assertEqual(api.served, 1)
+
+    def test_a_state_it_does_not_know_never_stops_a_job(self) -> None:
+        # A verdict reads a completed job with an unknown conclusion as a
+        # failure; asking at the start must not. Only "failure" stops a job.
+        for record in ({"status": "no-such-state"}, {"status": "completed", "conclusion": "neutral"},
+                       {"status": "completed"}, {"status": "completed", "conclusion": "cancelled"},
+                       {"status": "cancelled"}, {"status": "skipped"}, {}):
+            with self.subTest(record=record):
+                jobs = [{"id": 2, "run_id": RUN, "name": "Policy verification", "attempt": 1, **record}]
+                result, _ = self.ask(FakeForgejo([jobs]))
+                self.assertEqual(result, "go")
+        for record in ({"status": "failure"}, {"status": "completed", "conclusion": "failure"}):
+            with self.subTest(record=record):
+                jobs = [{"id": 2, "run_id": RUN, "name": "Policy verification", "attempt": 1, **record}]
+                self.assertEqual(self.ask(FakeForgejo([jobs]))[0], "stop")
+
+    def test_the_command_stops_only_a_pull_request_job_and_only_for_a_failure(self) -> None:
+        failed = FakeForgejo([base(policy="failure")])
+        running = FakeForgejo([base()])
+        pull_request = {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_RUN_ID": str(RUN)}
+        cases = (
+            (pull_request, failed, 1),
+            (pull_request, running, 0),
+            ({"GITHUB_EVENT_NAME": "pull_request", "GITHUB_RUN_ID": "x"}, failed, 0),
+            ({"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main", "GITHUB_RUN_ID": str(RUN)}, failed, 0),
+            ({"GITHUB_EVENT_NAME": "schedule", "GITHUB_RUN_ID": str(RUN)}, failed, 0),
+        )
+        for environ, api, expected in cases:
+            with self.subTest(environ=environ, expected=expected), \
+                    mock.patch.dict(os.environ, environ, clear=True), \
+                    mock.patch.object(watcher.verdicts.ForgejoAPI, "from_environ", return_value=api), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(watcher.main(["--at-start"]), expected)
+        self.assertEqual(failed.posts + running.posts, [])
+        # An unusable API starts the job, and an unknown argument is refused.
+        with mock.patch.dict(os.environ, pull_request, clear=True), \
+                mock.patch.object(watcher.verdicts.ForgejoAPI, "from_environ",
+                                  side_effect=watcher.verdicts.Unproven("forgejo-token-missing")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(watcher.main(["--at-start"]), 0)
+        # Nor can an error of any other kind stop a job.
+        for error in (RuntimeError("boom"), AttributeError("'str' object has no attribute 'get'")):
+            with self.subTest(error=type(error).__name__), mock.patch.dict(os.environ, pull_request, clear=True), \
+                    mock.patch.object(watcher.verdicts.ForgejoAPI, "from_environ", side_effect=error), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(watcher.main(["--at-start"]), 0)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(watcher.main(["--at-end"]), 2)
+
+
 class WorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.jobs = yaml.safe_load((ROOT / ".gitea/workflows/ci.yaml").read_text())["jobs"]
@@ -320,15 +440,15 @@ class WorkflowTests(unittest.TestCase):
         ids = ["fail-fast", *(f"fail-fast-{link}" for link in range(2, watcher.WATCH_LINKS + 1))]
         return [(job_id, self.jobs[job_id]) for job_id in ids]
 
-    def test_the_watcher_chain_watches_pull_requests_and_main_and_nothing_needs_it(self) -> None:
+    def test_the_watcher_chain_watches_main_alone_and_nothing_needs_it(self) -> None:
         links = self.links()
         self.assertEqual({job_["name"] for _, job_ in links}, watcher.WATCHER_JOBS)
         previous = None
         for job_id, job_ in links:
             self.assertEqual(job_["needs"], ["verification-selection"] + ([previous] if previous else []))
-            for fragment in ("github.event_name == 'pull_request'", "github.event.action != 'closed'",
-                             "github.event_name == 'push' && github.ref == 'refs/heads/main'"):
-                self.assertIn(fragment, job_["if"])
+            self.assertIn("github.event_name == 'push' && github.ref == 'refs/heads/main'", job_["if"])
+            # A pull request's run has no watcher: its jobs ask at their start.
+            self.assertNotIn("pull_request", job_["if"])
             if previous:
                 # A link starts only when the one before reached its deadline.
                 self.assertIn(f"needs.{previous}.outputs.continue == 'true'", job_["if"])
@@ -343,6 +463,43 @@ class WorkflowTests(unittest.TestCase):
                 self.assertFalse(watchers & set(needs), name)
         # The end-of-run retry job is gone: the watcher reruns at once instead.
         self.assertNotIn("retry-failed-once", self.jobs)
+
+    AT_START = "Stop if a check of this run has already failed"
+    # The jobs that cost a build machine, a test runner or a Kind runner.
+    COSTLY = {"rust-compile", "rust-packages", "rust-features", "rust-transport", "database",
+              "services-control", "services-runtime", "kind-workspace", "kind-product", "kind-daemon",
+              "kind-smokes", "edge-kind"}
+
+    def test_on_a_pull_request_every_costly_job_asks_at_its_start(self) -> None:
+        carrying = set()
+        for name, job_ in self.jobs.items():
+            steps = job_.get("steps", [])
+            asks = [index for index, step in enumerate(steps) if step.get("name") == self.AT_START]
+            if not asks:
+                continue
+            carrying.add(name)
+            self.assertEqual(len(asks), 1, name)
+            step, before = steps[asks[0]], steps[asks[0] - 1]
+            self.assertEqual(step["run"], "python3 -I -B scripts/ci/select/fail-fast-watch.py --at-start", name)
+            self.assertEqual(step["env"], {"GITEA_TOKEN": "${{ github.token }}"}, name)
+            self.assertIn("github.event_name == 'pull_request'", step["if"], name)
+            # It needs the checkout for its script and runs before anything
+            # else the job does, under the checkout's own condition.
+            self.assertIn("actions-checkout@", before.get("uses", ""), name)
+            if "if" in before:
+                self.assertIn(before["if"].removeprefix("${{ ").removesuffix(" }}"), step["if"], name)
+            self.assertFalse(any("actions-checkout@" not in other.get("uses", "x") and "run" in other
+                                 and "not selected" not in other.get("name", "")
+                                 and "Resolve" not in other.get("name", "")
+                                 and "Reuse exact PR-head" not in other.get("name", "")
+                                 for other in steps[:asks[0]]), name)
+        self.assertEqual(carrying, self.COSTLY)
+        # A job added behind the build or the Kind builds must ask too.
+        for name, job_ in self.jobs.items():
+            needs = job_.get("needs") or []
+            needs = [needs] if isinstance(needs, str) else needs
+            if set(needs) & self.COSTLY and name != "required-verification":
+                self.assertIn(name, self.COSTLY, name)
 
     def test_the_watcher_ends_quietly_before_its_runner_stops_it(self) -> None:
         # A light runner kills a task after 25 minutes, and a killed watcher

@@ -2,12 +2,21 @@
 """A CI run stops at its first failed job (infra#1632; owner, 2026-10-25).
 
 Owner, 2026-10-25: "Again, if any of these things fail, then we just stop
-everything." A pull request's and a main push's run both stop: this watcher, a
-job of the same run that nothing needs, polls the run's jobs and acts on the
-first failure.
+everything." A pull request's and a main push's run both stop, in two ways.
 
-- A pull request run is cancelled at once.
-- A main push run first gives a test job that failed on its first attempt one
+- In a pull request run nothing new starts after a failure: each costly job
+  (the build, the test jobs, the Kind jobs) begins with `--at-start`, which
+  reads the run's jobs once and ends the job there, naming the check that
+  failed, when one already has. No job waits for this. Until 2026-11-16 a
+  watcher job did it by cancelling the run, and on 2026-11-15 those watchers
+  held 6,450 slot-minutes of the light runner, a third of its task time, to
+  save about 110 job-minutes: every minute saved was work that had not
+  started, a build already running was never stopped by the cancel, and a
+  watcher that died turned one green run red (infra#1534, codewire#3013).
+  Work already running when a check fails runs to its end.
+- A main push run is watched by this script as a job of the run that nothing
+  needs: it polls the run's jobs and acts on the first failure. It first gives
+  a test job that failed on its first attempt one
   immediate rerun, in the same run (a flake must not cost main a whole cycle;
   runs 21922 and 22110). Policy, a job's second failure and any other job
   cancel the run. Rerunning restarts Required verification and Dev delivery
@@ -30,7 +39,9 @@ watcher says so and reruns anyway.
 
 Only the latest attempt of each job counts. The watcher never fails its run:
 anything unreadable is retried, and it gives up quietly at its deadline,
-asking the next link of its chain to take over (WATCH_LINKS).
+asking the next link of its chain to take over (WATCH_LINKS). `--at-start`
+never stops a job for anything but a check whose latest attempt has ended in
+failure: an unreadable or malformed answer starts the job.
 """
 
 from __future__ import annotations
@@ -235,6 +246,49 @@ def watch(
         sleep(poll_seconds)
 
 
+def failed_first(checks: dict[str, tuple[int, dict]]) -> list[str]:
+    """The checks whose latest attempt ended in failure, the earliest first.
+
+    Jobs this script stopped at their start are failures too, so the order
+    matters: the first to end is the cause. A job without a readable end time
+    sorts after those with one, by name."""
+    failed = [(str(job.get("completed_at") or job.get("stopped_at") or "~"), name)
+              for name, (_, job) in checks.items() if ended_in_failure(job)]
+    return [name for _, name in sorted(failed)]
+
+
+def ended_in_failure(job: dict) -> bool:
+    """Whether Forgejo says, in so many words, that this job failed.
+
+    Stricter than verdicts.state_of, which reads a completed job with a
+    conclusion it does not know as a failure: right for a verdict, which must
+    not pass what it cannot read, and wrong here, where the doubt must start
+    the job."""
+    status, conclusion = job.get("status"), job.get("conclusion")
+    return status == "failure" or (status == "completed" and conclusion == "failure")
+
+
+def at_start(api, run_id: int, log: Callable[[str], None] = print) -> str:
+    """"stop" when a check of this run has already failed, otherwise "go".
+
+    Asked once by a costly job before it does anything. It can only stop a
+    job, never cancel a run, and anything unreadable is "go": a job that
+    should have been stopped costs minutes, a job stopped wrongly would turn a
+    green run red."""
+    try:
+        failed = failed_first(latest_attempts(verdicts.jobs_of(api, run_id)))
+    except Exception as exc:  # noqa: BLE001 - whatever goes wrong here, the job starts
+        log(f"::warning::cannot read this run's jobs ({type(exc).__name__}: {exc}); starting this job anyway")
+        return "go"
+    if not failed:
+        log("no check of this run has failed; starting")
+        return "go"
+    also = f"; also failed by now: {', '.join(failed[1:])}" if failed[1:] else ""
+    log(f"::error::not started: {failed[0]} failed first in this run{also}. Nothing new starts after a "
+        f"failure (infra#1632), so this job did not run; fix {failed[0]}")
+    return "stop"
+
+
 def say(line: str) -> None:
     print(line, flush=True)
 
@@ -247,8 +301,31 @@ def handover(result: str, environ: dict[str, str]) -> None:
             handle.write(f"continue={'true' if result == 'deadline' else 'false'}\n")
 
 
-def main() -> int:
+def main_at_start(environ: dict[str, str]) -> int:
+    """`--at-start`: exit 1 to end a pull request's job before it starts."""
+    if environ.get("GITHUB_EVENT_NAME") != "pull_request":
+        print("only a pull request's jobs ask at their start; starting")
+        return 0
+    run_id = environ.get("GITHUB_RUN_ID", "")
+    if not POSITIVE_RE.fullmatch(run_id):
+        print("::warning::the run ID is invalid; starting this job anyway")
+        return 0
+    try:
+        api = verdicts.ForgejoAPI.from_environ(environ)
+        return 1 if at_start(api, int(run_id), log=say) == "stop" else 0
+    except Exception as exc:  # noqa: BLE001 - only a failed check may stop a job (codewire#5024 review)
+        print(f"::warning::asking at the start failed ({type(exc).__name__}: {exc}); starting this job anyway")
+        return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
     environ = dict(os.environ)
+    if argv == ["--at-start"]:
+        return main_at_start(environ)
+    if argv:
+        print("usage: fail-fast-watch.py [--at-start]", file=sys.stderr)
+        return 2
     event, ref = environ.get("GITHUB_EVENT_NAME"), environ.get("GITHUB_REF")
     on_main = event == "push" and ref == "refs/heads/main"
     if event != "pull_request" and not on_main:
