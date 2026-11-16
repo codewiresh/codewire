@@ -1107,6 +1107,10 @@ run_paths_case ci_done_measures pull_request refs/pull/3144/head false \
   .gitea/workflows/ci-done-measures.yaml \
   scripts/ci/measure/ci-done-measures \
   scripts/ci/tests/test-ci-done-measures.py
+run_paths_case readme_recording_renderer pull_request refs/pull/4942/head false \
+  'policy security security_js' \
+  scripts/docs/render-terminal-svg.py \
+  scripts/ci/tests/test-render-terminal-svg.py
 run_paths_case retired_prod_readonly_smoke pull_request refs/pull/3021/head false \
   'policy security security_js' \
   .gitea/workflows/prod-readonly-smoke.yaml \

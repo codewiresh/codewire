@@ -16,6 +16,9 @@ import sys
 from xml.sax.saxutils import escape
 
 # Terminal escapes, then the control characters XML 1.0 forbids; a tab stays.
+# An OSC sequence, such as an OSC 8 hyperlink around a link's text, ends with
+# BEL or ESC backslash; it goes first, so its text is kept and its URL is not.
+OPERATING_SYSTEM_COMMAND = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 ESCAPE_SEQUENCE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
@@ -50,13 +53,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+class Unrenderable(Exception):
+    pass
+
+
 def load(path: str, replacements: list[tuple[str, str]]) -> list[dict]:
     events = []
     with open(path, encoding="utf-8") as handle:
-        for raw in handle:
+        for number, raw in enumerate(handle, start=1):
             event = json.loads(raw)
             text = event.get("cmd", event.get("out", ""))
-            text = CONTROL.sub("", ESCAPE_SEQUENCE.sub("", text))
+            text = ESCAPE_SEQUENCE.sub("", OPERATING_SYSTEM_COMMAND.sub("", text))
+            # An escape left now began a sequence this line does not end, such
+            # as a hyperlink split across two output lines. Stripping only its
+            # ESC would show the rest, a URL perhaps, so it is refused instead.
+            if "\x1b" in text:
+                raise Unrenderable(f"transcript line {number} has an escape sequence that does not end on its line")
+            text = CONTROL.sub("", text)
             for old, new in replacements:
                 text = text.replace(old, new)
             # A progress line that a terminal redraws as its finished line.
@@ -167,7 +180,11 @@ def main() -> int:
             print(f"--replace needs OLD=NEW, got {item!r}", file=sys.stderr)
             return 2
         replacements.append((old, new))
-    lines = timeline(load(args.transcript, replacements))
+    try:
+        lines = timeline(load(args.transcript, replacements))
+    except Unrenderable as error:
+        print(error, file=sys.stderr)
+        return 1
     if not lines:
         print("the transcript is empty", file=sys.stderr)
         return 1
