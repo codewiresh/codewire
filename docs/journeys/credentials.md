@@ -21,6 +21,7 @@ observed**.
 | `cred-claude-setup-token` | not yet observed | not yet observed | not yet observed |
 | `cred-claude-sign-in` | observed, #4798 at f5657302c, 2026-11-15 (steps 1–4; the plan and `/usage`, step 5, not yet observed) | failed 2026-11-15: stored, but the login never reached the VM (#4714) | link screen and paste prompt observed, v0.4.18, 2026-11-14; a completed sign-in not yet observed |
 | `cred-ssh-key` | not yet observed | not yet observed | not yet observed |
+| `profile-default` | not yet observed | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -183,3 +184,54 @@ Issues: #4714 (local), #2559 (cloud).
   broker's agent route. Expect no private key in the environment.
 - **Remove:** `rotate` is refused (enrol a new key instead). Delete removes
   it; the public key stays wherever it was added.
+
+## 9. `profile-default`: the default profile a create uses
+
+- **Entry points:** `cw credentials --local profiles default NAME` and
+  `cw credentials --cloud profiles default NAME`; `cw credentials
+  --PLACEMENT profiles list`; `cw create --local` and `cw create --cloud`
+  with no `--profile`.
+- **States to exercise:**
+  - a store with no profiles: create says nothing about a profile;
+  - the store's first profile: it becomes the default;
+  - a second profile made the default: create uses it, and `--no-profile`
+    selects none;
+  - deleting the default: refused;
+  - local only, a store from before defaults (schema 5) with profiles: no
+    default, so create uses no profile and says so, and a profile added
+    afterwards does not become the default (#4717).
+- **Driving it:** with a throwaway `HOME` and synthetic credentials named
+  `parity-default-*`, for each placement:
+
+  ```sh
+  cw credentials --PLACEMENT --profile parity-default-a set codex parity-default-a
+  cw credentials --PLACEMENT profiles list
+  cw credentials --PLACEMENT --profile parity-default-b set codex parity-default-b
+  cw credentials --PLACEMENT profiles default parity-default-b
+  cw credentials --PLACEMENT --profile parity-default-b delete
+  cw --PLACEMENT create parity-default-env
+  cw --PLACEMENT create parity-default-bare --no-profile
+  ```
+
+  Then delete the environments, make `parity-default-a` the default, and
+  delete both profiles' credentials and `parity-default-b`.
+- **Proof:**
+  - `profiles list` lists `parity-default-a` first, marked default.
+  - After `profiles default`, both placements print `Default credential
+    profile: "parity-default-b".` with their own placement word.
+  - The delete exits non-zero with `"parity-default-b" is your default
+    credential profile and cannot be deleted; make another profile the
+    default first: cw credentials --PLACEMENT profiles default NAME`.
+  - The first create prints `Credential profile: parity-default-b (your
+    default; --no-profile creates without one)`, and its environment
+    selects that profile. The second selects none.
+  - On an upgraded local store with profiles, create prints `Credential
+    profile: none (no default; set one with cw credentials --local
+    profiles default NAME)` and selects none.
+- **Gotchas:**
+  - The local default needs authority protocol 18. A `cw` update while a
+    local VM runs keeps the older authority, which has no default: stop
+    the VMs and run the command again.
+  - A cloud profile cannot be deleted while it is the default either. The
+    walk's last profile stays until another is made the default.
+- **Observed:** not yet observed.

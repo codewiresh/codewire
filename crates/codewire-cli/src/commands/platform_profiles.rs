@@ -115,7 +115,10 @@ async fn handle_profile(
         }
         CredentialProfileCommand::Delete(args) => {
             let profile = resolve_profile(client, &args.profile, None).await?;
-            anyhow::ensure!(!profile.is_default, default_delete_refusal(&profile.name));
+            anyhow::ensure!(
+                !profile.is_default,
+                default_delete_refusal(&profile.name, "--cloud")
+            );
             if !args.yes
                 && !prompt_confirm_default_no(&format!(
                     "Delete platform user profile {:?} ({}) at revision {}?",
@@ -336,9 +339,11 @@ pub(super) fn default_first(mut profiles: Vec<rpc::AccessProfile>) -> Vec<rpc::A
     profiles
 }
 
-fn default_delete_refusal(name: &str) -> String {
+/// One sentence for deleting the default in either placement (`--cloud` or
+/// `--local`), so the two say the same (#4717).
+pub(super) fn default_delete_refusal(name: &str, placement: &str) -> String {
     format!(
-        "{name:?} is your default credential profile and cannot be deleted; make another profile the default first: cw credentials --cloud profiles default NAME"
+        "{name:?} is your default credential profile and cannot be deleted; make another profile the default first: cw credentials {placement} profiles default NAME"
     )
 }
 

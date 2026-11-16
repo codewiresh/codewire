@@ -550,7 +550,7 @@ pub(crate) async fn create_native_environment(
     if let Some(image) = args.image.as_deref().and_then(trimmed_str) {
         project.spec.image = image.to_owned();
     }
-    sources::apply_create_source_flags(&mut project.spec, &args)?;
+    sources::apply_create_sources(&mut project.spec, &args).await?;
     let declared_direct_mounts = native_direct_mount_warning(&project.local_mounts);
     let implicit = project.spec.repositories.is_empty() && project.local_mounts.is_empty();
     let path_mode = args.path_mode.or(project.path_mode);
@@ -1202,7 +1202,8 @@ fn native_create_is_interactive(args: &EnvCreateArgs) -> bool {
 async fn review_native_create(globals: &Globals, args: &mut EnvCreateArgs) -> anyhow::Result<bool> {
     use super::guided::{self, Choice};
     loop {
-        eprintln!("{}", native_create_summary(args)?);
+        let default = sources::read_local_default().await?;
+        eprintln!("{}", native_create_summary(args, &default)?);
         match guided::choose(
             "Create with these settings?",
             &[
@@ -1296,7 +1297,10 @@ fn default_native_name(path: Option<&Path>, taken: &[String]) -> String {
     name
 }
 
-fn native_create_summary(args: &EnvCreateArgs) -> anyhow::Result<String> {
+fn native_create_summary(
+    args: &EnvCreateArgs,
+    default: &sources::LocalDefault,
+) -> anyhow::Result<String> {
     let (source, mut project, provenance) = native_plan(args)?;
     sources::apply_create_source_flags(&mut project.spec, args)?;
     let implicit = project.spec.repositories.is_empty() && project.local_mounts.is_empty();
@@ -1337,17 +1341,7 @@ fn native_create_summary(args: &EnvCreateArgs) -> anyhow::Result<String> {
         };
         format!("on ({} data disk)", gib_label(disk))
     };
-    let profile = args
-        .profile
-        .clone()
-        .or_else(|| {
-            project
-                .spec
-                .credentials
-                .as_ref()
-                .map(|binding| binding.profile.clone())
-        })
-        .unwrap_or_else(|| "none".to_owned());
+    let profile = sources::review_profile(&project.spec, args.no_profile, default);
     let ports = if project.host_ports.is_empty() {
         "none".to_owned()
     } else {
@@ -6061,7 +6055,7 @@ working_directory: /workspace/github
         let (_temp, root) = checkout("version: 1\nimage: workspace\n");
         let mut args = local_create_args(&["--path", root.join("crates").to_str().unwrap()]);
         args.name = Some("app".to_owned());
-        let summary = native_create_summary(&args).unwrap();
+        let summary = native_create_summary(&args, &sources::LocalDefault::NoProfiles).unwrap();
         assert!(
             summary.contains(&format!(
                 "  Config       {}\n",
@@ -6070,7 +6064,7 @@ working_directory: /workspace/github
             "{summary}"
         );
         std::fs::remove_file(root.join("codewire.yaml")).unwrap();
-        let summary = native_create_summary(&args).unwrap();
+        let summary = native_create_summary(&args, &sources::LocalDefault::NoProfiles).unwrap();
         assert!(
             summary.contains(
                 "  Config       flags only, no codewire.yaml found; default workspace image\n"

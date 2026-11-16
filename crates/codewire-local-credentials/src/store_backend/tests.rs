@@ -697,6 +697,12 @@ impl PlaceholderEnvironment {
                 self.binding.profile_revision,
             )
             .unwrap();
+        // The default cannot be deleted (#4717): an empty spare, which holds
+        // no value, takes it first.
+        let spare = authority
+            .create_profile(AccessProfileName::parse("spare").unwrap(), BTreeMap::new())
+            .unwrap();
+        authority.set_default_profile(&spare.profile.id).unwrap();
         authority.delete_profile(&self.profile_id).unwrap();
         authority.delete_credential(&self.credential_id).unwrap();
     }

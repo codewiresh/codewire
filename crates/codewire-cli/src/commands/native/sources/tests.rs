@@ -799,3 +799,129 @@ async fn local_only_empty_resolution_never_reads_platform_configuration_or_authe
     assert!(resolved.profile.is_none());
     assert!(resolved.platform.is_none());
 }
+
+fn local_profile(
+    id: &str,
+    name: &str,
+    is_default: bool,
+) -> codewire_local_credentials::AccessProfileRecord {
+    codewire_local_credentials::AccessProfileRecord {
+        profile: codewire_access::AccessProfile {
+            id: codewire_access::AccessProfileId::parse(id).unwrap(),
+            placement: codewire_access::Placement::Local,
+            owner: Owner::User(codewire_access::OwnerId::parse("local-user").unwrap()),
+            name: codewire_access::AccessProfileName::parse(name).unwrap(),
+            revision: 1,
+            entries: std::collections::BTreeMap::new(),
+        },
+        created_at_unix_ms: 10,
+        updated_at_unix_ms: 20,
+        is_default,
+    }
+}
+
+/// A local create with no profile named takes the store's default, by exact
+/// ID, and says so as a cloud create does (#4717).
+#[test]
+fn a_local_create_naming_no_profile_takes_the_default_and_says_so() {
+    let default = LocalDefault::from_profiles(&[
+        local_profile(ENV_ID, "spare", false),
+        local_profile(PROFILE_ID, "work", true),
+    ])
+    .unwrap();
+    let mut spec = ProjectSpec::default();
+    apply_local_default(&mut spec, &default);
+    assert_eq!(
+        spec.credentials.map(|binding| binding.profile),
+        Some(format!("local:id:{PROFILE_ID}"))
+    );
+    assert_eq!(
+        default.message().as_deref(),
+        Some("Credential profile: work (your default; --no-profile creates without one)")
+    );
+    // Two defaults are the authority's error, never a choice.
+    assert!(
+        LocalDefault::from_profiles(&[
+            local_profile(ENV_ID, "spare", true),
+            local_profile(PROFILE_ID, "work", true),
+        ])
+        .is_err()
+    );
+}
+
+/// #4717: an upgraded store with profiles but no
+/// default creates with no credentials and says so; a store with no profiles
+/// creates as before, silently.
+#[test]
+fn an_upgraded_store_with_profiles_and_no_default_creates_without_credentials_and_says_so() {
+    let none_set =
+        LocalDefault::from_profiles(&[local_profile(PROFILE_ID, "work", false)]).unwrap();
+    assert_eq!(none_set, LocalDefault::NoneSet);
+    let mut spec = ProjectSpec::default();
+    apply_local_default(&mut spec, &none_set);
+    assert_eq!(spec.credentials, None);
+    assert_eq!(
+        none_set.message().as_deref(),
+        Some(
+            "Credential profile: none (no default; set one with cw credentials --local profiles default NAME)"
+        )
+    );
+
+    let empty = LocalDefault::from_profiles(&[]).unwrap();
+    assert_eq!(empty, LocalDefault::NoProfiles);
+    apply_local_default(&mut spec, &empty);
+    assert_eq!(spec.credentials, None);
+    assert_eq!(empty.message(), None);
+}
+
+/// `--no-profile`, or a profile already named, never consults the store.
+#[tokio::test]
+async fn a_named_profile_or_no_profile_never_reads_the_default() {
+    let named = CredentialBinding {
+        profile: "local:user/work".to_owned(),
+    };
+    let mut spec = ProjectSpec {
+        credentials: Some(named.clone()),
+        ..Default::default()
+    };
+    select_local_default_profile(&mut spec, false, OutputFormat::Text)
+        .await
+        .unwrap();
+    assert_eq!(spec.credentials, Some(named));
+    let mut spec = ProjectSpec::default();
+    select_local_default_profile(&mut spec, true, OutputFormat::Text)
+        .await
+        .unwrap();
+    assert_eq!(spec.credentials, None);
+}
+
+/// The guided review shows the profile the create will select: a named one,
+/// else the store's default, else none (#4717).
+#[test]
+fn the_review_shows_the_profile_the_create_will_use() {
+    let default = LocalDefault::Profile {
+        name: "work".to_owned(),
+        id: PROFILE_ID.to_owned(),
+    };
+    let named = ProjectSpec {
+        credentials: Some(CredentialBinding {
+            profile: "local:user/other".to_owned(),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(review_profile(&named, false, &default), "local:user/other");
+    let unnamed = ProjectSpec::default();
+    assert_eq!(
+        review_profile(&unnamed, false, &default),
+        "work (your default)"
+    );
+    assert_eq!(review_profile(&unnamed, true, &default), "none");
+    assert_eq!(
+        review_profile(&unnamed, false, &LocalDefault::NoneSet),
+        "none"
+    );
+    assert_eq!(
+        review_profile(&unnamed, false, &LocalDefault::NoProfiles),
+        "none"
+    );
+}

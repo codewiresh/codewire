@@ -82,7 +82,13 @@ const MAX_SSH_ENROLLMENT_WORKERS: u32 = 8;
 const SSH_ENROLLMENT_DEADLINE: Duration = Duration::from_secs(30);
 
 mod grants;
+mod profiles;
 mod repository;
+
+use profiles::{
+    environment_binding_to_proto, profile_entries, profile_record_to_proto,
+    profile_revision_to_proto,
+};
 pub(crate) use repository::REPOSITORY_PREPARATION_TIMEOUT;
 use repository::{PreparedRepository, RepositoryProcessManager, cleanup_repository_ssh_runtimes};
 
@@ -1819,6 +1825,16 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         Ok(Response::new(v1::DeleteAccessProfileResponse {}))
     }
 
+    async fn set_default_access_profile(
+        &self,
+        request: Request<v1::AccessProfileSelector>,
+    ) -> Result<Response<v1::AccessProfileRevision>, Status> {
+        let id = profile_id(request.into_inner().profile_id)?;
+        let authority = Arc::clone(&self.authority);
+        let profile = run_blocking(move || authority.set_default_profile(&id)).await?;
+        Ok(Response::new(profile_record_to_proto(profile)))
+    }
+
     async fn create_environment_access_binding(
         &self,
         request: Request<v1::CreateEnvironmentAccessBindingRequest>,
@@ -2322,34 +2338,6 @@ fn broker_lease_audit_event_to_proto(
     }
 }
 
-/// Parse entries. Every profile includes the store's one GitHub connection, so
-/// a legacy client's `github` entry is accepted and its credential ID discarded.
-fn profile_entries(
-    entries: Vec<v1::AccessProfileEntry>,
-) -> Result<BTreeMap<CapabilitySlot, CredentialId>, Status> {
-    let mut parsed = BTreeMap::new();
-    let mut github = false;
-    for entry in entries {
-        let slot = CapabilitySlot::parse(entry.capability_slot).map_err(status_for_access_error)?;
-        let credential =
-            CredentialId::parse(entry.credential_id).map_err(status_for_access_error)?;
-        if slot == CapabilitySlot::github() {
-            if std::mem::replace(&mut github, true) {
-                return Err(Status::invalid_argument(
-                    "duplicate access profile capability slot",
-                ));
-            }
-            continue;
-        }
-        if parsed.insert(slot, credential).is_some() {
-            return Err(Status::invalid_argument(
-                "duplicate access profile capability slot",
-            ));
-        }
-    }
-    Ok(parsed)
-}
-
 fn auth_kind_from_proto(value: i32) -> Result<CredentialAuthKind, Status> {
     match CredentialAuthenticationKind::try_from(value) {
         Ok(CredentialAuthenticationKind::Oauth) => Ok(CredentialAuthKind::OAuth),
@@ -2415,56 +2403,6 @@ pub(crate) fn credential_to_proto(record: CredentialRecord) -> v1::Credential {
             openssh: key.openssh,
             fingerprint: key.fingerprint,
         }),
-    }
-}
-
-fn profile_record_to_proto(record: AccessProfileRecord) -> v1::AccessProfileRevision {
-    profile_to_proto(
-        record.profile,
-        record.created_at_unix_ms,
-        record.updated_at_unix_ms,
-    )
-}
-
-fn profile_revision_to_proto(record: AccessProfileRevisionRecord) -> v1::AccessProfileRevision {
-    profile_to_proto(
-        record.profile,
-        record.profile_created_at_unix_ms,
-        record.revision_created_at_unix_ms,
-    )
-}
-
-fn profile_to_proto(
-    profile: codewire_access::AccessProfile,
-    profile_created_at_unix_ms: u64,
-    revision_created_at_unix_ms: u64,
-) -> v1::AccessProfileRevision {
-    v1::AccessProfileRevision {
-        id: profile.id.to_string(),
-        name: profile.name.to_string(),
-        revision: profile.revision,
-        entries: profile
-            .entries
-            .into_iter()
-            .map(|(slot, credential)| v1::AccessProfileEntry {
-                capability_slot: slot.to_string(),
-                credential_id: credential.to_string(),
-            })
-            .collect(),
-        profile_created_at_unix_ms,
-        revision_created_at_unix_ms,
-    }
-}
-
-fn environment_binding_to_proto(
-    record: EnvironmentAccessBindingRecord,
-) -> v1::EnvironmentAccessBinding {
-    v1::EnvironmentAccessBinding {
-        environment_id: record.binding.environment_id.to_string(),
-        profile_id: record.binding.profile_id.to_string(),
-        profile_revision: record.binding.profile_revision,
-        created_at_unix_ms: record.created_at_unix_ms,
-        updated_at_unix_ms: record.updated_at_unix_ms,
     }
 }
 
@@ -2549,6 +2487,9 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         ),
         LocalCredentialError::ProfileInUse => Status::failed_precondition(
             "local access profile is selected by an environment; remove the environment first",
+        ),
+        LocalCredentialError::ProfileIsDefault => Status::failed_precondition(
+            "local access profile is your default credential profile and cannot be deleted; make another profile the default first: cw credentials --local profiles default NAME",
         ),
         LocalCredentialError::SshCredentialRequiresEnrollment => Status::failed_precondition(
             "SSH credentials require the dedicated enrollment operation",

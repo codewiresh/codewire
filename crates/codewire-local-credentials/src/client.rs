@@ -19,6 +19,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 mod grants;
+mod profiles;
 
 pub use grants::EnvironmentGrants;
 
@@ -672,116 +673,6 @@ impl LocalCredentialClient {
             .into_iter()
             .map(resolved_workload_secret_from_proto)
             .collect()
-    }
-
-    pub async fn create_profile(
-        &mut self,
-        name: &AccessProfileName,
-        entries: &BTreeMap<CapabilitySlot, CredentialId>,
-    ) -> Result<AccessProfileRecord, Status> {
-        profile_record_from_proto(
-            self.inner
-                .create_access_profile(v1::CreateAccessProfileRequest {
-                    name: name.to_string(),
-                    entries: profile_entries_to_proto(entries),
-                })
-                .await?
-                .into_inner(),
-        )
-    }
-
-    pub async fn update_profile(
-        &mut self,
-        id: &AccessProfileId,
-        expected_revision: u64,
-        entries: &BTreeMap<CapabilitySlot, CredentialId>,
-    ) -> Result<AccessProfileRecord, Status> {
-        profile_record_from_proto(
-            self.inner
-                .update_access_profile(v1::UpdateAccessProfileRequest {
-                    profile_id: id.to_string(),
-                    expected_revision,
-                    entries: profile_entries_to_proto(entries),
-                })
-                .await?
-                .into_inner(),
-        )
-    }
-
-    pub async fn list_profiles(&mut self) -> Result<Vec<AccessProfileRecord>, Status> {
-        self.inner
-            .list_access_profiles(v1::ListAccessProfilesRequest {})
-            .await?
-            .into_inner()
-            .profiles
-            .into_iter()
-            .map(profile_record_from_proto)
-            .collect()
-    }
-
-    pub async fn get_profile(
-        &mut self,
-        id: &AccessProfileId,
-    ) -> Result<AccessProfileRecord, Status> {
-        profile_record_from_proto(
-            self.inner
-                .get_access_profile(profile_selector(id))
-                .await?
-                .into_inner(),
-        )
-    }
-
-    pub async fn get_profile_revision(
-        &mut self,
-        id: &AccessProfileId,
-        revision: u64,
-    ) -> Result<AccessProfileRevisionRecord, Status> {
-        profile_revision_from_proto(
-            self.inner
-                .get_access_profile_revision(v1::GetAccessProfileRevisionRequest {
-                    profile_id: id.to_string(),
-                    revision,
-                })
-                .await?
-                .into_inner(),
-        )
-    }
-
-    pub async fn list_profile_revisions(
-        &mut self,
-        id: &AccessProfileId,
-    ) -> Result<Vec<AccessProfileRevisionRecord>, Status> {
-        self.inner
-            .list_access_profile_revisions(v1::ListAccessProfileRevisionsRequest {
-                profile_id: id.to_string(),
-            })
-            .await?
-            .into_inner()
-            .revisions
-            .into_iter()
-            .map(profile_revision_from_proto)
-            .collect()
-    }
-
-    pub async fn resolve_profile(
-        &mut self,
-        reference: &AccessProfileReference,
-    ) -> Result<AccessProfileRecord, Status> {
-        profile_record_from_proto(
-            self.inner
-                .resolve_access_profile(v1::ResolveAccessProfileRequest {
-                    reference: reference.to_string(),
-                })
-                .await?
-                .into_inner(),
-        )
-    }
-
-    pub async fn delete_profile(&mut self, id: &AccessProfileId) -> Result<(), Status> {
-        self.inner
-            .delete_access_profile(profile_selector(id))
-            .await?;
-        Ok(())
     }
 
     pub async fn create_environment_access_binding(
@@ -1595,10 +1486,12 @@ fn profile_record_from_proto(
 ) -> Result<AccessProfileRecord, Status> {
     let created_at_unix_ms = value.profile_created_at_unix_ms;
     let updated_at_unix_ms = value.revision_created_at_unix_ms;
+    let is_default = value.is_default;
     Ok(AccessProfileRecord {
         profile: profile_from_proto(value)?,
         created_at_unix_ms,
         updated_at_unix_ms,
+        is_default,
     })
 }
 
@@ -1607,10 +1500,12 @@ fn profile_revision_from_proto(
 ) -> Result<AccessProfileRevisionRecord, Status> {
     let profile_created_at_unix_ms = value.profile_created_at_unix_ms;
     let revision_created_at_unix_ms = value.revision_created_at_unix_ms;
+    let is_default = value.is_default;
     Ok(AccessProfileRevisionRecord {
         profile: profile_from_proto(value)?,
         profile_created_at_unix_ms,
         revision_created_at_unix_ms,
+        is_default,
     })
 }
 

@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 17;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 18;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -39,6 +39,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         17,
         "admits and leases a Claude sign-in, and EvaluateEnvironmentGrants names the Anthropic grant's kind (#4714)",
     ),
+    (
+        18,
+        "keeps a default profile: SetDefaultAccessProfile, is_default on every profile read, and the default cannot be deleted (#4717)",
+    ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
@@ -52,16 +56,24 @@ pub enum AuthorityFeature {
     /// A Claude sign-in: stored, leased as Claude Code's login and named in
     /// the Anthropic grant. An older authority refuses to store one.
     ClaudeSignIn,
+    /// The store's default profile: set, read and kept from deletion. An
+    /// older authority has no default.
+    DefaultProfile,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 2] = [Self::PlatformGithub, Self::ClaudeSignIn];
+    pub const ALL: [Self; 3] = [
+        Self::PlatformGithub,
+        Self::ClaudeSignIn,
+        Self::DefaultProfile,
+    ];
 
     /// The protocol that introduced it.
     pub const fn since(self) -> u32 {
         match self {
             Self::PlatformGithub => 16,
             Self::ClaudeSignIn => 17,
+            Self::DefaultProfile => 18,
         }
     }
 

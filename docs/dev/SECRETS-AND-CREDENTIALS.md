@@ -252,6 +252,17 @@ confirmation, and `--no-profile` sends none; the dashboard create form
 preselects it. `CreateEnvironment` without a selection still means no
 provider access. Lists show the default first.
 
+A local store keeps one default the same way (#4717): `default_profiles` in
+its SQLite (schema 6), served from authority protocol 18 by
+`SetDefaultAccessProfile` and `is_default` on every profile read, and moved
+with `cw credentials --local profiles default NAME`. The store's first
+profile becomes it, deleting it is refused, and a local `cw create` that names
+no profile selects it with the same line as the cloud. A store made before
+schema 6 starts with none, and a profile added to it later does not become
+the default on its own: an upgrade never widens what an unchanged
+`cw create --local` hands a VM (#4717). Such a
+create selects no profile and says how to set a default.
+
 No ambient Codex, GitHub, Claude, SSH or keyring import is allowed. Explicit SSH
 file import is owner-selected; passphrases and API keys use protected input.
 Local connect runs the same native device logins as the platform, from the

@@ -104,6 +104,128 @@ pub(super) fn apply_create_source_flags(
     Ok(())
 }
 
+/// What a local create's profile comes from when it names none.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum LocalDefault {
+    /// The store's default, by name and exact ID.
+    Profile { name: String, id: String },
+    /// Profiles but no default: an upgraded store keeps today's create.
+    NoneSet,
+    /// No profiles at all, so nothing to say.
+    NoProfiles,
+}
+
+impl LocalDefault {
+    /// The store's default among `profiles`, as the authority marks it.
+    pub(super) fn from_profiles(
+        profiles: &[codewire_local_credentials::AccessProfileRecord],
+    ) -> anyhow::Result<Self> {
+        let mut defaults = profiles.iter().filter(|record| record.is_default);
+        let default = defaults.next();
+        anyhow::ensure!(
+            defaults.next().is_none(),
+            "local credential authority returned more than one default credential profile"
+        );
+        Ok(match default {
+            Some(record) => Self::Profile {
+                name: record.profile.name.to_string(),
+                id: record.profile.id.to_string(),
+            },
+            None if profiles.is_empty() => Self::NoProfiles,
+            None => Self::NoneSet,
+        })
+    }
+
+    /// The line a text create prints, if any.
+    pub(super) fn message(&self) -> Option<String> {
+        match self {
+            Self::Profile { name, .. } => Some(format!(
+                "Credential profile: {name} (your default; --no-profile creates without one)"
+            )),
+            Self::NoneSet => Some(
+                "Credential profile: none (no default; set one with cw credentials --local profiles default NAME)"
+                    .to_owned(),
+            ),
+            Self::NoProfiles => None,
+        }
+    }
+}
+
+/// A local create's sources: its flags, then, when it names no profile, the
+/// store's default (#4717).
+pub(super) async fn apply_create_sources(
+    spec: &mut ProjectSpec,
+    args: &EnvCreateArgs,
+) -> anyhow::Result<()> {
+    apply_create_source_flags(spec, args)?;
+    select_local_default_profile(spec, args.no_profile, args.output).await
+}
+
+/// A local create's profile, in order: `--profile`, then codewire.yaml (both
+/// already in `spec`), then the store's default; `--no-profile` selects
+/// none, as a cloud create's `select_default_profile`. A failure to read the
+/// default fails the create; it never becomes "no profile".
+pub(super) async fn select_local_default_profile(
+    spec: &mut ProjectSpec,
+    no_profile: bool,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    if no_profile || spec.credentials.is_some() {
+        return Ok(());
+    }
+    let default = read_local_default().await?;
+    apply_local_default(spec, &default);
+    if matches!(output, OutputFormat::Text)
+        && let Some(message) = default.message()
+    {
+        eprintln!("{message}");
+    }
+    Ok(())
+}
+
+/// The store's default. A store that was never created has no profiles, so
+/// no authority is started for it. An authority older than the default
+/// profile marks none, so it reads as no default.
+pub(super) async fn read_local_default() -> anyhow::Result<LocalDefault> {
+    let context = "read your default credential profile; --no-profile creates without one";
+    let root = local_credential_root(&OsEnv)?;
+    if !root
+        .join(codewire_local_credentials::DATABASE_FILE)
+        .exists()
+    {
+        return Ok(LocalDefault::NoProfiles);
+    }
+    let mut client = connect_local_credential_authority()
+        .await
+        .context(context)?;
+    LocalDefault::from_profiles(&client.list_profiles().await.context(context)?)
+}
+
+/// The review's credential line for what the create will select: the named
+/// profile, else the store's default, else none.
+pub(super) fn review_profile(
+    spec: &ProjectSpec,
+    no_profile: bool,
+    default: &LocalDefault,
+) -> String {
+    match (&spec.credentials, default) {
+        (Some(binding), _) => binding.profile.clone(),
+        (None, LocalDefault::Profile { name, .. }) if !no_profile => {
+            format!("{name} (your default)")
+        }
+        _ => "none".to_owned(),
+    }
+}
+
+/// Select the default's exact profile, or nothing.
+pub(super) fn apply_local_default(spec: &mut ProjectSpec, default: &LocalDefault) {
+    if let LocalDefault::Profile { id, .. } = default {
+        spec.credentials = Some(CredentialBinding {
+            profile: format!("local:id:{id}"),
+        });
+    }
+}
+
 fn storage_placement(value: StoragePlacementArg) -> StoragePlacement {
     match value {
         StoragePlacementArg::Local => StoragePlacement::Local,

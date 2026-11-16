@@ -109,6 +109,15 @@ async fn handle_local_with_receipt(
 fn authority_feature_needed(
     operation: &CredentialOperation,
 ) -> Option<(codewire_local_credentials::AuthorityFeature, &'static str)> {
+    if matches!(
+        operation,
+        CredentialOperation::Profile(CredentialProfileCommand::Default(_))
+    ) {
+        return Some((
+            codewire_local_credentials::AuthorityFeature::DefaultProfile,
+            "a default credential profile",
+        ));
+    }
     matches!(
         operation,
         CredentialOperation::Credential(CredentialsCommand::Connect(CredentialConnectArgs {
@@ -120,6 +129,14 @@ fn authority_feature_needed(
         codewire_local_credentials::AuthorityFeature::ClaudeSignIn,
         "a Claude sign-in",
     ))
+}
+
+/// What `profiles default` says once the local default is set: the cloud's
+/// sentence with the placement word changed.
+fn default_set_message(name: &str) -> String {
+    format!(
+        "Default credential profile: {name:?}. A local `cw create` uses it when you name no profile."
+    )
 }
 
 fn remember_local(
@@ -902,9 +919,22 @@ async fn profile_command(
             print_profile_revisions(&revisions, args.output)
         }
         CredentialProfileCommand::Delete(args) => delete_profile(client, args).await,
-        CredentialProfileCommand::Default(_) => anyhow::bail!(
-            "local credential profiles have no default; the default is a cloud credential profile (use --cloud)"
-        ),
+        CredentialProfileCommand::Default(args) => {
+            let record = resolve_profile(client, &args.profile).await?;
+            let selected = client
+                .set_default_profile(&record.profile.id)
+                .await
+                .context("set the local default credential profile")?;
+            anyhow::ensure!(
+                selected.profile.id == record.profile.id && selected.is_default,
+                "local credential authority returned a different default profile"
+            );
+            eprintln!(
+                "{}",
+                default_set_message(&selected.profile.name.to_string())
+            );
+            Ok(())
+        }
     }
 }
 
@@ -927,6 +957,7 @@ async fn set_profile_entry(
     entries.insert(slot, credential.metadata.id);
     // Creation publishes the first complete selection atomically. An existing
     // profile gets exactly one immutable CAS update, with no conflict retry.
+    let created = existing.is_none();
     let updated = match existing {
         Some(profile) => client
             .update_profile(&profile.profile.id, profile.profile.revision, &entries)
@@ -939,7 +970,18 @@ async fn set_profile_entry(
         updated.profile.name.to_string(),
         updated.profile.revision
     );
+    if created && updated.is_default {
+        eprintln!("{}", now_default_message(&updated.profile.name.to_string()));
+    }
     Ok(())
+}
+
+/// What a set says when the profile it created is the store's first, and so
+/// its default (#4717).
+fn now_default_message(name: &str) -> String {
+    format!(
+        "{name:?} is now your default credential profile: a local `cw create` uses it when you name no profile."
+    )
 }
 
 async fn local_profile_for_set(
@@ -1001,6 +1043,13 @@ async fn delete_profile(
     args: CredentialProfileDeleteArgs,
 ) -> anyhow::Result<()> {
     let record = resolve_profile(client, &args.profile).await?;
+    anyhow::ensure!(
+        !record.is_default,
+        super::platform_profiles::default_delete_refusal(
+            &record.profile.name.to_string(),
+            "--local"
+        )
+    );
     if !args.yes
         && !prompt_confirm_default_no(&format!(
             "Delete local access profile {:?}?",
@@ -1208,6 +1257,8 @@ struct AccessProfileView {
     entries: BTreeMap<String, String>,
     profile_created_at_unix_ms: u64,
     revision_created_at_unix_ms: u64,
+    /// The store's default profile, as the cloud marks its own (#4717).
+    is_default: bool,
 }
 
 impl AccessProfileView {
@@ -1216,6 +1267,7 @@ impl AccessProfileView {
             &record.profile,
             record.created_at_unix_ms,
             record.updated_at_unix_ms,
+            record.is_default,
         )
     }
 
@@ -1224,6 +1276,7 @@ impl AccessProfileView {
             &record.profile,
             record.profile_created_at_unix_ms,
             record.revision_created_at_unix_ms,
+            record.is_default,
         )
     }
 
@@ -1231,6 +1284,7 @@ impl AccessProfileView {
         profile: &codewire_access::AccessProfile,
         profile_created_at_unix_ms: u64,
         revision_created_at_unix_ms: u64,
+        is_default: bool,
     ) -> Self {
         Self {
             id: profile.id.to_string(),
@@ -1245,6 +1299,7 @@ impl AccessProfileView {
                 .collect(),
             profile_created_at_unix_ms,
             revision_created_at_unix_ms,
+            is_default,
         }
     }
 }
@@ -1258,11 +1313,13 @@ fn print_credentials(records: &[CredentialRecord], output: OutputFormat) -> anyh
     Ok(())
 }
 
+/// Profiles with the default first, as the cloud lists them.
 fn print_profiles(records: &[AccessProfileRecord], output: OutputFormat) -> anyhow::Result<()> {
-    let views = records
+    let mut views = records
         .iter()
         .map(AccessProfileView::current)
         .collect::<Vec<_>>();
+    views.sort_by_key(|view| !view.is_default);
     print_profile_views(&views, output)
 }
 
@@ -1323,8 +1380,13 @@ fn format_profiles_text(records: &[AccessProfileView]) -> String {
             .collect::<Vec<_>>()
             .join(",");
         output.push_str(&format!(
-            "{:<36} {:<10} {:<24} {:<10} {}\n",
-            record.id, record.placement, record.name, record.revision, entries
+            "{:<36} {:<10} {:<24} {:<10} {}{}\n",
+            record.id,
+            record.placement,
+            record.name,
+            record.revision,
+            entries,
+            if record.is_default { "\tdefault" } else { "" }
         ));
     }
     output
@@ -1438,6 +1500,7 @@ mod tests {
             },
             created_at_unix_ms: 10,
             updated_at_unix_ms: 20,
+            is_default: false,
         }
     }
 
@@ -2552,5 +2615,41 @@ mod tests {
         assert!(github_reach_summary(&[]).starts_with(
             "Codewire can read, push to and open pull requests in repositories where the Codewire GitHub App is installed."
         ));
+    }
+
+    /// The local default speaks the cloud's sentences with the placement
+    /// word changed, and needs an authority that keeps one (#4717).
+    #[test]
+    fn the_local_default_says_what_the_cloud_says_and_needs_an_authority_that_keeps_one() {
+        use codewire_local_credentials::AuthorityFeature;
+        assert_eq!(
+            now_default_message("work"),
+            "\"work\" is now your default credential profile: a local `cw create` uses it when you name no profile."
+        );
+        assert_eq!(
+            default_set_message("work"),
+            "Default credential profile: \"work\". A local `cw create` uses it when you name no profile."
+        );
+        assert_eq!(
+            super::super::platform_profiles::default_delete_refusal("work", "--local"),
+            "\"work\" is your default credential profile and cannot be deleted; make another profile the default first: cw credentials --local profiles default NAME"
+        );
+        let operation = CredentialOperation::Profile(CredentialProfileCommand::Default(
+            super::super::CredentialProfileDefaultArgs {
+                profile: "work".into(),
+            },
+        ));
+        let (feature, _) = authority_feature_needed(&operation).expect("default needs a feature");
+        assert_eq!(feature, AuthorityFeature::DefaultProfile);
+        // The Claude sign-in authority (protocol 17) has no default.
+        assert!(!feature.served_by(17));
+
+        let mut marked = AccessProfileView::current(&profile_with(
+            "33333333-3333-4333-8333-333333333333",
+            "work",
+        ));
+        marked.is_default = true;
+        let text = format_profiles_text(&[marked]);
+        assert!(text.lines().nth(1).unwrap().ends_with("\tdefault"));
     }
 }

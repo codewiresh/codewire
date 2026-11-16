@@ -19,13 +19,23 @@ mod broker_log;
 mod broker_process;
 mod client;
 mod control;
+mod default_profile;
 mod placeholder;
 mod platform;
+mod profile_rows;
 mod repository;
 mod service;
 mod store_backend;
 mod transport;
 mod workload_secret;
+
+use default_profile::{
+    DEFAULT_PROFILE_SCHEMA, make_first_profile_default, upgrade_default_profile_schema,
+};
+use profile_rows::{
+    insert_profile_revision, load_profile, load_profile_revision, profile_exists,
+    profile_is_default,
+};
 
 pub use broker_channel::{
     BrokerCredentialRefreshAdmission, BrokerCredentialRefreshReservation, BrokerLeaseAuditDecision,
@@ -118,7 +128,9 @@ pub const AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES: [&str; 2] =
 
 const AUTHORITY_LOCK_FILE: &str = "authority.lock";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_4352; // "CWCR"
-const DATABASE_SCHEMA_VERSION: i64 = 5;
+const DATABASE_SCHEMA_VERSION: i64 = 6;
+/// Makes GitHub one connection per store.
+const GITHUB_SINGLETON_DATABASE_SCHEMA_VERSION: i64 = 5;
 /// Adds typed SSH public-key metadata.
 const SSH_DATABASE_SCHEMA_VERSION: i64 = 4;
 const PREVIOUS_DATABASE_SCHEMA_VERSION: i64 = 3;
@@ -161,6 +173,8 @@ pub struct AccessProfileRecord {
     pub profile: AccessProfile,
     pub created_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
+    /// The store's default profile; a mark on the profile, not a revision.
+    pub is_default: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,6 +182,8 @@ pub struct AccessProfileRevisionRecord {
     pub profile: AccessProfile,
     pub profile_created_at_unix_ms: u64,
     pub revision_created_at_unix_ms: u64,
+    /// Whether the profile is the default now, whichever revision this is.
+    pub is_default: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1900,6 +1916,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             return Err(map_insert_error(error));
         }
         insert_profile_revision(&transaction, &profile, now)?;
+        make_first_profile_default(&transaction, &self.owner_id, &profile.id)?;
         transaction.commit().map_err(database_error)?;
         load_profile(&connection, &profile.id)
     }
@@ -2041,17 +2058,25 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     }
 
     pub fn delete_profile(&self, id: &AccessProfileId) -> Result<(), LocalCredentialError> {
-        let connection = self.connection()?;
-        if environment_binding_references_profile(&connection, id)? {
+        let mut connection = self.connection()?;
+        // One immediate transaction, so a racing default change is refused
+        // as the default rather than by the foreign key.
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        if environment_binding_references_profile(&transaction, id)? {
             return Err(LocalCredentialError::ProfileInUse);
         }
-        let changed = connection
+        if profile_is_default(&transaction, id)? {
+            return Err(LocalCredentialError::ProfileIsDefault);
+        }
+        let changed = transaction
             .execute("DELETE FROM profiles WHERE id = ?1", [id.as_str()])
             .map_err(database_error)?;
         if changed == 0 {
             return Err(LocalCredentialError::ProfileNotFound);
         }
-        Ok(())
+        transaction.commit().map_err(database_error)
     }
 
     pub fn create_environment_access_binding(
@@ -2640,7 +2665,9 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalCredentialError
         )
         .map_err(database_error)?;
     connection
-        .execute_batch(&format!("{GITHUB_SINGLETON_SCHEMA} COMMIT;"))
+        .execute_batch(&format!(
+            "{GITHUB_SINGLETON_SCHEMA} {DEFAULT_PROFILE_SCHEMA} COMMIT;"
+        ))
         .map_err(database_error)?;
     connection
         .pragma_update(None, "application_id", DATABASE_APPLICATION_ID)
@@ -2678,6 +2705,18 @@ fn validate_schema(connection: &Connection) -> Result<(), LocalCredentialError> 
     if github_schema != 3 {
         return Err(LocalCredentialError::InvalidDatabase);
     }
+    let default_profiles = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'default_profiles'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(database_error)?
+        .is_some();
+    if !default_profiles {
+        return Err(LocalCredentialError::InvalidDatabase);
+    }
     Ok(())
 }
 
@@ -2693,6 +2732,7 @@ fn validate_openable_schema(connection: &Connection) -> Result<(), LocalCredenti
             schema_version,
             PREVIOUS_DATABASE_SCHEMA_VERSION
                 | SSH_DATABASE_SCHEMA_VERSION
+                | GITHUB_SINGLETON_DATABASE_SCHEMA_VERSION
                 | DATABASE_SCHEMA_VERSION
         )
     {
@@ -2746,11 +2786,18 @@ fn upgrade_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
             validate_schema_tables(connection)?;
             upgrade_ssh_schema(connection)?;
             upgrade_github_singleton_schema(connection)?;
+            upgrade_default_profile_schema(connection)?;
             validate_schema(connection)
         }
         SSH_DATABASE_SCHEMA_VERSION => {
             validate_schema_tables(connection)?;
             upgrade_github_singleton_schema(connection)?;
+            upgrade_default_profile_schema(connection)?;
+            validate_schema(connection)
+        }
+        GITHUB_SINGLETON_DATABASE_SCHEMA_VERSION => {
+            validate_schema_tables(connection)?;
+            upgrade_default_profile_schema(connection)?;
             validate_schema(connection)
         }
         _ => Err(LocalCredentialError::UnsupportedSchema),
@@ -2798,7 +2845,11 @@ fn upgrade_github_singleton_schema(connection: &Connection) -> Result<(), LocalC
         ))
         .map_err(database_error)?;
     transaction
-        .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
+        .pragma_update(
+            None,
+            "user_version",
+            GITHUB_SINGLETON_DATABASE_SCHEMA_VERSION,
+        )
         .map_err(database_error)?;
     transaction.commit().map_err(database_error)
 }
@@ -3721,196 +3772,6 @@ fn validate_environment_access_bindings(
     Ok(())
 }
 
-fn insert_profile_revision(
-    transaction: &rusqlite::Transaction<'_>,
-    profile: &AccessProfile,
-    now: u64,
-) -> Result<(), LocalCredentialError> {
-    transaction
-        .execute(
-            "INSERT INTO profile_revisions(profile_id, revision, created_at_unix_ms)
-             VALUES (?1, ?2, ?3)",
-            params![
-                profile.id.as_str(),
-                i64::try_from(profile.revision)
-                    .map_err(|_| LocalCredentialError::CorruptMetadata)?,
-                i64::try_from(now).map_err(|_| LocalCredentialError::InvalidTime)?
-            ],
-        )
-        .map_err(database_error)?;
-    for (slot, credential_id) in &profile.entries {
-        transaction
-            .execute(
-                "INSERT INTO profile_entries(profile_id, revision, capability_slot, credential_id)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    profile.id.as_str(),
-                    i64::try_from(profile.revision)
-                        .map_err(|_| LocalCredentialError::CorruptMetadata)?,
-                    slot.as_str(),
-                    credential_id.as_str()
-                ],
-            )
-            .map_err(database_error)?;
-    }
-    Ok(())
-}
-
-fn load_profile(
-    connection: &Connection,
-    id: &AccessProfileId,
-) -> Result<AccessProfileRecord, LocalCredentialError> {
-    let raw = connection
-        .query_row(
-            "SELECT owner_id, name, current_revision, created_at_unix_ms, updated_at_unix_ms
-             FROM profiles WHERE id = ?1",
-            [id.as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(database_error)?
-        .ok_or(LocalCredentialError::ProfileNotFound)?;
-    let owner = OwnerId::parse(raw.0).map_err(|_| LocalCredentialError::CorruptMetadata)?;
-    if owner.as_str() != LOCAL_OWNER_ID {
-        return Err(LocalCredentialError::OwnerMismatch);
-    }
-    let revision = u64::try_from(raw.2).map_err(|_| LocalCredentialError::CorruptMetadata)?;
-    let entries = load_profile_entries(connection, id, revision)?;
-    let profile = AccessProfile {
-        id: id.clone(),
-        placement: Placement::Local,
-        owner: Owner::User(owner),
-        name: AccessProfileName::parse(raw.1).map_err(|_| LocalCredentialError::CorruptMetadata)?,
-        revision,
-        entries,
-    };
-    profile
-        .validate()
-        .map_err(|_| LocalCredentialError::CorruptMetadata)?;
-    Ok(AccessProfileRecord {
-        profile,
-        created_at_unix_ms: u64::try_from(raw.3)
-            .map_err(|_| LocalCredentialError::CorruptMetadata)?,
-        updated_at_unix_ms: u64::try_from(raw.4)
-            .map_err(|_| LocalCredentialError::CorruptMetadata)?,
-    })
-}
-
-fn profile_exists(
-    connection: &Connection,
-    id: &AccessProfileId,
-) -> Result<bool, LocalCredentialError> {
-    connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM profiles WHERE id = ?1)",
-            [id.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(database_error)
-}
-
-fn load_profile_revision(
-    connection: &Connection,
-    id: &AccessProfileId,
-    revision: u64,
-) -> Result<AccessProfileRevisionRecord, LocalCredentialError> {
-    if revision == 0 {
-        return Err(LocalCredentialError::ProfileRevisionNotFound);
-    }
-    let raw = connection
-        .query_row(
-            "SELECT p.owner_id, p.name, p.created_at_unix_ms, r.created_at_unix_ms
-             FROM profiles p
-             JOIN profile_revisions r ON r.profile_id = p.id
-             WHERE p.id = ?1 AND r.revision = ?2",
-            params![
-                id.as_str(),
-                i64::try_from(revision).map_err(|_| LocalCredentialError::CorruptMetadata)?
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(database_error)?;
-    let Some(raw) = raw else {
-        return if profile_exists(connection, id)? {
-            Err(LocalCredentialError::ProfileRevisionNotFound)
-        } else {
-            Err(LocalCredentialError::ProfileNotFound)
-        };
-    };
-    let owner = OwnerId::parse(raw.0).map_err(|_| LocalCredentialError::CorruptMetadata)?;
-    if owner.as_str() != LOCAL_OWNER_ID {
-        return Err(LocalCredentialError::OwnerMismatch);
-    }
-    let profile = AccessProfile {
-        id: id.clone(),
-        placement: Placement::Local,
-        owner: Owner::User(owner),
-        name: AccessProfileName::parse(raw.1).map_err(|_| LocalCredentialError::CorruptMetadata)?,
-        revision,
-        entries: load_profile_entries(connection, id, revision)?,
-    };
-    profile
-        .validate()
-        .map_err(|_| LocalCredentialError::CorruptMetadata)?;
-    Ok(AccessProfileRevisionRecord {
-        profile,
-        profile_created_at_unix_ms: u64::try_from(raw.2)
-            .map_err(|_| LocalCredentialError::CorruptMetadata)?,
-        revision_created_at_unix_ms: u64::try_from(raw.3)
-            .map_err(|_| LocalCredentialError::CorruptMetadata)?,
-    })
-}
-
-fn load_profile_entries(
-    connection: &Connection,
-    id: &AccessProfileId,
-    revision: u64,
-) -> Result<BTreeMap<CapabilitySlot, CredentialId>, LocalCredentialError> {
-    let mut statement = connection
-        .prepare(
-            "SELECT capability_slot, credential_id FROM profile_entries
-             WHERE profile_id = ?1 AND revision = ?2 ORDER BY capability_slot",
-        )
-        .map_err(database_error)?;
-    let rows = statement
-        .query_map(
-            params![
-                id.as_str(),
-                i64::try_from(revision).map_err(|_| LocalCredentialError::CorruptMetadata)?
-            ],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .map_err(database_error)?;
-    let mut entries = BTreeMap::new();
-    for row in rows {
-        let (slot, credential_id) = row.map_err(database_error)?;
-        let slot =
-            CapabilitySlot::parse(slot).map_err(|_| LocalCredentialError::CorruptMetadata)?;
-        let credential_id = CredentialId::parse(credential_id)
-            .map_err(|_| LocalCredentialError::CorruptMetadata)?;
-        if entries.insert(slot, credential_id).is_some() {
-            return Err(LocalCredentialError::CorruptMetadata);
-        }
-    }
-    Ok(entries)
-}
-
 fn auth_kind_to_str(kind: CredentialAuthKind) -> &'static str {
     match kind {
         CredentialAuthKind::OAuth => "oauth",
@@ -4076,6 +3937,8 @@ pub enum LocalCredentialError {
     StaleProfileRevision,
     #[error("local access profile is selected by an environment")]
     ProfileInUse,
+    #[error("local access profile is the default")]
+    ProfileIsDefault,
     #[error("local environment access binding already exists")]
     EnvironmentBindingAlreadyExists,
     #[error("local environment access binding was not found")]

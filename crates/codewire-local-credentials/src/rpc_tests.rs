@@ -1091,6 +1091,7 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
         .await
         .unwrap();
     assert_eq!(recovered.metadata.status, CredentialStatus::Expired);
+    move_default_away(&mut client).await;
     client.delete_profile(&profile.profile.id).await.unwrap();
     client
         .delete_credential(&credential.metadata.id)
@@ -1511,6 +1512,7 @@ async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants
         .delete_environment_access_binding_if_present(&environment_id)
         .await
         .unwrap();
+    move_default_away(&mut client).await;
     client.delete_profile(&profile.profile.id).await.unwrap();
     shutdown.send(()).unwrap();
     task.await.unwrap().unwrap();
@@ -2487,5 +2489,24 @@ fn a_socket_path_over_the_kernel_limit_is_refused_by_name() {
             config.socket().display(),
             crate::MAXIMUM_SOCKET_PATH_BYTES
         )
+    );
+}
+
+/// The default profile cannot be deleted (#4717): make an empty spare the
+/// default so a test can delete the profile it made.
+async fn move_default_away(client: &mut LocalCredentialClient) {
+    let spare = client
+        .create_profile(
+            &AccessProfileName::parse("spare").unwrap(),
+            &BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        client
+            .set_default_profile(&spare.profile.id)
+            .await
+            .unwrap()
+            .is_default
     );
 }

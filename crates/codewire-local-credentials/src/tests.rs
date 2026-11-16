@@ -1773,6 +1773,7 @@ fn profile_revisions_are_immutable_and_only_current_references_block_deletion() 
         authority.delete_credential(&second.metadata.id),
         Err(LocalCredentialError::CredentialInUse)
     );
+    move_default_away(&authority);
     authority
         .delete_profile(&profile.profile.id)
         .expect("delete profile");
@@ -1928,6 +1929,7 @@ fn environment_bindings_pin_revisions_survive_restart_and_guard_deletion() {
             updated_profile.profile.revision,
         )
         .expect("delete binding");
+    move_default_away(&authority);
     authority
         .delete_profile(&profile.profile.id)
         .expect("delete unbound profile");
@@ -3014,8 +3016,19 @@ fn generic_operation_lease_rejects_runnable_ssh_before_store_read() {
     assert_eq!(store.call_counts(), before);
 }
 
+/// Remove exactly the version-6 default profile table.
+fn downgrade_to_schema_five(connection: &Connection) {
+    connection
+        .execute_batch(
+            "DROP TABLE default_profiles;
+             PRAGMA user_version = 5;",
+        )
+        .expect("construct exact schema-five fixture");
+}
+
 /// Remove exactly the version-5 GitHub singleton additions.
 fn downgrade_to_schema_four(connection: &Connection) {
+    downgrade_to_schema_five(connection);
     connection
         .execute_batch(
             "DROP INDEX credentials_github_oauth_singleton;
@@ -3798,5 +3811,140 @@ fn the_credential_kinds_the_local_authority_stores_are_pinned_to_its_protocol() 
         admitted, expected,
         "bump the authority protocol with this set"
     );
-    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 17);
+    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 18);
+}
+
+/// The store keeps one default profile as the cloud does (#4717): the first
+/// profile becomes it, setting another replaces it, and the default cannot be
+/// deleted until another is chosen.
+#[test]
+fn the_first_profile_becomes_the_default_which_moves_only_when_set_and_is_never_deleted() {
+    let temp = TempDir::new().expect("temporary directory");
+    let authority = LocalCredentialAuthority::open(
+        &authority_root(&temp),
+        TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem),
+        catalog(),
+    )
+    .unwrap();
+    assert_eq!(authority.default_profile().unwrap(), None);
+    let work = authority
+        .create_profile(AccessProfileName::parse("work").unwrap(), BTreeMap::new())
+        .unwrap();
+    assert!(work.is_default);
+    let other = authority
+        .create_profile(AccessProfileName::parse("other").unwrap(), BTreeMap::new())
+        .unwrap();
+    assert!(
+        !other.is_default,
+        "a second profile never takes the default"
+    );
+    assert_eq!(
+        authority
+            .default_profile()
+            .unwrap()
+            .map(|record| record.profile.id),
+        Some(work.profile.id.clone())
+    );
+
+    assert_eq!(
+        authority.delete_profile(&work.profile.id),
+        Err(LocalCredentialError::ProfileIsDefault)
+    );
+    assert!(authority.get_profile(&work.profile.id).unwrap().is_default);
+
+    // Setting the default again changes nothing; setting another replaces it.
+    assert!(
+        authority
+            .set_default_profile(&work.profile.id)
+            .unwrap()
+            .is_default
+    );
+    let moved = authority.set_default_profile(&other.profile.id).unwrap();
+    assert!(moved.is_default);
+    assert!(!authority.get_profile(&work.profile.id).unwrap().is_default);
+    let marks: Vec<_> = authority
+        .list_profiles()
+        .unwrap()
+        .into_iter()
+        .map(|record| (record.profile.name.to_string(), record.is_default))
+        .collect();
+    assert_eq!(
+        marks,
+        [("other".to_owned(), true), ("work".to_owned(), false)]
+    );
+    assert!(
+        authority
+            .get_profile_revision(&other.profile.id, 1)
+            .unwrap()
+            .is_default
+    );
+    authority.delete_profile(&work.profile.id).unwrap();
+
+    let unknown = AccessProfileId::parse(Uuid::new_v4().to_string()).unwrap();
+    assert_eq!(
+        authority.set_default_profile(&unknown),
+        Err(LocalCredentialError::ProfileNotFound)
+    );
+}
+
+/// An upgrade never widens what an unchanged `cw create --local` hands a VM
+/// (#4717): a version-5 store with profiles opens
+/// with no default, and gets one only when one is set or a profile is created
+/// while there is none.
+#[test]
+fn schema_five_upgrades_with_its_profiles_and_no_default() {
+    let temp = TempDir::new().expect("temporary directory");
+    let root = authority_root(&temp);
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog()).unwrap();
+    let work = authority
+        .create_profile(AccessProfileName::parse("work").unwrap(), BTreeMap::new())
+        .unwrap();
+    drop(authority);
+    let connection = Connection::open(root.join(DATABASE_FILE)).unwrap();
+    downgrade_to_schema_five(&connection);
+    drop(connection);
+
+    for _ in 0..2 {
+        let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog())
+            .expect("open upgraded authority");
+        assert_eq!(authority.default_profile().unwrap(), None);
+        assert!(!authority.get_profile(&work.profile.id).unwrap().is_default);
+        drop(authority);
+        let connection = Connection::open(root.join(DATABASE_FILE)).unwrap();
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+    }
+
+    let authority = LocalCredentialAuthority::open(&root, store, catalog()).unwrap();
+    // A profile made later is not the store's first, so it never becomes the
+    // default on its own (#4717), and without a default any
+    // profile can still be deleted.
+    let spare = authority
+        .create_profile(AccessProfileName::parse("spare").unwrap(), BTreeMap::new())
+        .unwrap();
+    assert!(
+        !spare.is_default,
+        "only the store's first profile becomes the default"
+    );
+    assert_eq!(authority.default_profile().unwrap(), None);
+    authority.delete_profile(&spare.profile.id).unwrap();
+    authority.set_default_profile(&work.profile.id).unwrap();
+    assert!(authority.get_profile(&work.profile.id).unwrap().is_default);
+}
+
+/// The default profile cannot be deleted (#4717): make an empty spare the
+/// default so a test can delete the profile it made.
+fn move_default_away(authority: &LocalCredentialAuthority<TestProtectedStore>) {
+    let spare = authority
+        .create_profile(AccessProfileName::parse("spare").unwrap(), BTreeMap::new())
+        .unwrap();
+    assert!(
+        authority
+            .set_default_profile(&spare.profile.id)
+            .unwrap()
+            .is_default
+    );
 }

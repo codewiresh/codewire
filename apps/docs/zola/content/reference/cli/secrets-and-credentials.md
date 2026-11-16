@@ -140,6 +140,8 @@ cw credentials --cloud --profile NAME delete [--yes]
 cw credentials --local --profile NAME revisions                   # local storage
 cw credentials --cloud profiles list                               # alias: ls; the default first
 cw credentials --cloud profiles default NAME                       # make NAME your default
+cw credentials --local profiles list                               # the same for local storage
+cw credentials --local profiles default NAME                       # make NAME your local default
 ```
 
 Guided `credentials set` offers an existing profile or a new name, then a
@@ -156,7 +158,12 @@ makes a new revision; environments keep the revision they selected.
 Profiles are referenced from environments as `local:NAME` or `platform:NAME`
 (`cw create --profile`, `cw update ENV --profile`).
 
-Your first cloud profile becomes your default. A cloud `cw create` that names
-no profile, in a flag or in `codewire.yaml`, uses it; `--no-profile` creates
-without one. The default cannot be deleted: make another profile the default
-first.
+Your first profile becomes your default, in the cloud and in local storage
+alike. A `cw create` that names no profile, in a flag or in `codewire.yaml`,
+uses the default of its placement; `--no-profile` creates without one. The
+default cannot be deleted: make another profile the default first.
+
+Local storage made before defaults existed has none, so a local `cw create`
+there still creates without a profile, and says so, until you run
+`cw credentials --local profiles default NAME`. A profile you add there later
+does not become the default on its own.
