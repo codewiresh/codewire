@@ -650,7 +650,10 @@ cw / OpenSSH / VS Code
 The client publishes its node to the coordinator, dials SSH as soon as the
 environment peer arrives, and WireGuard rides DERP until disco proves direct
 UDP or the UDP relay; the transport then moves under the open stream without
-reconnecting. The daemon's Ed25519 host key is generated per binding, never
+reconnecting. A client stays one peer of the daemon while its coordinator
+session reconnects: the coordinator names nodes by session, and the daemon
+takes a newer announcement of the same node key in place of the older, so the
+client's address keeps routing to it and its open stream continues (#5120). The daemon's Ed25519 host key is generated per binding, never
 leaves the VM, and only its public line is recorded with orchestration,
 write-once. `cw setup ssh` writes an OpenSSH block whose `KnownHostsCommand`
 asks the platform for that key, so there is no trust-on-first-use, and turns

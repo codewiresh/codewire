@@ -118,7 +118,11 @@ same process:
   serves the same SSH server over tailnet. The world reaches 31000 through
   the environment's direct-UDP LoadBalancer `cw-tailnet-udp-<env>`, and
   clients fall back to the shared UDP relay (allocated through
-  `AllocatePeerRelay`) and then DERP.
+  `AllocatePeerRelay`) and then DERP. The daemon keeps one peer per node
+  key: when a client's coordinator session reconnects and the coordinator
+  announces its node again under the new session's ID, that entry replaces
+  the older one. Kept twice, the client's address would be claimed by two
+  peers, and the daemon routes an address claimed twice to neither (#5120).
 - **Credential bridge**: the credential relay in orchestration dials the
   daemon over the daemon Service and relays the bridge to the broker.
 

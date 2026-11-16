@@ -18,6 +18,7 @@ Updated 2026-11-16.
 | `sandbox-create-fails` | cw-cleanup | observed 2026-11-14 (#4482) | not yet observed; v0.4.17 lacks it |
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
+| `sandbox-attach-stays` | cw-direct-udp | not yet observed | not yet observed |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
@@ -248,6 +249,41 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished).
     `shell-says-42` and `cw` exited 3. The dashboard terminal and `ssh` were
     not walked. Evidence: the pull
     request that added this section.
+
+## `sandbox-attach-stays`: an attached session stays connected
+
+- **Entry points:** `cw attach SANDBOX --session NAME` with a full-screen
+  program in the session, and `cw shell SANDBOX`, both over the tailnet.
+- **States to exercise:**
+  - an attachment left open for 30 minutes with a key every 10 seconds and
+    mouse reports every minute;
+  - the client's coordinator session reconnecting during it (it does so
+    every few minutes, #5120);
+  - a real cut, such as a Wi-Fi change, which may reconnect once.
+- **Driving it:** without a person, give `cw attach` a terminal and a trickle
+  of input, with `CW_DEBUG_TAILNET=1` so the attachment logs its path:
+
+  ```sh
+  cw run --in walk --name soak --detach --tty -- sh -c \
+    'printf "\033[?1049h\033[?1003h"; cat >/dev/null & while :; do date; sleep 5; done'
+  CW_DEBUG_TAILNET=1 script -qec 'cw attach walk --session soak' /dev/null
+  ```
+
+  Keep the daemon's log for the same window (`kubectl logs` on the
+  sandbox's Pod, read-only).
+- **Proof:**
+  - no `[cw] connection lost` line in 30 minutes without a real cut;
+  - the daemon logs no `rust tailnet refused peer addresses` line for the
+    client;
+  - the coordinator log shows the client's session reconnecting at least
+    once in the window.
+- **Gotchas:**
+  - The client's coordinator session reconnects on its own schedule. Check
+    the coordinator log for a second `coordinator peer connected` from the
+    client before calling a window proof.
+  - Before the fix, a drop came about 60 seconds after each coordinator
+    reconnect, when SSH keepalive gave up.
+- **Observed:** not yet observed.
 
 ## `sandbox-stop-start`: stop a sandbox and start it again
 

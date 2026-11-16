@@ -1365,6 +1365,12 @@ where
                 return Ok(());
             };
             for node in nodes {
+                // The coordinator names a node by its session, so a peer whose
+                // session reconnected is announced again under a new ID with
+                // the same key and address. Kept twice, that address belongs
+                // to neither and the peer is unreachable (#5120): the newer
+                // announcement replaces the older.
+                peers.retain(|id, known| *id == node.id || known.key != node.key);
                 peers.insert(node.id, node);
             }
             let snapshot = peers.values().cloned().collect::<Vec<_>>();
@@ -1842,5 +1848,68 @@ mod tests {
             remove.msg,
             Some(coordinate_response::Msg::PeerRemove(_))
         ));
+    }
+
+    fn peer_update(nodes: &[&Node]) -> CoordinateResponse {
+        CoordinateResponse {
+            msg: CoordinatePeerUpdate {
+                nodes: nodes
+                    .iter()
+                    .map(|node| node_to_proto(node).unwrap())
+                    .collect(),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    /// The Dev reproduction on #5120: a client's coordinator session
+    /// reconnects, the coordinator keeps the older session, and the daemon
+    /// hears the same node under both session IDs.
+    #[test]
+    fn a_node_announced_again_under_a_new_session_replaces_the_older_entry() {
+        let first = sample_node(Uuid::new_v4(), 7);
+        let again = Node {
+            id: Uuid::new_v4(),
+            ..first.clone()
+        };
+        let other = Node {
+            key: NodePublic::from_raw([0x33; 32]),
+            ..sample_node(Uuid::new_v4(), 7)
+        };
+        let remove_first = CoordinateResponse {
+            msg: CoordinatePeerRemove {
+                peer_id: first.id.to_string(),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        };
+        let mut peers = BTreeMap::new();
+        let mut seen = Vec::new();
+        {
+            let mut handlers = Handlers {
+                on_peers: |nodes: &[Node]| {
+                    seen.push(nodes.iter().map(|node| node.id).collect::<Vec<_>>())
+                },
+                on_derp_map: |_: &serde_json::Value| {},
+            };
+            handle_response(&mut peers, peer_update(&[&first, &other]), &mut handlers).unwrap();
+            handle_response(&mut peers, peer_update(&[&again]), &mut handlers).unwrap();
+            // Both sessions in one update: the later one is kept.
+            handle_response(&mut peers, peer_update(&[&first, &again]), &mut handlers).unwrap();
+            // The older session's removal, if it ever comes, removes nothing.
+            handle_response(&mut peers, remove_first, &mut handlers).unwrap();
+        }
+
+        let mut expected = vec![again.id, other.id];
+        expected.sort();
+        assert_eq!(seen.len(), 4);
+        for snapshot in &seen[1..] {
+            assert_eq!(snapshot, &expected);
+        }
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[&again.id].addresses, first.addresses);
     }
 }
