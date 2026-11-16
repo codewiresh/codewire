@@ -1,19 +1,18 @@
 //! The deployment settings for hosted egress (#4000). Both are read once at
 //! startup; a value that does not parse fails startup.
 
-use super::service::PlatformDestination;
-
 /// Serves `EgressService` when `true`. Off unless a deployment turns it on.
 pub const SWITCH: &str = "CODEWIRE_HOSTED_EGRESS_ENABLED";
-/// Comma-separated `host:port` destinations every broker-mode sandbox may
-/// reach whatever its policy: the control plane, DERP and Mesh. Only this
-/// setting adds them; no user policy can.
+/// Destinations every broker-mode sandbox would reach whatever its policy.
+/// No deployment sets one: a broker-mode daemon reaches the platform's own
+/// services inside the cluster (decided 2026-11-15 on #4000). Nothing
+/// enforces an entry yet, so while hosted egress is on a non-empty list stops
+/// startup rather than look configured and do nothing.
 pub const PLATFORM_ALLOWS: &str = "CODEWIRE_EGRESS_PLATFORM_ALLOWS";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EgressSettings {
     pub enabled: bool,
-    pub platform: Vec<PlatformDestination>,
 }
 
 impl EgressSettings {
@@ -31,39 +30,17 @@ impl EgressSettings {
             // egress off never fails on it.
             return Ok(Self::default());
         }
-        let platform = platform
+        let named = platform
             .unwrap_or_default()
             .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(parse_destination)
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        if platform.is_empty() {
-            anyhow::bail!("{SWITCH} is on but {PLATFORM_ALLOWS} names no destination");
+            .any(|entry| !entry.trim().is_empty());
+        if named {
+            anyhow::bail!(
+                "{PLATFORM_ALLOWS} names a destination, but platform allows are not enforced yet; leave it unset"
+            );
         }
-        Ok(Self { enabled, platform })
+        Ok(Self { enabled })
     }
-}
-
-fn parse_destination(entry: &str) -> anyhow::Result<PlatformDestination> {
-    let (host, port) = entry
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow::anyhow!("{PLATFORM_ALLOWS}: {entry:?} is not host:port"))?;
-    let port: u16 = port
-        .parse()
-        .ok()
-        .filter(|port| *port != 0)
-        .ok_or_else(|| anyhow::anyhow!("{PLATFORM_ALLOWS}: {entry:?} has no valid port"))?;
-    let host = host.trim().to_ascii_lowercase();
-    let valid = !host.is_empty()
-        && host.len() <= 253
-        && host
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-');
-    if !valid {
-        anyhow::bail!("{PLATFORM_ALLOWS}: {entry:?} has no valid host name");
-    }
-    Ok(PlatformDestination { host, port })
 }
 
 #[cfg(test)]
@@ -71,60 +48,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn off_by_default_and_on_only_with_a_destination() {
+    fn off_by_default_and_on_with_no_platform_allow() {
         assert_eq!(
             EgressSettings::from_values(None, None).unwrap(),
             EgressSettings::default()
         );
-        assert!(EgressSettings::from_values(Some("true"), None).is_err());
-        assert!(EgressSettings::from_values(Some("maybe"), Some("a.example:443")).is_err());
+        for empty in [None, Some(""), Some(" , ")] {
+            assert_eq!(
+                EgressSettings::from_values(Some("true"), empty).unwrap(),
+                EgressSettings { enabled: true },
+                "{empty:?}"
+            );
+        }
+        assert!(EgressSettings::from_values(Some("maybe"), None).is_err());
     }
 
     #[test]
-    fn destinations_parse_as_host_and_port() {
-        let settings = EgressSettings::from_values(
-            Some("true"),
-            Some(" codewire-dev.sh:443, DERP.codewire-dev.sh:443 ,"),
-        )
-        .unwrap();
-        assert!(settings.enabled);
-        assert_eq!(
-            settings.platform,
-            [
-                PlatformDestination {
-                    host: "codewire-dev.sh".into(),
-                    port: 443
-                },
-                PlatformDestination {
-                    host: "derp.codewire-dev.sh".into(),
-                    port: 443
-                },
-            ]
-        );
+    fn a_platform_allow_stops_startup_while_nothing_enforces_it() {
+        for named in [
+            "control.example.com:443",
+            " , derp.example.com:443",
+            "no-port",
+        ] {
+            assert!(
+                EgressSettings::from_values(Some("true"), Some(named)).is_err(),
+                "{named}"
+            );
+        }
     }
 
     #[test]
     fn the_list_is_not_read_while_hosted_egress_is_off() {
         assert_eq!(
-            EgressSettings::from_values(Some("false"), Some("no-port")).unwrap(),
+            EgressSettings::from_values(Some("false"), Some("control.example.com:443")).unwrap(),
             EgressSettings::default()
         );
-    }
-
-    #[test]
-    fn a_malformed_destination_fails_startup() {
-        for bad in [
-            "no-port",
-            "host:0",
-            "host:99999",
-            ":443",
-            "a b:443",
-            "10.0.0.0/8:443",
-        ] {
-            assert!(
-                EgressSettings::from_values(Some("true"), Some(bad)).is_err(),
-                "{bad}"
-            );
-        }
     }
 }

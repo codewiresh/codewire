@@ -46,7 +46,8 @@ pub fn service_state(
         pool,
         server_namespace: server_namespace.to_owned(),
         sandbox_namespace: sandbox_namespace.to_owned(),
-        platform: settings.platform,
+        // No deployment sets a platform allow (see `settings::PLATFORM_ALLOWS`).
+        platform: Vec::new(),
         starts: Default::default(),
     })))
 }
@@ -100,13 +101,7 @@ mod tests {
 
     #[tokio::test]
     async fn on_without_a_runtime_or_a_namespace_fails_startup() {
-        let on = || settings::EgressSettings {
-            enabled: true,
-            platform: vec![service::PlatformDestination {
-                host: "control.example.com".into(),
-                port: 443,
-            }],
-        };
+        let on = || settings::EgressSettings { enabled: true };
         assert!(service_state(on(), None, "postgres://unused", pool(), "dev", "sb").is_err());
         // Startup builds the state without calling Kubernetes.
         let client = kube::Client::new(
