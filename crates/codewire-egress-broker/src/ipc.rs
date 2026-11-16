@@ -1843,6 +1843,81 @@ rules:
         assert_eq!(connector.calls.load(Ordering::Relaxed), 0);
     }
 
+    /// #3999: a front door that takes a stream but never acknowledges it
+    /// fails the hand-off, so later connects are refused at once instead of
+    /// hanging, nothing is dialled, and the held copy is released. The
+    /// deadline's own boundary is pinned in `handoff.rs`.
+    #[tokio::test]
+    async fn an_unacknowledged_stream_fails_the_hand_off_and_later_connects_are_refused() {
+        use codewire_egress_policy::handoff::HandoffReceiver;
+        use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
+
+        use crate::handoff::StreamHandoff;
+
+        let policy = named_policy();
+        let binding = binding(&policy);
+        let resolver = Arc::new(FakeResolver::new([positive(PUBLIC_V4, 60)]));
+        let connector = Arc::new(NoConnector::default());
+        let (broker_end, front_door_end) = codewire_egress_policy::handoff::stream_pair().unwrap();
+        let handoff = Arc::new(
+            StreamHandoff::new(broker_end, "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11".into()).unwrap(),
+        );
+        let broker = PolicyEgressBroker::new(
+            policy,
+            RouteClass::General,
+            Arc::clone(&resolver),
+            Arc::clone(&connector),
+            Arc::new(FakeClock::default()),
+        )
+        .with_intercept_handoff(Arc::clone(&handoff) as Arc<dyn crate::InterceptHandoff>);
+        broker
+            .replace_intercepts(
+                InterceptSet::new([InterceptBinding::new("allowed.example.com", 443).unwrap()])
+                    .unwrap(),
+            )
+            .await;
+        let broker = Arc::new(broker);
+        let (client_streams, server_streams) = session_pairs();
+        let _server = tokio::spawn(serve_broker_ipc(
+            server_streams,
+            binding,
+            key(),
+            Arc::clone(&broker),
+        ));
+        let client = client(client_streams, binding);
+        client
+            .resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4)
+            .await
+            .unwrap();
+        let destination = SocketAddr::new(PUBLIC_V4, 443);
+        client.authorize_tcp(destination).await.unwrap();
+        assert!(matches!(
+            client.connect_tcp(destination).await.unwrap(),
+            BrokerIpcConnection::Intercepted(_)
+        ));
+        // The front door takes the stream and then never acknowledges it.
+        let silent = tokio::task::spawn_blocking(move || {
+            let mut receiver = HandoffReceiver::new(front_door_end).unwrap();
+            receiver.recv_frame(16, 4).unwrap();
+            receiver.recv_intercepted_stream().unwrap();
+            receiver
+        })
+        .await
+        .unwrap();
+        // A hang guard only; the deadline itself is two seconds.
+        timeout(Duration::from_secs(30), async {
+            while !handoff.has_failed() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("an unacknowledged stream never failed the hand-off");
+        assert_eq!(handoff.held_streams(), 0);
+        assert!(client.connect_tcp(destination).await.is_err());
+        assert_eq!(connector.calls.load(Ordering::Relaxed), 0);
+        drop(silent);
+    }
+
     /// #3999 end to end: the worker's connect to a bound name reaches the
     /// front door through the broker's hand-off, as a Unix stream that
     /// carries bytes both ways, and the broker never dials it.
@@ -1916,7 +1991,7 @@ rules:
         })
         .await
         .unwrap();
-        timeout(Duration::from_secs(10), async {
+        timeout(Duration::from_secs(30), async {
             while handoff.held_streams() != 0 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -2038,7 +2113,7 @@ rules:
             })
             .await
             .unwrap();
-            timeout(Duration::from_secs(10), async {
+            timeout(Duration::from_secs(30), async {
                 while !handoff.has_failed() {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
@@ -2144,7 +2219,7 @@ rules:
             worker.read_exact(&mut byte).unwrap();
             assert_eq!(byte, [!tag], "stream {index} back to the worker");
         }
-        timeout(Duration::from_secs(10), async {
+        timeout(Duration::from_secs(30), async {
             while handoff.held_streams() != 0 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }

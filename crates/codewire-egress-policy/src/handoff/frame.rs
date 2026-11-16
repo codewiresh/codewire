@@ -54,9 +54,9 @@ const RECEIVE_FLAGS: RecvFlags = RecvFlags::empty();
 ///   to a peer that has shut its receiving side down with `EINVAL`, and
 ///   still takes plain bytes (measured on macOS 27.2.1, #3999).
 /// - A frame that went out only in part, a closed peer, or any other error
-///   poisons it: the stream may be out of step, so it shuts down its writing
-///   side (the front door reads end of file) and every later send fails with
-///   `Poisoned`.
+///   poisons it: the stream may be out of step, so it shuts the socket down
+///   both ways (the peer reads end of file, and so does a reader on a
+///   duplicate of this socket) and every later send fails with `Poisoned`.
 pub struct HandoffSender {
     socket: OwnedFd,
     state: SenderState,
@@ -152,8 +152,10 @@ impl HandoffSender {
             }
         };
         self.state = SenderState::Poisoned;
-        // Best effort: a peer already gone has nothing left to tell.
-        let _ = rustix::net::shutdown(&self.socket, rustix::net::Shutdown::Write);
+        // Best effort: a peer already gone has nothing left to tell. Both
+        // ways, so a reader on a duplicate of this socket (the broker's
+        // acknowledgement reader) reads end of file and fails the hand-off.
+        let _ = rustix::net::shutdown(&self.socket, rustix::net::Shutdown::Both);
         Err(result)
     }
 
@@ -469,5 +471,11 @@ fn wait_readable(socket: BorrowedFd<'_>, timeout: Duration) -> bool {
         rustix::event::PollFlags::IN,
     )];
     let timeout = rustix::event::Timespec::try_from(timeout).ok();
-    matches!(rustix::event::poll(&mut fds, timeout.as_ref()), Ok(n) if n > 0)
+    match rustix::event::poll(&mut fds, timeout.as_ref()) {
+        Ok(ready) => ready > 0,
+        // A signal interrupted the wait: reported as ready, so the caller's
+        // next receive finds nothing and it waits again for the time left.
+        Err(rustix::io::Errno::INTR) => true,
+        Err(_) => false,
+    }
 }

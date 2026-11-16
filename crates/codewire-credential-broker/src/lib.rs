@@ -90,9 +90,10 @@ pub trait BrokerCredentialLease: Sized {
     /// Consume the lease while the provider adapter prepares one request.
     fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T;
     /// The admitting authority's placeholder for this lease's credential in
-    /// this environment generation, when it has one (#3999). Only the local
-    /// authority derives them yet, once it has loaded its placeholder key;
-    /// nothing reads it yet.
+    /// this environment, for the binding's profile revision, when it has one
+    /// (#3999). Only the local authority derives them yet, once it has loaded
+    /// its placeholder key. The front door's swap rule compares a request's
+    /// placeholder against it (`runtime/swap.rs`).
     fn placeholder(&self) -> Option<&CredentialPlaceholder> {
         None
     }

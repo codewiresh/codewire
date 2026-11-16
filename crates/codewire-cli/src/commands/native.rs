@@ -700,7 +700,7 @@ pub(crate) async fn create_native_environment(
         platform_source_authority: selected.platform,
         local_mounts,
         implicit_vm_only,
-        network_policy: args.policy.clone().unwrap_or_default(),
+        network_policy: args.policy.clone().map(String::from).unwrap_or_default(),
         snapshot: None,
     };
     if !request.network_policy.is_empty() {
@@ -1524,17 +1524,7 @@ async fn edit_native_create(globals: &Globals, args: &mut EnvCreateArgs) -> anyh
             args.no_profile = args.profile.is_none();
         }
         6 => args.secrets = Some(super::launch_setup::choose_secret_project(globals, false).await?),
-        7 => {
-            args.policy = Some(guided::text(
-                "Network policy",
-                args.policy.as_deref().or(Some("open")),
-                |s| {
-                    codewire_egress_policy::reference::PolicyReference::parse(s)
-                        .map(drop)
-                        .map_err(|e| e.to_string())
-                },
-            )?)
-        }
+        7 => args.policy = Some(super::policy::PolicyName::ask(args.policy.as_deref())?),
         8 => {
             args.no_docker = guided::choose(
                 "Guest Docker",

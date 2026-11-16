@@ -22,6 +22,50 @@ use super::*;
 const DEFAULT_PORTS: [u16; 3] = [22, 80, 443];
 const DEFAULT_CHECK_PORT: u16 = 443;
 
+/// The network policy `--policy` names on a create or an update. An empty
+/// name is refused when the command line is parsed, so it can never read as
+/// "no policy given" and fall back to the default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PolicyName(String);
+
+impl std::str::FromStr for PolicyName {
+    type Err = &'static str;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        if name.is_empty() {
+            return Err("name a network policy: open, locked, or a policy from `cw policy`");
+        }
+        Ok(Self(name.to_owned()))
+    }
+}
+
+impl std::ops::Deref for PolicyName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<PolicyName> for String {
+    fn from(name: PolicyName) -> Self {
+        name.0
+    }
+}
+
+impl PolicyName {
+    /// Ask for the policy in the guided create, offering `current` or `open`.
+    /// Only a reference that parses is accepted.
+    pub(super) fn ask(current: Option<&str>) -> anyhow::Result<Self> {
+        guided::text("Network policy", current.or(Some("open")), |name| {
+            PolicyReference::parse(name)
+                .map(drop)
+                .map_err(|error| error.to_string())
+        })
+        .map(Self)
+    }
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct PolicyArgs {
     #[command(subcommand)]

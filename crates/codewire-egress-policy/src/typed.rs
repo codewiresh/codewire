@@ -709,8 +709,8 @@ mod tests {
             !tcp(leased, 443, None).is_allowed(),
             "a raw address needs a lease"
         );
-        let credential = EgressRequest::dns_query("github.com", RouteClass::Credential).unwrap();
-        assert!(!policy.evaluate(&credential).is_allowed());
+        let mesh = EgressRequest::dns_query("github.com", RouteClass::Mesh).unwrap();
+        assert!(!policy.evaluate(&mesh).is_allowed());
 
         let decision = tcp(leased, 443, Some("github.com"));
         let matched = sample();

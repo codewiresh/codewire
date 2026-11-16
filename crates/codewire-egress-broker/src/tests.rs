@@ -482,6 +482,47 @@ impl InterceptHandoff for FakeHandoff {
     }
 }
 
+struct FailingHandoff;
+
+impl InterceptHandoff for FailingHandoff {
+    fn hand_off(&self, _interception: &TcpInterception) -> Result<OwnedFd, BrokerAdapterFailure> {
+        Err(BrokerAdapterFailure::Unavailable)
+    }
+}
+
+#[tokio::test]
+async fn a_failed_hand_off_is_a_counted_refusal_and_is_never_dialled() {
+    let resolver = Arc::new(FakeResolver::new([positive(PUBLIC_V4, 60)]));
+    let connector = Arc::new(FakeConnector::new([Ok(3)]));
+    let broker = PolicyEgressBroker::new(
+        CompiledPolicy::developer_baseline(),
+        RouteClass::General,
+        Arc::clone(&resolver),
+        Arc::clone(&connector),
+        Arc::new(FakeClock::default()),
+    )
+    .with_intercept_handoff(Arc::new(FailingHandoff) as Arc<dyn InterceptHandoff>);
+    broker
+        .replace_intercepts(
+            InterceptSet::new([InterceptBinding::new("api.example.com", HTTPS).unwrap()]).unwrap(),
+        )
+        .await;
+    broker
+        .resolve_dns("api.example.com", DnsRecordFamily::Ipv4)
+        .await
+        .unwrap();
+    let destination = SocketAddr::new(PUBLIC_V4, HTTPS);
+
+    assert!(matches!(
+        broker.connect_or_intercept(destination).await,
+        Err(BrokerError::Denied(_))
+    ));
+    let counts = broker.refusal_counts().await;
+    assert_eq!(counts.get(RefusalReason::InterceptUnavailable), 1);
+    assert_eq!(counts.total(), 1);
+    assert!(connector.destinations().is_empty());
+}
+
 struct EndedFlow(Arc<std::sync::atomic::AtomicBool>);
 
 impl PassedFlow for EndedFlow {
@@ -843,12 +884,12 @@ async fn route_class_is_fixed_before_any_adapter_call() {
     let connector = Arc::new(FakeConnector::new([Ok(1)]));
     let broker = broker(
         named_policy(),
-        RouteClass::Credential,
+        RouteClass::Mesh,
         Arc::clone(&resolver),
         Arc::clone(&connector),
         Arc::new(FakeClock::default()),
     );
-    assert_eq!(broker.route_class(), RouteClass::Credential);
+    assert_eq!(broker.route_class(), RouteClass::Mesh);
     assert!(matches!(
         broker
             .resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4)

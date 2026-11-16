@@ -17,9 +17,12 @@ where
 {
     /// [`Self::execute`] for a request on a front-door session, which only
     /// the host process that admitted that session may call. The request must
-    /// name the host it was intercepted for, one its slot's route sends to,
-    /// and is then served exactly as [`Self::execute`] serves it. The only way
-    /// in from outside this crate is the front-door bridge runner.
+    /// name the host it was intercepted for, one its slot's route sends to.
+    /// It is then served by the swap rule (`runtime/swap.rs`): this
+    /// environment's placeholder is replaced with the leased credential,
+    /// anything else is forwarded untouched, and a placeholder beside another
+    /// credential is refused. The only way in from outside this crate is the
+    /// front-door bridge runner.
     pub(crate) async fn execute_front_door(
         &self,
         request: v1::CredentialBridgeRequest,

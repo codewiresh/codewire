@@ -52,13 +52,8 @@ fn developer_baseline_allows_public_general_dns_and_tcp_only() {
         EgressRequest::dns_answer("registry.npmjs.org", PUBLIC_V4, RouteClass::General).unwrap();
     assert!(policy.evaluate(&answer).is_allowed());
 
-    let credential = request(PUBLIC_V4, 443, None, RouteClass::Credential);
     let mesh = request(PUBLIC_V4, 443, None, RouteClass::Mesh);
     let uncurated_port = request(PUBLIC_V4, 25, None, RouteClass::General);
-    assert_eq!(
-        policy.evaluate(&credential).reason,
-        DecisionReason::DefaultDeny
-    );
     assert_eq!(policy.evaluate(&mesh).reason, DecisionReason::DefaultDeny);
     assert_eq!(
         policy.evaluate(&uncurated_port).reason,
@@ -253,12 +248,7 @@ fn rule_categories_are_and_ed_while_values_within_them_are_or_ed() {
     for denied in [
         request(PUBLIC_V4, 80, Some("api.example.com"), RouteClass::General),
         request(PUBLIC_V4, 443, Some("example.com"), RouteClass::General),
-        request(
-            PUBLIC_V4,
-            443,
-            Some("api.example.com"),
-            RouteClass::Credential,
-        ),
+        request(PUBLIC_V4, 443, Some("api.example.com"), RouteClass::Mesh),
         request(
             "1.1.1.1".parse().unwrap(),
             443,
@@ -534,11 +524,7 @@ fn builtin_names_are_reserved_in_any_letter_case() {
 fn locked_admits_no_workload_egress() {
     let policy = CompiledPolicy::locked();
     assert!(policy.canonical_document().rules.is_empty());
-    for route_class in [
-        RouteClass::General,
-        RouteClass::Credential,
-        RouteClass::Mesh,
-    ] {
+    for route_class in [RouteClass::General, RouteClass::Mesh] {
         let query = EgressRequest::dns_query("github.com", route_class).unwrap();
         assert_eq!(policy.evaluate(&query).reason, DecisionReason::DefaultDeny);
         for address in [PUBLIC_V4, PUBLIC_V6] {
@@ -592,6 +578,23 @@ fn protected_overlap_finds_any_shared_address() {
             "{network}"
         );
     }
+}
+
+/// The `credential` route class is gone (#3999). A document that still names
+/// it is refused whole, and the error says which class it did not know, so a
+/// stored policy that used it fails closed and is never read without the rule.
+#[test]
+fn a_document_naming_the_removed_credential_route_class_is_refused_by_name() {
+    const BASE: &str = include_str!("../policies/developer-v1.yaml");
+    assert!(BASE.contains("route_classes: [general]"));
+    let named = BASE.replacen("route_classes: [general]", "route_classes: [credential]", 1);
+    let Err(error) = PolicyDocument::parse_yaml(named.as_bytes()) else {
+        panic!("a document naming the credential route class parsed");
+    };
+    assert!(matches!(error, PolicyError::Yaml(_)), "{error}");
+    let message = error.to_string();
+    assert!(message.contains("credential"), "{message}");
+    assert!(PolicyDocument::parse_yaml(BASE.as_bytes()).is_ok());
 }
 
 /// How a policy's YAML is read (#4278), pinned from the differential against

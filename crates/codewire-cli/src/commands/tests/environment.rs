@@ -569,6 +569,20 @@ fn platform_create_rejects_native_only_options() {
     );
 }
 
+/// #2537: an empty `--policy` is refused at parsing, so the create review
+/// never shows "(--policy)" for a choice that would have selected `open`.
+#[test]
+fn an_empty_policy_flag_is_refused() {
+    for args in [
+        ["cw", "create", "--local", "--policy", ""],
+        ["cw", "update", "work", "--policy", ""],
+    ] {
+        let error = Cli::try_parse_from(args).unwrap_err();
+        assert!(error.to_string().contains("--policy"), "{error}");
+    }
+    assert!(Cli::try_parse_from(["cw", "create", "--local", "--policy", "work"]).is_ok());
+}
+
 #[test]
 fn ambiguous_placement_error_gives_both_exact_commands() {
     assert_eq!(

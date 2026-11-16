@@ -14,6 +14,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use base64::Engine as _;
+
 use super::*;
 use crate::bridge::AdmittedCredentialBridge;
 use crate::bridge::{BrokerRequestExecutor as _, FrontDoorExecutor};
@@ -166,6 +168,8 @@ struct Recorded {
     /// The upstream echoes the credential it received in a reply header and
     /// the body.
     echo_credential: bool,
+    /// The authority refuses every lease.
+    deny: bool,
 }
 
 impl Recorded {
@@ -174,6 +178,7 @@ impl Recorded {
             Authority {
                 leases: Arc::clone(&self.leases),
                 placeholder: self.placeholder,
+                deny: self.deny,
             },
             Upstream {
                 outbound: Arc::clone(&self.outbound),
@@ -195,6 +200,7 @@ impl Recorded {
 struct Authority {
     leases: Arc<AtomicUsize>,
     placeholder: Option<&'static str>,
+    deny: bool,
 }
 
 #[async_trait]
@@ -211,6 +217,9 @@ impl BrokerLeaseProvider for Authority {
         route: BrokerRouteId,
     ) -> Result<Lease, BrokerLeaseError> {
         self.leases.fetch_add(1, Ordering::Relaxed);
+        if self.deny {
+            return Err(BrokerLeaseError::Denied);
+        }
         let (provider, kind) = match slot.as_str() {
             "codex" | "openai" => ("openai", CredentialAuthKind::ApiKey),
             "anthropic" => ("anthropic", CredentialAuthKind::ApiKey),
@@ -410,8 +419,11 @@ async fn this_environments_placeholder_is_swapped_for_the_leased_credential() {
     };
     let broker = recorded.broker();
     collect(broker.execute(anthropic("", &[])).await.unwrap()).await;
+    let basic = base64::engine::general_purpose::STANDARD.encode(format!("user:{OURS}"));
     for credential in [
         ("authorization", format!("Bearer {OURS}")),
+        ("authorization", format!("Token {OURS}")),
+        ("authorization", format!("Basic {basic}")),
         ("x-api-key", OURS.to_owned()),
     ] {
         let (status, _, _) = collect(
@@ -439,7 +451,31 @@ async fn this_environments_placeholder_is_swapped_for_the_leased_credential() {
             [crate::http_test_support::TOKEN]
         );
     }
-    assert_eq!(recorded.leases(), 3);
+    assert_eq!(recorded.leases(), 5);
+}
+
+/// This environment's placeholder with a lease the authority denies sends
+/// nothing upstream and never forwards the placeholder.
+#[tokio::test]
+async fn a_denied_lease_sends_nothing_upstream() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        deny: true,
+        ..Recorded::default()
+    };
+    let broker = recorded.broker();
+    let served = broker
+        .execute_front_door(anthropic(
+            "api.anthropic.com",
+            &[("x-api-key", OURS.to_owned())],
+        ))
+        .await;
+    if let Ok(response) = served {
+        let (status, _, _) = collect(response).await;
+        assert_ne!(status, StatusCode::OK);
+    }
+    assert_eq!(recorded.leases(), 1);
+    assert!(recorded.outbound().is_empty());
 }
 
 /// A user's own key takes no lease and reaches the provider as it was sent;

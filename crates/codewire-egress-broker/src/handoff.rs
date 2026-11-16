@@ -23,6 +23,7 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use codewire_egress_policy::handoff::{
     HANDOFF_ROLE_TAG, HANDOFF_VERSION, HandoffError, HandoffReceiver, HandoffSender,
@@ -31,11 +32,19 @@ use codewire_egress_policy::handoff::{
 use codewire_egress_policy::lease::TcpInterception;
 use tokio::io::Interest;
 use tokio::net::UnixStream;
+use tokio::time::Instant;
 
 use crate::{BrokerAdapterFailure, InterceptHandoff, MAX_PASSED_FLOWS};
 
 /// An acknowledgement's body: the stream's `stream_id`, little-endian.
 pub const HANDOFF_ACK_LEN: usize = 8;
+
+/// How long a handed-off stream may wait for its acknowledgement. It matches
+/// the front door's own bound on sending one (`ACKNOWLEDGEMENT_TIMEOUT` in
+/// `codewire-egress-front-door-bridge`). A front door that stops reading or
+/// acknowledging fails the hand-off within it, so a guest's connect is
+/// refused instead of hanging until [`MAX_PASSED_FLOWS`] copies are held.
+pub const HANDOFF_ACK_DEADLINE: Duration = Duration::from_secs(2);
 
 /// The broker's side: a `SOCK_STREAM` Unix socket to the front door,
 /// inherited from the supervisor. A frame that fails part-way poisons the
@@ -53,12 +62,15 @@ pub struct StreamHandoff {
 /// hand-off has failed for good.
 #[derive(Default)]
 struct Held {
-    streams: Mutex<HashMap<u64, OwnedFd>>,
+    streams: Mutex<HashMap<u64, (OwnedFd, Instant)>>,
     failed: AtomicBool,
+    /// Wakes the acknowledgement reader when a copy is held, so it arms its
+    /// deadline. A permit is kept when the reader is not waiting yet.
+    newly_held: tokio::sync::Notify,
 }
 
 impl Held {
-    fn streams(&self) -> MutexGuard<'_, HashMap<u64, OwnedFd>> {
+    fn streams(&self) -> MutexGuard<'_, HashMap<u64, (OwnedFd, Instant)>> {
         self.streams.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -66,6 +78,28 @@ impl Held {
     fn fail(&self) {
         self.failed.store(true, Ordering::SeqCst);
         self.streams().clear();
+    }
+
+    /// When the oldest held copy has waited [`HANDOFF_ACK_DEADLINE`], or
+    /// `None` while nothing is held.
+    fn deadline(&self) -> Option<Instant> {
+        self.streams()
+            .values()
+            .map(|(_, since)| *since + HANDOFF_ACK_DEADLINE)
+            .min()
+    }
+
+    /// Whether a held copy has waited [`HANDOFF_ACK_DEADLINE`] in full.
+    fn overdue(&self, now: Instant) -> bool {
+        self.deadline().is_some_and(|deadline| now >= deadline)
+    }
+}
+
+/// Resolves at `deadline`, or never when there is none.
+async fn reached(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -126,17 +160,31 @@ impl Drop for StreamHandoff {
 }
 
 /// Release each acknowledged stream's copy. An unknown or repeated stream,
-/// a body that is not eight bytes, a descriptor, or the socket closing fails
-/// the hand-off.
+/// a body that is not eight bytes, a descriptor, the socket closing, or a
+/// copy left unacknowledged past [`HANDOFF_ACK_DEADLINE`] fails the hand-off.
 async fn read_acknowledgements(
     mut acknowledgements: HandoffReceiver,
     readable: UnixStream,
     held: Arc<Held>,
 ) {
     loop {
-        if readable.readable().await.is_err() {
-            held.fail();
-            return;
+        // The timer is armed only while a copy is held, for the oldest one,
+        // so it fires at the deadline and the reader sleeps otherwise.
+        tokio::select! {
+            ready = readable.readable() => {
+                if ready.is_err() {
+                    held.fail();
+                    return;
+                }
+            }
+            () = reached(held.deadline()) => {
+                if held.overdue(Instant::now()) {
+                    held.fail();
+                    return;
+                }
+                continue;
+            }
+            () = held.newly_held.notified() => continue,
         }
         // A `WouldBlock` clears the readiness, so the next wait sleeps.
         let received = readable.try_io(Interest::READABLE, || {
@@ -188,8 +236,9 @@ impl InterceptHandoff for StreamHandoff {
             if self.held.failed.load(Ordering::SeqCst) || streams.len() >= MAX_PASSED_FLOWS {
                 return Err(BrokerAdapterFailure::Unavailable);
             }
-            streams.insert(stream_id, copy);
+            streams.insert(stream_id, (copy, Instant::now()));
         }
+        self.held.newly_held.notify_one();
         // A sender is only ever in a consistent state between calls, so a
         // panic elsewhere leaves it usable.
         let sent = self
@@ -236,7 +285,7 @@ mod tests {
         let _handoff = StreamHandoff::new(broker_end, ENVIRONMENT.into()).unwrap();
         let mut front_door = HandoffReceiver::new(front_door_end).unwrap();
         front_door
-            .expect_role_tag(std::time::Duration::from_secs(2))
+            .expect_role_tag(std::time::Duration::from_secs(30))
             .unwrap();
         rustix::io::ioctl_fionbio(&front_door, true).unwrap();
         assert_eq!(
@@ -257,7 +306,7 @@ mod tests {
         let handoff = StreamHandoff::new(broker_end, ENVIRONMENT.into()).unwrap();
         let mut front_door = HandoffReceiver::new(front_door_end).unwrap();
         front_door
-            .expect_role_tag(std::time::Duration::from_secs(2))
+            .expect_role_tag(std::time::Duration::from_secs(30))
             .unwrap();
         // A second wait finds no role tag, and poisons.
         assert!(
@@ -265,7 +314,7 @@ mod tests {
                 .expect_role_tag(std::time::Duration::from_millis(50))
                 .is_err()
         );
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             while !handoff.has_failed() {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
@@ -273,6 +322,63 @@ mod tests {
         .await
         .expect("the broker never read the front door's shutdown");
         drop(front_door);
+    }
+
+    fn held_since(held: &Held, stream: u64, since: Instant) {
+        let (copy, _other) = StdUnixStream::pair().unwrap();
+        held.streams().insert(stream, (OwnedFd::from(copy), since));
+        held.newly_held.notify_one();
+    }
+
+    /// The deadline is the oldest held copy's, and a copy is overdue once it
+    /// has waited the deadline in full, not a moment before.
+    #[test]
+    fn a_held_copy_is_overdue_at_its_deadline_and_not_before() {
+        let held = Held::default();
+        let first = Instant::now();
+        assert_eq!(held.deadline(), None);
+        assert!(!held.overdue(first + 10 * HANDOFF_ACK_DEADLINE));
+
+        held_since(&held, 1, first + Duration::from_millis(500));
+        held_since(&held, 2, first);
+        let deadline = first + HANDOFF_ACK_DEADLINE;
+        assert_eq!(held.deadline(), Some(deadline));
+        assert!(!held.overdue(deadline - Duration::from_nanos(1)));
+        assert!(held.overdue(deadline));
+
+        // Acknowledging the oldest leaves the next one's deadline.
+        held.streams().remove(&2);
+        assert_eq!(held.deadline(), Some(deadline + Duration::from_millis(500)));
+        assert!(!held.overdue(deadline));
+    }
+
+    /// #3999: the acknowledgement reader fails the hand-off when a held copy
+    /// reaches its deadline, releases every copy, and does nothing while
+    /// nothing is held, however long that lasts.
+    #[tokio::test(start_paused = true)]
+    async fn the_reader_fails_the_hand_off_at_a_held_copys_deadline() {
+        async fn settle() {
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+        }
+        let (broker_end, _front_door_end) = codewire_egress_policy::handoff::stream_pair().unwrap();
+        let handoff = StreamHandoff::new(broker_end, ENVIRONMENT.into()).unwrap();
+        tokio::time::advance(10 * HANDOFF_ACK_DEADLINE).await;
+        settle().await;
+        assert!(!handoff.has_failed(), "nothing is held");
+
+        held_since(&handoff.held, 1, Instant::now());
+        settle().await;
+        tokio::time::advance(HANDOFF_ACK_DEADLINE - Duration::from_millis(1)).await;
+        settle().await;
+        assert!(!handoff.has_failed(), "the deadline has not passed");
+        assert_eq!(handoff.held_streams(), 1);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        settle().await;
+        assert!(handoff.has_failed());
+        assert_eq!(handoff.held_streams(), 0);
     }
 
     #[tokio::test]

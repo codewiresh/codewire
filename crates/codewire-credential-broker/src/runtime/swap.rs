@@ -233,8 +233,9 @@ fn swap_shape(name: &HeaderName, value: &[u8]) -> Option<CredentialPlaceholder> 
     let candidate = if *name == header::AUTHORIZATION {
         match value.split_once(' ') {
             None => value.to_owned(),
+            // Exactly one space after the scheme, as RFC 9110 writes it; a
+            // value with more is not a swap shape and is forwarded untouched.
             Some((scheme, rest)) => {
-                let rest = rest.trim_start_matches(' ');
                 if scheme.eq_ignore_ascii_case("bearer") || scheme.eq_ignore_ascii_case("token") {
                     rest.to_owned()
                 } else if scheme.eq_ignore_ascii_case("basic") {

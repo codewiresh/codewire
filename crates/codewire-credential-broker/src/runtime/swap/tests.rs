@@ -26,7 +26,7 @@ fn every_swap_shape_presents_the_placeholder() {
     for (name, value) in [
         ("authorization", OURS.to_owned()),
         ("authorization", format!("Bearer {OURS}")),
-        ("authorization", format!("bearer  {OURS}")),
+        ("authorization", format!("bearer {OURS}")),
         ("authorization", format!("Token {OURS}")),
         ("authorization", format!("Basic {basic}")),
         ("x-api-key", OURS.to_owned()),
@@ -51,6 +51,8 @@ fn anything_but_a_swap_shape_is_foreign() {
         vec![("authorization", format!("Bearer {OURS}x"))],
         vec![("authorization", format!("Bearer {OURS} trailing"))],
         vec![("authorization", format!("Digest {OURS}"))],
+        vec![("authorization", format!("Bearer  {OURS}"))],
+        vec![("authorization", format!("Token  {OURS}"))],
         vec![("x-api-key", format!(" {OURS}"))],
         vec![("cookie", format!("session={OURS}"))],
         vec![("proxy-authorization", format!("Bearer {OURS}"))],
@@ -122,4 +124,42 @@ fn forwarding_strips_framing_only() {
             "set-cookie"
         ]
     );
+}
+
+const THEIRS: &str = "cwp1_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA";
+
+/// The cache remembers this environment's placeholder for
+/// `PLACEHOLDER_FRESH_FOR` only. After that a foreign value costs a lease
+/// again, so a rebind is seen within the window. Forcing the freshness check
+/// to always hold fails this test.
+#[tokio::test(start_paused = true)]
+async fn the_placeholder_cache_forgets_after_its_window() {
+    let cache = PlaceholderCache::default();
+    let slot = CapabilitySlot::parse("anthropic").unwrap();
+    let ours = CredentialPlaceholder::parse(OURS).unwrap();
+    let theirs = CredentialPlaceholder::parse(THEIRS).unwrap();
+    cache.remember(&slot, Some(&ours));
+    assert!(cache.known_foreign(&slot, &theirs));
+    assert!(!cache.known_foreign(&slot, &ours));
+    tokio::time::advance(PLACEHOLDER_FRESH_FOR - Duration::from_secs(1)).await;
+    assert!(cache.known_foreign(&slot, &theirs));
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(!cache.known_foreign(&slot, &theirs));
+}
+
+/// A forwarded reply is bounded: past `max_bytes` the stream ends with
+/// `ResponseTooLarge` instead of passing more bytes.
+#[tokio::test]
+async fn a_forwarded_reply_past_its_bound_is_refused() {
+    use futures::StreamExt as _;
+    let upstream: BrokerUpstreamBody = Box::pin(futures::stream::iter([
+        Ok(bytes::Bytes::from_static(b"abcd")),
+        Ok(bytes::Bytes::from_static(b"efgh")),
+    ]));
+    let mut body = forwarded_body(upstream, 6);
+    assert_eq!(body.next().await.unwrap().unwrap(), &b"abcd"[..]);
+    assert!(matches!(
+        body.next().await,
+        Some(Err(BrokerRequestError::ResponseTooLarge))
+    ));
 }

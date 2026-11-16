@@ -97,7 +97,6 @@ pub enum EgressProtocol {
 #[serde(rename_all = "snake_case")]
 pub enum RouteClass {
     General,
-    Credential,
     Mesh,
 }
 

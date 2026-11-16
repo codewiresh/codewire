@@ -1368,7 +1368,7 @@ pub(crate) struct EnvCreateArgs {
         value_name = "POLICY",
         help = "Network policy for outbound connections: open (default), locked, or a policy from `cw policy` (local VMs only; unrelated to --network, which joins a Mesh network)"
     )]
-    policy: Option<String>,
+    policy: Option<policy::PolicyName>,
     #[arg(short, long, default_value_t = true, help = "Watch startup progress")]
     follow: bool,
     #[arg(
@@ -1497,7 +1497,7 @@ pub(crate) struct EnvUpdateArgs {
         value_name = "POLICY",
         help = "Select the network policy for outbound connections: open, locked, or a policy from `cw policy` (local VMs only; unrelated to Mesh networks)"
     )]
-    policy: Option<String>,
+    policy: Option<policy::PolicyName>,
     #[arg(short, long, help = "Apply without the confirmation prompt")]
     yes: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]

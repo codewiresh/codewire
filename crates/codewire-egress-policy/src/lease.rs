@@ -1751,12 +1751,12 @@ rules:
                 )
                 .unwrap(),
         );
-        let credential = denied(
+        let mesh = denied(
             table
-                .admit_or_refuse(PUBLIC_V4, 443, RouteClass::Credential, LeaseInstant::ZERO)
+                .admit_or_refuse(PUBLIC_V4, 443, RouteClass::Mesh, LeaseInstant::ZERO)
                 .unwrap(),
         );
-        assert_eq!(credential.reason, DecisionReason::DefaultDeny);
+        assert_eq!(mesh.reason, DecisionReason::DefaultDeny);
     }
 
     #[test]

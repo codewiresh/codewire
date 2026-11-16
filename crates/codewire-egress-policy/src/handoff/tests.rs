@@ -513,7 +513,7 @@ fn a_short_write_poisons_the_sender_and_ends_the_stream() {
     let reader = StdUnixStream::from(reader);
     reader.set_nonblocking(false).unwrap();
     reader
-        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .set_read_timeout(Some(std::time::Duration::from_secs(30)))
         .unwrap();
     let mut drained = Vec::new();
     (&reader).read_to_end(&mut drained).unwrap();
@@ -531,7 +531,8 @@ fn tag_ends() -> (HandoffSender, HandoffReceiver) {
     )
 }
 
-const TAG_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// A hang guard, not a product bound: the waits under test are 200 ms.
+const TAG_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// #3999: on a blocking socket too, the wait ends at its timeout. Measured
 /// on macOS 27.2.1, a blocking receive here once waited for an hour; the

@@ -30,8 +30,11 @@ where
     K: BrokerClock,
 {
     /// Admit a dial again, then dial it, or hand it to the front door when the
-    /// table intercepts it. Without a hand-off an intercepted dial is refused,
-    /// never dialled; a failed hand-off is an error, never a dial.
+    /// table intercepts it. Without a hand-off, or when the hand-off fails, an
+    /// intercepted dial is refused and counted as
+    /// [`RefusalReason::InterceptUnavailable`]; it is never dialled.
+    ///
+    /// [`RefusalReason::InterceptUnavailable`]: codewire_egress_policy::lease::RefusalReason::InterceptUnavailable
     pub async fn connect_or_intercept(
         &self,
         destination: SocketAddr,
@@ -60,14 +63,21 @@ where
                             .clone(),
                     ));
                 };
-                let stream = handoff
-                    .hand_off(&interception)
-                    .map_err(BrokerError::Connector)?;
-                Ok(BrokerConnection::Intercepted {
-                    stream,
-                    interception,
-                    revision,
-                })
+                match handoff.hand_off(&interception) {
+                    Ok(stream) => Ok(BrokerConnection::Intercepted {
+                        stream,
+                        interception,
+                        revision,
+                    }),
+                    Err(_) => Err(BrokerError::Denied(
+                        self.state
+                            .lock()
+                            .await
+                            .refuse_interception(interception)
+                            .decision()
+                            .clone(),
+                    )),
+                }
             }
         }
     }
