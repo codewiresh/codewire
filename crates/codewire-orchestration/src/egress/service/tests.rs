@@ -316,11 +316,16 @@ async fn call(cluster: &Arc<Cluster>, method: &str, body: Value) -> (StatusCode,
 
 /// A server stream's first frame: the message, or the end-of-stream error.
 async fn first_frame(cluster: &Arc<Cluster>, body: Value) -> Value {
+    first_frame_of(cluster, "WatchAssignment", body).await
+}
+
+/// The first frame of METHOD's response stream, for one request frame.
+async fn first_frame_of(cluster: &Arc<Cluster>, method: &str, body: Value) -> Value {
     let payload = serde_json::to_vec(&body).unwrap();
     let mut framed = vec![0_u8];
     framed.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
     framed.extend_from_slice(&payload);
-    let request = Request::post("/codewire.internal.v1.EgressService/WatchAssignment")
+    let request = Request::post(format!("/codewire.internal.v1.EgressService/{method}"))
         .header("content-type", "application/connect+json")
         .header(AUTHORIZATION, format!("Bearer {}", token()))
         .body(Body::from(framed))
@@ -429,6 +434,8 @@ async fn a_sandbox_presenting_the_egress_node_purpose_is_refused_by_every_method
     }
     let frame = first_frame(&cluster, named_guest()).await;
     assert_eq!(frame["error"]["code"], "permission_denied", "{frame}");
+    let frame = first_frame_of(&cluster, "FrontDoorSession", json!({"open": named_guest()})).await;
+    assert_eq!(frame["error"]["code"], "permission_denied", "{frame}");
 }
 
 #[tokio::test]
@@ -447,6 +454,19 @@ async fn cw_egress_in_another_namespace_is_refused() {
     });
     let (status, _) = call(&cluster, "Admit", admit_body()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_front_door_session_answers_unimplemented_to_a_valid_caller() {
+    // Until the relay attachment lands (#4001), cw-egress retries as for
+    // UNAVAILABLE.
+    let frame = first_frame_of(
+        &Cluster::healthy(),
+        "FrontDoorSession",
+        json!({"open": named_guest()}),
+    )
+    .await;
+    assert_eq!(frame["error"]["code"], "unimplemented", "{frame}");
 }
 
 #[tokio::test]

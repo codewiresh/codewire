@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .egress_pb2 import AdmitRequest, AdmitResponse, ReportEnforcementRequest, ReportEnforcementResponse, ReportRecordsRequest, ReportRecordsResponse, WatchAssignmentRequest, WatchAssignmentResponse
+from .egress_pb2 import AdmitRequest, AdmitResponse, FrontDoorSessionRequest, FrontDoorSessionResponse, ReportEnforcementRequest, ReportEnforcementResponse, ReportRecordsRequest, ReportRecordsResponse, WatchAssignmentRequest, WatchAssignmentResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -45,6 +45,9 @@ class EgressService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def report_records(self, request: ReportRecordsRequest, ctx: RequestContext[ReportRecordsRequest, ReportRecordsResponse]) -> ReportRecordsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def front_door_session(self, request: AsyncIterator[FrontDoorSessionRequest], ctx: RequestContext[FrontDoorSessionRequest, FrontDoorSessionResponse]) -> AsyncIterator[FrontDoorSessionResponse]:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -100,6 +103,16 @@ class EgressServiceASGIApplication(ConnectASGIApplication[EgressService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.report_records,
+                ),
+                "/codewire.internal.v1.EgressService/FrontDoorSession": Endpoint.bidi_stream(
+                    method=MethodInfo(
+                        name="FrontDoorSession",
+                        service_name="codewire.internal.v1.EgressService",
+                        input=FrontDoorSessionRequest,
+                        output=FrontDoorSessionResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.front_door_session,
                 ),
             },
             interceptors=interceptors,
@@ -219,6 +232,26 @@ class EgressServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    def front_door_session(
+        self,
+        request: AsyncIterator[FrontDoorSessionRequest],
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AsyncIterator[FrontDoorSessionResponse]:
+        return self.execute_bidi_stream(
+            request=request,
+            method=MethodInfo(
+                name="FrontDoorSession",
+                service_name="codewire.internal.v1.EgressService",
+                input=FrontDoorSessionRequest,
+                output=FrontDoorSessionResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class EgressServiceSync(Protocol):
     def admit(self, request: AdmitRequest, ctx: RequestContext[AdmitRequest, AdmitResponse]) -> AdmitResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -230,6 +263,9 @@ class EgressServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def report_records(self, request: ReportRecordsRequest, ctx: RequestContext[ReportRecordsRequest, ReportRecordsResponse]) -> ReportRecordsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def front_door_session(self, request: Iterator[FrontDoorSessionRequest], ctx: RequestContext[FrontDoorSessionRequest, FrontDoorSessionResponse]) -> Iterator[FrontDoorSessionResponse]:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -283,6 +319,16 @@ class EgressServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.report_records,
+                ),
+                "/codewire.internal.v1.EgressService/FrontDoorSession": EndpointSync.bidi_stream(
+                    method=MethodInfo(
+                        name="FrontDoorSession",
+                        service_name="codewire.internal.v1.EgressService",
+                        input=FrontDoorSessionRequest,
+                        output=FrontDoorSessionResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.front_door_session,
                 ),
             },
             interceptors=interceptors,
@@ -393,6 +439,25 @@ class EgressServiceClientSync(ConnectClientSync):
                 service_name="codewire.internal.v1.EgressService",
                 input=ReportRecordsRequest,
                 output=ReportRecordsResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def front_door_session(
+        self,
+        request: Iterator[FrontDoorSessionRequest],
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> Iterator[FrontDoorSessionResponse]:
+        return self.execute_bidi_stream(
+            request=request,
+            method=MethodInfo(
+                name="FrontDoorSession",
+                service_name="codewire.internal.v1.EgressService",
+                input=FrontDoorSessionRequest,
+                output=FrontDoorSessionResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

@@ -1079,6 +1079,28 @@ inside an opaque encoding would not be caught, in a header or in a body. GitHub
 keeps its closed families and exact operations, since `git` and `gh` go through
 its signer and executor.
 
+### Hosted front-door session (not yet served)
+
+`EgressService.FrontDoorSession` is specified, but not served yet: it answers
+`UNIMPLEMENTED` until the credential relay attaches it (#4001). It is the
+hosted TLS front door's way into the credential broker, beside a Sandbox's
+loopback ingress, and these rules hold from the start:
+
+- **Who opens it:** only `cw-egress`, with its own projected token (audience
+  `codewire.internal.egress-node.v1`, its ServiceAccount and namespace), for
+  an admitted Pod on its own node. Orchestration reads the node from the
+  caller's live Pod. The Sandbox's workspace binding token cannot open one: a
+  loopback session never becomes a front-door session.
+- **The environment** comes only from that Pod's live workspace binding, never
+  from a request field.
+- **The frames** after the open frame are the credential bridge's
+  `front-door.v1` frames, carried unchanged. Orchestration does not read or
+  keep them. Injection, redaction, refresh and every authority check stay in
+  the broker.
+- **It ends with its credential relay epoch,** so the epoch's reuse limits
+  above bound it. `cw-egress` opens a new session for the next epoch. A Pod
+  has at most one per epoch.
+
 ### Provider matrix
 
 | Provider | Operations |

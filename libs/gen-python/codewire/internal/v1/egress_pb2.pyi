@@ -166,3 +166,31 @@ class EgressRecord(_message.Message):
     last_seen_unix_ms: int
     count: int
     def __init__(self, name: _Optional[str] = ..., address_only: _Optional[str] = ..., address: _Optional[str] = ..., transport: _Optional[_Union[EgressTransport, str]] = ..., port: _Optional[int] = ..., refusal: _Optional[str] = ..., policy_reference: _Optional[str] = ..., policy_revision: _Optional[int] = ..., policy_digest: _Optional[bytes] = ..., first_seen_unix_ms: _Optional[int] = ..., last_seen_unix_ms: _Optional[int] = ..., count: _Optional[int] = ...) -> None: ...
+
+class FrontDoorSessionRequest(_message.Message):
+    __slots__ = ("open", "bridge")
+    OPEN_FIELD_NUMBER: _ClassVar[int]
+    BRIDGE_FIELD_NUMBER: _ClassVar[int]
+    open: FrontDoorSessionOpen
+    bridge: bytes
+    def __init__(self, open: _Optional[_Union[FrontDoorSessionOpen, _Mapping]] = ..., bridge: _Optional[bytes] = ...) -> None: ...
+
+class FrontDoorSessionOpen(_message.Message):
+    __slots__ = ("pod_name", "pod_uid")
+    POD_NAME_FIELD_NUMBER: _ClassVar[int]
+    POD_UID_FIELD_NUMBER: _ClassVar[int]
+    pod_name: str
+    pod_uid: str
+    def __init__(self, pod_name: _Optional[str] = ..., pod_uid: _Optional[str] = ...) -> None: ...
+
+class FrontDoorSessionResponse(_message.Message):
+    __slots__ = ("attached", "bridge")
+    ATTACHED_FIELD_NUMBER: _ClassVar[int]
+    BRIDGE_FIELD_NUMBER: _ClassVar[int]
+    attached: FrontDoorSessionAttached
+    bridge: bytes
+    def __init__(self, attached: _Optional[_Union[FrontDoorSessionAttached, _Mapping]] = ..., bridge: _Optional[bytes] = ...) -> None: ...
+
+class FrontDoorSessionAttached(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...

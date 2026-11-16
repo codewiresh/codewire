@@ -12,11 +12,14 @@ use std::time::Duration;
 use codewire_proto::codewire::internal::v1::__buffa::oneof::egress_assignment::Binding;
 use codewire_proto::codewire::internal::v1::{
     AdmitRequest, AdmitResponse, BoundAssignment, EgressAssignment, EgressPolicyRevision,
-    EgressService, PlatformAllow, ReportEnforcementRequest, ReportEnforcementResponse,
-    ReportRecordsRequest, ReportRecordsResponse, WatchAssignmentRequest, WatchAssignmentResponse,
+    EgressService, FrontDoorSessionRequest, FrontDoorSessionResponse, PlatformAllow,
+    ReportEnforcementRequest, ReportEnforcementResponse, ReportRecordsRequest,
+    ReportRecordsResponse, WatchAssignmentRequest, WatchAssignmentResponse,
 };
 use codewire_server_core::pod_identity::PodIdentityError;
-use connectrpc::{ConnectError, RequestContext, ServiceRequest, ServiceResult, ServiceStream};
+use connectrpc::{
+    ConnectError, InboundStream, RequestContext, ServiceRequest, ServiceResult, ServiceStream,
+};
 use sqlx::PgPool;
 
 use codewire_egress_node::replacement::StartLimiter;
@@ -475,6 +478,19 @@ impl EgressService for EgressConnectService {
         self.state.guest_on_node(&guest, &node).await?;
         Err(ConnectError::unimplemented(
             "egress records are stored from a later change",
+        ))
+    }
+
+    async fn front_door_session(
+        &self,
+        ctx: RequestContext,
+        _requests: InboundStream<FrontDoorSessionRequest>,
+    ) -> ServiceResult<ServiceStream<FrontDoorSessionResponse>> {
+        // Authenticated now, so a caller sees the final answer to the wrong
+        // identity; the session itself is served from a later change (#4001).
+        self.state.caller_node(&ctx).await?;
+        Err(ConnectError::unimplemented(
+            "front-door sessions are served from a later change",
         ))
     }
 }

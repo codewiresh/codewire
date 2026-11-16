@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/internal/v1/egress.proto.
  */
 export const file_codewire_internal_v1_egress: GenFile = /*@__PURE__*/
-  fileDesc("CiFjb2Rld2lyZS9pbnRlcm5hbC92MS9lZ3Jlc3MucHJvdG8SFGNvZGV3aXJlLmludGVybmFsLnYxIjQKDEFkbWl0UmVxdWVzdBITCgtndWVzdF90b2tlbhgBIAEoCRIPCgdwZWVyX2lwGAIgASgJIm4KDUFkbWl0UmVzcG9uc2USDwoHcG9kX3VpZBgBIAEoCRI6Cgphc3NpZ25tZW50GAIgASgLMiYuY29kZXdpcmUuaW50ZXJuYWwudjEuRWdyZXNzQXNzaWdubWVudBIQCghwb2RfbmFtZRgDIAEoCSI7ChZXYXRjaEFzc2lnbm1lbnRSZXF1ZXN0Eg8KB3BvZF91aWQYASABKAkSEAoIcG9kX25hbWUYAiABKAkiVQoXV2F0Y2hBc3NpZ25tZW50UmVzcG9uc2USOgoKYXNzaWdubWVudBgBIAEoCzImLmNvZGV3aXJlLmludGVybmFsLnYxLkVncmVzc0Fzc2lnbm1lbnQizwEKEEVncmVzc0Fzc2lnbm1lbnQSOgoHdW5ib3VuZBgBIAEoCzInLmNvZGV3aXJlLmludGVybmFsLnYxLlVuYm91bmRBc3NpZ25tZW50SAASNgoFYm91bmQYAiABKAsyJS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Cb3VuZEFzc2lnbm1lbnRIABI8Cg9wbGF0Zm9ybV9hbGxvd3MYAyADKAsyIy5jb2Rld2lyZS5pbnRlcm5hbC52MS5QbGF0Zm9ybUFsbG93QgkKB2JpbmRpbmciEwoRVW5ib3VuZEFzc2lnbm1lbnQigwEKD0JvdW5kQXNzaWdubWVudBIWCg5lbnZpcm9ubWVudF9pZBgBIAEoCRIcChRvcGVyYXRpb25fZ2VuZXJhdGlvbhgCIAEoAxI6CgZwb2xpY3kYAyABKAsyKi5jb2Rld2lyZS5pbnRlcm5hbC52MS5FZ3Jlc3NQb2xpY3lSZXZpc2lvbiJdChRFZ3Jlc3NQb2xpY3lSZXZpc2lvbhIRCglyZWZlcmVuY2UYASABKAkSEAoIcmV2aXNpb24YAiABKA0SEAoIZG9jdW1lbnQYAyABKAwSDgoGZGlnZXN0GAQgASgMIisKDVBsYXRmb3JtQWxsb3cSDAoEaG9zdBgBIAEoCRIMCgRwb3J0GAIgASgNIqwBChhSZXBvcnRFbmZvcmNlbWVudFJlcXVlc3QSDwoHcG9kX3VpZBgBIAEoCRIQCghwb2RfbmFtZRgCIAEoCRI7CgVzdGF0ZRgDIAEoDjIsLmNvZGV3aXJlLmludGVybmFsLnYxLkVncmVzc0VuZm9yY2VtZW50U3RhdGUSEAoIcmV2aXNpb24YBCABKA0SDgoGZGlnZXN0GAUgASgMEg4KBmRldGFpbBgGIAEoCSIbChlSZXBvcnRFbmZvcmNlbWVudFJlc3BvbnNlIm4KFFJlcG9ydFJlY29yZHNSZXF1ZXN0Eg8KB3BvZF91aWQYASABKAkSEAoIcG9kX25hbWUYAiABKAkSMwoHcmVjb3JkcxgDIAMoCzIiLmNvZGV3aXJlLmludGVybmFsLnYxLkVncmVzc1JlY29yZCIXChVSZXBvcnRSZWNvcmRzUmVzcG9uc2UivwIKDEVncmVzc1JlY29yZBIOCgRuYW1lGAEgASgJSAASFgoMYWRkcmVzc19vbmx5GAIgASgJSAASDwoHYWRkcmVzcxgDIAEoCRI4Cgl0cmFuc3BvcnQYBCABKA4yJS5jb2Rld2lyZS5pbnRlcm5hbC52MS5FZ3Jlc3NUcmFuc3BvcnQSDAoEcG9ydBgFIAEoDRIPCgdyZWZ1c2FsGAYgASgJEhgKEHBvbGljeV9yZWZlcmVuY2UYByABKAkSFwoPcG9saWN5X3JldmlzaW9uGAggASgNEhUKDXBvbGljeV9kaWdlc3QYCSABKAwSGgoSZmlyc3Rfc2Vlbl91bml4X21zGAogASgEEhkKEWxhc3Rfc2Vlbl91bml4X21zGAsgASgEEg0KBWNvdW50GAwgASgEQg0KC2Rlc3RpbmF0aW9uKsABChZFZ3Jlc3NFbmZvcmNlbWVudFN0YXRlEigKJEVHUkVTU19FTkZPUkNFTUVOVF9TVEFURV9VTlNQRUNJRklFRBAAEiUKIUVHUkVTU19FTkZPUkNFTUVOVF9TVEFURV9FTkZPUkNFRBABEioKJkVHUkVTU19FTkZPUkNFTUVOVF9TVEFURV9GQUlMRURfQ0xPU0VEEAISKQolRUdSRVNTX0VORk9SQ0VNRU5UX1NUQVRFX0RJU0NPTk5FQ1RFRBADKoEBCg9FZ3Jlc3NUcmFuc3BvcnQSIAocRUdSRVNTX1RSQU5TUE9SVF9VTlNQRUNJRklFRBAAEhgKFEVHUkVTU19UUkFOU1BPUlRfRE5TEAESGAoURUdSRVNTX1RSQU5TUE9SVF9UQ1AQAhIYChRFR1JFU1NfVFJBTlNQT1JUX1VEUBADMrMDCg1FZ3Jlc3NTZXJ2aWNlElAKBUFkbWl0EiIuY29kZXdpcmUuaW50ZXJuYWwudjEuQWRtaXRSZXF1ZXN0GiMuY29kZXdpcmUuaW50ZXJuYWwudjEuQWRtaXRSZXNwb25zZRJwCg9XYXRjaEFzc2lnbm1lbnQSLC5jb2Rld2lyZS5pbnRlcm5hbC52MS5XYXRjaEFzc2lnbm1lbnRSZXF1ZXN0Gi0uY29kZXdpcmUuaW50ZXJuYWwudjEuV2F0Y2hBc3NpZ25tZW50UmVzcG9uc2UwARJ0ChFSZXBvcnRFbmZvcmNlbWVudBIuLmNvZGV3aXJlLmludGVybmFsLnYxLlJlcG9ydEVuZm9yY2VtZW50UmVxdWVzdBovLmNvZGV3aXJlLmludGVybmFsLnYxLlJlcG9ydEVuZm9yY2VtZW50UmVzcG9uc2USaAoNUmVwb3J0UmVjb3JkcxIqLmNvZGV3aXJlLmludGVybmFsLnYxLlJlcG9ydFJlY29yZHNSZXF1ZXN0GisuY29kZXdpcmUuaW50ZXJuYWwudjEuUmVwb3J0UmVjb3Jkc1Jlc3BvbnNlQuUBChhjb20uY29kZXdpcmUuaW50ZXJuYWwudjFCC0VncmVzc1Byb3RvUAFaSmdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS9pbnRlcm5hbC92MTtpbnRlcm5hbHYxogIDQ0lYqgIUQ29kZXdpcmUuSW50ZXJuYWwuVjHKAhRDb2Rld2lyZVxJbnRlcm5hbFxWMeICIENvZGV3aXJlXEludGVybmFsXFYxXEdQQk1ldGFkYXRh6gIWQ29kZXdpcmU6OkludGVybmFsOjpWMWIGcHJvdG8z");
+  fileDesc("CiFjb2Rld2lyZS9pbnRlcm5hbC92MS9lZ3Jlc3MucHJvdG8SFGNvZGV3aXJlLmludGVybmFsLnYxIjQKDEFkbWl0UmVxdWVzdBITCgtndWVzdF90b2tlbhgBIAEoCRIPCgdwZWVyX2lwGAIgASgJIm4KDUFkbWl0UmVzcG9uc2USDwoHcG9kX3VpZBgBIAEoCRI6Cgphc3NpZ25tZW50GAIgASgLMiYuY29kZXdpcmUuaW50ZXJuYWwudjEuRWdyZXNzQXNzaWdubWVudBIQCghwb2RfbmFtZRgDIAEoCSI7ChZXYXRjaEFzc2lnbm1lbnRSZXF1ZXN0Eg8KB3BvZF91aWQYASABKAkSEAoIcG9kX25hbWUYAiABKAkiVQoXV2F0Y2hBc3NpZ25tZW50UmVzcG9uc2USOgoKYXNzaWdubWVudBgBIAEoCzImLmNvZGV3aXJlLmludGVybmFsLnYxLkVncmVzc0Fzc2lnbm1lbnQizwEKEEVncmVzc0Fzc2lnbm1lbnQSOgoHdW5ib3VuZBgBIAEoCzInLmNvZGV3aXJlLmludGVybmFsLnYxLlVuYm91bmRBc3NpZ25tZW50SAASNgoFYm91bmQYAiABKAsyJS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Cb3VuZEFzc2lnbm1lbnRIABI8Cg9wbGF0Zm9ybV9hbGxvd3MYAyADKAsyIy5jb2Rld2lyZS5pbnRlcm5hbC52MS5QbGF0Zm9ybUFsbG93QgkKB2JpbmRpbmciEwoRVW5ib3VuZEFzc2lnbm1lbnQigwEKD0JvdW5kQXNzaWdubWVudBIWCg5lbnZpcm9ubWVudF9pZBgBIAEoCRIcChRvcGVyYXRpb25fZ2VuZXJhdGlvbhgCIAEoAxI6CgZwb2xpY3kYAyABKAsyKi5jb2Rld2lyZS5pbnRlcm5hbC52MS5FZ3Jlc3NQb2xpY3lSZXZpc2lvbiJdChRFZ3Jlc3NQb2xpY3lSZXZpc2lvbhIRCglyZWZlcmVuY2UYASABKAkSEAoIcmV2aXNpb24YAiABKA0SEAoIZG9jdW1lbnQYAyABKAwSDgoGZGlnZXN0GAQgASgMIisKDVBsYXRmb3JtQWxsb3cSDAoEaG9zdBgBIAEoCRIMCgRwb3J0GAIgASgNIqwBChhSZXBvcnRFbmZvcmNlbWVudFJlcXVlc3QSDwoHcG9kX3VpZBgBIAEoCRIQCghwb2RfbmFtZRgCIAEoCRI7CgVzdGF0ZRgDIAEoDjIsLmNvZGV3aXJlLmludGVybmFsLnYxLkVncmVzc0VuZm9yY2VtZW50U3RhdGUSEAoIcmV2aXNpb24YBCABKA0SDgoGZGlnZXN0GAUgASgMEg4KBmRldGFpbBgGIAEoCSIbChlSZXBvcnRFbmZvcmNlbWVudFJlc3BvbnNlIm4KFFJlcG9ydFJlY29yZHNSZXF1ZXN0Eg8KB3BvZF91aWQYASABKAkSEAoIcG9kX25hbWUYAiABKAkSMwoHcmVjb3JkcxgDIAMoCzIiLmNvZGV3aXJlLmludGVybmFsLnYxLkVncmVzc1JlY29yZCIXChVSZXBvcnRSZWNvcmRzUmVzcG9uc2UivwIKDEVncmVzc1JlY29yZBIOCgRuYW1lGAEgASgJSAASFgoMYWRkcmVzc19vbmx5GAIgASgJSAASDwoHYWRkcmVzcxgDIAEoCRI4Cgl0cmFuc3BvcnQYBCABKA4yJS5jb2Rld2lyZS5pbnRlcm5hbC52MS5FZ3Jlc3NUcmFuc3BvcnQSDAoEcG9ydBgFIAEoDRIPCgdyZWZ1c2FsGAYgASgJEhgKEHBvbGljeV9yZWZlcmVuY2UYByABKAkSFwoPcG9saWN5X3JldmlzaW9uGAggASgNEhUKDXBvbGljeV9kaWdlc3QYCSABKAwSGgoSZmlyc3Rfc2Vlbl91bml4X21zGAogASgEEhkKEWxhc3Rfc2Vlbl91bml4X21zGAsgASgEEg0KBWNvdW50GAwgASgEQg0KC2Rlc3RpbmF0aW9uInAKF0Zyb250RG9vclNlc3Npb25SZXF1ZXN0EjoKBG9wZW4YASABKAsyKi5jb2Rld2lyZS5pbnRlcm5hbC52MS5Gcm9udERvb3JTZXNzaW9uT3BlbkgAEhAKBmJyaWRnZRgCIAEoDEgAQgcKBWZyYW1lIjkKFEZyb250RG9vclNlc3Npb25PcGVuEhAKCHBvZF9uYW1lGAEgASgJEg8KB3BvZF91aWQYAiABKAkieQoYRnJvbnREb29yU2Vzc2lvblJlc3BvbnNlEkIKCGF0dGFjaGVkGAEgASgLMi4uY29kZXdpcmUuaW50ZXJuYWwudjEuRnJvbnREb29yU2Vzc2lvbkF0dGFjaGVkSAASEAoGYnJpZGdlGAIgASgMSABCBwoFZnJhbWUiGgoYRnJvbnREb29yU2Vzc2lvbkF0dGFjaGVkKsABChZFZ3Jlc3NFbmZvcmNlbWVudFN0YXRlEigKJEVHUkVTU19FTkZPUkNFTUVOVF9TVEFURV9VTlNQRUNJRklFRBAAEiUKIUVHUkVTU19FTkZPUkNFTUVOVF9TVEFURV9FTkZPUkNFRBABEioKJkVHUkVTU19FTkZPUkNFTUVOVF9TVEFURV9GQUlMRURfQ0xPU0VEEAISKQolRUdSRVNTX0VORk9SQ0VNRU5UX1NUQVRFX0RJU0NPTk5FQ1RFRBADKoEBCg9FZ3Jlc3NUcmFuc3BvcnQSIAocRUdSRVNTX1RSQU5TUE9SVF9VTlNQRUNJRklFRBAAEhgKFEVHUkVTU19UUkFOU1BPUlRfRE5TEAESGAoURUdSRVNTX1RSQU5TUE9SVF9UQ1AQAhIYChRFR1JFU1NfVFJBTlNQT1JUX1VEUBADMqoECg1FZ3Jlc3NTZXJ2aWNlElAKBUFkbWl0EiIuY29kZXdpcmUuaW50ZXJuYWwudjEuQWRtaXRSZXF1ZXN0GiMuY29kZXdpcmUuaW50ZXJuYWwudjEuQWRtaXRSZXNwb25zZRJwCg9XYXRjaEFzc2lnbm1lbnQSLC5jb2Rld2lyZS5pbnRlcm5hbC52MS5XYXRjaEFzc2lnbm1lbnRSZXF1ZXN0Gi0uY29kZXdpcmUuaW50ZXJuYWwudjEuV2F0Y2hBc3NpZ25tZW50UmVzcG9uc2UwARJ0ChFSZXBvcnRFbmZvcmNlbWVudBIuLmNvZGV3aXJlLmludGVybmFsLnYxLlJlcG9ydEVuZm9yY2VtZW50UmVxdWVzdBovLmNvZGV3aXJlLmludGVybmFsLnYxLlJlcG9ydEVuZm9yY2VtZW50UmVzcG9uc2USaAoNUmVwb3J0UmVjb3JkcxIqLmNvZGV3aXJlLmludGVybmFsLnYxLlJlcG9ydFJlY29yZHNSZXF1ZXN0GisuY29kZXdpcmUuaW50ZXJuYWwudjEuUmVwb3J0UmVjb3Jkc1Jlc3BvbnNlEnUKEEZyb250RG9vclNlc3Npb24SLS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Gcm9udERvb3JTZXNzaW9uUmVxdWVzdBouLmNvZGV3aXJlLmludGVybmFsLnYxLkZyb250RG9vclNlc3Npb25SZXNwb25zZSgBMAFC5QEKGGNvbS5jb2Rld2lyZS5pbnRlcm5hbC52MUILRWdyZXNzUHJvdG9QAVpKZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL2ludGVybmFsL3YxO2ludGVybmFsdjGiAgNDSViqAhRDb2Rld2lyZS5JbnRlcm5hbC5WMcoCFENvZGV3aXJlXEludGVybmFsXFYx4gIgQ29kZXdpcmVcSW50ZXJuYWxcVjFcR1BCTWV0YWRhdGHqAhZDb2Rld2lyZTo6SW50ZXJuYWw6OlYxYgZwcm90bzM");
 
 /**
  * @generated from message codewire.internal.v1.AdmitRequest
@@ -446,6 +446,110 @@ export const EgressRecordSchema: GenMessage<EgressRecord> = /*@__PURE__*/
   messageDesc(file_codewire_internal_v1_egress, 13);
 
 /**
+ * @generated from message codewire.internal.v1.FrontDoorSessionRequest
+ */
+export type FrontDoorSessionRequest = Message<"codewire.internal.v1.FrontDoorSessionRequest"> & {
+  /**
+   * @generated from oneof codewire.internal.v1.FrontDoorSessionRequest.frame
+   */
+  frame: {
+    /**
+     * The first frame, exactly once.
+     *
+     * @generated from field: codewire.internal.v1.FrontDoorSessionOpen open = 1;
+     */
+    value: FrontDoorSessionOpen;
+    case: "open";
+  } | {
+    /**
+     * One length-delimited front-door.v1 credential bridge frame.
+     *
+     * @generated from field: bytes bridge = 2;
+     */
+    value: Uint8Array;
+    case: "bridge";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message codewire.internal.v1.FrontDoorSessionRequest.
+ * Use `create(FrontDoorSessionRequestSchema)` to create a new message.
+ */
+export const FrontDoorSessionRequestSchema: GenMessage<FrontDoorSessionRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_egress, 14);
+
+/**
+ * @generated from message codewire.internal.v1.FrontDoorSessionOpen
+ */
+export type FrontDoorSessionOpen = Message<"codewire.internal.v1.FrontDoorSessionOpen"> & {
+  /**
+   * As the other methods: orchestration reads the Pod by name and refuses it
+   * unless the UID matches and it is on the caller's node.
+   *
+   * @generated from field: string pod_name = 1;
+   */
+  podName: string;
+
+  /**
+   * @generated from field: string pod_uid = 2;
+   */
+  podUid: string;
+};
+
+/**
+ * Describes the message codewire.internal.v1.FrontDoorSessionOpen.
+ * Use `create(FrontDoorSessionOpenSchema)` to create a new message.
+ */
+export const FrontDoorSessionOpenSchema: GenMessage<FrontDoorSessionOpen> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_egress, 15);
+
+/**
+ * @generated from message codewire.internal.v1.FrontDoorSessionResponse
+ */
+export type FrontDoorSessionResponse = Message<"codewire.internal.v1.FrontDoorSessionResponse"> & {
+  /**
+   * @generated from oneof codewire.internal.v1.FrontDoorSessionResponse.frame
+   */
+  frame: {
+    /**
+     * The session joined the environment's current epoch.
+     *
+     * @generated from field: codewire.internal.v1.FrontDoorSessionAttached attached = 1;
+     */
+    value: FrontDoorSessionAttached;
+    case: "attached";
+  } | {
+    /**
+     * One length-delimited front-door.v1 credential bridge frame.
+     *
+     * @generated from field: bytes bridge = 2;
+     */
+    value: Uint8Array;
+    case: "bridge";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message codewire.internal.v1.FrontDoorSessionResponse.
+ * Use `create(FrontDoorSessionResponseSchema)` to create a new message.
+ */
+export const FrontDoorSessionResponseSchema: GenMessage<FrontDoorSessionResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_egress, 16);
+
+/**
+ * @generated from message codewire.internal.v1.FrontDoorSessionAttached
+ */
+export type FrontDoorSessionAttached = Message<"codewire.internal.v1.FrontDoorSessionAttached"> & {
+};
+
+/**
+ * Describes the message codewire.internal.v1.FrontDoorSessionAttached.
+ * Use `create(FrontDoorSessionAttachedSchema)` to create a new message.
+ */
+export const FrontDoorSessionAttachedSchema: GenMessage<FrontDoorSessionAttached> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_egress, 17);
+
+/**
  * @generated from enum codewire.internal.v1.EgressEnforcementState
  */
 export enum EgressEnforcementState {
@@ -586,6 +690,30 @@ export const EgressService: GenService<{
     methodKind: "unary";
     input: typeof ReportRecordsRequestSchema;
     output: typeof ReportRecordsResponseSchema;
+  },
+  /**
+   * The TLS front door's credential session for one admitted Pod on the
+   * caller's node (#4001). The stream carries the credential bridge's
+   * front-door.v1 frames unchanged; orchestration never parses them.
+   * Orchestration takes the environment from the Pod's live workspace binding,
+   * never from a request field, and attaches the session to that
+   * environment's current credential relay epoch. The credential broker
+   * serves it as its front-door entry, with the epoch's leases and refresh.
+   * The session ends with its epoch, and cw-egress opens it again for the
+   * next one. A Pod has at most one session per epoch.
+   *
+   * Refusals: PERMISSION_DENIED, with no detail, for a Pod that is not on the
+   * caller's node, is not admitted, has no live binding, or whose UID or
+   * binding generation differs from the epoch's; FAILED_PRECONDITION for a
+   * frame before open or a second open; ALREADY_EXISTS for a second session
+   * in the epoch; UNAVAILABLE while no epoch runs, and cw-egress retries.
+   *
+   * @generated from rpc codewire.internal.v1.EgressService.FrontDoorSession
+   */
+  frontDoorSession: {
+    methodKind: "bidi_streaming";
+    input: typeof FrontDoorSessionRequestSchema;
+    output: typeof FrontDoorSessionResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_codewire_internal_v1_egress, 0);

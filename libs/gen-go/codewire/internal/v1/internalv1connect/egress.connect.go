@@ -44,6 +44,9 @@ const (
 	// EgressServiceReportRecordsProcedure is the fully-qualified name of the EgressService's
 	// ReportRecords RPC.
 	EgressServiceReportRecordsProcedure = "/codewire.internal.v1.EgressService/ReportRecords"
+	// EgressServiceFrontDoorSessionProcedure is the fully-qualified name of the EgressService's
+	// FrontDoorSession RPC.
+	EgressServiceFrontDoorSessionProcedure = "/codewire.internal.v1.EgressService/FrontDoorSession"
 )
 
 // EgressServiceClient is a client for the codewire.internal.v1.EgressService service.
@@ -69,6 +72,22 @@ type EgressServiceClient interface {
 	// orchestration serves back to the guest goes through the same
 	// protected-reason projection as local (record::guest_records).
 	ReportRecords(context.Context, *connect.Request[v1.ReportRecordsRequest]) (*connect.Response[v1.ReportRecordsResponse], error)
+	// The TLS front door's credential session for one admitted Pod on the
+	// caller's node (#4001). The stream carries the credential bridge's
+	// front-door.v1 frames unchanged; orchestration never parses them.
+	// Orchestration takes the environment from the Pod's live workspace binding,
+	// never from a request field, and attaches the session to that
+	// environment's current credential relay epoch. The credential broker
+	// serves it as its front-door entry, with the epoch's leases and refresh.
+	// The session ends with its epoch, and cw-egress opens it again for the
+	// next one. A Pod has at most one session per epoch.
+	//
+	// Refusals: PERMISSION_DENIED, with no detail, for a Pod that is not on the
+	// caller's node, is not admitted, has no live binding, or whose UID or
+	// binding generation differs from the epoch's; FAILED_PRECONDITION for a
+	// frame before open or a second open; ALREADY_EXISTS for a second session
+	// in the epoch; UNAVAILABLE while no epoch runs, and cw-egress retries.
+	FrontDoorSession(context.Context) *connect.BidiStreamForClient[v1.FrontDoorSessionRequest, v1.FrontDoorSessionResponse]
 }
 
 // NewEgressServiceClient constructs a client for the codewire.internal.v1.EgressService service. By
@@ -106,6 +125,12 @@ func NewEgressServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(egressServiceMethods.ByName("ReportRecords")),
 			connect.WithClientOptions(opts...),
 		),
+		frontDoorSession: connect.NewClient[v1.FrontDoorSessionRequest, v1.FrontDoorSessionResponse](
+			httpClient,
+			baseURL+EgressServiceFrontDoorSessionProcedure,
+			connect.WithSchema(egressServiceMethods.ByName("FrontDoorSession")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -115,6 +140,7 @@ type egressServiceClient struct {
 	watchAssignment   *connect.Client[v1.WatchAssignmentRequest, v1.WatchAssignmentResponse]
 	reportEnforcement *connect.Client[v1.ReportEnforcementRequest, v1.ReportEnforcementResponse]
 	reportRecords     *connect.Client[v1.ReportRecordsRequest, v1.ReportRecordsResponse]
+	frontDoorSession  *connect.Client[v1.FrontDoorSessionRequest, v1.FrontDoorSessionResponse]
 }
 
 // Admit calls codewire.internal.v1.EgressService.Admit.
@@ -135,6 +161,11 @@ func (c *egressServiceClient) ReportEnforcement(ctx context.Context, req *connec
 // ReportRecords calls codewire.internal.v1.EgressService.ReportRecords.
 func (c *egressServiceClient) ReportRecords(ctx context.Context, req *connect.Request[v1.ReportRecordsRequest]) (*connect.Response[v1.ReportRecordsResponse], error) {
 	return c.reportRecords.CallUnary(ctx, req)
+}
+
+// FrontDoorSession calls codewire.internal.v1.EgressService.FrontDoorSession.
+func (c *egressServiceClient) FrontDoorSession(ctx context.Context) *connect.BidiStreamForClient[v1.FrontDoorSessionRequest, v1.FrontDoorSessionResponse] {
+	return c.frontDoorSession.CallBidiStream(ctx)
 }
 
 // EgressServiceHandler is an implementation of the codewire.internal.v1.EgressService service.
@@ -160,6 +191,22 @@ type EgressServiceHandler interface {
 	// orchestration serves back to the guest goes through the same
 	// protected-reason projection as local (record::guest_records).
 	ReportRecords(context.Context, *connect.Request[v1.ReportRecordsRequest]) (*connect.Response[v1.ReportRecordsResponse], error)
+	// The TLS front door's credential session for one admitted Pod on the
+	// caller's node (#4001). The stream carries the credential bridge's
+	// front-door.v1 frames unchanged; orchestration never parses them.
+	// Orchestration takes the environment from the Pod's live workspace binding,
+	// never from a request field, and attaches the session to that
+	// environment's current credential relay epoch. The credential broker
+	// serves it as its front-door entry, with the epoch's leases and refresh.
+	// The session ends with its epoch, and cw-egress opens it again for the
+	// next one. A Pod has at most one session per epoch.
+	//
+	// Refusals: PERMISSION_DENIED, with no detail, for a Pod that is not on the
+	// caller's node, is not admitted, has no live binding, or whose UID or
+	// binding generation differs from the epoch's; FAILED_PRECONDITION for a
+	// frame before open or a second open; ALREADY_EXISTS for a second session
+	// in the epoch; UNAVAILABLE while no epoch runs, and cw-egress retries.
+	FrontDoorSession(context.Context, *connect.BidiStream[v1.FrontDoorSessionRequest, v1.FrontDoorSessionResponse]) error
 }
 
 // NewEgressServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -193,6 +240,12 @@ func NewEgressServiceHandler(svc EgressServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(egressServiceMethods.ByName("ReportRecords")),
 		connect.WithHandlerOptions(opts...),
 	)
+	egressServiceFrontDoorSessionHandler := connect.NewBidiStreamHandler(
+		EgressServiceFrontDoorSessionProcedure,
+		svc.FrontDoorSession,
+		connect.WithSchema(egressServiceMethods.ByName("FrontDoorSession")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.internal.v1.EgressService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case EgressServiceAdmitProcedure:
@@ -203,6 +256,8 @@ func NewEgressServiceHandler(svc EgressServiceHandler, opts ...connect.HandlerOp
 			egressServiceReportEnforcementHandler.ServeHTTP(w, r)
 		case EgressServiceReportRecordsProcedure:
 			egressServiceReportRecordsHandler.ServeHTTP(w, r)
+		case EgressServiceFrontDoorSessionProcedure:
+			egressServiceFrontDoorSessionHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -226,4 +281,8 @@ func (UnimplementedEgressServiceHandler) ReportEnforcement(context.Context, *con
 
 func (UnimplementedEgressServiceHandler) ReportRecords(context.Context, *connect.Request[v1.ReportRecordsRequest]) (*connect.Response[v1.ReportRecordsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.EgressService.ReportRecords is not implemented"))
+}
+
+func (UnimplementedEgressServiceHandler) FrontDoorSession(context.Context, *connect.BidiStream[v1.FrontDoorSessionRequest, v1.FrontDoorSessionResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.EgressService.FrontDoorSession is not implemented"))
 }

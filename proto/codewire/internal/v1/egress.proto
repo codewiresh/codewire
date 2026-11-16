@@ -41,6 +41,23 @@ service EgressService {
   // orchestration serves back to the guest goes through the same
   // protected-reason projection as local (record::guest_records).
   rpc ReportRecords(ReportRecordsRequest) returns (ReportRecordsResponse);
+
+  // The TLS front door's credential session for one admitted Pod on the
+  // caller's node (#4001). The stream carries the credential bridge's
+  // front-door.v1 frames unchanged; orchestration never parses them.
+  // Orchestration takes the environment from the Pod's live workspace binding,
+  // never from a request field, and attaches the session to that
+  // environment's current credential relay epoch. The credential broker
+  // serves it as its front-door entry, with the epoch's leases and refresh.
+  // The session ends with its epoch, and cw-egress opens it again for the
+  // next one. A Pod has at most one session per epoch.
+  //
+  // Refusals: PERMISSION_DENIED, with no detail, for a Pod that is not on the
+  // caller's node, is not admitted, has no live binding, or whose UID or
+  // binding generation differs from the epoch's; FAILED_PRECONDITION for a
+  // frame before open or a second open; ALREADY_EXISTS for a second session
+  // in the epoch; UNAVAILABLE while no epoch runs, and cw-egress retries.
+  rpc FrontDoorSession(stream FrontDoorSessionRequest) returns (stream FrontDoorSessionResponse);
 }
 
 message AdmitRequest {
@@ -172,3 +189,30 @@ enum EgressTransport {
   EGRESS_TRANSPORT_TCP = 2;
   EGRESS_TRANSPORT_UDP = 3;
 }
+
+message FrontDoorSessionRequest {
+  oneof frame {
+    // The first frame, exactly once.
+    FrontDoorSessionOpen open = 1;
+    // One length-delimited front-door.v1 credential bridge frame.
+    bytes bridge = 2;
+  }
+}
+
+message FrontDoorSessionOpen {
+  // As the other methods: orchestration reads the Pod by name and refuses it
+  // unless the UID matches and it is on the caller's node.
+  string pod_name = 1;
+  string pod_uid = 2;
+}
+
+message FrontDoorSessionResponse {
+  oneof frame {
+    // The session joined the environment's current epoch.
+    FrontDoorSessionAttached attached = 1;
+    // One length-delimited front-door.v1 credential bridge frame.
+    bytes bridge = 2;
+  }
+}
+
+message FrontDoorSessionAttached {}
