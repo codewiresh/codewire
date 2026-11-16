@@ -96,6 +96,9 @@ struct PollRequest<'a> {
     user_code: &'a str,
 }
 
+/// A Codex device login the user approved, not yet exchanged.
+pub struct ApprovedCodexDeviceLogin(ApprovedCode);
+
 #[derive(Deserialize)]
 struct ApprovedCode {
     authorization_code: Secret,
@@ -159,9 +162,29 @@ impl CodexDeviceLogin {
         &self,
         pending: PendingCodexDeviceLogin,
     ) -> Result<CodexOAuthImport, DeviceLoginError> {
-        let approved =
-            poll_until_done(pending.interval, pending.deadline, || self.poll(&pending)).await?;
-        let tokens = self.exchange(approved).await?;
+        let approved = self.approve(pending).await?;
+        self.finish(approved).await
+    }
+
+    /// Wait for the user's approval. Nothing is issued yet, so dropping the
+    /// future abandons the login safely.
+    pub async fn approve(
+        &self,
+        pending: PendingCodexDeviceLogin,
+    ) -> Result<ApprovedCodexDeviceLogin, DeviceLoginError> {
+        poll_until_done(pending.interval, pending.deadline, || self.poll(&pending))
+            .await
+            .map(ApprovedCodexDeviceLogin)
+    }
+
+    /// Exchange the approved code and return the canonical Codex import. Once
+    /// the exchange is sent OpenAI may issue the sign-in, so a caller that
+    /// cancels runs this to its end and revokes what it returns (#4904).
+    pub async fn finish(
+        &self,
+        approved: ApprovedCodexDeviceLogin,
+    ) -> Result<CodexOAuthImport, DeviceLoginError> {
+        let tokens = self.exchange(approved.0).await?;
         import_codex_tokens(
             tokens.id_token.into_inner(),
             tokens.access_token.into_inner(),

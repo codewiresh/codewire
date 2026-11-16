@@ -268,16 +268,30 @@ impl ConnectStore for LocalConnectStore<'_> {
             }
             CredentialConnectProviderArg::Github => {
                 let mut import =
-                    super::provider_login::github_device_login(sign_in, interrupt).await?;
+                    match super::provider_login::github_device_login(sign_in, interrupt).await {
+                        Ok(import) => import,
+                        Err(error) => {
+                            return Err(
+                                match error.downcast::<super::provider_login::IssuedButNotSaved>() {
+                                    Ok(issued) => {
+                                        say_discarded(CredentialConnectProviderArg::Github, None);
+                                        issued.0
+                                    }
+                                    Err(error) => error,
+                                },
+                            );
+                        }
+                    };
                 let reach = import.reach().to_vec();
                 // A reconnect keeps the GitHub account its profiles already follow.
                 if let Some(expected) = target
                     .existing
                     .as_ref()
                     .and_then(|record| record.metadata.account_hint.as_deref())
+                    && expected != import.account_hint()
                 {
-                    anyhow::ensure!(
-                        expected == import.account_hint(),
+                    say_discarded(CredentialConnectProviderArg::Github, None);
+                    anyhow::bail!(
                         "the approved GitHub account {:?} is not the connected account {expected:?}; no credential was changed",
                         import.account_hint(),
                     );
@@ -296,6 +310,15 @@ impl ConnectStore for LocalConnectStore<'_> {
         }
     }
 
+    async fn discard(
+        &mut self,
+        provider: CredentialConnectProviderArg,
+        approval: LocalApproval,
+    ) -> Option<String> {
+        let revoked = revoke_unsaved(provider, Some(approval.material)).await;
+        super::credential_input::connect::discarded_sign_in(provider, revoked)
+    }
+
     async fn publish(
         &mut self,
         target: ConnectTarget<CredentialRecord>,
@@ -304,9 +327,14 @@ impl ConnectStore for LocalConnectStore<'_> {
         execution: &mut super::credential_input::CredentialExecution,
     ) -> anyhow::Result<()> {
         let label = provider_label(target.provider);
+        let connecting = target.provider;
         let provider = ProviderId::parse(provider_id(target.provider))?;
         let authentication_kind = connected_kind(&provider);
-        let record = publish_oauth_connection(
+        // A copy to revoke if the store definitely refuses the save.
+        let revocable = matches!(connecting, CredentialConnectProviderArg::Codex)
+            .then(|| ProtectedValue::from_slice(approval.material.expose_secret()).ok())
+            .flatten();
+        let saved = publish_oauth_connection(
             self.client,
             OAuthConnectionTarget {
                 provider,
@@ -317,8 +345,18 @@ impl ConnectStore for LocalConnectStore<'_> {
             approval.material,
             approval.account_hint,
         )
-        .await
-        .map_err(|status| local_connect_publish_error(label, &status))?;
+        .await;
+        let record = match saved {
+            Ok(record) => record,
+            Err(status) => {
+                // A refusal saved nothing, so the approved sign-in is
+                // discarded as a cancel's is; an uncertain save may hold it.
+                if definitely_not_saved(&status) {
+                    say_discarded(connecting, revoke_unsaved(connecting, revocable).await);
+                }
+                return Err(local_connect_publish_error(label, &status));
+            }
+        };
         remember_local(&record, execution);
         let name = &record.metadata.display_name;
         eprint!(
@@ -496,14 +534,7 @@ fn local_connect_publish_error(provider: &str, status: &tonic::Status) -> anyhow
     use tonic::Code;
     let next = "cw credentials --local list";
     let error = match status.code() {
-        Code::Unavailable
-        | Code::DeadlineExceeded
-        | Code::Cancelled
-        | Code::Unknown
-        | Code::Internal
-        | Code::Aborted
-        | Code::DataLoss
-        | Code::Ok => anyhow::anyhow!(
+        _ if !definitely_not_saved(status) => anyhow::anyhow!(
             "the local credential store didn't confirm saving your {provider} sign-in, so it may or may not be saved; check the list before connecting again"
         ),
         Code::AlreadyExists => anyhow::anyhow!(
@@ -512,18 +543,50 @@ fn local_connect_publish_error(provider: &str, status: &tonic::Status) -> anyhow
         Code::NotFound => anyhow::anyhow!(
             "the local credential to reconnect is gone, so your {provider} sign-in wasn't saved; connect it again under a new name"
         ),
-        Code::InvalidArgument
-        | Code::FailedPrecondition
-        | Code::OutOfRange
-        | Code::Unimplemented
-        | Code::PermissionDenied
-        | Code::Unauthenticated
-        | Code::ResourceExhausted => anyhow::anyhow!(
+        _ => anyhow::anyhow!(
             "the local credential store refused your {provider} sign-in, so nothing was saved: {}",
             status.message()
         ),
     };
     crate::error_report::with_next_step(error, next)
+}
+
+/// Whether the store's answer to a save is a definite refusal. A failure
+/// after the request may have reached the store leaves the outcome unknown.
+fn definitely_not_saved(status: &tonic::Status) -> bool {
+    use tonic::Code;
+    !matches!(
+        status.code(),
+        Code::Unavailable
+            | Code::DeadlineExceeded
+            | Code::Cancelled
+            | Code::Unknown
+            | Code::Internal
+            | Code::Aborted
+            | Code::DataLoss
+            | Code::Ok
+    )
+}
+
+/// Revokes what this process can of a sign-in approved and not saved: only
+/// OpenAI takes a revocation from here. The GitHub App's secret is the
+/// platform's, and Claude has no revocation.
+async fn revoke_unsaved(
+    provider: CredentialConnectProviderArg,
+    material: Option<ProtectedValue>,
+) -> Option<codewire_credential_broker::provider_oauth::ProviderRevocation> {
+    let material = material.filter(|_| matches!(provider, CredentialConnectProviderArg::Codex))?;
+    eprintln!("Asking OpenAI to revoke the Codex sign-in you approved…");
+    Some(super::provider_login::revoke_unsaved_codex(material).await)
+}
+
+fn say_discarded(
+    provider: CredentialConnectProviderArg,
+    revoked: Option<codewire_credential_broker::provider_oauth::ProviderRevocation>,
+) {
+    if let Some(line) = super::credential_input::connect::discarded_sign_in(provider, revoked) {
+        eprintln!("{line}");
+    }
 }
 
 fn select_oauth_connection_target(

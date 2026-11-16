@@ -8,6 +8,7 @@
 use std::io::IsTerminal as _;
 
 use anyhow::Context as _;
+use codewire_credential_broker::provider_oauth::{ProviderRevocation, RevocationFailure};
 
 use super::CredentialExecution;
 use crate::commands::{
@@ -24,6 +25,51 @@ pub(in crate::commands) fn provider_id(provider: CredentialConnectProviderArg) -
         CredentialConnectProviderArg::Github => "github",
         CredentialConnectProviderArg::Claude => "anthropic",
     }
+}
+
+/// What the provider still holds of a sign-in it approved that a cancel
+/// discarded. `revoked` is OpenAI's answer when this process asked it; the
+/// provider's own error never reaches the terminal.
+/// Where a person ends every ChatGPT session (OpenAI help article 9243857).
+/// OpenAI doesn't document that it ends a Codex sign-in, so `cw` names where
+/// it is without claiming that, and without a link (cw-cli on #4908). #4908
+/// adds the same words for `cw credentials delete`; one copy moves to the
+/// other's home once both have landed.
+const CHATGPT_SIGN_OUT: &str =
+    "you can sign out of all ChatGPT devices in ChatGPT under Settings → Security";
+
+pub(in crate::commands) fn discarded_sign_in(
+    provider: CredentialConnectProviderArg,
+    revoked: Option<ProviderRevocation>,
+) -> Option<String> {
+    let line = match (provider, revoked) {
+        (CredentialConnectProviderArg::Codex, Some(ProviderRevocation::Confirmed)) => {
+            "OpenAI revoked the Codex sign-in you approved.".to_owned()
+        }
+        (CredentialConnectProviderArg::Codex, Some(ProviderRevocation::Failed(failure))) => {
+            // The reason in words; the status code only in parentheses
+            // (cw-cli on #4908).
+            let reason = match failure {
+                RevocationFailure::Refused(status) => {
+                    format!("OpenAI refused the request (HTTP {status})")
+                }
+                RevocationFailure::Unreadable => "the sign-in couldn't be read".to_owned(),
+                // Unavailable; a Codex revocation never answers Expired.
+                _ => "OpenAI couldn't be reached".to_owned(),
+            };
+            format!(
+                "OpenAI didn't confirm revoking the Codex sign-in you approved: {reason}. It may stay valid until it expires; {CHATGPT_SIGN_OUT}."
+            )
+        }
+        (CredentialConnectProviderArg::Codex, None) => return None,
+        (CredentialConnectProviderArg::Github, _) => {
+            "GitHub keeps the sign-in you approved until you revoke Codewire at https://github.com/settings/apps/authorizations.".to_owned()
+        }
+        (CredentialConnectProviderArg::Claude, _) => {
+            "The Claude sign-in you approved expires on its own; you can remove it sooner in your Claude account settings.".to_owned()
+        }
+    };
+    Some(line)
 }
 
 /// The provider's name in messages.
@@ -86,6 +132,15 @@ pub(in crate::commands) trait ConnectStore {
         target: &ConnectTarget<Self::Record>,
         interrupt: &mut Interrupt,
     ) -> anyhow::Result<Self::Approval>;
+
+    /// A cancel came after the provider approved: revoke what it approved
+    /// where this store can, and say what the provider still holds (#4904;
+    /// cw-security on #4717). Nothing is saved.
+    async fn discard(
+        &mut self,
+        provider: CredentialConnectProviderArg,
+        approval: Self::Approval,
+    ) -> Option<String>;
 
     /// Save the approved credential and print the result.
     async fn publish(
@@ -153,8 +208,14 @@ async fn connect_with<S: ConnectStore>(
     let mut interrupt = Interrupt::default();
     let approval = store.approve(&target, &mut interrupt).await?;
     // A Ctrl-C while the provider answered, or since, is a cancellation
-    // (cw-security on #4798): nothing is saved after it.
-    anyhow::ensure!(!interrupt.was_pressed(), CANCELED);
+    // (cw-security on #4798): nothing is saved after it, and what the
+    // provider approved does not stay live where Codewire can revoke it.
+    if interrupt.was_pressed() {
+        if let Some(line) = store.discard(provider, approval).await {
+            eprintln!("{line}");
+        }
+        anyhow::bail!(CANCELED);
+    }
     store
         .publish(target, approval, &mut interrupt, execution)
         .await
@@ -251,7 +312,10 @@ impl Interrupt {
 }
 
 /// A sticky Ctrl-C flag. Without a usable signal handler Ctrl-C keeps its
-/// default behaviour and this never reads pressed.
+/// default behaviour and this never reads pressed. A second press ends the
+/// process as Ctrl-C would, so a person never waits on a step after the
+/// first one. Ctrl-C arrives as a signal only while the terminal is in its
+/// normal mode, so that exit has no terminal mode to restore.
 struct CtrlC {
     pressed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     woken: std::sync::Arc<tokio::sync::Notify>,
@@ -268,6 +332,9 @@ impl CtrlC {
                 if tokio::signal::ctrl_c().await.is_ok() {
                     pressed.store(true, std::sync::atomic::Ordering::SeqCst);
                     woken.notify_waiters();
+                    if tokio::signal::ctrl_c().await.is_ok() {
+                        std::process::exit(130);
+                    }
                 }
             }
         })

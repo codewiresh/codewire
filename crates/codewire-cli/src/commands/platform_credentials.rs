@@ -517,6 +517,16 @@ impl ConnectStore for CloudConnectStore<'_> {
         })
     }
 
+    /// Nothing was issued here: the service runs Codex and GitHub, and
+    /// revokes a sign-in it didn't store; a pasted Claude code is not yet
+    /// exchanged.
+    async fn discard(
+        &mut self,
+        _: CredentialConnectProviderArg,
+        _: CloudApproval,
+    ) -> Option<String> {
+        None
+    }
     async fn publish(
         &mut self,
         target: ConnectTarget<rpc::Credential>,

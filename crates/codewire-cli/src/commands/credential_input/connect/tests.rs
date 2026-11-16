@@ -8,6 +8,7 @@ struct Fake {
     records: Vec<FakeRecord>,
     press_ctrl_c_while_approving: bool,
     approvals: usize,
+    discarded: usize,
     published: Vec<Option<String>>,
 }
 
@@ -83,6 +84,11 @@ impl ConnectStore for Fake {
             press(interrupt);
         }
         Ok(())
+    }
+
+    async fn discard(&mut self, _: CredentialConnectProviderArg, (): ()) -> Option<String> {
+        self.discarded += 1;
+        None
     }
 
     async fn publish(
@@ -255,8 +261,38 @@ async fn a_ctrl_c_after_the_provider_answers_saves_nothing() {
         .unwrap_err();
         assert_eq!(error.to_string(), "canceled; no credential was changed");
         assert_eq!(store.approvals, 1);
+        // What the provider approved is discarded, never saved (#4904).
+        assert_eq!(store.discarded, 1);
         assert!(store.published.is_empty());
     }
+}
+
+#[test]
+fn a_discarded_sign_in_says_what_its_provider_still_holds() {
+    use CredentialConnectProviderArg::{Claude, Codex, Github};
+    assert_eq!(
+        discarded_sign_in(Codex, Some(ProviderRevocation::Confirmed)).unwrap(),
+        "OpenAI revoked the Codex sign-in you approved."
+    );
+    assert_eq!(
+        discarded_sign_in(
+            Codex,
+            Some(ProviderRevocation::Failed(RevocationFailure::Refused(400)))
+        )
+        .unwrap(),
+        "OpenAI didn't confirm revoking the Codex sign-in you approved: OpenAI refused the request (HTTP 400). It may stay valid until it expires; you can sign out of all ChatGPT devices in ChatGPT under Settings → Security."
+    );
+    assert!(discarded_sign_in(Codex, None).is_none());
+    assert!(
+        discarded_sign_in(Github, None)
+            .unwrap()
+            .contains("https://github.com/settings/apps/authorizations")
+    );
+    assert!(
+        discarded_sign_in(Claude, None)
+            .unwrap()
+            .contains("expires on its own")
+    );
 }
 
 #[tokio::test]

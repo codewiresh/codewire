@@ -88,6 +88,10 @@ pub struct GitHubDeviceLogin {
 
 /// A started login: the challenge to show, and the device code that only
 /// [`GitHubDeviceLogin::complete`] uses.
+/// A GitHub device login the user approved: its user token is issued, but
+/// not yet checked against the App's installation.
+pub struct ApprovedGitHubDeviceLogin(TokenResponse);
+
 pub struct PendingGitHubDeviceLogin {
     challenge: DeviceChallenge,
     device_code: Secret,
@@ -173,9 +177,28 @@ impl GitHubDeviceLogin {
         &self,
         pending: PendingGitHubDeviceLogin,
     ) -> Result<GitHubAppAuthorizationImport, DeviceLoginError> {
-        let response =
-            poll_until_done(pending.interval, pending.deadline, || self.poll(&pending)).await?;
-        import_initial_authorization(self.upstream.as_ref(), &self.config.app_slug, response)
+        let approved = self.approve(pending).await?;
+        self.finish(approved).await
+    }
+
+    /// Wait for the user's approval. GitHub issues the user token with it.
+    pub async fn approve(
+        &self,
+        pending: PendingGitHubDeviceLogin,
+    ) -> Result<ApprovedGitHubDeviceLogin, DeviceLoginError> {
+        poll_until_done(pending.interval, pending.deadline, || self.poll(&pending))
+            .await
+            .map(ApprovedGitHubDeviceLogin)
+    }
+
+    /// Verify the issued token's user and this App's installation, as the
+    /// browser authorization does. The token is already issued, so a caller
+    /// that cancels runs this to its end and says what GitHub holds (#4904).
+    pub async fn finish(
+        &self,
+        approved: ApprovedGitHubDeviceLogin,
+    ) -> Result<GitHubAppAuthorizationImport, DeviceLoginError> {
+        import_initial_authorization(self.upstream.as_ref(), &self.config.app_slug, approved.0)
             .await
             .map_err(device_error)
     }

@@ -4,7 +4,8 @@
 //! No provider CLI runs. This process speaks the provider's OAuth device flow
 //! over a pinned provider transport, and the issued tokens go straight to the
 //! local credential authority's protected store. Nothing is written to disk
-//! before that, so a cancelled or failed login leaves nothing to clean up.
+//! before that, so a cancelled or failed login leaves nothing to clean up on
+//! disk; a Codex sign-in cancelled after OpenAI approved it is revoked there.
 
 #[cfg(not(feature = "local-broker-synthetic-smoke"))]
 use std::collections::BTreeSet;
@@ -19,22 +20,86 @@ use codewire_credential_broker::SyntheticOpenAiSmokeTransport;
 use codewire_credential_broker::provider_oauth::claude::{
     CLAUDE_SIGN_IN_CODE_INVALID, CLAUDE_SIGN_IN_EXPIRED, ClaudeSignIn, ClaudeSignInError,
 };
-use codewire_credential_broker::provider_oauth::codex::CodexDeviceLogin;
+use codewire_credential_broker::provider_oauth::codex::{self, CodexDeviceLogin};
 #[cfg(test)]
 use codewire_credential_broker::provider_oauth::github::GitHubDeviceLoginConfig;
 use codewire_credential_broker::provider_oauth::github::{
     GitHubDeviceLogin, codewire_github_app, codewire_github_app_install_url,
 };
-use codewire_credential_broker::provider_oauth::{DeviceChallenge, DeviceLoginError};
+use codewire_credential_broker::provider_oauth::{
+    DeviceChallenge, DeviceLoginError, ProviderRevocation, RevocationFailure,
+};
 use codewire_credential_broker::{
     BrokerUpstreamTransport, ClaudeOAuthImport, CodexOAuthImport, GitHubAppAuthorizationImport,
 };
+use codewire_protected_store::ProtectedValue;
 
 use super::credential_input::CODEX_DEVICE_AUTHORIZATION_GUIDANCE;
 use super::credential_input::connect::Interrupt;
 use super::login_screen::SignInScreen;
 
 const CANCELLED: &str = "login cancelled; no credential was changed";
+
+/// How long a cancel waits for OpenAI to revoke the unsaved sign-in: the
+/// lookup and the request together.
+const UNSAVED_REVOCATION_BOUND: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Asks OpenAI, once, to revoke a Codex sign-in it approved that this
+/// process will not save (#4904), over the one revocation route. `material`
+/// is the bundle the login produced.
+pub(crate) async fn revoke_unsaved_codex(material: ProtectedValue) -> ProviderRevocation {
+    revoke_unsaved_codex_over(
+        resolve(HttpProvider::CodexTokenRevocation),
+        material,
+        UNSAVED_REVOCATION_BOUND,
+    )
+    .await
+}
+
+async fn revoke_unsaved_codex_over(
+    upstream: impl Future<Output = anyhow::Result<Arc<dyn BrokerUpstreamTransport>>> + Send + 'static,
+    material: ProtectedValue,
+    bound: std::time::Duration,
+) -> ProviderRevocation {
+    // The resolver's address lookup blocks its thread and can outlast the
+    // bound, so it runs on a thread of its own. Unlike a blocking task, a
+    // detached thread never holds the runtime's shutdown, so `cw` exits at
+    // the bound whatever the resolver does (cw-network on #4991).
+    let runtime = tokio::runtime::Handle::current();
+    let (resolved, lookup) = tokio::sync::oneshot::channel();
+    // A thread that can't start drops `resolved`, which reads as unavailable.
+    let _detached = std::thread::Builder::new()
+        .name("cw-revocation-lookup".into())
+        .spawn(move || {
+            let _ = resolved.send(runtime.block_on(upstream));
+        });
+    let ask = async move {
+        match lookup.await {
+            Ok(Ok(transport)) => codex::revoke_stored(&transport, material.expose_secret()).await,
+            _ => ProviderRevocation::Failed(RevocationFailure::Unavailable),
+        }
+    };
+    tokio::time::timeout(bound, ask)
+        .await
+        .unwrap_or(ProviderRevocation::Failed(RevocationFailure::Unavailable))
+}
+
+/// A login's error after the provider issued the sign-in, so the connect can
+/// say what the provider still holds. It reads as the error it carries.
+#[derive(Debug)]
+pub(crate) struct IssuedButNotSaved(pub(crate) anyhow::Error);
+
+impl std::fmt::Display for IssuedButNotSaved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for IssuedButNotSaved {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
 
 /// Log in to ChatGPT for Codex over the Codex device-enrollment routes.
 pub(crate) async fn codex_device_login(
@@ -80,13 +145,14 @@ pub(crate) async fn claude_sign_in(
     let pasted = super::login_screen::claude_sign_in_code(sign_in, started.authorize_url())?;
     let pasted = std::str::from_utf8(pasted.expose_secret())
         .map_err(|_| anyhow::anyhow!(CLAUDE_SIGN_IN_CODE_INVALID))?;
-    tokio::select! {
-        biased;
-        () = interrupt.pressed() => anyhow::bail!(CANCELLED),
-        result = login.complete(started.handle(), pasted) => {
-            result.map_err(claude_sign_in_error)
-        }
-    }
+    // The code is exchanged to the end even after a Ctrl-C: Claude may issue
+    // the sign-in once it is sent, and the connect reads the press from the
+    // sticky flag and says what Claude holds.
+    interrupt.listen();
+    login
+        .complete(started.handle(), pasted)
+        .await
+        .map_err(claude_sign_in_error)
 }
 
 /// The same words the platform service uses for the same outcome.
@@ -108,15 +174,22 @@ async fn codex_device_login_with(
     cancel: impl Future<Output = ()>,
 ) -> anyhow::Result<CodexOAuthImport> {
     let login = CodexDeviceLogin::new(upstream);
-    tokio::select! {
+    // Only the wait for approval is cancelled; nothing is issued before it.
+    // The exchange after it runs to its end, and a Ctrl-C meanwhile reaches
+    // the connect through the sticky flag, which revokes what it returns.
+    let approved = tokio::select! {
         biased;
         () = cancel => anyhow::bail!(CANCELLED),
         result = async {
             let pending = login.start().await.context("start the Codex device login")?;
             show_challenge(sign_in, pending.challenge());
-            login.complete(pending).await.context("complete the Codex device login")
-        } => result,
-    }
+            login.approve(pending).await.context("complete the Codex device login")
+        } => result?,
+    };
+    login
+        .finish(approved)
+        .await
+        .context("complete the Codex device login")
 }
 
 async fn github_device_login_with(
@@ -126,22 +199,28 @@ async fn github_device_login_with(
     cancel: impl Future<Output = ()>,
 ) -> anyhow::Result<GitHubAppAuthorizationImport> {
     let login = GitHubDeviceLogin::new(app, upstream);
-    tokio::select! {
+    // GitHub issues the user token with the approval, so only the wait for it
+    // is cancelled; the checks after it run to their end.
+    let approved = tokio::select! {
         biased;
         () = cancel => anyhow::bail!(CANCELLED),
         result = async {
             let pending = login.start().await.context("start the GitHub device login")?;
             show_challenge(sign_in, pending.challenge());
-            match login.complete(pending).await {
-                Err(DeviceLoginError::InstallationRequired) => Err(anyhow::anyhow!(
-                    "the Codewire GitHub App is not installed on any account this GitHub login can use; \
-                     install it, choose the accounts and repositories, then connect again: {}",
-                    codewire_github_app_install_url()
-                )),
-                result => result.context("complete the GitHub device login"),
-            }
-        } => result,
-    }
+            login.approve(pending).await.context("complete the GitHub device login")
+        } => result?,
+    };
+    login.finish(approved).await.map_err(|error| {
+        let error = match error {
+            DeviceLoginError::InstallationRequired => anyhow::anyhow!(
+                "the Codewire GitHub App is not installed on any account this GitHub login can use; \
+                 install it, choose the accounts and repositories, then connect again: {}",
+                codewire_github_app_install_url()
+            ),
+            error => anyhow::Error::new(error).context("complete the GitHub device login"),
+        };
+        anyhow::Error::new(IssuedButNotSaved(error))
+    })
 }
 
 #[cfg(not(feature = "local-broker-synthetic-smoke"))]
