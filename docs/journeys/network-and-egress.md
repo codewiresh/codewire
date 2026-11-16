@@ -968,7 +968,12 @@ walked on a hosted Sandbox as well.
   - one Sandbox's front door session opened with another Sandbox's token;
   - a Claude turn with interception on, and the same turn on today's relay
     path;
-  - `cw-egress`'s logs and configuration after a session.
+  - `cw-egress`'s logs and configuration after a session;
+  - a `cw-egress` rollout, and a `cw-egress` restart, under a running
+    Sandbox that has made intercepted calls;
+  - a Sandbox claimed from the warm pool;
+  - the credential service unreachable for longer than a certificate's
+    life.
 - **Driving it:** no command yet (#4001).
 - **Proof:**
   - a front door session for one Sandbox is refused another Sandbox's
@@ -978,9 +983,26 @@ walked on a hosted Sandbox as well.
     hosted interception are recorded beside the same turn on today's relay
     path, on the same Dev node;
   - the real token appears nowhere in `cw-egress`'s logs or configuration,
-    beside the check inside the Sandbox that `agent-claude` makes.
-- **Gotchas:** the search for the real token is done by its holder, without
-  printing it; the tool is owned by #3999.
+    beside the check inside the Sandbox that `agent-claude` makes;
+  - an intercepted connection opened after a `cw-egress` rollout, and
+    after a `cw-egress` restart, is served under the same CA the Sandbox
+    installed at its start. The Sandbox installs nothing new, and a
+    process that was already running keeps working;
+  - a Sandbox claimed from the warm pool serves an intercepted host under
+    the CA it installed before it was claimed;
+  - no CA key is on a node: `cw-egress` holds only certificates for the
+    hosts the Sandbox's credentials bind, each valid for at most an hour;
+  - with the credential service unreachable past a certificate's life,
+    an intercepted host fails closed and the Sandbox's status shows it.
+    Its other egress is unaffected, and interception returns by itself
+    when the service does.
+- **Gotchas:**
+  - The search for the real token is done by its holder, without
+    printing it; the tool is owned by #3999.
+  - A host bound as a suffix is served for names one label under it. A
+    deeper name fails its handshake on a hosted Sandbox, where a local VM
+    serves it. No real routed origin has been observed yet; the first
+    `agent-codex` run records its depth (#4947).
 - **Observed:** not yet observed.
 
 ## `hosted-enforcement`: a hosted Sandbox proves its egress is enforced
@@ -1018,6 +1040,10 @@ Issue: #4000.
     `FAILED_CLOSED`, and an operator alert fires. A check that gives no
     result in its time, or a Sandbox whose stream drops before the result,
     reads `FAILED_CLOSED` the same way;
+  - on a test cluster with the Sandbox's lockdown left out, the same
+    self-check reports that its direct connection got through and the
+    Sandbox reads `FAILED_CLOSED`. Without this nothing shows the check
+    can fail;
   - a claimed warm Sandbox enforces the claimer's policy before the user can
     run anything in it; a claim that cannot confirm that within its limit
     fails, and never hands over an unrestricted Sandbox;
