@@ -34,6 +34,10 @@ service LocalSupervisorService {
   rpc GetLocalHttps(EnvironmentSelector) returns (LocalHttps);
   // Chooses the router's port, or turns it off; remembered for this user.
   rpc SetLocalHttpsPort(SetLocalHttpsPortRequest) returns (LocalHttps);
+  // Makes sure the local HTTPS CA exists, or replaces it with a new one, and
+  // reports where its certificate is (#4316, protocol 24). The caller
+  // untrusts an old CA first.
+  rpc PrepareLocalHttpsCa(PrepareLocalHttpsCaRequest) returns (LocalHttps);
   // Serves SSH for one running environment over this owner-only socket
   // (#3025, protocol 15). The client's first frame opens the stream; every
   // other frame in either direction carries SSH protocol bytes. The supervisor
@@ -958,6 +962,11 @@ message LocalHttpsHost {
   string label = 2;
   // Empty when the label and the environment's name make no hostname.
   string hostname = 3;
+}
+
+message PrepareLocalHttpsCaRequest {
+  // Replace the CA with a new key and certificate.
+  bool rotate = 1;
 }
 
 message SetLocalHttpsPortRequest {

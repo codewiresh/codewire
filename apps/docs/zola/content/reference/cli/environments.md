@@ -258,6 +258,7 @@ Withdrew 127.0.0.1:8080 -> app:8080
 cw local-https status
 cw local-https port PORT|off
 sudo cw local-https setup        # Linux, once
+cw local-https trust | untrust | rotate
 ```
 
 A local VM's labelled ports are served at `https://{label}-{env}.cw.localhost`
@@ -266,7 +267,14 @@ says whether they are served, on which port, and where the CA certificate
 is. `port` chooses the port, 443 by default, or turns the URLs off; the
 choice is kept for your user. `setup` lets programs that aren't root listen
 on ports 443 and up on Linux, and prints how to undo it; on macOS there is
-nothing to set up.
+nothing to set up. `trust` adds the CA to your own browsers' stores, for
+HTTPS servers only: the NSS databases Firefox and, on Linux,
+Chromium-family browsers read, through NSS's `certutil`. On macOS the login
+keychain isn't changed yet. `untrust` removes exactly this CA from them.
+`rotate` makes a new CA and shreds the old one's key, then trusts the new CA
+wherever the old one was trusted, which removes the old one there. If it
+stops part way, `trust` finishes it: trusting also removes an older Codewire
+CA from the same store.
 
 On a hosted sandbox the same command prints the preview URL; see
 [Ports and preview URLs](@/access/ports.md).

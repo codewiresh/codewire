@@ -624,6 +624,22 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
+    /// Make sure the local HTTPS CA exists, or replace it with `rotate`
+    /// (#4316). Fails with `Unimplemented` before contacting a supervisor
+    /// older than protocol 24.
+    pub async fn prepare_local_https_ca(&mut self, rotate: bool) -> Result<v1::LocalHttps, Status> {
+        if !self.supports(SupervisorFeature::LocalHttpsCa) {
+            return Err(Status::unimplemented(
+                "your local VMs run on an older cw's supervisor, which can't manage the local HTTPS CA; `cw upgrade --vms` moves them to this cw once they are idle",
+            ));
+        }
+        Ok(self
+            .inner
+            .prepare_local_https_ca(v1::PrepareLocalHttpsCaRequest { rotate })
+            .await?
+            .into_inner())
+    }
+
     pub async fn managed_runtime(
         &mut self,
         name: &str,

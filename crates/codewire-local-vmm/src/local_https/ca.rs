@@ -58,12 +58,12 @@ pub(crate) enum LocalCaError {
     Invalid,
     #[error("the local HTTPS CA certificate does not match its key")]
     Mismatch,
-    /// The key is not this user's alone. Nothing trusts the CA yet, so a new
-    /// one costs nothing.
+    /// The key is not this user's alone. `cw local-https rotate` removes the
+    /// CA from every store it was trusted in and makes a new one.
     #[error(
-        "the local HTTPS CA key {0} must belong to you and be readable only by you; remove {1} and Codewire makes a new CA"
+        "the local HTTPS CA key {0} must belong to you and be readable only by you; run `cw local-https rotate` for a new CA"
     )]
-    Exposed(PathBuf, PathBuf),
+    Exposed(PathBuf),
     #[error("local HTTPS CA generation failed")]
     Generate,
 }
@@ -101,19 +101,63 @@ impl std::fmt::Debug for LocalCa {
     }
 }
 
+/// Serialises making and removing the CA's files in this process, so a
+/// rotation and the router's first load never pair one call's key with the
+/// other's certificate.
+static CA_FILES: Mutex<()> = Mutex::new(());
+
+/// Remove the CA's key and certificate, so the next load makes a new CA.
+/// Trust stores are the caller's to clean first: `cw local-https rotate`
+/// untrusts the old CA before it asks for this.
+pub(crate) fn remove(state_root: &Path) -> io::Result<()> {
+    let _files = CA_FILES.lock().unwrap_or_else(PoisonError::into_inner);
+    let directory = state_root.join(CA_DIRECTORY);
+    // The key goes first. Were the certificate removed first, a failure or a
+    // crash before the shred would leave the old, perhaps read, key for the
+    // next load to sign a fresh certificate with, so the CA would look
+    // rotated and wasn't. Without a key, the next load makes a new key and
+    // removes any certificate left behind.
+    shred(&directory.join(CA_KEY_FILE))?;
+    remove_if_present(&directory.join(CA_CERTIFICATE_FILE))
+}
+
+/// Overwrite the key file with zeros and sync it before removing it, so the
+/// old key's bytes don't stay in the file's blocks. Best effort on
+/// copy-on-write and journalling filesystems, which may keep old blocks.
+fn shred(path: &Path) -> io::Result<()> {
+    let length = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => metadata.len(),
+        Ok(_) => return remove_if_present(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        let zeros = vec![0_u8; usize::try_from(length).unwrap_or(usize::MAX).min(1 << 20)];
+        file.write_all(&zeros)?;
+        file.sync_all()?;
+    }
+    fs::remove_file(path)
+}
+
 impl LocalCa {
     /// The CA under `state_root`: the stored one when present, otherwise a
     /// new one, written owner-only. A stored certificate that no longer
     /// matches its key is refused, never replaced, because browsers may
     /// trust it.
     pub(crate) fn load_or_create(state_root: &Path) -> Result<Self, LocalCaError> {
+        let _files = CA_FILES.lock().unwrap_or_else(PoisonError::into_inner);
         let directory = state_root.join(CA_DIRECTORY);
         ensure_private_directory(&directory)?;
         let key_path = directory.join(CA_KEY_FILE);
         let certificate_path = directory.join(CA_CERTIFICATE_FILE);
         let key = match read_private_key(&key_path) {
             Ok(Some(pem)) => SecretKey(KeyPair::from_pem(&pem).map_err(|_| LocalCaError::Invalid)?),
-            Ok(None) => return Err(LocalCaError::Exposed(key_path, directory)),
+            Ok(None) => return Err(LocalCaError::Exposed(key_path)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let key = SecretKey(
                     KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
@@ -187,6 +231,23 @@ impl LocalCa {
             vec![certificate.der().clone()],
             signing_key,
         )))
+    }
+}
+
+/// Tests elsewhere in the crate: where the key is, without naming its file.
+#[cfg(test)]
+pub(crate) fn key_path_for_test(state_root: &Path) -> PathBuf {
+    state_root.join(CA_DIRECTORY).join(CA_KEY_FILE)
+}
+
+#[cfg(test)]
+impl LocalCa {
+    /// Signs anything with this CA's key: how the verifier proofs build
+    /// certificates the CA would never mint.
+    pub(crate) fn sign_for_test(&self, params: CertificateParams, key: &KeyPair) -> Certificate {
+        params
+            .signed_by(key, &self.issuer, &self.key.0)
+            .expect("test certificate")
     }
 }
 

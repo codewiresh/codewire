@@ -7222,6 +7222,15 @@ impl LocalSupervisorService for SupervisorRpc {
             .map(Response::new)
     }
 
+    async fn prepare_local_https_ca(
+        &self,
+        request: Request<v1::PrepareLocalHttpsCaRequest>,
+    ) -> Result<Response<v1::LocalHttps>, Status> {
+        self.prepare_local_https_ca(request.into_inner().rotate)
+            .await
+            .map(Response::new)
+    }
+
     async fn ensure_credential_broker(
         &self,
         request: Request<v1::EnvironmentSelector>,

@@ -10,6 +10,8 @@ use codewire_local_vmm::local_https::{ALTERNATIVE_PORT, DEFAULT_PORT, url};
 
 use super::*;
 
+mod trust;
+
 /// Where `cw local-https setup` records its one setting.
 #[cfg(target_os = "linux")]
 const SYSCTL_FILE: &str = "/etc/sysctl.d/60-codewire-local-https.conf";
@@ -173,10 +175,13 @@ async fn ask_for_another_port(
         .ok_or_else(|| anyhow::anyhow!("the local supervisor changed while choosing a port"))
 }
 
-/// `cw local-https status|port|setup`.
+/// `cw local-https status|port|setup|trust|untrust|rotate`.
 pub(crate) async fn handle_local_https(command: LocalHttpsCommand) -> anyhow::Result<()> {
     match command {
         LocalHttpsCommand::Setup => setup(),
+        LocalHttpsCommand::Trust => trust_command().await,
+        LocalHttpsCommand::Untrust => untrust_command().await,
+        LocalHttpsCommand::Rotate => rotate_command().await,
         LocalHttpsCommand::Status => {
             let mut client = native_client().await?;
             let status = client.local_https("").await.map_err(native_status)?;
@@ -203,6 +208,112 @@ pub(crate) async fn handle_local_https(command: LocalHttpsCommand) -> anyhow::Re
             Ok(())
         }
     }
+}
+
+/// The per-user stores to change, refusing without `certutil` when there
+/// are any.
+fn usable_stores() -> anyhow::Result<Vec<trust::Store>> {
+    let stores = trust::stores()?;
+    anyhow::ensure!(
+        stores.is_empty() || trust::certutil_installed(),
+        "Browsers read their trusted CAs from NSS databases here, which only NSS's certutil can change: {}.",
+        trust::CERTUTIL_HINT
+    );
+    Ok(stores)
+}
+
+/// What `trust` can't reach on macOS yet.
+const MACOS_KEYCHAIN_NOTE: &str = "On macOS, Safari and Chromium-family browsers read the login keychain, which cw doesn't change yet; name the CA per command instead.";
+
+/// `cw local-https trust`: add the CA to every per-user store.
+async fn trust_command() -> anyhow::Result<()> {
+    let stores = usable_stores()?;
+    let mut client = native_client().await?;
+    let status = client
+        .prepare_local_https_ca(false)
+        .await
+        .map_err(native_status)?;
+    let ca = trust::LocalCaCertificate::read(Path::new(&status.ca_certificate_path))?;
+    for store in &stores {
+        if trust::trust(&ca, store)? {
+            println!("Trusted in {store}, for HTTPS servers only.");
+        } else {
+            println!("Already trusted in {store}.");
+        }
+    }
+    if cfg!(target_os = "macos") {
+        println!("{MACOS_KEYCHAIN_NOTE}");
+    }
+    println!(
+        "The CA signs only names under cw.localhost. Restart your browser if it was open.\n\
+         Command-line tools need it named: curl --cacert {path}, SSL_CERT_FILE={path}, or NODE_EXTRA_CA_CERTS={path}.",
+        path = status.ca_certificate_path
+    );
+    Ok(())
+}
+
+/// `cw local-https untrust`: remove exactly this CA from every per-user store.
+async fn untrust_command() -> anyhow::Result<()> {
+    let stores = usable_stores()?;
+    let mut client = native_client().await?;
+    let Some(status) = client.local_https("").await.map_err(native_status)? else {
+        println!("Your local VMs run on an older cw's supervisor, which has no local HTTPS CA.");
+        return Ok(());
+    };
+    let path = Path::new(&status.ca_certificate_path);
+    if !path.exists() {
+        println!("There is no local HTTPS CA yet, so nothing trusts it.");
+        return Ok(());
+    }
+    let ca = trust::LocalCaCertificate::read(path)?;
+    let mut removed = 0;
+    for store in &stores {
+        if trust::untrust(&ca, store)? {
+            println!("Removed from {store}.");
+            removed += 1;
+        }
+    }
+    if removed == 0 {
+        println!("No per-user store trusted this CA.");
+    }
+    Ok(())
+}
+
+/// `cw local-https rotate`: replace the CA, then trust the new one in every
+/// store that trusted the old one, which removes the old one there. A store
+/// never trusts no CA on the way, and a rotation that stops part way is
+/// finished by `cw local-https trust`.
+async fn rotate_command() -> anyhow::Result<()> {
+    let stores = usable_stores()?;
+    let mut client = native_client().await?;
+    let status = client.local_https("").await.map_err(native_status)?;
+    // Read the old CA while its certificate exists; only its fingerprint is
+    // needed afterwards, to find its entries.
+    let old = match status {
+        Some(status) if Path::new(&status.ca_certificate_path).exists() => Some(
+            trust::LocalCaCertificate::read(Path::new(&status.ca_certificate_path))?,
+        ),
+        _ => None,
+    };
+    let status = client
+        .prepare_local_https_ca(true)
+        .await
+        .map_err(native_status)?;
+    let new = trust::LocalCaCertificate::read(Path::new(&status.ca_certificate_path))?;
+    println!("Made a new local HTTPS CA; the old one's key is shredded.");
+    let moved = match &old {
+        Some(old) => trust::move_trust(old, &new, &stores)?,
+        None => Vec::new(),
+    };
+    for store in &moved {
+        println!("Trusted the new CA in {store}, and removed the old one.");
+    }
+    if moved.is_empty() {
+        println!(
+            "Nothing trusted the old CA; `cw local-https trust` adds the new one to your browsers."
+        );
+    }
+    Ok(())
 }
 
 fn print_status(status: Option<&v1::LocalHttps>) {

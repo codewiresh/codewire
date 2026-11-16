@@ -145,6 +145,8 @@ struct Published {
 pub(super) struct LocalHttpsHandle {
     status: watch::Receiver<Published>,
     requests: Arc<AtomicU64>,
+    /// Bumped by each rotation, so the task drops the CA it holds.
+    rotations: Arc<AtomicU64>,
     wake: Arc<Notify>,
 }
 
@@ -152,6 +154,7 @@ pub(super) struct LocalHttpsHandle {
 pub(super) struct LocalHttpsTask {
     status: watch::Sender<Published>,
     requests: Arc<AtomicU64>,
+    rotations: Arc<AtomicU64>,
     wake: Arc<Notify>,
 }
 
@@ -164,16 +167,19 @@ pub(super) fn channel() -> (LocalHttpsHandle, LocalHttpsTask) {
         answers: 0,
     });
     let requests = Arc::new(AtomicU64::new(0));
+    let rotations = Arc::new(AtomicU64::new(0));
     let wake = Arc::new(Notify::new());
     (
         LocalHttpsHandle {
             status: receiver,
             requests: requests.clone(),
+            rotations: rotations.clone(),
             wake: wake.clone(),
         },
         LocalHttpsTask {
             status,
             requests,
+            rotations,
             wake,
         },
     )
@@ -196,8 +202,16 @@ impl LocalHttpsTask {
         let mut ticks = tokio::time::interval(RECONCILE_INTERVAL);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut serving = Serving::default();
+        let mut rotated = 0;
         loop {
             let answers = self.requests.load(Ordering::SeqCst);
+            // A rotation has replaced the CA's files: serve with the new one.
+            let rotations = self.rotations.load(Ordering::SeqCst);
+            if rotations != rotated {
+                serving.router = None;
+                serving.ca = None;
+                rotated = rotations;
+            }
             let wanted = routes.rebuild();
             let status = serving.reconcile(&root, &routes, wanted);
             if self.status.borrow().status != status {
@@ -432,6 +446,37 @@ impl SupervisorRpc {
         self.local_https("").await
     }
 
+    /// `PrepareLocalHttpsCa`: make sure the CA exists, or replace it, then
+    /// report the router's state after it has reloaded.
+    pub(super) async fn prepare_local_https_ca(
+        &self,
+        rotate: bool,
+    ) -> Result<v1::LocalHttps, Status> {
+        let root = self.supervisor.core().config.root.clone();
+        let made = tokio::task::spawn_blocking(move || {
+            if rotate {
+                crate::local_https::ca::remove(&root)?;
+            }
+            LocalCa::load_or_create(&root)
+                .map(drop)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        })
+        .await
+        .map_err(|_| Status::internal("the local HTTPS CA could not be prepared"))?;
+        if let Err(error) = made {
+            return Err(Status::failed_precondition(error.to_string()));
+        }
+        if rotate {
+            self.local_https.rotations.fetch_add(1, Ordering::SeqCst);
+            diagnostic_log::record(
+                self.supervisor.log.as_deref(),
+                "local_https_ca_rotated",
+                &[],
+            );
+        }
+        self.local_https("").await
+    }
+
     /// The status of a reconcile that began after this call, or the last
     /// one when none follows in time.
     async fn fresh_local_https_status(&self) -> RouterStatus {
@@ -481,6 +526,43 @@ mod tests {
         environment.name = name.to_owned();
         environment.project_spec_json = Some(project(ports).canonical_json().unwrap());
         environment
+    }
+
+    #[tokio::test]
+    async fn preparing_makes_the_ca_once_and_rotating_replaces_it() {
+        let (_parent, core) = crate::supervisor::tests::test_supervisor_core(project_environment());
+        let root = core.config.root.clone();
+        let rpc = crate::supervisor::tests::test_supervisor_service(core);
+        let key = crate::local_https::ca::key_path_for_test(&root);
+        let certificate = root.join(CA_DIRECTORY).join(CA_CERTIFICATE_FILE);
+
+        let status = rpc.prepare_local_https_ca(false).await.unwrap();
+        assert_eq!(
+            status.ca_certificate_path,
+            certificate.display().to_string()
+        );
+        let first = (
+            std::fs::read(&key).unwrap(),
+            std::fs::read(&certificate).unwrap(),
+        );
+        rpc.prepare_local_https_ca(false).await.unwrap();
+        assert_eq!(
+            (
+                std::fs::read(&key).unwrap(),
+                std::fs::read(&certificate).unwrap()
+            ),
+            first,
+            "preparing again keeps the CA"
+        );
+
+        rpc.prepare_local_https_ca(true).await.unwrap();
+        let rotated = (
+            std::fs::read(&key).unwrap(),
+            std::fs::read(&certificate).unwrap(),
+        );
+        assert_ne!(rotated.0, first.0, "a rotation makes a new key");
+        assert_ne!(rotated.1, first.1, "and a new certificate");
+        assert_eq!(rpc.local_https.rotations.load(Ordering::SeqCst), 1);
     }
 
     #[test]

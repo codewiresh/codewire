@@ -151,10 +151,26 @@ already has, and names it. Ports without a label are unaffected.
 The certificates come from a certificate authority of your own. Codewire
 makes it the first time, keeps it in its local state readable only by you,
 and it can sign only names under `cw.localhost`. `cw local-https status`
-prints where its certificate is. Browsers don't trust it yet, so they warn.
-Command-line tools trust it when told to: `curl --cacert PATH`, or
-`SSL_CERT_FILE=PATH` for most OpenSSL-based tools, and
-`NODE_EXTRA_CA_CERTS=PATH` for Node.js.
+prints where its certificate is.
+
+```sh
+cw local-https trust      # your browsers trust the CA, for HTTPS servers only
+cw local-https untrust    # remove it again
+cw local-https rotate     # replace it with a new CA, wherever it was trusted
+```
+
+`trust` adds the CA only to your own stores: the NSS databases Firefox and,
+on Linux, Chromium-family browsers read, through NSS's `certutil`. Nothing
+machine-wide changes. Restart a browser that was open. On macOS, Safari and
+Chromium-family browsers read the login keychain, which `cw` doesn't change
+yet; name the CA per command there, as below. `rotate` trusts the new CA in
+each store before the old one leaves it, and if it stops part way, `trust`
+finishes it.
+
+Command-line tools trust it when told to, per command: `curl --cacert PATH`,
+or `SSL_CERT_FILE=PATH` for most OpenSSL-based tools, and
+`NODE_EXTRA_CA_CERTS=PATH` for Node.js. Never add this CA to an OpenSSL,
+system or code-signing trust store: it is for local HTTPS only.
 
 On Linux only root may listen on port 443 until you allow it once:
 
