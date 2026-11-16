@@ -719,8 +719,9 @@ Issues: #3999 (local VMs, #4897), #4001 (hosted Sandboxes).
 - **Entry points:** none for a user. A scan run by whoever walks this file,
   over what a local VM writes.
 - **States to exercise:**
-  - a VM's disks, a VM checkpoint, and the supervisor's, the runner's, the
-    brokers' and the front door's logs, after an agent has run;
+  - a VM's disks, a VM checkpoint, and the supervisor's, the runner's and
+    the brokers' logs (the front door's once it writes one, #4884), after an
+    agent has run;
   - synthetic values planted in the credential store, and controls planted
     where a scan must find them;
   - on macOS, disks and logs only: VM checkpoints are Linux-only.
@@ -733,8 +734,9 @@ Issues: #3999 (local VMs, #4897), #4001 (hosted Sandboxes).
     or page, not as base64, hex or UTF-16, and not through an ext4 image's
     filesystem;
   - three controls written into the guest's home are found on its state
-    disk, raw and through the filesystem: plain, base64-only, and one split
-    across non-adjacent blocks;
+    disk, raw and through the filesystem: plain, base64-only, and one cut
+    inside a scan window and split across non-adjacent blocks, found only
+    through its other window;
   - a control held only in a guest process's memory is found in the
     checkpoint's memory;
   - each log was read and is not empty;
@@ -744,8 +746,8 @@ Issues: #3999 (local VMs, #4897), #4001 (hosted Sandboxes).
   - A run needs about 40 GB free: a checkpoint holds all of the guest's
     memory.
   - Until the local placement gives Codex placeholders (#4002), the Codex
-    access token is in the guest by the listed exception, and the scan does
-    not look for it.
+    access token is in the guest by the listed exception, and the scan looks
+    for it only after the VM is deleted.
 - **Observed:** not yet observed.
 
 ## `agent-own-key`: a process with its own key is left alone
@@ -897,7 +899,9 @@ Issue: #4000.
   - at every start the Sandbox tries one direct connection and one lookup
     at the cluster's DNS, around its egress path. Both must fail. If either
     succeeds the Sandbox does not become ready, its status reads
-    `FAILED_CLOSED`, and an operator alert fires;
+    `FAILED_CLOSED`, and an operator alert fires. A check that gives no
+    result in its time, or a Sandbox whose stream drops before the result,
+    reads `FAILED_CLOSED` the same way;
   - a claimed warm Sandbox enforces the claimer's policy before the user can
     run anything in it; a claim that cannot confirm that within its limit
     fails, and never hands over an unrestricted Sandbox;
@@ -932,6 +936,9 @@ Issue: #4000.
     after the old version was told to stop, the download is reset once, and
     the Sandbox's egress works on the new version afterwards. No connection
     is reset twice;
+  - the old `cw-egress` Pod exits as soon as its last Sandbox has moved, and
+    no later than 30 s after the deadline; it does not sit terminating for
+    the whole 30 minutes when nothing is left on it;
   - the open terminal or SSH session carries on through its Sandbox's move
     without a drop: it rides the daemon's path to the platform, which does
     not pass through `cw-egress`;
