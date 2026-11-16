@@ -732,7 +732,7 @@ start_proc billing-webhook "$BILLING_WEBHOOK_PORT" env \
   DATABASE_URL="$DATABASE_URL_RUST" \
   SESSION_SECRET="$SESSION_SECRET" \
   BILLING_PORT="$BILLING_WEBHOOK_PORT" \
-  BILLING_LOOPS=trials \
+  BILLING_LOOPS= \
   STRIPE_SECRET_KEY=sk_test_buildtest_dummy \
   STRIPE_WEBHOOK_SECRET=whsec_test_secret \
   STRIPE_WEBHOOK_URL=off \

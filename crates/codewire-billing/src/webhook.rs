@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use stripe_webhook::{Event, EventObject, Webhook, WebhookError};
 
-use crate::email::{EmailClient, ReceiptData};
+use crate::email::ReceiptData;
 use crate::receipts::ReceiptSender;
 use crate::routes::BillingState;
 
@@ -170,11 +170,8 @@ async fn claim_event(
 /// The Stripe event types `handle_webhook_event` acts on. Billing's Stripe
 /// endpoint check requires its endpoint to send each of them and nothing
 /// else (#3263), so keep this list and the match in step.
-pub const HANDLED_EVENT_TYPES: [&str; 8] = [
+pub const HANDLED_EVENT_TYPES: [&str; 5] = [
     "checkout.session.completed",
-    "customer.subscription.updated",
-    "customer.subscription.deleted",
-    "customer.subscription.trial_will_end",
     "invoice.created",
     "invoice.paid",
     "invoice.payment_failed",
@@ -203,15 +200,6 @@ pub async fn handle_webhook_event(state: &BillingState, event: Event) -> anyhow:
         match &event.data.object {
             EventObject::CheckoutSessionCompleted(session) => {
                 handle_checkout_completed(state, session).await?
-            }
-            EventObject::CustomerSubscriptionUpdated(sub) => {
-                handle_subscription_updated(pool, sub, event.created, event.id.as_str()).await?
-            }
-            EventObject::CustomerSubscriptionDeleted(sub) => {
-                handle_subscription_deleted(pool, sub, event.created, event.id.as_str()).await?
-            }
-            EventObject::CustomerSubscriptionTrialWillEnd(sub) => {
-                handle_trial_will_end(pool, &state.email, sub).await?
             }
             EventObject::InvoiceCreated(inv) => handle_invoice_created(state, inv).await?,
             EventObject::InvoicePaid(inv) => handle_invoice_paid(state, inv).await?,
@@ -315,135 +303,9 @@ async fn handle_checkout_completed(
         return handle_credit_checkout(state, session).await;
     }
 
-    let Some(sub_ref) = &session.subscription else {
-        return Ok(());
-    };
-
-    // Fetch the subscription for its metadata.
-    let sub = state
-        .stripe
-        .retrieve_subscription(&expandable_id(sub_ref))
-        .await?;
-    let org_id = sub.metadata.get("org_id").cloned().unwrap_or_default();
-    let plan_name = sub.metadata.get("plan").cloned().unwrap_or_default();
-    if org_id.is_empty() || plan_name.is_empty() {
-        tracing::warn!(sub_id = %sub.id, "billing: checkout completed but missing metadata");
-        return Ok(());
-    }
-
-    if sub.metadata.get("entity_type").map(String::as_str) == Some("environment") {
-        let status = sub.status.to_string();
-        let price_cents: Option<i32> = sqlx::query_scalar(
-            r#"SELECT price_cents FROM billing_catalog_plans
-               WHERE resource_type = 'sandbox' AND plan_key = $1"#,
-        )
-        .bind(&plan_name)
-        .fetch_optional(pool)
-        .await?;
-        let price_id: Option<String> = sqlx::query_scalar(
-            r#"SELECT stripe_price_id FROM billing_catalog_prices
-               WHERE resource_type = 'sandbox' AND plan_key = $1 AND stripe_mode = $2
-                 AND price_kind = 'subscription' AND archived_at IS NULL"#,
-        )
-        .bind(&plan_name)
-        .bind(state.stripe.stripe_mode())
-        .fetch_optional(pool)
-        .await?;
-
-        if let Err(e) = sqlx::query(
-            r#"INSERT INTO environment_subscriptions
-               (id, org_id, plan, status, stripe_subscription_id, stripe_price_id, created_at, updated_at)
-               VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, NOW(), NOW())
-               ON CONFLICT (org_id) DO UPDATE SET
-                      plan = EXCLUDED.plan, status = EXCLUDED.status,
-                      stripe_subscription_id = EXCLUDED.stripe_subscription_id,
-                      stripe_price_id = EXCLUDED.stripe_price_id,
-                      updated_at = NOW()"#,
-        )
-        .bind(&org_id)
-        .bind(&plan_name)
-        .bind(&status)
-        .bind(sub.id.as_str())
-        .bind(price_id.unwrap_or_default())
-        .execute(pool)
-        .await
-        {
-            tracing::error!(error = ?e, "billing: failed to upsert environment subscription");
-        }
-
-        if let Some(pm) = &sub.default_payment_method {
-            let customer_id = expandable_id(&sub.customer);
-            let payment_method_id = expandable_id(pm);
-            let idempotency_key = provider_idempotency_key(
-                "default-payment-method",
-                &[&org_id, &customer_id, &payment_method_id],
-            );
-            if let Err(e) = run_organization_billing_mutation(pool, &org_id, async {
-                state
-                    .stripe
-                    .set_default_payment_method(&customer_id, &payment_method_id, &idempotency_key)
-                    .await
-                    .map_err(OrganizationBillingMutationError::ambiguous)
-            })
-            .await
-            {
-                tracing::warn!(error = ?e, "billing: failed to set default payment method");
-            }
-        }
-
-        log_billing_event(
-            pool,
-            "env_checkout_completed",
-            &org_id,
-            price_cents,
-            "usd",
-            sub.id.as_str(),
-            serde_json::json!({"plan": plan_name, "entity_type": "environment"}),
-        )
-        .await;
-        tracing::info!(
-            org_id,
-            plan = plan_name,
-            "billing: environment checkout completed"
-        );
-        return Ok(());
-    }
-
-    // Legacy org-level path.
-    sqlx::query(
-        r#"INSERT INTO org_subscriptions (id, org_id, plan, status, stripe_subscription_id, created_at, updated_at)
-           VALUES (gen_random_uuid()::text, $1, $2, 'active', $3, NOW(), NOW())
-           ON CONFLICT (org_id) DO UPDATE SET
-                  plan = EXCLUDED.plan, status = 'active',
-                  stripe_subscription_id = EXCLUDED.stripe_subscription_id,
-                  updated_at = NOW()"#,
-    )
-    .bind(&org_id)
-    .bind(&plan_name)
-    .bind(sub.id.as_str())
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        r#"UPDATE organizations SET billing_plan = $1, billing_status = 'active', updated_at = NOW()
-           WHERE id = $2"#,
-    )
-    .bind(&plan_name)
-    .bind(&org_id)
-    .execute(pool)
-    .await?;
-
-    log_billing_event(
-        pool,
-        "checkout_completed",
-        &org_id,
-        None,
-        "usd",
-        sub.id.as_str(),
-        serde_json::json!({"plan": plan_name}),
-    )
-    .await;
-    tracing::info!(org_id, plan = plan_name, sub_id = %sub.id, "billing: checkout completed");
+    // Plans are retired (#3381): billing sells no subscription, so any other
+    // completed session is a stale plan checkout and is only logged.
+    tracing::warn!(session_id = %session.id, "billing: ignoring a completed checkout that buys no credit");
     Ok(())
 }
 
@@ -576,255 +438,6 @@ async fn settle_after_new_card(state: &BillingState, org_id: &str) -> anyhow::Re
         ?settlement,
         "billing: credit settled after a new card"
     );
-    Ok(())
-}
-
-// ── customer.subscription.updated / deleted ─────────────────────────
-
-/// Stripe status → DB status, mirroring the Go switch (notably
-/// `unpaid` → `suspended`).
-fn db_status(status: &stripe_shared::SubscriptionStatus) -> String {
-    use stripe_shared::SubscriptionStatus as S;
-    match status {
-        S::Active => "active".into(),
-        S::PastDue => "past_due".into(),
-        S::Canceled => "canceled".into(),
-        S::Unpaid => "suspended".into(),
-        S::Trialing => "trialing".into(),
-        other => other.to_string(),
-    }
-}
-
-async fn handle_subscription_updated(
-    pool: &PgPool,
-    sub: &stripe_shared::Subscription,
-    event_created: i64,
-    event_id: &str,
-) -> anyhow::Result<()> {
-    let status = db_status(&sub.status);
-    let plan_name = sub.metadata.get("plan").cloned().unwrap_or_default();
-
-    let env_org: Option<String> = sqlx::query_scalar(
-        r#"SELECT org_id FROM environment_subscriptions WHERE stripe_subscription_id = $1"#,
-    )
-    .bind(sub.id.as_str())
-    .fetch_optional(pool)
-    .await?;
-
-    if let Some(env_org_id) = env_org.filter(|o| !o.is_empty()) {
-        let updated = sqlx::query(
-            r#"UPDATE environment_subscriptions
-                  SET status = $1,
-                      plan = CASE WHEN $2 = '' THEN plan ELSE $2 END,
-                      stripe_event_created_at = to_timestamp($3),
-                      stripe_event_id = $4,
-                      updated_at = NOW()
-                WHERE stripe_subscription_id = $5
-                  AND (stripe_event_created_at IS NULL
-                       OR stripe_event_created_at < to_timestamp($3)
-                       OR (stripe_event_created_at = to_timestamp($3)
-                           AND COALESCE(stripe_event_id, '') < $4))"#,
-        )
-        .bind(&status)
-        .bind(&plan_name)
-        .bind(event_created)
-        .bind(event_id)
-        .bind(sub.id.as_str())
-        .execute(pool)
-        .await;
-        if updated
-            .map(|result| result.rows_affected() == 0)
-            .unwrap_or(true)
-        {
-            return Ok(());
-        }
-        log_billing_event(
-            pool,
-            "env_subscription_updated",
-            &env_org_id,
-            None,
-            "usd",
-            sub.id.as_str(),
-            serde_json::json!({"status": status, "plan": plan_name}),
-        )
-        .await;
-        return Ok(());
-    }
-
-    let updated = sqlx::query(
-        r#"UPDATE org_subscriptions
-              SET status = $1,
-                  plan = CASE WHEN $2 = '' THEN plan ELSE $2 END,
-                  stripe_event_created_at = to_timestamp($3),
-                  stripe_event_id = $4,
-                  updated_at = NOW()
-            WHERE stripe_subscription_id = $5
-              AND (stripe_event_created_at IS NULL
-                   OR stripe_event_created_at < to_timestamp($3)
-                   OR (stripe_event_created_at = to_timestamp($3)
-                       AND COALESCE(stripe_event_id, '') < $4))"#,
-    )
-    .bind(&status)
-    .bind(&plan_name)
-    .bind(event_created)
-    .bind(event_id)
-    .bind(sub.id.as_str())
-    .execute(pool)
-    .await?;
-    if updated.rows_affected() == 0 {
-        return Ok(());
-    }
-
-    let org_id: Option<String> = sqlx::query_scalar(
-        r#"SELECT org_id FROM org_subscriptions WHERE stripe_subscription_id = $1"#,
-    )
-    .bind(sub.id.as_str())
-    .fetch_optional(pool)
-    .await?;
-    if let Some(org_id) = org_id {
-        let _ = sqlx::query(
-            r#"UPDATE organizations SET billing_status = $1, updated_at = NOW() WHERE id = $2"#,
-        )
-        .bind(&status)
-        .bind(&org_id)
-        .execute(pool)
-        .await;
-        if !plan_name.is_empty() {
-            let _ = sqlx::query(
-                r#"UPDATE organizations SET billing_plan = $1, updated_at = NOW() WHERE id = $2"#,
-            )
-            .bind(&plan_name)
-            .bind(&org_id)
-            .execute(pool)
-            .await;
-        }
-    }
-
-    Ok(())
-}
-
-async fn handle_subscription_deleted(
-    pool: &PgPool,
-    sub: &stripe_shared::Subscription,
-    event_created: i64,
-    event_id: &str,
-) -> anyhow::Result<()> {
-    let env_org: Option<String> = sqlx::query_scalar(
-        r#"SELECT org_id FROM environment_subscriptions WHERE stripe_subscription_id = $1"#,
-    )
-    .bind(sub.id.as_str())
-    .fetch_optional(pool)
-    .await?;
-
-    if let Some(env_org_id) = env_org.filter(|o| !o.is_empty()) {
-        let updated = sqlx::query(
-            r#"UPDATE environment_subscriptions
-                  SET status = 'canceled', stripe_event_created_at = to_timestamp($1),
-                      stripe_event_id = $2, updated_at = NOW()
-                WHERE stripe_subscription_id = $3
-                  AND (stripe_event_created_at IS NULL
-                       OR stripe_event_created_at < to_timestamp($1)
-                       OR (stripe_event_created_at = to_timestamp($1)
-                           AND COALESCE(stripe_event_id, '') < $2))"#,
-        )
-        .bind(event_created)
-        .bind(event_id)
-        .bind(sub.id.as_str())
-        .execute(pool)
-        .await;
-        if updated
-            .map(|result| result.rows_affected() == 0)
-            .unwrap_or(true)
-        {
-            return Ok(());
-        }
-        log_billing_event(
-            pool,
-            "env_subscription_canceled",
-            &env_org_id,
-            None,
-            "usd",
-            sub.id.as_str(),
-            serde_json::Value::Null,
-        )
-        .await;
-        tracing::info!(
-            org_id = env_org_id,
-            "billing: environment subscription canceled"
-        );
-        return Ok(());
-    }
-
-    let updated = sqlx::query(
-        r#"UPDATE org_subscriptions
-              SET status = 'canceled', stripe_event_created_at = to_timestamp($1),
-                  stripe_event_id = $2, updated_at = NOW()
-            WHERE stripe_subscription_id = $3
-              AND (stripe_event_created_at IS NULL
-                   OR stripe_event_created_at < to_timestamp($1)
-                   OR (stripe_event_created_at = to_timestamp($1)
-                       AND COALESCE(stripe_event_id, '') < $2))"#,
-    )
-    .bind(event_created)
-    .bind(event_id)
-    .bind(sub.id.as_str())
-    .execute(pool)
-    .await?;
-    if updated.rows_affected() == 0 {
-        return Ok(());
-    }
-
-    let org_id: Option<String> = sqlx::query_scalar(
-        r#"SELECT org_id FROM org_subscriptions WHERE stripe_subscription_id = $1"#,
-    )
-    .bind(sub.id.as_str())
-    .fetch_optional(pool)
-    .await?;
-    if let Some(org_id) = org_id {
-        let _ = sqlx::query(
-            r#"UPDATE organizations SET billing_status = 'canceled', updated_at = NOW() WHERE id = $1"#,
-        )
-        .bind(&org_id)
-        .execute(pool)
-        .await;
-        log_billing_event(
-            pool,
-            "subscription_canceled",
-            &org_id,
-            None,
-            "usd",
-            sub.id.as_str(),
-            serde_json::Value::Null,
-        )
-        .await;
-    }
-
-    Ok(())
-}
-
-async fn handle_trial_will_end(
-    pool: &PgPool,
-    email: &EmailClient,
-    sub: &stripe_shared::Subscription,
-) -> anyhow::Result<()> {
-    let org_id = sub.metadata.get("org_id").cloned().unwrap_or_default();
-    if org_id.is_empty() {
-        return Ok(());
-    }
-    if email.is_configured()
-        && let Some(owner_email) = org_owner_email_by_id(pool, &org_id).await
-        && let Err(e) = email
-            .send_trial_ending(
-                &owner_email,
-                org_slug_for_email(pool, &org_id, "trial ending")
-                    .await
-                    .as_deref(),
-                3,
-            )
-            .await
-    {
-        tracing::error!(error = ?e, "billing: failed to send trial ending email");
-    }
     Ok(())
 }
 
@@ -1240,6 +853,7 @@ fn format_go_date(ts: i64, style: &str) -> String {
 mod tests {
     use super::*;
     use crate::checkout_sessions::FrontendOrigin;
+    use crate::email::EmailClient;
     use crate::stripe_client::StripeHandle;
     use codewire_server_core::credit_enforcement::CreditEnforcement;
 
@@ -1428,21 +1042,5 @@ mod tests {
         let ts = 1780396200;
         assert_eq!(format_go_date(ts, "long"), "June 2, 2026");
         assert_eq!(format_go_date(ts, "short"), "Jun 2, 2026");
-    }
-
-    #[test]
-    fn unpaid_maps_to_suspended() {
-        assert_eq!(
-            db_status(&stripe_shared::SubscriptionStatus::Unpaid),
-            "suspended"
-        );
-        assert_eq!(
-            db_status(&stripe_shared::SubscriptionStatus::Active),
-            "active"
-        );
-        assert_eq!(
-            db_status(&stripe_shared::SubscriptionStatus::Incomplete),
-            "incomplete"
-        );
     }
 }

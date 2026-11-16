@@ -17,7 +17,6 @@ use codewire_server_core::{AppBuilder, ServiceConfig};
 const DEFAULT_BILLING_LOOPS: &[&str] = &[
     "env-usage-metering",
     "credit-metering",
-    "trials",
     "stripe-delivery-check",
 ];
 
@@ -91,8 +90,8 @@ async fn main() -> anyhow::Result<()> {
         ),
     );
 
-    // Leader-gated billing loops: usage metering, overage invoicing,
-    // trial expiry. BILLING_LOOPS remains an explicit override for
+    // Leader-gated billing loops: usage and credit metering, and the
+    // webhook delivery check. BILLING_LOOPS remains an explicit override for
     // focused diagnostics; unset means the Rust-owned production set.
     let loops = billing_loops_from_env();
     if !loops.is_empty() {
@@ -166,7 +165,6 @@ mod tests {
             vec![
                 "env-usage-metering",
                 "credit-metering",
-                "trials",
                 "stripe-delivery-check"
             ]
         );
@@ -180,8 +178,8 @@ mod tests {
     #[test]
     fn billing_loops_parse_trimmed_override() {
         assert_eq!(
-            billing_loops_from(Some(" env-usage-metering, trials ,, ")),
-            vec!["env-usage-metering", "trials"]
+            billing_loops_from(Some(" env-usage-metering, credit-metering ,, ")),
+            vec!["env-usage-metering", "credit-metering"]
         );
     }
 }

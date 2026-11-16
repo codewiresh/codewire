@@ -28,8 +28,7 @@ use codewire_server_core::{AppError, AppResult};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 
 use crate::checkout_sessions::{
-    CheckoutRequest, PortalRequest, SetupRequest, create_checkout_session, create_portal_session,
-    create_setup_session,
+    PortalRequest, SetupRequest, create_portal_session, create_setup_session,
 };
 use crate::credit_purchase::{AddCreditOutcome, add_credit};
 use crate::org_billing::{
@@ -176,29 +175,20 @@ impl BillingService for BillingConnectService {
         connectrpc::Response::ok(response)
     }
 
+    /// Plans are retired (#3381): billing sells prepaid credit only, so a
+    /// plan checkout is refused before anything reaches Stripe.
     async fn create_checkout_session(
         &self,
         ctx: RequestContext,
-        request: ServiceRequest<'_, CreateCheckoutSessionRequest>,
+        _request: ServiceRequest<'_, CreateCheckoutSessionRequest>,
     ) -> ServiceResult<CreateCheckoutSessionResponse> {
-        let user = auth_user(&ctx)?.clone();
-        let request = request.view();
-        let checkout_url = create_checkout_session(
-            &self.state,
-            &user,
-            request.org_id,
-            CheckoutRequest {
-                plan: request.plan.to_owned(),
-                success_url: request.success_url.to_owned(),
-                cancel_url: request.cancel_url.to_owned(),
-            },
-        )
-        .await
-        .map_err(|error| rpc_app_error(&error, &ctx))?;
-        connectrpc::Response::ok(CreateCheckoutSessionResponse {
-            checkout_url,
-            ..Default::default()
-        })
+        auth_user(&ctx)?;
+        Err(rpc_app_error(
+            &AppError::Precondition(
+                "plans are retired; add prepaid credit on the organization's Billing page".into(),
+            ),
+            &ctx,
+        ))
     }
 
     async fn create_portal_session(

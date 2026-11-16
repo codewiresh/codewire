@@ -44,10 +44,10 @@ use stripe_billing::subscription_item::{
 use stripe_checkout::checkout_session::{
     CreateCheckoutSession, CreateCheckoutSessionInvoiceCreation,
     CreateCheckoutSessionInvoiceCreationInvoiceData, CreateCheckoutSessionLineItems,
-    CreateCheckoutSessionLineItemsAdjustableQuantity, CreateCheckoutSessionLineItemsPriceData,
-    CreateCheckoutSessionPaymentIntentData, CreateCheckoutSessionPaymentIntentDataSetupFutureUsage,
-    CreateCheckoutSessionPaymentMethodTypes, CreateCheckoutSessionSubscriptionData,
-    ExpireCheckoutSession, ListCheckoutSession, ProductData,
+    CreateCheckoutSessionLineItemsPriceData, CreateCheckoutSessionPaymentIntentData,
+    CreateCheckoutSessionPaymentIntentDataSetupFutureUsage,
+    CreateCheckoutSessionPaymentMethodTypes, ExpireCheckoutSession, ListCheckoutSession,
+    ProductData,
 };
 use stripe_client_core::{RequestBuilder, StripeMethod};
 use stripe_core::customer::{
@@ -110,7 +110,6 @@ const IDEMPOTENT_CALLS: &[(&str, IdempotencyKind)] = &[
     ("update_subscription_item", IdempotencyKind::Operation),
     ("set_default_payment_method", IdempotencyKind::Operation),
     ("charge_top_up", IdempotencyKind::Operation),
-    ("create_org_checkout_session", IdempotencyKind::Parameters),
     ("create_portal_session", IdempotencyKind::Parameters),
     ("create_setup_session", IdempotencyKind::Parameters),
     (
@@ -523,40 +522,6 @@ impl StripeHandle {
         Ok(customer.id.to_string())
     }
 
-    /// Opens a subscription checkout. Parameter-keyed: see the module docs.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_org_checkout_session(
-        &self,
-        customer_id: &str,
-        org_id: &str,
-        plan_name: &str,
-        price_id: &str,
-        seat_price_id: Option<&str>,
-        trial_days_remaining: Option<u32>,
-        success_url: &str,
-        cancel_url: &str,
-    ) -> Result<String, AppError> {
-        let client = self.client()?;
-        let request = org_checkout_request(
-            customer_id,
-            org_id,
-            plan_name,
-            price_id,
-            seat_price_id,
-            trial_days_remaining,
-            success_url,
-            cancel_url,
-        );
-        let idempotency_key = parameter_key("org-checkout", &request)?;
-        let session = request
-            .customize()
-            .request_strategy(RequestStrategy::Idempotent(idempotency_key))
-            .send(client)
-            .await
-            .map_err(stripe_err)?;
-        Ok(session.url.unwrap_or_default())
-    }
-
     /// Mirrors `billing.CreatePortalSession`. Parameter-keyed: see the module
     /// docs.
     pub async fn create_portal_session(
@@ -748,58 +713,6 @@ impl StripeHandle {
         }
         Ok(page.data)
     }
-}
-
-/// The subscription checkout `create_org_checkout_session` sends.
-#[allow(clippy::too_many_arguments)]
-fn org_checkout_request(
-    customer_id: &str,
-    org_id: &str,
-    plan_name: &str,
-    price_id: &str,
-    seat_price_id: Option<&str>,
-    trial_days_remaining: Option<u32>,
-    success_url: &str,
-    cancel_url: &str,
-) -> CreateCheckoutSession {
-    let mut line_items = vec![CreateCheckoutSessionLineItems {
-        price: Some(price_id.to_string()),
-        quantity: Some(1),
-        ..Default::default()
-    }];
-    if let Some(seat) = seat_price_id
-        && !seat.is_empty()
-    {
-        line_items.push(CreateCheckoutSessionLineItems {
-            price: Some(seat.to_string()),
-            quantity: Some(0),
-            adjustable_quantity: Some(CreateCheckoutSessionLineItemsAdjustableQuantity {
-                enabled: true,
-                minimum: Some(0),
-                maximum: Some(1000),
-            }),
-            ..Default::default()
-        });
-    }
-    let sub_data = CreateCheckoutSessionSubscriptionData {
-        metadata: Some(
-            [
-                ("org_id".to_string(), org_id.to_string()),
-                ("plan".to_string(), plan_name.to_string()),
-            ]
-            .into(),
-        ),
-        trial_period_days: trial_days_remaining,
-        ..Default::default()
-    };
-    CreateCheckoutSession::new()
-        .customer(customer_id)
-        .mode(stripe_shared::CheckoutSessionMode::Subscription)
-        .line_items(line_items)
-        .success_url(success_url)
-        .cancel_url(cancel_url)
-        .allow_promotion_codes(true)
-        .subscription_data(sub_data)
 }
 
 /// The payment-mode session `create_credit_checkout_session` sends.
@@ -1561,9 +1474,8 @@ mod currency_tests {
 #[cfg(test)]
 mod idempotency_key_tests {
     use super::{
-        CreditCheckout, IDEMPOTENT_CALLS, IdempotencyKind, credit_checkout_request,
-        org_checkout_request, parameter_key, portal_session_request, setup_session_request,
-        setup_window,
+        CreditCheckout, IDEMPOTENT_CALLS, IdempotencyKind, credit_checkout_request, parameter_key,
+        portal_session_request, setup_session_request, setup_window,
     };
 
     fn key(kind: &str, request: &impl serde::Serialize) -> String {
@@ -1685,116 +1597,6 @@ mod idempotency_key_tests {
         );
     }
 
-    #[test]
-    fn an_org_checkout_key_changes_with_every_parameter() {
-        let k = |c, o, p, pr, seat, trial, s, x| {
-            key(
-                "org-checkout",
-                &org_checkout_request(c, o, p, pr, seat, trial, s, x),
-            )
-        };
-        let base = || {
-            k(
-                "cus_1",
-                "org-1",
-                "pro",
-                "price_1",
-                Some("seat_1"),
-                Some(7),
-                "https://a/ok",
-                "https://a/no",
-            )
-        };
-        all_distinct(
-            base(),
-            base(),
-            vec![
-                k(
-                    "cus_2",
-                    "org-1",
-                    "pro",
-                    "price_1",
-                    Some("seat_1"),
-                    Some(7),
-                    "https://a/ok",
-                    "https://a/no",
-                ),
-                k(
-                    "cus_1",
-                    "org-2",
-                    "pro",
-                    "price_1",
-                    Some("seat_1"),
-                    Some(7),
-                    "https://a/ok",
-                    "https://a/no",
-                ),
-                k(
-                    "cus_1",
-                    "org-1",
-                    "team",
-                    "price_1",
-                    Some("seat_1"),
-                    Some(7),
-                    "https://a/ok",
-                    "https://a/no",
-                ),
-                k(
-                    "cus_1",
-                    "org-1",
-                    "pro",
-                    "price_2",
-                    Some("seat_1"),
-                    Some(7),
-                    "https://a/ok",
-                    "https://a/no",
-                ),
-                k(
-                    "cus_1",
-                    "org-1",
-                    "pro",
-                    "price_1",
-                    None,
-                    Some(7),
-                    "https://a/ok",
-                    "https://a/no",
-                ),
-                k(
-                    "cus_1",
-                    "org-1",
-                    "pro",
-                    "price_1",
-                    Some("seat_1"),
-                    Some(6),
-                    "https://a/ok",
-                    "https://a/no",
-                ),
-                k(
-                    "cus_1",
-                    "org-1",
-                    "pro",
-                    "price_1",
-                    Some("seat_1"),
-                    Some(7),
-                    "https://a/ok2",
-                    "https://a/no",
-                ),
-                k(
-                    "cus_1",
-                    "org-1",
-                    "pro",
-                    "price_1",
-                    Some("seat_1"),
-                    Some(7),
-                    "https://a/ok",
-                    "https://a/no2",
-                ),
-            ],
-        );
-    }
-
-    /// Every function that sends an idempotent Stripe request is in
-    /// `IDEMPOTENT_CALLS`, and is keyed the way the table says.
     #[test]
     fn every_idempotent_call_is_named_and_keyed_by_its_kind() {
         let file = include_str!("stripe_client.rs");

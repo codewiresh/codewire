@@ -1,10 +1,9 @@
 //! Rust-owned deploy-shaped billing smoke.
 //!
 //! Runs against the real billing binary and PostgreSQL database. It proves a
-//! valid signed Stripe `invoice.paid` delivery is idempotent and that the
-//! Rust-owned trial loop suspends an expired organization. The retired
-//! pre-session-ledger usage writer is intentionally not part of this current
-//! product contract.
+//! valid signed Stripe `invoice.paid` delivery is idempotent. The retired
+//! pre-session-ledger usage writer and the trial loop (#3381) are
+//! intentionally not part of this current product contract.
 
 #![recursion_limit = "256"]
 
@@ -56,11 +55,8 @@ async fn main() -> anyhow::Result<()> {
         .context("build billing runtime HTTP client")?;
 
     assert_invoice_paid_idempotency(&http, &pool, &base_url, &webhook_secret).await?;
-    assert_trial_expiry(&pool).await?;
 
-    println!(
-        "billing-runtime-smoke: signed Stripe invoice idempotency and Rust trial expiry green"
-    );
+    println!("billing-runtime-smoke: signed Stripe invoice idempotency green");
     Ok(())
 }
 
@@ -174,71 +170,6 @@ async fn assert_invoice_paid_idempotency(
         .execute(pool)
         .await?;
     sqlx::query("DELETE FROM environment_subscriptions WHERE org_id = $1")
-        .bind(&org_id)
-        .execute(pool)
-        .await?;
-    sqlx::query("DELETE FROM organizations WHERE id = $1")
-        .bind(&org_id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-async fn assert_trial_expiry(pool: &PgPool) -> anyhow::Result<()> {
-    let suffix = &Uuid::new_v4().to_string()[..8];
-    let org_id = Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO organizations
-             (id, name, slug, created_by, billing_status, created_at, updated_at)
-         VALUES ($1, 'Rust Trial Runtime', $2, 'usr_contract_admin', 'trialing', NOW(), NOW())",
-    )
-    .bind(&org_id)
-    .bind(format!("rust-trial-runtime-{suffix}"))
-    .execute(pool)
-    .await
-    .context("seed trial organization")?;
-    sqlx::query(
-        "INSERT INTO org_members (id, org_id, user_id, role, created_at, updated_at)
-         VALUES ($1, $2, 'usr_contract_admin', 'owner', NOW(), NOW())",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(&org_id)
-    .execute(pool)
-    .await
-    .context("seed trial owner")?;
-    sqlx::query(
-        "INSERT INTO org_subscriptions
-             (org_id, plan, status, trial_start, trial_end)
-         VALUES ($1, 'starter', 'trialing', NOW() - INTERVAL '15 days', NOW() - INTERVAL '1 minute')",
-    )
-    .bind(&org_id)
-    .execute(pool)
-    .await
-    .context("seed expired trial")?;
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(70);
-    loop {
-        let state = sqlx::query_as::<_, (String, String, i64)>(
-            "SELECT os.status, COALESCE(o.billing_status, ''),
-                    (SELECT COUNT(*) FROM billing_events
-                      WHERE event_type = 'trial_expired' AND org_id = os.org_id)
-               FROM org_subscriptions os
-               JOIN organizations o ON o.id = os.org_id
-              WHERE os.org_id = $1",
-        )
-        .bind(&org_id)
-        .fetch_one(pool)
-        .await?;
-        if state == ("suspended".into(), "suspended".into(), 1) {
-            break;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("expired trial was not fully suspended: {state:?}");
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-
-    sqlx::query("DELETE FROM billing_events WHERE org_id = $1")
         .bind(&org_id)
         .execute(pool)
         .await?;

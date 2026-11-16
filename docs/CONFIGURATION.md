@@ -242,10 +242,11 @@ startup and then hourly, using its own key. It lists the account's webhook
 endpoints and requires exactly one endpoint for the webhook URL. That
 endpoint must be enabled and in the key's mode, use the Stripe API version of
 billing's SDK, and send exactly the event types billing handles:
-`checkout.session.completed`, `customer.subscription.updated`,
-`customer.subscription.deleted`, `customer.subscription.trial_will_end`,
-`invoice.created`, `invoice.paid`, `invoice.payment_failed` and
-`invoice.finalized`. The one other type it may also send is
+`checkout.session.completed`, `invoice.created`, `invoice.paid`,
+`invoice.payment_failed` and `invoice.finalized`. Billing sells no
+subscriptions (#3381), so an endpoint that still sends the
+`customer.subscription.*` events reports `degraded` until they are removed
+from it. The one other type it may also send is
 `customer.updated`, the delivery check's sentinel event below.
 
 A mismatch logs `billing: Stripe webhook endpoint check failed` at ERROR with

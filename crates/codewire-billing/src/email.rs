@@ -1,6 +1,6 @@
 //! Billing emails via the shared transactional-email provider.
 //!
-//! Owns payment receipt, payment-failed, credit, trial and account-deleted
+//! Owns payment receipt, payment-failed, credit and account-deleted
 //! messages. The payment receipt is sent only while billing, not Stripe,
 //! sends receipts (`CODEWIRE_BILLING_RECEIPTS`, #4816). Every email that asks the owner to pay or add credit links to
 //! the organization's Billing page on the configured frontend origin (#4553).
@@ -126,24 +126,6 @@ impl EmailClient {
         self.send(to, &credit_exhausted_email(&billing_url)).await
     }
 
-    /// Mirrors `email.SendTrialExpired`.
-    pub async fn send_trial_expired(&self, to: &str, org_slug: Option<&str>) -> anyhow::Result<()> {
-        let billing_url = self.billing_url(org_slug);
-        self.send(to, &trial_expired_email(&billing_url)).await
-    }
-
-    /// Mirrors `email.SendTrialEnding`.
-    pub async fn send_trial_ending(
-        &self,
-        to: &str,
-        org_slug: Option<&str>,
-        days_left: i32,
-    ) -> anyhow::Result<()> {
-        let billing_url = self.billing_url(org_slug);
-        self.send(to, &trial_ending_email(days_left, &billing_url))
-            .await
-    }
-
     /// The confirmation that an account was deleted (#3679).
     pub async fn send_account_deleted(&self, to: &str) -> anyhow::Result<()> {
         self.send(to, &account_deleted_email()).await
@@ -242,29 +224,6 @@ fn credit_exhausted_email(billing_url: &str) -> Email {
     )
     .button("Add credit", billing_url)
     .reason(OWNER_BILLING_REASON)
-}
-
-fn trial_expired_email(billing_url: &str) -> Email {
-    Email::new("Your Codewire trial has ended", "Your trial has ended")
-        .paragraph("Your Codewire free trial has expired. Your organization has been suspended.")
-        .paragraph("Upgrade to a paid plan to restore access and continue using your resources.")
-        .button("Choose a plan", billing_url)
-        .note("If you have any questions, please contact support.")
-        .reason(OWNER_BILLING_REASON)
-}
-
-fn trial_ending_email(days_left: i32, billing_url: &str) -> Email {
-    let days_str = if days_left == 1 {
-        "1 day".to_string()
-    } else {
-        format!("{days_left} days")
-    };
-    Email::new("Your Codewire trial ends soon", "Your trial is ending soon")
-        .paragraph(format!("Your Codewire free trial ends in {days_str}."))
-        .paragraph("Upgrade now to keep your resources running and avoid any disruption.")
-        .button("Choose a plan", billing_url)
-        .note("If you have any questions, please contact support.")
-        .reason(OWNER_BILLING_REASON)
 }
 
 fn account_deleted_email() -> Email {
@@ -427,8 +386,6 @@ mod tests {
             payment_failed_email(1250, "eur", &dashboard),
             credit_low_email(250, &dashboard),
             credit_exhausted_email(&dashboard),
-            trial_expired_email(&dashboard),
-            trial_ending_email(3, &dashboard),
         ] {
             let urls: Vec<_> = email
                 .blocks
@@ -456,8 +413,6 @@ mod tests {
             ),
             (credit_low_email(250, &billing_url), "Add credit"),
             (credit_exhausted_email(&billing_url), "Add credit"),
-            (trial_expired_email(&billing_url), "Choose a plan"),
-            (trial_ending_email(3, &billing_url), "Choose a plan"),
         ] {
             let buttons: Vec<_> = email
                 .blocks
@@ -507,8 +462,6 @@ mod tests {
             ),
             ("billing-credit-low", credit_low_email(250, &billing)),
             ("billing-credit-exhausted", credit_exhausted_email(&billing)),
-            ("billing-trial-expired", trial_expired_email(&billing)),
-            ("billing-trial-ending", trial_ending_email(3, &billing)),
             ("billing-account-deleted", account_deleted_email()),
         ] {
             std::fs::write(dir.join(format!("{name}.html")), email.html()).unwrap();
@@ -526,7 +479,7 @@ mod tests {
     async fn unconfigured_client_reports_unavailable_delivery() {
         let c = EmailClient::disabled();
         let error = c
-            .send_trial_expired("owner@example.com", Some("acme"))
+            .send_account_deleted("owner@example.com")
             .await
             .unwrap_err();
         assert_eq!(
