@@ -191,7 +191,7 @@
         address.sun_family = sa_family_t(AF_UNIX)
         let path = directory.appendingPathComponent("s").path
         withUnsafeMutableBytes(of: &address.sun_path) { bytes in
-          _ = path.utf8CString.withUnsafeBytes { bytes.copyMemory(from: $0) }
+          path.utf8CString.withUnsafeBytes { bytes.copyMemory(from: $0) }
         }
         let connected = withUnsafePointer(to: &address) {
           $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
