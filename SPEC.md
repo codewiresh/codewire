@@ -435,12 +435,24 @@ declared ports.
 Target, not shipped (#3999): for an agent's provider hosts the broker hands
 the connection to a TLS front door, one process per VM, instead of dialling.
 The front door is confined to no filesystem, no new sockets and no process
-creation, and holds only the descriptors it inherits; Linux first, macOS to
-follow. What an agent sends to its provider is not documented and changes
+creation, and holds only the descriptors it inherits: by Landlock and
+seccomp on Linux, and by a Seatbelt profile on macOS.
+What an agent sends to its provider is not documented and changes
 between releases, so a compatibility test runs the real Claude Code against a
 stand-in provider (#4925): for the image's version when that version or a
 login file Codewire writes changes, and on a schedule for the newest release,
 which is the one environments run (#4946).
+On an intercepted host, only a request that carries the environment's
+placeholder on a path its route serves is served whatever the network
+policy's default. A placeholder on a path the route does not serve is refused
+before any lease, whatever the policy. Every other request to that host
+follows the policy as if the host were not intercepted:
+a rule that allows it lets it through untouched, and without one it is
+refused and counted. A deny rule on the host refuses everything to it. A
+selected credential acts on the user's own account at its provider, which no
+network policy limits. The managed GitHub credential is the exception: it is
+served only where a rule allows the GitHub hosts, because its grant cannot be
+limited to an environment's own repositories.
 
 A Mesh node is online only while it holds a live coordinator session that
 Mesh has heard from in the last 45 s. Every Mesh client pings every 15 s, so a
@@ -697,6 +709,37 @@ platform. A local VM's egress is bounded by its selected network policy,
 `open` by default, as above.
 Credential non-disclosure is not egress mediation: a sandbox can still open
 TCP 443 to a provider directly.
+
+Target, not shipped (#4000): with hosted egress on, a Sandbox Pod's own
+egress is only to named peers inside the cluster, each by selector and port,
+with no address range and no DNS: the egress process on its node, the
+binding, the UDP relay, the confidential key broker where configured, the
+platform's public gateway and the DERP relay. Everything else the Sandbox
+sends leaves through the egress broker under its network policy. The daemon
+reaches the control plane, the tailnet coordinator and Mesh through that
+gateway, on the listener the public reaches, and the relay directly, at
+addresses from its configuration. None of them is a destination the broker
+allows, and a name whose addresses other sites share is never one. A workload
+in the Sandbox can use every path the daemon has. So a Sandbox on `locked`
+reaches the platform's own services, which are whatever the public gateway
+serves and the relay, and nothing else; it is never described as unable to
+send anything out. The journeys are `policy-hosted` and `hosted-enforcement`
+in `docs/journeys/network-and-egress.md`, not yet observed.
+
+Target, not shipped (#4000, item 5): a new cw-egress version starts on each
+node beside the one it replaces. Sandboxes created or started from then on,
+and every new egress stream, use the new version. The old version accepts no
+more streams, and ends a Sandbox's stream once that Sandbox holds no open
+connection through it; the Sandbox reconnects to the new version, and nothing
+is reset. The daemon's connections to the platform's own services do not pass
+through cw-egress (above), so they neither count as open nor are touched by a
+move. Thirty minutes after it was told to stop, the old version ends the
+streams that are left, which resets those Sandboxes' open connections once. A
+Sandbox between versions has no egress through cw-egress; its path to the
+platform's own services is unaffected. A version that never becomes ready
+replaces nothing. The journey is
+`hosted-enforcement` in `docs/journeys/network-and-egress.md`, not yet
+observed.
 
 Hosted enforcement status (#4000;
 `crates/codewire-orchestration/src/api/network_policies.rs`,
