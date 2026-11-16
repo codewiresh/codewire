@@ -725,11 +725,21 @@ impl GhConfigProjection {
 /// guest loopback listener and keeps material in its broker boundary. The
 /// Codex slot's provider names no environment key; the OpenAI API-key slot's
 /// names only the session's public `OPENAI_API_KEY` placeholder.
+///
+/// Every Codex Codewire configures runs with `sandbox_mode =
+/// "danger-full-access"`: the environment is the boundary, and Codex's own
+/// sandbox would deny the SSH agent socket and the network (#4956). The
+/// approval policy stays Codex's default here; managed Codex sets its own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexProviderProjection {
     config_toml: String,
-    overrides: [String; 3],
+    signed_in_config_toml: String,
+    overrides: [String; 4],
 }
+
+/// The one setting every Codewire `config.toml` holds, with or without a
+/// provider.
+const CODEX_SANDBOX_SETTING: (&str, &str) = ("sandbox_mode", "\"danger-full-access\"");
 
 impl CodexProviderProjection {
     /// Create a Responses-only provider projection for one unprivileged IPv4
@@ -811,9 +821,12 @@ impl CodexProviderProjection {
             .map(|(key, value)| format!("{key}={value}"))
             .collect::<Vec<_>>()
             .join(",");
+        let (sandbox_key, sandbox_value) = CODEX_SANDBOX_SETTING;
+        let sandbox = format!("{sandbox_key} = {sandbox_value}\n");
         Ok(Self {
             config_toml: format!(
                 concat!(
+                    "{sandbox}",
                     "model_provider = \"{id}\"\n",
                     "\n",
                     "[model_providers.{id}]\n",
@@ -822,10 +835,13 @@ impl CodexProviderProjection {
                     "[features]\n",
                     "enable_request_compression = false\n",
                 ),
+                sandbox = sandbox,
                 id = id,
                 lines = lines,
             ),
+            signed_in_config_toml: sandbox,
             overrides: [
+                format!("{sandbox_key}={sandbox_value}"),
                 format!("model_provider=\"{id}\""),
                 format!("model_providers.{id}={{{inline}}}"),
                 "features.enable_request_compression=false".to_owned(),
@@ -838,6 +854,10 @@ impl CodexProviderProjection {
     fn with_managed_header(self) -> Self {
         Self {
             config_toml: format!("{CODEX_MANAGED_CONFIG_HEADER}\n{}", self.config_toml),
+            signed_in_config_toml: format!(
+                "{CODEX_MANAGED_CONFIG_HEADER}\n{}",
+                self.signed_in_config_toml
+            ),
             ..self
         }
     }
@@ -851,6 +871,13 @@ impl CodexProviderProjection {
     /// Consume the projection and return its complete UTF-8 contents.
     pub fn into_config_toml(self) -> String {
         self.config_toml
+    }
+
+    /// The `config.toml` for the same home while a ChatGPT sign-in is
+    /// delivered: no provider, so Codex uses its own, and only the sandbox
+    /// setting every Codewire configuration holds.
+    pub fn signed_in_config_toml(&self) -> &str {
+        &self.signed_in_config_toml
     }
 
     /// The same settings as Codex `-c` override values, each one `key=value`
@@ -890,6 +917,7 @@ mod tests {
         assert_eq!(
             config,
             concat!(
+                "sandbox_mode = \"danger-full-access\"\n",
                 "model_provider = \"codewire_openai\"\n",
                 "\n",
                 "[model_providers.codewire_openai]\n",
@@ -987,6 +1015,7 @@ mod tests {
         assert_eq!(
             codex.overrides(),
             [
+                "sandbox_mode=\"danger-full-access\"",
                 "model_provider=\"codewire_openai\"",
                 concat!(
                     "model_providers.codewire_openai={name=\"Codewire OpenAI\",",
@@ -1012,12 +1041,43 @@ mod tests {
         }
     }
 
+    /// Codewire's Codex runs without Codex's own sandbox in every
+    /// configuration it writes, provider or none, and never sets the approval
+    /// policy: a person in Codex's terminal UI keeps its prompts (#4956).
+    #[test]
+    fn every_codewire_codex_configuration_turns_off_codexs_own_sandbox() {
+        for projection in [
+            CodexProviderProjection::for_loopback_port(38_081).unwrap(),
+            CodexProviderProjection::for_openai_api_loopback_port(38_081).unwrap(),
+        ] {
+            for config in [projection.config_toml(), projection.signed_in_config_toml()] {
+                let parsed = toml::from_str::<toml::Table>(config).unwrap();
+                assert_eq!(
+                    parsed.get("sandbox_mode").and_then(Value::as_str),
+                    Some("danger-full-access"),
+                    "{config}"
+                );
+                assert!(!parsed.contains_key("approval_policy"), "{config}");
+            }
+            assert_eq!(
+                projection.signed_in_config_toml(),
+                "sandbox_mode = \"danger-full-access\"\n"
+            );
+            let hosted = projection.clone().with_managed_header();
+            assert_eq!(
+                hosted.signed_in_config_toml(),
+                format!("{CODEX_MANAGED_CONFIG_HEADER}\nsandbox_mode = \"danger-full-access\"\n")
+            );
+        }
+    }
+
     #[test]
     fn openai_api_slot_provider_names_its_managed_base_and_the_public_placeholder() {
         let projection = CodexProviderProjection::for_openai_api_loopback_port(38_081).unwrap();
         assert_eq!(
             projection.config_toml(),
             concat!(
+                "sandbox_mode = \"danger-full-access\"\n",
                 "model_provider = \"codewire_openai_api\"\n",
                 "\n",
                 "[model_providers.codewire_openai_api]\n",
@@ -1063,6 +1123,7 @@ mod tests {
             hosted.config_toml(),
             concat!(
                 "# Managed by Codewire. Delete this line to manage this file yourself.\n",
+                "sandbox_mode = \"danger-full-access\"\n",
                 "model_provider = \"codewire_openai\"\n",
                 "\n",
                 "[model_providers.codewire_openai]\n",

@@ -1453,9 +1453,21 @@ the files it owns:
   placeholder is never touched.
 - `codex logout` stays logged out until Codex is re-selected or the Sandbox
   restarts.
-- When no login is delivered, Codex uses the proxy through a Codewire
-  `config.toml`. Codewire owns that file only while its first line is
-  `# Managed by Codewire. Delete this line to manage this file yourself.`
+- While Codex is selected, Codewire's `config.toml` is always there and
+  sets `sandbox_mode = "danger-full-access"`, so Codex started any way
+  (`cw run codex`, `cw exec … codex`, a shell) runs without its own inner
+  sandbox: the environment is the boundary, as for managed Codex, and Codex's
+  sandbox would otherwise deny the SSH agent socket and the network (#4956).
+  So the agent can sign with the SSH agent (for example, to push) and reach
+  what the network policy allows, as any process in the environment can.
+  It leaves `approval_policy` at Codex's default, so a person in Codex's
+  terminal UI keeps its approval prompts; managed Codex's `never` stays in
+  its own launch. Codex flags such as `--sandbox` still override the file.
+- When no login is delivered, the same file also names the proxy as Codex's
+  provider; with a delivered login it holds only the sandbox line, so Codex
+  uses its built-in provider. Codewire owns that file only while its first
+  line is `# Managed by Codewire. Delete this line to manage this file
+  yourself.`
 - A denied delivery (an API key, a credential needing Reconnect, a revoked or
   organization-owned credential, Codex not selected) removes Codewire's
   `auth.json` at the next check, within 2 minutes.
@@ -1690,11 +1702,12 @@ Once it listens, while Codex is selected, the daemon asks the broker for the
 creator's login ([Direct delivery exceptions](#direct-delivery-exceptions))
 at start and every 2 minutes, sooner with jittered backoff while no bridge
 epoch is admitted. It writes a delivered login as Codex's standard ChatGPT
-`auth.json` (0600) and removes Codewire's `config.toml`, so Codex uses its
-built-in provider and talks to chatgpt.com directly; this holds even when
+`auth.json` (0600) and replaces Codewire's `config.toml` with one that holds
+only the sandbox line (see below), so Codex uses its built-in provider and
+talks to chatgpt.com directly; this holds even when
 your own login is in `auth.json`, so your login is the one Codex uses. A
 denial, an expired login or 10 minutes of bridge failure removes Codewire's
-`auth.json` and brings Codewire's `config.toml` back. `auth.json` is
+`auth.json` and brings back Codewire's `config.toml` with the provider. `auth.json` is
 Codewire's only while it is a regular file of the daemon's user that parses,
 has `auth_mode` `chatgpt` and holds exactly the placeholder refresh token;
 anything else, including a file Codex is rewriting in place at that moment,

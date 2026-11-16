@@ -20,12 +20,21 @@ fn clients(slots: &[&str]) -> ManagedCredentialClients {
     ManagedCredentialClients::from_profile_slots(slots.iter().copied()).unwrap()
 }
 
-fn proxy_config() -> String {
+fn projection() -> CodexProviderProjection {
     clients(&["codex"])
         .for_placement(ManagedCredentialClientPlacement::Platform)
         .codex
         .unwrap()
-        .into_config_toml()
+}
+
+fn proxy_config() -> String {
+    projection().into_config_toml()
+}
+
+/// Codewire's `config.toml` while a login is delivered: no provider, only
+/// the sandbox setting (#4956).
+fn signed_in_config() -> String {
+    projection().signed_in_config_toml().to_owned()
 }
 
 fn base64url(bytes: &[u8]) -> String {
@@ -114,7 +123,7 @@ impl Fixture {
     }
 
     fn writer_for(&self, state: &Path, generation: u64) -> CodexLoginWriter {
-        CodexLoginWriter::new(self.home(), proxy_config(), state, generation, T0)
+        CodexLoginWriter::new(self.home(), projection(), state, generation, T0)
     }
 
     fn auth(&self) -> PathBuf {
@@ -191,7 +200,7 @@ fn the_placeholder_refresh_token_is_never_empty() {
 }
 
 #[test]
-fn a_delivered_login_is_codex_standard_chatgpt_auth_json_and_the_proxy_config_goes() {
+fn a_delivered_login_is_codex_standard_chatgpt_auth_json_and_the_config_keeps_only_the_sandbox() {
     let fixture = Fixture::new();
     assert!(fixture.config().is_some());
     let mut writer = fixture.writer();
@@ -227,9 +236,13 @@ fn a_delivered_login_is_codex_standard_chatgpt_auth_json_and_the_proxy_config_go
             .count(),
         3
     );
-    // Codex now uses its built-in provider; no temporary file remains.
-    assert_eq!(fixture.config(), None);
-    assert_eq!(fixture.entries(), [CODEX_AUTH_FILE_NAME]);
+    // Codex now uses its built-in provider, and still runs without its own
+    // sandbox; no temporary file remains.
+    assert_eq!(fixture.config(), Some(signed_in_config()));
+    assert_eq!(
+        fixture.entries(),
+        [CODEX_AUTH_FILE_NAME, CODEX_CONFIG_FILE_NAME]
+    );
 }
 
 #[test]
@@ -279,7 +292,10 @@ fn rotation_is_adopted_and_an_unchanged_login_is_left_alone() {
         CodexLoginSync::Written
     );
     assert_eq!(mode(&fixture.auth()), 0o600);
-    assert_eq!(fixture.entries(), [CODEX_AUTH_FILE_NAME]);
+    assert_eq!(
+        fixture.entries(),
+        [CODEX_AUTH_FILE_NAME, CODEX_CONFIG_FILE_NAME]
+    );
 }
 
 #[test]
@@ -353,7 +369,7 @@ fn the_users_own_login_is_never_touched() {
         assert_eq!(fixture.snapshot(), before);
         // A delivered login still means Codex's built-in provider, so the
         // user's own login is the one Codex uses.
-        assert_eq!(fixture.config(), None);
+        assert_eq!(fixture.config(), Some(signed_in_config()));
         for (answer, at) in [
             (CodexLoginDelivery::Unavailable, T0 + 60),
             (CodexLoginDelivery::Unsupported, T0 + 6_000),
@@ -437,7 +453,7 @@ fn symlinks_and_special_files_are_never_followed() {
     symlink(&target, linked.root()).unwrap();
     let mut linked_writer = CodexLoginWriter::new(
         linked.clone(),
-        proxy_config(),
+        projection(),
         fixture.root.path().join("linked-state"),
         GENERATION,
         T0,
@@ -474,7 +490,7 @@ fn logout_stays_logged_out_across_a_daemon_restart_until_a_new_container_or_gene
         );
         assert!(!fixture.auth().exists());
         // Logged out means logged out, not quietly back on the proxy.
-        assert_eq!(fixture.config(), None);
+        assert_eq!(fixture.config(), Some(signed_in_config()));
     }
     // The marker is container-local, keyed by generation and credential.
     assert!(
@@ -557,7 +573,7 @@ fn only_an_explicit_denial_removes_codewires_login_and_restores_the_proxy() {
     ] {
         assert_eq!(writer.apply(answer, T0 + 60).unwrap(), outcome);
         assert_eq!(fixture.snapshot(), before);
-        assert_eq!(fixture.config(), None);
+        assert_eq!(fixture.config(), Some(signed_in_config()));
     }
     assert_eq!(
         writer.apply(CodexLoginDelivery::Denied, T0 + 120).unwrap(),
@@ -574,7 +590,7 @@ fn only_an_explicit_denial_removes_codewires_login_and_restores_the_proxy() {
             .unwrap(),
         CodexLoginSync::Written
     );
-    assert_eq!(fixture.config(), None);
+    assert_eq!(fixture.config(), Some(signed_in_config()));
 }
 
 #[test]
@@ -624,7 +640,7 @@ fn an_expired_login_is_removed_while_the_bridge_fails() {
             .unwrap(),
         CodexLoginSync::Written
     );
-    assert_eq!(fixture.config(), None);
+    assert_eq!(fixture.config(), Some(signed_in_config()));
 }
 
 #[test]
@@ -749,7 +765,10 @@ fn a_file_changed_or_created_after_inspection_is_never_replaced() {
     // A file created after an absent inspection stays as well.
     assert!(!install_new(&home, b"{\"replacement\":true}").unwrap());
     assert_eq!(fs::read(fixture.auth()).unwrap(), users_login());
-    assert_eq!(fixture.entries(), [CODEX_AUTH_FILE_NAME]);
+    assert_eq!(
+        fixture.entries(),
+        [CODEX_AUTH_FILE_NAME, CODEX_CONFIG_FILE_NAME]
+    );
 }
 
 #[test]
@@ -919,7 +938,7 @@ impl NativeFixture {
     fn writer(&self) -> CodexLoginWriter {
         CodexLoginWriter::new(
             self.home(),
-            native_config(),
+            native_projection(),
             self.root.path().join("tmp/codewire-codex-login"),
             GENERATION,
             T0,
@@ -928,11 +947,14 @@ impl NativeFixture {
 }
 
 fn native_config() -> String {
+    native_projection().into_config_toml()
+}
+
+fn native_projection() -> CodexProviderProjection {
     clients(&["codex"])
         .for_placement(ManagedCredentialClientPlacement::Native)
         .codex
         .unwrap()
-        .into_config_toml()
 }
 
 /// A local VM gets exactly the login a hosted Sandbox gets: the same
@@ -969,9 +991,14 @@ fn a_native_home_gets_the_same_login_document_as_a_hosted_one() {
     let metadata = fs::symlink_metadata(native.home().auth_path()).unwrap();
     assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
     assert_eq!(metadata.uid(), NativeFixture::owner().uid);
-    // The native proxy configuration is Codewire's and is removed while the
-    // login is delivered, so Codex uses its own login.
-    assert!(!native.home().config_path().exists());
+    // While the login is delivered the native configuration names no
+    // provider, so Codex uses its own login, and keeps the sandbox setting.
+    let native_signed_in = fs::read_to_string(native.home().config_path()).unwrap();
+    assert_eq!(
+        native_signed_in,
+        native_projection().signed_in_config_toml()
+    );
+    assert!(native_signed_in.contains("sandbox_mode = \"danger-full-access\""));
 
     // An explicit denial withdraws the login and restores the native proxy.
     assert_eq!(
@@ -1027,7 +1054,7 @@ fn a_native_home_recognizes_only_codewires_configuration() {
     let missing = CodexHome::native(native.root.path().join("missing"), NativeFixture::owner());
     let mut writer = CodexLoginWriter::new(
         missing.clone(),
-        native_config(),
+        native_projection(),
         native.root.path().join("tmp/missing-state"),
         GENERATION,
         T0,
@@ -1053,7 +1080,7 @@ fn a_native_home_of_another_owner_is_left_alone() {
     let home = CodexHome::native(native.home().root(), other);
     let mut writer = CodexLoginWriter::new(
         home,
-        native_config(),
+        native_projection(),
         native.root.path().join("tmp/other-state"),
         GENERATION,
         T0,
@@ -1213,7 +1240,7 @@ async fn the_task_checks_at_start_changes_nothing_without_the_capability_and_sto
         stopped,
     ));
     eventually(|| fixture.auth().exists()).await;
-    eventually(|| fixture.config().is_none()).await;
+    eventually(|| fixture.config() == Some(signed_in_config())).await;
     stop.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(5), task)
         .await

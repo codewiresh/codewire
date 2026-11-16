@@ -39,7 +39,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use codewire_access::ManagedCredentialClientPlacement;
+use codewire_access::{CodexProviderProjection, ManagedCredentialClientPlacement};
 use codewire_credential_bridge::LoginFailure;
 use codewire_workload_secrets::{CodexLogin, CodexLoginBinding, OpenedCodexLogin};
 use serde_json::{Map, Value};
@@ -133,6 +133,7 @@ impl From<Result<OpenedCodexLogin, LoginFailure>> for CodexLoginDelivery {
 pub struct CodexLoginWriter {
     home: CodexHome,
     proxy_config: String,
+    signed_in_config: String,
     state: LoginState,
     /// Unix seconds since when no login has been delivered; `None` right
     /// after a delivery or a denial.
@@ -140,20 +141,22 @@ pub struct CodexLoginWriter {
 }
 
 impl CodexLoginWriter {
-    /// A writer for `home` that restores `proxy_config` (Codewire's
-    /// `config.toml`) whenever no login is delivered. Its logout and last-write
-    /// records live in `state_directory` under `generation`. `now_unix` starts
-    /// the [`CODEX_LOGIN_LAPSE`] window: no login has been delivered yet.
+    /// A writer for `home` that keeps `config`'s `config.toml` there: its
+    /// proxy configuration whenever no login is delivered, its provider-free
+    /// one while a login is. Its logout and last-write records live in
+    /// `state_directory` under `generation`. `now_unix` starts the
+    /// [`CODEX_LOGIN_LAPSE`] window: no login has been delivered yet.
     pub fn new(
         home: CodexHome,
-        proxy_config: String,
+        config: CodexProviderProjection,
         state_directory: impl Into<PathBuf>,
         generation: u64,
         now_unix: u64,
     ) -> Self {
         Self {
             home,
-            proxy_config,
+            signed_in_config: config.signed_in_config_toml().to_owned(),
+            proxy_config: config.into_config_toml(),
             state: LoginState::load(state_directory.into(), generation, "codex"),
             failing_since: Some(now_unix),
         }
@@ -189,8 +192,9 @@ impl CodexLoginWriter {
         let outcome = self.install(&home, binding, &login)?;
         // A delivered login means Codex uses its built-in provider, whatever
         // `auth.json` holds: the user's own login wins, and a logged-out Codex
-        // stays logged out instead of falling back to the proxy.
-        self.home.sync_config(None)?;
+        // stays logged out instead of falling back to the proxy. The file
+        // stays, without a provider, for its sandbox setting.
+        self.home.sync_config(Some(&self.signed_in_config))?;
         Ok(outcome)
     }
 
@@ -636,14 +640,13 @@ pub(crate) fn login_writer(config: &crate::Config, home: CodexHome) -> Option<Co
     {
         return None;
     }
-    let proxy_config = config
+    let projection = config
         .managed_credential_clients
         .for_placement(placement)
-        .codex?
-        .into_config_toml();
+        .codex?;
     let writer = CodexLoginWriter::new(
         home,
-        proxy_config,
+        projection,
         CODEX_LOGIN_STATE_DIRECTORY,
         bridge.environment_generation,
         unix_now(),

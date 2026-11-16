@@ -989,6 +989,10 @@ fn platform_control_codex_slot_route_is_credential_free_through_the_codex_route(
     // The file and the overrides configure the same provider.
     for settings in [&file, &overrides] {
         assert_eq!(settings["model_provider"].as_str(), Some("codewire_openai"));
+        assert_eq!(
+            settings["sandbox_mode"].as_str(),
+            Some("danger-full-access")
+        );
         assert_eq!(settings["forced_login_method"].as_str(), Some("api"));
         assert_eq!(
             settings["cli_auth_credentials_store"].as_str(),

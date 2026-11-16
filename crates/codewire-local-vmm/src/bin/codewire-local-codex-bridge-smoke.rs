@@ -2518,6 +2518,7 @@ function generalEgress(){
         use super::*;
 
         const CODEX_CONFIG_FIXTURE: &str = concat!(
+            "sandbox_mode = \"danger-full-access\"\n",
             "model_provider = \"codewire_openai\"\n",
             "\n",
             "[model_providers.codewire_openai]\n",
@@ -2551,10 +2552,10 @@ function generalEgress(){
                     .into_config_toml();
             assert_eq!(canonical, CODEX_CONFIG_FIXTURE);
             let retained = format!("{CODEX_CONFIG_FIXTURE}{CODEX_TRUST_FIXTURE}");
-            assert_eq!(retained.len(), 317);
+            assert_eq!(retained.len(), 353);
             assert_eq!(
                 format!("{:x}", Sha256::digest(retained.as_bytes())),
-                "7f2546a5da1e82bf68b16dc446705de681b10844b189ed4cff920a9a8df1cde9"
+                "601d7067c19f7158e09a07e08e6625c9ef8e811e2821000bc0329b50b622d68a"
             );
             // The old whole-file predicate accepts pristine state and rejects
             // the actual retained file even though the provider is unchanged.

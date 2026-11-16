@@ -652,6 +652,16 @@ Issues: #3999 (local VMs; changes 8 and 11), #4001 (hosted Sandboxes).
   - Codex keeps working past the real token's expiry;
   - after `cw credentials revoke`, the next call fails and none succeeds after
     it.
+- **Terminal UI:** `cw run codex --in ENV` (Codex's own terminal UI), local
+  and cloud. Inside it, `ssh-add -l` lists the profile's key and
+  `git ls-remote` of a private repository over SSH answers; Codex's
+  `/status` shows its sandbox as full access, and it still asks before
+  running a command (#4956). Full access means the agent can sign with the
+  profile's SSH key through the agent, for example to push, and reach
+  whatever the network policy allows; the key itself never enters the
+  environment. With a delivered login, Codewire's `config.toml` holds only
+  `sandbox_mode = "danger-full-access"`, so the provider check above still
+  prints `0`.
 - **Gotchas:**
   - In a local VM Codewire writes Codex's login into its own Codex home,
     not `~/.codex`; a hosted Sandbox uses `~/.codex`. Read the files where

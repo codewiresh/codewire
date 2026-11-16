@@ -173,7 +173,9 @@ notification without replaying a completed or ambiguous provider task.
 | noel | `noel --mode rpc` stdio, upstream pi's RPC | `steer` with `expectedRunId`, run ID required | `abort` with `expectedRunId` | Saved session ID, reopened with `--session-id`; a run a crash interrupted, or its environment's takedown paused, continues with `resume_run` |
 
 Managed Codex uses `danger-full-access` and `approvalPolicy: never` on the
-explicitly trusted host. In every placement it starts with its working
+explicitly trusted host. Codex started by a person in an environment gets
+the same `danger-full-access` from Codewire's `config.toml`, but keeps
+Codex's own approval prompts (#4956; `docs/dev/SECRETS-AND-CREDENTIALS.md`). In every placement it starts with its working
 directory trusted as a Codex project: a `-c projects=…` launch override sets
 Codex's `[projects."<dir>"] trust_level = "trusted"` entry, so the project's
 own `.codex` configuration, hooks and exec policies load without a trust

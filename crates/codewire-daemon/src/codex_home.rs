@@ -90,9 +90,10 @@ enum ConfigMarker {
     /// The first line is exactly [`CODEX_MANAGED_CONFIG_HEADER`]: the hosted
     /// home is the user's `~/.codex`.
     Header,
-    /// The file is exactly these bytes, the native provider configuration
-    /// the guest writes into Codewire's own directory.
-    Native(String),
+    /// The file is exactly one of these, the native configurations Codewire
+    /// keeps in its own directory: with the provider (the guest writes it at
+    /// boot), or without one while a login is delivered.
+    Native { provider: String, signed_in: String },
 }
 
 impl Default for CodexHome {
@@ -119,11 +120,14 @@ impl CodexHome {
         Self {
             root: root.into(),
             owner: Some(owner),
-            marker: ConfigMarker::Native(
-                CodexProviderProjection::for_loopback_port(MANAGED_HTTP_PORT)
-                    .expect("fixed managed HTTP port is unprivileged")
-                    .into_config_toml(),
-            ),
+            marker: {
+                let native = CodexProviderProjection::for_loopback_port(MANAGED_HTTP_PORT)
+                    .expect("fixed managed HTTP port is unprivileged");
+                ConfigMarker::Native {
+                    signed_in: native.signed_in_config_toml().to_owned(),
+                    provider: native.into_config_toml(),
+                }
+            },
         }
     }
 
@@ -235,7 +239,10 @@ impl CodexHome {
                 contents.split(|byte| *byte == b'\n').next().unwrap_or(&[])
                     == CODEX_MANAGED_CONFIG_HEADER.as_bytes()
             }
-            ConfigMarker::Native(native) => contents == native.as_bytes(),
+            ConfigMarker::Native {
+                provider,
+                signed_in,
+            } => contents == provider.as_bytes() || contents == signed_in.as_bytes(),
         }
     }
 
