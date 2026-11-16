@@ -64,6 +64,9 @@ pub mod network_policy_store;
 pub mod network_session;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod network_worker;
+// Puts the non-shipping feature in a build's dep-info for release admission (#4986).
+#[cfg(feature = "synthetic-oci-input-smoke")]
+mod non_shipping_synthetic_oci_input_smoke;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod process_birth;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

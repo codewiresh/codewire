@@ -660,6 +660,52 @@ class SourceDigestTest(unittest.TestCase):
             release.check_build_inputs(source, self.depinfo(base, [target / "out/generated.rs"]), (target, cargo))
 
 
+    def test_a_cw_built_with_a_non_shipping_feature_is_refused(self):
+        # #4986: a cw built with local-broker-synthetic-smoke compiles its
+        # synthetic broker module, so its dep-info lists that file; admission
+        # refuses it, and admits the same build without it.
+        base = self.base / "non-shipping"
+        base.mkdir()
+        source, _ = fx.source_repo(base)
+        target, cargo = base / "target", base / "cargo home"
+        (cargo / "registry/src").mkdir(parents=True)
+        (target / "out").mkdir(parents=True)
+        normal = [source / "crates/demo/src/lib.rs", source / "Cargo.lock"]
+        self.assertEqual(release.check_build_inputs(source, self.depinfo(base, normal), (target, cargo)), 2)
+        for relative, feature in release.NON_SHIPPING_INPUTS.items():
+            with self.subTest(feature), self.assertRaisesRegex(
+                    release.ReleaseError, f"non-shipping feature {feature} \\(its dep-info lists {relative}\\)"):
+                release.check_build_inputs(source, self.depinfo(base, [*normal, source / relative]), (target, cargo))
+
+    def test_each_non_shipping_input_is_compiled_only_under_its_feature(self):
+        # The refusal keys on a file path; if a module moved or lost its cfg,
+        # the check would pass silently. Each entry's module must be declared,
+        # somewhere in its crate, directly under `#[cfg(feature = "...")]`:
+        # by its own name, or by a #[path] that names the file.
+        root = Path(release.__file__).resolve().parents[3]
+        for relative, feature in release.NON_SHIPPING_INPUTS.items():
+            with self.subTest(relative):
+                file = root / relative
+                self.assertTrue(file.is_file(), relative)
+                crate = Path(*Path(relative).parts[:2])
+                src = root / crate / "src"
+                gate = rf'#\[cfg\(feature = "{re.escape(feature)}"\)\]\n(?:#\[[^\n]*\]\n)*'
+                declared = []
+                for declaring in sorted(src.rglob("*.rs")):
+                    text = declaring.read_text()
+                    for match in re.finditer(gate + r'(?:pub )?mod (\w+);', text):
+                        attrs = match.group(0)
+                        path = re.search(r'#\[path = "([^"]+)"\]', attrs)
+                        if path:
+                            target = (declaring.parent / path.group(1)).resolve()
+                        else:
+                            base = declaring.parent if declaring.name in ("lib.rs", "main.rs", "mod.rs") \
+                                else declaring.with_suffix("")
+                            target = (base / f"{match.group(1)}.rs").resolve()
+                        if target == file.resolve():
+                            declared.append(declaring.relative_to(root).as_posix())
+                self.assertTrue(declared, f"{relative} is not declared under cfg(feature = {feature!r})")
+
     def test_only_the_verified_runtime_document_is_admitted_outside_the_repository(self):
         base = self.base / "embedded-runtime-document"
         base.mkdir()

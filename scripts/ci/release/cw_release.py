@@ -94,6 +94,18 @@ MAX_SOURCE_DIRECTORY_DEPTH = 16
 # The closed record crates/codewire-cli/build.rs embeds once in every cw.
 BUILD_RECORD_MAGIC = b"\0codewire-cw-build-record-v1\0"
 BUILD_RECORD_FIELDS = {"package_version", "rustc", "source_revision", "source_tree_sha256", "target"}
+# Source files compiled only under a non-shipping Cargo feature, one for each
+# such feature a cw's dependency graph can turn on. A cw whose dep-info lists
+# one was built with that feature, and a release never ships it (#4986): under
+# local-broker-synthetic-smoke the local credential broker and the provider
+# revocation executor answer in process, so a shipped cw would report a sign-in
+# revoked at the provider when nothing reached it. A feature that only changes
+# lines in always-compiled files gets an empty module of its own to key on.
+NON_SHIPPING_INPUTS = {
+    "crates/codewire-credential-broker/src/runtime/native_managed_smoke.rs": "local-broker-synthetic-smoke",
+    "crates/codewire-local-vmm/src/non_shipping_synthetic_oci_input_smoke.rs": "synthetic-oci-input-smoke",
+    "crates/codewire-cli/src/fuzzing.rs": "fuzzing",
+}
 MAX_BUILD_RECORD = 1024
 # Host development builds may also target these; releases never do.
 DEVELOPMENT_TARGETS = RELEASE_TARGETS + ("aarch64-unknown-linux-musl", "x86_64-unknown-linux-gnu")
@@ -498,6 +510,9 @@ def check_build_inputs(root, depinfo, allowed_outside, embedded=None):
             continue
         repository += 1
         relative = resolved.relative_to(root).as_posix()
+        require(relative not in NON_SHIPPING_INPUTS,
+                f"this cw was built with the non-shipping feature {NON_SHIPPING_INPUTS.get(relative)} "
+                f"(its dep-info lists {relative}); a release never ships it")
         if relative in SOURCE_DIRECTORY_INPUTS:
             require(path == resolved and relative in inventory,
                     "compiled directory input is not canonical and covered")
