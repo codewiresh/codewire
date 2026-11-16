@@ -5,7 +5,9 @@
 //!
 //! `cw create`, `cw start` and `cw logs ENV --setup --follow` follow setup
 //! through this module, and the iOS app follows a create the same way
-//! (#3825). The words a person reads stay with each surface: this module
+//! (#3825). [`await_setup`] is the whole wait of a create: the follow, a
+//! guard for a setup that stops without a `failed` row, and the workspace
+//! daemon's readiness. The words a person reads stay with each surface: this module
 //! carries rows, typed facts about them and the state of the connection.
 //!
 //! # The daemon status setup read (#3684)
@@ -22,6 +24,7 @@
 //! writes no such row, is asked through the API instead.
 
 mod follow;
+mod wait;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -35,6 +38,14 @@ use crate::{
 pub use follow::{
     EnvironmentLogFeed, FollowEnd, FollowError, FollowPolicy, Interruption, LogFeedConnection,
     LogFeedEvent, PlatformLogFeed, SetupObserver, follow_setup, wait_with_ticks,
+};
+pub use wait::{
+    CONFIDENTIAL_READY_TIMEOUT, DAEMON_READY_TIMEOUT, DaemonObservation, DaemonWaitError,
+    EnvironmentFacts, GetEnvironmentError, PlatformEnd, READY_POLL, READY_TIMEOUT,
+    SETUP_GUARD_INTERVAL, SetupEnd, SetupStop, SetupWaitError, SetupWaitObserver,
+    await_daemon_ready, await_setup, daemon_state_token, desired_state_token,
+    environment_state_token, get_environment_facts, lifecycle_ready_timeout, ready_poll,
+    watch_environment,
 };
 
 /// One `environment_logs` row as a client shows it. Its JSON shape is the

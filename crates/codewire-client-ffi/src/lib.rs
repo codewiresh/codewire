@@ -1,7 +1,9 @@
 //! The iOS app's connection to an environment's shell (#3825): the shell of
 //! `codewire_client::hosted_shell`, the same loop `cw shell` runs, behind the
 //! surface Swift calls through UniFFI. Dial, read, write, resize and close,
-//! and the connection's state through [`ShellObserver`].
+//! and the connection's state through [`ShellObserver`]; and creating an
+//! environment and following its setup ([`create_environment`],
+//! [`EnvironmentSetup`]).
 //!
 //! Each shell runs on a thread of its own with a single-threaded runtime, so
 //! the app's calls never wait on its network work. Keys sent just before a
@@ -22,6 +24,12 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 uniffi::setup_scaffolding!();
 
+mod create;
+pub use create::{
+    CreatedEnvironment, EnvironmentSetup, OrgTarget, PresetSummary, SetupOutcome, SetupStep,
+    SetupStepObserver, StepStatus, create_environment, list_presets,
+};
+
 /// The command a hosted shell runs: the user's login shell.
 const LOGIN_SHELL: [&str; 3] = ["/bin/sh", "-c", "exec \"${SHELL:-/bin/sh}\" -l"];
 
@@ -29,7 +37,7 @@ const LOGIN_SHELL: [&str; 3] = ["/bin/sh", "-c", "exec \"${SHELL:-/bin/sh}\" -l"
 const OUTPUT_BACKLOG: usize = 64;
 
 /// Which environment to open a shell on, and the terminal it starts with.
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct ShellTarget {
     pub server_url: String,
     /// The app's current access token; refreshing it moves into Rust later.
@@ -39,6 +47,20 @@ pub struct ShellTarget {
     pub term: String,
     pub columns: u16,
     pub rows: u16,
+}
+
+impl std::fmt::Debug for ShellTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellTarget")
+            .field("server_url", &self.server_url)
+            .field("access_token", &"<redacted>")
+            .field("org_id", &self.org_id)
+            .field("environment_id", &self.environment_id)
+            .field("term", &self.term)
+            .field("columns", &self.columns)
+            .field("rows", &self.rows)
+            .finish()
+    }
 }
 
 /// The path that carries the shell.
@@ -210,20 +232,32 @@ fn ended() -> ShellError {
 }
 
 fn client_for(target: &ShellTarget) -> Result<CodewireClient, ShellError> {
-    for (name, value) in [
-        ("server URL", &target.server_url),
-        ("access token", &target.access_token),
-        ("organization", &target.org_id),
-        ("environment", &target.environment_id),
-    ] {
+    client(
+        &target.server_url,
+        &target.access_token,
+        &[
+            ("organization", &target.org_id),
+            ("environment", &target.environment_id),
+        ],
+    )
+}
+
+/// A client for the server, refusing an empty URL, token or `required` value.
+fn client(
+    server_url: &str,
+    access_token: &str,
+    required: &[(&str, &str)],
+) -> Result<CodewireClient, ShellError> {
+    let fields = [("server URL", server_url), ("access token", access_token)];
+    for (name, value) in fields.iter().chain(required) {
         if value.trim().is_empty() {
             return Err(ShellError::Invalid {
                 message: format!("the {name} is empty"),
             });
         }
     }
-    let config = ClientConfig::new(&target.server_url)?;
-    let token = StaticTokenProvider::new(target.access_token.clone())?;
+    let config = ClientConfig::new(server_url)?;
+    let token = StaticTokenProvider::new(access_token.to_owned())?;
     Ok(CodewireClient::new(config, token)?)
 }
 

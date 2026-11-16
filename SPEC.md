@@ -268,7 +268,7 @@ fan-out where a service needs it.
 
 | Component | Crate | Role |
 | --- | --- | --- |
-| iOS shell connection | `crates/codewire-client-ffi` | The iOS app's shell: `codewire-client`'s hosted shell, the loop `cw shell` runs, behind UniFFI bindings for Swift (#3825). |
+| iOS app core | `crates/codewire-client-ffi` | The iOS app's Rust core behind UniFFI bindings for Swift (#3825): the shell, `codewire-client`'s hosted shell, the loop `cw shell` runs; and a create, with the organization's presets, `CreateEnvironment` and the setup wait `cw create` uses (`codewire_client::environment_setup::await_setup`), each row a step. Journey: [docs/journeys/ios-app.md](docs/journeys/ios-app.md). |
 
 ### Local VM runtime
 

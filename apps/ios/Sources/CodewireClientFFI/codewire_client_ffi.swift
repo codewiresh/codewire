@@ -441,6 +441,22 @@ fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterInt32: FfiConverterPrimitive {
     typealias FfiType = Int32
     typealias SwiftType = Int32
@@ -450,6 +466,30 @@ fileprivate struct FfiConverterInt32: FfiConverterPrimitive {
     }
 
     public static func write(_ value: Int32, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
         writeInt(&buf, lower(value))
     }
 }
@@ -512,6 +552,470 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
         writeBytes(&buf, value)
     }
 }
+
+
+
+
+/**
+ * Following one environment's setup.
+ */
+public protocol EnvironmentSetupProtocol: AnyObject, Sendable {
+    
+    /**
+     * Stop following. The environment's setup carries on.
+     */
+    func stop() 
+    
+}
+/**
+ * Following one environment's setup.
+ */
+open class EnvironmentSetup: EnvironmentSetupProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_codewire_client_ffi_fn_clone_environmentsetup(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_codewire_client_ffi_fn_free_environmentsetup(handle, $0) }
+    }
+
+    
+    /**
+     * Follow the environment's setup from its first row, until it is ready,
+     * fails, can no longer be followed, or [`EnvironmentSetup::stop`] is
+     * called or the handle dropped.
+     */
+public static func follow(target: OrgTarget, environmentId: String, observer: SetupStepObserver)throws  -> EnvironmentSetup  {
+    return try  FfiConverterTypeEnvironmentSetup_lift(try rustCallWithError(FfiConverterTypeShellError_lift) {
+    uniffi_codewire_client_ffi_fn_constructor_environmentsetup_follow(
+        FfiConverterTypeOrgTarget_lower(target),
+        FfiConverterString.lower(environmentId),
+        FfiConverterTypeSetupStepObserver_lower(observer),$0
+    )
+})
+}
+    
+
+    
+    /**
+     * Stop following. The environment's setup carries on.
+     */
+open func stop()  {try! rustCall() {
+    uniffi_codewire_client_ffi_fn_method_environmentsetup_stop(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEnvironmentSetup: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = EnvironmentSetup
+
+    public static func lift(_ handle: UInt64) throws -> EnvironmentSetup {
+        return EnvironmentSetup(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: EnvironmentSetup) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EnvironmentSetup {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: EnvironmentSetup, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEnvironmentSetup_lift(_ handle: UInt64) throws -> EnvironmentSetup {
+    return try FfiConverterTypeEnvironmentSetup.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEnvironmentSetup_lower(_ value: EnvironmentSetup) -> UInt64 {
+    return FfiConverterTypeEnvironmentSetup.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Told the steps of a setup, on the follower's own thread.
+ */
+public protocol SetupStepObserver: AnyObject, Sendable {
+    
+    func step(step: SetupStep) 
+    
+    /**
+     * Setup is complete and the wait for the workspace daemon begins.
+     */
+    func daemonWaiting() 
+    
+    /**
+     * The connection dropped; reconnect `attempt` of `max_reconnects` follows.
+     */
+    func reconnecting(reason: String, attempt: UInt32, maxReconnects: UInt32) 
+    
+    /**
+     * Called once, last.
+     */
+    func finished(outcome: SetupOutcome) 
+    
+}
+/**
+ * Told the steps of a setup, on the follower's own thread.
+ */
+open class SetupStepObserverImpl: SetupStepObserver, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_codewire_client_ffi_fn_clone_setupstepobserver(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_codewire_client_ffi_fn_free_setupstepobserver(handle, $0) }
+    }
+
+    
+
+    
+open func step(step: SetupStep)  {try! rustCall() {
+    uniffi_codewire_client_ffi_fn_method_setupstepobserver_step(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSetupStep_lower(step),$0
+    )
+}
+}
+    
+    /**
+     * Setup is complete and the wait for the workspace daemon begins.
+     */
+open func daemonWaiting()  {try! rustCall() {
+    uniffi_codewire_client_ffi_fn_method_setupstepobserver_daemon_waiting(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+    
+    /**
+     * The connection dropped; reconnect `attempt` of `max_reconnects` follows.
+     */
+open func reconnecting(reason: String, attempt: UInt32, maxReconnects: UInt32)  {try! rustCall() {
+    uniffi_codewire_client_ffi_fn_method_setupstepobserver_reconnecting(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(reason),
+        FfiConverterUInt32.lower(attempt),
+        FfiConverterUInt32.lower(maxReconnects),$0
+    )
+}
+}
+    
+    /**
+     * Called once, last.
+     */
+open func finished(outcome: SetupOutcome)  {try! rustCall() {
+    uniffi_codewire_client_ffi_fn_method_setupstepobserver_finished(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSetupOutcome_lower(outcome),$0
+    )
+}
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceSetupStepObserver {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceSetupStepObserver = UniffiVTableCallbackInterfaceSetupStepObserver(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeSetupStepObserver.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface SetupStepObserver: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeSetupStepObserver.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface SetupStepObserver: handle missing in uniffiClone")
+            }
+        },
+        step: { (
+            uniffiHandle: UInt64,
+            step: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeSetupStepObserver.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.step(
+                     step: try FfiConverterTypeSetupStep_lift(step)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        daemonWaiting: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeSetupStepObserver.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.daemonWaiting(
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        reconnecting: { (
+            uniffiHandle: UInt64,
+            reason: RustBuffer,
+            attempt: UInt32,
+            maxReconnects: UInt32,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeSetupStepObserver.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.reconnecting(
+                     reason: try FfiConverterString.lift(reason),
+                     attempt: try FfiConverterUInt32.lift(attempt),
+                     maxReconnects: try FfiConverterUInt32.lift(maxReconnects)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        finished: { (
+            uniffiHandle: UInt64,
+            outcome: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeSetupStepObserver.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.finished(
+                     outcome: try FfiConverterTypeSetupOutcome_lift(outcome)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceSetupStepObserver> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceSetupStepObserver>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitSetupStepObserver() {
+    uniffi_codewire_client_ffi_fn_init_callback_vtable_setupstepobserver(UniffiCallbackInterfaceSetupStepObserver.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSetupStepObserver: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<SetupStepObserver>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = SetupStepObserver
+
+    public static func lift(_ handle: UInt64) throws -> SetupStepObserver {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return SetupStepObserverImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: SetupStepObserver) -> UInt64 {
+         if let rustImpl = value as? SetupStepObserverImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SetupStepObserver {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: SetupStepObserver, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSetupStepObserver_lift(_ handle: UInt64) throws -> SetupStepObserver {
+    return try FfiConverterTypeSetupStepObserver.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSetupStepObserver_lower(_ value: SetupStepObserver) -> UInt64 {
+    return FfiConverterTypeSetupStepObserver.lower(value)
+}
+
+
 
 
 
@@ -917,6 +1421,260 @@ public func FfiConverterTypeShellObserver_lower(_ value: ShellObserver) -> UInt6
 
 
 
+public struct CreatedEnvironment: Equatable, Hashable {
+    public var id: String
+    public var name: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String) {
+        self.id = id
+        self.name = name
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CreatedEnvironment: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCreatedEnvironment: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CreatedEnvironment {
+        return
+            try CreatedEnvironment(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CreatedEnvironment, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCreatedEnvironment_lift(_ buf: RustBuffer) throws -> CreatedEnvironment {
+    return try FfiConverterTypeCreatedEnvironment.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCreatedEnvironment_lower(_ value: CreatedEnvironment) -> RustBuffer {
+    return FfiConverterTypeCreatedEnvironment.lower(value)
+}
+
+
+/**
+ * The organization a call acts in.
+ */
+public struct OrgTarget: Equatable, Hashable {
+    public var serverUrl: String
+    public var accessToken: String
+    public var orgId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(serverUrl: String, accessToken: String, orgId: String) {
+        self.serverUrl = serverUrl
+        self.accessToken = accessToken
+        self.orgId = orgId
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension OrgTarget: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOrgTarget: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OrgTarget {
+        return
+            try OrgTarget(
+                serverUrl: FfiConverterString.read(from: &buf), 
+                accessToken: FfiConverterString.read(from: &buf), 
+                orgId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: OrgTarget, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.serverUrl, into: &buf)
+        FfiConverterString.write(value.accessToken, into: &buf)
+        FfiConverterString.write(value.orgId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOrgTarget_lift(_ buf: RustBuffer) throws -> OrgTarget {
+    return try FfiConverterTypeOrgTarget.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOrgTarget_lower(_ value: OrgTarget) -> RustBuffer {
+    return FfiConverterTypeOrgTarget.lower(value)
+}
+
+
+public struct PresetSummary: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    public var description: String?
+    /**
+     * Codewire's own preset, offered to every organization.
+     */
+    public var official: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, description: String?, 
+        /**
+         * Codewire's own preset, offered to every organization.
+         */official: Bool) {
+        self.id = id
+        self.name = name
+        self.description = description
+        self.official = official
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PresetSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePresetSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PresetSummary {
+        return
+            try PresetSummary(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                description: FfiConverterOptionString.read(from: &buf), 
+                official: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PresetSummary, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterBool.write(value.official, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePresetSummary_lift(_ buf: RustBuffer) throws -> PresetSummary {
+    return try FfiConverterTypePresetSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePresetSummary_lower(_ value: PresetSummary) -> RustBuffer {
+    return FfiConverterTypePresetSummary.lower(value)
+}
+
+
+/**
+ * One setup row.
+ */
+public struct SetupStep: Equatable, Hashable {
+    public var phase: String
+    public var status: StepStatus
+    public var label: String
+    /**
+     * RFC 3339, or empty when the server sent no time.
+     */
+    public var createdAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(phase: String, status: StepStatus, label: String, 
+        /**
+         * RFC 3339, or empty when the server sent no time.
+         */createdAt: String) {
+        self.phase = phase
+        self.status = status
+        self.label = label
+        self.createdAt = createdAt
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SetupStep: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSetupStep: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SetupStep {
+        return
+            try SetupStep(
+                phase: FfiConverterString.read(from: &buf), 
+                status: FfiConverterTypeStepStatus.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                createdAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SetupStep, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.phase, into: &buf)
+        FfiConverterTypeStepStatus.write(value.status, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterString.write(value.createdAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSetupStep_lift(_ buf: RustBuffer) throws -> SetupStep {
+    return try FfiConverterTypeSetupStep.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSetupStep_lower(_ value: SetupStep) -> RustBuffer {
+    return FfiConverterTypeSetupStep.lower(value)
+}
+
+
 /**
  * Which environment to open a shell on, and the terminal it starts with.
  */
@@ -998,6 +1756,109 @@ public func FfiConverterTypeShellTarget_lift(_ buf: RustBuffer) throws -> ShellT
 public func FfiConverterTypeShellTarget_lower(_ value: ShellTarget) -> RustBuffer {
     return FfiConverterTypeShellTarget.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * How following a setup ended.
+ */
+
+public enum SetupOutcome: Equatable, Hashable {
+    
+    /**
+     * Setup finished and the workspace daemon is ready.
+     */
+    case ready
+    /**
+     * Setup cannot finish. `step` is the failed row, when one said so.
+     */
+    case failed(message: String, step: SetupStep?
+    )
+    /**
+     * The app can no longer follow it. Setup itself may still be running.
+     */
+    case lost(message: String
+    )
+    /**
+     * The app stopped following.
+     */
+    case stopped
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SetupOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSetupOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = SetupOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SetupOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .ready
+        
+        case 2: return .failed(message: try FfiConverterString.read(from: &buf), step: try FfiConverterOptionTypeSetupStep.read(from: &buf)
+        )
+        
+        case 3: return .lost(message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 4: return .stopped
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SetupOutcome, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .ready:
+            writeInt(&buf, Int32(1))
+        
+        
+        case let .failed(message,step):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(message, into: &buf)
+            FfiConverterOptionTypeSetupStep.write(step, into: &buf)
+            
+        
+        case let .lost(message):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case .stopped:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSetupOutcome_lift(_ buf: RustBuffer) throws -> SetupOutcome {
+    return try FfiConverterTypeSetupOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSetupOutcome_lower(_ value: SetupOutcome) -> RustBuffer {
+    return FfiConverterTypeSetupOutcome.lower(value)
+}
+
 
 
 public enum ShellError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
@@ -1325,6 +2186,100 @@ public func FfiConverterTypeShellState_lower(_ value: ShellState) -> RustBuffer 
 }
 
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum StepStatus: Equatable, Hashable {
+    
+    case started
+    case completed
+    case failed
+    case skipped
+    /**
+     * A status this app does not know yet.
+     */
+    case other(status: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension StepStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStepStatus: FfiConverterRustBuffer {
+    typealias SwiftType = StepStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StepStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .started
+        
+        case 2: return .completed
+        
+        case 3: return .failed
+        
+        case 4: return .skipped
+        
+        case 5: return .other(status: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: StepStatus, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .started:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .completed:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .skipped:
+            writeInt(&buf, Int32(4))
+        
+        
+        case let .other(status):
+            writeInt(&buf, Int32(5))
+            FfiConverterString.write(status, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStepStatus_lift(_ buf: RustBuffer) throws -> StepStatus {
+    return try FfiConverterTypeStepStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStepStatus_lower(_ value: StepStatus) -> RustBuffer {
+    return FfiConverterTypeStepStatus.lower(value)
+}
+
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -1396,6 +2351,55 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
         }
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeSetupStep: FfiConverterRustBuffer {
+    typealias SwiftType = SetupStep?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSetupStep.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSetupStep.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePresetSummary: FfiConverterRustBuffer {
+    typealias SwiftType = [PresetSummary]
+
+    public static func write(_ value: [PresetSummary], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePresetSummary.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PresetSummary] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PresetSummary]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePresetSummary.read(from: &buf))
+        }
+        return seq
+    }
+}
 private let UNIFFI_RUST_FUTURE_POLL_READY: Int8 = 0
 private let UNIFFI_RUST_FUTURE_POLL_WAKE: Int8 = 1
 
@@ -1444,6 +2448,38 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
         print("uniffiFutureContinuationCallback invalid handle")
     }
 }
+/**
+ * Ask for a new environment. The server picks the name when `name` is empty
+ * and applies the preset's configuration; setup starts on its own.
+ */
+public func createEnvironment(target: OrgTarget, name: String?, presetId: String?)async throws  -> CreatedEnvironment  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_codewire_client_ffi_fn_func_create_environment(FfiConverterTypeOrgTarget_lower(target),FfiConverterOptionString.lower(name),FfiConverterOptionString.lower(presetId)
+                )
+            },
+            pollFunc: ffi_codewire_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_codewire_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_codewire_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeCreatedEnvironment_lift,
+            errorHandler: FfiConverterTypeShellError_lift
+        )
+}
+public func listPresets(target: OrgTarget)async throws  -> [PresetSummary]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_codewire_client_ffi_fn_func_list_presets(FfiConverterTypeOrgTarget_lower(target)
+                )
+            },
+            pollFunc: ffi_codewire_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_codewire_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_codewire_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypePresetSummary.lift,
+            errorHandler: FfiConverterTypeShellError_lift
+        )
+}
 
 private enum InitializationResult {
     case ok
@@ -1460,6 +2496,12 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_codewire_client_ffi_checksum_func_create_environment() != 3124) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_codewire_client_ffi_checksum_func_list_presets() != 57371) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_codewire_client_ffi_checksum_method_shell_close() != 47127) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1475,10 +2517,29 @@ private let initializationResult: InitializationResult = {
     if (uniffi_codewire_client_ffi_checksum_method_shellobserver_state_changed() != 29577) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_codewire_client_ffi_checksum_method_environmentsetup_stop() != 61792) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_codewire_client_ffi_checksum_method_setupstepobserver_step() != 45774) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_codewire_client_ffi_checksum_method_setupstepobserver_daemon_waiting() != 6718) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_codewire_client_ffi_checksum_method_setupstepobserver_reconnecting() != 23179) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_codewire_client_ffi_checksum_method_setupstepobserver_finished() != 3676) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_codewire_client_ffi_checksum_constructor_shell_dial() != 54990) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_codewire_client_ffi_checksum_constructor_environmentsetup_follow() != 47660) {
+        return InitializationResult.apiChecksumMismatch
+    }
 
+    uniffiCallbackInitSetupStepObserver()
     uniffiCallbackInitShellObserver()
     return InitializationResult.ok
 }()

@@ -58,8 +58,9 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use codewire_client::environment_setup::{
-    self as setup, FollowError, Interruption, LogStreamError, ServerStep, SetupObserver,
-    daemon_ready_row, metadata_count, reported_duration_ms, repository_scope, stage_key,
+    self as setup, EnvironmentFacts, FollowError, Interruption, LogStreamError, PlatformEnd,
+    ServerStep, SetupEnd, SetupObserver, SetupStop, SetupWaitError, SetupWaitObserver,
+    metadata_count, reported_duration_ms, repository_scope, stage_key,
 };
 use serde_json::Value;
 
@@ -71,9 +72,10 @@ pub(crate) use codewire_client::environment_setup::{
 
 use crate::environment_client::{EnvironmentClient, log_stream_error};
 use crate::output::{Capabilities, Motion, OutputMode, Status, StatusLine};
-use crate::presentation::{Environment, EnvironmentDaemonStatus, EnvironmentLog};
+#[cfg(test)]
+use crate::presentation::Environment;
+use crate::presentation::{EnvironmentDaemonStatus, EnvironmentLog};
 
-const SETUP_GUARD_INTERVAL: Duration = Duration::from_secs(5);
 const DAEMON_STAGE_KEY: &str = "cli:daemon_ready";
 const DAEMON_WAIT_LABEL: &str = "Waiting for the workspace daemon";
 const DAEMON_READY_LABEL: &str = "Workspace daemon ready";
@@ -183,8 +185,6 @@ pub(crate) struct StartProgress<W: Write> {
     /// The Pod whose start timing rows are on screen, so their header is
     /// drawn once per Pod.
     pod_breakdown: Option<String>,
-    /// The daemon status setup read in-cluster: its latest `daemon_ready` row.
-    daemon: Option<EnvironmentDaemonStatus>,
     /// Whether the server's own bookkeeping rows are shown: `cw logs` shows
     /// every row, a create or start only the stages a user follows (#4596).
     bookkeeping: bool,
@@ -217,7 +217,6 @@ impl<W: Write> StartProgress<W> {
             idle_label,
             open: Vec::new(),
             pod_breakdown: None,
-            daemon: None,
             bookkeeping: false,
             last_hidden: None,
         }
@@ -249,9 +248,6 @@ impl<W: Write> StartProgress<W> {
         received: Instant,
     ) -> std::io::Result<Option<StageFailure>> {
         self.set_now(received);
-        if let Some(daemon) = daemon_ready_status(event) {
-            self.daemon = Some(daemon);
-        }
         // A create's progress names what the user waits for. The server's
         // own steps stay open under a stage in user terms, so a wait or a
         // failure in one is named, but print no line of their own unless
@@ -544,17 +540,21 @@ where
 {
     setup::follow_setup(feed, view, cursor, policy)
         .await
-        .map_err(|error| match error {
-            FollowError::Fatal(error) => log_stream_error(error).context("follow environment logs"),
-            FollowError::Lost {
-                max_reconnects,
-                last,
-            } => anyhow::anyhow!(
-                "lost the environment log stream after {max_reconnects} reconnect attempts: {}",
-                interruption_reason(&last)
-            ),
-            FollowError::Observer(error) => error.into(),
-        })
+        .map_err(follow_error)
+}
+
+fn follow_error(error: FollowError<std::io::Error>) -> anyhow::Error {
+    match error {
+        FollowError::Fatal(error) => log_stream_error(error).context("follow environment logs"),
+        FollowError::Lost {
+            max_reconnects,
+            last,
+        } => anyhow::anyhow!(
+            "lost the environment log stream after {max_reconnects} reconnect attempts: {}",
+            interruption_reason(&last)
+        ),
+        FollowError::Observer(error) => error.into(),
+    }
 }
 
 /// Why a connection was resumed, as the CLI says it.
@@ -605,6 +605,16 @@ impl<W: Write> SetupObserver for StartProgress<W> {
     }
 }
 
+impl<W: Write> SetupWaitObserver for StartProgress<W> {
+    fn daemon_waiting(&mut self, now: Instant) -> std::io::Result<()> {
+        self.begin_local_stage(DAEMON_STAGE_KEY, DAEMON_WAIT_LABEL, now)
+    }
+
+    fn daemon_ready(&mut self, now: Instant) -> std::io::Result<()> {
+        self.complete_local_stage(DAEMON_STAGE_KEY, DAEMON_READY_LABEL, now)
+    }
+}
+
 /// Awaits `future`, redrawing the live row meanwhile at the spinner's pace,
 /// and at least every `max_tick`.
 pub(crate) async fn wait_with_ticks<W, T>(
@@ -635,54 +645,46 @@ where
     D: FnOnce() -> R,
     R: Future<Output = anyhow::Result<()>>,
 {
-    let mut cursor = None;
-    let followed = {
-        let follow = follow_start_progress(feed, view, &mut cursor, policy);
-        tokio::select! {
-            biased;
-            end = follow => end,
-            error = setup_guard => Err(error),
-        }
-    };
-    match followed {
-        Ok(FollowEnd::Complete) => {}
-        Ok(FollowEnd::Failed(failure)) => {
+    let waited = setup::await_setup(feed, view, policy, setup_guard, daemon_ready).await;
+    match waited {
+        Ok(SetupEnd::Ready) => {
             view.finish()?;
-            return Err(failure.into_error(environment_id));
+            Ok(())
         }
-        Err(error) => {
+        Ok(SetupEnd::Failed(failure)) => {
+            view.finish()?;
+            Err(failure.into_error(environment_id))
+        }
+        Err(SetupWaitError::Follow(error)) => {
             let stage = view.fail_open_stage(None, Instant::now())?;
             view.finish()?;
-            return Err(stage_error(error, stage));
+            Err(stage_error(follow_error(error), stage))
         }
-    }
-    // Setup read the daemon's status in-cluster (#3684): the same rule as the
-    // API's answer decides, and only a daemon still starting, or a server
-    // that wrote no row, is asked again.
-    if let Some(daemon) = view.daemon.clone() {
-        match super::environment_daemon_readiness(&daemon) {
-            Ok(true) => {
-                view.finish()?;
-                return Ok(());
-            }
-            Ok(false) => {}
-            Err(error) => {
-                view.finish()?;
-                return Err(error);
-            }
+        Err(SetupWaitError::Stopped(error)) => {
+            let stage = view.fail_open_stage(None, Instant::now())?;
+            view.finish()?;
+            Err(stage_error(error, stage))
         }
+        // Setup read the daemon's status in-cluster (#3684), and the same
+        // rule as the API's answer words it.
+        Err(SetupWaitError::DaemonRow(row)) => {
+            view.finish()?;
+            let status = EnvironmentDaemonStatus {
+                state: row.state.token().to_owned(),
+                message: row.message,
+                ..Default::default()
+            };
+            Err(super::environment_daemon_readiness(&status)
+                .err()
+                .unwrap_or_else(|| anyhow::anyhow!("environment daemon is not ready")))
+        }
+        Err(SetupWaitError::Daemon(error)) => {
+            let stage = view.fail_open_stage(Some(DAEMON_STAGE_KEY), Instant::now())?;
+            view.finish()?;
+            Err(stage_error(error, stage))
+        }
+        Err(SetupWaitError::Observer(error)) => Err(error.into()),
     }
-    await_daemon_ready(view, policy, daemon_ready()).await
-}
-
-/// The daemon status in a setup `daemon_ready` row (#3684), as the readiness
-/// rule reads it.
-fn daemon_ready_status(event: &EnvironmentLog) -> Option<EnvironmentDaemonStatus> {
-    daemon_ready_row(event).map(|row| EnvironmentDaemonStatus {
-        state: row.state.token().to_owned(),
-        message: row.message,
-        ..Default::default()
-    })
 }
 
 /// `cw start`: shows the rows the start produces after `cursor` while
@@ -820,22 +822,7 @@ pub(crate) async fn watch_setup_failure(
     org_id: &str,
     environment_id: &str,
 ) -> anyhow::Error {
-    loop {
-        let interval = match client
-            .get_environment_with_poll_interval(org_id, environment_id)
-            .await
-        {
-            Ok((environment, interval)) => {
-                if let Some(error) = setup_failure(&environment) {
-                    return error;
-                }
-                interval.unwrap_or(SETUP_GUARD_INTERVAL)
-            }
-            // The log stream reports persistent connection failures itself.
-            Err(_) => SETUP_GUARD_INTERVAL,
-        };
-        tokio::time::sleep(interval.max(SETUP_GUARD_INTERVAL)).await;
-    }
+    setup::watch_environment(client.codewire(), org_id, environment_id, setup_stop_error).await
 }
 
 /// Resolves only when a start can no longer finish: the environment was
@@ -845,92 +832,73 @@ pub(crate) async fn watch_start_failure(
     org_id: &str,
     environment_id: &str,
 ) -> anyhow::Error {
-    loop {
-        let interval = match client
-            .get_environment_with_poll_interval(org_id, environment_id)
-            .await
-        {
-            Ok((environment, interval)) => {
-                if let Some(error) = start_failure(&environment) {
-                    return error;
-                }
-                interval.unwrap_or(SETUP_GUARD_INTERVAL)
-            }
-            // The log stream reports persistent connection failures itself.
-            Err(_) => SETUP_GUARD_INTERVAL,
-        };
-        tokio::time::sleep(interval.max(SETUP_GUARD_INTERVAL)).await;
-    }
+    setup::watch_environment(client.codewire(), org_id, environment_id, start_stop_error).await
 }
 
-/// A start is accepted while the environment is still `stopped`, with
-/// `started` desired, so only a change of intent ends it there.
+// Kept for the progress tests, which state the CLI's words through it; the
+// wait itself calls the *_stop_error and platform_end_error below.
+#[cfg(test)]
 pub(crate) fn start_failure(environment: &Environment) -> Option<anyhow::Error> {
-    if let Some(failure) = platform_ended_failure(environment) {
-        return Some(failure);
-    }
-    let left = match environment.state.as_str() {
-        "build_failed" | "error" | "failed" | "stopping" | "destroying" | "destroyed" => true,
-        "stopped" => environment.desired_state != "started",
-        _ => false,
-    };
-    if !left {
-        return None;
-    }
-    let reason = environment
-        .error_reason
-        .as_deref()
-        .map(terminal_text)
-        .filter(|reason| !reason.is_empty())
-        .map(|reason| format!(": {reason}"))
-        .unwrap_or_default();
-    Some(anyhow::anyhow!(
-        "environment {} became {} before its start finished{reason}",
-        environment.id,
-        environment.state
-    ))
+    start_stop_error(&environment.setup_facts())
+}
+
+fn start_stop_error(facts: &EnvironmentFacts) -> Option<anyhow::Error> {
+    Some(match facts.start_stop()? {
+        SetupStop::PlatformEnded(end) => platform_end_error(facts, end),
+        SetupStop::Left | SetupStop::SetupError => anyhow::anyhow!(
+            "environment {} became {} before its start finished{}",
+            facts.id,
+            facts.state,
+            reason_suffix(facts)
+        ),
+    })
+}
+
+// Kept for the progress tests, which state the CLI's words through it; the
+// wait itself calls the *_stop_error and platform_end_error below.
+#[cfg(test)]
+pub(crate) fn platform_ended_failure(environment: &Environment) -> Option<anyhow::Error> {
+    let facts = environment.setup_facts();
+    facts
+        .platform_end()
+        .map(|end| platform_end_error(&facts, end))
 }
 
 /// The message when the platform ended this environment's create or start and
 /// said why: the cluster had no room, or a container of its sandbox could not
 /// start. It is written for the user, whatever state the environment has
 /// reached on the way out.
-pub(crate) fn platform_ended_failure(environment: &Environment) -> Option<anyhow::Error> {
-    let fallback = match environment.error_code.as_deref() {
-        Some("no_capacity") => "No capacity right now. Try again shortly.",
-        Some("container_start_failed") => "The sandbox could not start.",
-        _ => return None,
+pub(crate) fn platform_end_error(facts: &EnvironmentFacts, end: PlatformEnd) -> anyhow::Error {
+    let fallback = match end {
+        PlatformEnd::NoCapacity => "No capacity right now. Try again shortly.",
+        PlatformEnd::ContainerStartFailed => "The sandbox could not start.",
     };
-    let message = environment
+    let message = facts
         .error_reason
         .as_deref()
         .map(terminal_text)
         .filter(|reason| !reason.is_empty())
         .unwrap_or_else(|| fallback.to_owned());
-    Some(anyhow::anyhow!(message))
+    anyhow::anyhow!(message)
 }
 
+// Kept for the progress tests, which state the CLI's words through it; the
+// wait itself calls the *_stop_error and platform_end_error below.
+#[cfg(test)]
 pub(crate) fn setup_failure(environment: &Environment) -> Option<anyhow::Error> {
-    if let Some(failure) = platform_ended_failure(environment) {
-        return Some(failure);
-    }
-    let id = &environment.id;
-    match environment.state.as_str() {
-        "build_failed" | "error" | "failed" | "stopping" | "stopped" | "destroying"
-        | "destroyed" => {
-            let reason = environment
-                .error_reason
-                .as_deref()
-                .map(terminal_text)
-                .filter(|reason| !reason.is_empty())
-                .map(|reason| format!(": {reason}"))
-                .unwrap_or_default();
-            Some(anyhow::anyhow!(
-                "environment {id} became {} before setup completed{reason}",
-                environment.state
-            ))
-        }
-        _ => environment
+    setup_stop_error(&environment.setup_facts())
+}
+
+fn setup_stop_error(facts: &EnvironmentFacts) -> Option<anyhow::Error> {
+    let id = &facts.id;
+    match facts.setup_stop()? {
+        SetupStop::PlatformEnded(end) => Some(platform_end_error(facts, end)),
+        SetupStop::Left => Some(anyhow::anyhow!(
+            "environment {id} became {} before setup completed{}",
+            facts.state,
+            reason_suffix(facts)
+        )),
+        SetupStop::SetupError => facts
             .setup_error
             .as_deref()
             .map(terminal_text)
@@ -941,6 +909,17 @@ pub(crate) fn setup_failure(environment: &Environment) -> Option<anyhow::Error> 
                 )
             }),
     }
+}
+
+/// `: REASON` when the environment gave one.
+fn reason_suffix(facts: &EnvironmentFacts) -> String {
+    facts
+        .error_reason
+        .as_deref()
+        .map(terminal_text)
+        .filter(|reason| !reason.is_empty())
+        .map(|reason| format!(": {reason}"))
+        .unwrap_or_default()
 }
 
 /// The id of the newest row, so a follow shows only rows written after it.

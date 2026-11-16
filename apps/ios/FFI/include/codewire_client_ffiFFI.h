@@ -250,6 +250,34 @@ typedef void (*UniffiCallbackInterfaceShellObserverMethod0)(uint64_t, RustBuffer
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_SETUP_STEP_OBSERVER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_SETUP_STEP_OBSERVER_METHOD0
+typedef void (*UniffiCallbackInterfaceSetupStepObserverMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_SETUP_STEP_OBSERVER_METHOD1
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_SETUP_STEP_OBSERVER_METHOD1
+typedef void (*UniffiCallbackInterfaceSetupStepObserverMethod1)(uint64_t, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_SETUP_STEP_OBSERVER_METHOD2
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_SETUP_STEP_OBSERVER_METHOD2
+typedef void (*UniffiCallbackInterfaceSetupStepObserverMethod2)(uint64_t, RustBuffer, uint32_t, uint32_t, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_SETUP_STEP_OBSERVER_METHOD3
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_SETUP_STEP_OBSERVER_METHOD3
+typedef void (*UniffiCallbackInterfaceSetupStepObserverMethod3)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_SHELL_OBSERVER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_SHELL_OBSERVER
 typedef struct UniffiVTableCallbackInterfaceShellObserver {
@@ -257,6 +285,18 @@ typedef struct UniffiVTableCallbackInterfaceShellObserver {
     UniffiCallbackInterfaceClone _Nonnull uniffiClone;
     UniffiCallbackInterfaceShellObserverMethod0 _Nonnull stateChanged;
 } UniffiVTableCallbackInterfaceShellObserver;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_SETUP_STEP_OBSERVER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_SETUP_STEP_OBSERVER
+typedef struct UniffiVTableCallbackInterfaceSetupStepObserver {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceSetupStepObserverMethod0 _Nonnull step;
+    UniffiCallbackInterfaceSetupStepObserverMethod1 _Nonnull daemonWaiting;
+    UniffiCallbackInterfaceSetupStepObserverMethod2 _Nonnull reconnecting;
+    UniffiCallbackInterfaceSetupStepObserverMethod3 _Nonnull finished;
+} UniffiVTableCallbackInterfaceSetupStepObserver;
 
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_CLONE_SHELL
@@ -312,6 +352,71 @@ void uniffi_codewire_client_ffi_fn_init_callback_vtable_shellobserver(const Unif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_METHOD_SHELLOBSERVER_STATE_CHANGED
 #define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_METHOD_SHELLOBSERVER_STATE_CHANGED
 void uniffi_codewire_client_ffi_fn_method_shellobserver_state_changed(uint64_t ptr, RustBuffer state, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_CLONE_ENVIRONMENTSETUP
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_CLONE_ENVIRONMENTSETUP
+uint64_t uniffi_codewire_client_ffi_fn_clone_environmentsetup(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_FREE_ENVIRONMENTSETUP
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_FREE_ENVIRONMENTSETUP
+void uniffi_codewire_client_ffi_fn_free_environmentsetup(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_CONSTRUCTOR_ENVIRONMENTSETUP_FOLLOW
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_CONSTRUCTOR_ENVIRONMENTSETUP_FOLLOW
+uint64_t uniffi_codewire_client_ffi_fn_constructor_environmentsetup_follow(RustBuffer target, RustBuffer environment_id, uint64_t observer, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_METHOD_ENVIRONMENTSETUP_STOP
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_METHOD_ENVIRONMENTSETUP_STOP
+void uniffi_codewire_client_ffi_fn_method_environmentsetup_stop(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_CLONE_SETUPSTEPOBSERVER
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_CLONE_SETUPSTEPOBSERVER
+uint64_t uniffi_codewire_client_ffi_fn_clone_setupstepobserver(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_FREE_SETUPSTEPOBSERVER
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_FREE_SETUPSTEPOBSERVER
+void uniffi_codewire_client_ffi_fn_free_setupstepobserver(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_INIT_CALLBACK_VTABLE_SETUPSTEPOBSERVER
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_INIT_CALLBACK_VTABLE_SETUPSTEPOBSERVER
+void uniffi_codewire_client_ffi_fn_init_callback_vtable_setupstepobserver(const UniffiVTableCallbackInterfaceSetupStepObserver* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_METHOD_SETUPSTEPOBSERVER_STEP
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_METHOD_SETUPSTEPOBSERVER_STEP
+void uniffi_codewire_client_ffi_fn_method_setupstepobserver_step(uint64_t ptr, RustBuffer step, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_METHOD_SETUPSTEPOBSERVER_DAEMON_WAITING
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_METHOD_SETUPSTEPOBSERVER_DAEMON_WAITING
+void uniffi_codewire_client_ffi_fn_method_setupstepobserver_daemon_waiting(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_METHOD_SETUPSTEPOBSERVER_RECONNECTING
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_METHOD_SETUPSTEPOBSERVER_RECONNECTING
+void uniffi_codewire_client_ffi_fn_method_setupstepobserver_reconnecting(uint64_t ptr, RustBuffer reason, uint32_t attempt, uint32_t max_reconnects, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_METHOD_SETUPSTEPOBSERVER_FINISHED
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_METHOD_SETUPSTEPOBSERVER_FINISHED
+void uniffi_codewire_client_ffi_fn_method_setupstepobserver_finished(uint64_t ptr, RustBuffer outcome, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_FUNC_CREATE_ENVIRONMENT
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_FUNC_CREATE_ENVIRONMENT
+uint64_t uniffi_codewire_client_ffi_fn_func_create_environment(RustBuffer target, RustBuffer name, RustBuffer preset_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_FUNC_LIST_PRESETS
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_FN_FUNC_LIST_PRESETS
+uint64_t uniffi_codewire_client_ffi_fn_func_list_presets(RustBuffer target
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_CODEWIRE_CLIENT_FFI_RUSTBUFFER_ALLOC
@@ -574,6 +679,18 @@ void ffi_codewire_client_ffi_rust_future_free_void(uint64_t handle
 void ffi_codewire_client_ffi_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_FUNC_CREATE_ENVIRONMENT
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_FUNC_CREATE_ENVIRONMENT
+uint16_t uniffi_codewire_client_ffi_checksum_func_create_environment(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_FUNC_LIST_PRESETS
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_FUNC_LIST_PRESETS
+uint16_t uniffi_codewire_client_ffi_checksum_func_list_presets(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_METHOD_SHELL_CLOSE
 #define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_METHOD_SHELL_CLOSE
 uint16_t uniffi_codewire_client_ffi_checksum_method_shell_close(void
@@ -604,9 +721,45 @@ uint16_t uniffi_codewire_client_ffi_checksum_method_shellobserver_state_changed(
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_METHOD_ENVIRONMENTSETUP_STOP
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_METHOD_ENVIRONMENTSETUP_STOP
+uint16_t uniffi_codewire_client_ffi_checksum_method_environmentsetup_stop(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_METHOD_SETUPSTEPOBSERVER_STEP
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_METHOD_SETUPSTEPOBSERVER_STEP
+uint16_t uniffi_codewire_client_ffi_checksum_method_setupstepobserver_step(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_METHOD_SETUPSTEPOBSERVER_DAEMON_WAITING
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_METHOD_SETUPSTEPOBSERVER_DAEMON_WAITING
+uint16_t uniffi_codewire_client_ffi_checksum_method_setupstepobserver_daemon_waiting(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_METHOD_SETUPSTEPOBSERVER_RECONNECTING
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_METHOD_SETUPSTEPOBSERVER_RECONNECTING
+uint16_t uniffi_codewire_client_ffi_checksum_method_setupstepobserver_reconnecting(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_METHOD_SETUPSTEPOBSERVER_FINISHED
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_METHOD_SETUPSTEPOBSERVER_FINISHED
+uint16_t uniffi_codewire_client_ffi_checksum_method_setupstepobserver_finished(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_CONSTRUCTOR_SHELL_DIAL
 #define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_CONSTRUCTOR_SHELL_DIAL
 uint16_t uniffi_codewire_client_ffi_checksum_constructor_shell_dial(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_CONSTRUCTOR_ENVIRONMENTSETUP_FOLLOW
+#define UNIFFI_FFIDEF_UNIFFI_CODEWIRE_CLIENT_FFI_CHECKSUM_CONSTRUCTOR_ENVIRONMENTSETUP_FOLLOW
+uint16_t uniffi_codewire_client_ffi_checksum_constructor_environmentsetup_follow(void
     
 );
 #endif

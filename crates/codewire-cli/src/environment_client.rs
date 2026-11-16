@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use codewire_client::environment_setup::{LogStreamError, log_row_from_stream};
+use codewire_client::environment_setup::{self as setup, LogStreamError, log_row_from_stream};
 use codewire_client::{self as rpc, ClientError, CodewireClient, ErrorCode};
 use serde::{Deserialize, Serialize};
 
@@ -1171,6 +1171,15 @@ pub(crate) fn connect_client(config: &ResolvedPlatformConfig) -> anyhow::Result<
     CodewireClient::with_token_provider(client_config, config.token_provider()?).map_err(Into::into)
 }
 
+pub(crate) fn get_environment_error(error: setup::GetEnvironmentError) -> anyhow::Error {
+    match error {
+        setup::GetEnvironmentError::Client(error) => display_client_error(error),
+        setup::GetEnvironmentError::Missing => {
+            anyhow::anyhow!("GetEnvironment returned no environment")
+        }
+    }
+}
+
 pub(crate) fn display_client_error(error: ClientError) -> anyhow::Error {
     if error.code() == ErrorCode::Unauthenticated {
         return anyhow::anyhow!("session expired or invalid");
@@ -1422,15 +1431,7 @@ fn repo_config_from_proto(value: rpc::RepoConfig) -> anyhow::Result<RepoConfig> 
 pub(crate) fn legacy_environment_daemon_status(
     value: rpc::EnvironmentDaemonStatus,
 ) -> EnvironmentDaemonStatus {
-    let state = match value.state.as_known() {
-        Some(rpc::EnvironmentDaemonState::Unspecified) => "unspecified",
-        Some(rpc::EnvironmentDaemonState::Unsupported) => "unsupported",
-        Some(rpc::EnvironmentDaemonState::Starting) => "starting",
-        Some(rpc::EnvironmentDaemonState::Ready) => "ready",
-        Some(rpc::EnvironmentDaemonState::Unhealthy) => "unhealthy",
-        Some(rpc::EnvironmentDaemonState::UpgradeRequired) => "upgrade_required",
-        None => "unknown",
-    };
+    let state = setup::daemon_state_token(&value.state);
     EnvironmentDaemonStatus {
         state: state.to_string(),
         protocol_version: value.protocol_version,
@@ -1471,36 +1472,8 @@ pub(crate) fn environment_network_policy_from_proto(
 }
 
 fn environment_from_proto(value: rpc::Environment) -> anyhow::Result<Environment> {
-    let state = match value.state.as_known() {
-        Some(rpc::EnvironmentState::Unspecified) => "",
-        Some(rpc::EnvironmentState::Pending) => "pending",
-        Some(rpc::EnvironmentState::PendingBuild) => "pending_build",
-        Some(rpc::EnvironmentState::Building) => "building",
-        Some(rpc::EnvironmentState::BuildFailed) => "build_failed",
-        Some(rpc::EnvironmentState::PullingSnapshot) => "pulling_snapshot",
-        Some(rpc::EnvironmentState::Creating) => "creating",
-        Some(rpc::EnvironmentState::Starting) => "starting",
-        Some(rpc::EnvironmentState::Running) => "running",
-        Some(rpc::EnvironmentState::Stopping) => "stopping",
-        Some(rpc::EnvironmentState::Stopped) => "stopped",
-        Some(rpc::EnvironmentState::Archiving) => "archiving",
-        Some(rpc::EnvironmentState::Archived) => "archived",
-        Some(rpc::EnvironmentState::Restoring) => "restoring",
-        Some(rpc::EnvironmentState::Resizing) => "resizing",
-        Some(rpc::EnvironmentState::Destroying) => "destroying",
-        Some(rpc::EnvironmentState::Destroyed) => "destroyed",
-        Some(rpc::EnvironmentState::Error) => "error",
-        Some(rpc::EnvironmentState::Unknown) | None => "unknown",
-    };
-    let desired_state = match value.desired_state.as_known() {
-        Some(rpc::DesiredState::Unspecified) => "",
-        Some(rpc::DesiredState::Started) => "started",
-        Some(rpc::DesiredState::Stopped) => "stopped",
-        Some(rpc::DesiredState::Destroyed) => "destroyed",
-        Some(rpc::DesiredState::Archived) => "archived",
-        Some(rpc::DesiredState::Resized) => "resized",
-        None => "unknown",
-    };
+    let state = setup::environment_state_token(&value.state);
+    let desired_state = setup::desired_state_token(&value.desired_state);
     Ok(Environment {
         network_policy: value
             .network_policy

@@ -13,23 +13,15 @@ use cp::handle_unified_environment_cp;
 
 use progress::{FollowPolicy, StartProgress, format_environment_logs_plain};
 
-// Match the server-owned sandbox lifecycle first, then give daemon setup its
-// own post-running window. Confidential guests deliberately have a longer boot
-// horizon; one fixed three-minute stopwatch reports false failure while the
-// accepted server operation is still progressing.
-const PLATFORM_READY_TIMEOUT: Duration = Duration::from_secs(600);
-const PLATFORM_CONFIDENTIAL_READY_TIMEOUT: Duration = Duration::from_secs(1800);
-const PLATFORM_DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(180);
-// The server sends no interval while a start runs, so this tick decides when
-// the CLI sees it finish. At 2 s, a start 1 s slower on the server could return
-// 2 s later (#3922).
-const PLATFORM_READY_POLL: Duration = Duration::from_millis(500);
 const STOPPING_LABEL: &str = "Stopping the environment";
 const REMOVING_LABEL: &str = "Removing the environment";
 
 use super::lifecycle_output::InterruptNotice;
-use crate::environment_client::ResolvingCreateError;
+use crate::environment_client::{
+    ResolvingCreateError, display_client_error, get_environment_error,
+};
 use crate::output::{Outcome, StatusLine, VmLocation};
+use codewire_client::environment_setup::{self as setup, DaemonObservation, DaemonWaitError};
 
 /// The environment's name for a text result, read once; scripts (machine
 /// output) and a failed read keep the reference they gave.
@@ -2515,72 +2507,58 @@ async fn wait_for_platform_environment_daemon_ready(
     org_id: &str,
     environment_id: &str,
 ) -> anyhow::Result<()> {
-    let lifecycle_started = Instant::now();
-    let mut lifecycle_timeout = PLATFORM_READY_TIMEOUT;
-    let mut daemon_started = None;
+    setup::await_daemon_ready(client.codewire(), org_id, environment_id)
+        .await
+        .map_err(|error| daemon_wait_error(environment_id, error))
+}
 
-    loop {
-        let (environment, poll_interval) = client
-            .get_environment_with_poll_interval(org_id, environment_id)
-            .await
-            .context("get environment")?;
-        lifecycle_timeout = lifecycle_timeout.max(platform_lifecycle_ready_timeout(
-            &environment.isolation_tier,
-        ));
-        if let Some(failure) = progress::platform_ended_failure(&environment) {
-            return Err(failure);
+fn daemon_wait_error(environment_id: &str, error: DaemonWaitError) -> anyhow::Error {
+    match error {
+        DaemonWaitError::GetEnvironment(error) => {
+            get_environment_error(error).context("get environment")
         }
-
-        let observation = match environment.state.as_str() {
-            "running" => {
-                daemon_started.get_or_insert_with(Instant::now);
-                match client
-                    .get_environment_daemon_status(org_id, environment_id)
-                    .await
-                {
-                    Ok(status) => match environment_daemon_readiness(&status)? {
-                        true => return Ok(()),
-                        false => "daemon is still starting".to_string(),
-                    },
-                    Err(error) => error.to_string(),
-                }
-            }
-            "destroyed" | "destroying" | "failed" | "error" => {
-                anyhow::bail!(
-                    "environment {environment_id:?} became {} before its daemon was ready",
-                    environment.state
-                );
-            }
-            state => format!("environment is {state}"),
-        };
-
-        if daemon_started
-            .as_ref()
-            .is_some_and(|started| started.elapsed() >= PLATFORM_DAEMON_READY_TIMEOUT)
-        {
-            anyhow::bail!(
-                "timed out waiting for environment {environment_id:?} daemon to become ready: {observation}"
-            );
+        DaemonWaitError::PlatformEnded(facts, end) => progress::platform_end_error(&facts, end),
+        DaemonWaitError::Unusable { state, message } => {
+            let status = EnvironmentDaemonStatus {
+                state,
+                message,
+                ..Default::default()
+            };
+            environment_daemon_readiness(&status)
+                .err()
+                .unwrap_or_else(|| anyhow::anyhow!("environment daemon is not ready"))
         }
-        if daemon_started.is_none() && lifecycle_started.elapsed() >= lifecycle_timeout {
-            anyhow::bail!(
-                "timed out waiting for environment {environment_id:?} to reach running state: {observation}"
-            );
-        }
-        tokio::time::sleep(platform_ready_poll(poll_interval)).await;
+        DaemonWaitError::Left(state) => anyhow::anyhow!(
+            "environment {environment_id:?} became {state} before its daemon was ready"
+        ),
+        DaemonWaitError::DaemonTimeout(seen) => anyhow::anyhow!(
+            "timed out waiting for environment {environment_id:?} daemon to become ready: {}",
+            daemon_observation(seen)
+        ),
+        DaemonWaitError::LifecycleTimeout(seen) => anyhow::anyhow!(
+            "timed out waiting for environment {environment_id:?} to reach running state: {}",
+            daemon_observation(seen)
+        ),
     }
 }
 
+fn daemon_observation(seen: DaemonObservation) -> String {
+    match seen {
+        DaemonObservation::Starting => "daemon is still starting".to_owned(),
+        DaemonObservation::StatusFailed(error) => display_client_error(error).to_string(),
+        DaemonObservation::NoStatus => "GetEnvironmentDaemonStatus returned no status".to_owned(),
+        DaemonObservation::Environment(state) => format!("environment is {state}"),
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn platform_ready_poll(server_interval: Option<Duration>) -> Duration {
-    server_interval.unwrap_or(PLATFORM_READY_POLL)
+    setup::ready_poll(server_interval)
 }
 
+#[cfg(test)]
 pub(crate) fn platform_lifecycle_ready_timeout(isolation_tier: &str) -> Duration {
-    if isolation_tier == "confidential" {
-        PLATFORM_CONFIDENTIAL_READY_TIMEOUT
-    } else {
-        PLATFORM_READY_TIMEOUT
-    }
+    setup::lifecycle_ready_timeout(isolation_tier == "confidential")
 }
 
 pub(crate) fn environment_daemon_readiness(

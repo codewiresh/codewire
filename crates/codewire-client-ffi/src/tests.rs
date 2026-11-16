@@ -249,3 +249,10 @@ async fn a_server_that_cannot_be_reached_fails_dial_and_ends_the_shell() {
         "{states:?}"
     );
 }
+
+#[test]
+fn a_shell_target_s_debug_never_shows_its_token() {
+    let shown = format!("{:?}", target("https://codewire.invalid"));
+    assert!(!shown.contains("synthetic-token"), "{shown}");
+    assert!(shown.contains("environment_id: \"env\""), "{shown}");
+}
