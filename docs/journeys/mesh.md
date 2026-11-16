@@ -35,6 +35,9 @@ observation; walk it again and record it in this file.
   `mesh-walk-a`, `mesh-walk-b`, `mesh-walk-c`), and remove them at the end.
   A Mesh Network's name is retired for good when it is deleted, so use a
   fresh name for each walk.
+- A walk on Production leaves its Mesh Network's name retired for good, so it
+  is not wholly self-cleaning. Record the owner's yes on #3350 before the
+  first Production walk.
 - On Production, use the dedicated smoke identity
   (`scripts/runtime/prod/with-prod-smoke-auth.sh`) and only its own
   environments.
@@ -75,7 +78,7 @@ Issue: #3350.
   three Sandboxes, and delete the Mesh Network.
 - **Proof:**
   - `cw info` reads `Network: cloud:mesh-walk (attached)` for `mesh-walk-a`
-    and `mesh-walk-b`, and names no network for `mesh-walk-c`;
+    and `mesh-walk-b`, and `Network: not attached` for `mesh-walk-c`;
   - `nodes` lists both Sandboxes, each `reported online`;
   - the probe from `mesh-walk-b` prints `HTTP/1.0 200 OK`; the probe from
     `mesh-walk-c` fails with "`cw network connect` works only inside a cloud
@@ -165,11 +168,13 @@ Issue: #5118.
     a reload;
   - the invite code is shown once, with its expiry, and the joined machine
     appears in the list;
-  - the member's Revoke on the owner's machine is disabled and says who can
-    revoke it; a Sandbox's node offers no Revoke and says it leaves when its
-    Sandbox is deleted;
-  - step 6 is refused, naming the nodes, then succeeds; step 7 is refused
-    because the name was retired;
+  - as the member, Revoke on the owner's machine and on a Sandbox's node is
+    disabled and says who can revoke it, and a Sandbox's node says it leaves
+    when its Sandbox is deleted; as the owner, every node offers Revoke,
+    a Sandbox's node included (`crates/codewire-mesh/src/product.rs`);
+  - step 6 is refused, and the page names the nodes still on the Mesh
+    Network from its own node list, because Mesh's refusal names none; then
+    it succeeds. Step 7 is refused because the name was retired;
   - with Mesh stopped the page says Mesh isn't answering and keeps what it
     last showed; nothing claims two nodes reach each other.
 - **Gotchas:** the node kind (Sandbox, local VM, host) is not recorded by

@@ -475,7 +475,8 @@ policy without a restart; later it lists what was refused, with a one-step
 Allow. While hosted Sandboxes do not enforce network policies, each of these
 pages says so. The dashboard never shows a local policy: those live on the
 user's computer. A page learns of a new revision, an enforcement change or a
-refusal from the live event stream, never by polling.
+refusal from the live event stream, never by polling; those events are part
+of #5114, #5116 and #5117, and none exists yet.
 
 A Mesh node is online only while it holds a live coordinator session that
 Mesh has heard from in the last 45 s. Every Mesh client pings every 15 s, so a
@@ -504,7 +505,8 @@ nodes under the rules above, and deletes a Mesh Network that has no nodes.
 The Sandbox create form chooses a Mesh Network. Online means the node holds a
 live session with Mesh; the dashboard never claims that two nodes reach each
 other. A page learns that a node or an attachment changed from the live event
-stream, never by polling.
+stream, never by polling; those events are part of #5115 and #5118, and none
+exists yet.
 
 ### Credentials on the host
 
