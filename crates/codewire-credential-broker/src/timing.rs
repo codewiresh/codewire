@@ -255,6 +255,7 @@ pub(crate) fn route_label(route: &str) -> &'static str {
     match route {
         "openai-api" => "openai-api",
         "anthropic-api" => "anthropic-api",
+        "claude-oauth-token" => "claude-oauth-token",
         "github-api" => "github-api",
         "github-https" => "github-https",
         _ => "invalid",
@@ -559,6 +560,7 @@ pub(crate) mod tests {
         "github",
         "openai-api",
         "anthropic-api",
+        "claude-oauth-token",
         "github-api",
         "github-https",
         "invalid",
@@ -768,7 +770,13 @@ pub(crate) mod tests {
         for slot in ["codex", "openai", "anthropic", "github"] {
             assert_eq!(slot_label(slot), slot);
         }
-        for route in ["openai-api", "anthropic-api", "github-api", "github-https"] {
+        for route in [
+            "openai-api",
+            "anthropic-api",
+            "claude-oauth-token",
+            "github-api",
+            "github-https",
+        ] {
             assert_eq!(route_label(route), route);
         }
         for guest in ["sk-synthetic-secret", "codex\n", "", "Codex", "openai-api "] {

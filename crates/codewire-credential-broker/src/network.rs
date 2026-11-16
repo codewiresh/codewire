@@ -417,14 +417,16 @@ fn provider_host(target: &url::Url) -> &'static str {
 
 /// A provider host a credential route sends its requests to: the only hosts a
 /// front-door request may name as the one it was intercepted for. The hosts
-/// the broker calls only to refresh a token are no route's. `github.com` is
-/// both a route's host and where a GitHub App token is exchanged; the route
-/// admits only its Git paths.
+/// the broker calls only to refresh a token are no route's, except Claude's
+/// token host, which a Claude sign-in's front door also routes: Claude Code
+/// refreshes through it. `github.com` is both a route's host and where a
+/// GitHub App token is exchanged; the route admits only its Git paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RouteHost {
     OpenAiApi,
     ChatGpt,
     AnthropicApi,
+    ClaudeToken,
     GitHubApi,
     GitHub,
 }
@@ -435,6 +437,7 @@ impl RouteHost {
             Self::OpenAiApi => OPENAI_HOST,
             Self::ChatGpt => CHATGPT_HOST,
             Self::AnthropicApi => ANTHROPIC_HOST,
+            Self::ClaudeToken => CLAUDE_TOKEN_HOST,
             Self::GitHubApi => GITHUB_API_HOST,
             Self::GitHub => GITHUB_GIT_HOST,
         }
@@ -448,6 +451,7 @@ impl RouteHost {
             ("codex", "openai-api") => &[Self::OpenAiApi, Self::ChatGpt],
             ("openai", "openai-api") => &[Self::OpenAiApi],
             ("anthropic", "anthropic-api") => &[Self::AnthropicApi],
+            ("anthropic", "claude-oauth-token") => &[Self::ClaudeToken],
             ("github", "github-api") => &[Self::GitHubApi],
             ("github", "github-https") => &[Self::GitHub],
             _ => &[],
@@ -540,14 +544,17 @@ fn validate_target(
                     && target.path() == CLAUDE_PROFILE_PATH
                     && target.query().is_none())
         }
-        // Claude's token endpoint: the broker's refresh of a sign-in, and the
-        // enrollment's code exchange. Nothing else on this host.
+        // Claude's token host. For a sign-in, the broker's own refresh and
+        // any request its front door forwards untouched, which is what the
+        // environment's egress would send without interception; the broker
+        // refuses one that carries a Codewire value before it gets here. For
+        // an enrollment, the code exchange alone.
         Some(CLAUDE_TOKEN_HOST) => {
-            (selected.contains(&HttpProvider::AnthropicClaudeSignIn)
-                || selected.contains(&HttpProvider::ClaudeSignInEnrollment))
-                && method == Method::POST
-                && target.path() == CLAUDE_TOKEN_PATH
-                && target.query().is_none()
+            (selected.contains(&HttpProvider::AnthropicClaudeSignIn) && transparent_method(method))
+                || (selected.contains(&HttpProvider::ClaudeSignInEnrollment)
+                    && method == Method::POST
+                    && target.path() == CLAUDE_TOKEN_PATH
+                    && target.query().is_none())
         }
         Some(GITHUB_API_HOST) => {
             (selected.contains(&HttpProvider::GitHubOAuth)
@@ -782,6 +789,26 @@ mod upgrade_tests;
 mod tests {
     use super::*;
 
+    /// `DestinationDenied` means nothing was sent (#3999): a request-builder
+    /// error maps to it, and an error from sending never does.
+    #[tokio::test]
+    async fn only_an_unsent_request_is_destination_denied() {
+        let client = reqwest::Client::new();
+        let unbuilt = client.get("not a url").send().await.unwrap_err();
+        assert!(unbuilt.is_builder());
+        assert_eq!(
+            map_reqwest_error(unbuilt),
+            BrokerUpstreamError::DestinationDenied
+        );
+        // Nothing listens on the discard port: the connect is refused.
+        let refused = client.get("http://127.0.0.1:9/").send().await.unwrap_err();
+        assert!(!refused.is_builder());
+        assert_ne!(
+            map_reqwest_error(refused),
+            BrokerUpstreamError::DestinationDenied
+        );
+    }
+
     #[test]
     fn selected_http_hosts_are_closed_and_empty_selection_never_resolves() {
         assert_eq!(
@@ -928,16 +955,28 @@ mod tests {
     }
 
     #[test]
-    fn claude_sign_in_transport_adds_only_claudes_token_endpoint() {
+    fn claude_sign_in_transport_adds_only_claudes_token_host() {
         let selected = BTreeSet::from([HttpProvider::AnthropicClaudeSignIn]);
         assert_eq!(
             selected_hosts(&selected).unwrap(),
             BTreeSet::from(["api.anthropic.com", "platform.claude.com"])
         );
+        // Every CRUD request on Claude's token host: the broker's refresh and
+        // the front door's untouched forwards.
         for (method, target) in [
             (Method::POST, "https://api.anthropic.com/v1/messages"),
             (Method::GET, "https://api.anthropic.com/api/oauth/usage"),
             (Method::POST, "https://platform.claude.com/v1/oauth/token"),
+            (Method::GET, "https://platform.claude.com/v1/oauth/token"),
+            (
+                Method::POST,
+                "https://platform.claude.com/v1/oauth/token?next=1",
+            ),
+            (Method::POST, "https://platform.claude.com/v1/oauth/revoke"),
+            (
+                Method::DELETE,
+                "https://platform.claude.com/oauth/authorize",
+            ),
         ] {
             assert!(
                 validate_target(&url::Url::parse(target).unwrap(), &method, &selected).is_ok(),
@@ -945,13 +984,10 @@ mod tests {
             );
         }
         for (method, target) in [
-            (Method::GET, "https://platform.claude.com/v1/oauth/token"),
             (
-                Method::POST,
-                "https://platform.claude.com/v1/oauth/token?next=evil",
+                Method::OPTIONS,
+                "https://platform.claude.com/v1/oauth/token",
             ),
-            (Method::POST, "https://platform.claude.com/v1/oauth/revoke"),
-            (Method::POST, "https://platform.claude.com/oauth/authorize"),
             (Method::POST, "https://claude.com/cai/oauth/authorize"),
             (
                 Method::POST,

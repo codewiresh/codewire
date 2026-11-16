@@ -15,7 +15,7 @@ use http::StatusCode;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
-use crate::{BrokerRefreshError, BrokerUpstreamError};
+use crate::{BrokerRefreshError, BrokerRequestError, BrokerUpstreamError};
 
 const FAILURE_MESSAGE: &str = "provider credential refresh failed";
 
@@ -320,6 +320,19 @@ impl TransportFailure {
             Self::Request => "request",
             Self::Other => "other",
         }
+    }
+}
+
+/// The request error for a refresh the transport failed. A destination the
+/// transport refused was never asked, so it says nothing about the login:
+/// it is a passing upstream failure, not a denial a caller would read as a
+/// login to drop (#3999).
+pub(crate) fn transport_request_error(error: BrokerUpstreamError) -> BrokerRequestError {
+    match error {
+        BrokerUpstreamError::ResourceLimit => BrokerRequestError::ResponseTooLarge,
+        BrokerUpstreamError::DestinationDenied
+        | BrokerUpstreamError::Connect
+        | BrokerUpstreamError::Protocol => BrokerRequestError::UpstreamFailed,
     }
 }
 

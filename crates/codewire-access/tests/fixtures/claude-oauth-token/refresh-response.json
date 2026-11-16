@@ -1,0 +1,7 @@
+{
+  "access_token": "cwp1_<43 base64url characters>",
+  "refresh_token": "codewire-managed-no-refresh-token-<32 lowercase hexadecimal characters>",
+  "expires_in": 315360000,
+  "scope": "<the stored sign-in's granted scopes, space-separated>",
+  "token_type": "Bearer"
+}

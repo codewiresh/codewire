@@ -29,7 +29,9 @@ pub(crate) use sign_in::AnthropicClaudeSignInAdapter;
 pub use subscription::AnthropicSubscriptionTokenAdapter;
 
 const PROVIDER: &str = "anthropic";
-const ROUTE: &str = "anthropic-api";
+/// The route every Anthropic request, and a Claude sign-in's token answer,
+/// leases.
+pub(crate) const ROUTE: &str = "anthropic-api";
 /// The route's one operation; every request leases it.
 pub(crate) const OPERATION: &str = "messages";
 /// The pinned origin. Guest paths keep their own `/v1` prefix.

@@ -217,7 +217,8 @@ fn header_names(request: &v1::CredentialBridgeRequest) -> Vec<&str> {
 #[tokio::test]
 async fn each_default_route_reaches_the_bridge_as_its_loopback_form_does() {
     let mut host = Host::start().await;
-    let backend = host.backend(RouteTable::defaults());
+    // The defaults and Claude's token host, as a Claude sign-in binds them.
+    let backend = host.backend(RouteTable::with_claude_token_host(true));
     // (bound host, method, path and query, the loopback form, slot, route,
     // provider path, query)
     let cases = [
@@ -240,6 +241,26 @@ async fn each_default_route_reaches_the_bridge_as_its_loopback_form_does() {
             "anthropic-api",
             "/api/oauth/usage",
             "",
+        ),
+        (
+            "platform.claude.com",
+            Method::POST,
+            "/v1/oauth/token",
+            "/_codewire/anthropic-oauth/v1/oauth/token",
+            "anthropic",
+            "claude-oauth-token",
+            "/v1/oauth/token",
+            "",
+        ),
+        (
+            "platform.claude.com",
+            Method::GET,
+            "/v1/oauth/profile?account=1",
+            "/_codewire/anthropic-oauth/v1/oauth/profile?account=1",
+            "anthropic",
+            "claude-oauth-token",
+            "/v1/oauth/profile",
+            "account=1",
         ),
         (
             "api.openai.com",
@@ -366,6 +387,45 @@ fn the_defaults_bind_three_hosts() {
     EnvironmentCa::generate(defaults.hosts()).expect("the CA binds every default host");
 }
 
+/// Claude's token host is routed, and so bound, only when the Anthropic
+/// slot holds a Claude sign-in: never for an API key, a subscription token
+/// or no Anthropic client, whose agents reach it as without a front door.
+#[test]
+fn claudes_token_host_is_routed_only_for_a_claude_sign_in() {
+    let none = ManagedCredentialClients::from_profile_slots(["openai", "github"]).unwrap();
+    let api_key = ManagedCredentialClients::from_profile_slots(["anthropic"]).unwrap();
+    let subscription = api_key.with_anthropic_subscription_token().unwrap();
+    let sign_in = api_key.with_anthropic_sign_in().unwrap();
+    for clients in [
+        ManagedCredentialClients::default(),
+        none,
+        api_key,
+        subscription,
+    ] {
+        let routes = RouteTable::for_clients(clients);
+        assert_eq!(routes, RouteTable::defaults(), "{clients:?}");
+        assert!(!routes.hosts().contains(&"platform.claude.com"));
+    }
+    let routes = RouteTable::for_clients(sign_in);
+    assert_eq!(
+        routes.hosts(),
+        [
+            "api.anthropic.com",
+            "platform.claude.com",
+            "api.openai.com",
+            "chatgpt.com"
+        ]
+    );
+    assert!(
+        routes
+            .routes()
+            .iter()
+            .any(|route| route.host == "platform.claude.com"
+                && route.add_prefix == MANAGED_ANTHROPIC_OAUTH_PREFIX)
+    );
+    EnvironmentCa::generate(routes.hosts()).expect("the CA binds every sign-in host");
+}
+
 /// Mapping `chatgpt.com` whole (#3999) changes no other host's rewrite: the
 /// Anthropic API still maps every path under its prefix, and the OpenAI API
 /// only `/v1` and below. Codex's paths now reach the bridge whole, and the
@@ -428,6 +488,13 @@ fn every_route_prefix_is_recognised_by_the_bridge() {
             "/v1/messages",
             "anthropic",
             "anthropic-api",
+        ),
+        (
+            MANAGED_ANTHROPIC_OAUTH_PREFIX,
+            Method::POST,
+            "",
+            "anthropic",
+            "claude-oauth-token",
         ),
         (
             MANAGED_OPENAI_API_PREFIX,
@@ -522,11 +589,67 @@ async fn a_request_no_route_covers_is_404_and_never_reaches_the_bridge() {
         ("api.openai.com", "/v2/models"),
         ("api.openai.com", "/v1x"),
         ("api.openai.com", "/"),
+        // Without a Claude sign-in, Claude's token host has no route at all.
+        ("platform.claude.com", "/v1/oauth/token"),
+        ("platform.claude.com", "/"),
+        ("platform.claude.com", "/v1/oauth"),
+        ("platform.claude.com", "/v1/oauth/tokens"),
+        ("platform.claude.com", "/v1/oauth/revoke"),
+        ("platform.claude.com", "/v1/oauth/authorize"),
+        ("platform.claude.com", "/oauth/code/callback"),
+        ("platform.claude.com", "/v1/messages"),
     ] {
         assert_eq!(
             refused(&mut host, &backend, bound, uri).await,
             StatusCode::NOT_FOUND,
             "{bound}{uri}"
+        );
+    }
+}
+
+/// For a Claude sign-in every path and method of Claude's token host reaches
+/// the bridge on the token route, which the broker answers only for a
+/// managed refresh and otherwise forwards untouched.
+#[tokio::test]
+async fn every_path_of_claudes_token_host_reaches_the_bridge_for_a_sign_in() {
+    let mut host = Host::start().await;
+    let backend = host.backend(RouteTable::with_claude_token_host(true));
+    for (method, uri, path, query) in [
+        (Method::GET, "/v1/oauth/token", "/v1/oauth/token", ""),
+        (Method::DELETE, "/v1/oauth/token", "/v1/oauth/token", ""),
+        (Method::POST, "/v1/oauth/token/x", "/v1/oauth/token/x", ""),
+        (
+            Method::POST,
+            "/v1/oauth/token?grant_type=refresh_token",
+            "/v1/oauth/token",
+            "grant_type=refresh_token",
+        ),
+        (Method::PUT, "/v1/oauth/revoke", "/v1/oauth/revoke", ""),
+        (Method::GET, "/", "/", ""),
+    ] {
+        let request = Request::builder()
+            .method(method.clone())
+            .uri(uri)
+            .header(HOST, "platform.claude.com")
+            .body(Full::default())
+            .unwrap();
+        let (seen, _) = through_backend(&mut host, &backend, "platform.claude.com", request).await;
+        assert_eq!(
+            (
+                seen.capability_slot.as_str(),
+                seen.route.as_str(),
+                seen.method.as_str(),
+                seen.path.as_str(),
+                seen.query.as_str()
+            ),
+            (
+                "anthropic",
+                "claude-oauth-token",
+                method.as_str(),
+                path,
+                query
+            ),
+            "{method} {uri}"
         );
     }
 }

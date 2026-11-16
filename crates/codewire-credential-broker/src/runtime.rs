@@ -65,8 +65,11 @@ const GITHUB_REFRESH_PROVIDER: &str = "github";
 const SYNTHETIC_CODEX_ACCOUNT_ID: &str = "account-native-broker";
 
 mod anthropic_route;
+mod claude_token;
 mod entry;
 mod forced_refresh;
+mod request_binding;
+use request_binding::validate_request_binding;
 #[cfg(test)]
 #[path = "runtime_http_tests.rs"]
 mod http_tests;
@@ -295,6 +298,9 @@ pub enum BrokerRefreshError {
 /// Stable upstream failures safe to map back to the guest.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum BrokerUpstreamError {
+    /// Raised only before any byte is sent: an empty provider selection, the
+    /// target check, the resolved-address check or a request-builder error.
+    /// A refresh that gets it was never sent (#3999).
     #[error("credential broker upstream destination was denied")]
     DestinationDenied,
     #[error("credential broker upstream connection failed")]
@@ -1269,26 +1275,6 @@ fn require_direct_refresh_successor(
                 .material_generation
                 .checked_add(1)
                 .ok_or(BrokerRequestError::Denied)?
-    {
-        return Err(BrokerRequestError::Denied);
-    }
-    Ok(())
-}
-
-/// Refresh and its bounded retry belong to the original request binding, not
-/// whichever account/profile happens to be current after an asynchronous wait.
-/// Material and revocation generations may advance when tokens rotate.
-fn validate_request_binding(
-    current: &DerivedGrant,
-    admitted: &DerivedGrant,
-) -> Result<(), BrokerRequestError> {
-    let now = current_unix_time()?;
-    if current.environment_id != admitted.environment_id
-        || current.environment_generation != admitted.environment_generation
-        || current.profile != admitted.profile
-        || current.capability_slot != admitted.capability_slot
-        || current.credential_id != admitted.credential_id
-        || admitted.expires_at_unix.is_some_and(|expiry| expiry <= now)
     {
         return Err(BrokerRequestError::Denied);
     }
@@ -2313,7 +2299,7 @@ where
         .await
         .map_err(|error| {
             OAuthRefreshError::Uncertain(
-                map_upstream_error(error),
+                crate::refresh_failure::transport_request_error(error),
                 RefreshFailure::Transport(error),
             )
         })?;
@@ -2457,7 +2443,7 @@ impl ValidatedGuestRequest {
         if !matches!(
             (request.capability_slot.as_str(), request.route.as_str()),
             ("codex" | "openai", "openai-api")
-                | ("anthropic", "anthropic-api")
+                | ("anthropic", "anthropic-api" | "claude-oauth-token")
                 | ("github", "github-api" | "github-https")
         ) || request.body.len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES
             || request.headers.len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_HEADERS

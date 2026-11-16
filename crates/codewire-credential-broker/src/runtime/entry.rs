@@ -3,6 +3,7 @@
 
 use codewire_daemon_proto::codewire::bridge::v1;
 
+use super::claude_token::CLAUDE_TOKEN_ROUTE;
 use super::{
     BrokerHttpResponse, BrokerLeaseProvider, BrokerRequestBodyStream, BrokerRequestError,
     BrokerUpstreamTransport, OpenAiBroker, ValidatedGuestRequest,
@@ -95,7 +96,8 @@ where
 
     /// A front-door request, under the swap rule. Only the Anthropic route
     /// and Codex at `chatgpt.com` have it yet; any other front-door request
-    /// is refused before a lease, never served by always injecting.
+    /// is refused before a lease, never served by always injecting. Claude's
+    /// token host is answered or forwarded by its own rule (`claude_token.rs`).
     async fn execute_intercepted(
         &self,
         request: ValidatedGuestRequest,
@@ -103,6 +105,9 @@ where
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         match (request.slot.as_str(), request.intercepted_host) {
             _ if streamed_body => Err(BrokerRequestError::InvalidRequest),
+            ("anthropic", _) if request.route.as_str() == CLAUDE_TOKEN_ROUTE => {
+                self.execute_claude_token(request).await
+            }
             ("anthropic", _) => self.execute_swap(request).await,
             ("codex", Some(RouteHost::ChatGpt)) => self.execute_codex_swap(request).await,
             _ => Err(BrokerRequestError::InvalidRequest),
@@ -113,12 +118,18 @@ where
 /// The host a request on `entry` was intercepted for, checked before any
 /// credential lease. A loopback request names none: the environment controls
 /// every field of it. A front-door request must name one of its route's hosts.
+/// Claude's token route exists only behind the front door: a loopback
+/// request for it is refused.
 pub(super) fn intercepted_host(
     entry: BridgeEntry,
     request: &v1::CredentialBridgeRequest,
 ) -> Result<Option<RouteHost>, BrokerRequestError> {
     match entry {
-        BridgeEntry::Loopback if request.intercepted_host.is_empty() => Ok(None),
+        BridgeEntry::Loopback
+            if request.intercepted_host.is_empty() && request.route != CLAUDE_TOKEN_ROUTE =>
+        {
+            Ok(None)
+        }
         BridgeEntry::Loopback => Err(BrokerRequestError::InvalidRequest),
         BridgeEntry::FrontDoor => RouteHost::intercepted(
             &request.capability_slot,

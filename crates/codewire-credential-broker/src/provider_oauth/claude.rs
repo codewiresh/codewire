@@ -62,7 +62,7 @@ pub(crate) const CLAUDE_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d19
 /// Claude's token endpoint, for both the code exchange and refresh.
 pub(crate) const CLAUDE_TOKEN_HOST: &str = "platform.claude.com";
 pub(crate) const CLAUDE_TOKEN_PATH: &str = "/v1/oauth/token";
-const CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+pub(crate) const CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 /// Claude's OAuth profile, read once with a new sign-in for its plan.
 pub(crate) const CLAUDE_PROFILE_PATH: &str = "/api/oauth/profile";
 const CLAUDE_PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";

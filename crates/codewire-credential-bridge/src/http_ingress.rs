@@ -12,7 +12,8 @@ use std::net::Ipv6Addr;
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header::HOST, uri::Authority};
 
 pub use codewire_access::{
-    MANAGED_ANTHROPIC_API_PREFIX, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX,
+    MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX, MANAGED_GITHUB_GIT_PREFIX,
+    MANAGED_OPENAI_API_PREFIX,
 };
 
 const GITHUB_API_HOST: &str = "api.github.com";
@@ -86,9 +87,13 @@ pub fn classify_http_request<'a>(
         });
     }
     // Most specific base first: the Codex client's bare `/v1` comes last.
+    // Claude's token host is a family too: the broker answers a managed
+    // refresh and forwards every other request untouched.
     let (capability_slot, route, path) =
         if let Some(provider_path) = under(path, MANAGED_ANTHROPIC_API_PREFIX) {
             ("anthropic", "anthropic-api", provider_path)
+        } else if let Some(provider_path) = under(path, MANAGED_ANTHROPIC_OAUTH_PREFIX) {
+            ("anthropic", "claude-oauth-token", provider_path)
         } else if let Some(provider_path) = under(path, MANAGED_OPENAI_API_PREFIX) {
             ("openai", "openai-api", provider_path)
         } else if path.starts_with(MANAGED_GITHUB_GIT_PREFIX) {

@@ -300,7 +300,7 @@ fn credential_conflict_response() -> BrokerHttpResponse {
 /// Headers that carry a credential. Only `authorization` and `x-api-key` can
 /// carry a placeholder the broker swaps; the other two only count against a
 /// placeholder sent beside them.
-const CREDENTIAL_HEADERS: [HeaderName; 4] = [
+pub(super) const CREDENTIAL_HEADERS: [HeaderName; 4] = [
     header::AUTHORIZATION,
     HeaderName::from_static("x-api-key"),
     header::PROXY_AUTHORIZATION,

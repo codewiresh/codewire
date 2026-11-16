@@ -26,7 +26,7 @@ use uuid::Uuid;
 use codewire_egress_policy::handoff::InterceptedStreamHeader;
 
 use crate::handoff::{HandoffSocket, Received};
-use crate::{CredentialRouteBackend, RouteTable};
+use crate::{CLAUDE_TOKEN_HOST, CredentialRouteBackend, RouteTable};
 
 /// The only port a binding may name: the front door serves TLS.
 pub const INTERCEPT_PORT: u16 = 443;
@@ -93,7 +93,12 @@ impl EnvironmentFrontDoor {
             .collect();
         names.dedup();
         let ca = EnvironmentCa::generate(names)?;
-        let backend = CredentialRouteBackend::new(RouteTable::defaults(), bridge.clone());
+        // Claude's token host is bound only for a Claude sign-in, once the
+        // boot chain builds its intercepts from `RouteTable::for_clients`
+        // (#4809); its route follows that binding.
+        let routes =
+            RouteTable::with_claude_token_host(intercepts.binds(CLAUDE_TOKEN_HOST, INTERCEPT_PORT));
+        let backend = CredentialRouteBackend::new(routes, bridge.clone());
         let door = FrontDoor::new(ca, backend, FrontDoorConfig::default());
         Ok(Self {
             environment_id: environment_id.to_string(),

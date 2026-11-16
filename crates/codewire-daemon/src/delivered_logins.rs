@@ -54,7 +54,9 @@ pub mod codex {
     /// revokes the refresh token, or the access token when the refresh token is
     /// empty, and Codewire's access token must stay usable by the creator's other
     /// Sandboxes.
-    pub const CODEX_MANAGED_REFRESH_TOKEN: &str = "codewire-managed-no-refresh-token";
+    /// Defined in codewire-access, beside the credential broker's recogniser
+    /// of it (#3999).
+    pub use codewire_access::CODEX_MANAGED_REFRESH_TOKEN;
     const _: () = assert!(!CODEX_MANAGED_REFRESH_TOKEN.is_empty());
 
     /// `contents` parsed, when it is an `auth.json` Codewire wrote.
@@ -126,11 +128,14 @@ pub mod claude {
     /// name, so it survives both.
     pub const CLAUDE_MANAGED_MARKER: &str = "codewireManaged";
     /// The start of the refresh token Codewire writes. It is never empty: Claude
-    /// Code reads an empty refresh token as a dead login.
-    pub const CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX: &str = "codewire-managed-no-refresh-token-";
+    /// Code reads an empty refresh token as a dead login. Defined in
+    /// codewire-access, beside the credential broker's recogniser of it
+    /// (#3999).
+    pub use codewire_access::CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX;
     const _: () = assert!(!CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX.is_empty());
     /// The hexadecimal nonce after [`CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX`].
-    pub(crate) const NONCE_LENGTH: usize = 32;
+    #[cfg(test)]
+    pub(crate) const NONCE_LENGTH: usize = codewire_access::CLAUDE_MANAGED_REFRESH_NONCE_LENGTH;
 
     /// What `claudeAiOauth` in a file Codewire may write is.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,14 +187,7 @@ pub mod claude {
 
     /// Whether `token` is a refresh token Codewire wrote.
     pub(crate) fn is_placeholder(token: &str) -> bool {
-        token
-            .strip_prefix(CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX)
-            .is_some_and(|nonce| {
-                nonce.len() == NONCE_LENGTH
-                    && nonce
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            })
+        codewire_access::is_managed_claude_refresh_token(token)
     }
 
     /// Whether `contents` is a credential store whose `claudeAiOauth` is

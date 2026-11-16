@@ -28,7 +28,9 @@ use std::task::{Context, Poll};
 
 use axum::body::Body;
 use bytes::Bytes;
-use codewire_access::MANAGED_ANTHROPIC_API_PREFIX;
+use codewire_access::{
+    MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX, ManagedCredentialClients,
+};
 use codewire_credential_bridge::{
     CredentialBridge, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX, UpgradeAnswer,
 };
@@ -56,13 +58,19 @@ const OPENAI_API_PATH: &str = "/v1";
 /// Codex on a ChatGPT sign-in: every path maps whole, and the broker admits
 /// only the ones Codex sends its credential to (#3999).
 const CHATGPT_HOST: &str = "chatgpt.com";
+/// Claude's token host, on every path: the pinned Claude Code refreshes its
+/// sign-in at `/v1/oauth/token`, and the broker forwards every request that
+/// is not a managed refresh untouched. Routed only for an environment whose
+/// Anthropic slot holds a Claude sign-in ([`RouteTable::for_clients`]).
+pub(crate) const CLAUDE_TOKEN_HOST: &str = "platform.claude.com";
 
 /// The managed path prefixes the bridge's classifier recognises. Each
 /// selects one route; a rewritten path is that prefix and the rest of the
 /// request's path.
-fn route_prefixes() -> [&'static str; 4] {
+fn route_prefixes() -> [&'static str; 5] {
     [
         MANAGED_ANTHROPIC_API_PREFIX,
+        MANAGED_ANTHROPIC_OAUTH_PREFIX,
         MANAGED_OPENAI_API_PREFIX,
         // The constant carries the slash that begins the rest of the path.
         MANAGED_GITHUB_GIT_PREFIX.trim_end_matches('/'),
@@ -156,11 +164,38 @@ impl RouteTable {
     /// every path, the OpenAI API under `/v1`, and Codex on a ChatGPT
     /// sign-in on every path, whole, which the broker narrows to Codex's own.
     pub fn defaults() -> Self {
-        Self::new([
-            HostRoute::new(ANTHROPIC_API_HOST, "/", MANAGED_ANTHROPIC_API_PREFIX),
-            HostRoute::new(OPENAI_API_HOST, OPENAI_API_PATH, MANAGED_OPENAI_API_PREFIX),
-            HostRoute::new(CHATGPT_HOST, "/", CODEX_PREFIX),
-        ])
+        Self::with_claude_token_host(false)
+    }
+
+    /// The routes for an environment whose stock clients are `clients`: the
+    /// defaults, and Claude's token host only when the Anthropic slot holds
+    /// a Claude sign-in. With an API key, a subscription token or
+    /// no Anthropic client, Claude's token host is never bound, so the
+    /// environment reaches it exactly as it would without a front door. A
+    /// boot binds these hosts and no others once the boot chain calls this
+    /// (#4809); until then the token host is never bound (#3999).
+    pub fn for_clients(clients: ManagedCredentialClients) -> Self {
+        Self::with_claude_token_host(clients.anthropic_sign_in())
+    }
+
+    /// The defaults, with Claude's token host on every path when
+    /// `claude_token_host`.
+    pub(crate) fn with_claude_token_host(claude_token_host: bool) -> Self {
+        let claude_token = claude_token_host
+            .then(|| HostRoute::new(CLAUDE_TOKEN_HOST, "/", MANAGED_ANTHROPIC_OAUTH_PREFIX));
+        Self::new(
+            [HostRoute::new(
+                ANTHROPIC_API_HOST,
+                "/",
+                MANAGED_ANTHROPIC_API_PREFIX,
+            )]
+            .into_iter()
+            .chain(claude_token)
+            .chain([
+                HostRoute::new(OPENAI_API_HOST, OPENAI_API_PATH, MANAGED_OPENAI_API_PREFIX),
+                HostRoute::new(CHATGPT_HOST, "/", CODEX_PREFIX),
+            ]),
+        )
         .expect("the built-in routes are valid")
     }
 

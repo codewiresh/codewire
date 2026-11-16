@@ -41,10 +41,11 @@ type Outbound = (Method, String, Vec<(String, Vec<u8>)>, Vec<u8>);
 const GENERATION: u64 = 3;
 
 /// Every host some route sends to.
-const ROUTE_HOSTS: [&str; 5] = [
+const ROUTE_HOSTS: [&str; 6] = [
     "api.openai.com",
     "chatgpt.com",
     "api.anthropic.com",
+    "platform.claude.com",
     "api.github.com",
     "github.com",
 ];

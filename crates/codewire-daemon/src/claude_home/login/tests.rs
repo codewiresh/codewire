@@ -2,7 +2,7 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::sync::{Arc, Mutex};
 
-use codewire_access::ManagedCredentialClients;
+use codewire_access::{ManagedCredentialClients, is_managed_claude_refresh_token};
 use serde_json::json;
 use zeroize::Zeroizing;
 
@@ -182,7 +182,7 @@ fn a_delivered_login_is_claude_codes_own_login_with_a_placeholder_and_the_marker
     assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
     let written = fixture.json();
     let refresh = fixture.refresh_token();
-    assert!(is_placeholder(&refresh), "{refresh}");
+    assert!(is_managed_claude_refresh_token(&refresh), "{refresh}");
     assert!(refresh.starts_with("codewire-managed-no-refresh-token-"));
     assert_eq!(
         written,
@@ -268,7 +268,7 @@ fn unrelated_members_are_kept_and_the_nonce_changes_only_with_the_token() {
     assert_eq!(rotated[CLAUDE_LOGIN_KEY]["accessToken"], ROTATED);
     assert_eq!(rotated[CLAUDE_LOGIN_KEY]["expiresAt"], EXPIRES + 60_000);
     assert_ne!(fixture.refresh_token(), nonce);
-    assert!(is_placeholder(&fixture.refresh_token()));
+    assert!(is_managed_claude_refresh_token(&fixture.refresh_token()));
     assert_eq!(rotated["mcpOAuth"], unrelated()["mcpOAuth"]);
     assert_eq!(fixture.entries(), [CLAUDE_CREDENTIALS_FILE_NAME]);
 
@@ -944,7 +944,7 @@ fn placeholders_are_fresh_hex_nonces_after_the_prefix() {
     let two = placeholder();
     assert_ne!(one, two);
     for token in [&one, &two] {
-        assert!(is_placeholder(token));
+        assert!(is_managed_claude_refresh_token(token));
         assert_eq!(
             token.len(),
             CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX.len() + NONCE_LENGTH
@@ -958,7 +958,7 @@ fn placeholders_are_fresh_hex_nonces_after_the_prefix() {
         &one.to_uppercase(),
         "sk-ant-ort01-synthetic",
     ] {
-        assert!(!is_placeholder(other), "{other}");
+        assert!(!is_managed_claude_refresh_token(other), "{other}");
     }
 }
 

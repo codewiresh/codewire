@@ -407,10 +407,8 @@ fn classify(config: &PrivateDirectory, name: &str) -> io::Result<Credentials> {
 
 /// A fresh placeholder refresh token.
 fn placeholder() -> String {
-    format!(
-        "{CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX}{}",
-        uuid::Uuid::new_v4().simple()
-    )
+    // The marker's one constructor, which the broker's answer uses too.
+    codewire_access::managed_claude_refresh_token(uuid::Uuid::new_v4().into_bytes())
 }
 
 /// The members of `claudeAiOauth` Codewire writes, besides the refresh

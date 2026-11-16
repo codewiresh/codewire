@@ -110,7 +110,9 @@ is now their one home, and `AGENTS.md` points here.
     (#3999; `agent-own-key`): it's forwarded untouched where the policy
     allows the host, and refused otherwise. That's the rule. Until the
     egress broker's signed policy decision exists, the forward is
-    unconditional. A request carrying
+    unconditional: with interception switched on, untouched forwards to
+    `platform.claude.com` don't yet follow a `locked` policy (the bound-host
+    rule, #3999). A request carrying
     a placeholder or managed value anywhere else is refused, never
     forwarded. A sign-in that can't be used is answered `invalid_grant`,
     and a passing failure `temporarily_unavailable`, so a short outage
@@ -488,10 +490,12 @@ a fresher one, with the OAuth beta. The refresh token never enters the
 Sandbox. The selection digest is the same in every Anthropic form, so a
 running Sandbox switches form at its next restart.
 
-The broker's pinned transport admits `platform.claude.com` for the token
-endpoint only; the credential service's separate sign-in transport admits that
-endpoint and the one profile read. Claude itself (`claude.com`) is reached only
-by your browser.
+For a Claude sign-in the broker's pinned transport admits `platform.claude.com`:
+its own refresh at the token endpoint and, while the environment's front door
+intercepts that host, any request it forwards untouched; one that carries a
+Codewire placeholder or marker is refused before it is sent. The credential
+service's separate sign-in transport admits only that endpoint and the one
+profile read. Claude itself (`claude.com`) is reached only by your browser.
 
 ### Dashboard GitHub connection and repositories
 

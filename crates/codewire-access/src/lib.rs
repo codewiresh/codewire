@@ -9,6 +9,7 @@
 mod catalog;
 mod grant;
 mod id;
+mod managed_refresh;
 mod model;
 mod placeholder;
 mod projection;
@@ -26,6 +27,11 @@ pub use id::{
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialId, EnvironmentId, OwnerId,
     ProviderId,
 };
+pub use managed_refresh::{
+    CLAUDE_MANAGED_REFRESH_NONCE_BYTES, CLAUDE_MANAGED_REFRESH_NONCE_LENGTH,
+    CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX, CODEX_MANAGED_REFRESH_TOKEN,
+    is_managed_claude_refresh_token, managed_claude_refresh_token,
+};
 pub use model::{
     AccessProfile, CapabilityPolicy, CredentialAuthKind, CredentialMetadata, CredentialStatus,
     EnvironmentAccessBinding, GrantPermission, HttpProvider, Owner, Placement, ProviderCatalog,
@@ -40,11 +46,12 @@ pub use projection::{
     CODEX_PLATFORM_TOKEN_FILE, CodexProviderProjection, GH_CONFIG_FILE_NAME, GH_NATIVE_CONFIG_DIR,
     GH_PLATFORM_CONFIG_DIR, GH_TOKEN_PLACEHOLDER, GITHUB_GIT_URL, GITHUB_HTTPS_URL, GITHUB_SCP_URL,
     GITHUB_SSH_KNOWN_HOSTS, GITHUB_SSH_URL, GhConfigProjection, MANAGED_ANTHROPIC_API_PREFIX,
-    MANAGED_CREDENTIAL_CLIENTS_ENV, MANAGED_GITHUB_GIT_PREFIX, MANAGED_HTTP_NATIVE_SOCKET,
-    MANAGED_HTTP_PLATFORM_SOCKET, MANAGED_HTTP_PORT, MANAGED_NO_PROXY, MANAGED_OPENAI_API_PREFIX,
-    ManagedAgent, ManagedCredentialClient, ManagedCredentialClientPlacement,
-    ManagedCredentialClientProjection, ManagedCredentialClients, NO_PROXY_NAMES, ProjectionError,
-    SSH_NATIVE_AUTH_SOCK, SSH_PLATFORM_AUTH_SOCK, github_known_hosts_additions,
+    MANAGED_ANTHROPIC_OAUTH_PREFIX, MANAGED_CREDENTIAL_CLIENTS_ENV, MANAGED_GITHUB_GIT_PREFIX,
+    MANAGED_HTTP_NATIVE_SOCKET, MANAGED_HTTP_PLATFORM_SOCKET, MANAGED_HTTP_PORT, MANAGED_NO_PROXY,
+    MANAGED_OPENAI_API_PREFIX, ManagedAgent, ManagedCredentialClient,
+    ManagedCredentialClientPlacement, ManagedCredentialClientProjection, ManagedCredentialClients,
+    NO_PROXY_NAMES, ProjectionError, SSH_NATIVE_AUTH_SOCK, SSH_PLATFORM_AUTH_SOCK,
+    github_known_hosts_additions,
 };
 
 use thiserror::Error;

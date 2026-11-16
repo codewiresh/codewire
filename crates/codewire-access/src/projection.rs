@@ -58,6 +58,12 @@ pub const MANAGED_OPENAI_API_PREFIX: &str = "/_codewire/openai/v1";
 /// Base-URL path for the Anthropic profile slot. Every request under it
 /// reaches the Anthropic API unchanged except for its credential.
 pub const MANAGED_ANTHROPIC_API_PREFIX: &str = "/_codewire/anthropic";
+/// Base path of Claude's token host on the managed ingress. Only the front
+/// door reaches it, for `platform.claude.com`, which it binds only while the
+/// Anthropic slot holds a Claude sign-in. The broker answers a
+/// `POST /v1/oauth/token` refresh that carries Codewire's managed marker and
+/// forwards every other request untouched (#3999).
+pub const MANAGED_ANTHROPIC_OAUTH_PREFIX: &str = "/_codewire/anthropic-oauth";
 /// Smart Git prefix on the existing managed HTTP ingress. Only the selected
 /// GitHub adapter may resolve this route to an upstream provider.
 pub const MANAGED_GITHUB_GIT_PREFIX: &str = "/_codewire/github/";

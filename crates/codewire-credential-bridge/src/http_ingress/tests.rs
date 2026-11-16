@@ -41,6 +41,34 @@ fn provider_families_keep_provider_relative_paths_and_queries() {
             "/chat/completions",
             None,
         ),
+        // Claude's token host: every path, as the other families.
+        (
+            "POST",
+            "/_codewire/anthropic-oauth/v1/oauth/token",
+            None,
+            "anthropic",
+            "claude-oauth-token",
+            "/v1/oauth/token",
+            None,
+        ),
+        (
+            "GET",
+            "/_codewire/anthropic-oauth/v1/oauth/token?grant_type=refresh_token",
+            Some("127.0.0.1:38081"),
+            "anthropic",
+            "claude-oauth-token",
+            "/v1/oauth/token",
+            Some("grant_type=refresh_token"),
+        ),
+        (
+            "DELETE",
+            "/_codewire/anthropic-oauth",
+            None,
+            "anthropic",
+            "claude-oauth-token",
+            "/",
+            None,
+        ),
         (
             "POST",
             "/_codewire/anthropic/v1/messages",
@@ -277,6 +305,12 @@ fn rejected_routes() -> Vec<(&'static str, &'static str, Option<&'static str>)> 
         ("POST", "/_codewire/anthropic/v1/../messages", None),
         ("POST", "/_codewire/anthropic/v1//messages", None),
         ("POST", "/_codewire/openai/v10/responses", None),
+        // Claude's token host is refused only as every family is.
+        ("OPTIONS", "/_codewire/anthropic-oauth/v1/oauth/token", None),
+        ("POST", "/_codewire/anthropic-oauth/v1/../oauth/token", None),
+        ("POST", "/_codewire/anthropic-oauth//v1/oauth/token", None),
+        ("POST", "/_codewire/anthropic-oauthx", None),
+        ("POST", "/_codewire/anthropic-oauth", Some("api.github.com")),
         (
             "POST",
             "/_codewire/openai/v1/responses",
