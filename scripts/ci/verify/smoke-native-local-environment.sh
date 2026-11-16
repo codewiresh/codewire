@@ -3494,7 +3494,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   scan_for_credential_canary before-delete-anthropic-key "$ANTHROPIC_CREDENTIAL_CANARY"
   scan_for_credential_canary before-delete-workload-secret "$WORKLOAD_SECRET_CANARY"
 
-  log 'deleting the environment, profile, credentials, and protected-store entries'
+  log 'deleting the environment, credentials, and protected-store entries; the default profile stays'
   run_cw rm --local "$NAME" --yes
   ENV_CREATED=0
   assert_current_target_cleared
@@ -3503,7 +3503,20 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   [[ "$(cat "$DIRECT_RW_SOURCE/guest-write.txt")" == 'direct guest write' &&
      "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||
     die 'environment deletion changed acknowledged direct-share host content'
-  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" delete --yes
+  # The store's first profile is its default, and a default cannot be deleted
+  # (docs/journeys/credentials.md, profile-default). The refusal is part of
+  # the proof. A credential can go once the profile's current revision no
+  # longer selects it, so each entry is unset first, and the store keeps its
+  # empty default profile.
+  run_cw_expect_failure credentials --local --profile "$CREDENTIAL_PROFILE_NAME" delete --yes
+  rg -qF 'is your default credential profile and cannot be deleted' "$LAST_STDERR" ||
+    die 'deleting the default profile was not refused with its guidance'
+  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
+  mapfile -t profile_entries < <(jq -r '.[0].entries | keys[]' "$LAST_STDOUT")
+  [[ ${#profile_entries[@]} -ge 1 ]] || die 'the default profile selected no credential before deletion'
+  for profile_entry in "${profile_entries[@]}"; do
+    run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" unset "$profile_entry"
+  done
   run_cw credentials --local delete "id:$CREDENTIAL_ID" --yes
   run_cw credentials --local delete "id:$GITHUB_CREDENTIAL_ID" --yes
   run_cw credentials --local delete "id:$OPENAI_CREDENTIAL_ID" --yes
@@ -3525,8 +3538,10 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
     die 'synthetic credential metadata remained after deletion'
   run_cw credentials --local profiles list --output json
-  jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
-    die 'synthetic access profile remained after deletion'
+  jq -e --arg name "$CREDENTIAL_PROFILE_NAME" '
+    length == 1 and .[0].name == $name and .[0].is_default == true and .[0].entries == {}
+  ' "$LAST_STDOUT" >/dev/null ||
+    die 'the store did not keep exactly its empty default profile after deletion'
   keyring_service_ready || die 'isolated Secret Service exited before deletion proof'
   if secret_tool_isolated lookup \
     application codewire \
