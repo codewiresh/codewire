@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -1072,6 +1073,52 @@ print('normal-default-cli-and-library-source-unchanged/flag-restored')
 
 
 class FinalizerDiagnostic(unittest.TestCase):
+    def test_compile_deadline_names_itself_and_shows_each_process_state(self):
+        # A family like #4847's: one process spinning, one asleep in the kernel.
+        script = "import os,time\nif os.fork()==0:\n time.sleep(30)\nelse:\n while True: pass\n"
+        family = subprocess.Popen([sys.executable, "-c", script], start_new_session=True)
+        self.addCleanup(family.wait)
+        self.addCleanup(os.killpg, family.pid, 9)
+        time.sleep(0.5)
+        with mock.patch.dict(finalizer._DIAGNOSTIC, {"phase": "compile"}), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            finalizer.compile_deadline(family.pid)
+            phase = finalizer._DIAGNOSTIC["phase"]
+            text = finalizer.failure_diagnostic(ValueError("kernel command failed"))
+        self.assertEqual(phase, "compile-deadline")
+        self.assertEqual(json.loads(text[len(finalizer.DIAGNOSTIC_PREFIX):])["phase"], "compile-deadline")
+        lines = stderr.getvalue().splitlines()
+        self.assertIn(f"passed its {finalizer.COMPILER_DEADLINE} s deadline", lines[0])
+        states = sorted(line.split(" state=")[1][0] for line in lines[1:])
+        self.assertEqual(states, ["R", "S"])
+        for line in lines[1:]:
+            self.assertRegex(line, r"comm=python[^ ]* state=[RS] cpu_s=\d+ threads=1 rss_mib=\d+ "
+                                   r"wchan=[A-Za-z0-9_?-]+ read_bytes=\d+ write_bytes=\d+$")
+
+    @unittest.skipUnless(sys.platform == "linux" and hasattr(os, "pidfd_open"), "Linux custody required")
+    def test_a_failing_deadline_snapshot_still_stops_the_compile_and_names_the_phase(self):
+        owner = finalizer.owner
+        owner.arm_custody()
+        owner.STOP = None
+        root = Path(tempfile.mkdtemp(prefix="compile-deadline-"))
+        self.addCleanup(shutil.rmtree, root)
+
+        def failing_snapshot(session):
+            with mock.patch.object(finalizer.os, "sysconf", side_effect=ValueError("no sysconf")):
+                finalizer.compile_deadline(session)
+
+        with mock.patch.dict(finalizer._DIAGNOSTIC, {"phase": "compile"}), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            with self.assertRaisesRegex(ValueError, '"timed_out": true') as refused:
+                owner.run_owned([sys.executable, "-c", "import time; time.sleep(30)"], root,
+                                {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, root / "compile.log",
+                                time.monotonic() + 0.2, grace=0.1, cleanup_bound=60,
+                                on_deadline=failing_snapshot)
+            text = finalizer.failure_diagnostic(refused.exception)
+        self.assertIn("run_owned: deadline snapshot failed: ValueError", stderr.getvalue())
+        self.assertEqual(json.loads(text[len(finalizer.DIAGNOSTIC_PREFIX):])["phase"], "compile-deadline")
+        self.assertEqual(owner.children(), set())
+
     def test_closed_refusal_diagnostic_never_renders_secret_exception_fields(self):
         canary = "DIAGNOSTIC_SECRET_CANARY"
         cases = (

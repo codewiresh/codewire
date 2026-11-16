@@ -243,6 +243,21 @@ time.sleep(30)
             self.run_command(script, timeout=0.2)
         self.no_children()
 
+    def test_deadline_hook_sees_the_live_family_once_before_any_signal(self):
+        seen = []
+
+        def hook(session):
+            alive = [pid for pid in kernel.children() if os.getsid(pid) == session]
+            seen.append((session, alive))
+
+        with self.assertRaisesRegex(ValueError, '"timed_out": true'):
+            kernel.run_owned([sys.executable, "-c", "import time; time.sleep(30)"], self.root, self.environment,
+                             self.root / "output.log", time.monotonic() + 0.2, grace=0.1, cleanup_bound=60,
+                             on_deadline=hook)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][1], [seen[0][0]])
+        self.no_children()
+
     def test_unexpected_surviving_compiler_is_refused_after_cleanup(self):
         script = """import os,signal,time
 if os.fork()==0:

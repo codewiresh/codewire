@@ -97,13 +97,17 @@ def cargo_jobs():
     cpus, gib = machine()
     return str(max(2, min(MAX_JOBS, cpus, gib // GIB_PER_JOB)))
 FILES = {"cw", "cw.d", "compile.log", "cw.oci.tar", "image.json", "runtime.pack", "cw-runtime.lock.json", "producer.json"}
-COMPILER_DEADLINE = 7200
+# Inside the job's own limit, so a hung compile fails here, named, and frees
+# the delivery turn (#4847: zig's final link of cw spun for 100 minutes with no
+# I/O until the 110-minute job limit). The slowest compile in the 14 days to
+# 2026-11-16 took 824 s; most take 270-705 s.
+COMPILER_DEADLINE = 2400
 COMPLETION_FIELDS = {"command", "exit", "elapsed_seconds", "log", "log_sha256", "timed_out", "interrupted",
                      "unexpected_family", "cleanup_unknown"}
 
 
 DIAGNOSTIC_PHASES = frozenset({"arguments", "custody", "capsule", "profile", "readonly", "home",
-                              "environment", "rustc", "compile", "export", "result",
+                              "environment", "rustc", "compile", "compile-deadline", "export", "result",
                               "export-admission", "export-binary", "export-depinfo", "export-log",
                               "export-directory", "export-transports", "export-retained", "export-verify"})
 DIAGNOSTIC_ERRNOS = {errno.EPERM: "permission", errno.EACCES: "permission", errno.EROFS: "readonly",
@@ -235,6 +239,43 @@ def command(profile):
     return ["/usr/local/cargo/bin/cargo", "zigbuild", "--locked", *PROFILES[profile],
             "-p", "codewire-cli-bin", "--bin", "cw", "--target", source.TARGET,
             "--manifest-path", "/src/Cargo.toml", "--target-dir", str(TARGET_ROOT), "--jobs", cargo_jobs()]
+
+
+def compile_deadline(session):
+    """Name the deadline and print what each process of the compile was doing:
+    spinning (state R, CPU rising), waiting in the kernel (wchan) or on I/O
+    (#4847 asked whether a hang is a deadlock, memory or the disk). Numbers and
+    process names only; a process that is gone or unreadable is skipped."""
+    _DIAGNOSTIC["phase"] = "compile-deadline"
+    print(f"finalize-cw-runtime-source: compile passed its {COMPILER_DEADLINE} s deadline; "
+          "the build family before it is stopped:", file=sys.stderr)
+    tick = os.sysconf("SC_CLK_TCK")
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            name, fields = Path(f"/proc/{entry.name}/stat").read_text().rsplit(") ", 1)
+            fields = fields.split()
+            if int(fields[3]) != session:
+                continue
+        except (OSError, ValueError):
+            continue
+        # State and wait channel are the useful part, so an unreadable io or
+        # wchan file costs only its own fields.
+        try:
+            io = dict(line.split(": ", 1) for line in Path(f"/proc/{entry.name}/io").read_text().splitlines())
+        except (OSError, ValueError):
+            io = {}
+        try:
+            wchan = Path(f"/proc/{entry.name}/wchan").read_text() or "-"
+        except OSError:
+            wchan = "?"
+        comm = re.sub(r"[^A-Za-z0-9._+-]", "?", name.split(" (", 1)[1])[:16]
+        print(f"finalize-cw-runtime-source: pid={entry.name} comm={comm} state={fields[0]} "
+              f"cpu_s={(int(fields[11]) + int(fields[12])) // tick} threads={fields[17]} "
+              f"rss_mib={int(fields[21]) * os.sysconf('SC_PAGE_SIZE') >> 20} wchan={re.sub(r'[^A-Za-z0-9_]', '?', wchan)[:40]} "
+              f"read_bytes={io.get('read_bytes', '?')} write_bytes={io.get('write_bytes', '?')}",
+              file=sys.stderr)
 
 
 # The target folder is a BuildKit cache mount on the trusted builder
@@ -579,7 +620,8 @@ def main(argv=None):
         print(f"finalize-cw-runtime-source: cargo --jobs {cargo_jobs()} (cpus={cpus} memory_gib={gib})",
               file=sys.stderr)
         result = owner.run_owned(command(admitted.model["profile"]), SOURCE_ROOT, environment,
-                                 home / "compile.log", time.monotonic() + COMPILER_DEADLINE)
+                                 home / "compile.log", time.monotonic() + COMPILER_DEADLINE,
+                                 on_deadline=compile_deadline)
         profile = admitted.model["profile"]
         _DIAGNOSTIC["phase"] = "export"
         receipt = finalize(admitted, TARGET_ROOT / source.TARGET / profile / "cw",

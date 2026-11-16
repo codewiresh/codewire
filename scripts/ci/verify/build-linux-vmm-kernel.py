@@ -248,8 +248,11 @@ def abort_family(process, adopted, bound=30):
             time.sleep(0.05)
 
 
-def run_owned(command, cwd, environment, log, deadline, grace=3, cleanup_bound=30):
-    """Reserve the leader through group cleanup; join adopted children to ECHILD."""
+def run_owned(command, cwd, environment, log, deadline, grace=3, cleanup_bound=30, on_deadline=None):
+    """Reserve the leader through group cleanup; join adopted children to ECHILD.
+
+    on_deadline(session) runs once when the deadline passes, before any signal,
+    so a caller can record what the still-live family was doing."""
     began = time.monotonic()
     adopted = {}
     timed_out = interrupted = unexpected_family = False
@@ -265,6 +268,13 @@ def run_owned(command, cwd, environment, log, deadline, grace=3, cleanup_bound=3
                 if STOP is not None or time.monotonic() >= deadline:
                     interrupted = STOP is not None
                     timed_out = not interrupted
+                    if timed_out and on_deadline is not None:
+                        # Only a record: whatever it raises, the family is
+                        # still stopped below.
+                        try:
+                            on_deadline(process.pid)
+                        except Exception as error:
+                            print(f"run_owned: deadline snapshot failed: {type(error).__name__}", file=sys.stderr)
                     break
                 time.sleep(0.05)
             cleanup_started = time.monotonic()
