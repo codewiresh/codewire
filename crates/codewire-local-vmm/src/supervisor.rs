@@ -4653,29 +4653,29 @@ impl Supervisor {
                 progress,
             },
         ));
-        // Broker startup must proceed while the runner waits for install and
-        // startup. Its owner-only runner seam does not take either lifecycle
-        // mutex; the immutable selection is admitted before either future.
-        let (start, broker) = while_holding_direct_shares(checked_direct_shares, async {
-            tokio::join!(client.start(start_request), async {
-                if let Some(events) = broker_events {
+        // The broker starts while the runner waits for install and startup: its owner-only
+        // seam takes neither lifecycle mutex, and the selection is admitted first.
+        let (start, broker) = while_holding_direct_shares(
+            checked_direct_shares,
+            Box::pin(bootstrap::start_beside_broker(
+                client.start(start_request),
+                broker_events.map(|events| {
                     bootstrap::wait_for_broker_bootstrap(
                         events,
                         environment.id,
                         generation,
                         &expected_artifact_generation,
                     )
-                    .await?;
-                }
-                ensure_credential_broker(broker_request).await
-            },)
-        })
+                }),
+                ensure_credential_broker(broker_request),
+            )),
+        )
         .await;
         let start = match broker {
             Ok(_) => start,
             Err(error) => {
                 let _ = client.stop().await;
-                Err(Status::unavailable(error.to_string()))
+                start.and(Err(Status::unavailable(error.to_string())))
             }
         };
         if start.is_err() {

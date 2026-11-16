@@ -3,7 +3,43 @@
 //! boot budget; terminal install readiness must never be a prerequisite.
 
 use super::*;
+use tokio::sync::Notify;
 use tokio_stream::StreamExt;
+
+/// The runner's start beside the credential broker's wait for the guest's
+/// bootstrap. A start the runner refuses ends that wait at once: the
+/// bootstrap it waits for can no longer come, and the wait would otherwise
+/// hold the start, and every operation queued behind it, for its full 20
+/// minutes (#4953). Once the wait is over the broker's launch runs to its end
+/// whatever the start does, so no broker starts after the cleanup that
+/// follows a failed start. It holds all three futures at once, so a caller
+/// that is itself a large future boxes it: unboxed in `ensure_vm_started`, it
+/// overflowed the stack of the supervisor tests that start an environment.
+pub(super) async fn start_beside_broker<T, U>(
+    start: impl Future<Output = Result<T, Status>>,
+    wait: Option<impl Future<Output = Result<(), SupervisorError>>>,
+    launch: impl Future<Output = Result<U, SupervisorError>>,
+) -> (Result<T, Status>, Result<U, SupervisorError>) {
+    let refused = Notify::new();
+    tokio::join!(
+        async {
+            let started = start.await;
+            if started.is_err() {
+                refused.notify_one();
+            }
+            started
+        },
+        async {
+            if let Some(wait) = wait {
+                tokio::select! {
+                    waited = wait => waited?,
+                    () = refused.notified() => return Err(SupervisorError::RunnerUnavailable),
+                }
+            }
+            launch.await
+        },
+    )
+}
 
 pub(super) async fn wait_for_broker_bootstrap(
     mut events: impl Stream<Item = Result<v1::RunnerEvent, Status>> + Unpin,
@@ -79,6 +115,71 @@ fn broker_bootstrap_ready(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HANG_GUARD: Duration = Duration::from_secs(30);
+
+    /// #4953: a runner that refuses the start, as one still holding a failed
+    /// VM does, ends a bootstrap wait that would otherwise never finish, and
+    /// the refusal is what comes back. The broker is never launched.
+    #[tokio::test]
+    async fn a_refused_start_ends_the_brokers_wait() {
+        let launched = std::sync::atomic::AtomicBool::new(false);
+        let (start, broker) = tokio::time::timeout(
+            HANG_GUARD,
+            start_beside_broker(
+                async { Err::<(), _>(Status::already_exists("environment is already running")) },
+                Some(std::future::pending()),
+                async {
+                    launched.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            ),
+        )
+        .await
+        .expect("the broker's wait held the refused start");
+        assert_eq!(start.unwrap_err().code(), tonic::Code::AlreadyExists);
+        assert!(matches!(broker, Err(SupervisorError::RunnerUnavailable)));
+        assert!(!launched.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// Once the guest's bootstrap has come, a start that fails later leaves
+    /// the broker's launch to finish, so the cleanup after it finds the broker.
+    #[tokio::test(start_paused = true)]
+    async fn a_start_that_fails_after_the_wait_leaves_the_launch_to_finish() {
+        let (start, broker) = start_beside_broker(
+            async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Err::<(), _>(Status::unavailable("guest daemon never became ready"))
+            },
+            Some(std::future::ready(Ok(()))),
+            async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok(7)
+            },
+        )
+        .await;
+        assert!(start.is_err());
+        assert_eq!(broker.unwrap(), 7);
+    }
+
+    /// The normal case: both finish, the broker only after its wait.
+    #[tokio::test(start_paused = true)]
+    async fn a_start_and_its_broker_both_finish() {
+        let (start, broker) = start_beside_broker(
+            async {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                Ok::<_, Status>("started")
+            },
+            Some(async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Ok(())
+            }),
+            async { Ok("launched") },
+        )
+        .await;
+        assert_eq!(start.unwrap(), "started");
+        assert_eq!(broker.unwrap(), "launched");
+    }
 
     fn event(id: Uuid, generation: u64, guest: v1::GuestBootStage) -> v1::RunnerEvent {
         v1::RunnerEvent {

@@ -42,6 +42,9 @@ Issues: #4478 (VMs did not start on macOS 27), #4370 (launch step 11).
   - a fresh install, and `cw upgrade` from the previous release;
   - a first create, which pulls the image, and a create from cached layers;
   - a stopped VM started again, and a command run after the restart;
+  - a VM with a credential profile whose egress broker was lost
+    (`egress_broker_exit`): `cw --local stop`, then `start`, each finish in
+    their usual time and egress works again (#4953);
   - a start macOS refuses (`mac-vm-refused-start`).
 - **Driving it:**
   1. Install: `curl -fsSL https://codewire.sh/install.sh | sh`, or
