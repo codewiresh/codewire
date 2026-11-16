@@ -267,18 +267,22 @@ process_start() {
 # - a stopped waiter (Ctrl-Z) keeps its ticket and is passed over until it
 #   continues.
 queue_head() {
-  local ticket recorded
+  # Not `ticket`: the waiter's EXIT trap removes "$ticket", and a signal handled
+  # while this runs would see this function's variable in its place, unset
+  # (exit 1 under set -u, the waiter's own ticket left behind) or naming
+  # another waiter's ticket, which it would remove (2026-11-16).
+  local queued recorded
   head=
-  for ticket in "$BUILD_SLOT_DIR"/queue/*; do
-    [ -e "$ticket" ] || continue
-    process_start "${ticket##*-}"
-    { IFS= read -r recorded <"$ticket"; } 2>/dev/null || recorded=
+  for queued in "$BUILD_SLOT_DIR"/queue/*; do
+    [ -e "$queued" ] || continue
+    process_start "${queued##*-}"
+    { IFS= read -r recorded <"$queued"; } 2>/dev/null || recorded=
     if [ -z "$proc_start" ] || [ "$proc_start" != "$recorded" ]; then
-      rm -f "$ticket"
+      rm -f "$queued"
       continue
     fi
     [ "$proc_state" != T ] || continue
-    head="$ticket"
+    head="$queued"
     return
   done
 }
@@ -329,7 +333,10 @@ build() {
   # A waiter that is told to stop takes its ticket with it, and exits with the
   # signal's own status; one that is killed outright leaves its ticket for
   # queue_head to remove.
-  trap 'rm -f "$ticket" "${ticket%/*}/.${ticket##*/}"' EXIT
+  # The paths are written into the trap now, so no variable a helper declares
+  # later can change what it removes.
+  # shellcheck disable=SC2064 # expanded now, on purpose
+  trap "rm -f -- $(printf '%q' "$ticket") $(printf '%q' "${ticket%/*}/.${ticket##*/}")" EXIT
   trap 'exit 143' TERM
   trap 'exit 130' INT
   trap 'exit 129' HUP

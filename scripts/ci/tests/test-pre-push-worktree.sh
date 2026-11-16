@@ -629,6 +629,11 @@ if command -v flock >/dev/null 2>&1; then
     } | grep -v '^[[:space:]]*#' | sed 's/\$((//g' | grep -E '\$\(|<\(|`' || true
   )"
   [ -z "$substitutions" ] || fail "a waiter with its traps set runs a substitution: $substitutions"
+  # Nor may a helper it calls use the name of the waiter's own ticket: its EXIT
+  # trap removes "$ticket", and inside the helper that is the helper's variable.
+  shadowing="$(awk '/^(slot_holders_line|process_start|queue_head)\(\) \{/,/^}/' "$ROOT/scripts/dev/workstation-cpu.sh" |
+    grep -v '^[[:space:]]*#' | grep -E '\bticket\b' || true)"
+  [ -z "$shadowing" ] || fail "a helper of the waiter names its own ticket: $shadowing"
   grep -q "trap 'exit 143' TERM" "$ROOT/scripts/dev/workstation-cpu.sh" ||
     fail 'the waiter'"'"'s TERM trap moved; point the substitution check at it'
   # Each signal ends the waiter with that signal's own status. A background
