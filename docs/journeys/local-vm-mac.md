@@ -69,7 +69,9 @@ Issues: #4478 (VMs did not start on macOS 27), #4370 (launch step 11).
   (`scripts/ci/verify/macos-local-vm-journey.sh`); it is advisory until #4506.
 - **Proof:** the shell prints `aarch64`; `cw --local ls` reads `stopped` after
   step 6 and `running` after step 7; the command after the restart prints
-  `after-restart` and an uptime under a minute.
+  `after-restart` and an uptime under a minute. After a lost egress broker,
+  `cw --local info` reads `Error: egress_broker_exit` with the broker's exit
+  status and its name, such as `exited 72: egress_broker_protocol` (#4953).
 - **Gotchas:**
   - A first create with the default workspace image pulls about a minute of
     layers; a slow pull is not a failure.

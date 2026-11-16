@@ -26,6 +26,7 @@ use uuid::Uuid;
 use super::*;
 use crate::commands::progress::terminal_text;
 
+mod error_view;
 pub(crate) mod host_create;
 mod host_support;
 mod lifecycle;
@@ -2467,8 +2468,8 @@ pub(crate) struct NativeEnvironmentView {
     pub(crate) network: Option<String>,
     /// The `Network policy:` line (#2537); unrelated to the Mesh network.
     pub(crate) network_policy: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) error_code: Option<String>,
+    #[serde(flatten)]
+    pub(crate) error: error_view::ErrorView,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) access_profile: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2519,7 +2520,7 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
                 .as_ref()
                 .and_then(|mesh| trimmed_str(&mesh.network_id))
                 .map(str::to_owned),
-            error_code: trimmed_str(&environment.error_code).map(str::to_owned),
+            error: error_view::ErrorView::of(environment),
             access_profile: environment.access_profile.clone(),
             access_profile_revision: (!environment.access_profile.is_empty()
                 && environment.access_profile_revision > 0)
@@ -2641,9 +2642,7 @@ fn format_native_environment(
     if let Some(network_policy) = &view.network_policy {
         output.push_str(&format!("Network policy: {network_policy}\n"));
     }
-    if let Some(error_code) = &view.error_code {
-        output.push_str(&format!("Error:       {error_code}\n"));
-    }
+    output.push_str(&view.error.line());
     for row in attention {
         output.push_str(&format!("Attention:   {row}\n"));
     }
@@ -6637,7 +6636,10 @@ working_directory: /workspace/github
 
         let view = NativeEnvironmentView::try_from(&environment).unwrap();
         assert_eq!(view.network.as_deref(), Some("mesh-dev"));
-        assert_eq!(view.error_code.as_deref(), Some("mesh_transport_exit"));
+        assert_eq!(
+            view.error.error_code.as_deref(),
+            Some("mesh_transport_exit")
+        );
         assert_eq!(view.docker_disk.as_deref(), Some("8Gi"));
     }
 
@@ -6673,7 +6675,7 @@ working_directory: /workspace/github
             }],
             network: Some("mesh-dev".to_owned()),
             network_policy: Some("work · rev 3".to_owned()),
-            error_code: None,
+            error: Default::default(),
             access_profile: "user/work".to_owned(),
             access_profile_revision: Some(2),
             generation: 7,

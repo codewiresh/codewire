@@ -12,6 +12,7 @@ mod metadata;
 mod network_policies;
 mod operation_log;
 mod retained_images;
+mod runner_exit;
 mod runtime;
 mod snapshots;
 mod sources;
@@ -6281,11 +6282,10 @@ impl LocalSupervisorService for SupervisorRpc {
             .reconcile_if_idle(&name)
             .await
             .map_err(Status::from)?;
+        let environment = self.supervisor.core().environment_proto(&name);
+        let environment = environment.map_err(Status::from)?;
         Ok(Response::new(
-            self.supervisor
-                .core()
-                .environment_proto(&name)
-                .map_err(Status::from)?,
+            runner_exit::with_runner_exit(&self.supervisor, environment).await,
         ))
     }
 

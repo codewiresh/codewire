@@ -422,7 +422,9 @@ metadata ranges, the host's own interface addresses and the public address the
 host is seen from are always refused under every policy, with an immediate
 reset. Both processes run under Landlock and seccomp on Linux and under
 Seatbelt on macOS; losing either fails the environment closed (`error`), and a
-stop and start restores egress. An answer from the broker that misses the
+stop and start restores egress. The state keeps which process ended and how:
+`cw info` names its exit status and what that status means, as the process's
+own exit codes define it (#4953). An answer from the broker that misses the
 worker's deadline refuses only its own lookup or connection: the worker keeps
 the session until the late answer arrives and checks it, so a slow resolver or
 a stalled broker never ends the broker or fails the environment (#4948). A

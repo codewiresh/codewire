@@ -884,6 +884,9 @@ message Environment {
   PlatformSourceAuthority platform_source_authority = 27;
   // The network policy it selects and what its running VM enforces (#2537).
   EnvironmentNetworkPolicy network_policy = 28;
+  // How the process whose exit failed the environment closed ended, read
+  // from its runner while it still reports error_code (#4953).
+  RunnerExit runner_exit = 29;
 }
 
 message ListEnvironmentsRequest {}
@@ -988,6 +991,18 @@ message RunnerInfo {
   string error_code = 5;
   // Actual owned VMM attachment. Empty when no catalog disk is running.
   string cw_runtime_catalog_generation = 6;
+  // How the process whose exit set error_code ended. Unset for every other
+  // error and state (#4953).
+  RunnerExit exit = 7;
+}
+
+// How one of a runner's processes (the VMM or a sidecar) ended.
+message RunnerExit {
+  // Its exit status; absent when a signal ended it.
+  optional int32 status = 1;
+  // That status's name in the process's own exit-code table, in the
+  // error_code vocabulary; empty when the table has none.
+  string reason = 2;
 }
 
 enum RunnerStage {

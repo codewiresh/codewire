@@ -80,7 +80,10 @@ pub struct RunnerEntrypointConfig {
 
 #[cfg(target_os = "linux")]
 mod checkpoint;
+mod exit_cause;
 mod stage_log;
+
+use exit_cause::runner_exit_error_code;
 
 use stage_log::guest_stage_name;
 
@@ -522,6 +525,7 @@ impl RunnerEvents {
             generation,
             artifact_generation: artifact_generation.clone(),
             error_code: String::new(),
+            exit: None,
             cw_runtime_catalog_generation: String::new(),
         };
         let initial = v1::RunnerEvent {
@@ -578,6 +582,7 @@ impl RunnerEvents {
                 generation,
                 artifact_generation: self.artifact_generation.clone(),
                 error_code: error_code.unwrap_or_default().to_owned(),
+                exit: None,
                 cw_runtime_catalog_generation: cw_runtime_catalog_generation
                     .unwrap_or_default()
                     .to_owned(),
@@ -666,6 +671,7 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
             generation,
             state: v1::EnvironmentState::Stopped,
             error_code: None,
+            exit: None,
             adopted: false,
             retirement: RetirementState::Active,
             mesh_data_dir: config.mesh_data_dir,
@@ -817,6 +823,7 @@ struct RunnerState {
     generation: u64,
     state: v1::EnvironmentState,
     error_code: Option<&'static str>,
+    exit: Option<exit_cause::ObservedExit>,
     adopted: bool,
     retirement: RetirementState,
     mesh_data_dir: PathBuf,
@@ -831,6 +838,9 @@ impl RunnerState {
             generation: self.generation,
             artifact_generation: self.artifact_generation.clone(),
             error_code: self.error_code.unwrap_or_default().to_owned(),
+            exit: self
+                .exit
+                .and_then(|exit| exit.reported_for(self.error_code)),
             cw_runtime_catalog_generation: self
                 .cw_runtime_catalog_generation()
                 .unwrap_or_default()
@@ -874,6 +884,7 @@ impl RunnerState {
             self.generation_access = None;
         }
         let error_code = runner_exit_error_code(exit);
+        self.exit = exit_cause::observed_exit(exit).or(self.exit);
         match exit {
             ExitClass::StillRunning => Ok(error_code),
             ExitClass::GuestShutdown => {
@@ -926,20 +937,6 @@ impl RunnerState {
                 Ok(error_code)
             }
         }
-    }
-}
-
-fn runner_exit_error_code(exit: ExitClass) -> Option<&'static str> {
-    match exit {
-        ExitClass::StillRunning => None,
-        ExitClass::GuestShutdown => Some("guest_shutdown"),
-        ExitClass::VmmFailure(_) => Some("vmm_exit"),
-        ExitClass::DirectShareFailure(_) => Some("direct_share_exit"),
-        ExitClass::NetworkWorkerFailure(_) => Some("network_worker_exit"),
-        ExitClass::EgressBrokerFailure(_) => Some("egress_broker_exit"),
-        ExitClass::IngressForwarderFailure => Some("ingress_forwarder_exit"),
-        ExitClass::MeshTransportFailure(_) => Some("mesh_transport_exit"),
-        ExitClass::MeshIngressReceiverFailure => Some("mesh_ingress_receiver_exit"),
     }
 }
 
@@ -2492,6 +2489,7 @@ mod tests {
                 generation: 1,
                 state: v1::EnvironmentState::Starting,
                 error_code: None,
+                exit: None,
                 adopted: true,
                 retirement: RetirementState::Active,
                 mesh_data_dir: parent.path().join("mesh"),

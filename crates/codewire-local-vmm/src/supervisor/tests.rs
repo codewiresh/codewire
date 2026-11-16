@@ -7958,6 +7958,7 @@ async fn operation_watch_starts_from_durable_state_and_ends_at_terminal_state() 
                         generation: 1,
                         artifact_generation: "a".repeat(64),
                         error_code: String::new(),
+                        exit: None,
                     }),
                     stage: v1::RunnerStage::GuestInit as i32,
                     guest_sequence: 3,

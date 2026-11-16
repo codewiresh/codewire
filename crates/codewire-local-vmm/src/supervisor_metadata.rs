@@ -246,6 +246,8 @@ impl EnvironmentRecord {
                 .and_then(|runner| runner.error_code.clone())
                 .filter(|_| self.state == StoredEnvironmentState::Error)
                 .unwrap_or_default(),
+            // Read from the runner when the environment is shown (#4953).
+            runner_exit: None,
         }
     }
 
