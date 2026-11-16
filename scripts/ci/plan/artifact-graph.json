@@ -23,6 +23,7 @@
     ".gitea/workflows/mirror-github.yaml",
     "AGENTS.md",
     "CLAUDE.md",
+    "SPEC.md",
     "docs/**",
     "scripts/ci/images/cosign-private-signing-config.json",
     "scripts/ci/images/pipeline-identity.sh",

@@ -1735,6 +1735,10 @@ class PlannerFixtureTests(unittest.TestCase):
     def test_known_non_artifact_changes_leave_artifacts_unaffected(self) -> None:
         self.repo.change("AGENTS.md", "# Agent policy\n")
         self.repo.change("CLAUDE.md", "AGENTS.md\n")
+        # The specification is prose no artifact is built from. Unlisted, it made
+        # every artifact unclassified: on 2026-11-15 a two-file docs change waited
+        # from 19:55Z for a Rust build it did not need (#4931).
+        self.repo.change("SPEC.md", "# Specification\n")
         self.repo.change(".agents/skills/example/SKILL.md", "# Example skill\n")
         self.repo.change("docs/dev/AGENT-WORKFLOW.md", "# Agent workflow\n")
         document = self.repo.plan()
