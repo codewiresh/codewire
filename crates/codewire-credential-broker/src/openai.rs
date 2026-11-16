@@ -20,9 +20,11 @@ const CREDENTIAL_KEY: &str = "OPENAI_API_KEY";
 const CODEX_OAUTH_ACCESS_TOKEN_KEY: &str = "CODEX_OAUTH_ACCESS_TOKEN";
 const OPENAI_API_BASE_URL: &str = "https://api.openai.com/v1";
 const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+/// A front-door request's path is the whole path it was sent to (#3999).
+const CHATGPT_ORIGIN: &str = "https://chatgpt.com";
 const MAX_OPENAI_API_KEY_BYTES: usize = 1024;
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
-const MAX_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
 
 /// Headers the Codex OAuth form derives from its credential; a guest value is
 /// never forwarded.
@@ -69,14 +71,17 @@ impl OpenAiApiKeyAdapter {
         headers: HeaderMap,
         body: Vec<u8>,
     ) -> Result<ValidatedOpenAiRequest, CredentialBrokerError> {
-        Ok(ValidatedOpenAiRequest(TransparentRequest::admit(
-            method,
-            path,
-            query,
-            headers,
-            body,
-            MAX_REQUEST_BYTES,
-        )?))
+        Ok(ValidatedOpenAiRequest {
+            request: TransparentRequest::admit(
+                method,
+                path,
+                query,
+                headers,
+                body,
+                MAX_REQUEST_BYTES,
+            )?,
+            chatgpt_base: ChatGptBase::Codex,
+        })
     }
 
     /// Consume one already validated request and one exact authority lease.
@@ -87,7 +92,14 @@ impl OpenAiApiKeyAdapter {
         request: ValidatedOpenAiRequest,
     ) -> Result<PreparedOpenAiRequest, CredentialBrokerError> {
         validate_lease(&lease)?;
-        let ValidatedOpenAiRequest(request) = request;
+        let ValidatedOpenAiRequest {
+            request,
+            chatgpt_base,
+        } = request;
+        // A path on chatgpt.com never reaches the API with a key.
+        if chatgpt_base != ChatGptBase::Codex {
+            return Err(CredentialBrokerError::RequestDenied);
+        }
         let target = request.target(OPENAI_API_BASE_URL)?;
         let mut headers = request.outbound_headers(CREDENTIAL_DERIVED_HEADERS);
         lease.with_material(|material| {
@@ -164,13 +176,48 @@ impl OpenAiChatGptOAuthAdapter {
         })
     }
 
+    /// Admit a front-door request to `chatgpt.com`: its path is the whole
+    /// path it was sent to, and must be one the pinned Codex sends its
+    /// credential to (#3999). The path checked is the path sent: one that
+    /// resolving dot segments (`%2e%2e` among them) or re-encoding would
+    /// change is refused, and so is an encoded slash or backslash, which a
+    /// server may decode into another path. All before any lease.
+    pub(crate) fn validate_front_door(
+        &self,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        headers: HeaderMap,
+        body: Vec<u8>,
+    ) -> Result<ValidatedOpenAiRequest, CredentialBrokerError> {
+        let lowered = path.to_ascii_lowercase();
+        if lowered.contains("%2f") || lowered.contains("%5c") {
+            return Err(CredentialBrokerError::RequestDenied);
+        }
+        let request =
+            TransparentRequest::admit(method, path, query, headers, body, MAX_REQUEST_BYTES)?;
+        let target = request
+            .target(CHATGPT_ORIGIN)
+            .map_err(|_| CredentialBrokerError::RequestDenied)?;
+        if target.path() != path || !crate::network::chatgpt_path(target.path()) {
+            return Err(CredentialBrokerError::RequestDenied);
+        }
+        Ok(ValidatedOpenAiRequest {
+            request,
+            chatgpt_base: ChatGptBase::Origin,
+        })
+    }
+
     pub(crate) fn prepare_credential(
         &self,
         credential: CodexOAuthCredential,
         request: ValidatedOpenAiRequest,
     ) -> Result<PreparedOpenAiRequest, CredentialBrokerError> {
-        let ValidatedOpenAiRequest(request) = request;
-        let target = request.target(CHATGPT_CODEX_BASE_URL)?;
+        let ValidatedOpenAiRequest {
+            request,
+            chatgpt_base,
+        } = request;
+        let target = request.target(chatgpt_base.url())?;
         let source = CodexOAuthAccessToken {
             material: credential.access_token(),
         };
@@ -196,11 +243,21 @@ impl OpenAiChatGptOAuthAdapter {
         // This bearer-only route has no body substitutions. Retain both AV
         // injection inputs, including encodings of the complete outbound
         // header, while adding the separately injected account identifier.
-        let redaction = RedactionSet::new([
-            credential.access_token().as_bytes(),
-            authorization.as_bytes(),
-            credential.account_id().as_bytes(),
-        ]);
+        // A front-door request's environment already holds the account id
+        // in its own login file, and Codex finds its workspace in
+        // `accounts/check` by that id, so there it is not redacted (#3999).
+        let account_id = credential.account_id().as_bytes();
+        let redaction = match chatgpt_base {
+            ChatGptBase::Codex => RedactionSet::new([
+                credential.access_token().as_bytes(),
+                authorization.as_bytes(),
+                account_id,
+            ]),
+            ChatGptBase::Origin => RedactionSet::new([
+                credential.access_token().as_bytes(),
+                authorization.as_bytes(),
+            ]),
+        };
         Ok(PreparedOpenAiRequest {
             method: request.method,
             target,
@@ -214,7 +271,47 @@ impl OpenAiChatGptOAuthAdapter {
 /// Credential-free request admitted by the transparent OpenAI route. It
 /// deliberately carries no authority lease or prepared authorization.
 #[derive(Clone)]
-pub struct ValidatedOpenAiRequest(TransparentRequest);
+pub struct ValidatedOpenAiRequest {
+    request: TransparentRequest,
+    chatgpt_base: ChatGptBase,
+}
+
+impl ValidatedOpenAiRequest {
+    /// The request as the environment sent it, every header kept, aimed at
+    /// its `chatgpt.com` path: for a front-door request that carries no
+    /// placeholder, which is forwarded without a lease (#3999).
+    pub(crate) fn into_forwarded(
+        self,
+    ) -> Result<(Method, Url, HeaderMap, Vec<u8>), CredentialBrokerError> {
+        let target = self.request.target(self.chatgpt_base.url())?;
+        let TransparentRequest {
+            method,
+            headers,
+            body,
+            ..
+        } = self.request;
+        Ok((method, target, headers, body))
+    }
+}
+
+/// What a ChatGPT-login request's path is relative to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChatGptBase {
+    /// The loopback route: under Codex's base, `/backend-api/codex`.
+    Codex,
+    /// A front-door request: the origin, its path already checked against
+    /// the paths Codex sends its credential to.
+    Origin,
+}
+
+impl ChatGptBase {
+    fn url(self) -> &'static str {
+        match self {
+            Self::Codex => CHATGPT_CODEX_BASE_URL,
+            Self::Origin => CHATGPT_ORIGIN,
+        }
+    }
+}
 
 impl Default for OpenAiApiKeyAdapter {
     fn default() -> Self {

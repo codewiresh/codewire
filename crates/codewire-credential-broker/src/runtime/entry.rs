@@ -72,17 +72,19 @@ where
     U: BrokerUpstreamTransport + 'static,
 {
     /// A front-door request, under the swap rule. Only the Anthropic route
-    /// has it yet; any other route's front-door request is refused before a
-    /// lease, never served by always injecting.
+    /// and Codex at `chatgpt.com` have it yet; any other front-door request
+    /// is refused before a lease, never served by always injecting.
     async fn execute_intercepted(
         &self,
         request: ValidatedGuestRequest,
         streamed_body: bool,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
-        if streamed_body || request.slot.as_str() != "anthropic" {
-            return Err(BrokerRequestError::InvalidRequest);
+        match (request.slot.as_str(), request.intercepted_host) {
+            _ if streamed_body => Err(BrokerRequestError::InvalidRequest),
+            ("anthropic", _) => self.execute_swap(request).await,
+            ("codex", Some(RouteHost::ChatGpt)) => self.execute_codex_swap(request).await,
+            _ => Err(BrokerRequestError::InvalidRequest),
         }
-        self.execute_swap(request).await
     }
 }
 

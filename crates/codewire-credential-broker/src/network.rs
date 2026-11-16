@@ -30,6 +30,17 @@ const OPENAI_PORT: u16 = 443;
 /// Transparent routes' pinned base paths (#2536); Anthropic's is its origin.
 const OPENAI_BASE_PATH: &str = "/v1/";
 const CHATGPT_CODEX_BASE_PATH: &str = "/backend-api/codex/";
+/// The `chatgpt.com` paths the pinned Codex was observed sending its
+/// credential to (#3999): its base, its usage and account namespace, its
+/// plugins, and one account check. A loopback target is always under
+/// [`CHATGPT_CODEX_BASE_PATH`]; only a front-door request names the others.
+const CHATGPT_FRONT_DOOR_PREFIXES: [&str; 4] = [
+    CHATGPT_CODEX_BASE_PATH,
+    "/backend-api/wham/",
+    "/backend-api/plugins/",
+    "/backend-api/ps/",
+];
+const CHATGPT_FRONT_DOOR_PATHS: [&str; 1] = ["/backend-api/accounts/verified_access"];
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The whole-request bound for a request with a whole body. A streamed GitHub
 /// Git request has none: its bridge bounds it by idle time instead (#4280).
@@ -502,7 +513,7 @@ fn validate_target(
         Some(CHATGPT_HOST) => {
             selected.contains(&HttpProvider::CodexOAuth)
                 && transparent_method(method)
-                && target.path().starts_with(CHATGPT_CODEX_BASE_PATH)
+                && chatgpt_path(target.path())
         }
         Some(OPENAI_AUTH_HOST) => {
             method == Method::POST
@@ -585,6 +596,15 @@ fn validate_target(
         return Err(BrokerUpstreamError::DestinationDenied);
     }
     Ok(())
+}
+
+/// A `chatgpt.com` path a Codex request may reach: under Codex's base, or
+/// one of the front door's wider paths.
+pub(crate) fn chatgpt_path(path: &str) -> bool {
+    CHATGPT_FRONT_DOOR_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+        || CHATGPT_FRONT_DOOR_PATHS.contains(&path)
 }
 
 /// Transparent provider routes carry any CRUD request on their pinned host.
@@ -1313,9 +1333,35 @@ mod tests {
             )
             .is_ok()
         );
+        for allowed in [
+            "https://chatgpt.com/backend-api/wham/usage",
+            "https://chatgpt.com/backend-api/wham/accounts/check",
+            "https://chatgpt.com/backend-api/plugins/featured?platform=codex",
+            "https://chatgpt.com/backend-api/ps/mcp",
+            "https://chatgpt.com/backend-api/accounts/verified_access",
+        ] {
+            assert!(
+                validate_target(
+                    &url::Url::parse(allowed).unwrap(),
+                    &Method::GET,
+                    &BTreeSet::from([HttpProvider::CodexOAuth]),
+                )
+                .is_ok(),
+                "{allowed}"
+            );
+        }
         for denied in [
             "https://api.openai.com/v1/responses",
             "https://chatgpt.com/backend-api/other",
+            "https://chatgpt.com/backend-api/conversation",
+            "https://chatgpt.com/backend-api/wham",
+            "https://chatgpt.com/backend-api/accounts/verified_access/x",
+            "https://chatgpt.com/backend-api/accounts/check",
+            "https://chatgpt.com/backend-api/codex/../conversation",
+            "https://chatgpt.com/backend-api/codex/%2e%2e/conversation",
+            "https://chatgpt.com/backend-api/codex/%2E%2E/conversation",
+            "https://chatgpt.com/wham/usage",
+            "https://chatgpt.com/",
             "https://auth.openai.com/oauth/revoke",
             "https://user@auth.openai.com/oauth/token",
         ] {

@@ -261,25 +261,36 @@ async fn each_default_route_reaches_the_bridge_as_its_loopback_form_does() {
             "/models",
             "limit=2",
         ),
+        // chatgpt.com maps whole: the broker narrows it to Codex's paths.
         (
             "chatgpt.com",
             Method::POST,
             "/backend-api/codex/responses",
-            "/v1/responses",
+            "/v1/backend-api/codex/responses",
             "codex",
             "openai-api",
-            "/responses",
+            "/backend-api/codex/responses",
             "",
         ),
         (
             "chatgpt.com",
             Method::GET,
             "/backend-api/codex/models?client_version=1.0.0",
-            "/v1/models?client_version=1.0.0",
+            "/v1/backend-api/codex/models?client_version=1.0.0",
             "codex",
             "openai-api",
-            "/models",
+            "/backend-api/codex/models",
             "client_version=1.0.0",
+        ),
+        (
+            "chatgpt.com",
+            Method::GET,
+            "/backend-api/wham/usage",
+            "/v1/backend-api/wham/usage",
+            "codex",
+            "openai-api",
+            "/backend-api/wham/usage",
+            "",
         ),
     ];
     for (bound, method, uri, loopback_uri, slot, route, path, query) in cases {
@@ -345,7 +356,7 @@ fn the_defaults_bind_three_hosts() {
         [
             HostRoute::new("api.anthropic.com", "/", "/_codewire/anthropic"),
             HostRoute::new("api.openai.com", "/v1", "/_codewire/openai/v1"),
-            HostRoute::new("chatgpt.com", "/backend-api/codex", "/v1"),
+            HostRoute::new("chatgpt.com", "/", "/v1"),
         ]
     );
     assert_eq!(
@@ -353,6 +364,57 @@ fn the_defaults_bind_three_hosts() {
         ["api.anthropic.com", "api.openai.com", "chatgpt.com"]
     );
     EnvironmentCa::generate(defaults.hosts()).expect("the CA binds every default host");
+}
+
+/// Mapping `chatgpt.com` whole (#3999) changes no other host's rewrite: the
+/// Anthropic API still maps every path under its prefix, and the OpenAI API
+/// only `/v1` and below. Codex's paths now reach the bridge whole, and the
+/// broker admits only the ones Codex sends its credential to.
+#[test]
+fn only_chatgpt_com_maps_its_whole_path() {
+    let defaults = RouteTable::defaults();
+    for (host, uri, rewritten) in [
+        (
+            "api.anthropic.com",
+            "/v1/messages?beta=true",
+            Ok("/_codewire/anthropic/v1/messages?beta=true".to_owned()),
+        ),
+        (
+            "api.anthropic.com",
+            "/api/oauth/usage",
+            Ok("/_codewire/anthropic/api/oauth/usage".to_owned()),
+        ),
+        (
+            "api.anthropic.com",
+            "/",
+            Ok("/_codewire/anthropic/".to_owned()),
+        ),
+        (
+            "api.openai.com",
+            "/v1/responses",
+            Ok("/_codewire/openai/v1/responses".to_owned()),
+        ),
+        (
+            "api.openai.com",
+            "/v1",
+            Ok("/_codewire/openai/v1".to_owned()),
+        ),
+        ("api.openai.com", "/v2/models", Err(StatusCode::NOT_FOUND)),
+        ("api.openai.com", "/", Err(StatusCode::NOT_FOUND)),
+        (
+            "chatgpt.com",
+            "/backend-api/codex/responses",
+            Ok("/v1/backend-api/codex/responses".to_owned()),
+        ),
+        (
+            "chatgpt.com",
+            "/backend-api/wham/usage",
+            Ok("/v1/backend-api/wham/usage".to_owned()),
+        ),
+        ("chatgpt.com", "/", Ok("/v1/".to_owned())),
+    ] {
+        assert_eq!(rewrite(&defaults, host, uri), rewritten, "{host}{uri}");
+    }
 }
 
 /// The managed prefixes are partly a literal in the bridge's classifier:
@@ -460,9 +522,6 @@ async fn a_request_no_route_covers_is_404_and_never_reaches_the_bridge() {
         ("api.openai.com", "/v2/models"),
         ("api.openai.com", "/v1x"),
         ("api.openai.com", "/"),
-        ("chatgpt.com", "/backend-api/other"),
-        ("chatgpt.com", "/backend-api/codexx"),
-        ("chatgpt.com", "/"),
     ] {
         assert_eq!(
             refused(&mut host, &backend, bound, uri).await,
@@ -498,7 +557,7 @@ async fn a_path_decoding_or_resolution_could_change_is_400_and_never_reaches_the
     for path in refused_paths {
         let uri: Uri = path.parse().unwrap();
         assert_eq!(uri.path(), path, "the URI parser keeps the raw path");
-        for bound in ["api.anthropic.com", "api.openai.com"] {
+        for bound in ["api.anthropic.com", "api.openai.com", "chatgpt.com"] {
             assert_eq!(
                 refused(&mut host, &backend, bound, path).await,
                 StatusCode::BAD_REQUEST,
@@ -625,7 +684,7 @@ async fn an_upgrade_takes_the_request_route_and_its_socket_reaches_the_host() {
         (
             "codex",
             "openai-api",
-            "/responses",
+            "/backend-api/codex/responses",
             "stream=1",
             "chatgpt.com"
         )
@@ -685,7 +744,7 @@ async fn an_upgrade_to_a_path_no_route_covers_is_404() {
         .header(UPGRADE, "websocket")
         .body(())
         .unwrap();
-    let Err(response) = bounded(backend.upgrade("chatgpt.com", request)).await else {
+    let Err(response) = bounded(backend.upgrade("api.openai.com", request)).await else {
         panic!("an unrouted upgrade was accepted");
     };
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -911,7 +970,12 @@ async fn requests_through_a_front_door_reach_the_bridge_and_replies_stream_back(
             seen.method.as_str(),
             seen.path.as_str()
         ),
-        ("codex", "openai-api", "POST", "/responses")
+        (
+            "codex",
+            "openai-api",
+            "POST",
+            "/backend-api/codex/responses"
+        )
     );
     assert_eq!(seen.body, b"{\"input\":\"hi\"}");
     assert_eq!(header_names(&seen), ["content-type"]);

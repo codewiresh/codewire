@@ -53,9 +53,9 @@ const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
 /// The OpenAI API: the route's base is `/v1`.
 const OPENAI_API_HOST: &str = "api.openai.com";
 const OPENAI_API_PATH: &str = "/v1";
-/// Codex on a ChatGPT sign-in: the route's base is `/backend-api/codex`.
+/// Codex on a ChatGPT sign-in: every path maps whole, and the broker admits
+/// only the ones Codex sends its credential to (#3999).
 const CHATGPT_HOST: &str = "chatgpt.com";
-const CHATGPT_CODEX_PATH: &str = "/backend-api/codex";
 
 /// The managed path prefixes the bridge's classifier recognises. Each
 /// selects one route; a rewritten path is that prefix and the rest of the
@@ -154,12 +154,12 @@ impl RouteTable {
 
     /// The routes the credential bridge serves today: the Anthropic API on
     /// every path, the OpenAI API under `/v1`, and Codex on a ChatGPT
-    /// sign-in under `/backend-api/codex`.
+    /// sign-in on every path, whole, which the broker narrows to Codex's own.
     pub fn defaults() -> Self {
         Self::new([
             HostRoute::new(ANTHROPIC_API_HOST, "/", MANAGED_ANTHROPIC_API_PREFIX),
             HostRoute::new(OPENAI_API_HOST, OPENAI_API_PATH, MANAGED_OPENAI_API_PREFIX),
-            HostRoute::new(CHATGPT_HOST, CHATGPT_CODEX_PATH, CODEX_PREFIX),
+            HostRoute::new(CHATGPT_HOST, "/", CODEX_PREFIX),
         ])
         .expect("the built-in routes are valid")
     }

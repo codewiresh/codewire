@@ -170,6 +170,8 @@ struct Recorded {
     echo_credential: bool,
     /// The authority refuses every lease.
     deny: bool,
+    /// The codex slot holds a ChatGPT sign-in instead of an API key.
+    codex_sign_in: bool,
 }
 
 impl Recorded {
@@ -179,6 +181,7 @@ impl Recorded {
                 leases: Arc::clone(&self.leases),
                 placeholder: self.placeholder,
                 deny: self.deny,
+                codex_sign_in: self.codex_sign_in,
             },
             Upstream {
                 outbound: Arc::clone(&self.outbound),
@@ -201,6 +204,7 @@ struct Authority {
     leases: Arc<AtomicUsize>,
     placeholder: Option<&'static str>,
     deny: bool,
+    codex_sign_in: bool,
 }
 
 #[async_trait]
@@ -221,6 +225,7 @@ impl BrokerLeaseProvider for Authority {
             return Err(BrokerLeaseError::Denied);
         }
         let (provider, kind) = match slot.as_str() {
+            "codex" if self.codex_sign_in => ("openai", CredentialAuthKind::OAuth),
             "codex" | "openai" => ("openai", CredentialAuthKind::ApiKey),
             "anthropic" => ("anthropic", CredentialAuthKind::ApiKey),
             "github" => ("github", CredentialAuthKind::OAuth),
@@ -236,6 +241,9 @@ impl BrokerLeaseProvider for Authority {
         lease.placeholder = self
             .placeholder
             .map(|value| codewire_access::CredentialPlaceholder::parse(value).unwrap());
+        if kind == CredentialAuthKind::OAuth && slot.as_str() == "codex" {
+            lease.material = codex_sign_in();
+        }
         Ok(lease)
     }
 
@@ -285,6 +293,11 @@ impl BrokerUpstreamTransport for Upstream {
         let (method, target, headers, body) = request.into_parts();
         let echoed = headers
             .get("x-api-key")
+            .or_else(|| headers.get("authorization"))
+            .map(|value| value.as_bytes().to_vec())
+            .unwrap_or_default();
+        let account = headers
+            .get("chatgpt-account-id")
             .map(|value| value.as_bytes().to_vec())
             .unwrap_or_default();
         let media = if target.host_str() == Some("github.com") {
@@ -307,6 +320,8 @@ impl BrokerUpstreamTransport for Upstream {
             reply_headers.insert("x-echo", HeaderValue::from_bytes(&echoed).unwrap());
             let mut body = b"{\"echo\":\"".to_vec();
             body.extend_from_slice(&echoed);
+            body.extend_from_slice(b"\",\"account\":\"");
+            body.extend_from_slice(&account);
             body.extend_from_slice(b"\"}");
             Bytes::from(body)
         } else {
@@ -330,18 +345,25 @@ async fn collect(response: BrokerHttpResponse) -> (StatusCode, HeaderMap, Vec<u8
 }
 
 /// A front-door request naming one of its route's hosts is validated with
-/// that host. Only the Anthropic route has the swap rule yet: a front-door
-/// request on any other route is refused before a lease, never served by
-/// always injecting; an Anthropic one with no credential is forwarded as the
-/// environment sent it, without a lease.
+/// that host. Only the Anthropic route and Codex at `chatgpt.com` have the
+/// swap rule yet: a front-door request on any other route is refused before a
+/// lease, never served by always injecting; one with the rule and no
+/// credential is forwarded as the environment sent it, without a lease.
 #[tokio::test]
 async fn a_front_door_request_is_served_only_on_a_route_with_the_swap_rule() {
     for case in cases() {
         for host in case.hosts {
             let recorded = Recorded::default();
             let broker = recorded.broker();
-            let front_door = broker.execute_front_door(case.request(host)).await;
-            if case.slot == "anthropic" {
+            let swapped =
+                case.slot == "anthropic" || (case.slot == "codex" && *host == "chatgpt.com");
+            let mut request = case.request(host);
+            if case.slot == "codex" && *host == "chatgpt.com" {
+                // A front-door path on chatgpt.com is the whole path.
+                request.path = "/backend-api/codex/responses".into();
+            }
+            let front_door = broker.execute_front_door(request).await;
+            if swapped {
                 let (status, _, body) = collect(front_door.unwrap()).await;
                 assert_eq!((status, body.as_slice()), (StatusCode::OK, &b"{}"[..]));
                 assert_eq!(recorded.leases(), 0);
@@ -1241,5 +1263,378 @@ async fn once_the_loopback_session_ends_no_front_door_joins() {
     assert!(
         joins.send(late_session).await.is_err(),
         "nothing joins an ended loopback session"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Codex at chatgpt.com (#3999 change 8)
+
+/// The ChatGPT sign-in the codex slot holds when `codex_sign_in` is set: an
+/// access token that expires in a day, so nothing refreshes.
+const SIGN_IN_ACCOUNT: &str = "account-work";
+
+fn jwt(payload: serde_json::Value) -> String {
+    use base64::Engine as _;
+    let encode = |value: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value);
+    format!(
+        "{}.{}.synthetic-signature",
+        encode(br#"{"alg":"none"}"#),
+        encode(&serde_json::to_vec(&payload).unwrap())
+    )
+}
+
+fn sign_in_access_token() -> String {
+    let in_a_day = crate::runtime::current_unix_time().unwrap() + 24 * 60 * 60;
+    jwt(serde_json::json!({ "exp": in_a_day }))
+}
+
+fn codex_sign_in() -> zeroize::Zeroizing<Vec<u8>> {
+    let id_token = jwt(serde_json::json!({
+        "email": "developer@example.test",
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": SIGN_IN_ACCOUNT,
+            "chatgpt_account_is_fedramp": false
+        }
+    }));
+    let bundle = crate::import_codex_tokens(
+        zeroize::Zeroizing::new(id_token),
+        zeroize::Zeroizing::new(sign_in_access_token()),
+        zeroize::Zeroizing::new("synthetic-refresh-token".to_owned()),
+    )
+    .unwrap()
+    .into_parts()
+    .0;
+    zeroize::Zeroizing::new(bundle.as_bytes().to_vec())
+}
+
+/// A front-door Codex request to chatgpt.com, as Codex sends it: the whole
+/// path, its credential, and the account it names.
+fn codex(method: &str, path: &str, credential: Option<String>) -> v1::CredentialBridgeRequest {
+    let mut request = cases()[0].request("chatgpt.com");
+    assert_eq!(request.capability_slot, "codex");
+    request.method = method.into();
+    request.path = path.into();
+    request.headers.push(v1::CredentialHttpHeader {
+        name: "chatgpt-account-id".into(),
+        value: b"guest-named-account".to_vec(),
+    });
+    if let Some(credential) = credential {
+        request.headers.push(v1::CredentialHttpHeader {
+            name: "authorization".into(),
+            value: credential.into_bytes(),
+        });
+    }
+    request
+}
+
+fn contains(haystack: &[u8], needle: &str) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle.as_bytes())
+}
+
+/// The paths the pinned Codex sends its credential to (#3999): with this
+/// environment's placeholder, each reaches chatgpt.com at its own path with
+/// the sign-in's access token and account, and the placeholder never leaves.
+#[tokio::test]
+async fn codex_s_placeholder_at_chatgpt_com_is_swapped_for_the_sign_in() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        codex_sign_in: true,
+        ..Recorded::default()
+    };
+    let broker = recorded.broker();
+    let paths = [
+        ("POST", "/backend-api/codex/responses"),
+        ("GET", "/backend-api/codex/models"),
+        ("GET", "/backend-api/wham/accounts/check"),
+        ("GET", "/backend-api/wham/usage"),
+        ("GET", "/backend-api/plugins/featured"),
+        ("POST", "/backend-api/ps/mcp"),
+        ("GET", "/backend-api/accounts/verified_access"),
+    ];
+    for (method, path) in paths {
+        let response = broker
+            .execute_front_door(codex(method, path, Some(format!("Bearer {OURS}"))))
+            .await
+            .unwrap();
+        assert_eq!(collect(response).await.0, StatusCode::OK, "{path}");
+        let outbound = recorded.outbound();
+        let sent = outbound.last().unwrap();
+        assert_eq!(sent.1, format!("https://chatgpt.com{path}"));
+        let authorization = header(sent, "authorization");
+        assert_eq!(authorization.len(), 1);
+        assert!(authorization[0].starts_with(b"Bearer ey"), "{path}");
+        assert_eq!(
+            header(sent, "chatgpt-account-id"),
+            [SIGN_IN_ACCOUNT.as_bytes()]
+        );
+        assert!(
+            sent.2.iter().all(|(_, value)| !contains(value, OURS)),
+            "the placeholder never leaves: {path}"
+        );
+    }
+    assert_eq!(recorded.leases(), paths.len());
+}
+
+/// A user's own token takes no lease and reaches chatgpt.com as Codex sent
+/// it, account header and all; so does a request with no credential.
+#[tokio::test]
+async fn codex_without_this_environments_placeholder_is_forwarded_untouched() {
+    for credential in [Some("Bearer users-own-token".to_owned()), None] {
+        let recorded = Recorded {
+            placeholder: Some(OURS),
+            codex_sign_in: true,
+            ..Recorded::default()
+        };
+        let response = recorded
+            .broker()
+            .execute_front_door(codex("GET", "/backend-api/wham/usage", credential.clone()))
+            .await
+            .unwrap();
+        assert_eq!(collect(response).await.0, StatusCode::OK);
+        assert_eq!(recorded.leases(), 0);
+        let outbound = recorded.outbound();
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].1, "https://chatgpt.com/backend-api/wham/usage");
+        let sent: Vec<&[u8]> = header(&outbound[0], "authorization");
+        assert_eq!(
+            sent,
+            credential
+                .iter()
+                .map(|value| value.as_bytes())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            header(&outbound[0], "chatgpt-account-id"),
+            [&b"guest-named-account"[..]]
+        );
+    }
+}
+
+/// Every other chatgpt.com path is refused before any lease, whatever it
+/// carries: the front door maps the host whole, and only Codex's own paths
+/// are admitted.
+#[tokio::test]
+async fn a_chatgpt_com_path_codex_does_not_use_is_refused_before_any_lease() {
+    for path in [
+        "/",
+        "/backend-api/conversation",
+        "/backend-api/accounts/check",
+        "/backend-api/accounts/verified_access/x",
+        "/backend-api/wham",
+        "/backend-api/codexx/responses",
+        "/backend-api/codex/../conversation",
+        "/backend-api/codex/%2e%2e/conversation",
+        "/backend-api/codex/%2E%2E/conversation",
+        "/backend-api/codex/.%2e/conversation",
+        "/backend-api/codex/%2e/responses",
+        "/backend-api/wham/%2e%2e/%2e%2e/conversation",
+        "/backend-api/codex/a b",
+        "/backend-api/codex/..%2f..%2fconversation",
+        "/backend-api/codex/..%2F..%2Fconversation",
+        "/backend-api/codex/..%5cconversation",
+        "/backend-api/codex/..%5C..%5Cconversation",
+        "/backend-api/wham%2fusage",
+        "/public-api/conversation",
+        "/responses",
+    ] {
+        for credential in [
+            Some(format!("Bearer {OURS}")),
+            Some("Bearer theirs".into()),
+            None,
+        ] {
+            let recorded = Recorded {
+                placeholder: Some(OURS),
+                codex_sign_in: true,
+                ..Recorded::default()
+            };
+            let refused = recorded
+                .broker()
+                .execute_front_door(codex("GET", path, credential))
+                .await;
+            assert!(refused.is_err(), "{path}");
+            assert_eq!(recorded.leases(), 0, "{path}");
+            assert!(recorded.outbound().is_empty(), "{path}");
+        }
+    }
+}
+
+/// A codex slot holding an API key never sends it to chatgpt.com, even for
+/// this environment's placeholder; nor does a placeholder beside another
+/// credential reach anything.
+#[tokio::test]
+async fn a_key_never_goes_to_chatgpt_com_and_a_mixed_credential_is_refused() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        ..Recorded::default()
+    };
+    let refused = recorded
+        .broker()
+        .execute_front_door(codex(
+            "POST",
+            "/backend-api/codex/responses",
+            Some(format!("Bearer {OURS}")),
+        ))
+        .await;
+    assert!(matches!(refused, Err(BrokerRequestError::Denied)));
+    assert!(recorded.outbound().is_empty());
+
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        codex_sign_in: true,
+        ..Recorded::default()
+    };
+    let mut mixed = codex(
+        "POST",
+        "/backend-api/codex/responses",
+        Some(format!("Bearer {OURS}")),
+    );
+    mixed.headers.push(v1::CredentialHttpHeader {
+        name: "cookie".into(),
+        value: b"session=users-own".to_vec(),
+    });
+    let (status, _, body) =
+        collect(recorded.broker().execute_front_door(mixed).await.unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(contains(
+        &body,
+        crate::runtime::swap::CREDENTIAL_CONFLICT_CODE
+    ));
+    assert_eq!(recorded.leases(), 0);
+    assert!(recorded.outbound().is_empty());
+}
+
+/// The loopback Codex route keeps its base: a provider-relative path goes
+/// under `/backend-api/codex`, with the sign-in, exactly as before.
+#[tokio::test]
+async fn a_loopback_codex_request_keeps_its_base() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        codex_sign_in: true,
+        ..Recorded::default()
+    };
+    let mut request = cases()[0].request("");
+    request.path = "/responses".into();
+    let response = recorded.broker().execute(request).await.unwrap();
+    assert_eq!(collect(response).await.0, StatusCode::OK);
+    let outbound = recorded.outbound();
+    assert_eq!(
+        outbound[0].1,
+        "https://chatgpt.com/backend-api/codex/responses"
+    );
+    assert_eq!(
+        header(&outbound[0], "chatgpt-account-id"),
+        [SIGN_IN_ACCOUNT.as_bytes()]
+    );
+}
+
+/// The other swap shapes carry the placeholder as Codex's own Bearer does:
+/// `Token`, the Basic password, and `x-api-key` are each swapped for the
+/// sign-in's Bearer, and the placeholder header is gone.
+#[tokio::test]
+async fn codex_s_placeholder_in_every_swap_shape_is_swapped() {
+    use base64::Engine as _;
+    let basic = base64::engine::general_purpose::STANDARD.encode(format!("codex:{OURS}"));
+    for (name, value) in [
+        ("authorization", format!("Token {OURS}")),
+        ("authorization", format!("Basic {basic}")),
+        ("x-api-key", OURS.to_owned()),
+    ] {
+        let recorded = Recorded {
+            placeholder: Some(OURS),
+            codex_sign_in: true,
+            ..Recorded::default()
+        };
+        let mut request = codex("GET", "/backend-api/wham/usage", None);
+        request.headers.push(v1::CredentialHttpHeader {
+            name: name.into(),
+            value: value.clone().into_bytes(),
+        });
+        let response = recorded.broker().execute_front_door(request).await.unwrap();
+        assert_eq!(collect(response).await.0, StatusCode::OK, "{name}: {value}");
+        assert_eq!(recorded.leases(), 1);
+        let outbound = recorded.outbound();
+        let authorization = header(&outbound[0], "authorization");
+        assert_eq!(authorization.len(), 1, "{name}: {value}");
+        assert!(
+            authorization[0].starts_with(b"Bearer ey"),
+            "{name}: {value}"
+        );
+        assert!(header(&outbound[0], "x-api-key").is_empty());
+        assert!(
+            outbound[0]
+                .2
+                .iter()
+                .all(|(_, value)| !contains(value, OURS))
+        );
+    }
+}
+
+/// Another environment's placeholder takes the lease, does not match it, and
+/// reaches chatgpt.com as Codex sent it, unredacted.
+#[tokio::test]
+async fn another_environments_codex_placeholder_is_forwarded_untouched() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        codex_sign_in: true,
+        ..Recorded::default()
+    };
+    let response = recorded
+        .broker()
+        .execute_front_door(codex(
+            "GET",
+            "/backend-api/wham/usage",
+            Some(format!("Bearer {THEIRS}")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(collect(response).await.0, StatusCode::OK);
+    assert_eq!(recorded.leases(), 1);
+    let outbound = recorded.outbound();
+    assert_eq!(
+        header(&outbound[0], "authorization"),
+        [format!("Bearer {THEIRS}").as_bytes()]
+    );
+    assert_eq!(
+        header(&outbound[0], "chatgpt-account-id"),
+        [&b"guest-named-account"[..]]
+    );
+}
+
+/// A swapped reply that echoes the sign-in's Bearer has it redacted, in its
+/// headers and body. The account id is not: the environment's own login
+/// file holds it, and Codex finds its workspace in `accounts/check` by it.
+#[tokio::test]
+async fn a_swapped_codex_reply_redacts_the_token_and_keeps_the_account() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        codex_sign_in: true,
+        echo_credential: true,
+        ..Recorded::default()
+    };
+    let (status, headers, body) = collect(
+        recorded
+            .broker()
+            .execute_front_door(codex(
+                "GET",
+                "/backend-api/wham/accounts/check",
+                Some(format!("Bearer {OURS}")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let sent = recorded.outbound();
+    let bearer = header(&sent[0], "authorization")[0].to_vec();
+    let token = &bearer[b"Bearer ".len()..];
+    let echoed = headers.get("x-echo").unwrap().as_bytes();
+    assert!(!echoed.windows(token.len()).any(|window| window == token));
+    assert!(!body.windows(token.len()).any(|window| window == token));
+    assert!(
+        contains(&body, SIGN_IN_ACCOUNT),
+        "{}",
+        String::from_utf8_lossy(&body)
     );
 }

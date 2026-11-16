@@ -9,6 +9,10 @@
 //! works as theirs; a placeholder sent with any other credential header is
 //! refused. Loopback requests never come here: their credential is always
 //! dropped and the leased one injected.
+//!
+//! The rule covers the Anthropic route, and Codex on a ChatGPT sign-in at
+//! `chatgpt.com`, whose paths are the ones the pinned Codex sends its
+//! credential to.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
@@ -17,7 +21,9 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
-use codewire_access::{CapabilitySlot, CredentialPlaceholder};
+use codewire_access::{
+    BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialPlaceholder,
+};
 use futures::{Stream, StreamExt as _, stream};
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use tokio::time::Instant;
@@ -25,12 +31,13 @@ use tokio::time::Instant;
 use super::anthropic_route::anthropic_operation;
 use super::{
     BrokerHttpResponse, BrokerLeaseProvider, BrokerRequestError, BrokerResponseBody,
-    BrokerUpstreamBody, BrokerUpstreamRequest, BrokerUpstreamTransport, OpenAiBroker, Phase,
-    ValidatedGuestRequest, map_adapter_error, map_lease_error, map_upstream_error, timing,
-    validate_http_lease_coordinates,
+    BrokerUpstreamBody, BrokerUpstreamRequest, BrokerUpstreamTransport, OPENAI_OPERATION,
+    OPENAI_ROUTE, OpenAiBroker, Phase, ValidatedGuestRequest, map_adapter_error, map_lease_error,
+    map_upstream_error, timing, validate_http_lease_coordinates,
 };
 use crate::BrokerCredentialLease as _;
 use crate::anthropic::ValidatedAnthropicRequest;
+use crate::openai::ValidatedOpenAiRequest;
 use crate::transparent::without_framing;
 
 /// How long a lease's placeholder is trusted without a new lease. A
@@ -102,6 +109,91 @@ where
         .await
     }
 
+    /// A front-door Codex request to `chatgpt.com` under the swap rule. Only a
+    /// ChatGPT sign-in is swapped in; a key never goes to `chatgpt.com`.
+    pub(super) async fn execute_codex_swap(
+        &self,
+        request: ValidatedGuestRequest,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        let presented = match Presented::of(&request.headers) {
+            Presented::Conflict => return Ok(credential_conflict_response()),
+            Presented::Foreign => None,
+            Presented::Placeholder(placeholder) => Some(placeholder),
+        };
+        let provider_request = self
+            .oauth_adapter
+            .validate_front_door(
+                &request.method,
+                &request.path,
+                request.query.as_deref(),
+                request.headers,
+                request.body,
+            )
+            .map_err(map_adapter_error)?;
+        let Some(presented) = presented else {
+            return self.forward_chatgpt(provider_request).await;
+        };
+        if self.placeholders.known_foreign(&request.slot, &presented) {
+            return self.forward_chatgpt(provider_request).await;
+        }
+        let operation = BrokerOperationId::parse(OPENAI_OPERATION)
+            .map_err(|_| BrokerRequestError::InvalidRequest)?;
+        let route =
+            BrokerRouteId::parse(OPENAI_ROUTE).map_err(|_| BrokerRequestError::InvalidRequest)?;
+        let lease = self
+            .leases
+            .lease_operation(
+                request.request_id,
+                request.slot.clone(),
+                operation.clone(),
+                route.clone(),
+            )
+            .await
+            .map_err(map_lease_error)?;
+        validate_http_lease_coordinates(&lease, &request.slot, &operation, &route)?;
+        self.placeholders
+            .remember(&request.slot, lease.placeholder());
+        if !lease
+            .placeholder()
+            .is_some_and(|ours| ours.ct_eq(&presented))
+        {
+            drop(lease);
+            return self.forward_chatgpt(provider_request).await;
+        }
+        if lease.credential_metadata().authentication_kind != CredentialAuthKind::OAuth {
+            return Err(BrokerRequestError::Denied);
+        }
+        self.serve_openai(
+            request.request_id,
+            &request.slot,
+            operation,
+            route,
+            lease,
+            provider_request,
+        )
+        .await
+    }
+
+    /// A front-door Codex request that carries no placeholder of this
+    /// environment's: sent to `chatgpt.com` as the environment sent it,
+    /// framing aside, and its reply returned unredacted. No header is logged.
+    async fn forward_chatgpt(
+        &self,
+        provider_request: ValidatedOpenAiRequest,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        let (method, target, headers, body) = provider_request
+            .into_forwarded()
+            .map_err(map_adapter_error)?;
+        self.forward(
+            method,
+            target,
+            &headers,
+            body,
+            crate::openai::MAX_RESPONSE_BYTES,
+        )
+        .await
+    }
+
     /// A front-door Anthropic request that carries no placeholder of this
     /// environment's: sent to the pinned origin as the environment sent it,
     /// framing aside, and its reply returned unredacted, since nothing of
@@ -112,12 +204,32 @@ where
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         let (method, target, headers, body) =
             validated.into_forwarded().map_err(map_adapter_error)?;
+        self.forward(
+            method,
+            target,
+            &headers,
+            body,
+            crate::anthropic::MAX_RESPONSE_BYTES,
+        )
+        .await
+    }
+
+    /// One forwarded request, framing aside both ways, its reply bounded at
+    /// `max_bytes` and not redacted.
+    async fn forward(
+        &self,
+        method: http::Method,
+        target: url::Url,
+        headers: &HeaderMap,
+        body: Vec<u8>,
+        max_bytes: usize,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         let response = timing::timed(
             Phase::Provider,
             self.upstream.execute(BrokerUpstreamRequest {
                 method,
                 target,
-                headers: without_framing(&headers),
+                headers: without_framing(headers),
                 body,
                 body_stream: None,
             }),
@@ -131,7 +243,7 @@ where
         Ok(BrokerHttpResponse::new(
             status,
             without_framing(&headers),
-            forwarded_body(body, crate::anthropic::MAX_RESPONSE_BYTES),
+            forwarded_body(body, max_bytes),
         ))
     }
 }
