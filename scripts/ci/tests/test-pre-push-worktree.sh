@@ -389,6 +389,15 @@ if command -v flock >/dev/null 2>&1; then
   status=0
   build_slot sh -c 'exit 7' || status=$?
   [ "$status" -eq 7 ] || fail "a build's exit status was $status, not its command's"
+  # A command that has ended before the wrapper looks for it is still waited
+  # for. Bash has reaped it by then, so no process answers; the wrapper once
+  # took that for "nothing to wait for" and reported 0 for a failing command
+  # (main's Policy verification on 2026-11-15, under load). The slow `kill`
+  # makes that order certain here.
+  printf 'kill() { sleep 0.3; builtin kill "$@"; }\n' >"$TMP/slow-kill.bash"
+  status=0
+  BASH_ENV="$TMP/slow-kill.bash" build_slot sh -c 'exit 7' || status=$?
+  [ "$status" -eq 7 ] || fail "a build that ended at once exited $status, not with its command's status"
   ignored="$(build_slot awk '/^SigIgn:/ {print $2}' /proc/self/status)"
   [ "$(( 0x$ignored & 0x6 ))" -eq 0 ] ||
     fail "a build's command ignores SIGINT or SIGQUIT (SigIgn $ignored), so a Ctrl-C would leave its children running"
@@ -396,6 +405,19 @@ if command -v flock >/dev/null 2>&1; then
   flock -n "$slots/1.lock" true || fail 'a process the command left behind kept its slot'
   [ "$(CODEWIRE_CPU_SLOT=1 "$ROOT/scripts/dev/workstation-cpu.sh" build -- sh -c 'echo "$CODEWIRE_CPU_SLOT"')" = 1 ] ||
     fail 'a command started inside a slot did not run in it'
+  # A signal to a running build goes on to its command, and the build still
+  # waits for the command to end and exits with the command's own status, not
+  # with the status of the wait the signal cut short.
+  env -u CODEWIRE_CPU_SLOT CODEWIRE_CPU_SLOT_DIR="$slots" CODEWIRE_CPU_SLOT_ONLY=1 \
+    "$ROOT/scripts/dev/workstation-cpu.sh" build -- \
+    sh -c 'trap "exit 5" TERM; echo ready >"$1"; while :; do sleep 0.1; done' sh "$TMP/signalled-ready" &
+  signalled_build=$!
+  for _ in $(seq 1 300); do [ -s "$TMP/signalled-ready" ] && break; sleep 0.1; done # a hang guard
+  [ -s "$TMP/signalled-ready" ] || fail 'the build to be signalled did not start its command'
+  kill -TERM "$signalled_build"
+  if wait "$signalled_build" 2>/dev/null; then status=0; else status=$?; fi
+  [ "$status" -eq 5 ] || fail "a signalled build exited $status, not with the status its command ended with"
+  flock -n "$slots/1.lock" true || fail 'a signalled build kept its slot'
   holders=() # each is the build itself, not a subshell around it, so a signal reaches it
   for _ in 1 2 3; do
     env -u CODEWIRE_CPU_SLOT CODEWIRE_CPU_SLOT_DIR="$slots" CODEWIRE_CPU_SLOT_ONLY=1 \

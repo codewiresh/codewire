@@ -245,7 +245,7 @@ build() {
   [ "${1:-}" != -- ] || shift
   [ "$#" -ge 1 ] || usage
   [ -z "${CODEWIRE_CPU_SLOT:-}" ] || exec "$@"
-  local slot fd ticket first_ahead started=$SECONDS waited=0 report=0 ran child status=0
+  local slot fd ticket first_ahead started=$SECONDS waited=0 report=0 ran child status=0 signalled=
   mkdir -p "$BUILD_SLOT_DIR/queue"
   # 19 digits of arrival time, so tickets sort by it.
   ticket="$(date +%s%N)"
@@ -312,9 +312,19 @@ build() {
   # and leave rustc and the test binaries running after the slot is free.
   env --default-signal=INT,QUIT "$@" <&0 {fd}>&- &
   child=$!
-  trap 'kill -TERM "$child" 2>/dev/null' TERM INT HUP
-  while kill -0 "$child" 2>/dev/null; do
+  trap 'signalled=1; kill -TERM "$child" 2>/dev/null' TERM INT HUP
+  # Wait first and look afterwards. Bash reaps a command that has ended
+  # before this line, and then no process answers `kill -0`, though its status
+  # has not been read: looking first reported 0 for a command that failed at
+  # once. Only a wait that a forwarded signal cut short comes round again: the
+  # interrupted wait did not read the command's status, so the next one
+  # returns it, also when the command has ended in between. Nothing here asks
+  # whether a process with its PID exists; after a real end that may be a
+  # stranger.
+  while :; do
+    signalled=
     if wait "$child"; then status=0; else status=$?; fi
+    [ -n "$signalled" ] || break
   done
   { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$slot" "$waited" \
     "$((SECONDS - ran))" "$status" "$(pwd -P)" "$*" >>"$BUILD_SLOT_DIR/times.tsv"; } 2>/dev/null || true
