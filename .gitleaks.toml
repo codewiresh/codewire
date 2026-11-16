@@ -95,3 +95,11 @@ condition = "AND"
 paths = ['''(^|/)crates/codewire-protected-store/src/ssh_material/tests\.rs$''']
 regexTarget = "match"
 regexes = ['''BEGIN OPENSSH PRIVATE KEY-----\\n"\)\);[[:space:]]+assert!\(actual\.ends_with\(b"\\n-----END OPENSSH PRIVATE KEY''']
+
+[[allowlists]]
+description = "The support-image workflow test names the Amp npm package, whose scope is the Sourcegraph token rule's keyword, so its pinned action commit IDs read as tokens"
+targetRules = ["sourcegraph-access-token"]
+condition = "AND"
+paths = ['''(^|/)scripts/ci/tests/test-support-images-workflow\.sh$''']
+regexTarget = "line"
+regexes = ['''noel/actions-[a-z-]+@[[:xdigit:]]{40}''']
