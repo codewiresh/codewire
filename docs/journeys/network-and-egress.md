@@ -32,6 +32,7 @@ separately.
 | `policy-select` | #2537 | observed 2026-11-16, source 40a2877e7 | not yet observed | n/a | n/a |
 | `policy-project-file` | #2537, #4835 | no command yet | no command yet | no command yet | no command yet |
 | `policy-hosted` | #4000, #4211 | n/a | n/a | not yet observed | not yet observed |
+| `policy-dashboard` | #5114, #5116, #5117 | n/a | n/a | not yet observed | not yet observed |
 | `policy-protected` | #2537, #4000 | observed 2026-11-16, source 40a2877e7 | not yet observed | no command yet | no command yet |
 | `locked-refuses-managed-github` | #4926 | not yet observed | not yet observed | n/a | n/a |
 | `egress-late-answer` | #4948 | not yet observed | not yet observed | n/a | n/a |
@@ -268,6 +269,77 @@ Issue: #4000. The store and its API merged with #4211, behind a switch.
     with the "not enforced" line on every command that's meant to show it;
   - Dev and Production: not yet observed. The enforcement half of the proof
     waits for `hosted-enforcement`.
+
+## `policy-dashboard`: an organization's policies in the dashboard
+
+Issues: #5114 (the Network policies page), #5116 (Network access on a
+Sandbox), #5117 (what was refused, with a one-step Allow). `SPEC.md`
+"Networking and egress" defines it. The store and its rules are
+`policy-hosted`'s; this step proves the dashboard shows and changes the same
+policies.
+
+- **Entry points:** Network policies in the organization's navigation;
+  Network access on a Sandbox's page; the network policy field on the
+  Sandbox create form.
+- **States to exercise:**
+  - an organization with no policies of its own: the built-ins `open` and
+    `locked`, "No policies yet" and Create policy;
+  - a policy created from `locked` with two destinations, one a wildcard,
+    then a destination added and one removed;
+  - a protected range typed as a destination;
+  - two browsers editing the same policy, the second saving after the first;
+  - the "Used by" number on a policy that 12 Sandboxes select, opened by
+    hover, by keyboard focus and by a tap;
+  - a member who is not an owner or admin;
+  - deleting a policy a Sandbox selects;
+  - a deployment with the store switched off;
+  - the list failing to load;
+  - Network access on a running Sandbox, on a stopped one, and a policy
+    changed there (#5116);
+  - a refused destination allowed from its row (#5117).
+- **Driving it:** on the retained Kind cluster (its overlay switches the store
+  on), signed in as an organization owner, then as a member, in two browser
+  windows:
+  1. Open Network policies. It shows `open` and `locked` as built in,
+     "No policies yet", and the notice that hosted Sandboxes don't enforce
+     network policies yet.
+  2. Create policy `walk-dash` from `locked`, allowing `docs.rs` on 443 and
+     `*.crates.io` on the default ports. Add `crates.io` on 443, then remove
+     `docs.rs`. Type `10.0.0.0/8` as a destination.
+  3. In the second window, add a destination to `walk-dash` and save. Then
+     save a different one in the first window, which has not reloaded.
+  4. Check `static.crates.io:443` and `pypi.org:443` with Check a
+     destination.
+  5. Create 12 Sandboxes with `cw --cloud create --policy walk-dash`, then
+     hover, focus and tap the number under Used by.
+  6. Delete `walk-dash`, then move the Sandboxes to `locked` with
+     `cw update NAME --policy locked` and delete it again.
+  7. Sign in as a member and open the page.
+  8. Turn the store off on the deployment and open the page.
+- **Proof:**
+  - every revision and rule the page shows matches `cw --cloud policy ls
+    --output json` at the same moment;
+  - step 2 makes revisions 1 to 3 and refuses the range with "The range
+    includes protected addresses", without making a revision;
+  - in step 3 the first window's list updated without a reload when the
+    second saved, and its own save says another revision was saved first and
+    keeps the unsaved destination;
+  - step 4 shows Allowed by `*.crates.io` and Refused with "name not
+    allowed", as `cw --cloud policy check` does;
+  - in step 5 the cell reads `12`, and hover, focus and tap each list 10
+    Sandboxes by name, then "and 2 more", and a link to `walk-dash`'s page,
+    which lists all 12;
+  - step 6 is refused, naming the Sandboxes, and succeeds after the move;
+  - a member reads every policy and sees no Create, edit or Delete;
+  - with the store off the page says network policies aren't available on
+    this deployment, and no RPC error;
+  - no page makes a request without a live event or a user action.
+- **Gotchas:**
+  - The page shows only the organization's store. A policy made with
+    `cw --local policy` never appears, even under the same name.
+  - Until `hosted-enforcement` reports, every Sandbox reads "Not enforced
+    yet". That is the expected state, not a failure of the page.
+- **Observed:** not yet observed.
 
 ## `policy-protected`: addresses no policy can allow
 

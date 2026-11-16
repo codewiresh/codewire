@@ -464,6 +464,19 @@ network policy limits. The managed GitHub credential is the exception: it is
 served only where a rule allows the GitHub hosts, because its grant cannot be
 limited to an environment's own repositories.
 
+Target, not shipped (#5114, #5116, #5117): the dashboard's Network policies
+page lists an organization's policies, each with its revision, its rules and
+the number of Sandboxes that select it; hovering, focusing or tapping that
+number names up to ten of them. Owners and admins create, edit, check and
+delete policies there, and members read them, under the store's own rules
+and refusals. A Sandbox's page shows its policy, revision and enforcement
+state under Network access, and lets the Sandbox's creator choose another
+policy without a restart; later it lists what was refused, with a one-step
+Allow. While hosted Sandboxes do not enforce network policies, each of these
+pages says so. The dashboard never shows a local policy: those live on the
+user's computer. A page learns of a new revision, an enforcement change or a
+refusal from the live event stream, never by polling.
+
 A Mesh node is online only while it holds a live coordinator session that
 Mesh has heard from in the last 45 s. Every Mesh client pings every 15 s, so a
 node that goes silent shows offline within 45 s; Mesh records when it last
@@ -481,6 +494,17 @@ owner store (`cw --local rm` does); the supervisor never holds that
 credential. A failed revoke leaves the removal done and the exit status
 unchanged: the node shows offline, and `cw` prints the exact
 `cw network revoke` command that removes it.
+
+Target, not shipped (#5115, #5118, #5119): a Sandbox's page in the
+dashboard names its Mesh Network and whether it joined, in the words `cw info`
+uses for each attachment state and failure. The Mesh Networks page lists an
+organization's Mesh Networks and their nodes: whether each is online and when
+Mesh last heard from it. It creates Mesh Networks and invite codes, revokes
+nodes under the rules above, and deletes a Mesh Network that has no nodes.
+The Sandbox create form chooses a Mesh Network. Online means the node holds a
+live session with Mesh; the dashboard never claims that two nodes reach each
+other. A page learns that a node or an attachment changed from the live event
+stream, never by polling.
 
 ### Credentials on the host
 
