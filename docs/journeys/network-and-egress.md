@@ -33,6 +33,7 @@ separately.
 | `policy-project-file` | #2537, #4835 | no command yet | no command yet | no command yet | no command yet |
 | `policy-hosted` | #4000, #4211 | n/a | n/a | not yet observed | not yet observed |
 | `policy-protected` | #2537, #4000 | not yet observed | not yet observed | no command yet | no command yet |
+| `locked-refuses-managed-github` | #4926 | not yet observed | not yet observed | n/a | n/a |
 | `egress-late-answer` | #4948 | not yet observed | not yet observed | n/a | n/a |
 | `refusal-log` | #3999, #4000 | no command yet | no command yet | no command yet | no command yet |
 | `refusal-in-environment` | #4015 | no command yet | no command yet | no command yet | no command yet |
@@ -241,6 +242,56 @@ Issues: #2537, #4000.
   reachable.
 - **Gotchas:** a name that resolves only to protected addresses is refused as
   a name. Do not read that as a DNS outage.
+- **Observed:** not yet observed.
+
+## `locked-refuses-managed-github`: a policy that does not allow GitHub refuses the managed credential
+
+Issue: #4926. **Not built yet.** Today the managed GitHub credential is served
+whatever the policy says; `docs/dev/LINUX-LOCAL-VMS.md`, "Network policies",
+states the limit.
+
+- **Entry points:** `git` and `gh` in a local VM whose profile has a GitHub
+  connection, with interception off, so requests take the credential route on
+  the host. With interception on, the same rule is part of the GitHub step
+  of #3999.
+- **States to exercise:**
+  - `open`;
+  - `locked`;
+  - a stored policy that allows `github.com` and `api.github.com` on 443;
+  - a stored policy that allows `github.com` only;
+  - a change from `open` to `locked` and back while the VM runs;
+  - a local VM on a platform profile.
+- **Driving it:** with `OWNER/PRIVATE` a private repository the connection
+  reaches, on the host and then in the VM:
+
+  ```sh
+  cw update team --policy locked
+  git clone https://github.com/OWNER/PRIVATE.git    # in the VM
+  gh api user                                       # in the VM
+  cw update team --policy open
+  git clone https://github.com/OWNER/PRIVATE.git    # in the VM
+  ```
+
+- **Proof:**
+  - under `locked`, the clone and `gh api user` fail with a message that
+    names the network policy and the two hosts to allow, and the credential
+    broker's log shows the refusal and no lease;
+  - with rules for both hosts, both work; with a rule for `github.com` only,
+    both are refused;
+  - after the change to `locked` on a running VM the next request is
+    refused, and after the change back the next one works, with no restart;
+  - under `open`, nothing differs from before the fix;
+  - on a platform profile the results are the same.
+- **Gotchas:**
+  - Both hosts must be allowed. Git needs only `github.com`, but one answer
+    for both keeps `git` and `gh` from disagreeing.
+  - Only a rule that names the hosts counts. A rule for an address range
+    that happens to hold GitHub's addresses does not, so the credential is
+    refused.
+  - The refusal is about the managed credential. Under a policy that allows
+    GitHub, a user's own token goes through the VM's network as before.
+  - Hosted Sandboxes do not apply network policies yet, so this step is local
+    only.
 - **Observed:** not yet observed.
 
 ## `egress-late-answer`: a late answer refuses only its own request

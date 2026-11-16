@@ -1,7 +1,7 @@
 ---
 title: Egress policies
 description: Decide what an environment may reach on the Internet; the built-in open and locked policies, your own policies, and what egress does not protect.
-updated: 2026-10-26
+updated: 2026-11-16
 weight: 3
 ---
 
@@ -52,6 +52,12 @@ Choose it when you create the VM with `cw create --local --policy web-only`.
 `cw policy allow` and `cw policy rm` change a policy, and `cw policy delete`
 removes one no environment selects. If the worker or the broker stops, the
 environment fails closed (`error`) until you stop and start it.
+
+A network policy does not yet cover Codewire's own GitHub connection. In a VM
+whose profile has one, `git` and `gh` reach GitHub through Codewire on your
+machine, whatever the policy: they can fetch and push to every repository the
+connection reaches, even under `locked`. For a VM that must send nothing out,
+use a profile without a GitHub connection.
 
 **A hosted sandbox** may reach the public Internet; private, loopback,
 link-local and carrier-grade NAT ranges are excluded. There is no

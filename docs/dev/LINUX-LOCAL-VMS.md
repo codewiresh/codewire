@@ -190,6 +190,17 @@ rev 3 until restarted`) and takes the selection at its next start.
 `--policy` is unrelated to `--network`, which joins a Mesh network. A policy an
 environment selects cannot be deleted.
 
+Known limit (#4926): a network policy does not yet apply to the managed GitHub
+credential. On a VM whose profile has a GitHub connection, Git and `gh` reach
+GitHub through the credential route on the host, outside the VM's network,
+whatever the policy says: fetch and push to every repository the connection
+reaches, and with a personal access token whatever else that token may do. So
+`locked` does not stop a process in such a VM from pushing to GitHub. Until
+the fix, give a VM that must send nothing out a profile with no GitHub
+connection. The fix refuses the managed GitHub credential unless the policy
+allows `github.com` and `api.github.com` by rule; the journey step is
+`locked-refuses-managed-github` in `docs/journeys/network-and-egress.md`.
+
 ## Host ports
 
 `cw ports ENV --publish PORT`, and `ports:` entries with `host_port` in
