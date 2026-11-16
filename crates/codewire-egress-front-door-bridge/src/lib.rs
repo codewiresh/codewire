@@ -30,7 +30,7 @@ use axum::body::Body;
 use bytes::Bytes;
 use codewire_access::MANAGED_ANTHROPIC_API_PREFIX;
 use codewire_credential_bridge::{
-    CredentialBridge, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX,
+    CredentialBridge, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX, UpgradeAnswer,
 };
 use codewire_egress_front_door::{Backend, BoxError, Incoming, ResponseBody, UpgradeOutcome};
 use codewire_egress_policy::check::CheckDestination;
@@ -232,25 +232,41 @@ impl CredentialRouteBackend {
         B: HttpBody<Data = Bytes> + Send + 'static,
         B::Error: Into<BoxError>,
     {
-        let uri = match self.routes.rewrite(host, request.uri()) {
-            Ok(uri) => uri,
-            Err(status) => {
+        let request = match self.routed(host, request) {
+            Ok(request) => request,
+            Err(status) => return empty(status),
+        };
+        boxed(
+            self.bridge
+                .respond_intercepted(host, request.map(Body::new))
+                .await,
+        )
+    }
+
+    /// `request` on its credential route, without Host, or the status to
+    /// answer with instead. Requests and WebSocket upgrades take the same
+    /// route.
+    fn routed<B>(&self, host: &str, request: Request<B>) -> Result<Request<B>, StatusCode> {
+        let uri = self
+            .routes
+            .rewrite(host, request.uri())
+            .inspect_err(|status| {
                 tracing::debug!(
                     host,
                     outcome = "no_credential_route",
                     status = status.as_u16()
                 );
-                return empty(status);
-            }
-        };
+            })?;
         let (mut parts, body) = request.into_parts();
         parts.uri = uri;
         parts.headers = without_host(std::mem::take(&mut parts.headers));
-        self.bridge
-            .respond_intercepted(host, Request::from_parts(parts, Body::new(body)))
-            .await
-            .map(|body| BoxBody::new(SyncBody(Mutex::new(body))))
+        Ok(Request::from_parts(parts, body))
     }
+}
+
+/// A bridge response as the front door sends it.
+fn boxed(response: Response<Body>) -> Response<ResponseBody> {
+    response.map(|body| BoxBody::new(SyncBody(Mutex::new(body))))
 }
 
 impl Backend for CredentialRouteBackend {
@@ -258,11 +274,20 @@ impl Backend for CredentialRouteBackend {
         self.forward(host, request).await
     }
 
-    async fn upgrade(&self, host: &str, _request: Request<()>) -> UpgradeOutcome {
-        // The bridge carries HTTP requests only. WebSockets reach the routes
-        // with the bridge protocol change in a later slice of #3999.
-        tracing::debug!(host, outcome = "upgrade_refused");
-        Err(empty(StatusCode::FORBIDDEN))
+    /// The bridge refuses unless its session's host carries WebSockets.
+    async fn upgrade(&self, host: &str, request: Request<()>) -> UpgradeOutcome {
+        let request = self.routed(host, request).map_err(empty)?;
+        match self.bridge.upgrade_intercepted(host, request).await {
+            UpgradeAnswer::Switched { response, socket } => Ok((response, Box::new(socket))),
+            UpgradeAnswer::Refused(refused) => {
+                tracing::debug!(
+                    host,
+                    outcome = "upgrade_refused",
+                    status = refused.status().as_u16()
+                );
+                Err(boxed(refused))
+            }
+        }
     }
 }
 

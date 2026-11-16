@@ -260,6 +260,10 @@ pub const CREDENTIAL_BRIDGE_BODY_IDLE_TIMEOUT: std::time::Duration =
 pub const CREDENTIAL_BRIDGE_STREAMED_FIRST_RESPONSE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(10 * 60);
 pub const CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES: usize = 64 * 1024;
+/// The upgraded-stream bytes either side of a front-door session lets its
+/// peer send ahead of what it has written out (#3999): one stalled WebSocket
+/// holds at most this much, and never the session's other requests.
+pub const CREDENTIAL_BRIDGE_STREAM_WINDOW_BYTES: u32 = 256 * 1024;
 pub const CREDENTIAL_BRIDGE_MAX_HEADERS: usize = 64;
 pub const CREDENTIAL_BRIDGE_MAX_HEADER_NAME_BYTES: usize = 128;
 pub const CREDENTIAL_BRIDGE_MAX_HEADER_VALUE_BYTES: usize = 8 * 1024;

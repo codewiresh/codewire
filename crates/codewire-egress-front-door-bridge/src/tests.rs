@@ -46,13 +46,22 @@ struct Host {
 
 impl Host {
     async fn start() -> Self {
+        Self::start_with(&[]).await
+    }
+
+    /// A host whose Open lists `capabilities`.
+    async fn start_with(capabilities: &[&str]) -> Self {
+        let capabilities = capabilities
+            .iter()
+            .map(|capability| (*capability).to_owned())
+            .collect::<Vec<_>>();
         let bridge = CredentialBridge::new(Uuid::new_v4(), 1).unwrap();
         let (prepared, mut output) = bridge.prepare_connection().unwrap();
         let ready = bounded(output.next()).await.unwrap().unwrap();
         assert!(matches!(ready.payload, Some(GuestPayload::Ready(_))));
         let (input, receiver) = mpsc::channel(32);
         let connection = prepared
-            .activate(ReceiverStream::new(receiver))
+            .activate_with_capabilities(ReceiverStream::new(receiver), &capabilities)
             .await
             .unwrap();
         tokio::spawn(connection.run());
@@ -559,7 +568,7 @@ async fn host_never_selects_the_route() {
 }
 
 #[tokio::test]
-async fn an_upgrade_is_403_and_never_reaches_the_bridge() {
+async fn an_upgrade_on_a_session_without_websockets_is_403_and_never_reaches_the_host() {
     let mut host = Host::start().await;
     let backend = host.backend(RouteTable::defaults());
     let request = Request::get("/backend-api/codex/responses")
@@ -572,7 +581,114 @@ async fn an_upgrade_is_403_and_never_reaches_the_bridge() {
         panic!("an upgrade was accepted");
     };
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert_eq!(body_of(response).await, "");
+    assert_eq!(
+        body_of(response).await,
+        "credential route does not carry WebSockets\n"
+    );
+    host.assert_untouched();
+}
+
+/// An opening request takes the route a request to the same path takes,
+/// and its accepted socket carries bytes to the host.
+#[tokio::test]
+async fn an_upgrade_takes_the_request_route_and_its_socket_reaches_the_host() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut host =
+        Host::start_with(&[codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_WEBSOCKET]).await;
+    let backend = host.backend(RouteTable::defaults());
+    let request = Request::get("/backend-api/codex/responses?stream=1")
+        .header(HOST, "chatgpt.com")
+        .header(CONNECTION, "Upgrade")
+        .header(UPGRADE, "websocket")
+        .header("sec-websocket-key", "test-nonce")
+        .header("sec-websocket-version", "13")
+        .header("authorization", "Bearer placeholder")
+        .body(())
+        .unwrap();
+    let upgrading = tokio::spawn({
+        let backend = backend.clone();
+        async move { backend.upgrade("chatgpt.com", request).await }
+    });
+    let upgrade = match bounded(host.output.next()).await.unwrap().unwrap().payload {
+        Some(GuestPayload::Upgrade(upgrade)) => upgrade,
+        other => panic!("expected an upgrade, got {other:?}"),
+    };
+    assert_eq!(
+        (
+            upgrade.capability_slot.as_str(),
+            upgrade.route.as_str(),
+            upgrade.path.as_str(),
+            upgrade.query.as_str(),
+            upgrade.intercepted_host.as_str(),
+        ),
+        (
+            "codex",
+            "openai-api",
+            "/responses",
+            "stream=1",
+            "chatgpt.com"
+        )
+    );
+    let names = upgrade
+        .headers
+        .iter()
+        .map(|header| header.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "sec-websocket-key",
+            "sec-websocket-version",
+            "authorization"
+        ]
+    );
+    host.send(HostPayload::UpgradeAccepted(
+        v1::CredentialBridgeUpgradeAccepted {
+            request_id: upgrade.request_id.clone(),
+            headers: vec![v1::CredentialHttpHeader {
+                name: "sec-websocket-accept".to_owned(),
+                value: b"test-accept".to_vec(),
+            }],
+        },
+    ))
+    .await;
+    host.send(HostPayload::StreamCredit(
+        v1::CredentialBridgeStreamCredit {
+            request_id: upgrade.request_id.clone(),
+            credit_bytes: 1024,
+        },
+    ))
+    .await;
+    let Ok((switched, mut socket)) = bounded(upgrading).await.unwrap() else {
+        panic!("the accepted upgrade was refused");
+    };
+    assert_eq!(switched.status(), StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(switched.headers()["sec-websocket-accept"], "test-accept");
+    socket.write_all(b"ping").await.unwrap();
+    match bounded(host.output.next()).await.unwrap().unwrap().payload {
+        Some(GuestPayload::StreamData(data)) => {
+            assert_eq!(data.request_id, upgrade.request_id);
+            assert_eq!(data.data, b"ping");
+        }
+        other => panic!("expected stream data, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_upgrade_to_a_path_no_route_covers_is_404() {
+    let mut host =
+        Host::start_with(&[codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_WEBSOCKET]).await;
+    let backend = host.backend(RouteTable::defaults());
+    let request = Request::get("/elsewhere")
+        .header(CONNECTION, "Upgrade")
+        .header(UPGRADE, "websocket")
+        .body(())
+        .unwrap();
+    let Err(response) = bounded(backend.upgrade("chatgpt.com", request)).await else {
+        panic!("an unrouted upgrade was accepted");
+    };
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     host.assert_untouched();
 }
 

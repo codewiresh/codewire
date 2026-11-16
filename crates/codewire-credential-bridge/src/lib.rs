@@ -54,6 +54,9 @@ use login::{LoginCapabilities, PendingLogin, fail_logins, take_logins};
 mod projection;
 pub use projection::RelayedEnvironmentProjection;
 mod request_body;
+mod upgrade;
+pub use upgrade::{MAX_OPEN_SOCKETS, UpgradeAnswer, UpgradedSocket};
+pub mod upgraded_stream;
 use projection::{PendingProjection, fail_projections, take_projections};
 use request_body::{RequestCredit, StartFailure};
 mod ssh;
@@ -136,6 +139,8 @@ struct BridgeState {
     projections: BTreeMap<String, PendingProjection>,
     ssh: BTreeMap<String, PendingSsh>,
     logins: BTreeMap<String, PendingLogin>,
+    /// Accepted WebSocket upgrades, apart from the requests in flight.
+    sockets: upgrade::Sockets,
 }
 
 impl BridgeState {
@@ -166,6 +171,7 @@ impl BridgeState {
             projections: take_projections(self, epoch),
             ssh: take_ssh(self, epoch),
             logins: take_logins(self, epoch),
+            sockets: self.sockets.take(|socket_epoch| socket_epoch == epoch),
         }
     }
 
@@ -178,6 +184,7 @@ impl BridgeState {
                 .collect(),
             ssh: std::mem::take(&mut self.ssh).into_values().collect(),
             logins: std::mem::take(&mut self.logins).into_values().collect(),
+            sockets: self.sockets.take(|_| true),
         }
     }
 }
@@ -189,6 +196,7 @@ struct LostRequests {
     projections: Vec<PendingProjection>,
     ssh: Vec<PendingSsh>,
     logins: Vec<PendingLogin>,
+    sockets: Vec<upgraded_stream::StreamControl>,
 }
 
 impl LostRequests {
@@ -197,6 +205,10 @@ impl LostRequests {
         fail_projections(self.projections);
         fail_ssh(self.ssh);
         fail_logins(self.logins);
+        // Their host is gone: nothing is sent, the client ends see the reset.
+        for socket in self.sockets {
+            socket.abort();
+        }
     }
 }
 
@@ -223,6 +235,8 @@ struct ActiveHost {
     logins: LoginCapabilities,
     /// Whether the host's Open listed streamed request bodies.
     streams_request_body: bool,
+    /// Whether the host's Open listed WebSocket upgrades.
+    websockets: bool,
 }
 
 struct PendingResponse {
@@ -234,6 +248,8 @@ struct PendingResponse {
     response_limit: usize,
     /// The host's request body credit, for a request whose body streams.
     credit: Option<RequestCredit>,
+    /// Where an accepted WebSocket upgrade goes; `None` for a request.
+    switched: Option<oneshot::Sender<upgrade::Switched>>,
     start: Option<oneshot::Sender<Result<ResponseStart, BridgeFailure>>>,
     body: mpsc::Sender<ResponseBodyItem>,
     completed: Arc<AtomicBool>,
@@ -335,6 +351,7 @@ impl CredentialBridge {
                 projections: BTreeMap::new(),
                 ssh: BTreeMap::new(),
                 logins: BTreeMap::new(),
+                sockets: upgrade::Sockets::default(),
             })),
             host_admitted: Arc::new(Notify::new()),
         })
@@ -587,17 +604,15 @@ impl CredentialBridge {
             Some(Payload::ClaudeLogin(response)) => {
                 self.apply_claude_login_response(epoch, response).await
             }
-            // A front-door session's frames are an unknown frame here: no
-            // epoch of this bridge is one.
             Some(
-                Payload::Open(_)
-                | Payload::UpgradeAccepted(_)
+                payload @ (Payload::UpgradeAccepted(_)
                 | Payload::StreamData(_)
                 | Payload::StreamCredit(_)
-                | Payload::StreamClose(_)
-                | Payload::InterceptionHint(_),
-            )
-            | None => Err(invalid_host_frame()),
+                | Payload::StreamClose(_)),
+            ) => self.apply_socket_frame(epoch, payload).await,
+            Some(Payload::Open(_) | Payload::InterceptionHint(_)) | None => {
+                Err(invalid_host_frame())
+            }
         }
     }
 
@@ -666,6 +681,7 @@ impl CredentialBridge {
                         CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES
                     },
                     credit: credit.clone(),
+                    switched: None,
                     start: Some(start_tx),
                     body: body_tx,
                     completed: Arc::clone(&completed),
@@ -919,6 +935,7 @@ impl PreparedBridgeConnection {
         }
         let logins = LoginCapabilities::from_open(capabilities);
         let streams_request_body = request_body::listed(capabilities);
+        let websockets = upgrade::listed(capabilities);
         let (cancel, cancelled) = oneshot::channel();
         let mut draining = None;
         let (epoch, closed, lost) = {
@@ -944,6 +961,7 @@ impl PreparedBridgeConnection {
                 cancel,
                 logins,
                 streams_request_body,
+                websockets,
             });
             match (replacement, replaced) {
                 (EpochReplacement::Drain, Some(replaced)) => {
