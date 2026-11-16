@@ -101,7 +101,7 @@ jobs:
   pr-admission:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token only reads runs.
     name: PR admission
-    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT') }}
     # The light runner's 240-minute cap is the gate's; it starts the run by 230.
     timeout-minutes: 235
     steps:
@@ -130,7 +130,7 @@ jobs:
   verification-selection:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job receives no write-capable integration.
     name: Verification selection
-    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT') }}
     timeout-minutes: 25
     needs: [pr-admission]
     # A closed pull request verifies nothing; every other job needs this one.
@@ -2200,7 +2200,7 @@ jobs:
   required-verification:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this aggregator receives no write-capable integration.
     name: Required verification
-    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT') }}
     timeout-minutes: 25
     if: ${{ always() && github.event.action != 'closed' }}
     needs:
@@ -2394,7 +2394,7 @@ jobs:
   deliver-to-dev:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the job token reads runs and reruns one Deploy Dev job.
     name: Start Dev delivery of the verified commit
-    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT') }}
     timeout-minutes: 15
     needs: [verification-selection, required-verification]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.required-verification.result == 'success' && needs.verification-selection.outputs.superseded == 'false' }}

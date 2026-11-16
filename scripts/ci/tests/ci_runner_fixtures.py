@@ -20,6 +20,10 @@ def by_trust(trusted: str, untrusted: str) -> str:
 
 UNTRUSTED_LIGHT = one("CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT")
 TRUSTED_LIGHT = one("CODEWIRE_CI_RUNNER_TRUSTED_LIGHT")
+# The small jobs every run starts and ends on (the gate, selection, the
+# verdict, the Dev delivery start): a main push runs them on the trusted light
+# runner, where they do not wait behind pull requests' gates (infra#1534).
+LIGHT = by_trust("CODEWIRE_CI_RUNNER_TRUSTED_LIGHT", "CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT")
 MACOS = one("CODEWIRE_CI_RUNNER_MACOS")
 UNTRUSTED_BUILD = one("CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD")
 HEAVY = by_trust("CODEWIRE_CI_RUNNER_TRUSTED_HEAVY", "CODEWIRE_CI_RUNNER_UNTRUSTED_HEAVY")

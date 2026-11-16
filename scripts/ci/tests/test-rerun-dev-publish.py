@@ -298,7 +298,9 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual(users, {"deliver-to-dev"})
         job = self.jobs["deliver-to-dev"]
         self.assertEqual(job["needs"], ["verification-selection", "required-verification"])
-        self.assertEqual(job["runs-on"], runners.UNTRUSTED_LIGHT)
+        # The trusted light runner for a push to main, which is the only run
+        # that delivers (infra#1534).
+        self.assertEqual(job["runs-on"], runners.LIGHT)
         self.assertLessEqual(job["timeout-minutes"], 15)
         self.assertNotIn("enable-openid-connect", job)
         steps = [step for step in job["steps"] if "run" in step]

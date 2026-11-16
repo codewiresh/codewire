@@ -80,7 +80,10 @@ METAL = {runners.MEDIUM, runners.HEAVY}
 BUILD = {runners.BUILD}
 # Kind runs on the cloud Heavy label until it runs in a metal guest.
 CLOUD = {runners.KIND}
-LIGHT = {runners.UNTRUSTED_LIGHT, runners.TRUSTED_LIGHT}
+LIGHT = {runners.UNTRUSTED_LIGHT, runners.TRUSTED_LIGHT, runners.LIGHT}
+# A light runner a pull request's job can reach: the untrusted one, and the
+# by-trust expression, whose pull request side is the untrusted one.
+PULL_REQUEST_LIGHT = {runners.UNTRUSTED_LIGHT, runners.LIGHT}
 KNOWN_RUNNERS = METAL | BUILD | CLOUD | LIGHT
 BOUND_CARGO = "scripts/ci/setup/bound-cargo-jobs.sh"
 MAX_TIMEOUT = 90
@@ -89,7 +92,7 @@ MAX_TIMEOUT = 90
 # untrusted one every job sets its own 25 minutes at most: that runner's cap
 # rises to about four hours for the pull request admission gate, and every
 # other job keeps the 25 minutes it had (owner, 2026-11-13, infra#2471).
-JOB_LIMIT = {runners.UNTRUSTED_LIGHT: 25, runners.TRUSTED_LIGHT: 330}
+JOB_LIMIT = {runners.UNTRUSTED_LIGHT: 25, runners.LIGHT: 25, runners.TRUSTED_LIGHT: 330}
 # A dispatched release waits its turn on the unprivileged runner (#2892) for
 # the release in flight, so it always delivers (owner, 2026-11-12; #4476).
 LONG_WAITS = {("cli-release.yaml", "pending"): 190, ("deploy-prod.yaml", "pending"): 190,
@@ -421,6 +424,10 @@ def workflow_errors(name, text):
         runner = job.get("runs-on")
         if not isinstance(runner, str) or not RUNNER_EXPRESSION.fullmatch(runner):
             errors.append(f"{name} {job_name} runs on {runner!r}, not a repository-variable runner expression")
+        # A run a pull request can start reaches a trusted-only runner by no
+        # job: a by-trust expression is its only way there, for a push to main.
+        if unsafe and runner in TRUSTED_ONLY and not drift_exception:
+            errors.append(f"{name} {job_name} runs on a trusted-only runner in a run started by {unsafe}")
         for step in job.get("steps") or []:
             uses = step.get("uses")
             if uses and not PINNED_ACTION.fullmatch(uses):
@@ -436,7 +443,7 @@ def workflow_errors(name, text):
         holds_oidc = job.get("enable-openid-connect", workflow.get("enable-openid-connect"))
         timeout = job.get("timeout-minutes")
         limit = LONG_WAITS.get((name, job_name), JOB_LIMIT.get(runner))
-        if runner == runners.UNTRUSTED_LIGHT and not isinstance(timeout, int):
+        if runner in PULL_REQUEST_LIGHT and not isinstance(timeout, int):
             errors.append(f"{name} {job_name} runs on the untrusted light runner without its own timeout-minutes")
         elif limit and isinstance(timeout, int) and timeout > limit:
             errors.append(f"{name} {job_name} timeout {timeout} outlasts its light runner's {limit}-minute limit")
@@ -444,7 +451,7 @@ def workflow_errors(name, text):
         # it mints Forgejo integrations, and the publisher roles bind no job or
         # runner claim, so no job on the shared untrusted light runner holds
         # one (#3674, #3758). ci.yaml's metal jobs split by event instead.
-        if holds_oidc and runner == runners.UNTRUSTED_LIGHT and not drift_exception:
+        if holds_oidc and runner in PULL_REQUEST_LIGHT and not drift_exception:
             errors.append(f"{name} {job_name} holds OIDC on the untrusted light runner")
         if holds_oidc and reads_openbao:
             if unsafe:
@@ -574,8 +581,8 @@ MUTATIONS = {
     "a main push runs on the untrusted metal": lambda t: in_job(
         t, "policy", f"runs-on: {TRUSTED_RUNNER}", f"runs-on: {UNTRUSTED_MEDIUM}"),
     "the light runner gets OIDC": lambda t: in_job(
-        t, REQUIRED, f"    runs-on: {runners.UNTRUSTED_LIGHT}\n",
-        f"    runs-on: {runners.UNTRUSTED_LIGHT}\n    enable-openid-connect: true\n"),
+        t, REQUIRED, f"    runs-on: {runners.LIGHT}\n",
+        f"    runs-on: {runners.LIGHT}\n    enable-openid-connect: true\n"),
     "a metal job stops bounding Cargo": lambda t: in_job(
         t, "database", "run: scripts/ci/setup/bound-cargo-jobs.sh", "run: true"),
     "a build runner job bounds Cargo": lambda t: in_job(
@@ -603,6 +610,10 @@ CHECKOUT = "noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 # Each mutation of one workflow file is a failure an earlier text pin caught,
 # or one it missed.
 WORKFLOW_MUTATIONS = {
+    # The verdict runs on the trusted light runner only for a push to main
+    # (infra#1534); a pull request's must never reach it.
+    "a pull request's verdict runs on the trusted light runner": ("ci.yaml", lambda t: in_job(
+        t, REQUIRED, f"    runs-on: {runners.LIGHT}\n", f"    runs-on: {runners.TRUSTED_LIGHT}\n")),
     "the Dev delivery turn outlasts its light runner's limit": ("deploy-dev.yaml", lambda t: in_job(
         t, "dev-delivery-turn", "timeout-minutes: 25", "timeout-minutes: 90")),
     "a light job leans on the runner's cap": ("ci.yaml", lambda t: in_job(
