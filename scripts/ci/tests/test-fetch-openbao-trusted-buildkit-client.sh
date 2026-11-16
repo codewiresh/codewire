@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Execute fetch-openbao-trusted-buildkit-client.sh against a fake curl: only
-# the Dev, support and production publisher roles and the two protected-main
-# release builds read the trusted builder's client tuple, it lands only in an
-# empty private directory as three mode-0600
-# PEM files, nothing secret is printed or passed as an argument, and every
+# the Dev and support publisher roles and the two protected-main release
+# builds read the trusted builder's client tuple, it lands only in an empty
+# private directory as three mode-0600 PEM files, nothing secret is printed or passed as an argument, and every
 # failure says what failed.
 set -euo pipefail
 unset CODEWIRE_OPENBAO_ADDR  # the tests exercise the script default
@@ -40,7 +39,6 @@ done
 case "$url" in
   https://git.example.invalid/*audience=openbao-codewire-source-dev-publisher | \
     https://git.example.invalid/*audience=openbao-codewire-source-support-publisher | \
-    https://git.example.invalid/*audience=openbao-codewire-source-prod-publisher | \
     https://git.example.invalid/*audience=openbao-codewire-source-cli-release-build | \
     https://git.example.invalid/*audience=openbao-codewire-source-release-dry-run-build)
     jq -n --arg value synthetic-forgejo-jwt '{value:$value}' >"$output" ;;
@@ -114,11 +112,6 @@ OPENBAO_ROLE=codewire-source-dev-publisher OPENBAO_AUDIENCE=openbao-codewire-sou
   "$FETCHER" "$dev_tls" >"$work/dev.out" 2>&1 || { cat "$work/dev.out" >&2; fail 'the Dev publisher could not read the client tuple'; }
 [[ "$(cd "$dev_tls" && find . -type f | sort | tr '\n' ' ')" == './ca.crt ./client.crt ./client.key ' ]] ||
   fail 'the Dev publisher did not receive exactly the client tuple'
-prod_tls="$(private_dir prod-tls)"
-OPENBAO_ROLE=codewire-source-prod-publisher OPENBAO_AUDIENCE=openbao-codewire-source-prod-publisher \
-  "$FETCHER" "$prod_tls" >"$work/prod.out" 2>&1 || { cat "$work/prod.out" >&2; fail 'the production publisher could not read the client tuple'; }
-[[ "$(cd "$prod_tls" && find . -type f | sort | tr '\n' ' ')" == './ca.crt ./client.crt ./client.key ' ]] ||
-  fail 'the production publisher did not receive exactly the client tuple'
 # So do the two protected-main release builds (#3119).
 for role in codewire-source-cli-release-build codewire-source-release-dry-run-build; do
   release_tls="$(private_dir "$role")"
@@ -128,14 +121,20 @@ for role in codewire-source-cli-release-build codewire-source-release-dry-run-bu
     fail "$role did not receive exactly the client tuple"
 done
 calls_before="$(wc -l <"$FAKE_CURL_CALLS")"
-refuse other-role 'only the Dev, support and production publisher roles' "$(private_dir other-role)" \
+refuse other-role 'only the Dev and support publisher roles' "$(private_dir other-role)" \
   OPENBAO_ROLE=codewire-source-ci-cache OPENBAO_AUDIENCE=openbao-codewire-source-ci-cache
-refuse mixed-role 'only the Dev, support and production publisher roles' "$(private_dir mixed-role)" \
+refuse mixed-role 'only the Dev and support publisher roles' "$(private_dir mixed-role)" \
   OPENBAO_ROLE=codewire-source-prod-publisher OPENBAO_AUDIENCE=openbao-codewire-source-support-publisher
-refuse release-signing-role 'only the Dev, support and production publisher roles' "$(private_dir release-signing)" \
+refuse release-signing-role 'only the Dev and support publisher roles' "$(private_dir release-signing)" \
   OPENBAO_ROLE=codewire-source-cli-release-signing OPENBAO_AUDIENCE=openbao-codewire-source-cli-release-signing
-refuse mixed-release-role 'only the Dev, support and production publisher roles' "$(private_dir mixed-release)" \
+refuse mixed-release-role 'only the Dev and support publisher roles' "$(private_dir mixed-release)" \
   OPENBAO_ROLE=codewire-source-cli-release-build OPENBAO_AUDIENCE=openbao-codewire-source-release-dry-run-build
+# A release builds no support pair (#2892), so neither production publisher
+# role reads the tuple any more.
+refuse prod-role 'only the Dev and support publisher roles' "$(private_dir prod-role)" \
+  OPENBAO_ROLE=codewire-source-prod-publisher OPENBAO_AUDIENCE=openbao-codewire-source-prod-publisher
+refuse prod-schedule-role 'only the Dev and support publisher roles' "$(private_dir prod-schedule-role)" \
+  OPENBAO_ROLE=codewire-source-prod-publisher-schedule OPENBAO_AUDIENCE=openbao-codewire-source-prod-publisher-schedule
 shared="$work/shared"; mkdir -m 0755 "$shared"
 refuse shared-directory 'empty private directory' "$shared"
 used="$(private_dir used)"; : >"$used/leftover"
@@ -172,4 +171,4 @@ for identity in 'GITHUB_EVENT_NAME=workflow_dispatch GITHUB_ACTOR=noel GITHUB_RU
   fi
 done
 
-echo 'test-fetch-openbao-trusted-buildkit-client: PASS cases=12'
+echo 'test-fetch-openbao-trusted-buildkit-client: PASS cases=13'

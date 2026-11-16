@@ -32,18 +32,17 @@ readonly output_dir="$1"
 readonly OPENBAO_ADDR="${CODEWIRE_OPENBAO_ADDR:-https://openbao.example.invalid}"
 readonly CREDENTIAL_PATH='platform/data/ci/codewire/trusted-buildkit-client'
 readonly -a CURL_BOUNDS=(--connect-timeout 10 --max-time 30)
-# Only the three protected-main publishers and the two protected-main release
-# builds may read the builder's client tuple; OpenBao enforces the same set
-# (forgejo-codewire-trusted-buildkit-client).
+# Only the protected-main Dev and support publishers and the two protected-main
+# release builds may read the builder's client tuple; OpenBao enforces the same
+# set (forgejo-codewire-trusted-buildkit-client). A release builds no support
+# pair, so the production publisher does not read it (#2892).
 case "$OPENBAO_ROLE|$OPENBAO_AUDIENCE" in
   'codewire-source-dev-publisher|openbao-codewire-source-dev-publisher' | \
     'codewire-source-support-publisher|openbao-codewire-source-support-publisher' | \
-    'codewire-source-prod-publisher|openbao-codewire-source-prod-publisher' | \
-    'codewire-source-prod-publisher-schedule|openbao-codewire-source-prod-publisher-schedule' | \
     'codewire-source-cli-release-build|openbao-codewire-source-cli-release-build' | \
     'codewire-source-cli-release-build-schedule|openbao-codewire-source-cli-release-build-schedule' | \
     'codewire-source-release-dry-run-build|openbao-codewire-source-release-dry-run-build') ;;
-  *) fail 'only the Dev, support and production publisher roles and the two release builds read the trusted BuildKit client certificate' ;;
+  *) fail 'only the Dev and support publisher roles and the two release builds read the trusted BuildKit client certificate' ;;
 esac
 # A schedule role is read only by the release schedule's own first attempt
 # (#2892).
