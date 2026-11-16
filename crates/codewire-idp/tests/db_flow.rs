@@ -6774,3 +6774,223 @@ async fn mail_to_one_address_stops_after_three_an_hour_and_the_audit_log_says_so
         .await
         .unwrap();
 }
+
+/// Every route class under `/api/` answers with `Cache-Control: no-store,
+/// private` and no validator, redirects and errors included, while the
+/// public discovery and JWKS documents keep their own caching
+/// (docs/dev/AUTH-POLICY.md, "Credential rules"; #5054).
+#[tokio::test]
+async fn api_responses_are_never_stored_by_a_shared_cache() {
+    use axum::{body::Body, http::Request, response::Response};
+    use tower::ServiceExt;
+
+    async fn send(app: &axum::Router, request: Request<Body>) -> Response {
+        app.clone().oneshot(request).await.unwrap()
+    }
+    fn get(path: &str) -> axum::http::request::Builder {
+        Request::builder().method("GET").uri(path)
+    }
+    fn assert_private(response: &Response, what: &str) {
+        let headers = response.headers();
+        assert_eq!(
+            headers.get("cache-control").map(|v| v.to_str().unwrap()),
+            Some("no-store, private"),
+            "{what}"
+        );
+        assert!(headers.get("etag").is_none(), "{what}");
+        assert!(headers.get("last-modified").is_none(), "{what}");
+    }
+    fn location(response: &Response) -> String {
+        response.headers()["location"].to_str().unwrap().to_owned()
+    }
+    fn code_in(url: &str) -> String {
+        url.split("code=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap()
+            .to_owned()
+    }
+
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping idp private API e2e");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+    seed(&pool).await;
+    codewire_idp::provisioning::ensure_desktop_client(&pool)
+        .await
+        .expect("converge desktop client");
+    let cfg = IdpConfig {
+        issuer: "https://idp.codewire.test".into(),
+        frontend_url: "https://app.codewire.test".into(),
+        turnstile_secret_key: String::new(),
+        turnstile_bypass_email: String::new(),
+        signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
+        revoke_reused_refresh_tokens: false,
+        scopes_supported: vec!["openid".into(), "profile".into(), "email".into()],
+    };
+    let provider = build_provider(
+        pool.clone(),
+        &cfg,
+        test_signing_keyring(),
+        TEST_CAPABILITY_HMAC_SECRET,
+    )
+    .await
+    .unwrap();
+    let app = codewire_idp::private_api::private_api_responses(
+        codewire_idp::service::router(provider)
+            .merge(codewire_idp::auth_session::router(
+                pool.clone(),
+                false,
+                codewire_idp::auth_session::SignupInvitePolicy::open(),
+            ))
+            .merge(codewire_idp::access_admin::router(
+                pool.clone(),
+                cfg.frontend_url.clone(),
+                codewire_email::EmailClient::disabled(),
+                AuthState { pool: pool.clone() },
+            )),
+    );
+    let cookie = "codewire.session_token=sess_tok_e2e";
+
+    // get-session, signed out and signed in.
+    let response = send(
+        &app,
+        get("/api/auth/get-session").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert_private(&response, "signed-out get-session");
+    let response = send(
+        &app,
+        get("/api/auth/get-session")
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert_private(&response, "signed-in get-session");
+    let body = axum::body::to_bytes(response.into_body(), 65_536)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["user"]["id"], USER);
+
+    // authorize: signed out it redirects to the login page with the stored
+    // request; the callback resumes it and redirects with a code.
+    let authorize = format!(
+        "/api/oauth/authorize?client_id={CLIENT}&redirect_uri={}&response_type=code\
+         &scope=openid&state=st&code_challenge={CHALLENGE}&code_challenge_method=S256",
+        urlencoding::encode(REDIRECT)
+    );
+    let response = send(&app, get(&authorize).body(Body::empty()).unwrap()).await;
+    assert_eq!(response.status(), 302);
+    assert_private(&response, "authorize redirect to login");
+    let login = location(&response);
+    let request_id = login.split("authRequestID=").nth(1).unwrap().to_owned();
+    let response = send(
+        &app,
+        get(&format!("/api/oidc/callback?id={request_id}"))
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), 302);
+    assert_private(&response, "callback redirect with a code");
+    let callback_code = code_in(&location(&response));
+    assert!(location(&response).starts_with(REDIRECT));
+
+    // authorize with the session cookie redirects straight back with a code.
+    let response = send(
+        &app,
+        get(&authorize)
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), 302);
+    assert_private(&response, "authorize redirect with a code");
+    assert!(location(&response).starts_with(REDIRECT));
+
+    // The token endpoint's own plain no-store gives way to the full rule.
+    let form = format!(
+        "grant_type=authorization_code&client_id={CLIENT}&code={callback_code}\
+         &redirect_uri={}&code_verifier={VERIFIER}",
+        urlencoding::encode(REDIRECT)
+    );
+    let response = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/oauth/token")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(form))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert_private(&response, "token");
+    let tokens = axum::body::to_bytes(response.into_body(), 65_536)
+        .await
+        .unwrap();
+    let tokens: serde_json::Value = serde_json::from_slice(&tokens).unwrap();
+    let access_token = tokens["access_token"].as_str().unwrap();
+
+    // userinfo: the bearer's claims at a fixed URL, and its 401 without one.
+    let response = send(
+        &app,
+        get("/api/oauth/userinfo")
+            .header("authorization", format!("Bearer {access_token}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert_private(&response, "userinfo with a bearer");
+    let response = send(
+        &app,
+        get("/api/oauth/userinfo").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), 401);
+    assert_private(&response, "userinfo without a bearer");
+
+    // An admin route refuses a signed-in account that is not an admin.
+    let response = send(
+        &app,
+        get("/api/admin/accounts")
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), 403);
+    assert_private(&response, "admin refusal");
+
+    // The public documents are not forced to no-store.
+    for path in [
+        "/.well-known/openid-configuration",
+        "/.well-known/jwks.json",
+    ] {
+        let response = send(&app, get(path).body(Body::empty()).unwrap()).await;
+        assert_eq!(response.status(), 200, "{path}");
+        let cache_control = response
+            .headers()
+            .get("cache-control")
+            .map(|v| v.to_str().unwrap().to_owned())
+            .unwrap_or_default();
+        assert!(
+            !cache_control.contains("no-store"),
+            "{path}: {cache_control}"
+        );
+        assert!(
+            !cache_control.contains("private"),
+            "{path}: {cache_control}"
+        );
+    }
+}

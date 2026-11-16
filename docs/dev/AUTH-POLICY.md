@@ -21,6 +21,19 @@ workspace daemon uses to fetch its binding.
 - Session cookies are browser credentials. A session token in
   `Authorization: Bearer` is invalid and must not be reinterpreted as another
   flavor.
+- Every IdP response under `/api/` depends on the caller's cookie or
+  `Authorization` header, so it carries `Cache-Control: no-store, private`
+  and no `ETag` or `Last-Modified`: no shared cache may store one caller's
+  answer for another. This covers `/api/auth/*` (including
+  `get-session`), `/api/admin/*`, and every `/api/oauth/*` and
+  `/api/oidc/*` response: redirects that carry a code
+  (`GET /api/oauth/authorize`, `GET /api/oidc/callback`),
+  `GET /api/oauth/userinfo` (the bearer's claims at a fixed URL), and
+  every error. Public, caller-independent documents (`/.well-known/*`, including
+  the JWKS) keep their own caching. The edge also bypasses its cache for
+  these paths; the origin rule holds without it (P0 found by cw-selfhost,
+  2026-11-16: the edge cache served one caller's `/api/auth/get-session`
+  to others; edge fix by cw-security; routes on #5054).
 - Native OAuth credentials are opaque and authoritative in the IDP token
   store. `TokenProvider` supplies the current access token; a
   `CredentialStore` persists the access/refresh pair atomically and saves a

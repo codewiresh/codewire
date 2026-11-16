@@ -267,20 +267,22 @@ async fn serve() -> anyhow::Result<()> {
         email,
     );
 
-    let app = AppBuilder::new("codewire-idp")
-        .with_health_and_db(pool)
-        .into_router()
-        .merge(oidc)
-        .merge(device_verification)
-        .merge(session_auth)
-        .merge(signup_mode)
-        .merge(oauth)
-        .merge(email_password)
-        .merge(access_admin)
-        .merge(account_admin_delete)
-        .merge(two_factor)
-        .merge(two_factor_replacement)
-        .merge(password_add);
+    let app = codewire_idp::private_api::private_api_responses(
+        AppBuilder::new("codewire-idp")
+            .with_health_and_db(pool)
+            .into_router()
+            .merge(oidc)
+            .merge(device_verification)
+            .merge(session_auth)
+            .merge(signup_mode)
+            .merge(oauth)
+            .merge(email_password)
+            .merge(access_admin)
+            .merge(account_admin_delete)
+            .merge(two_factor)
+            .merge(two_factor_replacement)
+            .merge(password_add),
+    );
 
     let metrics_bind = metrics_addr(std::env::var(METRICS_ADDR_ENV).ok().as_deref())?;
     let metrics = codewire_server_core::metrics::router("codewire-idp");

@@ -35,6 +35,7 @@ pub mod keys;
 mod mail_limit;
 pub mod oauth;
 pub mod password_add;
+pub mod private_api;
 pub mod provisioning;
 pub mod service;
 mod signup_limit;
