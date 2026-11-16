@@ -126,11 +126,23 @@ class PrAdmission(unittest.TestCase):
         state = {run_id: "admitted" for run_id in range(1, 6)} | {7: "cancelled", 10: "waiting"}
         self.assertEqual(self.decide(state, 10)[0], gate.ADMITTED)
 
+    def test_at_most_two_gates_hold_a_light_runner_slot(self) -> None:
+        # Seven gates held slots and polled for a median 2,875 s on 2026-11-16
+        # while the light runner's real jobs queued: now two wait, and the
+        # oldest of any more start over the limit.
+        self.assertEqual(gate.WAITING_LIMIT, 2)
+        state = ({run_id: "admitted" for run_id in range(1, 7)}
+                 | {10: "waiting", 11: "waiting", 12: "waiting"})
+        self.assertEqual(self.decide(state, 10)[0], gate.OVERFLOW)
+        self.assertEqual([self.decide(state, run_id)[0] for run_id in (11, 12)], [gate.WAIT, gate.WAIT])
+
+    @mock.patch.object(gate, "WAITING_LIMIT", 6)
     def test_too_many_waiting_gates_overflow_rather_than_fill_the_light_runner(self) -> None:
         # Seven gates wait: one more than the light runner holds beside the
         # admitted runs' jobs, so one starts over the limit. It is the oldest:
         # letting the newest in made the first six wait while later pushes
-        # passed them (2026-11-15: two hours, 12 runs admitted).
+        # passed them (2026-11-15: two hours, 12 runs admitted). The cases
+        # read with the limit at its earlier 6, which they were written for.
         self.assertEqual(gate.WAITING_LIMIT, 6)
         state = ({run_id: "admitted" for run_id in range(1, 7)}
                  | {run_id: "waiting" for run_id in range(10, 16)} | {30: "waiting"})

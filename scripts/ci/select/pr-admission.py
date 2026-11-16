@@ -60,9 +60,13 @@ GATE_JOB = "PR admission"
 UNFINISHED_RUN_STATES = ("waiting", "running", "unknown")
 ADMITTED_LIMIT = 6
 # Waiting gates hold light runner slots. The light runner takes 24 jobs
-# (owner, 2026-11-14: faster jobs, not more of them; infra#2471), so at most 6
-# wait and at least 18 slots stay for every repository's real light jobs.
-WAITING_LIMIT = 6
+# (owner, 2026-11-14: faster jobs, not more of them; infra#2471), so at most 2
+# wait and at least 22 slots stay for every repository's real light jobs. At 6,
+# on 2026-11-16, seven gates held slots and polled for a median 2,875 s while
+# infra's contract shards and the pull requests' own light jobs queued behind
+# them (infra#1534); an overflowed run's build still waits its turn on the
+# build runners, holding no slot.
+WAITING_LIMIT = 2
 POLL_SECONDS = 45
 # Inside the gate job's 235 minutes and the light runner's 240-minute cap.
 WAIT_SECONDS = 230 * 60
@@ -117,12 +121,14 @@ def gate_state(jobs: list[dict], run_id: int) -> str | None:
 
 
 def decide(api, own_run_id: int, *, limit: int = ADMITTED_LIMIT,
-           waiting_limit: int = WAITING_LIMIT, deadline: float | None = None,
+           waiting_limit: int | None = None, deadline: float | None = None,
            clock: Callable[[], float] = time.monotonic) -> tuple[str, str]:
     """ADMITTED, OVERFLOW or WAIT for this run, with the reason.
 
     Only the run list itself unreadable raises Unproven; past the deadline,
     before any request, it raises DeadlineReached."""
+    # Read at call time, so the module's limit is the one that applies.
+    waiting_limit = WAITING_LIMIT if waiting_limit is None else waiting_limit
     def in_time() -> None:
         if deadline is not None and clock() >= deadline:
             raise DeadlineReached
