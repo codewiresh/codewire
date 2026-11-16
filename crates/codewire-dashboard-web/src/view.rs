@@ -146,6 +146,10 @@ pub(crate) struct AccountAccessView {
     pub(crate) name: String,
     pub(crate) email_verified: bool,
     pub(crate) enabled: bool,
+    /// Suspended by an administrator: only Unsuspend brings it back.
+    pub(crate) suspended: bool,
+    /// The signed-in administrator's own account, which it can't suspend.
+    pub(crate) own: bool,
     pub(crate) reason: String,
     pub(crate) has_reason: bool,
     pub(crate) created_at: String,

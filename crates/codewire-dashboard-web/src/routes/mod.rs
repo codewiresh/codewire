@@ -131,6 +131,14 @@ pub(crate) fn router() -> Router<AppState> {
             "/admin/accounts/_actions/resend-verification",
             post(admin::resend_account_verification),
         )
+        .route(
+            "/admin/accounts/_actions/suspend",
+            post(admin::suspend_account),
+        )
+        .route(
+            "/admin/accounts/_actions/unsuspend",
+            post(admin::unsuspend_account),
+        )
         .route("/admin/organizations", get(slash_redirect))
         .route("/admin/organizations/", get(admin::organizations))
         .route(

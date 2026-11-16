@@ -6089,6 +6089,33 @@ async fn admin_resends_verification_only_for_an_unverified_account_against_postg
             .await
             .unwrap();
     assert!(!enabled, "a suspended account stays disabled");
+    // The list says which accounts are suspended, so Account Access offers
+    // Unsuspend instead of Enable.
+    let (status, body, _) = sess_req(
+        &app,
+        "GET",
+        "/api/admin/accounts",
+        Some("sess_admin_resend_token"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let suspended = |id: &str| {
+        body["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|account| account["id"] == id)
+            .map(|account| account["suspended"].clone())
+    };
+    assert_eq!(
+        suspended("u_verified_resend"),
+        Some(serde_json::json!(true))
+    );
+    assert_eq!(
+        suspended("u_waiting_resend"),
+        Some(serde_json::json!(false))
+    );
     cleanup(pool.clone()).await;
 }
 

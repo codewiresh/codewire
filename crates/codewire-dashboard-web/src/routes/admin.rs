@@ -29,6 +29,8 @@ use crate::{
     view::{AccountAccessView, DashboardView, LinkedIdentityView},
 };
 
+mod account_suspension;
+pub(super) use account_suspension::{suspend_account, unsuspend_account};
 pub(super) mod account_list;
 pub(super) mod feedback;
 
@@ -71,6 +73,9 @@ struct AccountAccessResponse {
     name: Option<String>,
     email_verified: bool,
     enabled: bool,
+    /// An IdP that does not say is read as not suspended.
+    #[serde(default)]
+    suspended: bool,
     access_reason: Option<String>,
     created_at: String,
     /// An IdP that does not list identities yet is read as none.
@@ -342,6 +347,7 @@ pub(super) async fn set_account_enabled(
         StatusCode::FORBIDDEN => error_page(WebError::Forbidden),
         StatusCode::NOT_FOUND => account_redirect("", "not-found", &headers),
         StatusCode::BAD_REQUEST => account_redirect("", "invalid", &headers),
+        StatusCode::CONFLICT => account_redirect("", "suspended", &headers),
         StatusCode::SERVICE_UNAVAILABLE => account_redirect("", "email-unavailable", &headers),
         _ => account_redirect("", "unavailable", &headers),
     }
@@ -1099,7 +1105,7 @@ async fn admin_action_page_context_for(
     admin_context(state, headers, &continuation, selected_slug).await
 }
 
-fn account_access_view(account: &AccountAccessResponse) -> AccountAccessView {
+fn account_access_view(account: &AccountAccessResponse, own_id: &str) -> AccountAccessView {
     let name = account
         .name
         .as_deref()
@@ -1120,6 +1126,8 @@ fn account_access_view(account: &AccountAccessResponse) -> AccountAccessView {
         name,
         email_verified: account.email_verified,
         enabled: account.enabled,
+        suspended: account.suspended,
+        own: account.id == own_id,
         reason,
         has_reason: account.access_reason.is_some(),
         created_at: account.created_at.clone(),
@@ -1359,7 +1367,7 @@ fn account_message(value: &str) -> &'static str {
         "account-enabled" => "Account enabled and access email sent.",
         "account-disabled" => "Account disabled.",
         "verification-sent" => "Verification email sent. The link works for 24 hours.",
-        _ => "",
+        _ => account_suspension::message(value),
     }
 }
 
@@ -1375,7 +1383,7 @@ fn account_error(value: &str) -> &'static str {
             "The verification email could not be sent. Try again shortly."
         }
         "unavailable" => "Account access is temporarily unavailable.",
-        _ => "",
+        _ => account_suspension::error(value),
     }
 }
 

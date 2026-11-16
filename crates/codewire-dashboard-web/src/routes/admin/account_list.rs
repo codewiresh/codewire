@@ -63,7 +63,7 @@ pub(in crate::routes) async fn list(
         .accounts
         .iter()
         .filter(|row| account.is_none_or(|account| row.id == account))
-        .map(account_access_view)
+        .map(|row| account_access_view(row, &dashboard.account_id))
         .collect::<Vec<_>>();
     // A session the IdP changed gets a new token, and the forms render with
     // the token the browser keeps.

@@ -12,7 +12,8 @@ use codewire_admin_proto::codewire::admin::v1::{
     SetDefaultEnvironmentQuotaRequest, SetOrganizationConfidentialEnvironmentsRequest,
     SetOrganizationDedicatedCpuRequest, SetOrganizationEnvironmentQuotaRequest,
     SetOrganizationRateCardRequest, SetPlanArchivedRequest, SetPriceArchivedRequest,
-    UpdatePlanRequest, UpdatePriceRequest, UpdateSettingRequest,
+    SuspendAccountRequest, UnsuspendAccountRequest, UpdatePlanRequest, UpdatePriceRequest,
+    UpdateSettingRequest,
 };
 use connectrpc::{ConnectError, client::ClientConfig};
 
@@ -677,6 +678,41 @@ pub(crate) async fn set_confidential_environments(
                 ..Default::default()
             },
         )
+        .await?;
+    Ok(())
+}
+
+/// Suspends an account and the organizations it alone owns (#3297). Returns
+/// how many organizations it shares with another owner, which are left as
+/// they were.
+pub(crate) async fn suspend_account(
+    state: &AppState,
+    cookie: HeaderValue,
+    account_id: String,
+    reason: String,
+) -> Result<usize, ConnectError> {
+    let suspension = admin_client(state, cookie)
+        .suspend_account(SuspendAccountRequest {
+            account_id,
+            reason,
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    Ok(suspension.shared_organization_ids.len())
+}
+
+/// Clears an account's suspension and the marks it made on organizations.
+pub(crate) async fn unsuspend_account(
+    state: &AppState,
+    cookie: HeaderValue,
+    account_id: String,
+) -> Result<(), ConnectError> {
+    admin_client(state, cookie)
+        .unsuspend_account(UnsuspendAccountRequest {
+            account_id,
+            ..Default::default()
+        })
         .await?;
     Ok(())
 }

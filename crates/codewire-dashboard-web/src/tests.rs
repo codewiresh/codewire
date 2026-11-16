@@ -353,6 +353,8 @@ fn admin_accounts_template_escapes_access_request_fields() {
         name: "<script>alert('name')</script>".into(),
         email_verified: true,
         enabled: false,
+        suspended: false,
+        own: false,
         reason: "</td><script>alert('reason')</script>".into(),
         has_reason: true,
         created_at: "2026-09-08T12:00:00".into(),
@@ -420,6 +422,8 @@ fn only_an_unverified_account_offers_to_resend_its_verification_email() {
         name: id.into(),
         email_verified,
         enabled: false,
+        suspended: false,
+        own: false,
         reason: "Build agents".into(),
         has_reason: true,
         created_at: "2026-11-12T12:00:00".into(),
@@ -446,6 +450,112 @@ fn only_an_unverified_account_offers_to_resend_its_verification_email() {
     );
     assert!(body.contains(
         "<span class=\"cw-badge\" data-tone=\"warning\">Unverified</span><form class=\"cw-access-resend\" method=\"post\" action=\"/admin/accounts/_actions/resend-verification\"><input type=\"hidden\" name=\"_csrf\" value=\"csrf-marker\"><input type=\"hidden\" name=\"user_id\" value=\"user-waiting\"><button class=\"cw-button cw-button--outline cw-button--pill cw-button--small\" type=\"submit\">Resend verification email</button></form>"
+    ));
+}
+
+/// Suspend is offered on every account but the administrator's own, behind a
+/// confirmation that asks why; a suspended account offers only Unsuspend,
+/// never Enable (#3297, #4579).
+#[test]
+fn account_access_offers_suspend_and_unsuspend_behind_a_confirmation() {
+    let view = DashboardView {
+        account_id: "user-admin".to_owned(),
+        user_name: "Admin".into(),
+        csrf_token: Default::default(),
+        is_admin: true,
+        organizations: Vec::new(),
+        has_organizations: false,
+        organization_navigation_unavailable: false,
+        new_organization_url: "/organizations/new/".into(),
+        settings_url: "/settings/".into(),
+        has_selected_organization: false,
+        selected_organization_name: String::new(),
+        selected_organization_slug: String::new(),
+        selected_organization_url: String::new(),
+        sandboxes: Vec::new(),
+        recent_sandboxes: Vec::new(),
+        sandbox_rail_available: false,
+        sandbox_rail_loading: false,
+        sandbox_total: 0,
+        sandbox_running: 0,
+        sandbox_stopped: 0,
+        sandbox_attention: 0,
+        provisioned_cpu_millicores: 0,
+        provisioned_memory_mb: 0,
+        provisioned_disk_gb: 0,
+        sidebar_collapsed: false,
+        support_mailto: String::new(),
+    };
+    let account = |id: &str, suspended: bool, own: bool| AccountAccessView {
+        id: id.into(),
+        email: format!("{id}@example.test"),
+        name: id.into(),
+        email_verified: true,
+        enabled: !suspended,
+        suspended,
+        own,
+        reason: "Build agents".into(),
+        has_reason: true,
+        created_at: "2026-11-12T12:00:00".into(),
+        identities: Vec::new(),
+    };
+    let accounts = vec![
+        account("user-active", false, false),
+        account("user-suspended", true, false),
+        account("user-admin", false, true),
+    ];
+    let body = AdminAccountsTemplate {
+        view: &view,
+        accounts: &accounts,
+        one_account: false,
+        csrf_token: "csrf-marker",
+        message: "",
+        error: "",
+    }
+    .render()
+    .expect("render admin account access page");
+
+    // Only the active account that isn't the administrator's can be suspended.
+    assert_eq!(
+        body.matches("data-dialog-open=\"account-1-suspend\"")
+            .count(),
+        1
+    );
+    assert!(!body.contains("account-3-suspend"));
+    assert_eq!(
+        body.matches("action=\"/admin/accounts/_actions/suspend\"")
+            .count(),
+        1
+    );
+    assert!(body.contains(
+        "<p>Suspending signs this account out everywhere and disables its API keys. Unsuspending does not bring them back.</p>"
+    ));
+    assert!(body.contains(
+        "<input type=\"hidden\" name=\"user_id\" value=\"user-active\"><div class=\"cw-field\"><label class=\"cw-label\" for=\"account-1-suspend-reason\">Reason</label><textarea class=\"cw-textarea\" id=\"account-1-suspend-reason\" name=\"reason\" rows=\"3\" maxlength=\"2000\" required"
+    ));
+    assert!(body.contains(
+        "<button class=\"cw-button cw-danger-button\" type=\"submit\" form=\"account-1-suspend-form\">Suspend account</button>"
+    ));
+
+    // The suspended account says so and offers Unsuspend, not Enable.
+    assert!(body.contains(
+        "<span class=\"cw-badge\" data-tone=\"danger\">Suspended</span><button class=\"cw-button cw-button--outline cw-button--pill\" type=\"button\" data-dialog-open=\"account-2-unsuspend\""
+    ));
+    assert_eq!(
+        body.matches("action=\"/admin/accounts/_actions/unsuspend\"")
+            .count(),
+        1
+    );
+    assert!(
+        body.contains("<input type=\"hidden\" name=\"user_id\" value=\"user-suspended\"></form>")
+    );
+    assert_eq!(
+        body.matches("action=\"/admin/accounts/_actions/enabled\"")
+            .count(),
+        2
+    );
+    assert!(body.contains(
+        "Nothing the suspension stopped comes back: its Sandboxes stay stopped, its API keys stay disabled and its ports stay creator-only."
     ));
 }
 

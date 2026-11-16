@@ -37,6 +37,8 @@ struct AccountAccessRow {
     name: Option<String>,
     email_verified: bool,
     enabled: bool,
+    /// Suspended by an administrator (#3297): only unsuspending enables it.
+    suspended: bool,
     access_reason: Option<String>,
     created_at: NaiveDateTime,
     /// Who vouched for the address on a server with no mail (#4121):
@@ -124,6 +126,7 @@ async fn list_accounts(
                   name,
                   COALESCE(email_verified, false) AS email_verified,
                   enabled,
+                  suspended_at IS NOT NULL AS suspended,
                   access_reason,
                   COALESCE(created_at, NOW()::timestamp) AS created_at,
                   email_vouched_by AS vouched_by
