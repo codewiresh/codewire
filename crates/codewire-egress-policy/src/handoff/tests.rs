@@ -657,3 +657,151 @@ fn a_poisoned_receiver_makes_the_next_send_fail_at_once() {
     );
     assert!(started.elapsed() < TAG_WAIT);
 }
+
+/// What a test passes in flight: one end of a Unix socket pair, or an
+/// accepted loopback TCP connection, the shape of a Mesh ingress connection.
+#[derive(Clone, Copy)]
+enum Passed {
+    Unix,
+    Tcp,
+}
+
+/// Passes a socket whose peer has written `MESH` `attempts` times, receives
+/// each 20 ms later, and counts those whose bytes arrived, while other threads
+/// keep discarding sockets still queued in closed carriers. The sender closes
+/// its own copy right after sending unless `sender_keeps` holds it until the
+/// receiver has taken it.
+fn in_flight_sockets_keeping_their_bytes(
+    kind: Passed,
+    attempts: usize,
+    sender_keeps: bool,
+) -> usize {
+    use std::io::Write as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let churn: Vec<_> = (0..4)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    // Churn only: an iteration that cannot get its sockets
+                    // (a descriptor limit while the suite runs) is skipped.
+                    let (Ok((carrier, carrier_end)), Ok((queued, queued_peer))) =
+                        (stream_pair(), stream_pair())
+                    else {
+                        std::thread::yield_now();
+                        continue;
+                    };
+                    if let Ok(mut sender) = HandoffSender::new(carrier) {
+                        let _ = sender.send_frame(b"c", &[queued.as_fd()]);
+                    }
+                    drop((queued, queued_peer, carrier_end));
+                }
+            })
+        })
+        .collect();
+    let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let (control, control_end) = stream_pair().unwrap();
+    let mut sender = HandoffSender::new(control).unwrap();
+    let mut receiver = HandoffReceiver::new(control_end).unwrap();
+    let mut kept_bytes = 0;
+    for _ in 0..attempts {
+        // The peer, which must outlive the read, and the socket passed.
+        let (peer, passed): (Box<dyn std::any::Any>, OwnedFd) = match kind {
+            Passed::Unix => {
+                let (peer, passed) = stream_pair().unwrap();
+                assert_eq!(rustix::io::write(&peer, b"MESH").unwrap(), 4);
+                (Box::new(peer), passed)
+            }
+            Passed::Tcp => {
+                let mut client =
+                    std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+                client.write_all(b"MESH").unwrap();
+                let (accepted, _) = listener.accept().unwrap();
+                (Box::new(client), OwnedFd::from(accepted))
+            }
+        };
+        sender.send_frame(b"p", &[passed.as_fd()]).unwrap();
+        let held = sender_keeps.then_some(passed);
+        std::thread::sleep(Duration::from_millis(20));
+        let (_, descriptors) = receiver.recv_frame(1, 1).unwrap();
+        drop(held);
+        let mut bytes = [0_u8; 4];
+        if read_passed(&descriptors[0], &mut bytes) && bytes == *b"MESH" {
+            kept_bytes += 1;
+        }
+        drop(peer);
+    }
+    stop.store(true, Ordering::Relaxed);
+    for thread in churn {
+        thread.join().unwrap();
+    }
+    kept_bytes
+}
+
+/// Fills `bytes` from a received socket of either kind, waiting at most
+/// 500 ms for each read; false at end of file, on an error, or on a wait that
+/// runs out.
+fn read_passed(socket: &OwnedFd, bytes: &mut [u8]) -> bool {
+    let mut read = 0;
+    while read < bytes.len() {
+        let mut fds = [rustix::event::PollFd::new(
+            socket,
+            rustix::event::PollFlags::IN,
+        )];
+        let timeout = rustix::event::Timespec {
+            tv_sec: 0,
+            tv_nsec: 500_000_000,
+        };
+        if !matches!(rustix::event::poll(&mut fds, Some(&timeout)), Ok(ready) if ready > 0) {
+            return false;
+        }
+        match rustix::io::read(socket, &mut bytes[read..]) {
+            Ok(0) | Err(_) => return false,
+            Ok(more) => read += more,
+        }
+    }
+    true
+}
+
+/// macOS discards a socket in flight in `SCM_RIGHTS` once its sender has
+/// closed its last copy, if the kernel collects in-flight sockets before the
+/// receiver takes it: the receiver gets a socket with no data that reads as end
+/// of file (#4916). Measured on macOS 27.2.1 with this churn: 200 of 200 Unix
+/// sockets and 200 of 200 accepted TCP connections lost, and 14 of 200 Unix
+/// sockets with no churn at all. Linux keeps them.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_loses_an_in_flight_socket_whose_sender_closed_it() {
+    for kind in [Passed::Unix, Passed::Tcp] {
+        let kept = in_flight_sockets_keeping_their_bytes(kind, 20, false);
+        assert!(
+            kept < 20,
+            "macOS kept every in-flight socket ({kept} of 20): the kernel no longer discards them, \
+             so re-measure before relaxing the rule that a sender keeps each passed descriptor \
+             until the receiver has it"
+        );
+    }
+}
+
+/// Linux keeps an in-flight socket whose sender closed its copy: the same
+/// churn loses nothing there (#4916).
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_keeps_an_in_flight_socket_whose_sender_closed_it() {
+    for kind in [Passed::Unix, Passed::Tcp] {
+        assert_eq!(in_flight_sockets_keeping_their_bytes(kind, 20, false), 20);
+    }
+}
+
+/// A sender that keeps its copy until the receiver has taken the socket loses
+/// nothing under the same churn: what a descriptor's sender must do on macOS.
+#[test]
+fn a_sender_that_keeps_its_copy_until_received_loses_nothing() {
+    for kind in [Passed::Unix, Passed::Tcp] {
+        assert_eq!(in_flight_sockets_keeping_their_bytes(kind, 20, true), 20);
+    }
+}
