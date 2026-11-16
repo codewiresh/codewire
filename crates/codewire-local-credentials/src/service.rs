@@ -509,6 +509,7 @@ struct BrokerEnsureRequest {
     projection: Option<crate::LocalEnvironmentProjectionBinding>,
     platform: Option<crate::PlatformCredentialBinding>,
     local_profile: Option<EnvironmentAccessBinding>,
+    network_policy_allows_github: bool,
 }
 
 type PlatformBrokerBinding = (
@@ -739,6 +740,7 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
             runner_socket: request.runner_socket,
             http_providers,
             platform_delegated,
+            network_policy_allows_github: request.network_policy_allows_github,
         };
         config
             .validate()
@@ -753,7 +755,13 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
                 if *existing.shutdown.borrow() {
                     return Err(Status::unavailable("local credential broker is draining"));
                 }
-                if existing.config != config
+                // The network policy's answer for GitHub is the one part of
+                // a selection that may change while a generation runs.
+                let under_this_policy = LocalBrokerProcessConfig {
+                    network_policy_allows_github: config.network_policy_allows_github,
+                    ..existing.config.clone()
+                };
+                if under_this_policy != config
                     || existing.projection != request.projection
                     || existing.platform != request.platform
                     || existing.local_profile != request.local_profile
@@ -762,8 +770,13 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
                         "broker selection changed within an active environment generation",
                     ));
                 }
-                let running = *existing.state.borrow() == BrokerProcessState::Running;
-                return Ok(broker_runtime(config, running));
+                if existing.config == config {
+                    let running = *existing.state.borrow() == BrokerProcessState::Running;
+                    return Ok(broker_runtime(config, running));
+                }
+                // A live policy change (#4926): the broker that served under
+                // the earlier answer is stopped before its replacement
+                // starts, so a replacement that fails leaves none serving.
             }
             stop_broker_entry(existing, &self.ssh_runtime).await?;
         }
@@ -2015,6 +2028,9 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
                     .platform
                     .map(crate::PlatformCredentialBinding::from_proto)
                     .transpose()?,
+                // A supervisor older than protocol 20 does not say; it is
+                // served as it was before the rule existed.
+                network_policy_allows_github: request.network_policy_allows_github.unwrap_or(true),
             })
             .await?;
         Ok(Response::new(environment_broker_runtime_to_proto(runtime)))
@@ -2586,6 +2602,7 @@ mod drain_tests {
             runner_socket: directory.path().join("runner.sock"),
             http_providers: BTreeSet::new(),
             platform_delegated: false,
+            network_policy_allows_github: true,
         };
         manager.entries.lock().await.insert(
             environment_id.clone(),

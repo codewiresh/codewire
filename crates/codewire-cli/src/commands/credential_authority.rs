@@ -510,6 +510,9 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
         if config.platform_delegated {
             command.arg("--platform-delegated");
         }
+        if config.network_policy_allows_github {
+            command.arg("--network-policy-allows-github");
+        }
         // SAFETY: this post-fork hook uses scalar libc operations only. It
         // transfers one authority-created socket to fixed FD 3, marks every
         // other inherited descriptor close-on-exec, removes capabilities,

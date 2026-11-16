@@ -11,6 +11,10 @@ pub struct EnvironmentBrokerSelection {
     pub local_profile: Option<codewire_access::EnvironmentAccessBinding>,
     pub projection: Option<crate::LocalEnvironmentProjectionBinding>,
     pub platform: Option<crate::PlatformCredentialBinding>,
+    /// Whether the environment's network policy allows GitHub's hosts by
+    /// rule (#4926). The default is no: a caller of this client that does
+    /// not say is refused the managed GitHub credential.
+    pub network_policy_allows_github: bool,
 }
 
 /// Material-free launch description for one environment generation. Provider
@@ -24,6 +28,9 @@ pub struct LocalBrokerProcessConfig {
     pub http_providers: BTreeSet<HttpProvider>,
     /// The child is a material-free platform relay, not a local store reader.
     pub platform_delegated: bool,
+    /// Whether the child serves the managed GitHub credential: the
+    /// environment's network policy allows GitHub's hosts by rule (#4926).
+    pub network_policy_allows_github: bool,
 }
 
 impl LocalBrokerProcessConfig {
@@ -93,6 +100,7 @@ mod tests {
             runner_socket: PathBuf::from("/run/user/1000/codewire/runners/environment-id.sock"),
             http_providers: BTreeSet::from([HttpProvider::OpenAiApiKey]),
             platform_delegated: false,
+            network_policy_allows_github: true,
         }
     }
 

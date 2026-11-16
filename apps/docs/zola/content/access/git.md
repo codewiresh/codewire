@@ -1,7 +1,7 @@
 ---
 title: Git repositories
 description: Create environments from private GitHub repositories through the Codewire GitHub App or an SSH key, without a token in the environment.
-updated: 2026-10-26
+updated: 2026-11-16
 weight: 3
 aliases: ["/guides/private-repositories"]
 ---
@@ -77,3 +77,7 @@ An SSH source uses the profile's SSH key; without a key, a `github.com`
 source in SSH form goes through the GitHub connection, and its origin stays
 as written. Other SSH hosts need the key and their `known_hosts` lines in the
 project file. See [`codewire.yaml`](@/environments/codewire-yaml.md).
+
+Inside the VM, `git` and `gh` use the GitHub connection only when the VM's
+network policy allows both `github.com` and `api.github.com`. See
+[Egress policies](@/networking/egress.md).

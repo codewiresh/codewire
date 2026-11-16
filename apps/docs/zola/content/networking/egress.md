@@ -53,11 +53,22 @@ Choose it when you create the VM with `cw create --local --policy web-only`.
 removes one no environment selects. If the worker or the broker stops, the
 environment fails closed (`error`) until you stop and start it.
 
-A network policy does not yet cover Codewire's own GitHub connection. In a VM
-whose profile has one, `git` and `gh` reach GitHub through Codewire on your
-machine, whatever the policy: they can fetch and push to every repository the
-connection reaches, even under `locked`. For a VM that must send nothing out,
-use a profile without a GitHub connection.
+A network policy also decides whether Codewire's own GitHub connection is
+used. In a VM whose profile has one, `git` and `gh` use it only when the
+policy allows both `github.com` and `api.github.com`. `open` does. Under
+`locked`, or a policy that leaves either host out, they fail with a message
+that names the network policy. To use the connection under your own policy,
+allow both hosts:
+
+```sh
+cw --local policy allow web-only api.github.com
+```
+
+Right after you update `cw`, VMs that were already running are still served
+by the earlier version's background services. Until you have stopped your
+local VMs once, a VM that was already running keeps using the GitHub
+connection as before the update, and a VM you start under a policy that does
+not allow GitHub gets none of its profile's credentials and says so.
 
 **A hosted sandbox** may reach the public Internet; private, loopback,
 link-local and carrier-grade NAT ranges are excluded. Your organization can

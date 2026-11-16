@@ -309,9 +309,8 @@ Issues: #2537, #4000.
 
 ## `locked-refuses-managed-github`: a policy that does not allow GitHub refuses the managed credential
 
-Issue: #4926. **Not built yet.** Today the managed GitHub credential is served
-whatever the policy says; `docs/dev/LINUX-LOCAL-VMS.md`, "Network policies",
-states the limit.
+Issue: #4926. `docs/dev/LINUX-LOCAL-VMS.md`, "Network policies", states the
+rule.
 
 - **Entry points:** `git` and `gh` in a local VM whose profile has a GitHub
   connection, with interception off, so requests take the credential route on
@@ -919,9 +918,8 @@ Issue: #3999. Hosted Sandboxes follow with #4001.
   - with the switch off, on a policy that allows the two hosts, clone and
     push work through the loopback rewrite, as before;
   - with the switch off on `locked`, the same rule holds: nothing reaches
-    GitHub without a rule that allows it, the managed credential included.
-    Not yet observed, and not yet true: today the loopback route still
-    serves the managed credential there (#4926).
+    GitHub without a rule that allows it, the managed credential included
+    (#4926; the step is `locked-refuses-managed-github`).
 - **Gotchas:**
   - Git trusts the boot's CA through `GIT_SSL_CAINFO` and `gh` through
     `SSL_CERT_FILE`, both set only when the GitHub hosts are bound and both

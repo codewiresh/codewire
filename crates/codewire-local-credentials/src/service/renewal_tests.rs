@@ -249,6 +249,7 @@ impl Lifecycle {
             runner_socket: directory.path().join(format!("{environment_id}.sock")),
             http_providers: BTreeSet::from([HttpProvider::CodexOAuth]),
             platform_delegated: false,
+            network_policy_allows_github: true,
         };
         let (shutdown, shutdown_rx) = watch::channel(false);
         let (state, mut state_rx) = watch::channel(BrokerProcessState::Starting);

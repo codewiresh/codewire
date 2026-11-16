@@ -301,6 +301,9 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
         if config.platform_delegated {
             command.arg("--platform-delegated");
         }
+        if config.network_policy_allows_github {
+            command.arg("--network-policy-allows-github");
+        }
         bind_child_to_authority(&mut command, authority_fd);
         command.spawn().map_err(|_| LocalBrokerSpawnError::Spawn)
     }
@@ -511,6 +514,7 @@ mod tests {
             runner_socket: root.join("runners").join(format!("{environment}.sock")),
             http_providers: [codewire_access::HttpProvider::OpenAiApiKey].into(),
             platform_delegated: false,
+            network_policy_allows_github: false,
         };
         let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut child = LocalBrokerProcessSpawner::spawn(&spawner, &config, peer).unwrap();
@@ -542,6 +546,7 @@ mod tests {
         let platform = LocalBrokerProcessConfig {
             http_providers: Default::default(),
             platform_delegated: true,
+            network_policy_allows_github: false,
             ..config
         };
         let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();

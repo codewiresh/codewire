@@ -410,6 +410,10 @@ pub(crate) struct LocalCredentialBrokerArgs {
     pub(crate) http_providers: Vec<String>,
     #[arg(long)]
     pub(crate) platform_delegated: bool,
+    /// The environment's network policy allows GitHub's hosts by rule, so
+    /// the managed GitHub credential is served (#4926). Absent, it is not.
+    #[arg(long)]
+    pub(crate) network_policy_allows_github: bool,
     /// The authority's store: macOS brokers read the selected backend.
     #[cfg(target_os = "macos")]
     #[command(flatten)]

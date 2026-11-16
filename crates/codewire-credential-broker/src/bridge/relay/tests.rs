@@ -87,15 +87,19 @@ async fn relay_preserves_actual_ready_and_forwards_only_remaining_frames() {
     };
     let expected_response = response.payload.clone().unwrap();
 
-    let result = run_admitted_credential_bridge_relay(admitted, move |actual, mut input| {
-        assert_eq!(actual.environment_id, environment_id.to_string());
-        assert_eq!(actual.environment_generation, 9);
-        async move {
-            assert_eq!(input.next().await, Some(cancel));
-            assert!(input.next().await.is_none());
-            Ok(Box::pin(stream::iter([Ok(response)])) as CredentialBridgeRelayOutput)
-        }
-    })
+    let result = run_admitted_credential_bridge_relay(
+        admitted,
+        RelayNetworkPolicy::AllowsGitHub,
+        move |actual, mut input| {
+            assert_eq!(actual.environment_id, environment_id.to_string());
+            assert_eq!(actual.environment_generation, 9);
+            async move {
+                assert_eq!(input.next().await, Some(cancel));
+                assert!(input.next().await.is_none());
+                Ok(Box::pin(stream::iter([Ok(response)])) as CredentialBridgeRelayOutput)
+            }
+        },
+    )
     .await;
 
     assert_eq!(result, Err(BrokerBridgeError::Unavailable));
@@ -119,11 +123,15 @@ async fn relay_rejects_a_missing_host_payload() {
     .await
     .unwrap();
 
-    let result = run_admitted_credential_bridge_relay(admitted, |_actual, _input| async {
-        Ok(Box::pin(stream::iter([Ok(
-            v1::CredentialBridgeHostMessage::default(),
-        )])) as CredentialBridgeRelayOutput)
-    })
+    let result = run_admitted_credential_bridge_relay(
+        admitted,
+        RelayNetworkPolicy::AllowsGitHub,
+        |_actual, _input| async {
+            Ok(Box::pin(stream::iter([Ok(
+                v1::CredentialBridgeHostMessage::default(),
+            )])) as CredentialBridgeRelayOutput)
+        },
+    )
     .await;
 
     assert_eq!(result, Err(BrokerBridgeError::InvalidProtocol));
@@ -173,13 +181,16 @@ async fn relay_carries_the_codex_login_request_and_its_answer() {
     };
     let expected = answer.payload.clone().unwrap();
 
-    let result =
-        run_admitted_credential_bridge_relay(admitted, move |_actual, mut input| async move {
+    let result = run_admitted_credential_bridge_relay(
+        admitted,
+        RelayNetworkPolicy::AllowsGitHub,
+        move |_actual, mut input| async move {
             assert_eq!(input.next().await, Some(login));
             assert!(input.next().await.is_none());
             Ok(Box::pin(stream::iter([Ok(answer)])) as CredentialBridgeRelayOutput)
-        })
-        .await;
+        },
+    )
+    .await;
 
     assert_eq!(result, Err(BrokerBridgeError::Unavailable));
     assert_eq!(host_rx.recv().await, Some(expected));
@@ -228,13 +239,16 @@ async fn relay_carries_the_claude_login_request_and_its_answer() {
     };
     let expected = answer.payload.clone().unwrap();
 
-    let result =
-        run_admitted_credential_bridge_relay(admitted, move |_actual, mut input| async move {
+    let result = run_admitted_credential_bridge_relay(
+        admitted,
+        RelayNetworkPolicy::AllowsGitHub,
+        move |_actual, mut input| async move {
             assert_eq!(input.next().await, Some(login));
             assert!(input.next().await.is_none());
             Ok(Box::pin(stream::iter([Ok(answer)])) as CredentialBridgeRelayOutput)
-        })
-        .await;
+        },
+    )
+    .await;
 
     assert_eq!(result, Err(BrokerBridgeError::Unavailable));
     assert_eq!(host_rx.recv().await, Some(expected));
@@ -317,12 +331,15 @@ async fn relay_ends_the_input_on_a_front_door_guest_frame_as_on_an_unknown_one()
         .await
         .unwrap();
 
-        let result =
-            run_admitted_credential_bridge_relay(admitted, |_actual, mut input| async move {
+        let result = run_admitted_credential_bridge_relay(
+            admitted,
+            RelayNetworkPolicy::AllowsGitHub,
+            |_actual, mut input| async move {
                 assert!(input.next().await.is_none());
                 Ok(Box::pin(stream::empty()) as CredentialBridgeRelayOutput)
-            })
-            .await;
+            },
+        )
+        .await;
 
         assert_eq!(result, Err(BrokerBridgeError::Unavailable));
         assert!(host_rx.try_recv().is_err());
@@ -350,15 +367,107 @@ async fn relay_refuses_a_front_door_host_frame_as_an_unknown_one() {
         .await
         .unwrap();
 
-        let result = run_admitted_credential_bridge_relay(admitted, |_actual, _input| async {
-            Ok(Box::pin(stream::iter([Ok(v1::CredentialBridgeHostMessage {
-                payload,
-            })])) as CredentialBridgeRelayOutput)
-        })
+        let result = run_admitted_credential_bridge_relay(
+            admitted,
+            RelayNetworkPolicy::AllowsGitHub,
+            |_actual, _input| async {
+                Ok(Box::pin(stream::iter([Ok(v1::CredentialBridgeHostMessage {
+                    payload,
+                })])) as CredentialBridgeRelayOutput)
+            },
+        )
         .await;
 
         assert_eq!(result, Err(BrokerBridgeError::InvalidProtocol));
         assert!(host_rx.try_recv().is_err());
         drop(guest_tx);
     }
+}
+
+fn request(slot: &str, route: &str) -> v1::CredentialBridgeGuestMessage {
+    v1::CredentialBridgeGuestMessage {
+        payload: Some(v1::credential_bridge_guest_message::Payload::Request(
+            v1::CredentialBridgeRequest {
+                capability_slot: slot.into(),
+                route: route.into(),
+                request_id: Uuid::new_v4().to_string(),
+                method: "GET".into(),
+                path: "/user".into(),
+                ..Default::default()
+            },
+        )),
+    }
+}
+
+fn request_id(frame: &v1::CredentialBridgeGuestMessage) -> String {
+    match &frame.payload {
+        Some(v1::credential_bridge_guest_message::Payload::Request(request)) => {
+            request.request_id.clone()
+        }
+        _ => panic!("not a request"),
+    }
+}
+
+/// #4926: the remote authority has no network policy in hand, so a relay
+/// told that the policy does not allow GitHub answers a GitHub request
+/// itself, whole, and relays everything else. Before the fix the GitHub
+/// request reached the remote authority.
+#[tokio::test]
+async fn a_relay_refuses_github_itself_when_the_network_policy_does() {
+    use v1::credential_bridge_host_message::Payload;
+
+    let environment_id = Uuid::new_v4();
+    let (guest_tx, guest_rx) = mpsc::channel(4);
+    let (host_tx, mut host_rx) = mpsc::channel(8);
+    guest_tx.send(ready(environment_id, 9)).await.unwrap();
+    let github = request("github", "github-api");
+    let codex = request("codex", "openai-api");
+    guest_tx.send(github.clone()).await.unwrap();
+    guest_tx.send(codex.clone()).await.unwrap();
+    drop(guest_tx);
+    let admitted = super::super::admit_credential_bridge(
+        FakeBridge {
+            input: guest_rx,
+            output: FakeResponseSink(host_tx),
+        },
+        environment_id,
+        9,
+    )
+    .await
+    .unwrap();
+
+    let result = run_admitted_credential_bridge_relay(
+        admitted,
+        RelayNetworkPolicy::RefusesGitHub,
+        move |_actual, mut input| async move {
+            assert_eq!(input.next().await, Some(codex), "only the other slot");
+            assert!(input.next().await.is_none());
+            Ok(Box::pin(stream::iter([])) as CredentialBridgeRelayOutput)
+        },
+    )
+    .await;
+    assert_eq!(result, Err(BrokerBridgeError::Unavailable));
+
+    let id = request_id(&github);
+    match host_rx.recv().await {
+        Some(Payload::ResponseStart(start)) => {
+            assert_eq!((start.request_id, start.status_code), (id.clone(), 403));
+        }
+        other => panic!("expected the refusal's start, got {other:?}"),
+    }
+    match host_rx.recv().await {
+        Some(Payload::ResponseBody(body)) => {
+            assert_eq!(body.request_id, id);
+            let json: serde_json::Value = serde_json::from_slice(&body.data).unwrap();
+            assert_eq!(json["code"], "network_policy_refuses_github");
+        }
+        other => panic!("expected the refusal's body, got {other:?}"),
+    }
+    assert_eq!(
+        host_rx.recv().await,
+        Some(Payload::ResponseEnd(v1::CredentialBridgeResponseEnd {
+            request_id: id
+        }))
+    );
+    assert_eq!(host_rx.recv().await, None);
 }

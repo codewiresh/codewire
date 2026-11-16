@@ -40,7 +40,8 @@ pub use front_door::{
 };
 
 pub use relay::{
-    CredentialBridgeRelayInput, CredentialBridgeRelayOutput, run_admitted_credential_bridge_relay,
+    CredentialBridgeRelayInput, CredentialBridgeRelayOutput, RelayNetworkPolicy,
+    run_admitted_credential_bridge_relay,
 };
 
 /// Stable, value-blind failures for one authenticated broker bridge epoch.

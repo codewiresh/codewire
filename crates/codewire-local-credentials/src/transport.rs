@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 19;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 20;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -47,6 +47,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         19,
         "GetEnvironmentCredentialPlaceholders gives a boot its credential placeholders, and placeholders derive from the binding's profile revision (#3999)",
     ),
+    (
+        20,
+        "EnsureEnvironmentBroker carries the network policy's answer for GitHub, and the broker refuses the managed GitHub credential when it is no (#4926)",
+    ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
@@ -67,14 +71,20 @@ pub enum AuthorityFeature {
     /// agent hosts. An older authority has no such call, and derives its
     /// leases' placeholders from the VM generation.
     CredentialPlaceholders,
+    /// `EnsureEnvironmentBroker` with the network policy's answer for
+    /// GitHub: the broker it starts refuses the managed GitHub credential
+    /// when the answer is no. An older authority ignores the field and
+    /// serves GitHub whatever the policy says.
+    NetworkPolicyGithub,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::PlatformGithub,
         Self::ClaudeSignIn,
         Self::DefaultProfile,
         Self::CredentialPlaceholders,
+        Self::NetworkPolicyGithub,
     ];
 
     /// The protocol that introduced it.
@@ -84,6 +94,7 @@ impl AuthorityFeature {
             Self::ClaudeSignIn => 17,
             Self::DefaultProfile => 18,
             Self::CredentialPlaceholders => 19,
+            Self::NetworkPolicyGithub => 20,
         }
     }
 

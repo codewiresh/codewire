@@ -1913,6 +1913,24 @@ mod tests {
         assert!(permissions_fall_short(None));
     }
 
+    /// The App's permission set bounds what the managed GitHub credential
+    /// can do anywhere it is served: with these three it can push and open
+    /// pull requests, and cannot create a repository. `administration` would
+    /// bring repository creation back, and with it a way to carry data out
+    /// to a new repository (#4926). Widening this set is a security
+    /// decision, not a routine edit: change this test only with that review.
+    #[test]
+    fn the_app_asks_for_exactly_three_permissions() {
+        assert_eq!(
+            REQUIRED_PERMISSIONS,
+            [
+                ("contents", PermissionLevel::Write),
+                ("pull_requests", PermissionLevel::Write),
+                ("metadata", PermissionLevel::Read),
+            ]
+        );
+    }
+
     #[test]
     fn pending_permissions_link_to_the_installation_settings_page() {
         let pending = |installation_id, account_kind| GitHubAppPendingPermissions {

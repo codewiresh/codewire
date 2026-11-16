@@ -5768,6 +5768,69 @@ async fn credential_broker_rpc_quarantines_an_unsafe_runner_before_authority_use
     runner_server.await.unwrap();
 }
 
+/// #4926: an authority from before the rule keeps serving across a cw
+/// update and would ignore a "no". It is asked for a broker only when the
+/// policy allows GitHub anyway.
+#[test]
+fn an_authority_from_before_the_rule_is_not_asked_to_refuse_github() {
+    let since = AuthorityFeature::NetworkPolicyGithub.since();
+    assert!(authority_applies_network_policy(since, false));
+    assert!(authority_applies_network_policy(since, true));
+    assert!(authority_applies_network_policy(since - 1, true));
+    assert!(!authority_applies_network_policy(since - 1, false));
+}
+
+/// #4926: the credential broker never sees the network policy, so the
+/// request that starts it carries the policy's answer for GitHub, from the
+/// selection the environment's egress broker enforces.
+#[tokio::test]
+async fn the_credential_broker_is_told_whether_the_network_policy_allows_github() {
+    let environment = project_environment_with_access();
+    let (_parent, core) = test_supervisor_core(environment.clone());
+    let allows = |core: &SupervisorCore| {
+        core.credential_broker_request_for_environment(&environment, 1)
+            .unwrap()
+            .network_policy_allows_github
+    };
+    assert!(allows(&core), "no selection is `open`");
+    core.network_policies
+        .select(
+            environment.id,
+            Some(&crate::network_policy_store::PolicySelection::Locked),
+        )
+        .unwrap();
+    assert!(!allows(&core), "`locked` has no rule for GitHub");
+    core.network_policies.select(environment.id, None).unwrap();
+    assert!(allows(&core));
+
+    // A stored policy answers by its rules: both hosts, or not at all.
+    use crate::network_policy_store::{PolicyBase, PolicySelection, PolicySelector};
+    use codewire_egress_policy::reference::PolicyName;
+    use codewire_egress_policy::typed::{AllowRule, AllowTarget};
+    let rule = |target: &str| AllowRule::new(AllowTarget::parse(target).unwrap(), [443]).unwrap();
+    for (name, targets, expected) in [
+        ("both-hosts", &["github.com", "api.github.com"][..], true),
+        ("one-host", &["github.com"][..], false),
+        ("range-only", &["185.199.108.0/22"][..], false),
+    ] {
+        let name = PolicyName::parse(name).unwrap();
+        core.network_policies
+            .create(
+                &name,
+                &PolicyBase::Locked,
+                targets.iter().map(|target| rule(target)).collect(),
+            )
+            .unwrap();
+        core.network_policies
+            .select(
+                environment.id,
+                Some(&PolicySelection::Stored(PolicySelector::Name(name.clone()))),
+            )
+            .unwrap();
+        assert_eq!(allows(&core), expected, "{name}");
+    }
+}
+
 #[tokio::test]
 async fn credential_broker_requires_an_exact_runner_after_reconciliation() {
     let mut environment = project_environment_with_access();

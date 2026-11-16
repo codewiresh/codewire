@@ -10,8 +10,8 @@ use codewire_credential_broker::ProviderHttpsTransport;
 #[cfg(feature = "local-broker-synthetic-smoke")]
 use codewire_credential_broker::SyntheticOpenAiSmokeTransport;
 use codewire_credential_broker::{
-    BrokerBridgeError, CredentialBridgeRelayOutput, OpenAiBroker, admit_credential_bridge,
-    run_admitted_credential_bridge, run_admitted_credential_bridge_relay,
+    BrokerBridgeError, CredentialBridgeRelayOutput, OpenAiBroker, RelayNetworkPolicy,
+    admit_credential_bridge, run_admitted_credential_bridge, run_admitted_credential_bridge_relay,
 };
 #[cfg(target_os = "linux")]
 use codewire_local_credentials::AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES;
@@ -322,23 +322,32 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
         #[cfg(target_os = "linux")]
         apply_broker_seccomp_confinement().context("seal platform credential relay")?;
         stage.set("relay.run");
-        return run_admitted_credential_bridge_relay(bridge, move |ready, input| async move {
-            let output = delegation
-                .delegate_credentials(ready, input)
-                .await
-                .map_err(|_| BrokerBridgeError::Unavailable)?;
-            // The exact private admission was consumed only after the parent
-            // verified the exact public selection echo. HTTP headers alone
-            // never make this native broker ready.
-            delegation
-                .report_ready()
-                .await
-                .map_err(|_| BrokerBridgeError::Unavailable)?;
-            Ok(
-                Box::pin(output.map(|frame| frame.map_err(|_| BrokerBridgeError::Unavailable)))
-                    as CredentialBridgeRelayOutput,
-            )
-        })
+        let relay_policy = if args.network_policy_allows_github {
+            RelayNetworkPolicy::AllowsGitHub
+        } else {
+            RelayNetworkPolicy::RefusesGitHub
+        };
+        return run_admitted_credential_bridge_relay(
+            bridge,
+            relay_policy,
+            move |ready, input| async move {
+                let output = delegation
+                    .delegate_credentials(ready, input)
+                    .await
+                    .map_err(|_| BrokerBridgeError::Unavailable)?;
+                // The exact private admission was consumed only after the parent
+                // verified the exact public selection echo. HTTP headers alone
+                // never make this native broker ready.
+                delegation
+                    .report_ready()
+                    .await
+                    .map_err(|_| BrokerBridgeError::Unavailable)?;
+                Ok(
+                    Box::pin(output.map(|frame| frame.map_err(|_| BrokerBridgeError::Unavailable)))
+                        as CredentialBridgeRelayOutput,
+                )
+            },
+        )
         .await
         .context("run platform credential relay");
     }
@@ -373,7 +382,8 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
         .context("complete broker launch handshake")?;
     stage.set("provider.policy");
     let broker = OpenAiBroker::new(leases, upstream)
-        .map_err(|_| anyhow::anyhow!("initialize broker provider policy"))?;
+        .map_err(|_| anyhow::anyhow!("initialize broker provider policy"))?
+        .with_network_policy_allowing_github(args.network_policy_allows_github);
     #[cfg(not(feature = "local-broker-synthetic-smoke"))]
     let broker = match github_app {
         Some(owner) => broker.with_github_app_authorization_owner(owner),

@@ -740,6 +740,26 @@ the connection becomes active, before the next start configures Git and `gh`
 for it, as in a hosted Sandbox. It is still only the creator's own connection
 from their personal profile.
 
+On a local VM the network policy does limit it (#4926). Selecting a credential
+must not widen a network policy, and the managed route runs on the host,
+outside the VM's network. So the supervisor, which holds the VM's selected
+policy, decides whether a rule of that policy allows both `github.com` and
+`api.github.com` on 443 (`CompiledPolicy::allows_managed_github`), and the
+local credential authority passes the answer to the broker it starts. When the
+answer is no, a request on the GitHub slot is refused before any lease with
+status 403 and the code `network_policy_refuses_github`, as plain text for Git
+and JSON for the API, and one log line records it; a VM on a platform profile
+is refused the same way by its local relay, because the hosted credential
+service has no network policy in hand. A broker launched without the answer
+refuses GitHub. The answer is authority protocol 20: a supervisor from an
+earlier `cw` does not send it and is served as before, and a supervisor that
+finds an earlier authority still running, under a policy that does not allow
+GitHub, starts no credential broker for that VM and says to stop the local
+VMs so the authority is replaced. A change of policy stops the running broker
+before its replacement starts, so none serves under the earlier answer. Hosted Sandboxes do not apply
+network policies yet; the same decision applies there when they do. The
+intercepted route asks the same function per connection (#3999).
+
 Stock `gh` uses the same connection. While GitHub is selected, every session
 and managed agent also gets `GH_TOKEN=codewire-managed`, a public placeholder
 that only makes `gh` send requests, and `GH_CONFIG_DIR` naming a directory

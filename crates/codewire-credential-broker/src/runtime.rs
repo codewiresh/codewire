@@ -1052,6 +1052,7 @@ pub struct OpenAiBroker<P, U> {
     oauth_refresh: tokio::sync::Mutex<()>,
     oauth_refresh_operations: TaskTracker,
     placeholders: swap::PlaceholderCache,
+    network_policy_allows_github: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1337,6 +1338,7 @@ where
             oauth_refresh: tokio::sync::Mutex::new(()),
             oauth_refresh_operations: TaskTracker::new(),
             placeholders: swap::PlaceholderCache::default(),
+            network_policy_allows_github: true,
         })
     }
 

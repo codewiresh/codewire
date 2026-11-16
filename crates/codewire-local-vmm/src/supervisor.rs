@@ -169,6 +169,13 @@ fn platform_github_askable(authority_protocol: u32) -> Result<(), &'static str> 
     }
 }
 
+/// Whether an authority at `authority_protocol` may be asked for a broker
+/// under this answer (#4926). One from before the rule ignores the answer
+/// and serves GitHub, which is only right when the policy allows GitHub.
+fn authority_applies_network_policy(authority_protocol: u32, allows_github: bool) -> bool {
+    allows_github || AuthorityFeature::NetworkPolicyGithub.served_by(authority_protocol)
+}
+
 async fn request_runner_shutdown_and_observe(
     client: &mut RunnerClient,
     environment_id: Uuid,
@@ -207,6 +214,7 @@ struct CredentialBrokerEnsureRequest {
     projection: Option<codewire_local_credentials::LocalEnvironmentProjectionBinding>,
     platform: Option<codewire_local_credentials::PlatformCredentialBinding>,
     local_profile: Option<EnvironmentAccessBinding>,
+    network_policy_allows_github: bool,
     enabled: bool,
 }
 
@@ -5213,6 +5221,12 @@ impl Supervisor {
         if enforced != policy.digest() {
             return Err(SupervisorError::InvalidRunnerResponse);
         }
+        // The credential broker takes the policy's answer for GitHub before
+        // the change is recorded as enforced. The authority stops the broker
+        // that served under the earlier answer first, so a replacement that
+        // fails leaves none serving, and the change reports as not taken.
+        let broker_request = self.core().credential_broker_ensure_request(name)?;
+        ensure_credential_broker(broker_request).await?;
         store
             .record_enforced(environment.id, &current.selected)
             .map_err(store_error)?;
@@ -5932,9 +5946,23 @@ impl SupervisorCore {
             projection,
             platform,
             local_profile,
+            // The credential broker never sees the network policy, so its
+            // answer for GitHub is decided here, from the same selection
+            // this environment's egress broker enforces (#4926).
+            network_policy_allows_github: self
+                .network_policies
+                .environment_policy(environment.id)
+                .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?
+                .selected
+                .compile()
+                .allows_managed_github(),
         })
     }
 }
+
+/// What a user reads when the running credential authority cannot apply a
+/// network policy to the GitHub connection (#4926).
+const AUTHORITY_PREDATES_NETWORK_POLICY_GITHUB: &str = "this environment's network policy does not allow GitHub, and the local credential service that is running is from an earlier cw, which would use the GitHub connection anyway; stop your local VMs so cw replaces that service, or select a network policy that allows github.com and api.github.com";
 
 async fn ensure_credential_broker(
     request: CredentialBrokerEnsureRequest,
@@ -5949,6 +5977,21 @@ async fn ensure_credential_broker(
     let mut client = LocalCredentialControlClient::connect(&request.authority)
         .await
         .map_err(|_| SupervisorError::CredentialAuthorityUnavailable)?;
+    if !authority_applies_network_policy(
+        client.info().protocol_version,
+        request.network_policy_allows_github,
+    ) {
+        // An authority from before the rule would ignore the answer and
+        // serve GitHub under this policy. It keeps serving the VMs that ran
+        // across a cw update, so it cannot be replaced here; this
+        // environment gets no credential broker from it instead.
+        let _ = client
+            .stop_environment_broker(&request.environment_id, None)
+            .await;
+        return Err(SupervisorError::NetworkPolicySelection(
+            AUTHORITY_PREDATES_NETWORK_POLICY_GITHUB.to_owned(),
+        ));
+    }
     client
         .ensure_environment_broker(
             &request.environment_id,
@@ -5959,6 +6002,7 @@ async fn ensure_credential_broker(
                 local_profile: request.local_profile,
                 projection: request.projection,
                 platform: request.platform,
+                network_policy_allows_github: request.network_policy_allows_github,
             },
         )
         .await
@@ -7310,8 +7354,8 @@ impl LocalSupervisorService for SupervisorRpc {
         }))
     }
 
-    /// Select the network policy an environment enforces from its next start
-    /// (#2537 B1). A running VM keeps the revision it started with.
+    /// Select the network policy an environment enforces (#2537 B1). A
+    /// running VM takes the selection at once.
     async fn update_environment_network_policy(
         &self,
         request: Request<v1::UpdateEnvironmentNetworkPolicyRequest>,

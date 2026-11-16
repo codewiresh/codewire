@@ -144,6 +144,78 @@ impl CompiledPolicy {
     }
 }
 
+/// The hosts the managed GitHub credential is sent to, on [`GITHUB_PORT`].
+pub const MANAGED_GITHUB_HOSTS: [&str; 2] = ["github.com", "api.github.com"];
+const GITHUB_PORT: u16 = 443;
+
+impl CompiledPolicy {
+    /// Whether a rule of this policy allows a TCP dial to `name` on `port`:
+    /// an allow rule for the name's lookup and an allow rule for its dial,
+    /// with no deny rule against either. Never true by a default, and never
+    /// by an interception binding, which lets a bound name resolve without
+    /// allowing it. With no `address` the dial is judged as [`Self::check`]
+    /// judges a name, by rules that match every address; with the address a
+    /// broker dialled, a rule that allows that address counts too.
+    /// So a policy that allows the name's lookup and only an address range
+    /// for its dial is "not allowed" without an address and "allowed" for a
+    /// dial inside the range. Likewise a deny rule on any network makes it
+    /// "not allowed" without an address, because the name might answer
+    /// inside that network; with an address the deny applies only inside it. A caller with no address, such as a credential
+    /// route on the host, takes the stricter answer on purpose: its user
+    /// allows the host by name.
+    ///
+    /// This is the question a credential asks before it is used on a host:
+    /// selecting a credential must not widen a network policy (#4926).
+    pub fn allows_by_rule(
+        &self,
+        name: &str,
+        port: u16,
+        address: Option<IpAddr>,
+    ) -> Result<bool, PolicyError> {
+        let route_class = RouteClass::General;
+        let lookup = EgressRequest::dns_query(name, route_class)?;
+        let Some(name) = lookup.hostname.clone() else {
+            return Ok(false);
+        };
+        if protected_name(&name).is_some()
+            || self.evaluate(&lookup).reason != DecisionReason::RuleAllow
+        {
+            return Ok(false);
+        }
+        match address {
+            None => {
+                let dial = self.judge_named_dial(&name, port, route_class)?;
+                // A deny on a network could hold the address the name
+                // answers, and no address is known here to rule that out.
+                Ok(matches!(dial.decided_by, Some((PolicyAction::Allow, _)))
+                    && dial.refused_within.is_empty())
+            }
+            Some(address) => Ok(classify_address(address).is_none()
+                && self
+                    .evaluate(&EgressRequest::tcp(
+                        address,
+                        port,
+                        Some(&name),
+                        route_class,
+                    )?)
+                    .reason
+                    == DecisionReason::RuleAllow),
+        }
+    }
+
+    /// Whether the managed GitHub credential may be used under this policy:
+    /// a rule allows every one of [`MANAGED_GITHUB_HOSTS`] on 443. One answer
+    /// for both hosts, so Git and `gh` never disagree. The credential routes
+    /// on the host and through the front door both ask this, so they cannot
+    /// differ.
+    pub fn allows_managed_github(&self) -> bool {
+        MANAGED_GITHUB_HOSTS.iter().all(|host| {
+            self.allows_by_rule(host, GITHUB_PORT, None)
+                .unwrap_or(false)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +314,103 @@ mod tests {
                 "{protected}"
             );
         }
+    }
+
+    #[test]
+    fn the_managed_github_credential_needs_a_rule_for_both_hosts() {
+        assert!(BuiltinPolicy::Open.compile().allows_managed_github());
+        assert!(!BuiltinPolicy::Locked.compile().allows_managed_github());
+        assert!(
+            policy(&[("github.com", &[443]), ("api.github.com", &[443])]).allows_managed_github()
+        );
+        assert!(
+            policy(&[("github.com", &[22, 443]), ("*.github.com", &[443])]).allows_managed_github()
+        );
+        for (rules, why) in [
+            (&[("github.com", &[443][..])][..], "one host only"),
+            (
+                &[("github.com", &[443]), ("api.github.com", &[22])],
+                "the other host on another port",
+            ),
+            (
+                &[("185.199.108.0/22", &[443])],
+                "an address range alone resolves no name",
+            ),
+            (
+                &[("github.com", &[443]), ("185.199.108.0/22", &[443])],
+                "an address range does not stand in for the other host",
+            ),
+        ] {
+            assert!(!policy(rules).allows_managed_github(), "{why}");
+        }
+    }
+
+    #[test]
+    fn allowed_by_rule_is_never_the_default_and_a_deny_rule_wins() {
+        let allow = "  - id: names\n    action: allow\n    protocols: [dns, tcp]\n    ports: [53, 443]\n    destinations: [github.com, api.github.com]\n    route_classes: [general]\n";
+        let document = |rules: &str| {
+            crate::PolicyDocument::parse_yaml(
+                format!("version: 1\ndefault: deny\nrules:\n{rules}").as_bytes(),
+            )
+            .unwrap()
+        };
+        assert!(document(allow).allows_managed_github());
+        let deny = "  - id: no-api\n    action: deny\n    protocols: [tcp]\n    destinations: [api.github.com]\n    route_classes: [general]\n";
+        let denied = document(&format!("{deny}{allow}"));
+        assert!(!denied.allows_managed_github());
+        assert!(denied.allows_by_rule("github.com", 443, None).unwrap());
+        assert!(!denied.allows_by_rule("api.github.com", 443, None).unwrap());
+
+        // A deny on a network refuses the name when no address is known to
+        // rule the network out, and only inside the network when one is.
+        let deny_range = "  - id: no-range\n    action: deny\n    protocols: [tcp]\n    cidrs: [185.199.108.0/22]\n    route_classes: [general]\n";
+        let ranged_deny = document(&format!("{deny_range}{allow}"));
+        assert!(!ranged_deny.allows_managed_github());
+        assert!(!ranged_deny.allows_by_rule("github.com", 443, None).unwrap());
+        assert!(
+            !ranged_deny
+                .allows_by_rule("github.com", 443, Some("185.199.108.153".parse().unwrap()))
+                .unwrap()
+        );
+        assert!(
+            ranged_deny
+                .allows_by_rule("github.com", 443, Some("8.8.8.8".parse().unwrap()))
+                .unwrap()
+        );
+
+        // With the address a broker dialled, a rule for that address counts,
+        // a protected address never does, and the name still needs its own
+        // lookup rule.
+        let ranged = policy(&[("github.com", &[53]), ("185.199.108.0/22", &[443])]);
+        let inside = "185.199.108.153".parse().unwrap();
+        assert!(!ranged.allows_by_rule("github.com", 443, None).unwrap());
+        assert!(
+            ranged
+                .allows_by_rule("github.com", 443, Some(inside))
+                .unwrap()
+        );
+        assert!(
+            !ranged
+                .allows_by_rule("github.com", 443, Some("8.8.8.8".parse().unwrap()))
+                .unwrap()
+        );
+        assert!(
+            !BuiltinPolicy::Open
+                .compile()
+                .allows_by_rule("github.com", 443, Some("10.0.0.1".parse().unwrap()))
+                .unwrap()
+        );
+        assert!(
+            !ranged
+                .allows_by_rule("example.com", 443, Some(inside))
+                .unwrap()
+        );
+        assert!(
+            !BuiltinPolicy::Locked
+                .compile()
+                .allows_by_rule("github.com", 443, None)
+                .unwrap()
+        );
     }
 
     #[test]

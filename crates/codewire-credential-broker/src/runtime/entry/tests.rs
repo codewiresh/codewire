@@ -1175,6 +1175,57 @@ async fn a_front_door_that_dies_leaves_the_loopback_session_serving() {
     assert!(!sessions.runner.is_finished());
 }
 
+/// #4926: a credential route on the host never passes the environment's
+/// network policy, so the policy's answer for GitHub is applied to a
+/// loopback request before any lease. Before the fix every case here was
+/// served.
+#[tokio::test]
+async fn a_loopback_github_request_follows_the_network_policy() {
+    let recorded = Recorded::default();
+    let refusing = recorded.broker().with_network_policy_allowing_github(false);
+    for case in cases().iter().filter(|case| case.slot == "github") {
+        let response = refusing.execute(case.request("")).await.unwrap();
+        let (status, headers, mut body) = response.into_parts();
+        assert_eq!(status, StatusCode::FORBIDDEN, "{}", case.route);
+        assert_eq!(headers[http::header::CACHE_CONTROL], "no-store");
+        let mut text = Vec::new();
+        while let Some(chunk) = body.next().await {
+            text.extend_from_slice(&chunk.unwrap());
+        }
+        let text = String::from_utf8(text).unwrap();
+        for part in ["network policy", "github.com", "api.github.com"] {
+            assert!(text.contains(part), "{}: {text}", case.route);
+        }
+    }
+    assert_eq!(recorded.leases(), 0, "refused before any lease");
+    assert!(recorded.outbound().is_empty(), "GitHub is never contacted");
+
+    // The rule is about GitHub alone: the same broker serves every other slot.
+    for case in cases().iter().filter(|case| case.slot != "github") {
+        let (status, _, _) = refusing
+            .execute(case.request(""))
+            .await
+            .unwrap()
+            .into_parts();
+        assert_eq!(status, StatusCode::OK, "{} {}", case.slot, case.route);
+    }
+    let others = recorded.leases();
+    assert_eq!(others, 3);
+
+    // With a rule for GitHub's hosts, and wherever no policy is in hand (the
+    // constructor's default, which the hosted service uses), it is served.
+    for broker in [
+        recorded.broker().with_network_policy_allowing_github(true),
+        recorded.broker(),
+    ] {
+        for case in cases().iter().filter(|case| case.slot == "github") {
+            let (status, _, _) = broker.execute(case.request("")).await.unwrap().into_parts();
+            assert_eq!(status, StatusCode::OK, "{}", case.route);
+        }
+    }
+    assert_eq!(recorded.leases(), others + 4);
+}
+
 /// A front door's guest side serving on a real socket pair, and the broker's
 /// admitted end of it.
 async fn front_door_pair(

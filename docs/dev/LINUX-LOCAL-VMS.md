@@ -190,16 +190,39 @@ rev 3 until restarted`) and takes the selection at its next start.
 `--policy` is unrelated to `--network`, which joins a Mesh network. A policy an
 environment selects cannot be deleted.
 
-Known limit (#4926): a network policy does not yet apply to the managed GitHub
-credential. On a VM whose profile has a GitHub connection, Git and `gh` reach
-GitHub through the credential route on the host, outside the VM's network,
-whatever the policy says: fetch and push to every repository the connection
-reaches, and with a personal access token whatever else that token may do. So
-`locked` does not stop a process in such a VM from pushing to GitHub. Until
-the fix, give a VM that must send nothing out a profile with no GitHub
-connection. The fix refuses the managed GitHub credential unless the policy
-allows `github.com` and `api.github.com` by rule; the journey step is
-`locked-refuses-managed-github` in `docs/journeys/network-and-egress.md`.
+The managed GitHub credential follows the policy (#4926). On a VM whose
+profile has a GitHub connection, Git and `gh` reach GitHub through the
+credential route on the host, outside the VM's network, so the policy is
+applied to that route as well: it serves the GitHub connection only when the
+selected policy allows both `github.com` and `api.github.com` on 443 by rule.
+`open` does. `locked` does not, and neither does a policy that names one of the
+two hosts, or only an address range. Git and `gh` then fail with a message
+that names the network policy, no credential is leased, and GitHub is not
+contacted. To use the connection under your own policy, allow both hosts:
+
+```sh
+cw policy --local allow work github.com:443
+cw policy --local allow work api.github.com:443
+```
+
+A change of policy applies to this at once, as it does to the network: the
+credential broker that served under the earlier answer is stopped before its
+replacement starts. The supervisor decides the answer, from the same selection
+the VM's egress broker enforces, and the local credential authority passes it
+to the broker it starts. After a `cw` update an earlier credential authority
+keeps running while local VMs run, and it cannot apply this rule: under a
+policy that does not allow GitHub such a VM gets no credential broker, and
+the error says to stop the local VMs so the authority is replaced. The other
+way round, a supervisor from before the update does not send the answer, and
+the newer authority serves it as before until that supervisor exits.
+Repositories the project file or `--repo` names are not under this rule.
+Codewire fetches them at create, on the host, in an isolated one-shot
+process that can only fetch, never push, and hands the VM a bundle without
+the credential. That brings data in and sends none out, so `locked` does not
+stop it. What the connection can reach once it is served is unchanged: every
+repository it reaches (#4927 narrows that). Hosted Sandboxes do not apply
+network policies yet. The journey step is `locked-refuses-managed-github` in
+`docs/journeys/network-and-egress.md`.
 
 ## Host ports
 

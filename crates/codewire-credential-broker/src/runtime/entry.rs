@@ -9,6 +9,7 @@ use super::{
 };
 use crate::bridge::BridgeEntry;
 use crate::network::RouteHost;
+use crate::network_policy;
 
 impl<P, U> OpenAiBroker<P, U>
 where
@@ -50,6 +51,17 @@ where
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         let request = ValidatedGuestRequest::parse(entry, request, body.is_some())?;
         let slot = request.slot.clone();
+        // A loopback request never passed the environment's network policy,
+        // so the policy's answer for GitHub is applied here, before any
+        // lease. A front-door request carries its own decision.
+        if entry == BridgeEntry::Loopback
+            && slot.as_str() == network_policy::GITHUB_SLOT
+            && !self.network_policy_allows_github
+        {
+            return Ok(network_policy::github_refused_response(
+                request.route.as_str(),
+            ));
+        }
         let result = match body {
             _ if request.intercepted_host.is_some() => {
                 self.execute_intercepted(request, body.is_some()).await
@@ -71,6 +83,16 @@ where
     P: BrokerLeaseProvider + 'static,
     U: BrokerUpstreamTransport + 'static,
 {
+    /// Whether the environment's network policy allows GitHub's hosts by
+    /// rule (#4926). Whoever holds the policy decides and says so at launch;
+    /// a launch that does not say passes `false`. Without this call the
+    /// broker serves the GitHub slot, as the hosted credential service does,
+    /// which has no network policy in hand.
+    pub fn with_network_policy_allowing_github(mut self, allowed: bool) -> Self {
+        self.network_policy_allows_github = allowed;
+        self
+    }
+
     /// A front-door request, under the swap rule. Only the Anthropic route
     /// and Codex at `chatgpt.com` have it yet; any other front-door request
     /// is refused before a lease, never served by always injecting.

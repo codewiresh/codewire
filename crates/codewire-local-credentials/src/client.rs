@@ -1168,6 +1168,7 @@ impl LocalCredentialControlClient {
             local_profile,
             projection,
             platform,
+            network_policy_allows_github,
         } = selection;
         if local_profile.as_ref().is_some_and(|binding| {
             binding.environment_id != *environment_id || binding.profile_revision == 0
@@ -1195,6 +1196,7 @@ impl LocalCredentialControlClient {
                     profile_id: binding.profile_id.to_string(),
                     profile_revision: binding.profile_revision,
                 }),
+                network_policy_allows_github: Some(network_policy_allows_github),
             })
             .await?
             .into_inner();
