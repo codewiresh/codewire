@@ -769,7 +769,7 @@ fn a_broker_mode_pool_member_is_admitted_only_with_hosted_egress() {
     use crate::worker::workspace_binding::checks::pool_member_isolated;
     use serde_json::json;
 
-    let (_, mut wanted) = golden_member(false);
+    let (_, mut wanted) = golden_member();
     wanted.hosted_egress = Some(HostedEgressTemplate {
         stream_addr: "10.44.0.89:8089".into(),
         binding_addr: "10.44.0.87:8087".into(),
