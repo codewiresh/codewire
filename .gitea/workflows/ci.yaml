@@ -208,12 +208,16 @@ jobs:
           scripts/ci/setup/assert-ci-runner-image.sh
           scripts/ci/tests/test-ci-runner-image-contract.sh
 
+      # The trusted policy is only run, never asked for history: every planner
+      # and selector here works on `--repository .`, the checkout above. One
+      # commit is enough, as for the admission gate; the whole history with
+      # every branch took 22 to 47 s of each selection (infra#1534).
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ github.event_name == 'pull_request' }}
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: .trusted-ci-policy
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -221,7 +225,7 @@ jobs:
         with:
           ref: ${{ github.event.before }}
           path: .trusted-ci-policy
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
       - name: Verify sealed Rust toolchain for trusted artifact planning
