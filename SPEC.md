@@ -755,9 +755,10 @@ Hosted enforcement status (#4000;
 `crates/codewire-orchestration/src/api/network_policies.rs`,
 `crates/codewire-orchestration/src/egress/reports.rs`): an environment's
 network policy status (`EnvironmentNetworkPolicy.enforcement`) says what
-cw-egress reports the environment's current Pod enforces. Only cw-egress
-writes it, through orchestration's internal egress service, with its
-node-bound service-account token and only for Pods on its own node. The Pod's
+cw-egress reports the environment's current Pod enforces. cw-egress writes
+it, through orchestration's internal egress service, with its node-bound
+service-account token and only for Pods on its own node. Orchestration writes
+one thing itself: its lockdown check's refusal of a Pod (#5068). The Pod's
 environment comes from orchestration's own workspace binding, never from the
 report; a bind moves the status to the new Pod and an unbind removes the
 Pod's report. The status reads:
@@ -766,12 +767,32 @@ Pod's report. The status reads:
   is the selected policy's (the digest decides, not the revision number);
 - `ENFORCING`, with the reported revision, while an older document is still
   in force;
-- `FAILED_CLOSED` when the Pod's self-check or its policy failed, which
-  leaves the Pod no egress;
+- `FAILED_CLOSED` when the Pod's self-check or its policy failed, or when
+  orchestration's lockdown check refused the Pod, which leaves the Pod no
+  egress. `failure_code` names why, from a closed set: `self_check_failed`
+  and `policy_digest_mismatch` from cw-egress, and `lockdown_not_applied`
+  from orchestration. The public code does not say which lockdown refusal it
+  was: each describes the platform's own `NetworkPolicy`, which the
+  environment's owner cannot change, and what the check compares is still
+  moving (#4964). The exact refusal is kept for operators, in orchestration's
+  stored refusal, its log line and its counter by reason.
+  Orchestration records a lockdown refusal only when the refusal ends the
+  Sandbox's stream: at once for a bound guest at admission, and after the 30
+  second bind grace for a claimed warm member. A failed write is logged and
+  changes nothing else: the Sandbox fails closed either way. The refusal
+  stays the Pod's status over any report and at any age, so the end of the
+  refused stream does not turn it into `NOT_ENFORCED`, and cw-egress can
+  neither set nor clear it. It clears when the Pod's lockdown check next
+  passes, when the Pod is bound to another environment, and when the Pod is
+  released. A Pod that died bound keeps it until its environment is placed
+  on a new Pod, unbound or deleted, as every bound Pod's row does;
 - `NOT_ENFORCED` when there is no report, the Pod's stream is down, or the
   latest report is older than 15 minutes. cw-egress refreshes every live
   Pod's report every 5 minutes, so a stale report means its cw-egress is gone,
   and a cached `ENFORCED` is never shown.
+
+`cw info` shows a hosted environment's status, and with `FAILED_CLOSED` its
+reason in words, with the code under `--output json`.
 
 The records cw-egress reports of what a Pod reached are folded per
 environment and kept to the most recent 1,000. Hosted egress is off by default

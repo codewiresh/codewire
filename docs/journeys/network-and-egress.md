@@ -1156,6 +1156,14 @@ Issue: #4000.
     self-check reports that its direct connection got through and the
     Sandbox reads `FAILED_CLOSED`. Without this nothing shows the check
     can fail;
+  - a Sandbox whose lockdown is not applied when it starts reads
+    `FAILED_CLOSED` with `failure_code` `lockdown_not_applied`, in the API
+    and in `cw info`: at once when it is bound at admission, and once the
+    bind grace has passed for a claimed warm member. Orchestration's log line
+    and counter name the exact refusal, `policy_missing` when the policy is
+    absent. It still reads so after its stream has ended. Applying the
+    lockdown and starting the Sandbox again clears it (#5068; not yet
+    observed);
   - a claimed warm Sandbox enforces the claimer's policy before the user can
     run anything in it; a claim that cannot confirm that within its limit
     fails, and never hands over an unrestricted Sandbox;
