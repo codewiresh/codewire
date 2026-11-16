@@ -21,3 +21,13 @@ What fails, and what to do:
   `scripts/ci/verify/workspace-agents.sh` on a lockfile-only change): check the
   new agent version still reads each file, then record the version in
   `manifest.json`.
+- **Claude Code no longer does what Codewire expects with its file**
+  (`scripts/ci/verify/claude-login-compat.py`, run by
+  `scripts/ci/verify/workspace-agents.sh`): the pinned Claude Code is run with
+  no network against a fake provider, starting from
+  `claude-code.credentials.json` with its access token run out. The failure
+  names what changed: the refresh request, where the placeholder is sent, or
+  what the agent wrote back. The broker swaps the placeholder on every path
+  of the API host, so the script's path lists are its alarm for a new pin,
+  not a rule the broker enforces: look at what a new path is before adding
+  it.
