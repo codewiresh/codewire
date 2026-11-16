@@ -103,7 +103,7 @@ pub struct RuleInput<'a> {
     pub ports: &'a [u32],
 }
 
-/// An environment's selection, resolved. Nothing enforces it yet.
+/// An environment's selection, resolved, and what its current Pod enforces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvironmentPolicyView {
     /// `open`, `locked`, `hosted-default` or `platform:id:UUID`.
@@ -112,6 +112,68 @@ pub struct EnvironmentPolicyView {
     /// The stored policy's current revision; zero for a built-in.
     pub revision: u32,
     pub digest: String,
+    pub enforcement: EnforcementView,
+}
+
+/// How old a cw-egress report may be and still describe the Pod: three of
+/// cw-egress's 5-minute refreshes. The SQL in [`environment_policy_cols`]
+/// states the same bound.
+pub const ENFORCEMENT_REPORT_STALE_MINUTES: i64 = 15;
+
+/// What cw-egress reports the environment's current Pod enforces (#4000).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnforcementView {
+    /// No report, or the Pod's stream is down.
+    NotEnforced,
+    /// The selected revision is in force.
+    Enforced(EnforcedRevision),
+    /// An older revision is in force while the selected one is applied.
+    Enforcing(EnforcedRevision),
+    /// The sandbox has no egress: its self-check or the policy failed.
+    FailedClosed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnforcedRevision {
+    pub revision: u32,
+    /// Lowercase hex.
+    pub digest: String,
+    pub at: DateTime<Utc>,
+}
+
+impl EnforcementView {
+    /// From the current Pod's enforcement row, against the selected digest.
+    /// A report older than [`ENFORCEMENT_REPORT_STALE_MINUTES`] says nothing
+    /// about now: cw-egress refreshes every live Pod's report every 5
+    /// minutes, so a stale row means its cw-egress is gone.
+    fn from_row(row: &PgRow, selected_digest: &str) -> Result<Self, sqlx::Error> {
+        let state: Option<String> = row.try_get("egress_state")?;
+        let fresh: Option<bool> = row.try_get("egress_report_fresh")?;
+        if fresh != Some(true) {
+            return Ok(Self::NotEnforced);
+        }
+        Ok(match state.as_deref() {
+            None | Some("disconnected") => Self::NotEnforced,
+            Some("failed_closed") => Self::FailedClosed,
+            Some("enforced") => {
+                let revision: i32 = row.try_get("egress_revision")?;
+                let digest: Vec<u8> = row.try_get("egress_digest")?;
+                let enforced = EnforcedRevision {
+                    revision: stored_revision(revision)?,
+                    digest: hex_digest(&digest)?,
+                    at: row.try_get("egress_reported_at")?,
+                };
+                // The digest decides, not the revision: a revision number is
+                // per policy, and the digest names the exact document.
+                if enforced.digest == selected_digest {
+                    Self::Enforced(enforced)
+                } else {
+                    Self::Enforcing(enforced)
+                }
+            }
+            Some(_) => return Err(corrupt_selection()),
+        })
+    }
 }
 
 impl EnvironmentPolicyView {
@@ -125,6 +187,7 @@ impl EnvironmentPolicyView {
             name: name.to_owned(),
             revision: 0,
             digest: digest.to_owned(),
+            enforcement: EnforcementView::NotEnforced,
         }
     }
 }
@@ -136,7 +199,10 @@ macro_rules! environment_policy_cols {
     () => {
         "np.policy_id AS network_policy_id,
     np.builtin AS network_policy_builtin, npp.name AS network_policy_name,
-    npp.current_revision AS network_policy_revision, npr.digest AS network_policy_digest"
+    npp.current_revision AS network_policy_revision, npr.digest AS network_policy_digest,
+    se.state AS egress_state, se.revision AS egress_revision, se.digest AS egress_digest,
+    se.reported_at AS egress_reported_at,
+    se.reported_at > now() - interval '15 minutes' AS egress_report_fresh"
     };
 }
 pub(crate) use environment_policy_cols;
@@ -146,7 +212,10 @@ macro_rules! environment_policy_joins {
         "LEFT JOIN platform_environment_network_policies np ON np.environment_id = e.id
     LEFT JOIN platform_network_policies npp ON npp.id = np.policy_id
     LEFT JOIN platform_network_policy_revisions npr
-        ON npr.policy_id = npp.id AND npr.revision = npp.current_revision"
+        ON npr.policy_id = npp.id AND npr.revision = npp.current_revision
+    LEFT JOIN sandbox_environment_backend seb ON seb.environment_id = e.id
+    LEFT JOIN sandbox_egress_enforcement se
+        ON se.pod_uid = seb.pod_uid AND se.environment_id = e.id"
     };
 }
 pub(crate) use environment_policy_joins;
@@ -157,8 +226,8 @@ pub(crate) fn environment_policy_from_row(
 ) -> Result<EnvironmentPolicyView, sqlx::Error> {
     let policy_id: Option<String> = row.try_get("network_policy_id")?;
     let builtin: Option<String> = row.try_get("network_policy_builtin")?;
-    let view = match (policy_id, builtin.as_deref()) {
-        (None, None) => return Ok(EnvironmentPolicyView::hosted_default()),
+    let mut view = match (policy_id, builtin.as_deref()) {
+        (None, None) => EnvironmentPolicyView::hosted_default(),
         (Some(id), None) => {
             let revision: i32 = row.try_get("network_policy_revision")?;
             let digest: Vec<u8> = row.try_get("network_policy_digest")?;
@@ -167,6 +236,7 @@ pub(crate) fn environment_policy_from_row(
                 name: row.try_get("network_policy_name")?,
                 revision: stored_revision(revision)?,
                 digest: hex_digest(&digest)?,
+                enforcement: EnforcementView::NotEnforced,
             }
         }
         (None, Some(name)) => {
@@ -175,6 +245,7 @@ pub(crate) fn environment_policy_from_row(
         }
         (Some(_), Some(_)) => return Err(corrupt_selection()),
     };
+    view.enforcement = EnforcementView::from_row(row, &view.digest)?;
     Ok(view)
 }
 

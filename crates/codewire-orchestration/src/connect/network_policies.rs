@@ -247,15 +247,45 @@ fn proto_policy(view: PolicyView) -> NetworkPolicy {
     }
 }
 
-/// The environment read's form. Nothing enforces a hosted policy yet, so the
-/// state is always NOT_ENFORCED; cw-egress brings the others (#4000).
+/// The environment read's form: the selection, and what cw-egress reports
+/// the environment's current Pod enforces (#4000).
 pub(crate) fn proto_environment_policy(view: EnvironmentPolicyView) -> EnvironmentNetworkPolicy {
+    use crate::api::network_policies::EnforcementView;
+    let (enforcement, enforced) = match view.enforcement {
+        EnforcementView::NotEnforced => (
+            NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED,
+            None,
+        ),
+        EnforcementView::Enforced(at) => (
+            NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_ENFORCED,
+            Some(at),
+        ),
+        EnforcementView::Enforcing(at) => (
+            NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_ENFORCING,
+            Some(at),
+        ),
+        EnforcementView::FailedClosed => (
+            NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED,
+            None,
+        ),
+    };
+    let (enforced_revision, enforced_digest, enforced_at) = match enforced {
+        Some(enforced) => (
+            enforced.revision,
+            enforced.digest,
+            Some(proto_timestamp(enforced.at)).into(),
+        ),
+        None => (0, String::new(), None.into()),
+    };
     EnvironmentNetworkPolicy {
         reference: view.reference,
         name: view.name,
         revision: view.revision,
         digest: view.digest,
-        enforcement: NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED.into(),
+        enforcement: enforcement.into(),
+        enforced_revision,
+        enforced_digest,
+        enforced_at,
         ..Default::default()
     }
 }
@@ -323,6 +353,7 @@ mod tests {
             name: "web".into(),
             revision: 2,
             digest: "aa".into(),
+            enforcement: crate::api::network_policies::EnforcementView::NotEnforced,
         });
         assert_eq!(
             wire.enforcement.as_known(),

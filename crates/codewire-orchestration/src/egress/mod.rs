@@ -16,6 +16,7 @@ use crate::workspace_binding::PgBindingStore;
 
 pub mod admission;
 pub mod assignment;
+pub mod reports;
 pub mod service;
 pub mod settings;
 
@@ -70,10 +71,32 @@ pub fn mount(
         &api.sandbox_cfg.sandbox_namespace,
     )?;
     Ok(match state {
-        Some(state) => app.with_connect_routes(service::egress_router(state)),
+        Some(state) => {
+            spawn_report_sweep(state.pool.clone());
+            app.with_connect_routes(service::egress_router(state))
+        }
         None => app,
     }
     .into_router())
+}
+
+/// How often orchestration deletes the enforcement rows of Pods that are
+/// gone ([`reports::sweep`]).
+pub const REPORT_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+fn spawn_report_sweep(pool: PgPool) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(REPORT_SWEEP_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            match reports::sweep(&pool).await {
+                Ok(0) => {}
+                Ok(swept) => tracing::info!(swept, "swept egress enforcement rows of gone Pods"),
+                Err(error) => tracing::warn!(%error, "egress enforcement sweep failed"),
+            }
+        }
+    });
 }
 
 #[cfg(test)]

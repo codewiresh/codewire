@@ -457,6 +457,58 @@ async fn cw_egress_in_another_namespace_is_refused() {
 }
 
 #[tokio::test]
+async fn malformed_reports_are_refused_before_anything_is_stored() {
+    // The store's pool connects nowhere: reaching it would answer 503.
+    let guest = json!({"podUid": GUEST_UID, "podName": GUEST});
+    let with = |extra: Value| {
+        let mut body = guest.clone();
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        body
+    };
+    let digest = URL_SAFE_NO_PAD.encode([1_u8; 32]);
+    for body in [
+        with(json!({})),
+        with(json!({"state": "EGRESS_ENFORCEMENT_STATE_FAILED_CLOSED", "detail": "anything"})),
+        with(json!({"state": "EGRESS_ENFORCEMENT_STATE_DISCONNECTED", "revision": 3})),
+        with(json!({"state": "EGRESS_ENFORCEMENT_STATE_ENFORCED", "revision": 1, "digest": "AQ"})),
+    ] {
+        let (status, response) = call(&Cluster::healthy(), "ReportEnforcement", body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
+    }
+    let record = |transport: &str, port: u32| {
+        json!({
+            "name": "example.com",
+            "transport": transport,
+            "port": port,
+            "refusal": "name_not_allowed",
+            "policyReference": "locked",
+            "policyDigest": digest,
+            "firstSeenUnixMs": 1,
+            "lastSeenUnixMs": 2,
+            "count": 1,
+        })
+    };
+    for records in [
+        vec![record("EGRESS_TRANSPORT_TCP", 0)],
+        vec![record("EGRESS_TRANSPORT_DNS", 53)],
+        vec![
+            record("EGRESS_TRANSPORT_TCP", 443);
+            crate::egress::reports::MAX_RECORDS_PER_REPORT + 1
+        ],
+    ] {
+        let (status, response) = call(
+            &Cluster::healthy(),
+            "ReportRecords",
+            with(json!({"records": records})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    }
+}
+
+#[tokio::test]
 async fn a_front_door_session_answers_unimplemented_to_a_valid_caller() {
     // Until the relay attachment lands (#4001), cw-egress retries as for
     // UNAVAILABLE.
@@ -467,14 +519,6 @@ async fn a_front_door_session_answers_unimplemented_to_a_valid_caller() {
     )
     .await;
     assert_eq!(frame["error"]["code"], "unimplemented", "{frame}");
-}
-
-#[tokio::test]
-async fn the_reports_answer_unimplemented_to_a_valid_caller() {
-    for method in ["ReportEnforcement", "ReportRecords"] {
-        let (status, body) = call(&Cluster::healthy(), method, named_guest()).await;
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{method}: {body}");
-    }
 }
 
 #[tokio::test]

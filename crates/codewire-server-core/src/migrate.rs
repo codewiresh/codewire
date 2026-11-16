@@ -73,6 +73,7 @@ mod tests {
     mod resend_verification_purpose;
     mod reserve_legal_page_slugs;
     mod runtime_dispatch_scope;
+    mod sandbox_egress;
     mod session_mutation;
     mod signup_credit_setting;
     mod ssh;
@@ -88,9 +89,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced) and 0002 to 0029.
+    // (which equals the 41-migration history it replaced) and 0002 to 0030.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "dd340b239a6d7fa22a51479842166239d6efb26b6c5aaa803f0218a778029ebc";
+        "d8b39caa730924684a8bb5d3fb48005b587ea62f21a1451fb55565c52b971d2b";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -164,6 +165,9 @@ mod tests {
     const APPLIED_HOST_OPERATIONS_CHECKSUM: &str = "232e295da610657e51ec588699ca5ab53b75d28b7a1536e25737bf11d4edb8eba80046e9f63299c6edf74fe424ff997b";
     // SHA-384 of 0029_credit_changes.sql (#4754).
     const APPLIED_CREDIT_CHANGES_CHECKSUM: &str = "5890781b448b2e68a80826bd5cb9e02e80032b0cd287aa430f85b80de81788a09b7fff259d557502f62f7c546f16ec1a";
+
+    // SHA-384 of 0030_sandbox_egress.sql (#4000).
+    const APPLIED_SANDBOX_EGRESS_CHECKSUM: &str = "060c5a6779c3363d0ef750233672b62e0e60978c26ec296d58c14705a57ff68543e01fd06b8758d8c608d10889f5ab3d";
 
     // SHA-384 of 0027_account_suspension.sql (#3297).
     const APPLIED_ACCOUNT_SUSPENSION_CHECKSUM: &str = "1d65c097962b0485945992adfa2bb69e53886b2195359748805e894a37192d1bcc7659ab74d2019845b128b1b0e5dbf4";
@@ -1279,6 +1283,7 @@ mod tests {
             (27, APPLIED_ACCOUNT_SUSPENSION_CHECKSUM),
             (28, APPLIED_CW_RUNTIME_RESOLUTION_CHECKSUM),
             (29, APPLIED_CREDIT_CHANGES_CHECKSUM),
+            (30, APPLIED_SANDBOX_EGRESS_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1309,10 +1314,10 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 29
+                first.len() == 30
                     && first.iter().map(|migration| migration.0).eq([
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-                        22, 23, 24, 25, 26, 27, 28, 29
+                        22, 23, 24, 25, 26, 27, 28, 29, 30
                     ])
                     && first.iter().all(|migration| migration.2)
             );

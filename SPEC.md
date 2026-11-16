@@ -698,6 +698,35 @@ platform. A local VM's egress is bounded by its selected network policy,
 Credential non-disclosure is not egress mediation: a sandbox can still open
 TCP 443 to a provider directly.
 
+Hosted enforcement status (#4000;
+`crates/codewire-orchestration/src/api/network_policies.rs`,
+`crates/codewire-orchestration/src/egress/reports.rs`): an environment's
+network policy status (`EnvironmentNetworkPolicy.enforcement`) says what
+cw-egress reports the environment's current Pod enforces. Only cw-egress
+writes it, through orchestration's internal egress service, with its
+node-bound service-account token and only for Pods on its own node. The Pod's
+environment comes from orchestration's own workspace binding, never from the
+report; a bind moves the status to the new Pod and an unbind removes the
+Pod's report. The status reads:
+
+- `ENFORCED`, with the revision, digest and time, when the reported document
+  is the selected policy's (the digest decides, not the revision number);
+- `ENFORCING`, with the reported revision, while an older document is still
+  in force;
+- `FAILED_CLOSED` when the Pod's self-check or its policy failed, which
+  leaves the Pod no egress;
+- `NOT_ENFORCED` when there is no report, the Pod's stream is down, or the
+  latest report is older than 15 minutes. cw-egress refreshes every live
+  Pod's report every 5 minutes, so a stale report means its cw-egress is gone,
+  and a cached `ENFORCED` is never shown.
+
+The records cw-egress reports of what a Pod reached are folded per
+environment and kept to the most recent 1,000. Hosted egress is off by default
+(`CODEWIRE_HOSTED_EGRESS_ENABLED`) and cw-egress does not run yet, so every
+hosted environment reads `NOT_ENFORCED` today, and its egress is bounded only
+by the `NetworkPolicy` above. The journey is `hosted-enforcement` in
+`docs/journeys/network-and-egress.md`, not yet observed.
+
 ### Direct delivery exceptions
 
 Provider material enters an environment only where the proxy cannot work, with

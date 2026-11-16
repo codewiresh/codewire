@@ -364,6 +364,7 @@ async fn db_an_environment_selects_a_policy_and_follows_its_current_revision() -
                 name: "hosted-default".into(),
                 revision: 0,
                 digest: HOSTED_DEFAULT_DIGEST.into(),
+                enforcement: EnforcementView::NotEnforced,
             }
         );
 
@@ -379,6 +380,7 @@ async fn db_an_environment_selects_a_policy_and_follows_its_current_revision() -
                     name: "web".into(),
                     revision: 1,
                     digest: web.digest.clone(),
+                    enforcement: EnforcementView::NotEnforced,
                 },
                 "{reference}"
             );

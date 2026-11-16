@@ -280,11 +280,8 @@ pub(crate) async fn write_binding(
     .bind(&record.workspace_pvc_uid)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("SELECT pg_notify($1, $2)")
-        .bind(crate::workspace_binding::WORKSPACE_BINDINGS_CHANNEL)
-        .bind(&record.pod_uid)
-        .execute(&mut *tx)
-        .await?;
+    // Records the Pod's environment for hosted egress (#4000), then notifies.
+    crate::egress::reports::record_bind(&mut *tx, &record.pod_uid, &record.environment_id).await?;
     Ok(WriteOutcome::Recorded)
 }
 
@@ -1410,6 +1407,7 @@ async fn release_absent_binding(
     .execute(&mut *tx)
     .await?
     .rows_affected();
+    crate::egress::reports::release_pod(&mut *tx, pod_uid).await?;
     sqlx::query(
         "UPDATE sandbox_environment_backend SET pod_uid = NULL, bound_at = NULL
           WHERE environment_id = $1 AND pod_uid = $2",

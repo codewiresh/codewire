@@ -26,6 +26,9 @@ use codewire_egress_node::replacement::StartLimiter;
 
 use super::admission::{self, Reviewed};
 use super::assignment::{AssignedPolicy, environment_policy};
+use super::reports;
+
+mod wire;
 use crate::runtime::RuntimeAttestation;
 use crate::workspace_binding::BindingStore;
 
@@ -131,6 +134,10 @@ pub const WATCH_READ_FAILURES: u32 = 3;
 /// The longest one recheck may take. A read that hangs past it counts as one
 /// failed read, and a recheck never runs past the caller's token expiry.
 pub const RECHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn invalid_report() -> ConnectError {
+    ConnectError::invalid_argument("the report is not well formed")
+}
 
 fn denied() -> ConnectError {
     ConnectError::permission_denied("egress is not admitted")
@@ -459,12 +466,20 @@ impl EgressService for EgressConnectService {
         request: ServiceRequest<'_, ReportEnforcementRequest>,
     ) -> ServiceResult<ReportEnforcementResponse> {
         let node = self.state.caller_node(&ctx).await?;
-        let request = request.view();
-        let guest = self.state.named_guest(request.pod_name, request.pod_uid);
+        let request = request.to_owned_message();
+        let guest = self.state.named_guest(&request.pod_name, &request.pod_uid);
         self.state.guest_on_node(&guest, &node).await?;
-        Err(ConnectError::unimplemented(
-            "enforcement reports are stored from a later change",
-        ))
+        let enforcement = wire::enforcement(&request).ok_or_else(invalid_report)?;
+        reports::record_enforcement(&self.state.pool, &guest.uid, &node, &enforcement)
+            .await
+            .map_err(|error| match error {
+                reports::ReportError::Store(error) => {
+                    unavailable("store the enforcement report", error)
+                }
+                // A retry cannot fix it.
+                _ => invalid_report(),
+            })?;
+        connectrpc::Response::ok(ReportEnforcementResponse::default())
     }
 
     async fn report_records(
@@ -473,12 +488,26 @@ impl EgressService for EgressConnectService {
         request: ServiceRequest<'_, ReportRecordsRequest>,
     ) -> ServiceResult<ReportRecordsResponse> {
         let node = self.state.caller_node(&ctx).await?;
-        let request = request.view();
-        let guest = self.state.named_guest(request.pod_name, request.pod_uid);
+        let request = request.to_owned_message();
+        let guest = self.state.named_guest(&request.pod_name, &request.pod_uid);
         self.state.guest_on_node(&guest, &node).await?;
-        Err(ConnectError::unimplemented(
-            "egress records are stored from a later change",
-        ))
+        if request.records.len() > reports::MAX_RECORDS_PER_REPORT {
+            return Err(invalid_report());
+        }
+        let records = request
+            .records
+            .iter()
+            .map(wire::record)
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(invalid_report)?;
+        match reports::record_records(&self.state.pool, &guest.uid, &records).await {
+            // An unbound warm member has no log; its records are dropped.
+            Ok(_) => connectrpc::Response::ok(ReportRecordsResponse::default()),
+            Err(reports::ReportError::Store(error)) => {
+                Err(unavailable("store the egress records", error))
+            }
+            Err(_) => Err(invalid_report()),
+        }
     }
 
     async fn front_door_session(

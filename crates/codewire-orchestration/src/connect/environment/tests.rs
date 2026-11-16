@@ -549,6 +549,7 @@ fn the_network_policy_shows_only_while_platform_policies_are_on() {
         name: "hosted-default".into(),
         revision: 0,
         digest: codewire_egress_policy::HOSTED_DEFAULT_DIGEST.into(),
+        enforcement: crate::api::network_policies::EnforcementView::NotEnforced,
     });
     let off = proto_environment(environment.clone(), NetworkPolicyFlags::default()).unwrap();
     assert!(off.network_policy.as_option().is_none());
