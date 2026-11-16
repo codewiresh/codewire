@@ -37,6 +37,7 @@ separately.
 | `egress-late-answer` | #4948 | not yet observed | not yet observed | n/a | n/a |
 | `refusal-log` | #3999, #4000 | no command yet | no command yet | no command yet | no command yet |
 | `refusal-in-environment` | #4015 | no command yet | no command yet | no command yet | no command yet |
+| `refusal-readable` | #5057, #5058 | no command yet | no command yet | n/a | n/a |
 | `learn-mode` | #4015 | after launch | after launch | after launch | after launch |
 | `agent-vm-interception` | #3999 (#4809, #4884, #4812, #4887) | no command yet | no command yet | n/a | n/a |
 | `agent-claude` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
@@ -443,6 +444,45 @@ Issue: #4015.
     refusals.
 - **Gotchas:** the owner's `cw policy log` shows the full reason. The two
   views differ on purpose.
+- **Observed:** not yet observed.
+
+## `refusal-readable`: a refused request says why, in words a person can read
+
+Issues: #5057, #5058. The list is in `docs/dev/SECRETS-AND-CREDENTIALS.md`,
+"Refusals an agent or a person can read".
+
+- **Entry points:** an agent's request on an intercepted host, in a local VM
+  with interception on, as in `agent-claude` and `agent-codex`.
+- **States to exercise:**
+  - answered: the credential revoked while the agent runs (`cw credentials
+    --local revoke NAME`), its slot emptied (`cw credentials --local
+    --profile P unset anthropic`), a credential needing reconnect, the
+    placeholder sent beside an API key, a path the route doesn't serve, the
+    broker unreachable for a moment;
+  - refused at the connection: a host the policy refuses, a port it refuses,
+    a protected address.
+- **Driving it:** no command yet (#5057). Run `claude -p "hi"` and
+  `codex exec 'Reply ok.'` in each state, and `curl -si` the same URLs to see
+  the status, headers and body.
+- **Proof:**
+  - after the revoke, Claude Code shows "Codewire: the Anthropic credential
+    this environment uses was revoked." and "Fix: in a local VM, run `cw
+    credentials --local list` on the computer that runs it; in a hosted
+    Sandbox, run `cw credentials --cloud list` wherever you're signed in to
+    Codewire; then connect it again"; `curl` shows 403, `Codewire-Refusal: credential_revoked` and the
+    same text. Record what Codex prints for the same refusal;
+  - each other answered state reads as its row in the list, with its reason
+    in the header;
+  - no body names the credential, the profile, an id, an email or an account,
+    and a canary sent in the request never comes back;
+  - a refused host or port, and a protected address, get no answer from
+    Codewire: the agent reports a failed connection, and the reason shows
+    only in the guest's refusal list (#4015) and the owner's `cw policy log`
+    (#5058), the protected one as plain `address_not_allowed`;
+  - `cw policy log` names the same reason as the header for every answered
+    refusal.
+- **Hosted Sandbox:** the same list holds once #4001's switch is on, with the
+  `--cloud` fix lines; not yet observed there either.
 - **Observed:** not yet observed.
 
 ## `learn-mode`: record what an environment reaches, then lock it

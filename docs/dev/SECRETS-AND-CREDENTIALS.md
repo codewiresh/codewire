@@ -1147,6 +1147,121 @@ these pieces are in place for the boot seed that will:
   because the swap rule refuses a placeholder sent beside a second credential
   header. Without interception, the projection is exactly the one above.
 
+### Refusals an agent or a person can read (#5057)
+
+Codewire refuses some of an agent's traffic itself, on every managed route:
+an intercepted host's front door, the loopback ingress of the base-URL
+route, and Git's route. One rendering serves them all. This section is the
+one list of those refusals: what the agent receives, the `Codewire-Refusal`
+reason, and what the guest's refusal list (#4015) and the owner's
+`cw policy log` (#5058) show. A new refusal is added here first.
+
+**Not yet built** (#5057 builds it): today every answered refusal except
+`credential_conflict` and the hosted Sandbox's reconnect answer reaches the
+agent as a bare status or `credential route unavailable`, with no
+`Codewire-Refusal` header; an unserved `chatgpt.com` path (#4898) is refused
+as the broker's denial (403), not yet as `path_not_served` (404). The list
+below is what #5057's code delivers.
+
+**Two kinds.** Only a request the TLS front door has taken (an intercepted
+host, its connection handed off) can be answered in HTTP. Everything refused
+at the connection gets no answer from Codewire: the agent sees its lookup
+fail or its connection reset, and the reason appears only in the refusal
+lists. Codewire never terminates TLS for a host it refuses just to explain
+it.
+
+**Answered refusals.** A plain-text body (`text/plain; charset=utf-8`,
+`cache-control: no-store`) of the sentence below, then one line
+`Fix: …` where the row has a fix, and the header
+`Codewire-Refusal: <reason>`. Claude Code shows the body as it is.
+
+One exception: where the client parses the answer as a protocol's error, the
+body keeps that protocol's shape. The OAuth token endpoint
+(`platform.claude.com/v1/oauth/token`) answers an RFC 6749 error, which
+Claude Code acts on (`invalid_grant` ends its login,
+`temporarily_unavailable` keeps it running): `invalid_request`
+(`request_not_forwarded`), `invalid_grant` with the description "Codewire:
+this environment's Claude sign-in needs to be renewed"
+(`credential_needs_reconnect`), and `temporarily_unavailable`
+(`upstream_failed`). The same header and body rules apply. Its rows come
+with #4971.
+
+| Reason | Status | When | Body |
+| --- | --- | --- | --- |
+| `credential_revoked` | 403 | the slot's credential was revoked or deleted | "Codewire: the PROVIDER credential this environment uses was revoked." Fix: in a local VM, run `cw credentials --local list` on the computer that runs it; in a hosted Sandbox, run `cw credentials --cloud list` wherever you're signed in to Codewire; then connect it again |
+| `credential_expired` | 403 | the credential passed its hard expiry | "Codewire: the PROVIDER credential this environment uses has expired." Fix as for `credential_revoked` |
+| `credential_needs_reconnect` | 403 | the credential is marked for reconnecting: the provider refused it, or a refresh was refused or its outcome is unknown, which is terminal | "Codewire: the PROVIDER credential this environment uses needs reconnecting." Fix as for `credential_revoked` |
+| `no_credential_selected` | 403 | a request carries this environment's placeholder for a slot its profile no longer fills. Without a placeholder the request isn't a credential request at all and follows the network policy (interception design, 3a) | "Codewire: this environment's profile no longer has a PROVIDER credential." Fix: `cw credentials --local profiles list` on the computer that runs the VM, or `cw credentials --cloud profiles list` for a hosted Sandbox |
+| `credential_unavailable` | 503 | the credential authority or the broker doesn't answer now | "Codewire: the PROVIDER credential can't be used right now; try again." |
+| `credential_conflict` | 400 | the placeholder is sent beside another credential header, or more than one placeholder | "Codewire: this request carries the Codewire placeholder and another credential; send only one." |
+| `path_not_served` | 404 | the host's route doesn't cover this path (for example `chatgpt.com` outside `/backend-api/codex`, #4898) | "Codewire: this path on HOST isn't one Codewire forwards." |
+| `websocket_not_served` | 403 | a WebSocket the route doesn't carry yet (#3999 changes 9 and 10) | "Codewire: WebSockets to HOST aren't carried yet." |
+| `route_not_served` | 403 | an intercepted host whose credential route the front door doesn't serve yet (today every slot but Anthropic) | "Codewire: requests to HOST can't use this environment's credentials yet." |
+| `request_not_forwarded` | 400, 403 or 421, as today | a request the front door or bridge won't forward as it is: CONNECT, a malformed target, a host that isn't this connection's (421), a bad upgrade, an unsafe path, a method outside GET, HEAD, POST, PUT, PATCH and DELETE, an oversized query or a header it can't carry | "Codewire: this request to HOST isn't one Codewire forwards." |
+| `body_too_large` | 413 | a body over 4 MiB on a host that doesn't stream | "Codewire: this request's body is over the 4 MiB Codewire forwards to HOST." |
+| `busy` | 503 | the bridge's limits on requests or WebSockets in flight | "Codewire: too many requests are in flight; try again." |
+| `upstream_failed` | 502 | PROVIDER couldn't be reached, or answered in a way Codewire won't pass on | "Codewire: PROVIDER couldn't be reached; try again." |
+| `name_not_allowed` | 403 | a request on an intercepted host without a Codewire value, which the network policy refuses (design 3a) | "Codewire: this environment's network policy doesn't allow this request to HOST." The owner's `cw policy log` (#5058) shows it; until that exists, no fix line |
+| `unavailable` | 503 | the request can't be checked against the network policy now: the signed policy decision is missing or doesn't match | "Codewire: this request to HOST can't be checked against the network policy right now; try again." |
+
+A response that has already started when its stream fails can't change its
+status or headers; the stream ends with an error, and the refusal lists
+record `upstream_failed`.
+
+**Not on this list: the provider's own answers.** A provider's response
+passes through unchanged and isn't a Codewire refusal. That includes a 401
+the provider gives a managed credential after Codewire's one forced refresh
+failed (#4972); "never 401" below is about Codewire's own refusals, and the
+next request gets `credential_needs_reconnect`.
+
+**Rows still owed.** #4971 (the token host's answers and refusals) and
+#4947 (a routed origin's refusals) each add their rows here when they land.
+
+**Refused at the connection** (no answer; the agent sees a failed lookup or
+a reset): `name_not_allowed`, `port_not_allowed`, `address_not_allowed`,
+`lease_expired`, and, when the front door itself is down, `unavailable`.
+These are the guest reasons of the egress broker's `RefusalReason`
+(`protected_answers_only` and `protected_address` fold into the matching
+not-allowed reason, `intercept_unavailable` into `unavailable`), so a refusal
+never tells an environment which names or ranges are protected. The owner's
+`cw policy log` shows the raw reason; the credential and request reasons
+above are the same in both views.
+
+**Why these statuses.** Never 401: an agent answers a 401 by starting its
+own token refresh, with a placeholder it can't refresh. 403 for what a retry
+won't change, 503 for what it may, 502 for the provider's side, and the
+request errors keep the status they have today (400, 404, 413, 421).
+
+**What a body may say** (cw-security's ruling of 2026-11-16, recorded on
+#5057):
+- always: the provider (PROVIDER: Anthropic, OpenAI or GitHub), HOST, PORT,
+  the kind of failure and the kind of fix. HOST is the canonical bound name
+  from the interceptable-host table that took the connection (for a suffix
+  binding, the suffix itself), never the request's Host, SNI or `:authority`,
+  which the sender chooses; PORT is the bound port;
+- the owner's labels (a credential's or a profile's name) only where the
+  environment can already read that exact label through a channel this spec
+  names. None does today, so bodies say "the PROVIDER credential this
+  environment uses" and point to the owner's own `cw`, where the names are;
+- never: internal ids (credential, binding, lease, environment), an
+  organization's name, another member's name, an email or a provider account
+  name; nothing from the provider's answer or the request is ever echoed.
+
+`Codewire-Refusal` carries exactly one reason from the two lists above, or
+`denied` (below), never free text. The set is versioned by this table: a
+reader that meets a reason it doesn't know, from a newer broker, treats it as
+`unavailable`. A refusal from an older broker that sends no reason at all
+keeps today's status (403 for a denial) with the body "Codewire: this request
+was refused." and `Codewire-Refusal: denied`, never a 503, which would invite
+an agent to retry a refusal that won't change.
+
+Git's route keeps the statuses it has today (Git treats 401 and 403 itself)
+and never answers 401; its body is the same sentence, at most two lines,
+since Git prints it after `remote:`. Tests match every body
+against its fixed template, check that no label appears, and place a canary
+in the request, including one in a Host subname under a suffix binding, that
+must never come back.
+
 ### Hosted front-door session (not yet served)
 
 `EgressService.FrontDoorSession` is specified, but not served yet: it answers
