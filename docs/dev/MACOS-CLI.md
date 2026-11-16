@@ -312,6 +312,36 @@ without it the transport can use only its DERP relay over TCP. This path is
 implemented and unit-tested on the Mac but not yet observed with a real Mesh
 login.
 
+A socket passed between these host processes stays open at its sender until
+its receiver has it. On macOS a socket whose only reference is a descriptor in
+flight, sent and not yet received, can be disposed of once its sender has
+closed its last copy: the receiver gets it at end of file, and the bytes it
+held are gone. Measured on macOS 27.2.1 under load, for a Unix socket and for
+an accepted TCP connection: with the sender closing at once, 0 of 200 TCP
+connections arrived with the bytes their client had written; with the sender
+keeping its copy, 200 of 200 did (#4916, #5070). Linux keeps such a socket.
+So on both systems each sender keeps its own copy until the receiver
+acknowledges it, for a bounded time:
+
+- the egress broker keeps each intercepted stream's front-door end until the
+  front door's acknowledgement of that stream;
+- the runner keeps the sockets it passes to the network worker at its start
+  until the worker's status frame for them, within the start's deadline
+  (#5076);
+- a Mesh connection to the VM is passed twice, and held at each: the Mesh
+  transport keeps its stream until the runner acknowledges it, and the
+  runner keeps it until the network worker does. Each sender passes one
+  connection at a time and waits up to two seconds for that
+  acknowledgement, so it never holds more than one. A connection not
+  acknowledged in time is not let go silently, which would be the same loss
+  again: its sender closes it, so the client sees it end at once, and
+  records `mesh_ingress_unacknowledged`. Three in a row end that sender's
+  channel, as a receiver that has stopped answering, and the environment
+  turns `error`. A late acknowledgement of a connection already closed is
+  ignored; anything else the receiver says on that channel ends it. Not yet
+  built (#5084): today each sender lets go as soon as the connection is
+  sent, so on a loaded Mac a Mesh connection to a local VM can arrive dead.
+
 `cw mesh up` runs the standalone Mesh service on a Mac from the same code as on
 Linux (#3797): the installed `cw` serves the Mesh (`cw __local-mesh`), which
 starts and owns its DERP relay (`cw __local-derp`), so the relay ends with it.

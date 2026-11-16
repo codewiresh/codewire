@@ -15,6 +15,7 @@ Updated 2026-11-16.
 | `mac-vm-lifecycle` | observed on a development build of the #4478 fix; failure observed on v0.4.16 | observed on a development build of the #4478 fix |
 | `mac-vm-refused-start` | refused create observed on a development build | not yet observed |
 | `mac-vm-cached-image` | observed on a development build of #5036 (e42e2f457) | not yet observed |
+| `mac-vm-mesh-ingress` | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -158,3 +159,37 @@ Issues: #4968, #4917.
     registry could not be reached and that a tag is always checked with its
     registry. The firewall logged that supervisor's DNS lookup of ghcr.io and
     its connection to ghcr.io:443.
+
+## 4. `mac-vm-mesh-ingress`: a Mesh connection reaches the VM whole, under load
+
+Issue: #5084.
+
+- **Entry points:** `cw create --local --network NAME`, with the ports the
+  project declares; then a connection from another member of that Mesh
+  network to one of those ports on the VM's node.
+- **States to exercise:** the Mac idle; the Mac under load, with other
+  processes passing and closing sockets (the churn of
+  `in_flight_sockets_keeping_their_bytes` in `codewire-egress-policy`); a
+  client that writes as soon as it connects; many connections one after
+  another; a network worker that does not acknowledge a connection.
+- **Driving it:** create a VM on a Mesh network with a server on a declared
+  port that echoes what it reads. From another node of the network, open 200
+  connections in turn, each writing a few bytes at once and reading them
+  back, first with the Mac idle and then under the churn. No command wraps
+  this yet.
+- **Proof:** every connection gets its bytes back, idle and under load: none
+  ends at once, and none loses what its client wrote first. The runner's
+  copy of each accepted connection is released when the network worker
+  acknowledges it, and the Mesh transport's when the runner does, so a
+  connection the VM's server closes still ends at once for its client. A
+  connection not acknowledged within two seconds is closed by whichever of
+  the two was holding it: its client sees it end, never hang, and
+  `mesh_ingress_unacknowledged` is recorded. After three in a row the
+  environment turns `error`, as when the forwarder or the transport is lost
+  for any other reason.
+- **Gotchas:** Mesh attachment on a Mac local VM is implemented but not yet
+  observed with a real Mesh sign-in (`docs/dev/MACOS-CLI.md`), so this step
+  waits on that walk too. Linux local VMs keep a socket in flight and do
+  not show the loss; the rule is the same on both.
+- **Observed:** not yet observed. The loss itself is measured outside the
+  product (`docs/dev/MACOS-CLI.md`); the fix is not built.
