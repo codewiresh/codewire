@@ -364,6 +364,7 @@ fn admin_accounts_template_escapes_access_request_fields() {
             account: "<script>alert('login')</script>".into(),
             linked_at: "2026-11-12T09:30:00".into(),
         }],
+        deletion: crate::view::AccountDeletionOffer::Offered,
     }];
     let body = AdminAccountsTemplate {
         view: &view,
@@ -428,6 +429,7 @@ fn only_an_unverified_account_offers_to_resend_its_verification_email() {
         has_reason: true,
         created_at: "2026-11-12T12:00:00".into(),
         identities: Vec::new(),
+        deletion: crate::view::AccountDeletionOffer::Offered,
     };
     let accounts = vec![
         account("user-waiting", false),
@@ -498,6 +500,7 @@ fn account_access_offers_suspend_and_unsuspend_behind_a_confirmation() {
         has_reason: true,
         created_at: "2026-11-12T12:00:00".into(),
         identities: Vec::new(),
+        deletion: crate::view::AccountDeletionOffer::Offered,
     };
     let accounts = vec![
         account("user-active", false, false),

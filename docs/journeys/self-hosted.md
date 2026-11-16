@@ -37,7 +37,7 @@ into Turnstile and into asking a reason.
 The four combinations for a sign-up without an invite, with and without
 mail:
 
-| Combination | What the person sees | What the admin sees at Admin → Account Access |
+| Combination | What the person sees | What the admin sees at Admin → Manage account access |
 | --- | --- | --- |
 | Default: neither option | Name, email, password. Then "Your account is waiting for the admin." Signing in says the same until the admin enables it. With mail, the address is verified first. | The account as Disabled. Without mail, Enable is available, and its row says nothing has proved who owns the address. With mail, Enable waits for verification. |
 | Turnstile on | The same, after the challenge. | The same. |
@@ -78,7 +78,7 @@ challenge, never asks a reason and never waits.
   2. Without mail, sign in at once. With mail, open the verification email,
      then sign in.
   3. Create the first organization at `/organizations/new`.
-- **Proof:** the account opens Admin → Account Access, which only an admin
+- **Proof:** the account opens Admin → Manage account access, which only an admin
   can, and a second `create-admin` run leaves one admin.
 - **Observed:** not yet observed.
 
@@ -103,7 +103,7 @@ challenge, never asks a reason and never waits.
      Then they accept the invitation.
   4. With mail, the invite arrives by email; the rest is the same.
 - **Proof:** the person appears on Members with the invitation's role. Admin
-  → Account Access shows how they joined: the organization, the inviter and
+  → Manage account access shows how they joined: the organization, the inviter and
   the time.
 - **Observed:** not yet observed.
 
@@ -116,7 +116,7 @@ challenge, never asks a reason and never waits.
   1. Set the combination in the IdP's and the dashboard's environment, and
      restart them.
   2. Sign up without a link, and try to sign in.
-  3. As the admin, find the account at Admin → Account Access and enable it.
+  3. As the admin, find the account at Admin → Manage account access and enable it.
      Sign in again.
 - **Proof:** before Enable, sign-in is refused with the waiting message. After
   it, sign-in works. With the reason on, the admin's row shows the answer.

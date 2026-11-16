@@ -22,6 +22,7 @@ Updated 2026-11-14.
 | `signup-provider` | not yet observed by a walk; reported working by the owner 2026-11-14 (#4062), release not recorded | not yet observed by a walk; reported working by the owner 2026-11-14 (#4062), release not recorded |
 | `signup-gates` | not yet observed | not yet observed |
 | `account-password-reset` | not yet observed | not yet observed |
+| `account-admin-delete` | not yet observed | not yet observed |
 | `account-receipt-email` | not yet observed | not yet observed |
 
 ## Before the walk
@@ -297,6 +298,52 @@ session; until it merges, leave that state out.
     and the reset page reports success, but no password is set and nothing is
     signed out (#4528). Walk this step with a password account;
   - each request sends an email; the throttle on account mail is #3297's.
+- **Observed:** not yet observed.
+
+## `account-admin-delete`: an admin deletes someone else's account
+
+Issue: #4541. The rules are in AUTH-POLICY's "Account deletion by an admin or
+the purge". The page names no money (owner, 2026-11-15, #3013).
+
+- **Entry points:** Admin → **Manage account access**, the **Delete account**
+  link on an account's row, which opens `/admin/accounts/<id>/delete`.
+- **States to exercise:**
+  - the list: the walker's own row says "Your account. Delete it in
+    Settings." and another admin's row says "An admin. Demote them first.";
+    neither has the link;
+  - an account with a personal organization and a sandbox, and a membership
+    in someone else's organization: the plan lists both;
+  - an account that is the only owner of an organization others belong to:
+    "Transfer or delete these organizations first", with the form disabled;
+  - a wrong address typed, a wrong password or code, and the hourly limit:
+    each says "Nothing was deleted.";
+  - an account whose deletion is already running.
+- **Driving it:** as a platform admin with an authenticator:
+  1. Create the scratch account to delete with
+     `scripts/runtime/dev/provision-dev-scratch-account.sh --verified --label <label>`
+     (Dev only, through Infra's kube-access wrapper).
+  2. Open Admin → Manage account access and choose **Delete account** on its
+     row. Read the plan: what is deleted with the account, the memberships
+     that end, and "Everything listed is removed permanently. This can't be
+     undone."
+  3. Type a different address, your password and a current code, and press
+     **Delete account**.
+  4. Type the account's address, a wrong code, and press it again.
+  5. Type the account's address, your password and a current code, and press
+     it.
+- **Proof:**
+  - step 3 says "The address you typed is not this account's. Nothing was
+    deleted." and step 4 "Your password or code is incorrect. Nothing was
+    deleted."; the account still signs in after both;
+  - step 5 returns to the list with "Deletion started for <address>.";
+  - the account can no longer sign in, and its sandboxes and personal
+    organizations are gone;
+  - the deletion operation records `initiator = admin` and the walker as its
+    actor; the "account deleted" email goes only to a verified address.
+- **Gotchas:**
+  - an admin's own account and other admins' accounts are deleted another
+    way: Settings → Delete account, after a demotion;
+  - each admin may start 10 deletions an hour, a count no setting raises.
 - **Observed:** not yet observed.
 
 ## `account-receipt-email`: the receipt after a top-up

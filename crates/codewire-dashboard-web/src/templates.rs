@@ -9,8 +9,8 @@ use crate::billing_banner::BillingBannerView;
 use crate::billing_connect::BillingPageView;
 use crate::view::EnvironmentCreateFormView;
 use crate::view::{
-    AccountAccessView, AccountDeletionPageView, ApiKeysPageView, AuthFormView,
-    CredentialSettingsView, DashboardView, DevicePageView, EnvironmentsPageView,
+    AccountAccessView, AccountDeletionPageView, AdminAccountDeletionView, ApiKeysPageView,
+    AuthFormView, CredentialSettingsView, DashboardView, DevicePageView, EnvironmentsPageView,
     InvitationPageView, MembersPageView, OrganizationContext, OrganizationFormView,
     OrganizationRow, PersonalApiKeysPageView, PersonalSecretsPageView, PresetsPageView,
     SecretBucketPageView, SecretProjectsPageView, SettingsPageView, SetupTwoFactorView,
@@ -92,6 +92,13 @@ pub(crate) struct AdminAccountsTemplate<'a> {
     pub(crate) csrf_token: &'a str,
     pub(crate) message: &'a str,
     pub(crate) error: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "admin-account-delete.html")]
+pub(crate) struct AdminAccountDeleteTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) page: &'a AdminAccountDeletionView,
 }
 
 #[derive(Template)]

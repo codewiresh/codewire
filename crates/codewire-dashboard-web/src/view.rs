@@ -154,6 +154,32 @@ pub(crate) struct AccountAccessView {
     pub(crate) has_reason: bool,
     pub(crate) created_at: String,
     pub(crate) identities: Vec<LinkedIdentityView>,
+    pub(crate) deletion: AccountDeletionOffer,
+}
+
+/// Whether an account row offers "Delete account" (#4541).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccountDeletionOffer {
+    Offered,
+    /// The signed-in admin's own account, deleted from Settings.
+    OwnAccount,
+    /// Another admin, demoted before their account is deleted.
+    Admin,
+}
+
+impl AccountDeletionOffer {
+    pub(crate) fn is_offered(self) -> bool {
+        self == Self::Offered
+    }
+
+    /// Why the row offers no deletion, empty when it does.
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::Offered => "",
+            Self::OwnAccount => "Your account. Delete it in Settings.",
+            Self::Admin => "An admin. Demote them first.",
+        }
+    }
 }
 
 /// A GitHub or Google identity that signs in to an account, for admins.
@@ -464,6 +490,40 @@ pub(crate) struct AccountDeletionPageView {
 pub(crate) struct AccountDeletionOrganizationView {
     pub(crate) name: String,
     pub(crate) url: String,
+    pub(crate) detail: String,
+}
+
+/// An admin's confirmation page for deleting someone else's account (#4541):
+/// what goes, what stands in the way, and the form.
+#[derive(Default)]
+pub(crate) struct AdminAccountDeletionView {
+    pub(crate) user_id: String,
+    pub(crate) email: String,
+    /// The email as an exact-match HTML `pattern`.
+    pub(crate) email_pattern: String,
+    /// What the admin typed, kept when the page comes back with an error.
+    pub(crate) confirm_email: String,
+    pub(crate) csrf_token: String,
+    /// Organizations deleted with the account, each with its sandboxes.
+    pub(crate) personal: Vec<DeletedOrganizationView>,
+    /// Organizations the account leaves.
+    pub(crate) shared: Vec<String>,
+    /// Organizations to transfer or delete first.
+    pub(crate) blocking: Vec<String>,
+    pub(crate) is_admin: bool,
+    pub(crate) deletion_running: bool,
+    pub(crate) error: String,
+}
+
+impl AdminAccountDeletionView {
+    /// An admin account or a blocking organization disables the form.
+    pub(crate) fn refused(&self) -> bool {
+        self.is_admin || !self.blocking.is_empty()
+    }
+}
+
+pub(crate) struct DeletedOrganizationView {
+    pub(crate) name: String,
     pub(crate) detail: String,
 }
 

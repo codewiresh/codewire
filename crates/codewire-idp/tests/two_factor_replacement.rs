@@ -1572,3 +1572,189 @@ async fn an_admin_may_ask_for_ten_deletions_an_hour() {
     admin_cleanup(&pool, &target, &target_email).await;
     cleanup(&pool, &admin.email).await;
 }
+
+// The admin's confirmation page reads what the deletion would do first.
+
+async fn plan_as(app: &Router, admin: &Enrolled, target: &str) -> Response {
+    call(
+        app,
+        "GET",
+        &format!("{ADMIN_DELETE}/{target}/deletion-plan"),
+        Call {
+            cookie: Some(&admin.session),
+            ..Default::default()
+        },
+        Value::Null,
+    )
+    .await
+}
+
+/// An organization with these members and roles, created by the first.
+async fn organization(pool: &PgPool, id: &str, name: &str, members: &[(&str, &str)]) {
+    sqlx::query("INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $2, $1, $3)")
+        .bind(id)
+        .bind(name)
+        .bind(members[0].0)
+        .execute(pool)
+        .await
+        .unwrap();
+    for (user_id, role) in members {
+        sqlx::query("INSERT INTO org_members (id, org_id, user_id, role) VALUES ($1, $2, $3, $4)")
+            .bind(format!("{id}-{user_id}"))
+            .bind(id)
+            .bind(user_id)
+            .bind(role)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+}
+
+/// One running sandbox in the organization.
+async fn sandbox(pool: &PgPool, organization: &str, created_by: &str) {
+    let spec = r#"{"schema_version":1,"working_directory":"/workspace"}"#;
+    sqlx::query(
+        "INSERT INTO environment_presets (id, org_id, name, slug, project_spec) \
+         VALUES ($1, $2, 'Synthetic', $1, $3::jsonb)",
+    )
+    .bind(format!("{organization}-preset"))
+    .bind(organization)
+    .bind(spec)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO environments (id, org_id, created_by, type, preset_id, state, \
+         desired_state, environment_operation_generation, project_spec) \
+         VALUES ($1, $2, $3, 'sandbox', $4, 'running', 'started', 1, $5::jsonb)",
+    )
+    .bind(format!("{organization}-sandbox"))
+    .bind(organization)
+    .bind(created_by)
+    .bind(format!("{organization}-preset"))
+    .bind(spec)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn organization_cleanup(pool: &PgPool, ids: &[&str]) {
+    for statement in [
+        "DELETE FROM environments WHERE org_id = ANY($1)",
+        "DELETE FROM environment_presets WHERE org_id = ANY($1)",
+        "DELETE FROM org_members WHERE org_id = ANY($1)",
+        "DELETE FROM organizations WHERE id = ANY($1)",
+    ] {
+        sqlx::query(statement)
+            .bind(ids)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn an_admin_sees_what_deleting_an_account_would_do() {
+    let Some(pool) = pool().await else { return };
+    let apps = apps(&pool);
+    let app = admin_delete_app(pool.clone());
+    let admin = enrolled_admin(&pool, &apps, "admin-plans").await;
+    let (target, target_email) = access_request(&pool, "admin-plans-target").await;
+    let (colleague, colleague_email) = access_request(&pool, "admin-plans-colleague").await;
+    let orgs = [
+        "admin-plans-solo",
+        "admin-plans-shared",
+        "admin-plans-owned",
+    ];
+    organization_cleanup(&pool, &orgs).await;
+    organization(&pool, orgs[0], "Solo Lab", &[(&target, "owner")]).await;
+    sandbox(&pool, orgs[0], &target).await;
+    organization(
+        &pool,
+        orgs[1],
+        "Shared Team",
+        &[(&colleague, "owner"), (&target, "member")],
+    )
+    .await;
+    organization(
+        &pool,
+        orgs[2],
+        "Owned Team",
+        &[(&target, "owner"), (&colleague, "member")],
+    )
+    .await;
+
+    let plan = plan_as(&app, &admin, &target).await;
+    assert_eq!(plan.status, 200, "{}", plan.body);
+    assert_eq!(plan.headers["cache-control"], "no-store");
+    assert_eq!(
+        plan.body,
+        json!({
+            "email": target_email,
+            "name": "Waiting",
+            "isAdmin": false,
+            "personalOrganizations": [{"name": "Solo Lab", "sandboxes": 1}],
+            "sharedOrganizations": ["Shared Team"],
+            "blockingOrganizations": ["Owned Team"],
+            "deletionRunning": false,
+        })
+    );
+    // Reading the plan changes nothing.
+    assert_eq!(deletion_of(&pool, &target).await, None);
+
+    organization_cleanup(&pool, &orgs).await;
+    admin_cleanup(&pool, &target, &target_email).await;
+    admin_cleanup(&pool, &colleague, &colleague_email).await;
+    cleanup(&pool, &admin.email).await;
+}
+
+#[tokio::test]
+async fn the_deletion_plan_is_for_admins_and_existing_accounts() {
+    let Some(pool) = pool().await else { return };
+    let apps = apps(&pool);
+    let app = admin_delete_app(pool.clone());
+    let admin = enrolled_admin(&pool, &apps, "admin-plan-reads").await;
+    let other_admin = enrolled_admin(&pool, &apps, "admin-plan-reads-other").await;
+    let member = enrolled(&pool, &apps, "admin-plan-reads-member").await;
+    let (target, target_email) = access_request(&pool, "admin-plan-reads-target").await;
+
+    let not_admin = plan_as(&app, &member, &target).await;
+    assert_eq!(not_admin.status, 403, "not an admin: {}", not_admin.body);
+    let signed_out = call(
+        &app,
+        "GET",
+        &format!("{ADMIN_DELETE}/{target}/deletion-plan"),
+        Call::default(),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(signed_out.status, 401, "signed out: {}", signed_out.body);
+    for unknown in ["u_admin-plan-reads-nobody", "deleted-user", "a%20b"] {
+        let missing = plan_as(&app, &admin, unknown).await;
+        assert_eq!(missing.status, 404, "{unknown}: {}", missing.body);
+    }
+
+    let admin_plan = plan_as(&app, &admin, &other_admin.user_id).await;
+    assert_eq!(admin_plan.status, 200, "{}", admin_plan.body);
+    assert_eq!(admin_plan.body["isAdmin"], true, "{}", admin_plan.body);
+
+    let before = plan_as(&app, &admin, &target).await;
+    assert_eq!(before.body["deletionRunning"], false, "{}", before.body);
+    let deleted = delete_as(
+        &app,
+        &admin,
+        &target,
+        &target_email,
+        &code_at(&admin.secret, &admin.email, 0),
+    )
+    .await;
+    assert_eq!(deleted.status, 200, "{}", deleted.body);
+    let after = plan_as(&app, &admin, &target).await;
+    assert_eq!(after.status, 200, "{}", after.body);
+    assert_eq!(after.body["deletionRunning"], true, "{}", after.body);
+
+    admin_cleanup(&pool, &target, &target_email).await;
+    for enrolled in [&admin, &other_admin, &member] {
+        cleanup(&pool, &enrolled.email).await;
+    }
+}

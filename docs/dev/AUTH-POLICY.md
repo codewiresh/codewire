@@ -293,7 +293,12 @@ starts (`server-core/src/account_deletion.rs`), whoever asks (#4541):
   deletes their own account from Settings, and demotes another admin before
   deleting them. Each admin may ask for 10 deletions an hour, a count no
   setting raises. The operation records the admin as its actor, and the
-  "account deleted" mail goes only to a verified address.
+  "account deleted" mail goes only to a verified address. Before confirming,
+  the admin reads `GET /api/admin/accounts/{user_id}/deletion-plan`: the
+  account's personal organizations and their sandboxes, the memberships that
+  end, the organizations in the way and whether a deletion already runs.
+  Admin → Manage account access offers "Delete account" on every row except
+  the admin's own and other admins'.
 
 ## Account access revocation
 
@@ -364,7 +369,7 @@ owner.
 `UnsuspendAccount` re-enables the account and clears the marks. It revives
 nothing suspension revoked or stopped: the person signs in again and creates
 new API keys, environments stay stopped until started, and ports stay with
-their creator. Account Access's ordinary enable refuses a suspended account,
+their creator. The ordinary enable on Manage account access refuses a suspended account,
 so only unsuspension brings it back.
 
 ## Client use

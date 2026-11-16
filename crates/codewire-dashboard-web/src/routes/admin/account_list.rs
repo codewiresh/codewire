@@ -65,6 +65,8 @@ pub(in crate::routes) async fn list(
         .filter(|row| account.is_none_or(|account| row.id == account))
         .map(|row| account_access_view(row, &dashboard.account_id))
         .collect::<Vec<_>>();
+    let message = deletion_started(&query, &accounts)
+        .unwrap_or_else(|| account_message(&query.message).to_owned());
     // A session the IdP changed gets a new token, and the forms render with
     // the token the browser keeps.
     let token = if identity.changes_session() {
@@ -78,12 +80,30 @@ pub(in crate::routes) async fn list(
             accounts: &accounts,
             one_account: account.is_some(),
             csrf_token: &token,
-            message: account_message(&query.message),
+            message: &message,
             error: account_error(&query.error),
         }),
         csrf_cookie(&state.public_origin, &token),
     );
     append_session_cookies(response, &identity)
+}
+
+/// "Deletion started for <email>" after "Delete account". The URL names the
+/// account by id; its address comes from the list, which keeps it while the
+/// deletion runs.
+fn deletion_started(
+    query: &AdminQuery,
+    accounts: &[crate::view::AccountAccessView],
+) -> Option<String> {
+    if query.message != "deletion-started" {
+        return None;
+    }
+    Some(
+        match accounts.iter().find(|account| account.id == query.deleted) {
+            Some(account) => format!("Deletion started for {}.", account.email),
+            None => "Deletion started.".to_owned(),
+        },
+    )
 }
 
 /// Account IDs are short opaque strings of letters, digits, `-` and `_`.

@@ -118,7 +118,9 @@ impl Started {
     }
 }
 
-async fn bounded_json<T: DeserializeOwned>(mut response: reqwest::Response) -> Result<T, ()> {
+pub(crate) async fn bounded_json<T: DeserializeOwned>(
+    mut response: reqwest::Response,
+) -> Result<T, ()> {
     if response
         .content_length()
         .is_some_and(|length| length > RESPONSE_LIMIT as u64)
@@ -174,7 +176,7 @@ fn request<I: Serialize>(
     request.build().map_err(|_| ())
 }
 
-async fn post<I: Serialize>(
+pub(crate) async fn post<I: Serialize>(
     state: &AppState,
     path: &str,
     cookie: HeaderValue,

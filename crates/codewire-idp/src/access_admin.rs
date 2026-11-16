@@ -37,6 +37,8 @@ struct AccountAccessRow {
     name: Option<String>,
     email_verified: bool,
     enabled: bool,
+    /// An admin's account is not deleted until they are demoted (#4541).
+    is_admin: bool,
     /// Suspended by an administrator (#3297): only unsuspending enables it.
     suspended: bool,
     access_reason: Option<String>,
@@ -126,6 +128,7 @@ async fn list_accounts(
                   name,
                   COALESCE(email_verified, false) AS email_verified,
                   enabled,
+                  COALESCE(is_admin, false) AS is_admin,
                   suspended_at IS NOT NULL AS suspended,
                   access_reason,
                   COALESCE(created_at, NOW()::timestamp) AS created_at,

@@ -132,6 +132,14 @@ pub(crate) fn router() -> Router<AppState> {
             post(admin::resend_account_verification),
         )
         .route(
+            "/admin/accounts/{user_id}/delete",
+            get(admin::account_delete::page),
+        )
+        .route(
+            "/admin/accounts/_actions/delete",
+            post(admin::account_delete::delete).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
             "/admin/accounts/_actions/suspend",
             post(admin::suspend_account),
         )

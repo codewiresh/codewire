@@ -879,7 +879,7 @@ fn approved_delete_account_error(code: &str) -> &'static str {
 
 /// An HTML `pattern` that matches exactly `value`. The attribute is compiled
 /// with the `v` flag, so every syntax character is escaped.
-fn exact_pattern(value: &str) -> String {
+pub(super) fn exact_pattern(value: &str) -> String {
     let mut pattern = String::with_capacity(value.len() * 2);
     for character in value.chars() {
         if "\\^$.|?*+()[]{}/".contains(character) {
@@ -890,7 +890,7 @@ fn exact_pattern(value: &str) -> String {
     pattern
 }
 
-fn count(value: i64, one: &str, many: &str) -> String {
+pub(super) fn count(value: i64, one: &str, many: &str) -> String {
     format!("{value} {}", if value == 1 { one } else { many })
 }
 

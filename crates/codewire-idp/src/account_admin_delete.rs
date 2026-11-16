@@ -10,17 +10,24 @@
 //! account is not one. Each admin may ask for a fixed number of deletions an
 //! hour, a count no setting can raise. The deletion itself is the account's
 //! own deletion, recorded with the admin as its actor.
+//!
+//! `GET /api/admin/accounts/{user_id}/deletion-plan` shows the admin what
+//! that deletion would do before they confirm it: the account's personal
+//! organizations and their sandboxes, the memberships that end, the
+//! organizations that block it. It names no money (owner, 2026-11-15, on
+//! #3013).
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Extension, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware;
 use axum::response::Response;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use codewire_server_core::AppError;
 use codewire_server_core::account_deletion::{
-    DELETED_USER_ID, Initiator, begin_account_deletion_in,
+    AccountOrganization, DELETED_USER_ID, Initiator, account_deletion_plan,
+    begin_account_deletion_in,
 };
 use codewire_server_core::auth::{AuthState, AuthUser, require_session_auth};
 use codewire_server_core::rate_limit::{ADMIN_ACCOUNT_DELETE, take_fixed_for_user};
@@ -61,6 +68,40 @@ struct DeleteResponse {
     operation_id: String,
 }
 
+/// What deleting the account would do, for the admin's confirmation page.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeletionPlanResponse {
+    email: String,
+    name: Option<String>,
+    /// An admin is demoted before their account is deleted.
+    is_admin: bool,
+    /// Deleted with the account.
+    personal_organizations: Vec<PersonalOrganization>,
+    /// The account's membership ends; the organization stays.
+    shared_organizations: Vec<String>,
+    /// The account is their only owner while others are members: the
+    /// deletion is refused until they are transferred or deleted.
+    blocking_organizations: Vec<String>,
+    /// A deletion of this account has already started.
+    deletion_running: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersonalOrganization {
+    name: String,
+    sandboxes: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct PlannedAccount {
+    email: String,
+    name: Option<String>,
+    is_admin: bool,
+    deletion_running: bool,
+}
+
 pub fn router(
     pool: PgPool,
     session_secret: String,
@@ -69,6 +110,10 @@ pub fn router(
 ) -> Router {
     Router::new()
         .route("/api/admin/accounts/{user_id}/delete", post(delete_account))
+        .route(
+            "/api/admin/accounts/{user_id}/deletion-plan",
+            get(deletion_plan),
+        )
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
         .route_layer(middleware::from_fn_with_state(auth, require_session_auth))
         .with_state(AdminDeleteState {
@@ -76,6 +121,64 @@ pub fn router(
             session_secret,
             frontend_url,
         })
+}
+
+async fn deletion_plan(
+    State(state): State<AdminDeleteState>,
+    Path(user_id): Path<String>,
+    actor: AuthUser,
+) -> Response {
+    private(
+        read_deletion_plan(&state.pool, &user_id, &actor)
+            .await
+            .map(Json),
+    )
+}
+
+async fn read_deletion_plan(
+    pool: &PgPool,
+    user_id: &str,
+    actor: &AuthUser,
+) -> Result<DeletionPlanResponse, AppError> {
+    actor.require_global_admin()?;
+    if !valid_id(user_id) || user_id == DELETED_USER_ID {
+        return Err(AppError::NotFound("Account not found".into()));
+    }
+    let account = sqlx::query_as::<_, PlannedAccount>(
+        r#"SELECT email, name, COALESCE(is_admin, false) AS is_admin,
+                  EXISTS (SELECT 1 FROM account_deletion_operations o
+                           WHERE o.user_id = u.id) AS deletion_running
+           FROM users u WHERE id = $1"#,
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::from)?
+    .ok_or_else(|| AppError::NotFound("Account not found".into()))?;
+    let plan = account_deletion_plan(pool, user_id).await?;
+    Ok(DeletionPlanResponse {
+        email: account.email,
+        name: account.name,
+        is_admin: account.is_admin,
+        personal_organizations: plan
+            .personal
+            .into_iter()
+            .map(|organization| PersonalOrganization {
+                name: organization.name,
+                sandboxes: organization.environment_count,
+            })
+            .collect(),
+        shared_organizations: names(plan.shared),
+        blocking_organizations: names(plan.blocking),
+        deletion_running: account.deletion_running,
+    })
+}
+
+fn names(organizations: Vec<AccountOrganization>) -> Vec<String> {
+    organizations
+        .into_iter()
+        .map(|organization| organization.name)
+        .collect()
 }
 
 async fn delete_account(

@@ -162,7 +162,7 @@ CSRF checks.
   returning to the open dialog. The password row and `user.password.added`
   commit together, sessions stay, and the account's address is told.
 
-The Account Access admin page lists each account's linked identities:
+The Manage account access admin page lists each account's linked identities:
 provider, account when known, subject and when it was linked.
 
 Focused proof is `cargo test -p codewire-idp --lib oauth`, the twenty-five

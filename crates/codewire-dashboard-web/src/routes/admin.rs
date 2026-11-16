@@ -26,9 +26,10 @@ use crate::{
         AdminAuditTemplate, AdminBillingTemplate, AdminOrganizationTemplate,
         AdminOrganizationsTemplate, AdminOverviewTemplate,
     },
-    view::{AccountAccessView, DashboardView, LinkedIdentityView},
+    view::{AccountAccessView, AccountDeletionOffer, DashboardView, LinkedIdentityView},
 };
 
+pub(super) mod account_delete;
 mod account_suspension;
 pub(super) use account_suspension::{suspend_account, unsuspend_account};
 pub(super) mod account_list;
@@ -51,6 +52,10 @@ pub(super) struct AdminQuery {
     /// On Accounts, show only this account, as a feedback row links to it.
     #[serde(default)]
     account: String,
+    /// On Accounts after "Delete account", the account whose deletion
+    /// started. Its id, never its address, is in the URL.
+    #[serde(default)]
+    deleted: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -73,6 +78,10 @@ struct AccountAccessResponse {
     name: Option<String>,
     email_verified: bool,
     enabled: bool,
+    /// An IdP that does not say yet is read as not an admin; its delete
+    /// route still refuses an admin.
+    #[serde(default)]
+    is_admin: bool,
     /// An IdP that does not say is read as not suspended.
     #[serde(default)]
     suspended: bool,
@@ -1143,6 +1152,13 @@ fn account_access_view(account: &AccountAccessResponse, own_id: &str) -> Account
                 })
             })
             .collect(),
+        deletion: if account.id == own_id {
+            AccountDeletionOffer::OwnAccount
+        } else if account.is_admin {
+            AccountDeletionOffer::Admin
+        } else {
+            AccountDeletionOffer::Offered
+        },
     }
 }
 
