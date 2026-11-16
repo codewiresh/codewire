@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 
 static SERVICE_INFO: OnceLock<IntGaugeVec> = OnceLock::new();
 static RATE_LIMIT_REFUSALS: OnceLock<IntCounterVec> = OnceLock::new();
+static RATE_LIMIT_UNAVAILABLE: OnceLock<IntCounterVec> = OnceLock::new();
 
 /// The counter types a service registers through [`counter`] and
 /// [`counter_vec`], so a crate needs no Prometheus dependency of its own.
@@ -29,6 +30,19 @@ pub fn counter(name: &str, help: &str) -> IntCounter {
 pub fn counter_vec(name: &str, help: &str, labels: &[&str]) -> IntCounterVec {
     register_int_counter_vec!(Opts::new(name, help), labels)
         .unwrap_or_else(|error| panic!("metric {name} must register once: {error}"))
+}
+
+/// Requests refused because a named rate limit couldn't be read, so they
+/// failed closed (#3256, #3297): a database incident behind a limit, by the
+/// limit's name only.
+pub fn rate_limit_unavailable() -> &'static IntCounterVec {
+    RATE_LIMIT_UNAVAILABLE.get_or_init(|| {
+        counter_vec(
+            "codewire_rate_limit_unavailable_total",
+            "Requests refused because a named rate limit could not be read.",
+            &["limit"],
+        )
+    })
 }
 
 /// Requests a named rate limit refused (#3297), by the limit's name only, a

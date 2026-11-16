@@ -3052,8 +3052,8 @@ async fn session_auth_flow_against_postgres() {
     // 1. A wrong configured invite enters review and fails closed when review
     // email delivery is unavailable, before any user is inserted.
     let unavailable = r#"codewire_idp_sign_up_refusals_total{reason="unavailable"} "#;
-    let attempts = "codewire_idp_sign_up_attempts_total ";
-    let (unavailable_before, attempts_before) = (metric(unavailable).await, metric(attempts).await);
+    let admitted = "codewire_idp_sign_ups_admitted_total ";
+    let (unavailable_before, admitted_before) = (metric(unavailable).await, metric(admitted).await);
     let (st, body, _) = sess_req(
         &undeliverable,
         "POST",
@@ -3097,7 +3097,7 @@ async fn session_auth_flow_against_postgres() {
         body.get("accessPending").is_none(),
         "an invite skips review: {body}"
     );
-    assert!(metric(attempts).await >= attempts_before + 1.0);
+    assert!(metric(admitted).await >= admitted_before + 1.0);
     assert!(body.get("session").is_none() && cookie.is_none());
     let (enabled, sessions): (bool, i64) = sqlx::query_as(
         "SELECT u.enabled, (SELECT count(*) FROM sessions s WHERE s.user_id = u.id) \

@@ -290,18 +290,19 @@ pub async fn take_fixed_for_user(
 }
 
 /// Counts a refusal of `limit` in `codewire_rate_limit_refusals_total`, so an
-/// alert sees an account reach a cap (#3297 item 13).
+/// alert sees an account reach a cap, and a limit that couldn't be read, which
+/// its caller refuses, in `codewire_rate_limit_unavailable_total` (#3297 item
+/// 13).
 fn counted(
     limit: &Limit,
     decision: Result<Decision, sqlx::Error>,
 ) -> Result<Decision, sqlx::Error> {
-    if let Ok(decision) = &decision
-        && !decision.allowed
-    {
-        crate::metrics::rate_limit_refusals()
-            .with_label_values(&[limit.name])
-            .inc();
-    }
+    let counter = match &decision {
+        Ok(decision) if decision.allowed => return Ok(*decision),
+        Ok(_) => crate::metrics::rate_limit_refusals(),
+        Err(_) => crate::metrics::rate_limit_unavailable(),
+    };
+    counter.with_label_values(&[limit.name]).inc();
     decision
 }
 
@@ -314,6 +315,44 @@ async fn database_now(connection: &mut PgConnection) -> Result<DateTime<Utc>, sq
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_and_an_unreadable_limit_each_count_once_and_an_admission_not_at_all() {
+        // Its own name, so no other test's counting moves these series.
+        const COUNTED: Limit = Limit {
+            name: "test_counted",
+            key_prefix: "test_counted",
+            window_secs: 60,
+            default_max: 1,
+            per_user: false,
+        };
+        let refusals = || {
+            crate::metrics::rate_limit_refusals()
+                .with_label_values(&[COUNTED.name])
+                .get()
+        };
+        let unavailable = || {
+            crate::metrics::rate_limit_unavailable()
+                .with_label_values(&[COUNTED.name])
+                .get()
+        };
+        let decision = |allowed| Decision {
+            allowed,
+            max: 1,
+            resets_at: Utc::now(),
+        };
+        let before = (refusals(), unavailable());
+        assert!(counted(&COUNTED, Ok(decision(true))).is_ok_and(|d| d.allowed));
+        assert_eq!(
+            (refusals(), unavailable()),
+            before,
+            "an admission counts nothing"
+        );
+        assert!(counted(&COUNTED, Ok(decision(false))).is_ok_and(|d| !d.allowed));
+        assert_eq!((refusals(), unavailable()), (before.0 + 1, before.1));
+        assert!(counted(&COUNTED, Err(sqlx::Error::PoolClosed)).is_err());
+        assert_eq!((refusals(), unavailable()), (before.0 + 1, before.1 + 1));
+    }
 
     #[test]
     fn a_refusal_names_the_limit_and_when_it_resets() {

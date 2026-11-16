@@ -8,7 +8,7 @@ use codewire_server_core::metrics::{IntCounter, IntCounterVec, counter, counter_
 use std::sync::OnceLock;
 
 static SIGN_IN_FAILURES: OnceLock<IntCounterVec> = OnceLock::new();
-static SIGN_UP_ATTEMPTS: OnceLock<IntCounter> = OnceLock::new();
+static SIGN_UPS_ADMITTED: OnceLock<IntCounter> = OnceLock::new();
 static SIGN_UP_REFUSALS: OnceLock<IntCounterVec> = OnceLock::new();
 
 pub(crate) fn sign_in_failures() -> &'static IntCounterVec {
@@ -21,10 +21,10 @@ pub(crate) fn sign_in_failures() -> &'static IntCounterVec {
     })
 }
 
-pub(crate) fn sign_up_attempts() -> &'static IntCounter {
-    SIGN_UP_ATTEMPTS.get_or_init(|| {
+pub(crate) fn sign_ups_admitted() -> &'static IntCounter {
+    SIGN_UPS_ADMITTED.get_or_init(|| {
         counter(
-            "codewire_idp_sign_up_attempts_total",
+            "codewire_idp_sign_ups_admitted_total",
             "Sign-ups that passed their own checks and the sign-up limits.",
         )
     })
