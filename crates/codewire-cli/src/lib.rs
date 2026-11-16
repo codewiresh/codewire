@@ -625,7 +625,7 @@ enum Command {
     Create(Box<EnvCreateArgs>),
     #[command(
         about = "Start an environment",
-        long_about = "Start a stopped environment:\n  cw start ENV\n\nA cloud start returns once the environment is usable: its Git identity is set and its startup script has finished, as after `cw create`. A long startup script makes the start as long; start servers in a session instead. Ctrl-C ends only the wait."
+        long_about = "Start a stopped environment, or recover one in error:\n  cw start ENV\n\nIn error, a local VM's failed VM is stopped first, as `cw stop` would, and a cloud environment retries its create, which replaces a failed Pod. A cloud start returns once the environment is usable: its Git identity is set and its startup script has finished, as after `cw create`. A long startup script makes the start as long; start servers in a session instead. Ctrl-C ends only the wait."
     )]
     Start(EnvTargetArgs),
     #[command(about = "Remove an environment")]

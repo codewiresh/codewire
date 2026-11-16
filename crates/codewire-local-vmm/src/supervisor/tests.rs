@@ -924,6 +924,9 @@ struct TestRunnerProtocolService {
     useful_calls: Arc<AtomicUsize>,
     shutdown_effect: Option<Arc<std::sync::Mutex<Option<std::process::ChildStdin>>>>,
     info_gate: Option<RunnerInfoGate>,
+    /// The state `get_runner_info` reports, which `stop_vm` sets to
+    /// `stopped`, counting each stop in `useful_calls`.
+    runner_info: Option<Arc<std::sync::Mutex<v1::RunnerInfo>>>,
 }
 
 /// Holds a runner's `get_runner_info` once it is entered, until released,
@@ -974,6 +977,9 @@ impl crate::control::v1::environment_runner_service_server::EnvironmentRunnerSer
             gate.entered.notify_one();
             gate.release.notified().await;
         }
+        if let Some(info) = &self.runner_info {
+            return Ok(Response::new(info.lock().unwrap().clone()));
+        }
         self.unexpected_use()
     }
 
@@ -998,7 +1004,13 @@ impl crate::control::v1::environment_runner_service_server::EnvironmentRunnerSer
         &self,
         _request: Request<v1::StopVmRequest>,
     ) -> Result<Response<v1::RunnerInfo>, Status> {
-        self.unexpected_use()
+        let Some(info) = &self.runner_info else {
+            return self.unexpected_use();
+        };
+        self.useful_calls.fetch_add(1, Ordering::Relaxed);
+        let mut info = info.lock().unwrap();
+        info.state = v1::EnvironmentState::Stopped as i32;
+        Ok(Response::new(info.clone()))
     }
 
     async fn grow_state_disk(
@@ -1089,6 +1101,39 @@ pub(super) fn spawn_gated_test_runner_server(
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<()>,
 ) {
+    spawn_test_runner_server(socket, reply, info_gate, None)
+}
+
+/// A test runner that reports `info` and whose `stop_vm` stops it; the
+/// counter counts its stops.
+pub(super) fn spawn_stateful_test_runner_server(
+    socket: &Path,
+    info: v1::RunnerInfo,
+) -> (
+    SocketIdentity,
+    Arc<AtomicUsize>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    spawn_test_runner_server(
+        socket,
+        TestRunnerProtocolReply::Version(crate::runner_service::NATIVE_RUNNER_PROTOCOL_VERSION),
+        None,
+        Some(Arc::new(std::sync::Mutex::new(info))),
+    )
+}
+
+fn spawn_test_runner_server(
+    socket: &Path,
+    reply: TestRunnerProtocolReply,
+    info_gate: Option<RunnerInfoGate>,
+    runner_info: Option<Arc<std::sync::Mutex<v1::RunnerInfo>>>,
+) -> (
+    SocketIdentity,
+    Arc<AtomicUsize>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
     let (incoming, socket_identity) = bind_owner_only(socket).unwrap();
     let useful_calls = Arc::new(AtomicUsize::new(0));
     let service = TestRunnerProtocolService {
@@ -1096,6 +1141,7 @@ pub(super) fn spawn_gated_test_runner_server(
         useful_calls: Arc::clone(&useful_calls),
         shutdown_effect: None,
         info_gate,
+        runner_info,
     };
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {
@@ -1224,6 +1270,7 @@ async fn unacknowledged_runner_shutdown_still_observes_natural_exit() {
         useful_calls: Arc::new(AtomicUsize::new(0)),
         shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.0.stdin.take()))),
         info_gate: None,
+        runner_info: None,
     };
     let (incoming, identity) = bind_owner_only(&socket).unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();

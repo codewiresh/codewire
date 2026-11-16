@@ -1,7 +1,7 @@
 ---
 title: Environments
 description: ls, info, create, start, stop, restart, rm, update, ports, local-https, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh, setup rex, checkpoint and preset.
-updated: 2026-11-14
+updated: 2026-11-16
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -140,6 +140,10 @@ and everything on its disk; anything but `y` keeps it. `-y` (`--yes`) removes
 it without asking. Without a terminal, or with `--output json`, there is no one
 to ask, so `cw rm` refuses unless `--yes` is given: a script that removes an
 environment passes `--yes`.
+
+`cw start` starts a stopped environment, or recovers one in `error`: a local
+VM's failed VM is stopped first, as `cw stop` would, and a cloud environment
+retries its create, which replaces a failed Pod.
 
 A cloud `start` returns once the environment is usable: its Git identity is
 set and its startup script has finished, as after `create`. A long startup

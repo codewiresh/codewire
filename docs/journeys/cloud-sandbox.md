@@ -255,6 +255,9 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished).
   - stop a running sandbox;
   - a command against it while stopped;
   - start it again, and find the files under `/workspace` unchanged;
+  - a sandbox in `error`: `cw --cloud start` recovers it, retrying its create
+    and replacing a failed Pod, as one `cw --local start` recovers a local VM
+    in `error` (#4953); not walked yet;
   - a start the cluster has no room for, which ends with a "no capacity"
     message (not walked yet).
 - **Driving it:**

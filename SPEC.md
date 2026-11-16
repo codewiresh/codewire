@@ -62,8 +62,11 @@ survive a stop), CPU, memory and disk, sessions, ports and selected secret and
 credential sources. Environment states are `pending`, `pending_build`,
 `building`, `build_failed`, `pulling_snapshot`, `creating`, `starting`,
 `running`, `stopping`, `stopped`, `archiving`, `archived`, `restoring`,
-`resizing`, `destroying`, `destroyed`, `error` and `unknown`. The dashboard
-calls a hosted environment a **Sandbox**; it is the same object.
+`resizing`, `destroying`, `destroyed`, `error` and `unknown`. A start of an
+environment in `error` recovers it in both placements (#4953): a local VM's
+runner first stops the failed VM it may still hold, as `cw stop` would, then
+boots; a hosted Sandbox retries its create, which replaces a failed Pod. The
+dashboard calls a hosted environment a **Sandbox**; it is the same object.
 
 A `codewire.yaml` in the project describes an environment once (image,
 repositories, setup, ports, kept folders, secrets and credential profile) and

@@ -16,6 +16,7 @@ mod runtime;
 mod snapshots;
 mod sources;
 mod ssh;
+mod start_state;
 #[cfg(test)]
 pub(crate) use crate::supervisor_metadata::SUPERVISOR_STATE_SCHEMA;
 pub(crate) use crate::supervisor_metadata::{
@@ -4527,14 +4528,8 @@ impl Supervisor {
         let mut client = self
             .runner_client_for_artifact(name, &expected_artifact_generation)
             .await?;
-        let current = client
-            .info()
-            .await
-            .map_err(|_| SupervisorError::RunnerUnavailable)?;
-        if current.environment_id != environment.id.to_string() {
-            return Err(SupervisorError::InvalidRunnerResponse);
-        }
-        let current_state = StoredEnvironmentState::from_proto(current.state)?;
+        let (current, current_state) =
+            start_state::runner_state_for_start(&mut client, environment.id).await?;
         if current_state == StoredEnvironmentState::Running {
             if current.generation != generation
                 || current.cw_runtime_catalog_generation != expected_cw_runtime_generation
