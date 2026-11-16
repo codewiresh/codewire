@@ -218,31 +218,46 @@ run() {
   echo "moved $* into $SLICE (weight $SLICE_WEIGHT, ceiling $SLICE_CEILING, memory high $SLICE_MEMORY_HIGH)"
 }
 
-# slot_holders prints each slot's holder, or "free", on one line.
-slot_holders() {
-  local slot holder out=""
-  for slot in $(seq 1 "$BUILD_SLOTS"); do
-    holder="$(cat "$BUILD_SLOT_DIR/$slot.holder" 2>/dev/null || true)"
+# A waiter in `build` runs the helpers below with signal traps set, so they
+# use no command or process substitution: bash 5.2 parses a substitution's
+# text when it runs it, and a trap that runs during that parse fails with
+# "unexpected EOF while looking for matching `)'" and exits 2. On 2026-11-16 a
+# waiter told to stop with TERM or HUP exited 2 that way in 2 of 120 tries
+# under Ubuntu 24.04's bash 5.2.21, and pull request runs went red on it.
+
+# slot_holders_line sets holders_line to each slot's holder, or "free".
+slot_holders_line() {
+  local slot holder
+  holders_line=
+  for ((slot = 1; slot <= BUILD_SLOTS; slot++)); do
+    { IFS= read -r holder <"$BUILD_SLOT_DIR/$slot.holder"; } 2>/dev/null || holder=
     if [ ! -e "$BUILD_SLOT_DIR/$slot.lock" ] || flock -n "$BUILD_SLOT_DIR/$slot.lock" true 2>/dev/null; then
       holder=free
     fi
-    out+="${out:+; }$slot: ${holder:-held}"
+    holders_line+="${holders_line:+; }$slot: ${holder:-held}"
   done
-  echo "$out"
 }
 
-# process_start PID prints the process's state and its start time (fields 3
-# and 22 of /proc/PID/stat, read past the command name, which may hold spaces
-# and brackets), or nothing when there is no such process.
+# slot_holders prints each slot's holder, or "free", on one line.
+slot_holders() {
+  slot_holders_line
+  echo "$holders_line"
+}
+
+# process_start PID sets proc_state and proc_start to the process's state and
+# its start time (fields 3 and 22 of /proc/PID/stat, read past the command
+# name, which may hold spaces and brackets), or to nothing when there is no
+# such process.
 process_start() {
   local stat
-  stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
+  proc_state='' proc_start=''
+  { IFS= read -r stat <"/proc/$1/stat"; } 2>/dev/null || return 0
   # shellcheck disable=SC2086 # split the fields after the command name
   set -- ${stat##*) }
-  echo "$1 ${20}"
+  proc_state="$1" proc_start="${20}"
 }
 
-# queue_head prints the ticket of the waiter whose turn it is: the oldest
+# queue_head sets head to the ticket of the waiter whose turn it is: the oldest
 # ticket whose waiter can take a slot. A ticket is named for its arrival time
 # and its waiter's process and holds that process's start time, so the names
 # sort in arrival order and a reused process ID does not pass for the waiter.
@@ -252,16 +267,18 @@ process_start() {
 # - a stopped waiter (Ctrl-Z) keeps its ticket and is passed over until it
 #   continues.
 queue_head() {
-  local ticket state start
+  local ticket recorded
+  head=
   for ticket in "$BUILD_SLOT_DIR"/queue/*; do
     [ -e "$ticket" ] || continue
-    read -r state start < <(process_start "${ticket##*-}") || true
-    if [ -z "${start:-}" ] || [ "$start" != "$(cat "$ticket" 2>/dev/null)" ]; then
+    process_start "${ticket##*-}"
+    { IFS= read -r recorded <"$ticket"; } 2>/dev/null || recorded=
+    if [ -z "$proc_start" ] || [ "$proc_start" != "$recorded" ]; then
       rm -f "$ticket"
       continue
     fi
-    [ "$state" != T ] || continue
-    echo "$ticket"
+    [ "$proc_state" != T ] || continue
+    head="$ticket"
     return
   done
 }
@@ -286,6 +303,7 @@ build() {
   [ "$#" -ge 1 ] || usage
   [ -z "${CODEWIRE_CPU_SLOT:-}" ] || exec "$@"
   local slot fd ticket first_ahead started=$SECONDS waited=0 report=0 ran child status=0 signalled=
+  local head proc_state proc_start holders_line waiting queued ended here
   mkdir -p "$BUILD_SLOT_DIR/queue"
   # 19 digits of arrival time, so tickets sort by it.
   ticket="$(date +%s%N)"
@@ -322,11 +340,13 @@ build() {
     # dot, so queue_head's glob never sees it.
     if [ ! -e "$ticket" ]; then
       mkdir -p "$BUILD_SLOT_DIR/queue"
-      process_start "$$" | cut -d' ' -f2 >"${ticket%/*}/.${ticket##*/}"
+      process_start "$$"
+      echo "$proc_start" >"${ticket%/*}/.${ticket##*/}"
       mv "${ticket%/*}/.${ticket##*/}" "$ticket"
     fi
-    if [ "$(queue_head)" = "$ticket" ]; then
-      for slot in $(seq 1 "$BUILD_SLOTS"); do
+    queue_head
+    if [ "$head" = "$ticket" ]; then
+      for ((slot = 1; slot <= BUILD_SLOTS; slot++)); do
         exec {fd}>>"$BUILD_SLOT_DIR/$slot.lock"
         ! flock -n "$fd" || break 2
         exec {fd}>&-
@@ -334,7 +354,12 @@ build() {
     fi
     waited=$((SECONDS - started))
     if [ "$waited" -ge "$report" ]; then
-      echo "codewire-cpu: waited ${waited}s for one of $BUILD_SLOTS build slots, $(find "$BUILD_SLOT_DIR/queue" -type f -name '[0-9]*' 2>/dev/null | wc -l) in line ($(slot_holders))" >&2
+      waiting=0
+      for queued in "$BUILD_SLOT_DIR"/queue/[0-9]*; do
+        [ ! -f "$queued" ] || waiting=$((waiting + 1))
+      done
+      slot_holders_line
+      echo "codewire-cpu: waited ${waited}s for one of $BUILD_SLOTS build slots, $waiting in line ($holders_line)" >&2
       report=$((waited + 60))
     fi
     sleep 2
@@ -344,7 +369,8 @@ build() {
   # Refusing here frees the slot: it is this process's lock.
   disk_check
   waited=$((SECONDS - started))
-  printf 'pid %s since %s in %s: %s\n' "$$" "$(date -u +%H:%M:%SZ)" "$(pwd -P)" "$*" \
+  here="$(pwd -P)"
+  printf 'pid %s since %s in %s: %s\n' "$$" "$(date -u +%H:%M:%SZ)" "$here" "$*" \
     >"$BUILD_SLOT_DIR/$slot.holder"
   # Tests keep the fixture out of systemd.
   if [ -z "${CODEWIRE_CPU_SLOT_ONLY:-}" ] && ! grep -q "/$SLICE/" /proc/self/cgroup 2>/dev/null; then
@@ -371,8 +397,10 @@ build() {
     if wait "$child"; then status=0; else status=$?; fi
     [ -n "$signalled" ] || break
   done
-  { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$slot" "$waited" \
-    "$((SECONDS - ran))" "$status" "$(pwd -P)" "$*" >>"$BUILD_SLOT_DIR/times.tsv"; } 2>/dev/null || true
+  # The forwarding trap is still set here, so no substitution (see above).
+  TZ=UTC0 printf -v ended '%(%Y-%m-%dT%H:%M:%SZ)T' -1
+  { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ended" "$slot" "$waited" \
+    "$((SECONDS - ran))" "$status" "$here" "$*" >>"$BUILD_SLOT_DIR/times.tsv"; } 2>/dev/null || true
   exit "$status"
 }
 

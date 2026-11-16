@@ -614,6 +614,23 @@ if command -v flock >/dev/null 2>&1; then
   holders[1]=$!
   until_true eval '! flock -n "$slots/1.lock" true && ! flock -n "$slots/2.lock" true && ! flock -n "$slots/3.lock" true' ||
     fail 'the three slots were not all held again'
+  # While a waiter's signal traps, or the forwarding trap of a running build,
+  # are set it runs no command or process
+  # substitution: under bash 5.2 a trap that runs while one is being parsed
+  # exits 2 instead of the signal's status (2 of 120 signals, 2026-11-16).
+  # Arithmetic $(( )) is no substitution.
+  substitutions="$(
+    {
+      awk '/^build\(\) \{/,/^}/' "$ROOT/scripts/dev/workstation-cpu.sh" |
+        awk "/trap 'exit 143' TERM/,/trap - EXIT TERM INT HUP/"
+      awk '/^build\(\) \{/,/^}/' "$ROOT/scripts/dev/workstation-cpu.sh" |
+        awk "/trap 'signalled=1/,/exit \"\\\$status\"/"
+      awk '/^(slot_holders_line|process_start|queue_head)\(\) \{/,/^}/' "$ROOT/scripts/dev/workstation-cpu.sh"
+    } | grep -v '^[[:space:]]*#' | sed 's/\$((//g' | grep -E '\$\(|<\(|`' || true
+  )"
+  [ -z "$substitutions" ] || fail "a waiter with its traps set runs a substitution: $substitutions"
+  grep -q "trap 'exit 143' TERM" "$ROOT/scripts/dev/workstation-cpu.sh" ||
+    fail 'the waiter'"'"'s TERM trap moved; point the substitution check at it'
   # Each signal ends the waiter with that signal's own status. A background
   # command starts with SIGINT ignored, so the waiter is given it back.
   for stop in TERM:143 INT:130 HUP:129; do
