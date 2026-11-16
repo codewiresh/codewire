@@ -27,6 +27,7 @@ runs the same commands and holds the result to the same standard.
 | [sandbox-identity.md](sandbox-identity.md) | Sandbox identity (#4661): each organization's OIDC issuer, its keys and their rotation, and later the tokens sandboxes present to Kubernetes, OpenBao and cloud verifiers |
 | [network-and-egress.md](network-and-egress.md) | Network policies, refusals and agents through the front door (#3997): choosing what an environment may reach, the refusal log, and Claude Code and Codex with stock settings and no token inside. Written first; every step is not yet observed |
 | [ios-app.md](ios-app.md) | The iOS app (#3825): create an environment from the app, follow its setup steps and open its shell. Written first; not yet observed |
+| [cli-completion.md](cli-completion.md) | Tab completion of names in `cw` (#5108): environments, sessions, credentials, profiles, policies, mesh networks, presets, snapshots, checkpoints and organizations in zsh, bash and fish, bounded and never prompting. Written first; every step is not yet observed |
 | [mesh.md](mesh.md) | Mesh Networks (#3350, #5115, #5118, #5119): Sandboxes on one Mesh Network reach each other's published ports and nothing else does, and the dashboard shows the same Mesh Networks, nodes and join state as `cw`. Written first; every step is not yet observed |
 | [deletion.md](deletion.md) | Deleting an account or an organization (#4823): the account-deletion page and `cw org delete` say it is permanent, before it happens |
 

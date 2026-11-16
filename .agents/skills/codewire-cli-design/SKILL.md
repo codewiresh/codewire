@@ -141,6 +141,53 @@ the docs, and nothing on screen is internal.
   code in bold, a URL that already carries the code where the server supports
   it, and how to cancel. It never says it is opening a browser when it cannot.
 
+## Completion
+
+The spec and journey are `docs/journeys/cli-completion.md` (#5108; owner,
+2026-11-16: "tab complete the cli").
+
+- One mechanism: the shell asks the installed `cw` at run time, for commands,
+  flags and names alike (`clap_complete`'s dynamic engine). Its shell glue and
+  the binary must come from the same `clap_complete`, which upstream does not
+  keep stable, so the installed file names the `cw` version that wrote it and
+  `cw doctor` says to run `cw completion --install` again when that is not the
+  running version. The upstream engine is unstable, so its version is pinned
+  exactly in the workspace manifest and all use of it sits in one module of
+  `codewire-cli`; a breaking upstream change touches that file only.
+  Completion is answered before anything else in `main`
+  runs: no async runtime, no update check, no telemetry, no migration. It loads
+  only what a completer reads, lazily: the config and the stored token
+  read-only, never refreshed or rewritten. The engine's variable
+  is `CW_COMPLETE`, not the generic `COMPLETE`, so no other tool's setting
+  reaches `cw`.
+- Every argument that takes an environment, session, credential, profile,
+  policy, mesh network, preset, snapshot, checkpoint or organization name has
+  a completer, and a test over the command tree fails for one that has not. An
+  argument of free text, such as a message or the command `cw exec` runs,
+  completes nothing, and the same test fails if one gets a completer.
+- Names only. Never a value, token, key or hash, and never an ID where a name
+  exists. A description beside a candidate never carries a command line, which
+  can hold a secret: a session with no name is described by its program name
+  (the first word), state and start time, and nothing more of its command is
+  shown or cached.
+- Never a hang, a prompt or a message. The whole answer is bounded at 1 s, and a cloud request and a read of a
+  local daemon at 400 ms each, so a daemon that accepts and never answers
+  costs that bound; past a bound, it offers what it has, or nothing.
+  It never signs in, refreshes a sign-in, starts a daemon or a VM, or writes
+  to stdout or stderr but the candidates.
+- Local names come from local state and a daemon that is already running.
+  Cloud names come from a names-only cache in the user's state directory
+  (mode 0600), keyed by server URL, user and organization, fresh for 30 s and
+  served stale for an hour when the bounded request fails. `cw logout` removes
+  it, and a switch of account, organization or server never offers the
+  previous one's names. Signed out, a cloud name is simply not offered.
+- A name is offered in the form its argument accepts: an organization's slug
+  or ID where `--org` takes one, the name where a command takes a name, the
+  short ID `--session` accepts for a session that has no name, and
+  `PROVIDER/NAME` for a credential name that two providers share, once #4928
+  makes that the accepted form. A completed value the command refuses is worse
+  than none.
+
 ## Tables
 
 - Column widths come from the content and fit the terminal. A long value never
