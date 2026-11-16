@@ -15,9 +15,13 @@ use super::environments::{coded_owned, format_time};
 use super::secrets::{forbidden, log_audit};
 
 mod address_proof;
+mod create;
 mod invitation_limits;
 
 use address_proof::AddressProof;
+#[cfg(test)]
+pub(crate) use create::create_organization;
+pub(crate) use create::create_organization_core;
 
 #[derive(Debug)]
 pub struct OrgMember {
@@ -1455,121 +1459,6 @@ async fn list_memberships(pool: &sqlx::PgPool, user: &AuthUser) -> AppResult<Vec
         });
     }
     Ok(result)
-}
-
-pub(crate) async fn create_organization_core(
-    state: ApiState,
-    user: AuthUser,
-    body: CreateOrgBody,
-) -> AppResult<Organization> {
-    let name = body.name.trim();
-    let slug = body.slug.trim().to_lowercase();
-    let slug = slug.as_str();
-    if name.is_empty() {
-        return Err(AppError::BadRequest("name is required".into()));
-    }
-    if slug.is_empty() {
-        return Err(AppError::BadRequest("slug is required".into()));
-    }
-    if !codewire_server_core::organization_slug::valid_organization_slug(slug) {
-        return Err(AppError::BadRequest(
-            "slug is reserved or does not match the canonical route-safe format".into(),
-        ));
-    }
-
-    let org_id = uuid::Uuid::new_v4().simple().to_string();
-    let member_id = uuid::Uuid::new_v4().simple().to_string();
-    let now = chrono::Utc::now().naive_utc();
-
-    let mut tx = state.pool.begin().await.map_err(|e| {
-        tracing::error!(error = %e, "organizations: create begin tx failed");
-        AppError::InternalMsg("failed to begin transaction".into())
-    })?;
-    sqlx::query(
-        r#"INSERT INTO organizations (id, name, slug, created_by, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $5)"#,
-    )
-    .bind(&org_id)
-    .bind(name)
-    .bind(slug)
-    .bind(&user.user_id)
-    .bind(now)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("duplicate key") || msg.contains("unique constraint") {
-            return AppError::Conflict("organization slug already exists".into());
-        }
-        tracing::error!(error = %e, "organizations: create failed");
-        AppError::InternalMsg("failed to create organization".into())
-    })?;
-    sqlx::query(
-        r#"INSERT INTO org_members (id, org_id, user_id, role, created_at, updated_at)
-           VALUES ($1, $2, $3, 'owner', $4, $4)"#,
-    )
-    .bind(&member_id)
-    .bind(&org_id)
-    .bind(&user.user_id)
-    .bind(now)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "organizations: add owner failed");
-        AppError::InternalMsg("failed to add owner membership".into())
-    })?;
-    // It commits with the organization, so neither exists without the other.
-    let signup_credit_nano_eur = grant_signup_credit(&mut tx, &org_id).await.map_err(|e| {
-        tracing::error!(error = %e, "organizations: sign-up credit failed");
-        AppError::InternalMsg("failed to grant the sign-up credit".into())
-    })?;
-    tx.commit().await.map_err(|e| {
-        tracing::error!(error = %e, "organizations: create commit failed");
-        AppError::InternalMsg("failed to commit transaction".into())
-    })?;
-
-    log_audit(
-        &state,
-        "org.created",
-        &user.user_id,
-        serde_json::json!({
-            "org_id": org_id,
-            "name": name,
-            "slug": slug,
-            "signup_credit_nano_eur": signup_credit_nano_eur.unwrap_or(0),
-        }),
-        "info",
-    )
-    .await;
-
-    Ok(Organization {
-        id: org_id,
-        name: name.to_string(),
-        slug: slug.to_string(),
-        created_by: user.user_id.clone(),
-        created_at: format_time(now),
-        updated_at: format_time(now),
-    })
-}
-
-/// Grants a new organization the sign-up credit current now, once (#3381,
-/// owner, 2026-11-10), and returns it in nano-euros. A platform admin sets it
-/// on the admin Billing page; 0 is off and grants nothing.
-async fn grant_signup_credit(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    organization_id: &str,
-) -> Result<Option<i64>, sqlx::Error> {
-    sqlx::query_scalar(
-        r#"INSERT INTO billing_credit_ledger
-               (organization_id, entry_kind, amount_nano_eur, idempotency_key, reason)
-           SELECT $1, 'grant', int_value::int8 * 10000000, 'signup_credit', 'Sign-up credit'
-             FROM billing_catalog_settings
-            WHERE setting_key = 'signup_credit_cents' AND int_value > 0
-           RETURNING amount_nano_eur"#,
-    )
-    .bind(organization_id)
-    .fetch_optional(&mut **tx)
-    .await
 }
 
 /// Test-only refusals (#4613): an invitation test makes one step of

@@ -1107,6 +1107,18 @@ fn require_network_policies(
     }
 }
 
+/// Counts one Sandbox create against both of its limits (#3297): ten a
+/// minute and sixty an hour per user, at the counts in force.
+pub(crate) async fn take_create_limits(pool: &PgPool, user_id: &str) -> AppResult<()> {
+    for limit in [
+        &rate_limit::SANDBOX_CREATE,
+        &rate_limit::SANDBOX_CREATE_HOURLY,
+    ] {
+        take_user_rate_limit(pool, limit, user_id, "sandbox creates").await?;
+    }
+    Ok(())
+}
+
 /// The create API's span: the environment id is recorded once the row exists.
 #[tracing::instrument(
     level = "debug",
@@ -1154,13 +1166,7 @@ pub(crate) async fn create_environment_core(
         body.project_spec.image = normalize_image_ref(&body.project_spec.image);
     }
 
-    take_user_rate_limit(
-        pool,
-        &rate_limit::SANDBOX_CREATE,
-        &user.user_id,
-        "sandbox creates",
-    )
-    .await?;
+    take_create_limits(pool, &user.user_id).await?;
 
     ensure_current_platform_runtime_support(&body)?;
     validate_environment_repository_mounts(&body.project_spec.repositories)?;
@@ -1333,6 +1339,8 @@ pub(crate) async fn create_environment_core(
     .await
 }
 
+#[cfg(test)]
+mod limit_database_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

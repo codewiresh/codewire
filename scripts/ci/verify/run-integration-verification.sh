@@ -1190,6 +1190,12 @@ database_lane_orchestration_workspaces() {
       'api::environments::rate_limit_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "Sandbox and organization create limits" create-limits \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::create::limit_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "failed create listing" failed-create-listing \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

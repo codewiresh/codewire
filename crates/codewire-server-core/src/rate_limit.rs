@@ -43,6 +43,17 @@ pub const SANDBOX_CREATE: Limit = Limit {
     per_user: true,
 };
 
+/// Sandbox creates per user in an hour (#3297 item 17), beside the
+/// per-minute [`SANDBOX_CREATE`], so a steady stream under ten a minute still
+/// stops at sixty an hour.
+pub const SANDBOX_CREATE_HOURLY: Limit = Limit {
+    name: "sandbox_create_hourly",
+    key_prefix: "env_create_hourly",
+    window_secs: 3_600,
+    default_max: 60,
+    per_user: true,
+};
+
 /// Sandbox starts per user, as before named limits.
 pub const SANDBOX_START: Limit = Limit {
     name: "sandbox_start",
@@ -96,6 +107,17 @@ pub const SIGNUP_ADDRESS: Limit = Limit {
     per_user: false,
 };
 
+/// Organizations one user creates in a day (#3297 item 17). Each new
+/// organization comes with its own quota, so an unbounded number of them
+/// multiplies what one account can run.
+pub const ORG_CREATE: Limit = Limit {
+    name: "org_create",
+    key_prefix: "org_create",
+    window_secs: 86_400,
+    default_max: 5,
+    per_user: true,
+};
+
 /// Password-reset email to one address (#3297 item 11): the reset link, or,
 /// for an account that signs in only with GitHub or Google, how it signs in.
 /// Counted under a SHA-256 of the lowercased address, so a stranger can't
@@ -122,8 +144,10 @@ pub const MAIL_VERIFICATION: Limit = Limit {
 /// Every named limit, in the order an admin sees them.
 pub const LIMITS: &[Limit] = &[
     SANDBOX_CREATE,
+    SANDBOX_CREATE_HOURLY,
     SANDBOX_START,
     SNAPSHOT_CREATE,
+    ORG_CREATE,
     SIGNUP,
     SIGNUP_ADDRESS,
     MAIL_PASSWORD_RESET,
@@ -376,6 +400,8 @@ mod tests {
         assert_eq!(SNAPSHOT_CREATE.key("u1"), "snapshot_create:u1");
         assert_eq!(SIGNUP.key("all"), "signup:all");
         assert_eq!(SIGNUP_ADDRESS.key("ab12"), "signup_address:ab12");
+        assert_eq!(SANDBOX_CREATE_HOURLY.key("u1"), "env_create_hourly:u1");
+        assert_eq!(ORG_CREATE.key("u1"), "org_create:u1");
         assert_eq!(MAIL_PASSWORD_RESET.key("ab"), "mail_password_reset:ab");
         assert_eq!(MAIL_VERIFICATION.key("ab"), "mail_verification:ab");
         let mut names: Vec<_> = LIMITS.iter().map(|limit| limit.name).collect();

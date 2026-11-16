@@ -3,7 +3,7 @@
 
 use sqlx::PgPool;
 
-use super::*;
+use super::create::grant_signup_credit;
 use crate::api::runtime_lease_test_support::LeaseFixture;
 
 async fn set_signup_credit(pool: &PgPool, cents: i32) {
