@@ -25,6 +25,7 @@ mod naming;
 mod network;
 mod runtime_policy;
 mod workspace;
+mod workspace_flush;
 
 pub use credentials::{CredentialRuntimeTemplateConfig, MANAGED_CREDENTIAL_CLIENTS_ENV};
 
@@ -61,12 +62,13 @@ pub(crate) use workspace::{
 #[cfg(test)]
 pub(crate) use workspace::{
     DIND_WORKSPACE_ROOT, MOUNT_WORKSPACE_DEVICE_PATH, MOUNT_WORKSPACE_SCRIPT, WORKSPACE_DIR_VOLUME,
-    WORKSPACE_FLUSH_CONTAINER, WORKSPACE_FLUSH_SCRIPT,
 };
 pub use workspace::{
     ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, orchestration_internal_tls_host,
     render_sandbox_template, render_workspace_daemon_service,
 };
+#[cfg(test)]
+pub(crate) use workspace_flush::{WORKSPACE_FLUSH_CONTAINER, WORKSPACE_FLUSH_SCRIPT};
 
 /// Return the exact raw TOML bytes that the hypervisor annotation compresses
 /// and the SNP verifier hashes into HOST_DATA. Callers use this single source

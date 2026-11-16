@@ -457,7 +457,7 @@
             "command": [
               "sh",
               "-c",
-              "# The path is overridable only for the script's own test.\nws=\"${CODEWIRE_WORKSPACE_FLUSH_ROOT:-/mnt/ws}\"\nflush() {\n  began=\"$(date +%s%N)\"\n  status=0\n  timeout 35 sync -f \"$ws\" || status=$?\n  took=$((($(date +%s%N) - began) / 1000000))\n  if [ \"$status\" = 0 ]; then\n    echo \"codewire workspace-flush: flushed the workspace (flush_ms=$took)\"\n  else\n    echo \"codewire workspace-flush: flushing the workspace failed (status=$status flush_ms=$took)\" >&2\n  fi\n  kill \"$sleeper\" 2>/dev/null\n  exit 0\n}\ntrap flush TERM\nwhile :; do\n  sleep 3600 &\n  sleeper=$!\n  wait \"$sleeper\"\ndone\n"
+              "# The path and the bound are overridable only for the script's own test.\nws=\"${CODEWIRE_WORKSPACE_FLUSH_ROOT:-/mnt/ws}\"\nbound=\"${CODEWIRE_WORKSPACE_FLUSH_BOUND:-35}\"\nflush() {\n  began=\"$(date +%s%N)\"\n  trap : USR1\n  sync -f \"$ws\" &\n  syncer=$!\n  (sleep \"$bound\"; kill -USR1 $$) &\n  watchdog=$!\n  wait \"$syncer\"\n  status=$?\n  kill \"$watchdog\" 2>/dev/null\n  # Only the watchdog ends the wait early, and then sync is still running.\n  if kill -0 \"$syncer\" 2>/dev/null; then status=timeout; fi\n  took=$((($(date +%s%N) - began) / 1000000))\n  if [ \"$status\" = 0 ]; then\n    echo \"codewire workspace-flush: flushed the workspace (flush_ms=$took)\"\n  else\n    echo \"codewire workspace-flush: flushing the workspace failed (status=$status flush_ms=$took)\" >&2\n  fi\n  kill \"$sleeper\" 2>/dev/null\n  exit 0\n}\ntrap flush TERM\nwhile :; do\n  sleep 3600 &\n  sleeper=$!\n  wait \"$sleeper\"\ndone\n"
             ],
             "image": "registry.example.invalid/codewire/daemon:golden",
             "name": "workspace-flush",

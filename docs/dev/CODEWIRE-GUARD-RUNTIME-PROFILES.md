@@ -234,7 +234,13 @@ workspace keeps a Filesystem claim.
   next container by about a second.
 - **Flush.** The `workspace-flush` sidecar (an init container with
   `restartPolicy: Always`) waits for SIGTERM, then runs `syncfs` on the
-  workspace with a 35 s bound, inside the Pod's 60 s grace period. The guest
+  workspace with a 35 s bound, inside the Pod's 60 s grace period. The bound
+  is a watchdog on the sidecar's own shell: a `syncfs` stuck in
+  uninterruptible sleep holds even SIGKILL, so the sidecar never waits on it
+  past 35 s. It reports the flush failed and exits, and nothing waits for
+  the stuck `syncfs` again: it holds the disk until its writes complete or
+  the Pod's VM goes (#5089). A `syncfs` that returns before the bound is
+  reported by its own status. The guest
   keeps the kernel's writeback defaults, so the most it can have to write is
   its dirty limit: 6.22 GiB in a 32 GiB guest, about 20 s at the measured
   327 MB/s. The kubelet stops it after the workspace and

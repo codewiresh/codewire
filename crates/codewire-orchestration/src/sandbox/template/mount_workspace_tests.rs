@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::MOUNT_WORKSPACE_SCRIPT;
-use super::workspace::WORKSPACE_FLUSH_SCRIPT;
+use super::workspace_flush::WORKSPACE_FLUSH_SCRIPT;
 
 /// The stand-ins. `blkid -p` answers from `$FAKE/signature` (`none`, `ext4`,
 /// `xfs`, `error` or `ambiguous`); `mkfs.ext4` writes `ext4` there unless
@@ -483,27 +483,81 @@ fn has_child(pid: u32) -> bool {
     })
 }
 
-/// Runs `workspace-flush` until it waits, then stops it as the kubelet does.
-/// `sync` is the real one unless `fail_sync` puts a failing stand-in first.
+/// The `sync` a test puts first on `PATH` for `workspace-flush`. The test
+/// proves the script, never the runner's disk, so no real `sync` runs.
 #[cfg(target_os = "linux")]
-fn stop_workspace_flush(fail_sync: bool) -> std::process::Output {
+#[derive(Clone, Copy)]
+enum StandInSync {
+    /// Records its arguments and succeeds.
+    Succeeds,
+    /// Succeeds after half a second.
+    SucceedsSlowly,
+    /// Fails with status 3.
+    Fails,
+    /// Ignores every signal it can and sleeps, as a `sync` stuck in the
+    /// kernel on writeback answers no signal at all.
+    Stuck,
+}
+
+/// What stopping `workspace-flush` gave: its output, how long the stop took,
+/// and the stand-in `sync`'s arguments.
+#[cfg(target_os = "linux")]
+struct Flushed {
+    output: std::process::Output,
+    took: std::time::Duration,
+    sync_calls: String,
+}
+
+/// Runs `workspace-flush` until it waits, then stops it as the kubelet does,
+/// with `sync` as the stand-in says. The bound is 2 s for a stuck `sync`, so
+/// the test is quick, and 10 s otherwise, so a slow runner never makes a
+/// finished one late.
+#[cfg(target_os = "linux")]
+fn stop_workspace_flush(sync: StandInSync) -> Flushed {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
-    if fail_sync {
-        let sync = bin.join("sync");
-        std::fs::write(&sync, "#!/bin/sh\nexit 3\n").unwrap();
-        let mut permissions = std::fs::metadata(&sync).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-        std::fs::set_permissions(&sync, permissions).unwrap();
-    }
-    let child = Command::new("sh")
+    let calls = dir.path().join("sync-calls");
+    let pid_file = dir.path().join("sync-pid");
+    let stdout = dir.path().join("stdout");
+    let stderr = dir.path().join("stderr");
+    let body = match sync {
+        StandInSync::Succeeds => "exit 0",
+        StandInSync::SucceedsSlowly => "sleep 0.5\nexit 0",
+        StandInSync::Fails => "exit 3",
+        StandInSync::Stuck => "trap '' TERM INT HUP USR1 USR2\nexec sleep 120",
+    };
+    let script = bin.join("sync");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\necho $$ > '{}'\n{body}\n",
+            calls.display(),
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    std::fs::set_permissions(&script, permissions).unwrap();
+    let mut child = Command::new("sh")
         .args(["-c", WORKSPACE_FLUSH_SCRIPT])
         .env_clear()
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("CODEWIRE_WORKSPACE_FLUSH_ROOT", dir.path())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .env(
+            "CODEWIRE_WORKSPACE_FLUSH_BOUND",
+            if matches!(sync, StandInSync::Stuck) {
+                "2"
+            } else {
+                "10"
+            },
+        )
+        // Files, not pipes: a stuck `sync` inherits them and keeps a pipe open
+        // after the shell exits, and the stop is timed to the shell's exit,
+        // which is what the kubelet waits for.
+        .stdout(std::fs::File::create(&stdout).unwrap())
+        .stderr(std::fs::File::create(&stderr).unwrap())
         .spawn()
         .unwrap();
     // The trap is set once the script waits on its sleep, a child of the
@@ -516,30 +570,59 @@ fn stop_workspace_flush(fail_sync: bool) -> std::process::Output {
         std::thread::sleep(std::time::Duration::from_millis(10));
         waited += 1;
     }
+    let stopped = std::time::Instant::now();
     let status = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
         .unwrap();
     assert!(status.success());
-    child.wait_with_output().unwrap()
+    let status = child.wait().unwrap();
+    let took = stopped.elapsed();
+    let output = std::process::Output {
+        status,
+        stdout: std::fs::read(&stdout).unwrap(),
+        stderr: std::fs::read(&stderr).unwrap(),
+    };
+    // The stuck stand-in outlives the flush, as a stuck `sync` would; unlike
+    // one, it can be killed, so the test leaves nothing running.
+    if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+        let _ = Command::new("kill").args(["-KILL", pid.trim()]).status();
+    }
+    Flushed {
+        output,
+        took,
+        sync_calls: std::fs::read_to_string(&calls).unwrap_or_default(),
+    }
 }
 
 #[test]
 #[cfg(target_os = "linux")]
 fn workspace_flush_syncs_the_workspace_when_stopped() {
-    let output = stop_workspace_flush(false);
+    let flushed = stop_workspace_flush(StandInSync::Succeeds);
+    let output = &flushed.output;
     assert!(output.status.success(), "{output:?}");
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
     assert!(
         stdout.starts_with("codewire workspace-flush: flushed the workspace (flush_ms="),
         "{stdout}"
+    );
+    assert_eq!(
+        flushed.sync_calls.lines().count(),
+        1,
+        "{}",
+        flushed.sync_calls
+    );
+    assert!(
+        flushed.sync_calls.starts_with("-f /"),
+        "{}",
+        flushed.sync_calls
     );
 }
 
 #[test]
 #[cfg(target_os = "linux")]
 fn a_failed_flush_is_logged_and_the_pod_still_stops() {
-    let output = stop_workspace_flush(true);
+    let output = stop_workspace_flush(StandInSync::Fails).output;
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
@@ -550,16 +633,63 @@ fn a_failed_flush_is_logged_and_the_pod_still_stops() {
     );
 }
 
+/// A `sync` that answers no signal never holds the flush past its bound
+/// (#5089): it is reported as a failure, never as flushed, and the flush
+/// exits so the Pod stops on time.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_stuck_sync_is_reported_failed_at_the_bound_and_the_pod_still_stops() {
+    let flushed = stop_workspace_flush(StandInSync::Stuck);
+    let output = &flushed.output;
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr.clone()).unwrap();
+    assert!(
+        stderr.starts_with(
+            "codewire workspace-flush: flushing the workspace failed (status=timeout flush_ms="
+        ),
+        "{stderr}"
+    );
+    assert!(output.stdout.is_empty(), "never reported flushed");
+    // The 2 s bound, with room for a slow runner but far short of the
+    // stand-in's 120 s.
+    assert!(
+        flushed.took >= std::time::Duration::from_secs(2),
+        "{:?}",
+        flushed.took
+    );
+    assert!(
+        flushed.took < std::time::Duration::from_secs(20),
+        "{:?}",
+        flushed.took
+    );
+}
+
+/// A `sync` that returns before the bound is reported by its own status, and
+/// the watchdog, killed when it returns, never reports it late (#5089).
+#[test]
+#[cfg(target_os = "linux")]
+fn a_slow_flush_inside_the_bound_is_reported_flushed() {
+    let flushed = stop_workspace_flush(StandInSync::SucceedsSlowly);
+    let output = &flushed.output;
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
+    assert!(
+        stdout.starts_with("codewire workspace-flush: flushed the workspace (flush_ms="),
+        "{stdout}"
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
 #[test]
 fn the_flush_bound_and_the_grace_period_fit_together() {
     let bound: u32 = WORKSPACE_FLUSH_SCRIPT
-        .split_once("timeout ")
-        .and_then(|(_, rest)| rest.split_once(" sync -f"))
+        .split_once("CODEWIRE_WORKSPACE_FLUSH_BOUND:-")
+        .and_then(|(_, rest)| rest.split_once('}'))
         .map(|(seconds, _)| seconds.parse().unwrap())
         .expect("workspace-flush bounds its sync");
     assert_eq!(bound, 35);
     // The flush comes after the workspace and DinD shutdowns, up to 15 s.
-    assert!(bound + 15 <= super::workspace::BLOCK_WORKSPACE_GRACE_SECONDS);
+    assert!(bound + 15 <= super::workspace_flush::BLOCK_WORKSPACE_GRACE_SECONDS);
 }
 
 /// `-subfolder` binds the filesystem's `workspace/` folder for `/workspace`

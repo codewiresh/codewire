@@ -3,13 +3,13 @@
   "kind": "SandboxTemplate",
   "metadata": {
     "annotations": {
-      "codewire.sh/pool-revision": "21e76a5f3045f2fc41765e2cbd96560b10088ffa378cff6da862092cb30ba062"
+      "codewire.sh/pool-revision": "f778c1562e11f2820ee9b073c00fda387189a442e92809c07654f3af0b533d88"
     },
     "labels": {
       "app.kubernetes.io/managed-by": "codewire",
       "codewire.sh/type": "workspace-pool"
     },
-    "name": "cw-pool-1000m-4096mi-10gi-b7b11d4a",
+    "name": "cw-pool-1000m-4096mi-10gi-7bece3cf",
     "namespace": "dev-sandboxes"
   },
   "spec": {
@@ -199,7 +199,7 @@
               },
               {
                 "name": "CODEWIRE_WORKSPACE_POOL_REVISION",
-                "value": "21e76a5f3045f2fc41765e2cbd96560b10088ffa378cff6da862092cb30ba062"
+                "value": "f778c1562e11f2820ee9b073c00fda387189a442e92809c07654f3af0b533d88"
               }
             ],
             "image": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -480,7 +480,7 @@
             "command": [
               "sh",
               "-c",
-              "# The path is overridable only for the script's own test.\nws=\"${CODEWIRE_WORKSPACE_FLUSH_ROOT:-/mnt/ws}\"\nflush() {\n  began=\"$(date +%s%N)\"\n  status=0\n  timeout 35 sync -f \"$ws\" || status=$?\n  took=$((($(date +%s%N) - began) / 1000000))\n  if [ \"$status\" = 0 ]; then\n    echo \"codewire workspace-flush: flushed the workspace (flush_ms=$took)\"\n  else\n    echo \"codewire workspace-flush: flushing the workspace failed (status=$status flush_ms=$took)\" >&2\n  fi\n  kill \"$sleeper\" 2>/dev/null\n  exit 0\n}\ntrap flush TERM\nwhile :; do\n  sleep 3600 &\n  sleeper=$!\n  wait \"$sleeper\"\ndone\n"
+              "# The path and the bound are overridable only for the script's own test.\nws=\"${CODEWIRE_WORKSPACE_FLUSH_ROOT:-/mnt/ws}\"\nbound=\"${CODEWIRE_WORKSPACE_FLUSH_BOUND:-35}\"\nflush() {\n  began=\"$(date +%s%N)\"\n  trap : USR1\n  sync -f \"$ws\" &\n  syncer=$!\n  (sleep \"$bound\"; kill -USR1 $$) &\n  watchdog=$!\n  wait \"$syncer\"\n  status=$?\n  kill \"$watchdog\" 2>/dev/null\n  # Only the watchdog ends the wait early, and then sync is still running.\n  if kill -0 \"$syncer\" 2>/dev/null; then status=timeout; fi\n  took=$((($(date +%s%N) - began) / 1000000))\n  if [ \"$status\" = 0 ]; then\n    echo \"codewire workspace-flush: flushed the workspace (flush_ms=$took)\"\n  else\n    echo \"codewire workspace-flush: flushing the workspace failed (status=$status flush_ms=$took)\" >&2\n  fi\n  kill \"$sleeper\" 2>/dev/null\n  exit 0\n}\ntrap flush TERM\nwhile :; do\n  sleep 3600 &\n  sleeper=$!\n  wait \"$sleeper\"\ndone\n"
             ],
             "image": "registry.example.invalid/codewire/daemon@sha256:2222222222222222222222222222222222222222222222222222222222222222",
             "name": "workspace-flush",
