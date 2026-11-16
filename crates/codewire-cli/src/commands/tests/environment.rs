@@ -510,6 +510,58 @@ fn platform_lifecycle_wait_horizon_matches_server_class() {
 }
 
 #[test]
+fn a_cloud_create_accepts_a_network_policy() {
+    let cli = Cli::try_parse_from(["cw", "--cloud", "create", "--policy", "platform:web"]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
+        panic!("expected platform environment create");
+    };
+    assert_eq!(args.policy.as_deref(), Some("platform:web"));
+    reject_local_create_options(&args).unwrap();
+}
+
+#[test]
+fn a_selected_policy_says_what_its_enforcement_means() {
+    let policy = |enforcement: &str| crate::presentation::EnvironmentNetworkPolicy {
+        reference: "platform:id:6f1c".into(),
+        name: "web".into(),
+        revision: 2,
+        enforcement: enforcement.into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        policy_selection_notice("web", "app", Some(&policy("not_enforced"))).as_deref(),
+        Some("Network policy web is not enforced yet: this environment's outbound connections are not restricted.")
+    );
+    assert_eq!(
+        policy_selection_notice("platform:web", "app", Some(&policy("enforcing"))).as_deref(),
+        Some("Network policy web is being applied: until it is, the environment's previous policy applies.")
+    );
+    assert_eq!(
+        policy_selection_notice("platform:id:6f1c", "app", Some(&policy("failed_closed"))).as_deref(),
+        Some("Network policy web couldn't be confirmed as enforced: this environment's outbound connections are refused until it is.")
+    );
+    assert_eq!(policy_selection_notice("web", "app", Some(&policy("enforced"))), None);
+}
+
+#[test]
+fn a_policy_the_server_did_not_record_is_said_plainly() {
+    let not_recorded = Some(
+        "The server didn't record network policy web for app: it may not support network policies, so the environment has its default."
+            .to_owned(),
+    );
+    // A server older than #4211 returns no selection.
+    assert_eq!(policy_selection_notice("web", "app", None), not_recorded);
+    // Or one other than the policy asked for.
+    let other = crate::presentation::EnvironmentNetworkPolicy {
+        reference: "hosted-default".into(),
+        name: "hosted-default".into(),
+        enforcement: "not_enforced".into(),
+        ..Default::default()
+    };
+    assert_eq!(policy_selection_notice("web", "app", Some(&other)), not_recorded);
+}
+
+#[test]
 fn platform_create_rejects_native_only_options() {
     let cli =
         Cli::try_parse_from(["cw", "--cloud", "create", "--backend", "native"]).unwrap();

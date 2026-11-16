@@ -634,6 +634,7 @@ async fn handle_platform_env_create(
         require_cloud_network_membership(globals, paths, &env, &mesh).await?;
         request.network = Some(mesh.network_id);
     }
+    request.network_policy = args.policy.clone().map(String::from);
     let names =
         sources::prepare_create_sources(platform, environment_client, &org, &args, &mut request)
             .await?;
@@ -642,6 +643,15 @@ async fn handle_platform_env_create(
         return Ok(None);
     }
     let environment = create_in_organization(environment_client, &org, &request).await?;
+    if args.output == OutputFormat::Text
+        && let Some(asked) = args.policy.as_deref()
+    {
+        report_policy_selection(
+            asked,
+            environment.name.as_deref().unwrap_or(&environment.id),
+            environment.network_policy.as_ref(),
+        );
+    }
     if args.write_preset {
         write_resolved_codewire_yaml(Path::new("codewire.yaml"), &request)
             .context("write codewire.yaml")?;
@@ -753,12 +763,31 @@ async fn handle_platform_env_command_with_created(
         }
         EnvCommand::Runtime(_) => anyhow::bail!("cw runtime supports only native Linux VMs"),
         EnvCommand::Create(_) => unreachable!("handled before the organization listing"),
-        EnvCommand::Update(args) => {
-            anyhow::ensure!(
-                args.policy.is_none(),
-                "network policies for hosted Sandboxes are not available yet; --policy applies to local VMs"
-            );
-            sources::update_platform_sources(&platform, &environment_client, &org_id, args).await?;
+        EnvCommand::Update(mut args) => {
+            let policy = args.policy.take();
+            let output = args.output;
+            let environment = args.environment.clone();
+            let sources_changed = args.clear_secrets
+                || args.clear_profile
+                || args.secrets.is_some()
+                || args.user_secrets.is_some()
+                || args.org_secrets
+                || args.profile.is_some();
+            if sources_changed || policy.is_none() {
+                sources::update_platform_sources(&platform, &environment_client, &org_id, args)
+                    .await?;
+            }
+            if let Some(reference) = policy {
+                update_platform_network_policy(
+                    globals,
+                    &environment_client,
+                    &org_id,
+                    &environment,
+                    &reference,
+                    output,
+                )
+                .await?;
+            }
         }
         EnvCommand::Info(args) => {
             let environment_id =
@@ -2334,6 +2363,107 @@ pub(crate) fn ambiguous_environment_placement_error(
     )
 }
 
+/// After `--policy` on a hosted create or update (#4000): what the selection
+/// means for the environment's outbound connections, or, when the reply
+/// doesn't carry the selection asked for, that the server didn't record it
+/// (a server older than #4211 ignores `--policy`). Without `--policy` there
+/// is nothing to say: the default selection is not news.
+pub(crate) fn report_policy_selection(
+    asked: &str,
+    environment: &str,
+    selected: Option<&crate::presentation::EnvironmentNetworkPolicy>,
+) {
+    if let Some(notice) = policy_selection_notice(asked, environment, selected) {
+        let style = crate::output::Capabilities::from_process(crate::output::OutputMode::Text)
+            .stderr_style();
+        eprintln!(
+            "{} {notice}",
+            style.status(crate::output::Status::Attention)
+        );
+    }
+}
+
+/// The words `report_policy_selection` prints, without the status glyph.
+pub(crate) fn policy_selection_notice(
+    asked: &str,
+    environment: &str,
+    selected: Option<&crate::presentation::EnvironmentNetworkPolicy>,
+) -> Option<String> {
+    match selected {
+        Some(policy) if policy.selects(asked) => enforcement_notice(policy),
+        _ => Some(format!(
+            "The server didn't record network policy {asked} for {environment}: it may not support network policies, so the environment has its default."
+        )),
+    }
+}
+
+/// What a selection's enforcement means for the environment, in the user's
+/// terms; nothing once it is enforced.
+pub(crate) fn enforcement_notice(
+    policy: &crate::presentation::EnvironmentNetworkPolicy,
+) -> Option<String> {
+    let name = &policy.name;
+    match policy.enforcement.as_str() {
+        "enforced" => None,
+        "enforcing" => Some(format!(
+            "Network policy {name} is being applied: until it is, the environment's previous policy applies."
+        )),
+        "failed_closed" => Some(format!(
+            "Network policy {name} couldn't be confirmed as enforced: this environment's outbound connections are refused until it is."
+        )),
+        _ => Some(format!(
+            "Network policy {name} is not enforced yet: this environment's outbound connections are not restricted."
+        )),
+    }
+}
+
+/// `cw update ENV --policy POLICY` on hosted: the selection changes in
+/// place; nothing restarts (#4000). `hosted-default` clears a selection.
+async fn update_platform_network_policy(
+    globals: &Globals,
+    environment_client: &EnvironmentClient,
+    org_id: &str,
+    environment: &str,
+    reference: &str,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    let environment_id = resolve_environment_id(environment_client, org_id, environment).await?;
+    let client = super::guided_credentials::platform_client(globals)?;
+    let response = client
+        .update_environment_network_policy(codewire_client::UpdateEnvironmentNetworkPolicyRequest {
+            org_id: org_id.to_owned(),
+            environment_id: environment_id.clone(),
+            network_policy: reference.to_owned(),
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| match error.reason() {
+            Some("NETWORK_POLICIES_DISABLED") => {
+                anyhow::anyhow!("organization network policies are not enabled on this deployment")
+            }
+            _ => anyhow::anyhow!("select the network policy: {}", error.message()),
+        })?;
+    let selected = response
+        .network_policy
+        .as_option()
+        .map(crate::environment_client::environment_network_policy_from_proto)
+        .context("the platform returned no network policy selection")?;
+    match output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&selected)?),
+        OutputFormat::Text => {
+            // By the time it gets here the environment is an ID; text names it.
+            let shown = environment_client
+                .get_environment(org_id, &environment_id)
+                .await
+                .map(|found| super::platform_commands::environment_display_name(&found).to_owned())
+                .unwrap_or_else(|_| environment.to_owned());
+            println!("Network policy for {shown}: {}", selected.summary());
+            report_policy_selection(reference, &shown, Some(&selected));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn reject_local_create_options(args: &EnvCreateArgs) -> anyhow::Result<()> {
     if args.backend.is_some()
         || args.path.is_some()
@@ -2346,10 +2476,6 @@ pub(crate) fn reject_local_create_options(args: &EnvCreateArgs) -> anyhow::Resul
             "--backend, --path, --path-mode, --spec, --docker-disk, and --no-docker require `cw create --local`"
         );
     }
-    anyhow::ensure!(
-        args.policy.is_none(),
-        "network policies for hosted Sandboxes are not available yet; --policy applies to `cw create --local`"
-    );
     Ok(())
 }
 
@@ -4009,6 +4135,9 @@ pub(crate) fn format_env_info_text(environment: &Environment) -> String {
     ));
     if let Some(network) = environment.network.as_deref().and_then(trimmed_str) {
         output.push_str(&format!("{:<14} {}\n", "Network:", network));
+    }
+    if let Some(policy) = &environment.network_policy {
+        output.push_str(&format!("{:<14} {}\n", "NetworkPolicy:", policy.summary()));
     }
     output.push_str(&format!("CPU:           {}m\n", environment.cpu_millicores));
     output.push_str(&format!(

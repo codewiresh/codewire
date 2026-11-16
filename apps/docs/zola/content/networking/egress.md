@@ -60,8 +60,22 @@ connection reaches, even under `locked`. For a VM that must send nothing out,
 use a profile without a GitHub connection.
 
 **A hosted sandbox** may reach the public Internet; private, loopback,
-link-local and carrier-grade NAT ranges are excluded. There is no
-per-environment egress rule on the hosted platform yet.
+link-local and carrier-grade NAT ranges are excluded. Your organization can
+keep network policies on the platform, with the same rules and words as on
+your computer, on a deployment that has them switched on:
+
+```sh
+cw --cloud policy create web-only --allow github.com
+cw --cloud create --policy web-only
+cw --cloud policy ls
+```
+
+They are stored, not enforced yet: a hosted sandbox can still reach anything
+public whatever it selects, and each command says so. `cw info` shows a
+sandbox's policy and whether it's enforced. A sandbox that selects nothing has
+`hosted-default`. `cw --local policy` and `cw --cloud policy` are two stores:
+the same name in both is two policies, and `cw policy` with neither uses this
+computer's.
 
 Egress is not credential mediation: an environment that can reach a
 provider's API on port 443 can try it directly. Codewire keeps provider keys

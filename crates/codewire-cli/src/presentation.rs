@@ -53,6 +53,56 @@ pub struct Environment {
     pub operation_generation: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_selection: Option<EnvironmentSourceSelection>,
+    /// The network policy a hosted environment selects, and whether it is
+    /// enforced; unset where the deployment has no organization network
+    /// policies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_policy: Option<EnvironmentNetworkPolicy>,
+}
+
+/// A hosted environment's network policy (#4000).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EnvironmentNetworkPolicy {
+    /// `hosted-default`, `locked`, `open` or `platform:id:UUID`.
+    pub reference: String,
+    pub name: String,
+    /// The selected policy's current revision; zero for a built-in.
+    pub revision: u32,
+    /// `not_enforced`, `enforced`, `enforcing`, `failed_closed` or `unknown`.
+    pub enforcement: String,
+    /// The revision cw-egress enforces, once it does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enforced_revision: Option<u32>,
+}
+
+impl EnvironmentNetworkPolicy {
+    /// Whether this is the selection `asked` names: a built-in, a stored
+    /// policy's name, `platform:NAME` or its `platform:id:` reference.
+    pub fn selects(&self, asked: &str) -> bool {
+        asked == self.reference
+            || asked == self.name
+            || asked.strip_prefix("platform:") == Some(self.name.as_str())
+    }
+
+    /// `web · rev 2 · not enforced yet`: the policy and its state, in words.
+    pub fn summary(&self) -> String {
+        let revision = match self.revision {
+            0 => String::new(),
+            revision => format!(" · rev {revision}"),
+        };
+        let state = match self.enforcement.as_str() {
+            "enforced" => match self.enforced_revision {
+                Some(enforced) => format!("enforces rev {enforced}"),
+                None => "enforced".to_owned(),
+            },
+            "enforcing" => "applying the new revision".to_owned(),
+            "failed_closed" => "no egress: enforcement failed".to_owned(),
+            "not_enforced" => "not enforced yet".to_owned(),
+            _ => "enforcement unknown".to_owned(),
+        };
+        format!("{}{revision} · {state}", self.name)
+    }
 }
 
 /// How long the platform lists a create it ended, matching the server's
@@ -326,6 +376,10 @@ pub struct CreateEnvironmentRequest {
     /// The hosted Mesh network to join, by name, in the organization.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
+    /// The network policy to select: a reference such as `platform:web`,
+    /// `locked` or `hosted-default` (#4000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_policy: Option<String>,
     /// The hosted disk snapshot to start from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_snapshot_id: Option<String>,
@@ -391,6 +445,37 @@ pub use codewire_client::environment_setup::EnvironmentLogRow as EnvironmentLog;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_network_policy_summary_says_whether_it_is_enforced() {
+        let policy = |name: &str, revision, enforcement: &str, enforced| EnvironmentNetworkPolicy {
+            reference: String::new(),
+            name: name.into(),
+            revision,
+            enforcement: enforcement.into(),
+            enforced_revision: enforced,
+        };
+        assert_eq!(
+            policy("web", 2, "not_enforced", None).summary(),
+            "web · rev 2 · not enforced yet"
+        );
+        assert_eq!(
+            policy("hosted-default", 0, "not_enforced", None).summary(),
+            "hosted-default · not enforced yet"
+        );
+        assert_eq!(
+            policy("web", 3, "enforced", Some(3)).summary(),
+            "web · rev 3 · enforces rev 3"
+        );
+        assert_eq!(
+            policy("web", 3, "enforcing", Some(2)).summary(),
+            "web · rev 3 · applying the new revision"
+        );
+        assert_eq!(
+            policy("web", 3, "failed_closed", None).summary(),
+            "web · rev 3 · no egress: enforcement failed"
+        );
+    }
 
     #[test]
     fn environment_request_presentation_serializes_only_canonical_project_intent() {

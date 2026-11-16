@@ -175,19 +175,25 @@ Issue: #4000. The store and its API merged with #4211, behind a switch.
   - deleting a policy a Sandbox selects;
   - a deployment with the store switched off;
   - a Sandbox on `locked`, reached by its owner;
-  - the default when nothing is selected (any TCP port through the broker,
-    plus DNS; other UDP off unless the environment opts in).
+  - the default when nothing is selected, `hosted-default` (any TCP port
+    through the broker, plus DNS; other UDP off unless the environment opts
+    in).
 - **Driving it,** as a member of an organization whose deployment has the
   store switched on (Kind's overlay does; Dev once
   `CODEWIRE_PLATFORM_NETWORK_POLICIES_ENABLED` is set):
   1. `cw --cloud policy create walk-docs --allow docs.rs:443` makes revision
-     1 from `locked`, the default base. `cw --cloud policy ls`, and the same
-     with `--output json`, list it with its rules, revision and digest, as
-     `platform:walk-docs`.
+     1 from `locked`, the default base. `cw --cloud policy ls` lists it with
+     its revision and rules; with `--output json` each policy also has its
+     digest and its reference, `platform:id:…`. Until `hosted-enforcement`
+     reports, each of these commands' text ends with one stderr line saying
+     hosted sandboxes don't enforce network policies yet (create, allow and
+     rm start it with "Stored."), and `check`'s JSON says `"enforced":
+     false`.
   2. `cw --cloud create --policy walk-docs --name policy-walk` selects it at
-     create. `cw info policy-walk` shows `NetworkPolicy: walk-docs, revision
-     1`. Until `hosted-enforcement` reports, it also says not enforced, and
-     the create prints one notice on stderr (never in `--output json`).
+     create. `cw info policy-walk` shows `NetworkPolicy: walk-docs · rev 1 ·
+     not enforced yet`, and the create prints one notice on stderr, never in
+     `--output json`. A create without `--policy` prints none. If the server
+     doesn't record the selection, the create says so instead.
   3. `cw --cloud policy allow walk-docs crates.io:443` makes revision 2.
      `cw --cloud policy check walk-docs crates.io` says it is allowed, and
      by which rule. `cw info policy-walk` shows revision 2 desired.
@@ -218,7 +224,11 @@ Issue: #4000. The store and its API merged with #4211, behind a switch.
     public gateway serves, and the relay (see `hosted-enforcement`).
 - **Gotchas:** a hosted policy is stored on the platform, a local one on the
   host. The same name in both is two policies.
-- **Observed:** not yet observed.
+- **Observed:**
+  - on a local Kind cluster, 2026-11-16 (#4000): steps 1 to 8 as written,
+    with the "not enforced" line on every command that's meant to show it;
+  - Dev and Production: not yet observed. The enforcement half of the proof
+    waits for `hosted-enforcement`.
 
 ## `policy-protected`: addresses no policy can allow
 

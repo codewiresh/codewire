@@ -126,6 +126,12 @@ patches:
                   # manifests can reject managed runc by default.
                   - name: SANDBOX_RUNTIME_PROFILE
                     value: runc
+                  # The organization network policy store (#4211), so
+                  # `cw --cloud policy` and `--policy` can be walked here
+                  # (docs/journeys/network-and-egress.md, `policy-hosted`).
+                  # Nothing enforces a hosted policy yet (#4000).
+                  - name: CODEWIRE_PLATFORM_NETWORK_POLICIES_ENABLED
+                    value: "true"
                   - name: SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME
                     value: "true"
                   # Workspace Pods run their daemon from the kind-loaded support

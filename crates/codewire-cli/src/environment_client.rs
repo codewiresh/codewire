@@ -1341,6 +1341,7 @@ fn proto_create_environment_request(
         confirm_personal_secrets: request.confirm_personal_secrets,
         omit_application_previews: request.omit_application_previews,
         network: request.network.clone().unwrap_or_default(),
+        network_policy: request.network_policy.clone().unwrap_or_default(),
         source_snapshot_id: request.source_snapshot_id.clone().unwrap_or_default(),
         ..Default::default()
     }
@@ -1397,6 +1398,7 @@ fn create_environment_request_from_proto(
         confirm_personal_secrets: value.confirm_personal_secrets,
         omit_application_previews: value.omit_application_previews,
         network: empty_to_none(value.network),
+        network_policy: empty_to_none(value.network_policy),
         source_snapshot_id: empty_to_none(value.source_snapshot_id),
     })
 }
@@ -1449,6 +1451,25 @@ pub(crate) fn legacy_environment_daemon_status(
     }
 }
 
+pub(crate) fn environment_network_policy_from_proto(
+    value: &rpc::EnvironmentNetworkPolicy,
+) -> crate::presentation::EnvironmentNetworkPolicy {
+    let enforcement = match value.enforcement.as_known() {
+        Some(rpc::NetworkPolicyEnforcement::NotEnforced) => "not_enforced",
+        Some(rpc::NetworkPolicyEnforcement::Enforced) => "enforced",
+        Some(rpc::NetworkPolicyEnforcement::Enforcing) => "enforcing",
+        Some(rpc::NetworkPolicyEnforcement::FailedClosed) => "failed_closed",
+        Some(rpc::NetworkPolicyEnforcement::Unspecified) | None => "unknown",
+    };
+    crate::presentation::EnvironmentNetworkPolicy {
+        reference: value.reference.clone(),
+        name: value.name.clone(),
+        revision: value.revision,
+        enforcement: enforcement.to_owned(),
+        enforced_revision: (value.enforced_revision != 0).then_some(value.enforced_revision),
+    }
+}
+
 fn environment_from_proto(value: rpc::Environment) -> anyhow::Result<Environment> {
     let state = match value.state.as_known() {
         Some(rpc::EnvironmentState::Unspecified) => "",
@@ -1481,6 +1502,10 @@ fn environment_from_proto(value: rpc::Environment) -> anyhow::Result<Environment
         None => "unknown",
     };
     Ok(Environment {
+        network_policy: value
+            .network_policy
+            .as_option()
+            .map(environment_network_policy_from_proto),
         operation_generation: value.operation_generation,
         source_selection: value
             .source_selection
@@ -1859,6 +1884,50 @@ mod tests {
 
     const SOURCE_UPDATE_PATH: &str = "/codewire.v1.EnvironmentService/UpdateEnvironmentSources";
     const LIST_ENVIRONMENTS_PATH: &str = "/codewire.v1.EnvironmentService/ListEnvironments";
+
+    #[test]
+    fn a_hosted_create_carries_its_network_policy_both_ways() {
+        let request = CreateEnvironmentRequest {
+            network_policy: Some("platform:web".into()),
+            ..Default::default()
+        };
+        let message = proto_create_environment_request("org", &request);
+        assert_eq!(message.network_policy, "platform:web");
+        let back = create_environment_request_from_proto(rpc::CreateEnvironmentRequest {
+            project_spec: Some(codewire_project_proto::to_proto(Default::default())).into(),
+            ..message
+        })
+        .unwrap();
+        assert_eq!(back.network_policy.as_deref(), Some("platform:web"));
+        let none = proto_create_environment_request("org", &CreateEnvironmentRequest::default());
+        assert!(none.network_policy.is_empty());
+    }
+
+    #[test]
+    fn an_environments_network_policy_reads_its_enforcement_state() {
+        let mut selected = rpc::EnvironmentNetworkPolicy {
+            reference: "platform:id:1".into(),
+            name: "web".into(),
+            revision: 2,
+            enforcement: rpc::NetworkPolicyEnforcement::NotEnforced.into(),
+            ..Default::default()
+        };
+        let view = environment_network_policy_from_proto(&selected);
+        assert_eq!(view.enforcement, "not_enforced");
+        assert_eq!(view.enforced_revision, None);
+        selected.enforcement = rpc::NetworkPolicyEnforcement::Enforced.into();
+        selected.enforced_revision = 2;
+        let view = environment_network_policy_from_proto(&selected);
+        assert_eq!(
+            (view.enforcement.as_str(), view.enforced_revision),
+            ("enforced", Some(2))
+        );
+        selected.enforcement = buffa::EnumValue::from(99);
+        assert_eq!(
+            environment_network_policy_from_proto(&selected).enforcement,
+            "unknown"
+        );
+    }
 
     #[test]
     fn prepared_create_round_trip_preserves_explicit_no_previews() {

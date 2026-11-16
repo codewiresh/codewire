@@ -36,6 +36,9 @@ data:
   CODEWIRE_COORDINATOR_URL: "http://codewire-coordinator.default.svc.cluster.local:8090"
   NAMESPACE_PREFIX: "local-tenant"
   CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER: "true"
+  # Organization network policies (#4000): Kind tests the store and `cw --cloud policy`.
+  # Nothing enforces them until cw-egress does; Production keeps the switch off.
+  CODEWIRE_PLATFORM_NETWORK_POLICIES_ENABLED: "true"
   # Local clusters pull the workspace image from its public mirror
   # (docs/CONFIGURATION.md).
   CODEWIRE_WORKSPACE_IMAGE_REPOSITORY: "ghcr.io/codewiresh/workspace"

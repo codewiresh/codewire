@@ -2,8 +2,9 @@
 //! (#2537). Not Mesh networks, which `cw network` manages.
 //!
 //! A policy is named and every edit makes a new revision. `open` and `locked`
-//! are built-ins. Policies live in this host's store (`--local`); platform
-//! policies come later.
+//! are built-ins. Policies live in this host's store (`--local`) or in the
+//! organization's platform store (`--cloud`, #4000), which nothing enforces
+//! until cw-egress does.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -16,6 +17,8 @@ use codewire_egress_policy::typed::{AllowRule, AllowTarget, TypedPolicy};
 use codewire_egress_policy::{BuiltinPolicy, CompiledPolicy};
 
 use super::*;
+
+mod platform;
 
 /// The ports a target gets when it names none: those `open` allows, so an
 /// allowed Git host also works over SSH.
@@ -162,6 +165,14 @@ impl PolicyCommand {
     }
 }
 
+/// Whether a policy command uses the organization's store: only when its
+/// location says `--cloud`. With no location it uses this computer's store,
+/// as before organization policies existed, so a scripted `cw policy allow …`
+/// keeps its meaning (#4594, #4000).
+fn uses_platform(placement: Option<EnvironmentPlacement>) -> bool {
+    matches!(placement, Some(EnvironmentPlacement::Platform))
+}
+
 pub(crate) async fn handle_policy_command(
     globals: &Globals,
     mut args: PolicyArgs,
@@ -170,34 +181,33 @@ pub(crate) async fn handle_policy_command(
     if let PolicyCommand::Check(check) = &args.command
         && let Some(builtin) = BuiltinPolicy::from_name(&check.name)
     {
-        return print_check(check, &builtin.to_string(), None, &builtin.compile());
+        return print_check(check, &builtin.to_string(), None, &builtin.compile(), None);
     }
     let guided_create = matches!(&args.command, PolicyCommand::Create(args) if args.name.is_none());
     if let PolicyCommand::Create(args) = &mut args.command {
-        if guided_create && globals.placement == Some(EnvironmentPlacement::Platform) {
-            anyhow::bail!(
-                "platform network policies are not available yet; use `cw --local policy create`"
-            );
-        }
+        let hint = match globals.placement {
+            Some(EnvironmentPlacement::Platform) => {
+                "name the policy: `cw --cloud policy create NAME`"
+            }
+            _ => "name the policy: `cw --local policy create NAME`",
+        };
         args.name = Some(super::additions::required(
             args.name.take(),
             "Policy name",
             args.output,
-            "name the policy: `cw --local policy create NAME`",
+            hint,
         )?);
     }
-    match globals.placement {
-        Some(EnvironmentPlacement::Platform) => anyhow::bail!(
-            "platform network policies are not available yet; keep this policy on this host with --local"
-        ),
-        Some(EnvironmentPlacement::Local) => {}
-        // Policies have one store, this computer's, so there is nothing to
-        // ask: a list names the store it read (#4594).
-        None => {
-            if !args.command.json() && matches!(args.command, PolicyCommand::List(_)) {
-                eprintln!("Policies on this computer (cloud policy storage is not available yet):");
-            }
-        }
+    let platform = uses_platform(globals.placement);
+    // A list says which store it read, and never asks (#4594).
+    if globals.placement.is_none()
+        && matches!(args.command, PolicyCommand::List(_))
+        && !args.command.json()
+    {
+        eprintln!("Policies on this computer; your organization's are in `cw --cloud policy ls`:");
+    }
+    if platform {
+        return platform::handle(globals, args.command).await;
     }
     handle_local_policy_command(args.command, guided_create).await
 }
@@ -339,8 +349,8 @@ async fn handle_local_policy_command(
                 })
                 .await
                 .map_err(status("read the network policy"))?;
-            let compiled = typed_from(&stored)?.compile();
-            print_check(&args, &stored.name, Some(stored.revision), &compiled)
+            let compiled = typed_from(&stored, "the supervisor")?.compile();
+            print_check(&args, &stored.name, Some(stored.revision), &compiled, None)
         }
         PolicyCommand::Delete(args) => {
             let deleted = client
@@ -349,7 +359,7 @@ async fn handle_local_policy_command(
                 .map_err(status("delete the network policy"))?;
             match args.output {
                 OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&policy_json(&deleted))?)
+                    println!("{}", serde_json::to_string_pretty(&deleted.json())?)
                 }
                 OutputFormat::Text => println!("Deleted network policy {}", deleted.name),
             }
@@ -492,87 +502,122 @@ fn rule_proto(rule: AllowRule) -> codewire_local_vmm::control::v1::NetworkPolicy
     }
 }
 
+/// What the renderers need from a stored policy, on this host or on the
+/// platform.
+trait ShownPolicy {
+    fn name(&self) -> &str;
+    fn revision(&self) -> u32;
+    fn digest(&self) -> &str;
+    fn rules(&self) -> Vec<(&str, &[u32])>;
+    fn json(&self) -> serde_json::Value;
+    /// Where an edit took effect at once, and where it waits for a restart.
+    fn applied(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn typed_from(
-    policy: &codewire_local_vmm::control::v1::NetworkPolicy,
-) -> anyhow::Result<TypedPolicy> {
+impl ShownPolicy for codewire_local_vmm::control::v1::NetworkPolicy {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn revision(&self) -> u32 {
+        self.revision
+    }
+
+    fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    fn rules(&self) -> Vec<(&str, &[u32])> {
+        self.rules
+            .iter()
+            .map(|rule| (rule.target.as_str(), rule.ports.as_slice()))
+            .collect()
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "name": self.name,
+            "reference": format!("local:id:{}", self.id),
+            "revision": self.revision,
+            "current_revision": self.current_revision,
+            "digest": self.digest,
+            "rules": rules_json(self),
+            "created_unix_ms": self.created_unix_ms,
+            "enforced_in": self.enforced_in,
+            "restart_required_in": self.restart_required_in,
+        })
+    }
+
+    fn applied(&self) -> Vec<String> {
+        applied_text(self)
+    }
+}
+
+/// The policy's rules, checked against its digest. `source` names who
+/// returned it, for the error.
+fn typed_from(policy: &impl ShownPolicy, source: &str) -> anyhow::Result<TypedPolicy> {
     let rules = policy
-        .rules
-        .iter()
-        .map(|rule| {
-            let ports = rule
-                .ports
+        .rules()
+        .into_iter()
+        .map(|(target, ports)| {
+            let ports = ports
                 .iter()
                 .map(|port| u16::try_from(*port))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(AllowRule::new(AllowTarget::parse(&rule.target)?, ports)?)
+            Ok(AllowRule::new(AllowTarget::parse(target)?, ports)?)
         })
         .collect::<anyhow::Result<Vec<_>>>()
-        .context("the supervisor returned an invalid network policy")?;
+        .with_context(|| format!("{source} returned an invalid network policy"))?;
     let typed = TypedPolicy::new(rules)?;
     anyhow::ensure!(
-        typed.compile().digest().to_hex() == policy.digest,
-        "the supervisor returned a network policy whose rules do not match its digest"
+        typed.compile().digest().to_hex() == policy.digest(),
+        "{source} returned a network policy whose rules do not match its digest"
     );
     Ok(typed)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn policy_json(policy: &codewire_local_vmm::control::v1::NetworkPolicy) -> serde_json::Value {
-    serde_json::json!({
-        "id": policy.id,
-        "name": policy.name,
-        "reference": format!("local:id:{}", policy.id),
-        "revision": policy.revision,
-        "current_revision": policy.current_revision,
-        "digest": policy.digest,
-        "rules": policy.rules.iter().map(|rule| serde_json::json!({
-            "target": rule.target,
-            "ports": rule.ports,
-        })).collect::<Vec<_>>(),
-        "created_unix_ms": policy.created_unix_ms,
-        "enforced_in": policy.enforced_in,
-        "restart_required_in": policy.restart_required_in,
-    })
+fn rules_json(policy: &impl ShownPolicy) -> Vec<serde_json::Value> {
+    policy
+        .rules()
+        .into_iter()
+        .map(|(target, ports)| serde_json::json!({ "target": target, "ports": ports }))
+        .collect()
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn rules_text(policy: &codewire_local_vmm::control::v1::NetworkPolicy) -> String {
-    if policy.rules.is_empty() {
+fn rules_text(policy: &impl ShownPolicy) -> String {
+    let rules = policy.rules();
+    if rules.is_empty() {
         return "nothing (like `locked`)".to_owned();
     }
-    policy
-        .rules
-        .iter()
-        .map(|rule| {
-            let ports = rule
-                .ports
+    rules
+        .into_iter()
+        .map(|(target, ports)| {
+            let ports = ports
                 .iter()
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{} ({ports})", rule.target)
+            format!("{target} ({ports})")
         })
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn print_policy(
-    verb: &str,
-    policy: &codewire_local_vmm::control::v1::NetworkPolicy,
-    output: OutputFormat,
-) -> anyhow::Result<()> {
+fn print_policy(verb: &str, policy: &impl ShownPolicy, output: OutputFormat) -> anyhow::Result<()> {
     match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&policy_json(policy))?),
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&policy.json())?),
         OutputFormat::Text => {
             println!(
                 "{verb} network policy {} · rev {}\n  Allows: {}",
-                policy.name,
-                policy.revision,
+                policy.name(),
+                policy.revision(),
                 rules_text(policy)
             );
-            for line in applied_text(policy) {
+            for line in policy.applied() {
                 println!("  {line}");
             }
         }
@@ -599,15 +644,13 @@ fn applied_text(policy: &codewire_local_vmm::control::v1::NetworkPolicy) -> Vec<
     lines
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn print_policies(
-    policies: &[codewire_local_vmm::control::v1::NetworkPolicy],
-    output: OutputFormat,
-) -> anyhow::Result<()> {
+fn print_policies(policies: &[impl ShownPolicy], output: OutputFormat) -> anyhow::Result<()> {
     match output {
         OutputFormat::Json => println!(
             "{}",
-            serde_json::to_string_pretty(&policies.iter().map(policy_json).collect::<Vec<_>>())?
+            serde_json::to_string_pretty(
+                &policies.iter().map(ShownPolicy::json).collect::<Vec<_>>()
+            )?
         ),
         OutputFormat::Text => {
             println!("open    built-in · every public destination on TCP 22, 80 and 443");
@@ -615,8 +658,8 @@ fn print_policies(
             for policy in policies {
                 println!(
                     "{}  rev {} · {}",
-                    policy.name,
-                    policy.revision,
+                    policy.name(),
+                    policy.revision(),
                     rules_text(policy)
                 );
             }
@@ -625,11 +668,15 @@ fn print_policies(
     Ok(())
 }
 
+/// `hosted_enforced` is `Some` for an organization's policy only: whether
+/// hosted Sandboxes enforce it, which its JSON reports. A local or built-in
+/// policy's JSON is unchanged.
 fn print_check(
     args: &PolicyCheckArgs,
     name: &str,
     revision: Option<u32>,
     policy: &CompiledPolicy,
+    hosted_enforced: Option<bool>,
 ) -> anyhow::Result<()> {
     let (destination, port) = split_port(&args.destination)?;
     let port = port.unwrap_or(DEFAULT_CHECK_PORT);
@@ -646,9 +693,8 @@ fn print_check(
         .map(|revision| format!(" rev {revision}"))
         .unwrap_or_default();
     match args.output {
-        OutputFormat::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+        OutputFormat::Json => {
+            let mut json = serde_json::json!({
                 "policy": name,
                 "revision": revision,
                 "destination": shown,
@@ -656,8 +702,18 @@ fn print_check(
                 "reason": check.refusal.map(RefusalReason::code),
                 "allowed_within": check.allowed_within,
                 "refused_within": check.refusal.is_none().then_some(&check.refused_within),
-            }))?
-        ),
+            });
+            if let Some(enforced) = hosted_enforced {
+                json["enforced"] = enforced.into();
+                json["enforcement"] = if enforced {
+                    "available"
+                } else {
+                    "not_available"
+                }
+                .into();
+            }
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
         OutputFormat::Text => {
             match check.refusal {
                 None if named => println!(
@@ -695,6 +751,13 @@ fn check_networks_text(check: &PolicyCheck) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_no_location_every_policy_command_uses_this_computers_store() {
+        assert!(!uses_platform(None));
+        assert!(!uses_platform(Some(EnvironmentPlacement::Local)));
+        assert!(uses_platform(Some(EnvironmentPlacement::Platform)));
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]

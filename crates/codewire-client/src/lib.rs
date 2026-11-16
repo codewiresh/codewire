@@ -20,6 +20,7 @@ pub mod hosts;
 #[cfg(target_os = "linux")]
 pub mod member_tailnet;
 mod mesh;
+mod network_policies;
 pub mod platform_agents;
 pub mod session_wire;
 mod tailnet;
@@ -35,8 +36,9 @@ use codewire_proto::codewire::v1::{
     AccessProfileServiceClient, ApiKeyServiceClient, CredentialMutationServiceClient,
     CredentialServiceClient, EnvironmentServiceClient, EnvironmentSessionServiceClient,
     ExecServiceClient, FileServiceClient, GithubRepositoryServiceClient, MeshInviteServiceClient,
-    MeshNetworkServiceClient, MeshNodeServiceClient, OrganizationServiceClient, PortServiceClient,
-    PresetServiceClient, SecretServiceClient, SnapshotServiceClient,
+    MeshNetworkServiceClient, MeshNodeServiceClient, NetworkPolicyServiceClient,
+    OrganizationServiceClient, PortServiceClient, PresetServiceClient, SecretServiceClient,
+    SnapshotServiceClient,
 };
 use connectrpc::ConnectError;
 use connectrpc::client::{BoxFuture, CallOptions, ClientBody, ClientTransport};
@@ -157,6 +159,14 @@ pub use codewire_proto::codewire::v1::{
     RevokeMeshNodeRequest, RevokeMeshNodeResponse,
 };
 pub use codewire_proto::codewire::v1::{
+    CreateNetworkPolicyRequest, CreateNetworkPolicyResponse, DeleteNetworkPolicyRequest,
+    DeleteNetworkPolicyResponse, EnvironmentNetworkPolicy, GetNetworkPolicyRequest,
+    GetNetworkPolicyResponse, ListNetworkPoliciesRequest, ListNetworkPoliciesResponse,
+    NetworkPolicy, NetworkPolicyEnforcement, NetworkPolicyRule,
+    UpdateEnvironmentNetworkPolicyRequest, UpdateEnvironmentNetworkPolicyResponse,
+    UpdateNetworkPolicyRequest, UpdateNetworkPolicyResponse,
+};
+pub use codewire_proto::codewire::v1::{
     CreateSecretProjectRequest, CreateSecretProjectResponse, DeleteProjectSecretRequest,
     DeleteProjectSecretResponse, DeleteSecretProjectRequest, DeleteSecretProjectResponse,
     DeleteSecretRequest, DeleteSecretResponse, DeleteUserSecretRequest, DeleteUserSecretResponse,
@@ -220,6 +230,7 @@ pub struct CodewireClient {
     secrets: SecretServiceClient<ReqwestConnectTransport>,
     snapshots: SnapshotServiceClient<ReqwestConnectTransport>,
     access_profiles: AccessProfileServiceClient<ReqwestConnectTransport>,
+    network_policies: NetworkPolicyServiceClient<ReqwestConnectTransport>,
     credentials: CredentialServiceClient<ReqwestConnectTransport>,
     credential_mutations: CredentialMutationServiceClient<ReqwestConnectTransport>,
     github_repositories: GithubRepositoryServiceClient<ReqwestConnectTransport>,
@@ -424,6 +435,7 @@ impl CodewireClient {
         let secret_config = config.connect_config()?;
         let snapshot_config = config.connect_config()?;
         let access_profile_config = config.connect_config()?;
+        let network_policy_config = config.connect_config()?;
         let credential_config = config.connect_config()?;
         let credential_mutation_config = config.connect_config()?;
         let github_repository_config = config.connect_config()?;
@@ -463,6 +475,10 @@ impl CodewireClient {
             access_profiles: AccessProfileServiceClient::new(
                 ReqwestConnectTransport(http.clone()),
                 access_profile_config,
+            ),
+            network_policies: NetworkPolicyServiceClient::new(
+                ReqwestConnectTransport(http.clone()),
+                network_policy_config,
             ),
             credentials: CredentialServiceClient::new(
                 ReqwestConnectTransport(http.clone()),
