@@ -640,6 +640,7 @@ fn ipc_broker_error(error: BrokerIpcError) -> io::Error {
         BrokerIpcError::Denied => io::ErrorKind::PermissionDenied,
         BrokerIpcError::RemoteUnavailable => io::ErrorKind::ConnectionRefused,
         BrokerIpcError::SessionBusy => io::ErrorKind::WouldBlock,
+        BrokerIpcError::Late => io::ErrorKind::TimedOut,
         _ => io::ErrorKind::ConnectionAborted,
     };
     io::Error::new(kind, "authenticated egress broker request failed")

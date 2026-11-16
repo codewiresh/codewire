@@ -33,6 +33,7 @@ separately.
 | `policy-project-file` | #2537, #4835 | no command yet | no command yet | no command yet | no command yet |
 | `policy-hosted` | #4000, #4211 | n/a | n/a | not yet observed | not yet observed |
 | `policy-protected` | #2537, #4000 | not yet observed | not yet observed | no command yet | no command yet |
+| `egress-late-answer` | #4948 | not yet observed | not yet observed | n/a | n/a |
 | `refusal-log` | #3999, #4000 | no command yet | no command yet | no command yet | no command yet |
 | `refusal-in-environment` | #4015 | no command yet | no command yet | no command yet | no command yet |
 | `learn-mode` | #4015 | after launch | after launch | after launch | after launch |
@@ -232,6 +233,42 @@ Issues: #2537, #4000.
   reachable.
 - **Gotchas:** a name that resolves only to protected addresses is refused as
   a name. Do not read that as a DNS outage.
+- **Observed:** not yet observed.
+
+## `egress-late-answer`: a late answer refuses only its own request
+
+Issue: #4948.
+
+- **Entry points:** every lookup and connection a local VM makes.
+- **States to exercise:**
+  - the egress broker paused for longer than the network worker's 8 s
+    deadline while a lookup waits, then while a connection waits;
+  - the broker resumed, then paused for good.
+- **Driving it:** on the host, take the VM's ID from `cw --local info`, find
+  its broker's process ID by its exact arguments, and pause and resume it:
+
+  ```sh
+  cw --local info egress-walk
+  ps -axo pid=,args= | grep -F -- "__native-egress-broker --environment-id ID"
+  kill -STOP PID
+  cw --local exec --in egress-walk -- sh -c 'time getent hosts example.com'
+  kill -CONT PID
+  cw --local exec --in egress-walk -- getent hosts example.com
+  cw --local exec --in egress-walk -- curl -sS -o /dev/null -w '%{http_code}\n' https://example.com/
+  cw --local info egress-walk
+  ```
+
+  Then the same with `curl` in place of `getent` while the broker is paused.
+- **Proof:**
+  - while the broker is paused, each lookup and connection fails after the
+    8 s deadline instead of hanging, and nothing is reached;
+  - after `kill -CONT`, the next lookup answers, `curl` prints `200`, and
+    `cw info` reads `running`, with no restart;
+  - paused for good, requests keep failing and the VM stays `running`;
+  - the late answers are counted for the refusal log (no command yet to read
+    the count, #3999).
+- **Gotchas:** the guest's resolver retries a failed lookup, so `getent`'s
+  total time is a multiple of the deadline.
 - **Observed:** not yet observed.
 
 ## `refusal-log`: the owner sees what was refused, and why

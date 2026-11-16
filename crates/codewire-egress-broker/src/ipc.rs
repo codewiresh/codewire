@@ -18,7 +18,7 @@ use std::io::{self, IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream as StdTcpStream};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 
@@ -34,7 +34,7 @@ use sha2::Sha256;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, Interest};
 use tokio::net::UnixStream;
-use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, timeout, timeout_at};
 use uuid::Uuid;
@@ -44,6 +44,10 @@ use crate::{
     BrokerAdapterFailure, BrokerClock, BrokerConnection, BrokerDnsResponse, BrokerError,
     DnsRecordFamily, DnsResolver, PassedFlow, PolicyEgressBroker, TcpConnector,
 };
+
+mod late;
+
+use late::{LateAnswer, LateOperation};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -61,8 +65,8 @@ const FRAME_DOMAIN: &[u8] = b"codewire.egress-broker-ipc/v1\0";
 const DESCRIPTOR_MARKER: u8 = b'F';
 // Queue admission cannot consume the adapter's transaction budget. The latter
 // includes the production DNS/TCP deadline plus IPC and descriptor delivery,
-// with a margin: a transaction that outlives it fails its session, which ends
-// the broker.
+// with a margin. A transaction that outlives it is refused to its caller, and
+// its session waits for the late answer before it carries another (#4948).
 const BROKER_IPC_QUEUE_TIMEOUT: Duration = Duration::from_secs(2);
 const BROKER_IPC_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -220,6 +224,8 @@ pub enum BrokerIpcError {
     SessionClosed,
     #[error("broker IPC session is busy")]
     SessionBusy,
+    #[error("broker IPC answer missed its deadline")]
+    Late,
     #[error("broker IPC session count is wrong")]
     SessionCount,
     #[error("broker IPC request is outside its session's class")]
@@ -256,20 +262,21 @@ struct ClientState {
     key: BrokerIpcKey,
     next_sequence: u64,
     failed: bool,
+    late: Option<LateAnswer>,
 }
 
 /// Sessions of one class. A request checks out an idle session and gives it
 /// back when it is done; a session that failed is never given back.
 struct SessionPool {
     idle: StdMutex<VecDeque<ClientState>>,
-    available: Semaphore,
+    available: Arc<Semaphore>,
     live: AtomicUsize,
 }
 
 impl SessionPool {
     fn new(sessions: Vec<ClientState>) -> Self {
         Self {
-            available: Semaphore::new(sessions.len()),
+            available: Arc::new(Semaphore::new(sessions.len())),
             live: AtomicUsize::new(sessions.len()),
             idle: StdMutex::new(sessions.into()),
         }
@@ -280,8 +287,9 @@ impl SessionPool {
     }
 
     /// Take the longest-idle session, waiting at most the queue timeout for one.
-    async fn checkout(&self) -> Result<CheckedOut<'_>, BrokerIpcError> {
-        let permit = match timeout(BROKER_IPC_QUEUE_TIMEOUT, self.available.acquire()).await {
+    async fn checkout(self: &Arc<Self>) -> Result<CheckedOut, BrokerIpcError> {
+        let available = Arc::clone(&self.available);
+        let permit = match timeout(BROKER_IPC_QUEUE_TIMEOUT, available.acquire_owned()).await {
             Err(_) => return Err(BrokerIpcError::SessionBusy),
             // Closed once every session of the class has failed.
             Ok(Err(_)) => return Err(BrokerIpcError::SessionClosed),
@@ -295,7 +303,7 @@ impl SessionPool {
             .pop_front()
             .ok_or(BrokerIpcError::SessionClosed)?;
         Ok(CheckedOut {
-            pool: self,
+            pool: Arc::clone(self),
             state: Some(state),
             permit: Some(permit),
         })
@@ -303,14 +311,15 @@ impl SessionPool {
 }
 
 /// A checked-out session. Dropping it, including when its request is
-/// cancelled, returns it only if it can carry another request.
-struct CheckedOut<'a> {
-    pool: &'a SessionPool,
+/// cancelled, returns it only if it can carry another request; one whose
+/// answer was late is returned once that answer has been read.
+struct CheckedOut {
+    pool: Arc<SessionPool>,
     state: Option<ClientState>,
-    permit: Option<SemaphorePermit<'a>>,
+    permit: Option<OwnedSemaphorePermit>,
 }
 
-impl std::ops::Deref for CheckedOut<'_> {
+impl std::ops::Deref for CheckedOut {
     type Target = ClientState;
 
     fn deref(&self) -> &ClientState {
@@ -320,7 +329,7 @@ impl std::ops::Deref for CheckedOut<'_> {
     }
 }
 
-impl std::ops::DerefMut for CheckedOut<'_> {
+impl std::ops::DerefMut for CheckedOut {
     fn deref_mut(&mut self) -> &mut ClientState {
         self.state
             .as_mut()
@@ -328,9 +337,12 @@ impl std::ops::DerefMut for CheckedOut<'_> {
     }
 }
 
-impl Drop for CheckedOut<'_> {
+impl Drop for CheckedOut {
     fn drop(&mut self) {
         let (Some(state), Some(permit)) = (self.state.take(), self.permit.take()) else {
+            return;
+        };
+        let Some((state, permit)) = late::wait_for_late_answer(&self.pool, state, permit) else {
             return;
         };
         if state.failed {
@@ -368,9 +380,10 @@ impl BrokerIpcConnection {
 }
 
 pub struct BrokerIpcClient {
-    admission: SessionPool,
-    dns: SessionPool,
-    connect: SessionPool,
+    admission: Arc<SessionPool>,
+    dns: Arc<SessionPool>,
+    connect: Arc<SessionPool>,
+    late_answers: AtomicU64,
 }
 
 impl BrokerIpcClient {
@@ -392,6 +405,7 @@ impl BrokerIpcClient {
                 key: key.for_session(index)?,
                 next_sequence: 1,
                 failed: false,
+                late: None,
             };
             match BrokerIpcSessionClass::of(index).ok_or(BrokerIpcError::SessionCount)? {
                 BrokerIpcSessionClass::Admission => admission.push(state),
@@ -400,9 +414,10 @@ impl BrokerIpcClient {
             }
         }
         Ok(Self {
-            admission: SessionPool::new(admission),
-            dns: SessionPool::new(dns),
-            connect: SessionPool::new(connect),
+            admission: Arc::new(SessionPool::new(admission)),
+            dns: Arc::new(SessionPool::new(dns)),
+            connect: Arc::new(SessionPool::new(connect)),
+            late_answers: AtomicU64::new(0),
         })
     }
 
@@ -436,7 +451,11 @@ impl BrokerIpcClient {
         let request = encode_dns_request(name, family)?;
         let mut state = self.dns.checkout().await?;
         let deadline = Instant::now() + BROKER_IPC_TRANSACTION_TIMEOUT;
-        let response = state.request(&request, deadline).await?;
+        let response = self.count_late(
+            state
+                .request(&request, deadline, LateOperation::Dns(family))
+                .await,
+        )?;
         match decode_dns_response(&response, family) {
             Ok(response) => Ok(response),
             Err(error) if error.is_valid_remote_result() => Err(error),
@@ -451,7 +470,11 @@ impl BrokerIpcClient {
         let request = encode_tcp_request(OP_AUTHORIZE_TCP, destination)?;
         let mut state = self.admission.checkout().await?;
         let deadline = Instant::now() + BROKER_IPC_TRANSACTION_TIMEOUT;
-        let response = state.request(&request, deadline).await?;
+        let response = self.count_late(
+            state
+                .request(&request, deadline, LateOperation::Authorize)
+                .await,
+        )?;
         match decode_empty_response(&response, OP_AUTHORIZE_TCP) {
             Ok(()) => Ok(()),
             Err(error) if error.is_valid_remote_result() => Err(error),
@@ -469,7 +492,11 @@ impl BrokerIpcClient {
         let request = encode_tcp_request(OP_CONNECT_TCP, destination)?;
         let mut state = self.connect.checkout().await?;
         let deadline = Instant::now() + BROKER_IPC_TRANSACTION_TIMEOUT;
-        let response = state.request(&request, deadline).await?;
+        let response = self.count_late(
+            state
+                .request(&request, deadline, LateOperation::Connect)
+                .await,
+        )?;
         let intercepted = response == [OP_CONNECT_TCP, STATUS_INTERCEPTED];
         if !intercepted {
             match decode_empty_response(&response, OP_CONNECT_TCP) {
@@ -484,9 +511,7 @@ impl BrokerIpcClient {
         // The descriptor is part of this operation, not the next frame. A
         // cancelled receive must never leave it for a subsequent request.
         state.failed = true;
-        let descriptor = timeout_at(deadline, receive_descriptor(&state.stream))
-            .await
-            .unwrap_or(Err(BrokerIpcError::FrameIo))?;
+        let descriptor = self.count_late(state.receive_descriptor_by(deadline).await)?;
         // The marker and its one descriptor are read: the session is in step
         // again, whatever the connection itself turns out to be.
         state.failed = false;
@@ -517,6 +542,7 @@ impl ClientState {
         &mut self,
         payload: &[u8],
         deadline: Instant,
+        operation: LateOperation,
     ) -> Result<Vec<u8>, BrokerIpcError> {
         if self.failed {
             return Err(BrokerIpcError::SessionClosed);
@@ -533,21 +559,11 @@ impl ClientState {
         // unread response. Poison the session before the first await; only a
         // complete authenticated response can make it reusable again.
         self.failed = true;
-        let response = timeout_at(deadline, async {
-            write_client_bytes(&self.stream, &frame)
-                .await
-                .map_err(|_| BrokerIpcError::FrameIo)?;
-            read_client_frame(
-                &mut self.stream,
-                FRAME_KIND_RESPONSE,
-                sequence,
-                self.binding,
-                &self.key,
-            )
+        timeout_at(deadline, write_client_bytes(&self.stream, &frame))
             .await
-        })
-        .await
-        .map_err(|_| BrokerIpcError::FrameIo)??;
+            .map_err(|_| BrokerIpcError::FrameIo)?
+            .map_err(|_| BrokerIpcError::FrameIo)?;
+        let response = self.read_answer(sequence, deadline, operation).await?;
         self.next_sequence = match sequence.checked_add(1) {
             Some(next) => next,
             None => {
@@ -594,15 +610,21 @@ async fn read_client_exact(stream: &UnixStream, mut bytes: &mut [u8]) -> io::Res
     Ok(())
 }
 
+/// Read one frame. A caller that already read its first byte passes it in.
 async fn read_client_frame(
     stream: &mut UnixStream,
+    first: Option<u8>,
     expected_kind: u8,
     expected_sequence: u64,
     binding: BrokerIpcBinding,
     key: &BrokerIpcKey,
 ) -> Result<Vec<u8>, BrokerIpcError> {
     let mut header = [0_u8; FRAME_HEADER_LEN];
-    read_client_exact(stream, &mut header)
+    let start = first.map_or(0, |byte| {
+        header[0] = byte;
+        1
+    });
+    read_client_exact(stream, &mut header[start..])
         .await
         .map_err(|_| BrokerIpcError::FrameIo)?;
     let payload_len = usize::from(u16::from_be_bytes([header[10], header[11]]));
@@ -2201,7 +2223,7 @@ rules:
     }
 
     /// Every session of a class checked out, as if each were in flight.
-    async fn hold_all(pool: &SessionPool) -> Vec<CheckedOut<'_>> {
+    async fn hold_all(pool: &Arc<SessionPool>) -> Vec<CheckedOut> {
         let mut held = Vec::new();
         for _ in 0..pool.len() {
             held.push(pool.checkout().await.unwrap());
@@ -2302,8 +2324,10 @@ rules:
         );
     }
 
+    /// #4948: a session whose late answer never comes is retired once the
+    /// broker closes it, as any session that falls out of step is.
     #[tokio::test]
-    async fn stalled_response_timeout_retires_the_session() {
+    async fn a_session_whose_late_answer_never_comes_is_retired() {
         let policy = named_policy();
         let binding = binding(&policy);
         let request_observed = Arc::new(Notify::new());
@@ -2345,12 +2369,360 @@ rules:
         tokio::time::pause();
         let stalled_result = stalled.await;
         tokio::time::resume();
-        assert_eq!(stalled_result, Err(BrokerIpcError::FrameIo));
-        assert_eq!(client.dns.len(), BROKER_IPC_DNS_SESSIONS - 1);
+        assert_eq!(stalled_result, Err(BrokerIpcError::Late));
+        // It waits for the answer rather than being retired at once.
+        assert_eq!(client.dns.len(), BROKER_IPC_DNS_SESSIONS);
         drop(server_streams);
 
         close_server.notify_one();
         server.await.unwrap();
+        wait_live(&client.dns, BROKER_IPC_DNS_SESSIONS - 1).await;
+    }
+
+    /// Wait until the pool holds `sessions` live sessions.
+    async fn wait_live(pool: &SessionPool, sessions: usize) {
+        tokio::time::timeout(HANG_GUARD, async {
+            while pool.len() != sessions {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the pool's session count settled");
+    }
+
+    /// A late answer that is not the authenticated answer the session waits
+    /// for retires the session, as it would have on time.
+    #[tokio::test]
+    async fn a_late_answer_out_of_sequence_retires_its_session() {
+        let policy = named_policy();
+        let binding = binding(&policy);
+        let request_observed = Arc::new(Notify::new());
+        let answer = Arc::new(Notify::new());
+        let (client_streams, mut server_streams) = session_pairs();
+        let mut server_stream = server_streams.remove(FIRST_DNS);
+        let server = tokio::spawn({
+            let request_observed = Arc::clone(&request_observed);
+            let answer = Arc::clone(&answer);
+            async move {
+                read_frame(
+                    &mut server_stream,
+                    FRAME_KIND_REQUEST,
+                    1,
+                    binding,
+                    &session_key(FIRST_DNS),
+                )
+                .await
+                .unwrap();
+                request_observed.notify_one();
+                answer.notified().await;
+                write_frame(
+                    &mut server_stream,
+                    FRAME_KIND_RESPONSE,
+                    2,
+                    binding,
+                    &session_key(FIRST_DNS),
+                    &[OP_RESOLVE_DNS, STATUS_NO_DATA],
+                )
+                .await
+                .unwrap();
+                server_stream
+            }
+        });
+        let client = client(client_streams, binding);
+
+        let refused = {
+            let late = client.resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4);
+            tokio::pin!(late);
+            tokio::select! {
+                () = request_observed.notified() => {}
+                result = &mut late => {
+                    panic!("DNS request completed before the server stalled: {result:?}")
+                }
+            }
+            tokio::time::pause();
+            let refused = late.await;
+            tokio::time::resume();
+            refused
+        };
+        assert_eq!(refused, Err(BrokerIpcError::Late));
+        assert_eq!(client.dns.len(), BROKER_IPC_DNS_SESSIONS);
+        answer.notify_one();
+        let _server_stream = server.await.unwrap();
+        wait_live(&client.dns, BROKER_IPC_DNS_SESSIONS - 1).await;
+        drop(server_streams);
+    }
+
+    /// #4948: a connect answered after the deadline is refused to its caller.
+    /// The session waits for the answer and its descriptor, closes the late
+    /// connection, and carries the next request in step.
+    #[tokio::test]
+    async fn a_late_connect_closes_its_connection_and_its_session_carries_on() {
+        let policy = CompiledPolicy::developer_baseline();
+        let binding = binding(&policy);
+        let requested = SocketAddr::new(PUBLIC_V4, 443);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let late_connection = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut accepted, _) = listener.accept().unwrap();
+        let request_observed = Arc::new(Notify::new());
+        let answer = Arc::new(Notify::new());
+        let (client_streams, mut server_streams) = session_pairs();
+        let mut server_stream = server_streams.remove(FIRST_CONNECT);
+        let server = tokio::spawn({
+            let request_observed = Arc::clone(&request_observed);
+            let answer = Arc::clone(&answer);
+            async move {
+                let key = session_key(FIRST_CONNECT);
+                read_frame(&mut server_stream, FRAME_KIND_REQUEST, 1, binding, &key)
+                    .await
+                    .unwrap();
+                request_observed.notify_one();
+                answer.notified().await;
+                write_frame(
+                    &mut server_stream,
+                    FRAME_KIND_RESPONSE,
+                    1,
+                    binding,
+                    &key,
+                    &[OP_CONNECT_TCP, STATUS_OK],
+                )
+                .await
+                .unwrap();
+                send_connected_descriptor(&server_stream, late_connection.as_fd())
+                    .await
+                    .unwrap();
+                drop(late_connection);
+                // In step again: the session's next request is sequence 2.
+                read_frame(&mut server_stream, FRAME_KIND_REQUEST, 2, binding, &key)
+                    .await
+                    .unwrap();
+                write_frame(
+                    &mut server_stream,
+                    FRAME_KIND_RESPONSE,
+                    2,
+                    binding,
+                    &key,
+                    &[OP_CONNECT_TCP, STATUS_UNAVAILABLE],
+                )
+                .await
+                .unwrap();
+                server_stream
+            }
+        });
+        let client = client(client_streams, binding);
+
+        let refused = {
+            let late = client.connect_tcp(requested);
+            tokio::pin!(late);
+            tokio::select! {
+                () = request_observed.notified() => {}
+                result = &mut late => {
+                    panic!("connect completed before the server stalled: {result:?}")
+                }
+            }
+            tokio::time::pause();
+            let refused = late.await;
+            tokio::time::resume();
+            refused
+        };
+        assert_eq!(refused.unwrap_err(), BrokerIpcError::Late);
+        assert_eq!(client.late_answers(), 1);
+        assert_eq!(client.connect.len(), BROKER_IPC_CONNECT_SESSIONS);
+
+        answer.notify_one();
+        wait_idle(&client.connect, BROKER_IPC_CONNECT_SESSIONS).await;
+        // The late connection was closed, not kept.
+        accepted.set_read_timeout(Some(HANG_GUARD)).unwrap();
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            accepted.read(&mut byte).unwrap(),
+            0,
+            "the late connection is still open"
+        );
+        // The late session went to the back of the queue: hold every other
+        // one, so the next connect uses it.
+        let mut others = Vec::new();
+        for _ in 1..BROKER_IPC_CONNECT_SESSIONS {
+            others.push(client.connect.checkout().await.unwrap());
+        }
+        assert_eq!(
+            client.connect_tcp(requested).await.unwrap_err(),
+            BrokerIpcError::RemoteUnavailable
+        );
+        drop(others);
+        let _server_stream = server.await.unwrap();
+        drop(server_streams);
+    }
+
+    /// How long a test waits for something that should happen at once before
+    /// it calls the wait a hang.
+    const HANG_GUARD: Duration = Duration::from_secs(30);
+
+    /// Wait until `sessions` of the pool are idle again.
+    async fn wait_idle(pool: &SessionPool, sessions: usize) {
+        tokio::time::timeout(HANG_GUARD, async {
+            while pool
+                .idle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len()
+                < sessions
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the late session came back to the pool");
+    }
+
+    /// #4948: a broker that answers after the deadline, as one whose only
+    /// thread stalled, refuses only that lookup. The session waits for the
+    /// late answer and carries on, and the broker keeps serving.
+    #[tokio::test]
+    async fn a_late_dns_answer_refuses_its_request_and_its_session_carries_on() {
+        let policy = named_policy();
+        let binding = binding(&policy);
+        let resolver = Arc::new(BlockingResolver::default());
+        let broker = Arc::new(PolicyEgressBroker::new(
+            policy,
+            RouteClass::General,
+            Arc::clone(&resolver),
+            Arc::new(NoConnector::default()),
+            Arc::new(FakeClock::default()),
+        ));
+        let (client_streams, server_streams) = session_pairs();
+        let mut server = tokio::spawn(serve_broker_ipc(server_streams, binding, key(), broker));
+        let client = client(client_streams, binding);
+
+        let refused = {
+            let late = client.resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4);
+            tokio::pin!(late);
+            tokio::select! {
+                () = resolver.entered.notified() => {}
+                result = &mut late => {
+                    panic!("DNS request completed before the resolver stalled: {result:?}")
+                }
+            }
+            tokio::time::pause();
+            let refused = late.await;
+            tokio::time::resume();
+            refused
+        };
+        assert_eq!(refused, Err(BrokerIpcError::Late));
+        assert_eq!(client.late_answers(), 1);
+        assert_eq!(
+            client.dns.len(),
+            BROKER_IPC_DNS_SESSIONS,
+            "the late session was retired"
+        );
+        // While it waits, the other sessions answer.
+        for _ in 1..BROKER_IPC_DNS_SESSIONS {
+            assert_eq!(
+                client
+                    .resolve_dns("denied.example.com", DnsRecordFamily::Ipv4)
+                    .await,
+                Err(BrokerIpcError::Denied)
+            );
+        }
+
+        resolver.release.notify_one();
+        wait_idle(&client.dns, BROKER_IPC_DNS_SESSIONS).await;
+        // Every session, the late one too, is in step.
+        for _ in 0..=BROKER_IPC_DNS_SESSIONS {
+            assert_eq!(
+                client
+                    .resolve_dns("denied.example.com", DnsRecordFamily::Ipv4)
+                    .await,
+                Err(BrokerIpcError::Denied)
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut server)
+                .await
+                .is_err(),
+            "the broker ended"
+        );
+
+        drop(client);
+        let _ = tokio::time::timeout(HANG_GUARD, server)
+            .await
+            .expect("server did not close");
+    }
+
+    /// A late answer is read once. The same answer sent again, after the
+    /// session drained the first, is out of sequence for the next request and
+    /// retires the session.
+    #[tokio::test]
+    async fn a_late_answer_sent_twice_retires_its_session() {
+        let policy = named_policy();
+        let binding = binding(&policy);
+        let request_observed = Arc::new(Notify::new());
+        let answer = Arc::new(Notify::new());
+        let (client_streams, mut server_streams) = session_pairs();
+        let mut server_stream = server_streams.remove(FIRST_DNS);
+        let server = tokio::spawn({
+            let request_observed = Arc::clone(&request_observed);
+            let answer = Arc::clone(&answer);
+            async move {
+                let key = session_key(FIRST_DNS);
+                read_frame(&mut server_stream, FRAME_KIND_REQUEST, 1, binding, &key)
+                    .await
+                    .unwrap();
+                request_observed.notify_one();
+                answer.notified().await;
+                for _ in 0..2 {
+                    write_frame(
+                        &mut server_stream,
+                        FRAME_KIND_RESPONSE,
+                        1,
+                        binding,
+                        &key,
+                        &[OP_RESOLVE_DNS, STATUS_NO_DATA],
+                    )
+                    .await
+                    .unwrap();
+                }
+                // The session's next request, answered by the duplicate.
+                read_frame(&mut server_stream, FRAME_KIND_REQUEST, 2, binding, &key)
+                    .await
+                    .unwrap();
+                server_stream
+            }
+        });
+        let client = client(client_streams, binding);
+
+        let refused = {
+            let late = client.resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4);
+            tokio::pin!(late);
+            tokio::select! {
+                () = request_observed.notified() => {}
+                result = &mut late => {
+                    panic!("DNS request completed before the server stalled: {result:?}")
+                }
+            }
+            tokio::time::pause();
+            let refused = late.await;
+            tokio::time::resume();
+            refused
+        };
+        assert_eq!(refused, Err(BrokerIpcError::Late));
+        answer.notify_one();
+        wait_idle(&client.dns, BROKER_IPC_DNS_SESSIONS).await;
+        // The drained session went to the back of the queue: hold every other
+        // one, so the next request uses it.
+        let mut others = Vec::new();
+        for _ in 1..BROKER_IPC_DNS_SESSIONS {
+            others.push(client.dns.checkout().await.unwrap());
+        }
+        assert_eq!(
+            client
+                .resolve_dns("allowed.example.com", DnsRecordFamily::Ipv4)
+                .await,
+            Err(BrokerIpcError::SequenceMismatch)
+        );
+        drop(others);
+        wait_live(&client.dns, BROKER_IPC_DNS_SESSIONS - 1).await;
+        let _server_stream = server.await.unwrap();
+        drop(server_streams);
     }
 
     #[tokio::test]

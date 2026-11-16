@@ -407,7 +407,12 @@ metadata ranges, the host's own interface addresses and the public address the
 host is seen from are always refused under every policy, with an immediate
 reset. Both processes run under Landlock and seccomp on Linux and under
 Seatbelt on macOS; losing either fails the environment closed (`error`), and a
-stop and start restores egress. Published ports listen on `127.0.0.1` only. A
+stop and start restores egress. An answer from the broker that misses the
+worker's deadline refuses only its own lookup or connection: the worker keeps
+the session until the late answer arrives and checks it, so a slow resolver or
+a stalled broker never ends the broker or fails the environment (#4948). A
+malformed or unauthenticated answer still does. Published ports listen on
+`127.0.0.1` only. A
 local VM joins Codewire Mesh only when a network is selected at creation; the
 host owns the Mesh identity and the VM sees only admitted streams for its
 declared ports.
