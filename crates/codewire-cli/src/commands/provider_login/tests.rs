@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 
 use super::*;
 
+const SIGN_IN: SignInScreen<'static> = SignInScreen::local("Codex", "work");
+
 #[derive(Default)]
 struct Scripted(Mutex<VecDeque<Value>>, Mutex<Vec<String>>);
 
@@ -63,7 +65,7 @@ async fn codex_login_imports_the_issued_tokens_without_a_provider_cli() {
                 "https://api.openai.com/auth":{"chatgpt_account_id":"account"}}))),
             "access_token":"synthetic-access","refresh_token":"synthetic-refresh"}),
     ]);
-    let import = codex_device_login_with(provider.clone(), std::future::pending())
+    let import = codex_device_login_with(SIGN_IN, provider.clone(), std::future::pending())
         .await
         .unwrap();
     assert_eq!(import.account_hint(), Some("person@example.test"));
@@ -87,7 +89,7 @@ async fn github_login_verifies_the_app_installation() {
     ]);
     let app =
         GitHubDeviceLoginConfig::new("Iv1.synthetic".into(), "codewire-synthetic".into()).unwrap();
-    let import = github_device_login_with(app, provider, std::future::pending())
+    let import = github_device_login_with(SIGN_IN, app, provider, std::future::pending())
         .await
         .unwrap();
     assert_eq!(import.account_hint(), "octo-user");
@@ -96,7 +98,7 @@ async fn github_login_verifies_the_app_installation() {
 #[tokio::test]
 async fn cancelling_a_pending_login_changes_nothing() {
     let provider = scripted([]);
-    let error = match codex_device_login_with(provider, async {}).await {
+    let error = match codex_device_login_with(SIGN_IN, provider, async {}).await {
         Ok(_) => panic!("a cancelled login must not complete"),
         Err(error) => error,
     };

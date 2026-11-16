@@ -391,7 +391,7 @@ async fn declined_reconnect_never_offers_or_changes_profile_assignment() {
         );
         process.expect("Credential name");
         process.send(b"work\r");
-        process.expect("Reconnect platform Codex");
+        process.expect("Reconnect cloud Codex");
         process.send(b"n\n");
         let output = process.finish(false);
         assert!(!output.contains("Credential saved"));

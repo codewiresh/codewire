@@ -1,0 +1,441 @@
+use std::time::Duration;
+
+use super::*;
+
+/// A store that records which steps ran. Synthetic metadata only.
+#[derive(Default)]
+struct Fake {
+    records: Vec<FakeRecord>,
+    press_ctrl_c_while_approving: bool,
+    approvals: usize,
+    published: Vec<Option<String>>,
+}
+
+#[derive(Clone)]
+struct FakeRecord {
+    name: String,
+    provider: &'static str,
+}
+
+fn record(name: &str, provider: &'static str) -> FakeRecord {
+    FakeRecord {
+        name: name.into(),
+        provider,
+    }
+}
+
+impl ConnectStore for Fake {
+    const PLACEMENT: &'static str = "local";
+    type Record = FakeRecord;
+    type Approval = ();
+
+    async fn named(
+        &mut self,
+        provider: CredentialConnectProviderArg,
+        name: &str,
+    ) -> anyhow::Result<Option<FakeRecord>> {
+        let found = self
+            .records
+            .iter()
+            .find(|record| record.name.eq_ignore_ascii_case(name))
+            .cloned();
+        if let Some(found) = &found {
+            anyhow::ensure!(
+                found.provider == provider_id(provider),
+                "different provider"
+            );
+        }
+        Ok(found)
+    }
+
+    async fn connections(
+        &mut self,
+        provider: CredentialConnectProviderArg,
+    ) -> anyhow::Result<Vec<FakeRecord>> {
+        Ok(self
+            .records
+            .iter()
+            .filter(|record| record.provider == provider_id(provider))
+            .cloned()
+            .collect())
+    }
+
+    fn display_name(record: &FakeRecord) -> &str {
+        &record.name
+    }
+
+    fn describe(record: &FakeRecord) -> anyhow::Result<Reconnecting> {
+        Ok(Reconnecting {
+            name: record.name.clone(),
+            id: "11111111-1111-4111-8111-111111111111".into(),
+            revision: 7,
+            status: "active",
+        })
+    }
+
+    async fn approve(
+        &mut self,
+        _: &ConnectTarget<FakeRecord>,
+        interrupt: &mut Interrupt,
+    ) -> anyhow::Result<()> {
+        self.approvals += 1;
+        if self.press_ctrl_c_while_approving {
+            press(interrupt);
+        }
+        Ok(())
+    }
+
+    async fn publish(
+        &mut self,
+        target: ConnectTarget<FakeRecord>,
+        (): (),
+        _: &mut Interrupt,
+        _: &mut CredentialExecution,
+    ) -> anyhow::Result<()> {
+        self.published
+            .push(target.existing.map(|existing| existing.name));
+        Ok(())
+    }
+}
+
+/// The state a Ctrl-C leaves behind, without a real signal.
+fn press(interrupt: &mut Interrupt) {
+    interrupt.pressed_in_test = true;
+}
+
+fn args(provider: CredentialConnectProviderArg, name: &str, yes: bool) -> CredentialConnectArgs {
+    CredentialConnectArgs {
+        provider: Some(provider),
+        name: Some(name.into()),
+        yes,
+        guided: false,
+    }
+}
+
+async fn run(
+    store: &mut Fake,
+    args: CredentialConnectArgs,
+    is_terminal: bool,
+    prompt: impl FnOnce(&str) -> anyhow::Result<bool>,
+) -> anyhow::Result<()> {
+    let mut execution = CredentialExecution::Unchanged;
+    connect_with(store, args, &mut execution, is_terminal, prompt).await
+}
+
+fn no_prompt(_: &str) -> anyhow::Result<bool> {
+    panic!("this connect must not ask")
+}
+
+#[tokio::test]
+async fn a_second_github_connection_under_another_name_is_refused_before_the_provider() {
+    for yes in [false, true] {
+        let mut store = Fake {
+            records: vec![record("work", "github")],
+            ..Fake::default()
+        };
+        let error = run(
+            &mut store,
+            args(CredentialConnectProviderArg::Github, "other", yes),
+            true,
+            no_prompt,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "GitHub is already connected as work; run `cw credentials --local connect github --name work --yes` to reconnect it"
+        );
+        assert_eq!(store.approvals, 0);
+        assert!(store.published.is_empty());
+    }
+    // The command in the sentence runs as printed.
+    let mut store = Fake {
+        records: vec![record("my work", "github")],
+        ..Fake::default()
+    };
+    let error = run(
+        &mut store,
+        args(CredentialConnectProviderArg::Github, "other", true),
+        true,
+        no_prompt,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("run `cw credentials --local connect github --name 'my work' --yes`"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn the_same_github_name_reconnects_only_after_confirmation() {
+    let mut store = Fake {
+        records: vec![record("work", "github")],
+        ..Fake::default()
+    };
+    run(
+        &mut store,
+        args(CredentialConnectProviderArg::Github, "WORK", true),
+        false,
+        no_prompt,
+    )
+    .await
+    .unwrap();
+    assert_eq!(store.approvals, 1);
+    assert_eq!(store.published, [Some("work".to_owned())]);
+    let error = run(
+        &mut store,
+        args(CredentialConnectProviderArg::Github, "work", false),
+        false,
+        no_prompt,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("--yes"), "{error}");
+    assert_eq!(store.approvals, 1);
+}
+
+#[tokio::test]
+async fn only_github_is_one_connection_per_user() {
+    let mut store = Fake {
+        records: vec![record("first", "openai")],
+        ..Fake::default()
+    };
+    run(
+        &mut store,
+        args(CredentialConnectProviderArg::Codex, "second", false),
+        false,
+        no_prompt,
+    )
+    .await
+    .unwrap();
+    assert_eq!(store.published, [None]);
+    let mut store = Fake {
+        records: vec![record("one", "github"), record("two", "github")],
+        ..Fake::default()
+    };
+    let error = run(
+        &mut store,
+        args(CredentialConnectProviderArg::Github, "one", true),
+        true,
+        no_prompt,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("more than one local GitHub connection exists"),
+        "{error}"
+    );
+    assert_eq!(store.approvals, 0);
+}
+
+#[tokio::test]
+async fn a_ctrl_c_after_the_provider_answers_saves_nothing() {
+    for existing in [false, true] {
+        let mut store = Fake {
+            records: if existing {
+                vec![record("work", "openai")]
+            } else {
+                Vec::new()
+            },
+            press_ctrl_c_while_approving: true,
+            ..Fake::default()
+        };
+        let error = run(
+            &mut store,
+            args(CredentialConnectProviderArg::Codex, "work", true),
+            false,
+            no_prompt,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "canceled; no credential was changed");
+        assert_eq!(store.approvals, 1);
+        assert!(store.published.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn new_oauth_name_needs_no_replacement_confirmation() {
+    let mut store = Fake {
+        records: vec![record("work-openai", "openai")],
+        ..Fake::default()
+    };
+    run(
+        &mut store,
+        args(CredentialConnectProviderArg::Github, "new-name", false),
+        false,
+        |_| panic!("new enrollment must not prompt for replacement"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(store.published, [None]);
+}
+
+#[tokio::test]
+async fn a_declined_reconnect_changes_nothing() {
+    for guided in [false, true] {
+        let mut store = Fake {
+            records: vec![record("work", "anthropic")],
+            ..Fake::default()
+        };
+        let mut connect = args(CredentialConnectProviderArg::Claude, "work", false);
+        connect.guided = guided;
+        let result = run(&mut store, connect, true, |_| Ok(false)).await;
+        // A guided connect reports the cancellation to its caller.
+        assert_eq!(result.is_err(), guided);
+        if let Err(error) = result {
+            assert_eq!(error.to_string(), CANCELED);
+        }
+        assert_eq!(store.approvals, 0);
+        assert!(store.published.is_empty());
+    }
+}
+
+#[test]
+fn oauth_reconnect_requires_yes_or_a_positive_terminal_confirmation() {
+    let record = Reconnecting {
+        name: "work-openai".into(),
+        id: "11111111-1111-4111-8111-111111111111".into(),
+        revision: 7,
+        status: "revoked",
+    };
+    let codex = CredentialConnectProviderArg::Codex;
+    let error = confirm_reconnect_with("local", codex, &record, false, false, |_| {
+        panic!("noninteractive reconnect must not read stdin");
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("--yes"));
+    assert!(
+        confirm_reconnect_with("local", codex, &record, true, false, |_| {
+            panic!("--yes must not read stdin");
+        })
+        .unwrap()
+    );
+    for answer in [false, true] {
+        assert_eq!(
+            confirm_reconnect_with("local", codex, &record, false, true, |message| {
+                assert!(message.contains(&record.id));
+                assert!(message.contains("revision 7"));
+                assert!(message.contains("revoked"));
+                assert!(message.contains("profile bindings will be kept"));
+                assert!(message.contains("hard expiry will be preserved"));
+                Ok(answer)
+            })
+            .unwrap(),
+            answer
+        );
+    }
+    assert!(
+        confirm_reconnect_with("local", codex, &record, false, true, |_| {
+            Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "synthetic EOF").into())
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn both_placements_ask_the_same_reconnect_question() {
+    let record = Reconnecting {
+        name: "work".into(),
+        id: "fdd5612f-12ca-4a21-9557-dc4875f9c1f6".into(),
+        revision: 9,
+        status: "active",
+    };
+    let asked = |placement| {
+        let mut asked = String::new();
+        confirm_reconnect_with(
+            placement,
+            CredentialConnectProviderArg::Github,
+            &record,
+            false,
+            true,
+            |message| {
+                asked = message.to_owned();
+                Ok(true)
+            },
+        )
+        .unwrap();
+        asked
+    };
+    assert_eq!(
+        asked("cloud"),
+        "Reconnect cloud GitHub credential \"work\" (fdd5612f-12ca-4a21-9557-dc4875f9c1f6, revision 9, status active)? Its identity and profile bindings will be kept; it will become active and its hard expiry will be preserved."
+    );
+    assert_eq!(asked("local"), asked("cloud").replacen("cloud", "local", 1));
+    let refusal = |placement| {
+        confirm_reconnect_with(
+            placement,
+            CredentialConnectProviderArg::Github,
+            &record,
+            false,
+            false,
+            no_prompt,
+        )
+        .unwrap_err()
+        .to_string()
+    };
+    assert_eq!(
+        refusal("cloud"),
+        "reconnecting an existing cloud GitHub credential requires terminal confirmation or --yes"
+    );
+    assert_eq!(
+        refusal("local"),
+        refusal("cloud").replacen("cloud", "local", 1)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_ctrl_c_while_nothing_waits_for_it_is_still_seen() {
+    // SIGINT reaches the whole test process, so this runs alone in a child of
+    // this binary, where no other test's SIGINT listener can see it (#3231).
+    const ISOLATED: &str = "CODEWIRE_TEST_SIGINT_ISOLATED";
+    const NAME: &str = "commands::credential_input::connect::tests::a_ctrl_c_while_nothing_waits_for_it_is_still_seen";
+    if std::env::var_os(ISOLATED).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(ISOLATED, "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "isolated SIGINT test failed: {}\n{stdout}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    // A listener of our own keeps every SIGINT below from reaching the
+    // default handler, whatever the order of registration.
+    let _listener =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+    let mut interrupt = Interrupt::default();
+    assert!(!interrupt.was_pressed());
+    interrupt.listen();
+    assert!(!interrupt.was_pressed());
+    let pid = std::process::id().to_string();
+    // Nothing awaits the interrupt while the signal arrives, as between a
+    // provider's answer and the save. The bound only turns a hang into a
+    // failure.
+    tokio::time::timeout(Duration::from_secs(120), async {
+        while !interrupt.was_pressed() {
+            std::process::Command::new("kill")
+                .args(["-INT", &pid])
+                .status()
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the press is remembered");
+    tokio::time::timeout(Duration::from_secs(120), interrupt.pressed())
+        .await
+        .expect("a remembered press ends the next wait at once");
+}

@@ -56,7 +56,12 @@ Each setup below runs the same five steps on each surface. The section lists
 only what differs.
 
 1. **Enrol:** `cw credentials --local|--cloud …` as the section says. Expect
-   the same prompts and screens in both placements.
+   the same prompts and screens in both placements. A sign-in screen is
+   titled for its provider (` Connect Codex`) and says
+   `Saving as "NAME" on this computer` locally or `in your Codewire account`
+   in the cloud. A device code (Codex, GitHub) is alone on its line, bold at
+   a terminal, and the success screen reads ` Codex connected`, then
+   `Signed in as ACCOUNT`.
 2. **List:** `cw credentials --local|--cloud list` and `list --output json`.
    Expect the credential with its provider, kind, status `active` and, where
    the provider gives one, an account hint.
@@ -74,6 +79,9 @@ only what differs.
   at github.com/login/device. A second connection under another name is
   refused, saying "GitHub is already connected as NAME" and how to
   reconnect it.
+- **Ctrl-C:** pressed after approving the device code and before the save,
+  it saves nothing and says so ("canceled; no credential was changed").
+  Not yet observed.
 - **Profile:** every profile includes the one GitHub connection; `set github`
   is refused.
 - **Use:** `git clone` of a private repository the connection can read, inside
@@ -88,6 +96,9 @@ only what differs.
 - **Enrol:** `connect codex --name NAME`. "Enable device code authorization
   for Codex" in ChatGPT's Security settings first, then a device code,
   approved by a person.
+- **Ctrl-C:** pressed after approving the device code and before the save,
+  it saves nothing and says so ("canceled; no credential was changed").
+  Not yet observed.
 - **Profile:** `set codex NAME`.
 - **Use:** `codex` in the environment. Expect Codex signed in with the
   ChatGPT plan (`/status`), a model answer through the broker, and Codex's
@@ -131,7 +142,8 @@ only what differs.
 Issues: #4714 (local), #2559 (cloud).
 
 - **Enrol:** `connect claude --name NAME`. Both placements show the same
-  screen: ` Login`, "Browser didn't open? Use the url below to sign in", a
+  screen: ` Connect Claude`, the `Saving as` line, "Browser didn't open? Use
+  the url below to sign in", a
   `https://claude.com/cai/oauth/authorize?` link, then `Paste code here if
   prompted >`. A person signs in with a Pro, Max, Team or Enterprise plan and
   pastes the `code#state` Claude shows. Locally, the store is checked before
@@ -150,8 +162,9 @@ Issues: #4714 (local), #2559 (cloud).
   - `/usage` shows the subscription's usage.
 - **States:** a reconnect of the same name asks first (or takes `--yes`); a
   value that isn't `code#state` gets one retry, then a refusal; an expired
-  sign-in says to start again; Ctrl-C saves nothing until the code is
-  accepted.
+  sign-in says to start again; Ctrl-C after pasting the code and before the
+  save saves nothing and says so ("canceled; no credential was changed"),
+  not yet observed.
 - **Remove:** `cw` says the sign-in keeps working at Claude until it expires,
   or until you sign out of other sessions in Claude's settings.
 - **Gotchas:** after a `cw` update, the first local `connect claude` may

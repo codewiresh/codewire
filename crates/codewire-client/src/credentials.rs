@@ -243,14 +243,14 @@ impl CodewireClient {
             .credential_mutations
             .enroll_github_with_options(request, options)
             .await
-            .map_err(|_| github_enrollment_unknown())?;
+            .map_err(github_enrollment_refusal)?;
         let mut challenged = false;
         loop {
             let message = match stream.message::<EnrollGithubResponse>().await {
                 Ok(Some(message)) => message,
                 Ok(None) => return Err(github_enrollment_unknown()),
                 Err(error) if challenged => return Err(github_enrollment_terminal_error(error)),
-                Err(_) => return Err(github_enrollment_unknown()),
+                Err(error) => return Err(github_enrollment_refusal(error)),
             };
             let message = message.to_owned_message();
             match message.event {
@@ -310,6 +310,25 @@ fn github_enrollment_unknown() -> ClientError {
         ErrorCode::Unknown,
         "GitHub enrollment acknowledgement is unknown; reconcile the credential by name before retrying",
     )
+}
+
+/// Before any challenge the service refuses a second GitHub connection
+/// definitely, having asked GitHub nothing. Every other early close stays
+/// uncertain.
+fn github_enrollment_refusal(error: connectrpc::ConnectError) -> ClientError {
+    let error = ClientError::from(error);
+    let already_connected = error.code() == ErrorCode::AlreadyExists
+        && error.error_info().is_some_and(|info| {
+            info.domain() == "codewire.sh" && info.reason() == "CREDENTIAL_GITHUB_ALREADY_CONNECTED"
+        });
+    if already_connected {
+        ClientError::new(
+            ErrorCode::AlreadyExists,
+            "GitHub is already connected for this account; no platform credential was changed",
+        )
+    } else {
+        github_enrollment_unknown()
+    }
 }
 
 /// A known terminal reason after a verified challenge is safe to render using
@@ -826,6 +845,70 @@ mod tests {
             assert_eq!(error.message(), expected_message);
             assert!(!error.message().contains("private provider"));
             assert!(error.reason().is_none());
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn github_already_connected_before_any_challenge_is_a_definite_refusal() {
+        for (code, reason, domain, expected_code) in [
+            (
+                "already_exists",
+                "CREDENTIAL_GITHUB_ALREADY_CONNECTED",
+                "codewire.sh",
+                ErrorCode::AlreadyExists,
+            ),
+            (
+                "already_exists",
+                "CREDENTIAL_GITHUB_ALREADY_CONNECTED",
+                "untrusted.invalid",
+                ErrorCode::Unknown,
+            ),
+            (
+                "already_exists",
+                "CREDENTIAL_MUTATION_UNCERTAIN",
+                "codewire.sh",
+                ErrorCode::Unknown,
+            ),
+            (
+                "failed_precondition",
+                "CREDENTIAL_GITHUB_ALREADY_CONNECTED",
+                "codewire.sh",
+                ErrorCode::Unknown,
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let terminal = github_terminal_error(code, reason, domain);
+            stream_at_terminal(
+                &server,
+                "/codewire.v1.CredentialMutationService/EnrollGithub",
+                &mut Vec::new(),
+                &terminal,
+            )
+            .await;
+            let mut prompts = 0;
+            let error = client(&server)
+                .enroll_github(
+                    EnrollGithubRequest {
+                        name: "other".into(),
+                        ..Default::default()
+                    },
+                    |_| {
+                        prompts += 1;
+                        true
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), expected_code, "{reason} from {domain}");
+            assert_eq!(prompts, 0);
+            assert!(!error.message().contains("private provider"));
+            if expected_code == ErrorCode::AlreadyExists {
+                assert_eq!(
+                    error.message(),
+                    "GitHub is already connected for this account; no platform credential was changed"
+                );
+            }
             server.verify().await;
         }
     }

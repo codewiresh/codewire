@@ -941,6 +941,8 @@ fn read_ssh_passphrase(
     Ok((!bytes.is_empty()).then_some(bytes))
 }
 
+pub(super) mod connect;
+
 #[cfg(test)]
 mod tests {
     use super::*;

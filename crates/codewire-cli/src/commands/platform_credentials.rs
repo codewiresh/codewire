@@ -2,6 +2,9 @@
 
 use codewire_client::{self as rpc, CodewireClient};
 
+use super::credential_input::connect::{
+    ConnectStore, ConnectTarget, Interrupt, Reconnecting, provider_id, provider_label,
+};
 use super::credential_input::{
     CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE, CLAUDE_SUBSCRIPTION_TOKEN_PROMPT,
     CODEX_DEVICE_AUTHORIZATION_GUIDANCE, ParsedCredentialSelector, SSH_PUBLIC_KEY_GITHUB_HINT,
@@ -64,156 +67,15 @@ async fn handle_with_receipt(
             .await
             .map(|record| remember_platform(&record, execution)),
         CredentialsCommand::Connect(args) => {
-            let selected_provider = args.provider.context("credential provider is required")?;
-            let (provider, kind, label) = match selected_provider {
-                CredentialConnectProviderArg::Codex => {
-                    ("openai", rpc::CredentialAuthenticationKind::Oauth, "Codex")
-                }
-                CredentialConnectProviderArg::Github => {
-                    ("github", rpc::CredentialAuthenticationKind::Oauth, "GitHub")
-                }
-                CredentialConnectProviderArg::Claude => (
-                    "anthropic",
-                    rpc::CredentialAuthenticationKind::ClaudeSignIn,
-                    "Claude",
-                ),
-            };
-            let name = trimmed_required(
-                args.name
-                    .as_deref()
-                    .context("credential name is required")?,
-                "credential name",
-            )?
-            .to_owned();
-            let current = find_named(client, &name).await?;
-            let request = oauth_connection_request(provider, kind, &name, current.as_ref())?;
-            if let Some(current) = &current {
-                anyhow::ensure!(
-                    args.yes || (std::io::stdin().is_terminal() && std::io::stderr().is_terminal()),
-                    "reconnecting an existing platform OAuth credential requires terminal confirmation or --yes"
-                );
-                let message = format!(
-                    "Reconnect platform {label} credential {:?} ({}, revision {})? Its identity, profile bindings and hard expiry will be kept.",
-                    current.name, current.id, current.revocation_generation
-                );
-                if args.yes {
-                    eprintln!("{message}");
-                } else if !prompt_confirm_default_no(&message)? {
-                    eprintln!("Canceled; no credential was changed.");
-                    anyhow::ensure!(!args.guided, "canceled; no credential was changed");
-                    return Ok(());
-                }
-            }
-            // The Claude sign-in is started and its code read before the
-            // cancellable exchange, so Ctrl-C at the prompt simply exits.
-            let claude = match selected_provider {
-                CredentialConnectProviderArg::Claude => Some(start_claude_sign_in(client).await?),
-                _ => None,
-            };
-            let enrollment = async {
-                match selected_provider {
-                    CredentialConnectProviderArg::Claude => {
-                        let (sign_in, pasted) = claude.expect("started above");
-                        client
-                            .complete_claude_sign_in(rpc::CompleteClaudeSignInRequest {
-                                name: request.name,
-                                sign_in,
-                                authorization_code: pasted.expose_secret().to_vec(),
-                                credential_id: request.credential_id,
-                                expected_revocation_generation: request
-                                    .expected_revocation_generation,
-                                ..Default::default()
-                            })
-                            .await
-                            .and_then(|response| {
-                                response.credential.into_option().ok_or_else(|| {
-                                    rpc::ClientError::new(
-                                        rpc::ErrorCode::Internal,
-                                        "platform omitted Claude sign-in metadata",
-                                    )
-                                })
-                            })
-                            .map(|credential| (credential, Vec::new()))
-                    }
-                    CredentialConnectProviderArg::Codex => {
-                        eprintln!("{}", CODEX_DEVICE_AUTHORIZATION_GUIDANCE);
-                        client
-                            .enroll_codex(
-                                rpc::EnrollCodexRequest {
-                                    name: request.name,
-                                    credential_id: request.credential_id,
-                                    expected_revocation_generation: request
-                                        .expected_revocation_generation,
-                                    ..Default::default()
-                                },
-                                |challenge| {
-                                    display_challenge(
-                                        label,
-                                        &challenge.verification_url,
-                                        &challenge.user_code,
-                                    )
-                                },
-                            )
-                            .await
-                            .map(|credential| (credential, Vec::new()))
-                    }
-                    CredentialConnectProviderArg::Github => client
-                        .enroll_github(
-                            rpc::EnrollGithubRequest {
-                                name: request.name,
-                                credential_id: request.credential_id,
-                                expected_revocation_generation: request
-                                    .expected_revocation_generation,
-                                ..Default::default()
-                            },
-                            |challenge| {
-                                display_challenge(
-                                    label,
-                                    &challenge.verification_url,
-                                    &challenge.user_code,
-                                )
-                            },
-                        )
-                        .await
-                        .map(|enrolled| (enrolled.credential, enrolled.pending_permissions)),
-                }
-            };
-            let (credential, pending) = tokio::select! {
-                result = enrollment => result.context("enroll platform OAuth credential")?,
-                _ = tokio::signal::ctrl_c() => {
-                    anyhow::bail!("enrollment cancelled; inspect the credential by name before retrying because storage acknowledgement may be unknown");
-                }
-            };
-            eprint!(
-                "\n{}",
-                login_screen::success_screen(signed_in_account(&credential))
-            );
-            remember_platform(&credential, execution);
-            print(&[credential], OutputFormat::Text)?;
-            super::credentials::report_github_pending(github_pending(&pending));
-            Ok(())
+            super::credential_input::connect::connect(
+                &mut CloudConnectStore { client },
+                args,
+                execution,
+            )
+            .await
         }
         CredentialsCommand::List(args) => {
-            let mut credentials = Vec::new();
-            let mut cursors = BTreeSet::new();
-            let mut page_token = String::new();
-            loop {
-                let page = client
-                    .list_credentials(rpc::ListCredentialsRequest {
-                        page_size: 100,
-                        page_token,
-                        ..Default::default()
-                    })
-                    .await?;
-                credentials.extend(page.credentials);
-                if page.next_page_token.is_empty() {
-                    break;
-                }
-                if !cursors.insert(page.next_page_token.clone()) {
-                    anyhow::bail!("platform returned a repeated credential cursor");
-                }
-                page_token = page.next_page_token;
-            }
+            let credentials = list_all(client).await?;
             print(&credentials, args.output)?;
             report_live_github_status(client, &credentials, args.output).await;
             Ok(())
@@ -526,6 +388,237 @@ fn validate_update_ack(expected: &rpc::Credential, actual: &rpc::Credential) -> 
     Ok(())
 }
 
+/// Every credential of the signed-in user, across pages.
+async fn list_all(client: &CodewireClient) -> anyhow::Result<Vec<rpc::Credential>> {
+    let mut credentials = Vec::new();
+    let mut cursors = BTreeSet::new();
+    let mut page_token = String::new();
+    loop {
+        let page = client
+            .list_credentials(rpc::ListCredentialsRequest {
+                page_size: 100,
+                page_token,
+                ..Default::default()
+            })
+            .await?;
+        credentials.extend(page.credentials);
+        if page.next_page_token.is_empty() {
+            return Ok(credentials);
+        }
+        if !cursors.insert(page.next_page_token.clone()) {
+            anyhow::bail!("platform returned a repeated credential cursor");
+        }
+        page_token = page.next_page_token;
+    }
+}
+
+/// The credential service's side of `cw credentials connect`: it runs the
+/// provider step and saves the result itself.
+struct CloudConnectStore<'a> {
+    client: &'a CodewireClient,
+}
+
+/// What the CLI holds between the provider step and the save. A device flow
+/// holds nothing: the service completes and saves it within one request, so
+/// the CLI has no point between the provider's answer and the save to stop at.
+enum CloudApproval {
+    Claude {
+        sign_in: String,
+        pasted: codewire_protected_store::ProtectedValue,
+    },
+    Codex,
+    Github,
+}
+
+/// The kind a provider's `connect` stores in the cloud.
+fn cloud_connected_kind(
+    provider: CredentialConnectProviderArg,
+) -> rpc::CredentialAuthenticationKind {
+    match provider {
+        CredentialConnectProviderArg::Claude => rpc::CredentialAuthenticationKind::ClaudeSignIn,
+        CredentialConnectProviderArg::Codex | CredentialConnectProviderArg::Github => {
+            rpc::CredentialAuthenticationKind::Oauth
+        }
+    }
+}
+
+impl ConnectStore for CloudConnectStore<'_> {
+    const PLACEMENT: &'static str = "cloud";
+    type Record = rpc::Credential;
+    type Approval = CloudApproval;
+
+    async fn named(
+        &mut self,
+        provider: CredentialConnectProviderArg,
+        name: &str,
+    ) -> anyhow::Result<Option<rpc::Credential>> {
+        let current = find_named(self.client, name).await?;
+        oauth_connection_request(
+            provider_id(provider),
+            cloud_connected_kind(provider),
+            name,
+            current.as_ref(),
+        )?;
+        Ok(current)
+    }
+
+    async fn connections(
+        &mut self,
+        provider: CredentialConnectProviderArg,
+    ) -> anyhow::Result<Vec<rpc::Credential>> {
+        let kind = cloud_connected_kind(provider);
+        let mut credentials = list_all(self.client)
+            .await
+            .context("inspect existing platform credentials before enrollment")?;
+        credentials.retain(|credential| {
+            credential.provider == provider_id(provider) && credential.authentication_kind == kind
+        });
+        Ok(credentials)
+    }
+
+    fn display_name(record: &rpc::Credential) -> &str {
+        &record.name
+    }
+
+    fn describe(record: &rpc::Credential) -> anyhow::Result<Reconnecting> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        Ok(Reconnecting {
+            name: record.name.clone(),
+            id: record.id.clone(),
+            revision: record.revocation_generation,
+            status: text_status(record, now)?,
+        })
+    }
+
+    async fn approve(
+        &mut self,
+        target: &ConnectTarget<rpc::Credential>,
+        interrupt: &mut Interrupt,
+    ) -> anyhow::Result<CloudApproval> {
+        Ok(match target.provider {
+            CredentialConnectProviderArg::Claude => {
+                // The code is read before listening starts, so Ctrl-C at the
+                // prompt simply exits.
+                let (sign_in, pasted) = start_claude_sign_in(
+                    self.client,
+                    login_screen::SignInScreen::cloud(
+                        provider_label(target.provider),
+                        &target.name,
+                    ),
+                )
+                .await?;
+                interrupt.listen();
+                CloudApproval::Claude { sign_in, pasted }
+            }
+            CredentialConnectProviderArg::Codex => CloudApproval::Codex,
+            CredentialConnectProviderArg::Github => CloudApproval::Github,
+        })
+    }
+
+    async fn publish(
+        &mut self,
+        target: ConnectTarget<rpc::Credential>,
+        approval: CloudApproval,
+        interrupt: &mut Interrupt,
+        execution: &mut super::credential_input::CredentialExecution,
+    ) -> anyhow::Result<()> {
+        let screen =
+            login_screen::SignInScreen::cloud(provider_label(target.provider), &target.name);
+        let request = oauth_connection_request(
+            provider_id(target.provider),
+            cloud_connected_kind(target.provider),
+            &target.name,
+            target.existing.as_ref(),
+        )?;
+        let client = self.client;
+        let enrollment = async {
+            match approval {
+                CloudApproval::Claude { sign_in, pasted } => client
+                    .complete_claude_sign_in(rpc::CompleteClaudeSignInRequest {
+                        name: request.name,
+                        sign_in,
+                        authorization_code: pasted.expose_secret().to_vec(),
+                        credential_id: request.credential_id,
+                        expected_revocation_generation: request.expected_revocation_generation,
+                        ..Default::default()
+                    })
+                    .await
+                    .and_then(|response| {
+                        response.credential.into_option().ok_or_else(|| {
+                            rpc::ClientError::new(
+                                rpc::ErrorCode::Internal,
+                                "platform omitted Claude sign-in metadata",
+                            )
+                        })
+                    })
+                    .map(|credential| (credential, Vec::new())),
+                CloudApproval::Codex => {
+                    eprintln!("{}", CODEX_DEVICE_AUTHORIZATION_GUIDANCE);
+                    client
+                        .enroll_codex(
+                            rpc::EnrollCodexRequest {
+                                name: request.name,
+                                credential_id: request.credential_id,
+                                expected_revocation_generation: request
+                                    .expected_revocation_generation,
+                                ..Default::default()
+                            },
+                            |challenge| {
+                                display_challenge(
+                                    screen,
+                                    &challenge.verification_url,
+                                    &challenge.user_code,
+                                )
+                            },
+                        )
+                        .await
+                        .map(|credential| (credential, Vec::new()))
+                }
+                CloudApproval::Github => client
+                    .enroll_github(
+                        rpc::EnrollGithubRequest {
+                            name: request.name,
+                            credential_id: request.credential_id,
+                            expected_revocation_generation: request.expected_revocation_generation,
+                            ..Default::default()
+                        },
+                        |challenge| {
+                            display_challenge(
+                                screen,
+                                &challenge.verification_url,
+                                &challenge.user_code,
+                            )
+                        },
+                    )
+                    .await
+                    .map(|enrolled| (enrolled.credential, enrolled.pending_permissions)),
+            }
+        };
+        let (credential, pending) = tokio::select! {
+            result = enrollment => result.context("enroll platform OAuth credential")?,
+            () = interrupt.pressed() => {
+                anyhow::bail!("enrollment cancelled; inspect the credential by name before retrying because storage acknowledgement may be unknown");
+            }
+        };
+        eprint!(
+            "\n{}",
+            login_screen::success_screen(
+                screen,
+                login_screen::signed_in_account(
+                    credential.account_hint.as_deref(),
+                    &credential.name
+                )
+            )
+        );
+        remember_platform(&credential, execution);
+        print(&[credential], OutputFormat::Text)?;
+        super::credentials::report_github_pending(github_pending(&pending));
+        Ok(())
+    }
+}
+
 async fn find_named(
     client: &CodewireClient,
     name: &str,
@@ -550,21 +643,12 @@ async fn find_named(
 
 /// A device flow's challenge (Codex, GitHub): the link screen, then the code
 /// to enter on the provider's page.
-fn display_challenge(provider: &str, url: &str, code: &str) -> bool {
-    login_screen::open_sign_in_link(url);
-    eprint!("{}", login_screen::device_code_lines(provider, code));
+fn display_challenge(screen: login_screen::SignInScreen<'_>, url: &str, code: &str) -> bool {
+    login_screen::open_sign_in_link(screen, url);
+    let style =
+        crate::output::Capabilities::from_process(crate::output::OutputMode::Text).stderr_style();
+    eprint!("{}", login_screen::device_code_lines(screen, code, style));
     true
-}
-
-/// The account a connected credential names: its account hint (an email or
-/// login), or its name when the provider gave none. Metadata only.
-fn signed_in_account(credential: &rpc::Credential) -> &str {
-    credential
-        .account_hint
-        .as_deref()
-        .map(str::trim)
-        .filter(|hint| !hint.is_empty())
-        .unwrap_or(&credential.name)
 }
 
 /// Start a Claude sign-in, show where to sign in, and read the code Claude
@@ -573,6 +657,7 @@ fn signed_in_account(credential: &rpc::Credential) -> &str {
 /// process.
 async fn start_claude_sign_in(
     client: &CodewireClient,
+    screen: login_screen::SignInScreen<'_>,
 ) -> anyhow::Result<(String, codewire_protected_store::ProtectedValue)> {
     let started = client
         .start_claude_sign_in(rpc::StartClaudeSignInRequest::default())
@@ -585,7 +670,7 @@ async fn start_claude_sign_in(
             && !started.sign_in.is_empty(),
         "platform returned an invalid Claude sign-in"
     );
-    let pasted = login_screen::claude_sign_in_code(&started.authorize_url)?;
+    let pasted = login_screen::claude_sign_in_code(screen, &started.authorize_url)?;
     Ok((started.sign_in, pasted))
 }
 
@@ -1300,6 +1385,50 @@ mod tests {
         let claude =
             oauth_connection_request("anthropic", SIGN_IN, "work", Some(&current)).unwrap();
         assert_eq!(claude.credential_id.as_deref(), Some(ID));
+    }
+
+    #[tokio::test]
+    async fn a_second_cloud_github_connection_is_refused_before_any_device_code() {
+        let server = MockServer::start().await;
+        let mut github = metadata(rpc::CredentialStatus::Active);
+        github.provider = "github".into();
+        github.authentication_kind = rpc::CredentialAuthenticationKind::Oauth.into();
+        let mut codex = metadata(rpc::CredentialStatus::Active);
+        codex.id = "0b7d0f43-3a43-4d55-9a54-30a8b1a8e0c1".into();
+        codex.name = "other".into();
+        codex.authentication_kind = rpc::CredentialAuthenticationKind::Oauth.into();
+        unary(
+            &server,
+            "CredentialService",
+            "ListCredentials",
+            rpc::ListCredentialsRequest {
+                page_size: 100,
+                ..Default::default()
+            },
+            rpc::ListCredentialsResponse {
+                credentials: vec![codex, github],
+                ..Default::default()
+            },
+        )
+        .await;
+        let error = execute(
+            &client(&server),
+            CredentialsCommand::Connect(CredentialConnectArgs {
+                provider: Some(CredentialConnectProviderArg::Github),
+                name: Some("other".into()),
+                yes: true,
+                guided: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "GitHub is already connected as work; run `cw credentials --cloud connect github --name work --yes` to reconnect it"
+        );
+        // Only the listing: no name lookup and no enrollment.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        server.verify().await;
     }
 
     #[tokio::test]

@@ -22,6 +22,9 @@ use serde::Serialize;
 use super::CredentialsArgs;
 #[cfg(test)]
 use super::credential_input::CODEX_DEVICE_AUTHORIZATION_GUIDANCE;
+use super::credential_input::connect::{
+    ConnectStore, ConnectTarget, Interrupt, Reconnecting, provider_id, provider_label,
+};
 use super::credential_input::{
     CredentialOperation, GITHUB_ALWAYS_INCLUDED, ParsedCredentialSelector, ParsedProfileSelector,
     SSH_PUBLIC_KEY_GITHUB_HINT, parse_credential_selector, parse_profile_selector,
@@ -156,109 +159,191 @@ async fn connect_credential(
     args: CredentialConnectArgs,
     execution: &mut super::credential_input::CredentialExecution,
 ) -> anyhow::Result<()> {
-    match args.provider.context("credential provider is required")? {
-        CredentialConnectProviderArg::Codex => connect_codex(client, args, execution).await,
-        CredentialConnectProviderArg::Github => connect_github(client, args, execution).await,
-        CredentialConnectProviderArg::Claude => connect_claude(client, args, execution).await,
+    super::credential_input::connect::connect(&mut LocalConnectStore { client }, args, execution)
+        .await
+}
+
+/// The local authority's side of `cw credentials connect`: the provider login
+/// runs in this process and the result is saved to the authority.
+struct LocalConnectStore<'a> {
+    client: &'a mut LocalCredentialClient,
+}
+
+/// A provider's answer, held only until it is saved.
+struct LocalApproval {
+    material: ProtectedValue,
+    account_hint: Option<String>,
+    reach: Vec<codewire_credential_broker::GitHubAppInstallationReach>,
+}
+
+impl ConnectStore for LocalConnectStore<'_> {
+    const PLACEMENT: &'static str = "local";
+    type Record = CredentialRecord;
+    type Approval = LocalApproval;
+
+    async fn named(
+        &mut self,
+        provider: CredentialConnectProviderArg,
+        name: &str,
+    ) -> anyhow::Result<Option<CredentialRecord>> {
+        let records = self
+            .client
+            .list_credentials()
+            .await
+            .context("check local credential name before provider login")?;
+        Ok(select_oauth_connection_target(records, name, provider_id(provider))?.existing)
     }
-}
 
-async fn connect_claude(
-    client: &mut LocalCredentialClient,
-    args: CredentialConnectArgs,
-    execution: &mut super::credential_input::CredentialExecution,
-) -> anyhow::Result<()> {
-    let Some(target) = prepare_oauth_connection(client, &args, "anthropic").await? else {
-        anyhow::ensure!(!args.guided, "canceled; no credential was changed");
-        return Ok(());
-    };
-    let (bundle, account_hint) = super::provider_login::claude_sign_in().await?.into_parts();
-    let mut bytes = bundle.into_bytes();
-    let material = ProtectedValue::new(std::mem::take(&mut *bytes))
-        .context("prepare protected Claude sign-in")?;
-    let record = publish_oauth_connection(client, target, material, account_hint)
+    async fn connections(
+        &mut self,
+        provider: CredentialConnectProviderArg,
+    ) -> anyhow::Result<Vec<CredentialRecord>> {
+        let provider = ProviderId::parse(provider_id(provider))?;
+        let kind = connected_kind(&provider);
+        let records = self
+            .client
+            .list_credentials()
+            .await
+            .context("check local credentials before provider login")?;
+        records
+            .into_iter()
+            .filter(|record| {
+                record.metadata.provider == provider && record.metadata.authentication_kind == kind
+            })
+            .map(|record| {
+                record.metadata.validate()?;
+                Ok(record)
+            })
+            .collect()
+    }
+
+    fn display_name(record: &CredentialRecord) -> &str {
+        &record.metadata.display_name
+    }
+
+    fn describe(record: &CredentialRecord) -> anyhow::Result<Reconnecting> {
+        Ok(Reconnecting {
+            name: record.metadata.display_name.clone(),
+            id: record.metadata.id.to_string(),
+            revision: record.metadata.revocation_generation,
+            status: status_label(record.metadata.status),
+        })
+    }
+
+    async fn approve(
+        &mut self,
+        target: &ConnectTarget<CredentialRecord>,
+        interrupt: &mut Interrupt,
+    ) -> anyhow::Result<LocalApproval> {
+        let sign_in =
+            super::login_screen::SignInScreen::local(provider_label(target.provider), &target.name);
+        match target.provider {
+            CredentialConnectProviderArg::Claude => {
+                let (bundle, account_hint) =
+                    super::provider_login::claude_sign_in(sign_in, interrupt)
+                        .await?
+                        .into_parts();
+                let mut bytes = bundle.into_bytes();
+                let material = ProtectedValue::new(std::mem::take(&mut *bytes))
+                    .context("prepare protected Claude sign-in")?;
+                Ok(LocalApproval {
+                    material,
+                    account_hint,
+                    reach: Vec::new(),
+                })
+            }
+            CredentialConnectProviderArg::Codex => {
+                let (bundle, account_hint) =
+                    super::provider_login::codex_device_login(sign_in, interrupt)
+                        .await?
+                        .into_parts();
+                let mut bytes = bundle.into_bytes();
+                let material = ProtectedValue::new(std::mem::take(&mut *bytes))
+                    .context("prepare protected Codex credential")?;
+                Ok(LocalApproval {
+                    material,
+                    account_hint,
+                    reach: Vec::new(),
+                })
+            }
+            CredentialConnectProviderArg::Github => {
+                let mut import =
+                    super::provider_login::github_device_login(sign_in, interrupt).await?;
+                let reach = import.reach().to_vec();
+                // A reconnect keeps the GitHub account its profiles already follow.
+                if let Some(expected) = target
+                    .existing
+                    .as_ref()
+                    .and_then(|record| record.metadata.account_hint.as_deref())
+                {
+                    anyhow::ensure!(
+                        expected == import.account_hint(),
+                        "the approved GitHub account {:?} is not the connected account {expected:?}; no credential was changed",
+                        import.account_hint(),
+                    );
+                }
+                let (mut bytes, account_hint) = import
+                    .take_import()
+                    .context("prepare protected GitHub credential")?;
+                let material = ProtectedValue::new(std::mem::take(&mut *bytes))
+                    .context("prepare protected GitHub credential")?;
+                Ok(LocalApproval {
+                    material,
+                    account_hint,
+                    reach,
+                })
+            }
+        }
+    }
+
+    async fn publish(
+        &mut self,
+        target: ConnectTarget<CredentialRecord>,
+        approval: LocalApproval,
+        _: &mut Interrupt,
+        execution: &mut super::credential_input::CredentialExecution,
+    ) -> anyhow::Result<()> {
+        let label = provider_label(target.provider);
+        let provider = ProviderId::parse(provider_id(target.provider))?;
+        let authentication_kind = connected_kind(&provider);
+        let record = publish_oauth_connection(
+            self.client,
+            OAuthConnectionTarget {
+                provider,
+                authentication_kind,
+                display_name: target.name,
+                existing: target.existing,
+            },
+            approval.material,
+            approval.account_hint,
+        )
         .await
-        .map_err(|status| local_connect_publish_error("Claude", &status))?;
-    remember_local(&record, execution);
-    eprintln!(
-        "Local Claude sign-in {:?} connected ({}).",
-        record.metadata.display_name, record.metadata.id
-    );
-    Ok(())
-}
-
-async fn connect_codex(
-    client: &mut LocalCredentialClient,
-    args: CredentialConnectArgs,
-    execution: &mut super::credential_input::CredentialExecution,
-) -> anyhow::Result<()> {
-    let Some(target) = prepare_oauth_connection(client, &args, "openai").await? else {
-        anyhow::ensure!(!args.guided, "canceled; no credential was changed");
-        return Ok(());
-    };
-    let (bundle, account_hint) = super::provider_login::codex_device_login()
-        .await?
-        .into_parts();
-    let mut bytes = bundle.into_bytes();
-    let material = ProtectedValue::new(std::mem::take(&mut *bytes))
-        .context("prepare protected Codex credential")?;
-    let record = publish_oauth_connection(client, target, material, account_hint)
-        .await
-        .map_err(|status| local_connect_publish_error("Codex", &status))?;
-    remember_local(&record, execution);
-    eprintln!(
-        "Local Codex credential {:?} connected ({}).",
-        record.metadata.display_name, record.metadata.id
-    );
-    Ok(())
-}
-
-async fn connect_github(
-    client: &mut LocalCredentialClient,
-    args: CredentialConnectArgs,
-    execution: &mut super::credential_input::CredentialExecution,
-) -> anyhow::Result<()> {
-    let Some(target) = prepare_oauth_connection(client, &args, "github").await? else {
-        anyhow::ensure!(!args.guided, "canceled; no credential was changed");
-        return Ok(());
-    };
-    let mut import = super::provider_login::github_device_login().await?;
-    let reach = import.reach().to_vec();
-    // A reconnect keeps the GitHub account its profiles already follow.
-    if let Some(expected) = target
-        .existing
-        .as_ref()
-        .and_then(|record| record.metadata.account_hint.as_deref())
-    {
-        anyhow::ensure!(
-            expected == import.account_hint(),
-            "the approved GitHub account {:?} is not the connected account {expected:?}; no credential was changed",
-            import.account_hint(),
+        .map_err(|status| local_connect_publish_error(label, &status))?;
+        remember_local(&record, execution);
+        let name = &record.metadata.display_name;
+        eprint!(
+            "\n{}",
+            super::login_screen::success_screen(
+                super::login_screen::SignInScreen::local(label, name),
+                super::login_screen::signed_in_account(
+                    record.metadata.account_hint.as_deref(),
+                    name
+                ),
+            )
         );
+        if matches!(target.provider, CredentialConnectProviderArg::Github) {
+            eprintln!("{}", github_reach_summary(&approval.reach));
+            report_github_pending(approval.reach.iter().filter_map(|installation| {
+                let pending = installation.pending_permissions.as_ref()?;
+                Some((
+                    installation.account.as_str(),
+                    pending.installation_id,
+                    pending.account_kind,
+                ))
+            }));
+        }
+        Ok(())
     }
-    let (mut bytes, account_hint) = import
-        .take_import()
-        .context("prepare protected GitHub credential")?;
-    let material = ProtectedValue::new(std::mem::take(&mut *bytes))
-        .context("prepare protected GitHub credential")?;
-    let record = publish_oauth_connection(client, target, material, account_hint)
-        .await
-        .map_err(|status| local_connect_publish_error("GitHub", &status))?;
-    remember_local(&record, execution);
-    eprintln!(
-        "Local GitHub credential {:?} connected ({}).",
-        record.metadata.display_name, record.metadata.id
-    );
-    eprintln!("{}", github_reach_summary(&reach));
-    report_github_pending(reach.iter().filter_map(|installation| {
-        let pending = installation.pending_permissions.as_ref()?;
-        Some((
-            installation.account.as_str(),
-            pending.installation_id,
-            pending.account_kind,
-        ))
-    }));
-    Ok(())
 }
 
 /// After a GitHub connect, name each installation that has not yet granted
@@ -441,35 +526,6 @@ fn local_connect_publish_error(provider: &str, status: &tonic::Status) -> anyhow
     crate::error_report::with_next_step(error, next)
 }
 
-async fn prepare_oauth_connection(
-    client: &mut LocalCredentialClient,
-    args: &CredentialConnectArgs,
-    provider: &str,
-) -> anyhow::Result<Option<OAuthConnectionTarget>> {
-    let display_name = trimmed_required(
-        args.name
-            .as_deref()
-            .context("credential name is required")?,
-        "credential name",
-    )?;
-    let records = client
-        .list_credentials()
-        .await
-        .context("check local credential name before provider login")?;
-    let target = select_oauth_connection_target(records, display_name, provider)?;
-    let confirmed = confirm_oauth_connection_with(
-        &target,
-        args.yes,
-        std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
-        prompt_confirm_default_no,
-    )?;
-    if !confirmed {
-        eprintln!("Canceled; no credential was changed.");
-        return Ok(None);
-    }
-    Ok(Some(target))
-}
-
 fn select_oauth_connection_target(
     records: Vec<CredentialRecord>,
     display_name: &str,
@@ -477,27 +533,6 @@ fn select_oauth_connection_target(
 ) -> anyhow::Result<OAuthConnectionTarget> {
     let provider = ProviderId::parse(provider)?;
     let authentication_kind = connected_kind(&provider);
-    // GitHub is one connection per store: reconnect it in place whatever name
-    // was supplied, keeping its identity and name. Only create when absent.
-    if provider.as_str() == "github" {
-        let mut connections = records.iter().filter(|record| {
-            record.metadata.provider == provider
-                && record.metadata.authentication_kind == CredentialAuthKind::OAuth
-        });
-        if let Some(record) = connections.next() {
-            anyhow::ensure!(
-                connections.next().is_none(),
-                "more than one local GitHub connection exists; delete all but one before reconnecting"
-            );
-            record.metadata.validate()?;
-            return Ok(OAuthConnectionTarget {
-                provider,
-                authentication_kind,
-                display_name: record.metadata.display_name.clone(),
-                existing: Some(record.clone()),
-            });
-        }
-    }
     let mut matches = records.into_iter().filter(|record| {
         record
             .metadata
@@ -523,33 +558,6 @@ fn select_oauth_connection_target(
         display_name: display_name.to_owned(),
         existing,
     })
-}
-
-fn confirm_oauth_connection_with(
-    target: &OAuthConnectionTarget,
-    yes: bool,
-    is_terminal: bool,
-    prompt: impl FnOnce(&str) -> anyhow::Result<bool>,
-) -> anyhow::Result<bool> {
-    let Some(record) = &target.existing else {
-        return Ok(true);
-    };
-    let message = format!(
-        "Reconnect local OAuth credential {:?} ({}, revision {}, status {})? Its identity and profile bindings will be kept; the credential will become active and its hard expiry will be preserved.",
-        record.metadata.display_name,
-        record.metadata.id,
-        record.metadata.revocation_generation,
-        status_label(record.metadata.status),
-    );
-    if yes {
-        eprintln!("{message}");
-        return Ok(true);
-    }
-    anyhow::ensure!(
-        is_terminal,
-        "reconnecting an existing local OAuth credential requires terminal confirmation or --yes"
-    );
-    prompt(&message)
 }
 
 async fn publish_oauth_connection(
@@ -1531,6 +1539,9 @@ mod tests {
                 .err()
                 .unwrap();
         assert!(error.to_string().contains("ambiguous"));
+        let target =
+            select_oauth_connection_target(vec![credential()], "new-name", "github").unwrap();
+        assert!(target.existing.is_none());
     }
 
     #[test]
@@ -1641,60 +1652,6 @@ mod tests {
                 Some("cw credentials --local list")
             );
         }
-    }
-
-    #[test]
-    fn new_oauth_name_needs_no_replacement_confirmation() {
-        let target =
-            select_oauth_connection_target(vec![credential()], "new-name", "github").unwrap();
-        assert!(target.existing.is_none());
-        assert!(
-            confirm_oauth_connection_with(&target, false, false, |_| {
-                panic!("new enrollment must not prompt for replacement");
-            })
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn oauth_reconnect_requires_yes_or_a_positive_terminal_confirmation() {
-        let mut record = credential();
-        record.metadata.authentication_kind = CredentialAuthKind::OAuth;
-        record.metadata.status = CredentialStatus::Revoked;
-        record.metadata.revocation_generation = 7;
-        let target =
-            select_oauth_connection_target(vec![record.clone()], "work-openai", "openai").unwrap();
-        let error = confirm_oauth_connection_with(&target, false, false, |_| {
-            panic!("noninteractive reconnect must not read stdin");
-        })
-        .unwrap_err();
-        assert!(error.to_string().contains("--yes"));
-        assert!(
-            confirm_oauth_connection_with(&target, true, false, |_| {
-                panic!("--yes must not read stdin");
-            })
-            .unwrap()
-        );
-        for answer in [false, true] {
-            assert_eq!(
-                confirm_oauth_connection_with(&target, false, true, |message| {
-                    assert!(message.contains(record.metadata.id.as_str()));
-                    assert!(message.contains("revision 7"));
-                    assert!(message.contains("revoked"));
-                    assert!(message.contains("profile bindings will be kept"));
-                    assert!(message.contains("hard expiry will be preserved"));
-                    Ok(answer)
-                })
-                .unwrap(),
-                answer
-            );
-        }
-        assert!(
-            confirm_oauth_connection_with(&target, false, true, |_| {
-                Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "synthetic EOF").into())
-            })
-            .is_err()
-        );
     }
 
     #[test]
@@ -1881,6 +1838,61 @@ mod tests {
             );
         }
         assert_eq!(client.list_credentials().await.unwrap().len(), 2);
+        client.shutdown().await.unwrap();
+        tokio::time::timeout(READINESS_HANG_GUARD, server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_second_local_github_connection_is_refused_before_any_device_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = codewire_local_credentials::AuthorityRuntimeConfig {
+            root: temp.path().join("authority"),
+            executable: std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap(),
+            socket_dir: temp.path().join("authority"),
+        };
+        let server = tokio::spawn(
+            codewire_local_credentials::serve_local_credential_authority(
+                config.clone(),
+                codewire_protected_store::EphemeralProtectedStore::default(),
+                builtin_provider_catalog(),
+            ),
+        );
+        let mut client = connect_ready_authority(&config, &server).await;
+        let target = select_oauth_connection_target(Vec::new(), "work", "github").unwrap();
+        let connected = publish_oauth_connection(
+            &mut client,
+            target,
+            ProtectedValue::from_slice(b"synthetic-github-oauth").unwrap(),
+            Some("octocat".into()),
+        )
+        .await
+        .unwrap();
+        let mut execution = super::super::credential_input::CredentialExecution::Unchanged;
+        let error = connect_credential(
+            &mut client,
+            CredentialConnectArgs {
+                provider: Some(CredentialConnectProviderArg::Github),
+                name: Some("other".into()),
+                yes: true,
+                guided: false,
+            },
+            &mut execution,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "GitHub is already connected as work; run `cw credentials --local connect github --name work --yes` to reconnect it"
+        );
+        assert!(matches!(
+            execution,
+            super::super::credential_input::CredentialExecution::Unchanged
+        ));
+        assert_eq!(client.list_credentials().await.unwrap(), [connected]);
         client.shutdown().await.unwrap();
         tokio::time::timeout(READINESS_HANG_GUARD, server)
             .await
