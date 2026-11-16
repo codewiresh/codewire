@@ -19,6 +19,7 @@ Updated 2026-11-14.
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14 | not yet observed |
+| `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
 | `sandbox-setup-retry` | cw-snapshots | not yet observed | not yet observed |
 | `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-14 (#4460) | not yet observed |
 | `sandbox-cp-resume` | cw-workspace-mount | observed 2026-11-13 (#4373) | not yet observed; v0.4.17 lacks it |
@@ -287,6 +288,53 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished).
     start took 8 s and `cw ls` showed `running`; the marker written before
     the stop was read back unchanged. Evidence: the pull
     request that added this section.
+
+## `sandbox-list-live`: the Sandboxes page changes as its Sandboxes do
+
+Issue: #4762.
+
+- **Entry points:** the dashboard's Sandboxes page (`/<org>/sandboxes`) and
+  its sidebar rail, with a Sandbox's state changed from `cw` or another tab.
+  Design: private-docs `designs/live-updates.md` §3a (#4762).
+- **States to exercise:**
+  - a Sandbox stopped, then started, from `cw`: only its row changes;
+  - a Sandbox created, and one removed, from `cw`: the list gains or loses
+    the row;
+  - a row's menu open while its Sandbox changes: the menu stays open, and the
+    row changes once it is closed;
+  - a row's Resize, Delete or Secrets and credentials dialog open while its
+    Sandbox changes: the same;
+  - a Sandbox removed while its row's menu is open: the row stays, with its
+    old actions, until the menu closes. An action chosen then is refused by
+    the server, never applied;
+  - the tab hidden while Sandboxes change, then shown: the list catches up
+    once;
+  - a filter or search that the changed Sandbox no longer matches: the row
+    leaves the list.
+- **Driving it:** open the Sandboxes page with the browser's network panel
+  showing fragment requests. In a terminal:
+
+  ```sh
+  cw --cloud stop walk
+  cw --cloud start walk
+  cw --cloud create --name walk-2 --no-file --ttl 30m --no-network --no-wait
+  cw --cloud rm walk-2 --yes
+  ```
+
+  Then repeat the stop with `walk`'s row menu open, and with its Resize
+  dialog open.
+- **Proof:**
+  - each change shows on the page within 2 s;
+  - between changes the page makes no request for the list, and a change
+    requests only that row's fragment, except a create, a removal or a
+    filter change, which requests the list once;
+  - an open menu or dialog is never closed or replaced by an update;
+  - the rail shows the same states as the list.
+- **Gotchas:** with the stream unavailable or busy, the page degrades to a
+  fallback: it refreshes when the tab is focused or shown, and once a minute
+  while visible. A walk that sees list requests once a minute has lost the
+  stream; that is not the journey working.
+- **Observed:** not yet observed.
 
 ## `sandbox-setup-retry`: a failed setup, fixed in a shell and retried
 
