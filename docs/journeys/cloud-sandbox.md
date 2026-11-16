@@ -402,10 +402,14 @@ Issue: #4767.
   - **After the failure:** the page shows the banner "Setup failed at Running install command: …" over an open terminal.
   - **After Retry:** the list, headed "Retrying setup", shows the steps before install as done without running them, and install runs again. The Sandbox then becomes ready, and the banner is gone.
   - **The clone case:** a Retry that would clone again opens "Retry cloning?" before it runs.
+  - **`cw` after the failure:** `cw run --in SANDBOX -- CMD` and `cw shell SANDBOX` print `! Setup failed at Running install command: …`, then run.
+  - **`cw` while setup runs:** they refuse with "SANDBOX's setup is running; wait for it, or follow it with `cw logs SANDBOX --setup --follow`".
 - **Gotchas:**
   - A Retry runs the failed step's own command again: install and startup scripts should be safe to rerun.
   - New terminals wait while the Retry's setup runs, as they do during the first setup.
-- **Observed:** not yet.
+- **Observed:**
+  - Dev, 2026-11-16 (cw-cli), `cw` built from #5028 at 49a8bb95b, smoke identity: after an install command failed, `cw run --in SANDBOX --no-tty -- echo ran` printed `! Setup failed at Running install command: workspace exec exited 1`, started the session and printed `ran` (exit 0). `cw shell SANDBOX` printed the same line and opened the shell, which ran a piped command. Evidence: #5028.
+  - Not yet observed: `cw`'s refusal while setup runs, the dashboard banner, and Retry.
 
 ## `sandbox-cp-upload`: copy a file into a sandbox
 

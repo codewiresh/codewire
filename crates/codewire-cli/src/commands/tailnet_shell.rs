@@ -99,12 +99,14 @@ impl ReconnectPacing {
     }
 }
 
-/// Launch the shell and run it to its end. Returns its exit status.
+/// Launch the shell and run it to its end, under a failed setup's warning
+/// (#4767). Returns its exit status.
 pub(crate) async fn run(
     client: &CodewireClient,
     org_id: &str,
     environment_id: &str,
 ) -> anyhow::Result<i32> {
+    super::sessions::setup::ready(client, org_id, environment_id).await?;
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let (columns, rows) = interactive
         .then(terminal_size)

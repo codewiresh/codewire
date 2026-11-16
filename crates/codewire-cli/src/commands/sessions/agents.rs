@@ -1481,7 +1481,7 @@ pub(super) async fn handle_agent_run_command(
         .clone()
         .unwrap_or_else(|| target.default_working_dir());
     let launch_env = parse_env_overrides(&args.env)?;
-    target.ensure_ready_for_run()?;
+    target.ensure_ready_for_run().await?;
     let parent = match args.parent.as_deref().and_then(trimmed_str) {
         Some(requested) => Some(resolve_parent_link(&target, &environment, requested).await?),
         None => None,

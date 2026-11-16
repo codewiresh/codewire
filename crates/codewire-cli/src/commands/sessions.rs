@@ -6,6 +6,7 @@ use codewire_client::hosted_shell::{InputNotice, InputStream, restart};
 pub(crate) mod agents;
 mod entry;
 mod exec;
+pub(crate) mod setup;
 pub(crate) use entry::{handle_environment_run_command, handle_environment_shell_command};
 pub(crate) use exec::handle_exec_command;
 
@@ -141,14 +142,8 @@ impl EnvironmentSessionTarget {
             }
         }
     }
-    fn ensure_ready_for_run(&self) -> anyhow::Result<()> {
-        match self {
-            #[cfg(unix)]
-            Self::Host { .. } => Ok(()),
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            Self::NativeLocal { .. } => Ok(()),
-            Self::Platform { .. } => Ok(()),
-        }
+    async fn ensure_ready_for_run(&self) -> anyhow::Result<()> {
+        setup::ready_for_run(self).await
     }
 
     async fn list(&self) -> anyhow::Result<Vec<EnvironmentSessionView>> {
@@ -1806,7 +1801,7 @@ async fn launch_run(
     };
     let parent_session_id = resolve_parent_session(&target, args.parent.as_deref()).await?;
     let working_dir = args.workdir.unwrap_or_else(|| target.default_working_dir());
-    target.ensure_ready_for_run()?;
+    target.ensure_ready_for_run().await?;
     let env_overrides = parse_env_overrides(&args.env)?;
     // A restart can begin after the list above (#4342). The launch is made
     // again only after a restart: when the gate refused it while starting, or
@@ -2074,7 +2069,7 @@ async fn plain_shell(
     globals: &Globals,
     target: EnvironmentSessionTarget,
 ) -> anyhow::Result<Option<i32>> {
-    target.ensure_ready_for_run()?;
+    target.ensure_ready_for_run().await?;
     let grace = codewire_client::hosted_shell::SHELL_GRACE.as_secs() as u32;
     let launched = target
         .launch(
