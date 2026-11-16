@@ -138,20 +138,6 @@ impl Environment {
             .as_deref()
             .unwrap_or(&self.state_changed_at)
     }
-
-    /// What a setup or start wait reads about this environment.
-    #[cfg(test)]
-    pub fn setup_facts(&self) -> codewire_client::environment_setup::EnvironmentFacts {
-        codewire_client::environment_setup::EnvironmentFacts {
-            id: self.id.clone(),
-            state: self.state.clone(),
-            desired_state: self.desired_state.clone(),
-            confidential: self.isolation_tier == "confidential",
-            error_code: self.error_code.clone(),
-            error_reason: self.error_reason.clone(),
-            setup_error: self.setup_error.clone(),
-        }
-    }
 }
 
 /// Complete value-free selection, including the immutable credential revision.

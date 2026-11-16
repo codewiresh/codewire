@@ -1290,7 +1290,7 @@ async fn create_fails_when_setup_stops_without_a_failed_row() {
     let mut view = plain_view(Instant::now());
     let guard = async {
         tokio::time::sleep(Duration::from_millis(20)).await;
-        setup_failure(&Environment {
+        setup_stop_error(&EnvironmentFacts {
             id: "env-1".to_owned(),
             state: "running".to_owned(),
             setup_error: Some("sync workspace env: timed out".to_owned()),
@@ -1610,8 +1610,8 @@ async fn start_still_waits_for_the_daemon_when_progress_is_unavailable() {
 /// #3938: a start is accepted while the environment is still `stopped`, so
 /// only a stop that's no longer wanted, or a state on the way out, ends it.
 #[test]
-fn start_failure_reports_states_that_cannot_finish_the_start() {
-    let environment = |state: &str, desired: &str| Environment {
+fn start_stop_error_reports_states_that_cannot_finish_the_start() {
+    let environment = |state: &str, desired: &str| EnvironmentFacts {
         id: "env-1".to_owned(),
         state: state.to_owned(),
         desired_state: desired.to_owned(),
@@ -1619,24 +1619,24 @@ fn start_failure_reports_states_that_cannot_finish_the_start() {
     };
     for state in ["stopped", "pending", "creating", "starting", "running"] {
         assert!(
-            start_failure(&environment(state, "started")).is_none(),
+            start_stop_error(&environment(state, "started")).is_none(),
             "{state}"
         );
     }
     assert_eq!(
-        start_failure(&environment("stopped", "stopped"))
+        start_stop_error(&environment("stopped", "stopped"))
             .unwrap()
             .to_string(),
         "environment env-1 became stopped before its start finished"
     );
     for state in ["error", "stopping", "destroying", "destroyed"] {
         assert!(
-            start_failure(&environment(state, "started")).is_some(),
+            start_stop_error(&environment(state, "started")).is_some(),
             "{state}"
         );
     }
     assert_eq!(
-        start_failure(&Environment {
+        start_stop_error(&EnvironmentFacts {
             error_code: Some("no_capacity".to_owned()),
             ..environment("error", "started")
         })
@@ -1647,34 +1647,34 @@ fn start_failure_reports_states_that_cannot_finish_the_start() {
 }
 
 #[test]
-fn setup_failure_reports_states_that_cannot_finish_setup() {
-    let environment = |state: &str| Environment {
+fn setup_stop_error_reports_states_that_cannot_finish_setup() {
+    let environment = |state: &str| EnvironmentFacts {
         id: "env-1".to_owned(),
         state: state.to_owned(),
         ..Default::default()
     };
     for state in ["pending", "creating", "starting", "running"] {
-        assert!(setup_failure(&environment(state)).is_none(), "{state}");
+        assert!(setup_stop_error(&environment(state)).is_none(), "{state}");
     }
     // No room says so plainly, at every state on the way out and not only "error".
     for state in ["error", "destroying", "destroyed", "stopping", "stopped"] {
-        let refused = Environment {
+        let refused = EnvironmentFacts {
             error_code: Some("no_capacity".to_owned()),
             error_reason: Some("No capacity right now. Try again shortly.".to_owned()),
             ..environment(state)
         };
         assert_eq!(
-            setup_failure(&refused).unwrap().to_string(),
+            setup_stop_error(&refused).unwrap().to_string(),
             "No capacity right now. Try again shortly.",
             "{state}"
         );
-        assert!(platform_ended_failure(&refused).is_some(), "{state}");
+        assert!(refused.platform_end().is_some(), "{state}");
     }
-    assert!(platform_ended_failure(&environment("error")).is_none());
+    assert!(environment("error").platform_end().is_none());
     // A container that could not start says so in the kubelet's words, on the
     // way out too, and plainly when no reason was recorded.
     for state in ["error", "destroying", "destroyed"] {
-        let failed = Environment {
+        let failed = EnvironmentFacts {
             error_code: Some("container_start_failed".to_owned()),
             error_reason: Some(
                 "The sandbox could not start: container workspace could not start: ErrImagePull."
@@ -1683,13 +1683,13 @@ fn setup_failure_reports_states_that_cannot_finish_setup() {
             ..environment(state)
         };
         assert_eq!(
-            setup_failure(&failed).unwrap().to_string(),
+            setup_stop_error(&failed).unwrap().to_string(),
             "The sandbox could not start: container workspace could not start: ErrImagePull.",
             "{state}"
         );
     }
     assert_eq!(
-        setup_failure(&Environment {
+        setup_stop_error(&EnvironmentFacts {
             error_code: Some("container_start_failed".to_owned()),
             ..environment("destroyed")
         })
@@ -1698,7 +1698,7 @@ fn setup_failure_reports_states_that_cannot_finish_setup() {
         "The sandbox could not start."
     );
     assert_eq!(
-        setup_failure(&Environment {
+        setup_stop_error(&EnvironmentFacts {
             error_reason: Some("claim: quota exceeded\n".to_owned()),
             ..environment("error")
         })
@@ -1707,13 +1707,13 @@ fn setup_failure_reports_states_that_cannot_finish_setup() {
         "environment env-1 became error before setup completed: claim: quota exceeded"
     );
     assert_eq!(
-        setup_failure(&environment("destroying"))
+        setup_stop_error(&environment("destroying"))
             .unwrap()
             .to_string(),
         "environment env-1 became destroying before setup completed"
     );
     assert!(
-        setup_failure(&Environment {
+        setup_stop_error(&EnvironmentFacts {
             setup_error: Some("  ".to_owned()),
             ..environment("running")
         })

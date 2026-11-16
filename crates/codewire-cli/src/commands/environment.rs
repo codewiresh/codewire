@@ -2551,16 +2551,6 @@ fn daemon_observation(seen: DaemonObservation) -> String {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn platform_ready_poll(server_interval: Option<Duration>) -> Duration {
-    setup::ready_poll(server_interval)
-}
-
-#[cfg(test)]
-pub(crate) fn platform_lifecycle_ready_timeout(isolation_tier: &str) -> Duration {
-    setup::lifecycle_ready_timeout(isolation_tier == "confidential")
-}
-
 pub(crate) fn environment_daemon_readiness(
     status: &EnvironmentDaemonStatus,
 ) -> anyhow::Result<bool> {

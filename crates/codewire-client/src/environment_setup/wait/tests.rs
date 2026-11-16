@@ -314,3 +314,18 @@ fn facts_read_the_environment_as_the_server_sent_it() {
     );
     assert_eq!(facts.error_reason, None, "an empty reason is none");
 }
+
+#[test]
+fn the_daemon_wait_polls_at_the_server_s_pace_and_briefly_without_one() {
+    assert_eq!(
+        ready_poll(Some(Duration::from_secs(3))),
+        Duration::from_secs(3)
+    );
+    assert_eq!(ready_poll(None), Duration::from_millis(500));
+}
+
+#[test]
+fn a_confidential_environment_gets_longer_to_become_ready() {
+    assert_eq!(lifecycle_ready_timeout(false), Duration::from_secs(600));
+    assert_eq!(lifecycle_ready_timeout(true), Duration::from_secs(1800));
+}

@@ -72,8 +72,6 @@ pub(crate) use codewire_client::environment_setup::{
 
 use crate::environment_client::{EnvironmentClient, log_stream_error};
 use crate::output::{Capabilities, Motion, OutputMode, Status, StatusLine};
-#[cfg(test)]
-use crate::presentation::Environment;
 use crate::presentation::{EnvironmentDaemonStatus, EnvironmentLog};
 
 const DAEMON_STAGE_KEY: &str = "cli:daemon_ready";
@@ -835,13 +833,6 @@ pub(crate) async fn watch_start_failure(
     setup::watch_environment(client.codewire(), org_id, environment_id, start_stop_error).await
 }
 
-// Kept for the progress tests, which state the CLI's words through it; the
-// wait itself calls the *_stop_error and platform_end_error below.
-#[cfg(test)]
-pub(crate) fn start_failure(environment: &Environment) -> Option<anyhow::Error> {
-    start_stop_error(&environment.setup_facts())
-}
-
 fn start_stop_error(facts: &EnvironmentFacts) -> Option<anyhow::Error> {
     Some(match facts.start_stop()? {
         SetupStop::PlatformEnded(end) => platform_end_error(facts, end),
@@ -852,16 +843,6 @@ fn start_stop_error(facts: &EnvironmentFacts) -> Option<anyhow::Error> {
             reason_suffix(facts)
         ),
     })
-}
-
-// Kept for the progress tests, which state the CLI's words through it; the
-// wait itself calls the *_stop_error and platform_end_error below.
-#[cfg(test)]
-pub(crate) fn platform_ended_failure(environment: &Environment) -> Option<anyhow::Error> {
-    let facts = environment.setup_facts();
-    facts
-        .platform_end()
-        .map(|end| platform_end_error(&facts, end))
 }
 
 /// The message when the platform ended this environment's create or start and
@@ -880,13 +861,6 @@ pub(crate) fn platform_end_error(facts: &EnvironmentFacts, end: PlatformEnd) -> 
         .filter(|reason| !reason.is_empty())
         .unwrap_or_else(|| fallback.to_owned());
     anyhow::anyhow!(message)
-}
-
-// Kept for the progress tests, which state the CLI's words through it; the
-// wait itself calls the *_stop_error and platform_end_error below.
-#[cfg(test)]
-pub(crate) fn setup_failure(environment: &Environment) -> Option<anyhow::Error> {
-    setup_stop_error(&environment.setup_facts())
 }
 
 fn setup_stop_error(facts: &EnvironmentFacts) -> Option<anyhow::Error> {
