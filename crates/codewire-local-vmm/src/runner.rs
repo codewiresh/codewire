@@ -96,6 +96,7 @@ mod boot_seed;
 #[cfg(target_os = "linux")]
 mod checkpoint;
 mod egress_spawn;
+mod egress_status;
 mod inherited;
 mod intercept;
 
@@ -2138,6 +2139,7 @@ struct NetworkWorkerProcess {
     ingress_forwarder: Option<JoinHandle<Result<(), RunnerError>>>,
     host_port_commands: Option<tokio::sync::mpsc::Sender<HostPortCommand>>,
     mesh_transport: Option<MeshTransportProcess>,
+    egress_status: egress_status::EgressStatusCell,
 }
 
 /// Publishes `add` and withdraws `remove` (host ports) on the running
@@ -2229,6 +2231,7 @@ impl NetworkWorkerStartup {
             mesh_ingress_key,
             mesh_ingress_publisher: None,
             ingress_forwarder: None,
+            egress_status: Default::default(),
             host_port_commands: None,
             mesh_transport: None,
         }
@@ -2523,6 +2526,7 @@ fn start_ingress_forwarder(
         process_wait_descriptors,
         vm_id,
         generation,
+        worker.egress_status.clone(),
     )));
     Ok(())
 }
@@ -2596,6 +2600,7 @@ struct HostPortIngress {
     commands: tokio::sync::mpsc::Receiver<HostPortCommand>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_ingress_forwarder(
     mut control: tokio::net::UnixStream,
     mesh_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
@@ -2604,6 +2609,7 @@ async fn run_ingress_forwarder(
     process_wait_descriptors: Vec<(HostPortDependency, OwnedFd)>,
     vm_id: Uuid,
     generation: u64,
+    egress: egress_status::EgressStatusCell,
 ) -> Result<(), RunnerError> {
     let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(HOST_PORT_ACCEPT_QUEUE);
     let (failed_tx, mut failed_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2671,15 +2677,7 @@ async fn run_ingress_forwarder(
                     .checked_add(1)
                     .ok_or(RunnerError::IngressControl)?;
             }
-            readable = control.readable() => {
-                readable.map_err(|_| RunnerError::IngressControl)?;
-                let mut unexpected = [0_u8; 1];
-                match control.try_read(&mut unexpected) {
-                    Ok(0) | Ok(_) => return Err(RunnerError::IngressControl),
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(_) => return Err(RunnerError::IngressControl),
-                }
-            }
+            readable = control.readable() => egress.read_from(&control, readable)?,
             failed = failed_rx.recv() => {
                 let port = failed.ok_or(RunnerError::IngressControl)?;
                 if acceptors.contains_key(&port) {
@@ -5993,6 +5991,7 @@ mod tests {
             mesh_ingress_key: None,
             mesh_ingress_publisher: None,
             ingress_forwarder: None,
+            egress_status: Default::default(),
             host_port_commands: None,
             mesh_transport: Some(MeshTransportProcess {
                 child: mesh_child,
@@ -6241,6 +6240,7 @@ mod tests {
             ],
             vm_id,
             1,
+            Default::default(),
         ));
 
         broker.signal(Signal::KILL).unwrap();
@@ -6328,6 +6328,7 @@ mod tests {
             ],
             Uuid::new_v4(),
             1,
+            Default::default(),
         ));
         tokio::time::sleep(Duration::from_millis(100)).await;
         if abort {
@@ -6403,6 +6404,7 @@ mod tests {
             ],
             vm_id,
             1,
+            Default::default(),
         ));
         let send = |add: Vec<ReservedHostPort>, remove: Vec<u16>| {
             let commands = commands.clone();

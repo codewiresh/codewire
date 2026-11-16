@@ -5,8 +5,8 @@
 //! request instead of every session.
 
 use std::os::fd::OwnedFd;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::OwnedSemaphorePermit;
@@ -161,19 +161,68 @@ async fn drain_late_answer(mut session: CheckedOut, late: LateAnswer) {
     }
 }
 
+/// The client's late answers: how many requests were refused because the
+/// broker's answer missed its deadline, and since when it has been refusing.
+#[derive(Debug, Default)]
+pub(super) struct LateAnswers {
+    count: AtomicU64,
+    refusing_since: Mutex<Option<Instant>>,
+}
+
+/// What a client reports about its late answers (#4965): how many in all,
+/// and how long it has been refusing, while no request since has been
+/// answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LateAnswerStatus {
+    pub late_answers: u64,
+    pub refusing_for: Option<Duration>,
+}
+
 impl BrokerIpcClient {
     /// Requests refused because the broker's answer missed its deadline, for
     /// the refusal log (#4948).
     pub fn late_answers(&self) -> u64 {
-        self.late_answers.load(Ordering::Relaxed)
+        self.late.count.load(Ordering::Relaxed)
     }
 
+    /// The late answers and how long the client has been refusing, for the
+    /// owner's "egress unavailable" line (#4965).
+    pub fn late_answer_status(&self) -> LateAnswerStatus {
+        let refusing_since = *self
+            .late
+            .refusing_since
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        LateAnswerStatus {
+            late_answers: self.late_answers(),
+            refusing_for: refusing_since.map(|since| since.elapsed()),
+        }
+    }
+
+    /// Count a late answer, and note when refusing began. An answer in time,
+    /// whatever it says, ends it; a session's own failure is neither.
     pub(super) fn count_late<T>(
         &self,
         result: Result<T, BrokerIpcError>,
     ) -> Result<T, BrokerIpcError> {
-        if matches!(result, Err(BrokerIpcError::Late)) {
-            self.late_answers.fetch_add(1, Ordering::Relaxed);
+        let late = matches!(result, Err(BrokerIpcError::Late));
+        if late {
+            self.late.count.fetch_add(1, Ordering::Relaxed);
+        }
+        let answered = matches!(
+            result,
+            Ok(_)
+                | Err(BrokerIpcError::Denied
+                    | BrokerIpcError::RemoteUnavailable
+                    | BrokerIpcError::RemoteMalformed)
+        );
+        if late || answered {
+            let mut since = self
+                .late
+                .refusing_since
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *since = late.then(|| since.unwrap_or_else(Instant::now));
         }
         result
     }

@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use codewire_egress_broker::DnsRecordFamily;
 use codewire_egress_broker::ipc::{
     BROKER_IPC_KEY_LEN, BROKER_IPC_SESSIONS, BrokerIpcBinding, BrokerIpcClient,
-    BrokerIpcDnsResponse, BrokerIpcError, BrokerIpcKey,
+    BrokerIpcDnsResponse, BrokerIpcError, BrokerIpcKey, LateAnswerStatus,
 };
 use codewire_egress_policy::PolicyDigest;
 use codewire_netstack::{DnsAnswer, DnsQuestion, DnsRecordType};
@@ -62,7 +62,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(test)]
 use tokio::sync::Mutex;
 
+mod control;
 mod host_session;
+
+use control::run_ingress_control;
+pub(crate) use control::{LATE_STATUS_FRAME_LEN, LateStatusFrame};
 
 pub use host_session::run_host_session;
 use host_session::run_host_session_with_ingress;
@@ -565,6 +569,10 @@ impl IpcEgressBroker {
 
 #[async_trait]
 impl EgressBroker for IpcEgressBroker {
+    fn late_answer_status(&self) -> Option<LateAnswerStatus> {
+        Some(self.client.late_answer_status())
+    }
+
     async fn authorize_tcp(&self, flow: TcpFlow) -> io::Result<()> {
         let destination = Self::admit_guest_flow(flow)?;
         self.client
@@ -894,6 +902,10 @@ async fn run_prepared_product_worker<B: EgressBroker>(
         session.mesh_ingress_ports,
         vm_id,
         generation,
+        Arc::new({
+            let broker = Arc::clone(&broker);
+            move || broker.late_answer_status()
+        }),
     ));
     let session = run_host_session_with_ingress(
         network,
@@ -931,69 +943,6 @@ fn publish_product_worker_status(
         .ok_or_else(|| io::Error::other("network worker status was already published"))?
         .send(message)
         .map_err(|_| io::Error::other("network worker status channel closed"))
-}
-
-async fn run_ingress_control(
-    control: tokio::net::UnixStream,
-    status: oneshot::Receiver<&'static [u8]>,
-    inbound: mpsc::Sender<InboundGuestStream>,
-    mesh_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
-    mesh_ingress_ports: Vec<u16>,
-    vm_id: Uuid,
-    generation: u64,
-) -> Result<(), NetworkWorkerError> {
-    let status = status.await.map_err(|_| NetworkWorkerError::StatusIo)?;
-    write_worker_control_descriptor(control.as_raw_fd(), status)
-        .map_err(|_| NetworkWorkerError::StatusIo)?;
-    if status != WORKER_READY_MESSAGE {
-        return Err(NetworkWorkerError::Protocol);
-    }
-
-    let mut mesh_receiver = MeshIngressControlReceiver::new(vm_id, generation, &mesh_ingress_ports)
-        .map_err(|_| NetworkWorkerError::Protocol)?;
-    loop {
-        let mut frame = [0_u8; MESH_INGRESS_CONTROL_FRAME_LEN];
-        read_worker_control_exact(&control, &mut frame).await?;
-        if !is_mesh_ingress_control_frame(&frame) {
-            return Err(NetworkWorkerError::Protocol);
-        }
-        let frame = mesh_receiver
-            .decode(&frame, &mesh_key)
-            .map_err(|_| NetworkWorkerError::Protocol)?;
-        let descriptor = receive_mesh_ingress_descriptor(&control).await?;
-        let guest_port = frame.binding.guest_port;
-        let stream =
-            transferred_stream(descriptor).map_err(|_| NetworkWorkerError::InheritedDescriptor)?;
-        inbound
-            .send(InboundGuestStream {
-                guest_port,
-                stream: Box::pin(stream),
-            })
-            .await
-            .map_err(|_| NetworkWorkerError::Engine)?;
-    }
-}
-
-async fn read_worker_control_exact(
-    control: &tokio::net::UnixStream,
-    mut bytes: &mut [u8],
-) -> Result<(), NetworkWorkerError> {
-    // Tokio's AsyncRead implementation for UnixStream uses recvfrom(2), which
-    // this worker intentionally denies. Keep that confinement boundary and use
-    // the already-audited read(2) helper for this fixed-size control record.
-    while !bytes.is_empty() {
-        let read = control
-            .async_io(Interest::READABLE, || {
-                read_worker_bytes(control.as_raw_fd(), bytes)
-            })
-            .await
-            .map_err(|_| NetworkWorkerError::FrameIo)?;
-        if read == 0 {
-            return Err(NetworkWorkerError::FrameIo);
-        }
-        bytes = &mut bytes[read..];
-    }
-    Ok(())
 }
 
 async fn run_prepared_worker<B: EgressBroker>(
@@ -1854,6 +1803,7 @@ mod tests {
             Vec::new(),
             vm_id,
             generation,
+            Arc::new(|| None),
         ));
         status_tx.send(WORKER_READY_MESSAGE).unwrap();
         let mut ready = [0_u8; WORKER_READY_MESSAGE.len()];
@@ -1891,6 +1841,7 @@ mod tests {
             vec![guest_port],
             vm_id,
             generation,
+            Arc::new(|| None),
         ));
         status_tx.send(WORKER_READY_MESSAGE).unwrap();
         let mut ready = [0_u8; WORKER_READY_MESSAGE.len()];

@@ -79,6 +79,13 @@ pub trait EgressBroker: Send + Sync + 'static {
 
     /// Resolve one already-parsed canonical DNS question.
     async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<BrokerDnsAnswer>;
+
+    /// Requests refused because the broker's answer missed its deadline, and
+    /// how long it has refused (#4965); `None` for a broker with no deadline
+    /// of its own.
+    fn late_answer_status(&self) -> Option<codewire_egress_broker::ipc::LateAnswerStatus> {
+        None
+    }
 }
 
 #[derive(Debug, Default)]

@@ -902,6 +902,8 @@ message Environment {
   // How the process whose exit failed the environment closed ended, read
   // from its runner while it still reports error_code (#4953).
   RunnerExit runner_exit = 29;
+  // Read from the running VM's runner when the environment is shown (#4965).
+  EgressUnavailable egress_unavailable = 30;
 }
 
 message ListEnvironmentsRequest {}
@@ -1014,6 +1016,17 @@ message RunnerInfo {
   // How the process whose exit set error_code ended. Unset for every other
   // error and state (#4953).
   RunnerExit exit = 7;
+  EgressUnavailable egress_unavailable = 8;
+}
+
+// The VM's egress broker is past its deadline, so its network worker refuses
+// each request on time (#4965): set from the first refusal until a request
+// is answered again.
+message EgressUnavailable {
+  // Requests refused because the broker answered late, in all.
+  uint64 late_answers = 1;
+  // When the refusing began.
+  int64 since_unix_ms = 2;
 }
 
 // How one of a runner's processes (the VMM or a sidecar) ended.

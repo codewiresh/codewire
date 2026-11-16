@@ -430,9 +430,10 @@ rule.
 
 ## `egress-late-answer`: a late answer refuses only its own request
 
-Issue: #4948.
+Issues: #4948, #4965.
 
-- **Entry points:** every lookup and connection a local VM makes.
+- **Entry points:** every lookup and connection a local VM makes;
+  `cw --local info` and `cw doctor` while the broker is late.
 - **States to exercise:**
   - the egress broker paused for longer than the network worker's 8 s
     deadline while a lookup waits, then while a connection waits;
@@ -455,11 +456,15 @@ Issue: #4948.
 - **Proof:**
   - while the broker is paused, each lookup and connection fails after the
     8 s deadline instead of hanging, and nothing is reached;
+  - while the broker is paused, after the first refused request, `cw info`
+    shows `Egress: unavailable for …`, naming the egress broker as past its
+    deadline and `cw --local stop` then `cw --local start` as what restarts
+    it. `cw doctor` names the VM the same way;
   - after `kill -CONT`, the next lookup answers, `curl` prints `200`, and
-    `cw info` reads `running`, with no restart;
-  - paused for good, requests keep failing and the VM stays `running`;
-  - the late answers are counted for the refusal log (no command yet to read
-    the count, #3999).
+    `cw info` reads `running` with no egress line, with no restart;
+  - paused for good, requests keep failing, the VM stays `running`, and the
+    time in the egress line grows;
+  - the same count feeds the refusal log (#3999).
 - **Gotchas:** the guest's resolver retries a failed lookup, so `getent`'s
   total time is a multiple of the deadline.
 - **Observed:** not yet observed.

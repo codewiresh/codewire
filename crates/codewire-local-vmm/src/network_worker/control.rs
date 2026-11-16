@@ -1,0 +1,253 @@
+//! The worker's side of its control socket once it is ready: the runner's
+//! Mesh ingress frames in, and the egress broker's late answers out (#4965).
+
+use super::*;
+
+/// How often the worker looks at the broker's late answers. A frame goes out
+/// only when the count rose or requests are answered again, so at most one a
+/// second while the broker stays late.
+const LATE_STATUS_INTERVAL: Duration = Duration::from_secs(1);
+
+const LATE_STATUS_MAGIC: &[u8; 8] = b"CWNETWL1";
+
+/// The broker's late answers, as the worker reports them; `None` for a
+/// broker with no deadline of its own.
+pub(super) type LateStatus = Arc<dyn Fn() -> Option<LateAnswerStatus> + Send + Sync>;
+
+/// One late-answer frame: the magic, the count, and how long the broker has
+/// been refusing in milliseconds plus one, or 0 once requests are answered
+/// again.
+pub(crate) const LATE_STATUS_FRAME_LEN: usize = 24;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LateStatusFrame {
+    pub(crate) late_answers: u64,
+    pub(crate) refusing_for: Option<Duration>,
+}
+
+impl LateStatusFrame {
+    pub(crate) fn encode(self) -> [u8; LATE_STATUS_FRAME_LEN] {
+        let refusing = self.refusing_for.map_or(0, |refusing| {
+            u64::try_from(refusing.as_millis())
+                .unwrap_or(u64::MAX - 1)
+                .min(u64::MAX - 1)
+                + 1
+        });
+        let mut frame = [0_u8; LATE_STATUS_FRAME_LEN];
+        frame[..8].copy_from_slice(LATE_STATUS_MAGIC);
+        frame[8..16].copy_from_slice(&self.late_answers.to_be_bytes());
+        frame[16..].copy_from_slice(&refusing.to_be_bytes());
+        frame
+    }
+
+    /// The frame `bytes` holds, or `None` for anything else.
+    pub(crate) fn decode(bytes: &[u8; LATE_STATUS_FRAME_LEN]) -> Option<Self> {
+        if &bytes[..8] != LATE_STATUS_MAGIC {
+            return None;
+        }
+        let late_answers = u64::from_be_bytes(bytes[8..16].try_into().ok()?);
+        let refusing = u64::from_be_bytes(bytes[16..].try_into().ok()?);
+        Some(Self {
+            late_answers,
+            refusing_for: refusing.checked_sub(1).map(Duration::from_millis),
+        })
+    }
+}
+
+/// What the worker last told the runner.
+#[derive(Debug, Default)]
+struct LateReport {
+    late_answers: u64,
+    refusing: bool,
+}
+
+impl LateReport {
+    /// The frame to send for `status`: when the count rose while refusing,
+    /// or once refusing ended.
+    fn next(&mut self, status: Option<LateAnswerStatus>) -> Option<LateStatusFrame> {
+        let status = status?;
+        let refusing = status.refusing_for.is_some();
+        let send =
+            (refusing && status.late_answers != self.late_answers) || (self.refusing && !refusing);
+        self.late_answers = status.late_answers;
+        self.refusing = refusing;
+        send.then_some(LateStatusFrame {
+            late_answers: status.late_answers,
+            refusing_for: status.refusing_for,
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_ingress_control(
+    control: tokio::net::UnixStream,
+    status: oneshot::Receiver<&'static [u8]>,
+    inbound: mpsc::Sender<InboundGuestStream>,
+    mesh_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
+    mesh_ingress_ports: Vec<u16>,
+    vm_id: Uuid,
+    generation: u64,
+    late: LateStatus,
+) -> Result<(), NetworkWorkerError> {
+    let status = status.await.map_err(|_| NetworkWorkerError::StatusIo)?;
+    write_worker_control_descriptor(control.as_raw_fd(), status)
+        .map_err(|_| NetworkWorkerError::StatusIo)?;
+    if status != WORKER_READY_MESSAGE {
+        return Err(NetworkWorkerError::Protocol);
+    }
+
+    let mut mesh_receiver = MeshIngressControlReceiver::new(vm_id, generation, &mesh_ingress_ports)
+        .map_err(|_| NetworkWorkerError::Protocol)?;
+    let mut tick = tokio::time::interval(LATE_STATUS_INTERVAL);
+    let mut reported = LateReport::default();
+    let mut frame = [0_u8; MESH_INGRESS_CONTROL_FRAME_LEN];
+    let mut filled = 0;
+    loop {
+        // Readiness and the tick are both cancel-safe, and a Mesh frame's
+        // bytes are kept across wakes, so a frame is always read whole.
+        let ticked = tokio::select! {
+            readable = control.readable() => {
+                readable.map_err(|_| NetworkWorkerError::FrameIo)?;
+                false
+            }
+            _ = tick.tick() => true,
+        };
+        if ticked {
+            if let Some(status) = reported.next(late()) {
+                write_control_bytes(&control, &status.encode()).await?;
+            }
+            continue;
+        }
+        // Tokio's reads use recvfrom(2), which this worker denies; read(2)
+        // is the audited path for its fixed-size control records.
+        let read = control.try_io(Interest::READABLE, || {
+            read_worker_bytes(control.as_raw_fd(), &mut frame[filled..])
+        });
+        match read {
+            Ok(0) => return Err(NetworkWorkerError::FrameIo),
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(_) => return Err(NetworkWorkerError::FrameIo),
+        }
+        if filled < frame.len() {
+            continue;
+        }
+        filled = 0;
+        if !is_mesh_ingress_control_frame(&frame) {
+            return Err(NetworkWorkerError::Protocol);
+        }
+        let frame = mesh_receiver
+            .decode(&frame, &mesh_key)
+            .map_err(|_| NetworkWorkerError::Protocol)?;
+        let descriptor = receive_mesh_ingress_descriptor(&control).await?;
+        let guest_port = frame.binding.guest_port;
+        let stream =
+            transferred_stream(descriptor).map_err(|_| NetworkWorkerError::InheritedDescriptor)?;
+        inbound
+            .send(InboundGuestStream {
+                guest_port,
+                stream: Box::pin(stream),
+            })
+            .await
+            .map_err(|_| NetworkWorkerError::Engine)?;
+    }
+}
+
+/// Write `bytes` with write(2), as the worker's status messages are.
+async fn write_control_bytes(
+    control: &tokio::net::UnixStream,
+    mut bytes: &[u8],
+) -> Result<(), NetworkWorkerError> {
+    while !bytes.is_empty() {
+        let sent = control
+            .async_io(Interest::WRITABLE, || {
+                send_worker_bytes(control.as_raw_fd(), bytes)
+            })
+            .await
+            .map_err(|_| NetworkWorkerError::StatusIo)?;
+        if sent == 0 {
+            return Err(NetworkWorkerError::StatusIo);
+        }
+        bytes = &bytes[sent..];
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_late_status_frame_round_trips_and_nothing_else_decodes() {
+        for frame in [
+            LateStatusFrame {
+                late_answers: 3,
+                refusing_for: Some(Duration::from_millis(12_500)),
+            },
+            LateStatusFrame {
+                late_answers: 3,
+                refusing_for: Some(Duration::ZERO),
+            },
+            LateStatusFrame {
+                late_answers: 3,
+                refusing_for: None,
+            },
+        ] {
+            assert_eq!(LateStatusFrame::decode(&frame.encode()), Some(frame));
+        }
+        let mut other = LateStatusFrame {
+            late_answers: 1,
+            refusing_for: None,
+        }
+        .encode();
+        other[0] ^= 1;
+        assert_eq!(LateStatusFrame::decode(&other), None);
+    }
+
+    /// A frame when the count rises while refusing, and one when refusing
+    /// ends; nothing while it is unchanged, or for a broker with no deadline.
+    #[test]
+    fn the_worker_reports_only_a_change() {
+        let refusing = |late_answers, seconds| {
+            Some(LateAnswerStatus {
+                late_answers,
+                refusing_for: Some(Duration::from_secs(seconds)),
+            })
+        };
+        let mut report = LateReport::default();
+        assert_eq!(report.next(None), None);
+        assert_eq!(
+            report.next(Some(LateAnswerStatus {
+                late_answers: 0,
+                refusing_for: None
+            })),
+            None
+        );
+        assert_eq!(
+            report.next(refusing(1, 0)).map(|frame| frame.late_answers),
+            Some(1)
+        );
+        assert_eq!(report.next(refusing(1, 1)), None);
+        assert_eq!(
+            report.next(refusing(4, 2)).map(|frame| frame.late_answers),
+            Some(4)
+        );
+        assert_eq!(
+            report.next(Some(LateAnswerStatus {
+                late_answers: 4,
+                refusing_for: None
+            })),
+            Some(LateStatusFrame {
+                late_answers: 4,
+                refusing_for: None
+            })
+        );
+        assert_eq!(
+            report.next(Some(LateAnswerStatus {
+                late_answers: 4,
+                refusing_for: None
+            })),
+            None
+        );
+    }
+}

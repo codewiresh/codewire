@@ -67,6 +67,15 @@ pub(super) fn observed_exit(exit: ExitClass) -> Option<ObservedExit> {
     })
 }
 
+impl super::RunnerState {
+    /// How the failed process ended, while the runner is still in the error
+    /// its exit gave.
+    pub(super) fn reported_exit(&self) -> Option<v1::RunnerExit> {
+        self.exit
+            .and_then(|exit| exit.reported_for(self.error_code))
+    }
+}
+
 impl ObservedExit {
     /// As `RunnerInfo` carries it, while the runner's error code is `code`.
     pub(super) fn reported_for(self, code: Option<&'static str>) -> Option<v1::RunnerExit> {

@@ -15,7 +15,7 @@ mod metadata;
 mod network_policies;
 mod operation_log;
 mod retained_images;
-mod runner_exit;
+mod runner_report;
 mod runtime;
 mod snapshots;
 mod sources;
@@ -6303,7 +6303,7 @@ impl LocalSupervisorService for SupervisorRpc {
         let environment = self.supervisor.core().environment_proto(&name);
         let environment = environment.map_err(Status::from)?;
         Ok(Response::new(
-            runner_exit::with_runner_exit(&self.supervisor, environment).await,
+            runner_report::with_runner_report(&self.supervisor, environment).await,
         ))
     }
 

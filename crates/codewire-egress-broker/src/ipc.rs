@@ -18,7 +18,7 @@ use std::io::{self, IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream as StdTcpStream};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 
@@ -46,6 +46,8 @@ use crate::{
 };
 
 mod late;
+
+pub use late::LateAnswerStatus;
 
 use late::{LateAnswer, LateOperation};
 
@@ -383,7 +385,7 @@ pub struct BrokerIpcClient {
     admission: Arc<SessionPool>,
     dns: Arc<SessionPool>,
     connect: Arc<SessionPool>,
-    late_answers: AtomicU64,
+    late: late::LateAnswers,
 }
 
 impl BrokerIpcClient {
@@ -417,7 +419,7 @@ impl BrokerIpcClient {
             admission: Arc::new(SessionPool::new(admission)),
             dns: Arc::new(SessionPool::new(dns)),
             connect: Arc::new(SessionPool::new(connect)),
-            late_answers: AtomicU64::new(0),
+            late: late::LateAnswers::default(),
         })
     }
 
@@ -2601,6 +2603,10 @@ rules:
         };
         assert_eq!(refused.unwrap_err(), BrokerIpcError::Late);
         assert_eq!(client.late_answers(), 1);
+        // Refusing until a request is answered again (#4965).
+        let status = client.late_answer_status();
+        assert_eq!(status.late_answers, 1);
+        assert!(status.refusing_for.is_some(), "{status:?}");
         assert_eq!(client.connect.len(), BROKER_IPC_CONNECT_SESSIONS);
 
         answer.notify_one();
@@ -2622,6 +2628,14 @@ rules:
         assert_eq!(
             client.connect_tcp(requested).await.unwrap_err(),
             BrokerIpcError::RemoteUnavailable
+        );
+        // An answer in time, even a refusal, ends the refusing; the count stays.
+        assert_eq!(
+            client.late_answer_status(),
+            LateAnswerStatus {
+                late_answers: 1,
+                refusing_for: None
+            }
         );
         drop(others);
         let _server_stream = server.await.unwrap();

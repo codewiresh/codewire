@@ -2204,8 +2204,8 @@ mod tests {
             state: v1::EnvironmentState::Running as i32,
             artifact_generation: "d".repeat(64),
             error_code: String::new(),
-            exit: None,
             cw_runtime_catalog_generation: binding.bootstrap_catalog_sha256.clone(),
+            ..Default::default()
         };
         let service = ObservedRunnerFixture {
             protocol: Arc::new(std::sync::atomic::AtomicU32::new(

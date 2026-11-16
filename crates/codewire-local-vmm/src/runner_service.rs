@@ -82,6 +82,7 @@ pub struct RunnerEntrypointConfig {
 
 #[cfg(target_os = "linux")]
 mod checkpoint;
+mod egress_status;
 mod exit_cause;
 mod stage_log;
 mod start_request;
@@ -533,8 +534,8 @@ impl RunnerEvents {
             generation,
             artifact_generation: artifact_generation.clone(),
             error_code: String::new(),
-            exit: None,
             cw_runtime_catalog_generation: String::new(),
+            ..Default::default()
         };
         let initial = v1::RunnerEvent {
             sequence: 1,
@@ -590,10 +591,10 @@ impl RunnerEvents {
                 generation,
                 artifact_generation: self.artifact_generation.clone(),
                 error_code: error_code.unwrap_or_default().to_owned(),
-                exit: None,
                 cw_runtime_catalog_generation: cw_runtime_catalog_generation
                     .unwrap_or_default()
                     .to_owned(),
+                ..Default::default()
             }),
             stage: stage as i32,
             guest_sequence: guest.map_or(0, |update| update.sequence),
@@ -846,9 +847,8 @@ impl RunnerState {
             generation: self.generation,
             artifact_generation: self.artifact_generation.clone(),
             error_code: self.error_code.unwrap_or_default().to_owned(),
-            exit: self
-                .exit
-                .and_then(|exit| exit.reported_for(self.error_code)),
+            exit: self.reported_exit(),
+            egress_unavailable: self.egress_unavailable(),
             cw_runtime_catalog_generation: self
                 .cw_runtime_catalog_generation()
                 .unwrap_or_default()

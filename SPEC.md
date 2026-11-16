@@ -435,8 +435,12 @@ stop and start restores egress. The state keeps which process ended and how:
 own exit codes define it (#4953). An answer from the broker that misses the
 worker's deadline refuses only its own lookup or connection: the worker keeps
 the session until the late answer arrives and checks it, so a slow resolver or
-a stalled broker never ends the broker or fails the environment (#4948). A
-malformed or unauthenticated answer still does. Published ports listen on
+a stalled broker never ends the broker or fails the environment (#4948). While
+the broker is past that deadline the VM stays `running` with egress refused,
+and `cw info` and `cw doctor` say so, with how long it has refused, until a
+request is answered again; `cw info` names stopping and starting the VM, which
+restarts the broker, as the next step (#4965). A malformed or unauthenticated
+answer still ends the broker. Published ports listen on
 `127.0.0.1` only. A
 local VM joins Codewire Mesh only when a network is selected at creation; the
 host owns the Mesh identity and the VM sees only admitted streams for its
