@@ -22,7 +22,7 @@ Updated 2026-11-16.
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
-| `sandbox-setup-retry` | cw-snapshots | not yet observed | not yet observed |
+| `sandbox-setup-retry` | cw-snapshots | observed in part 2026-11-16 (CLI only) | not yet observed |
 | `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-14 (#4460) | not yet observed |
 | `sandbox-cp-resume` | cw-workspace-mount | observed 2026-11-13 (#4373) | not yet observed; v0.4.17 lacks it |
 | `sandbox-cp-download` | cw-workspace-mount | observed 2026-11-13 (#4394) | not yet observed |
@@ -444,8 +444,17 @@ Issue: #4767.
   - A Retry runs the failed step's own command again: install and startup scripts should be safe to rerun.
   - New terminals wait while the Retry's setup runs, as they do during the first setup.
 - **Observed:**
+  - Dev, 2026-11-16, in part: source 54ed105a2, the CLI only, as the Dev smoke identity with the released `cw` v0.4.21. Evidence: #4767's comment of that date.
+    - `cw create --cloud --install 'test -f /tmp/setup-walk-fixed'` stopped at "Running install command: workspace exec exited 1" and exited 1.
+    - `cw info` showed the Sandbox running, with `setup_error` "install: workspace exec exited 1".
+    - `cw exec` ran in it at once.
+    - After `cw stop` and `cw start`, `cw exec` ran again and the error stayed recorded.
   - Dev, 2026-11-16 (cw-cli), `cw` built from #5028 at 49a8bb95b, smoke identity: after an install command failed, `cw run --in SANDBOX --no-tty -- echo ran` printed `! Setup failed at Running install command: workspace exec exited 1`, started the session and printed `ran` (exit 0). `cw shell SANDBOX` printed the same line and opened the shell, which ran a piped command. Evidence: #5028.
-  - Not yet observed: `cw`'s refusal while setup runs, the dashboard banner, and Retry.
+  - Kind, 2026-11-16: a local cluster built from #5053's branch at 0c7e484d8 (with #4846), the dashboard as the synthetic owner. Evidence: #4767's Kind comment of that date.
+    - An install command failed: the danger banner read "Setup failed at Running install command: workspace exec exited 1", with a terminal open. After the cause was fixed in that terminal, Retry setup ran install again, and only install, then setup completed and the banner cleared.
+    - A clone of a private repository on a forge other than GitHub, with no credential, failed with #5053's sentence naming the host. Retry setup asked "Retry cloning?"; Cancel left the failure; "Delete and retry" showed "Retrying setup" and failed again the same way.
+  - Not yet observed: `cw`'s refusal while setup runs; on Dev, the dashboard banner and Retry setup (a dashboard walk runs on Dev only in the protected smoke, which gains this step in #5065).
+  - Production: not yet; v0.4.21 lacks Retry setup.
 
 ## `sandbox-cp-upload`: copy a file into a sandbox
 
