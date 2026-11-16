@@ -8,9 +8,10 @@
 //!   `DELETE … RETURNING` by digest.
 //! - **refresh tokens** live in `oidc_refresh_tokens`; `consume_refresh`
 //!   rotates via `DELETE … RETURNING` and records the digest in
-//!   `oidc_consumed_refresh_tokens`, so a rotated token presented again
-//!   revokes that user's tokens for the client. `get_refresh` reads
-//!   non-destructively.
+//!   `oidc_consumed_refresh_tokens`, so a rotated token presented again is
+//!   recognised and refused, and with reuse revocation on also revokes that
+//!   user's tokens for the client. Each outcome is counted in
+//!   `crate::refresh_metrics`. `get_refresh` reads non-destructively.
 //! - **access tokens** are the source of truth in `oidc_access_tokens`
 //!   (carrying scopes + client for userinfo/introspection). Product API
 //!   auth resolves flavor-2 bearers against the same table
@@ -23,6 +24,7 @@
 //! only in memory and in the one-time token response; every lookup hashes
 //! the presented token first. `revoke` clears both tables by digest.
 
+use crate::refresh_metrics::{RefreshOutcome, refresh_grant};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use codewire_oidc::{
@@ -284,6 +286,7 @@ impl TokenStore for PgTokenStore {
             .await
             .map_err(StoreError::new)?;
             tx.commit().await.map_err(StoreError::new)?;
+            refresh_grant(RefreshOutcome::Rotated, &client_id);
             return Ok(Some(RefreshGrant {
                 subject: Subject(user_id),
                 client_id,
@@ -303,7 +306,7 @@ impl TokenStore for PgTokenStore {
         .fetch_optional(&mut *tx)
         .await
         .map_err(StoreError::new)?;
-        if let Some((client_id, user_id, rotated_secs_ago)) = rotated {
+        let replayed_client = if let Some((client_id, user_id, rotated_secs_ago)) = rotated {
             if self.revoke_reused {
                 for statement in [
                     "DELETE FROM oidc_refresh_tokens WHERE user_id = $1 AND client_id = $2",
@@ -324,8 +327,19 @@ impl TokenStore for PgTokenStore {
                 revoked = self.revoke_reused,
                 "a rotated refresh token was presented again"
             );
-        }
+            Some(client_id)
+        } else {
+            None
+        };
         tx.commit().await.map_err(StoreError::new)?;
+        if let Some(client_id) = replayed_client {
+            let outcome = if self.revoke_reused {
+                RefreshOutcome::Revoked
+            } else {
+                RefreshOutcome::Replayed
+            };
+            refresh_grant(outcome, &client_id);
+        }
         Ok(None)
     }
 

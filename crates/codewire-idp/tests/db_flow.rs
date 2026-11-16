@@ -5829,9 +5829,8 @@ async fn forget_mail_counts(pool: &PgPool, emails: &[&str]) {
     .unwrap();
 }
 
-/// One series' value in the process's Prometheus exposition, read the way
-/// Prometheus reads it, or 0 before the series exists (#3297 item 13).
-async fn metric(series: &str) -> f64 {
+/// The process's Prometheus exposition, read the way Prometheus reads it.
+async fn exposition() -> String {
     use tower::ServiceExt;
     let response = codewire_server_core::metrics::router("idp-test")
         .oneshot(
@@ -5844,11 +5843,31 @@ async fn metric(series: &str) -> f64 {
     let body = axum::body::to_bytes(response.into_body(), 1 << 22)
         .await
         .unwrap();
-    String::from_utf8(body.to_vec())
-        .unwrap()
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
+/// One series' value in the exposition, or 0 before the series exists
+/// (#3297 item 13).
+async fn metric(series: &str) -> f64 {
+    exposition()
+        .await
         .lines()
         .find_map(|line| line.strip_prefix(series)?.trim().parse().ok())
         .unwrap_or(0.0)
+}
+
+/// The refresh grants counted for one `client` label, as `[rotated,
+/// replayed, revoked]`, each 0 before its series exists.
+async fn refresh_grants(client: &str) -> [u64; 3] {
+    let text = exposition().await;
+    ["rotated", "replayed", "revoked"].map(|outcome| {
+        let series = format!(
+            "codewire_idp_refresh_grants_total{{client=\"{client}\",outcome=\"{outcome}\"}}"
+        );
+        text.lines()
+            .find_map(|line| line.strip_prefix(series.as_str())?.trim().parse().ok())
+            .unwrap_or(0)
+    })
 }
 
 async fn sess_req(
@@ -6382,7 +6401,8 @@ async fn expired_oidc_rows(pool: PgPool) {
 
 /// A rotated refresh token presented again is refused. With revocation on,
 /// it also revokes every token that user holds for that client, and only for
-/// that client; an expired token is refused without revoking anything.
+/// that client; an expired token is refused without revoking anything. Each
+/// recognised token is counted once by outcome and client.
 #[tokio::test]
 async fn reused_refresh_token_revokes_the_users_tokens_for_its_client() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
@@ -6584,6 +6604,156 @@ async fn refresh_reuse(pool: PgPool) {
         remembered,
         "a never-expiring token's record has no bounded lifetime"
     );
+
+    refresh_grants_counted(&pool).await;
+}
+
+fn refresh_config(revoke_reused_refresh_tokens: bool) -> IdpConfig {
+    IdpConfig {
+        issuer: "https://idp.codewire.test".into(),
+        frontend_url: "https://app.codewire.test".into(),
+        turnstile_secret_key: String::new(),
+        turnstile_bypass_email: String::new(),
+        signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
+        revoke_reused_refresh_tokens,
+        scopes_supported: vec!["openid".into()],
+    }
+}
+
+/// Refresh grants through the token endpoint's grant, counted in
+/// `codewire_idp_refresh_grants_total` (OIDC-PROVIDER-THREAT-MODEL.md,
+/// "Refresh grant counter"). No other test in this binary refreshes as the
+/// iOS client or as a client outside the first-party set, so these series
+/// move only here and each step's expected counts are exact.
+async fn refresh_grants_counted(pool: &PgPool) {
+    const IOS: &str = IOS_CLIENT;
+    const SCRATCH_CLIENT: &str = "refresh-count-scratch";
+    let mut ios = refresh_grants(IOS).await;
+    let mut other = refresh_grants("other").await;
+    let ios_token = |token: &str| {
+        let token = token.to_owned();
+        let pool = pool.clone();
+        async move {
+            PgTokenStore::new(pool)
+                .store_refresh(
+                    &token,
+                    RefreshGrant {
+                        subject: Subject(USER.into()),
+                        client_id: IOS.into(),
+                        scopes: Scopes(vec!["openid".into()]),
+                    },
+                    3600,
+                )
+                .await
+                .unwrap();
+        }
+    };
+    let reporting = build_provider(
+        pool.clone(),
+        &refresh_config(false),
+        test_signing_keyring(),
+        TEST_CAPABILITY_HMAC_SECRET,
+    )
+    .await
+    .unwrap();
+
+    // A normal refresh is rotated.
+    ios_token("count-ios-1").await;
+    reporting
+        .exchange_refresh_token(IOS, None, "count-ios-1", None)
+        .await
+        .unwrap();
+    ios[0] += 1;
+    assert_eq!(refresh_grants(IOS).await, ios, "a refresh is rotated");
+
+    // With revocation off, the same token again is replayed, and the user's
+    // other iOS token survives it.
+    ios_token("count-ios-live").await;
+    let replay = reporting
+        .exchange_refresh_token(IOS, None, "count-ios-1", None)
+        .await
+        .unwrap_err();
+    assert_eq!(replay.code, ErrorCode::InvalidGrant);
+    ios[1] += 1;
+    assert_eq!(refresh_grants(IOS).await, ios, "a replay is replayed");
+    let store = PgTokenStore::new(pool.clone());
+    assert!(store.get_refresh("count-ios-live").await.unwrap().is_some());
+
+    // A client the IdP doesn't know is refused before any token is read, so
+    // it counts nothing and the token it presented stays live.
+    let unknown = reporting
+        .exchange_refresh_token("refresh-count-unregistered", None, "count-ios-live", None)
+        .await
+        .unwrap_err();
+    assert_eq!(unknown.code, ErrorCode::InvalidClient);
+    assert_eq!(refresh_grants(IOS).await, ios);
+    assert!(store.get_refresh("count-ios-live").await.unwrap().is_some());
+
+    // A token the IdP never issued counts nothing.
+    reporting
+        .exchange_refresh_token(IOS, None, "count-never-issued", None)
+        .await
+        .unwrap_err();
+    assert_eq!(refresh_grants(IOS).await, ios);
+
+    // With revocation on, a replay is revoked, once, and not also replayed.
+    let revoking = build_provider(
+        pool.clone(),
+        &refresh_config(true),
+        test_signing_keyring(),
+        TEST_CAPABILITY_HMAC_SECRET,
+    )
+    .await
+    .unwrap();
+    ios_token("count-ios-2").await;
+    revoking
+        .exchange_refresh_token(IOS, None, "count-ios-2", None)
+        .await
+        .unwrap();
+    ios[0] += 1;
+    assert_eq!(refresh_grants(IOS).await, ios);
+    revoking
+        .exchange_refresh_token(IOS, None, "count-ios-2", None)
+        .await
+        .unwrap_err();
+    ios[2] += 1;
+    assert_eq!(
+        refresh_grants(IOS).await,
+        ios,
+        "a revoking replay is revoked"
+    );
+    assert!(store.get_refresh("count-ios-live").await.unwrap().is_none());
+
+    // Any other registered client counts as `other`; its id is never a label.
+    sqlx::query(
+        "INSERT INTO oidc_clients (id, name, application_type, auth_method, redirect_uris, \
+         grant_types, scopes) VALUES ($1, 'Refresh count scratch', 'native', 'none', \
+         ARRAY[]::text[], ARRAY['refresh_token'], ARRAY['openid'])",
+    )
+    .bind(SCRATCH_CLIENT)
+    .execute(pool)
+    .await
+    .unwrap();
+    store
+        .store_refresh(
+            "count-scratch",
+            RefreshGrant {
+                subject: Subject(USER.into()),
+                client_id: SCRATCH_CLIENT.into(),
+                scopes: Scopes(vec!["openid".into()]),
+            },
+            3600,
+        )
+        .await
+        .unwrap();
+    reporting
+        .exchange_refresh_token(SCRATCH_CLIENT, None, "count-scratch", None)
+        .await
+        .unwrap();
+    other[0] += 1;
+    assert_eq!(refresh_grants("other").await, other);
+    assert_eq!(refresh_grants(IOS).await, ios);
+    assert!(!exposition().await.contains(SCRATCH_CLIENT));
 }
 
 /// Three password-reset and three verification emails an hour reach one

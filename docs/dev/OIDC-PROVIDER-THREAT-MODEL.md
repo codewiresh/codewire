@@ -60,7 +60,7 @@ Endpoints (the library defaults):
 | T1 | Open redirect, redirect URI manipulation | `redirect_uri` must match one of the client's registered URIs exactly. No prefix, substring or port wildcard. Validation is staged: until `client_id` and `redirect_uri` are proven, an error is rendered directly and never redirected to a caller-supplied URI. |
 | T2 | Authorization code interception | PKCE is required for every client. Only `S256` is allowed; `plain` and a missing method are rejected. A code is single-use, lives 60 seconds, and is bound to the client, the redirect URI and the PKCE challenge. |
 | T3 | Authorization code replay | `TokenStore::consume_code` is atomic. The service implements it as `DELETE ... RETURNING` by digest. A second exchange finds nothing and fails with `invalid_grant`. |
-| T4 | Refresh token replay or theft | Refresh tokens rotate: the presented token is consumed atomically and a new one is issued. A rotated token presented again is refused with `invalid_grant` and logged with its age. A token presented by a different client is refused. Handles are stored as SHA-256 digests only. Revoking every refresh and access token the user holds for that client on such a replay is built and off by default (`IDP_REFRESH_REUSE_REVOKES`); turning it on is #4786. |
+| T4 | Refresh token replay or theft | Refresh tokens rotate: the presented token is consumed atomically and a new one is issued. A rotated token presented again is refused with `invalid_grant` and logged with its age. A token presented by a different client is refused. Handles are stored as SHA-256 digests only. Revoking every refresh and access token the user holds for that client on such a replay is built and off by default (`IDP_REFRESH_REUSE_REVOKES`); turning it on is #4786. Every refresh is counted by outcome and client (see [Refresh grant counter](#refresh-grant-counter)). |
 | T5 | CSRF on the login bridge | `state` is returned to the relying party unchanged. Resuming an authorization needs both the opaque authorization request id and the session cookie, which is `HttpOnly; SameSite=Lax`. |
 | T6 | Token substitution, audience confusion | The id_token carries `aud` set to the client id, `iss` set to the configured issuer, and the request's `nonce`. Access tokens are opaque and carry no claims to confuse. A client can introspect only its own tokens. |
 | T7 | Key compromise, weak keys, algorithm confusion | Signing is EdDSA only. The JOSE header pins `alg` to `EdDSA`, and verification uses Ed25519 against the published keys and never an algorithm chosen by the token header. Private key seeds are stored encrypted, bound to the key id and public key. The JWKS can publish several keys, so a key can be replaced without breaking verification of tokens signed by the previous one. |
@@ -86,6 +86,30 @@ count on them until their issues close:
 - request rate limits on the authorization, token and device endpoints of
   the hosted service (T12). They are written and wait to be rolled out,
   on the development environment first.
+
+## Refresh grant counter
+
+`codewire_idp_refresh_grants_total{outcome, client}` counts each refresh
+token the service recognises, once, under exactly one outcome:
+
+| `outcome` | Meaning |
+|---|---|
+| `rotated` | A live token was consumed, so it can't be used again. A new pair follows, unless the grant is then refused because the token belongs to another client or the request asks for wider scopes. |
+| `replayed` | A rotated token was presented again. It was refused and nothing else was revoked, because `IDP_REFRESH_REUSE_REVOKES` is off. |
+| `revoked` | A rotated token was presented again with `IDP_REFRESH_REUSE_REVOKES` on. It was refused and every refresh and access token the user holds for that client was revoked. |
+
+The share of refreshes that replay is `(replayed + revoked)` over the sum
+of all three. A token the service doesn't recognise (never issued, expired,
+or held by a disabled user) isn't counted: no client is known for it, and it
+says nothing about replay.
+
+`client` is the client the token was issued to, as the token row records
+it, never the request's `client_id`. It is `codewire-cli`,
+`codewire-desktop` or `codewire-ios`, and `other` for any other registered
+client, so the label has four values whatever clients exist.
+
+While revocation is off, the counter only reports: `revoked` stays at zero,
+and `replayed` shows how often clients replay before the switch (#4786).
 
 ## Device authorization
 
