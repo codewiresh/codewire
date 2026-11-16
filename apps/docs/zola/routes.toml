@@ -344,6 +344,12 @@ source = "content/reference/openssf.md"
 output = "reference/openssf/index.html"
 
 [[routes]]
+canonical = "/docs/reference/sdks"
+redirect_from = "/docs/reference/sdks/"
+source = "content/reference/sdks.md"
+output = "reference/sdks/index.html"
+
+[[routes]]
 canonical = "/docs/reference/troubleshooting"
 redirect_from = "/docs/reference/troubleshooting/"
 source = "content/reference/troubleshooting.md"

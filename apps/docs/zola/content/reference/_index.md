@@ -1,6 +1,6 @@
 ---
 title: "Reference"
-description: The CLI, codewire.yaml keys, environment statuses, the security model and OpenSSF posture, troubleshooting, frequently asked questions, and the documentation in forms agents read.
+description: The CLI, codewire.yaml keys, the Go SDK, environment statuses, the security model and OpenSSF posture, troubleshooting, frequently asked questions, and the documentation in forms agents read.
 weight: 80
 sort_by: weight
 ---
