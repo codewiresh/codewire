@@ -220,8 +220,12 @@ targets_prepare() {
   [ "${KEEP_JOB_RUNNING:-}" = 1 ] || rm -f "$marker_root/job-running"
 }
 marker_root="$work/marker-root/pr"
+# The archive leg's epoch, as prepare records it; the cases below keep their
+# fixture's archive folder at the current epoch, and the epoch has its own.
+archive_epoch() { printf '1\n' > "$marker_root/targets/archive/.build-once-epoch"; }
 targets_prepare
 mkdir -p "$marker_root/targets/archive"
+archive_epoch
 printf 'kept' > "$marker_root/targets/archive/lib.rlib"
 : > "$marker_root/unfinished"
 targets_prepare
@@ -240,6 +244,7 @@ targets_prepare
 [ ! -e "$marker_root/targets/archive/lib.rlib" ] || fail 'a new folder layout kept the targets'
 grep -q 'the folder layout changed; the target folders are wiped' "$work/prepare.log" || fail 'the layout wipe gave no reason'
 mkdir -p "$marker_root/targets/archive"
+archive_epoch
 printf 'kept' > "$marker_root/targets/archive/lib.rlib"
 rm -f "$marker_root/layout"
 printf 'old-stamp\n' > "$marker_root/lock-stamp"
@@ -249,6 +254,7 @@ targets_prepare
 # and prepare removes the sessions earlier builds left.
 grep -q "^    echo 'CARGO_INCREMENTAL=0'$" "$SCRIPT" || fail 'build runner builds are incremental'
 mkdir -p "$marker_root/targets/archive/debug/incremental/codewire_proto-x/s-1" "$marker_root/targets/archive/debug/deps"
+archive_epoch
 printf 'x' > "$marker_root/targets/archive/debug/incremental/codewire_proto-x/s-1/dep-graph.bin"
 printf 'keep' > "$marker_root/targets/archive/debug/deps/libkeep.rlib"
 targets_prepare
@@ -264,6 +270,28 @@ done
 [ ! -e "$marker_root/targets/stray" ] || fail 'prepare kept an unknown target folder'
 grep -q 'removing the unused target folder stray' "$work/prepare.log" || fail 'the stray folder removal gave no reason'
 
+# A leg's epoch: an archive folder from before it (no epoch file, or an older
+# number) is wiped once, with the reason, and started again at the epoch;
+# the next prepare keeps it, and another leg's folder is never touched.
+rm -rf "$marker_root/targets"
+mkdir -p "$marker_root/targets/archive/debug" "$marker_root/targets/database"
+printf 'old' > "$marker_root/targets/archive/debug/libold.rlib"
+printf 'kept' > "$marker_root/targets/database/lib.rlib"
+targets_prepare
+[ ! -e "$marker_root/targets/archive/debug/libold.rlib" ] || fail 'an archive folder from before its epoch kept its targets'
+grep -q "the archive leg's epoch is now 1; its target folder is wiped" "$work/prepare.log" ||
+  fail 'the epoch wipe gave no reason'
+grep -qx 1 "$marker_root/targets/archive/.build-once-epoch" || fail 'prepare did not record the archive epoch'
+[ -f "$marker_root/targets/database/lib.rlib" ] || fail "the archive epoch wiped another leg's folder"
+mkdir -p "$marker_root/targets/archive/debug"
+printf 'new' > "$marker_root/targets/archive/debug/libnew.rlib"
+targets_prepare
+[ -f "$marker_root/targets/archive/debug/libnew.rlib" ] || fail 'a folder at its epoch was wiped again'
+if grep -q 'epoch is now' "$work/prepare.log"; then fail 'a folder at its epoch was reported wiped'; fi
+printf '0\n' > "$marker_root/targets/archive/.build-once-epoch"
+targets_prepare
+[ ! -e "$marker_root/targets/archive/debug/libnew.rlib" ] || fail 'a folder at an older epoch kept its targets'
+
 # The disk bound: target files no build read for 3 days go; above 65 % of the
 # disk, whole idle leg folders go, least recently used first (a folder with no
 # use mark first), and a leg's desktop folder with it. A mark that names no
@@ -271,6 +299,7 @@ grep -q 'removing the unused target folder stray' "$work/prepare.log" || fail 't
 rm -rf "$marker_root/targets"
 mkdir -p "$marker_root/targets/archive/debug/deps" "$marker_root/targets/database" \
   "$marker_root/targets/features" "$marker_root/targets/database_desktop"
+archive_epoch
 printf 'stale' > "$marker_root/targets/archive/debug/deps/libold.rlib"
 printf 'fresh' > "$marker_root/targets/archive/debug/deps/libnew.rlib"
 touch -a -d '5 days ago' "$marker_root/targets/archive/debug/deps/libold.rlib"
@@ -437,6 +466,7 @@ finish_folder() {
 interrupted='did not finish (cancelled, or its guest died)'
 rm -rf "$marker_root/targets" "$marker_root/cargo-home"
 mkdir -p "$marker_root/targets/archive/debug/deps" "$marker_root/cargo-home/registry"
+archive_epoch
 old_bin="$marker_root/targets/archive/debug/deps/old-test"
 old_crate="$marker_root/cargo-home/registry/old.crate"
 : > "$old_bin"; : > "$old_crate"

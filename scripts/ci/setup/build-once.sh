@@ -99,6 +99,18 @@ readonly src="$work/src"
 # for the desktop check and package. A new folder is cold on its first run
 # on each build runner.
 readonly CHECK_FOLDERS=(clippy clippy_features darwin darwin_cw desktop)
+# Each leg's epoch. Raising a leg's number wipes only that leg's target folder,
+# once on each build runner, through this reviewed code rather than a hand in
+# a guest. The number is kept in a file inside the leg's own folder, which a
+# head without this code leaves alone; a pull request builds with its own
+# head's copy of this script, so a change every runner had to agree on, such
+# as the layout version, would make old and new heads wipe each other's
+# folders in turn. archive 1: one PR build runner's archive folder held 165 GB
+# on 2026-11-16, three times the other's, because no disk bound takes a live
+# leg's folder (bound_targets).
+declare -A LEG_EPOCHS=([archive]=1)
+readonly LEG_EPOCHS
+readonly LEG_EPOCH_FILE=.build-once-epoch
 
 check_folder() {
   # check_folder NAME: whether NAME is one of the Rust checks' folders.
@@ -212,14 +224,29 @@ prepare() {
     esac
   done
   bound_targets "$job"
+  # After the bound, so a folder it removed is started again with its epoch.
+  local leg recorded
+  for leg in "${!LEG_EPOCHS[@]}"; do
+    { read -r recorded <"$work/targets/$leg/$LEG_EPOCH_FILE"; } 2>/dev/null || recorded=
+    [ "$recorded" != "${LEG_EPOCHS[$leg]}" ] || continue
+    if [ -d "$work/targets/$leg" ]; then
+      echo "build-once: the $leg leg's epoch is now ${LEG_EPOCHS[$leg]}; its target folder is wiped"
+      rm -rf -- "$work/targets/$leg"
+    fi
+    mkdir -p "$work/targets/$leg"
+    printf '%s\n' "${LEG_EPOCHS[$leg]}" >"$work/targets/$leg/$LEG_EPOCH_FILE"
+  done
   mark_job_running
   # Tests stop here, before the pinned tools; never on a build runner's disk.
   if [ -n "${BUILD_ONCE_ROOT:-}" ] && [ "${BUILD_ONCE_TEST_STOP_AFTER_TARGETS:-}" = 1 ]; then
     return 0
   fi
   # Whether the archive folder is new, for the log.
+  # (An archive folder that holds only its epoch file is new.)
   local cold=false
-  [ -d "$work/targets/archive" ] || cold=true
+  if ! find "$work/targets/archive" -mindepth 1 -maxdepth 1 ! -name "$LEG_EPOCH_FILE" -print -quit 2>/dev/null | grep -q .; then
+    cold=true
+  fi
 
   bin="${RUNNER_TEMP:?RUNNER_TEMP is required}/build-once-bin"
   rm -rf -- "$bin"
