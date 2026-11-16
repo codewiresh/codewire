@@ -61,6 +61,9 @@ zeroize = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 codewire-server-core = { workspace = true }
+codewire-tls = { workspace = true, features = ["test-support"] }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 codewire-local-credentials = { workspace = true }
 codewire-protected-store = { workspace = true, features = ["platform-test-support"] }

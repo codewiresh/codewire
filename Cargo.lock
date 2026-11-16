@@ -1675,6 +1675,7 @@ dependencies = [
  "codewire-platform-credentials",
  "codewire-protected-store",
  "codewire-server-core",
+ "codewire-tls",
  "codewire-workload-secrets",
  "codewire-workspace-hack",
  "futures",

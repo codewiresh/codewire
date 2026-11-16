@@ -72,6 +72,10 @@ mod http_tests;
 #[cfg(feature = "local")]
 mod local;
 mod swap;
+mod upstream;
+pub use upstream::{
+    BrokerUpgradedIo, BrokerUpgradedStream, BrokerUpstreamTransport, BrokerUpstreamUpgrade,
+};
 
 #[cfg(test)]
 mod streamed_body_tests;
@@ -284,32 +288,6 @@ pub enum BrokerRefreshError {
     InProgress,
     #[error("credential refresh generation changed")]
     Stale,
-}
-
-/// Broker-owned transport for exactly one already-authorized upstream request.
-/// Implementations own DNS resolution, socket creation, TLS, redirects, and
-/// response framing; no credential-free process may implement this on behalf
-/// of the broker.
-#[async_trait]
-pub trait BrokerUpstreamTransport: Send + Sync {
-    async fn execute(
-        &self,
-        request: BrokerUpstreamRequest,
-    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError>;
-}
-
-/// A runtime with application sources only has no provider DNS/socket setup.
-#[async_trait]
-impl<T: BrokerUpstreamTransport> BrokerUpstreamTransport for Option<T> {
-    async fn execute(
-        &self,
-        request: BrokerUpstreamRequest,
-    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
-        match self {
-            Some(transport) => transport.execute(request).await,
-            None => Err(BrokerUpstreamError::DestinationDenied),
-        }
-    }
 }
 
 /// Stable upstream failures safe to map back to the guest.

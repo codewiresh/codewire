@@ -19,6 +19,7 @@ use crate::provider_oauth::{
 use crate::refresh_failure::TransportFailure;
 use crate::{
     BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport,
+    BrokerUpstreamUpgrade,
 };
 
 const OPENAI_HOST: &str = "api.openai.com";
@@ -34,6 +35,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Git request has none: its bridge bounds it by idle time instead (#4280).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const REFRESH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a WebSocket opening request waits for its response head. The
+/// connect has its own bound; once switched, the socket has none here.
+const UPGRADE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESOLVED_ADDRESSES: usize = 16;
 const MAX_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
 /// A pooled provider connection unused this long is closed.
@@ -61,6 +65,9 @@ enum ConnectionReuse {
 #[derive(Clone)]
 pub struct ProviderHttpsTransport {
     client: reqwest::Client,
+    /// HTTP/1.1 only, a connection per request and no whole-request bound,
+    /// for a front door's WebSocket upgrade (#3999); pinned like `client`.
+    upgrade_client: reqwest::Client,
     selected: BTreeSet<HttpProvider>,
     resolved_address_count: usize,
     reuse: ConnectionReuse,
@@ -123,7 +130,7 @@ impl ProviderHttpsTransport {
         // an already-running thread outside older Landlock thread domains.
         let hosts = selected_hosts(selected)?;
         let mut resolved_address_count = 0_usize;
-        let mut builder = client_builder(reuse);
+        let mut pinned = Vec::with_capacity(hosts.len());
         for host in &hosts {
             let addresses = lookup(host, OPENAI_PORT).map_err(|_| BrokerUpstreamError::Connect)?;
             let addresses = admit_resolved_addresses(addresses)?;
@@ -131,11 +138,20 @@ impl ProviderHttpsTransport {
                 .checked_add(addresses.len())
                 .filter(|count| *count <= MAX_RESOLVED_ADDRESSES.saturating_mul(hosts.len()))
                 .ok_or(BrokerUpstreamError::ResourceLimit)?;
-            builder = builder.resolve_to_addrs(host, &addresses);
+            pinned.push((host, addresses));
         }
-        let client = builder.build().map_err(|_| BrokerUpstreamError::Protocol)?;
+        // Both clients take the one pinned list, so they cannot differ.
+        let pin = |mut builder: reqwest::ClientBuilder| {
+            for (host, addresses) in &pinned {
+                builder = builder.resolve_to_addrs(host, addresses);
+            }
+            builder.build().map_err(|_| BrokerUpstreamError::Protocol)
+        };
+        let client = pin(client_builder(reuse))?;
+        let upgrade_client = pin(upgrade_client_builder())?;
         Ok(Self {
             client,
+            upgrade_client,
             selected: selected.clone(),
             resolved_address_count,
             reuse,
@@ -147,9 +163,10 @@ fn system_lookup(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
     Ok((host, port).to_socket_addrs()?.collect())
 }
 
-/// Everything about the provider client except its pinned addresses.
-fn client_builder(reuse: ConnectionReuse) -> reqwest::ClientBuilder {
-    let builder = reqwest::Client::builder()
+/// What every provider client shares: HTTPS to the pinned addresses, no
+/// proxy, no decoding, no redirects and a bounded connect.
+fn base_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
         .https_only(true)
         .no_proxy()
         .no_gzip()
@@ -159,7 +176,12 @@ fn client_builder(reuse: ConnectionReuse) -> reqwest::ClientBuilder {
         .redirect(Policy::none())
         .referer(false)
         .connect_timeout(CONNECT_TIMEOUT)
-        .http2_max_header_list_size(MAX_RESPONSE_HEADER_BYTES as u32);
+}
+
+/// Everything about the provider client except its pinned addresses.
+fn client_builder(reuse: ConnectionReuse) -> reqwest::ClientBuilder {
+    let builder =
+        base_client_builder().http2_max_header_list_size(MAX_RESPONSE_HEADER_BYTES as u32);
     match reuse {
         ConnectionReuse::PerRequest => builder.pool_max_idle_per_host(0),
         // TLS offers only http/1.1. Its response head is bounded by the
@@ -170,6 +192,14 @@ fn client_builder(reuse: ConnectionReuse) -> reqwest::ClientBuilder {
             .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
             .tcp_keepalive(POOL_TCP_KEEPALIVE),
     }
+}
+
+/// The upgrade client's settings except its pinned addresses. A WebSocket
+/// opening request is HTTP/1.1 only, and its connection becomes the socket,
+/// so it is never pooled. It has no whole-request bound: an open socket lasts
+/// as long as its grant, which the bridge enforces.
+fn upgrade_client_builder() -> reqwest::ClientBuilder {
+    base_client_builder().http1_only().pool_max_idle_per_host(0)
 }
 
 #[async_trait]
@@ -194,35 +224,170 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
             None if is_refresh => request.body(body).timeout(REFRESH_REQUEST_TIMEOUT),
             None => request.body(body).timeout(REQUEST_TIMEOUT),
         };
-        let response = request.send().await.map_err(|error| {
-            // Only fixed classes and an io::ErrorKind name are logged; reqwest
-            // and OS error text can carry URLs or peer details.
-            let (failure, io_error_kind) = TransportFailure::classify(
-                error.is_timeout(),
-                error.is_connect(),
-                error.is_request(),
-                &error,
-            );
-            let io_error_kind =
-                io_error_kind.map_or_else(|| "none".to_owned(), |kind| format!("{kind:?}"));
+        let response = request
+            .send()
+            .await
+            .map_err(|error| request_failed(provider_host, is_refresh, error))?;
+        validate_target(response.url(), &method, &self.selected)?;
+        upstream_response(response)
+    }
+
+    async fn upgrade(
+        &self,
+        mut request: BrokerUpstreamRequest,
+    ) -> Result<BrokerUpstreamUpgrade, BrokerUpstreamError> {
+        if request.take_body_stream().is_some() {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        let (method, target, headers, body) = request.into_parts();
+        validate_target(&target, &method, &self.selected)?;
+        if method != Method::GET {
+            return Err(BrokerUpstreamError::DestinationDenied);
+        }
+        if !body.is_empty()
+            || !websocket_handshake(&headers)
+            || UPGRADE_FRAMING_HEADERS
+                .iter()
+                .any(|name| headers.contains_key(name))
+        {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        let response = send_upgrade(&self.upgrade_client, &target, headers).await?;
+        validate_target(response.url(), &method, &self.selected)?;
+        switched_or_response(response).await
+    }
+}
+
+/// Send a WebSocket opening request as given: the caller has already swapped
+/// its credential, and its `Connection`, `Upgrade` and `Sec-WebSocket-*`
+/// headers go on the wire unchanged.
+async fn send_upgrade(
+    client: &reqwest::Client,
+    target: &url::Url,
+    headers: HeaderMap,
+) -> Result<reqwest::Response, BrokerUpstreamError> {
+    let provider_host = provider_host(target);
+    let sent = client.get(target.as_str()).headers(headers).send();
+    match tokio::time::timeout(UPGRADE_RESPONSE_TIMEOUT, sent).await {
+        Ok(response) => response.map_err(|error| request_failed(provider_host, false, error)),
+        Err(_) => {
             tracing::warn!(
                 provider_host,
-                refresh = is_refresh,
-                failure = failure.as_str(),
-                io_error_kind = %io_error_kind,
+                failure = "upgrade_response_timeout",
                 "provider transport request failed"
             );
-            map_reqwest_error(error)
-        })?;
-        validate_target(response.url(), &method, &self.selected)?;
-        let status = response.status();
-        let headers = response.headers().clone();
-        validate_response_headers(&headers)?;
-        let body = response
-            .bytes_stream()
-            .map(|chunk| chunk.map_err(map_reqwest_error));
-        Ok(BrokerUpstreamResponse::new(status, headers, Box::pin(body)))
+            Err(BrokerUpstreamError::Connect)
+        }
     }
+}
+
+/// A `101` becomes the provider's upgraded connection; any other status is
+/// an ordinary response.
+async fn switched_or_response(
+    response: reqwest::Response,
+) -> Result<BrokerUpstreamUpgrade, BrokerUpstreamError> {
+    if response.status() != http::StatusCode::SWITCHING_PROTOCOLS {
+        // The reply body gets `execute`'s whole-request bound, which the
+        // upgrade client cannot carry.
+        let (status, headers, body) = upstream_response(response)?.into_parts();
+        return Ok(BrokerUpstreamUpgrade::Response(
+            BrokerUpstreamResponse::new(status, headers, Box::pin(within(body, REQUEST_TIMEOUT))),
+        ));
+    }
+    let headers = response.headers().clone();
+    validate_response_headers(&headers)?;
+    // Any 101 would become a tunnel; only a WebSocket's may.
+    if !websocket_handshake(&headers) {
+        return Err(BrokerUpstreamError::Protocol);
+    }
+    let provider_host = provider_host(response.url());
+    let stream = tokio::time::timeout(UPGRADE_RESPONSE_TIMEOUT, response.upgrade())
+        .await
+        .map_err(|_| BrokerUpstreamError::Connect)?
+        .map_err(|error| request_failed(provider_host, false, error))?;
+    Ok(BrokerUpstreamUpgrade::Switched {
+        headers,
+        stream: Box::new(stream),
+    })
+}
+
+/// Request headers an upgrade refuses: the transport frames the request
+/// itself, and only the pinned destination names its `Host`.
+const UPGRADE_FRAMING_HEADERS: [http::HeaderName; 3] = [
+    http::header::HOST,
+    http::header::CONTENT_LENGTH,
+    http::header::TRANSFER_ENCODING,
+];
+
+/// A WebSocket handshake's headers: exactly one `Upgrade: websocket` and an
+/// `upgrade` token in `Connection`. The rest of the handshake is the agent's
+/// to verify.
+fn websocket_handshake(headers: &HeaderMap) -> bool {
+    let mut upgrade = headers.get_all(http::header::UPGRADE).iter();
+    let websocket = upgrade
+        .next()
+        .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"))
+        && upgrade.next().is_none();
+    websocket
+        && headers
+            .get_all(http::header::CONNECTION)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+}
+
+/// `body`, ended with a connect failure once `limit` has passed.
+fn within(
+    body: crate::runtime::BrokerUpstreamBody,
+    limit: Duration,
+) -> impl futures::Stream<Item = Result<bytes::Bytes, BrokerUpstreamError>> + Send + 'static {
+    let deadline = Box::pin(tokio::time::sleep(limit));
+    futures::stream::unfold(Some((body, deadline)), |state| async move {
+        let (mut body, mut deadline) = state?;
+        tokio::select! {
+            item = body.next() => item.map(|item| (item, Some((body, deadline)))),
+            () = &mut deadline => Some((Err(BrokerUpstreamError::Connect), None)),
+        }
+    })
+}
+
+/// A provider reply whose destination was checked, as the bridge receives it.
+fn upstream_response(
+    response: reqwest::Response,
+) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    validate_response_headers(&headers)?;
+    let body = response
+        .bytes_stream()
+        .map(|chunk| chunk.map_err(map_reqwest_error));
+    Ok(BrokerUpstreamResponse::new(status, headers, Box::pin(body)))
+}
+
+/// Log a failed provider request, then map it. Only fixed classes and an
+/// io::ErrorKind name are logged; reqwest and OS error text can carry URLs or
+/// peer details.
+fn request_failed(
+    provider_host: &'static str,
+    is_refresh: bool,
+    error: reqwest::Error,
+) -> BrokerUpstreamError {
+    let (failure, io_error_kind) = TransportFailure::classify(
+        error.is_timeout(),
+        error.is_connect(),
+        error.is_request(),
+        &error,
+    );
+    let io_error_kind = io_error_kind.map_or_else(|| "none".to_owned(), |kind| format!("{kind:?}"));
+    tracing::warn!(
+        provider_host,
+        refresh = is_refresh,
+        failure = failure.as_str(),
+        io_error_kind = %io_error_kind,
+        "provider transport request failed"
+    );
+    map_reqwest_error(error)
 }
 
 /// The already-validated destination as a fixed name, never request text.
@@ -588,6 +753,10 @@ fn map_reqwest_error(error: reqwest::Error) -> BrokerUpstreamError {
         BrokerUpstreamError::Protocol
     }
 }
+
+#[cfg(test)]
+#[path = "network/upgrade_tests.rs"]
+mod upgrade_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1493,6 +1662,7 @@ mod tests {
         let provider = ProviderStandIn::start().await;
         let transport = ProviderHttpsTransport {
             client: provider.client(ConnectionReuse::Pooled),
+            upgrade_client: upgrade_client_builder().build().unwrap(),
             selected: BTreeSet::from([HttpProvider::OpenAiApiKey]),
             resolved_address_count: 1,
             reuse: ConnectionReuse::Pooled,
