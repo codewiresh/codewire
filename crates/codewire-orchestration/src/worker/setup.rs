@@ -75,9 +75,15 @@ fn plain_clone_command(url: &str, destination: &str) -> Vec<String> {
     ]
 }
 
+mod clone_failure;
 mod clone_progress;
 mod github_checkout;
 mod ssh_checkout;
+
+use clone_failure::{
+    CloneFailure, CloneFailureClassifier, CloneTransport, clone_failure_context,
+    clone_failure_message,
+};
 
 /// Runs the clone chains depth by depth: every repository before the
 /// repositories inside it (#4024), each depth through
@@ -823,40 +829,6 @@ fn exited_with(error: &anyhow::Error, code: i32) -> bool {
 /// The visible note when a GitHub repository was cloned over HTTPS because
 /// GitHub refused the selected SSH key or the repository over SSH.
 const SSH_FALLBACK_WARNING: &str = "SSH key not accepted by GitHub; cloned over HTTPS";
-
-/// How one repository was cloned, for a failure that names the credential.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CloneTransport {
-    /// The selected SSH key. `refused`: the server did not accept it.
-    Ssh { refused: bool },
-    /// The selected GitHub connection, through the managed bridge.
-    GitHub,
-    /// The user's HTTPS URL after GitHub refused the SSH key.
-    HttpsAfterSshRefused { github: bool },
-    /// No credential. `github`: a canonical GitHub source.
-    Anonymous { github: bool },
-}
-
-fn clone_failure_context(url: &str, transport: CloneTransport) -> String {
-    let detail = match transport {
-        CloneTransport::Ssh { refused: false } => " over SSH",
-        CloneTransport::Ssh { refused: true } => {
-            " over SSH: the server did not accept the SSH key in the Sandbox's credential profile"
-        }
-        CloneTransport::GitHub => " through the GitHub connection",
-        CloneTransport::HttpsAfterSshRefused { github: true } => {
-            " through the GitHub connection after GitHub did not accept the SSH key"
-        }
-        CloneTransport::HttpsAfterSshRefused { github: false } => {
-            " over HTTPS after GitHub did not accept the SSH key; no GitHub connection is selected"
-        }
-        CloneTransport::Anonymous { github: true } => {
-            " (no SSH key or GitHub connection is selected; a private repository needs one)"
-        }
-        CloneTransport::Anonymous { github: false } => "",
-    };
-    format!("git clone {url}{detail}")
-}
 
 /// One repository's first clone and, for a GitHub HTTPS source cloned with the
 /// selected SSH key, the HTTPS clone to run if GitHub refuses that key.
@@ -1626,10 +1598,12 @@ impl WorkerSetupOps<'_> {
         let exec = self.workspace_exec_tapped(namespace, env_id, clone, "", env, Some(tap));
         let report = async {
             let mut parser = clone_progress::CloneProgressParser::default();
+            let mut classifier = CloneFailureClassifier::default();
             let mut throttle =
                 clone_progress::ProgressThrottle::new(clone_progress::PROGRESS_ROW_INTERVAL);
             // The tap closes when the command's stderr ends.
             while let Some(chunk) = chunks.recv().await {
+                classifier.feed(&chunk);
                 for progress in parser.feed(&chunk) {
                     if throttle.admit(progress, std::time::Instant::now()) {
                         self.emit_clone_row(
@@ -1641,9 +1615,14 @@ impl WorkerSetupOps<'_> {
                     }
                 }
             }
+            classifier
         };
-        let (result, ()) = tokio::join!(exec, report);
-        result
+        let (result, classifier) = tokio::join!(exec, report);
+        // Only the class of git's reason leaves here (#5050).
+        result.map_err(|error| match classifier.classify() {
+            CloneFailure::Other => error,
+            failure => error.context(failure),
+        })
     }
 
     /// Writes one A5a `git_clone` row under the active setup phase. These rows
@@ -2085,7 +2064,14 @@ impl SetupOps for WorkerSetupOps<'_> {
                         if is_setup_control_flow(&e) {
                             return Err(e);
                         }
-                        let error = e.context(clone_failure_context(&repo.url, transport));
+                        let failure = e
+                            .downcast_ref::<CloneFailure>()
+                            .copied()
+                            .unwrap_or(CloneFailure::Other);
+                        let error = match clone_failure_message(&repo.url, transport, failure) {
+                            Some(message) => anyhow::anyhow!(message),
+                            None => e.context(clone_failure_context(&repo.url, transport)),
+                        };
                         return Err(this.fence_failed_launch_group(input, error).await);
                     }
                     let selector = if repo.revision.is_empty() {

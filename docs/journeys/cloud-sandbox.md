@@ -424,7 +424,7 @@ Issue: #4762.
 
 ## `sandbox-setup-retry`: a failed setup, fixed in a shell and retried
 
-Issue: #4767.
+Issues: #4767, and #5050 for the clone's reason.
 
 - **Entry points:**
   - the dashboard's Sandbox page: the failure banner, its terminal and **Retry setup**;
@@ -432,12 +432,14 @@ Issue: #4767.
 - **States to exercise:**
   - a create whose install command fails;
   - a fix made in its terminal, then Retry setup;
-  - a setup that failed before or at the clone, whose Retry asks first.
+  - a setup that failed before or at the clone, whose Retry asks first;
+  - a clone of a private repository on a host other than GitHub, which needs a credential Codewire doesn't have (#5050).
 - **Driving it:** create a Sandbox with an install command that fails until a file exists, for example `test -f /workspace/ok`. Open its terminal, run `touch /workspace/ok`, and press Retry setup.
 - **Proof:**
   - **After the failure:** the page shows the banner "Setup failed at Running install command: …" over an open terminal.
   - **After Retry:** the list, headed "Retrying setup", shows the steps before install as done without running them, and install runs again. The Sandbox then becomes ready, and the banner is gone.
   - **The clone case:** a Retry that would clone again opens "Retry cloning?" before it runs.
+  - **A clone that needs a credential:** the banner reads "Setup failed at Cloning repositories: git clone <url>: <host> needs a credential that Codewire doesn't have; clone it in the terminal with your own". It names the host from the project's URL and nothing the remote wrote. The terminal opens, so the repository can be cloned there with your own token.
   - **`cw` after the failure:** `cw run --in SANDBOX -- CMD` and `cw shell SANDBOX` print `! Setup failed at Running install command: …`, then run.
   - **`cw` while setup runs:** they refuse with "SANDBOX's setup is running; wait for it, or follow it with `cw logs SANDBOX --setup --follow`".
 - **Gotchas:**
