@@ -190,6 +190,18 @@ simple." Don't over-tune: no optical offsets for text.
   classes, data hooks and route CSS.
 - A reusable class goes in `components.css` and is shown in
   `reference/fixtures/components.html`. Use tokens only.
+- An empty state is `.cw-empty`: a title, its copy, at most one action, then
+  at most one `.cw-empty-hint` (such as the `cw` command that does the same).
+  The space between them comes from the primitives and `--empty-state-gap`,
+  never from margins on the page (owner, 2026-11-16, #5112).
+- A page header whose title and primary action must stay on one line, with
+  the description below, is `.cw-page-header--stacked`: a
+  `.cw-page-header-row` holding the title and the action, then the
+  description. On a phone the title steps down a size; the action never
+  wraps under it (owner, 2026-11-16, #5113). Whether an existing page adopts
+  it is the owner's call.
+- Both are measured in `ssr-dashboard.design-system.ssr.ts` ("an empty
+  state's hint sits one token below its action…") at 1440 and 390.
 - `python3 scripts/checks/repo_checks.py design-tokens --self-test` fails on:
   - literals outside token files;
   - visual overrides of primitives in route CSS;

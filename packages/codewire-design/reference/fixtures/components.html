@@ -416,7 +416,7 @@
   </section>
 
   <section class="cw-card" aria-labelledby="page-parts-title">
-    <header class="cw-card-header"><h2 id="page-parts-title" class="cw-card-title">Form pages, states and organization cards</h2><p class="cw-card-description">A narrow form page with Back, an empty list, an organization card and the error page.</p></header>
+    <header class="cw-card-header"><h2 id="page-parts-title" class="cw-card-title">Form pages, states and organization cards</h2><p class="cw-card-description">A narrow form page with Back, a page header with its title and action on one line, an empty list with and without an action, an organization card and the error page.</p></header>
     <div class="cw-card-content cw-stack">
       <div class="cw-form-page">
         <a class="cw-back-link" href="#page-parts-title"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-left"/></svg>Organizations</a>
@@ -428,6 +428,8 @@
       </div>
       <div class="cw-state"><strong>No Sandboxes found</strong><p>Start an isolated workspace from a repository or image.</p></div>
       <div class="cw-card cw-empty"><span class="cw-empty-icon" aria-hidden="true"><svg class="cw-icon"><use href="../../assets/icons.svg#icon-building"/></svg></span><h3 class="cw-empty-title">No organizations yet</h3><p class="cw-empty-copy">Create your first organization to start creating Sandboxes.</p></div>
+      <header class="cw-page-header cw-page-header--stacked"><div class="cw-page-header-row"><h3 class="cw-page-title">Network policies</h3><button class="cw-button" type="button">Create policy</button></div><p class="cw-page-description">A page title and its primary action on one line, and the description below it, at every width.</p></header>
+      <section class="cw-card cw-empty" aria-labelledby="g-empty-action-title"><h3 id="g-empty-action-title" class="cw-empty-title">No policies yet</h3><p class="cw-empty-copy">By default, Sandboxes with no policy can reach any public address. Create a policy to lock them down further.</p><button class="cw-button" type="button">Create policy</button><p class="cw-empty-hint">Or from a terminal: <code>cw --cloud policy create NAME --allow docs.rs:443</code></p></section>
       <div class="cw-org-list"><a class="cw-card cw-org-card" href="#page-parts-title"><div class="cw-org-summary"><span class="cw-org-icon" aria-hidden="true"><svg class="cw-icon"><use href="../../assets/icons.svg#icon-building"/></svg></span><div><h3 class="cw-org-name">Second Team <span class="cw-badge">Owner</span></h3><p class="cw-org-meta">Plan: Free · second-team</p></div></div><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-right"/></svg></a></div>
       <div class="gallery-stage"><div class="cw-error-page"><section class="cw-card cw-error-card" aria-labelledby="g-error-title"><h3 id="g-error-title" class="cw-page-title">Dashboard unavailable</h3><p class="cw-page-description">Organization not found or access denied.</p><p><a class="cw-button cw-button--outline" href="#page-parts-title">Try again</a></p></section></div></div>
     </div>

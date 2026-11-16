@@ -201,6 +201,9 @@
   --space-10: 2.5rem;
   --space-12: 3rem;
   --space-16: 4rem;
+  /* An empty state's space between its action and the line under it, and
+     the same rhythm on every empty state (owner, 2026-11-16, #5112). */
+  --empty-state-gap: var(--space-5);
 
   --radius-sm: 0.25rem;
   --radius-md: 0.5rem;
@@ -511,6 +514,14 @@
   font-size: var(--text-page);
   font-weight: var(--weight-semibold);
   line-height: var(--leading-tight);
+}
+
+/* In a stacked page header the title shares its line with the action
+   (components.css, #5113); on a phone it steps down so both still fit. */
+.cw-page-header-row .cw-page-title { min-width: 0; }
+
+@media (max-width: 48rem) {
+  .cw-page-header-row .cw-page-title { font-size: var(--text-title); }
 }
 
 :is(.cw-page-description, .cw-context-page-header > p:last-child) {

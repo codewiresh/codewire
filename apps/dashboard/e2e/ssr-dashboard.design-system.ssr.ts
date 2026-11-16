@@ -434,6 +434,42 @@ test("buttons with an icon centre their label's capitals", { tag: "@mobile" }, a
   }
 });
 
+test("an empty state's hint sits one token below its action, and a stacked header keeps its action beside the title", { tag: "@mobile" }, async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system for fixture checks");
+  await page.goto(`${origin}/reference/fixtures/components.html`);
+  await page.evaluate(() => document.fonts.ready);
+
+  const empty = page.locator("section.cw-empty", { has: page.getByRole("heading", { name: "No policies yet" }) });
+  const action = empty.getByRole("button", { name: "Create policy" });
+  const hint = empty.locator(".cw-empty-hint");
+  const gap = await page.evaluate(() => {
+    const probe = document.createElement("div");
+    probe.style.height = "var(--empty-state-gap)";
+    document.body.append(probe);
+    const height = probe.getBoundingClientRect().height;
+    probe.remove();
+    return height;
+  });
+  expect(gap).toBeGreaterThan(0);
+  const actionBox = await action.boundingBox();
+  const hintBox = await hint.boundingBox();
+  expect(actionBox && hintBox).toBeTruthy();
+  expect.soft(Math.abs(hintBox!.y - (actionBox!.y + actionBox!.height) - gap), "hint below action").toBeLessThanOrEqual(1);
+
+  const header = page.locator("header.cw-page-header--stacked", { has: page.getByRole("heading", { name: "Network policies" }) });
+  const title = header.getByRole("heading", { name: "Network policies" });
+  const create = header.getByRole("button", { name: "Create policy" });
+  const description = header.locator(".cw-page-description");
+  const [headerBox, titleBox, createBox, descriptionBox] = await Promise.all([header, title, create, description].map((part) => part.boundingBox()));
+  const centre = (box: { y: number; height: number }) => box.y + box.height / 2;
+  expect.soft(Math.abs(centre(titleBox!) - centre(createBox!)), "title and action share a line").toBeLessThanOrEqual(1);
+  expect.soft(Math.abs(createBox!.x + createBox!.width - (headerBox!.x + headerBox!.width)), "action meets the right edge").toBeLessThanOrEqual(1);
+  expect.soft(titleBox!.x + titleBox!.width, "title and action don't overlap").toBeLessThanOrEqual(createBox!.x);
+  expect.soft(descriptionBox!.y, "description below the line").toBeGreaterThanOrEqual(Math.max(titleBox!.y + titleBox!.height, createBox!.y + createBox!.height));
+  expect.soft(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), "no horizontal scroll").toBe(true);
+});
+
 // What draws every fixture: the browser's GPU process. A host GPU driver in it
 // can block, and then no frame arrives and every click waits out its timeout
 // for a stable element (#3019). playwright.config.ts keeps the browser off the

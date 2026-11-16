@@ -824,6 +824,37 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
 .cw-field-row > .cw-field:has(> .cw-field-error) { grid-row: span 3; }
 .cw-field-row > :is(.cw-button, .cw-icon-button) { grid-row: 2; grid-column: -2; align-self: center; }
 
+/* The line under an empty state's action, such as the `cw` command that does
+   the same. Its space comes from the token, never from a page's margins
+   (#5112). */
+.cw-empty-hint {
+  margin: var(--empty-state-gap) 0 0;
+  color: var(--fg-tertiary);
+  font-size: var(--text-small);
+}
+
+/* A page header whose title and primary action share one line, with the
+   description on the line below, at every width (owner, 2026-11-16, #5113).
+   The plain header puts the description beside the action and stacks into a
+   column on a phone; this one never moves the action under the title. */
+.cw-page-header--stacked {
+  display: grid;
+  justify-content: stretch;
+  gap: var(--space-2);
+}
+
+.cw-page-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.cw-page-header-row > .cw-button { flex: none; }
+.cw-page-header-row > .cw-page-title-row { min-width: 0; }
+.cw-page-header--stacked > .cw-page-description { margin: 0; }
+
 /* Row button: one choice in a picker list, such as a repository result. The
    whole row is the target; separators and the focus ring stay inside the list.
    A skeleton row holds the same place, with the same inset, while rows load. */
