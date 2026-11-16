@@ -223,6 +223,7 @@ async fn an_api_key_401_is_returned_unchanged_and_marks_nothing() {
     let broker = broker(CredentialAuthKind::ApiKey, StatusCode::UNAUTHORIZED);
     let response = broker.execute(request(Uuid::new_v4())).await.unwrap();
     let requests = broker.upstream.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "an API key is never retried");
     let (_, headers) = &requests[0];
     assert_eq!(headers["x-api-key"].as_bytes(), TOKEN);
     assert!(!headers.contains_key("authorization"));

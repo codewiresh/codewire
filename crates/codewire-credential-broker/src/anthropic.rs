@@ -106,6 +106,7 @@ impl Default for AnthropicApiKeyAdapter {
 
 /// Credential-free validated request; its private field prevents route
 /// changes between validation and lease consumption.
+#[derive(Clone)]
 pub struct ValidatedAnthropicRequest(TransparentRequest);
 
 impl ValidatedAnthropicRequest {

@@ -464,7 +464,13 @@ endpoint when a request finds it within five minutes of expiry, through the
 same durable refresh journal as Codex: the refresh asks for exactly the
 granted scopes, keeps the previous refresh token when Claude returns none,
 and refuses a rotation that drops `user:inference` or `user:profile` or adds
-`org:create_api_key`. A refused
+`org:create_api_key`. When Claude answers a request with 401, the broker
+refreshes the sign-in once more, the same way, and sends the request once
+again; a second 401 is returned as it is. A 401 forces such a refresh only of
+a sign-in last refreshed ten minutes ago or more, by the time stored with the
+sign-in, because a process in the Sandbox shapes the request and can provoke
+one. The 401 of a sign-in refreshed more recently is returned as it is, and
+so is Claude's 401 when the forced refresh fails. A refused
 or uncertain refresh is terminal and the credential reads **Reconnect needed**;
 the old refresh token is never sent again. Idle sign-ins are kept alive (see
 [Idle OAuth keep-alive](#idle-oauth-keep-alive)). The plan is read only at

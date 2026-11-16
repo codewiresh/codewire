@@ -66,6 +66,7 @@ const SYNTHETIC_CODEX_ACCOUNT_ID: &str = "account-native-broker";
 
 mod anthropic_route;
 mod entry;
+mod forced_refresh;
 #[cfg(test)]
 #[path = "runtime_http_tests.rs"]
 mod http_tests;
@@ -1847,24 +1848,6 @@ where
             OAuthPurpose::ClaudeLogin => return Err(BrokerRequestError::Denied),
         }
         .map_err(map_adapter_error)
-    }
-
-    fn claude_oauth_credential(
-        &self,
-        lease: P::Lease,
-        purpose: &OAuthPurpose,
-    ) -> Result<ClaudeOAuthCredential, BrokerRequestError> {
-        match purpose {
-            OAuthPurpose::Operation { .. } => self
-                .anthropic_sign_in_adapter
-                .credential_from_lease(lease)
-                .map_err(map_adapter_error),
-            OAuthPurpose::ClaudeLogin => self
-                .anthropic_sign_in_adapter
-                .login_credential_from_lease(lease)
-                .map_err(map_adapter_error),
-            OAuthPurpose::CodexLogin => Err(BrokerRequestError::Denied),
-        }
     }
 
     /// The selected OAuth login from a lease whose access token stays valid
