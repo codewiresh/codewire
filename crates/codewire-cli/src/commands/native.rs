@@ -26,6 +26,7 @@ use uuid::Uuid;
 use super::*;
 use crate::commands::progress::terminal_text;
 
+mod dev_store;
 mod error_view;
 pub(crate) mod host_create;
 mod host_support;
@@ -3078,8 +3079,7 @@ pub(crate) fn runtime_artifact_paths() -> anyhow::Result<(PathBuf, PathBuf)> {
 pub(crate) fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
-    let root = absolute_override(NATIVE_STATE_ROOT_ENV)?
-        .unwrap_or_else(|| paths.mesh_data_dir.join("native-v1"));
+    let root = dev_store::state_root(&paths.mesh_data_dir)?;
     let (artifact_root, artifact_lock) = runtime_artifact_paths()?;
     Ok(NativeRuntimeConfig {
         root,

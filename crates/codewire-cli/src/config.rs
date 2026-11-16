@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
+#[cfg(unix)]
+pub(crate) mod account;
 mod deployment_ca;
 
 pub use deployment_ca::{

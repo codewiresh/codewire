@@ -21,9 +21,8 @@
 //! user that may run `security` can read Codewire's items while the keychain
 //! is unlocked.
 
-use std::ffi::{CStr, CString, OsStr};
-use std::os::unix::ffi::OsStrExt as _;
-use std::path::{Path, PathBuf};
+use std::ffi::CString;
+use std::path::Path;
 
 use anyhow::Context as _;
 
@@ -56,7 +55,8 @@ pub(super) fn confine_relay() -> anyhow::Result<()> {
 /// Install the broker's Seatbelt profile. Irreversible for the process.
 pub(super) fn confine(store: &ChildStore, provider_network: bool) -> anyhow::Result<()> {
     let home = match store {
-        ChildStore::Keychain { keychain: None } => Some(home_directory()?),
+        // The broker has no environment, and the login keychain lives below it.
+        ChildStore::Keychain { keychain: None } => Some(crate::config::account::home_directory()?),
         _ => None,
     };
     let profile = profile(store, provider_network, home.as_deref())?;
@@ -135,34 +135,6 @@ pub(super) fn profile(
 
 fn quoted(path: &Path) -> anyhow::Result<&str> {
     plain_path(path).context("broker store path cannot be confined")
-}
-
-/// This user's home directory from the user database: the broker has no
-/// environment, and the login keychain lives below it.
-fn home_directory() -> anyhow::Result<PathBuf> {
-    let mut buffer = vec![0 as libc::c_char; 16 * 1024];
-    // SAFETY: passwd is plain old data; zero is a valid value to overwrite.
-    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut result = std::ptr::null_mut();
-    // SAFETY: every pointer refers to a live, writable value of the stated
-    // size; on success `result` points at `entry`, whose strings live in
-    // `buffer`, which outlives their use below.
-    let status = unsafe {
-        libc::getpwuid_r(
-            libc::geteuid(),
-            &mut entry,
-            buffer.as_mut_ptr(),
-            buffer.len(),
-            &mut result,
-        )
-    };
-    anyhow::ensure!(
-        status == 0 && !result.is_null() && !entry.pw_dir.is_null(),
-        "resolve the broker user's home directory"
-    );
-    // SAFETY: pw_dir is a NUL-terminated string inside `buffer`.
-    let home = unsafe { CStr::from_ptr(entry.pw_dir) };
-    Ok(PathBuf::from(OsStr::from_bytes(home.to_bytes())))
 }
 
 #[cfg(test)]

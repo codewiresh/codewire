@@ -1,5 +1,6 @@
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt as _;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use clap::Parser as _;

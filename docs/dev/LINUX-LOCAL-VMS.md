@@ -470,6 +470,12 @@ included, names it and its recovery instead of a retry:
 `cw upgrade` still upgrades the CLI while it runs, and says the VMs were not
 checked.
 
+A development build refuses your own store (`.codewire/native-v1` under your
+account's home directory, whatever `HOME` says) unless
+`CODEWIRE_NATIVE_STATE_ROOT` names a root, so it never starts that supervisor
+in the first place (#4819). Run it with its own `HOME`, or set the variable
+to a scratch root, or to your store to use it on purpose.
+
 ## Troubleshooting
 
 **`this host cannot run local VMs yet`**: fix each listed item, then rerun the

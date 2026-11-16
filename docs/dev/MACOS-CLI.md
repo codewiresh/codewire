@@ -80,7 +80,8 @@ A local VM needs:
   beside an `artifacts/` directory holding those files. A release's cw pins
   its runtime (#2539): `cw setup --local` downloads exactly the files whose
   digests that cw embeds, from the release origin, and installs them. A
-  development build pins nothing; `cw setup --local --from DIR` installs a
+  development build pins nothing, and refuses your own local VM store unless
+  `CODEWIRE_NATIVE_STATE_ROOT` names one (#4819); `cw setup --local --from DIR` installs a
   runtime directory that `make macos-local-runtime` builds (see
   [Install the local VM runtime](#install-the-local-vm-runtime)). Before a
   local VM is created or started, a release's cw requires its own pinned
