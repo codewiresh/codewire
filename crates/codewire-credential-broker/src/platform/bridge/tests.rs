@@ -4,6 +4,7 @@
 //! prove publication drain through this same generated service and managed loop.
 
 mod authenticated;
+mod front_door;
 mod rotation;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

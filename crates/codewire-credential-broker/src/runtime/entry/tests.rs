@@ -23,7 +23,8 @@ use crate::{
     BrokerRefreshError, BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse,
     CanonicalCodexOAuthBundle, CredentialBridgeResponseSink, CredentialBridgeTransport,
     FrontDoorTransport, admit_credential_bridge, run_admitted_credential_bridge,
-    run_admitted_credential_bridges, run_admitted_front_door_bridge,
+    run_admitted_credential_bridge_with_front_doors, run_admitted_credential_bridges,
+    run_admitted_front_door_bridge,
 };
 use codewire_credential_bridge::{
     CredentialBridge, FrontDoorSessionError, serve_front_door_session,
@@ -1114,4 +1115,95 @@ async fn a_front_door_that_dies_leaves_the_loopback_session_serving() {
         "{frames:?}"
     );
     assert!(!sessions.runner.is_finished());
+}
+
+/// A front door's guest side serving on a real socket pair, and the broker's
+/// admitted end of it.
+async fn front_door_pair(
+    environment_id: Uuid,
+) -> (
+    CredentialBridge,
+    tokio::task::JoinHandle<Result<(), FrontDoorSessionError>>,
+    AdmittedCredentialBridge<FrontDoorTransport>,
+) {
+    let (front_door_end, broker_end) = tokio::net::UnixStream::pair().unwrap();
+    let guest = CredentialBridge::new(environment_id, GENERATION).unwrap();
+    let serving = guest.clone();
+    let guest_task =
+        tokio::spawn(async move { serve_front_door_session(&serving, front_door_end).await });
+    let front_door = FrontDoorTransport::open(broker_end, environment_id, GENERATION)
+        .await
+        .unwrap();
+    let front_door = admit_credential_bridge(front_door, environment_id, GENERATION)
+        .await
+        .unwrap();
+    (guest, guest_task, front_door)
+}
+
+/// A front-door session that joins later (a hosted relay epoch, #4001) is
+/// served beside the running loopback session; when it ends, the next one to
+/// join is served on the same broker.
+#[tokio::test]
+async fn a_front_door_that_ends_is_replaced_by_the_next_one_to_join() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        ..Recorded::default()
+    };
+    let environment_id = Uuid::new_v4();
+    let (loopback, _loopback_input, _loopback_output) = loopback_session(environment_id).await;
+    let (joins, joining) = mpsc::channel(1);
+    let broker = recorded.broker();
+    let runner = tokio::spawn(async move {
+        run_admitted_credential_bridge_with_front_doors(broker, loopback, joining).await
+    });
+
+    let (first, first_task, first_session) = front_door_pair(environment_id).await;
+    joins.send(first_session).await.unwrap();
+    let response = first
+        .respond_intercepted("api.anthropic.com", intercepted_anthropic_request())
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    first_task.abort();
+
+    let (second, _second_task, second_session) = front_door_pair(environment_id).await;
+    joins.send(second_session).await.unwrap();
+    let response = second
+        .respond_intercepted("api.anthropic.com", intercepted_anthropic_request())
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the next session joins the same broker"
+    );
+    assert_eq!(recorded.leases(), 2);
+    assert!(!runner.is_finished(), "loopback keeps serving throughout");
+}
+
+/// Once the loopback session ends, the serving front-door session is ended
+/// with it and no other can join.
+#[tokio::test]
+async fn once_the_loopback_session_ends_no_front_door_joins() {
+    let recorded = Recorded::default();
+    let environment_id = Uuid::new_v4();
+    let (loopback, loopback_input, _loopback_output) = loopback_session(environment_id).await;
+    let (joins, joining) = mpsc::channel(1);
+    let broker = recorded.broker();
+    let runner = tokio::spawn(async move {
+        run_admitted_credential_bridge_with_front_doors(broker, loopback, joining).await
+    });
+    let (_first, first_task, first_session) = front_door_pair(environment_id).await;
+    joins.send(first_session).await.unwrap();
+
+    drop(loopback_input);
+    assert_eq!(runner.await.unwrap(), Err(BrokerBridgeError::Unavailable));
+    assert_eq!(
+        first_task.await.unwrap(),
+        Ok(()),
+        "the serving session ends with loopback"
+    );
+    let (_late, _late_task, late_session) = front_door_pair(environment_id).await;
+    assert!(
+        joins.send(late_session).await.is_err(),
+        "nothing joins an ended loopback session"
+    );
 }

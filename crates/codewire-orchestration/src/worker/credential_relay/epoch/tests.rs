@@ -112,6 +112,16 @@ daemon_service! {
 #[tonic::async_trait]
 impl CredentialBrokerService for SyntheticBroker {
     type CredentialBridgeStream = ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>;
+    type FrontDoorBridgeStream = ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>;
+
+    // The relay does not join front-door streams yet (#4001).
+    async fn front_door_bridge(
+        &self,
+        _request: Request<Streaming<v1::CredentialBridgeGuestMessage>>,
+    ) -> Result<Response<Self::FrontDoorBridgeStream>, Status> {
+        Err(Status::unimplemented("not used by these relay tests"))
+    }
+
     async fn credential_bridge(
         &self,
         request: Request<Streaming<v1::CredentialBridgeGuestMessage>>,

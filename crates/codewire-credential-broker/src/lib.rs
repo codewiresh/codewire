@@ -153,5 +153,6 @@ pub use bridge::{
     CredentialBridgeRelayOutput, CredentialBridgeResponseSink, CredentialBridgeTransport,
     FrontDoorResponseSink, FrontDoorTransport, admit_credential_bridge,
     run_admitted_credential_bridge, run_admitted_credential_bridge_relay,
-    run_admitted_credential_bridges, run_admitted_front_door_bridge, run_credential_bridge,
+    run_admitted_credential_bridge_with_front_doors, run_admitted_credential_bridges,
+    run_admitted_front_door_bridge, run_credential_bridge,
 };

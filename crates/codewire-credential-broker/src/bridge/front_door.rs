@@ -10,6 +10,7 @@ use codewire_credential_bridge::{
     BridgeIdentity, FrontDoorHostSender, FrontDoorHostSession, SessionStream,
 };
 use codewire_daemon_proto::codewire::bridge::v1;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -119,25 +120,70 @@ where
     U: BrokerUpstreamTransport + 'static,
     B: CredentialBridgeTransport,
 {
+    // One session from the start: the joining runner with a single join.
+    let (joins, joining) = mpsc::channel(1);
+    joins
+        .try_send(front_door)
+        .map_err(|_| BrokerBridgeError::Unavailable)?;
+    drop(joins);
+    run_admitted_credential_bridge_with_front_doors(broker, loopback, joining).await
+}
+
+/// [`run_admitted_credential_bridges`] for front-door sessions that join a
+/// running loopback session, such as one relayed into a hosted epoch
+/// (#4001). They are served one at a time, each as it arrives on `joins`; one
+/// that ends, or fails, leaves the loopback session serving and the next may
+/// join. When the loopback session ends, the front-door session then serving
+/// is ended and drained, and no other joins. The caller admits at most one
+/// session at a time; a later one waits here until the current one ends.
+pub async fn run_admitted_credential_bridge_with_front_doors<P, U, B, F>(
+    broker: OpenAiBroker<P, U>,
+    loopback: AdmittedCredentialBridge<B>,
+    mut joins: mpsc::Receiver<AdmittedCredentialBridge<F>>,
+) -> Result<(), BrokerBridgeError>
+where
+    P: BrokerLeaseProvider + 'static,
+    U: BrokerUpstreamTransport + 'static,
+    B: CredentialBridgeTransport,
+    F: CredentialBridgeTransport,
+{
     let broker = Arc::new(broker);
-    let stop = front_door.bridge.stop.clone();
+    let ended = CancellationToken::new();
     let loopback = async {
         let result = run_managed_bridge(Arc::clone(&broker), loopback.bridge).await;
-        stop.cancel();
+        ended.cancel();
         result
     };
-    let front_door = async {
-        let stopped = front_door.bridge.stop.clone();
-        let result = run_admitted_front_door_bridge(Arc::clone(&broker), front_door).await;
-        // A runner reports every end as an error; only an end the loopback
-        // session did not cause is worth a line.
-        if let Err(error) = result
-            && !stopped.is_cancelled()
-        {
-            tracing::warn!(%error, "front-door credential session ended");
+    let front_doors = async {
+        loop {
+            let joined = tokio::select! {
+                biased;
+                () = ended.cancelled() => break,
+                joined = joins.recv() => joined,
+            };
+            let Some(session) = joined else {
+                // No more joins: keep serving loopback alone.
+                ended.cancelled().await;
+                break;
+            };
+            let stop = ended.child_token();
+            let result = run_admitted_front_door_bridge(
+                Arc::clone(&broker),
+                session.stoppable(stop.clone()),
+            )
+            .await;
+            // A runner reports every end as an error; only an end the
+            // loopback session did not cause is worth a line.
+            if let Err(error) = result
+                && !stop.is_cancelled()
+            {
+                tracing::warn!(%error, "front-door credential session ended");
+            }
         }
+        // Nothing joins once loopback has ended.
+        joins.close();
     };
-    let (result, ()) = tokio::join!(loopback, front_door);
+    let (result, ()) = tokio::join!(loopback, front_doors);
     result
 }
 

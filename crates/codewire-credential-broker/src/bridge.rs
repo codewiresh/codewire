@@ -35,8 +35,8 @@ mod ssh;
 #[cfg(test)]
 pub(crate) use front_door::FrontDoorExecutor;
 pub use front_door::{
-    FrontDoorResponseSink, FrontDoorTransport, run_admitted_credential_bridges,
-    run_admitted_front_door_bridge,
+    FrontDoorResponseSink, FrontDoorTransport, run_admitted_credential_bridge_with_front_doors,
+    run_admitted_credential_bridges, run_admitted_front_door_bridge,
 };
 
 pub use relay::{
@@ -83,6 +83,46 @@ impl<B: CredentialBridgeTransport> AdmittedCredentialBridge<B> {
     /// public binding metadata, not an independent proof of peer identity.
     pub fn ready(&self) -> &v1::CredentialBridgeReady {
         &self.ready
+    }
+
+    /// The same session, ended as its peer closing would once `stop` is
+    /// cancelled, so the runner drains its started operations.
+    pub(crate) fn stoppable(
+        self,
+        stop: CancellationToken,
+    ) -> AdmittedCredentialBridge<Stoppable<B>> {
+        AdmittedCredentialBridge {
+            bridge: Stoppable {
+                inner: self.bridge,
+                stop,
+            },
+            ready: self.ready,
+        }
+    }
+}
+
+/// A transport that ends, as an EOF, when its stop is cancelled.
+pub(crate) struct Stoppable<B> {
+    inner: B,
+    stop: CancellationToken,
+}
+
+#[async_trait]
+impl<B: CredentialBridgeTransport> CredentialBridgeTransport for Stoppable<B> {
+    type ResponseSink = B::ResponseSink;
+
+    fn response_sink(&self) -> Self::ResponseSink {
+        self.inner.response_sink()
+    }
+
+    async fn receive(
+        &mut self,
+    ) -> Result<Option<v1::CredentialBridgeGuestMessage>, BrokerBridgeError> {
+        tokio::select! {
+            biased;
+            () = self.stop.cancelled() => Ok(None),
+            message = self.inner.receive() => message,
+        }
     }
 }
 

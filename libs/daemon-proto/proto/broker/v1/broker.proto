@@ -20,4 +20,19 @@ service CredentialBrokerService {
   // direction, except the one listed direct delivery exception: a Codex login
   // sealed to the daemon's recipient key, opaque to the gateway.
   rpc CredentialBridge(stream codewire.bridge.v1.CredentialBridgeGuestMessage) returns (stream codewire.bridge.v1.CredentialBridgeHostMessage);
+
+  // A front door's session joining an admitted epoch (#4001, #4909). The
+  // caller presents the same relay and workspace authorization as that
+  // epoch's CredentialBridge, then the epoch's handle from its response
+  // headers (x-codewire-credential-bridge-epoch-bin); they are checked in
+  // that order, and the handle only among that binding's live epochs. The
+  // first guest message must be Ready for the same environment and
+  // generation. Requests take the front-door validation (BridgeEntry::
+  // FrontDoor) on that epoch's leases, decisions and single refresh, and the
+  // stream ends with the epoch. An epoch serves one front-door stream at a
+  // time; another is ALREADY_EXISTS. A handle of an ended or other epoch, or
+  // another binding's, is PERMISSION_DENIED. The successful response headers
+  // list the front-door operations served
+  // (x-codewire-credential-bridge-capabilities).
+  rpc FrontDoorBridge(stream codewire.bridge.v1.CredentialBridgeGuestMessage) returns (stream codewire.bridge.v1.CredentialBridgeHostMessage);
 }

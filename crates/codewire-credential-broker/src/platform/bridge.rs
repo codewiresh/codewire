@@ -42,7 +42,18 @@ use crate::{
     AdmittedCredentialBridge, BrokerBridgeError, BrokerLeaseError, BrokerUpstreamTransport,
     CredentialBridgeResponseSink, CredentialBridgeTransport, GitHubAppAuthorizationOwner,
     OpenAiBroker, admit_credential_bridge, run_admitted_credential_bridge,
+    run_admitted_credential_bridge_with_front_doors,
 };
+
+mod front_door;
+use front_door::{EpochBounds, EpochHandle, Registry as FrontDoorRegistry};
+
+/// The operations a joined front-door stream serves, listed in its response
+/// headers; the relay copies exactly these into the front door's Open.
+const FRONT_DOOR_CAPABILITIES: &[&str] = &[
+    codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR,
+    codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
+];
 
 /// Admission and active/draining epochs share one process-wide service budget.
 /// Each hosted Sandbox with credentials holds one long-lived epoch, and two for
@@ -127,6 +138,8 @@ struct ServiceState<A, U> {
     accepting: Arc<Mutex<bool>>,
     workers: TaskTracker,
     shutdown: CancellationToken,
+    /// Admitted epochs a front-door stream may join (#4001, #4909).
+    front_doors: Arc<FrontDoorRegistry>,
     #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
     ssh: Option<Arc<super::ssh::Service>>,
 }
@@ -189,6 +202,7 @@ where
                 accepting: Arc::new(Mutex::new(true)),
                 workers: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
+                front_doors: Arc::default(),
                 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
                 ssh: None,
             }),
@@ -270,6 +284,50 @@ where
         I: Stream<Item = Result<v1::CredentialBridgeGuestMessage, Status>> + Send + 'static,
         F: Future<Output = Result<(Arc<B>, I), PlatformBridgeAuthenticationError>> + Send,
     {
+        let (stream, expires_at_unix, _) = self.serve(admission, false).await?;
+        Ok((stream, expires_at_unix))
+    }
+
+    /// [`Self::serve_authenticated`] for an epoch a front-door stream may
+    /// join (#4001, #4909): also returns the epoch's handle, for its response
+    /// header and nowhere else.
+    pub async fn serve_authenticated_joinable<B, I, F>(
+        &self,
+        admission: F,
+    ) -> Result<
+        (
+            ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>,
+            u64,
+            tonic::metadata::BinaryMetadataValue,
+        ),
+        Status,
+    >
+    where
+        B: PlatformRuntimeAuthority + 'static,
+        I: Stream<Item = Result<v1::CredentialBridgeGuestMessage, Status>> + Send + 'static,
+        F: Future<Output = Result<(Arc<B>, I), PlatformBridgeAuthenticationError>> + Send,
+    {
+        let (stream, expires_at_unix, handle) = self.serve(admission, true).await?;
+        Ok((stream, expires_at_unix, handle.ok_or_else(unavailable)?))
+    }
+
+    async fn serve<B, I, F>(
+        &self,
+        admission: F,
+        joinable: bool,
+    ) -> Result<
+        (
+            ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>,
+            u64,
+            Option<tonic::metadata::BinaryMetadataValue>,
+        ),
+        Status,
+    >
+    where
+        B: PlatformRuntimeAuthority + 'static,
+        I: Stream<Item = Result<v1::CredentialBridgeGuestMessage, Status>> + Send + 'static,
+        F: Future<Output = Result<(Arc<B>, I), PlatformBridgeAuthenticationError>> + Send,
+    {
         let deadline = Instant::now() + ADMISSION_TIMEOUT;
         let permit = self.acquire()?;
         // The TokenReviews and resolves of authentication, the Ready wait and
@@ -300,18 +358,41 @@ where
             admitted,
             sink,
             receiver,
+            environment_id,
+            generation,
         } = admission?;
         sink.epoch.ensure_live().map_err(bridge_status)?;
         let expires_at_unix = sink.epoch.expires_at_unix;
+        if !joinable {
+            self.spawn_worker(permit, async move {
+                // Never select cancellation against or abort this future. Transport
+                // termination ends request tasks, then the shared runner drains
+                // accepted refresh work before this worker releases its stream slot.
+                if let Err(error) = run_admitted_credential_bridge(broker, admitted).await {
+                    let _ = sink.output.try_send(Err(bridge_status(error)));
+                }
+            })?;
+            return Ok((ReceiverStream::new(receiver), expires_at_unix, None));
+        }
+        let (joins, joining) = mpsc::channel(1);
+        let bounds = EpochBounds {
+            expires_at_unix,
+            deadline: sink.epoch.deadline,
+        };
+        let (handle, registration) =
+            self.state
+                .front_doors
+                .register(environment_id, generation, bounds, joins)?;
         self.spawn_worker(permit, async move {
-            // Never select cancellation against or abort this future. Transport
-            // termination ends request tasks, then the shared runner drains
-            // accepted refresh work before this worker releases its stream slot.
-            if let Err(error) = run_admitted_credential_bridge(broker, admitted).await {
+            // The epoch can be joined for exactly as long as this worker runs.
+            let _registration = registration;
+            if let Err(error) =
+                run_admitted_credential_bridge_with_front_doors(broker, admitted, joining).await
+            {
                 let _ = sink.output.try_send(Err(bridge_status(error)));
             }
         })?;
-        Ok((ReceiverStream::new(receiver), expires_at_unix))
+        Ok((ReceiverStream::new(receiver), expires_at_unix, Some(handle)))
     }
 
     /// Stop admission and signal transport cancellation synchronously. The
@@ -436,6 +517,7 @@ where
         let transport = RelayTransport {
             input,
             sink: sink.clone(),
+            _occupied: None,
         };
         let admitted = tokio::time::timeout_at(epoch.deadline, async {
             let admitted = timing::timed(
@@ -465,6 +547,8 @@ where
             admitted,
             sink,
             receiver,
+            environment_id,
+            generation,
         })
     }
 }
@@ -474,6 +558,8 @@ struct Admission<A, U> {
     admitted: AdmittedCredentialBridge<RelayTransport>,
     sink: ResponseSink,
     receiver: mpsc::Receiver<Result<v1::CredentialBridgeHostMessage, Status>>,
+    environment_id: Uuid,
+    generation: u64,
 }
 
 #[tonic::async_trait]
@@ -483,12 +569,13 @@ where
     U: BrokerUpstreamTransport + Clone + 'static,
 {
     type CredentialBridgeStream = ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>;
+    type FrontDoorBridgeStream = ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>;
 
     async fn credential_bridge(
         &self,
         request: Request<Streaming<v1::CredentialBridgeGuestMessage>>,
     ) -> Result<Response<Self::CredentialBridgeStream>, Status> {
-        self.serve_authenticated(async move {
+        self.serve_authenticated_joinable(async move {
             let (metadata, _, input) = request.into_parts();
             // Preserve the private Pod path: no frame consumption, domain
             // lookup or material access precedes its existing authenticator.
@@ -496,7 +583,7 @@ where
             Ok((authority, input))
         })
         .await
-        .map(|(stream, expires_at_unix)| {
+        .map(|(stream, expires_at_unix, handle)| {
             let mut response = Response::new(stream);
             for capability in PLATFORM_CREDENTIAL_BRIDGE_CAPABILITIES {
                 response.metadata_mut().append(
@@ -510,8 +597,75 @@ where
                 codewire_daemon_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
                 tonic::metadata::MetadataValue::from(expires_at_unix),
             );
+            // For the relay only: it never reaches the daemon or the guest.
+            response.metadata_mut().insert_bin(
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER,
+                handle,
+            );
             response
         })
+    }
+
+    async fn front_door_bridge(
+        &self,
+        request: Request<Streaming<v1::CredentialBridgeGuestMessage>>,
+    ) -> Result<Response<Self::FrontDoorBridgeStream>, Status> {
+        let permit = self.acquire()?;
+        let (metadata, _, input) = request.into_parts();
+        let deadline = Instant::now() + ADMISSION_TIMEOUT;
+        let joined = tokio::time::timeout_at(deadline, async {
+            // The relay token and the workspace authorization, exactly as the
+            // epoch's own CredentialBridge, before anything else is read.
+            let authority = self
+                .state
+                .authenticator
+                .authenticate(&metadata)
+                .await
+                .map_err(PlatformBridgeAuthenticationError::status)?;
+            let session = authority.current_session().await.map_err(runtime_status)?;
+            let environment_id =
+                Uuid::parse_str(session.context.environment_id.as_str()).map_err(|_| denied())?;
+            let generation = session.context.environment_generation;
+            // Then the handle, only among this binding's live epochs.
+            let presented = EpochHandle::presented(&metadata).ok_or_else(denied)?;
+            let claim =
+                self.state
+                    .front_doors
+                    .claim(environment_id, generation, &presented, permit)?;
+            let epoch = Epoch {
+                shutdown: self.state.shutdown.clone(),
+                input_closed: CancellationToken::new(),
+                expires_at_unix: claim.bounds.expires_at_unix,
+                deadline: claim.bounds.deadline,
+            };
+            epoch.ensure_live().map_err(bridge_status)?;
+            let (output, receiver) = mpsc::channel(RESPONSE_BUFFER);
+            let sink = ResponseSink { output, epoch };
+            let transport = RelayTransport {
+                input: input.boxed(),
+                sink,
+                _occupied: Some(claim.guard),
+            };
+            let admitted = admit_credential_bridge(transport, environment_id, generation)
+                .await
+                .map_err(bridge_status)?;
+            claim
+                .joins
+                .send(admitted)
+                .await
+                .map_err(|_| unavailable())?;
+            Ok::<_, Status>(receiver)
+        })
+        .await
+        .map_err(|_| Status::deadline_exceeded("front-door bridge admission timed out"))??;
+        let mut response = Response::new(ReceiverStream::new(joined));
+        for capability in FRONT_DOOR_CAPABILITIES {
+            response.metadata_mut().append(
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
+                tonic::metadata::MetadataValue::from_static(capability),
+            );
+        }
+        Ok(response)
     }
 }
 
@@ -540,6 +694,9 @@ impl Epoch {
 struct RelayTransport {
     input: BoxStream<'static, Result<v1::CredentialBridgeGuestMessage, Status>>,
     sink: ResponseSink,
+    /// A joined front-door stream holds its epoch's one place, and its
+    /// stream permit, until the transport is dropped.
+    _occupied: Option<front_door::Occupied>,
 }
 
 #[derive(Clone)]

@@ -274,6 +274,14 @@ pub const CREDENTIAL_BRIDGE_CAPABILITIES_HEADER: &str = "x-codewire-credential-b
 /// the epoch then. The relay uses it only to schedule and check the next
 /// epoch's admission before this one ends.
 pub const CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER: &str = "x-codewire-credential-bridge-expires-at";
+/// Response header on the broker's admitted `CredentialBridge` stream: the
+/// epoch's front-door handle (#4001), 32 random bytes as binary metadata. A
+/// `FrontDoorBridge` stream presents it, with the same relay and workspace
+/// authorization, to join that epoch. It grants nothing alone, lives only as
+/// long as its epoch, and the relay never passes it to the daemon or guest.
+pub const CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER: &str = "x-codewire-credential-bridge-epoch-bin";
+/// Bytes in a front-door epoch handle.
+pub const CREDENTIAL_BRIDGE_EPOCH_HANDLE_BYTES: usize = 32;
 /// The broker serves `CodexLoginRequest` on this epoch. A daemon sends that
 /// frame only when its epoch's Open lists this value: an older broker or
 /// relay ends the epoch on an unknown frame.

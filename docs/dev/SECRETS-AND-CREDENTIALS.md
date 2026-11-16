@@ -1030,6 +1030,24 @@ credential-service pods ends every epoch, flushing every cache and decision at
 once. Revoking or replacing a credential in Codewire still takes effect on the
 next request.
 
+A front-door stream joins an admitted hosted epoch; it is never a second way
+in (#4001). Each admitted `CredentialBridge` response carries one
+`x-codewire-credential-bridge-epoch-bin` header: 32 random bytes, unique to
+that epoch, for the relay only. `FrontDoorBridge` admits a stream only when the
+caller presents, in this order, the relay's own token and the epoch's workspace
+authorization, exactly as for `CredentialBridge`, and then that handle. The
+handle is looked up only among the live epochs of the binding the
+authorization names and compared in constant time, so a handle is refused once
+its epoch ends, as is another binding's or the same binding's previous one; a
+handle grants nothing alone and is never logged. An epoch takes one front-door
+stream at a time (a second gets `ALREADY_EXISTS`), which holds a slot of the
+same stream budget until it ends. The stream runs on the epoch's broker as a
+front-door entry, with that epoch's decision, material cache and single
+refresh, and lists only the `front-door.v1` and `request-body-stream`
+capabilities. It ends with its epoch; when it ends, the loopback session keeps
+serving and the next front-door stream may join. The relay does not open
+these yet: serving `EgressService.FrontDoorSession` through them comes next.
+
 Native authentication is ready before private checkout and install; the
 environment becomes ready only after setup succeeds. Credential delivery uses
 the environment operation's identity, cancellation, fencing and cleanup; there
