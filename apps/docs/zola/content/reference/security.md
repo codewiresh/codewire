@@ -1,7 +1,7 @@
 ---
 title: Security model
 description: What isolates an environment, where secrets and credentials live, and what each placement does not protect.
-updated: 2026-11-11
+updated: 2026-11-16
 weight: 4
 aliases: ["/security"]
 ---
@@ -28,7 +28,11 @@ hardware-virtualized VM with its own kernel.
   your files, your tools and your network. Codewire only owns process cleanup.
 
 Docker inside a hosted sandbox or a local VM is a daemon inside that VM. The
-host's container runtime is never mounted or proxied into an environment.
+host's container runtime is never mounted or proxied into an environment. In a
+local VM the workload can use that daemon, so it can act as root inside the VM,
+which reaches the VM's own disks and the folders shared into it, such as your
+project folder, and nothing else on your machine. `--no-docker` turns Docker off (see
+[Docker inside an environment](@/environments/docker.md#root-inside-a-local-vm)).
 
 ## The in-environment daemon
 

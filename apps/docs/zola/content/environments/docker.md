@@ -1,7 +1,7 @@
 ---
 title: Docker inside an environment
 description: Every hosted sandbox and local VM runs its own Docker daemon, so agents and builds can use containers without touching your machine's Docker.
-updated: 2026-10-27
+updated: 2026-11-16
 weight: 6
 aliases: ["/guides/docker"]
 ---
@@ -50,6 +50,32 @@ On a local VM, Docker's images and volumes live on a separate data disk:
 `cw info app` shows the disk as `Docker: 8Gi`. An image without Docker
 tooling fails to create with `create_guest_docker_tooling_missing` until you
 pass `--no-docker`.
+
+## Root inside a local VM
+
+In a local VM, Docker is on by default and the workload's user is in the
+`docker` group. So anything running in the environment, an agent included,
+can start a privileged container and act as root inside the VM. In a real run,
+the workload's user (`uid=1000(codewire)`) could not read `/etc/shadow`, but a
+container it started had every capability and entered the VM's init process
+as root:
+
+```sh
+cw run --in app --no-tty -- docker run --rm --privileged --pid=host alpine \
+  nsenter -t 1 -m -u -i -n -p -- sh -c 'id -u; cat /proc/1/comm'
+```
+
+```text
+0
+init
+```
+
+The VM is still the boundary. Root inside it reaches the VM's own disks and
+the folders shared into it, such as your project folder, which is mounted live
+and can be read and changed; nothing else on your machine. Its network policy is
+enforced outside the VM, by the [egress broker](@/networking/egress.md) on your
+machine. To keep the workload confined inside the VM, create it with
+`--no-docker`; it then has no Docker daemon and no Docker socket.
 
 ## Ports from containers
 
