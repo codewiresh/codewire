@@ -4,10 +4,12 @@
 //! and socket identities are persisted, but daemon capabilities and workload
 //! credentials never are.
 
+mod boot_egress;
 mod bootstrap;
 mod cached_image;
 mod checkpoints;
 mod collection_roots;
+mod egress_intercept;
 mod local_https;
 mod metadata;
 mod network_policies;
@@ -4571,23 +4573,10 @@ impl Supervisor {
             } else {
                 String::new()
             };
-        // The selected network policy at its current revision (#2537): the
-        // egress broker of this boot enforces exactly this document.
-        let network_policy = self
-            .core()
-            .network_policies
-            .environment_policy(environment.id)
-            .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?
-            .selected;
-        let network_policy_document = match &network_policy {
-            crate::network_policy_store::SelectedPolicy::Open => Vec::new(),
-            selected => selected
-                .compile()
-                .canonical_json()
-                .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?,
-        };
+        let egress = self.boot_egress(environment.id, generation)?;
         let start_request = v1::StartVmRequest {
-            network_policy_document,
+            network_policy_document: egress.network_policy_document,
+            intercept: egress.intercept,
             cw_runtime_catalog_generation: expected_cw_runtime_generation.clone(),
             environment_id: environment.id.to_string(),
             generation,
@@ -4705,6 +4694,9 @@ impl Supervisor {
                 if error_code == crate::runner_service::HOST_PORT_UNAVAILABLE {
                     return Err(SupervisorError::HostPortUnavailable);
                 }
+                if let Some(refusal) = crate::runner::InterceptRefusal::from_code(&error_code) {
+                    return Err(SupervisorError::Interception(refusal));
+                }
                 #[cfg(target_os = "macos")]
                 if error_code == crate::runner_service::VM_START_REFUSED {
                     return Err(SupervisorError::VmStartRefused);
@@ -4727,7 +4719,7 @@ impl Supervisor {
         }
         self.core()
             .network_policies
-            .record_enforced(environment.id, &network_policy)
+            .record_enforced(environment.id, &egress.network_policy)
             .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?;
         if cw_runtime.is_some() {
             let confirmation = match client.daemon_access().await {
@@ -10016,6 +10008,7 @@ impl From<SupervisorError> for Status {
             | SupervisorError::GuestSetupFailed
             | SupervisorError::GuestWorkspaceFailed
             | SupervisorError::HostPortUnavailable
+            | SupervisorError::Interception(_)
             | SupervisorError::VmStop
             | SupervisorError::VmResize
             | SupervisorError::VmDelete => Status::failed_precondition(error.to_string()),
@@ -10178,6 +10171,8 @@ pub enum SupervisorError {
         "a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; stop it, or publish a different host port"
     )]
     HostPortUnavailable,
+    #[error(transparent)]
+    Interception(crate::runner::InterceptRefusal),
     #[cfg(target_os = "macos")]
     #[error("macOS refused to start the VM (Virtualization.framework)")]
     VmStartRefused,
@@ -10273,6 +10268,7 @@ fn create_failure_code(error: &SupervisorError) -> &'static str {
         SupervisorError::GuestSetupFailed => "create_guest_setup_failed",
         SupervisorError::GuestWorkspaceFailed => "create_guest_workspace_failed",
         SupervisorError::HostPortUnavailable => "create_host_port_unavailable",
+        SupervisorError::Interception(refusal) => refusal.create_code(),
         #[cfg(target_os = "macos")]
         SupervisorError::VmStartRefused => "create_vm_start_refused",
         #[cfg(target_os = "macos")]
@@ -10445,6 +10441,7 @@ fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
         SupervisorError::GuestSetupFailed => "guest_setup_failed",
         SupervisorError::GuestWorkspaceFailed => "guest_workspace_failed",
         SupervisorError::HostPortUnavailable => "host_port_unavailable",
+        SupervisorError::Interception(refusal) => refusal.code(),
         #[cfg(target_os = "macos")]
         SupervisorError::VmStartRefused => "vm_start_refused",
         SupervisorError::VmStop => "vm_stop",

@@ -19,6 +19,7 @@ name = "codewire-vmm-guest-probe"
 path = "src/main.rs"
 
 [dependencies]
+base64 = { workspace = true }
 codewire-access = { workspace = true }
 codewire-network-session = { workspace = true }
 codewire-project = { workspace = true }
@@ -28,6 +29,7 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+x509-parser = { workspace = true }
 zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -45,6 +47,8 @@ tokio-stream = { workspace = true }
 tokio-vsock = { workspace = true, features = ["tonic014"] }
 
 [dev-dependencies]
+codewire-egress-front-door = { workspace = true }
+rcgen = "0.13"
 tempfile = { workspace = true }
 codewire-workspace-hack.workspace = true
 

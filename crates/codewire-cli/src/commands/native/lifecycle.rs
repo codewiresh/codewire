@@ -212,7 +212,11 @@ pub(super) fn wait_failure(
         return (None, lost_contact(noun, name, progress.lose()));
     }
     let stage = progress.fail_with_code(operation_error_code(&status));
-    (stage, native_status(status))
+    let error = native_status(status.clone());
+    (
+        stage,
+        crate::commands::checkpoint::interception::with_switch_step(error, &status),
+    )
 }
 
 /// A lifecycle call that failed after its progress began: the stage it
@@ -250,7 +254,17 @@ pub(super) async fn lifecycle_failure(
         },
         Err(_) => format!("the state of {name} is unknown; check `cw --local ls`"),
     };
-    anyhow::anyhow!("{head}: {error:#}\n{after}")
+    with_state(&head, &error, &after)
+}
+
+/// `error` under `head`, followed by the environment's state line, keeping
+/// the next step `error` carries as the error's own.
+fn with_state(head: &str, error: &anyhow::Error, after: &str) -> anyhow::Error {
+    let message = anyhow::anyhow!("{head}: {}\n{after}", crate::error_report::sentence(error));
+    match crate::error_report::next_step(error) {
+        Some(step) => crate::error_report::with_next_step(message, step),
+        None => message,
+    }
 }
 
 /// `cw start` on a local environment.
@@ -717,6 +731,27 @@ pub(crate) struct NativeCreated {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_state_line_keeps_the_next_step_on_its_own() {
+        let error = crate::error_report::with_next_step(
+            anyhow::anyhow!("start_intercept_unavailable (the switch is on)"),
+            "rm /state/egress-intercept",
+        );
+        let error = with_state(
+            "Start p3 failed at \"Starting the VM\"",
+            &error,
+            "p3 reports state error",
+        );
+        assert_eq!(
+            crate::error_report::next_step(&error).as_deref(),
+            Some("rm /state/egress-intercept")
+        );
+        assert_eq!(
+            crate::error_report::sentence(&error),
+            "Start p3 failed at \"Starting the VM\": start_intercept_unavailable (the switch is on)\np3 reports state error"
+        );
+    }
     use crate::output::{Charset, Style};
 
     #[tokio::test]

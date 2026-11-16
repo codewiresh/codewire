@@ -76,6 +76,7 @@ impl CloudHypervisorRunner {
             schema_version: PERSISTED_STATE_SCHEMA_VERSION,
             vm_id: prepared.request.vm_id,
             generation: prepared.request.generation,
+            intercept: !prepared.request.intercepts.is_empty(),
             vsock_cid: prepared.request.vsock_cid,
             daemon_vsock_port: prepared.request.daemon_vsock_port,
             phase: VmPhase::Starting,

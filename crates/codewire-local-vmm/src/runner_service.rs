@@ -60,7 +60,9 @@ const RUNNER_WATCH_BUFFER: usize = 8;
 //    ends the flows it refuses (#2537).
 // 11: host ports reach the guest's loopback through the daemon's ForwardTcp,
 //     and the network worker takes no host connections (#4347).
-pub(crate) const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 11;
+// 12: StartVmRequest.intercept binds the agent hosts for interception
+//     (#3999); an older runner would ignore it and boot without the CA.
+pub(crate) const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 12;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =
@@ -82,10 +84,16 @@ pub struct RunnerEntrypointConfig {
 mod checkpoint;
 mod exit_cause;
 mod stage_log;
+mod start_request;
 
 use exit_cause::runner_exit_error_code;
-
 use stage_log::guest_stage_name;
+use start_request::{
+    map_host_port_error, parse_cw_runtime_catalog_generation, parse_direct_shares,
+    parse_environment_id, parse_environment_projection, parse_host_ports,
+    parse_managed_credential_clients, parse_mesh_attachment, parse_setup_binding,
+    parse_skill_snapshot, start_network_policy,
+};
 
 #[derive(Clone)]
 pub struct RunnerClient {
@@ -1174,11 +1182,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let skill_snapshot_sha256 = parse_skill_snapshot(&request)?;
         let environment_projection_sha256 = parse_environment_projection(&request)?;
         let cw_runtime_catalog_generation = parse_cw_runtime_catalog_generation(&request)?;
-        let managed_credential_clients =
-            codewire_access::ManagedCredentialClients::decode(&request.managed_credential_clients)
-                .map_err(|_| {
-                    Status::invalid_argument("invalid managed credential client selection")
-                })?;
+        let managed_credential_clients = parse_managed_credential_clients(&request)?;
         #[cfg(target_os = "linux")]
         let checkpoint = checkpoint::parse_checkpoint_boot(&request)?;
         let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
@@ -1232,6 +1236,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 managed_credential_clients,
                 cw_runtime_catalog_generation,
                 network_policy,
+                intercepts: crate::runner::boot_intercepts(request.intercept),
                 #[cfg(target_os = "linux")]
                 checkpoint,
             })
@@ -1799,217 +1804,6 @@ impl EnvironmentRunnerService for RunnerRpc {
     }
 }
 
-fn parse_environment_id(value: &str) -> Result<Uuid, Status> {
-    let id =
-        Uuid::parse_str(value).map_err(|_| Status::invalid_argument("invalid environment ID"))?;
-    if id.is_nil() {
-        return Err(Status::invalid_argument("invalid environment ID"));
-    }
-    Ok(id)
-}
-
-fn parse_cw_runtime_catalog_generation(
-    request: &v1::StartVmRequest,
-) -> Result<Option<String>, Status> {
-    let generation = &request.cw_runtime_catalog_generation;
-    if generation.is_empty() {
-        return Ok(None);
-    }
-    if !crate::state::valid_root_generation(generation) {
-        return Err(Status::invalid_argument(
-            "invalid cw runtime catalog generation",
-        ));
-    }
-    Ok(Some(generation.clone()))
-}
-
-fn parse_setup_binding(request: &v1::StartVmRequest) -> Result<Option<SetupBinding>, Status> {
-    match (
-        request.setup_total_bytes,
-        request.setup_header_sha256.as_str(),
-        request.setup_root_generation.as_str(),
-    ) {
-        (0, "", "") => Ok(None),
-        (total_bytes, header_sha256, setup_root_generation)
-            if total_bytes > 0
-                && !header_sha256.is_empty()
-                && !setup_root_generation.is_empty() =>
-        {
-            let root_generation = Sha256Value::parse_hex(setup_root_generation)
-                .map_err(|_| Status::invalid_argument("invalid setup root generation"))?;
-            let header_sha256 = Sha256Value::parse_hex(header_sha256)
-                .map_err(|_| Status::invalid_argument("invalid setup header digest"))?;
-            Ok(Some(
-                SetupBinding::new(total_bytes, root_generation, header_sha256)
-                    .map_err(|_| Status::invalid_argument("invalid setup binding"))?,
-            ))
-        }
-        _ => Err(Status::invalid_argument("incomplete setup binding")),
-    }
-}
-
-fn parse_host_ports(host_ports: &[v1::HostPortBinding]) -> Result<Vec<HostPortBinding>, Status> {
-    let provided = host_ports
-        .iter()
-        .map(|binding| {
-            Ok(HostPortBinding {
-                host_port: u16::try_from(binding.host_port)
-                    .map_err(|_| Status::invalid_argument("invalid host-port binding"))?,
-                guest_port: u16::try_from(binding.guest_port)
-                    .map_err(|_| Status::invalid_argument("invalid host-port binding"))?,
-            })
-        })
-        .collect::<Result<Vec<_>, Status>>()?;
-    let canonical = canonical_host_port_bindings(provided.clone())
-        .map_err(|_| Status::invalid_argument("invalid host-port binding"))?;
-    if canonical != provided {
-        return Err(Status::invalid_argument(
-            "host-port bindings are not canonical",
-        ));
-    }
-    Ok(canonical)
-}
-
-fn parse_mesh_attachment(request: &v1::StartVmRequest) -> Result<Option<MeshAttachment>, Status> {
-    let Some(raw) = request.mesh.as_ref() else {
-        return Ok(None);
-    };
-    let guest_ports = raw
-        .guest_ports
-        .iter()
-        .map(|port| u16::try_from(*port).map_err(|_| Status::invalid_argument("invalid Mesh port")))
-        .collect::<Result<Vec<_>, _>>()?;
-    let auth_source = match v1::MeshEnrollmentAuthSource::try_from(raw.auth_source) {
-        Ok(v1::MeshEnrollmentAuthSource::StandaloneLocal) => {
-            MeshEnrollmentAuthSource::StandaloneLocal
-        }
-        Ok(v1::MeshEnrollmentAuthSource::HostedCurrent) => MeshEnrollmentAuthSource::HostedCurrent,
-        Ok(v1::MeshEnrollmentAuthSource::Unspecified) | Err(_) => {
-            return Err(Status::invalid_argument("invalid Mesh auth source"));
-        }
-    };
-    let attachment = MeshAttachment::new_with_auth_source(
-        auth_source,
-        &raw.mesh_url,
-        &raw.organization_id,
-        &raw.network_id,
-        &raw.node_name,
-        guest_ports,
-    )
-    .map_err(|_| Status::invalid_argument("invalid Mesh attachment"))?;
-    if attachment.mesh_url != raw.mesh_url
-        || attachment.organization_id != raw.organization_id
-        || attachment.network_id != raw.network_id
-        || attachment.node_name != raw.node_name
-        || match attachment.auth_source {
-            MeshEnrollmentAuthSource::StandaloneLocal => {
-                raw.auth_source != v1::MeshEnrollmentAuthSource::StandaloneLocal as i32
-            }
-            MeshEnrollmentAuthSource::HostedCurrent => {
-                raw.auth_source != v1::MeshEnrollmentAuthSource::HostedCurrent as i32
-            }
-        }
-        || attachment
-            .guest_ports
-            .iter()
-            .copied()
-            .map(u32::from)
-            .ne(raw.guest_ports.iter().copied())
-    {
-        return Err(Status::invalid_argument("noncanonical Mesh attachment"));
-    }
-    Ok(Some(attachment))
-}
-
-fn parse_direct_shares(request: &v1::StartVmRequest) -> Result<Vec<DirectShareRequest>, Status> {
-    if request.direct_shares.len() > MAX_DIRECT_SHARES {
-        return Err(Status::invalid_argument("too many direct shares"));
-    }
-    request
-        .direct_shares
-        .iter()
-        .enumerate()
-        .map(|(index, raw)| {
-            if raw.source_path.is_empty() || raw.source_path.contains(&0) {
-                return Err(Status::invalid_argument("invalid direct share"));
-            }
-            let identity = DirectShareIdentity::new(
-                raw.device_major,
-                raw.device_minor,
-                raw.inode,
-                raw.mount_id,
-                raw.owner_uid,
-                raw.filesystem_magic,
-            )
-            .map_err(|_| Status::invalid_argument("invalid direct share"))?;
-            let mount = DirectShareMount::for_index(index, raw.destination.clone(), raw.read_only)
-                .and_then(|mount| mount.with_vm_only(raw.vm_only.clone()))
-                .map_err(|_| Status::invalid_argument("invalid direct share"))?;
-            DirectShareRequest::new(
-                PathBuf::from(OsString::from_vec(raw.source_path.clone())),
-                identity,
-                mount,
-            )
-            .map_err(|_| Status::invalid_argument("invalid direct share"))
-        })
-        .collect()
-}
-
-fn parse_skill_snapshot(request: &v1::StartVmRequest) -> Result<Option<Sha256Value>, Status> {
-    if request.skill_snapshot_sha256.is_empty() {
-        Ok(None)
-    } else {
-        Sha256Value::parse_hex(&request.skill_snapshot_sha256)
-            .map(Some)
-            .map_err(|_| Status::invalid_argument("invalid skill snapshot digest"))
-    }
-}
-
-fn parse_environment_projection(
-    request: &v1::StartVmRequest,
-) -> Result<Option<Sha256Value>, Status> {
-    if request.environment_projection_sha256.is_empty() {
-        return Ok(None);
-    }
-    let digest = Sha256Value::parse_hex(&request.environment_projection_sha256)
-        .map_err(|_| Status::invalid_argument("invalid environment projection digest"))?;
-    if digest.as_bytes() == [0; 32] {
-        return Err(Status::invalid_argument(
-            "invalid environment projection digest",
-        ));
-    }
-    Ok(Some(digest))
-}
-
-/// A busy port names itself after the stable code, so the supervisor can say
-/// which one is taken.
-fn map_host_port_error(error: RunnerError) -> Status {
-    match error {
-        RunnerError::HostPortUnavailable(port) => {
-            Status::failed_precondition(format!("{HOST_PORT_UNAVAILABLE} {port}"))
-        }
-        RunnerError::InvalidRequest => Status::invalid_argument("invalid host-port bindings"),
-        _ => Status::internal("host-port update failed"),
-    }
-}
-
-/// The policy a boot's egress broker enforces: the selected revision's
-/// canonical document, or `open` when none is selected (#2537).
-fn start_network_policy(document: &[u8]) -> Result<codewire_egress_policy::CompiledPolicy, Status> {
-    if document.is_empty() {
-        return Ok(codewire_egress_policy::CompiledPolicy::developer_baseline());
-    }
-    if document.len() > codewire_egress_policy::MAX_POLICY_DOCUMENT_BYTES {
-        return Err(Status::invalid_argument(
-            "network policy document is too large",
-        ));
-    }
-    let document: codewire_egress_policy::PolicyDocument = serde_json::from_slice(document)
-        .map_err(|_| Status::invalid_argument("network policy document is invalid"))?;
-    codewire_egress_policy::CompiledPolicy::compile(document)
-        .map_err(|_| Status::invalid_argument("network policy document is invalid"))
-}
-
 fn map_start_error(error: RunnerError) -> Status {
     Status::failed_precondition(error.to_string())
 }
@@ -2028,10 +1822,11 @@ pub(crate) const HOST_PORT_UNAVAILABLE: &str = "host_port_unavailable";
 #[cfg(target_os = "macos")]
 pub(crate) const VM_START_REFUSED: &str = "vm_start_refused";
 
-/// Name the one prepare failure a user can fix without reading runner logs.
+/// Name the prepare failures a user can fix without reading runner logs.
 fn prepare_error_code(error: &RunnerError) -> &'static str {
     match error {
         RunnerError::HostPortUnavailable(_) => HOST_PORT_UNAVAILABLE,
+        RunnerError::Interception(refusal) => refusal.code(),
         _ => "prepare_failed",
     }
 }
@@ -2056,6 +1851,7 @@ fn network_start_error_code(error: &RunnerError) -> &'static str {
         RunnerError::EgressBrokerSpawn => "egress_broker_spawn",
         RunnerError::EgressBrokerStartTimeout => "egress_broker_start_timeout",
         RunnerError::EgressBrokerBootstrap => "egress_broker_bootstrap",
+        RunnerError::Interception(refusal) => refusal.code(),
         RunnerError::EgressBrokerStartup(failure) => failure.runner_error_code(),
         RunnerError::EgressBrokerWait => "egress_broker_wait",
         RunnerError::EgressBrokerKillTimeout => "egress_broker_kill_timeout",
@@ -3526,11 +3322,20 @@ mod tests {
     }
 
     #[test]
-    fn prepare_names_only_an_unavailable_host_port() {
+    fn prepare_names_the_failures_a_user_can_fix() {
         assert_eq!(
             prepare_error_code(&RunnerError::HostPortUnavailable(18_080)),
             HOST_PORT_UNAVAILABLE
         );
+        for refusal in [
+            crate::runner::InterceptRefusal::FrontDoorUnavailable,
+            crate::runner::InterceptRefusal::RestoreSwitchedOn,
+        ] {
+            assert_eq!(
+                prepare_error_code(&RunnerError::Interception(refusal)),
+                refusal.code()
+            );
+        }
         assert_eq!(
             prepare_error_code(&RunnerError::InvalidRequest),
             "prepare_failed"

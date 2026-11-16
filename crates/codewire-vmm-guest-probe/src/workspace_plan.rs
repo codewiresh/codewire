@@ -278,6 +278,36 @@ impl WorkspacePlan {
         Ok(self)
     }
 
+    /// Set each of `defaults` in this boot's active copy unless the image or
+    /// the project already sets that name, which keeps its value. Returns
+    /// the names it left alone.
+    pub(crate) fn with_environment_defaults(
+        mut self,
+        defaults: &[(&'static str, &str)],
+    ) -> Result<(Self, Vec<&'static str>), WorkspacePlanError> {
+        let mut kept = Vec::new();
+        for (name, value) in defaults {
+            let prefix = format!("{name}=");
+            if self
+                .environment
+                .iter()
+                .any(|entry| entry.starts_with(&prefix))
+            {
+                kept.push(*name);
+            } else {
+                self.environment.push(format!("{name}={value}"));
+            }
+        }
+        // The same order as a plan built from a map of names.
+        self.environment.sort_by(|a, b| {
+            a.split_once('=')
+                .map(|(key, _)| key)
+                .cmp(&b.split_once('=').map(|(key, _)| key))
+        });
+        self.validate()?;
+        Ok((self, kept))
+    }
+
     pub(crate) fn require_ordinary(&self) -> Result<(), WorkspacePlanError> {
         self.validate()?;
         if self.installation_plan_sha256.is_some() {

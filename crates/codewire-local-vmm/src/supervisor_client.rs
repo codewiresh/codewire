@@ -1208,6 +1208,15 @@ fn operation_error_hint(error_code: &str) -> &'static str {
         "start_host_port_unavailable" => {
             " (a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; `cw --local ports ENV` lists its ports: stop that program, or withdraw the port with `cw --local ports ENV --unpublish PORT` and publish another)"
         }
+        "create_intercept_unavailable" | "start_intercept_unavailable" => {
+            " (the egress-intercept file in the local VM state root switches agent interception on, and this cw cannot start the TLS front door yet)"
+        }
+        "create_restore_interception_switched_on" | "start_restore_interception_switched_on" => {
+            " (this VM checkpoint was taken with agent interception off, and the egress-intercept file in the local VM state root now switches it on; the file applies on a stop and start, never a restore)"
+        }
+        "create_restore_interception_switched_off" | "start_restore_interception_switched_off" => {
+            " (this VM checkpoint was taken with agent interception on, and no egress-intercept file in the local VM state root switches it on now; the file applies on a stop and start, never a restore)"
+        }
         "host_port_unavailable" => {
             " (the host port is in use on 127.0.0.1 by another program or local environment; choose another with --host-port)"
         }

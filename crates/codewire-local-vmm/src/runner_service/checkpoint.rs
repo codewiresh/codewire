@@ -102,6 +102,7 @@ impl RunnerRpc {
                         .clone()
                         .unwrap_or_default(),
                     daemon_vsock_port: boot.daemon_vsock_port,
+                    intercept: !boot.intercepts.is_empty(),
                 }),
                 resume_failed: capture.resume_failed,
             };
@@ -189,6 +190,7 @@ pub(super) fn parse_checkpoint_boot(
             .then(|| digest(&bindings.cw_runtime_catalog_generation))
             .transpose()?,
         daemon_vsock_port: bindings.daemon_vsock_port,
+        intercept: bindings.intercept,
     }))
 }
 

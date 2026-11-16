@@ -1920,6 +1920,7 @@ async fn publish_checkpoint_with_catalog(
             docker: false,
             cw_runtime_catalog_generation,
             daemon_vsock_port: 7777,
+            intercept: false,
         },
         timings: crate::supervisor::checkpoints::Timings::default(),
     });
@@ -2233,6 +2234,7 @@ fn a_checkpoint_manifest_must_name_its_own_kind_and_memory() {
             docker: true,
             cw_runtime_catalog_generation: None,
             daemon_vsock_port: 7777,
+            intercept: false,
         },
         timings: crate::supervisor::checkpoints::Timings::default(),
     };

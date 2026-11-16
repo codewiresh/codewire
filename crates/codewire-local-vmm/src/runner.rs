@@ -1,4 +1,5 @@
 use codewire_egress_policy::CompiledPolicy;
+use codewire_egress_policy::intercept::InterceptSet;
 use std::fmt;
 use std::io::{self, Read as _};
 use std::net::{Ipv4Addr, TcpListener as StdTcpListener};
@@ -91,12 +92,16 @@ use crate::state::{
     publish_seed, valid_root_generation,
 };
 
+mod boot_seed;
 #[cfg(target_os = "linux")]
 mod checkpoint;
 mod egress_spawn;
 mod inherited;
+mod intercept;
 
 use inherited::{INHERITED_SOURCE_FLOOR, duplicate_inherited_descriptor, raise_open_file_limit};
+pub use intercept::InterceptRefusal;
+pub(crate) use intercept::boot_intercepts;
 #[cfg(target_os = "linux")]
 mod cw_runtime_disk;
 mod host_port_forward;
@@ -165,6 +170,9 @@ pub struct CreateVmRequest {
     pub cw_runtime_catalog_generation: Option<String>,
     /// The network policy this boot's egress broker enforces (#2537).
     pub network_policy: CompiledPolicy,
+    /// The names this boot intercepts through its TLS front door (#3999);
+    /// empty, the default, intercepts nothing.
+    pub intercepts: InterceptSet,
     /// Restore this boot from the VM checkpoint placed in
     /// `checkpoints/in` instead of booting it (#3046 R4).
     #[cfg(target_os = "linux")]
@@ -296,32 +304,18 @@ impl CloudHypervisorRunner {
             .map_err(|_| RunnerError::InvalidRequest)?;
 
         let token = Zeroizing::new(generate_auth_token());
-        let seed = Seed::new_with_all_bindings(
-            request.vm_id,
-            request.generation,
-            request.daemon_vsock_port,
-            token.to_string(),
-            request.setup,
+        let egress_ca = intercept::boot_egress_ca(&request.intercepts)?;
+        let seed = boot_seed::boot_seed(
+            &request,
+            &token,
             direct_shares_sha256,
-            request.skill_snapshot_sha256,
+            docker_disk.is_some(),
+            cw_runtime_disk.as_ref(),
+            egress_ca,
+            // The front door's spawn supplies these with its CA (#3999,
+            // change 12); none until then.
+            codewire_vmm_guest_probe::SeedPlaceholders::default(),
         )?;
-        let seed = if docker_disk.is_some() {
-            seed.with_docker_data_disk()
-        } else {
-            seed
-        };
-        let seed = match request.environment_projection_sha256 {
-            Some(selection) => seed.with_environment_projection_sha256(selection),
-            None => seed,
-        };
-        let seed = seed.with_managed_credential_clients(request.managed_credential_clients);
-        let seed = match &cw_runtime_disk {
-            Some(disk) => seed.with_cw_runtime_catalog_sha256(
-                Sha256Value::parse_hex(&disk.generation)
-                    .map_err(|_| RunnerError::InvalidRequest)?,
-            ),
-            None => seed,
-        };
         publish_seed(&paths.seed_disk, &seed.encode())?;
         paths.prepare_diagnostics()?;
 
@@ -536,6 +530,7 @@ impl CloudHypervisorRunner {
             schema_version: PERSISTED_STATE_SCHEMA_VERSION,
             vm_id: prepared.request.vm_id,
             generation: prepared.request.generation,
+            intercept: !prepared.request.intercepts.is_empty(),
             vsock_cid: prepared.request.vsock_cid,
             daemon_vsock_port: prepared.request.daemon_vsock_port,
             phase: VmPhase::Starting,
@@ -589,6 +584,7 @@ impl CloudHypervisorRunner {
                 schema_version: PERSISTED_STATE_SCHEMA_VERSION,
                 vm_id: prepared.request.vm_id,
                 generation: prepared.request.generation,
+                intercept: !prepared.request.intercepts.is_empty(),
                 vsock_cid: prepared.request.vsock_cid,
                 daemon_vsock_port: prepared.request.daemon_vsock_port,
                 phase: VmPhase::Running,
@@ -1518,9 +1514,8 @@ impl RunningVm {
                 mesh: self.request.mesh.as_ref(),
                 mesh_credential_roots,
                 policy: &self.request.network_policy,
-                // Nothing binds interception yet; the front-door wiring sets
-                // this (#3999).
-                intercepts: codewire_egress_policy::intercept::InterceptSet::default(),
+                // Empty, the default, binds nothing (#3999).
+                intercepts: self.request.intercepts.clone(),
             };
             match spawn_network_stack_processes(&launch, key, mode).await {
                 Ok(mut worker) => {
@@ -5286,6 +5281,8 @@ pub enum RunnerError {
     EgressBrokerStartTimeout,
     #[error("egress broker private bootstrap failed")]
     EgressBrokerBootstrap,
+    #[error(transparent)]
+    Interception(#[from] InterceptRefusal),
     #[error("egress broker startup failed: {0:?}")]
     EgressBrokerStartup(EgressBrokerStartupFailure),
     #[error("wait for egress broker failed")]
@@ -5406,6 +5403,7 @@ impl RunnerError {
             Self::EgressBrokerSpawn => "egress_broker_spawn",
             Self::EgressBrokerStartTimeout => "egress_broker_start_timeout",
             Self::EgressBrokerBootstrap => "egress_broker_bootstrap",
+            Self::Interception(refusal) => refusal.code(),
             Self::EgressBrokerStartup(_) => "egress_broker_startup",
             Self::EgressBrokerWait => "egress_broker_wait",
             Self::EgressBrokerKillTimeout => "egress_broker_kill_timeout",
@@ -5529,6 +5527,7 @@ mod tests {
 
     fn persisted_starting_state(vm_id: Uuid, process: &LiveProcess) -> PersistedVmState {
         PersistedVmState {
+            intercept: false,
             schema_version: PERSISTED_STATE_SCHEMA_VERSION,
             vm_id,
             generation: 1,
@@ -5580,6 +5579,7 @@ mod tests {
             #[cfg(target_os = "linux")]
             checkpoint: None,
             network_policy: CompiledPolicy::developer_baseline(),
+            intercepts: InterceptSet::default(),
             vm_id: Uuid::new_v4(),
             generation: 1,
             vsock_cid: 7,
@@ -6543,6 +6543,7 @@ mod tests {
         write_test_ext4(&paths.state_disk, Uuid::new_v4());
         let admitted = StateDiskIdentity::capture(&paths.state_disk).unwrap();
         let persisted = PersistedVmState {
+            intercept: false,
             schema_version: PERSISTED_STATE_SCHEMA_VERSION,
             vm_id,
             generation: 1,
@@ -6628,6 +6629,7 @@ mod tests {
         ));
 
         let persisted = PersistedVmState {
+            intercept: false,
             schema_version: PERSISTED_STATE_SCHEMA_VERSION,
             vm_id,
             generation: 1,
@@ -6670,6 +6672,7 @@ mod tests {
         write_test_ext4(&root.root_disk, filesystem_uuid);
         let admitted = StateDiskIdentity::capture(&root.root_disk).unwrap();
         let persisted = PersistedVmState {
+            intercept: false,
             schema_version: PERSISTED_STATE_SCHEMA_VERSION,
             vm_id,
             generation: 1,
@@ -6804,6 +6807,7 @@ mod tests {
         write_test_ext4(&previous.root_disk, Uuid::new_v4());
         let previous_identity = StateDiskIdentity::capture(&previous.root_disk).unwrap();
         let persisted = PersistedVmState {
+            intercept: false,
             schema_version: PERSISTED_STATE_SCHEMA_VERSION,
             vm_id,
             generation: 1,

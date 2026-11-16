@@ -41,6 +41,7 @@ codewire-daemon = { workspace = true }
 codewire-daemon-bridge = { workspace = true }
 codewire-egress-broker = { workspace = true }
 codewire-egress-front-door = { workspace = true }
+codewire-egress-front-door-bridge = { workspace = true }
 codewire-egress-policy = { workspace = true }
 codewire-ext4-scrub = { workspace = true }
 codewire-netstack = { workspace = true }

@@ -155,6 +155,8 @@ pub(crate) fn unsupported_protocol_message(actual: u32) -> String {
         )
     }
 }
+/// The switch's file name in the native root.
+pub(crate) const EGRESS_INTERCEPT_SWITCH: &str = "egress-intercept";
 const NATIVE_SUPERVISOR_CONFIG_DIGEST_DOMAIN: &[u8] =
     b"codewire.native-supervisor.runtime-config.sha256.v1";
 
@@ -170,6 +172,12 @@ pub struct NativeRuntimeConfig {
 }
 
 impl NativeRuntimeConfig {
+    /// The per-host switch for intercepting agent hosts (#3999); see
+    /// `supervisor::egress_intercept`.
+    pub fn egress_intercept_switch(&self) -> PathBuf {
+        self.root.join(EGRESS_INTERCEPT_SWITCH)
+    }
+
     /// Bind a retained supervisor without changing any other configuration input.
     /// The caller admits this executable from the live kernel peer first.
     pub(crate) fn with_supervisor_executable(

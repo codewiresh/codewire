@@ -2124,6 +2124,7 @@ dependencies = [
  "codewire-daemon-proto",
  "codewire-egress-broker",
  "codewire-egress-front-door",
+ "codewire-egress-front-door-bridge",
  "codewire-egress-policy",
  "codewire-ext4-scrub",
  "codewire-local-credentials",
@@ -2565,9 +2566,11 @@ name = "codewire-vmm-guest-probe"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "codewire-access",
  "codewire-daemon",
  "codewire-daemon-proto",
+ "codewire-egress-front-door",
  "codewire-network-session",
  "codewire-project",
  "codewire-workload-secrets",
@@ -2576,6 +2579,7 @@ dependencies = [
  "hmac 0.12.1",
  "libc",
  "oci-spec",
+ "rcgen",
  "rustix",
  "serde",
  "serde_json",
@@ -2587,6 +2591,7 @@ dependencies = [
  "tokio-stream",
  "tokio-vsock",
  "uuid",
+ "x509-parser",
  "zeroize",
 ]
 
@@ -2802,6 +2807,7 @@ dependencies = [
  "url",
  "uuid",
  "winnow 1.0.3",
+ "x509-parser",
  "zeroize",
 ]
 

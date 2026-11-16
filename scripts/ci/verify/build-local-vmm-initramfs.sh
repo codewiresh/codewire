@@ -214,10 +214,26 @@ from pathlib import Path
 
 with Path(sys.argv[1]).open('rb') as stream:
     data = stream.read(64 * 1024 * 1024 + 1)
-marker = b'\0CWGUESTABI\0seed=9;cw_catalog=1;net=2\0'
+marker = b'\0CWGUESTABI\0seed=10;cw_catalog=1;net=2\0'
 if len(data) > 64 * 1024 * 1024 or data.count(marker) != 1 or data.count(b'\0CWGUESTABI\0') != 1:
-    raise SystemExit('static guest must contain exactly one current seed9/catalog1/net2 capability marker')
+    raise SystemExit('static guest must contain exactly one current seed10/catalog1/net2 capability marker')
 PY
+}
+
+# The guest init is linked with rust-lld and no C toolchain, so nothing in
+# its graph may build C: x509-parser's `verify` feature once brought in ring
+# that way (#3999). Every such build here goes through the cc crate.
+require_no_c_build() {
+  local tree
+  # From the workspace, as build_one runs: the guest root's build starts this
+  # script from outside it. Cargo's errors stay visible.
+  if tree="$(cd "$ROOT" && cargo tree --locked -q -p "$PACKAGE" --target "$TARGET" -e normal,build -i cc)"; then
+    :
+  else
+    die "the guest init's dependency graph for $TARGET could not be read (status=$?)"
+  fi
+  [[ -z "$tree" ]] || die "the guest init for $TARGET builds C code, which its static build cannot:
+$tree"
 }
 
 verify_reproducible() {
@@ -230,6 +246,7 @@ verify_reproducible() {
   fi
   validate_target
   require_exact_toolchain
+  require_no_c_build
   if [[ -n "$root_busybox" ]]; then
     root_busybox="$(absolute_existing_file BusyBox "$root_busybox")"
     [[ "$root_busybox_sha256" =~ ^[0-9a-f]{64}$ ]] ||

@@ -209,6 +209,38 @@ fn a_delivered_login_is_claude_codes_own_login_with_a_placeholder_and_the_marker
     assert_eq!(fixture.entries(), [CLAUDE_CREDENTIALS_FILE_NAME]);
 }
 
+/// Under interception (#3999) the broker delivers this environment's
+/// placeholder as the access token, and the front door swaps it outside the
+/// VM. The writer has no token format check that would refuse one.
+#[test]
+fn a_placeholder_access_token_is_written_as_delivered() {
+    let placeholder = codewire_access::CredentialPlaceholder::derive(
+        &codewire_access::PlaceholderKey::from_slice(&[9; codewire_access::PLACEHOLDER_KEY_BYTES])
+            .unwrap(),
+        &codewire_access::EnvironmentId::parse("environment-a").unwrap(),
+        GENERATION,
+        &codewire_access::CapabilitySlot::parse("anthropic").unwrap(),
+        &codewire_access::CredentialId::parse(CREDENTIAL).unwrap(),
+    );
+    assert!(
+        placeholder
+            .as_str()
+            .starts_with(codewire_access::CREDENTIAL_PLACEHOLDER_TAG)
+    );
+    let fixture = Fixture::new();
+    let mut writer = fixture.writer();
+    assert_eq!(
+        writer
+            .apply(delivery(CREDENTIAL, 1, placeholder.as_str(), EXPIRES), T0)
+            .unwrap(),
+        ClaudeLoginSync::Written
+    );
+    assert_eq!(
+        fixture.json()[CLAUDE_LOGIN_KEY]["accessToken"],
+        placeholder.as_str()
+    );
+}
+
 #[test]
 fn a_login_without_plan_or_tier_omits_both() {
     let fixture = Fixture::new();

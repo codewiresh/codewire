@@ -499,6 +499,10 @@ message CheckpointBootBindings {
   bool docker = 4;
   string cw_runtime_catalog_generation = 5;
   uint32 daemon_vsock_port = 6;
+  // The captured boot intercepted agent hosts and its guest trusts that
+  // boot's egress CA (#3999). A restore must match: the switch applies on a
+  // stop and start, not a restore.
+  bool intercept = 7;
 }
 
 message CheckpointVmResponse {
@@ -1127,6 +1131,12 @@ message StartVmRequest {
   // vms/<id>/checkpoints/in instead of booting it (#3046 R4, runner
   // protocol 10). vsock_cid is then the checkpoint's.
   CheckpointBoot checkpoint = 25;
+  // Intercept the agent hosts through this boot's TLS front door (#3999),
+  // off by default. The runner binds the front door's route hosts on 443 in
+  // the egress broker and carries the front door's CA certificate to the
+  // guest in the seed; no binding or key reaches the guest. A runner that
+  // cannot start the front door refuses the boot.
+  bool intercept = 26;
 }
 
 message CheckpointBoot {

@@ -18,6 +18,7 @@ pub mod cw_runtime;
 pub mod cw_runtime_live;
 #[cfg(target_os = "linux")]
 pub mod cw_runtime_publisher;
+mod egress_ca;
 mod newc;
 mod progress;
 mod seed;
@@ -69,6 +70,7 @@ pub use codewire_network_session::{
     NETWORK_KEY_LEN, NetworkDirection, NetworkError, NetworkGuestAck, NetworkHostHello,
     NetworkHostReady, NetworkKey, NetworkRole, NetworkSession, encoded_network_frame_len,
 };
+pub use egress_ca::{EgressCaCertificate, EgressCaError, MAX_EGRESS_CA_DER_BYTES};
 #[cfg(target_os = "linux")]
 pub use newc::write_canonical_guest_root_initramfs_with_cw;
 pub use newc::{
@@ -80,8 +82,8 @@ pub use progress::{
     PROGRESS_REQUEST_LEN, ProgressError, ProgressFrame, ProgressRequest,
 };
 pub use seed::{
-    DOCKER_DISK_SERIAL, GUEST_RUNTIME_ABI_MARKER, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN,
-    STATE_DISK_SERIAL, Seed, SeedError, SetupBinding,
+    DOCKER_DISK_SERIAL, GUEST_RUNTIME_ABI_MARKER, PlaceholderSlot, ROOT_DISK_SERIAL,
+    SEED_DISK_SERIAL, SEED_LEN, STATE_DISK_SERIAL, Seed, SeedError, SeedPlaceholders, SetupBinding,
 };
 pub use setup::{
     GUEST_ABI_VERSION, LayerEncoding, MAX_SETUP_CONFIG_BYTES, MAX_SETUP_LAYER_BYTES,

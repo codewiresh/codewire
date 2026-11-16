@@ -12,6 +12,8 @@ use serde::Serialize;
 
 use super::*;
 
+pub(in crate::commands) mod interception;
+
 #[derive(Debug, Args)]
 pub(crate) struct CheckpointArgs {
     #[command(subcommand)]
@@ -120,7 +122,10 @@ async fn handle_local_checkpoint_command(
     command: CheckpointCommand,
 ) -> anyhow::Result<()> {
     let status = |action: &'static str| {
-        move |status: tonic::Status| anyhow::anyhow!("{action}: {}", status.message())
+        move |status: tonic::Status| {
+            let error = anyhow::anyhow!("{action}: {}", status.message());
+            interception::with_switch_step(error, &status)
+        }
     };
     let mut client = native_client().await?;
     match command {

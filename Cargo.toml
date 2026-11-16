@@ -286,7 +286,7 @@ qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }
 tempfile = "3"
 wiremock = "=0.6.5"
 # Certificate assertions in tests only; never linked into a binary.
-x509-parser = { version = "=0.18.1", default-features = false, features = ["verify"] }
+x509-parser = { version = "=0.18.1", default-features = false }
 # Match the policy engine revision embedded by the pinned Kata runtime. Agent
 # policy is an executable security boundary, so syntax-only assertions are
 # insufficient.

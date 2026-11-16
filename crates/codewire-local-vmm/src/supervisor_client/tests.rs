@@ -1027,6 +1027,30 @@ fn an_unreachable_registry_says_a_tag_is_always_checked() {
 }
 
 #[test]
+fn interception_refusals_name_the_switch_file() {
+    for code in [
+        "create_intercept_unavailable",
+        "start_intercept_unavailable",
+        "create_restore_interception_switched_on",
+        "start_restore_interception_switched_on",
+        "create_restore_interception_switched_off",
+        "start_restore_interception_switched_off",
+    ] {
+        let hint = operation_error_hint(code);
+        assert!(hint.contains("egress-intercept file"), "{code}: {hint}");
+    }
+    // Each direction says which way the switch moved.
+    assert!(
+        operation_error_hint("start_restore_interception_switched_on")
+            .contains("now switches it on")
+    );
+    assert!(
+        operation_error_hint("start_restore_interception_switched_off")
+            .contains("no egress-intercept file")
+    );
+}
+
+#[test]
 fn a_failed_operation_status_carries_its_error_code() {
     let mut failed = operation(v1::OperationPhase::Failed);
     failed.error_code = "start_direct_share_changed".to_owned();

@@ -41,11 +41,19 @@ pub fn report_error(error: &anyhow::Error) {
     eprint!("{}", render(error, caps.stderr_style()));
 }
 
-fn render(error: &anyhow::Error, style: Style) -> String {
+/// The next step `error` carries, wherever it sits in the chain.
+pub(crate) fn next_step(error: &anyhow::Error) -> Option<String> {
+    error.downcast_ref::<NextStep>().map(|next| next.0.clone())
+}
+
+/// `error`'s chain as one sentence, joined by ": ", without its next step.
+/// A caller that rebuilds an error from this text attaches the step again
+/// with [`with_next_step`].
+pub(crate) fn sentence(error: &anyhow::Error) -> String {
     // A context shows in the chain as its own Display, so the step is found
     // through the error (which reaches every context) and its one layer is
     // left out of the sentence.
-    let step = error.downcast_ref::<NextStep>().map(|next| next.0.clone());
+    let step = next_step(error);
     let mut skipped = false;
     let parts: Vec<String> = error
         .chain()
@@ -56,10 +64,15 @@ fn render(error: &anyhow::Error, style: Style) -> String {
             !is_step
         })
         .collect();
+    parts.join(": ")
+}
+
+fn render(error: &anyhow::Error, style: Style) -> String {
+    let step = next_step(error);
     let mut text = format!(
         "{} {}\n",
         style.status(Status::Failed),
-        capitalised(&parts.join(": "))
+        capitalised(&sentence(error))
     );
     if let Some(step) = step {
         text.push_str(&format!("{} {step}\n", style.status(Status::Next)));

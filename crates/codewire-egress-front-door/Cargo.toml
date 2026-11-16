@@ -31,7 +31,7 @@ zeroize = { workspace = true }
 futures = { workspace = true }
 hyper = { workspace = true, features = ["client", "http1", "http2", "server"] }
 tokio = { workspace = true, features = ["test-util"] }
-x509-parser = { workspace = true }
+x509-parser = { workspace = true, features = ["verify"] }
 codewire-workspace-hack.workspace = true
 
 [lints]

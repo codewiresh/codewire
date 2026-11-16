@@ -1138,6 +1138,40 @@ inside an opaque encoding would not be caught, in a header or in a body. GitHub
 keeps its closed families and exact operations, since `git` and `gh` go through
 its signer and executor.
 
+### Agent host interception (in progress, #3999)
+
+Local VMs are gaining a TLS front door outside the VM that terminates
+connections to the agent hosts and swaps a per-environment placeholder for
+the credential (Program #3997). It is off by default, and with it off a boot
+is exactly as described above. What exists today:
+
+- **The switch, temporary and per host.** The file `egress-intercept` in the
+  local VM state root (`~/.codewire/native-v1` by default, or
+  `CODEWIRE_NATIVE_STATE_ROOT`) switches interception on
+  for every boot the supervisor starts while its whole content is exactly
+  `on`, with an optional trailing newline. Anything else is off and logged.
+  The supervisor reads it once per boot and logs `egress_intercept` with what
+  the boot used. D3 removes it once interception is the default (#3997).
+- **What a boot with it on does.** The runner binds the front door's route
+  hosts (`api.anthropic.com`, `api.openai.com`, `chatgpt.com`) on 443 in the
+  egress broker and carries the front door's CA certificate, never its key,
+  to the guest in the seed. The front door makes the CA in its own memory for
+  each boot, name-constrained to those hosts. Until the runner can start the
+  front door, a boot with the switch on is refused and names the file.
+- **What the guest trusts.** PID 1 publishes the CA alone as
+  `/run/codewire-host/egress-ca.pem` and sets `NODE_EXTRA_CA_CERTS` to it
+  (Claude Code), unless the image or project sets that name; then it is kept
+  and logged, and that tool's intercepted connections fail their TLS
+  handshake. It also publishes `/run/codewire-host/ca-certificates.crt`, the
+  image's own system bundle (read only from inside the image's root) followed
+  by the CA, which nothing names yet: the variables that would point other
+  tools at it replace a trust store rather than add to it. Nothing is
+  mounted over the image's trust store and its layer is never written. A
+  restored boot publishes from its own seed before the workspace thaws.
+- **The agent's login.** Claude Code's login writer accepts this
+  environment's placeholder as the access token; the broker delivering it is
+  the next step, and until then the direct delivery exception below applies.
+
 ### Per-environment placeholders (#3999)
 
 When a local VM's agent hosts go through the TLS front door, which is off by

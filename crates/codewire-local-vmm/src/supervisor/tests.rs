@@ -8579,6 +8579,14 @@ fn create_failure_codes_are_closed_and_discard_opaque_error_details() {
             SupervisorError::HostPortUnavailable,
             "create_host_port_unavailable",
         ),
+        (
+            SupervisorError::Interception(crate::runner::InterceptRefusal::FrontDoorUnavailable),
+            "create_intercept_unavailable",
+        ),
+        (
+            SupervisorError::Interception(crate::runner::InterceptRefusal::RestoreSwitchedOn),
+            "create_restore_interception_switched_on",
+        ),
     ];
     for (error, expected) in cases {
         let code = create_failure_code(&error);
@@ -8675,6 +8683,14 @@ fn lifecycle_failure_causes_are_closed_codes_that_discard_error_text() {
         (
             SupervisorError::HostPortUnavailable,
             "host_port_unavailable",
+        ),
+        (
+            SupervisorError::Interception(crate::runner::InterceptRefusal::FrontDoorUnavailable),
+            "intercept_unavailable",
+        ),
+        (
+            SupervisorError::Interception(crate::runner::InterceptRefusal::RestoreSwitchedOff),
+            "restore_interception_switched_off",
         ),
         (SupervisorError::GuestSetupFailed, "guest_setup_failed"),
         (

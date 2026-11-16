@@ -383,6 +383,8 @@ pub struct RestoreBoot {
     pub docker: bool,
     pub cw_runtime_catalog_generation: Option<String>,
     pub daemon_vsock_port: u32,
+    /// The captured boot intercepted agent hosts (#3999).
+    pub intercept: bool,
 }
 
 /// What the guest reported when the restored VM resumed.
@@ -422,6 +424,7 @@ impl CloudHypervisorRunner {
         if request.setup.is_some() {
             return Err(RunnerError::Checkpoint("a restored VM has no setup pack"));
         }
+        super::intercept::admit_restored_interception(restore.intercept, &request.intercepts)?;
         if request.skill_snapshot_sha256 != restore.skill_snapshot_sha256
             || request.environment_projection_sha256 != restore.environment_projection_sha256
             || request.managed_credential_clients != restore.managed_credential_clients

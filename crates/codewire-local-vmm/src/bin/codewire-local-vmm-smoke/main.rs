@@ -72,6 +72,9 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
+mod error_class;
+
+#[cfg(target_os = "linux")]
 mod linux {
     use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
@@ -86,6 +89,7 @@ mod linux {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use super::error_class::runner_error_class;
     use async_trait::async_trait;
     use codewire_daemon::client::{SessionClient, SessionClientError, v1};
     use codewire_daemon_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT;
@@ -1150,92 +1154,6 @@ mod linux {
         }
     }
 
-    fn runner_error_class(error: &RunnerError) -> &'static str {
-        match error {
-            RunnerError::CwRuntimeDiskChanged => "cw-runtime-disk-changed",
-            RunnerError::CwRuntime(_) => "cw-runtime",
-            RunnerError::InvalidRequest => "invalid-request",
-            RunnerError::Checkpoint(_) => "checkpoint",
-            RunnerError::InvalidArtifactStagingLayout => "invalid-artifact-layout",
-            RunnerError::Artifact(_) => "artifact",
-            RunnerError::Path(_) => "path",
-            RunnerError::State(_) => "state",
-            RunnerError::Preflight(_) => "preflight",
-            RunnerError::Recovery(error) => recovery_error_class(error),
-            RunnerError::Config(_) => "config",
-            RunnerError::Api(_) => "api",
-            RunnerError::HybridVsock(_) => "hybrid-vsock",
-            RunnerError::Seed(_) => "seed",
-            RunnerError::MissingSeedAfterReadiness => "missing-seed-after-readiness",
-            RunnerError::MissingSetupAfterReadiness => "missing-setup-after-readiness",
-            RunnerError::SetupDiskIdentityChanged => "setup-disk-identity-changed",
-            RunnerError::MissingPreformattedStateDisk => "missing-state-disk",
-            RunnerError::MissingPreformattedDockerDisk => "missing-docker-disk",
-            RunnerError::UnexpectedDockerDisk => "unexpected-docker-disk",
-            RunnerError::MissingPreformattedRootDisk => "missing-root-disk",
-            RunnerError::StateDiskSizeMismatch { .. } => "state-disk-size-mismatch",
-            RunnerError::DockerDiskSizeMismatch { .. } => "docker-disk-size-mismatch",
-            RunnerError::RootDiskSizeMismatch { .. } => "root-disk-size-mismatch",
-            RunnerError::PersistedRootGenerationMismatch => "root-generation-mismatch",
-            RunnerError::InvalidDiskGrowth(_) => "invalid-disk-growth",
-            RunnerError::DiskShrinkUnsupported { .. } => "disk-shrink",
-            RunnerError::StateDiskGrowthIdentityMismatch(_) => "disk-growth-identity",
-            RunnerError::E2fsckUnavailable => "e2fsck-unavailable",
-            RunnerError::E2fsckFailed(_) => "e2fsck-failed",
-            RunnerError::Resize2fsUnavailable => "resize2fs-unavailable",
-            RunnerError::Resize2fsFailed(_) => "resize2fs-failed",
-            RunnerError::DiskToolConfinement { .. } => "disk-tool-confinement",
-            RunnerError::GenerationNotAdvanced { .. } => "generation-not-advanced",
-            RunnerError::InvalidNetworkWorker => "invalid-network-worker",
-            RunnerError::NetworkWorkerSpawn => "network-worker-spawn",
-            RunnerError::NetworkWorkerStartTimeout => "network-worker-start-timeout",
-            RunnerError::NetworkWorkerBootstrap => "network-worker-bootstrap",
-            RunnerError::GuestDockerToolingMissing => "guest-docker-tooling-missing",
-            RunnerError::GuestSetupFailed => "guest-setup-failed",
-            RunnerError::GuestWorkspaceFailed => "guest-workspace-failed",
-            RunnerError::NetworkWorkerStartup(failure) => failure.code(),
-            RunnerError::NetworkWorkerWait => "network-worker-wait",
-            RunnerError::NetworkWorkerKillTimeout => "network-worker-kill-timeout",
-            RunnerError::HostPortUnavailable(_) => "host-port-unavailable",
-            RunnerError::IngressControl => "ingress-control",
-            RunnerError::EgressPolicyControl => "egress-policy-control",
-            RunnerError::EgressBrokerSpawn => "egress-broker-spawn",
-            RunnerError::EgressBrokerStartTimeout => "egress-broker-start-timeout",
-            RunnerError::EgressBrokerBootstrap => "egress-broker-bootstrap",
-            RunnerError::EgressBrokerStartup(failure) => failure.code(),
-            RunnerError::EgressBrokerWait => "egress-broker-wait",
-            RunnerError::EgressBrokerKillTimeout => "egress-broker-kill-timeout",
-            RunnerError::MeshTransportSpawn => "mesh-transport-spawn",
-            RunnerError::MeshTransportStartTimeout => "mesh-transport-start-timeout",
-            RunnerError::MeshTransportBootstrap => "mesh-transport-bootstrap",
-            RunnerError::MeshTransportStartup(failure) => failure.code(),
-            RunnerError::MeshEnrollmentBrokerSpawn => "mesh-enrollment-broker-spawn",
-            RunnerError::MeshEnrollmentBrokerStartTimeout => "mesh-enrollment-broker-start-timeout",
-            RunnerError::MeshEnrollmentBrokerBootstrap => "mesh-enrollment-broker-bootstrap",
-            RunnerError::MeshEnrollmentBrokerStartup(failure) => failure.code(),
-            RunnerError::MeshProcessWait => "mesh-process-wait",
-            RunnerError::MeshProcessKillTimeout => "mesh-process-kill-timeout",
-            RunnerError::ExitedDuringStart => "vmm-exited-during-start",
-            RunnerError::StartTimeout => "vmm-start-timeout",
-            RunnerError::VirtiofsdUnavailable => "virtiofsd-unavailable",
-            RunnerError::DirectShareChanged => "direct-share-changed",
-            RunnerError::VirtiofsdSpawn => "virtiofsd-spawn",
-            RunnerError::VirtiofsdConfinement => "virtiofsd-confinement",
-            RunnerError::VirtiofsdExitedDuringStart => "virtiofsd-exited-during-start",
-            RunnerError::VirtiofsdStartTimeout => "virtiofsd-start-timeout",
-            RunnerError::VirtiofsdPidFile => "virtiofsd-pid-file",
-            RunnerError::VirtiofsdWait => "virtiofsd-wait",
-            RunnerError::VirtiofsdKillTimeout => "virtiofsd-kill-timeout",
-            RunnerError::Spawn => "vmm-spawn",
-            RunnerError::Wait => "vmm-wait",
-            RunnerError::KillTimeout => "vmm-kill-timeout",
-            RunnerError::GuestPoweroff => "guest-poweroff",
-            RunnerError::VmStillRunning => "vm-still-running",
-            RunnerError::PersistedIdentityMismatch => "persisted-identity-mismatch",
-            RunnerError::Io { .. } => "io",
-        }
-    }
-
     fn running_exit_class(running: &mut RunningVm) -> &'static str {
         match running.try_exit() {
             Ok(ExitClass::StillRunning) => "running",
@@ -1279,24 +1197,6 @@ mod linux {
         }
     }
 
-    fn recovery_error_class(error: &RecoveryError) -> &'static str {
-        match error {
-            RecoveryError::InvalidPid(_) => "recovery-invalid-pid",
-            RecoveryError::ReadProcess(_) => "recovery-read-process",
-            RecoveryError::MalformedProcess => "recovery-malformed-process",
-            RecoveryError::IdentityMismatch => "recovery-identity-mismatch",
-            RecoveryError::ExecutableReplaced => "recovery-executable-replaced",
-            RecoveryError::UnexpectedSpawnedExecutable => "recovery-unexpected-executable",
-            RecoveryError::SpawnedIdentityChangedDuringCapture => "recovery-spawn-identity-changed",
-            RecoveryError::InvalidTargetFd(_) => "recovery-invalid-target-fd",
-            RecoveryError::ProcessExited => "recovery-process-exited",
-            RecoveryError::DuplicateProcessFd(_) => "recovery-duplicate-fd",
-            RecoveryError::InspectSocket(_) => "recovery-inspect-socket",
-            RecoveryError::MalformedSocketDomain => "recovery-socket-domain",
-            RecoveryError::Pidfd(_) => "recovery-pidfd",
-        }
-    }
-
     async fn cleanup(arguments: Args) -> SmokeResult<()> {
         let runner = CloudHypervisorRunner::new(arguments.runner_config()).await?;
         runner
@@ -1312,6 +1212,7 @@ mod linux {
         CreateVmRequest {
             cw_runtime_catalog_generation: None,
             network_policy: codewire_egress_policy::CompiledPolicy::developer_baseline(),
+            intercepts: codewire_egress_policy::intercept::InterceptSet::default(),
             checkpoint: None,
             vm_id: arguments.vm_id,
             generation,

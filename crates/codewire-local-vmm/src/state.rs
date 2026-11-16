@@ -353,6 +353,10 @@ pub struct PersistedVmState {
     pub root_disk: Option<StateDiskIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cw_runtime_disk: Option<AdmittedCwRuntimeDisk>,
+    /// This generation booted with agent interception switched on (#3999).
+    /// Absent in a record written before the switch existed: off.
+    #[serde(default)]
+    pub intercept: bool,
     pub api_socket: Option<SocketIdentity>,
     pub vsock_socket: Option<SocketIdentity>,
 }
@@ -1302,6 +1306,7 @@ mod tests {
             schema_version: PERSISTED_STATE_SCHEMA_VERSION,
             vm_id: Uuid::new_v4(),
             generation: 1,
+            intercept: false,
             vsock_cid: 7,
             daemon_vsock_port: 7777,
             phase,
@@ -1340,6 +1345,17 @@ mod tests {
             api_socket: None,
             vsock_socket: None,
         }
+    }
+
+    /// #3999: a record written before the switch existed reads as a boot
+    /// without interception.
+    #[test]
+    fn a_record_without_the_intercept_field_reads_as_off() {
+        let mut value = serde_json::to_value(persisted(VmPhase::Running)).unwrap();
+        assert_eq!(value["intercept"], false);
+        value.as_object_mut().unwrap().remove("intercept");
+        let read: PersistedVmState = serde_json::from_value(value).unwrap();
+        assert!(!read.intercept);
     }
 
     #[test]
