@@ -31,6 +31,22 @@ class GithubAppAccountKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     GITHUB_APP_ACCOUNT_KIND_USER: _ClassVar[GithubAppAccountKind]
     GITHUB_APP_ACCOUNT_KIND_ORGANIZATION: _ClassVar[GithubAppAccountKind]
     GITHUB_APP_ACCOUNT_KIND_ENTERPRISE: _ClassVar[GithubAppAccountKind]
+
+class ProviderRevocationOutcome(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    PROVIDER_REVOCATION_OUTCOME_UNSPECIFIED: _ClassVar[ProviderRevocationOutcome]
+    PROVIDER_REVOCATION_OUTCOME_CONFIRMED: _ClassVar[ProviderRevocationOutcome]
+    PROVIDER_REVOCATION_OUTCOME_NOT_AVAILABLE: _ClassVar[ProviderRevocationOutcome]
+    PROVIDER_REVOCATION_OUTCOME_FAILED: _ClassVar[ProviderRevocationOutcome]
+
+class ProviderRevocationFailure(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    PROVIDER_REVOCATION_FAILURE_UNSPECIFIED: _ClassVar[ProviderRevocationFailure]
+    PROVIDER_REVOCATION_FAILURE_UNAVAILABLE: _ClassVar[ProviderRevocationFailure]
+    PROVIDER_REVOCATION_FAILURE_REFUSED: _ClassVar[ProviderRevocationFailure]
+    PROVIDER_REVOCATION_FAILURE_UNREADABLE: _ClassVar[ProviderRevocationFailure]
+    PROVIDER_REVOCATION_FAILURE_EXPIRED: _ClassVar[ProviderRevocationFailure]
+    PROVIDER_REVOCATION_FAILURE_NOT_READ: _ClassVar[ProviderRevocationFailure]
 CREDENTIAL_AUTHENTICATION_KIND_UNSPECIFIED: CredentialAuthenticationKind
 CREDENTIAL_AUTHENTICATION_KIND_OAUTH: CredentialAuthenticationKind
 CREDENTIAL_AUTHENTICATION_KIND_API_KEY: CredentialAuthenticationKind
@@ -47,6 +63,16 @@ GITHUB_APP_ACCOUNT_KIND_UNSPECIFIED: GithubAppAccountKind
 GITHUB_APP_ACCOUNT_KIND_USER: GithubAppAccountKind
 GITHUB_APP_ACCOUNT_KIND_ORGANIZATION: GithubAppAccountKind
 GITHUB_APP_ACCOUNT_KIND_ENTERPRISE: GithubAppAccountKind
+PROVIDER_REVOCATION_OUTCOME_UNSPECIFIED: ProviderRevocationOutcome
+PROVIDER_REVOCATION_OUTCOME_CONFIRMED: ProviderRevocationOutcome
+PROVIDER_REVOCATION_OUTCOME_NOT_AVAILABLE: ProviderRevocationOutcome
+PROVIDER_REVOCATION_OUTCOME_FAILED: ProviderRevocationOutcome
+PROVIDER_REVOCATION_FAILURE_UNSPECIFIED: ProviderRevocationFailure
+PROVIDER_REVOCATION_FAILURE_UNAVAILABLE: ProviderRevocationFailure
+PROVIDER_REVOCATION_FAILURE_REFUSED: ProviderRevocationFailure
+PROVIDER_REVOCATION_FAILURE_UNREADABLE: ProviderRevocationFailure
+PROVIDER_REVOCATION_FAILURE_EXPIRED: ProviderRevocationFailure
+PROVIDER_REVOCATION_FAILURE_NOT_READ: ProviderRevocationFailure
 
 class ListGithubPendingPermissionsRequest(_message.Message):
     __slots__ = ()
@@ -385,10 +411,22 @@ class RevokeCredentialRequest(_message.Message):
     def __init__(self, credential_id: _Optional[str] = ..., expected_revocation_generation: _Optional[int] = ...) -> None: ...
 
 class RevokeCredentialResponse(_message.Message):
-    __slots__ = ("credential",)
+    __slots__ = ("credential", "provider_revocation")
     CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
+    PROVIDER_REVOCATION_FIELD_NUMBER: _ClassVar[int]
     credential: Credential
-    def __init__(self, credential: _Optional[_Union[Credential, _Mapping]] = ...) -> None: ...
+    provider_revocation: ProviderRevocation
+    def __init__(self, credential: _Optional[_Union[Credential, _Mapping]] = ..., provider_revocation: _Optional[_Union[ProviderRevocation, _Mapping]] = ...) -> None: ...
+
+class ProviderRevocation(_message.Message):
+    __slots__ = ("outcome", "failure", "http_status")
+    OUTCOME_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_FIELD_NUMBER: _ClassVar[int]
+    HTTP_STATUS_FIELD_NUMBER: _ClassVar[int]
+    outcome: ProviderRevocationOutcome
+    failure: ProviderRevocationFailure
+    http_status: int
+    def __init__(self, outcome: _Optional[_Union[ProviderRevocationOutcome, str]] = ..., failure: _Optional[_Union[ProviderRevocationFailure, str]] = ..., http_status: _Optional[int] = ...) -> None: ...
 
 class DeleteCredentialRequest(_message.Message):
     __slots__ = ("credential_id", "expected_revocation_generation")

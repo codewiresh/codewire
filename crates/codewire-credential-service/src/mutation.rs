@@ -11,6 +11,7 @@ mod enrollment;
 mod github;
 mod github_app;
 mod keys;
+mod provider_revocation;
 mod publication;
 mod ssh;
 #[cfg(test)]
@@ -88,10 +89,14 @@ struct Shared {
     /// Present exactly when the GitHub App is configured.
     github_login: Option<GitHubDeviceLogin>,
     github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
+    /// Present when a revoke also asks the credential's provider (#4717).
+    revocation: Option<RevocationTransports>,
     /// Bounds a mutation and every publication: [`MUTATION_TIMEOUT`] in the
     /// product.
     mutation_timeout: Duration,
 }
+
+pub use provider_revocation::RevocationTransports;
 
 /// Bounded owner of request drivers as well as the shared enrollment workers.
 /// A response disappearing signals cancellation; it never aborts SQL cleanup.
@@ -122,6 +127,7 @@ impl CredentialMutationOwner {
                 claude_sign_in,
                 github_login,
                 github_app_authorization,
+                revocation: None,
                 mutation_timeout: MUTATION_TIMEOUT,
             }),
             accepting: Mutex::new(true),
@@ -129,6 +135,15 @@ impl CredentialMutationOwner {
             workers: TaskTracker::new(),
             stop: CancellationToken::new(),
         }
+    }
+
+    /// The same owner, revoking each credential's token at its provider too
+    /// (#4717). Call it before serving.
+    pub fn with_provider_revocation(mut self, transports: RevocationTransports) -> Self {
+        Arc::get_mut(&mut self.shared)
+            .expect("an owner that has not served is not shared")
+            .revocation = Some(transports);
+        self
     }
 
     /// The same owner with `bound` in place of every mutation's and

@@ -312,19 +312,19 @@ impl CredentialMutationService for Service {
         request: ServiceRequest<'_, proto::RevokeCredentialRequest>,
     ) -> ServiceResult<proto::RevokeCredentialResponse> {
         let request = request.to_owned_message();
-        let metadata = self
+        let (metadata, provider) = self
             .owner
-            .lifecycle(
+            .revoke(
                 authority(&ctx)?,
                 request.credential_id,
                 request.expected_revocation_generation,
-                false,
             )
             .await
-            .map_err(error)?
-            .ok_or_else(|| error(Error::PublicationUnknown))?;
+            .map_err(error)?;
+        let metadata = metadata.ok_or_else(|| error(Error::PublicationUnknown))?;
         connectrpc::Response::ok(proto::RevokeCredentialResponse {
             credential: Some(credential(metadata)).into(),
+            provider_revocation: provider.to_proto().into(),
             ..Default::default()
         })
     }

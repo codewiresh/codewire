@@ -77,16 +77,20 @@ impl GitHubAppAuthorizationConfig {
         upstream: &std::sync::Arc<dyn crate::BrokerUpstreamTransport>,
         bundle: &GitHubAppUserOAuthBundle,
     ) -> crate::provider_oauth::ProviderRevocation {
-        let Ok(access_token) = bundle.access_token() else {
-            return crate::provider_oauth::ProviderRevocation::Failed(
-                crate::provider_oauth::RevocationFailure::Unreadable,
-            );
+        use crate::provider_oauth::{ProviderRevocation, RevocationFailure};
+        let Ok(payload) = parse_bundle_payload(&bundle.bytes) else {
+            return ProviderRevocation::Failed(RevocationFailure::Unreadable);
         };
+        // GitHub cannot be asked with an expired access token; refreshing
+        // first is #4896.
+        if unix_now().map_or(true, |now| payload.access_expires_at_unix <= now) {
+            return ProviderRevocation::Failed(RevocationFailure::Expired);
+        }
         crate::provider_oauth::github::revoke_app_token(
             upstream,
             &self.client_id,
             &self.client_secret,
-            &access_token,
+            &payload.access_token,
         )
         .await
     }
@@ -1645,6 +1649,36 @@ mod tests {
                 "{code}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_expired_user_token_is_reported_without_asking_github() {
+        let bundle = GitHubAppUserOAuthBundle::parse(
+            &bundle_from_expiring_tokens(
+                Zeroizing::new("ghu_synthetic_access_token".into()),
+                28_800,
+                Zeroizing::new("ghr_synthetic_refresh_token".into()),
+                15_897_600,
+                1_700_000_000,
+                GitHubAppRefreshExpectation {
+                    user_id: 7,
+                    app_slug: "codewire-sh".into(),
+                    installation_id: 9,
+                },
+            )
+            .unwrap()
+            .into_bytes(),
+        )
+        .unwrap();
+        let revocation = Arc::new(crate::provider_oauth::test_support::ScriptedProvider::default());
+        let upstream: Arc<dyn BrokerUpstreamTransport> = revocation.clone();
+        assert_eq!(
+            config().revoke_user_token(&upstream, &bundle).await,
+            crate::provider_oauth::ProviderRevocation::Failed(
+                crate::provider_oauth::RevocationFailure::Expired
+            )
+        );
+        assert!(revocation.sent().is_empty(), "GitHub is not asked");
     }
 
     #[tokio::test]

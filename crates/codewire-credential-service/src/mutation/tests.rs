@@ -27,6 +27,7 @@ mod claude;
 mod github;
 mod lifecycle;
 mod process_test_support;
+mod provider_revocation;
 mod ssh;
 pub(crate) mod support;
 use process_test_support::isolated_process_fixture;

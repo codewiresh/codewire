@@ -7,6 +7,7 @@
 
 mod config;
 mod hardening;
+
 #[cfg(test)]
 mod kind;
 mod ssh;
@@ -45,7 +46,7 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 use crate::KubernetesPlatformBridgeAuthenticator;
-use crate::mutation::CredentialMutationOwner;
+use crate::mutation::{CredentialMutationOwner, RevocationTransports};
 use crate::repositories::GithubRepositoryOwner;
 pub use config::CredentialServiceConfig;
 pub use hardening::harden_process;
@@ -284,14 +285,27 @@ async fn run_connected(
         None => bridge,
     };
     let bridge = ssh::configure(bridge, &config.runtime_directory)?;
-    let mutation = Arc::new(CredentialMutationOwner::new(
-        pool.clone(),
-        store,
-        codex_login,
-        claude_sign_in,
-        github_login,
-        github_app_authorization,
-    ));
+    // Revoking a credential also asks its provider, each over a transport
+    // that admits only that one request (#4717); GitHub's needs the App.
+    let revocation = RevocationTransports {
+        codex: revocation_transport(HttpProvider::CodexTokenRevocation).await?,
+        github: if github_app_authorization.is_some() {
+            Some(revocation_transport(HttpProvider::GitHubAppTokenRevocation).await?)
+        } else {
+            None
+        },
+    };
+    let mutation = Arc::new(
+        CredentialMutationOwner::new(
+            pool.clone(),
+            store,
+            codex_login,
+            claude_sign_in,
+            github_login,
+            github_app_authorization,
+        )
+        .with_provider_revocation(revocation),
+    );
     serve_owned(
         Listeners {
             public: config.public_listen,
@@ -308,6 +322,17 @@ async fn run_connected(
         shutdown,
     )
     .await
+}
+
+/// A resolved transport for one revocation family (#4717).
+async fn revocation_transport(
+    family: HttpProvider,
+) -> Result<Arc<dyn BrokerUpstreamTransport>, RuntimeError> {
+    Ok(Arc::new(
+        ProviderHttpsTransport::resolve(&std::collections::BTreeSet::from([family]))
+            .await
+            .map_err(|_| RuntimeError::Provider)?,
+    ))
 }
 
 struct Listeners {

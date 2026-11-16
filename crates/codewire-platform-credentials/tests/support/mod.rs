@@ -319,6 +319,8 @@ pub struct SyntheticKek {
     pub generate_calls: AtomicUsize,
     pub unwrap_calls: AtomicUsize,
     pub fail_generate: AtomicBool,
+    /// Fails the next unwrap, as a Transit outage would.
+    pub fail_unwrap: AtomicBool,
 }
 
 #[async_trait]
@@ -348,6 +350,11 @@ impl KekProvider for SyntheticKek {
     ) -> Result<Zeroizing<[u8; DEK_BYTES]>, SecretEnvelopeError> {
         self.unwrap_calls.fetch_add(1, Ordering::SeqCst);
         self.unwrap_gate.pass().await;
+        if self.fail_unwrap.swap(false, Ordering::SeqCst) {
+            let mut invalid = wrapped.clone();
+            invalid.ciphertext = b"synthetic-provider-error-input-never-public".to_vec();
+            return TestKekProvider.unwrap(context, &invalid).await;
+        }
         TestKekProvider.unwrap(context, wrapped).await
     }
 

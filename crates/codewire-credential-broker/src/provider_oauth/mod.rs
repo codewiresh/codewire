@@ -240,6 +240,10 @@ pub enum RevocationFailure {
     /// The stored material held no token Codewire could send.
     #[error("the stored token could not be read")]
     Unreadable,
+    /// The stored access token had expired, so the provider could not be
+    /// asked with it (#4896).
+    #[error("the stored sign-in had expired, so the provider could not be asked")]
+    Expired,
 }
 
 impl ProviderRevocation {

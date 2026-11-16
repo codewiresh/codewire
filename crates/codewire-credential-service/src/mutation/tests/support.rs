@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use async_trait::async_trait;
 use base64::Engine as _;
+use codewire_credential_broker::GitHubAppAuthorizationConfig;
 use codewire_credential_broker::provider_oauth::github::GitHubDeviceLoginConfig;
 use codewire_credential_broker::{
     BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport,
@@ -601,7 +602,20 @@ impl Harness {
     pub async fn new() -> Result<Self> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
-        Self::build(Some(listener), address, HANG_GUARD).await
+        Self::build(Some(listener), address, HANG_GUARD, None).await
+    }
+
+    /// A served owner that also revokes at providers (#4717), all of them
+    /// answered by one fake provider with `status`.
+    pub async fn with_provider_revocation(
+        status: http::StatusCode,
+    ) -> Result<(Self, Arc<RevocationProvider>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let provider = Arc::new(RevocationProvider::answering(status));
+        let harness =
+            Self::build(Some(listener), address, HANG_GUARD, Some(provider.clone())).await?;
+        Ok((harness, provider))
     }
 
     /// A served owner with the product's mutation bound, for a test whose
@@ -609,19 +623,20 @@ impl Harness {
     pub async fn with_product_mutation_timeout() -> Result<Self> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
-        Self::build(Some(listener), address, MUTATION_TIMEOUT).await
+        Self::build(Some(listener), address, MUTATION_TIMEOUT, None).await
     }
 
     /// The runtime tests mount this same owner in the real dual-listener
     /// runtime. Do not also start the mutation-only fixture server there.
     pub async fn unserved(address: SocketAddr) -> Result<Self> {
-        Self::build(None, address, HANG_GUARD).await
+        Self::build(None, address, HANG_GUARD, None).await
     }
 
     async fn build(
         listener: Option<tokio::net::TcpListener>,
         address: SocketAddr,
         mutation_timeout: Duration,
+        revocation: Option<Arc<RevocationProvider>>,
     ) -> Result<Self> {
         let db = TestDatabase::create().await?;
         let setup = async {
@@ -647,10 +662,29 @@ impl Harness {
             );
             let provider = Arc::new(SyntheticKek::default());
             let store = Arc::new(PlatformCredentialStore::new(pool.clone(),provider.clone(),builtin_provider_catalog()));
-            let owner = Arc::new(
-                CredentialMutationOwner::new(pool.clone(),store.clone(),codex_login,claude_sign_in,Some(github_login),None)
-                    .with_mutation_timeout(mutation_timeout),
-            );
+            // Revocation tests also hold the App's secret, as the platform does.
+            let github_app = revocation.as_ref().map(|_| {
+                Arc::new(GitHubAppAuthorizationOwner::new(
+                    GitHubAppAuthorizationConfig::new(
+                        GITHUB_APP_CLIENT.into(),
+                        zeroize::Zeroizing::new("synthetic-client-secret".into()),
+                        GITHUB_APP_SLUG.into(),
+                        "https://codewire.example/api/v1/github/oauth/callback".into(),
+                    )
+                    .expect("synthetic GitHub App configuration"),
+                    device.clone(),
+                ))
+            });
+            let mut owner =
+                CredentialMutationOwner::new(pool.clone(),store.clone(),codex_login,claude_sign_in,Some(github_login),github_app)
+                    .with_mutation_timeout(mutation_timeout);
+            if let Some(revocation) = revocation {
+                owner = owner.with_provider_revocation(RevocationTransports {
+                    codex: revocation.clone(),
+                    github: Some(revocation),
+                });
+            }
+            let owner = Arc::new(owner);
             let rpc = Rpc {client:Client::builder().no_proxy().timeout(HANG_GUARD).build()?,url:format!("http://{address}")};
             let server = listener.map(|listener| {
                 let app = connect_router_with_auth(owner.router(),ConnectAuthLayer::credential_mutation(AuthState{pool:pool.clone()},http::HeaderValue::from_static("https://codewire.example")));
@@ -865,4 +899,73 @@ pub async fn blocked_by(pool: &PgPool, blocker: i32) -> Result<i32> {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }).await.context("publication did not reach exact SQL blocker")?
+}
+
+/// The synthetic App's client id in the revocation tests' requests.
+pub const GITHUB_APP_CLIENT: &str = "Iv1.syntheticclient";
+
+/// A provider that records every revocation request and answers each with
+/// one status (#4717).
+pub struct RevocationProvider {
+    status: http::StatusCode,
+    sent: Mutex<Vec<(http::Method, String, Vec<u8>)>>,
+    /// When set, each request first reads this credential's status, so a test
+    /// sees what Codewire had published when the provider was asked.
+    observed: Mutex<Option<(PgPool, String)>>,
+    seen: Mutex<Vec<String>>,
+}
+
+impl RevocationProvider {
+    fn answering(status: http::StatusCode) -> Self {
+        Self {
+            status,
+            sent: Mutex::new(Vec::new()),
+            observed: Mutex::new(None),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Read `credential`'s status in `pool` as each request arrives.
+    pub fn observe(&self, pool: PgPool, credential: &str) {
+        *self.observed.lock().unwrap() = Some((pool, credential.to_owned()));
+    }
+
+    /// The statuses read when the provider was asked.
+    pub fn seen(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    /// Each request's method, target and form or JSON body.
+    pub fn sent(&self) -> Vec<(http::Method, String, Vec<u8>)> {
+        self.sent.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl BrokerUpstreamTransport for RevocationProvider {
+    async fn execute(
+        &self,
+        request: BrokerUpstreamRequest,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        let (method, target, _headers, body) = request.into_parts();
+        let observed = self.observed.lock().unwrap().clone();
+        if let Some((pool, credential)) = observed {
+            let status: String =
+                sqlx::query_scalar("SELECT status::text FROM platform_credentials WHERE id = $1")
+                    .bind(&credential)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|_| BrokerUpstreamError::Protocol)?;
+            self.seen.lock().unwrap().push(status);
+        }
+        self.sent
+            .lock()
+            .unwrap()
+            .push((method, target.as_str().to_owned(), body.to_vec()));
+        Ok(BrokerUpstreamResponse::new(
+            self.status,
+            http::HeaderMap::new(),
+            Box::pin(futures::stream::empty()),
+        ))
+    }
 }
