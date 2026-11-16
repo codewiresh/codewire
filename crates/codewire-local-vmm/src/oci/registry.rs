@@ -91,7 +91,9 @@ impl ResolvedImage {
         Ok(())
     }
 
-    #[cfg(all(target_os = "linux", feature = "synthetic-oci-input-smoke"))]
+    /// The image a stored source document describes, with everything it
+    /// names verified in `store`: a pinned synthetic image, or a digest
+    /// already cached (#4968).
     pub(crate) fn from_cached_source(
         source_reference: String,
         architecture: OciArchitecture,
@@ -1407,5 +1409,117 @@ mod tests {
         assert!(bearer_challenge(&headers, "other/image", false).is_err());
         let token = BearerToken::new("sensitive-synthetic-token").unwrap();
         assert!(!format!("{token:?}").contains("sensitive-synthetic-token"));
+    }
+    /// A digest whose content is all stored is resolved from the store, as
+    /// the registry resolved it, with no registry to ask (#4968).
+    #[tokio::test]
+    async fn a_cached_digest_needs_no_registry() {
+        let fixture = Fixture::new();
+        let server = MockServer::start().await;
+        mount_authenticated_fixture(&server, &fixture).await;
+        let base = Url::parse(&format!("{}/", server.uri())).unwrap();
+        let resolver =
+            RegistryResolver::for_test(&fixture.store, base, OciArchitecture::Amd64).unwrap();
+        let tag = RegistryReference::parse("registry.test/test/workspace:latest").unwrap();
+        let pulled = resolver.resolve_anonymous(&tag).await.unwrap();
+        drop(server);
+
+        let pinned = RegistryReference::parse(&format!(
+            "registry.test/test/workspace@{}",
+            fixture.index_digest
+        ))
+        .unwrap();
+        let size = fixture.index.len() as u64;
+        let cached =
+            crate::oci::cached_digest_image(&pinned, size, OciArchitecture::Amd64, &fixture.store)
+                .unwrap();
+        assert_eq!(
+            cached,
+            ResolvedImage {
+                source_reference: pinned.original().to_owned(),
+                ..pulled
+            }
+        );
+        // A tag can move, so it is never taken from the store.
+        assert_eq!(
+            crate::oci::cached_digest_image(&tag, size, OciArchitecture::Amd64, &fixture.store),
+            None
+        );
+        // Nor is a size the store does not hold, or another platform.
+        assert_eq!(
+            crate::oci::cached_digest_image(
+                &pinned,
+                size + 1,
+                OciArchitecture::Amd64,
+                &fixture.store
+            ),
+            None
+        );
+        assert_eq!(
+            crate::oci::cached_digest_image(&pinned, size, OciArchitecture::Arm64, &fixture.store),
+            None
+        );
+    }
+
+    /// A digest with one blob missing is not taken from the store; the
+    /// registry then fetches only that blob (#4968, #2952).
+    #[tokio::test]
+    async fn a_partly_cached_digest_fetches_only_what_is_missing() {
+        let fixture = Fixture::new();
+        for (digest, bytes) in [
+            (&fixture.index_digest, &fixture.index),
+            (&fixture.manifest_digest, &fixture.manifest),
+            (&fixture.config_digest, &fixture.config),
+        ] {
+            let chunks =
+                futures::stream::iter([Ok::<_, std::io::Error>(Bytes::from(bytes.clone()))]);
+            fixture
+                .store
+                .admit_stream(digest, bytes.len() as u64, chunks)
+                .await
+                .unwrap();
+        }
+        let pinned = RegistryReference::parse(&format!(
+            "registry.test/test/workspace@{}",
+            fixture.index_digest
+        ))
+        .unwrap();
+        let size = fixture.index.len() as u64;
+        assert_eq!(
+            crate::oci::cached_digest_image(&pinned, size, OciArchitecture::Amd64, &fixture.store),
+            None
+        );
+
+        let server = MockServer::start().await;
+        for (digest, media_type, bytes) in [
+            (&fixture.index_digest, OCI_INDEX, &fixture.index),
+            (&fixture.manifest_digest, OCI_MANIFEST, &fixture.manifest),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("/v2/test/workspace/manifests/{digest}")))
+                .respond_with(document_response(media_type, digest, bytes))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        for (digest, body, fetches) in [
+            (&fixture.config_digest, &fixture.config, 0),
+            (&fixture.layer_digest, &fixture.layer, 1),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("/v2/test/workspace/blobs/{digest}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+                .expect(fetches)
+                .mount(&server)
+                .await;
+        }
+        let base = Url::parse(&format!("{}/", server.uri())).unwrap();
+        let resolver =
+            RegistryResolver::for_test(&fixture.store, base, OciArchitecture::Amd64).unwrap();
+        let resolved = resolver.resolve_anonymous(&pinned).await.unwrap();
+        assert_eq!(
+            crate::oci::cached_digest_image(&pinned, size, OciArchitecture::Amd64, &fixture.store),
+            Some(resolved)
+        );
     }
 }

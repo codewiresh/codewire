@@ -5,6 +5,7 @@
 //! credentials never are.
 
 mod bootstrap;
+mod cached_image;
 mod checkpoints;
 mod collection_roots;
 mod local_https;
@@ -528,6 +529,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         incompatible_runners: BTreeSet::new(),
         download_cache: BTreeMap::new(),
         retained_images,
+        cached_image_operations: Default::default(),
         content_writers: 0,
         collection_wanted: false,
         collecting: false,
@@ -788,6 +790,8 @@ struct SupervisorCore {
     // The newest pulled image of each repository, kept after its last
     // environment is removed (#4262; see `retained_images`).
     retained_images: retained_images::RetainedImages,
+    /// The recent creates whose image came from the content store (#4968).
+    cached_image_operations: std::collections::VecDeque<Uuid>,
     // Content and artifact writers in flight, and whether a collection is
     // wanted or running (#2978). A collection runs only with no writer in
     // flight, and a writer waits only while one runs.
@@ -1563,28 +1567,6 @@ fn record_staged_workspace_rollback(
             &parameters.prior_storage_generation,
             rollback_storage_generation,
         )
-}
-
-impl Supervisor {
-    async fn resolve_workspace_image(
-        &self,
-        name: &str,
-        reference: &RegistryReference,
-        content: &ContentStore,
-        pinned: Option<ResolvedImage>,
-    ) -> Result<ResolvedImage, SupervisorError> {
-        if let Some(image) = pinned {
-            if image.source_reference != reference.original() {
-                return Err(SupervisorError::InvalidState);
-            }
-            image.verify_cached(content)?;
-            return Ok(image);
-        }
-        let resolver = RegistryResolver::new(content)?;
-        let resolved = resolver.resolve_anonymous(reference).await;
-        self.core()
-            .record_pull(name, reference, resolver.verified_blobs(), resolved)
-    }
 }
 
 impl SupervisorCore {
@@ -7003,7 +6985,8 @@ impl LocalSupervisorService for SupervisorRpc {
                 ));
             }
         };
-        operation_proto(&operation).map(Response::new)
+        operation_proto(&operation)
+            .map(|operation| Response::new(cached_image::noted(&self.supervisor, operation)))
     }
 
     type WatchOperationStream =
@@ -7029,8 +7012,9 @@ impl LocalSupervisorService for SupervisorRpc {
         let initial = self.operation(operation_id).await?;
         let initial_terminal = initial.phase.terminal();
         let initial_checkpoint = initial.checkpoint;
-        let initial = operation_proto(&initial)?;
+        let initial = cached_image::noted(&self.supervisor, operation_proto(&initial)?);
         let reader = Arc::clone(&self.operation_reader);
+        let supervisor = Arc::clone(&self.supervisor);
         let (sender, receiver) = mpsc::channel(OPERATION_WATCH_BUFFER);
         tokio::spawn(async move {
             if sender.send(Ok(initial)).await.is_err() || initial_terminal {
@@ -7095,7 +7079,7 @@ impl LocalSupervisorService for SupervisorRpc {
                         checkpoint = operation.checkpoint;
                         let terminal = operation.phase.terminal();
                         let update = match operation_proto(&operation) {
-                            Ok(update) => update,
+                            Ok(update) => cached_image::noted(&supervisor, update),
                             Err(error) => {
                                 let _ = sender.send(Err(error)).await;
                                 return;
@@ -7138,7 +7122,7 @@ impl LocalSupervisorService for SupervisorRpc {
                         progress_sequence = progress.event.sequence;
                         let terminal = operation.phase.terminal();
                         let update = match operation_proto_with_runner(&operation, &progress.event) {
-                            Ok(update) => update,
+                            Ok(update) => cached_image::noted(&supervisor, update),
                             Err(error) => {
                                 let _ = sender.send(Err(error)).await;
                                 return;
@@ -7756,6 +7740,7 @@ fn operation_proto(operation: &OperationRecord) -> Result<v1::Operation, Status>
         guest_sequence: 0,
         guest_stage: v1::GuestBootStage::Unspecified as i32,
         runner_error_code: String::new(),
+        workspace_image_cached: false,
     })
 }
 

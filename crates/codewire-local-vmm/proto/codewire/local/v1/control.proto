@@ -614,6 +614,9 @@ message Operation {
   uint64 guest_sequence = 14;
   GuestBootStage guest_stage = 15;
   string runner_error_code = 16;
+  // The create's workspace image came from the content store, with no
+  // registry round trip (#4968).
+  bool workspace_image_cached = 17;
 }
 
 message OperationResult {

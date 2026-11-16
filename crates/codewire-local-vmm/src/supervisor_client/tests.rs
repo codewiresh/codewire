@@ -1007,6 +1007,18 @@ fn direct_share_change_failures_name_the_moved_source() {
     assert_eq!(operation_error_hint("start_failed"), "");
 }
 
+/// A registry that can't be reached says why a cached image was not used:
+/// a tag is always checked with its registry (#4968).
+#[test]
+fn an_unreachable_registry_says_a_tag_is_always_checked() {
+    let hint = operation_error_hint("create_registry_transport");
+    assert!(hint.contains("could not be reached"), "{hint}");
+    assert!(
+        hint.contains("a tag is always checked with its registry"),
+        "{hint}"
+    );
+}
+
 #[test]
 fn a_failed_operation_status_carries_its_error_code() {
     let mut failed = operation(v1::OperationPhase::Failed);

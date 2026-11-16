@@ -405,6 +405,14 @@ credential stores. Folders matching `workspace.vm_only` (default `node_modules`,
 `target`, `.venv`) are bound to the VM's disk over the live mount. A dedicated
 Docker data disk (8 GiB by default) is attached for `/var/lib/docker`.
 
+A create takes the workspace image from the supervisor's content store when it
+can. If the image is named by digest, and that document and every blob it names
+are already stored and verified, the create uses them without the network, and its
+image step reads "Using the cached image". Any part that is missing is fetched
+alone. A tag is always resolved with the registry, because a tag can move. A
+create that can't reach the registry for a tag says that it asked the registry
+for the tag (#4968).
+
 ### Networking and egress
 
 The VM has no network device. Inside the guest a TUN device carries raw IP

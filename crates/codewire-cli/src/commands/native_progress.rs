@@ -24,6 +24,10 @@ use crate::output::{Capabilities, StatusLine};
 /// The CLI-side stage before the supervisor has an operation: it inspects the
 /// workspace source and fetches repositories inside the create request.
 const SOURCES: (&str, &str) = ("cli:sources", "Preparing sources");
+/// The image stage, and its done line when the supervisor took the image from
+/// its content store with no registry round trip (#4968).
+const IMAGE: (&str, &str) = ("image", "Preparing the image");
+const CACHED_IMAGE: &str = "Using the cached image";
 
 /// Redraws at least this often while waiting, so elapsed time keeps counting.
 const MAX_TICK: Duration = Duration::from_secs(1);
@@ -71,6 +75,9 @@ impl NativeProgress {
     /// Feeds one operation update from the supervisor.
     pub(crate) fn observe(&self, operation: &v1::Operation) {
         self.confirmed.store(true, Ordering::Relaxed);
+        if operation.workspace_image_cached {
+            self.relabel(IMAGE.0, CACHED_IMAGE);
+        }
         match stage_of(operation) {
             Some((key, label)) => self.enter(key, label, guest_detail(operation)),
             None => {
@@ -196,6 +203,17 @@ impl NativeProgress {
         let _ = line.detail(detail);
     }
 
+    /// Names the open stage `key` by what it turned out to do, for its done
+    /// line.
+    fn relabel(&self, key: &'static str, label: &'static str) {
+        if let Ok(mut current) = self.current.lock()
+            && let Some((open, open_label)) = current.as_mut()
+            && *open == key
+        {
+            *open_label = label;
+        }
+    }
+
     fn close_current(&self) {
         let (Ok(mut current), Ok(mut line)) = (self.current.lock(), self.line.lock()) else {
             return;
@@ -218,7 +236,7 @@ fn stage_of(operation: &v1::Operation) -> Option<(&'static str, &'static str)> {
         | Stage::RequireEnvironmentAccess
         | Stage::ApplySourceAccessBinding => ("access", "Checking credential access"),
         Stage::ProvisionWorkspace => ("disk", "Preparing the workspace disk"),
-        Stage::StageWorkspaceGeneration => ("image", "Preparing the image"),
+        Stage::StageWorkspaceGeneration => IMAGE,
         Stage::EnsureRunner => ("runner", "Starting the VM runner"),
         Stage::StartVm | Stage::RestartVm => match Runner::try_from(operation.runner_stage) {
             Ok(Runner::WaitingGuest | Runner::GuestInit | Runner::DaemonReady) => {
@@ -383,5 +401,39 @@ mod tests {
             NativeProgress::new(&caps).fail_with_code(Some("start_direct_share_changed")),
             None
         );
+    }
+
+    /// The image stage is named by what it did: the supervisor took a cached
+    /// image, so no registry was asked (#4968). Only the image stage is
+    /// renamed.
+    #[test]
+    fn a_cached_image_names_the_image_stage() {
+        let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Machine);
+        let stage = |stage, cached| v1::Operation {
+            workspace_image_cached: cached,
+            ..operation(stage, v1::RunnerStage::Unspecified)
+        };
+        for (open, cached, expected) in [
+            (
+                v1::OperationStage::StageWorkspaceGeneration,
+                true,
+                "Using the cached image",
+            ),
+            (
+                v1::OperationStage::StageWorkspaceGeneration,
+                false,
+                "Preparing the image",
+            ),
+            (
+                v1::OperationStage::EnsureRunner,
+                true,
+                "Starting the VM runner",
+            ),
+        ] {
+            let progress = NativeProgress::new(&caps);
+            progress.observe(&stage(open, false));
+            progress.observe(&stage(open, cached));
+            assert_eq!(progress.fail(), Some(expected), "{open:?} {cached}");
+        }
     }
 }

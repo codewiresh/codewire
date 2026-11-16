@@ -8,12 +8,13 @@ walk observed on macOS 27 and on macOS 26. The format is in
 
 ## Where it stands
 
-Updated 2026-11-13.
+Updated 2026-11-16.
 
 | ID | macOS 27 | macOS 26 |
 | --- | --- | --- |
 | `mac-vm-lifecycle` | observed on a development build of the #4478 fix; failure observed on v0.4.16 | observed on a development build of the #4478 fix |
 | `mac-vm-refused-start` | refused create observed on a development build | not yet observed |
+| `mac-vm-cached-image` | observed on a development build of #5036 (e42e2f457) | not yet observed |
 
 ## Before the walk
 
@@ -122,3 +123,38 @@ Issues: #4478.
     Virtualization framework refused to start the VM", and the supervisor
     logged `runner_error=vm_start_refused` (#4478).
   - A refused start of an existing VM: not yet observed.
+
+## 3. `mac-vm-cached-image`: a cached image needs no registry
+
+Issues: #4968, #4917.
+
+- **Entry points:** `cw create --local` with the default workspace image,
+  which is pinned by digest, or `--image` with a `REPOSITORY@sha256:…`
+  reference, and `--image` with a tag.
+- **States to exercise:** a create whose image is all in the content store
+  while the registry can't be reached; the same with a tag.
+- **Driving it:** create and remove a VM with the default image, so the
+  repository's retained image keeps its content. With the registry out of
+  reach (the Mac offline, or a firewall holding the connection), create
+  another VM with the same image, then one with a tag of that repository.
+- **Proof:** the digest create succeeds with no registry connection, and its
+  image step reads "Using the cached image". The tag
+  create fails at "Preparing the image" and says it asked the registry for
+  the tag.
+- **Gotchas:** a cached image is one the content store still keeps: an
+  environment's, a pending create's, or the repository's retained image.
+  After `cw prune --local`, the next create downloads it again. Linux local
+  VMs behave the same way.
+- **Observed:** macOS 27.2.1, a development build of #5036 at e42e2f457,
+  2026-11-16, at a new path that the Mac's application firewall held at
+  ghcr.io (#4917), in a HOME that had pulled the default image earlier that
+  day:
+  - The default-image create succeeded. Its image step read "Using the
+    cached image" (0.9 s), and the supervisor logged
+    `workspace_image_cached`. The firewall logged no connection from the
+    supervisor during it.
+  - The create with `ghcr.io/codewiresh/workspace:latest` failed after 11 s at
+    "Preparing the image" with `create_registry_transport`. The hint said the
+    registry could not be reached and that a tag is always checked with its
+    registry. The firewall logged that supervisor's DNS lookup of ghcr.io and
+    its connection to ghcr.io:443.

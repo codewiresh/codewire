@@ -1207,6 +1207,9 @@ fn operation_error_hint(error_code: &str) -> &'static str {
         "create_registry_platform" => {
             " (the image has no variant for this host's architecture; pass --image with one that has)"
         }
+        "create_registry_transport" => {
+            " (the image registry could not be reached; an image named by a tag is always checked with its registry, while one named by a digest is used from the local cache when all of it is stored)"
+        }
         "create_name_taken" => {
             " (an environment with this name already exists; remove it with cw --local rm NAME or choose another --name)"
         }
