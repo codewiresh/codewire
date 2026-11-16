@@ -667,14 +667,24 @@ commands never dispatch lifecycle recovery, create a runner, or retire a VM.
 A changed global image or artifact lock does not change an existing VM's
 retained runtime on restart. Missing retained bytes refuse recovery without
 replaying a task. Keep the durable base inputs outside disposable worktrees.
-Boot assets from the earlier seed8 format cannot start a seed9 runner. Reads
-preserve an exact incompatible runner; explicit stop/delete remain available.
-Boot assets whose guest speaks another network session protocol (`net=N` in
-the guest runtime ABI marker) are refused the same way, and so is a VM
-checkpoint taken under them, so no guest is booted or restored without a
-network. What the user is then told, and can do, is #4980.
-A restart must refuse unsupported boot assets before stopping the VM. Runtime
-selection does not silently replace those boot assets.
+Boot assets whose guest speaks an earlier guest runtime ABI (the seed format,
+or the network session protocol, in the guest init's ABI marker) cannot boot
+under a newer runner, and their VM checkpoints cannot be restored by it. A
+start of an environment on such boot assets that isn't running (stopped, or in
+`error` after an earlier refused start) moves it onto the installed runtime,
+and says so on one line: the runtime it moved from and to, and how many of its
+VM checkpoints that leaves unrestorable. The environment keeps its disk and
+workspace. A running environment is never moved. A restart stages the move
+before it stops the VM, and refuses, leaving the VM running, when the move
+can't be made. The earlier boot assets stay while a VM checkpoint refers to
+them, and go with the last such checkpoint. `cw --local checkpoint ls` marks
+those checkpoints unrestorable with the reason. A restore or a fork of one (`cw
+create --local --checkpoint`) is refused with that reason and names `cw --local
+checkpoint rm`. A fork of a disk snapshot, which holds no memory, moves onto
+the installed runtime as a start does. `cw --local checkpoint rm` and `cw
+--local rm` work on all of them (orchestrator, 2026-11-15: start means "make it
+run", from the owner's "it's fine if we don't have to spend time updating it
+all the time"; #4980). Reads preserve an exact incompatible runner.
 Stop task-owned daemons and retire task-only environments before deleting their
 executable paths. Retained host managed sessions still need the original `cw`
 path after daemon shutdown; preserve that executable and their state.

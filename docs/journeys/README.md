@@ -10,6 +10,7 @@ runs the same commands and holds the result to the same standard.
 | --- | --- |
 | [launch.md](launch.md) | The public-launch walk (#4370), step by step: what the launch asks of each step, which journey below holds it, and where the walk stands |
 | [local-vm-mac.md](local-vm-mac.md) | Local VMs on a Mac (#4370 step 11): install, create, shell, run, stop and start on macOS 27 and 26 |
+| [local-vm-upgrade.md](local-vm-upgrade.md) | Local VMs across an upgrade that changes the guest runtime ABI (#4980): a start moves a stopped environment onto the installed runtime, and old VM checkpoints say why they can't be restored and can be removed |
 | [invitations.md](invitations.md) | Invite a teammate by email, who accepts, is listed and can be removed, within the invitation limits |
 | [self-hosted.md](self-hosted.md) | The self-hosted walk (#4121): install, the first admin, invite links and sign-up without an invite |
 | [node-reboot.md](node-reboot.md) | Production keeps serving through one node's drain or reboot, and a sandbox on that node says why it restarted (#3542, #4461, #3772) |
