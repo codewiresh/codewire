@@ -115,8 +115,8 @@ pub struct SessionAuthState {
     pub(crate) email: EmailClient,
     human_verification: HumanVerification,
     turnstile_bypass_email: String,
-    /// Keys the client-address hashes: the per-address sign-up limit and the
-    /// OAuth starts one client may hold ([`crate::client_address`]).
+    /// Keys the client-address hashes the per-address sign-up limit counts
+    /// ([`crate::client_address`]).
     pub(crate) client_address_key: std::sync::Arc<str>,
     http: reqwest::Client,
 }

@@ -217,8 +217,7 @@ struct Harness {
     fake: Arc<Fake>,
     mail: Arc<Mailbox>,
     app: Router,
-    /// This test's client address, so the start bound counts its starts
-    /// apart from the other tests'.
+    /// This test's client address, as the edge names it.
     client: String,
     /// The requester secret this test's browser holds for its latest link
     /// confirmation.
@@ -288,10 +287,22 @@ impl Harness {
         cookies: &[String],
         body: Option<Value>,
     ) -> Reply {
+        self.request_from(&self.client, method, path, cookies, body)
+            .await
+    }
+
+    async fn request_from(
+        &self,
+        client: &str,
+        method: &str,
+        path: &str,
+        cookies: &[String],
+        body: Option<Value>,
+    ) -> Reply {
         let mut builder = Request::builder()
             .method(method)
             .uri(path)
-            .header("x-forwarded-for", &self.client);
+            .header("x-forwarded-for", client);
         if !cookies.is_empty() {
             builder = builder.header(header::COOKIE, cookies.join("; "));
         }
@@ -329,8 +340,13 @@ impl Harness {
     /// Start a round trip and return the browser's state cookie and the
     /// provider authorize URL's query.
     async fn start(&self, provider: &str, query: &str) -> Started {
+        self.start_from(&self.client, provider, query).await
+    }
+
+    async fn start_from(&self, client: &str, provider: &str, query: &str) -> Started {
         let reply = self
-            .request(
+            .request_from(
+                client,
                 "GET",
                 &format!("/api/auth/oauth/{provider}/start{query}"),
                 &[],
@@ -348,10 +364,16 @@ impl Harness {
                 && cookie.contains("Secure"),
             "{cookie}"
         );
-        let state = cookie_value(&cookie);
-        assert_eq!(params["state"], state);
+        // The cookie is sealed: it never carries the raw state.
+        let state = params["state"].clone();
+        let cookie = cookie_value(&cookie);
+        assert!(state.len() == 64 && !cookie.contains(&state), "{cookie}");
         assert_eq!(params["code_challenge_method"], "S256");
-        Started { state, params }
+        Started {
+            state,
+            cookie,
+            params,
+        }
     }
 
     /// Answer `code` with `answer` for this round trip.
@@ -370,7 +392,7 @@ impl Harness {
                     "/api/auth/oauth/{provider}/callback?code={code}&state={}",
                     started.state
                 ),
-                &[format!("codewire_oauth_state={}", started.state)],
+                &[started.state_cookie()],
                 None,
             )
             .await;
@@ -383,8 +405,18 @@ impl Harness {
 }
 
 struct Started {
+    /// The `state` the provider returns.
     state: String,
+    /// The browser's `codewire_oauth_state` cookie: sealed for a sign-in, the
+    /// raw state for a link.
+    cookie: String,
     params: HashMap<String, String>,
+}
+
+impl Started {
+    fn state_cookie(&self) -> String {
+        format!("codewire_oauth_state={}", self.cookie)
+    }
 }
 
 struct Reply {
@@ -761,6 +793,15 @@ async fn new_identity_with_an_invite_signs_up_active_and_gets_a_session() {
     h.answer(&started, "active-code", Answer::Google { claims });
     let reply = h.callback("google", &started, "active-code").await;
     assert_eq!(reply.location.as_deref(), Some("/signup/complete"));
+    // A Google round trip's marker keeps a sentinel, not the spent nonce.
+    let (verifier, nonce): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT pkce_verifier, nonce FROM oauth_states WHERE token_hash = $1")
+            .bind(hash_session_token(&started.state))
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(verifier.as_deref(), Some("-".repeat(43).as_str()));
+    assert_eq!(nonce.as_deref(), Some("-".repeat(16).as_str()));
     let handle = cookie_value(&reply.cookie("codewire_oauth_signup").unwrap());
 
     let complete = h
@@ -1342,58 +1383,36 @@ async fn a_confirmation_is_refused_when_the_account_changed_since() {
 }
 
 #[tokio::test]
-async fn starts_are_bounded_per_client_address() {
+async fn starts_from_many_addresses_write_no_rows() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
-    let first = h.start("github", "").await;
-    for _ in 1..30 {
-        h.start("github", "").await;
+    // More starts than any per-address bound, each from its own address, and
+    // past the 30 one address could once hold.
+    let mut hashes = Vec::new();
+    for client in 0..40u8 {
+        for provider in ["github", "google"] {
+            let started = h
+                .start_from(
+                    &format!("198.51.100.{client}"),
+                    provider,
+                    "?return_to=%2Fdevice",
+                )
+                .await;
+            hashes.push(hash_session_token(&started.state));
+        }
     }
-    let refused = h
-        .request(
-            "GET",
-            "/api/auth/oauth/github/start?return_to=%2Fdevice",
-            &[],
-            None,
-        )
-        .await;
-    assert_eq!(refused.status, StatusCode::SEE_OTHER);
-    assert_eq!(
-        refused.location.as_deref(),
-        Some("/login?oauth_error=rate_limited&return_to=%2Fdevice")
-    );
-    assert!(refused.cookie("codewire_oauth_state").is_none());
-
-    // Another client is unaffected, and the address is stored only as a
-    // keyed hash.
-    let Some(other) = Harness::new(SignupInvitePolicy::open()).await else {
-        return;
-    };
-    other.start("github", "").await;
-    let raw: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM oauth_states WHERE client_address_hash = $1 OR client_address_hash = $2",
-    )
-    .bind(&h.client)
-    .bind(format!("{:x}", Sha256::digest(h.client.as_bytes())))
-    .fetch_one(&h.pool)
-    .await
-    .unwrap();
-    assert_eq!(raw, 0);
-
-    // A finished round trip (here, cancelled) frees its place.
-    h.request(
-        "GET",
-        &format!(
-            "/api/auth/oauth/github/callback?error=access_denied&state={}",
-            first.state
-        ),
-        &[format!("codewire_oauth_state={}", first.state)],
-        None,
-    )
-    .await
-    .assert_refused("cancelled");
-    h.start("github", "").await;
+    for _ in 0..40 {
+        let started = h.start("github", "").await;
+        hashes.push(hash_session_token(&started.state));
+    }
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM oauth_states WHERE token_hash = ANY($1)")
+            .bind(&hashes)
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0, "a start writes nothing");
 }
 
 #[tokio::test]
@@ -1752,78 +1771,90 @@ async fn disabled_and_locked_accounts_are_refused() {
 }
 
 #[tokio::test]
-async fn state_missing_mismatched_expired_or_replayed_is_refused() {
+async fn state_missing_replaced_tampered_or_replayed_is_refused() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {
         return;
     };
+    let h = &h;
     let github_id = GitHubId::new();
     let email = "oauth-state@example.test";
     cleanup(&h.pool, &[email], &[github_id.subject()]).await;
     insert_user(&h.pool, "oauth-state", email, true, true).await;
     link_github(&h.pool, "oauth-state", github_id).await;
     let exchanges = || *h.fake.exchanges.lock().unwrap();
+    let callback = |state: &str, cookies: Vec<String>| {
+        let path = format!("/api/auth/oauth/github/callback?code=state-code&state={state}");
+        async move { h.request("GET", &path, &cookies, None).await }
+    };
+    let resealed = |started: &Started, edit: fn(&mut Vec<u8>)| {
+        let mut bytes = URL_SAFE_NO_PAD.decode(&started.cookie).unwrap();
+        edit(&mut bytes);
+        format!("codewire_oauth_state={}", URL_SAFE_NO_PAD.encode(bytes))
+    };
 
-    // Missing cookie: a callback from another browser.
     let started = h.start("github", "").await;
     h.answer(&started, "state-code", github(github_id, email, true));
     let before = exchanges();
-    h.request(
-        "GET",
-        &format!(
-            "/api/auth/oauth/github/callback?code=state-code&state={}",
-            started.state
-        ),
-        &[],
-        None,
-    )
-    .await
-    .assert_refused("expired");
-
-    // Mismatched: the query names another state than the cookie.
-    let other = h.start("github", "").await;
-    h.request(
-        "GET",
-        &format!(
-            "/api/auth/oauth/github/callback?code=state-code&state={}",
-            other.state
-        ),
-        &[format!("codewire_oauth_state={}", started.state)],
-        None,
-    )
-    .await
-    .assert_refused("expired");
-    // Missing state query.
+    // No cookie: a callback in another browser.
+    callback(&started.state, Vec::new())
+        .await
+        .assert_refused("expired");
+    // A newer start in another tab replaced this browser's cookie.
+    let newer = h.start("github", "").await;
+    callback(&started.state, vec![newer.state_cookie()])
+        .await
+        .assert_refused("expired");
+    // No state query.
     h.request(
         "GET",
         "/api/auth/oauth/github/callback?code=state-code",
-        &[format!("codewire_oauth_state={}", started.state)],
+        &[started.state_cookie()],
         None,
     )
     .await
     .assert_refused("expired");
-    // A state for one provider is not accepted on the other's callback.
+    // Sealed for one provider, used on the other's callback.
     h.callback("google", &started, "state-code")
         .await
         .assert_refused("expired");
-    assert_eq!(exchanges(), before, "no refused state reaches the provider");
-
-    // Expired.
-    let expired = h.start("github", "").await;
+    // Changed, or of another version. An expired cookie is refused the same
+    // way, before any exchange (the lib tests seal one).
+    for edit in [
+        (|bytes: &mut Vec<u8>| *bytes.last_mut().unwrap() ^= 1) as fn(&mut Vec<u8>),
+        |bytes| bytes[0] = 2,
+    ] {
+        callback(&started.state, vec![resealed(&started, edit)])
+            .await
+            .assert_refused("expired");
+    }
+    // A sign-in the release before sealed cookies started: its raw state
+    // matches its row, which only a link's callback may claim.
+    let old_state = format!("{}{}", hex_token(), hex_token());
     sqlx::query(
-        "UPDATE oauth_states SET created_at = NOW() - interval '20 minutes', \
-         expires_at = NOW() - interval '1 minute' WHERE token_hash = $1",
+        "INSERT INTO oauth_states (id, token_hash, provider, intent, pkce_verifier, expires_at) \
+         VALUES ($1, $2, 'github', 'sign_in', $3, NOW() + interval '10 minutes')",
     )
-    .bind(hash_session_token(&expired.state))
+    .bind(format!("oauth-state-old-{}", hex_token()))
+    .bind(hash_session_token(&old_state))
+    .bind("v".repeat(43))
     .execute(&h.pool)
     .await
     .unwrap();
-    h.answer(&expired, "expired-code", github(github_id, email, true));
-    h.callback("github", &expired, "expired-code")
+    callback(
+        &old_state,
+        vec![format!("codewire_oauth_state={old_state}")],
+    )
+    .await
+    .assert_refused("expired");
+    assert_eq!(exchanges(), before, "no refused state reaches the provider");
+    sqlx::query("DELETE FROM oauth_states WHERE token_hash = $1")
+        .bind(hash_session_token(&old_state))
+        .execute(&h.pool)
         .await
-        .assert_refused("expired");
-    assert_eq!(exchanges(), before);
+        .unwrap();
 
-    // Replayed: the first use signs in, the second finds no row.
+    // Replayed: the first use signs in and marks the state used; the second
+    // is refused even though the provider (here) accepts the code again.
     let replayed = h.start("github", "").await;
     h.answer(&replayed, "replay-code", github(github_id, email, true));
     let first = h.callback("github", &replayed, "replay-code").await;
@@ -1832,21 +1863,38 @@ async fn state_missing_mismatched_expired_or_replayed_is_refused() {
     h.callback("github", &replayed, "replay-code")
         .await
         .assert_refused("expired");
-    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM oauth_states WHERE token_hash = $1")
-        .bind(hash_session_token(&replayed.state))
-        .fetch_one(&h.pool)
-        .await
-        .unwrap();
-    assert_eq!(rows, 0);
+    let markers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM oauth_states WHERE token_hash = $1 AND intent = 'sign_in' \
+         AND expires_at > NOW()",
+    )
+    .bind(hash_session_token(&replayed.state))
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(markers, 1);
+    // The marker keeps nothing of the round trip: fixed sentinels stand
+    // where the schema requires a verifier.
+    let (verifier, nonce): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT pkce_verifier, nonce FROM oauth_states WHERE token_hash = $1")
+            .bind(hash_session_token(&replayed.state))
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(verifier.as_deref(), Some("-".repeat(43).as_str()));
+    assert_eq!(nonce, None);
     assert_eq!(sessions(&h.pool, "oauth-state").await, 1);
 
-    // The state rows store only a hash of the browser's state.
-    let raw: i64 = sqlx::query_scalar("SELECT count(*) FROM oauth_states WHERE token_hash = $1")
-        .bind(&other.state)
-        .fetch_one(&h.pool)
-        .await
-        .unwrap();
-    assert_eq!(raw, 0);
+    // The starts that never finished wrote nothing.
+    let unfinished: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM oauth_states WHERE token_hash = ANY($1)")
+            .bind(vec![
+                hash_session_token(&started.state),
+                hash_session_token(&newer.state),
+            ])
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(unfinished, 0);
     cleanup(&h.pool, &[email], &[github_id.subject()]).await;
 }
 
@@ -1942,7 +1990,7 @@ async fn provider_cancel_and_exchange_failures_land_on_login() {
                 "/api/auth/oauth/github/callback?error=access_denied&error_description=The+user+has+denied&state={}",
                 started.state
             ),
-            &[format!("codewire_oauth_state={}", started.state)],
+            &[started.state_cookie()],
             None,
         )
         .await;
@@ -1970,6 +2018,48 @@ async fn provider_cancel_and_exchange_failures_land_on_login() {
     h.callback("google", &started, "unknown-code")
         .await
         .assert_refused("failed");
+}
+
+#[tokio::test]
+async fn the_sweeper_deletes_expired_rows_and_keeps_live_ones() {
+    let Some(pool) = pool().await else { return };
+    let run = hex_token();
+    let row = |name: &str| format!("oauth-sweep-{run}-{name}");
+    for (name, created, expires) in [
+        ("expired", "20 minutes", "-1 minute"),
+        ("live", "0 minutes", "10 minutes"),
+    ] {
+        sqlx::query(
+            "INSERT INTO oauth_states \
+                 (id, token_hash, provider, intent, provider_identity, created_at, expires_at) \
+             VALUES ($1, $2, 'github', 'sign_up', '{}'::jsonb, \
+                     NOW() - $3::interval, NOW() + $4::interval)",
+        )
+        .bind(row(name))
+        .bind(hash_session_token(&row(name)))
+        .bind(created)
+        .bind(expires)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    codewire_idp::oauth::sweep_expired_states(&pool)
+        .await
+        .unwrap();
+
+    let left: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM oauth_states WHERE id LIKE $1 ORDER BY id")
+            .bind(format!("oauth-sweep-{run}-%"))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(left, [row("live")]);
+    sqlx::query("DELETE FROM oauth_states WHERE id = $1")
+        .bind(row("live"))
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 // --- Sign-in methods in Settings: connect and disconnect ---
@@ -2066,7 +2156,11 @@ impl Harness {
         let state = cookie_value(&cookie);
         assert_eq!(params["state"], state);
         assert_eq!(params["code_challenge_method"], "S256");
-        Started { state, params }
+        Started {
+            cookie: state.clone(),
+            state,
+            params,
+        }
     }
 
     /// The provider's redirect back, in a browser holding `session`.
@@ -2077,7 +2171,7 @@ impl Harness {
         code: &str,
         session: Option<&str>,
     ) -> Reply {
-        let mut cookies = format!("codewire_oauth_state={}", started.state);
+        let mut cookies = started.state_cookie();
         if let Some(session) = session {
             cookies.push_str("; ");
             cookies.push_str(&session_cookie(session));
@@ -2446,7 +2540,7 @@ async fn an_identity_linked_to_another_account_is_refused() {
             "/api/auth/oauth/github/callback?error=access_denied&state={}",
             started.state
         ),
-        &[format!("codewire_oauth_state={}", started.state)],
+        &[started.state_cookie()],
         None,
     )
     .await

@@ -3,16 +3,14 @@
 //!
 //! - `GET /api/auth/oauth/providers` names the configured providers (no
 //!   secrets); the dashboard shows a button for each.
-//! - `GET /api/auth/oauth/{provider}/start` writes a single-use
-//!   `oauth_states` row (the hash of a random state, the PKCE verifier, a
-//!   Google nonce, the return target), sets the raw state in an HttpOnly Lax
-//!   cookie scoped to `/api/auth/oauth/`, and redirects to the provider. One
-//!   client address may hold at most [`MAX_STARTS_PER_CLIENT`] unfinished
-//!   starts.
-//! - `GET /api/auth/oauth/{provider}/callback` requires the `state` query to
-//!   equal that cookie and deletes its unexpired row in the statement that
-//!   reads it, exchanges the code server-side with the verifier, reads a
-//!   verified email (GitHub's primary, or Google's ID token after its `iss`,
+//! - `GET /api/auth/oauth/{provider}/start` writes nothing: it seals the
+//!   hash of a random state, the PKCE verifier, a Google nonce and the return
+//!   target into an HttpOnly Lax cookie scoped to `/api/auth/oauth/`
+//!   ([`state_cookie`]), and redirects to the provider.
+//! - `GET /api/auth/oauth/{provider}/callback` opens that cookie for the
+//!   `state` query (a link from Settings instead claims its row), exchanges
+//!   the code server-side with the verifier, records the state as used, reads
+//!   a verified email (GitHub's primary, or Google's ID token after its `iss`,
 //!   `aud`, `exp` and `nonce` checks) and resolves it:
 //!   - a linked identity continues as a password sign-in does from the
 //!     lockout check on: `enabled`, then the two-factor challenge, which the
@@ -45,11 +43,13 @@ mod link_confirm;
 mod providers;
 mod sign_in_methods;
 mod sign_up;
+mod state_cookie;
 
 pub use providers::{
     OAuthProviders, OAuthUpstream, Provider, ReqwestUpstream, UpstreamError, UpstreamRequest,
     UpstreamResponse,
 };
+pub use state_cookie::{EmptySessionSecret, StateCookieKey};
 
 use std::sync::Arc;
 
@@ -77,8 +77,10 @@ use crate::auth_session::{
 use crate::email_password::{send_provider_link_confirmation_email, send_provider_linked_email};
 use providers::{IdentityError, ProviderIdentity};
 pub(crate) use sign_in_methods::LINKED_ACCOUNT_SQL;
+use state_cookie::SignInStart;
 
-/// The browser's half of a round trip: the raw state.
+/// The browser's half of a round trip: a sealed sign-in, or the raw state of
+/// a link's row.
 const STATE_COOKIE: &str = "codewire_oauth_state";
 const STATE_COOKIE_PATH: &str = "/api/auth/oauth/";
 /// The browser's half of a pending sign-up.
@@ -101,15 +103,20 @@ const STATE_TTL_SECS: i64 = 10 * 60;
 const SIGNUP_TTL_SECS: i64 = 30 * 60;
 /// An emailed link confirmation is valid for thirty minutes.
 const LINK_CONFIRM_TTL_SECS: i64 = 30 * 60;
-/// How many started sign-ins one client address may hold at once. A start
-/// writes a row before the person reaches the provider, so an unauthenticated
-/// client could otherwise fill the table; a finished or abandoned round trip
-/// frees its place within ten minutes. Generous for a shared office address.
-const MAX_STARTS_PER_CLIENT: i64 = 30;
+/// How often the IdP deletes expired `oauth_states` rows, and how many
+/// batches one pass may delete.
+const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const MAX_SWEEP_BATCHES: u32 = 100;
+/// What a used sign-in's marker row holds where the schema requires a PKCE
+/// verifier and a Google nonce: the shortest values the checks accept.
+const MARKER_VERIFIER: &str = "-------------------------------------------";
+const MARKER_NONCE: &str = "----------------";
 const MAX_AUTH_REQUEST_ID_BYTES: usize = 256;
 const MAX_RETURN_TO_BYTES: usize = 2048;
 const MAX_CODE_BYTES: usize = 2048;
-const MAX_HANDLE_BYTES: usize = 128;
+/// A browser keeps a cookie of up to 4096 bytes; the largest sealed sign-in
+/// fits.
+const MAX_STATE_COOKIE_BYTES: usize = 4096;
 
 /// The fixed reasons a round trip lands back on `/login`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,7 +125,8 @@ enum Refusal {
     Unavailable,
     /// The person cancelled or denied access at the provider.
     Cancelled,
-    /// The state cookie or row is missing, mismatched, expired or used.
+    /// The state cookie or row is missing, mismatched, expired or used, or a
+    /// newer start in another tab replaced the cookie.
     Expired,
     /// The provider has no verified email for the account.
     UnverifiedEmail,
@@ -128,8 +136,6 @@ enum Refusal {
     Locked,
     /// The account's access is not enabled.
     Disabled,
-    /// This client address holds too many started sign-ins.
-    RateLimited,
     /// An invite-only server: sign up from the invite link, then connect the
     /// provider in Settings (#4121).
     InviteOnly,
@@ -149,7 +155,6 @@ impl Refusal {
             Self::LinkRequired
             | Self::Locked
             | Self::Disabled
-            | Self::RateLimited
             | Self::InviteOnly
             | Self::Failed => LinkResult::Failed,
         }
@@ -164,7 +169,6 @@ impl Refusal {
             Self::LinkRequired => "link_required",
             Self::Locked => "locked",
             Self::Disabled => "disabled",
-            Self::RateLimited => "rate_limited",
             Self::InviteOnly => "invite_only",
             Self::Failed => "failed",
         }
@@ -251,6 +255,7 @@ struct OAuthState {
     session: SessionAuthState,
     providers: OAuthProviders,
     mailer: Arc<dyn LinkConfirmationMailer>,
+    state_key: StateCookieKey,
 }
 
 /// Sends the one-time link confirmation to a Codewire account's own address.
@@ -314,6 +319,7 @@ pub fn router(
     turnstile_bypass_email: String,
     providers: OAuthProviders,
     client_address_key: String,
+    state_key: StateCookieKey,
 ) -> Router {
     let human_verification = configured_human_verification(&frontend_url, turnstile_secret_key);
     let mailer = Arc::new(EmailLinkMailer(email.clone()));
@@ -330,6 +336,7 @@ pub fn router(
         ),
         providers,
         mailer,
+        state_key,
     })
 }
 
@@ -347,6 +354,8 @@ pub fn trusted_test_router(
         session: SessionAuthState::trusted_test(pool, secure, signup_invite_policy, frontend_url),
         providers,
         mailer,
+        state_key: StateCookieKey::derive("synthetic-oauth-state-secret")
+            .expect("the synthetic secret is not empty"),
     })
 }
 
@@ -396,7 +405,7 @@ fn unique_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
             }
         }
     }
-    found.filter(|value| !value.is_empty() && value.len() <= MAX_HANDLE_BYTES)
+    found.filter(|value| !value.is_empty() && value.len() <= MAX_STATE_COOKIE_BYTES)
 }
 
 fn see_other(location: &str, cookies: Vec<HeaderValue>) -> Response {
@@ -464,11 +473,30 @@ fn pkce_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
-async fn sweep_expired<'e, E: sqlx::PgExecutor<'e>>(executor: E) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM oauth_states WHERE expires_at <= NOW()")
-        .execute(executor)
-        .await
-        .map(|_| ())
+/// Delete expired `oauth_states` rows every few minutes, whatever the
+/// traffic: no request path deletes them.
+pub fn spawn_expired_state_sweeper(pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            if let Err(error) = sweep_expired_states(&pool).await {
+                tracing::warn!(%error, "OAuth state sweep failed");
+            }
+        }
+    });
+}
+
+/// One sweep: bounded batches of expired rows until none is left or the
+/// pass has deleted [`MAX_SWEEP_BATCHES`] of them.
+pub async fn sweep_expired_states(pool: &PgPool) -> Result<(), sqlx::Error> {
+    for _ in 0..MAX_SWEEP_BATCHES {
+        if !crate::expired_rows::oauth_states(pool).await? {
+            break;
+        }
+    }
+    Ok(())
 }
 
 // --- GET /api/auth/oauth/providers ---
@@ -508,7 +536,6 @@ async fn start(
     State(state): State<OAuthState>,
     Path(provider): Path<String>,
     Query(query): Query<StartQuery>,
-    headers: HeaderMap,
 ) -> Response {
     let target = ReturnTarget::sanitized(&query.auth_request_id, &query.return_to);
     let Some(provider) = Provider::parse(&provider).filter(|p| state.providers.is_configured(*p))
@@ -529,73 +556,26 @@ async fn start(
         return login_with_refusal(Refusal::Unavailable, &target, Vec::new());
     };
 
-    let address = crate::client_address::unit_hash(
-        &state.session.client_address_key,
-        codewire_server_core::client_address::forwarded_client_ip(&headers),
+    let start = SignInStart::new(
+        &raw_state,
+        verifier,
+        nonce,
+        target,
+        chrono::Utc::now().timestamp() + STATE_TTL_SECS,
     );
-    let stored = async {
-        let mut tx = state.session.pool.begin().await?;
-        sweep_expired(&mut *tx).await?;
-        // One client's starts serialize on its own lock, so concurrent starts
-        // cannot both pass the count below.
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 4062))")
-            .bind(format!(
-                "codewire-oauth-start:{}",
-                address.as_deref().unwrap_or("unknown")
-            ))
-            .execute(&mut *tx)
-            .await?;
-        let held: i64 = sqlx::query_scalar(
-            r#"
-            SELECT count(*) FROM oauth_states
-             WHERE intent = 'sign_in' AND expires_at > NOW()
-               AND client_address_hash IS NOT DISTINCT FROM $1
-            "#,
-        )
-        .bind(&address)
-        .fetch_one(&mut *tx)
-        .await?;
-        if held >= MAX_STARTS_PER_CLIENT {
-            tx.commit().await?;
-            return Ok(false);
-        }
-        sqlx::query(
-            r#"
-            INSERT INTO oauth_states
-                (id, token_hash, provider, intent, pkce_verifier, nonce,
-                 return_auth_request_id, return_to, client_address_hash, expires_at)
-            VALUES ($1, $2, $3, 'sign_in', $4, $5, $6, $7, $8,
-                    NOW() + ($9::bigint * interval '1 second'))
-            "#,
-        )
-        .bind(hex_id())
-        .bind(hash_session_token(&raw_state))
-        .bind(provider.as_str())
-        .bind(&verifier)
-        .bind(&nonce)
-        .bind(&target.auth_request_id)
-        .bind(&target.return_to)
-        .bind(&address)
-        .bind(STATE_TTL_SECS)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await.map(|()| true)
-    }
-    .await;
-    match stored {
-        Ok(true) => {}
-        Ok(false) => return login_with_refusal(Refusal::RateLimited, &target, Vec::new()),
+    let sealed = match state_cookie::seal(&state.state_key, provider, &start) {
+        Ok(sealed) => sealed,
         Err(error) => {
-            tracing::error!(%error, provider = provider.as_str(), "failed to store OAuth state");
-            return login_with_refusal(Refusal::Failed, &target, Vec::new());
+            tracing::error!(%error, provider = provider.as_str(), "failed to seal OAuth state");
+            return login_with_refusal(Refusal::Failed, &start.target, Vec::new());
         }
-    }
+    };
 
     see_other(
         &location,
         vec![cookie(
             STATE_COOKIE,
-            &raw_state,
+            &sealed,
             STATE_COOKIE_PATH,
             STATE_TTL_SECS,
             state.session.secure,
@@ -615,16 +595,28 @@ struct CallbackQuery {
     error: String,
 }
 
+/// A link's row, claimed by its callback.
 #[derive(sqlx::FromRow)]
-struct ClaimedState {
+struct ClaimedLink {
     provider: String,
-    intent: String,
-    user_id: Option<String>,
-    pkce_verifier: Option<String>,
+    user_id: String,
+    pkce_verifier: String,
     nonce: Option<String>,
-    return_auth_request_id: Option<String>,
-    return_to: Option<String>,
     live: bool,
+}
+
+/// A round trip refused before the exchange, by where it lands: `/login`, or
+/// Settings once a link's row is claimed.
+enum Unclaimed {
+    SignIn(Refusal),
+    Link(Refusal),
+}
+
+/// A round trip this browser started, ready for the provider exchange.
+struct RoundTrip {
+    intent: Intent,
+    verifier: String,
+    nonce: Option<String>,
 }
 
 /// What a resolved sign-in hands the browser.
@@ -664,41 +656,24 @@ async fn callback(
     let secure = state.session.secure;
     // The state cookie is single use whatever happens next.
     let mut cookies = vec![clear_cookie(STATE_COOKIE, STATE_COOKIE_PATH, secure)];
-    let mut target = ReturnTarget::default();
 
     let Some(provider) = Provider::parse(&provider).filter(|p| state.providers.is_configured(*p))
     else {
-        return login_with_refusal(Refusal::Unavailable, &target, cookies);
+        return login_with_refusal(Refusal::Unavailable, &ReturnTarget::default(), cookies);
     };
-    let browser_state = unique_cookie(&headers, STATE_COOKIE);
-    let state_matches = browser_state.is_some_and(|cookie| {
-        !query.state.is_empty() && same_secret(cookie.as_bytes(), query.state.as_bytes())
-    });
-    if !state_matches {
-        return login_with_refusal(Refusal::Expired, &target, cookies);
-    }
-
-    let claimed = claim_state(&state.session.pool, &query.state).await;
-    let claimed = match claimed {
-        Ok(Some(claimed)) => claimed,
-        Ok(None) => return login_with_refusal(Refusal::Expired, &target, cookies),
-        Err(error) => {
-            tracing::error!(%error, "failed to claim OAuth state");
-            return login_with_refusal(Refusal::Failed, &target, cookies);
+    let RoundTrip {
+        intent,
+        verifier,
+        nonce,
+    } = match claim_round_trip(&state, provider, &query.state, &headers).await {
+        Ok(round_trip) => round_trip,
+        Err(Unclaimed::SignIn(refusal)) => {
+            return login_with_refusal(refusal, &ReturnTarget::default(), cookies);
+        }
+        Err(Unclaimed::Link(refusal)) => {
+            return sign_in_methods::settings_landing(refusal.link_result(), provider, cookies);
         }
     };
-    target = ReturnTarget {
-        auth_request_id: claimed.return_auth_request_id.clone(),
-        return_to: claimed.return_to.clone(),
-    };
-    let intent = match (claimed.intent.as_str(), claimed.user_id) {
-        ("sign_in", None) => Intent::SignIn(target),
-        ("link", Some(account_id)) => Intent::Link(account_id),
-        _ => return login_with_refusal(Refusal::Expired, &target, cookies),
-    };
-    if !claimed.live || claimed.provider != provider.as_str() {
-        return intent.refuse(Refusal::Expired, provider, cookies);
-    }
     if !query.error.is_empty() {
         let refusal = if query.error == "access_denied" {
             Refusal::Cancelled
@@ -707,9 +682,6 @@ async fn callback(
         };
         return intent.refuse(refusal, provider, cookies);
     }
-    let Some(verifier) = claimed.pkce_verifier.as_deref() else {
-        return intent.refuse(Refusal::Expired, provider, cookies);
-    };
     if query.code.is_empty() || query.code.len() > MAX_CODE_BYTES {
         return intent.refuse(Refusal::Failed, provider, cookies);
     }
@@ -719,9 +691,9 @@ async fn callback(
         .identify(
             provider,
             &query.code,
-            verifier,
+            &verifier,
             &state.redirect_uri(provider),
-            claimed.nonce.as_deref(),
+            nonce.as_deref(),
         )
         .await
     {
@@ -754,6 +726,14 @@ async fn callback(
             .await;
         }
     };
+    match mark_used(&state.session.pool, provider, &query.state).await {
+        Ok(true) => {}
+        Ok(false) => return login_with_refusal(Refusal::Expired, &target, cookies),
+        Err(error) => {
+            tracing::error!(%error, "failed to record a used OAuth state");
+            return login_with_refusal(Refusal::Failed, &target, cookies);
+        }
+    }
 
     match resolve(&state, provider, &identity, &target, &headers).await {
         Ok(Outcome::Session(session)) => {
@@ -801,24 +781,98 @@ async fn callback(
     }
 }
 
-/// Delete the round trip's row in the statement that reads it, so a state is
-/// used once even when two callbacks race; sweep expired rows on the way.
-async fn claim_state(pool: &PgPool, raw_state: &str) -> Result<Option<ClaimedState>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let claimed = sqlx::query_as::<_, ClaimedState>(
+/// Open this browser's round trip for `provider`'s callback, whose `state`
+/// parameter is `raw_state`, or the refusal that ends it before any exchange.
+/// A sign-in's cookie is sealed; a link's is the raw state of its row, which
+/// is deleted in the statement that reads it, so it is used once even when
+/// two callbacks race. Only `link` rows are claimed: a `sign_in` row is a
+/// used state's marker, or a start from the release before sealed cookies.
+async fn claim_round_trip(
+    state: &OAuthState,
+    provider: Provider,
+    raw_state: &str,
+    headers: &HeaderMap,
+) -> Result<RoundTrip, Unclaimed> {
+    let refuse = Unclaimed::SignIn;
+    let Some(browser_state) = unique_cookie(headers, STATE_COOKIE) else {
+        return Err(refuse(Refusal::Expired));
+    };
+    if !valid_handle(browser_state) {
+        let now = chrono::Utc::now().timestamp();
+        let start = state_cookie::open(&state.state_key, provider, browser_state, raw_state, now)
+            .map_err(|error| {
+            tracing::debug!(%error, provider = provider.as_str(), "OAuth state cookie refused");
+            refuse(Refusal::Expired)
+        })?;
+        return Ok(RoundTrip {
+            intent: Intent::SignIn(start.target),
+            verifier: start.verifier,
+            nonce: start.nonce,
+        });
+    }
+
+    if raw_state.is_empty() || !same_secret(browser_state.as_bytes(), raw_state.as_bytes()) {
+        return Err(refuse(Refusal::Expired));
+    }
+    let claimed = sqlx::query_as::<_, ClaimedLink>(
         r#"
         DELETE FROM oauth_states
-         WHERE token_hash = $1
-        RETURNING provider, intent, user_id, pkce_verifier, nonce,
-                  return_auth_request_id, return_to, expires_at > NOW() AS live
+         WHERE token_hash = $1 AND intent = 'link'
+        RETURNING provider, user_id, pkce_verifier, nonce, expires_at > NOW() AS live
         "#,
     )
     .bind(hash_session_token(raw_state))
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&state.session.pool)
+    .await;
+    let claimed = match claimed {
+        Ok(Some(claimed)) => claimed,
+        Ok(None) => return Err(refuse(Refusal::Expired)),
+        Err(error) => {
+            tracing::error!(%error, "failed to claim OAuth state");
+            return Err(refuse(Refusal::Failed));
+        }
+    };
+    let intent = Intent::Link(claimed.user_id);
+    if !claimed.live || claimed.provider != provider.as_str() {
+        return Err(Unclaimed::Link(Refusal::Expired));
+    }
+    Ok(RoundTrip {
+        intent,
+        verifier: claimed.pkce_verifier,
+        nonce: claimed.nonce,
+    })
+}
+
+/// Record a sign-in's state as used once the provider has accepted its code,
+/// so a second callback with it is refused: `false` when one already was.
+/// Written after the exchange, a marker costs a real round trip, which an
+/// unauthenticated client cannot repeat at will. The schema's `sign_in` shape
+/// requires a verifier and, for Google, a nonce; the marker holds fixed
+/// sentinels, never the spent values, and nothing reads them. The marker
+/// lives a full round trip from now, past the cookie it guards.
+async fn mark_used(
+    pool: &PgPool,
+    provider: Provider,
+    raw_state: &str,
+) -> Result<bool, sqlx::Error> {
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO oauth_states
+            (id, token_hash, provider, intent, pkce_verifier, nonce, expires_at)
+        VALUES ($1, $2, $3, 'sign_in', $4, $5,
+                NOW() + ($6::bigint * interval '1 second'))
+        ON CONFLICT (token_hash) DO NOTHING
+        "#,
+    )
+    .bind(hex_id())
+    .bind(hash_session_token(raw_state))
+    .bind(provider.as_str())
+    .bind(MARKER_VERIFIER)
+    .bind((provider == Provider::Google).then_some(MARKER_NONCE))
+    .bind(STATE_TTL_SECS)
+    .execute(pool)
     .await?;
-    sweep_expired(&mut *tx).await?;
-    tx.commit().await?;
-    Ok(claimed)
+    Ok(inserted.rows_affected() == 1)
 }
 
 #[derive(sqlx::FromRow)]

@@ -7,6 +7,10 @@
 //! are minted only for a signed-in user, so issuing one removes that user's
 //! expired tokens through the per-user index, and storing a refresh token
 //! also removes a batch of expired records of consumed ones.
+//!
+//! OAuth round-trip rows are removed by the IdP's periodic sweep instead
+//! ([`crate::oauth::sweep_expired_states`]): a sign-in start writes nothing, so
+//! no write is frequent enough to carry the removal.
 
 use sqlx::PgPool;
 
@@ -82,4 +86,25 @@ pub(crate) async fn consumed_refresh_tokens(pool: &PgPool) -> Result<(), sqlx::E
     .execute(pool)
     .await
     .map(|_| ())
+}
+
+/// Remove one batch of expired `oauth_states` rows: `true` when the batch was
+/// full, so more may remain.
+pub(crate) async fn oauth_states(pool: &PgPool) -> Result<bool, sqlx::Error> {
+    let removed = sqlx::query(
+        r#"
+        DELETE FROM oauth_states
+        WHERE ctid IN (
+            SELECT ctid FROM oauth_states
+            WHERE expires_at <= NOW()
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED
+        )
+        "#,
+    )
+    .bind(BATCH)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(i64::try_from(removed).is_ok_and(|removed| removed >= BATCH))
 }

@@ -177,7 +177,7 @@ async fn serve() -> anyhow::Result<()> {
     let secure = idp_cfg.frontend_url.starts_with("https");
     let signup_mode =
         codewire_idp::auth_session::signup_policy::mode_router(&idp_cfg.signup_invite_policy);
-    // Keys the client-address hashes the sign-up and OAuth start limits count.
+    // Keys the client-address hashes the sign-up limit counts.
     let client_address_key = codewire_server_core::internal_hmac::derive_internal_hmac_secret(
         &cfg.session_secret,
         codewire_idp::client_address::CLIENT_ADDRESS_KEY_LABEL,
@@ -196,6 +196,8 @@ async fn serve() -> anyhow::Result<()> {
     // Sign in with GitHub or Google: off unless a provider's client pair is
     // configured; half a pair stops startup.
     let oauth_providers = codewire_idp::oauth::OAuthProviders::from_env()?;
+    let oauth_state_key = codewire_idp::oauth::StateCookieKey::derive(&cfg.session_secret)?;
+    codewire_idp::oauth::spawn_expired_state_sweeper(pool.clone());
     tracing::info!(
         providers = ?oauth_providers
             .configured()
@@ -214,6 +216,7 @@ async fn serve() -> anyhow::Result<()> {
         idp_cfg.turnstile_bypass_email.clone(),
         oauth_providers,
         client_address_key,
+        oauth_state_key,
     );
     let email_password = codewire_idp::email_password::router(
         pool.clone(),

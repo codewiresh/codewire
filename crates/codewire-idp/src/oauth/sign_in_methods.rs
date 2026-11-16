@@ -34,7 +34,7 @@ use sqlx::{Postgres, Transaction};
 
 use super::{
     OAuthState, Provider, ProviderIdentity, STATE_COOKIE, STATE_COOKIE_PATH, STATE_TTL_SECS,
-    cookie, hex_token, pkce_challenge, pkce_verifier, see_other, sweep_expired,
+    cookie, hex_token, pkce_challenge, pkce_verifier, see_other,
 };
 use crate::auth_session::{
     STATEMENT_CEILING, bounded_transaction_within, cookie_digest, exact_origin, format_time,
@@ -301,7 +301,6 @@ async fn start_link(
         if connected {
             return Err(already_connected());
         }
-        sweep_expired(&mut *tx).await.map_err(database)?;
         // One link in flight per account and provider: a new start replaces
         // the old, so a signed-in account cannot fill the table.
         sqlx::query(

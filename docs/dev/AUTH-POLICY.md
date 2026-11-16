@@ -67,13 +67,54 @@ trip; the configuration is in [../CONFIGURATION.md](../CONFIGURATION.md).
   `google` and the provider's stable subject (GitHub's numeric user id,
   Google's `sub`) as `account_id`. A unique index gives each identity one
   owner.
-- Each round trip has a single-use `oauth_states` row holding a SHA-256 of a
-  random state, the PKCE (S256) verifier, a Google nonce and the return
-  target, valid for 10 minutes; the browser holds the raw state in an HttpOnly
-  `SameSite=Lax` cookie scoped to `/api/auth/oauth/`. The callback requires
-  the `state` parameter to equal that cookie, deletes the row in the statement
-  that reads it and refuses a row that is expired or for another provider.
-  The code is exchanged server-side with the verifier.
+- Each round trip has a random `state`, which the provider returns, and lives
+  10 minutes in an HttpOnly `SameSite=Lax` cookie, `codewire_oauth_state`,
+  scoped to `/api/auth/oauth/`. The code is exchanged server-side with the
+  PKCE (S256) verifier.
+- **A sign-in start writes nothing** (#4166). It is an unauthenticated `GET`,
+  so a row per start would let any client grow the table, and a global cap
+  would let one client refuse everyone. cw-security agreed this design on
+  2026-11-15: "A start that writes nothing removes the table growth without
+  the lock-everyone-out risk of a global cap. [...] Login CSRF stays closed,
+  because a callback without this browser's sealed cookie is refused."
+  - The start checks the return target against the allowed targets (an OIDC
+    auth request id, or a same-origin path), then seals the SHA-256 of the
+    state, the verifier, Google's nonce, the return target and an expiry 10
+    minutes ahead into the cookie. A second start, in another tab, replaces
+    the cookie, so the first tab's callback is refused and `/login` says the
+    attempt expired or was started elsewhere: start again.
+  - The cookie is sealed with AES-256-GCM under a key derived by HKDF-SHA256
+    from the IdP's session secret with the label `codewire-idp-oauth-state-v1`,
+    which keys nothing else; the session secret never keys it directly. Each
+    seal starts with a version byte and has its own random 96-bit nonce, and
+    the associated data binds the label, the version and the provider.
+    Rotating the session secret therefore ends every sign-in in flight, which
+    costs at most 10 minutes of restarted sign-ins.
+  - The callback opens the cookie first. Before any exchange with the
+    provider it refuses a missing cookie, one that fails authentication
+    (changed, sealed under another key, or sealed for the other provider), an
+    unknown version, an expired one, and a `state` whose SHA-256 is not the
+    sealed one. It checks the sealed return target against the allowed
+    targets again, since sealing proves only that the IdP wrote it. Google's
+    ID token `nonce` must equal the sealed one. Every outcome clears the
+    cookie.
+  - Only after the provider accepts the code does the callback write one
+    `sign_in` row, keyed by the state's SHA-256 and living 10 minutes, and a
+    callback that finds that row already written is refused as a replay. The
+    provider accepts a code once, so this marker is defence in depth; written
+    after the exchange, only a real round trip can add one (cw-security: "a
+    valid cookie costs nothing: one unauthenticated start mints it").
+  - A sign-in started on the release before this one holds a raw state, not a
+    sealed one, so its callback is refused once, at that deploy; the person
+    starts again.
+- A link from Settings keeps a row: its signed-in, CSRF-checked start writes a
+  single-use `link` row holding the SHA-256 of the state, the verifier and a
+  Google nonce, and the cookie holds the raw state. The callback tells the two
+  apart by the cookie's form, requires the `state` parameter to equal a raw
+  cookie, deletes the `link` row in the statement that reads it and refuses a
+  row that is expired or for another provider.
+- The IdP deletes expired `oauth_states` rows every 5 minutes, in bounded
+  batches, whatever the traffic.
 - Only a verified email counts: GitHub's primary email marked `verified`, or
   Google's ID token with `email_verified`. The ID token comes straight from
   Google's token endpoint over TLS, and its `iss`, `aud`, `exp` and `nonce`
@@ -82,11 +123,6 @@ trip; the configuration is in [../CONFIGURATION.md](../CONFIGURATION.md).
   sign-in applies after the password: lockout, then `enabled`, then the
   account's second factor when enrolled. A provider sign-in never skips
   Codewire two-factor authentication.
-- A start is an unauthenticated `GET` that writes a row, so each client
-  address (an IPv4 address or IPv6 /64, stored only as an HMAC under a key
-  derived from the session secret) may hold at most 30 unfinished sign-ins;
-  past that, `/login` says to wait. A finished or abandoned round trip frees
-  its place within ten minutes.
 - An unlinked identity whose email belongs to an account that verified that
   email (matched without regard to case) is linked to it only in two ways
   (owner, 2026-11-11, #4062), and never before the account's second factor
