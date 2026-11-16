@@ -57,6 +57,22 @@ export class DevUxError extends Error {
   constructor(readonly stage: string, readonly failureClass: FailureClass = "assertion") { super(stage); }
 }
 
+export type Expectation = [label: string, check: () => Promise<void>];
+
+// Whether every expectation of a check that must not fail the walk held. The
+// first that did not is named on one line, from its fixed label and the
+// value-blind class; the deploy repository's acceptance relays that line from
+// a closed set of checks and labels, so a new one is added there first.
+export async function holds(name: string, expectations: Expectation[]): Promise<boolean> {
+  for (const [label, check] of expectations) {
+    try { await check(); } catch (error) {
+      console.error(`[dev-ux] ${name}:not-held expectation=${label} class=${failureClassOf(error)}`);
+      return false;
+    }
+  }
+  return true;
+}
+
 type Command = (args: string[], deadline: number) => Promise<unknown>;
 type OwnedEnvironment = { id: string; state: string };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

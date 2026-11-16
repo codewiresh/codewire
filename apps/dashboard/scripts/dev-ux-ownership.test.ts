@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { DevUxError, OwnedUxSandbox, cwFailureClass, failureClassOf, uxOrganizationSlug } from "./dev-ux-ownership";
+import { expect, spyOn, test } from "bun:test";
+import { DevUxError, OwnedUxSandbox, cwFailureClass, failureClassOf, holds, uxOrganizationSlug } from "./dev-ux-ownership";
 
 const USER = "1".repeat(32);
 const ORG = "2".repeat(32);
@@ -304,4 +304,23 @@ test("cw failures are classified like the shell smoke's cw_failure_class", () =>
   ] as const) {
     expect(cwFailureClass(status, stderr)).toBe(expected);
   }
+});
+
+test("a check that does not hold names its first failed expectation on one line and stops there", async () => {
+  const lines = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const ran: string[] = [];
+    const expectation = (label: string, error?: Error) => [label, async () => {
+      ran.push(label);
+      if (error) throw error;
+    }] as [string, () => Promise<void>];
+    expect(await holds("create-start-list", [expectation("list-visible"), expectation("first-row")])).toBe(true);
+    expect(lines).not.toHaveBeenCalled();
+    const timeout = Object.assign(new Error("page text that must not be printed"), { name: "TimeoutError" });
+    expect(await holds("create-start-list", [
+      expectation("list-visible"), expectation("first-row", timeout), expectation("no-alert"),
+    ])).toBe(false);
+    expect(ran).toEqual(["list-visible", "first-row", "list-visible", "first-row"]);
+    expect(lines.mock.calls).toEqual([["[dev-ux] create-start-list:not-held expectation=first-row class=timeout"]]);
+  } finally { lines.mockRestore(); }
 });

@@ -1,7 +1,7 @@
 // Runs ONLY inside the existing protected Dev auth helper. No traces, page
 // dumps, screenshots, stored browser sessions, or provider authorizations.
 import { expect, request, type Locator, type Page, type WebSocketRoute } from "@playwright/test";
-import { DevUxError, failureClassOf, type OwnedUxSandbox } from "./dev-ux-ownership";
+import { DevUxError, failureClassOf, holds, type Expectation, type OwnedUxSandbox } from "./dev-ux-ownership";
 
 const ORIGIN = "https://codewire-dev.sh";
 // Re-attaching a surviving terminal after navigation, reload, reconnect, or
@@ -38,6 +38,28 @@ async function stage(name: string, operation: () => Promise<void>, started = Dat
   }
   passed(name, started);
 }
+
+// The start list (#3772; `sandbox-start-list` in docs/journeys/cloud-sandbox.md).
+// Its first row is the start itself and project setup adds only its named
+// steps, so any other row belongs to another run. The list keeps its rows
+// once the page hides it, so reading them after the Sandbox runs gives every
+// row that start showed.
+const START_ROW = "Starting the Sandbox";
+const SETUP_ROWS = new Set(["Checking sidecar readiness", "Configuring environment", "Cloning repositories",
+  "Running install command", "Running startup script", "Checking agent tools", "Registering ports"]);
+const startListRows = (page: Page) =>
+  page.locator("[data-setup-progress] [data-setup-stages] > .cw-setup-stage > .cw-setup-row > .cw-setup-stage-label");
+
+// The page an action has just sent to a starting Sandbox: the list is up with
+// its start row, and no alert above it repeats what the list says.
+const startListShown = (page: Page, alert: string): Expectation[] => [
+  ["list-visible", () => expect(page.getByRole("region", { name: "Starting your Sandbox", exact: true })).toBeVisible()],
+  ["first-row", () => expect(startListRows(page).first()).toHaveText(START_ROW)],
+  ["no-alert", () => expect(page.getByText(alert, { exact: true })).toHaveCount(0)],
+];
+
+// The start-list checks could not run against Dev before they merged, so one
+// that fails is reported by `holds` and does not fail the walk yet (#3772).
 
 // Why a shell command's marker did not appear, from fixed tokens only: the
 // selected terminal was paused by the Sandbox readiness check or account
@@ -653,12 +675,15 @@ export async function runDevUxWalkthrough(page: Page, options: {
     owned.beforeCreate();
     submitted = Date.now();
     await button(page, "Create Sandbox").click();
-    // Create lands on the new Sandbox's page. Its "Sandbox creation started."
-    // notice is withdrawn once the Sandbox runs, so a fast start may never
-    // show it; the landing URL is the acceptance.
+    // Create lands on the new Sandbox's page; the landing URL is the
+    // acceptance.
     await expect(page).toHaveURL(/\/[0-9a-f-]{36}\/\?message=environment-created$/);
     accepted = Date.now();
   });
+  // This shape has no warm pool on Dev, so its start outlasts the landing
+  // page's first paint and the list is there to check.
+  const landed = Date.now();
+  if (await holds("create-start-list", startListShown(page, "Sandbox creation started."))) passed("create-start-list", landed);
   const id = await owned.createdId(deadline);
   const detailPath = `/${slug}/${id}/`;
   const terminal = page.locator("[data-terminal-tab-panel]:not([hidden]) [data-terminal-root]");
@@ -682,6 +707,15 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(page.getByRole("tab")).toHaveCount(1, { timeout: 240_000 });
     await expect(button(page, "New terminal")).toBeEnabled({ timeout: 60_000 });
   }, accepted);
+  // The page above joined the start part-way: it may hold the start row, the
+  // setup steps still to come, or no list at all if the Sandbox already ran.
+  const ran = Date.now();
+  let listed: string[] = [];
+  if (await holds("create-start-list-rows", [
+    ["rows-read", async () => { listed = await startListRows(page).allTextContents(); }],
+    ["no-repeat", async () => expect(new Set(listed).size).toBe(listed.length)],
+    ["known-rows", async () => expect(listed.filter((row, index) => !(index === 0 && row === START_ROW) && !SETUP_ROWS.has(row))).toEqual([])],
+  ])) passed("create-start-list-rows", ran);
   await stage("terminal-attach", async () => {
     await attachedTerminal(page, 60_000);
     firstId = await page.getByRole("tabpanel").getAttribute("data-terminal-session-id");
@@ -962,8 +996,18 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(page.locator("[data-sandbox-state]")).toHaveText("stopped", { timeout: 120_000 });
     await button(page, "Start").click();
     await expect(page).toHaveURL(`${ORIGIN}${detailPath}?message=environment-started`);
+    // This Sandbox's setup finished on its first run, so a restart shows the
+    // start row alone, from the first paint until it runs.
+    const restarted = Date.now();
+    const shownAlone = await holds("lifecycle-live-state-start-list", [
+      ...startListShown(page, "Sandbox start requested."),
+      ["one-row", () => expect(startListRows(page)).toHaveText([START_ROW])],
+    ]);
     await expect(page.locator("[data-sandbox-state]")).toHaveText("running", { timeout: 240_000 });
     await expect(button(page, "New terminal")).toBeEnabled({ timeout: 60_000 });
+    if (shownAlone && await holds("lifecycle-live-state-start-list", [
+      ["one-row-kept", async () => expect(await startListRows(page).allTextContents()).toEqual([START_ROW])],
+    ])) passed("lifecycle-live-state-start-list", restarted);
     await button(await workspaceMenu(page, "More actions"), "Delete").click();
     const deletion = dialog(page, `Delete ${owned.name}?`);
     await expect(button(deletion, "Cancel")).toBeFocused();

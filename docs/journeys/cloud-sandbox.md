@@ -3,14 +3,14 @@
 This journey proves what a user does with a cloud sandbox, as `SPEC.md`
 describes it in "4. Hosted sandboxes" and "7. Access paths": creating one,
 what a create that fails leaves behind, running commands and shells in it,
-stopping and starting it, copying files with `cw cp` ("File transfer" in
-section 7), and what a user sees while a release replaces the orchestration
+stopping and starting it, what its page shows while it starts, copying files
+with `cw cp` ("File transfer" in section 7), and what a user sees while a release replaces the orchestration
 service ("Rollouts drain" in section 10). Large `cw run` output is not written
 yet; its owner adds it. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-14.
+Updated 2026-11-16.
 
 | ID | Owner | Dev | Production |
 | --- | --- | --- | --- |
@@ -19,6 +19,7 @@ Updated 2026-11-14.
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14 | not yet observed |
+| `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
 | `sandbox-setup-retry` | cw-snapshots | not yet observed | not yet observed |
 | `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-14 (#4460) | not yet observed |
@@ -288,6 +289,55 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished).
     start took 8 s and `cw ls` showed `running`; the marker written before
     the stop was read back unchanged. Evidence: the pull
     request that added this section.
+
+## `sandbox-start-list`: a starting sandbox's page shows one list of steps
+
+Issue: #3772.
+
+- **Entry points:** the dashboard's Create Sandbox form, and Start on a
+  stopped Sandbox's page.
+- **States to exercise:**
+  - a plain create, with no repository and no setup commands;
+  - a stopped Sandbox started again;
+  - a create with install and startup commands, whose steps follow the first
+    row (walked on Kind only);
+  - a setup that fails, which is `sandbox-setup-retry`.
+- **Driving it:** signed in to the dashboard, create a Sandbox from the form
+  and stay on the page it lands on. Once its terminal has opened, press Stop,
+  confirm, wait for "stopped", and press Start. On Dev every delivery walks
+  this as the Dev smoke browser identity, in
+  `apps/dashboard/scripts/dev-ux-walkthrough.ts`: `create-start-list` and
+  `create-start-list-rows` after Create, and
+  `lifecycle-live-state-start-list` after Start. In the delivery's acceptance
+  output a check that holds prints `stage NAME duration_ms=N`, and one that
+  fails prints `stage NAME not-held expectation=LABEL class=CLASS`. A failed
+  check does not fail the acceptance yet: the checks could not be run
+  against Dev before they merged. They become failing once three deliveries
+  in a row show all three stages and no `not-held` line.
+- **Proof:**
+  - **After Create:** the page shows "Starting your Sandbox" over a list whose
+    first row is "Starting the Sandbox". Every row is that one or a named
+    setup step, and none appears twice. No "Sandbox creation started." alert
+    sits above it.
+  - **After Start:** the list holds exactly one row, "Starting the Sandbox".
+    None of the earlier run's or the stop's rows return, and no "Sandbox start
+    requested." alert sits above it.
+  - **Both:** the list gives way to a terminal when the Sandbox runs.
+- **Gotchas:**
+  - A create served from the warm pool can be running before the page first
+    paints, and then no list is ever seen. Dev's walk creates a shape that has
+    no pool (1 vCPU, 2 GiB, 10 GiB), so its list is always there to check. If
+    that shape gains a pool, the create half of this step stops proving
+    anything and has to change.
+  - Nothing signs a browser in as the Production smoke identity, so
+    Production has no walk yet.
+- **Observed:**
+  - Kind, 2026-11-14: the retained review cluster with a synthetic account,
+    on the branch that merged as #4774 (`a6fefaf01`). A plain create, a create
+    with setup, and stop then start each showed every step once, with no
+    alert, and ended in a terminal. Evidence: #3772's comments of that date.
+  - Dev: not yet.
+  - Production: not yet.
 
 ## `sandbox-list-live`: the Sandboxes page changes as its Sandboxes do
 
