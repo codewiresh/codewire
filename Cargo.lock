@@ -2118,6 +2118,7 @@ dependencies = [
  "codewire-ext4-scrub",
  "codewire-local-credentials",
  "codewire-netstack",
+ "codewire-network-session",
  "codewire-project",
  "codewire-project-proto",
  "codewire-protected-store",

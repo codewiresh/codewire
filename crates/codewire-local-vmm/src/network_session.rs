@@ -19,10 +19,10 @@ use codewire_netstack::{
     build_ipv4_dns_response, build_ipv4_tcp_refusal, parse_canonical_ipv4_tcp_packet,
     parse_ipv4_dns_question,
 };
-use codewire_vmm_guest_probe::{
-    NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN, NETWORK_MAX_PACKET_BYTES, NetworkGuestAck,
-    NetworkHostHello, NetworkHostReady, NetworkKey, NetworkRole, NetworkSession,
-    encoded_network_frame_len,
+use codewire_network_session::{
+    EgressTrust, NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN, NetworkGuestAck,
+    NetworkHostHello, NetworkHostReady, NetworkKey, NetworkRole, NetworkSession, PacketBound,
+    SessionLimits, encoded_network_frame_len,
 };
 use rand::{RngCore as _, rngs::OsRng};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -140,11 +140,14 @@ pub enum NetworkSessionError {
 /// Run one authenticated generation-bound packet engine over an injected
 /// connected stream. `ready` is called only after the bounded netstack exists,
 /// the genuine guest acknowledgement authenticates, and HostReady is flushed.
+/// `limits` fixes the packet bound the hello sends, which the guest must
+/// accept, and the netstack's MTU: [`SessionLimits::LOCAL`] for a local VM.
 pub async fn run_network_session<S, B, R>(
     stream: S,
     key: NetworkKey,
     vm_id: Uuid,
     generation: u64,
+    limits: SessionLimits,
     broker: Arc<B>,
     ready: R,
 ) -> Result<(), NetworkSessionError>
@@ -153,14 +156,17 @@ where
     B: EgressBroker,
     R: FnOnce() -> io::Result<()> + Send,
 {
-    run_network_session_with_ingress(stream, key, vm_id, generation, broker, None, ready).await
+    run_network_session_with_ingress(stream, key, vm_id, generation, limits, broker, None, ready)
+        .await
 }
 
+#[allow(clippy::too_many_arguments)] // The public entry point plus the ingress channel.
 pub(crate) async fn run_network_session_with_ingress<S, B, R>(
     mut stream: S,
     key: NetworkKey,
     vm_id: Uuid,
     generation: u64,
+    limits: SessionLimits,
     broker: Arc<B>,
     inbound: Option<mpsc::Receiver<InboundGuestStream>>,
     ready: R,
@@ -174,26 +180,27 @@ where
     // Build the fixed-size engine before beginning the guest handshake. Once
     // the guest acknowledges the hello, no setup work remains that could
     // consume the guest's bounded authentication window.
-    let limits = NetstackLimits::default();
+    let stack_limits = NetstackLimits::default();
     let (to_stack, stack_packets) = mpsc::channel(PACKET_QUEUE);
     let (from_stack, outbound_packets) = mpsc::channel(PACKET_QUEUE);
     let stack = Netstack::with_config_and_limits(
         NetstackConfig {
             local_ip: IpAddr::V4(WORKER_IP),
             prefix_len: 30,
-            mtu: NETWORK_MTU,
+            mtu: limits.mtu(),
             verify_rx_checksums: true,
             accept_any_ip: true,
             default_gateway: None,
         },
-        limits,
+        stack_limits,
         stack_packets,
         from_stack.clone(),
     )
     .map_err(|_| NetworkSessionError::Engine)?;
 
     let nonce = network_nonce();
-    let hello = NetworkHostHello::new(vm_id, generation, nonce)
+    let bound = limits.packet_bound();
+    let hello = NetworkHostHello::new(vm_id, generation, nonce, bound)
         .map_err(|_| NetworkSessionError::Protocol)?;
     tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.write_all(&hello.encode(&key)))
         .await
@@ -204,13 +211,16 @@ where
         .await
         .map_err(|_| NetworkSessionError::AcknowledgementReadTimeout)?
         .map_err(|_| NetworkSessionError::AcknowledgementReadIo)?;
-    NetworkGuestAck::decode(&ack, &key, &nonce)
+    NetworkGuestAck::decode(&ack, &key, &nonce, bound)
         .map_err(|_| NetworkSessionError::AcknowledgementInvalid)?;
 
-    let session = Arc::new(Mutex::new(
-        NetworkSession::new(&key, &nonce, NetworkRole::Host)
-            .map_err(|_| NetworkSessionError::Protocol)?,
-    ));
+    let mut session = NetworkSession::new(&key, &nonce, NetworkRole::Host, bound)
+        .map_err(|_| NetworkSessionError::Protocol)?;
+    // A local VM's egress CA rides in its seed, so its first frame says none.
+    let egress_trust = session
+        .encode_egress_trust(&EgressTrust::None)
+        .map_err(|_| NetworkSessionError::Protocol)?;
+    let session = Arc::new(Mutex::new(session));
 
     stream
         .write_all(
@@ -221,6 +231,10 @@ where
         .await
         .map_err(|_| NetworkSessionError::HostReadyIo)?;
     stream
+        .write_all(&egress_trust)
+        .await
+        .map_err(|_| NetworkSessionError::HostReadyIo)?;
+    stream
         .flush()
         .await
         .map_err(|_| NetworkSessionError::HostReadyIo)?;
@@ -228,8 +242,9 @@ where
 
     let (stream_read, stream_write) = tokio::io::split(stream);
     let (guest_packet_tx, guest_packets) = mpsc::channel(PACKET_QUEUE);
-    let reader = read_authenticated_frames(stream_read, Arc::clone(&session), guest_packet_tx);
-    let writer = write_authenticated_frames(stream_write, session, outbound_packets);
+    let reader =
+        read_authenticated_frames(stream_read, Arc::clone(&session), bound, guest_packet_tx);
+    let writer = write_authenticated_frames(stream_write, session, bound, outbound_packets);
     let dispatcher = dispatch_packets(guest_packets, stack, to_stack, from_stack, broker, inbound);
     tokio::pin!(reader, writer, dispatcher);
     tokio::select! {
@@ -259,6 +274,7 @@ fn network_nonce() -> [u8; 32] {
 async fn read_authenticated_frames<R>(
     mut stream: R,
     session: Arc<Mutex<NetworkSession>>,
+    bound: PacketBound,
     packets: mpsc::Sender<Vec<u8>>,
 ) -> Result<(), NetworkSessionError>
 where
@@ -271,7 +287,7 @@ where
             .await
             .map_err(|_| NetworkSessionError::FrameIo)?;
         let frame_len =
-            encoded_network_frame_len(&header).map_err(|_| NetworkSessionError::Protocol)?;
+            encoded_network_frame_len(&header, bound).map_err(|_| NetworkSessionError::Protocol)?;
         let mut frame = vec![0_u8; frame_len];
         frame[..NETWORK_FRAME_HEADER_LEN].copy_from_slice(&header);
         stream
@@ -293,13 +309,14 @@ where
 async fn write_authenticated_frames<W>(
     mut stream: W,
     session: Arc<Mutex<NetworkSession>>,
+    bound: PacketBound,
     mut packets: mpsc::Receiver<Vec<u8>>,
 ) -> Result<(), NetworkSessionError>
 where
     W: AsyncWrite + Unpin,
 {
     while let Some(packet) = packets.recv().await {
-        if packet.is_empty() || packet.len() > NETWORK_MAX_PACKET_BYTES {
+        if packet.is_empty() || packet.len() > bound.bytes() {
             return Err(NetworkSessionError::Engine);
         }
         let frame = session
@@ -608,7 +625,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use codewire_netstack::DnsRecordType;
-    use codewire_vmm_guest_probe::{NETWORK_HOST_HELLO_LEN, NETWORK_HOST_READY_LEN, NetworkError};
+    use codewire_network_session::{NETWORK_HOST_HELLO_LEN, NETWORK_HOST_READY_LEN, NetworkError};
     use tokio::io::{DuplexStream, duplex};
     use tokio::sync::Semaphore;
 
@@ -703,6 +720,7 @@ mod tests {
             host_key,
             vm_id,
             generation,
+            SessionLimits::LOCAL,
             broker,
             || Ok(()),
         ));
@@ -1428,6 +1446,7 @@ mod tests {
             host_key,
             vm_id,
             generation,
+            SessionLimits::LOCAL,
             host_broker,
             move || ready_tx.try_send(()).map_err(io::Error::other),
         ));
@@ -1477,6 +1496,7 @@ mod tests {
                 key,
                 Uuid::nil(),
                 identity().1,
+                SessionLimits::LOCAL,
                 Arc::new(DenyBroker),
                 || panic!("invalid identity cannot become ready"),
             )
@@ -1492,6 +1512,7 @@ mod tests {
             key,
             vm_id,
             generation,
+            SessionLimits::LOCAL,
             Arc::new(DenyBroker),
             || panic!("forged acknowledgement cannot become ready"),
         ));
@@ -1517,13 +1538,31 @@ mod tests {
         stream.read_exact(&mut hello).await.unwrap();
         let hello = NetworkHostHello::decode(&hello, key, vm_id, generation)?;
         stream
-            .write_all(&NetworkGuestAck::new(hello.nonce)?.encode(key))
+            .write_all(&NetworkGuestAck::new(hello.nonce, hello.packet_bound)?.encode(key))
             .await
             .unwrap();
         let mut ready = [0_u8; NETWORK_HOST_READY_LEN];
         stream.read_exact(&mut ready).await.unwrap();
         NetworkHostReady::decode(&ready, key, &hello.nonce)?;
-        NetworkSession::new(key, &hello.nonce, NetworkRole::Guest)
+        let mut session =
+            NetworkSession::new(key, &hello.nonce, NetworkRole::Guest, hello.packet_bound)?;
+        // The host's frame 1: a local VM's says it has no egress CA.
+        let mut header = [0_u8; codewire_network_session::NETWORK_FRAME_HEADER_LEN];
+        stream.read_exact(&mut header).await.unwrap();
+        let mut frame =
+            vec![
+                0_u8;
+                codewire_network_session::encoded_network_frame_len(&header, hello.packet_bound)?
+            ];
+        frame[..header.len()].copy_from_slice(&header);
+        stream.read_exact(&mut frame[header.len()..]).await.unwrap();
+        assert_eq!(
+            session.decode_frame(&frame)?,
+            codewire_network_session::NetworkFrame::EgressTrust(
+                codewire_network_session::EgressTrust::None
+            )
+        );
+        Ok(session)
     }
 
     async fn write_guest_packet(
@@ -1541,7 +1580,9 @@ mod tests {
     ) -> io::Result<Vec<u8>> {
         let mut header = [0_u8; NETWORK_FRAME_HEADER_LEN];
         stream.read_exact(&mut header).await?;
-        let length = encoded_network_frame_len(&header).map_err(io::Error::other)?;
+        let length = session
+            .encoded_frame_len(&header)
+            .map_err(io::Error::other)?;
         let mut frame = vec![0_u8; length];
         frame[..NETWORK_FRAME_HEADER_LEN].copy_from_slice(&header);
         stream

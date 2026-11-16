@@ -214,9 +214,9 @@ from pathlib import Path
 
 with Path(sys.argv[1]).open('rb') as stream:
     data = stream.read(64 * 1024 * 1024 + 1)
-marker = b'\0CWGUESTABI\0seed=9;cw_catalog=1\0'
+marker = b'\0CWGUESTABI\0seed=9;cw_catalog=1;net=2\0'
 if len(data) > 64 * 1024 * 1024 or data.count(marker) != 1 or data.count(b'\0CWGUESTABI\0') != 1:
-    raise SystemExit('static guest must contain exactly one current seed9/catalog1 capability marker')
+    raise SystemExit('static guest must contain exactly one current seed9/catalog1/net2 capability marker')
 PY
 }
 

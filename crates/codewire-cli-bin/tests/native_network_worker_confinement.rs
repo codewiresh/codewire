@@ -348,7 +348,7 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
     let hello = NetworkHostHello::decode(&hello, &network_key, vm_id, generation).unwrap();
     guest
         .write_all(
-            &NetworkGuestAck::new(hello.nonce)
+            &NetworkGuestAck::new(hello.nonce, hello.packet_bound)
                 .unwrap()
                 .encode(&network_key),
         )

@@ -21,8 +21,10 @@ const MAGIC: &[u8; 8] = b"CWSEED1\0";
 // bearing v6, are never decoded or selected by a constructor.
 const FORMAT_VERSION: u16 = 9;
 // Referenced by the guest entrypoint and inspected in the admitted init ELF.
-// A retained boot without this capability is never sent the current seed.
-pub const GUEST_RUNTIME_ABI_MARKER: &[u8] = b"\0CWGUESTABI\0seed=9;cw_catalog=1\0";
+// A retained boot without this capability is never sent the current seed,
+// and neither is one that speaks another network session protocol: a VM
+// checkpoint taken under it would restore without a network (#4000).
+pub const GUEST_RUNTIME_ABI_MARKER: &[u8] = b"\0CWGUESTABI\0seed=9;cw_catalog=1;net=2\0";
 const HEADER_LEN: usize = 288;
 const CHECKSUM_LEN: usize = 32;
 const CHECKSUM_OFFSET: usize = SEED_LEN - CHECKSUM_LEN;
@@ -766,7 +768,11 @@ mod tests {
     fn runtime_catalog_binding_keeps_credential_framing_and_rejects_unbound_bytes() {
         assert_eq!(
             GUEST_RUNTIME_ABI_MARKER,
-            format!("\0CWGUESTABI\0seed={FORMAT_VERSION};cw_catalog=1\0").as_bytes()
+            format!(
+                "\0CWGUESTABI\0seed={FORMAT_VERSION};cw_catalog=1;net={}\0",
+                codewire_network_session::NETWORK_PROTOCOL_VERSION
+            )
+            .as_bytes()
         );
         let clients = ManagedCredentialClients::decode("v2:1f").unwrap();
         let hash = Sha256Value::from_bytes([0xa5; 32]);

@@ -66,9 +66,8 @@ pub const GUEST_CHECKPOINT_THAW_CLOCK_MARKER: &[u8] = b"\0CWCHECKPOINTABI\0hook=
 pub use codewire_network_session::{
     GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN,
     NETWORK_HOST_HELLO_LEN, NETWORK_HOST_READY_LEN, NETWORK_HOST_READY_TIMEOUT_SECONDS,
-    NETWORK_KEY_LEN, NETWORK_MAX_PACKET_BYTES, NetworkDirection, NetworkError, NetworkGuestAck,
-    NetworkHostHello, NetworkHostReady, NetworkKey, NetworkRole, NetworkSession,
-    encoded_network_frame_len,
+    NETWORK_KEY_LEN, NetworkDirection, NetworkError, NetworkGuestAck, NetworkHostHello,
+    NetworkHostReady, NetworkKey, NetworkRole, NetworkSession, encoded_network_frame_len,
 };
 #[cfg(target_os = "linux")]
 pub use newc::write_canonical_guest_root_initramfs_with_cw;

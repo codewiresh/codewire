@@ -669,6 +669,10 @@ retained runtime on restart. Missing retained bytes refuse recovery without
 replaying a task. Keep the durable base inputs outside disposable worktrees.
 Boot assets from the earlier seed8 format cannot start a seed9 runner. Reads
 preserve an exact incompatible runner; explicit stop/delete remain available.
+Boot assets whose guest speaks another network session protocol (`net=N` in
+the guest runtime ABI marker) are refused the same way, and so is a VM
+checkpoint taken under them, so no guest is booted or restored without a
+network. What the user is then told, and can do, is #4980.
 A restart must refuse unsupported boot assets before stopping the VM. Runtime
 selection does not silently replace those boot assets.
 Stop task-owned daemons and retire task-only environments before deleting their

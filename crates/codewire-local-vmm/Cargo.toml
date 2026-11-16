@@ -43,6 +43,7 @@ codewire-egress-front-door = { workspace = true }
 codewire-egress-policy = { workspace = true }
 codewire-ext4-scrub = { workspace = true }
 codewire-netstack = { workspace = true }
+codewire-network-session = { workspace = true }
 codewire-daemon-proto = { workspace = true }
 codewire-vmm-guest-probe = { workspace = true }
 codewire-workspace-access = { workspace = true }

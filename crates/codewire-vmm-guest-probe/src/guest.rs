@@ -63,10 +63,17 @@ use codewire_network_session::{
 };
 
 mod bootstrap;
+mod network_status;
 mod shutdown;
 mod vm_only;
+
 use bootstrap::{BootstrapChild, BootstrapParent};
 use codewire_daemon::execution::BootstrapPhase;
+use network_status::{
+    NETWORK_AGENT_FAILURE_STAGES, NETWORK_AGENT_GENERIC_FAILURE_STAGE,
+    NETWORK_AGENT_HOST_FAILURE_STAGE, NETWORK_STATUS_VALUES, handshake_failure_stage,
+    handshake_status,
+};
 
 pub const INIT_PATH: &str = "/init";
 pub const STATE_MOUNT_PATH: &str = "/state";
@@ -160,44 +167,6 @@ const NETWORK_AGENT_HOST_TIMEOUT: Duration =
     Duration::from_secs(NETWORK_HOST_READY_TIMEOUT_SECONDS);
 const NETWORK_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const NSFS_MAGIC: u64 = 0x6e73_6673;
-const NETWORK_AGENT_FAILURE_STAGES: &[&str] = &[
-    "workspace-net-seed-failed",
-    "workspace-net-tun-open-failed",
-    "workspace-net-tun-attach-failed",
-    "workspace-net-loopback-failed",
-    "workspace-net-link-failed",
-    "workspace-net-address-failed",
-    "workspace-net-route-failed",
-    "workspace-net-ipv-six-failed",
-    "workspace-net-topology-failed",
-    "workspace-net-async-failed",
-    "workspace-net-vsock-failed",
-    "workspace-net-caps-failed",
-    "workspace-net-ready-failed",
-    "workspace-net-publish-failed",
-    "workspace-net-peer-failed",
-    "workspace-net-handshake-timeout",
-    "workspace-net-hello-read-failed",
-    "workspace-net-hello-auth-failed",
-    "workspace-net-ack-write-failed",
-    "workspace-net-ready-read-failed",
-    "workspace-net-ready-auth-failed",
-    "workspace-net-session-failed",
-];
-const NETWORK_AGENT_GENERIC_FAILURE_STAGE: &str = "workspace-net-start-failed";
-const NETWORK_AGENT_HOST_FAILURE_STAGE: &str = "workspace-net-host-failed";
-const NETWORK_STATUS_VALUES: &[&str] = &[
-    "network-listening",
-    "network-peer-rejected",
-    "network-handshake-timeout",
-    "network-hello-read-failed",
-    "network-hello-auth-failed",
-    "network-ack-write-failed",
-    "network-ready-read-failed",
-    "network-ready-auth-failed",
-    "network-session-failed",
-    "network-authenticated",
-];
 const CREDENTIAL_FORWARDER_READY_FD: RawFd = 4;
 const WORKSPACE_READY_LIMIT: usize = 96;
 const CREDENTIAL_FORWARDER_READY: &[u8] = b"CWCREDS1 ready\n";
@@ -827,7 +796,7 @@ pub async fn run_network_agent() -> Result<()> {
 
     loop {
         tokio::select! {
-            packet = codewire_network_session::guest::read_tun_packet(&tun) => {
+            packet = codewire_network_session::guest::read_tun_packet(&tun, codewire_network_session::SessionLimits::LOCAL.packet_bound()) => {
                 // With no authenticated host, consuming and discarding the
                 // bounded packet is the fail-closed path. It also prevents a
                 // later worker from receiving pre-authentication traffic.
@@ -859,7 +828,19 @@ pub async fn run_network_agent() -> Result<()> {
                 )
                 .await;
                 let (stream, session) = match authenticated {
-                    Ok(Ok(authenticated)) => authenticated,
+                    // A local VM's egress CA rides in its seed, never in the
+                    // session, so its host's first frame says none.
+                    Ok(Ok(codewire_network_session::guest::GuestSession {
+                        stream,
+                        session,
+                        egress_trust: codewire_network_session::EgressTrust::None,
+                    })) => (stream, session),
+                    Ok(Ok(_)) => {
+                        let error = GuestHandshakeError::AuthenticateEgressTrust;
+                        record_network_status(handshake_status(error))?;
+                        record_boot_stage(handshake_failure_stage(error))?;
+                        bail!("guest network host offered an egress CA over the session");
+                    }
                     Ok(Err(error)) => {
                         record_network_status(handshake_status(error))?;
                         record_boot_stage(handshake_failure_stage(error))?;
@@ -886,30 +867,6 @@ pub async fn run_network_agent() -> Result<()> {
                 }
             }
         }
-    }
-}
-
-/// The guest's network status for a failed handshake.
-fn handshake_status(error: GuestHandshakeError) -> &'static str {
-    match error {
-        GuestHandshakeError::ReadHello => "network-hello-read-failed",
-        GuestHandshakeError::AuthenticateHello => "network-hello-auth-failed",
-        GuestHandshakeError::WriteAcknowledgement => "network-ack-write-failed",
-        GuestHandshakeError::ReadReady => "network-ready-read-failed",
-        GuestHandshakeError::AuthenticateReady => "network-ready-auth-failed",
-        GuestHandshakeError::Session => "network-session-failed",
-    }
-}
-
-/// The boot stage a failed handshake records.
-fn handshake_failure_stage(error: GuestHandshakeError) -> &'static str {
-    match error {
-        GuestHandshakeError::ReadHello => "workspace-net-hello-read-failed",
-        GuestHandshakeError::AuthenticateHello => "workspace-net-hello-auth-failed",
-        GuestHandshakeError::WriteAcknowledgement => "workspace-net-ack-write-failed",
-        GuestHandshakeError::ReadReady => "workspace-net-ready-read-failed",
-        GuestHandshakeError::AuthenticateReady => "workspace-net-ready-auth-failed",
-        GuestHandshakeError::Session => "workspace-net-session-failed",
     }
 }
 

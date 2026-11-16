@@ -1205,7 +1205,7 @@ run_paths_case local_vmm_guest_source pull_request refs/pull/5012/head false \
   crates/codewire-vmm-guest-probe/src/lib.rs
 run_paths_case local_vmm_network_fixture pull_request refs/pull/50121/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
-  testdata/local-vm-network/protocol-v1.json
+  testdata/local-vm-network/protocol-v2.json
 run_paths_case local_vmm_initramfs_builder pull_request refs/pull/5013/head false \
   'policy security security_js transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/build-local-vmm-initramfs.sh

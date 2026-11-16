@@ -462,7 +462,8 @@ if [[ "$SMOKE_STATUS" -ne 0 ]]; then
   case "$NETWORK_STATUS" in
     network-listening|network-peer-rejected|network-handshake-timeout|network-hello-read-failed|\
       network-hello-auth-failed|network-ack-write-failed|network-ready-read-failed|\
-      network-ready-auth-failed|network-session-failed|network-authenticated)
+      network-ready-auth-failed|network-session-failed|network-trust-read-failed|\
+      network-trust-auth-failed|network-authenticated)
       log "diagnostic guest.network_status=$NETWORK_STATUS"
       ;;
     *)

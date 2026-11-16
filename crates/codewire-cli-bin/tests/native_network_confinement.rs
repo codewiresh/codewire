@@ -582,9 +582,8 @@ fn the_confined_worker_holds_only_the_descriptors_it_was_given() {
     let mut hello = [0_u8; NETWORK_HOST_HELLO_LEN];
     guest.read_exact(&mut hello).unwrap();
     let hello = NetworkHostHello::decode(&hello, &key, vm_id, generation).unwrap();
-    guest
-        .write_all(&NetworkGuestAck::new(hello.nonce).unwrap().encode(&key))
-        .unwrap();
+    let ack = NetworkGuestAck::new(hello.nonce, hello.packet_bound).unwrap();
+    guest.write_all(&ack.encode(&key)).unwrap();
     let mut ready = [0_u8; NETWORK_HOST_READY_LEN];
     guest.read_exact(&mut ready).unwrap();
     NetworkHostReady::decode(&ready, &key, &hello.nonce).unwrap();

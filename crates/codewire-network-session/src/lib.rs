@@ -9,6 +9,9 @@
 
 #[cfg(target_os = "linux")]
 pub mod guest;
+pub mod hosted;
+mod limits;
 mod protocol;
 
+pub use limits::{MAX_PACKET_BOUND, MIN_PACKET_BOUND, PacketBound, SessionLimits};
 pub use protocol::*;

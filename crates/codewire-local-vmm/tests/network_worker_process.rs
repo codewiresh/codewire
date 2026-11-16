@@ -166,7 +166,11 @@ fn confined_fixture_worker_completes_the_two_phase_authenticated_bootstrap() {
     }
     let hello = NetworkHostHello::decode(&hello, &key, vm_id, generation).unwrap();
     guest
-        .write_all(&NetworkGuestAck::new(hello.nonce).unwrap().encode(&key))
+        .write_all(
+            &NetworkGuestAck::new(hello.nonce, hello.packet_bound)
+                .unwrap()
+                .encode(&key),
+        )
         .unwrap();
     let mut ready = [0_u8; NETWORK_HOST_READY_LEN];
     guest.read_exact(&mut ready).unwrap();
@@ -367,7 +371,7 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
     let hello = NetworkHostHello::decode(&hello, &network_key, vm_id, generation).unwrap();
     guest
         .write_all(
-            &NetworkGuestAck::new(hello.nonce)
+            &NetworkGuestAck::new(hello.nonce, hello.packet_bound)
                 .unwrap()
                 .encode(&network_key),
         )
