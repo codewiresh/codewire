@@ -31,6 +31,7 @@ mod front_door;
 mod relay;
 mod request_body;
 mod ssh;
+mod websocket;
 
 #[cfg(test)]
 pub(crate) use front_door::FrontDoorExecutor;
@@ -134,6 +135,23 @@ struct ActiveRequest {
     login: Option<LoginKind>,
     /// Where the request's streamed body stands, if it streams.
     body: BodyLedger,
+}
+
+impl ActiveRequest {
+    /// The guest cancelled this request. The caller has already cancelled the
+    /// guest-facing HTTP request and deliberately drains late host frames, so
+    /// the operation and its bounded in-flight slot stay alive: cancellation
+    /// cannot strand an OAuth refresh reservation or interrupt protected-store
+    /// staging after rotation. A signer stops, and a body that stops without
+    /// its end fails upstream.
+    fn cancel(&mut self) {
+        if let Some(cancellation) = &self.ssh_cancellation {
+            cancellation.cancel();
+        }
+        if matches!(self.body, BodyLedger::Flowing(_)) {
+            self.body = BodyLedger::Cancelled;
+        }
+    }
 }
 
 /// A request's body as the guest's frames see it. Frames are a protocol error
@@ -297,6 +315,24 @@ pub(crate) trait BrokerRequestExecutor: Send + Sync {
 
     async fn wait_for_active_operations(&self) -> Result<(), BrokerRequestError> {
         Ok(())
+    }
+
+    /// Whether this session serves WebSocket handshakes: only a front-door
+    /// session does (#3999). Anywhere else an Upgrade is a protocol error.
+    fn serves_upgrades(&self) -> bool {
+        false
+    }
+
+    async fn execute_upgrade(
+        &self,
+        _upgrade: v1::CredentialBridgeUpgrade,
+    ) -> Result<crate::runtime::upgrade::BrokerUpgradeOutcome, BrokerRequestError> {
+        Err(BrokerRequestError::Denied)
+    }
+
+    /// Whether an open socket's credential still leases; any doubt is no.
+    async fn socket_grant_holds(&self, _grant: &crate::runtime::upgrade::SocketGrant) -> bool {
+        false
     }
 }
 
@@ -588,8 +624,11 @@ where
     let mut active = HashMap::<String, ActiveRequest>::new();
     let mut finished = FinishedBodies::default();
     let mut next_incarnation = 0_u64;
+    // Open sockets run apart from requests; they end with this loop.
+    let mut sockets = websocket::SocketRuns::new();
     loop {
         tokio::select! {
+            () = sockets.step() => {}
             completed = tasks.join_next(), if !tasks.is_empty() => {
                 let Some(completed) = completed else {
                     continue;
@@ -660,7 +699,7 @@ where
                     }
                     Some(v1::credential_bridge_guest_message::Payload::EnvironmentProjection(request)) => {
                         let request_id = request.request_id.clone();
-                        if !Uuid::parse_str(&request_id).is_ok_and(|id| !id.is_nil() && id.to_string() == request_id)
+                        if !canonical_request_id(&request_id)
                             || active.contains_key(&request_id)
                         {
                             tasks.shutdown().await;
@@ -705,7 +744,7 @@ where
                         };
                         let kind = login.kind();
                         let request_id = login.request_id().to_owned();
-                        if !Uuid::parse_str(&request_id).is_ok_and(|id| !id.is_nil() && id.to_string() == request_id)
+                        if !canonical_request_id(&request_id)
                             || active.contains_key(&request_id)
                         {
                             tasks.shutdown().await;
@@ -746,10 +785,7 @@ where
                     }
                     Some(v1::credential_bridge_guest_message::Payload::Request(request)) => {
                         let request_id = request.request_id.clone();
-                        let canonical_request_id = Uuid::parse_str(&request_id).is_ok_and(|id| {
-                            !id.is_nil() && id.to_string() == request_id
-                        });
-                        if !canonical_request_id || active.contains_key(&request_id) {
+                        if !canonical_request_id(&request_id) || active.contains_key(&request_id) {
                             tasks.shutdown().await;
                             return Err(BrokerBridgeError::InvalidProtocol);
                         }
@@ -790,70 +826,69 @@ where
                         active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, login: None, body });
                     }
                     Some(v1::credential_bridge_guest_message::Payload::Cancel(cancel)) => {
-                        if !Uuid::parse_str(&cancel.request_id).is_ok_and(|id| {
-                            !id.is_nil() && id.to_string() == cancel.request_id
-                        }) {
+                        if !canonical_request_id(&cancel.request_id) {
                             tasks.shutdown().await;
                             return Err(BrokerBridgeError::InvalidProtocol);
                         }
                         if let Some(request) = active.get_mut(&cancel.request_id) {
-                            if let Some(cancellation) = &request.ssh_cancellation {
-                                cancellation.cancel();
-                            }
-                            // A body that stops without its end fails upstream.
-                            if matches!(request.body, BodyLedger::Flowing(_)) {
-                                request.body = BodyLedger::Cancelled;
-                            }
+                            request.cancel();
                         }
-                        // The caller has already cancelled the guest-facing HTTP
-                        // request and deliberately drains late host frames. Keep
-                        // this operation and its bounded in-flight slot alive so
-                        // cancellation cannot strand an OAuth refresh reservation
-                        // or interrupt protected-store staging after rotation.
                     }
-                    // A streamed body's frames. Those for a body the guest
-                    // cancelled, or for a streamed request that already
-                    // finished, race that cancel or answer and are dropped.
-                    // Any other stray frame is a protocol error, like a frame
-                    // past the credit.
-                    Some(v1::credential_bridge_guest_message::Payload::RequestBody(chunk)) => {
-                        let accepted = match active.get(&chunk.request_id).map(|request| &request.body) {
-                            Some(BodyLedger::Flowing(feed)) => feed.push(chunk.data).is_ok(),
-                            Some(BodyLedger::Cancelled) => true,
-                            Some(BodyLedger::Whole | BodyLedger::Ended) => false,
-                            None => finished.contains(&chunk.request_id),
-                        };
-                        if !accepted {
+                    // A streamed body's frames: see `accept_body_frame`.
+                    Some(
+                        payload @ (v1::credential_bridge_guest_message::Payload::RequestBody(_)
+                        | v1::credential_bridge_guest_message::Payload::RequestEnd(_)),
+                    ) => {
+                        if !accept_body_frame(&mut active, &finished, payload) {
                             tasks.shutdown().await;
                             return Err(BrokerBridgeError::InvalidProtocol);
                         }
                     }
-                    Some(v1::credential_bridge_guest_message::Payload::RequestEnd(end)) => {
-                        let accepted = match active.get_mut(&end.request_id) {
-                            Some(request) => match std::mem::replace(&mut request.body, BodyLedger::Ended) {
-                                BodyLedger::Flowing(feed) => {
-                                    feed.end();
-                                    true
-                                }
-                                BodyLedger::Cancelled => {
-                                    request.body = BodyLedger::Cancelled;
-                                    true
-                                }
-                                BodyLedger::Whole => {
-                                    request.body = BodyLedger::Whole;
-                                    false
-                                }
-                                BodyLedger::Ended => false,
-                            },
-                            None => finished.contains(&end.request_id),
+                    // A WebSocket handshake, on a front-door session only. It
+                    // holds an in-flight slot until it is answered.
+                    Some(v1::credential_bridge_guest_message::Payload::Upgrade(upgrade))
+                        if broker.serves_upgrades() =>
+                    {
+                        let request_id = upgrade.request_id.clone();
+                        if !canonical_request_id(&request_id)
+                            || active.contains_key(&request_id)
+                            || sockets.contains(&request_id)
+                        {
+                            tasks.shutdown().await;
+                            return Err(BrokerBridgeError::InvalidProtocol);
+                        }
+                        if active.len() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT || sockets.full() {
+                            let (limit, max, used) = if sockets.full() { ("bridge_open_sockets", websocket::MAX_OPEN_SOCKETS, sockets.in_use()) } else { ("bridge_in_flight", CREDENTIAL_BRIDGE_MAX_IN_FLIGHT, active.len()) };
+                            timing::capacity_rejected(limit, "websocket", max, used);
+                            if send_failure(&sender, request_id, BrokerRequestError::AuthorityUnavailable).await.is_err() {
+                                tasks.shutdown().await;
+                                return Err(BrokerBridgeError::Unavailable);
+                            }
+                            continue;
+                        }
+                        let Some(incarnation) = next_incarnation.checked_add(1) else {
+                            tasks.shutdown().await;
+                            return Err(BrokerBridgeError::Unavailable);
                         };
-                        if !accepted {
+                        next_incarnation = incarnation;
+                        let handshake = sockets.handshake(Arc::clone(&broker), sender.clone(), upgrade);
+                        let completed_id = request_id.clone();
+                        let _upgrade_task = tasks.spawn(async move { (completed_id, incarnation, handshake.await) });
+                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None, login: None, body: BodyLedger::Whole });
+                    }
+                    // A socket's frames: see `SocketRuns::route`.
+                    Some(
+                        payload @ (v1::credential_bridge_guest_message::Payload::StreamData(_)
+                        | v1::credential_bridge_guest_message::Payload::StreamCredit(_)
+                        | v1::credential_bridge_guest_message::Payload::StreamClose(_)),
+                    ) if broker.serves_upgrades() => {
+                        if sockets.route(payload).is_err() {
                             tasks.shutdown().await;
                             return Err(BrokerBridgeError::InvalidProtocol);
                         }
                     }
-                    // A front-door session's frames are unknown frames on
-                    // every session this runner serves today.
+                    // Unknown frames everywhere, and the front-door session's
+                    // frames on any other session.
                     Some(
                         v1::credential_bridge_guest_message::Payload::Ready(_)
                         | v1::credential_bridge_guest_message::Payload::Upgrade(_)
@@ -1005,6 +1040,54 @@ async fn send_composition_response<S: CredentialBridgeResponseSink>(
 }
 
 /// Remove a completed request; true when it was a streamed one.
+/// Apply one of a streamed body's frames. Those for a body the guest
+/// cancelled, or for a streamed request that already finished, race that
+/// cancel or answer and are dropped. Any other stray frame is a protocol
+/// error, like a frame past the credit: the caller ends the epoch on false.
+fn accept_body_frame(
+    active: &mut HashMap<String, ActiveRequest>,
+    finished: &FinishedBodies,
+    payload: v1::credential_bridge_guest_message::Payload,
+) -> bool {
+    match payload {
+        v1::credential_bridge_guest_message::Payload::RequestBody(chunk) => {
+            match active.get(&chunk.request_id).map(|request| &request.body) {
+                Some(BodyLedger::Flowing(feed)) => feed.push(chunk.data).is_ok(),
+                Some(BodyLedger::Cancelled) => true,
+                Some(BodyLedger::Whole | BodyLedger::Ended) => false,
+                None => finished.contains(&chunk.request_id),
+            }
+        }
+        v1::credential_bridge_guest_message::Payload::RequestEnd(end) => {
+            match active.get_mut(&end.request_id) {
+                Some(request) => match std::mem::replace(&mut request.body, BodyLedger::Ended) {
+                    BodyLedger::Flowing(feed) => {
+                        feed.end();
+                        true
+                    }
+                    BodyLedger::Cancelled => {
+                        request.body = BodyLedger::Cancelled;
+                        true
+                    }
+                    BodyLedger::Whole => {
+                        request.body = BodyLedger::Whole;
+                        false
+                    }
+                    BodyLedger::Ended => false,
+                },
+                None => finished.contains(&end.request_id),
+            }
+        }
+        _ => false,
+    }
+}
+
+/// A request id is a non-nil UUID in its canonical lowercase form, so one
+/// request never has two spellings.
+fn canonical_request_id(request_id: &str) -> bool {
+    Uuid::parse_str(request_id).is_ok_and(|id| !id.is_nil() && id.to_string() == request_id)
+}
+
 fn remove_completed_request(
     active: &mut HashMap<String, ActiveRequest>,
     request_id: &str,
@@ -1051,6 +1134,17 @@ where
         Ok(response) => response,
         Err(error) => return finish_with_failure(sender, request_id.to_owned(), error).await,
     };
+    send_response(sender, request_id, response, idle).await
+}
+
+/// Send `response` as the guest's reply to `request_id`, failing it if its
+/// body makes no progress for `idle`.
+async fn send_response<S: CredentialBridgeResponseSink>(
+    sender: &S,
+    request_id: &str,
+    response: BrokerHttpResponse,
+    idle: Option<std::time::Duration>,
+) -> Result<(), ()> {
     let (status, headers, mut body) = response.into_parts();
     let headers = match response_headers_to_proto(&headers) {
         Ok(headers) => headers,
@@ -1189,6 +1283,7 @@ pub(crate) mod tests {
     mod codex_login;
     mod projection;
     mod ssh;
+    mod websocket;
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

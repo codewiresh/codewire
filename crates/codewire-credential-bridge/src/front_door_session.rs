@@ -17,8 +17,9 @@ use bytes::{Buf as _, BufMut as _, BytesMut};
 use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR, CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
-    CREDENTIAL_BRIDGE_MAX_CAPABILITIES, CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES,
-    CREDENTIAL_BRIDGE_PROTOCOL_VERSION, valid_credential_bridge_capability,
+    CREDENTIAL_BRIDGE_CAPABILITY_WEBSOCKET, CREDENTIAL_BRIDGE_MAX_CAPABILITIES,
+    CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES, CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+    valid_credential_bridge_capability,
 };
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
@@ -139,8 +140,9 @@ pub struct FrontDoorHostSender(mpsc::Sender<v1::CredentialBridgeHostMessage>);
 
 impl FrontDoorHostSession {
     /// Write the Open for `identity`, listing
-    /// [`CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR`] and streamed request
-    /// bodies, since intercepted uploads are the large ones. Ready is not
+    /// [`CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR`], streamed request bodies,
+    /// since intercepted uploads are the large ones, and WebSockets, which
+    /// the broker's front-door runner serves (#3999). Ready is not
     /// read here: the caller admits it as it admits any bridge's first frame.
     pub async fn open<S: SessionStream>(
         stream: S,
@@ -157,6 +159,7 @@ impl FrontDoorHostSession {
                     capabilities: vec![
                         CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR.to_owned(),
                         CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM.to_owned(),
+                        CREDENTIAL_BRIDGE_CAPABILITY_WEBSOCKET.to_owned(),
                     ],
                 },
             )),

@@ -207,8 +207,9 @@ where
 }
 
 /// A front-door session's executor: its HTTP requests take the front-door
-/// validation. SSH, projections and logins keep the trait's denial, since
-/// only a daemon inside an environment asks for them.
+/// validation, and only it serves WebSocket handshakes. SSH, projections and
+/// logins keep the trait's denial, since only a daemon inside an environment
+/// asks for them.
 pub(crate) struct FrontDoorExecutor<P, U>(pub(crate) Arc<OpenAiBroker<P, U>>);
 
 #[async_trait]
@@ -234,5 +235,20 @@ where
 
     async fn wait_for_active_operations(&self) -> Result<(), BrokerRequestError> {
         self.0.wait_for_active_operations().await
+    }
+
+    fn serves_upgrades(&self) -> bool {
+        true
+    }
+
+    async fn execute_upgrade(
+        &self,
+        upgrade: v1::CredentialBridgeUpgrade,
+    ) -> Result<crate::runtime::upgrade::BrokerUpgradeOutcome, BrokerRequestError> {
+        self.0.execute_front_door_upgrade(upgrade).await
+    }
+
+    async fn socket_grant_holds(&self, grant: &crate::runtime::upgrade::SocketGrant) -> bool {
+        self.0.socket_grant_holds(grant).await
     }
 }

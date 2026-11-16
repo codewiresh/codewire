@@ -173,6 +173,27 @@ struct Recorded {
     deny: bool,
     /// The codex slot holds a ChatGPT sign-in instead of an API key.
     codex_sign_in: bool,
+    /// The provider's ends of the sockets its WebSocket handshakes opened.
+    sockets: Arc<Mutex<Vec<tokio::io::DuplexStream>>>,
+    /// Handshakes the provider answers 401 before it switches one.
+    unauthorized_upgrades: Arc<AtomicUsize>,
+    /// Counts refresh attempts and refuses each, instead of failing the test.
+    refreshes: Option<Arc<AtomicUsize>>,
+    /// What the next leases do, in order; then every lease is ordinary.
+    plan: Arc<Mutex<std::collections::VecDeque<LeasePlan>>>,
+}
+
+/// One planned lease.
+#[derive(Clone, Copy)]
+enum LeasePlan {
+    Ordinary,
+    Denied,
+    /// The slot now holds a different credential.
+    OtherCredential,
+    /// The same credential, revoked and reissued since.
+    NewRevocation,
+    /// The same credential, refreshed since.
+    NewerSignIn,
 }
 
 impl Recorded {
@@ -183,10 +204,14 @@ impl Recorded {
                 placeholder: self.placeholder,
                 deny: self.deny,
                 codex_sign_in: self.codex_sign_in,
+                refreshes: self.refreshes.clone(),
+                plan: Arc::clone(&self.plan),
             },
             Upstream {
                 outbound: Arc::clone(&self.outbound),
                 echo_credential: self.echo_credential,
+                sockets: Arc::clone(&self.sockets),
+                unauthorized_upgrades: Arc::clone(&self.unauthorized_upgrades),
             },
         )
         .unwrap()
@@ -206,6 +231,8 @@ struct Authority {
     placeholder: Option<&'static str>,
     deny: bool,
     codex_sign_in: bool,
+    refreshes: Option<Arc<AtomicUsize>>,
+    plan: Arc<Mutex<std::collections::VecDeque<LeasePlan>>>,
 }
 
 #[async_trait]
@@ -222,7 +249,13 @@ impl BrokerLeaseProvider for Authority {
         route: BrokerRouteId,
     ) -> Result<Lease, BrokerLeaseError> {
         self.leases.fetch_add(1, Ordering::Relaxed);
-        if self.deny {
+        let planned = self
+            .plan
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(LeasePlan::Ordinary);
+        if self.deny || matches!(planned, LeasePlan::Denied) {
             return Err(BrokerLeaseError::Denied);
         }
         let (provider, kind) = match slot.as_str() {
@@ -245,6 +278,16 @@ impl BrokerLeaseProvider for Authority {
         if kind == CredentialAuthKind::OAuth && slot.as_str() == "codex" {
             lease.material = codex_sign_in();
         }
+        match planned {
+            LeasePlan::OtherCredential => {
+                lease.metadata.id =
+                    codewire_access::CredentialId::parse("33333333-3333-4333-8333-333333333333")
+                        .unwrap();
+            }
+            LeasePlan::NewRevocation => lease.metadata.revocation_generation += 1,
+            LeasePlan::NewerSignIn => lease.material_generation += 1,
+            LeasePlan::Ordinary | LeasePlan::Denied => {}
+        }
         Ok(lease)
     }
 
@@ -252,7 +295,11 @@ impl BrokerLeaseProvider for Authority {
         &self,
         _: BrokerCredentialRefreshRequest,
     ) -> Result<BrokerRefreshAdmission<()>, BrokerRefreshError> {
-        panic!("non-refreshing identity attempted refresh")
+        let Some(refreshes) = &self.refreshes else {
+            panic!("non-refreshing identity attempted refresh")
+        };
+        refreshes.fetch_add(1, Ordering::Relaxed);
+        Err(BrokerRefreshError::Unavailable)
     }
 
     async fn start_credential_refresh(&self, _: ()) -> Result<(), BrokerRefreshError> {
@@ -283,6 +330,8 @@ impl BrokerLeaseProvider for Authority {
 struct Upstream {
     outbound: Arc<Mutex<Vec<Outbound>>>,
     echo_credential: bool,
+    sockets: Arc<Mutex<Vec<tokio::io::DuplexStream>>>,
+    unauthorized_upgrades: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -333,6 +382,64 @@ impl BrokerUpstreamTransport for Upstream {
             reply_headers,
             Box::pin(futures::stream::iter([Ok(reply_body)])),
         ))
+    }
+
+    /// Records the handshake like a request and switches it, keeping the
+    /// provider's end of a pipe; with `echo_credential` its `101` names the
+    /// credential it received.
+    async fn upgrade(
+        &self,
+        request: BrokerUpstreamRequest,
+    ) -> Result<crate::BrokerUpstreamUpgrade, BrokerUpstreamError> {
+        let (method, target, headers, body) = request.into_parts();
+        let received = headers
+            .get("authorization")
+            .map(|value| value.as_bytes().to_vec())
+            .unwrap_or_default();
+        self.outbound.lock().unwrap().push((
+            method,
+            target.to_string(),
+            headers
+                .iter()
+                .map(|(name, value)| (name.as_str().to_owned(), value.as_bytes().to_vec()))
+                .collect(),
+            body,
+        ));
+        if self
+            .unauthorized_upgrades
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Ok(crate::BrokerUpstreamUpgrade::Response(
+                BrokerUpstreamResponse::new(
+                    StatusCode::UNAUTHORIZED,
+                    HeaderMap::from_iter([(
+                        http::header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    )]),
+                    Box::pin(futures::stream::iter([Ok(Bytes::from_static(b"{}"))])),
+                ),
+            ));
+        }
+        let mut reply = HeaderMap::new();
+        reply.insert(
+            "sec-websocket-accept",
+            HeaderValue::from_static("test-accept"),
+        );
+        reply.insert("set-cookie", HeaderValue::from_static("provider-session=1"));
+        reply.insert("connection", HeaderValue::from_static("upgrade"));
+        reply.insert("upgrade", HeaderValue::from_static("websocket"));
+        if self.echo_credential {
+            reply.insert("x-echo", HeaderValue::from_bytes(&received).unwrap());
+        }
+        let (broker_end, provider_end) = tokio::io::duplex(8 * 1024);
+        self.sockets.lock().unwrap().push(provider_end);
+        Ok(crate::BrokerUpstreamUpgrade::Switched {
+            headers: reply,
+            stream: Box::new(broker_end),
+        })
     }
 }
 
@@ -1690,3 +1797,5 @@ async fn a_swapped_codex_reply_redacts_the_token_and_keeps_the_account() {
         String::from_utf8_lossy(&body)
     );
 }
+
+mod upgrade;

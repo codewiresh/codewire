@@ -1131,8 +1131,25 @@ work without a broker change. Do not add per-feature paths or header lists.
 
 What stays fixed: the pinned host and port, no redirects, a per-request lease
 with the authority checks above, each route's one operation in grants
-(`messages` on `anthropic-api`, `responses` on `openai-api`), no WebSockets,
-and AV's 4 MiB request limit, which is below Anthropic's own. Redaction matches
+(`messages` on `anthropic-api`, `responses` on `openai-api`), and AV's 4 MiB
+request limit, which is below Anthropic's own. The loopback routes carry no
+WebSockets.
+
+WebSockets cross only the TLS front door (#3999), and only for Codex's model
+call, `GET chatgpt.com/backend-api/codex/responses`; any other upgrade is
+refused before a lease. The swap rule and the route's response policy cover
+the handshake: the placeholder is swapped for the sign-in and a 401 is
+refreshed and retried once, and the `101`'s headers pass the response policy
+without `set-cookie`. A `101` that echoes the injected credential fails the
+upgrade. After the `101` the socket's bytes are neither read nor redacted, so a
+credential the agent puts inside a frame reaches the provider as it is. While
+a swapped socket is open the broker leases its credential again every 30
+seconds; a refusal, a lease that does not answer within 5 seconds, another
+credential or a newer revocation resets it. A refresh moves only the
+credential's material generation, so an open socket survives it; a Reconnect
+moves the revocation generation too and ends the credential's open sockets. A
+front-door session holds at most 16 open sockets beside its 16 requests in
+flight. Redaction matches
 the credential's raw, JSON-escaped, percent and base64 forms; it does not decode
 other encodings of a larger value, so a provider that reflected the credential
 inside an opaque encoding would not be caught, in a header or in a body. GitHub

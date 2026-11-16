@@ -21,6 +21,8 @@ pub(crate) struct Lease {
     pub material: Zeroizing<Vec<u8>>,
     pub reads: Arc<AtomicUsize>,
     pub placeholder: Option<CredentialPlaceholder>,
+    /// The material's generation; a refreshed sign-in has a later one.
+    pub material_generation: u64,
 }
 
 impl Lease {
@@ -67,6 +69,7 @@ impl Lease {
             material: Zeroizing::new(TOKEN.to_vec()),
             reads: Arc::new(AtomicUsize::new(0)),
             placeholder: None,
+            material_generation: 2,
         }
     }
 }
@@ -82,7 +85,7 @@ impl BrokerCredentialLease for Lease {
         &self.permission
     }
     fn material_generation(&self) -> u64 {
-        2
+        self.material_generation
     }
     fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T {
         self.reads.fetch_add(1, Ordering::Relaxed);

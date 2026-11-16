@@ -256,7 +256,11 @@ pub(super) struct PlaceholderCache(
 );
 
 impl PlaceholderCache {
-    fn known_foreign(&self, slot: &CapabilitySlot, presented: &CredentialPlaceholder) -> bool {
+    pub(super) fn known_foreign(
+        &self,
+        slot: &CapabilitySlot,
+        presented: &CredentialPlaceholder,
+    ) -> bool {
         let remembered = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         remembered.get(slot).is_some_and(|(ours, at)| {
             at.elapsed() < PLACEHOLDER_FRESH_FOR
@@ -264,7 +268,7 @@ impl PlaceholderCache {
         })
     }
 
-    fn remember(&self, slot: &CapabilitySlot, ours: Option<&CredentialPlaceholder>) {
+    pub(super) fn remember(&self, slot: &CapabilitySlot, ours: Option<&CredentialPlaceholder>) {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -274,7 +278,7 @@ impl PlaceholderCache {
 
 /// The answer to a placeholder sent beside another credential: the client
 /// must send one or the other. 400 is final, so it is shown at once.
-fn credential_conflict_response() -> BrokerHttpResponse {
+pub(super) fn credential_conflict_response() -> BrokerHttpResponse {
     let body = serde_json::json!({
         "type": "error",
         "error": {

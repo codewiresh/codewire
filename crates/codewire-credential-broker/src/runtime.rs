@@ -77,6 +77,7 @@ mod http_tests;
 mod local;
 mod openai_serve;
 mod swap;
+pub(crate) mod upgrade;
 mod upstream;
 pub use upstream::{
     BrokerUpgradedIo, BrokerUpgradedStream, BrokerUpstreamTransport, BrokerUpstreamUpgrade,
