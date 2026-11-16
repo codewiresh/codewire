@@ -66,6 +66,9 @@ assert hosted, "no image names the hosted registry"
 warm = json.loads((pods / "deny-mount-script.json").read_text())
 mount = next(c for c in warm["spec"]["initContainers"] if c["name"] == "mount-workspace")
 assert mount["command"][-1] == "true"
+# A template rendered only while hosted egress is on is classified, not built,
+# until the change that turns hosted egress on moves it into HOSTED (#4000).
+assert not (pods / "pass-warm-pool-broker-sandboxtemplate.json").exists()
 PY
 
 # A SandboxTemplate golden nobody classified, or a hosted one gone, is refused.
@@ -154,6 +157,25 @@ mv "$work/elsewhere" "$work/source/crates/codewire-orchestration/tests/fixtures/
 
 FAKE_GUARD_REFUSES=1 run_check && fail 'a deploy guard refusal passed'
 grep -q 'REFUSED by codewire/deploy' "$work/out" || fail 'the deploy refusal does not name deploy'
+
+# Deploy turning hosted egress on while a golden is still exempt is refused,
+# in every spelling a deploy overlay uses (#4000). The check fails closed: a
+# JSON patch names the key on one line and its value on the next, so it
+# counts as on whatever that value is.
+mkdir -p "$work/deploy/hosted/overlays/dev"
+for spelling in 'data:\n  CODEWIRE_HOSTED_EGRESS_ENABLED: "true"\n' 'CODEWIRE_HOSTED_EGRESS_ENABLED=true\n' \
+  '- op: replace\n  path: /data/CODEWIRE_HOSTED_EGRESS_ENABLED\n  value: "true"\n' \
+  '- op: replace\n  path: /data/CODEWIRE_HOSTED_EGRESS_ENABLED\n  value: "false"\n'; do
+  printf '%b' "$spelling" >"$work/deploy/hosted/overlays/dev/hosted-egress"
+  run_check && fail 'hosted egress on with an exempt golden passed'
+  grep -q 'still HOSTED_EGRESS in kyverno-pods-from-goldens.py: warm-pool-broker-sandboxtemplate' "$work/out" ||
+    fail 'the exempt golden is not named'
+done
+for spelling in 'data:\n  CODEWIRE_HOSTED_EGRESS_ENABLED: "false"\n' "CODEWIRE_HOSTED_EGRESS_ENABLED='false'\n"; do
+  printf '%b' "$spelling" >"$work/deploy/hosted/overlays/dev/hosted-egress"
+  run_check || { cat "$work/out" >&2; fail 'hosted egress off refused an exempt golden'; }
+done
+rm -r "$work/deploy/hosted"
 
 FAKE_FLIP=pass-confidential-sandboxtemplate run_check && fail 'an inadmissible Pod passed'
 grep -q 'REFUSED by infrastructure clusters/example-dev/' "$work/out" || fail 'the infra refusal does not name the policy'
