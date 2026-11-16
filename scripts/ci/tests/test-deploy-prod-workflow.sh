@@ -31,10 +31,10 @@ fi
 readonly ALIASES="$ROOT/scripts/ci/release/alias-release-images.sh"
 readonly FINISH="$ROOT/scripts/ci/release/finish-prod-release.sh"
 
-# The common release is one protected job (#3246): it selects the support
-# pair, aliases the five runtime images, validates and publishes the runtime
-# bundle and, with a reused pair, finishes the release.
-publish_job="$(sed -n '/^  publish-release:/,/^  build-support-amd64:/p' "$WORKFLOW")"
+# The release is one protected job (#3246): it requires the support pair main
+# published, aliases the five runtime images, validates and publishes the
+# runtime bundle and finishes the release. It is the workflow's last job.
+publish_job="$(sed -n '/^  publish-release:/,$p' "$WORKFLOW")"
 [[ "$(grep -Fc 'scripts/ci/images/image-bundle.py create' <<<"$publish_job")" -eq 1 ]] ||
   fail "production must validate exactly one complete runtime candidate set"
 [[ "$(grep -Fc '            --candidate ' <<<"$publish_job")" -eq 5 ]] ||
@@ -109,13 +109,13 @@ if grep -q continue-on-error <<<"$(awk '/^      - name: / { capture = ($0 !~ /GH
   fail "a required production step continues on error"
 fi
 
-# The finishing script joins each support image (verifying the whole index),
+# The finishing script verifies each published support image (the whole index),
 # checks its source, publishes both to Harbor, mirrors them without gating,
 # and only then dispatches the signed tag.
 # shellcheck disable=SC2016
 for expected in \
-    'join base "$source_dir/images/base/Dockerfile" "$source_dir/images/base" \' \
-    'join workspace "$source_dir/images/workspace/Dockerfile" "$source_dir" \' \
+    'join base "$source_dir/images/base/Dockerfile" "$source_dir/images/base"' \
+    'join workspace "$source_dir/images/workspace/Dockerfile" "$source_dir"' \
     '  [[ "$sha" == "$source_sha" ]] || fail "the $image index is from ${sha:-no source}, not $source_sha"' \
     '    "$(<"$work/$image.ref")" "$registry/codewire/$image" "$source_sha" "$tag"' \
     '    "$(<"$work/$image.ref")" "ghcr.io/codewiresh/$image" "$source_sha" "$tag" ||' \
@@ -132,18 +132,17 @@ if grep -Fq 'build-support-platform.sh' "$FINISH"; then
   fail "the finishing script rebuilds a platform"
 fi
 
-# A reused pair finishes in the publishing job, after the runtime bundle.
+# The reused pair finishes in the publishing job, after the runtime bundle.
 # shellcheck disable=SC2016
 reused="$(sed -n '/- name: Publish the reused support pair and deliver the release to Production/,/^$/p' <<<"$publish_job")"
-for expected in "        if: \${{ steps.pair.outputs.build == 'false' }}" "          BUILD_SUPPORT_PAIR: 'false'" \
-    '          CODEWIRE_SOURCE_DIR: .release-source' '        run: scripts/ci/release/finish-prod-release.sh' \
+for expected in '          CODEWIRE_SOURCE_DIR: .release-source' '        run: scripts/ci/release/finish-prod-release.sh' \
     "          SUPPORT_PROVENANCE_REVISION: \${{ steps.pair.outputs.provenance_revision }}"; do
   grep -qxF -- "$expected" <<<"$reused" || fail "the reused-pair finish omits: $expected"
 done
-# Only a reused pair may name another commit's provenance: a release that
-# builds its pair verifies it against its own source.
+# The reused pair's provenance comes only from the step that proved it.
 [[ "$(grep -c 'SUPPORT_PROVENANCE_REVISION' "$WORKFLOW")" -eq 1 ]] ||
-  fail 'a support pair other than the reused one takes another commit'"'"'s provenance'
+  fail 'the support pair takes its provenance from somewhere other than the pair step'
+if grep -q '^ *if:' <<<"$reused"; then fail 'the reused-pair finish can be skipped'; fi
 grep -q 'DIGEST' <<<"$reused" && fail 'the reused-pair finish takes platform digests'
 # Production pulls from Harbor, so the runtime GHCR mirror follows the
 # reused-pair delivery instead of delaying it (#4492).
@@ -156,184 +155,95 @@ grep -q 'DIGEST' <<<"$reused" && fail 'the reused-pair finish takes platform dig
 # shellcheck disable=SC2016
 grep -Fq '        run: scripts/ci/images/release-support-pair-state.sh "$SOURCE_SHA"' <<<"$publish_job" ||
   fail "the release support pair is not selected from what main published"
+[[ "$(grep -n 'release-support-pair-state.sh' <<<"$publish_job" | cut -d: -f1)" -lt \
+   "$(grep -n 'run: scripts/ci/release/alias-release-images.sh' <<<"$publish_job" | cut -d: -f1)" ]] ||
+  fail "the release publishes before it requires the support pair"
 
-# A built pair finishes in its own job, only after both native builds
-# succeeded, and takes exactly their four verified digests.
-finish_job="$(sed -n '/^  finish-built-release:/,$p' "$WORKFLOW")"
-# shellcheck disable=SC2016
-grep -Fxq "    if: \${{ always() && needs.release-selection.result == 'success' && needs.publish-release.result == 'success' && needs.publish-release.outputs.build == 'true' && needs.build-support-amd64.result == 'success' && needs.build-support-arm64.result == 'success' }}" <<<"$finish_job" ||
-  fail "the built-pair finish can run without both native platform builds"
-# shellcheck disable=SC2016
-[[ "$(grep -oF 'needs.build-support-' <<<"$finish_job" | wc -l)" -eq 6 \
-  && "$(grep -Fxc '          BASE_AMD64_DIGEST: ${{ needs.build-support-amd64.outputs.base_digest }}' <<<"$finish_job")" -eq 1 \
-  && "$(grep -Fxc '          BASE_ARM64_DIGEST: ${{ needs.build-support-arm64.outputs.base_digest }}' <<<"$finish_job")" -eq 1 \
-  && "$(grep -Fxc '          WORKSPACE_AMD64_DIGEST: ${{ needs.build-support-amd64.outputs.workspace_digest }}' <<<"$finish_job")" -eq 1 \
-  && "$(grep -Fxc '          WORKSPACE_ARM64_DIGEST: ${{ needs.build-support-arm64.outputs.workspace_digest }}' <<<"$finish_job")" -eq 1 ]] ||
-  fail "the built-pair finish consumes another job's output outside the verifying joins"
-for expected in "          BUILD_SUPPORT_PAIR: 'true'" '        run: scripts/ci/release/finish-prod-release.sh'; do
-  grep -qxF -- "$expected" <<<"$finish_job" || fail "the built-pair finish omits: $expected"
-done
-[[ "$(grep -Fc 'run: scripts/ci/release/finish-prod-release.sh' "$WORKFLOW")" -eq 2 ]] ||
-  fail "the release finishes from other than the two finishing steps"
+[[ "$(grep -Fc 'run: scripts/ci/release/finish-prod-release.sh' "$WORKFLOW")" -eq 1 ]] ||
+  fail "the release finishes from other than the one finishing step"
 if grep -Fq 'dispatch-deploy-prod.sh' <<<"$(grep -v '^ *#' "$WORKFLOW")"; then
   fail "the workflow dispatches outside the finishing script"
 fi
 
-for platform in amd64 arm64; do
-  case "$platform" in
-    amd64) next_job=build-support-arm64 ;;
-    arm64) next_job=finish-built-release ;;
-  esac
-  platform_job="$(sed -n "/^  build-support-$platform:/,/^  $next_job:/p" "$WORKFLOW")"
-  for expected in "    if: \${{ needs.publish-release.outputs.build == 'true' }}" \
-      '          CODEWIRE_SOURCE_DIR: .release-source' \
-      "          SUPPORT_PLATFORM_BASE_DIGEST: \${{ needs.publish-release.outputs.base_${platform}_digest }}" \
-      "          SUPPORT_PLATFORM_BUDGET_MINUTES: '110'" \
-      "        run: scripts/ci/images/build-support-platform.sh linux/$platform"; do
-    grep -qxF -- "$expected" <<<"$platform_job" || fail "linux/$platform release support build omits: $expected"
-  done
-  # Release-source code runs here, so no publication or deploy credential does.
-  if grep -Eq 'publish-image-to-|finish-prod-release|dispatch-deploy-prod|OPENBAO_GHCR|secrets\.' <<<"$platform_job"; then
-    fail "linux/$platform release support build crosses the publication boundary"
-  fi
-done
-# shellcheck disable=SC2016 # Match the literal workflow expression.
-grep -qxF '      workspace_digest: ${{ steps.build.outputs.workspace_digest }}' \
-  <<<"$(sed -n '/^  build-support-arm64:/,/^  finish-built-release:/p' "$WORKFLOW")" ||
-  fail 'the linux/arm64 release support build does not report its workspace digest'
-
-# The release tag's own workspace agent contract runs inside the exact amd64
-# image the build pushed, and the job reports the digest only from that step:
-# the join consumes nothing that skipped the contract.
-# contract_step_violation FILE prints the first broken rule, if any.
-contract_step_violation() {
-  python3 - "$1" <<'PY'
-import sys
-
-import yaml
-
+# A release builds nothing (#2892): the jobs are the pickup, the selection
+# and the one publishing job; no step builds an image, selects a builder,
+# platform or emulator, or switches to an in-job build; every image call
+# reuses an existing source image. The tag's pre-push check and the pair step
+# require the pair main published, and support-images.yaml backfills it.
+builds_nothing_violation() {
+  python3 - "$1" <<'PYCHECK'
+import re, sys, yaml
 try:
-    job = yaml.safe_load(open(sys.argv[1]))["jobs"]["build-support-amd64"]
+    workflow = yaml.safe_load(open(sys.argv[1]))
 except Exception as error:  # A mutation may break the document itself.
     sys.exit(f"the workflow does not parse: {error}")
-steps = job.get("steps") or []
-contract = [index for index, step in enumerate(steps) if step.get("id") == "contract"]
-if len(contract) != 1:
-    sys.exit("the amd64 release build job has no single workspace contract step")
-expected = {
-    "name": "Run the workspace contract on the exact image",
-    "id": "contract",
-    "env": {"WORKSPACE_DIGEST": "${{ steps.build.outputs.workspace_digest }}"},
-    "run": "set -euo pipefail\n"
-           'release_source_sha="$(git -C .release-source rev-parse HEAD)"\n'
-           "scripts/ci/images/run-workspace-contract-on-image.sh \\\n"
-           '  "$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$WORKSPACE_DIGEST" "$release_source_sha" \\\n'
-           "  .release-source/scripts/ci/verify/workspace-agent-contract.sh\n",
-}
-if steps[contract[0]] != expected:
-    sys.exit("the workspace contract step differs from the reviewed exact-image step")
-build = [index for index, step in enumerate(steps) if step.get("id") == "build"]
-if len(build) != 1 or not build[0] < contract[0]:
-    sys.exit("the workspace contract does not follow the build")
-if (job.get("outputs") or {}).get("workspace_digest") != "${{ steps.contract.outputs.workspace_digest }}":
-    sys.exit("the amd64 workspace digest leaves the job without the contract")
-if "continue-on-error" in job:
-    sys.exit("the amd64 release build job continues on error")
-if any("artifact" in str(step.get("uses", "")) for step in steps):
-    sys.exit("the amd64 release build job takes an artifact input")
-PY
-}
-violation="$(contract_step_violation "$WORKFLOW" 2>&1)" && [[ -z "$violation" ]] || fail "$violation"
-# Each rule refuses its own regression of the reviewed job.
-contract_tree="$(mktemp -d)"
-trap 'rm -rf -- "$contract_tree"' EXIT
-amd64_range='/^  build-support-amd64:/,/^  build-support-arm64:/'
-# shellcheck disable=SC2016 # The mutations insert literal workflow expressions.
-contract_mutations=(
-  "contract step removed::$amd64_range{/- name: Run the workspace contract on the exact image/,/^\$/d}"
-  "digest from the build step::s/workspace_digest: \${{ steps.contract.outputs.workspace_digest }}/workspace_digest: \${{ steps.build.outputs.workspace_digest }}/"
-  "continue-on-error::/        id: contract/a\\        continue-on-error: true"
-  "job continue-on-error::$amd64_range{/    timeout-minutes: 120/a\\    continue-on-error: true
-}"
-  "skippable contract::/        id: contract/a\\        if: \${{ always() }}"
-  'needs. input::/          WORKSPACE_DIGEST: /a\          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}'
-  'needs. revision::s/"$release_source_sha" \\$/"${{ needs.release-selection.outputs.source_sha }}" \\/'
-  'contract outside the release source::s|            .release-source/scripts/ci/verify/workspace-agent-contract.sh|            scripts/ci/verify/workspace-agent-contract.sh|'
-  'artifact contract::s|            .release-source/scripts/ci/verify/workspace-agent-contract.sh|            "$RUNNER_TEMP/artifact/workspace-agent-contract.sh"|'
-  "artifact step::$amd64_range{/      - name: Run the workspace contract on the exact image/i\\      - uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
-}"
-  'tagged image::s|"$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$WORKSPACE_DIGEST"|"$CODEWIRE_IMAGE_REGISTRY/codewire/workspace:$release_source_sha"|'
-  'public mirror source::s|run-workspace-contract-on-image.sh \\$|run-workspace-contract-on-image.sh --source ghcr \\|'
-)
-for mutation in "${contract_mutations[@]}"; do
-  label="${mutation%%::*}"
-  sed -e "${mutation#*::}" "$WORKFLOW" >"$contract_tree/workflow.yaml"
-  ! cmp -s "$WORKFLOW" "$contract_tree/workflow.yaml" || fail "contract mutation did not apply: $label"
-  [[ -n "$(contract_step_violation "$contract_tree/workflow.yaml" 2>&1)" ]] ||
-    fail "contract mutation was accepted: $label"
-done
-awk '
-  /^  [A-Za-z0-9_-]+:$/ { job = $0 }
-  job == "  build-support-amd64:" && $0 == "      - name: Run the workspace contract on the exact image" { grab = 1 }
-  grab { if ($0 == "") { grab = 0 } else { block = block $0 "\n" }; next }
-  { line[++count] = $0; owner[count] = job }
-  END {
-    for (index_ = 1; index_ <= count; index_++) {
-      if (owner[index_] == "  build-support-amd64:" && line[index_] == "      - name: Build the linux/amd64 base and workspace by digest") printf "%s\n", block
-      print line[index_]
-    }
-  }
-' "$WORKFLOW" >"$contract_tree/moved.yaml"
-! cmp -s "$WORKFLOW" "$contract_tree/moved.yaml" || fail 'contract move did not apply'
-[[ -n "$(contract_step_violation "$contract_tree/moved.yaml" 2>&1)" ]] ||
-  fail 'a workspace contract moved before the build was accepted'
-
-# No deploy-prod job builds linux/arm64 under emulation: every support image
-# is built only by build-support-platform.sh (arm64 on the protected remote
-# node, failing closed) or joined from its digests; every other image call
-# must reuse an existing source image; nothing selects platforms or emulators.
-python3 - "$WORKFLOW" <<'PYCHECK' || fail "a deploy-prod job can build linux/arm64 without the protected remote builder"
-import re, sys, yaml
-workflow = yaml.safe_load(open(sys.argv[1]))
-arm64_builders = []
-for job_name, job in workflow["jobs"].items():
+jobs = workflow["jobs"]
+if list(jobs) != ["pending", "release-selection", "publish-release"]:
+    sys.exit(f"deploy-prod runs jobs other than the pickup, the selection and the publication: {list(jobs)}")
+triggers = workflow.get("on", workflow.get(True))
+if list(triggers["workflow_dispatch"]["inputs"]) != ["release_tag"]:
+    sys.exit("a dispatch takes an input other than the release tag")
+for job_name, job in jobs.items():
+    if job.get("if") and "needs.publish-release" in str(job.get("if")):
+        sys.exit(f"{job_name}: follows the publication")
     for step in job.get("steps", []):
-        run = step.get("run", "")
-        env = {**job.get("env", {}), **step.get("env", {})}
-        for key in ("CODEWIRE_IMAGE_PLATFORM", "CODEWIRE_EXTERNAL_BUILDX_BUILDER", "CODEWIRE_IMAGE_JOIN"):
+        run = step.get("run", "") + " " + str(step.get("uses", ""))
+        env = {**(job.get("env") or {}), **(step.get("env") or {})}
+        for key in ("CODEWIRE_IMAGE_PLATFORM", "CODEWIRE_EXTERNAL_BUILDX_BUILDER", "CODEWIRE_IMAGE_JOIN",
+                    "CODEWIRE_IN_JOB_BUILD", "SUPPORT_PLATFORM_BUDGET_MINUTES"):
             if key in env:
-                sys.exit(f"{job_name}: sets {key} in the workflow")
-        if re.search(r"(--platform|platforms[:=]|setup-qemu|binfmt|tonistiigi|qemu-user)", run + " " + str(step.get("uses", ""))):
-            sys.exit(f"{job_name}: selects a platform or an emulator directly")
-        for match in re.finditer(r"build-support-platform\.sh (\S+)", run):
-            if match.group(1) == "linux/arm64":
-                arm64_builders.append(job_name)
-        if ("build-push-image.sh" in run or "alias-release-images.sh" in run) \
-                and env.get("REQUIRE_EXISTING_SOURCE_IMAGE") != "1":
+                sys.exit(f"{job_name}: sets {key}")
+        if re.search(r"(--platform|platforms[:=]|setup-qemu|binfmt|tonistiigi|qemu-user)", run):
+            sys.exit(f"{job_name}: selects a platform or an emulator")
+        if re.search(r"build-support-platform\.sh|trusted-buildkit|buildx build|docker build|build-push-image\.sh", run):
+            sys.exit(f"{job_name}: builds an image")
+        if "alias-release-images.sh" in run and env.get("REQUIRE_EXISTING_SOURCE_IMAGE") != "1":
             sys.exit(f"{job_name}: may build an image instead of reusing its source image")
-        if re.search(r"build-push-image\.sh (base|workspace)\b", run):
-            sys.exit(f"{job_name}: builds a support image outside the native platform jobs")
-if arm64_builders != ["build-support-arm64"]:
-    sys.exit(f"linux/arm64 is built by {arm64_builders}, not exactly the native build-support-arm64 job")
 PYCHECK
+}
+violation="$(builds_nothing_violation "$WORKFLOW" 2>&1)" && [[ -z "$violation" ]] || fail "$violation"
+build_tree="$(mktemp -d)"
+trap 'rm -rf -- "$build_tree"' EXIT
+# Each mutation puts back part of the build path #2892 removed.
+# shellcheck disable=SC2016 # The mutations insert literal workflow expressions.
+build_mutations=(
+  'a platform build job::$a\
+\
+  build-support-amd64:\
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT }}\
+    needs: [release-selection, publish-release]\
+    steps:\
+      - run: scripts/ci/images/build-support-platform.sh linux/amd64'
+  'a platform build step::/      - name: Alias the five existing runtime images side by side/i\      - run: scripts/ci/images/build-support-platform.sh linux/amd64\
+'
+  'the in-job build input::/        type: string/a\      in_job_build:\
+        required: false\
+        type: boolean'
+  'an in-job build switch::/          REQUIRE_EXISTING_SOURCE_IMAGE: .1./a\          CODEWIRE_IN_JOB_BUILD: '"'"'1'"'"''
+  'aliases that may build::s/          REQUIRE_EXISTING_SOURCE_IMAGE: .1./          REQUIRE_EXISTING_SOURCE_IMAGE: '"'"'0'"'"'/'
+  'a direct image build::/      - name: Alias the five existing runtime images side by side/i\      - run: docker buildx build --push images/base\
+'
+)
+for mutation in "${build_mutations[@]}"; do
+  label="${mutation%%::*}"
+  sed -e "${mutation#*::}" "$WORKFLOW" >"$build_tree/workflow.yaml"
+  ! cmp -s "$WORKFLOW" "$build_tree/workflow.yaml" || fail "build mutation did not apply: $label"
+  [[ -n "$(builds_nothing_violation "$build_tree/workflow.yaml" 2>&1)" ]] ||
+    fail "build mutation was accepted: $label"
+done
 
 # The dispatch runs only in the finishing script, so only in a job that
 # finished every publication first (asserted above).
-for job in publish-release finish-built-release; do
-  job_text="$(sed -n "/^  $job:/,/^  [a-z0-9-]*:\$/p" "$WORKFLOW")"
-  grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$job_text" ||
-    fail "the $job delivery does not use the protected CI tier"
-done
+grep -Fq "    runs-on: ${RUNS_ON_TRUSTED_LIGHT}" <<<"$publish_job" ||
+  fail "the delivery does not use the protected CI tier"
 # The dispatch waits for promote-prod's verdict, so a green release run means
 # Production accepted the release (#2892). The delivering job holds one
 # protected runner while promote-prod runs on the same pool: deploy-prod's
 # release turn allows one such wait at a time (release-turn.py, tested in
 # test-release-turn.py), and the pool runs several protected jobs at once.
-# Each delivering job's deadline outlasts that 30-minute wait.
-for job_text in "$publish_job" "$finish_job"; do
-  [[ "$(sed -n 's/^    timeout-minutes: //p' <<<"$job_text")" -gt 30 ]] ||
-    fail "a delivering job has no deadline beyond its work and 30-minute wait"
-done
+# The delivering job's deadline outlasts that 30-minute wait.
+[[ "$(sed -n 's/^    timeout-minutes: //p' <<<"$publish_job")" -gt 30 ]] ||
+  fail "the delivering job has no deadline beyond its work and 30-minute wait"
 grep -Fxq '        run: python3 -I -B scripts/ci/release/release-turn.py deploy-prod' "$WORKFLOW" &&
   grep -Fxq "        if: \${{ steps.turn.outputs.turn == 'go' }}" "$WORKFLOW" ||
   fail "production dispatches can wait on deploy runs side by side"
@@ -365,13 +275,12 @@ if grep -Eq 'scripts/ci/deploy/deploy-prod\.sh|--render-only|kustomize' \
   fail "the production path renders manifests in the source repository"
 fi
 
-# The join script never builds: a built pair is joined from both exact
-# platform digests, a reused pair must already exist.
+# The join script never builds: the pair must already exist.
 # The stub runs, so it lives in the repository's .tmp: a workstation /tmp may be
 # noexec, where a stub there cannot run and every join looks failed.
 mkdir -p "$ROOT/.tmp"
 stub_tree="$(mktemp -d "$ROOT/.tmp/deploy-prod-join.XXXXXX")"
-trap 'rm -rf -- "$contract_tree" "$stub_tree"' EXIT
+trap 'rm -rf -- "$build_tree" "$stub_tree"' EXIT
 cat >"$stub_tree/builder" <<'STUB'
 #!/usr/bin/env bash
 printf 'join=%s require=%s platform=%s args=%s\n' "${CODEWIRE_IMAGE_JOIN:-}" "${REQUIRE_EXISTING_SOURCE_IMAGE:-}" \
@@ -379,7 +288,6 @@ printf 'join=%s require=%s platform=%s args=%s\n' "${CODEWIRE_IMAGE_JOIN:-}" "${
 STUB
 chmod +x "$stub_tree/builder"
 digest_a=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-digest_b=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 join_case() {
   : >"$stub_tree/calls"
   if env -u CODEWIRE_IMAGE_JOIN -u REQUIRE_EXISTING_SOURCE_IMAGE "$@" STUB_CALLS="$stub_tree/calls" \
@@ -387,17 +295,12 @@ join_case() {
       "$ROOT/scripts/ci/images/join-release-support-image.sh" workspace .release-source/images/workspace/Dockerfile .release-source \
       >"$stub_tree/out" 2>&1; then echo ok; else echo failed; fi
 }
-[[ "$(join_case BUILD_SUPPORT_PAIR=true AMD64_DIGEST="$digest_a" ARM64_DIGEST="$digest_b")" == ok \
-  && "$(cat "$stub_tree/calls")" == "join=$digest_a $digest_b require= platform= args=workspace .release-source/images/workspace/Dockerfile .release-source" ]] ||
-  fail "a built release pair is not joined from exactly its amd64 then arm64 digests"
-[[ "$(join_case BUILD_SUPPORT_PAIR=false)" == ok \
-  && "$(cat "$stub_tree/calls")" == "join= require=1 platform= args=workspace .release-source/images/workspace/Dockerfile .release-source" ]] ||
-  fail "a reused release pair can be built instead of required"
-for bad in 'BUILD_SUPPORT_PAIR=true AMD64_DIGEST=sha256:aaaa' "BUILD_SUPPORT_PAIR=true ARM64_DIGEST=$digest_b" \
-    "BUILD_SUPPORT_PAIR=false AMD64_DIGEST=$digest_a" 'BUILD_SUPPORT_PAIR=' 'BUILD_SUPPORT_PAIR=maybe'; do
-  read -r -a bad_env <<<"$bad"
-  [[ "$(join_case "${bad_env[@]}")" == failed && ! -s "$stub_tree/calls" ]] ||
-    fail "the join script accepted: $bad"
+# A join set by the caller, or a retired build switch, never reaches the builder.
+for given in '' "CODEWIRE_IMAGE_JOIN=$digest_a" BUILD_SUPPORT_PAIR=true; do
+  read -r -a given_env <<<"$given"
+  [[ "$(join_case "${given_env[@]}")" == ok \
+    && "$(cat "$stub_tree/calls")" == "join= require=1 platform= args=workspace .release-source/images/workspace/Dockerfile .release-source" ]] ||
+    fail "a reused release pair can be built instead of required (given: ${given:-nothing})"
 done
 
 # The selection reads both source-SHA indexes with the pull robot.
@@ -459,15 +362,13 @@ state_case() {
     echo failed
   fi
 }
-[[ "$(state_case 'base workspace')" == "build=false
-provenance_revision=$release_source" && ! -s "$stub_tree/alias-calls" ]] ||
+[[ "$(state_case 'base workspace')" == "provenance_revision=$release_source" && ! -s "$stub_tree/alias-calls" ]] ||
   fail "a published release pair built for its own source is not reused as it is"
 # A pair main aliased from an earlier commit (#3504) keeps that commit's
 # provenance. The release reuses it only when the alias verifier derives the
 # same alias from Git, for exactly the published digests, and then verifies
 # the indexes against that commit.
-[[ "$(state_case 'base workspace' STUB_REVISION_base="$alias_origin" STUB_REVISION_workspace="$alias_origin")" == "build=false
-provenance_revision=$alias_origin" ]] || fail "an aliased release pair is not reused: $(cat "$stub_tree/out")"
+[[ "$(state_case 'base workspace' STUB_REVISION_base="$alias_origin" STUB_REVISION_workspace="$alias_origin")" == "provenance_revision=$alias_origin" ]] || fail "an aliased release pair is not reused: $(cat "$stub_tree/out")"
 [[ "$(cat "$stub_tree/alias-calls")" == "--repository $ROOT --source $release_source --origin $alias_origin --base-digest sha256:$(printf '%064d' 1) --workspace-digest sha256:$(printf '%064d' 4)" ]] ||
   fail "the alias was not proved for exactly the published pair: $(cat "$stub_tree/alias-calls")"
 if [[ "$(state_case 'base workspace' STUB_REVISION_base="$alias_origin" STUB_REVISION_workspace="$alias_origin" STUB_ALIAS_REFUSES=1)" != failed ]] ||
@@ -482,15 +383,15 @@ if [[ "$(state_case 'base workspace' STUB_ARM64_REVISION="$alias_origin")" != fa
     ! grep -qF 'does not name one source commit for every platform' "$stub_tree/out"; then
   fail "an index whose platforms name different commits was reused"
 fi
-[[ "$(state_case '')" == build=true ]] || fail "an unpublished release pair is not built"
-# A base a cancelled release published is reused per platform; only the
-# workspace is built, from exactly those images.
-[[ "$(state_case 'base')" == "build=true
-base_amd64_digest=sha256:$(printf '%064d' 1)
-base_arm64_digest=sha256:$(printf '%064d' 2)" ]] || fail "a published base alone is not reused per platform"
-if [[ "$(state_case 'workspace')" != failed ]] || ! grep -qF 'workspace is published without its base' "$stub_tree/out"; then
-  fail "a workspace published without its base was accepted"
-fi
+# A release builds nothing (#2892): a missing or half-published pair stops it
+# before it publishes, naming the backfill, with nothing written to the output.
+for published in '' base workspace; do
+  if [[ "$(state_case "$published")" != failed ]] ||
+      ! grep -qF "dispatch support-images.yaml on main with source_sha=$release_source" "$stub_tree/out" ||
+      [[ -s "$stub_tree/output" ]]; then
+    fail "a release whose published pair is '${published:-nothing}' did not stop: $(cat "$stub_tree/out")"
+  fi
+done
 [[ "$(state_case 'error')" == failed ]] || fail "an unreadable registry was taken as an unpublished pair"
 [[ -z "$(find "$stub_tree" -maxdepth 1 -name 'codewire-release-support-pair.*' -print -quit)" ]] ||
   fail "the selection left its pull credential behind"
@@ -503,22 +404,12 @@ if grep -qE '/actions/runs/[^ ]*/cancel' "$WORKFLOW"; then
   fail 'a support pair half cancels its own run'
 fi
 
-# The release's amd64 support build runs on the trusted BuildKit builder and
-# fails fast without it. Only the owner's explicit in_job_build dispatch builds
-# it in the job; nothing else sets the switch.
-python3 - "$WORKFLOW" <<'PY' || fail 'the owner-only in-job recovery input is not exactly wired'
+python3 - "$WORKFLOW" <<'PY' || fail 'a deploy-prod job runs outside the protected runner tiers'
 import sys
 
 import yaml
 
-document = yaml.safe_load(open(sys.argv[1]))
-triggers = document.get("on", document.get(True))
-recovery = triggers["workflow_dispatch"]["inputs"]["in_job_build"]
-assert recovery["type"] == "boolean" and recovery["default"] is False and recovery["required"] is False, recovery
-expected = "${{ (inputs.in_job_build == true || inputs.in_job_build == 'true') && '1' || '0' }}"
-jobs = document["jobs"]
-assert jobs["build-support-amd64"]["env"]["CODEWIRE_IN_JOB_BUILD"] == expected
-assert [name for name, job in jobs.items() if "CODEWIRE_IN_JOB_BUILD" in (job.get("env") or {})] == ["build-support-amd64"]
+jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
 assert all(str(job.get("runs-on", "")).startswith("${{ vars.CODEWIRE_CI_RUNNER_") for job in jobs.values())
 PY
 printf '[test-deploy-prod-workflow] signed-tag publication and dispatch contract passed\n'

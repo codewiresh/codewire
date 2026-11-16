@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # finish-prod-release.sh: publish the release's support pair and deliver the
-# release to Production (#3246). deploy-prod runs it once the runtime bundle is
-# published: in the publishing job when the release reuses the support pair
-# main published, or after the native platform builds otherwise.
+# release to Production (#3246). deploy-prod's publishing job runs it once the
+# runtime bundle is published. A release builds nothing (#2892): the pair is
+# the one main published.
 #
-#   1. join and verify the base and workspace indexes, or reuse the published
-#      ones (join-release-support-image.sh), and publish both to Harbor;
+#   1. verify the published base and workspace indexes
+#      (join-release-support-image.sh), and publish both to Harbor;
 #   2. dispatch the signed tag to codewire/deploy promote-prod and wait for
 #      Production to accept it (dispatch-deploy-prod.sh);
 #   3. mirror them to GHCR, which never gates the release. Production pulls
@@ -13,10 +13,8 @@
 #      cli-release waits for this whole run, mirror included (#4492).
 #
 # Environment: RELEASE_TAG, SOURCE_SHA, CODEWIRE_SOURCE_DIR (the release
-# checkout), CODEWIRE_IMAGE_REGISTRY, BUILD_SUPPORT_PAIR (true or false), and
-# with true the four platform digests BASE_AMD64_DIGEST, BASE_ARM64_DIGEST,
-# WORKSPACE_AMD64_DIGEST and WORKSPACE_ARM64_DIGEST. With false,
-# SUPPORT_PROVENANCE_REVISION names the commit the reused pair was built from
+# checkout), CODEWIRE_IMAGE_REGISTRY, and SUPPORT_PROVENANCE_REVISION, the
+# commit the reused pair was built from
 # (release-support-pair-state.sh): the release's own source, or the earlier
 # commit main aliased it from, whose base and workspace inputs it proved
 # identical.
@@ -34,31 +32,21 @@ readonly tag="${RELEASE_TAG:?RELEASE_TAG is required}"
 readonly source_sha="${SOURCE_SHA:?SOURCE_SHA is required}"
 readonly source_dir="${CODEWIRE_SOURCE_DIR:?CODEWIRE_SOURCE_DIR names the release checkout}"
 readonly registry="${CODEWIRE_IMAGE_REGISTRY:?CODEWIRE_IMAGE_REGISTRY is required}"
-case "${BUILD_SUPPORT_PAIR:-}" in
-  true|false) ;;
-  *) fail 'BUILD_SUPPORT_PAIR must be true or false' ;;
-esac
-
 provenance_revision="${SUPPORT_PROVENANCE_REVISION:-$source_sha}"
 [[ "$provenance_revision" =~ ^[0-9a-f]{40}$ ]] ||
   fail 'SUPPORT_PROVENANCE_REVISION must be a full lowercase commit ID'
-[[ "$BUILD_SUPPORT_PAIR" == false || "$provenance_revision" == "$source_sha" ]] ||
-  fail 'a support pair the release builds carries its own source in its provenance'
 readonly provenance_revision
 
 work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/codewire-finish-prod-release.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
-# join IMAGE DOCKERFILE CONTEXT AMD64 ARM64: the verified source-SHA index of
-# IMAGE, joined from the release's platform digests or reused from main.
+# join IMAGE DOCKERFILE CONTEXT: the verified source-SHA index of IMAGE that
+# main published.
 join() {
-  local image="$1" amd64="" arm64="" ref sha
-  if [[ "$BUILD_SUPPORT_PAIR" == true ]]; then
-    amd64="$4" arm64="$5"
-  fi
+  local image="$1" ref sha
   : >"$work/$image.output"
   GITHUB_OUTPUT="$work/$image.output" CODEWIRE_RELEASE_TAG="$tag" CODEWIRE_SOURCE_SHA="$source_sha" \
-    AMD64_DIGEST="$amd64" ARM64_DIGEST="$arm64" CODEWIRE_PROVENANCE_REVISION="$provenance_revision" \
+    CODEWIRE_PROVENANCE_REVISION="$provenance_revision" \
     "$ROOT/scripts/ci/images/join-release-support-image.sh" "$image" "$2" "$3" ||
     fail "the $image index did not join or verify"
   ref="$(sed -n 's/^candidate_ref=//p' "$work/$image.output" | tail -1)"
@@ -68,10 +56,8 @@ join() {
   printf '%s' "$ref" >"$work/$image.ref"
 }
 
-join base "$source_dir/images/base/Dockerfile" "$source_dir/images/base" \
-  "${BASE_AMD64_DIGEST:-}" "${BASE_ARM64_DIGEST:-}"
-join workspace "$source_dir/images/workspace/Dockerfile" "$source_dir" \
-  "${WORKSPACE_AMD64_DIGEST:-}" "${WORKSPACE_ARM64_DIGEST:-}"
+join base "$source_dir/images/base/Dockerfile" "$source_dir/images/base"
+join workspace "$source_dir/images/workspace/Dockerfile" "$source_dir"
 
 for image in base workspace; do
   "$ROOT/scripts/ci/images/publish-image-to-harbor.sh" \

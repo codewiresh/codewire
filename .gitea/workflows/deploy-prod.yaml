@@ -7,11 +7,6 @@ on:
         description: Existing canonical vMAJOR.MINOR.PATCH tag to recover
         required: true
         type: string
-      in_job_build:
-        description: Recovery only, when the trusted BuildKit builder is down. Build the release's amd64 support pair in the job instead of on the builder.
-        required: false
-        default: false
-        type: boolean
 
   # A pushed, signed release tag is picked up within five minutes (owner,
   # 2026-10-23, #2892). A scheduled run is main's workflow; its first job only
@@ -39,7 +34,6 @@ env:
   EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE: ${{ vars.EXPECTED_TAILNET_DIRECT_UDP_TRANSPORT_ZONE }}
   CODEWIRE_FORGEJO_INTERNAL_URL: ${{ vars.CODEWIRE_FORGEJO_INTERNAL_URL }}
   CONFIDENTIAL_SNP_NODE: ${{ vars.CONFIDENTIAL_SNP_NODE }}
-  ARM64_BUILDKIT_HOST: ${{ vars.ARM64_BUILDKIT_HOST }}
   CODEWIRE_IMAGE_REGISTRY: ${{ vars.CODEWIRE_IMAGE_REGISTRY }}
   CODEWIRE_SOURCE_URL: ${{ vars.CODEWIRE_SOURCE_URL }}
   CODEWIRE_RELEASE_TAGGER: ${{ vars.CODEWIRE_RELEASE_TAGGER }}
@@ -168,15 +162,11 @@ jobs:
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
           printf 'tag_object_sha=%s\n' "$remote_object_sha" >> "$GITHUB_OUTPUT"
 
-  # One protected job carries the common release end to end: it selects the
-  # support pair, aliases the five runtime images side by side, validates and
-  # publishes the runtime bundle and, when the release reuses the support pair
-  # main published, publishes that pair and delivers the release to Production.
-  # Every protected job first waits for a runner, so a release uses as few as
-  # its trust boundaries allow (#3246). Only a support pair that must be built
-  # takes more: the native platform builds run release-source code and stay in
-  # their own jobs, away from the deploy credential, and finish-built-release
-  # then delivers the release.
+  # One protected job carries the release end to end: it requires the support
+  # pair main published, aliases the five runtime images side by side,
+  # validates and publishes the runtime bundle, publishes the pair and delivers
+  # the release to Production. A release builds nothing (#2892): every image it
+  # ships was built and verified on main.
   publish-release:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Publish the release and deliver it to Production
@@ -186,10 +176,6 @@ jobs:
     # minutes for promote-prod's verdict, so the work keeps 45 of its own.
     timeout-minutes: 90
     needs: [release-selection]
-    outputs:
-      build: ${{ steps.pair.outputs.build }}
-      base_amd64_digest: ${{ steps.pair.outputs.base_amd64_digest }}
-      base_arm64_digest: ${{ steps.pair.outputs.base_arm64_digest }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -217,11 +203,10 @@ jobs:
           GITEA_TOKEN: ${{ github.token }}
         run: scripts/ci/release/require-current-release.sh "$RELEASE_TAG"
 
-      # A release reuses the support pair main published for its exact source.
-      # Otherwise the pair is built natively, exactly as support-images.yaml
-      # builds it: one job per platform, linux/arm64 on the protected arm64
-      # BuildKit node over mutual TLS, never under emulation.
-      - name: Reuse the published support pair or build it natively
+      # A release reuses the support pair main published for its exact source,
+      # and stops before publishing anything when there is none: the tag's
+      # pre-push check requires the pair, and support-images.yaml backfills it.
+      - name: Require the support pair main published
         id: pair
         env:
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
@@ -280,12 +265,10 @@ jobs:
             "$SOURCE_SHA" "$RELEASE_TAG"
 
       - name: Publish the reused support pair and deliver the release to Production
-        if: ${{ steps.pair.outputs.build == 'false' }}
         env:
           RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
           SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
           CODEWIRE_SOURCE_DIR: .release-source
-          BUILD_SUPPORT_PAIR: 'false'
           # The commit the reused pair was built from: the source, or the
           # earlier commit main aliased it from (#3504), which the pair step
           # proved has the same base and workspace inputs.
@@ -293,8 +276,7 @@ jobs:
         run: scripts/ci/release/finish-prod-release.sh
 
       # Harbor serves every consumer; the public GHCR copy never gates release.
-      # With a reused support pair it runs once Production accepted the
-      # release, off delivery's path; with a built pair, while the pair builds.
+      # It runs once Production accepted the release, off delivery's path.
       # cli-release still waits for it: it waits for this run to succeed (#4492).
       - name: Mirror the runtime release to GHCR without gating release
         continue-on-error: true
@@ -323,162 +305,3 @@ jobs:
             "${{ steps.alias.outputs.mesh_candidate_ref }}" \
             ghcr.io/codewiresh/mesh \
             "$SOURCE_SHA" "$RELEASE_TAG"
-
-  build-support-amd64:
-    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
-    name: Build the release support pair (linux/amd64)
-    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
-    enable-openid-connect: true
-    timeout-minutes: 120
-    needs: [release-selection, publish-release]
-    if: ${{ needs.publish-release.outputs.build == 'true' }}
-    outputs:
-      base_digest: ${{ steps.build.outputs.base_digest }}
-      # Only a passing workspace contract reports the digest the join consumes.
-      workspace_digest: ${{ steps.contract.outputs.workspace_digest }}
-    env:
-      # In-cluster cache of the dated apt snapshots, passed to BuildKit as a
-      # secret. The arm64 leg reads the same cache over the Tailnet.
-      CODEWIRE_APT_SNAPSHOT_MIRROR: http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.local:8080
-      # amd64 builds on the trusted BuildKit builder and fails fast when it is
-      # unreachable; only the owner's in_job_build dispatch builds it here.
-      CODEWIRE_IN_JOB_BUILD: ${{ (inputs.in_job_build == true || inputs.in_job_build == 'true') && '1' || '0' }}
-    steps:
-      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-
-      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
-          path: .release-source
-
-      - name: Confirm selected release checkout
-        env:
-          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
-          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
-        run: scripts/ci/release/confirm-release-checkout.sh .release-source
-
-      - name: Build the linux/amd64 base and workspace by digest
-        id: build
-        env:
-          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
-          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-          CODEWIRE_SOURCE_DIR: .release-source
-          SUPPORT_PLATFORM_BUDGET_MINUTES: '110'
-          # Set only when a base index for this source is already published.
-          SUPPORT_PLATFORM_BASE_DIGEST: ${{ needs.publish-release.outputs.base_amd64_digest }}
-        run: scripts/ci/images/build-support-platform.sh linux/amd64
-
-      # The release tag's own contract, version-locked to its agent pins, runs
-      # inside the exact image the build pushed, never on the host, before the
-      # join can publish it (scripts/ci/images/run-workspace-contract-on-image.sh).
-      - name: Run the workspace contract on the exact image
-        id: contract
-        env:
-          WORKSPACE_DIGEST: ${{ steps.build.outputs.workspace_digest }}
-        run: |
-          set -euo pipefail
-          release_source_sha="$(git -C .release-source rev-parse HEAD)"
-          scripts/ci/images/run-workspace-contract-on-image.sh \
-            "$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$WORKSPACE_DIGEST" "$release_source_sha" \
-            .release-source/scripts/ci/verify/workspace-agent-contract.sh
-
-  build-support-arm64:
-    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
-    name: Build the release support pair (linux/arm64)
-    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
-    enable-openid-connect: true
-    timeout-minutes: 120
-    needs: [release-selection, publish-release]
-    if: ${{ needs.publish-release.outputs.build == 'true' }}
-    outputs:
-      base_digest: ${{ steps.build.outputs.base_digest }}
-      workspace_digest: ${{ steps.build.outputs.workspace_digest }}
-    env:
-      # The same apt snapshot cache as the amd64 leg, passed to BuildKit as a
-      # secret. The remote ci-arm64-builder node is outside the cluster, so it
-      # reaches the cache on the Tailnet front door, the one address and port
-      # its Tailnet identity is admitted to besides the registry. The cache
-      # keeps serving stored snapshots when upstream fails; APT still verifies
-      # each signed InRelease and every package hash, and falls back to the
-      # canonical snapshots when the cache is unavailable.
-      CODEWIRE_APT_SNAPSHOT_MIRROR: http://10.47.0.10:8080
-    steps:
-      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-
-      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
-          path: .release-source
-
-      - name: Confirm selected release checkout
-        env:
-          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
-          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
-        run: scripts/ci/release/confirm-release-checkout.sh .release-source
-
-      # The production publisher reads the arm64 node's client certificate.
-      - name: Build the linux/arm64 base and workspace by digest
-        id: build
-        env:
-          CODEWIRE_RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
-          CODEWIRE_SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-          CODEWIRE_SOURCE_DIR: .release-source
-          SUPPORT_PLATFORM_BUDGET_MINUTES: '110'
-          # Set only when a base index for this source is already published.
-          SUPPORT_PLATFORM_BASE_DIGEST: ${{ needs.publish-release.outputs.base_arm64_digest }}
-        run: scripts/ci/images/build-support-platform.sh linux/arm64
-
-  # A release whose support pair had to be built joins the two platform
-  # digests the builds verified, publishes the pair and delivers the release.
-  finish-built-release:
-    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
-    name: Publish the built support pair and deliver the release to Production
-    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
-    enable-openid-connect: true
-    # The join and publication take minutes; the delivery then waits up to 45
-    # minutes for promote-prod's verdict.
-    timeout-minutes: 65
-    needs: [release-selection, publish-release, build-support-amd64, build-support-arm64]
-    if: ${{ always() && needs.release-selection.result == 'success' && needs.publish-release.result == 'success' && needs.publish-release.outputs.build == 'true' && needs.build-support-amd64.result == 'success' && needs.build-support-arm64.result == 'success' }}
-    steps:
-      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-
-      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: refs/tags/${{ needs.release-selection.outputs.release_tag }}
-          path: .release-source
-
-      - name: Confirm selected release checkout
-        env:
-          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
-          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-          TAG_OBJECT_SHA: ${{ needs.release-selection.outputs.tag_object_sha }}
-        run: scripts/ci/release/confirm-release-checkout.sh .release-source
-
-      # An old release run's jobs can be rerun, keeping that run's selection;
-      # they publish only while the tag is still the newest release (#2892).
-      - name: Refuse a release that is no longer the newest
-        env:
-          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
-          GITEA_TOKEN: ${{ github.token }}
-        run: scripts/ci/release/require-current-release.sh "$RELEASE_TAG"
-
-      - name: Publish the built support pair and deliver the release to Production
-        env:
-          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
-          SOURCE_SHA: ${{ needs.release-selection.outputs.source_sha }}
-          CODEWIRE_SOURCE_DIR: .release-source
-          BUILD_SUPPORT_PAIR: 'true'
-          BASE_AMD64_DIGEST: ${{ needs.build-support-amd64.outputs.base_digest }}
-          BASE_ARM64_DIGEST: ${{ needs.build-support-arm64.outputs.base_digest }}
-          WORKSPACE_AMD64_DIGEST: ${{ needs.build-support-amd64.outputs.workspace_digest }}
-          WORKSPACE_ARM64_DIGEST: ${{ needs.build-support-arm64.outputs.workspace_digest }}
-        run: scripts/ci/release/finish-prod-release.sh

@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
-# Whether main already published the support pair (base and workspace) for a
-# release's exact source commit. deploy-prod.yaml reuses a published pair as
-# it is, and otherwise builds the pair one platform per job, linux/arm64 on the
-# protected arm64 BuildKit node, never under emulation. Harbor is read with the
-# pull-only robot. Writes build=false (both published) or build=true (neither
-# published) to $GITHUB_OUTPUT. When only the base is published (a cancelled
-# release published it), build=true with base_amd64_digest and
-# base_arm64_digest, that index's platform images: the release builds only the
-# workspace, from exactly that base. A workspace without its base is refused.
+# Requires the support pair (base and workspace) main published for a
+# release's exact source commit. deploy-prod.yaml reuses it as it is; a release
+# builds nothing (#2892), so a pair that is missing, or only half published,
+# stops the release before it publishes anything. The tag's pre-push check
+# requires the same pair (verify-release-support-pair.sh), and support-images
+# backfills it. Harbor is read with the pull-only robot.
 #
-# A published pair also writes provenance_revision, the one commit both
+# Writes provenance_revision to $GITHUB_OUTPUT: the one commit both
 # indexes' provenance names. That is the source itself when main built the
 # pair for it. When main aliased the pair from an earlier commit with the same
 # base and workspace inputs (#3504), the indexes keep that commit's
@@ -75,21 +72,6 @@ state() {
   fail "could not determine whether $reference is published"
 }
 
-# platform_digest ARCH prints the published base index's linux/ARCH image.
-platform_digest() {
-  local digest
-  DOCKER_CONFIG="$work/docker-config" docker buildx imagetools inspect --raw \
-      "$REPOSITORY_PREFIX/base:$source_sha" >"$work/base-index.json" 2>"$work/base-index.err" || {
-    sed -n '1,20p' "$work/base-index.err" >&2
-    fail "could not read the published base index for $source_sha"
-  }
-  digest="$(jq -er --arg arch "$1" '
-      [.manifests[]? | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest]
-      | select(length == 1) | .[0] | select(test("^sha256:[0-9a-f]{64}$"))' "$work/base-index.json")" ||
-    fail "the published base index for $source_sha has no single linux/$1 image"
-  printf '%s\n' "$digest"
-}
-
 # provenance_revision IMAGE prints the one commit that every platform's
 # provenance in IMAGE's published index names. build-push-image.sh verifies
 # the whole provenance against it later; this only reads which commit it is.
@@ -115,34 +97,19 @@ index_digest() {
 
 base="$(state base)"
 workspace="$(state workspace)"
-extra_outputs=''
-case "$base:$workspace" in
-  published:published)
-    build=false
-    base_revision="$(provenance_revision base)"
-    workspace_revision="$(provenance_revision workspace)"
-    [[ "$base_revision" == "$workspace_revision" ]] ||
-      fail "the published base was built for $base_revision and the workspace for $workspace_revision; a pair has one source"
-    if [[ "$base_revision" == "$source_sha" ]]; then
-      printf 'Reusing the support pair main published for %s\n' "$source_sha"
-    else
-      "$alias_verifier" --repository "$ROOT" --source "$source_sha" --origin "$base_revision" \
-        --base-digest "$(index_digest base)" --workspace-digest "$(index_digest workspace)" ||
-        fail "the support pair published for $source_sha was built for $base_revision, and is not its alias"
-      printf 'Reusing the support pair main published for %s, built for %s with the same base and workspace inputs\n' \
-        "$source_sha" "$base_revision"
-    fi
-    extra_outputs="provenance_revision=$base_revision" ;;
-  missing:missing)
-    build=true
-    printf 'Main published no support pair for %s; building it here, linux/arm64 on the native node\n' "$source_sha" ;;
-  published:missing)
-    build=true
-    extra_outputs="base_amd64_digest=$(platform_digest amd64)
-base_arm64_digest=$(platform_digest arm64)"
-    printf 'Only the base is published for %s; building the workspace from it, linux/arm64 on the native node\n' "$source_sha" ;;
-  *)
-    fail "the workspace is published without its base for $source_sha (base $base, workspace $workspace); repair the publication before releasing" ;;
-esac
-printf 'build=%s\n' "$build" >>"$output"
-[[ -z "$extra_outputs" ]] || printf '%s\n' "$extra_outputs" >>"$output"
+[[ "$base:$workspace" == published:published ]] ||
+  fail "main published no support pair for $source_sha (base $base, workspace $workspace), and a release builds nothing; dispatch support-images.yaml on main with source_sha=$source_sha, then rerun this release"
+base_revision="$(provenance_revision base)"
+workspace_revision="$(provenance_revision workspace)"
+[[ "$base_revision" == "$workspace_revision" ]] ||
+  fail "the published base was built for $base_revision and the workspace for $workspace_revision; a pair has one source"
+if [[ "$base_revision" == "$source_sha" ]]; then
+  printf 'Reusing the support pair main published for %s\n' "$source_sha"
+else
+  "$alias_verifier" --repository "$ROOT" --source "$source_sha" --origin "$base_revision" \
+    --base-digest "$(index_digest base)" --workspace-digest "$(index_digest workspace)" ||
+    fail "the support pair published for $source_sha was built for $base_revision, and is not its alias"
+  printf 'Reusing the support pair main published for %s, built for %s with the same base and workspace inputs\n' \
+    "$source_sha" "$base_revision"
+fi
+printf 'provenance_revision=%s\n' "$base_revision" >>"$output"

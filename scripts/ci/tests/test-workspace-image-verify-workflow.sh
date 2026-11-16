@@ -59,15 +59,13 @@ import ci_runner_fixtures as runners  # noqa: E402
 # trusted light runner is the protected pool.
 CACHE_RUNNERS = {runners.KIND, runners.HEAVY, runners.MEDIUM, runners.TRUSTED_LIGHT}
 # The one job that calls an image builder without the cache: the support join
-# only assembles the two platform digests. A release's own pair
-# (deploy-prod.yaml) builds exactly as support-images does.
+# only assembles the two platform digests. A release builds nothing
+# (deploy-prod.yaml, #2892).
 CANONICAL = {
     "support-images.yaml:publish-support-images",
 }
 EXPECTED = {
     "ci.yaml:kind-workspace": MIRROR,
-    "deploy-prod.yaml:build-support-amd64": MIRROR,
-    "deploy-prod.yaml:build-support-arm64": TAILNET_MIRROR,
     "support-images.yaml:build-support-amd64": MIRROR,
     "support-images.yaml:build-support-arm64": TAILNET_MIRROR,
 }

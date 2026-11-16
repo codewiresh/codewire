@@ -107,10 +107,9 @@ PY
 # The release's run: one whose selection verified this exact tag, tag object
 # and commit, and whose delivery saw Production accept it.
 selected="^[0-9T:.-]+Z release tag verified: tag=${tag//./\\.} object=${tag_object_sha} commit=${source_sha} forgejo_signer=[^ ]+\$"
-# deploy-prod delivers from one of two jobs: the publishing job when the
-# release reuses the support pair, or the built-pair finish (#3246). Releases
-# delivered before then did so from one dispatch job; a CLI recovery for one
-# of them still finds it.
+# deploy-prod delivers from its publishing job. Earlier releases delivered
+# from the built-pair finish (#3246, removed by #2892) or, before that, from
+# one dispatch job; a CLI recovery for one of them still finds it.
 readonly DELIVERING_JOBS=(
   'Publish the release and deliver it to Production'
   'Publish the built support pair and deliver the release to Production'

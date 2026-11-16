@@ -10,11 +10,11 @@
 #
 # GITEA_TOKEN is the job's own token. PRODUCTION_WAIT_SECONDS bounds the wait.
 # Its default, 310 minutes, outlasts deploy-prod's longest delivery: release
-# selection 25, publication 90, a built support pair 120 and its finish 65
-# (test-cli-release-workflow.py derives that bound from deploy-prod.yaml), so
-# a release Production accepts late is still published. Each signing job then
-# keeps 15 to 20 minutes of its own within the trusted light runner's
-# 330-minute cap. PRODUCTION_POLL_SECONDS (default 30) spaces the checks.
+# selection 25 and publication 90 (test-cli-release-workflow.py derives that
+# bound from deploy-prod.yaml), so a release Production accepts late is still
+# published. Each signing job then keeps 15 to 20 minutes of its own within
+# the trusted light runner's 330-minute cap. PRODUCTION_POLL_SECONDS (default
+# 30) spaces the checks.
 set -euo pipefail
 
 fail() {

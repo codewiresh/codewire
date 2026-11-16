@@ -32,7 +32,7 @@ readonly TRUSTED_BUILDKIT_CARGO_BUILD_JOBS=8
 readonly TRUSTED_BUILDKIT_CW_PRODUCER_JOBS=8
 # deploy-dev.yaml and support-images.yaml pass no artifacts between jobs, and
 # a failed half cancels its run, so the recovery reruns the whole run.
-readonly TRUSTED_BUILDKIT_RECOVERY='after checking the builder (infra docs/runbooks/ci-buildkit-trusted.md), the owner may build this commit in the job: set the repository variable CODEWIRE_IN_JOB_BUILD_SHA to this commit and rerun all jobs of this run, or dispatch deploy-prod.yaml with in_job_build'
+readonly TRUSTED_BUILDKIT_RECOVERY='after checking the builder (infra docs/runbooks/ci-buildkit-trusted.md), the owner may build this commit in the job: set the repository variable CODEWIRE_IN_JOB_BUILD_SHA to this commit and rerun all jobs of this run'
 
 # Succeeds when the owner asked this run to build in the job.
 trusted_buildkit_in_job() {

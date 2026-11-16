@@ -85,8 +85,7 @@ grep -Fq '      source_sha: ${{ steps.source.outputs.source_sha }}' <<<"$selecti
 grep -Fq 'scripts/ci/images/resolve-published-support-pair.sh "$candidate" "$SOURCE_SHA"' <<<"$selection_job" ||
   fail 'a dispatch does not plan against its source'"'"'s newest published ancestor pair'
 # An earlier commit that needs a build builds its pair from its own checkout
-# with main's scripts, as deploy-prod.yaml builds a release's pair (owner,
-# 2026-11-12, #4243). Only the confidential probe and the pin proposal stay
+# with main's scripts (owner, 2026-11-12, #4243). Only the confidential probe and the pin proposal stay
 # with main's own commit.
 if grep -Fq 'name: Refuse a build' <<<"$selection_job"; then
   fail 'a dispatch for an earlier commit that needs a build is still refused'

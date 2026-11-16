@@ -219,13 +219,12 @@ if env -u GITEA_TOKEN GITHUB_SERVER_URL=https://git.example.invalid "$CHECK" "$T
 fi
 
 # The check reads what deploy-prod writes: its two job names, the verifier's
-# selection line and the dispatch's acceptance line.
+# selection line and the dispatch's acceptance line. The built-pair finish is
+# gone from deploy-prod (#2892); the check keeps its name for earlier releases.
 workflow="$ROOT/.gitea/workflows/deploy-prod.yaml"
 grep -Fxq '    name: Verify canonical release tag' "$workflow" || fail 'deploy-prod renamed its selection job'
 grep -Fxq '    name: Publish the release and deliver it to Production' "$workflow" ||
   fail 'deploy-prod renamed its publishing job'
-grep -Fxq '    name: Publish the built support pair and deliver the release to Production' "$workflow" ||
-  fail 'deploy-prod renamed its built-pair finish'
 grep -Fq "printf 'release tag verified: tag=%s object=%s commit=%s forgejo_signer=%s\\n'" \
   "$ROOT/scripts/ci/release/verify-release-tag-ref.sh" || fail 'the verifier changed its selection line'
 grep -Fq "printf '[dispatch-deploy-prod] deploy run %s succeeded: Production accepted %s\\n'" \

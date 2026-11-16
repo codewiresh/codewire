@@ -597,9 +597,8 @@ def check(text, ci_text):
         found = re.search(r"^    timeout-minutes: ([0-9]+)$", block, re.M)
         return int(found.group(1)) if found else 0
 
-    longest = (limit(deploy.get("release-selection", "")) + limit(deploy.get("publish-release", ""))
-               + max(limit(deploy.get("build-support-amd64", "")), limit(deploy.get("build-support-arm64", "")))
-               + limit(deploy.get("finish-built-release", "")))
+    # Every job after the pickup, as if each waited for the one before.
+    longest = sum(limit(block) for name, block in deploy.items() if name != "pending")
     need(longest > 0 and wait_minutes > longest,
          f"the Production wait ({wait_minutes} min) ends before deploy-prod's longest delivery ({longest} min)")
     for job in ("sign-helper", "sign-darwin", "package-release"):

@@ -3,9 +3,7 @@ from .shared import *
 # The deploy-prod jobs that use an OIDC token: each logs in to OpenBao or mints
 # the Deploy dispatch token. Those identities bind the workflow, not the job or
 # runner, so any other job holding OIDC could obtain them (#3674).
-PRODUCTION_OIDC_JOBS = frozenset(
-    {"publish-release", "build-support-amd64", "build-support-arm64", "finish-built-release"}
-)
+PRODUCTION_OIDC_JOBS = frozenset({"publish-release"})
 
 
 def production_oidc_errors(workflow: str) -> list[str]:
