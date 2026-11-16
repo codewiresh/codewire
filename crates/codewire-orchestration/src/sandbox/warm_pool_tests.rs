@@ -558,6 +558,26 @@ fn the_admission_policy_pins_the_renderer() {
     ] {
         assert!(policy.contains(&fragment), "policy lost {fragment}");
     }
+    // mount-workspace's state is exactly the two the renderer emits, and the
+    // removed whole-volume layout's are not admitted, so a later edit cannot
+    // widen it silently (#4026; cw-security's review on #4960).
+    use crate::sandbox::template::WorkspaceVolume;
+    let states = format!(
+        "c.command[4] in ['{}', '{}'] && !has(c.args)",
+        WorkspaceVolume::New.argument(),
+        WorkspaceVolume::Existing.argument()
+    );
+    assert_eq!(
+        states,
+        "c.command[4] in ['new-subfolder', 'existing-subfolder'] && !has(c.args)"
+    );
+    assert!(policy.contains(&states), "policy lost {states}");
+    for removed in ["'new'", "'existing'"] {
+        assert!(
+            !policy.contains(removed),
+            "the policy admits the removed state {removed}"
+        );
+    }
     // The policy's name pattern accepts exactly the names the renderer emits.
     let pattern = "^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$";
     assert!(policy.contains(pattern));

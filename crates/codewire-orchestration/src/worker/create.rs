@@ -249,10 +249,6 @@ pub struct SandboxWorkerCfg {
     pub docker_mode: String,
     pub allow_diagnostic_runtime: bool,
     pub workspace_storage_class: String,
-    /// `SANDBOX_WORKSPACE_LAYOUT=subfolder`: a commodity workspace's
-    /// `/workspace` is its disk's `workspace/` folder, the home its root
-    /// (#4026). Off by default; a rollback turns it off.
-    pub workspace_subfolder: bool,
     /// The VolumeSnapshotClass of hosted disk snapshots. Empty refuses them
     /// (`SANDBOX_VOLUME_SNAPSHOT_CLASS`, #3046).
     pub volume_snapshot_class: String,
@@ -453,10 +449,6 @@ impl SandboxWorkerCfg {
                 .as_deref(),
         )
         .unwrap_or_else(|error| panic!("{error}"));
-        let workspace_subfolder = crate::sandbox::template::workspace_subfolder_layout(
-            &std::env::var(crate::sandbox::template::WORKSPACE_LAYOUT_ENV).unwrap_or_default(),
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
         let cpu_sharing_ratio = crate::sandbox::template::CpuSharingRatio::parse(
             std::env::var(crate::sandbox::template::CPU_SHARING_RATIO_ENV)
                 .ok()
@@ -473,7 +465,6 @@ impl SandboxWorkerCfg {
             docker_mode: getenv("SANDBOX_DOCKER_MODE", "profile-default"),
             allow_diagnostic_runtime: getenv("SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME", "false") == "true",
             workspace_storage_class,
-            workspace_subfolder,
             volume_snapshot_class: getenv("SANDBOX_VOLUME_SNAPSHOT_CLASS", ""),
             confidential_workspace_storage_class,
             network_policy_management: getenv("SANDBOX_NETWORK_POLICY_MANAGEMENT", "Managed"),
@@ -690,7 +681,6 @@ impl From<&SandboxWorkerCfg> for KubernetesRenderConfig {
             udp_relay_bind_addrs: cfg.udp_relay_bind_addrs.clone(),
             uses_runtime_transport_registry: !cfg.runtime_transport_zones_json.trim().is_empty(),
             cpu_sharing_ratio: cfg.cpu_sharing_ratio,
-            workspace_subfolder: cfg.workspace_subfolder,
             network_policy_management: cfg.network_policy_management.clone(),
             kata_agent_policy_enabled: cfg.kata_agent_policy_enabled,
             kata_coco_init_data_enabled: cfg.kata_coco_init_data_enabled,

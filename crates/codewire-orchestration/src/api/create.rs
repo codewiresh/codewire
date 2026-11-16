@@ -365,21 +365,20 @@ fn validate_environment_repository_mounts(
 }
 
 /// A repository at /workspace itself needs a workspace that starts empty
-/// (#4027): a standard commodity workspace in the subfolder layout (#4026).
-/// Anywhere else /workspace holds the home's files, and the setup worker
-/// never cleans it; a confidential workspace gets the layout with #4093.
+/// (#4027): a standard commodity workspace, whose `/workspace` is its disk's
+/// `workspace/` folder (#4026). Anywhere else /workspace holds the home's
+/// files, and the setup worker never cleans it; a confidential workspace gets
+/// the layout with #4093.
 fn validate_workspace_root_repository(
     repositories: &[codewire_project::RepositorySpec],
     isolation_tier: &str,
     runtime_profile: &str,
-    workspace_subfolder: bool,
 ) -> AppResult<()> {
     let at_root = repositories
         .iter()
         .any(|repository| repository.destination == codewire_project::WORKSPACE_ROOT);
     let empty_workspace = isolation_tier == "standard"
-        && runtime_profile.trim() == crate::sandbox::template::RUNTIME_PROFILE_COMMODITY
-        && workspace_subfolder;
+        && runtime_profile.trim() == crate::sandbox::template::RUNTIME_PROFILE_COMMODITY;
     if !at_root || empty_workspace {
         return Ok(());
     }
@@ -1174,7 +1173,6 @@ pub(crate) async fn create_environment_core(
         &body.project_spec.repositories,
         isolation_tier,
         &state.sandbox_cfg.runtime_profile,
-        state.sandbox_cfg.workspace_subfolder,
     )?;
     // Reject explicit bad values before preset lookup or auto-creation can
     // write preset state. The effective values are checked again after
@@ -1260,7 +1258,6 @@ pub(crate) async fn create_environment_core(
                 &body.project_spec.repositories,
                 isolation_tier,
                 &state.sandbox_cfg.runtime_profile,
-                state.sandbox_cfg.workspace_subfolder,
             )?;
 
             let cpu = body.project_spec.resources.cpu_millicores.unwrap();
@@ -1348,14 +1345,14 @@ mod tests {
 
     /// #4027: a repository at /workspace only where /workspace starts empty.
     #[test]
-    fn a_repository_at_the_workspace_root_needs_the_subfolder_layout() {
+    fn a_repository_at_the_workspace_root_needs_a_standard_commodity_workspace() {
         let repository = |destination: &str| codewire_project::RepositorySpec {
             source: "https://example.test/org/app.git".into(),
             destination: destination.into(),
             ..Default::default()
         };
-        let code = |repositories: &[codewire_project::RepositorySpec], tier, profile, subfolder| {
-            match validate_workspace_root_repository(repositories, tier, profile, subfolder) {
+        let code = |repositories: &[codewire_project::RepositorySpec], tier, profile| {
+            match validate_workspace_root_repository(repositories, tier, profile) {
                 Ok(()) => "ok",
                 Err(AppError::Coded { code, .. }) => code,
                 Err(_) => "other",
@@ -1363,20 +1360,16 @@ mod tests {
         };
         let root = [repository("/workspace"), repository("/workspace/lib")];
         let below = [repository("/workspace/app")];
-        assert_eq!(code(&root, "standard", "commodity", true), "ok");
-        for (tier, profile, subfolder) in [
-            ("standard", "commodity", false),
-            ("standard", "runc", true),
-            ("confidential", "commodity", true),
-        ] {
+        assert_eq!(code(&root, "standard", "commodity"), "ok");
+        for (tier, profile) in [("standard", "runc"), ("confidential", "commodity")] {
             assert_eq!(
-                code(&root, tier, profile, subfolder),
+                code(&root, tier, profile),
                 "workspace_root_repository_unavailable",
-                "{tier} {profile} {subfolder}"
+                "{tier} {profile}"
             );
-            assert_eq!(code(&below, tier, profile, subfolder), "ok");
+            assert_eq!(code(&below, tier, profile), "ok");
         }
-        assert_eq!(code(&[], "standard", "runc", false), "ok");
+        assert_eq!(code(&[], "standard", "runc"), "ok");
     }
 
     #[test]

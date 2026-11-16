@@ -359,23 +359,9 @@ fn warm_pool_matches_golden_files() {
     let objects = render_warm_pool(&cfg.sandbox_namespace, &opts, 2, false).unwrap();
     crate::test_golden::assert_golden("warm-pool-sandboxtemplate.golden.json", &objects.template);
     crate::test_golden::assert_golden("warm-pool-sandboxwarmpool.golden.json", &objects.pool);
-}
-
-/// The subfolder layout's template, which infra's admission policy must also
-/// admit (#4026).
-#[test]
-fn a_subfolder_warm_pool_matches_its_golden_file() {
-    let cfg = SandboxWorkerCfg {
-        workspace_subfolder: true,
-        ..dev_cfg()
-    };
-    let opts = shape_template_opts(
-        &cfg,
-        SYNTHETIC_WORKSPACE_IMAGE,
-        &standard_runtime_profile_spec(&cfg),
-        shapes()[0],
-    );
-    let objects = render_warm_pool(&cfg.sandbox_namespace, &opts, 2, false).unwrap();
+    // Policy drift runs main's trusted Pod builder, which still lists this
+    // golden. It stays, the same template, until that builder stops naming
+    // it (#4026).
     crate::test_golden::assert_golden(
         "warm-pool-subfolder-sandboxtemplate.golden.json",
         &objects.template,
@@ -476,24 +462,16 @@ fn rendered_pool_templates_pass_the_admission_volume_rule() {
 
 /// A pool member's Pod spec: its golden template as stored, plus the
 /// workspace claim the controller adds, and the pool rendering it came from.
-fn golden_member(subfolder: bool) -> (Value, TemplateOpts) {
-    let cfg = SandboxWorkerCfg {
-        workspace_subfolder: subfolder,
-        ..dev_cfg()
-    };
+fn golden_member() -> (Value, TemplateOpts) {
+    let cfg = dev_cfg();
     let rendering = shape_template_opts(
         &cfg,
         SYNTHETIC_WORKSPACE_IMAGE,
         &standard_runtime_profile_spec(&cfg),
         shapes()[0],
     );
-    let file = if subfolder {
-        "warm-pool-subfolder-sandboxtemplate.golden.json"
-    } else {
-        "warm-pool-sandboxtemplate.golden.json"
-    };
     let path = format!(
-        "{}/tests/fixtures/sandbox/{file}",
+        "{}/tests/fixtures/sandbox/warm-pool-sandboxtemplate.golden.json",
         env!("CARGO_MANIFEST_DIR")
     );
     let template: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
@@ -517,7 +495,7 @@ fn container_index(spec: &Value, field: &str, name: &str) -> usize {
         .unwrap()
 }
 
-/// #3628 PR 5c, cw-confidential's condition 3: both golden pool members are
+/// #3628 PR 5c, cw-confidential's condition 3: the golden pool member is
 /// isolated as rendered, and each property the check guards, broken alone,
 /// is refused with its path, whatever the driver's pool verdict.
 #[test]
@@ -525,12 +503,8 @@ fn a_pool_member_is_isolated_exactly_as_its_rendering() {
     use crate::worker::workspace_binding::checks::pool_member_isolated;
     use serde_json::json;
 
-    for subfolder in [false, true] {
-        let (spec, wanted) = golden_member(subfolder);
-        assert_eq!(pool_member_isolated(&spec, &wanted), Ok(()), "{subfolder}");
-    }
-
-    let (golden, wanted) = golden_member(false);
+    let (golden, wanted) = golden_member();
+    assert_eq!(pool_member_isolated(&golden, &wanted), Ok(()));
     let volumes = golden["volumes"].as_array().unwrap().len();
     let token = golden["volumes"]
         .as_array()

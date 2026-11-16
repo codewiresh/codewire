@@ -1120,18 +1120,16 @@ fn workspace_volume_existing(
         .filter(|_| {
             init.pointer("/command/3").and_then(Value::as_str) == Some(MOUNT_WORKSPACE_CONTAINER)
         });
-    // The layout stays as rendered: a Sandbox created with the subfolder
-    // keeps it, whatever the setting says now (#4026).
     match state.map(|state| (state, WorkspaceVolume::parse_argument(state))) {
-        Some((_, Some((WorkspaceVolume::Existing, _)))) => Ok(Vec::new()),
-        Some((_, Some((WorkspaceVolume::New, _)))) if !mounted => Ok(Vec::new()),
-        Some((state, Some((WorkspaceVolume::New, subfolder)))) => Ok(vec![
+        Some((_, Some(WorkspaceVolume::Existing))) => Ok(Vec::new()),
+        Some((_, Some(WorkspaceVolume::New))) if !mounted => Ok(Vec::new()),
+        Some((state, Some(WorkspaceVolume::New))) => Ok(vec![
             serde_json::json!({"op":"test","path":format!("{entry}/name"),"value":MOUNT_WORKSPACE_CONTAINER}),
             serde_json::json!({"op":"test","path":format!("{entry}/command/4"),"value":state}),
             serde_json::json!({
                 "op":"replace",
                 "path":format!("{entry}/command/4"),
-                "value":WorkspaceVolume::Existing.argument(subfolder),
+                "value":WorkspaceVolume::Existing.argument(),
             }),
         ]),
         _ => anyhow::bail!("{MOUNT_WORKSPACE_CONTAINER} names no workspace volume state"),

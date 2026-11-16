@@ -64,8 +64,8 @@ pub(crate) use workspace::{
     WORKSPACE_FLUSH_CONTAINER, WORKSPACE_FLUSH_SCRIPT,
 };
 pub use workspace::{
-    ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, WORKSPACE_LAYOUT_ENV, orchestration_internal_tls_host,
-    render_sandbox_template, render_workspace_daemon_service, workspace_subfolder_layout,
+    ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP, orchestration_internal_tls_host,
+    render_sandbox_template, render_workspace_daemon_service,
 };
 
 /// Return the exact raw TOML bytes that the hypervisor annotation compresses
@@ -293,10 +293,6 @@ pub struct TemplateOpts {
     pub memory_mib: i64,
     pub disk_gib: i64,
     pub workspace_storage_class: String,
-    /// A Block (commodity) workspace's `/workspace` is its filesystem's
-    /// `workspace/` folder, not its root, which stays the home
-    /// (`SANDBOX_WORKSPACE_LAYOUT=subfolder`, #4026).
-    pub workspace_subfolder: bool,
     /// The `VolumeSnapshot` a new workspace PVC restores from. Only a create
     /// from a hosted snapshot has one; such a claim never comes from a pool.
     pub workspace_source_snapshot: Option<String>,
@@ -414,7 +410,6 @@ impl fmt::Debug for TemplateOpts {
             .field("memory_mib", &self.memory_mib)
             .field("disk_gib", &self.disk_gib)
             .field("workspace_storage_class", &self.workspace_storage_class)
-            .field("workspace_subfolder", &self.workspace_subfolder)
             .field("network_policy_management", &self.network_policy_management)
             .field("dind_enabled", &self.dind_enabled)
             .field("kata_agent_policy_enabled", &self.kata_agent_policy_enabled)

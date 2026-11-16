@@ -249,7 +249,6 @@ fn before_shape_template_opts(
         } else {
             cfg.workspace_storage_class.clone()
         },
-        workspace_subfolder: cfg.workspace_subfolder,
         network_policy_management: cfg.network_policy_management.clone(),
         dind_enabled: runtime_spec.docker_mode == DOCKER_MODE_LOCAL_DIND_DIRECT,
         kata_agent_policy_enabled: cfg.kata_agent_policy_enabled,
@@ -388,7 +387,6 @@ fn configurations() -> Vec<(&'static str, SandboxWorkerCfg)> {
                 ingress_pod_name: "ingress-controller".into(),
                 egress_bandwidth: "100M".into(),
                 cpu_sharing_ratio: CpuSharingRatio::parse(Some("4")).unwrap(),
-                workspace_subfolder: true,
                 network_policy_management: "Unmanaged".into(),
                 kata_agent_policy_enabled: false,
                 debug_tailnet: true,

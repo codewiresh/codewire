@@ -61,7 +61,6 @@ pub struct KubernetesRenderConfig {
     /// Relays come from the runtime transport registry, not fixed settings.
     pub uses_runtime_transport_registry: bool,
     pub cpu_sharing_ratio: CpuSharingRatio,
-    pub workspace_subfolder: bool,
     pub network_policy_management: String,
     pub kata_agent_policy_enabled: bool,
     pub kata_coco_init_data_enabled: bool,
@@ -300,7 +299,6 @@ impl KubernetesRenderConfig {
             } else {
                 self.workspace_storage_class.clone()
             },
-            workspace_subfolder: self.workspace_subfolder,
             network_policy_management: self.network_policy_management.clone(),
             dind_enabled: runtime_spec.docker_mode == DOCKER_MODE_LOCAL_DIND_DIRECT,
             kata_agent_policy_enabled: self.kata_agent_policy_enabled,

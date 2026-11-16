@@ -397,7 +397,7 @@ spec:
         variables.pod.initContainers.all(c, c.name != 'mount-workspace' ||
         (has(c.command) && size(c.command) == 5 && c.command[0] == 'sh' && c.command[1] == '-c' &&
         c.command[2] == variables.mountWorkspaceScript && c.command[3] == 'mount-workspace' &&
-        c.command[4] in ['new', 'existing', 'new-subfolder', 'existing-subfolder'] && !has(c.args) &&
+        c.command[4] in ['new-subfolder', 'existing-subfolder'] && !has(c.args) &&
         variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) &&
         has(v.image.reference) && v.image.reference == c.image)))
       message: mount-workspace runs exactly its rendered script, from the workspace daemon's support image

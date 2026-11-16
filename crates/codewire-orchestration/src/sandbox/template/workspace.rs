@@ -385,9 +385,8 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         configure_confidential_workspace_device(ws);
     }
     let block = block_workspace(opts, &runtime_spec);
-    let subfolder = block && opts.workspace_subfolder;
     if block {
-        configure_block_workspace_mounts(ws, true, subfolder);
+        configure_block_workspace_mounts(ws, true);
     }
     let daemon_image_volume = daemon_from_image_volume(&runtime_spec);
     let daemon_volume = if daemon_image_volume {
@@ -410,7 +409,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         volumes.insert(0, json!({ "name": "workspace", "emptyDir": {} }));
     }
     if block {
-        volumes.extend(block_workspace_volumes(subfolder));
+        volumes.extend(block_workspace_volumes());
     }
     if opts.credential_runtime.is_some() {
         volumes.extend(credentials::workspace_volumes(opts));
@@ -533,10 +532,8 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             configure_confidential_workspace_device(&mut dind);
         }
         if block {
-            configure_block_workspace_mounts(&mut dind, true, subfolder);
-            if subfolder {
-                dind_mount_workspace_root(&mut dind);
-            }
+            configure_block_workspace_mounts(&mut dind, true);
+            dind_mount_workspace_root(&mut dind);
         }
         containers.push(dind);
     } else if runtime_spec.docker_mode == DOCKER_MODE_GUEST_DIND {
@@ -555,10 +552,8 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             configure_confidential_workspace_device(&mut dind);
         }
         if block {
-            configure_block_workspace_mounts(&mut dind, true, subfolder);
-            if subfolder {
-                dind_mount_workspace_root(&mut dind);
-            }
+            configure_block_workspace_mounts(&mut dind, true);
+            dind_mount_workspace_root(&mut dind);
         }
         containers.push(dind);
     } else {
@@ -582,7 +577,6 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             support_image,
             WorkspaceVolume::rendered(opts),
             data_env.clone().unwrap_or_default(),
-            subfolder,
         ));
     }
     if !daemon_image_volume {
@@ -625,30 +619,15 @@ pub(crate) const MOUNT_WORKSPACE_CONTAINER: &str = "mount-workspace";
 pub(crate) const MOUNT_WORKSPACE_DEVICE_PATH: &str = "/dev/cwws";
 
 /// The guest-memory volume the workspace filesystem is mounted into: the
-/// home, and with no workspace subfolder also `/workspace`.
+/// home.
 pub(crate) const WORKSPACE_MOUNT_VOLUME: &str = "mnthome";
 /// Its name in Pods rendered before #4026, which a start still recognizes.
 pub(crate) const LEGACY_WORKSPACE_MOUNT_VOLUME: &str = "wsmnt";
 /// The guest-memory volume the filesystem's `workspace/` folder is bound
-/// into for `/workspace` when the workspace is a subfolder (#4026).
+/// into for `/workspace` (#4026).
 pub(crate) const WORKSPACE_DIR_VOLUME: &str = "mntws";
-/// Chooses the commodity Block workspace layout (#4026).
-pub const WORKSPACE_LAYOUT_ENV: &str = "SANDBOX_WORKSPACE_LAYOUT";
-
-/// Validates [`WORKSPACE_LAYOUT_ENV`] at startup: empty mounts the whole volume
-/// at `/workspace`, `subfolder` only its `workspace/` folder. Anything else is
-/// refused, so a misspelling never silently keeps the old layout.
-pub fn workspace_subfolder_layout(value: &str) -> Result<bool, String> {
-    match value.trim() {
-        "" => Ok(false),
-        "subfolder" => Ok(true),
-        other => Err(format!(
-            "{WORKSPACE_LAYOUT_ENV} must be empty or subfolder, not '{other}'"
-        )),
-    }
-}
-/// Where DinD sees the filesystem's root, and so its data image, when its
-/// `/workspace` is the subfolder (#4026).
+/// Where DinD sees the filesystem's root, and so its data image, beside its
+/// `/workspace`, the subfolder (#4026).
 pub(crate) const DIND_WORKSPACE_ROOT: &str = "/mnt/home";
 const WORKSPACE_TMP_VOLUME: &str = "wstmp";
 
@@ -684,62 +663,50 @@ impl WorkspaceVolume {
         }
     }
 
-    /// The argument `mount-workspace` takes: the state, with `-subfolder`
-    /// when `/workspace` is the filesystem's `workspace/` folder (#4026).
-    pub(crate) fn argument(self, subfolder: bool) -> String {
-        if subfolder {
-            format!("{}{SUBFOLDER_SUFFIX}", self.as_str())
-        } else {
-            self.as_str().to_owned()
-        }
+    /// The argument `mount-workspace` takes: the state, with `-subfolder`,
+    /// since `/workspace` is the filesystem's `workspace/` folder (#4026).
+    pub(crate) fn argument(self) -> String {
+        format!("{}{SUBFOLDER_SUFFIX}", self.as_str())
     }
 
-    /// Reads an [`Self::argument`] back: the state, and whether the Pod mounts
-    /// the subfolder. A Sandbox keeps the layout it was created with, whatever
-    /// `SANDBOX_WORKSPACE_LAYOUT` says later.
-    pub(crate) fn parse_argument(argument: &str) -> Option<(Self, bool)> {
-        let (state, subfolder) = match argument.strip_suffix(SUBFOLDER_SUFFIX) {
-            Some(state) => (state, true),
-            None => (argument, false),
-        };
-        let volume = match state {
-            "new" => Self::New,
-            "existing" => Self::Existing,
-            _ => return None,
-        };
-        Some((volume, subfolder))
+    /// Reads an [`Self::argument`] back. The whole-volume layout's arguments,
+    /// without `-subfolder`, are refused: none remained when that layout was
+    /// removed (#4026).
+    pub(crate) fn parse_argument(argument: &str) -> Option<Self> {
+        match argument.strip_suffix(SUBFOLDER_SUFFIX)? {
+            "new" => Some(Self::New),
+            "existing" => Some(Self::Existing),
+            _ => None,
+        }
     }
 }
 
 const SUBFOLDER_SUFFIX: &str = "-subfolder";
 
-/// The guest-memory emptyDirs a Block workspace is mounted into, with the
-/// subfolder's when `/workspace` is one (#4026). They hold only mount
-/// points, so they use no memory of their own.
-fn block_workspace_volumes(subfolder: bool) -> Vec<Value> {
-    let mut volumes = vec![
+/// The guest-memory emptyDirs a Block workspace is mounted into: the
+/// filesystem, its `workspace/` folder and its temporary directory (#4026).
+/// They hold only mount points, so they use no memory of their own.
+fn block_workspace_volumes() -> Vec<Value> {
+    vec![
         json!({ "name": WORKSPACE_MOUNT_VOLUME, "emptyDir": { "medium": "Memory" } }),
         json!({ "name": WORKSPACE_TMP_VOLUME, "emptyDir": { "medium": "Memory" } }),
-    ];
-    if subfolder {
-        volumes.push(json!({ "name": WORKSPACE_DIR_VOLUME, "emptyDir": { "medium": "Memory" } }));
-    }
-    volumes
+        json!({ "name": WORKSPACE_DIR_VOLUME, "emptyDir": { "medium": "Memory" } }),
+    ]
 }
 
 /// Replaces a container's `workspace` mounts with the mounted filesystem,
 /// seen through `HostToContainer` propagation, and, with `tmp`, mounts the
-/// workspace's temporary directory at `/tmp` and `/var/tmp` (R1). With
-/// `subfolder`, its `/workspace` is the filesystem's `workspace/` folder
-/// instead of its root (#4026). No long-lived container ever holds the
-/// device: a Kata container with a `volumeDevice` cannot restart (design §2).
-pub(crate) fn configure_block_workspace_mounts(container: &mut Value, tmp: bool, subfolder: bool) {
+/// workspace's temporary directory at `/tmp` and `/var/tmp` (R1). Its
+/// `/workspace` is the filesystem's `workspace/` folder, not its root (#4026).
+/// No long-lived container ever holds the device: a Kata container with a
+/// `volumeDevice` cannot restart (design §2).
+pub(crate) fn configure_block_workspace_mounts(container: &mut Value, tmp: bool) {
     let mounts = container["volumeMounts"]
         .as_array_mut()
         .expect("container volumeMounts array");
     for mount in mounts.iter_mut() {
         if mount["name"].as_str() == Some("workspace") {
-            mount["name"] = if subfolder && mount["mountPath"].as_str() == Some("/workspace") {
+            mount["name"] = if mount["mountPath"].as_str() == Some("/workspace") {
                 WORKSPACE_DIR_VOLUME
             } else {
                 WORKSPACE_MOUNT_VOLUME
@@ -769,11 +736,10 @@ pub(crate) fn mount_workspace_init_container(
     support_image: &str,
     volume: WorkspaceVolume,
     data_env: Vec<Value>,
-    subfolder: bool,
 ) -> Value {
     // The layout rides in the one argument, so the admitted argv keeps its
     // shape (infra's Kyverno policy pins five elements).
-    let state = volume.argument(subfolder);
+    let state = volume.argument();
     let command = json!([
         "sh",
         "-c",
@@ -781,13 +747,11 @@ pub(crate) fn mount_workspace_init_container(
         MOUNT_WORKSPACE_CONTAINER,
         state
     ]);
-    let mut mounts = vec![
+    let mounts = vec![
         json!({ "name": WORKSPACE_MOUNT_VOLUME, "mountPath": "/mnt/ws", "mountPropagation": "Bidirectional" }),
         json!({ "name": WORKSPACE_TMP_VOLUME, "mountPath": "/mnt/tmp", "mountPropagation": "Bidirectional" }),
+        json!({ "name": WORKSPACE_DIR_VOLUME, "mountPath": "/mnt/wsdir", "mountPropagation": "Bidirectional" }),
     ];
-    if subfolder {
-        mounts.push(json!({ "name": WORKSPACE_DIR_VOLUME, "mountPath": "/mnt/wsdir", "mountPropagation": "Bidirectional" }));
-    }
     let mut container = json!({
         "name": MOUNT_WORKSPACE_CONTAINER,
         "image": support_image,
@@ -923,8 +887,10 @@ fi"#
     };
 }
 
-/// `mount-workspace`'s shell; its one argument is `new` or `existing`, with
-/// `-subfolder` when `/workspace` is the filesystem's `workspace/` folder.
+/// `mount-workspace`'s shell; its one argument is the volume's state with
+/// `-subfolder`, as the renderer gives it (#4026). The script still accepts
+/// the removed whole-volume layout's `new` and `existing`: infra's Kyverno
+/// policy pins its digest, so it changes only after that pin moves.
 ///
 /// It fails closed and is never retried in place: a retried container
 /// cannot re-add the locked disk, so recovery is a new Pod (#3786). Every
@@ -1039,12 +1005,12 @@ echo "codewire mount-workspace: mounted the $volume workspace volume (formatted=
 "#
 );
 
-/// Where a guest DinD finds its data image: under `/workspace` when that is
-/// the filesystem's root, or under [`DIND_WORKSPACE_ROOT`] when `/workspace`
-/// is the subfolder (#4026). The image stays at the filesystem root's
-/// `.codewire/` either way.
+/// Where a guest DinD finds its data image: under [`DIND_WORKSPACE_ROOT`] for a
+/// Block workspace, whose `/workspace` is the subfolder (#4026), and under
+/// `/workspace` otherwise. The image is at the filesystem root's `.codewire/`
+/// either way.
 fn docker_data_image_path(opts: &TemplateOpts, runtime_spec: &RuntimeProfileSpec) -> String {
-    if opts.workspace_subfolder && block_workspace(opts, runtime_spec) {
+    if block_workspace(opts, runtime_spec) {
         format!("{DIND_WORKSPACE_ROOT}/.codewire/docker-data.ext4")
     } else {
         "/workspace/.codewire/docker-data.ext4".to_owned()

@@ -2742,13 +2742,11 @@ async fn a_duplicated_dind_container_fails_the_start_without_writes() {
     assert_eq!(state.sandbox, sandbox);
 }
 
-/// #4026: a Sandbox created with the subfolder layout stops into
-/// `existing-subfolder`, keeping its layout, even after
-/// `SANDBOX_WORKSPACE_LAYOUT` is turned back off: the stop reads the Sandbox,
-/// never the setting. Before this, its first stop failed ("names no workspace
-/// volume state") and left the environment in error.
+/// #4026: a Block workspace stops into `existing-subfolder`, keeping its
+/// layout, and a stop never accepts the removed whole-volume layout's
+/// arguments, `new` and `existing`.
 #[test]
-fn a_subfolder_workspace_stops_into_existing_subfolder_whatever_the_setting_says_now() {
+fn a_block_workspace_stops_into_existing_subfolder_and_never_the_whole_volume() {
     use super::super::template::{MOUNT_WORKSPACE_CONTAINER, RUNTIME_PROFILE_COMMODITY};
     let sandbox = |spec: Value| -> DynamicObject {
         serde_json::from_value(json!({
@@ -2761,7 +2759,6 @@ fn a_subfolder_workspace_stops_into_existing_subfolder_whatever_the_setting_says
     let on = TemplateOpts {
         runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
         disk_gib: 40,
-        workspace_subfolder: true,
         ..binding_opts()
     };
     let created = sandbox(render_sandbox_template(NS, &on)["spec"].clone());
@@ -2772,16 +2769,13 @@ fn a_subfolder_workspace_stops_into_existing_subfolder_whatever_the_setting_says
         "new-subfolder"
     );
 
-    // The setting is off again: a fresh render would be the whole volume, but
-    // the created Sandbox is what its stop patches.
-    let off = TemplateOpts {
-        workspace_subfolder: false,
-        ..on.clone()
-    };
-    assert_eq!(
-        render_sandbox_template(NS, &off)["spec"]["podTemplate"]["spec"]["initContainers"][index]["command"]
-            [4],
-        "new"
+    // The whole-volume layout's argument names no state a stop accepts.
+    let mut whole_volume = created.data.clone();
+    *whole_volume
+        .pointer_mut(&format!("{entry}/command/4"))
+        .unwrap() = json!("new");
+    assert!(
+        workspace_volume_existing(&sandbox(whole_volume["spec"].clone()), index, true).is_err()
     );
     assert!(
         workspace_volume_existing(&created, index, false)
@@ -2924,15 +2918,15 @@ fn a_mounted_block_workspace_becomes_existing_and_a_failed_one_stays_new() {
         operations,
         [
             json!({"op":"test","path":format!("{entry}/name"),"value":MOUNT_WORKSPACE_CONTAINER}),
-            json!({"op":"test","path":format!("{entry}/command/4"),"value":"new"}),
-            json!({"op":"replace","path":format!("{entry}/command/4"),"value":"existing"}),
+            json!({"op":"test","path":format!("{entry}/command/4"),"value":"new-subfolder"}),
+            json!({"op":"replace","path":format!("{entry}/command/4"),"value":"existing-subfolder"}),
         ]
     );
     let mut stopped = new.data.clone();
     assert!(apply_patch_fixture(&mut stopped, &json!(operations)));
     assert_eq!(
         stopped.pointer(&format!("{entry}/command/4")).unwrap(),
-        "existing"
+        "existing-subfolder"
     );
     assert!(
         workspace_volume_existing(&sandbox(stopped["spec"].clone()), index, true)
@@ -2955,7 +2949,7 @@ fn a_mounted_block_workspace_becomes_existing_and_a_failed_one_stays_new() {
     );
     assert_eq!(
         fork["podTemplate"]["spec"]["initContainers"][index]["command"][4],
-        "existing"
+        "existing-subfolder"
     );
     let fork = sandbox(fork);
     assert!(

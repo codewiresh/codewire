@@ -3,19 +3,19 @@
   "kind": "SandboxWarmPool",
   "metadata": {
     "annotations": {
-      "codewire.sh/pool-revision": "b55d3c94d752d36ee2b9cf1fabc57932a2ca78ca62aef7bebc276cd83f464496"
+      "codewire.sh/pool-revision": "fcc1b0b898be57ef666d83c48312cdccfe190494fc58f0072385ad1deab40237"
     },
     "labels": {
       "app.kubernetes.io/managed-by": "codewire",
       "codewire.sh/type": "workspace-pool"
     },
-    "name": "cw-pool-1000m-4096mi-10gi-96e2c0d4",
+    "name": "cw-pool-1000m-4096mi-10gi-d0d81360",
     "namespace": "dev-sandboxes"
   },
   "spec": {
     "replicas": 2,
     "sandboxTemplateRef": {
-      "name": "cw-pool-1000m-4096mi-10gi-96e2c0d4"
+      "name": "cw-pool-1000m-4096mi-10gi-d0d81360"
     },
     "updateStrategy": {
       "type": "Recreate"
