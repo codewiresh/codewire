@@ -1391,7 +1391,7 @@ pub(crate) struct EnvCreateArgs {
         long,
         value_name = "SNAPSHOT",
         group = "restore_source",
-        help = "Start from a disk snapshot (`cw snapshot`; with --cloud, a hosted one and its disk only) instead of provisioning: its image, workspace and disks, with fresh identity; local VMs on Linux"
+        help = "Start from a disk snapshot (`cw snapshot`; with --cloud, a hosted one and its disk only) instead of provisioning: its image, workspace and disks, with fresh identity"
     )]
     snapshot: Option<String>,
     #[arg(

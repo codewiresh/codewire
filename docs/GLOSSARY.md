@@ -75,8 +75,8 @@ snapshot.
 Saved state that Codewire can reuse or restore. Always qualify what was saved:
 a skill snapshot, disk snapshot, workspace snapshot, or environment snapshot.
 Skill snapshots and disk snapshots are implemented today: `cw snapshot` saves a
-stopped environment's disks, locally on Linux or in the cloud. A snapshot holds
-no memory; that is a VM checkpoint.
+stopped environment's disks, locally on Linux or a Mac, or in the cloud. A
+snapshot holds no memory; that is a VM checkpoint.
 
 ## VM checkpoint
 

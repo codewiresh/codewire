@@ -7,6 +7,7 @@ use serde_json::json;
 use zeroize::Zeroizing;
 
 use super::*;
+use crate::delivered_logins::claude::NONCE_LENGTH;
 
 const ACCESS: &str = "sk-ant-oat01-synthetic-claude-access-1";
 const ROTATED: &str = "sk-ant-oat01-synthetic-claude-access-2";

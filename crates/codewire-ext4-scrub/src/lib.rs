@@ -11,27 +11,29 @@
 //! that is itself the boundary ([`SystemTools`]).
 //!
 //! There are two backends. An image file has its ranges punched out
-//! ([`punch_unreadable_blocks`]); a block device has them discarded, then
-//! overwritten wherever they still read as data, then read back from the
-//! device ([`wipe_unreadable_blocks`]).
+//! ([`punch_unreadable_blocks`]), on Linux and macOS; a block device, on
+//! Linux, has them discarded, then overwritten wherever they still read as
+//! data, then read back from the device ([`wipe_unreadable_blocks`]).
 //!
 //! Before either, a caller removes files through [`files`], with debugfs on
 //! the unmounted disk.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
+#[cfg(target_os = "linux")]
 mod block;
 pub mod files;
+mod punch;
 mod ranges;
 
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{FileExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 pub use block::{WipeReport, wipe_unreadable_blocks};
 pub use ranges::{FileExtent, parse_extent};
 
@@ -86,8 +88,10 @@ pub trait Tools: Sync {
 /// e2fsprogs as they are, for a disk inside a VM that is itself the boundary,
 /// such as a hosted clearing Sandbox's. A tool is taken only from `/usr/sbin`,
 /// `/sbin` or `/usr/bin`, never `PATH`, and only when only root can change it.
+#[cfg(target_os = "linux")]
 pub struct SystemTools;
 
+#[cfg(target_os = "linux")]
 impl Tools for SystemTools {
     fn program(&self, name: &'static str) -> Option<PathBuf> {
         use std::os::unix::fs::MetadataExt as _;
@@ -176,7 +180,7 @@ pub async fn punch_unreadable_blocks(
             .checked_mul(block_size)
             .filter(|bytes| offset.saturating_add(*bytes) <= length)
             .ok_or(Error::Unreadable("dumpe2fs"))?;
-        punch_hole(&image, offset, bytes)?;
+        punch::punch_hole(&image, offset, bytes)?;
     }
     image.sync_all()?;
     verify_samples(&image, &ranges, block_size)
@@ -226,32 +230,35 @@ fn verify_samples(image: &File, ranges: &[(u64, u64)], block_size: u64) -> Resul
     Ok(())
 }
 
-fn punch_hole(image: &File, offset: u64, bytes: u64) -> io::Result<()> {
-    let (Ok(offset), Ok(bytes)) = (libc::off_t::try_from(offset), libc::off_t::try_from(bytes))
-    else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "range too large",
-        ));
-    };
-    // SAFETY: a plain fallocate on a live descriptor.
-    let result = unsafe {
-        libc::fallocate(
-            image.as_raw_fd(),
-            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
-            offset,
-            bytes,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
 fn program(tools: &impl Tools, name: &'static str) -> Result<PathBuf, Error> {
     tools.program(name).ok_or(Error::ToolUnavailable(name))
+}
+
+/// `name arguments... disk` through `tools`, with the one environment every
+/// e2fsprogs run here gets: none of the supervisor's, the C locale, no pager,
+/// no e2fsck configuration and no readline. `TZ` is set and empty, which libc
+/// takes as UTC without reading a zone file; a Mac's Seatbelt profile denies
+/// and logs each such read, and `TZ=UTC0` still makes one on macOS 27. The
+/// scrub reads no times. The caller sets the standard streams.
+fn tool_command(
+    tools: &impl Tools,
+    name: &'static str,
+    arguments: &[&str],
+    disk: &Path,
+) -> Result<tokio::process::Command, Error> {
+    let program = program(tools, name)?;
+    let mut command = tools
+        .command(&program, arguments, disk)
+        .map_err(|error| Error::Confinement(name, error))?;
+    command
+        .env_clear()
+        .env("LC_ALL", "C")
+        .env("PAGER", "__none__")
+        .env("DEBUGFS_PAGER", "__none__")
+        .env("E2FSCK_CONFIG", "/dev/null")
+        .env("SS_READLINE_PATH", "")
+        .env("TZ", "");
+    Ok(command)
 }
 
 /// Nothing on a tool's stderr but its version banner.
@@ -289,17 +296,7 @@ async fn run_tool_with_input(
 ) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), Error> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    let program = program(tools, name)?;
-    let mut command = tools
-        .command(&program, arguments, disk)
-        .map_err(|error| Error::Confinement(name, error))?;
-    let mut child = command
-        .env_clear()
-        .env("LC_ALL", "C")
-        .env("PAGER", "__none__")
-        .env("DEBUGFS_PAGER", "__none__")
-        .env("E2FSCK_CONFIG", "/dev/null")
-        .env("SS_READLINE_PATH", "")
+    let mut child = tool_command(tools, name, arguments, disk)?
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -343,4 +340,54 @@ async fn run_tool_with_input(
         return Err(Error::Unreadable(name));
     }
     Ok((code, output, errors))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each tool is a shell that records the time zone and home directory it
+    /// was given.
+    struct Recorder(PathBuf);
+
+    impl Tools for Recorder {
+        fn program(&self, _name: &'static str) -> Option<PathBuf> {
+            Some(PathBuf::from("/bin/sh"))
+        }
+
+        fn command(
+            &self,
+            program: &Path,
+            _leading_args: &[&str],
+            _disk: &Path,
+        ) -> io::Result<tokio::process::Command> {
+            let mut command = tokio::process::Command::new(program);
+            command
+                .arg("-c")
+                .arg(r#"printf 'TZ=%s HOME=%s\n' "${TZ-unset}" "${HOME-unset}" > "$0""#)
+                .arg(&self.0);
+            Ok(command)
+        }
+    }
+
+    /// The single-tool runs and the punch's inode read alike.
+    #[tokio::test]
+    async fn every_tool_run_gets_an_empty_time_zone_and_none_of_the_callers_environment() {
+        let scratch = tempfile::tempdir().unwrap();
+        let record = scratch.path().join("environment");
+        let tools = Recorder(record.clone());
+        let disk = scratch.path().join("disk.img");
+        let given = || std::fs::read_to_string(&record).unwrap();
+        assert!(std::env::var_os("HOME").is_some());
+        e2fsck(&tools, &disk).await.unwrap();
+        assert_eq!(given(), "TZ= HOME=unset\n");
+        std::fs::remove_file(&record).unwrap();
+        // The shell answers no stat, so the read fails after the run.
+        assert!(
+            ranges::unreadable_file_blocks(&tools, &disk, &[12], 4096)
+                .await
+                .is_err()
+        );
+        assert_eq!(given(), "TZ= HOME=unset\n");
+    }
 }

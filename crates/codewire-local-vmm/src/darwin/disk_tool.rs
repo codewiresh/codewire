@@ -74,7 +74,10 @@ pub(crate) fn command(
         .args(leading_args)
         .arg(&disk)
         // The profile cannot read the supervisor's working directory.
-        .current_dir("/");
+        .current_dir("/")
+        // sandbox-exec execs the tool in its own process, so a tool its
+        // caller gives up on, at a timeout, is killed, as on Linux.
+        .kill_on_drop(true);
     // SAFETY: the sweep makes only getdtablesize and fcntl calls, both
     // async-signal-safe, between fork and exec. The spawn guard requires
     // each preparation to run the sweep itself.

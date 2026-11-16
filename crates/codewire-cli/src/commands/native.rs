@@ -756,7 +756,6 @@ pub(crate) const MAXIMUM_SNAPSHOT_COUNT: u32 = 16;
 const SNAPSHOT_RESTORE_PARALLELISM: usize = 2;
 
 /// One environment made from a snapshot, as `--output json` reports it.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Serialize)]
 struct SnapshotRestoreResult {
     name: String,
@@ -776,22 +775,13 @@ pub(crate) async fn create_native_environments_from_snapshot(
     globals: &Globals,
     args: EnvCreateArgs,
 ) -> anyhow::Result<()> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (globals, args);
-        anyhow::bail!("local disk snapshots need a Linux host for now")
+    if args.checkpoint.is_some() {
+        super::checkpoint::require_local_checkpoints()?;
     }
-    #[cfg(target_os = "linux")]
-    {
-        create_from_snapshot_on_linux(globals, args).await
-    }
+    create_from_snapshot(globals, args).await
 }
 
-#[cfg(target_os = "linux")]
-async fn create_from_snapshot_on_linux(
-    globals: &Globals,
-    args: EnvCreateArgs,
-) -> anyhow::Result<()> {
+async fn create_from_snapshot(globals: &Globals, args: EnvCreateArgs) -> anyhow::Result<()> {
     host_support::require_local_vm_host()?;
     reject_snapshot_create_options(&args)?;
     let client = native_boot_client().await?;

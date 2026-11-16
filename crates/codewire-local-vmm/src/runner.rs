@@ -839,13 +839,19 @@ fn same_disk_object_ignoring_size(
 /// `program leading_args... disk`. e2fsck and resize2fs parse a filesystem
 /// the guest wrote, so they run confined to that one disk
 /// ([`crate::darwin::disk_tool`] on macOS, [`crate::linux::disk_tool`] on
-/// Linux). The caller sets the environment and standard streams.
+/// Linux), with none of the supervisor's environment: the C locale and an
+/// empty `TZ`, which libc takes as UTC without reading a zone file. A Mac's
+/// profile denies and logs each such read, and `TZ=UTC0` still makes one on
+/// macOS 27. The caller adds what its tool reads and sets the standard
+/// streams.
 fn disk_tool_command(
     program: &Path,
     leading_args: &[&str],
     disk: &Path,
 ) -> std::io::Result<tokio::process::Command> {
-    crate::host::disk_tool::command(program, leading_args, disk)
+    let mut command = crate::host::disk_tool::command(program, leading_args, disk)?;
+    command.env_clear().env("LC_ALL", "C").env("TZ", "");
+    Ok(command)
 }
 
 async fn run_e2fsck(disk: &Path) -> Result<(), RunnerError> {
@@ -856,8 +862,6 @@ async fn run_e2fsck(disk: &Path) -> Result<(), RunnerError> {
     };
     let status = disk_tool_command(&program, &["-p", "-f"], disk)
         .map_err(confinement)?
-        .env_clear()
-        .env("LC_ALL", "C")
         .env("E2FSCK_CONFIG", "/dev/null")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -879,8 +883,6 @@ async fn run_resize2fs(disk: &Path) -> Result<(), RunnerError> {
     };
     let status = disk_tool_command(&program, &[], disk)
         .map_err(confinement)?
-        .env_clear()
-        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -3,10 +3,6 @@
 //! --snapshot NAME` starts environments from one, each with fresh identity.
 //! Not a VM checkpoint, which would also save a running VM's memory.
 
-// Snapshots are Linux only, so most of this module is unused on other
-// targets.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
-
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
@@ -77,38 +73,19 @@ pub(crate) async fn handle_snapshot_command(
             "name a stopped environment: `cw snapshot create ENV [--name NAME]`",
         )?;
         if effective.placement.is_none() {
-            #[cfg(target_os = "linux")]
-            {
-                effective.placement = Some(
-                    if super::guided::choose(
-                        "Where is the stopped environment?",
-                        &[
-                            super::guided::Choice::new("On this computer", "Local disk snapshots"),
-                            super::guided::Choice::new("In Codewire cloud", "Cloud disk snapshots"),
-                        ],
-                    )? == 0
-                    {
-                        EnvironmentPlacement::Local
-                    } else {
-                        EnvironmentPlacement::Platform
-                    },
-                );
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                super::guided::choose(
+            effective.placement = Some(
+                if super::guided::choose(
                     "Where is the stopped environment?",
-                    &[super::guided::Choice::new(
-                        "In Codewire cloud",
-                        "Local disk snapshots require Linux",
-                    )],
-                )?;
-                effective.placement = Some(EnvironmentPlacement::Platform);
-            }
-        }
-        if effective.placement == Some(EnvironmentPlacement::Local) && !cfg!(target_os = "linux") {
-            anyhow::bail!(
-                "local disk snapshots need a Linux host for now; use --cloud for cloud snapshots"
+                    &[
+                        super::guided::Choice::new("On this computer", "Local disk snapshots"),
+                        super::guided::Choice::new("In Codewire cloud", "Cloud disk snapshots"),
+                    ],
+                )? == 0
+                {
+                    EnvironmentPlacement::Local
+                } else {
+                    EnvironmentPlacement::Platform
+                },
             );
         }
         let inventory = super::inventory::environment_inventory(
@@ -157,15 +134,7 @@ pub(crate) async fn handle_snapshot_command(
     if globals.placement == Some(EnvironmentPlacement::Platform) {
         return platform::handle_platform_snapshot_command(globals, args.command).await;
     }
-    #[cfg(target_os = "linux")]
-    {
-        handle_local_snapshot_command(globals, args.command).await
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = args;
-        anyhow::bail!("local disk snapshots need a Linux host for now")
-    }
+    handle_local_snapshot_command(globals, args.command).await
 }
 
 fn snapshot_candidates(
@@ -188,7 +157,6 @@ fn snapshot_candidates(
     Ok(&inventory.entries)
 }
 
-#[cfg(target_os = "linux")]
 async fn handle_local_snapshot_command(
     globals: &Globals,
     command: SnapshotCommand,

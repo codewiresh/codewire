@@ -52,8 +52,9 @@ comes back after a reboot with nobody logged in (owner, 2026-11-13). A Mac alway
 Keychain, so `--key-store file` is refused there and nothing falls back."""
 
 [groups.snapshots]
-reason = """Local disk snapshots and VM checkpoints are not yet implemented on macOS \
-(#3803): a missing implementation, refused with that reason."""
+reason = """VM checkpoints, and forks of them, are not yet implemented on macOS (#3803, \
+#4654): a missing implementation, refused with that reason. Local disk snapshots run on \
+both."""
 
 [groups.executable]
 reason = """The running executable: Linux opens its image through /proc/self/exe even \
@@ -97,7 +98,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli-bin/tests/retained_mesh.rs" = { group = "linux-tests", count = 6 }
 "crates/codewire-cli-bin/tests/support/cw_fixture.rs" = { group = "linux-tests", count = 10 }
 "crates/codewire-cli/src/build_record.rs" = { group = "executable", count = 1 }
-"crates/codewire-cli/src/commands/checkpoint.rs" = { group = "snapshots", count = 4 }
+"crates/codewire-cli/src/commands/checkpoint.rs" = { group = "snapshots", count = 5 }
 "crates/codewire-cli/src/commands/collaboration.rs" = { group = "member", count = 1 }
 "crates/codewire-cli/src/commands/credential_authority.rs" = { group = "credentials", count = 34 }
 "crates/codewire-cli/src/commands/credential_authority/ssh.rs" = { group = "credentials", count = 17 }
@@ -113,7 +114,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/commands/mesh_commands/owner.rs" = { group = "mesh", count = 1 }
 "crates/codewire-cli/src/commands/mesh_commands/retained.rs" = { group = "member", count = 2 }
 "crates/codewire-cli/src/commands/mod.rs" = { group = "dispatch", count = 15 }
-"crates/codewire-cli/src/commands/native.rs" = { group = "vm-backend", count = 16 }
+"crates/codewire-cli/src/commands/native.rs" = { group = "vm-backend", count = 12 }
 "crates/codewire-cli/src/commands/native/host_support.rs" = { group = "vm-backend", count = 7 }
 "crates/codewire-cli/src/commands/native/local_https.rs" = { group = "local-https", count = 9 }
 "crates/codewire-cli/src/commands/native/sources.rs" = { group = "vm-backend", count = 1 }
@@ -126,7 +127,6 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/commands/sessions/agents/noel.rs" = { group = "member", count = 6 }
 "crates/codewire-cli/src/commands/sessions/agents/pause.rs" = { group = "member", count = 11 }
 "crates/codewire-cli/src/commands/sessions/agents/turn_failure_tests.rs" = { group = "linux-tests", count = 2 }
-"crates/codewire-cli/src/commands/snapshot.rs" = { group = "snapshots", count = 7 }
 "crates/codewire-cli/src/commands/storage_placement.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli/src/commands/tests/environment.rs" = { group = "linux-tests", count = 5 }
 "crates/codewire-cli/src/commands/tests/sessions.rs" = { group = "linux-tests", count = 5 }

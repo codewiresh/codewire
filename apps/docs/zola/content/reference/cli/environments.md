@@ -553,7 +553,7 @@ At an interactive terminal, `cw snapshot create` without an environment asks
 for a supported location, then lists eligible stopped environments. Choose a
 source and snapshot name and review before creating the snapshot. Workload
 files are retained; Codewire-delivered sign-ins are removed. Local disk
-snapshots currently require Linux; other hosts offer cloud snapshots.
+snapshots run on Linux and on a Mac.
 Noninteractive and JSON calls must name the source environment explicitly.
 
 ## Cloud snapshots

@@ -1,4 +1,8 @@
 //! The debugfs file step on real e2fsprogs images.
+//!
+//! They run the system's e2fsprogs, which a Mac lacks; on macOS the same
+//! steps run in codewire-local-vmm's snapshot tests, with the runtime's own.
+#![cfg(target_os = "linux")]
 
 use std::fs;
 use std::io;

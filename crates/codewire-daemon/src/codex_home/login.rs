@@ -53,16 +53,13 @@ use crate::agent_login::{
 };
 #[cfg(test)]
 use crate::agent_login::{LOGIN_RETRY_MIN, Retry};
+use crate::delivered_logins::codex::codewire_document;
+pub use crate::delivered_logins::codex::{
+    CODEX_AUTH_FILE_NAME, CODEX_MANAGED_REFRESH_TOKEN, is_codewire_auth_file, is_codewire_leftover,
+    is_codewire_temporary, is_codewire_write_in_progress,
+};
 use crate::private_files::{Entry, OwnedEntry, PrivateDirectory, ensure_private_directory};
 
-/// Codex's login file in its home.
-pub const CODEX_AUTH_FILE_NAME: &str = "auth.json";
-/// The refresh token Codewire writes. It must not be empty: `codex logout`
-/// revokes the refresh token, or the access token when the refresh token is
-/// empty, and Codewire's access token must stay usable by the creator's other
-/// Sandboxes.
-pub const CODEX_MANAGED_REFRESH_TOKEN: &str = "codewire-managed-no-refresh-token";
-const _: () = assert!(!CODEX_MANAGED_REFRESH_TOKEN.is_empty());
 /// Container-local state: a new container (a Sandbox restart) starts empty.
 pub const CODEX_LOGIN_STATE_DIRECTORY: &str = "/tmp/codewire-codex-login";
 /// How often a delivered login is checked for rotation and revocation, unless
@@ -351,11 +348,6 @@ fn classify(home: &PrivateDirectory, name: &str) -> io::Result<AuthFile> {
     })
 }
 
-/// `contents` parsed, when it is an `auth.json` Codewire wrote.
-fn codewire_document(contents: &[u8]) -> Option<Document> {
-    Document::parse(contents).filter(Document::is_codewire)
-}
-
 /// Install a new `auth.json` where there was none. A file that appeared since
 /// the inspection is the user's and stays: the rename never replaces.
 fn install_new(home: &PrivateDirectory, contents: &[u8]) -> io::Result<bool> {
@@ -434,54 +426,6 @@ fn temporary_name(purpose: &str) -> String {
         ".{CODEX_AUTH_FILE_NAME}.codewire.{}.{purpose}",
         uuid::Uuid::new_v4().simple()
     )
-}
-
-/// `auth.json` as Codex writes it.
-impl Document {
-    fn tokens(&self) -> Option<&Map<String, Value>> {
-        self.object()?.get("tokens")?.as_object()
-    }
-
-    /// Codewire's: ChatGPT mode with exactly the placeholder refresh token.
-    fn is_codewire(&self) -> bool {
-        self.object()
-            .and_then(|object| object.get("auth_mode"))
-            .and_then(Value::as_str)
-            == Some("chatgpt")
-            && self
-                .tokens()
-                .and_then(|tokens| tokens.get("refresh_token"))
-                .and_then(Value::as_str)
-                == Some(CODEX_MANAGED_REFRESH_TOKEN)
-    }
-}
-
-/// Whether `contents` is an `auth.json` Codewire wrote: ChatGPT mode with
-/// exactly the placeholder refresh token. The rule the daemon removes by, for a reader
-/// of a disk image that holds such a file, such as a local VM's disk snapshot
-/// capture (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery
-/// exceptions").
-pub fn is_codewire_auth_file(contents: &[u8]) -> bool {
-    codewire_document(contents).is_some()
-}
-
-/// Whether `name` in Codex's home is one of Codewire's temporaries beside
-/// `auth.json`.
-pub fn is_codewire_temporary(name: &str) -> bool {
-    name.starts_with(&format!(".{CODEX_AUTH_FILE_NAME}.codewire."))
-}
-
-/// Whether the temporary `name` is a write in progress, which is Codewire's
-/// whatever it holds, so it is removed unread.
-pub fn is_codewire_write_in_progress(name: &str) -> bool {
-    is_codewire_temporary(name) && name.ends_with(".new")
-}
-
-/// Whether the temporary `name` holding `contents` is Codewire's: a write in
-/// progress, or Codewire's login. A user's file set aside stays.
-pub fn is_codewire_leftover(name: &str, contents: &[u8]) -> bool {
-    is_codewire_write_in_progress(name)
-        || (is_codewire_temporary(name) && is_codewire_auth_file(contents))
 }
 
 /// Codex 0.157's standard ChatGPT `auth.json`, keeping every other field of

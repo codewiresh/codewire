@@ -381,7 +381,8 @@ started with until they restart, the next `cw` release carries Cloud
 Hypervisor v54.0, and a snapshot taken from a VM still on the previous one
 starts on it.
 
-Disk snapshots need Linux and this `cw`'s supervisor (protocol 19); an older
+Disk snapshots need this `cw`'s supervisor (protocol 19), on Linux or a Mac
+(docs/dev/MACOS-CLI.md); an older
 cw's supervisor still serving your VMs refuses them until `cw upgrade --vms`.
 An older supervisor knows nothing of snapshots: after `cw upgrade rollback`, its
 garbage collection can remove the runtime a snapshot's root was built with, and

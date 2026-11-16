@@ -26,17 +26,12 @@
 //! environment's id, and the guest clears both agents' delivered logins on a
 //! disk's first boot as another environment.
 
-// Snapshots are Linux only, so most of this module is unused on other
-// targets.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
-
 use super::*;
 use crate::control::v1::local_snapshot_service_server::LocalSnapshotService;
 use crate::snapshot_store::{
     Retained, SnapshotKind, SnapshotRow, SnapshotState, SnapshotStore, SnapshotStoreError,
 };
 
-#[cfg(target_os = "linux")]
 use crate::fs_clone::{self, CloneMode};
 
 const SNAPSHOTS_DIRECTORY: &str = "snapshots";
@@ -51,15 +46,11 @@ const RESTORE_STAGING_PREFIX: &str = ".restore-";
 /// `trash/snapshot-delete-<operation>-<id>`, which the orphan inventory knows.
 pub(crate) const TRASH_PREFIX: &str = "snapshot-delete-";
 /// Free space a sparse copy leaves on the state root's filesystem.
-#[cfg(target_os = "linux")]
 const COPY_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
 /// The largest login file capture reads from a disk image, as the daemon.
-#[cfg(target_os = "linux")]
 const MAXIMUM_LOGIN_FILE_BYTES: u64 = 1024 * 1024;
 const SPACE_WARNING: &str = "a snapshot and the environments made from it share space only until they change: each copy that diverges takes its own space, and a full host disk can force a running VM's filesystem read-only";
 const COPY_WARNING: &str = "this filesystem cannot share blocks between files, so the snapshot is a full copy and holds its disks' allocated bytes now";
-#[cfg(not(target_os = "linux"))]
-const LINUX_ONLY: &str = "local disk snapshots need a Linux host for now";
 
 /// Where a disk came from and goes back to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -403,6 +394,38 @@ fn set_test_hook(engine_root: &Path, point: &'static str, hook: impl FnOnce() + 
         .insert((engine_root.to_owned(), point), Box::new(hook));
 }
 
+/// The e2fsprogs program a test makes capture find missing, by engine root.
+#[cfg(test)]
+static MISSING_SCRUB_TOOLS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, &'static str>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn set_missing_scrub_tool(engine_root: &Path, name: &'static str) {
+    MISSING_SCRUB_TOOLS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(engine_root.to_owned(), name);
+}
+
+/// Whether a test made capture find `name` missing.
+fn missing_scrub_tool(engine_root: &Path, name: &str) -> bool {
+    #[cfg(test)]
+    {
+        MISSING_SCRUB_TOOLS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(engine_root)
+            == Some(&name)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = (engine_root, name);
+        false
+    }
+}
+
 /// Run the test hook at `point`, if one is set.
 fn test_hook(engine_root: &Path, point: &'static str) {
     #[cfg(test)]
@@ -646,47 +669,42 @@ pub(super) async fn record_inputs(
     let Some(restore) = request.snapshot.as_ref() else {
         return Ok(None);
     };
-    #[cfg(not(target_os = "linux"))]
+    let id = canonical_id(&restore.snapshot_id).ok_or(SupervisorError::InvalidRequest)?;
+    let (_, manifest) = ready_snapshot(&supervisor.config, id)?;
+    if manifest.checkpoint.is_some()
+        && (restore.vcpus != u32::from(manifest.resources.vcpus)
+            || restore.memory_mib != manifest.resources.memory_mib)
     {
-        let _ = (supervisor, restore);
-        Err(SupervisorError::InvalidRequest)
+        return Err(SupervisorError::InvalidRequest);
+    }
+    let artifact_generation = manifest.root_generation.artifact_generation()?.to_owned();
+    supervisor
+        .require_guest_seed_abi_for_generation(&artifact_generation)
+        .await?;
+    if fs::symlink_metadata(supervisor.config.cw_runtime_lock()).is_ok() {
+        let engine = PrivateRoot::open(&supervisor.config.engine_root())?;
+        RuntimeArtifactStore::create(&engine)
+            .map_err(artifact_store_error)?
+            .open_generation(&artifact_generation)
+            .await
+            .map_err(artifact_store_error)?
+            .require_live_cw_runtime_publisher()?;
     }
     #[cfg(target_os = "linux")]
-    {
-        let id = canonical_id(&restore.snapshot_id).ok_or(SupervisorError::InvalidRequest)?;
-        let (_, manifest) = ready_snapshot(&supervisor.config, id)?;
-        if manifest.checkpoint.is_some()
-            && (restore.vcpus != u32::from(manifest.resources.vcpus)
-                || restore.memory_mib != manifest.resources.memory_mib)
-        {
-            return Err(SupervisorError::InvalidRequest);
-        }
-        let artifact_generation = manifest.root_generation.artifact_generation()?.to_owned();
-        supervisor
-            .require_guest_seed_abi_for_generation(&artifact_generation)
-            .await?;
-        if fs::symlink_metadata(supervisor.config.cw_runtime_lock()).is_ok() {
-            let engine = PrivateRoot::open(&supervisor.config.engine_root())?;
-            RuntimeArtifactStore::create(&engine)
-                .map_err(artifact_store_error)?
-                .open_generation(&artifact_generation)
-                .await
-                .map_err(artifact_store_error)?
-                .require_live_cw_runtime_publisher()?;
-        }
-        crate::linux::preflight::preflight().map_err(RunnerError::from)?;
-        Ok(Some(RestoreRecord {
-            artifact_generation,
-            checkpoint_cw_runtime: manifest
-                .checkpoint
-                .as_ref()
-                .map(|checkpoint| checkpoint.boot.cw_runtime_catalog_generation.clone()),
-            vcpus: u8::try_from(restore.vcpus).map_err(|_| SupervisorError::InvalidRequest)?,
-            memory_mib: restore.memory_mib,
-            disk_bytes: manifest.resources.disk_bytes,
-            docker_disk_bytes: manifest.resources.docker_disk_bytes,
-        }))
-    }
+    crate::linux::preflight::preflight().map_err(RunnerError::from)?;
+    #[cfg(target_os = "macos")]
+    supervisor.core().require_vz_helper()?;
+    Ok(Some(RestoreRecord {
+        artifact_generation,
+        checkpoint_cw_runtime: manifest
+            .checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.boot.cw_runtime_catalog_generation.clone()),
+        vcpus: u8::try_from(restore.vcpus).map_err(|_| SupervisorError::InvalidRequest)?,
+        memory_mib: restore.memory_mib,
+        disk_bytes: manifest.resources.disk_bytes,
+        docker_disk_bytes: manifest.resources.docker_disk_bytes,
+    }))
 }
 
 /// Open a VM checkpoint's recorded cw runtime catalog from the private store,
@@ -884,56 +902,56 @@ pub(super) async fn restore_plan(
     supervisor: &Supervisor,
     request: &v1::CreateEnvironmentRequest,
 ) -> Result<(WorkspacePlan, DirectShareDiscriminators), Status> {
+    let restore = request
+        .snapshot
+        .as_ref()
+        .ok_or_else(|| Status::invalid_argument("the create names no snapshot"))?;
+    let id = canonical_id(&restore.snapshot_id)
+        .ok_or_else(|| Status::invalid_argument("a snapshot is named by its id"))?;
+    let config = supervisor.config.clone();
+    let (row, manifest) = tokio::task::spawn_blocking(move || ready_snapshot(&config, id))
+        .await
+        .map_err(|_| Status::internal("snapshot admission task failed"))?
+        .map_err(|error| match error {
+            SupervisorError::NotFound(_) => Status::not_found(format!(
+                "no local snapshot has id {id}; list them with `cw snapshot ls`"
+            )),
+            other => status(other),
+        })?;
+    admit_restore_request(&row, &manifest, request)?;
+    // A fork of a VM checkpoint needs this host to take checkpoints; the CLI
+    // refuses it first.
     #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (supervisor, request);
-        Err(Status::unimplemented(LINUX_ONLY))
+    if manifest.checkpoint.is_some() {
+        return Err(Status::failed_precondition(
+            "VM checkpoints need a Linux host for now",
+        ));
     }
-    #[cfg(target_os = "linux")]
+    // A fork boots the cw runtime catalog its VM checkpoint's memory was
+    // booted with, never the installed one; refuse here, with the
+    // checkpoint's name, if that catalog is gone (#3046).
+    if let Some(generation) = manifest
+        .checkpoint
+        .as_ref()
+        .and_then(|checkpoint| checkpoint.boot.cw_runtime_catalog_generation.clone())
     {
-        let restore = request
-            .snapshot
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument("the create names no snapshot"))?;
-        let id = canonical_id(&restore.snapshot_id)
-            .ok_or_else(|| Status::invalid_argument("a snapshot is named by its id"))?;
         let config = supervisor.config.clone();
-        let (row, manifest) = tokio::task::spawn_blocking(move || ready_snapshot(&config, id))
-            .await
-            .map_err(|_| Status::internal("snapshot admission task failed"))?
-            .map_err(|error| match error {
-                SupervisorError::NotFound(_) => Status::not_found(format!(
-                    "no local snapshot has id {id}; list them with `cw snapshot ls`"
-                )),
-                other => status(other),
-            })?;
-        admit_restore_request(&row, &manifest, request)?;
-        // A fork boots the cw runtime catalog its VM checkpoint's memory was
-        // booted with, never the installed one; refuse here, with the
-        // checkpoint's name, if that catalog is gone (#3046).
-        if let Some(generation) = manifest
-            .checkpoint
-            .as_ref()
-            .and_then(|checkpoint| checkpoint.boot.cw_runtime_catalog_generation.clone())
-        {
-            let config = supervisor.config.clone();
-            let present = tokio::task::spawn_blocking(move || {
-                open_recorded_cw_runtime_catalog(&config, &generation).is_ok()
-            })
-            .await
-            .map_err(|_| Status::internal("snapshot admission task failed"))?;
-            if !present {
-                return Err(Status::failed_precondition(format!(
-                    "VM checkpoint {}'s cw runtime is no longer in the local store; it cannot be forked",
-                    row.name
-                )));
-            }
+        let present = tokio::task::spawn_blocking(move || {
+            open_recorded_cw_runtime_catalog(&config, &generation).is_ok()
+        })
+        .await
+        .map_err(|_| Status::internal("snapshot admission task failed"))?;
+        if !present {
+            return Err(Status::failed_precondition(format!(
+                "VM checkpoint {}'s cw runtime is no longer in the local store; it cannot be forked",
+                row.name
+            )));
         }
-        Ok((
-            manifest.workspace_plan,
-            DirectShareDiscriminators::decode(&manifest.direct_share_discriminators),
-        ))
     }
+    Ok((
+        manifest.workspace_plan,
+        DirectShareDiscriminators::decode(&manifest.direct_share_discriminators),
+    ))
 }
 
 /// Every refusal a restore's request can meet before it is journaled.
@@ -1046,51 +1064,42 @@ pub(super) async fn place_disks(
     environment_id: Uuid,
     operation: &OperationRecord,
 ) -> Result<OperationRecord, SupervisorError> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (supervisor, request, environment_id, operation);
-        Err(SupervisorError::InvalidRequest)
+    let restore = request
+        .snapshot
+        .as_ref()
+        .ok_or(SupervisorError::InvalidState)?;
+    let snapshot_id = canonical_id(&restore.snapshot_id).ok_or(SupervisorError::InvalidState)?;
+    let environment = supervisor.environment(&request.name)?;
+    if environment.id != environment_id {
+        return Err(SupervisorError::InvalidState);
     }
-    #[cfg(target_os = "linux")]
-    {
-        let restore = request
-            .snapshot
-            .as_ref()
-            .ok_or(SupervisorError::InvalidState)?;
-        let snapshot_id =
-            canonical_id(&restore.snapshot_id).ok_or(SupervisorError::InvalidState)?;
-        let environment = supervisor.environment(&request.name)?;
-        if environment.id != environment_id {
+    let config = supervisor.config.clone();
+    let operation_id = operation.operation_id;
+    let expected = (environment.disk_bytes, environment.docker_disk_bytes);
+    let root_generation = tokio::task::spawn_blocking(move || {
+        place_snapshot_tree(&config, snapshot_id, environment_id, operation_id, expected)
+    })
+    .await
+    .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
+    // ProvisionWorkspace is an idempotent external effect: the tree is
+    // published, then its root generation recorded (again, identically,
+    // on a replay), then the ordinary checkpoint taken.
+    supervisor.update_environment(&request.name, |environment| {
+        if environment.id != environment_id
+            || environment.active_artifact_generation.as_deref()
+                != Some(root_generation.artifact_generation()?)
+            || environment.staging_workspace_generation.is_some()
+            || environment
+                .active_workspace_generation
+                .as_ref()
+                .is_some_and(|active| active != &root_generation)
+        {
             return Err(SupervisorError::InvalidState);
         }
-        let config = supervisor.config.clone();
-        let operation_id = operation.operation_id;
-        let expected = (environment.disk_bytes, environment.docker_disk_bytes);
-        let root_generation = tokio::task::spawn_blocking(move || {
-            place_snapshot_tree(&config, snapshot_id, environment_id, operation_id, expected)
-        })
-        .await
-        .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
-        // ProvisionWorkspace is an idempotent external effect: the tree is
-        // published, then its root generation recorded (again, identically,
-        // on a replay), then the ordinary checkpoint taken.
-        supervisor.update_environment(&request.name, |environment| {
-            if environment.id != environment_id
-                || environment.active_artifact_generation.as_deref()
-                    != Some(root_generation.artifact_generation()?)
-                || environment.staging_workspace_generation.is_some()
-                || environment
-                    .active_workspace_generation
-                    .as_ref()
-                    .is_some_and(|active| active != &root_generation)
-            {
-                return Err(SupervisorError::InvalidState);
-            }
-            environment.active_workspace_generation = Some(root_generation);
-            Ok(())
-        })?;
-        supervisor.core().checkpoint_operation(operation)
-    }
+        environment.active_workspace_generation = Some(root_generation);
+        Ok(())
+    })?;
+    supervisor.core().checkpoint_operation(operation)
 }
 
 // ---------------------------------------------------------------------------
@@ -1149,36 +1158,9 @@ impl LocalSnapshotService for SupervisorRpc {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-async fn capture(
-    _supervisor: &Supervisor,
-    _request: v1::CreateSnapshotRequest,
-) -> Result<v1::Snapshot, Status> {
-    Err(Status::unimplemented(LINUX_ONLY))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn list(_config: &NativeRuntimeConfig) -> Result<Vec<v1::Snapshot>, Status> {
-    Err(Status::unimplemented(LINUX_ONLY))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn get(_config: &NativeRuntimeConfig, _selector: &str) -> Result<v1::Snapshot, Status> {
-    Err(Status::unimplemented(LINUX_ONLY))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn delete(_config: &NativeRuntimeConfig, _selector: &str) -> Result<v1::Snapshot, Status> {
-    Err(Status::unimplemented(LINUX_ONLY))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn reconcile(_engine_root: &Path, _store: &SnapshotStore) -> Result<(), SupervisorError> {
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-mod linux {
+/// Capture, placement, listing, deletion and reconciliation of the snapshot
+/// directories on this host.
+mod local {
     use std::fs::OpenOptions;
     use std::os::unix::fs::{FileExt as _, OpenOptionsExt as _};
 
@@ -1276,6 +1258,7 @@ mod linux {
         // runs until it ends.
         let _lease = supervisor.quiet_lease(&name).await.map_err(status)?;
         let environment = admit_source(supervisor, &name).await?;
+        require_scrub_tools(&supervisor.config)?;
         let proto = supervisor.core().environment_proto(&name).map_err(status)?;
         let discriminators = supervisor
             .core()
@@ -1874,7 +1857,7 @@ mod linux {
     }
 
     /// What capture does with one entry of a login directory, by the
-    /// daemon's own rules (`codex_home`, `claude_home`).
+    /// daemon's own rules (`codewire_daemon::delivered_logins`).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum LoginEntry {
         /// Not one of Codewire's names.
@@ -1889,17 +1872,17 @@ mod linux {
 
     impl LoginKind {
         fn entry(self, name: &str) -> LoginEntry {
-            use codewire_daemon::{claude_home, codex_home};
+            use codewire_daemon::delivered_logins::{claude, codex};
             let (file, temporary, in_progress) = match self {
                 Self::Codex => (
-                    codex_home::CODEX_AUTH_FILE_NAME,
-                    codex_home::is_codewire_temporary(name),
-                    codex_home::is_codewire_write_in_progress(name),
+                    codex::CODEX_AUTH_FILE_NAME,
+                    codex::is_codewire_temporary(name),
+                    codex::is_codewire_write_in_progress(name),
                 ),
                 Self::Claude => (
-                    claude_home::CLAUDE_CREDENTIALS_FILE_NAME,
-                    claude_home::is_codewire_temporary(name),
-                    claude_home::is_codewire_write_in_progress(name),
+                    claude::CLAUDE_CREDENTIALS_FILE_NAME,
+                    claude::is_codewire_temporary(name),
+                    claude::is_codewire_write_in_progress(name),
                 ),
             };
             if name == file {
@@ -1914,17 +1897,15 @@ mod linux {
         }
 
         fn codewire(self, name: &str, contents: &[u8]) -> bool {
-            use codewire_daemon::{claude_home, codex_home};
+            use codewire_daemon::delivered_logins::{claude, codex};
             match (self, self.entry(name)) {
                 (_, LoginEntry::Other) => false,
                 (_, LoginEntry::WriteInProgress) => true,
-                (Self::Codex, LoginEntry::File) => codex_home::is_codewire_auth_file(contents),
-                (Self::Claude, LoginEntry::File) => claude_home::holds_codewire_login(contents),
-                (Self::Codex, LoginEntry::Temporary) => {
-                    codex_home::is_codewire_leftover(name, contents)
-                }
+                (Self::Codex, LoginEntry::File) => codex::is_codewire_auth_file(contents),
+                (Self::Claude, LoginEntry::File) => claude::holds_codewire_login(contents),
+                (Self::Codex, LoginEntry::Temporary) => codex::is_codewire_leftover(name, contents),
                 (Self::Claude, LoginEntry::Temporary) => {
-                    claude_home::is_codewire_leftover(name, contents)
+                    claude::is_codewire_leftover(name, contents)
                 }
             }
         }
@@ -1932,8 +1913,18 @@ mod linux {
 
     #[derive(Debug, thiserror::Error)]
     pub(crate) enum ScrubError {
-        #[error(
-            "the host's e2fsprogs (debugfs, e2fsck, dumpe2fs) are unavailable; install your distribution's e2fsprogs package"
+        #[cfg_attr(
+            target_os = "linux",
+            error(
+                "the host's e2fsprogs (debugfs, e2fsck, dumpe2fs) are unavailable; install your distribution's e2fsprogs package"
+            )
+        )]
+        // A runtime packed before dumpe2fs shipped (#4654) has none.
+        #[cfg_attr(
+            target_os = "macos",
+            error(
+                "the local VM runtime's e2fsprogs (debugfs, e2fsck, dumpe2fs) are missing or changed; reinstall the local VM runtime: cw setup --local --replace"
+            )
         )]
         ToolUnavailable,
         #[error("{0} could not run confined: {1}")]
@@ -2056,9 +2047,35 @@ mod linux {
         Ok(codewire_ext4_scrub::e2fsck(&HostTools, disk).await?)
     }
 
-    /// The host's e2fsprogs, each confined to the disk alone
-    /// ([`crate::linux::disk_tool`]).
+    /// The e2fsprogs this host runs, each confined to the disk alone
+    /// ([`crate::host::disk_tool`]): the system's on Linux, the local VM
+    /// runtime's on a Mac.
     struct HostTools;
+
+    /// Every e2fsprogs program the scrub runs is found, before anything is
+    /// copied. A Mac admits the installed runtime's programs first, as a
+    /// create does before it prepares a workspace.
+    fn require_scrub_tools(config: &NativeRuntimeConfig) -> Result<(), Status> {
+        // A runtime that cannot be admitted leaves this process's tools as
+        // they were: none, which the check below refuses, or another
+        // runtime's admitted earlier, each re-hashed before every use. Either
+        // way no unadmitted program runs.
+        #[cfg(target_os = "macos")]
+        if let Ok(lock) = crate::artifact::ArtifactLock::read(&config.artifact_lock) {
+            let _ = lock.admit_host_tools(&config.artifact_root);
+        }
+        let engine_root = config.engine_root();
+        let found = |name: &'static str| {
+            !missing_scrub_tool(&engine_root, name) && crate::host::e2fsprogs(name).is_some()
+        };
+        if ["e2fsck", "debugfs", "dumpe2fs"].into_iter().all(found) {
+            Ok(())
+        } else {
+            Err(Status::failed_precondition(
+                ScrubError::ToolUnavailable.to_string(),
+            ))
+        }
+    }
 
     impl codewire_ext4_scrub::Tools for HostTools {
         fn program(&self, name: &'static str) -> Option<PathBuf> {
@@ -2071,7 +2088,7 @@ mod linux {
             leading_args: &[&str],
             disk: &Path,
         ) -> io::Result<tokio::process::Command> {
-            crate::linux::disk_tool::command(program, leading_args, disk)
+            crate::host::disk_tool::command(program, leading_args, disk)
         }
     }
 
@@ -2941,10 +2958,10 @@ mod linux {
     mod tests;
 }
 
-#[cfg(target_os = "linux")]
-use linux::{capture, delete, get, list, place_snapshot_tree, ready_snapshot, reconcile};
-#[cfg(target_os = "linux")]
-pub(in crate::supervisor) use linux::{
+use local::{capture, delete, get, list, place_snapshot_tree, ready_snapshot, reconcile};
+// VM checkpoints use these; they are Linux only until #4654's M4.
+#[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
+pub(in crate::supervisor) use local::{
     delete_ready, find_ready, list_ready, publish, remove_snapshot_tree, require_vmm_dead, settle,
     snapshot_proto, source_inputs,
 };

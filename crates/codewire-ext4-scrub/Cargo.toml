@@ -7,7 +7,7 @@ authors.workspace = true
 license = "AGPL-3.0-only"
 description = "Clearing every block of an ext4 disk its guest cannot read through the filesystem."
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
 thiserror = { workspace = true }
 tokio = { workspace = true }

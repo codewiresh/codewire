@@ -31,15 +31,25 @@ fn ext4_image(path: &Path, bytes: u64) {
         .unwrap();
     file.set_len(bytes).unwrap();
     drop(file);
-    let status = ProcessCommand::new(tool("mkfs.ext4"))
-        .args(crate::host::EXT4_FORMAT)
-        .args(["-q", "-F"])
-        .arg(path)
-        .env_clear()
-        .env("LC_ALL", "C")
-        .status()
-        .unwrap();
+    let status = mkfs().args(["-q", "-F"]).arg(path).status().unwrap();
     assert!(status.success());
+}
+
+/// `mkfs.ext4` with cw's format: given on Linux, pinned in the runtime's
+/// mke2fs.conf on a Mac, whose built-in default gives a small image 1 KiB
+/// blocks.
+fn mkfs() -> ProcessCommand {
+    let mut command = ProcessCommand::new(tool("mkfs.ext4"));
+    command
+        .args(crate::host::EXT4_FORMAT)
+        .env_clear()
+        .env("LC_ALL", "C");
+    #[cfg(target_os = "macos")]
+    command.env(
+        "MKE2FS_CONFIG",
+        crate::host::mke2fs_config().expect("the runtime's mke2fs.conf"),
+    );
+    command
 }
 
 /// Run debugfs on `image` unconfined, as a test's own setup.
@@ -78,7 +88,7 @@ fn codex_login(access_token: &str) -> Vec<u8> {
         "tokens": {
             "id_token": "synthetic-id-token",
             "access_token": access_token,
-            "refresh_token": codewire_daemon::codex_home::CODEX_MANAGED_REFRESH_TOKEN,
+            "refresh_token": codewire_daemon::delivered_logins::codex::CODEX_MANAGED_REFRESH_TOKEN,
             "account_id": "synthetic-account",
         },
     }))
@@ -91,7 +101,7 @@ fn claude_login(access_token: &str) -> Vec<u8> {
             "accessToken": access_token,
             "refreshToken": format!(
                 "{}{}",
-                codewire_daemon::claude_home::CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX,
+                codewire_daemon::delivered_logins::claude::CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX,
                 "0123456789abcdef0123456789abcdef"
             ),
             "expiresAt": 1,
@@ -448,6 +458,100 @@ async fn placement_publishes_one_complete_tree_and_replays() {
 
     // Sizes other than the record's are refused.
     assert!(place_snapshot_tree(&config, id, Uuid::new_v4(), Uuid::new_v4(), (1, 0)).is_err());
+}
+
+/// A capture whose scrub would lack a program, such as on a Mac runtime from
+/// before dumpe2fs shipped (#4654), is refused before anything is copied.
+#[tokio::test]
+async fn a_missing_scrub_tool_refuses_the_capture_before_anything_is_copied() {
+    let source = source(StoredEnvironmentState::Stopped);
+    let config = config(&source);
+    set_missing_scrub_tool(&config.engine_root(), "dumpe2fs");
+    let error = capture_named(&source, "s1").await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("dumpe2fs"), "{}", error.message());
+    // No staging tree and no snapshot directory or row.
+    let snapshots = config.engine_root().join(SNAPSHOTS_DIRECTORY);
+    let names = fs::read_dir(&snapshots)
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        names
+            .iter()
+            .all(|name| !name.starts_with(CAPTURE_STAGING_PREFIX) && canonical_id(name).is_none()),
+        "{names:?}"
+    );
+    assert!(list(&config).unwrap().is_empty());
+}
+
+/// Every regular file under `root`, relative to it, sorted.
+fn files_under(root: &Path) -> Vec<String> {
+    fn walk(root: &Path, directory: &Path, found: &mut Vec<String>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(root, &path, found);
+            } else {
+                found.push(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(root, root, &mut found);
+    found.sort();
+    found
+}
+
+/// A Mac VM's tree also holds its helper configuration and machine
+/// identifier. Neither is in a snapshot, so a VM made from one gets its own
+/// at its first start (#4654).
+#[tokio::test]
+async fn a_snapshot_and_its_placement_hold_only_the_disks() {
+    let source = source(StoredEnvironmentState::Stopped);
+    for name in ["vz.json", "vz-machine-id"] {
+        fs::write(source.paths.vm_dir.join(name), b"the source VM's own").unwrap();
+    }
+    let snapshot = capture_named(&source, "s1").await.unwrap();
+    let storage = workspace_storage_generation(
+        source
+            .environment
+            .active_workspace_generation
+            .as_ref()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        files_under(&snapshot_dir(&source, &snapshot)),
+        [
+            "disks/state.raw".to_owned(),
+            "manifest.json".to_owned(),
+            format!("root/{storage}/root.raw"),
+        ]
+    );
+
+    let config = config(&source);
+    let fork = Uuid::new_v4();
+    let id = canonical_id(&snapshot.id).unwrap();
+    let sizes = (source.environment.disk_bytes, 0);
+    place_snapshot_tree(&config, id, fork, Uuid::new_v4(), sizes).unwrap();
+    let vm = config.engine_root().join("vms").join(fork.to_string());
+    assert_eq!(
+        files_under(&vm),
+        [
+            "disks/state.raw".to_owned(),
+            format!("generations/{storage}/root.raw"),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -1419,12 +1523,9 @@ fn verity_image(image: &Path, bytes: u64) {
         .unwrap();
     file.set_len(bytes).unwrap();
     drop(file);
-    let status = ProcessCommand::new(tool("mkfs.ext4"))
-        .args(crate::host::EXT4_FORMAT)
+    let status = mkfs()
         .args(["-q", "-F", "-O", "verity"])
         .arg(image)
-        .env_clear()
-        .env("LC_ALL", "C")
         .status()
         .unwrap();
     assert!(status.success());
@@ -1736,14 +1837,17 @@ async fn keeping_everything_fails_when_it_cannot_list_what_is_on_disk() {
 }
 
 // ---------------------------------------------------------------------------
-// VM checkpoints in the same store (#3046 R4).
+// VM checkpoints in the same store (#3046 R4). The tests that take one are
+// Linux only, as VM checkpoints are until #4654's M4.
 
 /// Publish a VM checkpoint of the source, made from disk snapshot
 /// `snapshot`'s files plus `vmm/` files a VMM would have written.
+#[cfg(target_os = "linux")]
 async fn publish_checkpoint(source: &Source, snapshot: &v1::Snapshot, name: &str) -> SnapshotRow {
     publish_checkpoint_with_catalog(source, snapshot, name, None).await
 }
 
+#[cfg(target_os = "linux")]
 async fn publish_checkpoint_with_catalog(
     source: &Source,
     snapshot: &v1::Snapshot,
@@ -1825,6 +1929,7 @@ async fn publish_checkpoint_with_catalog(
         .unwrap()
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn checkpoints_and_snapshots_share_the_store_but_not_their_commands() {
     let source = source(StoredEnvironmentState::Stopped);
@@ -1894,6 +1999,7 @@ async fn checkpoints_and_snapshots_share_the_store_but_not_their_commands() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_checkpoint_survives_the_loss_of_the_store_only_with_its_own_vmm_files() {
     let source = source(StoredEnvironmentState::Stopped);
@@ -1924,6 +2030,7 @@ async fn a_checkpoint_survives_the_loss_of_the_store_only_with_its_own_vmm_files
     assert!(adopted[0].0.kind.is_checkpoint());
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_fork_needs_its_checkpoints_recorded_cw_runtime_and_never_another() {
     let source = source(StoredEnvironmentState::Stopped);
@@ -1952,6 +2059,8 @@ async fn a_fork_needs_its_checkpoints_recorded_cw_runtime_and_never_another() {
     );
 }
 
+// It checks the files with the checkpoint code, Linux only until #4654's M4.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_stop_for_restore_needs_the_checkpoint_files_the_restore_will_use() {
     let source = source(StoredEnvironmentState::Stopped);
@@ -2014,6 +2123,7 @@ async fn a_stop_for_restore_needs_the_checkpoint_files_the_restore_will_use() {
     intact(&kept).unwrap();
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_restore_after_a_stop_for_it_that_fails_leaves_the_stopped_source_on_its_own_disks() {
     // The state after a Stop for a restore: the source is stopped. Its
@@ -2071,6 +2181,7 @@ async fn a_restore_after_a_stop_for_it_that_fails_leaves_the_stopped_source_on_i
     );
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_deleted_environment_takes_its_checkpoints_with_it() {
     let source = source(StoredEnvironmentState::Stopped);

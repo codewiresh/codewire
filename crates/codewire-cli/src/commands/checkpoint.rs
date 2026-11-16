@@ -104,6 +104,16 @@ pub(crate) async fn handle_checkpoint_command(
     }
 }
 
+/// A fork of a VM checkpoint (`cw create --local --checkpoint`) needs this
+/// host to take checkpoints.
+pub(crate) fn require_local_checkpoints() -> anyhow::Result<()> {
+    if cfg!(target_os = "linux") {
+        Ok(())
+    } else {
+        anyhow::bail!("VM checkpoints need a Linux host for now")
+    }
+}
+
 #[cfg(target_os = "linux")]
 async fn handle_local_checkpoint_command(
     globals: &Globals,

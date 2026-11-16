@@ -1628,7 +1628,7 @@ async fn handle_unified_environment_create(
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         return Box::pin(create_native_environments_from_snapshot(globals, *args)).await;
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        anyhow::bail!("local disk snapshots need a Linux host for now");
+        anyhow::bail!("local disk snapshots need a Linux host or a Mac");
     }
     match placement {
         Some(EnvironmentPlacement::Local) => {

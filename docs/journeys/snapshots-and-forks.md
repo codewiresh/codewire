@@ -25,7 +25,7 @@ are not observed.
 | `snap-manage` | `cw --cloud snapshot ls`, `inspect` and `rm` | observed 2026-11-13 with `v0.4.17` (#4370) | observed 2026-11-13 with `v0.4.18`, as the smoke identity (#4370) |
 | `snap-fork` | `cw --cloud create --snapshot`, one fork and `--count N` | `--count 3` observed 2026-11-13 with `v0.4.17` (#4370); one fork on its own not yet observed | `--count 3` observed 2026-11-13 with `v0.4.18`, as the smoke identity (#4370) |
 | `snap-fork-node-down` | a fork while the snapshot's node is unavailable | not yet observed (#4371) | not yet observed |
-| `snap-local` | `cw snapshot create`, `ls`, `inspect` and `rm` on a local VM (Linux) | does not apply; a local VM observed on a pre-merge build (#3525) | does not apply |
+| `snap-local` | `cw snapshot create`, `ls`, `inspect` and `rm` on a local VM (Linux or a Mac) | does not apply; a local VM observed on a pre-merge build (#3525) | does not apply |
 | `snap-local-fork` | `cw create --local --snapshot`, one fork and `--count N` | does not apply; a local VM observed on a pre-merge build (#3525) | does not apply |
 | `snap-dashboard` | the organization's Snapshots page | hidden for launch (#4582) | hidden for launch (#4582) |
 
@@ -43,10 +43,11 @@ are not observed.
   snapshots.
 - Record `cw version` with every observation. An observation on Dev counts
   only for the source Dev had rolled out.
-- Local snapshots need a Linux host. On macOS, `cw snapshot create ENV`
-  without `--cloud`, `cw snapshot ls` without `--cloud` and `cw create --local
-  --snapshot` refuse with "local disk snapshots need a Linux host for now"
-  (#3803).
+- Local snapshots run on a Linux host or a Mac (#4654). On a Mac they need
+  the local VM runtime's `dumpe2fs`; a runtime installed before it shipped
+  refuses a capture with "reinstall the local VM runtime: cw setup --local
+  --replace". VM checkpoints, and `cw create --local --checkpoint`, still need
+  a Linux host (#3803).
 
 ## `snap-capture`: a snapshot of a stopped cloud sandbox
 
@@ -273,11 +274,11 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
   (#4370, "Step 10, prerequisite 1") inferred the wait from the scheduler's
   message; it did not take a node down.
 
-## `snap-local`: snapshots of a stopped local VM (Linux)
+## `snap-local`: snapshots of a stopped local VM (Linux or a Mac)
 
 - **Entry points:** `cw snapshot create ENV [--name NAME]`, `cw snapshot ls`,
   `cw snapshot inspect SNAPSHOT` and `cw snapshot rm SNAPSHOT`, without
-  `--cloud`, on a Linux host. `--local` selects the same.
+  `--cloud`, on a Linux host or a Mac. `--local` selects the same.
 - **States to exercise:**
   - a stopped VM: captured; the name defaults to `ENV-YYYYMMDD-HHMMSS`;
   - a running VM: "ENV is running; stop it first (`cw stop ENV`), or snapshot
@@ -320,7 +321,7 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     records no run date; it merged on 2026-10-26.
   - A local VM with a released `cw`: not yet observed.
 
-## `snap-local-fork`: local VMs from a snapshot (Linux)
+## `snap-local-fork`: local VMs from a snapshot (Linux or a Mac)
 
 - **Entry points:** `cw create --local --snapshot NAME`, with `--name`, or
   `--count N` (1 to 16) and `--name-prefix`; `--share-mounts` for a snapshot

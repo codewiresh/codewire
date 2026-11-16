@@ -19,9 +19,9 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use codewire_workload_secrets::CodexLoginBinding;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use tokio::sync::watch;
-use zeroize::{Zeroize as _, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::private_files::{Entry, PrivateDirectory, ensure_private_directory};
 
@@ -46,37 +46,9 @@ pub enum Removal {
     Kept,
 }
 
-/// A parsed login file. Every string in it is zeroized on drop.
-pub(crate) struct Document(pub(crate) Value);
-
-impl Drop for Document {
-    fn drop(&mut self) {
-        scrub(&mut self.0);
-    }
-}
-
-/// Zeroize every string in `value`.
-pub(crate) fn scrub(value: &mut Value) {
-    match value {
-        Value::String(text) => text.zeroize(),
-        Value::Array(values) => values.iter_mut().for_each(scrub),
-        Value::Object(object) => object.values_mut().for_each(scrub),
-        _ => {}
-    }
-}
+pub(crate) use crate::delivered_logins::{Document, scrub};
 
 impl Document {
-    /// A JSON object, or nothing.
-    pub(crate) fn parse(bytes: &[u8]) -> Option<Self> {
-        let document = Self(serde_json::from_slice(bytes).ok()?);
-        document.object()?;
-        Some(document)
-    }
-
-    pub(crate) fn object(&self) -> Option<&Map<String, Value>> {
-        self.0.as_object()
-    }
-
     pub(crate) fn to_bytes(&self) -> io::Result<Zeroizing<Vec<u8>>> {
         // Sized so serialization does not reallocate and leave a copy behind.
         let mut bytes = Zeroizing::new(Vec::with_capacity(2 * json_size(&self.0) + 4096));

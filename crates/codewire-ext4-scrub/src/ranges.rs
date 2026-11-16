@@ -5,7 +5,7 @@ use std::io;
 use std::path::Path;
 use std::process::Stdio;
 
-use super::{Error, MAXIMUM_TOOL_OUTPUT_BYTES, TOOL_TIMEOUT, Tools, program, require_quiet};
+use super::{Error, MAXIMUM_TOOL_OUTPUT_BYTES, TOOL_TIMEOUT, Tools, require_quiet, tool_command};
 
 /// ext4's inode flag for an fs-verity file (`EXT4_VERITY_FL`).
 const EXT4_VERITY_FL: u64 = 0x0010_0000;
@@ -161,16 +161,7 @@ pub(crate) async fn unreadable_file_blocks(
     if inodes.is_empty() {
         return Ok(Vec::new());
     }
-    let program = program(tools, "debugfs")?;
-    let mut command = tools
-        .command(&program, &[], disk)
-        .map_err(|error| Error::Confinement("debugfs", error))?;
-    let mut child = command
-        .env_clear()
-        .env("LC_ALL", "C")
-        .env("PAGER", "__none__")
-        .env("DEBUGFS_PAGER", "__none__")
-        .env("SS_READLINE_PATH", "")
+    let mut child = tool_command(tools, "debugfs", &[], disk)?
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

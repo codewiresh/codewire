@@ -210,6 +210,17 @@ These follow the Linux contract and messages:
   repository skills (including skills inside a direct mount).
 - A dedicated Docker data disk (`--docker-disk`, 8 GiB by default) is a sparse
   ext4 image attached as `CWDOCKER1` and mounted at `/var/lib/docker`.
+- Disk snapshots (`cw snapshot`, `cw create --local --snapshot`) work as on
+  Linux (docs/dev/LINUX-LOCAL-VMS.md, "Disk snapshots"), with three
+  differences (#4654). Each disk is an APFS clone. The sign-in scrub runs the
+  runtime's pinned `e2fsck`, `debugfs` and `dumpe2fs` under the same Seatbelt
+  profile as a resize, so a runtime installed before `dumpe2fs` shipped
+  refuses a capture until `cw setup --local --replace`. And it punches the
+  copy's unreadable blocks out with `F_PUNCHHOLE`: as with a reflink on
+  Linux, the copy stops referring to them, and the source VM's disk keeps
+  its own. A snapshot holds disks only, never the helper's `vz.json` or the
+  VM's machine identifier. VM checkpoints, and forks of them, still need a
+  Linux host.
 
 This is the product topology: the network worker and egress broker are host
 processes under Seatbelt, and no service VM is used.
