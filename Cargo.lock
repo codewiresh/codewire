@@ -1607,6 +1607,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-confinement"
+version = "0.1.0"
+dependencies = [
+ "codewire-workspace-hack",
+ "libc",
+ "rustix",
+]
+
+[[package]]
 name = "codewire-coordinator"
 version = "0.1.0"
 dependencies = [
@@ -2108,6 +2117,7 @@ dependencies = [
  "bytes",
  "codewire-access",
  "codewire-client",
+ "codewire-confinement",
  "codewire-cw-release",
  "codewire-daemon",
  "codewire-daemon-bridge",

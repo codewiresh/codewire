@@ -1,0 +1,676 @@
+//! Linux confinement primitives for single-purpose Codewire workers.
+
+use std::io;
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
+use std::path::Path;
+
+use rustix::fs::{Mode, OFlags, open};
+
+const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+/// Version 3 capability sets hold 64 bits.
+const MAXIMUM_CAPABILITY: libc::c_ulong = 63;
+
+const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
+const LANDLOCK_ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
+const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
+const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
+const LANDLOCK_ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
+const LANDLOCK_ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+const LANDLOCK_ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
+const LANDLOCK_ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
+const LANDLOCK_ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+const LANDLOCK_ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+const LANDLOCK_ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
+const LANDLOCK_ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+const LANDLOCK_ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
+const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
+const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
+const LANDLOCK_HANDLED_ACCESS_FS_V3: u64 = LANDLOCK_ACCESS_FS_EXECUTE
+    | LANDLOCK_ACCESS_FS_WRITE_FILE
+    | LANDLOCK_ACCESS_FS_READ_FILE
+    | LANDLOCK_ACCESS_FS_READ_DIR
+    | LANDLOCK_ACCESS_FS_REMOVE_DIR
+    | LANDLOCK_ACCESS_FS_REMOVE_FILE
+    | LANDLOCK_ACCESS_FS_MAKE_CHAR
+    | LANDLOCK_ACCESS_FS_MAKE_DIR
+    | LANDLOCK_ACCESS_FS_MAKE_REG
+    | LANDLOCK_ACCESS_FS_MAKE_SOCK
+    | LANDLOCK_ACCESS_FS_MAKE_FIFO
+    | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+    | LANDLOCK_ACCESS_FS_MAKE_SYM
+    | LANDLOCK_ACCESS_FS_REFER
+    | LANDLOCK_ACCESS_FS_TRUNCATE;
+
+const BPF_LD_W_ABS: u16 = 0x20;
+const BPF_ALU_AND_K: u16 = 0x54;
+const BPF_JMP_JEQ_K: u16 = 0x15;
+#[cfg(target_arch = "x86_64")]
+const BPF_JMP_JGE_K: u16 = 0x35;
+const BPF_RET_K: u16 = 0x06;
+const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
+const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+const SECCOMP_DATA_SYSCALL_OFFSET: u32 = 0;
+const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
+const SECCOMP_DATA_ARGUMENT_0_OFFSET: u32 = 16;
+const SECCOMP_DATA_ARGUMENT_1_OFFSET: u32 = 24;
+const SECCOMP_DATA_ARGUMENT_2_OFFSET: u32 = 32;
+
+#[cfg(target_arch = "x86_64")]
+const AUDIT_ARCH_NATIVE: u32 = 0xc000_003e;
+#[cfg(target_arch = "x86_64")]
+const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+#[cfg(target_arch = "aarch64")]
+const AUDIT_ARCH_NATIVE: u32 = 0xc000_00b7;
+
+#[repr(C)]
+struct LandlockRulesetAttr {
+    handled_access_fs: u64,
+}
+
+#[repr(C)]
+struct LandlockPathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: i32,
+}
+
+const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
+
+pub struct PreparedFilesystemDomain(OwnedFd);
+
+impl PreparedFilesystemDomain {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn descriptor_for_test(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+
+    pub fn restrict_self(&self) -> io::Result<()> {
+        // SAFETY: `self.0` is the descriptor `landlock_create_ruleset` returned,
+        // owned by this value and so open for the whole call. The call takes that
+        // descriptor and a zero flag word, and no pointer, so it cannot touch
+        // this process's memory.
+        if unsafe { libc::syscall(libc::SYS_landlock_restrict_self, self.0.as_raw_fd(), 0_u32) }
+            != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+pub fn prepare_virtiofsd_filesystem_domain(
+    source_fd: RawFd,
+    socket_directory: &Path,
+    executable: &Path,
+    read_only: bool,
+) -> io::Result<PreparedFilesystemDomain> {
+    let ruleset = create_filesystem_ruleset()?;
+    // Guest execution reads file data through FUSE; it never requires the
+    // host daemon itself to execute anything from the selected source.
+    let source_access = if read_only {
+        LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
+    } else {
+        LANDLOCK_ACCESS_FS_WRITE_FILE
+            | LANDLOCK_ACCESS_FS_READ_FILE
+            | LANDLOCK_ACCESS_FS_READ_DIR
+            | LANDLOCK_ACCESS_FS_REMOVE_DIR
+            | LANDLOCK_ACCESS_FS_REMOVE_FILE
+            | LANDLOCK_ACCESS_FS_MAKE_DIR
+            | LANDLOCK_ACCESS_FS_MAKE_REG
+            | LANDLOCK_ACCESS_FS_MAKE_SYM
+            | LANDLOCK_ACCESS_FS_REFER
+            | LANDLOCK_ACCESS_FS_TRUNCATE
+    };
+    add_path_beneath_rule(&ruleset, source_fd, source_access)?;
+
+    let socket_directory = open(
+        socket_directory,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )?;
+    add_path_beneath_rule(
+        &ruleset,
+        socket_directory.as_raw_fd(),
+        LANDLOCK_ACCESS_FS_WRITE_FILE
+            | LANDLOCK_ACCESS_FS_READ_FILE
+            | LANDLOCK_ACCESS_FS_READ_DIR
+            | LANDLOCK_ACCESS_FS_REMOVE_FILE
+            | LANDLOCK_ACCESS_FS_MAKE_REG
+            | LANDLOCK_ACCESS_FS_MAKE_SOCK
+            | LANDLOCK_ACCESS_FS_TRUNCATE,
+    )?;
+
+    add_opened_rule(
+        &ruleset,
+        executable,
+        OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
+    )?;
+    add_opened_rule(
+        &ruleset,
+        Path::new("/usr/lib"),
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR,
+    )?;
+    add_opened_rule(
+        &ruleset,
+        Path::new("/etc/ld.so.cache"),
+        OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        LANDLOCK_ACCESS_FS_READ_FILE,
+    )?;
+    // virtiofsd validates even an explicit --rlimit-nofile against this
+    // kernel ceiling before publishing its vhost-user socket.
+    add_opened_rule(
+        &ruleset,
+        Path::new("/proc/sys/fs/nr_open"),
+        OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        LANDLOCK_ACCESS_FS_READ_FILE,
+    )?;
+    Ok(PreparedFilesystemDomain(ruleset))
+}
+
+/// The filesystem a host e2fsprogs tool may use while it works on one
+/// guest-written disk: read and write that one file, run its own program and
+/// the shared libraries it loads, read the loader cache and procfs (the mount
+/// table and swaps it checks), and use `/dev/null` (its configuration, and
+/// e2fsck's descriptor padding). Nothing else can be opened, created, removed
+/// or run; refused reads such as the blkid cache and
+/// `/sys/devices/system/cpu` have fallbacks.
+pub fn prepare_disk_tool_filesystem_domain(
+    disk: &Path,
+    executable: &Path,
+) -> io::Result<PreparedFilesystemDomain> {
+    let ruleset = create_filesystem_ruleset()?;
+    let file = OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let directory = file | OFlags::DIRECTORY;
+    add_opened_rule(
+        &ruleset,
+        disk,
+        file,
+        LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE,
+    )?;
+    add_opened_rule(
+        &ruleset,
+        executable,
+        file,
+        LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
+    )?;
+    // Each real library directory; a link to another one (merged /usr) or an
+    // absent one adds nothing.
+    for libraries in ["/usr/lib", "/usr/lib64", "/lib", "/lib64"] {
+        match open(libraries, directory, Mode::empty()) {
+            Ok(descriptor) => add_path_beneath_rule(
+                &ruleset,
+                descriptor.as_raw_fd(),
+                LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
+            )?,
+            Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP) => {
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    match add_opened_rule(
+        &ruleset,
+        Path::new("/etc/ld.so.cache"),
+        file,
+        LANDLOCK_ACCESS_FS_READ_FILE,
+    ) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        result => result?,
+    }
+    add_opened_rule(
+        &ruleset,
+        Path::new("/dev/null"),
+        file,
+        LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE,
+    )?;
+    add_opened_rule(
+        &ruleset,
+        Path::new("/proc"),
+        directory,
+        LANDLOCK_ACCESS_FS_READ_FILE,
+    )?;
+    Ok(PreparedFilesystemDomain(ruleset))
+}
+
+/// A seccomp deny list built before fork, so the child only installs it.
+pub struct PreparedSyscallFilter(Vec<libc::sock_filter>);
+
+impl PreparedSyscallFilter {
+    pub fn denying(denied: &[libc::c_long], architecture_denied: &[libc::c_long]) -> Self {
+        let mut filter = base_filter();
+        append_denials(&mut filter, denied.iter().chain(architecture_denied));
+        filter.push(bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW));
+        Self(filter)
+    }
+
+    /// Install the filter; it makes only syscalls, so it is safe between fork
+    /// and exec. The caller has already set `no_new_privs`.
+    pub fn install(&mut self) -> io::Result<()> {
+        install_filter(&mut self.0)
+    }
+}
+
+fn create_filesystem_ruleset() -> io::Result<OwnedFd> {
+    let attributes = LandlockRulesetAttr {
+        handled_access_fs: LANDLOCK_HANDLED_ACCESS_FS_V3,
+    };
+    // SAFETY: `attributes` is a live, initialised `repr(C)` value whose single
+    // `u64` matches the first field of the kernel's `landlock_ruleset_attr`, and
+    // the size passed is exactly its size. The kernel copies only that many
+    // bytes (it accepts an older, shorter struct), so the read is in bounds.
+    // Flags 0 creates a ruleset rather than querying the ABI version.
+    let descriptor = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &raw const attributes,
+            std::mem::size_of::<LandlockRulesetAttr>(),
+            0_u32,
+        )
+    };
+    if descriptor < 0 || descriptor > i32::MAX as libc::c_long {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a non-negative return is a new descriptor the kernel opened for
+    // this process just now, and the check above keeps it within a C int.
+    // Nothing else refers to it, so this `OwnedFd` is its only owner.
+    Ok(unsafe { OwnedFd::from_raw_fd(descriptor as libc::c_int) })
+}
+
+fn add_opened_rule(ruleset: &OwnedFd, path: &Path, flags: OFlags, access: u64) -> io::Result<()> {
+    let descriptor = open(path, flags, Mode::empty())?;
+    add_path_beneath_rule(ruleset, descriptor.as_raw_fd(), access)
+}
+
+fn add_path_beneath_rule(
+    ruleset: &OwnedFd,
+    parent_fd: RawFd,
+    allowed_access: u64,
+) -> io::Result<()> {
+    let attributes = LandlockPathBeneathAttr {
+        allowed_access,
+        parent_fd,
+    };
+    // SAFETY: the kernel reads its packed, 12-byte `landlock_path_beneath_attr`.
+    // `attributes` is a live, initialised `repr(C)` value of 16 bytes with the
+    // same field offsets (0 and 8), so those 12 bytes are in bounds and line up.
+    // `ruleset` is borrowed and so open, and `parent_fd` is a descriptor the
+    // caller keeps open for the call.
+    if unsafe {
+        libc::syscall(
+            libc::SYS_landlock_add_rule,
+            ruleset.as_raw_fd(),
+            LANDLOCK_RULE_PATH_BENEATH,
+            &raw const attributes,
+            0_u32,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[repr(C)]
+struct CapabilityHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapabilityData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+pub fn require_single_threaded_process() -> io::Result<()> {
+    let mut tasks = std::fs::read_dir("/proc/self/task")?;
+    if tasks.next().transpose()?.is_none() || tasks.next().transpose()?.is_some() {
+        return Err(io::Error::other("process is not single threaded"));
+    }
+    Ok(())
+}
+
+/// Permanently discard process capabilities, ambient capability inheritance,
+/// ptrace/core-dump visibility, and future privilege gains.
+pub fn lock_process_privileges() -> io::Result<()> {
+    lock_process_privileges_inner(true)
+}
+
+/// Permanently discard executable privilege gains while retaining ordinary
+/// same-UID process observability for a parent that must admit the exec result.
+///
+/// This variant is for a directly spawned helper: setting `PR_SET_DUMPABLE`
+/// before exec would prevent the parent from validating `/proc/<pid>/exe`.
+pub fn lock_exec_process_privileges() -> io::Result<()> {
+    lock_process_privileges_inner(false)
+}
+
+/// Discard every capability this process holds, whoever started it.
+///
+/// The ambient, effective, permitted and inheritable sets are emptied and
+/// read back; a process that cannot empty them fails here. The bounding set
+/// is emptied too when the process may change it, which takes `CAP_SETPCAP`
+/// (a root-started process has it). Otherwise it stays as inherited: it
+/// grants nothing by itself, and every caller also sets `no_new_privs`, under
+/// which an exec cannot draw on it once the permitted set is empty. Only
+/// syscalls are made and nothing is allocated, so this is safe between fork
+/// and exec.
+pub fn drop_all_capabilities() -> io::Result<()> {
+    for capability in 0..=MAXIMUM_CAPABILITY {
+        // SAFETY: PR_CAPBSET_READ takes a capability number and no pointer, so it
+        // cannot touch this process's memory. A number past the kernel's last
+        // capability returns an error, handled below.
+        match unsafe { libc::prctl(libc::PR_CAPBSET_READ, capability, 0, 0, 0) } {
+            0 => {}
+            1 => {
+                // SAFETY: PR_CAPBSET_DROP takes a capability number, one the read above
+                // reported as held, and no pointer, so it cannot touch this
+                // process's memory.
+                if unsafe { libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) } == -1 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::EPERM) {
+                        break;
+                    }
+                    return Err(error);
+                }
+            }
+            // Past the kernel's last capability.
+            _ => break,
+        }
+    }
+    // SAFETY: PR_CAP_AMBIENT_CLEAR_ALL takes integer arguments and no pointer,
+    // so it cannot touch this process's memory.
+    if unsafe {
+        libc::prctl(
+            libc::PR_CAP_AMBIENT,
+            libc::PR_CAP_AMBIENT_CLEAR_ALL,
+            0,
+            0,
+            0,
+        )
+    } == -1
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let header = CapabilityHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let empty = CapabilityData {
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    };
+    let data = [empty; 2];
+    // SAFETY: `header.version` is version 3, for which capset reads one header
+    // and exactly two data entries. `header` is a live `repr(C)` value laid out
+    // as the kernel's header, and `data` is a two-element array of `repr(C)`
+    // values with its three `u32` fields, so both reads are in bounds. pid 0 is
+    // the calling thread.
+    if unsafe { libc::syscall(libc::SYS_capset, &raw const header, data.as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut held = [CapabilityData {
+        effective: u32::MAX,
+        permitted: u32::MAX,
+        inheritable: u32::MAX,
+    }; 2];
+    // SAFETY: for version 3, capget reads the header and writes exactly two
+    // data entries. `header` is live, and `held` is a mutably borrowed
+    // two-element array of the same `repr(C)` layout, so the write is in bounds.
+    if unsafe { libc::syscall(libc::SYS_capget, &raw const header, held.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if held
+        .iter()
+        .any(|set| set.effective != 0 || set.permitted != 0 || set.inheritable != 0)
+    {
+        return Err(io::Error::from_raw_os_error(libc::EPERM));
+    }
+    Ok(())
+}
+
+fn lock_process_privileges_inner(disable_dumpability: bool) -> io::Result<()> {
+    drop_all_capabilities()?;
+    // SAFETY: PR_SET_DUMPABLE takes integer arguments and no pointer, so it
+    // cannot touch this process's memory.
+    if disable_dumpability && unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: PR_SET_NO_NEW_PRIVS takes integer arguments and no pointer, so it
+    // cannot touch this process's memory.
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: umask only sets this process's file-creation mask; it takes no
+    // pointer and cannot fail.
+    unsafe {
+        libc::umask(0o077);
+    }
+    Ok(())
+}
+
+/// Enter a Landlock v3 domain with no filesystem rules. Callers must finish
+/// loading configuration before this point and operate only on admitted file
+/// descriptors afterward.
+pub fn install_deny_all_filesystem_domain() -> io::Result<()> {
+    // SAFETY: PR_SET_NO_NEW_PRIVS takes integer arguments and no pointer, so it
+    // cannot touch this process's memory.
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    create_filesystem_ruleset().and_then(|domain| PreparedFilesystemDomain(domain).restrict_self())
+}
+
+pub fn install_denied_syscalls(
+    denied: &[libc::c_long],
+    architecture_denied: &[libc::c_long],
+) -> io::Result<()> {
+    PreparedSyscallFilter::denying(denied, architecture_denied).install()
+}
+
+/// Make `setgroups(2)` an identity-preserving successful no-op.
+///
+/// A direct-share virtiofsd maps every guest GID to the daemon's existing
+/// effective GID and runs without capabilities. Linux may nevertheless attach
+/// the parent directory's GID to a create request through the FUSE
+/// supplementary-group extension, and virtiofsd unconditionally calls
+/// `setgroups(2)` when that extension is present. The call cannot change the
+/// intended identity, but would fail with `EPERM` after capabilities are
+/// discarded. Returning success without executing it preserves the already
+/// locked host identity and prevents the daemon from changing its inherited
+/// supplementary groups through any future request.
+pub fn install_identity_preserving_setgroups_filter() -> io::Result<()> {
+    let mut filter = base_filter();
+    filter.extend([
+        bpf_equal(libc::SYS_setgroups as u32, 0, 1),
+        bpf_statement(BPF_RET_K, SECCOMP_RET_ERRNO),
+        bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
+    ]);
+    install_filter(&mut filter)
+}
+
+/// Install a deny list plus an argument filter allowing newly created sockets
+/// only for IPv4/IPv6 TCP or UDP, including an exact protocol check. Already-
+/// inherited AF_UNIX capabilities remain usable for ordinary read/write and
+/// sendmsg operations.
+pub fn install_inet_socket_only_syscalls(
+    denied: &[libc::c_long],
+    architecture_denied: &[libc::c_long],
+) -> io::Result<()> {
+    install_inet_socket_syscalls(denied, architecture_denied, false)
+}
+
+/// Install a deny list while allowing newly created sockets only for IPv4 or
+/// IPv6 TCP. This is used by one-shot HTTPS control-plane workers which finish
+/// DNS resolution before confinement and have no reason to retain UDP or Unix
+/// socket creation authority.
+pub fn install_inet_stream_only_syscalls(
+    denied: &[libc::c_long],
+    architecture_denied: &[libc::c_long],
+) -> io::Result<()> {
+    let mut filter = base_filter();
+    append_denials(&mut filter, denied.iter().chain(architecture_denied));
+    filter.extend([
+        bpf_equal(libc::SYS_socket as u32, 0, 11),
+        bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_0_OFFSET),
+        bpf_equal(libc::AF_INET as u32, 1, 0),
+        bpf_equal(libc::AF_INET6 as u32, 0, 7),
+        bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_1_OFFSET),
+        bpf_statement(
+            BPF_ALU_AND_K,
+            !((libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32),
+        ),
+        bpf_equal(libc::SOCK_STREAM as u32, 0, 4),
+        bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_2_OFFSET),
+        bpf_equal(0, 1, 0),
+        bpf_equal(libc::IPPROTO_TCP as u32, 0, 1),
+        bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
+        bpf_statement(BPF_RET_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
+        bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
+    ]);
+    install_filter(&mut filter)
+}
+
+/// Install the same INET socket filter while also permitting only
+/// `socketpair(AF_UNIX, SOCK_STREAM, 0)`. This gives an isolated transport a
+/// way to hand an accepted stream to its parent without admitting arbitrary
+/// local socket creation.
+pub fn install_inet_and_unix_stream_pair_syscalls(
+    denied: &[libc::c_long],
+    architecture_denied: &[libc::c_long],
+) -> io::Result<()> {
+    install_inet_socket_syscalls(denied, architecture_denied, true)
+}
+
+fn install_inet_socket_syscalls(
+    denied: &[libc::c_long],
+    architecture_denied: &[libc::c_long],
+    allow_unix_stream_pair: bool,
+) -> io::Result<()> {
+    let mut filter = base_filter();
+    append_denials(&mut filter, denied.iter().chain(architecture_denied));
+    filter.extend([
+        bpf_equal(libc::SYS_socket as u32, 0, 15),
+        bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_0_OFFSET),
+        bpf_equal(libc::AF_INET as u32, 1, 0),
+        bpf_equal(libc::AF_INET6 as u32, 0, 11),
+        bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_1_OFFSET),
+        bpf_statement(
+            BPF_ALU_AND_K,
+            !((libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32),
+        ),
+        bpf_equal(libc::SOCK_STREAM as u32, 1, 0),
+        bpf_equal(libc::SOCK_DGRAM as u32, 3, 7),
+        bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_2_OFFSET),
+        bpf_equal(0, 4, 0),
+        bpf_equal(libc::IPPROTO_TCP as u32, 3, 4),
+        bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_2_OFFSET),
+        bpf_equal(0, 1, 0),
+        bpf_equal(libc::IPPROTO_UDP as u32, 0, 1),
+        bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
+        bpf_statement(BPF_RET_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
+    ]);
+    if allow_unix_stream_pair {
+        filter.extend([
+            bpf_equal(libc::SYS_socketpair as u32, 0, 9),
+            bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_0_OFFSET),
+            bpf_equal(libc::AF_UNIX as u32, 0, 6),
+            bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_1_OFFSET),
+            bpf_statement(
+                BPF_ALU_AND_K,
+                !((libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32),
+            ),
+            bpf_equal(libc::SOCK_STREAM as u32, 0, 3),
+            bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_2_OFFSET),
+            bpf_equal(0, 0, 1),
+            bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
+            bpf_statement(BPF_RET_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
+            bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
+        ]);
+    } else {
+        filter.push(bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW));
+    }
+    install_filter(&mut filter)
+}
+
+fn base_filter() -> Vec<libc::sock_filter> {
+    let mut filter = vec![
+        bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARCH_OFFSET),
+        bpf_equal(AUDIT_ARCH_NATIVE, 1, 0),
+        bpf_statement(BPF_RET_K, SECCOMP_RET_KILL_PROCESS),
+        bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_SYSCALL_OFFSET),
+    ];
+    // x32 uses the x86_64 audit architecture with a bit added to every
+    // syscall number. Reject it before comparing the native deny list so it
+    // cannot select an unfiltered alternate syscall table.
+    #[cfg(target_arch = "x86_64")]
+    filter.extend([
+        bpf_greater_or_equal(X32_SYSCALL_BIT, 0, 1),
+        bpf_statement(BPF_RET_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
+    ]);
+    filter
+}
+
+fn append_denials<'a>(
+    filter: &mut Vec<libc::sock_filter>,
+    denied: impl Iterator<Item = &'a libc::c_long>,
+) {
+    for syscall in denied {
+        filter.push(bpf_equal(*syscall as u32, 0, 1));
+        filter.push(bpf_statement(
+            BPF_RET_K,
+            SECCOMP_RET_ERRNO | libc::EPERM as u32,
+        ));
+    }
+}
+
+fn install_filter(filter: &mut [libc::sock_filter]) -> io::Result<()> {
+    let length = u16::try_from(filter.len())
+        .map_err(|_| io::Error::other("seccomp filter exceeds kernel length"))?;
+    let program = libc::sock_fprog {
+        len: length,
+        filter: filter.as_mut_ptr(),
+    };
+    // SAFETY: `program.filter` points at `filter`'s first element and
+    // `program.len` is its length, checked above to fit the kernel's u16, so the
+    // kernel reads only that slice. The slice is mutably borrowed for the call,
+    // so it stays in place, and the kernel copies and verifies the program
+    // before returning, so nothing points into it afterwards. 1 is
+    // SECCOMP_SET_MODE_FILTER, with no flags.
+    if unsafe { libc::syscall(libc::SYS_seccomp, 1_u32, 0_u32, &raw const program) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+const fn bpf_statement(code: u16, value: u32) -> libc::sock_filter {
+    libc::sock_filter {
+        code,
+        jt: 0,
+        jf: 0,
+        k: value,
+    }
+}
+
+const fn bpf_equal(value: u32, equal: u8, unequal: u8) -> libc::sock_filter {
+    libc::sock_filter {
+        code: BPF_JMP_JEQ_K,
+        jt: equal,
+        jf: unequal,
+        k: value,
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+const fn bpf_greater_or_equal(value: u32, greater_or_equal: u8, less: u8) -> libc::sock_filter {
+    libc::sock_filter {
+        code: BPF_JMP_JGE_K,
+        jt: greater_or_equal,
+        jf: less,
+        k: value,
+    }
+}

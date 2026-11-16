@@ -24,6 +24,7 @@ members = [
     "crates/codewire-idp",
     "crates/codewire-cli",
     "crates/codewire-cli-bin",
+    "crates/codewire-confinement",
     "crates/codewire-credential-broker",
     "crates/codewire-credential-bridge",
     "crates/codewire-credential-service",
@@ -81,6 +82,7 @@ codewire-proto = { path = "crates/codewire-proto", default-features = false }
 # crate. Customer clients must not pull billing/admin surfaces into their
 # dependency graph.
 codewire-admin-proto = { path = "crates/codewire-admin-proto", default-features = false }
+codewire-confinement = { path = "crates/codewire-confinement" }
 codewire-daemon = { path = "crates/codewire-daemon" }
 codewire-daemon-bridge = { path = "crates/codewire-daemon-bridge" }
 codewire-derp = { path = "crates/codewire-derp" }

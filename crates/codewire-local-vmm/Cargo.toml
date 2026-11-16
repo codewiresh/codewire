@@ -30,6 +30,7 @@ buffa-types = { workspace = true }
 bytes = { workspace = true }
 codewire-access = { workspace = true }
 codewire-client = { workspace = true }
+codewire-confinement = { workspace = true }
 codewire-cw-release = { workspace = true }
 codewire-local-credentials = { workspace = true }
 codewire-proto = { workspace = true }
@@ -86,6 +87,7 @@ tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
 hmac = { workspace = true }
+codewire-confinement = { workspace = true, features = ["test-support"] }
 codewire-access = { workspace = true }
 tokio-stream = { workspace = true }
 codewire-protected-store = { workspace = true }

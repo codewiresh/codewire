@@ -559,19 +559,20 @@ print("cooperative cancellation: no adopted children")
                                    "-p", "codewire-cli-bin"])
         self.assertEqual(cargo[3], ["cargo", "test", "--locked", "--offline", "--target",
                                    "aarch64-apple-darwin", "--no-fail-fast", "-p", "codewire-local-vmm",
-                                   "--lib"])
+                                   "-p", "codewire-confinement", "--lib"])
         credential_crates = ["-p", "codewire-local-credentials", "-p", "codewire-credential-broker",
                              "--features", "codewire-credential-broker/ssh-agent"]
         self.assertEqual(cargo[4], ["cargo", "test", "--locked", "--offline", "--target",
                                    "aarch64-apple-darwin", "--no-fail-fast", *credential_crates, "--lib"])
         self.assertEqual(cargo[6], ["cargo", "clippy", "--locked", "--offline", "--target",
-                                   "aarch64-apple-darwin", "-p", "codewire-local-vmm", "--lib", "--tests",
-                                   "--", "-D", "warnings"])
+                                   "aarch64-apple-darwin", "-p", "codewire-local-vmm", "-p", "codewire-confinement",
+                                   "--lib", "--tests", "--", "-D", "warnings"])
         self.assertEqual(cargo[7], ["cargo", "clippy", "--locked", "--offline", "--target",
                                    "aarch64-apple-darwin", *credential_crates, "--all-targets",
                                    "--", "-D", "warnings"])
         self.assertEqual(cargo[9], ["cargo", "test", "--locked", "--offline", "--target",
-                                   "x86_64-apple-darwin", "-p", "codewire-local-vmm", "--lib", "--no-run"])
+                                   "x86_64-apple-darwin", "-p", "codewire-local-vmm", "-p", "codewire-confinement",
+                                   "--lib", "--no-run"])
         for argv in cargo:
             self.assertIn("--offline", argv)
             self.assertIn("--locked", argv)

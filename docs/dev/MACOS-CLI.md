@@ -231,7 +231,8 @@ receives (and may still create an unnamed socketpair). A connected TCP stream it
 receives after confinement stays usable. Each confined process refuses to start
 when its profile is not applied; Seatbelt reports a refused profile as an error
 and leaves the process unconfined, never partly confined
-(`a_profile_seatbelt_refuses_is_an_error_and_confines_nothing`). The
+(`a_profile_seatbelt_refuses_is_an_error_and_confines_nothing`, in
+`codewire-confinement`). The
 `native_network_worker_confinement` test runs the real `cw` worker and broker,
 completes the product bootstrap, and reads the serving worker's descriptor
 table with libproc, as Linux reads `/proc/<pid>/fd`: standard I/O on

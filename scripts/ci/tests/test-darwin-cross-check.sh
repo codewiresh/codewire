@@ -16,7 +16,7 @@ source = Path(sys.argv[1])
 check = source / 'scripts/ci/verify/check-darwin-cross.sh'
 # Clippy with warnings as errors: Linux clippy never compiles macOS-only code.
 expected_check = ['clippy', '--locked', '-p', 'codewire-local-vmm',
-                  '-p', 'codewire-vmm-guest-probe', '--target', 'aarch64-apple-darwin',
+                  '-p', 'codewire-vmm-guest-probe', '-p', 'codewire-confinement', '--target', 'aarch64-apple-darwin',
                   '--', '-D', 'warnings']
 # The macOS cw links Apple frameworks, so Linux only compile-checks it, after
 # the CLI library's macOS-only unit tests.
@@ -24,7 +24,8 @@ expected_cli_tests = ['clippy', '--locked', '-p', 'codewire-cli', '--lib', '--te
                       '--target', 'aarch64-apple-darwin', '--', '-D', 'warnings']
 # The macOS test code of the local VMM and of cw's integration tests, which
 # nothing else compiles (#3810).
-expected_vmm_tests = ['clippy', '--locked', '-p', 'codewire-local-vmm', '--lib', '--tests',
+expected_vmm_tests = ['clippy', '--locked', '-p', 'codewire-local-vmm', '-p', 'codewire-confinement',
+                      '--lib', '--tests',
                       '--target', 'aarch64-apple-darwin', '--', '-D', 'warnings']
 expected_bin_tests = ['clippy', '--locked', '-p', 'codewire-cli-bin', '--tests',
                       '--target', 'aarch64-apple-darwin', '--', '-D', 'warnings']

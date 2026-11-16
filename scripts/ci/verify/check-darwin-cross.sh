@@ -113,7 +113,10 @@ printf '[darwin-cross] Zig %s; cargo-zigbuild %s; target aarch64-apple-darwin\n'
 # Keep the original packages, locked resolution, target and default features.
 # exec propagates the one actual Cargo check's failure to qualification.
 "$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \
+  -p codewire-confinement \
   --target aarch64-apple-darwin -- -D warnings
-# The local VMM's macOS unit tests too (#3810): nothing else compiles them.
-exec "$zigbuild_bin" clippy --locked -p codewire-local-vmm --lib --tests \
+# The local VMM's and its confinement's macOS unit tests too (#3810): nothing
+# else compiles them.
+exec "$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-confinement \
+  --lib --tests \
   --target aarch64-apple-darwin -- -D warnings

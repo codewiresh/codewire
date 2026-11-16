@@ -49,6 +49,7 @@ on:
       - 'crates/codewire-cli/**'
       - 'crates/codewire-cli-bin/**'
       - 'crates/codewire-client/**'
+      - 'crates/codewire-confinement/**'
       - 'crates/codewire-credential-bridge/**'
       - 'crates/codewire-credential-broker/**'
       - 'crates/codewire-cw-release/**'
