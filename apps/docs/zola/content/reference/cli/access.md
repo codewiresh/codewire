@@ -1,7 +1,7 @@
 ---
 title: Access
 description: run, exec, ls, attach, logs, send, wait, stop and restart, and the attach key bindings.
-updated: 2026-11-14
+updated: 2026-11-16
 weight: 3
 aliases: ["/cli/sessions"]
 ---
@@ -106,7 +106,11 @@ cw exec [--in ENV] [-w DIR] [-e KEY=VALUE]... [-t] COMMAND [ARG]...
 Runs a command once and waits for it, as `ssh HOST COMMAND` does. No session
 is made, so nothing appears in `cw ls` and nothing is left behind. The
 command's output and errors stream here, stdin is passed through, and `cw`
-exits with the command's exit status. Ctrl-C, or losing the connection, ends
+exits with the command's exit status. In the background of its terminal, as
+under `timeout` without `--foreground`, `cw` doesn't read that terminal, so
+the command gets no input instead of `cw` being stopped. That is decided when
+`cw exec` starts, so a later `fg` gives none either; `< /dev/null` gives none
+anywhere. Ctrl-C, or losing the connection, ends
 the command. `-t` gives it a terminal, for programs that need one, such as
 `htop` or `vim`; then Ctrl-C goes to the program. Use `cw run` for anything
 that should keep running after you leave.

@@ -163,6 +163,8 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished).
   - a command that succeeds, with its output;
   - a command that exits non-zero;
   - input on stdin;
+  - `cw exec` in the background of its terminal, as under `timeout` without
+    `--foreground` (#4883);
   - a command in a stopped sandbox, which is refused;
   - output larger than a terminal's worth (`sandbox-run-large-output`, not
     written yet).
@@ -172,6 +174,7 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished).
   cw exec --in walk sh -c 'echo marker-1 > /workspace/marker && cat /workspace/marker'
   cw exec --in walk sh -c 'exit 7'; echo $?
   printf 'from stdin\n' | cw exec --in walk cat
+  timeout 60 cw exec --in walk cat; echo $?   # from an interactive shell
   cw run --in walk --name job sh -c 'echo run-output-1; echo run-output-2'
   cw ls walk
   cw logs walk --session job
@@ -181,12 +184,19 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished).
   - the first command prints `marker-1`;
   - the second makes `cw` exit 7;
   - the third prints `from stdin`;
+  - the fourth exits 0 at once, the command having had no input, where `cw`
+    used to be stopped (SIGTTIN) and `timeout` to exit 1;
   - `cw run` prints both lines, `cw ls walk` lists session `job` as `Exited`,
     and `cw logs` prints the same two lines again.
 - **Gotchas:**
   - `cw`'s own options go before the command. After `--`, every word is the
     command's.
 - **Observed:**
+  - The terminal's background (#4883): not yet observed on Dev or
+    Production. On a macOS local VM, 2026-11-15 (cw-mac), with the fix on the
+    installed build, `/usr/bin/timeout 60 cw exec … /bin/echo` exited 0 with
+    its output, where the same build without it exited 1 with none. Evidence:
+    #4977.
   - Dev, 2026-11-15 (cw-cli), the stopped sandbox: with `cw` built from
     #4689's branch at eff227270, `cw exec`, `cw run`, `cw shell`, `cw logs`,
     `cw cp` and `cw vscode` each said "Cloud environment NAME is stopped",

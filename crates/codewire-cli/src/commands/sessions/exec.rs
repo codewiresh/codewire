@@ -259,14 +259,20 @@ fn request(input: run_request::Input) -> RunRequest {
 /// with `-t` the terminal is raw and Ctrl-C reaches the command.
 async fn drive(mut stream: impl RunStream, tty: bool) -> anyhow::Result<i32> {
     use std::io::Write as _;
-    let tty = tty && std::io::stdin().is_terminal();
+    let background = stdin_is_background_terminal();
+    let tty = tty && !background && std::io::stdin().is_terminal();
     let _raw = tty
         .then(RawModeGuard::enable)
         .transpose()
         .context("enabling raw mode")?;
     let mut stdin = crate::terminal_attach::terminal_input().await;
     let mut buffer = [0_u8; 8192];
-    let mut stdin_open = true;
+    let mut stdin_open = !background;
+    if background {
+        stream
+            .send(request(run_request::Input::CloseStdin(Box::default())))
+            .await?;
+    }
     let mut window = crate::terminal_attach::WindowSizeWatch::new(tty);
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
@@ -315,6 +321,26 @@ async fn drive(mut stream: impl RunStream, tty: bool) -> anyhow::Result<i32> {
     }
 }
 
+/// Whether stdin is a terminal this process is in the background of, as
+/// under `timeout` without `--foreground`. Reading it would stop `cw` with
+/// SIGTTIN, so the run gets no input there, as `ssh -n` gives none (#4883).
+fn stdin_is_background_terminal() -> bool {
+    let stdin = std::io::stdin();
+    stdin.is_terminal()
+        && in_terminal_background(
+            rustix::termios::tcgetpgrp(&stdin).ok(),
+            rustix::process::getpgrp(),
+        )
+}
+
+/// A terminal whose foreground process group is known and is not `own`.
+fn in_terminal_background(
+    foreground: Option<rustix::process::Pid>,
+    own: rustix::process::Pid,
+) -> bool {
+    foreground.is_some_and(|foreground| foreground != own)
+}
+
 /// A trusted host's command, run here as you in the environment's folder:
 /// a relative `-w` is inside it. The terminal stays with the command, so
 /// Ctrl-C reaches it and `cw` reports how it ended.
@@ -349,6 +375,16 @@ async fn exec_on_host(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a known foreground group other than this process's is the
+    /// background: no terminal, or a group that can't be read, still reads.
+    #[test]
+    fn stdin_is_left_unread_only_in_the_terminals_background() {
+        let pid = |raw| rustix::process::Pid::from_raw(raw).unwrap();
+        assert!(in_terminal_background(Some(pid(42)), pid(7)));
+        assert!(!in_terminal_background(Some(pid(7)), pid(7)));
+        assert!(!in_terminal_background(None, pid(7)));
+    }
 
     fn exec_args(words: &[&str]) -> ExecArgs {
         let args = words.iter().map(Into::into).collect();
