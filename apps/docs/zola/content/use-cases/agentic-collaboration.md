@@ -1,7 +1,7 @@
 ---
 title: Agentic collaboration
 description: Put agents and services in different environments, and on your own machines, on one private Mesh network, hosted by Codewire or run by you.
-updated: 2026-10-26
+updated: 2026-11-16
 weight: 6
 ---
 
@@ -56,24 +56,33 @@ of yours.
 
 ## 3. Reach one from another
 
-Start a service in `api`:
+Start a service in `api` and publish its port. A member serves only its
+published ports to the network:
 
 ```sh
 cw run --in api --name server --detach -- python3 -m http.server 8000
+cw ports api --publish 8000
 ```
+
+Publishing also gives the port a preview URL. Its default access, `creator`,
+keeps that URL to you; members of the network reach the port either way.
 
 From inside `lead`, `cw network connect` opens one TCP stream to a port on
 another member, on standard input and output, so it works anywhere a tool
 takes a proxy command:
 
 ```sh
-cw run --in lead --name probe --no-tty -- sh -c 'printf "GET / HTTP/1.0\r\n\r\n" | cw network connect api 8000 | head -1'
+cw run --in lead --name probe --no-tty -- sh -c 'printf "GET / HTTP/1.0\r\n\r\n" | cw network connect api 8000 | sed -n 1p'
 ```
 
-An agent in `lead` can do the same while it works: test the service in
-`api`, call a tool another agent runs, or reach a database a teammate runs in
-their local VM. A member serves only its own application ports, and members
-of other networks are never reachable.
+```text
+HTTP/1.0 200 OK
+```
+
+A port that isn't published gives an empty result. An agent in `lead` can do
+the same while it works: test the service in `api`, call a tool another agent
+runs, or reach a database a teammate runs in their local VM. Members of other
+networks are never reachable.
 
 ## 4. Drive agents on your own machine
 
