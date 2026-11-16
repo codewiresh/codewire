@@ -24,15 +24,15 @@ met by a base-URL route.
 
 ## Where the walk stands
 
-Updated 2026-11-15. A hosted Sandbox is recorded on Dev and on Production
+Updated 2026-11-16. A hosted Sandbox is recorded on Dev and on Production
 separately.
 
 | ID | Issue | Linux local VM | macOS local VM | Dev | Production |
 | --- | --- | --- | --- | --- | --- |
-| `policy-select` | #2537 | not yet observed | not yet observed | n/a | n/a |
+| `policy-select` | #2537 | observed 2026-11-16, source 40a2877e7 | not yet observed | n/a | n/a |
 | `policy-project-file` | #2537, #4835 | no command yet | no command yet | no command yet | no command yet |
 | `policy-hosted` | #4000, #4211 | n/a | n/a | not yet observed | not yet observed |
-| `policy-protected` | #2537, #4000 | not yet observed | not yet observed | no command yet | no command yet |
+| `policy-protected` | #2537, #4000 | observed 2026-11-16, source 40a2877e7 | not yet observed | no command yet | no command yet |
 | `locked-refuses-managed-github` | #4926 | not yet observed | not yet observed | n/a | n/a |
 | `egress-late-answer` | #4948 | not yet observed | not yet observed | n/a | n/a |
 | `refusal-log` | #3999, #4000 | no command yet | no command yet | no command yet | no command yet |
@@ -77,6 +77,10 @@ it again and record it in this file.
   environment starts, and the fallback when that install cannot run. Until
   that first use, `claude --version` answers from the image's copy; after
   it, from the build that runs. `cw doctor` does not show either yet (#4946).
+- Run `cw create --local` from an empty directory made for the walk. A
+  create takes the directory it runs in as the VM's workspace and shares it
+  live, read and write, so a walk started in a checkout hands that checkout
+  to the VM.
 - Use names that mark the walk (`egress-walk`, `egress-walk-policy`) and
   remove them at the end.
 
@@ -130,7 +134,41 @@ Issue: #2537. Code: `crates/codewire-egress-policy`,
     an allowed name, so a raw IP address is refused unless a rule covers it.
   - `open` allows TCP 22, 80 and 443 only. A refusal on another port is the
     port rule, not the name.
-- **Observed:** not yet observed.
+  - In the VM a refused name fails as a lookup (`curl: (6) Could not resolve
+    host`), and a refused address or port as a connection (`curl: (7) Failed
+    to connect`), each within milliseconds. Neither is a DNS or network
+    outage.
+  - A wildcard does not cover its own apex: `*.example.org` allows
+    `www.example.org` and refuses `example.org`.
+- **Observed:** Linux local VM (x86_64, KVM), 2026-11-16, `cw` 0.1.0 built
+  from 40a2877e7 with the runtime built from the same commit, in a throwaway
+  `HOME`:
+  - `policy list` shows `open` and `locked`; `policy create` from
+    `example.com,*.example.org` reports revision 1; `policy check` allows
+    `example.com:443` and `www.example.org:443`, and refuses
+    `example.net:443` and `example.org:443` with `(name not allowed)`, and
+    `example.com:8443` under `open` with `(port not allowed)`;
+  - a VM created with `--policy`: `cw info` shows `egress-walk-policy · rev
+    1`; `curl` to `example.com` printed `200`; to `example.net` it failed in
+    2 ms with a failed lookup;
+  - `policy allow … example.net` reported revision 2 and `Enforced now in:
+    egress-walk`, and the same `curl` printed `200` with no restart (the
+    VM's generation stayed 1);
+  - with a second VM on the policy and a TLS connection held open to
+    `example.net` and to `example.com` in each: `policy rm … example.net`
+    reported `Enforced now in: egress-walk, egress-walk-2`, and in both VMs
+    the connection to `example.net` had ended and the one to `example.com`
+    still answered `200`; allowing the name again was enforced in both;
+  - `cw update … --policy locked` on the running VM: `cw info` shows
+    `locked`, and `example.com`, `example.net` and the address `1.1.1.1`
+    were each refused within 3 ms while the other VM still reached
+    `example.com`; `--policy open` served both names again with no restart;
+  - failure states: `cw update … --policy` and `cw create --local --policy`
+    with a name that does not exist are refused (`no local network policy is
+    named …`), the update leaving the VM on its policy and the create
+    stopping at "Preparing sources" with nothing created; `policy delete` is
+    refused while a VM selects the policy, naming that VM, and succeeds once
+    none does.
 
 ## `policy-project-file`: `codewire.yaml` names a policy
 
@@ -248,11 +286,25 @@ Issues: #2537, #4000.
 
   Hosted: no command yet (#4000, with the static floor of its journey).
 - **Proof:** `check` prints `Refused: … (protected address)`; the `curl`
-  fails at once; naming a protected address in a policy does not make it
+  fails at once; a policy cannot name a protected address (`policy create
+  --allow` refuses it: `the range includes protected addresses`), and
+  allowing a name that answers only protected addresses does not make it
   reachable.
 - **Gotchas:** a name that resolves only to protected addresses is refused as
-  a name. Do not read that as a DNS outage.
-- **Observed:** not yet observed.
+  a name. Do not read that as a DNS outage. `policy check` reports such a
+  name as `Allowed … when the name answers public addresses`: it judges the
+  rule, not what the name resolves to.
+- **Observed:** Linux local VM (x86_64, KVM), 2026-11-16, `cw` 0.1.0 built
+  from 40a2877e7 with the runtime built from the same commit:
+  - `policy check open` refused `192.168.1.10:443`, `127.0.0.1:443` and
+    `169.254.169.254:80`, each with `(protected address)`;
+  - from the VM under `open`, `169.254.169.254`, `192.168.1.10`, `10.0.0.1`
+    and the host's own address (ports 80 and 22) were each refused within 3
+    ms;
+  - `policy create --allow '169.254.169.254,192.168.1.10'` was refused, so
+    no policy named them;
+  - a name that answers only loopback (`localtest.me`) failed in the VM as
+    a lookup, under `open` and again from a VM whose policy allowed the name.
 
 ## `locked-refuses-managed-github`: a policy that does not allow GitHub refuses the managed credential
 
