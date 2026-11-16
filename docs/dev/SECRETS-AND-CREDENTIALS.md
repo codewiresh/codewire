@@ -696,6 +696,21 @@ already finished or was cancelled are dropped, because they race that answer
 or cancel. The Anthropic and OpenAI routes never stream and
 keep their 4 MiB request limit.
 
+When GitHub answers a request on the managed route with 401, the broker
+rotates a GitHub App sign-in once and sends the request once again; a second
+401 is returned as it is. A 401 forces such a rotation only of a sign-in last
+rotated ten minutes ago or more, by the time stored with the sign-in, because
+a process in the Sandbox shapes the request and can provoke one, and a
+rotation can end the token another session is using. The 401 of a sign-in
+rotated more recently is returned as it is, and so is GitHub's 401 when the
+forced rotation is refused or its outcome is uncertain; that sign-in then
+reads **Reconnect needed**, as after any failed rotation. The time is written
+with the rotated tokens, in the same store write; a sign-in stored before the
+time existed reads as rotated long ago, so its first 401 may force one
+rotation, which records the time. A streamed push is still sent once and
+never replayed. A personal access token is never rotated. Not built yet
+(#5078): today every 401 on a GitHub App sign-in forces a rotation.
+
 While the SSH key is selected, no connection to github.com trusts a host key
 on first use. Before the workspace starts, `~/.ssh/known_hosts` in the
 workspace user's home lists GitHub's published host keys
