@@ -727,19 +727,34 @@ or cancel. The Anthropic and OpenAI routes never stream and
 keep their 4 MiB request limit.
 
 When GitHub answers a request on the managed route with 401, the broker
-rotates a GitHub App sign-in once and sends the request once again; a second
-401 is returned as it is. A 401 forces such a rotation only of a sign-in last
-rotated ten minutes ago or more, by the time stored with the sign-in, because
-a process in the Sandbox shapes the request and can provoke one, and a
-rotation can end the token another session is using. The 401 of a sign-in
-rotated more recently is returned as it is, and so is GitHub's 401 when the
-forced rotation is refused or its outcome is uncertain; that sign-in then
-reads **Reconnect needed**, as after any failed rotation. The time is written
-with the rotated tokens, in the same store write; a sign-in stored before the
-time existed reads as rotated long ago, so its first 401 may force one
-rotation, which records the time. A streamed push is still sent once and
-never replayed. A personal access token is never rotated. Not built yet
-(#5078): today every 401 on a GitHub App sign-in forces a rotation.
+rotates a GitHub App sign-in at most once per request and sends the request
+once again; a second 401 is returned as it is. A 401 forces such a rotation
+only of a sign-in last rotated ten minutes ago or more, because a process in
+the Sandbox shapes the request and can provoke one, and a rotation can end
+the token another session is using (#5078). The time of the last rotation is
+taken from the access token's stored expiry and GitHub's eight-hour lifetime
+for such a token. Every rotation writes that expiry with the rotated tokens,
+so the bound holds for one sign-in across every broker that serves it and
+across their restarts, and the stored form did not have to change: a broker
+that predates the bound still reads every sign-in. If GitHub issues another
+lifetime, the bound moves by the difference (a shorter lifetime loosens it,
+a longer one tightens it) and nothing else changes; the broker logs
+`github_app_token_lifetime_changed` when it sees one. The 401 of a sign-in
+rotated more recently is returned as it is. So is GitHub's 401 when the
+forced rotation's own exchange is refused or its outcome is uncertain; that
+sign-in then reads **Reconnect needed**, as after any failed rotation. A
+request that no longer has the credential when the rotation is tried (its
+re-lease or binding is refused) gets that denial, never the 401. Each broker
+also tries a forced rotation of one sign-in at most once in ten minutes, in
+its own memory, so a rotation that cannot start is not tried on every 401. A
+streamed push is still sent once and never replayed. A personal access token
+is never rotated.
+
+Storing the rotation time in the sign-in itself, as the Codex and Claude
+sign-ins do, would break brokers already shipped: they refuse a GitHub App
+bundle that has a field they do not know. This release's reader accepts a
+reserved `refreshed_at_unix` and nothing writes it. A later release may
+write it, once every supported reader accepts it.
 
 While the SSH key is selected, no connection to github.com trusts a host key
 on first use. Before the workspace starts, `~/.ssh/known_hosts` in the

@@ -31,6 +31,14 @@ const MAX_INSTALLATION_PAGES: u32 = 10;
 const GITHUB_APP_BUNDLE_PREFIX: &[u8] = b"codewire-github-app-user-v1:";
 const GITHUB_APP_BUNDLE_VERSION: u8 = 1;
 const ACCESS_TOKEN_RENEWAL_SKEW_SECONDS: u64 = 5 * 60;
+/// How long GitHub issues a GitHub App user access token for: eight hours
+/// (GitHub's documentation, "Refreshing user access tokens"). The bundle
+/// stores the token's expiry and not when it was issued, so the time of a
+/// sign-in's last rotation is its expiry less this
+/// ([`GitHubAppUserOAuthBundle::rotated_at_unix`], #5078). If GitHub issues
+/// another lifetime, that time is off by the difference, and
+/// [`bundle_from_expiring_tokens`] logs it.
+pub(crate) const GITHUB_APP_USER_TOKEN_LIFETIME_SECONDS: u64 = 8 * 60 * 60;
 const MIN_ACCESS_TOKEN_LIFETIME_SECONDS: u64 = 60;
 const MAX_ACCESS_TOKEN_LIFETIME_SECONDS: u64 = 24 * 60 * 60;
 const MIN_REFRESH_TOKEN_LIFETIME_SECONDS: u64 = 60;
@@ -145,6 +153,18 @@ impl GitHubAppUserOAuthBundle {
         }
         Ok(payload.access_expires_at_unix
             <= now_unix.saturating_add(ACCESS_TOKEN_RENEWAL_SKEW_SECONDS))
+    }
+
+    /// When this sign-in was last rotated, in Unix seconds: its access
+    /// token's stored expiry less the lifetime GitHub issues such a token
+    /// for. Every exchange writes that expiry with the rotated tokens, so
+    /// the time holds for one sign-in across every broker that serves it and
+    /// across their restarts, with no change to the stored form (#5078). An
+    /// expiry earlier than one lifetime reads as the beginning of time.
+    pub(crate) fn rotated_at_unix(&self) -> Result<u64, GitHubAppAuthorizationError> {
+        Ok(parse_bundle_payload(&self.bytes)?
+            .access_expires_at_unix
+            .saturating_sub(GITHUB_APP_USER_TOKEN_LIFETIME_SECONDS))
     }
 
     /// Access- and refresh-token expiry, in Unix seconds, from the validated
@@ -284,8 +304,14 @@ impl GitHubOAuthCredential {
         }
     }
 
-    pub(crate) fn is_app(&self) -> bool {
-        matches!(self, Self::App(_))
+    /// When a rotating sign-in was last rotated
+    /// ([`GitHubAppUserOAuthBundle::rotated_at_unix`]), or `None` for a raw
+    /// token, which has nothing to rotate with and is never rotated.
+    pub(crate) fn rotated_at_unix(&self) -> Result<Option<u64>, GitHubAppAuthorizationError> {
+        match self {
+            Self::Raw(_) => Ok(None),
+            Self::App(bundle) => bundle.rotated_at_unix().map(Some),
+        }
     }
 
     pub(crate) fn redaction_components(
@@ -323,6 +349,13 @@ struct GitHubAppUserOAuthPayload {
     user_id: u64,
     app_slug: String,
     installation_id: u64,
+    /// Reserved, and never written yet: when the sign-in was last rotated.
+    /// Readers shipped before this field refuse a bundle that has it, so
+    /// this reader accepts it for one release before any writer stores it
+    /// (#5078). Until then the time is derived from the access token's
+    /// expiry. Every other unknown field is still refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refreshed_at_unix: Option<u64>,
 }
 
 struct GitHubAppRefreshExpectation {
@@ -1065,6 +1098,14 @@ fn bundle_from_expiring_tokens(
     {
         return Err(GitHubAppAuthorizationError::InvalidResponse);
     }
+    if unexpected_access_lifetime(access_lifetime) {
+        // The bound on forced rotations is then off by the difference
+        // (#5078). The line names no lifetime, token or account.
+        tracing::warn!(
+            event = "github_app_token_lifetime_changed",
+            "GitHub issued an App user token for another lifetime than eight hours"
+        );
+    }
     let access_expires_at_unix = now_unix
         .checked_add(access_lifetime)
         .filter(|expiry| *expiry > now_unix)
@@ -1082,7 +1123,14 @@ fn bundle_from_expiring_tokens(
         user_id: expected.user_id,
         app_slug: expected.app_slug,
         installation_id: expected.installation_id,
+        refreshed_at_unix: None,
     })
+}
+
+/// Whether GitHub issued an access token for another lifetime than the one
+/// the time of a sign-in's last rotation is derived from.
+fn unexpected_access_lifetime(access_lifetime: u64) -> bool {
+    access_lifetime != GITHUB_APP_USER_TOKEN_LIFETIME_SECONDS
 }
 
 fn parse_bundle_payload(
@@ -1823,6 +1871,87 @@ mod tests {
             "gho_synthetic_raw_token"
         );
         assert!(github_access_token(b"codewire-github-app-user-v1:not-json", now).is_err());
+    }
+
+    fn bundle_issued(now: u64, access_lifetime: u64) -> GitHubAppUserOAuthBundle {
+        bundle_from_expiring_tokens(
+            Zeroizing::new("ghu_synthetic_access_token".into()),
+            access_lifetime,
+            Zeroizing::new("ghr_synthetic_refresh_token".into()),
+            15_897_600,
+            now,
+            GitHubAppRefreshExpectation {
+                user_id: 7,
+                app_slug: "codewire-sh".into(),
+                installation_id: 9,
+            },
+        )
+        .unwrap()
+    }
+
+    /// #5078: the time of a sign-in's last rotation is its access token's
+    /// stored expiry less GitHub's eight hours. GitHub documents that
+    /// lifetime; if it changes, this constant and its warning change with it.
+    #[test]
+    fn a_sign_ins_last_rotation_is_its_expiry_less_githubs_eight_hours() {
+        assert_eq!(GITHUB_APP_USER_TOKEN_LIFETIME_SECONDS, 28_800);
+        let now = 1_800_000_000;
+        assert_eq!(bundle_issued(now, 28_800).rotated_at_unix().unwrap(), now);
+        // A shorter lifetime reads as rotated earlier, a longer one as later:
+        // the bound moves by the difference and nothing else changes.
+        assert_eq!(
+            bundle_issued(now, 28_800 - 660).rotated_at_unix().unwrap(),
+            now - 660
+        );
+        assert_eq!(
+            bundle_issued(now, 9 * 60 * 60).rotated_at_unix().unwrap(),
+            now + 60 * 60
+        );
+        // An expiry earlier than one lifetime is the beginning of time.
+        assert_eq!(bundle_issued(100, 60).rotated_at_unix().unwrap(), 0);
+
+        let app = GitHubOAuthCredential::parse(&bundle_issued(now, 28_800).into_bytes()).unwrap();
+        assert_eq!(app.rotated_at_unix().unwrap(), Some(now));
+        // A raw token has nothing to rotate with.
+        let raw = GitHubOAuthCredential::parse(b"gho_synthetic_raw_token").unwrap();
+        assert_eq!(raw.rotated_at_unix().unwrap(), None);
+    }
+
+    #[test]
+    fn only_another_lifetime_than_eight_hours_is_unexpected() {
+        assert!(!unexpected_access_lifetime(28_800));
+        for other in [60, 28_799, 28_801, 86_400] {
+            assert!(unexpected_access_lifetime(other), "{other}");
+        }
+    }
+
+    /// The stored form does not change (#5078): nothing writes the reserved
+    /// field, a reader accepts it so a later release may, and any other
+    /// unknown field is still refused.
+    #[test]
+    fn the_reserved_rotation_time_is_accepted_and_never_written() {
+        let bytes = bundle_issued(1_800_000_000, 28_800).into_bytes();
+        let json = bytes.strip_prefix(GITHUB_APP_BUNDLE_PREFIX).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(json).unwrap();
+        let object = value.as_object_mut().unwrap();
+        assert!(!object.contains_key("refreshed_at_unix"));
+        assert_eq!(object["version"], 1);
+
+        let tagged = |value: &serde_json::Value| {
+            let mut bytes = GITHUB_APP_BUNDLE_PREFIX.to_vec();
+            bytes.extend(serde_json::to_vec(value).unwrap());
+            bytes
+        };
+        object.insert("refreshed_at_unix".into(), 1_800_000_000_u64.into());
+        let with_time = tagged(&value);
+        let parsed = GitHubAppUserOAuthBundle::parse(&with_time).expect("the reserved field");
+        // It is not read yet: the time still comes from the expiry.
+        assert_eq!(parsed.rotated_at_unix().unwrap(), 1_800_000_000);
+
+        let object = value.as_object_mut().unwrap();
+        object.remove("refreshed_at_unix");
+        object.insert("rotated_at_unix".into(), 1_u64.into());
+        assert!(GitHubAppUserOAuthBundle::parse(&tagged(&value)).is_err());
     }
 
     #[test]

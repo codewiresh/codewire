@@ -1,5 +1,7 @@
 //! When a provider's 401 may force a refresh of a stored sign-in (#3999).
 
+use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -50,6 +52,30 @@ pub(super) const FORCED_REFRESH_MIN_AGE: Duration = Duration::from_secs(10 * 60)
 /// `refreshed_at_unix`. One stamped in the future is not due.
 pub(super) fn forced_refresh_due(refreshed_at_unix: u64, now_unix: u64) -> bool {
     now_unix.saturating_sub(refreshed_at_unix) >= FORCED_REFRESH_MIN_AGE.as_secs()
+}
+
+/// When this broker last tried a forced rotation of each sign-in, in its own
+/// memory (#5078). The stored time moves only when a rotation succeeds, so
+/// without this a sign-in whose rotation cannot start (the authority refuses
+/// or is away) would be tried again on every 401. One try per sign-in in
+/// `FORCED_REFRESH_MIN_AGE`, per broker; the stored time remains the bound
+/// that holds across brokers.
+#[derive(Default)]
+pub(super) struct ForcedAttempts(Mutex<HashMap<CredentialId, u64>>);
+
+impl ForcedAttempts {
+    /// Whether this broker may try a forced rotation of `credential` now,
+    /// recording the try when it may. Entries past the age are dropped, so
+    /// the map holds only sign-ins tried in the last ten minutes.
+    pub(super) fn begin(&self, credential: &CredentialId, now_unix: u64) -> bool {
+        let mut attempts = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        attempts.retain(|_, at| !forced_refresh_due(*at, now_unix));
+        if attempts.contains_key(credential) {
+            return false;
+        }
+        attempts.insert(credential.clone(), now_unix);
+        true
+    }
 }
 
 /// The most of a provider's 401 held in memory while the sign-in refreshes.
@@ -174,6 +200,23 @@ mod tests {
     fn an_older_sign_in_is_due() {
         assert!(forced_refresh_due(NOW - MIN_AGE - 1, NOW));
         assert!(forced_refresh_due(0, NOW));
+    }
+
+    #[test]
+    fn one_forced_attempt_per_sign_in_in_the_age() {
+        let attempts = ForcedAttempts::default();
+        let first = CredentialId::parse("11111111-1111-4111-8111-111111111111").unwrap();
+        let second = CredentialId::parse("22222222-2222-4222-8222-222222222222").unwrap();
+        assert!(attempts.begin(&first, NOW));
+        assert!(!attempts.begin(&first, NOW));
+        assert!(!attempts.begin(&first, NOW + MIN_AGE - 1));
+        assert!(attempts.begin(&second, NOW), "another sign-in is its own");
+        assert!(attempts.begin(&first, NOW + MIN_AGE));
+        assert_eq!(
+            attempts.0.lock().unwrap().len(),
+            1,
+            "old entries are dropped"
+        );
     }
 
     #[test]

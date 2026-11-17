@@ -69,7 +69,10 @@ mod claude_token;
 mod entry;
 mod forced_refresh;
 mod github_front_door;
-use forced_refresh::{RefreshCredentialGeneration, RetryFailure, refresh_generation};
+use forced_refresh::{
+    RefreshCredentialGeneration, RetryFailure, after_failed_refresh, forced_refresh_due,
+    hold_rejection, refresh_generation,
+};
 mod request_binding;
 use request_binding::validate_request_binding;
 #[cfg(test)]
@@ -1061,6 +1064,7 @@ pub struct OpenAiBroker<P, U> {
     oauth_refresh: tokio::sync::Mutex<()>,
     oauth_refresh_operations: TaskTracker,
     placeholders: swap::PlaceholderCache,
+    github_forced_attempts: forced_refresh::ForcedAttempts,
     network_policy_allows_github: bool,
 }
 
@@ -1314,6 +1318,7 @@ where
             oauth_refresh: tokio::sync::Mutex::new(()),
             oauth_refresh_operations: TaskTracker::new(),
             placeholders: swap::PlaceholderCache::default(),
+            github_forced_attempts: forced_refresh::ForcedAttempts::default(),
             network_policy_allows_github: true,
         })
     }
@@ -1658,7 +1663,12 @@ where
             .github_adapter
             .credential_from_lease(lease)
             .map_err(map_adapter_error)?;
-        let github_app_retry = credential.is_app();
+        // A raw token has nothing to rotate with: `None`, and its 401 is
+        // returned as it came.
+        let rotated_at_unix = credential
+            .rotated_at_unix()
+            .map_err(map_github_app_authorization_error)?;
+        let credential_id = generation.credential_id.clone();
         let retry_request = validated.clone();
         let original_generation = generation.clone();
         let prepared = if credential
@@ -1694,24 +1704,47 @@ where
         let (mut response, mut policy) = self
             .execute_prepared_github(prepared.request, body_stream.take())
             .await?;
+        // GitHub's 401 forces one rotation, and the request once more, only
+        // of a sign-in last rotated `FORCED_REFRESH_MIN_AGE` ago or more
+        // (#5078): a process in the environment shapes the request and so
+        // decides when a 401 happens, and a rotation can end the token
+        // another session is using. Otherwise the 401 is GitHub's answer,
+        // returned as it came.
         if response.status == StatusCode::UNAUTHORIZED
-            && github_app_retry
             && !refreshed_before_request
             && replayable
+            && let Some(rotated_at_unix) = rotated_at_unix
         {
-            drop(response);
-            let retry = self
-                .prepare_github_after_refresh(GitHubRefreshPreparation {
-                    request_id,
-                    slot,
-                    operation,
-                    route,
-                    provider_request: retry_request,
-                    force_refresh_of: Some(&rejected_generation),
-                    admitted_grant: &admitted_grant,
-                })
-                .await?;
-            (response, policy) = self.execute_prepared_github(retry.request, None).await?;
+            let now_unix = current_unix_time()?;
+            if forced_refresh_due(rotated_at_unix, now_unix) {
+                let whole;
+                (response, whole) = hold_rejection(response).await;
+                // A 401 that could not be held whole is answered as it is,
+                // and so is one of a sign-in this broker tried moments ago.
+                if whole && self.github_forced_attempts.begin(&credential_id, now_unix) {
+                    match self
+                        .prepare_github_after_refresh(GitHubRefreshPreparation {
+                            request_id,
+                            slot,
+                            operation,
+                            route,
+                            provider_request: retry_request,
+                            force_refresh_of: Some(&rejected_generation),
+                            admitted_grant: &admitted_grant,
+                        })
+                        .await
+                    {
+                        Ok(retry) => {
+                            (response, policy) =
+                                self.execute_prepared_github(retry.request, None).await?;
+                        }
+                        // The exchange itself failed: the held 401 is
+                        // GitHub's own answer. Anything else is the
+                        // request's denial.
+                        Err(failure) => after_failed_refresh(failure, GITHUB_REFRESH_PROVIDER)?,
+                    }
+                }
+            }
         }
         let (status, headers, body) = response.into_parts();
         if status.is_informational() {
@@ -2032,7 +2065,7 @@ where
     async fn prepare_github_after_refresh(
         &self,
         preparation: GitHubRefreshPreparation<'_>,
-    ) -> Result<PreparedGitHubRefreshRequest, BrokerRequestError> {
+    ) -> Result<PreparedGitHubRefreshRequest, RetryFailure> {
         let GitHubRefreshPreparation {
             request_id,
             slot,
@@ -2051,7 +2084,7 @@ where
                 .map_err(map_lease_error)?;
             validate_request_binding(lease.grant(), admitted_grant)?;
             if lease.credential_metadata().authentication_kind != CredentialAuthKind::OAuth {
-                return Err(BrokerRequestError::Denied);
+                return Err(BrokerRequestError::Denied.into());
             }
             let generation = refresh_generation(&lease);
             let refresh_request = BrokerCredentialRefreshRequest {
@@ -2071,14 +2104,14 @@ where
                 // A replacement with legacy raw material may be selected only
                 // for a new request. Never replay an App-authenticated 401
                 // against a different credential form.
-                return Err(BrokerRequestError::Denied);
+                return Err(BrokerRequestError::Denied.into());
             };
             // The original request may only rotate its own exact material
             // generation. A reconnect/replacement while it waited is a new
             // authorization decision, never permission to replay this request
             // through another user's credential.
             if force_refresh_of.is_some_and(|expected| expected != &generation) {
-                return Err(BrokerRequestError::Denied);
+                return Err(BrokerRequestError::Denied.into());
             }
             let force_refresh = force_refresh_of.is_some();
             if !force_refresh
@@ -2120,7 +2153,7 @@ where
                         .credential_from_lease(lease)
                         .map_err(map_adapter_error)?;
                     let Some(bundle) = credential.into_app() else {
-                        return Err(BrokerRequestError::Denied);
+                        return Err(BrokerRequestError::Denied.into());
                     };
                     return Ok(PreparedGitHubRefreshRequest {
                         request: self
@@ -2136,23 +2169,26 @@ where
                 None if refresh_waits < OAUTH_REFRESH_WAIT_ATTEMPTS => {
                     tokio::time::sleep(OAUTH_REFRESH_WAIT_INTERVAL).await;
                 }
-                None => return Err(BrokerRequestError::AuthorityUnavailable),
+                None => return Err(BrokerRequestError::AuthorityUnavailable.into()),
             }
         }
-        Err(BrokerRequestError::AuthorityUnavailable)
+        Err(BrokerRequestError::AuthorityUnavailable.into())
     }
 
+    /// One rotation of a GitHub App sign-in. Only the exchange's own failure
+    /// is [`RetryFailure::Refresh`]; a refused begin is a refused re-lease,
+    /// which GitHub never judged.
     async fn refresh_github_app_credential(
         &self,
         bundle: GitHubAppUserOAuthBundle,
         refresh_request: BrokerCredentialRefreshRequest,
         owner: Arc<GitHubAppAuthorizationOwner>,
-    ) -> Result<Option<()>, BrokerRequestError> {
+    ) -> Result<Option<()>, RetryFailure> {
         let permit = match self.leases.begin_credential_refresh(refresh_request).await {
             Ok(BrokerRefreshAdmission::Reserved(reservation)) => reservation,
             Ok(BrokerRefreshAdmission::Recovered) => return Ok(Some(())),
             Err(BrokerRefreshError::InProgress | BrokerRefreshError::Stale) => return Ok(None),
-            Err(error) => return Err(map_refresh_error(error)),
+            Err(error) => return Err(map_refresh_error(error).into()),
         };
         // Transfer the Started provider exchange and durable publication into
         // the existing shutdown tracker before any cancellable await. GitHub
@@ -2164,8 +2200,9 @@ where
         });
         refresh
             .await
-            .map_err(|_| BrokerRequestError::AuthorityUnavailable)?
+            .map_err(|_| RetryFailure::Refresh(BrokerRequestError::AuthorityUnavailable))?
             .map(Some)
+            .map_err(RetryFailure::Refresh)
     }
 
     async fn complete_github_app_refresh(

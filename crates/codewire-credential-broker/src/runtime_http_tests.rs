@@ -652,6 +652,12 @@ impl BrokerLeaseProvider for AppRefreshAuthority {
     }
 }
 
+/// An access-token lifetime that makes a sign-in authorized now read as last
+/// rotated eleven minutes ago (its expiry less GitHub's eight hours), so its
+/// 401 may force a rotation (#5078). A sign-in issued for the full 28 800
+/// seconds reads as rotated now, inside the ten-minute bound.
+const ROTATED_ELEVEN_MINUTES_AGO: u64 = 28_800 - 11 * 60;
+
 struct AppAuthorizationUpstream {
     calls: AtomicUsize,
     refreshes: AtomicUsize,
@@ -905,7 +911,8 @@ fn github_app_refresh_accepts_only_the_direct_successor_generation() {
 
 #[tokio::test]
 async fn github_app_401_refreshes_once_then_retries_with_the_direct_successor() {
-    let authorization_upstream = Arc::new(AppAuthorizationUpstream::new(28_800));
+    let authorization_upstream =
+        Arc::new(AppAuthorizationUpstream::new(ROTATED_ELEVEN_MINUTES_AGO));
     let owner = Arc::new(GitHubAppAuthorizationOwner::new(
         app_authorization_config(),
         authorization_upstream.clone(),
@@ -1061,7 +1068,9 @@ async fn github_app_early_refresh_does_not_rotate_again_after_a_successor_401() 
 async fn a_streamed_github_app_push_answered_401_is_returned_without_a_replay() {
     // A streamed body is consumed by the first attempt, so a 401 cannot be
     // retried after a refresh; the client sees it and pushes again (#4280).
-    let authorization_upstream = Arc::new(AppAuthorizationUpstream::new(28_800));
+    // The sign-in is old enough that a whole-body request would rotate it.
+    let authorization_upstream =
+        Arc::new(AppAuthorizationUpstream::new(ROTATED_ELEVEN_MINUTES_AGO));
     let owner = Arc::new(GitHubAppAuthorizationOwner::new(
         app_authorization_config(),
         authorization_upstream.clone(),
@@ -1116,6 +1125,176 @@ async fn a_streamed_github_app_push_answered_401_is_returned_without_a_replay() 
     );
     assert_eq!(begins.load(Ordering::SeqCst), 0);
     assert_eq!(authorization_upstream.refreshes.load(Ordering::SeqCst), 0);
+}
+
+/// A broker for a GitHub App sign-in authorized for `access_lifetime`, the
+/// store it leases from, and the counters of its rotations.
+struct AppSignIn {
+    upstream: Arc<AppAuthorizationUpstream>,
+    owner: Arc<GitHubAppAuthorizationOwner>,
+    state: Arc<Mutex<AppRefreshState>>,
+    begins: Arc<AtomicUsize>,
+    failures: Arc<AtomicUsize>,
+    authorizations: Arc<Mutex<Vec<String>>>,
+}
+
+impl AppSignIn {
+    async fn authorized_for(access_lifetime: u64) -> Self {
+        let upstream = Arc::new(AppAuthorizationUpstream::new(access_lifetime));
+        let owner = Arc::new(GitHubAppAuthorizationOwner::new(
+            app_authorization_config(),
+            upstream.clone(),
+        ));
+        let mut import = owner
+            .complete(Zeroizing::new(b"synthetic-code-123".to_vec()))
+            .await
+            .expect("initial App authorization");
+        let (material, _) = import.take_import().expect("protected App import");
+        Self {
+            upstream,
+            owner,
+            state: Arc::new(Mutex::new(AppRefreshState {
+                material,
+                revocation_generation: 7,
+                material_generation: 2,
+            })),
+            begins: Arc::new(AtomicUsize::new(0)),
+            failures: Arc::new(AtomicUsize::new(0)),
+            authorizations: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// One broker over this sign-in's store. Each has its own memory, as two
+    /// brokers serving one sign-in do.
+    fn broker(
+        &self,
+        refreshed_status: StatusCode,
+    ) -> OpenAiBroker<AppRefreshAuthority, GitAppUpstream> {
+        OpenAiBroker::new(
+            AppRefreshAuthority {
+                state: self.state.clone(),
+                begins: self.begins.clone(),
+                starts: Arc::new(AtomicUsize::new(0)),
+                commits: Arc::new(AtomicUsize::new(0)),
+                failures: self.failures.clone(),
+                refuse_commit: false,
+            },
+            GitAppUpstream {
+                authorizations: self.authorizations.clone(),
+                refreshed_status,
+            },
+        )
+        .expect("broker")
+        .with_github_app_authorization_owner(self.owner.clone())
+    }
+
+    fn rotations(&self) -> (usize, usize) {
+        (
+            self.begins.load(Ordering::SeqCst),
+            self.upstream.refreshes.load(Ordering::SeqCst),
+        )
+    }
+}
+
+async fn status_and_body(response: BrokerHttpResponse) -> (StatusCode, Vec<u8>) {
+    let (status, _, mut body) = response.into_parts();
+    let mut output = Vec::new();
+    while let Some(chunk) = body.next().await {
+        output.extend(chunk.expect("response body"));
+    }
+    (status, output)
+}
+
+/// #5078: a 401 forces a rotation only of a sign-in last rotated ten minutes
+/// ago or more. One rotated more recently gets GitHub's 401 as it came, with
+/// no exchange. Before the fix this request rotated the sign-in.
+#[tokio::test]
+async fn a_github_app_sign_in_rotated_inside_ten_minutes_gets_its_401_as_it_came() {
+    let sign_in = AppSignIn::authorized_for(28_800).await;
+    let broker = sign_in.broker(StatusCode::OK);
+    let (status, body) = status_and_body(
+        broker
+            .execute(github_user_request())
+            .await
+            .expect("GitHub's own 401"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, b"initial response is never released");
+    assert_eq!(sign_in.rotations(), (0, 0));
+    assert_eq!(
+        *sign_in.authorizations.lock().unwrap(),
+        vec![format!("Bearer {APP_INITIAL_ACCESS_TOKEN}")]
+    );
+}
+
+/// #5078: the bound is the sign-in's own stored time, so it holds for a
+/// second request and for a second broker with no memory of the first. The
+/// first 401 rotates once; the rotated sign-in's 401s are returned as they
+/// came. Before the fix each later 401 tried another rotation.
+#[tokio::test]
+async fn a_github_app_sign_in_is_rotated_once_in_ten_minutes_across_brokers() {
+    let sign_in = AppSignIn::authorized_for(ROTATED_ELEVEN_MINUTES_AGO).await;
+    // GitHub rejects the rotated token too, so every request draws a 401.
+    let first = sign_in.broker(StatusCode::UNAUTHORIZED);
+    let (status, _) = status_and_body(first.execute(github_user_request()).await.unwrap()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(sign_in.rotations(), (1, 1), "one rotation, one resend");
+
+    let second = sign_in.broker(StatusCode::UNAUTHORIZED);
+    for broker in [&first, &second, &first] {
+        let (status, _) =
+            status_and_body(broker.execute(github_user_request()).await.unwrap()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(sign_in.rotations(), (1, 1), "no further rotation");
+    assert_eq!(
+        *sign_in.authorizations.lock().unwrap(),
+        vec![
+            format!("Bearer {APP_INITIAL_ACCESS_TOKEN}"),
+            format!("Bearer {APP_REFRESHED_ACCESS_TOKEN}"),
+            format!("Bearer {APP_REFRESHED_ACCESS_TOKEN}"),
+            format!("Bearer {APP_REFRESHED_ACCESS_TOKEN}"),
+            format!("Bearer {APP_REFRESHED_ACCESS_TOKEN}"),
+        ]
+    );
+}
+
+/// #5078: when the forced rotation's own exchange fails, the request is
+/// answered with GitHub's 401, held while the exchange ran, not with a
+/// broker error. The attempt is still finalized as failed.
+#[tokio::test]
+async fn a_failed_forced_github_app_rotation_answers_githubs_401() {
+    let sign_in = AppSignIn::authorized_for(ROTATED_ELEVEN_MINUTES_AGO).await;
+    sign_in
+        .upstream
+        .refresh_unreachable
+        .store(true, Ordering::SeqCst);
+    let broker = sign_in.broker(StatusCode::OK);
+    let (status, body) = status_and_body(
+        broker
+            .execute(github_user_request())
+            .await
+            .expect("the held 401"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, b"initial response is never released");
+    assert_eq!(sign_in.rotations(), (1, 1));
+    assert_eq!(sign_in.failures.load(Ordering::SeqCst), 1);
+}
+
+/// A raw token has nothing to rotate with: its 401 is returned as it came
+/// and no exchange is tried, however old it is.
+#[tokio::test]
+async fn a_raw_github_tokens_401_is_never_rotated() {
+    let sign_in = AppSignIn::authorized_for(ROTATED_ELEVEN_MINUTES_AGO).await;
+    sign_in.state.lock().unwrap().material =
+        Zeroizing::new(APP_INITIAL_ACCESS_TOKEN.as_bytes().to_vec());
+    let broker = sign_in.broker(StatusCode::OK);
+    let (status, _) = status_and_body(broker.execute(github_user_request()).await.unwrap()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(sign_in.rotations(), (0, 0));
 }
 
 /// A GitHub App broker whose access token is due for renewal, so its first
