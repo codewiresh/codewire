@@ -420,6 +420,39 @@ class BuildScriptTest(unittest.TestCase):
             self.assertIn(message, result.stderr)
         self.assertFalse(output.exists())
 
+    def test_a_dispatch_may_build_only_the_arm64_kernel(self):
+        # #5253: a dispatched dry run builds the one slow part the Mac's walk
+        # needs. Any other part, or both build rules at once, is refused before
+        # anything is written.
+        base = fx.scratch("runtime-build-only.")
+        self.addCleanup(shutil.rmtree, base)
+        head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+        args = ["bash", str(ROOT / "scripts/ci/release/build-local-runtime.sh"), "linux",
+                "--source-sha", head, "--version", "v1.2.3", "--output", str(base / "out")]
+        for extra, message in (
+            ({"LOCAL_RUNTIME_BUILD_ONLY": "kernel-x86_64"}, "LOCAL_RUNTIME_BUILD_ONLY may name only kernel-arm64"),
+            ({"LOCAL_RUNTIME_BUILD_ONLY": "kernel-arm64 kernel-x86_64"},
+             "LOCAL_RUNTIME_BUILD_ONLY may name only kernel-arm64"),
+            ({"LOCAL_RUNTIME_BUILD_ONLY": "kernel-arm64", "LOCAL_RUNTIME_NO_BUILD": "1"},
+             "set LOCAL_RUNTIME_NO_BUILD or LOCAL_RUNTIME_BUILD_ONLY, not both"),
+        ):
+            result = subprocess.run(args, capture_output=True, text=True, check=False,
+                                    env={**os.environ, **extra}, timeout=60)
+            self.assertEqual(result.returncode, 1, extra)
+            self.assertIn(message, result.stderr)
+            self.assertEqual(list(base.iterdir()), [])
+        # The rule a miss follows: the arm64 kernel builds, a missing x86_64
+        # kernel leaves the Linux target out, and anything else stops.
+        script = (ROOT / "scripts/ci/release/build-local-runtime.sh").read_text()
+        cached = script.split("\ncached() {\n", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('[ "$part" != "$LOCAL_RUNTIME_BUILD_ONLY" ] || return 1', cached)
+        self.assertIn('[ "$part" != kernel-x86_64 ] || return 2', cached)
+        self.assertIn("this run builds only $LOCAL_RUNTIME_BUILD_ONLY\" >&2\n         exit 4", cached)
+        linux = script.split("\nlinux() {\n", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('  [ "$linux_target" = true ] || return 0\n', linux)
+        self.assertIn("    side_by_side aarch64-parts\n", linux)
+
     def test_a_noexec_output_parent_is_refused_before_anything_is_written(self):
         # #4324: the parts' builds run tools from the scratch beside DIR.
         noexec = next((Path(path) for path in ("/dev/shm", "/tmp")

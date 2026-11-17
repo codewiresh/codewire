@@ -43,7 +43,11 @@ macos   An Apple silicon Mac. Takes e2fsprogs and git from the parts cache or
 
 Only a release's publishing job writes cache records; nothing here holds a
 credential. Set LOCAL_RUNTIME_NO_BUILD=1 to refuse a cache miss instead of
-building (the per-push dry run): it then exits 4. LOCAL_RUNTIME_KERNEL_SOURCE
+building (the per-push dry run): it then exits 4. LOCAL_RUNTIME_BUILD_ONLY=
+kernel-arm64 (a dispatched dry run, #5253) builds a missing arm64 kernel, the
+one slow part the Mac's local VM walk needs; a missing x86_64 kernel then
+leaves the Linux x86_64 target out instead of being built, and any other miss
+exits 4 as LOCAL_RUNTIME_NO_BUILD does. LOCAL_RUNTIME_KERNEL_SOURCE
 names an existing Linux clone to build the kernel from instead of cloning.
 --check only reports whether that side's slow parts are cached: it exits 0
 when all are, and 4 when one would be built.
@@ -107,6 +111,12 @@ else
   case "$output" in /*) ;; *) die "--output must be an absolute path" ;; esac
   [ ! -e "$output" ] || die "output already exists"
 fi
+case "${LOCAL_RUNTIME_BUILD_ONLY:-}" in
+  '') ;;
+  kernel-arm64)
+    [ -z "${LOCAL_RUNTIME_NO_BUILD:-}" ] || die "set LOCAL_RUNTIME_NO_BUILD or LOCAL_RUNTIME_BUILD_ONLY, not both" ;;
+  *) die "LOCAL_RUNTIME_BUILD_ONLY may name only kernel-arm64" ;;
+esac
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 release_dir="$root/scripts/ci/release"
@@ -138,13 +148,20 @@ fetch() {
   local url="$1" digest="$2" target="$3"
   "$release_dir/fetch-pinned.sh" "$url" "$digest" "$target" || die "download failed: $url"
 }
-# A cached part, or a build the caller asks for; returns 0 when cached.
+# A cached part, or a build the caller asks for; returns 0 when cached, 1 to
+# build it, and 2 for an x86_64 kernel that LOCAL_RUNTIME_BUILD_ONLY leaves out.
 cached() {
   local part="$1" recipe="$2" dir="$3" status=0
   python3 "$parts" fetch --part "$part" --recipe "$recipe" --dir "$dir" || status=$?
   case "$status" in
     0) return 0 ;;
-    3) if [ -n "${LOCAL_RUNTIME_NO_BUILD:-}" ]; then
+    3) if [ -n "${LOCAL_RUNTIME_BUILD_ONLY:-}" ]; then
+         [ "$part" != "$LOCAL_RUNTIME_BUILD_ONLY" ] || return 1
+         [ "$part" != kernel-x86_64 ] || return 2
+         echo "build-local-runtime: $part is not cached and this run builds only $LOCAL_RUNTIME_BUILD_ONLY" >&2
+         exit 4
+       fi
+       if [ -n "${LOCAL_RUNTIME_NO_BUILD:-}" ]; then
          echo "build-local-runtime: $part is not cached and this run builds no slow parts" >&2
          exit 4
        fi
@@ -246,16 +263,19 @@ kernel_source() {
 }
 
 # The ARCH kernel part in DIR from the parts cache; a miss is added to
-# kernels_missing (and with LOCAL_RUNTIME_NO_BUILD stops the run).
+# kernels_missing (and with LOCAL_RUNTIME_NO_BUILD stops the run). An x86_64
+# miss that LOCAL_RUNTIME_BUILD_ONLY leaves out clears linux_target.
 kernel_lookup() {
-  local arch="$1" dir="$2" part="kernel-$1" recipe
+  local arch="$1" dir="$2" part="kernel-$1" recipe status=0
   recipe="$(python3 "$parts" recipe --part "$part")"
-  if cached "$part" "$recipe" "$dir"; then
-    log "$part cached (recipe $recipe)"
-  else
-    log "$part not cached (recipe $recipe); building it"
-    kernels_missing+=("$arch")
-  fi
+  cached "$part" "$recipe" "$dir" || status=$?
+  case "$status" in
+    0) log "$part cached (recipe $recipe)" ;;
+    1) log "$part not cached (recipe $recipe); building it"
+       kernels_missing+=("$arch") ;;
+    *) log "$part not cached (recipe $recipe); this run builds only $LOCAL_RUNTIME_BUILD_ONLY, so it packs no Linux x86_64 target"
+       linux_target=false ;;
+  esac
 }
 
 # Build the ARCH kernel part into DIR in the pinned Arch container; its record
@@ -331,6 +351,7 @@ linux() {
   [ -z "${LOCAL_RUNTIME_JOB_CONTAINER:-}" ] || shared=(--job-container "$LOCAL_RUNTIME_JOB_CONTAINER")
   # The slow parts first: with LOCAL_RUNTIME_NO_BUILD a miss stops here.
   kernels_missing=()
+  linux_target=true
   kernel_lookup arm64 "$output/kernel"
   kernel_lookup x86_64 "$work/kernel-x86_64"
 
@@ -363,14 +384,19 @@ linux() {
     side_by_side "${kernels_missing[@]/#/kernel-}"
   fi
   # Each target's guest root and cw runtime, beside the other target's.
-  side_by_side aarch64-parts x86_64-parts
+  if [ "$linux_target" = true ]; then
+    side_by_side aarch64-parts x86_64-parts
+  else
+    side_by_side aarch64-parts
+  fi
 
   # The macOS target's Linux side.
   python3 "$release_dir/local_runtime_sources.py" fetch --side linux --kernel "$output/kernel" \
     --output "$output/sources"
 
   # The Linux target, packed as the linux fragment. Its kernel source is the
-  # archive above: the same pinned commit.
+  # archive above: the same pinned commit. The macOS side packs without it.
+  [ "$linux_target" = true ] || return 0
   python3 "$root/scripts/dev/linux-local-runtime.py" pack \
     --kernel "$work/kernel-x86_64/vmlinuz-$(pin sources linux version)-codewire3" \
     --initramfs "$work/initramfs-x86_64.cpio" \

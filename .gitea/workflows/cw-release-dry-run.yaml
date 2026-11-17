@@ -241,8 +241,9 @@ jobs:
     # Each job's limit is about three times its recent successful runs:
     # Linux side 9.6-9.8 min before it built the x86_64 guest root and both
     # cw runtimes (#2733), which build-native-managed-agent.py bounds at
-    # 20 min each; macOS 18.9-22.2 min, assembly 30.4-31.9 min.
-    timeout-minutes: 75
+    # 20 min each; macOS 18.9-22.2 min, assembly 30.4-31.9 min. A dispatch
+    # may also build the arm64 kernel (about 20 min, #5253).
+    timeout-minutes: 100
     outputs:
       superseded: ${{ steps.superseded.outputs.superseded }}
       mode: ${{ steps.select.outputs.mode }}
@@ -304,7 +305,12 @@ jobs:
           work="$GITHUB_WORKSPACE/.local-runtime"
           mkdir -m 0700 "$work" "$work/tmp"
           status=0
-          TMPDIR="$work/tmp" LOCAL_RUNTIME_NO_BUILD=1 LOCAL_RUNTIME_JOB_CONTAINER="${HOSTNAME:?}" \
+          # A push or the schedule builds no slow part. A dispatch verifies a
+          # release candidate, whose receipt needs the Mac to walk a VM, so it
+          # builds a missing arm64 kernel, and only that (#5253).
+          build_rule=LOCAL_RUNTIME_NO_BUILD=1
+          [ "$GITHUB_EVENT_NAME" != workflow_dispatch ] || build_rule=LOCAL_RUNTIME_BUILD_ONLY=kernel-arm64
+          TMPDIR="$work/tmp" env "$build_rule" LOCAL_RUNTIME_JOB_CONTAINER="${HOSTNAME:?}" \
             scripts/ci/release/build-local-runtime.sh linux --source-sha "$SOURCE_SHA" \
             --version "$DRY_RUN_VERSION" --output "$work/linux" || status=$?
           case "$status" in
@@ -614,20 +620,15 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  walk-local-vm-darwin:
+  test-vz-helper-darwin:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
-    # The macOS local VM journey (#4478; owner-confirmed plan on infra#2151):
-    # this run's own arm64 cw and packed runtime create a VM on the Mac, run in
-    # it, fail closed, stall and resume, and remove it
-    # (scripts/dev/test-cli-local-vm-macos.py), and the VZ helper's own tests
-    # run. Until the dry run embeds a runtime (a new helper is signed only by a
-    # release), the journey is not walked and the job says so. Its two checks
-    # are advisory until a run passes on the Mac; #4506 makes them blocking.
-    name: Walk a local VM on the Mac
-    needs: [protected-main, pack-runtime, build-darwin]
+    # The VZ helper's own tests, whether or not this run embeds a runtime.
+    # Advisory until a run passes on the Mac; #4506 makes it blocking.
+    name: Test the VZ helper on the Mac
+    needs: [protected-main, build-darwin]
     if: needs.build-darwin.outputs.superseded == 'false'
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_MACOS || 'unset-CODEWIRE_CI_RUNNER_MACOS' }}
-    timeout-minutes: 30
+    timeout-minutes: 15
     env:
       SOURCE_SHA: ${{ needs.protected-main.outputs.source_sha }}
     steps:
@@ -651,15 +652,52 @@ jobs:
         timeout-minutes: 5
         run: scripts/ci/verify/macos-vz-helper-tests.sh
 
+      # An advisory step's failure shows as a success; say it on the run.
+      - name: Say that the advisory helper tests failed
+        if: steps.superseded.outputs.superseded == 'false' && steps.helper-tests.outcome == 'failure'
+        run: |
+          echo '::warning::THE ADVISORY VZ HELPER TESTS FAILED (#4506 makes them blocking). Read the step above.'
+
+  walk-local-vm-darwin:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
+    # The macOS local VM journey (#4478; owner-confirmed plan on infra#2151):
+    # this run's own arm64 cw and packed runtime create a VM on the Mac, run in
+    # it, fail closed, stall and resume, and remove it
+    # (scripts/dev/test-cli-local-vm-macos.py). A run that embeds no runtime
+    # walks nothing, so this job is skipped, never green (#5253), and the next
+    # job says why; the release tag receipt counts only a walk that printed
+    # its test's own pass line. The walk is advisory until a run passes on the
+    # Mac; #4506 makes it blocking.
+    name: Walk a local VM on the Mac
+    needs: [protected-main, pack-runtime, build-darwin]
+    if: needs.build-darwin.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_MACOS || 'unset-CODEWIRE_CI_RUNNER_MACOS' }}
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: ${{ needs.protected-main.outputs.source_sha }}
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.protected-main.outputs.source_sha }}
+          fetch-depth: 0
+
+      # Main may have moved on while this run waited for the Mac: decide
+      # again, by the same rule, before using it.
+      - name: Skip a superseded commit
+        id: superseded
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"
+
       - name: Receive the local runtime
-        if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
+        if: steps.superseded.outputs.superseded == 'false'
         uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-dry-run-runtime-${{ github.run_id }}
           path: .local-runtime
 
       - name: Verify the received runtime is the packed runtime
-        if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
+        if: steps.superseded.outputs.superseded == 'false'
         env:
           DOCUMENT_SHA256: ${{ needs.pack-runtime.outputs.document_sha256 }}
         run: |
@@ -669,14 +707,14 @@ jobs:
           echo "CW_RELEASE_LOCAL_RUNTIME_DIR=$PWD/.local-runtime" >> "$GITHUB_ENV"
 
       - name: Receive the macOS pair
-        if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
+        if: steps.superseded.outputs.superseded == 'false'
         uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
         with:
           name: cw-dry-run-darwin-${{ github.run_id }}
           path: dist-darwin
 
       - name: Verify the received macOS pair is the built pair
-        if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
+        if: steps.superseded.outputs.superseded == 'false'
         env:
           UNSIGNED_SUMS_SHA256: ${{ needs.build-darwin.outputs.darwin_sums_sha256 }}
         run: |
@@ -687,21 +725,30 @@ jobs:
 
       - name: Walk a local VM with this run's cw and runtime
         id: walk
-        if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'
+        if: steps.superseded.outputs.superseded == 'false'
         continue-on-error: true
         timeout-minutes: 12
         run: scripts/ci/verify/macos-local-vm-journey.sh dist-darwin "$CW_RELEASE_LOCAL_RUNTIME_DIR"
 
       # An advisory step's failure shows as a success; say it on the run.
-      - name: Say that an advisory Mac check failed
-        if: steps.superseded.outputs.superseded == 'false' && (steps.helper-tests.outcome == 'failure' || steps.walk.outcome == 'failure')
+      - name: Say that the advisory local VM walk failed
+        if: steps.superseded.outputs.superseded == 'false' && steps.walk.outcome == 'failure'
         run: |
-          echo '::warning::AN ADVISORY MAC CHECK FAILED (the VZ helper tests or the local VM walk; #4506 makes them blocking). Read its step above.'
+          echo '::warning::THE ADVISORY LOCAL VM WALK ON THE MAC FAILED; #4506 makes it blocking. Read its step above.'
 
+  say-no-mac-walk:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
+    # The skipped walk's reason, on the run (#5253). A skipped job prints
+    # nothing of its own.
+    name: Say why no local VM was walked on the Mac
+    needs: [protected-main, pack-runtime, build-darwin]
+    if: needs.build-darwin.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime != 'true'
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_LIGHT' }}
+    timeout-minutes: 5
+    steps:
       - name: Say that no runtime was walked
-        if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime != 'true'
         run: |
-          echo '::warning::NO LOCAL VM WALKED ON THE MAC: this dry run embeds no runtime (a runtime part, such as a changed VZ helper, is signed only by a release). Walk docs/journeys/local-vm-mac.md by hand for this change.'
+          echo '::warning::NO LOCAL VM WALKED ON THE MAC: this dry run embeds no runtime, so "Walk a local VM on the Mac" is skipped and the release tag receipt does not count this run. A dispatched candidate dry run builds missing slow parts (#5253).'
 
   sign-darwin:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.

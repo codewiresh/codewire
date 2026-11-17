@@ -171,6 +171,9 @@ case "$FIXTURE_MODE" in
   kind_shards_skipped) shard_status=skipped; other_shard=skipped ;;
 esac
 dry_assemble=success
+# A dry run whose Mac walked no VM reads skipped (#5253).
+dry_walk=success
+[ "$FIXTURE_MODE" != mac_walk_skipped ] || dry_walk=skipped
 case "$repo:$verb:$target" in
   codewire:list:)
     [ "$output" = json ]
@@ -232,12 +235,13 @@ case "$repo:$verb:$target" in
     run_head="$head" run_event=''
     [ "$target" != 901 ] || run_event=push
     [ "$target" != 932 ] || run_head="$source_head"
-    if [ "$target" = 901 ]; then assemble=skipped; else assemble="$dry_assemble"; fi
-    printf '{"schema_version":1,"run":%s,"jobs":[%s,%s,%s]}' \
+    if [ "$target" = 901 ]; then assemble=skipped walk=skipped; else assemble="$dry_assemble" walk="$dry_walk"; fi
+    printf '{"schema_version":1,"run":%s,"jobs":[%s,%s,%s,%s]}' \
       "$(run "$target" "$run_event" success "$run_head" | dry)" \
       "$(job "${target}0" "$target" 'Refuse anything but protected main' success)" \
       "$(job "${target}1" "$target" 'Skip a superseded commit' success)" \
-      "$(job "${target}2" "$target" 'Assemble and verify the unsigned four-target delivery' "$assemble")"
+      "$(job "${target}2" "$target" 'Assemble and verify the unsigned four-target delivery' "$assemble")" \
+      "$(job "${target}3" "$target" 'Walk a local VM on the Mac' "$walk")"
     ;;
   codewire:logs:701|codewire:logs:711|codewire:logs:721)
     case "$job" in
@@ -282,6 +286,14 @@ case "$repo:$verb:$target" in
     if [ "$job" = "${target}0" ]; then
       printf '== job %s Refuse anything but protected main (success) ==\r\n' "$job"
       [ "$target" != 932 ] || [ "$FIXTURE_MODE" = source_dry_line_missing ] || source_lines
+      exit 0
+    fi
+    if [ "$job" = "${target}3" ]; then
+      printf '== job %s Walk a local VM on the Mac (success) ==\r\n' "$job"
+      printf '2026-10-20T14:30:00.0000000Z local-vm: create PASS\r\n'
+      # An advisory walk that failed still reads success; only its test's own
+      # last line proves it passed.
+      [ "$FIXTURE_MODE" = mac_walk_no_pass ] || printf '2026-10-20T14:32:00.0000000Z local-vm: all checks PASS\r\n'
       exit 0
     fi
     [ "$job" = "${target}2" ] || exit 2
@@ -391,8 +403,8 @@ case "$path" in
     endpoint=log
     job="${path#jobs/}" job="${job%/logs?attempt=1}"
     case "$job" in
-      9020|9022) run=902 ;;
-      9320|9322) run=932 ;;
+      9020|9022|9023) run=902 ;;
+      9320|9322|9323) run=932 ;;
       70[0-9]) run=701 ;;
       71[0-9]) run=711 ;;
       72[0-9]) run=721 ;;
@@ -514,6 +526,10 @@ run_case ancestor_no_kind_run no_kind_run v1.2.2 fallback exact-commit-kind-not-
 run_case no_dry_run no_dry_run v1.2.3 fallback exact-commit-dry-run-not-verified
 run_case dry_run_superseded dry_run_superseded v1.2.3 fallback exact-commit-dry-run-not-verified
 run_case dry_runs_unavailable dry_runs_unavailable v1.2.3 fallback exact-commit-dry-runs-unavailable
+# A walk that did not run is never green (#5253): a skipped Mac walk, and one
+# whose job succeeded without its test's pass line, are both refused.
+run_case mac_walk_skipped mac_walk_skipped v1.2.3 fallback exact-commit-dry-run-mac-walk-not-walked
+run_case mac_walk_no_pass mac_walk_no_pass v1.2.3 fallback exact-commit-dry-run-mac-walk-not-walked
 # A scheduled run, which Forgejo lists with event push, is never taken for
 # the push run: a failed push run stays failed behind a green schedule.
 run_case scheduled_masks_failed_push scheduled_masks_failed_push v1.2.3 fallback exact-main-ci-not-successful
@@ -544,6 +560,7 @@ source_case source_failed_ci failed_ci v1.2.3 fallback exact-main-ci-not-success
 source_case source_superseded superseded v1.2.2 fallback exact-main-ci-superseded
 source_case source_no_kind no_kind_run v1.2.3 fallback exact-commit-kind-not-verified
 source_case source_no_dry_run no_dry_run v1.2.3 fallback exact-commit-dry-run-not-verified
+source_case source_mac_walk_skipped mac_walk_skipped v1.2.3 fallback exact-commit-dry-run-mac-walk-not-walked
 source_case source_not_on_main success v1.2.4 fallback release-tag-not-on-canonical-main
 grep -Fq 'release-tag source evidence: not proven' <<<"$case_output" \
   || fail 'a refused source-evidence check did not say so'

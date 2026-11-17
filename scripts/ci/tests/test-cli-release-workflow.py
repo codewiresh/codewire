@@ -1146,13 +1146,14 @@ def check_dry_run(text, release):
     errors.extend(external_download_errors(text))
     blocks = jobs(text)
     need(list(blocks) == ["protected-main", "superseded", "build-runtime-linux", "build-helper-darwin",
-                          "sign-helper", "pack-runtime", "build-darwin", "walk-local-vm-darwin", "sign-darwin",
+                          "sign-helper", "pack-runtime", "build-darwin", "test-vz-helper-darwin",
+                          "walk-local-vm-darwin", "say-no-mac-walk", "sign-darwin",
                           "build-linux-musl", "build-linux-gnu", "assemble"], "unexpected dry-run job set")
     # A wedged step must fail within its job's limit instead of holding the
     # one-at-a-time dry-run queue until the runner's 330-minute limit.
-    for job, limit in (("build-runtime-linux", 75), ("build-helper-darwin", 30), ("sign-helper", 20),
-                       ("pack-runtime", 30), ("build-darwin", 60), ("walk-local-vm-darwin", 30),
-                       ("sign-darwin", 20),
+    for job, limit in (("build-runtime-linux", 100), ("build-helper-darwin", 30), ("sign-helper", 20),
+                       ("pack-runtime", 30), ("build-darwin", 60), ("test-vz-helper-darwin", 15),
+                       ("walk-local-vm-darwin", 30), ("say-no-mac-walk", 5), ("sign-darwin", 20),
                        ("build-linux-musl", 60), ("build-linux-gnu", 60), ("assemble", 30)):
         found = re.findall(r"^    timeout-minutes: ([0-9]+)$", blocks.get(job, ""), re.M)
         need(found == [str(limit)], f"dry-run job {job} lacks its {limit}-minute limit")
@@ -1193,8 +1194,16 @@ def check_dry_run(text, release):
          in guard_steps[2][1]
          and "      source_sha: ${{ steps.source.outputs.source_sha }}\n" in guard,
          "the dry run does not choose its commit with the checked-in rule from main's own checkout")
+    # The skipped walk's reason reads no source: it checks out nothing and
+    # runs on the untrusted light runner, only when no runtime was built.
+    say = blocks.get("say-no-mac-walk", "")
+    need("actions-checkout@" not in say and "SOURCE_SHA" not in say and "secrets." not in say
+         and "    needs: [protected-main, pack-runtime, build-darwin]\n"
+         "    if: needs.build-darwin.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime != 'true'\n"
+         f"    runs-on: {UNTRUSTED_LIGHT}\n" in say,
+         "the skipped Mac walk's reason runs with source or a credential, or when a runtime was walked")
     for job, body in blocks.items():
-        if job == "protected-main":
+        if job in ("protected-main", "say-no-mac-walk"):
             continue
         need(f"      SOURCE_SHA: {DRY_RUN_SOURCE}\n" in body
              and body.count("actions-checkout@") == body.count(f"          ref: {DRY_RUN_SOURCE}\n") > 0,
@@ -1241,7 +1250,7 @@ def check_dry_run(text, release):
                '        run: scripts/ci/release/dry-run-superseded.sh "$SOURCE_SHA" "$BEFORE"')
     gate = re.compile(r"^        if: steps\.superseded\.outputs\.superseded == 'false'( && |$)", re.M)
     for job in ("build-runtime-linux", "build-helper-darwin", "pack-runtime", "build-darwin",
-                "walk-local-vm-darwin", "build-linux-musl", "build-linux-gnu", "assemble"):
+                "test-vz-helper-darwin", "walk-local-vm-darwin", "build-linux-musl", "build-linux-gnu", "assemble"):
         named = steps(blocks.get(job, ""))
         need(len(named) > 2 and "actions-checkout" in named[0][0] and named[1][1].startswith(recheck),
              f"dry-run job {job} does not decide supersession again before its first step")
@@ -1259,14 +1268,23 @@ def check_dry_run(text, release):
          " && needs.build-linux-gnu.outputs.superseded == 'false'\n" in assemble,
          "the dry-run assembly runs after a Linux cw build found the commit superseded")
     # The Mac walks a local VM with exactly this run's arm64 cw and packed
-    # runtime, and runs the VZ helper's own tests (#4478). Only those two
-    # steps may continue on error, until #4506 makes them blocking.
+    # runtime (#4478), and the VZ helper's own tests run in their own job. A
+    # run that embeds no runtime walks nothing, so the walk job is skipped,
+    # never green, and another job says why (#5253). Only the two checks may
+    # continue on error, until #4506 makes them blocking.
     walk = blocks.get("walk-local-vm-darwin", "")
     walked = dict(steps(walk))
+    helper = blocks.get("test-vz-helper-darwin", "")
+    helped = dict(steps(helper))
     need("    needs: [protected-main, pack-runtime, build-darwin]\n"
-         "    if: needs.build-darwin.outputs.superseded == 'false'\n"
+         "    if: needs.build-darwin.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'\n"
          f"    runs-on: {MACOS}\n" in walk,
-         "the Mac's local VM walk does not wait for this run's macOS cw on the Mac")
+         "the Mac's local VM walk runs without a packed runtime or before this run's macOS cw")
+    need("    needs: [protected-main, build-darwin]\n"
+         "    if: needs.build-darwin.outputs.superseded == 'false'\n"
+         f"    runs-on: {MACOS}\n" in helper
+         and "needs.pack-runtime" not in helper,
+         "the VZ helper tests do not run on the Mac whether or not a runtime was built")
     need("          DOCUMENT_SHA256: ${{ needs.pack-runtime.outputs.document_sha256 }}\n"
          in walked.get("Verify the received runtime is the packed runtime", "")
          and '.local-runtime/local-runtime.json | cut -c1-64)" = "$DOCUMENT_SHA256" ]'
@@ -1279,27 +1297,28 @@ def check_dry_run(text, release):
          "the Mac's local VM walk may run a cw other than the built pair's")
     need('        run: scripts/ci/verify/macos-local-vm-journey.sh dist-darwin "$CW_RELEASE_LOCAL_RUNTIME_DIR"'
          in walked.get("Walk a local VM with this run's cw and runtime", "")
-         and "        run: scripts/ci/verify/macos-vz-helper-tests.sh" in walked.get("Test the VZ helper", ""),
+         and "        run: scripts/ci/verify/macos-vz-helper-tests.sh" in helped.get("Test the VZ helper", ""),
          "the Mac's local VM walk does not run the checked-in journey and helper tests")
-    need("::warning::NO LOCAL VM WALKED ON THE MAC" in walked.get("Say that no runtime was walked", "")
-         and "needs.pack-runtime.outputs.runtime != 'true'" in walked.get("Say that no runtime was walked", ""),
+    need("::warning::NO LOCAL VM WALKED ON THE MAC" in dict(steps(say)).get("Say that no runtime was walked", ""),
          "a dry run without a runtime does not say that no local VM was walked")
-    advisory = sorted(name for name, body in steps(walk) if "        continue-on-error: true\n" in body)
+    advisory = sorted(name for job in (walk, helper) for name, body in steps(job)
+                      if "        continue-on-error: true\n" in body)
     need(advisory == ["Test the VZ helper", "Walk a local VM with this run's cw and runtime"]
          and text.count("continue-on-error:") == 2,
          "steps other than the Mac's local VM walk and helper tests continue on error")
     # An advisory step that hangs must stop at its own limit, not time the job
     # out and turn the dry run red, and its failure must still show on the run.
-    helper_tests = walked.get("Test the VZ helper", "")
+    helper_tests = helped.get("Test the VZ helper", "")
     walk_step = walked.get("Walk a local VM with this run's cw and runtime", "")
     need("        id: helper-tests\n" in helper_tests and "        timeout-minutes: 5\n" in helper_tests
          and "        id: walk\n" in walk_step and "        timeout-minutes: 12\n" in walk_step,
          "an advisory Mac step has no limit of its own, so a hang times the job out")
-    need("needs.pack-runtime.outputs.runtime == 'true'" in walk_step,
-         "the Mac walks a local VM without a packed runtime")
-    warned = walked.get("Say that an advisory Mac check failed", "")
-    need("(steps.helper-tests.outcome == 'failure' || steps.walk.outcome == 'failure')" in warned
-         and "::warning::AN ADVISORY MAC CHECK FAILED" in warned,
+    need("steps.walk.outcome == 'failure'" in walked.get("Say that the advisory local VM walk failed", "")
+         and "::warning::THE ADVISORY LOCAL VM WALK ON THE MAC FAILED"
+         in walked.get("Say that the advisory local VM walk failed", "")
+         and "steps.helper-tests.outcome == 'failure'" in helped.get("Say that the advisory helper tests failed", "")
+         and "::warning::THE ADVISORY VZ HELPER TESTS FAILED"
+         in helped.get("Say that the advisory helper tests failed", ""),
          "a failed advisory Mac check leaves no warning on the run")
     errors.extend(dry_run_path_errors(text))
     need("    needs: [protected-main]\n    runs-on: " + UNTRUSTED_LIGHT + "\n" in superseded
@@ -1341,8 +1360,15 @@ def check_dry_run(text, release):
          "the dry run does not select the runtime build from the runtime's inputs")
     linux_build = dict(steps(runtime)).get("Build the Linux side from cached parts", "")
     mac_build = dict(steps(pack)).get("Build the local VM runtime from cached parts", "")
-    need("LOCAL_RUNTIME_NO_BUILD=1" in linux_build and "LOCAL_RUNTIME_NO_BUILD=1" in mac_build,
-         "the dry run builds slow runtime parts")
+    # A push or the schedule builds no slow part; a dispatch verifies a
+    # release candidate and builds a missing arm64 kernel, the one slow part
+    # the Mac's walk needs, and nothing else (#5253).
+    need("          build_rule=LOCAL_RUNTIME_NO_BUILD=1\n"
+         '          [ "$GITHUB_EVENT_NAME" != workflow_dispatch ] || build_rule=LOCAL_RUNTIME_BUILD_ONLY=kernel-arm64\n'
+         '          TMPDIR="$work/tmp" env "$build_rule" LOCAL_RUNTIME_JOB_CONTAINER=' in linux_build
+         and linux_build.count("build_rule=") == 2
+         and "LOCAL_RUNTIME_NO_BUILD=1" in mac_build,
+         "the dry run builds slow runtime parts beyond a dispatch's arm64 kernel")
     need('build-local-runtime.sh linux --source-sha "$SOURCE_SHA" \\\n'
          '            --version "$DRY_RUN_VERSION" --output "$work/linux"' in linux_build,
          "the dry-run Linux side does not build its cws from this commit and the dry-run version")
@@ -1456,20 +1482,24 @@ DRY_RUN_MUTATIONS = {
         "    needs: [protected-main, pack-runtime]\n"),
     "macOS signing continues on error": lambda t: in_job(
         t, "sign-darwin", "    timeout-minutes: 20\n", "    timeout-minutes: 20\n    continue-on-error: true\n"),
-    "Mac local VM walk without a packed runtime": lambda t: t.replace(
-        "        if: steps.superseded.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'\n"
-        "        continue-on-error: true\n        timeout-minutes: 12\n",
-        "        if: steps.superseded.outputs.superseded == 'false'\n"
-        "        continue-on-error: true\n        timeout-minutes: 12\n", 1),
     "Mac local VM walk on an unverified pair": lambda t: t.replace(
         "          (cd dist-darwin && shasum -a 256 -c SHA256SUMS)\n", "", 1),
     "advisory Mac walk without a step limit": lambda t: t.replace("        timeout-minutes: 12\n", "", 1),
     "advisory Mac helper tests without a step limit": lambda t: t.replace("        timeout-minutes: 5\n", "", 1),
-    "a failed advisory Mac check leaves no warning": lambda t: t.replace(
-        "::warning::AN ADVISORY MAC CHECK FAILED", "an advisory Mac check failed", 1),
+    "a failed advisory Mac walk leaves no warning": lambda t: t.replace(
+        "::warning::THE ADVISORY LOCAL VM WALK ON THE MAC FAILED", "the advisory walk failed", 1),
+    "failed advisory helper tests leave no warning": lambda t: t.replace(
+        "::warning::THE ADVISORY VZ HELPER TESTS FAILED", "the advisory helper tests failed", 1),
+    "a dry run without a runtime reads its walk green": lambda t: in_job(
+        t, "walk-local-vm-darwin",
+        "    if: needs.build-darwin.outputs.superseded == 'false' && needs.pack-runtime.outputs.runtime == 'true'\n",
+        "    if: needs.build-darwin.outputs.superseded == 'false'\n"),
+    "the skipped walk's reason checks out source": lambda t: in_job(
+        t, "say-no-mac-walk", "    steps:\n",
+        "    steps:\n      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"),
     "a dry run without a runtime walks nothing silently": lambda t: t.replace(
         "::warning::NO LOCAL VM WALKED ON THE MAC", "no local VM walked", 1),
-    "Linux side without a job limit": lambda t: t.replace("    timeout-minutes: 75\n", "", 1),
+    "Linux side without a job limit": lambda t: t.replace("    timeout-minutes: 100\n", "", 1),
     "dry-run Linux side from another commit": lambda t: t.replace(
         'linux --source-sha "$SOURCE_SHA"', 'linux --source-sha "$BEFORE"', 1),
     "dry-run Linux side with another version": lambda t: t.replace(
@@ -1665,7 +1695,9 @@ DRY_RUN_MUTATIONS = {
         "          BEFORE: ${{ github.event.before }}\n        run: scripts/ci/release/dry-run-superseded.sh",
         "          BEFORE: ''\n        run: scripts/ci/release/dry-run-superseded.sh", 1),
     "Linux dry run builds slow parts": lambda t: t.replace(
-        'TMPDIR="$work/tmp" LOCAL_RUNTIME_NO_BUILD=1 ', 'TMPDIR="$work/tmp" ', 1),
+        "          build_rule=LOCAL_RUNTIME_NO_BUILD=1\n", "          build_rule=LOCAL_RUNTIME_BUILD_ONLY=kernel-arm64\n", 1),
+    "a dispatched dry run builds every slow part": lambda t: t.replace(
+        "|| build_rule=LOCAL_RUNTIME_BUILD_ONLY=kernel-arm64\n", "|| build_rule=LOCAL_RUNTIME_JOBS=4\n", 1),
     "Mac dry run builds slow parts": lambda t: t.replace(
         "          LOCAL_RUNTIME_NO_BUILD=1 scripts/ci/release/build-local-runtime.sh macos",
         "          scripts/ci/release/build-local-runtime.sh macos", 1),

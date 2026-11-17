@@ -677,8 +677,8 @@ WORKFLOW_MUTATIONS = {
     "a pull request's verdict runs on the trusted light runner": ("ci.yaml", lambda t: in_job(
         t, REQUIRED, f"    runs-on: {runners.LIGHT}\n", f"    runs-on: {runners.TRUSTED_LIGHT}\n")),
     "a one-line run: is cut short by a YAML comment": ("cw-release-dry-run.yaml", lambda t: t.replace(
-        "        run: |\n          echo '::warning::AN ADVISORY MAC CHECK FAILED",
-        "        run: echo '::warning::AN ADVISORY MAC CHECK FAILED", 1)),
+        "        run: |\n          echo '::warning::THE ADVISORY LOCAL VM WALK ON THE MAC FAILED",
+        "        run: echo '::warning::THE ADVISORY LOCAL VM WALK ON THE MAC FAILED", 1)),
     "a run: script leaves a quote open": ("deploy-prod.yaml", lambda t: t.replace(
         "        run: scripts/ci/release/finish-prod-release.sh\n",
         "        run: scripts/ci/release/finish-prod-release.sh \"$RELEASE_TAG\n", 1)),

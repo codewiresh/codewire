@@ -386,8 +386,11 @@ fi
 
 # The release dry run: a successful cw-release-dry-run.yaml run that verified
 # the exact commit, whose assembly job verified the unsigned four-target
-# delivery. A superseded or deferred run skips that verification and does not
-# count.
+# delivery and whose Mac walked a local VM with that run's cw and runtime. A
+# superseded or deferred run skips that verification and does not count, and
+# neither does a run whose Mac walk was skipped or did not print its test's
+# own pass line: a walk that did not run is never green (#5253).
+mac_walk_missing=false
 dry_runs_json="$tmp/dry-runs.json"
 list_runs "$source_repo" "head_sha=$tag_commit&workflow_id=cw-release-dry-run.yaml" "$dry_runs_json" \
   || fallback 'exact-commit-dry-runs-unavailable'
@@ -417,10 +420,21 @@ while read -r candidate; do
       "$assemble_log"; then
     continue
   fi
+  walk_log="$tmp/dry-walk-$candidate.log"
+  if ! jq -e '[.jobs[] | select(.name == "Walk a local VM on the Mac")]
+        | length == 1 and .[0].status == "success"' "$candidate_view" >/dev/null 2>&1 \
+      || ! job_log "$source_repo" "$candidate_view" 'Walk a local VM on the Mac' "$walk_log" \
+      || ! grep -Eq '^[0-9T:.-]+Z local-vm: all checks PASS$' "$walk_log"; then
+    mac_walk_missing=true
+    continue
+  fi
   dry_run_id="$candidate"
   break
 done < <(candidates "$dry_runs_json" cw-release-dry-run.yaml "$tmp/dry-dispatched")
-[ -n "$dry_run_id" ] || fallback 'exact-commit-dry-run-not-verified'
+if [ -z "$dry_run_id" ]; then
+  [ "$mac_walk_missing" = false ] || fallback 'exact-commit-dry-run-mac-walk-not-walked'
+  fallback 'exact-commit-dry-run-not-verified'
+fi
 
 # The source evidence is complete here.
 if [ "$scope" = source-evidence ]; then

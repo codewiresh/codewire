@@ -69,6 +69,10 @@ Issues: #4478 (VMs did not start on macOS 27), #4370 (launch step 11).
   stalled VM resuming, and the VZ helper's sandbox posture. The release dry
   run's Mac job runs it with each run's own `cw` and runtime
   (`scripts/ci/verify/macos-local-vm-journey.sh`); it is advisory until #4506.
+  A dry run that embeds no runtime walks nothing, so that job reads skipped,
+  never green, and the release tag receipt counts only a walk that printed
+  `local-vm: all checks PASS` (#5253). A dispatched candidate dry run builds
+  a missing arm64 kernel so that its walk can run.
 - **Proof:** the shell prints `aarch64`; `cw --local ls` reads `stopped` after
   step 6 and `running` after step 7; the command after the restart prints
   `after-restart` and an uptime under a minute. After a lost egress broker,
