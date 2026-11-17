@@ -172,7 +172,7 @@ where
                 ACCESS_TOKEN_REFRESH_WINDOW_SECONDS,
             )
             .await
-            .map_err(|error| passing_if_expired(error, &admitted_grant))?
+            .map_err(|error| passing_if_expired(error.into(), &admitted_grant))?
             .0
         } else {
             credential

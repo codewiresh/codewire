@@ -491,7 +491,9 @@ again; a second 401 is returned as it is. A 401 forces such a refresh only of
 a sign-in last refreshed ten minutes ago or more, by the time stored with the
 sign-in, because a process in the Sandbox shapes the request and can provoke
 one. The 401 of a sign-in refreshed more recently is returned as it is, and
-so is Claude's 401 when the forced refresh fails. A refused
+so is Claude's 401 when the forced refresh fails. A retry Codewire refuses
+to lease again, or whose refresh the authority refuses to begin, is Codewire's
+denial of the request, since Claude never saw that refresh (#4974). A refused
 or uncertain refresh is terminal and the credential reads **Reconnect needed**;
 the old refresh token is never sent again. Idle sign-ins are kept alive (see
 [Idle OAuth keep-alive](#idle-oauth-keep-alive)). The plan is read only at
@@ -1171,8 +1173,9 @@ WebSockets.
 WebSockets cross only the TLS front door (#3999), and only for Codex's model
 call, `GET chatgpt.com/backend-api/codex/responses`; any other upgrade is
 refused before a lease. The swap rule and the route's response policy cover
-the handshake: the placeholder is swapped for the sign-in and a 401 is
-refreshed and retried once, and the `101`'s headers pass the response policy
+the handshake: the placeholder is swapped for the sign-in, a 401 is
+refreshed and retried once under the same rule as a request's (#4974), and
+the `101`'s headers pass the response policy
 without `set-cookie`. A `101` that echoes the injected credential fails the
 upgrade. After the `101` the socket's bytes are neither read nor redacted, so a
 credential the agent puts inside a frame reaches the provider as it is. While
@@ -1430,6 +1433,16 @@ loopback ingress, and these rules hold from the start:
 | GitHub | OAuth enrollment, protected HTTPS clone/fetch/push, stock gh API/repository/issue/PR workflows through admitted routes |
 | Anthropic | API key, Claude subscription token or Claude sign-in (refreshed by the broker), the transparent route: every Claude Code API request, including enterprise accounts using the same API |
 | SSH | Ed25519 generation, standard Ed25519/RSA OpenSSH import, initial private checkout, ssh/scp/sftp/Git-over-SSH |
+
+A Codex sign-in's request, or its WebSocket handshake through the front door,
+that the provider answers with 401 forces one refresh and one resend only of a
+sign-in last refreshed ten minutes ago or more, by the time stored with the
+sign-in, as for a Claude sign-in (#4974): a process in the environment shapes
+the request, and every forced exchange rotates the refresh token. The 401 of a
+sign-in refreshed more recently is returned as it is, and so is the provider's
+401 when the forced refresh fails.
+A retry Codewire refuses to lease again, or whose refresh the authority
+refuses to begin, is Codewire's denial of the request, as on the Claude route.
 
 av-credential-proxy provides injection and redaction (and GitHub's closed HTTP
 policy); Codewire owns the transparent routes and authorization, storage,

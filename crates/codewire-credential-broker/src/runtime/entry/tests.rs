@@ -197,6 +197,8 @@ enum LeasePlan {
     NewRevocation,
     /// The same credential, refreshed since.
     NewerSignIn,
+    /// The sign-in, last refreshed just now (#4974).
+    RefreshedJustNow,
 }
 
 impl Recorded {
@@ -294,6 +296,7 @@ impl BrokerLeaseProvider for Authority {
             }
             LeasePlan::NewRevocation => lease.metadata.revocation_generation += 1,
             LeasePlan::NewerSignIn => lease.material_generation += 1,
+            LeasePlan::RefreshedJustNow => lease.material = codex_sign_in_refreshed_ago(0),
             LeasePlan::Ordinary | LeasePlan::Denied => {}
         }
         Ok(lease)
@@ -1475,7 +1478,13 @@ fn sign_in_access_token() -> String {
     jwt(serde_json::json!({ "exp": in_a_day }))
 }
 
+/// The sign-in, last refreshed eleven minutes ago, so a 401 may force a
+/// refresh of it (#4974).
 fn codex_sign_in() -> zeroize::Zeroizing<Vec<u8>> {
+    codex_sign_in_refreshed_ago(11 * 60)
+}
+
+fn codex_sign_in_refreshed_ago(seconds: u64) -> zeroize::Zeroizing<Vec<u8>> {
     let id_token = jwt(serde_json::json!({
         "email": "developer@example.test",
         "https://api.openai.com/auth": {
@@ -1483,10 +1492,11 @@ fn codex_sign_in() -> zeroize::Zeroizing<Vec<u8>> {
             "chatgpt_account_is_fedramp": false
         }
     }));
-    let bundle = crate::import_codex_tokens(
+    let bundle = crate::codex_oauth::import_codex_tokens_at(
         zeroize::Zeroizing::new(id_token),
         zeroize::Zeroizing::new(sign_in_access_token()),
         zeroize::Zeroizing::new("synthetic-refresh-token".to_owned()),
+        crate::runtime::current_unix_time().unwrap() - seconds,
     )
     .unwrap()
     .into_parts()

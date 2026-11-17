@@ -7,7 +7,7 @@ use super::*;
 use crate::GitHubAppAuthorizationConfig;
 use crate::http_test_support::Lease;
 use bytes::Bytes;
-use codewire_access::{CredentialMetadata, GrantPermission};
+use codewire_access::{CredentialId, CredentialMetadata, GrantPermission};
 use zeroize::Zeroizing;
 
 pub(super) struct Authority {

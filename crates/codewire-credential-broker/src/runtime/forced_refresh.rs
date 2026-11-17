@@ -2,6 +2,33 @@
 
 use std::time::Duration;
 
+use bytes::Bytes;
+use futures::StreamExt as _;
+
+use codewire_access::CredentialId;
+
+use super::{BrokerRequestError, BrokerUpstreamBody, BrokerUpstreamError, BrokerUpstreamResponse};
+use crate::BrokerCredentialLease;
+
+/// The stored sign-in a request was sent with. A refresh forced by its 401
+/// replaces exactly this generation, never a later one.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct RefreshCredentialGeneration {
+    pub(super) credential_id: CredentialId,
+    pub(super) revocation_generation: u64,
+    pub(super) material_generation: u64,
+}
+
+pub(super) fn refresh_generation(
+    lease: &impl BrokerCredentialLease,
+) -> RefreshCredentialGeneration {
+    RefreshCredentialGeneration {
+        credential_id: lease.credential_metadata().id.clone(),
+        revocation_generation: lease.credential_metadata().revocation_generation,
+        material_generation: lease.material_generation(),
+    }
+}
+
 /// How long ago a sign-in must last have been refreshed before a provider
 /// 401 may force another refresh of it.
 ///
@@ -23,6 +50,101 @@ pub(super) const FORCED_REFRESH_MIN_AGE: Duration = Duration::from_secs(10 * 60)
 /// `refreshed_at_unix`. One stamped in the future is not due.
 pub(super) fn forced_refresh_due(refreshed_at_unix: u64, now_unix: u64) -> bool {
     now_unix.saturating_sub(refreshed_at_unix) >= FORCED_REFRESH_MIN_AGE.as_secs()
+}
+
+/// The most of a provider's 401 held in memory while the sign-in refreshes.
+/// The API's rejection is a few hundred bytes of JSON. A larger one is
+/// answered as it is, with no refresh.
+pub(super) const HELD_REJECTION_MAX_BYTES: usize = 64 * 1024;
+
+/// Reads the provider's 401 to its end, so no upstream connection is held
+/// open while the sign-in refreshes: an exchange can take as long as its
+/// timeout. Returns the reply, still to be answered as it came, and whether
+/// all of it was read. One longer than `HELD_REJECTION_MAX_BYTES`, or one
+/// that failed while it was read, was not: what was read goes back in front
+/// of the rest.
+pub(super) async fn hold_rejection(
+    response: BrokerUpstreamResponse,
+) -> (BrokerUpstreamResponse, bool) {
+    let (status, headers, mut body) = response.into_parts();
+    let mut held: Vec<Result<Bytes, BrokerUpstreamError>> = Vec::new();
+    let mut held_bytes = 0_usize;
+    let whole = loop {
+        match body.next().await {
+            None => break true,
+            Some(Ok(chunk)) => {
+                held_bytes = held_bytes.saturating_add(chunk.len());
+                held.push(Ok(chunk));
+                if held_bytes > HELD_REJECTION_MAX_BYTES {
+                    break false;
+                }
+            }
+            Some(Err(error)) => {
+                held.push(Err(error));
+                break false;
+            }
+        }
+    };
+    let held = futures::stream::iter(held);
+    let body: BrokerUpstreamBody = if whole {
+        Box::pin(held)
+    } else {
+        Box::pin(held.chain(body))
+    };
+    (BrokerUpstreamResponse::new(status, headers, body), whole)
+}
+
+/// Why a sign-in's request could not be prepared again after its forced
+/// refresh, split by where it failed (#4974).
+#[derive(Debug)]
+pub(super) enum RetryFailure {
+    /// The exchange itself failed: the provider refused it, its outcome is
+    /// uncertain, or its result could not be stored. The 401 is then the
+    /// provider's own answer about a credential still this environment's.
+    Refresh(BrokerRequestError),
+    /// The request no longer has this credential: the re-lease or its binding
+    /// was refused, before or after the exchange, or the authority refused to
+    /// begin a refresh of it. The provider never judged that, so its 401 says
+    /// nothing about it.
+    Request(BrokerRequestError),
+}
+
+impl From<BrokerRequestError> for RetryFailure {
+    fn from(error: BrokerRequestError) -> Self {
+        Self::Request(error)
+    }
+}
+
+impl From<RetryFailure> for BrokerRequestError {
+    fn from(failure: RetryFailure) -> Self {
+        match failure {
+            RetryFailure::Refresh(error) | RetryFailure::Request(error) => error,
+        }
+    }
+}
+
+/// What a sign-in's 401 is answered with when its forced refresh failed:
+/// `Ok` answers the provider's held 401, when the exchange itself failed.
+/// An unavailable authority still ends the epoch, and a request that no
+/// longer has this credential gets its own error, as before #4972.
+pub(super) fn after_failed_refresh(
+    failure: RetryFailure,
+    provider: &'static str,
+) -> Result<(), BrokerRequestError> {
+    match failure {
+        RetryFailure::Refresh(BrokerRequestError::AuthorityUnavailable) => {
+            Err(BrokerRequestError::AuthorityUnavailable)
+        }
+        RetryFailure::Refresh(error) => {
+            tracing::info!(
+                provider,
+                %error,
+                "a sign-in's 401 is returned after its forced refresh failed"
+            );
+            Ok(())
+        }
+        RetryFailure::Request(error) => Err(error),
+    }
 }
 
 #[cfg(test)]

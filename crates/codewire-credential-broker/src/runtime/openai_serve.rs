@@ -8,11 +8,12 @@ use codewire_access::{
 use http::StatusCode;
 use uuid::Uuid;
 
+use super::forced_refresh::{after_failed_refresh, forced_refresh_due, hold_rejection};
 use super::{
     BrokerHttpResponse, BrokerLeaseProvider, BrokerRedactedBody, BrokerRequestError,
-    BrokerUpstreamResponse, BrokerUpstreamTransport, OpenAiBroker, PreparedOAuthRequest,
-    ProviderStreamingResponse, RefreshCredentialGeneration, current_unix_time, map_adapter_error,
-    refresh_generation,
+    BrokerUpstreamResponse, BrokerUpstreamTransport, CODEX_REFRESH_PROVIDER, OpenAiBroker,
+    PreparedOAuthRequest, ProviderStreamingResponse, RefreshCredentialGeneration,
+    current_unix_time, map_adapter_error, refresh_generation,
 };
 use crate::openai::ValidatedOpenAiRequest;
 use crate::{BrokerCredentialLease as _, PreparedOpenAiRequest, PreparedOpenAiResponse};
@@ -21,6 +22,8 @@ use crate::{BrokerCredentialLease as _, PreparedOpenAiRequest, PreparedOpenAiRes
 pub(super) struct OAuthRetry {
     request: ValidatedOpenAiRequest,
     rejected: RefreshCredentialGeneration,
+    /// When the sign-in that was sent was last refreshed, by its stored time.
+    rejected_refreshed_at_unix: u64,
     grant: DerivedGrant,
 }
 
@@ -31,7 +34,8 @@ where
 {
     /// Serves `provider_request` with `lease`'s credential, its reply
     /// redacted: an API key, or a Codex sign-in refreshed when it is about to
-    /// expire and once more on a 401.
+    /// expire, and once more on a 401 only when the sign-in that was sent was
+    /// last refreshed `FORCED_REFRESH_MIN_AGE` ago or more (#4974).
     pub(super) async fn serve_openai(
         &self,
         request_id: Uuid,
@@ -55,11 +59,13 @@ where
         if upstream.status() == StatusCode::UNAUTHORIZED
             && let Some(retry) = retry
         {
-            drop(upstream);
-            let prepared = self
-                .retry_openai(request_id, operation, route, retry)
+            let prepared;
+            (upstream, prepared) = self
+                .after_unauthorized(request_id, operation, route, retry, upstream)
                 .await?;
-            (upstream, response_policy) = self.execute_prepared(prepared).await?;
+            if let Some(prepared) = prepared {
+                (upstream, response_policy) = self.execute_prepared(prepared).await?;
+            }
         }
         redacted_openai(upstream, response_policy)
     }
@@ -104,12 +110,14 @@ where
                     )
                     .await?
                 } else {
+                    let refreshed_at_unix = credential.refreshed_at_unix();
                     PreparedOAuthRequest {
                         request: self
                             .oauth_adapter
                             .prepare_credential(credential, provider_request)
                             .map_err(map_adapter_error)?,
                         generation,
+                        refreshed_at_unix,
                     }
                 };
                 Ok((
@@ -117,6 +125,7 @@ where
                     Some(OAuthRetry {
                         request: retry_request,
                         rejected: prepared.generation,
+                        rejected_refreshed_at_unix: prepared.refreshed_at_unix,
                         grant,
                     }),
                 ))
@@ -125,16 +134,28 @@ where
         }
     }
 
-    /// The request again after the provider refused the sign-in it carried:
-    /// refreshed outside the environment, once.
-    pub(super) async fn retry_openai(
+    /// What follows the provider's 401 of the Codex sign-in `retry` was sent
+    /// with (#4974): the request once more, with the sign-in refreshed
+    /// outside the environment, when it was last refreshed
+    /// `FORCED_REFRESH_MIN_AGE` ago or more and the 401 was held whole.
+    /// Otherwise `upstream`, the provider's own 401, to answer as it came.
+    pub(super) async fn after_unauthorized(
         &self,
         request_id: Uuid,
         operation: BrokerOperationId,
         route: BrokerRouteId,
         retry: OAuthRetry,
-    ) -> Result<PreparedOpenAiRequest, BrokerRequestError> {
-        Ok(self
+        upstream: BrokerUpstreamResponse,
+    ) -> Result<(BrokerUpstreamResponse, Option<PreparedOpenAiRequest>), BrokerRequestError> {
+        if !forced_refresh_due(retry.rejected_refreshed_at_unix, current_unix_time()?) {
+            return Ok((upstream, None));
+        }
+        let (upstream, whole) = hold_rejection(upstream).await;
+        // A 401 that could not be held whole is answered as it is.
+        if !whole {
+            return Ok((upstream, None));
+        }
+        match self
             .prepare_oauth_after_refresh(
                 request_id,
                 operation,
@@ -143,8 +164,13 @@ where
                 Some(&retry.rejected),
                 &retry.grant,
             )
-            .await?
-            .request)
+            .await
+        {
+            Ok(prepared) => Ok((upstream, Some(prepared.request))),
+            Err(failure) => {
+                after_failed_refresh(failure, CODEX_REFRESH_PROVIDER).map(|()| (upstream, None))
+            }
+        }
     }
 }
 

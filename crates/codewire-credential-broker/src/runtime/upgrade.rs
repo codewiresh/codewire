@@ -207,15 +207,27 @@ where
             )
             .await?;
         let mut sent = self.upgrade_prepared(prepared, &handshake).await?;
-        if let Sent::Refused(upstream, _) = &sent
-            && upstream.status() == StatusCode::UNAUTHORIZED
-            && let Some(retry) = retry
-        {
-            drop(sent);
-            let prepared = self
-                .retry_openai(request.request_id, operation.clone(), route.clone(), retry)
-                .await?;
-            sent = self.upgrade_prepared(prepared, &handshake).await?;
+        if let Some(retry) = retry {
+            sent = match sent {
+                Sent::Refused(upstream, policy)
+                    if upstream.status() == StatusCode::UNAUTHORIZED =>
+                {
+                    match self
+                        .after_unauthorized(
+                            request.request_id,
+                            operation.clone(),
+                            route.clone(),
+                            retry,
+                            upstream,
+                        )
+                        .await?
+                    {
+                        (_, Some(prepared)) => self.upgrade_prepared(prepared, &handshake).await?,
+                        (upstream, None) => Sent::Refused(upstream, policy),
+                    }
+                }
+                sent => sent,
+            };
         }
         match sent {
             Sent::Switched {

@@ -286,6 +286,25 @@ pub fn import_codex_tokens(
     )
 }
 
+/// [`import_codex_tokens`] stamped as refreshed at `imported_at_unix`, for
+/// tests of what a sign-in's age decides.
+#[cfg(test)]
+pub(crate) fn import_codex_tokens_at(
+    id_token: Zeroizing<String>,
+    access_token: Zeroizing<String>,
+    refresh_token: Zeroizing<String>,
+    imported_at_unix: u64,
+) -> Result<CodexOAuthImport, CodexOAuthMaterialError> {
+    import_tokens_at(
+        IssuedTokens {
+            id_token,
+            access_token,
+            refresh_token,
+        },
+        imported_at_unix,
+    )
+}
+
 fn import_tokens_at(
     tokens: IssuedTokens,
     imported_at_unix: u64,

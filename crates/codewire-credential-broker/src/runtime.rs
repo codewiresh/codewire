@@ -6,8 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use bytes::Bytes;
 use codewire_access::{
-    BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialId,
-    DerivedGrant, GrantPermission, PROVIDER_REFRESH_TIMEOUT_SECONDS, claude_login_permission,
+    BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, DerivedGrant,
+    GrantPermission, PROVIDER_REFRESH_TIMEOUT_SECONDS, claude_login_permission,
     codex_login_permission,
 };
 use codewire_daemon_proto::codewire::bridge::v1;
@@ -69,6 +69,7 @@ mod claude_token;
 mod entry;
 mod forced_refresh;
 mod github_front_door;
+use forced_refresh::{RefreshCredentialGeneration, RetryFailure, refresh_generation};
 mod request_binding;
 use request_binding::validate_request_binding;
 #[cfg(test)]
@@ -1063,16 +1064,11 @@ pub struct OpenAiBroker<P, U> {
     network_policy_allows_github: bool,
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct RefreshCredentialGeneration {
-    credential_id: CredentialId,
-    revocation_generation: u64,
-    material_generation: u64,
-}
-
 struct PreparedOAuthRequest {
     request: crate::PreparedOpenAiRequest,
     generation: RefreshCredentialGeneration,
+    /// When the sign-in the request is sent with was last refreshed.
+    refreshed_at_unix: u64,
 }
 
 struct PreparedGitHubRefreshRequest {
@@ -1247,14 +1243,6 @@ impl OAuthRefreshMaterial {
             Self::Codex(_) => CODEX_REFRESH_PROVIDER,
             Self::Claude(_) => CLAUDE_REFRESH_PROVIDER,
         }
-    }
-}
-
-fn refresh_generation(lease: &impl BrokerCredentialLease) -> RefreshCredentialGeneration {
-    RefreshCredentialGeneration {
-        credential_id: lease.credential_metadata().id.clone(),
-        revocation_generation: lease.credential_metadata().revocation_generation,
-        material_generation: lease.material_generation(),
     }
 }
 
@@ -1805,7 +1793,7 @@ where
         provider_request: ValidatedOpenAiRequest,
         force_refresh_of: Option<&RefreshCredentialGeneration>,
         admitted_grant: &DerivedGrant,
-    ) -> Result<PreparedOAuthRequest, BrokerRequestError> {
+    ) -> Result<PreparedOAuthRequest, RetryFailure> {
         let purpose = OAuthPurpose::Operation {
             slot: CapabilitySlot::codex(),
             operation,
@@ -1821,12 +1809,14 @@ where
                 ACCESS_TOKEN_REFRESH_WINDOW_SECONDS,
             )
             .await?;
+        let refreshed_at_unix = credential.refreshed_at_unix();
         Ok(PreparedOAuthRequest {
             request: self
                 .oauth_adapter
                 .prepare_credential(credential, provider_request)
                 .map_err(map_adapter_error)?,
             generation,
+            refreshed_at_unix,
         })
     }
 
@@ -1882,14 +1872,14 @@ where
         force_refresh_of: Option<&RefreshCredentialGeneration>,
         admitted_grant: &DerivedGrant,
         minimum_validity_seconds: u64,
-    ) -> Result<(C, RefreshCredentialGeneration), BrokerRequestError> {
+    ) -> Result<(C, RefreshCredentialGeneration), RetryFailure> {
         let _refresh_guard = self.oauth_refresh.lock().await;
         let permission = purpose.permission();
         for refresh_waits in 0..=OAUTH_REFRESH_WAIT_ATTEMPTS {
             let lease = self.lease_oauth(request_id, purpose).await?;
             validate_request_binding(lease.grant(), admitted_grant)?;
             if lease.credential_metadata().authentication_kind != C::AUTHENTICATION_KIND {
-                return Err(BrokerRequestError::Denied);
+                return Err(BrokerRequestError::Denied.into());
             }
             let generation = refresh_generation(&lease);
             let refresh_request = BrokerCredentialRefreshRequest {
@@ -1927,23 +1917,24 @@ where
                 None if refresh_waits < OAUTH_REFRESH_WAIT_ATTEMPTS => {
                     tokio::time::sleep(OAUTH_REFRESH_WAIT_INTERVAL).await;
                 }
-                None => return Err(BrokerRequestError::AuthorityUnavailable),
+                None => return Err(BrokerRequestError::AuthorityUnavailable.into()),
             }
         }
-        Err(BrokerRequestError::AuthorityUnavailable)
+        Err(BrokerRequestError::AuthorityUnavailable.into())
     }
 
     async fn refresh_oauth_credential(
         &self,
         credential: OAuthRefreshMaterial,
         refresh_request: BrokerCredentialRefreshRequest,
-    ) -> Result<Option<()>, BrokerRequestError> {
+    ) -> Result<Option<()>, RetryFailure> {
         let refreshed_at_unix = current_unix_time()?;
         let permit = match self.leases.begin_credential_refresh(refresh_request).await {
             Ok(BrokerRefreshAdmission::Reserved(reservation)) => reservation,
             Ok(BrokerRefreshAdmission::Recovered) => return Ok(Some(())),
             Err(BrokerRefreshError::InProgress | BrokerRefreshError::Stale) => return Ok(None),
-            Err(error) => return Err(map_refresh_error(error)),
+            // A refused begin is a refused re-lease: the provider never saw it.
+            Err(error) => return Err(map_refresh_error(error).into()),
         };
         // A successful begin call owns an authority reservation. Transfer the
         // entire remaining refresh exchange to the shutdown tracker in this
@@ -1960,8 +1951,9 @@ where
         });
         refresh
             .await
-            .map_err(|_| BrokerRequestError::AuthorityUnavailable)?
+            .map_err(|_| RetryFailure::Refresh(BrokerRequestError::AuthorityUnavailable))?
             .map(Some)
+            .map_err(RetryFailure::Refresh)
     }
 
     async fn complete_oauth_refresh(
@@ -2687,8 +2679,9 @@ mod tests {
 
     use base64::Engine as _;
     use codewire_access::{
-        AccessProfileName, CapabilityPolicy, CredentialAuthKind, EnvironmentAccessBinding,
-        EnvironmentId, GrantPermission, ProviderCatalog, ProviderDefinition, ProviderId,
+        AccessProfileName, CapabilityPolicy, CredentialAuthKind, CredentialId,
+        EnvironmentAccessBinding, EnvironmentId, GrantPermission, ProviderCatalog,
+        ProviderDefinition, ProviderId,
     };
     use codewire_local_credentials::{
         CredentialOperationLeaseRequest, LocalCredentialAuthority, NewCredential,
@@ -2705,6 +2698,7 @@ mod tests {
     use crate::openai::response_admission_test_cases::{accepted_encodings, denied_encodings};
 
     mod claude_login;
+    mod codex_forced_refresh;
     mod codex_login;
 
     #[cfg(feature = "local-broker-synthetic-smoke")]
@@ -3496,8 +3490,15 @@ mod tests {
         format!("{header}.{payload}.synthetic-signature")
     }
 
+    /// A sign-in last refreshed eleven minutes ago: old enough that a 401
+    /// may force its refresh (#4974).
     fn oauth_material(access_token: &str) -> CanonicalCodexOAuthBundle {
-        crate::import_codex_tokens(
+        let eleven_minutes_ago = current_unix_time().expect("current time") - 11 * 60;
+        oauth_material_at(access_token, eleven_minutes_ago)
+    }
+
+    fn oauth_material_at(access_token: &str, refreshed_at_unix: u64) -> CanonicalCodexOAuthBundle {
+        crate::codex_oauth::import_codex_tokens_at(
             Zeroizing::new(jwt(json!({
                 "email": "developer@example.test",
                 "https://api.openai.com/auth": {
@@ -3507,6 +3508,7 @@ mod tests {
             }))),
             Zeroizing::new(access_token.to_owned()),
             Zeroizing::new("synthetic-old-refresh-token".to_owned()),
+            refreshed_at_unix,
         )
         .expect("Codex OAuth import")
         .into_parts()
@@ -5188,6 +5190,7 @@ mod tests {
                     &original,
                 )
                 .await
+                .map_err(BrokerRequestError::from)
         });
         control.wait_accepted().await;
         tokio::time::timeout(Duration::from_secs(5), async {

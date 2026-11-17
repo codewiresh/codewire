@@ -227,6 +227,33 @@ async fn a_401_to_the_handshake_is_retried_once_with_a_newer_sign_in() {
     }
 }
 
+/// The handshake's 401 of a sign-in refreshed under ten minutes ago is
+/// answered as it came, with no refresh and no second handshake (#4974).
+#[tokio::test]
+async fn a_401_to_the_handshake_of_a_sign_in_refreshed_just_now_refreshes_nothing() {
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let recorded = Recorded {
+        unauthorized_upgrades: Arc::new(AtomicUsize::new(1)),
+        refreshes: Some(Arc::clone(&refreshes)),
+        ..signed_in()
+    };
+    recorded
+        .plan
+        .lock()
+        .unwrap()
+        .extend([LeasePlan::RefreshedJustNow]);
+    let broker = recorded.broker();
+    let Ok(BrokerUpgradeOutcome::Response(response)) = broker
+        .execute_front_door_upgrade(handshake(MODEL_CALL, Some(format!("Bearer {OURS}"))))
+        .await
+    else {
+        panic!("the provider's 401 is answered");
+    };
+    assert_eq!(response.into_parts().0, http::StatusCode::UNAUTHORIZED);
+    assert_eq!(refreshes.load(Ordering::Relaxed), 0);
+    assert_eq!(recorded.outbound().len(), 1);
+}
+
 /// When the sign-in the provider refused is still the newest, it must be
 /// refreshed; a refresh the authority refuses ends the handshake there,
 /// without a second one.

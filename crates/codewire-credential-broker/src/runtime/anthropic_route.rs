@@ -7,68 +7,28 @@
 //! A second 401 is returned as it is, and so is the first when that refresh
 //! fails. An API key or a subscription token is never retried.
 
-use bytes::Bytes;
 use codewire_access::{
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, DerivedGrant,
 };
-use futures::StreamExt as _;
 use http::StatusCode;
 use uuid::Uuid;
 
-use super::forced_refresh::forced_refresh_due;
+use super::forced_refresh::{
+    RetryFailure, after_failed_refresh, forced_refresh_due, hold_rejection,
+};
 use super::{
     ACCESS_TOKEN_REFRESH_WINDOW_SECONDS, BrokerHttpResponse, BrokerLeaseProvider,
-    BrokerRedactedBody, BrokerRequestError, BrokerUpstreamBody, BrokerUpstreamError,
-    BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport, OAuthPurpose,
-    OpenAiBroker, Phase, ProviderStreamingResponse, RefreshCredentialGeneration,
-    ValidatedGuestRequest, current_unix_time, map_adapter_error, map_lease_error,
-    map_upstream_error, refresh_generation, timing, validate_http_lease_coordinates,
+    BrokerRedactedBody, BrokerRequestError, BrokerUpstreamRequest, BrokerUpstreamResponse,
+    BrokerUpstreamTransport, CLAUDE_REFRESH_PROVIDER, OAuthPurpose, OpenAiBroker, Phase,
+    ProviderStreamingResponse, RefreshCredentialGeneration, ValidatedGuestRequest,
+    current_unix_time, map_adapter_error, map_lease_error, map_upstream_error, refresh_generation,
+    timing, validate_http_lease_coordinates,
 };
 use crate::BrokerCredentialLease as _;
 use crate::anthropic::{
     PreparedAnthropicRequest, PreparedAnthropicResponse, ValidatedAnthropicRequest,
 };
 use crate::claude_oauth::ClaudeOAuthCredential;
-
-/// The most of a provider's 401 held in memory while the sign-in refreshes.
-/// The API's rejection is a few hundred bytes of JSON. A larger one is
-/// answered as it is, with no refresh.
-const HELD_REJECTION_MAX_BYTES: usize = 64 * 1024;
-
-/// Reads the provider's 401 to its end, so no upstream connection is held
-/// open while the sign-in refreshes: an exchange can take as long as its
-/// timeout. Returns the reply, still to be answered as it came, and whether
-/// all of it was read. One longer than `HELD_REJECTION_MAX_BYTES`, or one
-/// that failed while it was read, was not: what was read goes back in front
-/// of the rest.
-async fn hold_rejection(response: BrokerUpstreamResponse) -> (BrokerUpstreamResponse, bool) {
-    let (status, headers, mut body) = response.into_parts();
-    let mut held: Vec<Result<Bytes, BrokerUpstreamError>> = Vec::new();
-    let mut held_bytes = 0_usize;
-    let whole = loop {
-        match body.next().await {
-            None => break true,
-            Some(Ok(chunk)) => {
-                held_bytes = held_bytes.saturating_add(chunk.len());
-                held.push(Ok(chunk));
-                if held_bytes > HELD_REJECTION_MAX_BYTES {
-                    break false;
-                }
-            }
-            Some(Err(error)) => {
-                held.push(Err(error));
-                break false;
-            }
-        }
-    };
-    let held = futures::stream::iter(held);
-    let body: BrokerUpstreamBody = if whole {
-        Box::pin(held)
-    } else {
-        Box::pin(held.chain(body))
-    };
-    (BrokerUpstreamResponse::new(status, headers, body), whole)
-}
 
 /// What sends a Claude sign-in's request once more after the provider
 /// rejected the token it was sent with.
@@ -206,24 +166,14 @@ where
             if whole {
                 match self.prepare_sign_in_retry(request_id, retry).await {
                     Ok(prepared) => (response, policy) = self.send_anthropic(prepared).await?,
-                    // The one failure that ends the epoch (a refresh the
-                    // authority could not start or settle) still has to.
-                    Err(BrokerRequestError::AuthorityUnavailable) => {
-                        return Err(BrokerRequestError::AuthorityUnavailable);
-                    }
-                    // Any other failed refresh answers the provider's own
-                    // 401, from the copy held above. The agent then asks the
-                    // token endpoint itself, which is the one place that
-                    // tells it whether its login is gone (`invalid_grant`) or
-                    // the failure will pass. The refresh path has already
-                    // logged the failure's class and, for a refused or
-                    // uncertain exchange, left the sign-in "Reconnect needed".
-                    Err(error) => {
-                        tracing::info!(
-                            %error,
-                            "a Claude sign-in's 401 is returned after its forced refresh failed"
-                        );
-                    }
+                    // A failed exchange answers the provider's own 401, from
+                    // the copy held above. The agent then asks the token
+                    // endpoint itself, which is the one place that tells it
+                    // whether its login is gone (`invalid_grant`) or the
+                    // failure will pass. The refresh path has already logged
+                    // the failure's class and, for a refused or uncertain
+                    // exchange, left the sign-in "Reconnect needed".
+                    Err(failure) => after_failed_refresh(failure, CLAUDE_REFRESH_PROVIDER)?,
                 }
             }
         }
@@ -304,7 +254,7 @@ where
         &self,
         request_id: Uuid,
         retry: SignInRetry,
-    ) -> Result<PreparedAnthropicRequest, BrokerRequestError> {
+    ) -> Result<PreparedAnthropicRequest, RetryFailure> {
         let SignInRetry {
             request,
             rejected,
@@ -322,9 +272,10 @@ where
                 ACCESS_TOKEN_REFRESH_WINDOW_SECONDS,
             )
             .await?;
-        self.anthropic_sign_in_adapter
+        Ok(self
+            .anthropic_sign_in_adapter
             .prepare_credential(&credential, request)
-            .map_err(map_adapter_error)
+            .map_err(map_adapter_error)?)
     }
 
     async fn send_anthropic(

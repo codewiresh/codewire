@@ -10,12 +10,10 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::HELD_REJECTION_MAX_BYTES;
-
-use codewire_access::{CredentialMetadata, CredentialPlaceholder};
+use codewire_access::{CredentialId, CredentialMetadata, CredentialPlaceholder};
 use tokio::sync::Barrier;
 
-use super::super::forced_refresh::FORCED_REFRESH_MIN_AGE;
+use super::super::forced_refresh::{FORCED_REFRESH_MIN_AGE, HELD_REJECTION_MAX_BYTES};
 use super::super::*;
 use crate::claude_oauth::{ClaudeIssuedTokens, ClaudeProfile, import_tokens_at};
 use crate::http_test_support::Lease;
@@ -69,6 +67,12 @@ struct Journal {
     failed: usize,
     /// The authority refuses to start a refresh it has reserved.
     refuses_start: bool,
+    /// The authority refuses to begin a refresh of this sign-in.
+    refuses_begin: bool,
+    leases: usize,
+    /// Leases after this many are of another credential, as when the
+    /// environment is bound to another sign-in.
+    rebind_after_leases: Option<usize>,
 }
 
 /// A sign-in whose access token was issued `age_seconds` ago.
@@ -93,6 +97,9 @@ fn journal(age_seconds: u64) -> Arc<Mutex<Journal>> {
         committed: 0,
         failed: 0,
         refuses_start: false,
+        refuses_begin: false,
+        leases: 0,
+        rebind_after_leases: None,
     }))
 }
 
@@ -138,7 +145,8 @@ impl BrokerLeaseProvider for Authority {
         operation: BrokerOperationId,
         route: BrokerRouteId,
     ) -> Result<SignInLease, BrokerLeaseError> {
-        let journal = self.journal.lock().unwrap();
+        let mut journal = self.journal.lock().unwrap();
+        journal.leases += 1;
         let mut lease = Lease::new(
             "anthropic",
             CredentialAuthKind::ClaudeSignIn,
@@ -147,6 +155,14 @@ impl BrokerLeaseProvider for Authority {
             route.as_str(),
         );
         lease.material = Zeroizing::new(journal.bundle.clone());
+        if journal
+            .rebind_after_leases
+            .is_some_and(|leases| journal.leases > leases)
+        {
+            let other = CredentialId::parse("33333333-3333-4333-8333-333333333333").unwrap();
+            lease.grant.credential_id = other.clone();
+            lease.metadata.id = other;
+        }
         Ok(SignInLease {
             lease,
             generation: journal.generation,
@@ -157,6 +173,9 @@ impl BrokerLeaseProvider for Authority {
         request: BrokerCredentialRefreshRequest,
     ) -> Result<BrokerRefreshAdmission<()>, BrokerRefreshError> {
         let mut journal = self.journal.lock().unwrap();
+        if journal.refuses_begin {
+            return Err(BrokerRefreshError::Denied);
+        }
         if request.material_generation != journal.generation {
             return Err(BrokerRefreshError::Stale);
         }
@@ -595,6 +614,33 @@ async fn a_forced_refresh_the_authority_cannot_start_fails_the_request() {
         failed.unwrap_err(),
         BrokerRequestError::AuthorityUnavailable
     );
+    assert_eq!(bearers(&broker), [bearer(0)]);
+    assert_eq!(refreshes(&broker), 0);
+}
+
+/// A retry the authority refuses to lease, because the environment is now
+/// bound to another sign-in, is the request's denial, not the provider's 401:
+/// the provider never judged that (#4974).
+#[tokio::test]
+async fn a_sign_in_unbound_while_its_401_is_held_is_a_denial() {
+    let journal = journal(OLD);
+    journal.lock().unwrap().rebind_after_leases = Some(1);
+    let broker = broker(&journal);
+    let failed = try_send(&broker, &[StatusCode::UNAUTHORIZED]).await;
+    assert_eq!(failed.unwrap_err(), BrokerRequestError::Denied);
+    assert_eq!(bearers(&broker), [bearer(0)]);
+    assert_eq!(refreshes(&broker), 0);
+}
+
+/// The authority refusing to begin the refresh is the same fact as a refused
+/// re-lease, so it is the request's denial too (#4974).
+#[tokio::test]
+async fn a_forced_refresh_the_authority_refuses_to_begin_is_a_denial() {
+    let journal = journal(OLD);
+    journal.lock().unwrap().refuses_begin = true;
+    let broker = broker(&journal);
+    let failed = try_send(&broker, &[StatusCode::UNAUTHORIZED]).await;
+    assert_eq!(failed.unwrap_err(), BrokerRequestError::Denied);
     assert_eq!(bearers(&broker), [bearer(0)]);
     assert_eq!(refreshes(&broker), 0);
 }
