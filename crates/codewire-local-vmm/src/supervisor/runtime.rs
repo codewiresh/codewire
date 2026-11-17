@@ -578,20 +578,21 @@ pub(super) async fn confirm_boot(
     let Some(binding) = environment.cw_runtime.as_ref() else {
         return Ok(());
     };
-    if binding.staging_catalog_generation.is_some() {
-        return Err(Status::failed_precondition(
-            "runtime bootstrap is not fixed",
-        ));
-    }
+    // A move to the installed runtime boots its staged catalog, which the
+    // boot's promotion then makes active (#4980).
+    let booted = binding
+        .staging_catalog_generation
+        .as_ref()
+        .unwrap_or(&binding.active_catalog_generation);
     let mut runner = environment
         .runner
         .clone()
         .ok_or_else(|| Status::failed_precondition("runtime startup owner is missing"))?;
-    runner.cw_runtime_catalog_generation = Some(binding.active_catalog_generation.clone());
+    runner.cw_runtime_catalog_generation = Some(booted.clone());
     let identity = RuntimeBinding {
         environment_id: environment.id,
         generation,
-        bootstrap_catalog_sha256: binding.active_catalog_generation.clone(),
+        bootstrap_catalog_sha256: booted.clone(),
     };
     identity.validate().map_err(Status::failed_precondition)?;
     let (endpoint, _) =

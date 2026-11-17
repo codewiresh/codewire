@@ -7410,7 +7410,8 @@ async fn reconcile_does_not_kill_a_runner_for_a_transient_protocol_query_failure
 
 #[cfg(target_arch = "x86_64")]
 #[tokio::test]
-async fn old_guest_start_refuses_before_checkpoint_or_runner_effects() {
+async fn an_old_guest_start_that_cannot_move_refuses_before_checkpoint_or_runner_effects() {
+    // The test supervisor has no installed runtime to move onto (#4980).
     for (checkpoint, staged) in [(0, false), (1, false), (0, true), (3, true)] {
         let (_parent, core) = test_supervisor_core(project_environment());
         let core = test_supervisor(core);
@@ -7448,12 +7449,15 @@ async fn old_guest_start_refuses_before_checkpoint_or_runner_effects() {
         );
 
         let error = core.start("dev", &operation).await.unwrap_err();
-        assert!(matches!(
-            error,
-            SupervisorError::Artifact(
-                crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(_)
-            )
-        ));
+        // Staged boot assets are checked as they are; unstaged ones move,
+        // and with nothing installed the move is refused.
+        assert!(
+            matches!(
+                error,
+                SupervisorError::Artifact(_) | SupervisorError::ArtifactStore
+            ),
+            "{error:?}"
+        );
         assert_eq!(core.environment("dev").unwrap(), before);
         assert_eq!(
             SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"],
@@ -7483,6 +7487,281 @@ async fn old_guest_start_refuses_before_checkpoint_or_runner_effects() {
         core.core().mark_runner_dead("dev").unwrap();
         shutdown_tx.send(()).unwrap();
         server.await.unwrap();
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[tokio::test]
+async fn a_stopped_environment_on_an_earlier_guest_moves_at_its_start_and_a_running_one_does_not() {
+    let (_parent, core) = test_supervisor_core(project_environment());
+    let core = test_supervisor(core);
+    let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+    let earlier = install_test_guest_generation(&engine, b"\0CWGUESTABI\0seed=8;cw_catalog=0\0");
+    let current =
+        install_test_guest_generation(&engine, codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER);
+    let set = |artifact: &str, state: StoredEnvironmentState| {
+        let mut guard = core.core();
+        let environment = guard.environment_mut("dev").unwrap();
+        environment.active_artifact_generation = Some(artifact.to_owned());
+        environment.state = state;
+        guard.save().unwrap();
+    };
+    // The ABI it moves from is named as its init declares it.
+    set(&earlier, StoredEnvironmentState::Stopped);
+    assert_eq!(
+        core.start_moves_from("dev").await.unwrap().as_deref(),
+        Some("seed=8;cw_catalog=0")
+    );
+    set(&earlier, StoredEnvironmentState::Error);
+    assert!(core.start_moves_from("dev").await.unwrap().is_some());
+    // A running environment is never moved by a start; a restart moves it.
+    set(&earlier, StoredEnvironmentState::Running);
+    assert!(core.start_moves_from("dev").await.unwrap().is_none());
+    assert!(core.runtime_move_from("dev").await.unwrap().is_some());
+    // Assets on the installed ABI never move.
+    set(&current, StoredEnvironmentState::Stopped);
+    assert!(core.start_moves_from("dev").await.unwrap().is_none());
+    // Neither does an environment with a boot already staged.
+    set(&earlier, StoredEnvironmentState::Stopped);
+    core.core()
+        .environment_mut("dev")
+        .unwrap()
+        .staging_artifact_generation = Some(current.clone());
+    assert!(core.start_moves_from("dev").await.unwrap().is_none());
+
+    // The store reads what each generation declares without admitting it,
+    // for VM checkpoints, which need a Linux host.
+    #[cfg(target_os = "linux")]
+    {
+        let store = RuntimeArtifactStore::create(&engine).unwrap();
+        assert_eq!(
+            store.guest_runtime_abi(&earlier).unwrap(),
+            "seed=8;cw_catalog=0"
+        );
+        assert_eq!(
+            store.guest_runtime_abi(&current).unwrap(),
+            crate::artifact::current_guest_abi()
+        );
+    }
+}
+
+#[test]
+fn a_staged_move_is_recorded_only_over_nothing_staged() {
+    let (_parent, core) = test_supervisor_core(project_environment());
+    let environment = core.state.environments["dev"].clone();
+    let generation = test_workspace_generation_with_artifact(
+        environment.project_spec_json.as_deref().unwrap(),
+        environment.project_spec_sha256.as_deref().unwrap(),
+        &"a".repeat(64),
+        b"moved",
+    );
+    let moved = |catalog_generation: Option<String>| runtime_move::StagedStart::Moved {
+        artifact_generation: "a".repeat(64),
+        catalog_generation,
+        generation: generation.clone(),
+    };
+    let mut state = core.state.clone();
+    moved(None).record(&mut state, "dev").unwrap();
+    let recorded = &state.environments["dev"];
+    assert_eq!(recorded.staging_artifact_generation, Some("a".repeat(64)));
+    assert_eq!(
+        recorded.staging_workspace_generation.as_ref(),
+        Some(&generation)
+    );
+    // Never over a boot that is already staged.
+    assert!(matches!(
+        moved(None).record(&mut state, "dev"),
+        Err(SupervisorError::InvalidState)
+    ));
+
+    // A bound environment's guest cw moves with its boot assets: the
+    // installed catalog is staged with them, booted, and made active by the
+    // boot's promotion, with the earlier catalog kept as its rollback.
+    let mut bound = core.state.clone();
+    bound.environments.get_mut("dev").unwrap().cw_runtime = Some(CwRuntimeBinding {
+        schema_version: 1,
+        active_catalog_generation: "b".repeat(64),
+        staging_catalog_generation: None,
+        rollback_catalog_generation: None,
+    });
+    let unbound = core.state.clone();
+    for (mut state, catalog) in [(bound.clone(), None), (unbound, Some("c".repeat(64)))] {
+        assert!(matches!(
+            moved(catalog).record(&mut state, "dev"),
+            Err(SupervisorError::InvalidState)
+        ));
+    }
+    // A move onto the catalog it is already bound to stages no catalog.
+    let mut same = bound.clone();
+    moved(Some("b".repeat(64)))
+        .record(&mut same, "dev")
+        .unwrap();
+    assert_eq!(
+        same.environments["dev"].cw_runtime,
+        bound.environments["dev"].cw_runtime
+    );
+    assert_eq!(
+        runtime_move::moved_catalogs(&bound.environments["dev"]),
+        None
+    );
+    moved(Some("c".repeat(64)))
+        .record(&mut bound, "dev")
+        .unwrap();
+    // Only a boot with a staged catalog names the catalog it moves from.
+    assert_eq!(
+        runtime_move::moved_catalogs(&bound.environments["dev"]),
+        Some(("b".repeat(64).as_str(), "c".repeat(64).as_str()))
+    );
+    let environment = bound.environments.get_mut("dev").unwrap();
+    assert_eq!(
+        environment
+            .cw_runtime
+            .as_ref()
+            .unwrap()
+            .staging_catalog_generation,
+        Some("c".repeat(64))
+    );
+    environment.promote_staging_workspace_generation().unwrap();
+    assert_eq!(runtime_move::moved_catalogs(environment), None);
+    assert_eq!(environment.active_artifact_generation, Some("a".repeat(64)));
+    assert_eq!(
+        environment.cw_runtime,
+        Some(CwRuntimeBinding {
+            schema_version: 1,
+            active_catalog_generation: "c".repeat(64),
+            staging_catalog_generation: None,
+            rollback_catalog_generation: Some("b".repeat(64)),
+        })
+    );
+}
+
+#[test]
+fn a_failed_moved_boot_keeps_its_move_staged_for_the_next_start() {
+    let earlier_environment = || {
+        let mut environment = project_environment();
+        environment.active_workspace_generation = Some(test_workspace_generation_with_artifact(
+            environment.project_spec_json.as_deref().unwrap(),
+            environment.project_spec_sha256.as_deref().unwrap(),
+            &"b".repeat(64),
+            b"earlier",
+        ));
+        environment.cw_runtime = Some(CwRuntimeBinding {
+            schema_version: 1,
+            active_catalog_generation: "d".repeat(64),
+            staging_catalog_generation: None,
+            rollback_catalog_generation: None,
+        });
+        environment
+    };
+    let stage_move = |core: &mut SupervisorCore| {
+        let active = core.state.environments["dev"]
+            .active_workspace_generation
+            .clone()
+            .unwrap();
+        runtime_move::StagedStart::Moved {
+            artifact_generation: "a".repeat(64),
+            catalog_generation: Some("c".repeat(64)),
+            generation: runtime_move::moved_generation(&active, &"a".repeat(64)).unwrap(),
+        }
+        .record(&mut core.state, "dev")
+        .unwrap();
+        core.save().unwrap();
+        core.state.environments["dev"].clone()
+    };
+    // A failed boot keeps the move staged, as a first boot's generation is
+    // kept, so the root disk the runner pinned is booted again by the next
+    // start or restart, and nothing refuses that environment meanwhile.
+    for (kind, state) in [
+        (OperationKind::Start, StoredEnvironmentState::Stopped),
+        (OperationKind::Restart, StoredEnvironmentState::Running),
+    ] {
+        let mut environment = earlier_environment();
+        environment.state = state;
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let staged = stage_move(&mut core);
+        assert!(runtime_move::staged_runtime_move(&staged));
+        let operation = begin_and_advance_test_operation(
+            &core.store,
+            staged.id,
+            kind,
+            &serde_json::json!({"name": "dev", "generation": staged.generation + 1}),
+            1,
+        );
+        core.fail_replayed_operation(&operation, "dev", "start_network_stack_failed")
+            .unwrap();
+        let mut expected = staged.clone();
+        expected.state = StoredEnvironmentState::Error;
+        assert_eq!(core.state.environments["dev"], expected, "{kind:?}");
+        assert_eq!(
+            SupervisorStore::inspect(&core.root).unwrap().1.environments["dev"],
+            expected
+        );
+        core.ensure_no_unowned_workspace_staging("dev").unwrap();
+    }
+
+    // Any other staging over an active generation, with no operation
+    // owning it, is still refused.
+    let (_parent, mut core) = test_supervisor_core(earlier_environment());
+    stage_move(&mut core);
+    let environment = core.environment_mut("dev").unwrap();
+    environment.staging_workspace_generation = Some(test_workspace_generation_with_artifact(
+        environment.project_spec_json.as_deref().unwrap(),
+        environment.project_spec_sha256.as_deref().unwrap(),
+        &"a".repeat(64),
+        b"another image",
+    ));
+    assert!(!runtime_move::staged_runtime_move(environment));
+    assert!(matches!(
+        core.ensure_no_unowned_workspace_staging("dev"),
+        Err(SupervisorError::InvalidState)
+    ));
+
+    // A restart its preflight refuses booted nothing: the VM keeps running,
+    // without the move.
+    let mut running = earlier_environment();
+    running.state = StoredEnvironmentState::Running;
+    let (_parent, mut core) = test_supervisor_core(running.clone());
+    stage_move(&mut core);
+    let operation = begin_and_advance_test_operation(
+        &core.store,
+        running.id,
+        OperationKind::Restart,
+        &serde_json::json!({"name": "dev", "generation": running.generation}),
+        1,
+    );
+    core.fail_restart_preflight(&operation, "dev").unwrap();
+    assert_eq!(core.state.environments["dev"], running);
+    let failed = core
+        .store
+        .operation_by_request(operation.request_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.phase, OperationPhase::Failed);
+    assert_eq!(failed.error_code.as_deref(), Some("restart_preflight"));
+    core.ensure_no_unowned_workspace_staging("dev").unwrap();
+}
+
+#[test]
+fn a_starts_runtime_move_is_reported_exactly_as_recorded() {
+    let recorded = serde_json::json!({
+        "from_guest_abi": "seed=9;cw_catalog=1",
+        "to_guest_abi": "seed=10;cw_catalog=1;net=2",
+        "unrestorable_checkpoints": 1,
+    });
+    let reported = runtime_move::runtime_move_proto(&recorded).unwrap();
+    assert_eq!(reported.from_guest_abi, "seed=9;cw_catalog=1");
+    assert_eq!(reported.to_guest_abi, "seed=10;cw_catalog=1;net=2");
+    assert_eq!(reported.unrestorable_checkpoints, 1);
+    for malformed in [
+        serde_json::json!({"from_guest_abi": "a", "to_guest_abi": "b"}),
+        serde_json::json!({"from_guest_abi": "", "to_guest_abi": "b", "unrestorable_checkpoints": 0}),
+        serde_json::json!({"from_guest_abi": "a", "to_guest_abi": "b", "unrestorable_checkpoints": -1}),
+        serde_json::json!("moved"),
+    ] {
+        assert!(
+            runtime_move::runtime_move_proto(&malformed).is_err(),
+            "{malformed}"
+        );
     }
 }
 

@@ -16,7 +16,7 @@ use x509_parser::prelude::{FromDer as _, X509Certificate};
 /// The most DER bytes the seed holds: everything between the credential
 /// placeholders, after the longest daemon token, and the checksum. An ECDSA
 /// P-256 CA constrained to a handful of hosts is about 600 bytes.
-pub const MAX_EGRESS_CA_DER_BYTES: usize = 3165;
+pub const MAX_EGRESS_CA_DER_BYTES: usize = 3133;
 
 /// The DER of one X.509 CA certificate. It parses as a certificate, with
 /// nothing after it, whose basic constraints mark it a CA, so neither a key
@@ -132,6 +132,21 @@ mod tests {
                 Err(EgressCaError::NotACertificate)
             );
         }
+    }
+
+    /// The seed's header grew by the runtime move's digest (#4980), which
+    /// took these 32 bytes from the CA's room (cw-security, 2026-11-16).
+    #[test]
+    fn the_seed_holds_exactly_3133_bytes_of_ca() {
+        assert_eq!(MAX_EGRESS_CA_DER_BYTES, 3133);
+        assert_eq!(
+            EgressCaCertificate::from_der(vec![0x30; 3134]),
+            Err(EgressCaError::TooLarge { actual: 3134 })
+        );
+        assert_ne!(
+            EgressCaCertificate::from_der(vec![0x30; 3133]),
+            Err(EgressCaError::TooLarge { actual: 3133 })
+        );
     }
 
     #[test]

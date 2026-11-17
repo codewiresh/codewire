@@ -27,6 +27,23 @@ pub(super) fn parse_cw_runtime_catalog_generation(
     Ok(Some(generation.clone()))
 }
 
+/// The catalog a move boots away from: only beside a catalog, never that one.
+pub(super) fn parse_cw_runtime_moved_from_generation(
+    request: &v1::StartVmRequest,
+) -> Result<Option<String>, Status> {
+    let generation = &request.cw_runtime_moved_from_generation;
+    if generation.is_empty() {
+        return Ok(None);
+    }
+    if !crate::state::valid_root_generation(generation)
+        || request.cw_runtime_catalog_generation.is_empty()
+        || *generation == request.cw_runtime_catalog_generation
+    {
+        return Err(Status::invalid_argument("invalid cw runtime move"));
+    }
+    Ok(Some(generation.clone()))
+}
+
 pub(super) fn parse_setup_binding(
     request: &v1::StartVmRequest,
 ) -> Result<Option<SetupBinding>, Status> {
@@ -231,4 +248,41 @@ pub(super) fn parse_managed_credential_clients(
 ) -> Result<codewire_access::ManagedCredentialClients, Status> {
     codewire_access::ManagedCredentialClients::decode(&request.managed_credential_clients)
         .map_err(|_| Status::invalid_argument("invalid managed credential client selection"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_move_names_another_catalog_beside_one() {
+        let catalog = "a".repeat(64);
+        let earlier = "b".repeat(64);
+        let request = |catalog: &str, moved_from: &str| v1::StartVmRequest {
+            cw_runtime_catalog_generation: catalog.to_owned(),
+            cw_runtime_moved_from_generation: moved_from.to_owned(),
+            ..v1::StartVmRequest::default()
+        };
+        assert_eq!(
+            parse_cw_runtime_moved_from_generation(&request(&catalog, "")).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_cw_runtime_moved_from_generation(&request(&catalog, &earlier)).unwrap(),
+            Some(earlier.clone())
+        );
+        for (catalog, moved_from) in [
+            ("", earlier.as_str()),
+            (catalog.as_str(), catalog.as_str()),
+            (catalog.as_str(), "B".repeat(64).as_str()),
+            (catalog.as_str(), &earlier[1..]),
+        ] {
+            assert_eq!(
+                parse_cw_runtime_moved_from_generation(&request(catalog, moved_from))
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::InvalidArgument
+            );
+        }
+    }
 }

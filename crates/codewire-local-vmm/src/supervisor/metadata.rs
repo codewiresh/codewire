@@ -65,7 +65,32 @@ impl EnvironmentRecord {
         self.project_spec_sha256 = Some(next_project_sha256);
         self.active_artifact_generation = Some(next_artifact_generation);
         self.staging_artifact_generation = None;
+        if let Some(binding) = self.cw_runtime.as_mut()
+            && let Some(staged) = binding.staging_catalog_generation.take()
+        {
+            binding.rollback_catalog_generation = Some(std::mem::replace(
+                &mut binding.active_catalog_generation,
+                staged,
+            ));
+        }
         Ok(displaced)
+    }
+
+    /// Drop the move onto the installed runtime that a restart staged and
+    /// its preflight refused before anything booted (#4980): the
+    /// environment keeps its earlier assets, catalog and workspace
+    /// generation, and a later start or restart stages the move again. Only
+    /// a move stages over an active generation, so a first boot's staged
+    /// generation stays.
+    pub(super) fn discard_staged_runtime_move(&mut self) {
+        if self.active_workspace_generation.is_none() {
+            return;
+        }
+        self.staging_workspace_generation = None;
+        self.staging_artifact_generation = None;
+        if let Some(binding) = self.cw_runtime.as_mut() {
+            binding.staging_catalog_generation = None;
+        }
     }
 
     pub(super) fn finish_staging_workspace_update_without_boot(

@@ -62,7 +62,10 @@ const RUNNER_WATCH_BUFFER: usize = 8;
 //     and the network worker takes no host connections (#4347).
 // 12: StartVmRequest.intercept binds the agent hosts for interception
 //     (#3999); an older runner would ignore it and boot without the CA.
-pub(crate) const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 12;
+// 13: StartVmRequest.cw_runtime_moved_from_generation lets a moved guest
+//     rebuild its runtime cache (#4980); an older runner would boot the move
+//     without it, and the guest would refuse the new bootstrap.
+pub(crate) const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 13;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =
@@ -85,15 +88,17 @@ mod checkpoint;
 mod egress_status;
 mod exit_cause;
 mod stage_log;
+mod start_error;
 mod start_request;
 
 use exit_cause::runner_exit_error_code;
 use stage_log::guest_stage_name;
+use start_error::{network_start_error_code, prepare_error_code};
 use start_request::{
-    map_host_port_error, parse_cw_runtime_catalog_generation, parse_direct_shares,
-    parse_environment_id, parse_environment_projection, parse_host_ports,
-    parse_managed_credential_clients, parse_mesh_attachment, parse_setup_binding,
-    parse_skill_snapshot, start_network_policy,
+    map_host_port_error, parse_cw_runtime_catalog_generation,
+    parse_cw_runtime_moved_from_generation, parse_direct_shares, parse_environment_id,
+    parse_environment_projection, parse_host_ports, parse_managed_credential_clients,
+    parse_mesh_attachment, parse_setup_binding, parse_skill_snapshot, start_network_policy,
 };
 
 #[derive(Clone)]
@@ -1182,6 +1187,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let skill_snapshot_sha256 = parse_skill_snapshot(&request)?;
         let environment_projection_sha256 = parse_environment_projection(&request)?;
         let cw_runtime_catalog_generation = parse_cw_runtime_catalog_generation(&request)?;
+        let cw_runtime_moved_from_generation = parse_cw_runtime_moved_from_generation(&request)?;
         let managed_credential_clients = parse_managed_credential_clients(&request)?;
         #[cfg(target_os = "linux")]
         let checkpoint = checkpoint::parse_checkpoint_boot(&request)?;
@@ -1235,6 +1241,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 environment_projection_sha256,
                 managed_credential_clients,
                 cw_runtime_catalog_generation,
+                cw_runtime_moved_from_generation,
                 network_policy,
                 intercepts: crate::runner::boot_intercepts(request.intercept),
                 #[cfg(target_os = "linux")]
@@ -1821,53 +1828,6 @@ pub(crate) const HOST_PORT_UNAVAILABLE: &str = "host_port_unavailable";
 /// refused (#4478).
 #[cfg(target_os = "macos")]
 pub(crate) const VM_START_REFUSED: &str = "vm_start_refused";
-
-/// Name the prepare failures a user can fix without reading runner logs.
-fn prepare_error_code(error: &RunnerError) -> &'static str {
-    match error {
-        RunnerError::HostPortUnavailable(_) => HOST_PORT_UNAVAILABLE,
-        RunnerError::Interception(refusal) => refusal.code(),
-        _ => "prepare_failed",
-    }
-}
-
-fn network_start_error_code(error: &RunnerError) -> &'static str {
-    match error {
-        RunnerError::InvalidNetworkWorker => "network_worker_invalid",
-        RunnerError::NetworkWorkerSpawn => "network_worker_spawn",
-        RunnerError::NetworkWorkerStartTimeout => "network_worker_start_timeout",
-        RunnerError::NetworkWorkerBootstrap => "network_worker_bootstrap",
-        #[cfg(target_os = "macos")]
-        RunnerError::VmStartRefused(_) => VM_START_REFUSED,
-        RunnerError::GuestDockerToolingMissing => GUEST_DOCKER_TOOLING_MISSING,
-        RunnerError::GuestSetupFailed => GUEST_SETUP_FAILED,
-        RunnerError::GuestWorkspaceFailed => GUEST_WORKSPACE_FAILED,
-        RunnerError::NetworkWorkerStartup(failure) => failure.runner_error_code(),
-        RunnerError::NetworkWorkerWait => "network_worker_wait",
-        RunnerError::NetworkWorkerKillTimeout => "network_worker_kill_timeout",
-        RunnerError::HostPortUnavailable(_) => HOST_PORT_UNAVAILABLE,
-        RunnerError::IngressControl => "ingress_forwarder_start",
-        RunnerError::EgressPolicyControl => "egress_policy_control",
-        RunnerError::EgressBrokerSpawn => "egress_broker_spawn",
-        RunnerError::EgressBrokerStartTimeout => "egress_broker_start_timeout",
-        RunnerError::EgressBrokerBootstrap => "egress_broker_bootstrap",
-        RunnerError::Interception(refusal) => refusal.code(),
-        RunnerError::EgressBrokerStartup(failure) => failure.runner_error_code(),
-        RunnerError::EgressBrokerWait => "egress_broker_wait",
-        RunnerError::EgressBrokerKillTimeout => "egress_broker_kill_timeout",
-        RunnerError::MeshTransportSpawn => "mesh_transport_spawn",
-        RunnerError::MeshTransportStartTimeout => "mesh_transport_start_timeout",
-        RunnerError::MeshTransportBootstrap => "mesh_transport_bootstrap",
-        RunnerError::MeshTransportStartup(failure) => failure.runner_error_code(),
-        RunnerError::MeshEnrollmentBrokerSpawn => "mesh_enrollment_broker_spawn",
-        RunnerError::MeshEnrollmentBrokerStartTimeout => "mesh_enrollment_broker_start_timeout",
-        RunnerError::MeshEnrollmentBrokerBootstrap => "mesh_enrollment_broker_bootstrap",
-        RunnerError::MeshEnrollmentBrokerStartup(failure) => failure.runner_error_code(),
-        RunnerError::MeshProcessWait => "mesh_process_wait",
-        RunnerError::MeshProcessKillTimeout => "mesh_process_kill_timeout",
-        _ => "network_stack_failed",
-    }
-}
 
 fn map_grow_error(error: RunnerError) -> Status {
     match error {

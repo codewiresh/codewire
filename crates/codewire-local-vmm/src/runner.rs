@@ -169,6 +169,8 @@ pub struct CreateVmRequest {
     pub environment_projection_sha256: Option<Sha256Value>,
     pub managed_credential_clients: codewire_access::ManagedCredentialClients,
     pub cw_runtime_catalog_generation: Option<String>,
+    /// The catalog a move boots this environment away from (#4980).
+    pub cw_runtime_moved_from_generation: Option<String>,
     /// The network policy this boot's egress broker enforces (#2537).
     pub network_policy: CompiledPolicy,
     /// The names this boot intercepts through its TLS front door (#3999);
@@ -304,7 +306,7 @@ impl CloudHypervisorRunner {
             .transpose()
             .map_err(|_| RunnerError::InvalidRequest)?;
 
-        let token = Zeroizing::new(generate_auth_token());
+        let token = Zeroizing::new(boot_seed::generate_auth_token());
         let egress_ca = intercept::boot_egress_ca(&request.intercepts)?;
         let seed = boot_seed::boot_seed(
             &request,
@@ -4556,17 +4558,6 @@ fn root_disk_path(paths: &VmPaths, generation: &str) -> Result<PathBuf, RunnerEr
     Ok(paths.generations_dir.join(generation).join("root.raw"))
 }
 
-fn generate_auth_token() -> String {
-    let mut bytes = [0_u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    let mut token = String::with_capacity(64);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut token, "{byte:02x}");
-    }
-    token
-}
-
 fn fresh_egress_broker_key() -> Zeroizing<[u8; BROKER_IPC_KEY_LEN]> {
     loop {
         let mut key = Zeroizing::new([0_u8; BROKER_IPC_KEY_LEN]);
@@ -5574,6 +5565,7 @@ mod tests {
     fn request(vcpus: u8, memory_mib: u32) -> CreateVmRequest {
         CreateVmRequest {
             cw_runtime_catalog_generation: None,
+            cw_runtime_moved_from_generation: None,
             #[cfg(target_os = "linux")]
             checkpoint: None,
             network_policy: CompiledPolicy::developer_baseline(),
@@ -6468,7 +6460,7 @@ mod tests {
 
     #[test]
     fn generated_tokens_fit_the_guest_codec_and_debug_is_redacted() {
-        let token = Zeroizing::new(generate_auth_token());
+        let token = Zeroizing::new(boot_seed::generate_auth_token());
         let seed = Seed::new(Uuid::new_v4(), 1, 7777, token.to_string()).unwrap();
         assert_eq!(seed.auth_token(), token.as_str());
         assert_eq!(token_fingerprint(&token).len(), 64);

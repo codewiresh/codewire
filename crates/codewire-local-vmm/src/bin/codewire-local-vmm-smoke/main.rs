@@ -1211,6 +1211,7 @@ mod linux {
     fn request(generation: u64, arguments: &Args, resources: RunResources) -> CreateVmRequest {
         CreateVmRequest {
             cw_runtime_catalog_generation: None,
+            cw_runtime_moved_from_generation: None,
             network_policy: codewire_egress_policy::CompiledPolicy::developer_baseline(),
             intercepts: codewire_egress_policy::intercept::InterceptSet::default(),
             checkpoint: None,

@@ -802,12 +802,7 @@ async fn create_from_snapshot(globals: &Globals, args: EnvCreateArgs) -> anyhow:
             .get_checkpoint(selector)
             .await
             .map_err(|status| anyhow::anyhow!("{}", status.message()))?;
-        anyhow::ensure!(
-            checkpoint.unrestorable_reason.is_empty(),
-            "VM checkpoint {} cannot be forked: {}",
-            terminal_text(&checkpoint.name),
-            terminal_text(&checkpoint.unrestorable_reason)
-        );
+        super::checkpoint::refuse_unrestorable(&checkpoint, "forked")?;
         checkpoint
             .snapshot
             .context("the supervisor described no VM checkpoint source")?
@@ -1902,32 +1897,6 @@ async fn prepare_native_start(
     get_native_environment_with_required_authority(client, name).await
 }
 
-/// The start of a local VM: its environment, or the stage it stopped at
-/// and why.
-type NativeStart = Result<v1::Environment, (Option<&'static str>, anyhow::Error)>;
-
-/// Starts `name` with its stages on `progress`. The outer error is an
-/// interrupted wait; the inner one a failed start with its stage.
-async fn run_native_start(
-    mut client: NativeSupervisorClient,
-    name: &str,
-    progress: &NativeProgress,
-) -> anyhow::Result<NativeStart> {
-    let mut observe = |operation: &v1::Operation| progress.observe(operation);
-    Ok(
-        match progress
-            .tick_while(client.start_observed(name, &mut observe))
-            .await?
-        {
-            Ok(environment) => {
-                progress.complete();
-                Ok(environment)
-            }
-            Err(status) => Err(lifecycle::wait_failure(progress, "start", name, status)),
-        },
-    )
-}
-
 /// Starts a local VM again after `cw upgrade` moved it to this cw.
 async fn start_native_environment_with(
     mut client: NativeSupervisorClient,
@@ -1935,8 +1904,9 @@ async fn start_native_environment_with(
 ) -> anyhow::Result<v1::Environment> {
     prepare_native_start(&mut client, name).await?;
     let progress = NativeProgress::new(&super::environment::progress::text_progress_capabilities());
-    run_native_start(client, name, &progress)
+    lifecycle::run_native_start(client, name, &progress)
         .await?
+        .map(|(environment, _)| environment)
         .map_err(|(stage, error)| match stage {
             Some(stage) => error.context(format!("start {name} failed at {stage:?}")),
             None => error,

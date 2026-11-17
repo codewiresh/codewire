@@ -156,3 +156,23 @@ fn event_fields_are_closed_and_never_carry_secret_values() {
     let oversized = "a".repeat(MAXIMUM_TOKEN_BYTES + 1);
     assert!(event_line(0, "x", &[("code", LogField::Code(&oversized))]).contains("code=invalid"));
 }
+
+#[test]
+fn a_digest_is_written_only_as_a_sha256() {
+    let digest = "0a".repeat(32);
+    assert_eq!(
+        event_line(0, "cw_runtime_move", &[("from", LogField::Digest(&digest))]),
+        format!("time_unix_ms=0 event=cw_runtime_move from={digest}\n")
+    );
+    for other in [
+        CANARY,
+        "0A".repeat(32).as_str(),
+        &digest[1..],
+        "z".repeat(64).as_str(),
+    ] {
+        assert!(
+            event_line(0, "x", &[("from", LogField::Digest(other))]).ends_with(" from=invalid\n"),
+            "{other}"
+        );
+    }
+}

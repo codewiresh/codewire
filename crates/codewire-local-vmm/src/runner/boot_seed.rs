@@ -1,6 +1,7 @@
 //! The seed a boot's guest reads first, built from the runner's request.
 
 use codewire_vmm_guest_probe::{EgressCaCertificate, Seed, SeedPlaceholders, Sha256Value};
+use rand::{RngCore as _, rngs::OsRng};
 
 use super::{CreateVmRequest, RunnerError};
 use crate::cw_runtime::AdmittedCwRuntimeDisk;
@@ -36,9 +37,11 @@ pub(super) fn boot_seed(
     };
     let seed = seed.with_managed_credential_clients(request.managed_credential_clients);
     let seed = match cw_runtime_disk {
-        Some(disk) => seed.with_cw_runtime_catalog_sha256(
-            Sha256Value::parse_hex(&disk.generation).map_err(|_| RunnerError::InvalidRequest)?,
-        ),
+        Some(disk) => seed.with_cw_runtime_catalog_sha256(digest(&disk.generation)?),
+        None => seed,
+    };
+    let seed = match request.cw_runtime_moved_from_generation.as_deref() {
+        Some(generation) => seed.with_cw_runtime_moved_from_sha256(digest(generation)?)?,
         None => seed,
     };
     let seed = match egress_ca {
@@ -48,4 +51,19 @@ pub(super) fn boot_seed(
     // Placeholders ride only beside the CA (#3999).
     let seed = seed.with_credential_placeholders(placeholders)?;
     Ok(seed)
+}
+
+fn digest(generation: &str) -> Result<Sha256Value, RunnerError> {
+    Sha256Value::parse_hex(generation).map_err(|_| RunnerError::InvalidRequest)
+}
+
+pub(super) fn generate_auth_token() -> String {
+    let mut bytes = [0_u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let mut token = String::with_capacity(64);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut token, "{byte:02x}");
+    }
+    token
 }

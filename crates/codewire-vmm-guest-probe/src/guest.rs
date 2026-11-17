@@ -717,11 +717,15 @@ fn initialize_live_cw_runtime(
         generation: seed.generation(),
         bootstrap_catalog_sha256: expected.to_string(),
     };
+    let moved_from = seed
+        .cw_runtime_moved_from_sha256()
+        .map(|catalog| catalog.to_string());
     crate::cw_runtime_publisher::RuntimeCache::initialize(
         binding,
         &catalog,
         Path::new(CW_RUNTIME_SOURCE),
         Path::new(INIT_PATH),
+        moved_from.as_deref(),
     )
     .map(Some)
 }

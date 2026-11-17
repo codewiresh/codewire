@@ -604,9 +604,11 @@ Conversation journals remain private to the workload user under HOME.
 
 ### Updating cw in a running native Linux VM
 
-The bootstrap image/disk stays fixed. A compatible Linux protocol9 guest runs
-a root-owned publisher outside HOME and exposes sealed versions through the
-same read-only runtime mount. Publishing copies a verified image-derived pack
+The bootstrap image/disk stays fixed, except when a move takes the environment
+off boot assets with an earlier guest runtime ABI (the paragraph on retained
+boot assets). A compatible Linux protocol9 guest runs a root-owned publisher
+outside HOME and exposes sealed versions through the same read-only runtime
+mount. Publishing copies a verified image-derived pack
 once; it does not execute incoming bytes as guest root. An atomic selector
 changes the default for new invocations. Existing conversations keep their
 original digest paths, and the VM and its existing processes keep running.
@@ -674,9 +676,19 @@ or the network session protocol, in the guest init's ABI marker) cannot boot
 under a newer runner, and their VM checkpoints cannot be restored by it. A
 start of an environment on such boot assets that isn't running (stopped, or in
 `error` after an earlier refused start) moves it onto the installed runtime,
-and says so on one line: the runtime it moved from and to, and how many of its
-VM checkpoints that leaves unrestorable. The environment keeps its disk and
-workspace. A running environment is never moved. A restart stages the move
+its boot assets and its bootstrap `cw` catalog together, and says so on one
+line: the runtime it moved from and to, and how many of its VM checkpoints
+that leaves unrestorable. The environment keeps its disk and workspace. The
+guest keeps its live `cw` runtime cache on that disk, bound to the
+environment, its bootstrap catalog and its init, and never replaces a
+bootstrap, with one exception: the boot that completes a move names, in its
+seed, the catalog it moves from, and a guest whose cache is bound to this
+environment and exactly that catalog rebuilds the cache from the installed
+bootstrap (once; a repeated move boot whose cache already matches proceeds
+unchanged). `cw` versions published into the VM under the earlier runtime go
+with it. Any other change of bootstrap or init is refused, as before. A move
+that fails to boot stays staged, and the next start or restart boots it
+again. A running environment is never moved. A restart stages the move
 before it stops the VM, and refuses, leaving the VM running, when the move
 can't be made. The earlier boot assets stay while a VM checkpoint refers to
 them, and go with the last such checkpoint. `cw --local checkpoint ls` marks

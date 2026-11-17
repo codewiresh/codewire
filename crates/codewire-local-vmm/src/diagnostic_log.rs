@@ -50,6 +50,9 @@ pub(crate) enum LogField<'a> {
     Code(&'a str),
     Id(Uuid),
     Count(u64),
+    /// A SHA-256 digest as 64 lowercase hex digits. Anything else is written
+    /// as `invalid`.
+    Digest(&'a str),
 }
 
 /// Opens (creating 0600) the named log for a child about to be spawned, after
@@ -171,6 +174,10 @@ fn event_line(
             LogField::Code(_) => "invalid".to_owned(),
             LogField::Id(id) => id.to_string(),
             LogField::Count(count) => count.to_string(),
+            LogField::Digest(digest) if crate::state::valid_root_generation(digest) => {
+                (*digest).to_owned()
+            }
+            LogField::Digest(_) => "invalid".to_owned(),
         };
         line.push_str(&format!(" {}={value}", token(key)));
     }

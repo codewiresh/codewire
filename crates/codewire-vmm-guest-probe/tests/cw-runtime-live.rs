@@ -288,7 +288,8 @@ fn kernel_login_shell() {
     let bootstrap_root = Path::new("/bootstrap");
     let launcher = Path::new("/trusted-source-built-init");
     let cache =
-        RuntimeCache::initialize(binding.clone(), &bootstrap, bootstrap_root, launcher).unwrap();
+        RuntimeCache::initialize(binding.clone(), &bootstrap, bootstrap_root, launcher, None)
+            .unwrap();
     let _view = OwnedMount::bind(
         Path::new(LIVE_RUNTIME_VIEW),
         Path::new(CW_RUNTIME_ROOT),

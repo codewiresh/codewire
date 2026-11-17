@@ -644,6 +644,20 @@ message EnvironmentOperationResult {
   string name = 2;
   EnvironmentState state = 3;
   uint64 generation = 4;
+  // Set when a start moved the environment onto the installed runtime
+  // (#4980).
+  RuntimeMove runtime_move = 5;
+}
+
+// A start's move of a stopped environment whose boot assets speak an earlier
+// guest runtime ABI onto the installed runtime.
+message RuntimeMove {
+  // What each runtime's guest init declares, such as
+  // "seed=10;cw_catalog=1;net=2".
+  string from_guest_abi = 1;
+  string to_guest_abi = 2;
+  // The environment's VM checkpoints the move leaves unrestorable.
+  uint32 unrestorable_checkpoints = 3;
 }
 
 // Names exactly one operation: by its own ID, or (protocol 22) by the
@@ -1150,6 +1164,10 @@ message StartVmRequest {
   // guest in the seed; no binding or key reaches the guest. A runner that
   // cannot start the front door refuses the boot.
   bool intercept = 26;
+  // The bootstrap catalog a move takes this environment off (#4980; runner
+  // protocol 13), sent only with a staged catalog: the guest rebuilds a
+  // runtime cache bound to exactly this one. Empty for every other boot.
+  string cw_runtime_moved_from_generation = 27;
 }
 
 message CheckpointBoot {

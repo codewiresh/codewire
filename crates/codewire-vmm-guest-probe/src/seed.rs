@@ -24,13 +24,13 @@ pub const DOCKER_DISK_SERIAL: &str = "CWDOCKER1";
 const MAGIC: &[u8; 8] = b"CWSEED1\0";
 // One current format. Retired versions, including the unshipped material-
 // bearing v6, are never decoded or selected by a constructor.
-const FORMAT_VERSION: u16 = 10;
+const FORMAT_VERSION: u16 = 11;
 // Referenced by the guest entrypoint and inspected in the admitted init ELF.
 // A retained boot without this capability is never sent the current seed,
 // and neither is one that speaks another network session protocol: a VM
 // checkpoint taken under it would restore without a network (#4000).
-pub const GUEST_RUNTIME_ABI_MARKER: &[u8] = b"\0CWGUESTABI\0seed=10;cw_catalog=1;net=2\0";
-const HEADER_LEN: usize = 288;
+pub const GUEST_RUNTIME_ABI_MARKER: &[u8] = b"\0CWGUESTABI\0seed=11;cw_catalog=1;net=2\0";
+const HEADER_LEN: usize = 320;
 const CHECKSUM_LEN: usize = 32;
 const CHECKSUM_OFFSET: usize = SEED_LEN - CHECKSUM_LEN;
 const TOKEN_MAX_LEN: usize = 512;
@@ -55,6 +55,8 @@ const MANAGED_CREDENTIAL_CLIENTS_END: usize = 248;
 const CW_RUNTIME_CATALOG_SHA256_OFFSET: usize = 248;
 const EGRESS_CA_LEN_OFFSET: usize = 280;
 const RESERVED_OFFSET: usize = 282;
+const RESERVED_END: usize = 288;
+const CW_RUNTIME_MOVED_FROM_SHA256_OFFSET: usize = 288;
 const TOKEN_OFFSET: usize = HEADER_LEN;
 /// The credential placeholders, then the egress CA's DER, start after the
 /// longest token, so their places never depend on the token's length.
@@ -70,6 +72,7 @@ const CW_RUNTIME_CATALOG_PRESENT_FLAG: u16 = 1 << 5;
 const EGRESS_CA_PRESENT_FLAG: u16 = 1 << 6;
 /// Valid only with [`EGRESS_CA_PRESENT_FLAG`].
 const PLACEHOLDERS_PRESENT_FLAG: u16 = 1 << 7;
+const CW_RUNTIME_MOVED_FROM_PRESENT_FLAG: u16 = 1 << 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetupBinding {
@@ -128,6 +131,7 @@ pub struct Seed {
     environment_projection_sha256: Option<Sha256Value>,
     managed_credential_clients: ManagedCredentialClients,
     cw_runtime_catalog_sha256: Option<Sha256Value>,
+    cw_runtime_moved_from_sha256: Option<Sha256Value>,
     egress_ca: Option<EgressCaCertificate>,
     placeholders: SeedPlaceholders,
 }
@@ -151,6 +155,7 @@ impl Seed {
             environment_projection_sha256: None,
             managed_credential_clients: ManagedCredentialClients::default(),
             cw_runtime_catalog_sha256: None,
+            cw_runtime_moved_from_sha256: None,
             egress_ca: None,
             placeholders: SeedPlaceholders::default(),
         };
@@ -177,6 +182,7 @@ impl Seed {
             environment_projection_sha256: None,
             managed_credential_clients: ManagedCredentialClients::default(),
             cw_runtime_catalog_sha256: None,
+            cw_runtime_moved_from_sha256: None,
             egress_ca: None,
             placeholders: SeedPlaceholders::default(),
         };
@@ -204,6 +210,7 @@ impl Seed {
             environment_projection_sha256: None,
             managed_credential_clients: ManagedCredentialClients::default(),
             cw_runtime_catalog_sha256: None,
+            cw_runtime_moved_from_sha256: None,
             egress_ca: None,
             placeholders: SeedPlaceholders::default(),
         };
@@ -232,6 +239,7 @@ impl Seed {
             environment_projection_sha256: None,
             managed_credential_clients: ManagedCredentialClients::default(),
             cw_runtime_catalog_sha256: None,
+            cw_runtime_moved_from_sha256: None,
             egress_ca: None,
             placeholders: SeedPlaceholders::default(),
         };
@@ -308,6 +316,27 @@ impl Seed {
         self.cw_runtime_catalog_sha256
     }
 
+    /// Name the catalog this boot moves the environment from, the one boot
+    /// whose guest may rebuild a runtime cache bound to it (#4980). Only
+    /// with a bound catalog other than this one.
+    pub fn with_cw_runtime_moved_from_sha256(
+        mut self,
+        hash: Sha256Value,
+    ) -> Result<Self, SeedError> {
+        if self
+            .cw_runtime_catalog_sha256
+            .is_none_or(|catalog| catalog == hash)
+        {
+            return Err(SeedError::InvalidRuntimeMove);
+        }
+        self.cw_runtime_moved_from_sha256 = Some(hash);
+        Ok(self)
+    }
+
+    pub fn cw_runtime_moved_from_sha256(&self) -> Option<Sha256Value> {
+        self.cw_runtime_moved_from_sha256
+    }
+
     /// Trust the TLS front door's CA for this boot (#3999). Public trust
     /// material only: the key never leaves the front door.
     pub fn with_egress_ca(mut self, certificate: EgressCaCertificate) -> Self {
@@ -382,6 +411,11 @@ impl Seed {
             bytes[CW_RUNTIME_CATALOG_SHA256_OFFSET..CW_RUNTIME_CATALOG_SHA256_OFFSET + 32]
                 .copy_from_slice(&hash.as_bytes());
         }
+        if let Some(hash) = self.cw_runtime_moved_from_sha256 {
+            flags |= CW_RUNTIME_MOVED_FROM_PRESENT_FLAG;
+            bytes[CW_RUNTIME_MOVED_FROM_SHA256_OFFSET..CW_RUNTIME_MOVED_FROM_SHA256_OFFSET + 32]
+                .copy_from_slice(&hash.as_bytes());
+        }
         if let Some(certificate) = &self.egress_ca {
             flags |= EGRESS_CA_PRESENT_FLAG;
             let der = certificate.der();
@@ -440,9 +474,10 @@ impl Seed {
                 | ENVIRONMENT_PROJECTION_PRESENT_FLAG
                 | CW_RUNTIME_CATALOG_PRESENT_FLAG
                 | EGRESS_CA_PRESENT_FLAG
-                | PLACEHOLDERS_PRESENT_FLAG)
+                | PLACEHOLDERS_PRESENT_FLAG
+                | CW_RUNTIME_MOVED_FROM_PRESENT_FLAG)
             != 0
-            || bytes[RESERVED_OFFSET..HEADER_LEN]
+            || bytes[RESERVED_OFFSET..RESERVED_END]
                 .iter()
                 .any(|byte| *byte != 0)
         {
@@ -496,6 +531,12 @@ impl Seed {
             CW_RUNTIME_CATALOG_PRESENT_FLAG,
             CW_RUNTIME_CATALOG_SHA256_OFFSET,
         )?;
+        let cw_runtime_moved_from_sha256 = decode_optional_hash(
+            bytes,
+            flags,
+            CW_RUNTIME_MOVED_FROM_PRESENT_FLAG,
+            CW_RUNTIME_MOVED_FROM_SHA256_OFFSET,
+        )?;
         let client_bytes =
             &bytes[MANAGED_CREDENTIAL_CLIENTS_OFFSET..MANAGED_CREDENTIAL_CLIENTS_END];
         let client_len = client_bytes
@@ -542,6 +583,11 @@ impl Seed {
         };
         let seed = if let Some(hash) = cw_runtime_catalog_sha256 {
             seed.with_cw_runtime_catalog_sha256(hash)
+        } else {
+            seed
+        };
+        let seed = if let Some(hash) = cw_runtime_moved_from_sha256 {
+            seed.with_cw_runtime_moved_from_sha256(hash)?
         } else {
             seed
         };
@@ -600,6 +646,10 @@ impl fmt::Debug for Seed {
             .field("skill_snapshot_sha256", &self.skill_snapshot_sha256)
             .field("docker_data_disk", &self.docker_data_disk)
             .field("cw_runtime_catalog_sha256", &self.cw_runtime_catalog_sha256)
+            .field(
+                "cw_runtime_moved_from_sha256",
+                &self.cw_runtime_moved_from_sha256,
+            )
             .field("egress_ca", &self.egress_ca)
             .field("credential_placeholders", &self.placeholders)
             .field(
@@ -654,6 +704,8 @@ pub enum SeedError {
     InvalidEgressCa(EgressCaError),
     #[error("seed credential placeholders are invalid")]
     InvalidPlaceholders,
+    #[error("seed runtime move must name a catalog other than the bound one")]
+    InvalidRuntimeMove,
 }
 
 /// The egress trust a seed carries (#3999): the CA certificate and, only

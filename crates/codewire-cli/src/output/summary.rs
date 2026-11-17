@@ -321,6 +321,11 @@ impl Outcome {
     }
 }
 
+/// The `→` line that ends a result, after a blank line.
+pub(crate) fn render_next(next: &str, style: Style) -> String {
+    format!("\n{} {}\n", style.status(Status::Next), terminal_text(next))
+}
+
 /// A create, start or restart result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LifecycleSummary {
@@ -361,11 +366,7 @@ impl LifecycleSummary {
         );
         self.push_details(&mut out, style);
         if let Some(next) = &self.next {
-            out.push_str(&format!(
-                "\n{} {}\n",
-                style.status(Status::Next),
-                terminal_text(next)
-            ));
+            out.push_str(&render_next(next, style));
         }
         out
     }

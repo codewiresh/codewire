@@ -21,7 +21,7 @@ fn seed_round_trip_is_exact_and_stable() {
     assert_eq!(&encoded[..8], MAGIC);
     assert_eq!(
         format!("{:x}", Sha256::digest(encoded)),
-        "e5922eb81f3a44b4640691ec9438f8088cd2ba306cf174d7d021659214134036"
+        "169f0b6ec3c6d32b03e2a4e34fc15a5d551cf24c7ebf3c395aca25896b6a16c9"
     );
     assert_eq!(Seed::decode(&encoded).unwrap(), seed);
     assert_eq!(seed.encode(), encoded);
@@ -248,7 +248,7 @@ fn current_seed_binds_one_boot_setup_with_source_compatible_constructor() {
     let encoded = seed.encode();
     assert_eq!(
         format!("{:x}", Sha256::digest(encoded)),
-        "aca990f9e81234d152c736d666bcf5e589d055b72b133c8aa020ce27cd3997ca"
+        "a25b6677da015db4db896ae816582b40558608d8775fece09ceb0d683b917742"
     );
     assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION);
     assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN as u16);
@@ -624,13 +624,19 @@ fn ca_bytes_without_their_flag_or_beyond_their_length_are_refused() {
     refresh_checksum(&mut trailing);
     assert_eq!(Seed::decode(&trailing), Err(SeedError::NonZeroPadding));
 
-    let mut overlong = with_ca;
-    put_u16(&mut overlong, EGRESS_CA_LEN_OFFSET, u16::MAX);
-    refresh_checksum(&mut overlong);
-    assert!(matches!(
-        Seed::decode(&overlong),
-        Err(SeedError::InvalidEgressCa(EgressCaError::TooLarge { .. }))
-    ));
+    for length in [MAX_EGRESS_CA_DER_BYTES + 1, usize::from(u16::MAX)] {
+        let mut overlong = with_ca;
+        put_u16(
+            &mut overlong,
+            EGRESS_CA_LEN_OFFSET,
+            u16::try_from(length).unwrap(),
+        );
+        refresh_checksum(&mut overlong);
+        assert!(matches!(
+            Seed::decode(&overlong),
+            Err(SeedError::InvalidEgressCa(EgressCaError::TooLarge { .. }))
+        ));
+    }
 
     let mut truncated = with_ca;
     put_u16(
@@ -647,11 +653,71 @@ fn ca_bytes_without_their_flag_or_beyond_their_length_are_refused() {
 }
 
 #[test]
-fn a_checksum_valid_v9_seed_is_refused() {
-    let mut encoded = sample_seed().encode();
-    put_u16(&mut encoded, VERSION_OFFSET, 9);
-    refresh_checksum(&mut encoded);
-    assert_eq!(Seed::decode(&encoded), Err(SeedError::UnsupportedVersion));
+fn a_checksum_valid_v9_or_v10_seed_is_refused() {
+    for version in [9, 10] {
+        let mut encoded = sample_seed().encode();
+        put_u16(&mut encoded, VERSION_OFFSET, version);
+        refresh_checksum(&mut encoded);
+        assert_eq!(Seed::decode(&encoded), Err(SeedError::UnsupportedVersion));
+    }
+}
+
+#[test]
+fn a_runtime_move_names_another_catalog_than_its_bound_one() {
+    let bound = Sha256Value::from_bytes([0xa5; 32]);
+    let earlier = Sha256Value::from_bytes([0x5a; 32]);
+    let seed = sample_seed()
+        .with_cw_runtime_catalog_sha256(bound)
+        .with_cw_runtime_moved_from_sha256(earlier)
+        .unwrap();
+    let encoded = seed.encode();
+    let decoded = Seed::decode(&encoded).unwrap();
+    assert_eq!(decoded, seed);
+    assert_eq!(decoded.cw_runtime_moved_from_sha256(), Some(earlier));
+    assert_eq!(
+        &encoded[CW_RUNTIME_MOVED_FROM_SHA256_OFFSET..HEADER_LEN],
+        &earlier.as_bytes()
+    );
+    assert!(
+        encoded[RESERVED_OFFSET..RESERVED_END]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+    // A boot that is no move carries none.
+    let unmoved = sample_seed().with_cw_runtime_catalog_sha256(bound);
+    assert_eq!(unmoved.cw_runtime_moved_from_sha256(), None);
+    assert!(
+        unmoved.encode()[CW_RUNTIME_MOVED_FROM_SHA256_OFFSET..HEADER_LEN]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+    // Only with a bound catalog, and never that catalog.
+    assert_eq!(
+        sample_seed().with_cw_runtime_moved_from_sha256(earlier),
+        Err(SeedError::InvalidRuntimeMove)
+    );
+    assert_eq!(
+        unmoved.clone().with_cw_runtime_moved_from_sha256(bound),
+        Err(SeedError::InvalidRuntimeMove)
+    );
+    // Decoding refuses the same, and move bytes without the flag.
+    let mut same = encoded;
+    same[CW_RUNTIME_MOVED_FROM_SHA256_OFFSET..HEADER_LEN].copy_from_slice(&bound.as_bytes());
+    refresh_checksum(&mut same);
+    assert_eq!(Seed::decode(&same), Err(SeedError::InvalidRuntimeMove));
+    let mut unflagged = encoded;
+    let flags = get_u16(&unflagged, FLAGS_OFFSET);
+    put_u16(
+        &mut unflagged,
+        FLAGS_OFFSET,
+        flags & !CW_RUNTIME_MOVED_FROM_PRESENT_FLAG,
+    );
+    refresh_checksum(&mut unflagged);
+    assert_eq!(Seed::decode(&unflagged), Err(SeedError::NonZeroReserved));
+    let mut reserved = unmoved.encode();
+    reserved[RESERVED_END - 1] = 1;
+    refresh_checksum(&mut reserved);
+    assert_eq!(Seed::decode(&reserved), Err(SeedError::NonZeroReserved));
 }
 
 fn placeholder(slot: &str, credential: &str) -> codewire_access::CredentialPlaceholder {

@@ -11,7 +11,7 @@ use crate::commands::lifecycle_output::{
 };
 use crate::output::{
     Allocation, Capabilities, LifecycleSummary, MeshPlacement, NetworkRef, Outcome, SourceRef,
-    Status, VmLocation,
+    Status, Style, VmLocation, render_next,
 };
 
 /// The stored source selection, when the environment reports a valid one.
@@ -291,7 +291,7 @@ pub(crate) async fn start_native_environment(
         InterruptNotice::new(VmLocation::Local, "start", &environment.name),
     );
     let started = run_native_start(client, &environment.name, &progress).await?;
-    let started = match started {
+    let (started, moved) = match started {
         Ok(started) => started,
         Err((stage, error)) => {
             return Err(lifecycle_failure("start", &environment.name, stage, error, true).await);
@@ -300,10 +300,121 @@ pub(crate) async fn start_native_environment(
     match output {
         OutputFormat::Json => print_native_environment(&started, output),
         OutputFormat::Text => {
-            print_summary(&local_summary(&started, Outcome::Started, secrets), &caps);
+            let mut summary = local_summary(&started, Outcome::Started, secrets);
+            // The move is part of the result, so it comes before the next step.
+            let next = moved.as_ref().and_then(|_| summary.next.take());
+            print_summary(&summary, &caps);
+            if let Some(moved) = &moved {
+                println!(
+                    "\n{}",
+                    runtime_move_line(&started.name, moved, caps.stdout_style())
+                );
+            }
+            if let Some(next) = next {
+                print!("{}", render_next(&next, caps.stdout_style()));
+            }
             Ok(())
         }
     }
+}
+
+/// The start of a local VM: its environment and, when the start moved it
+/// onto the installed runtime (#4980), that move; or the stage it stopped
+/// at and why.
+pub(super) type NativeStart =
+    Result<(v1::Environment, Option<v1::RuntimeMove>), (Option<&'static str>, anyhow::Error)>;
+
+/// Starts `name` with its stages on `progress`. The outer error is an
+/// interrupted wait; the inner one a failed start with its stage. The
+/// completed operation's result says whether the start moved the runtime.
+pub(super) async fn run_native_start(
+    mut client: NativeSupervisorClient,
+    name: &str,
+    progress: &NativeProgress,
+) -> anyhow::Result<NativeStart> {
+    let mut observe = |operation: &v1::Operation| progress.observe(operation);
+    let started = progress
+        .tick_while(client.start_observed(name, &mut observe))
+        .await?;
+    Ok(match started {
+        Ok((environment, completed)) => {
+            progress.complete();
+            Ok((environment, runtime_move_of(&completed)))
+        }
+        Err(status) => Err(wait_failure(progress, "start", name, status)),
+    })
+}
+
+/// The runtime move a completed start's result records, if it moved.
+fn runtime_move_of(completed: &v1::Operation) -> Option<v1::RuntimeMove> {
+    match completed.result.as_ref()?.value.as_ref()? {
+        v1::operation_result::Value::Environment(result) => result.runtime_move.clone(),
+        _ => None,
+    }
+}
+
+/// The line a start prints after moving an environment onto this cw's VM
+/// runtime: what changed in the guest runtime it speaks, and the VM
+/// checkpoints the move leaves unrestorable.
+fn runtime_move_line(name: &str, moved: &v1::RuntimeMove, style: Style) -> String {
+    let moved_to = format!(
+        "Moved {} to this cw's VM runtime ({})",
+        terminal_text(name),
+        terminal_text(&abi_change(&moved.from_guest_abi, &moved.to_guest_abi)),
+    );
+    match moved.unrestorable_checkpoints {
+        0 => format!("{} {moved_to}", style.status(Status::Done)),
+        count => format!(
+            "{} {moved_to}; its {count} VM checkpoint{} from before can't be restored (`cw --local checkpoint ls` lists {})",
+            style.status(Status::Attention),
+            if count == 1 { "" } else { "s" },
+            if count == 1 { "it" } else { "them" },
+        ),
+    }
+}
+
+/// What differs between two declared guest ABIs, key by key, such as
+/// "guest net none to 2" for `seed=9;cw_catalog=1` to
+/// `seed=9;cw_catalog=1;net=2`. A key missing on one side is "none". A
+/// declaration that isn't `key=value` pairs, or two that don't differ, is
+/// said as given.
+fn abi_change(from: &str, to: &str) -> String {
+    let keys = |abi: &str| -> Option<Vec<(String, String)>> {
+        abi.split(';')
+            .filter(|part| !part.trim().is_empty())
+            .map(|part| {
+                part.split_once('=')
+                    .map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned()))
+            })
+            .collect()
+    };
+    let as_given = || format!("guest {from} to {to}");
+    let (Some(before), Some(after)) = (keys(from), keys(to)) else {
+        return as_given();
+    };
+    let value = |pairs: &[(String, String)], key: &str| {
+        pairs
+            .iter()
+            .find(|(name, _)| name == key)
+            .map_or_else(|| "none".to_owned(), |(_, value)| value.clone())
+    };
+    let mut names: Vec<&str> = after.iter().map(|(key, _)| key.as_str()).collect();
+    for (key, _) in &before {
+        if !names.contains(&key.as_str()) {
+            names.push(key);
+        }
+    }
+    let changes: Vec<String> = names
+        .into_iter()
+        .filter_map(|key| {
+            let (was, now) = (value(&before, key), value(&after, key));
+            (was != now).then(|| format!("{key} {was} to {now}"))
+        })
+        .collect();
+    if changes.is_empty() {
+        return as_given();
+    }
+    format!("guest {}", changes.join(", "))
 }
 
 /// `cw restart` on a local environment.
@@ -730,6 +841,75 @@ pub(crate) struct NativeCreated {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_start_that_moved_the_runtime_says_so_on_one_line() {
+        let plain = Style::new(false, crate::output::Charset::Unicode);
+        let moved = |checkpoints| v1::RuntimeMove {
+            from_guest_abi: "seed=9;cw_catalog=1".into(),
+            to_guest_abi: "seed=9;cw_catalog=1;net=2".into(),
+            unrestorable_checkpoints: checkpoints,
+        };
+        assert_eq!(
+            runtime_move_line("up-walk", &moved(0), plain),
+            "✓ Moved up-walk to this cw's VM runtime (guest net none to 2)"
+        );
+        assert_eq!(
+            runtime_move_line("up-walk", &moved(1), plain),
+            "! Moved up-walk to this cw's VM runtime (guest net none to 2); its 1 VM checkpoint from before can't be restored (`cw --local checkpoint ls` lists it)"
+        );
+        assert!(runtime_move_line("up-walk", &moved(2), plain).contains("its 2 VM checkpoints"));
+        assert!(!runtime_move_line("up-walk", &moved(1), plain).contains('\n'));
+    }
+
+    /// The move comes from the completed start's result, which the
+    /// progress observer never sees.
+    #[test]
+    fn a_completed_start_reports_the_move_its_result_records() {
+        let moved = v1::RuntimeMove {
+            from_guest_abi: "seed=9;cw_catalog=1".into(),
+            to_guest_abi: "seed=10;cw_catalog=1;net=2".into(),
+            unrestorable_checkpoints: 1,
+        };
+        let completed = |runtime_move| v1::Operation {
+            phase: v1::OperationPhase::Completed as i32,
+            result: Some(v1::OperationResult {
+                value: Some(v1::operation_result::Value::Environment(
+                    v1::EnvironmentOperationResult {
+                        runtime_move,
+                        ..Default::default()
+                    },
+                )),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            runtime_move_of(&completed(Some(moved.clone()))),
+            Some(moved)
+        );
+        assert_eq!(runtime_move_of(&completed(None)), None);
+        assert_eq!(runtime_move_of(&v1::Operation::default()), None);
+    }
+
+    /// The line always shows what changed, whichever keys did.
+    #[test]
+    fn a_runtime_move_names_each_key_that_changed() {
+        assert_eq!(
+            abi_change("seed=9;cw_catalog=1", "seed=9;cw_catalog=1;net=2"),
+            "guest net none to 2"
+        );
+        assert_eq!(
+            abi_change("seed=9;cw_catalog=1", "seed=10;cw_catalog=1;net=2"),
+            "guest seed 9 to 10, net none to 2"
+        );
+        assert_eq!(
+            abi_change("seed=9;cw_catalog=1;net=1", "seed=9;cw_catalog=2"),
+            "guest cw_catalog 1 to 2, net 1 to none"
+        );
+        // Not key=value pairs, or nothing differs: the two as given.
+        assert_eq!(abi_change("v9", "v10"), "guest v9 to v10");
+        assert_eq!(abi_change("seed=9", "seed=9"), "guest seed=9 to seed=9");
+    }
+
     use super::*;
 
     #[test]

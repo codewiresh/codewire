@@ -9,11 +9,11 @@ format is in [README.md](README.md). Issue: #4980.
 
 ## Where it stands
 
-Updated 2026-11-15.
+Updated 2026-11-16.
 
 | ID | Linux | macOS |
 | --- | --- | --- |
-| `local-vm-runtime-upgrade` | failure observed from v0.4.21 (start, restore, listing); removal observed working; not yet observed with the fix | not yet observed |
+| `local-vm-runtime-upgrade` | observed working from v0.4.21 with #5088: the moved start with its line, the moved restart, the guest cw, the checkpoint listing, restore and fork refusals, the disk-snapshot fork and removal | observed working from v0.4.18 with #5088, including a failed move retried and the start's line |
 
 ## 1. `local-vm-runtime-upgrade`: an upgrade across a guest ABI change
 
@@ -72,7 +72,13 @@ installed runtime (orchestrator, 2026-11-15, recorded on #4980).
   - with the earlier `cw` installed again, before step 7, the checkpoint
     restores. Its boot assets are kept for that; the restore itself is to be
     observed;
-  - a restart whose move can't be staged leaves the VM `running`.
+  - a restart whose move can't be staged leaves the VM `running`;
+  - in the moved VM, `cw` is the installed runtime's (`cw run --in up-walk
+    --no-tty -- cw --version`): its runtime cache was rebuilt from the
+    installed bootstrap. Not yet observed;
+  - a moved start whose boot fails leaves the environment in `error` with the
+    move still staged, and `cw --local start` boots it again, and
+    `cw --local rm` removes it. Not yet observed.
 - **Gotchas:**
   - A `cw` built from source has no provenance, and a newer `cw` won't drive
     a supervisor started by a source build. Walk with released builds on the
@@ -104,3 +110,57 @@ installed runtime (orchestrator, 2026-11-15, recorded on #4980).
       the checkpoint as `ready`. `checkpoint rm` and `rm` both worked.
       Failure observed for the start, the restore and the listing; removal
       observed working (#4980).
+  - Linux, released v0.4.21 to #5088 at e4c1a2c4d with its runtime from
+    955494e45, 2026-11-16. `checkpoint ls` listed the earlier checkpoint as
+    `unrestorable` with the reason. Its restore and its fork were refused,
+    naming `cw --local checkpoint rm before`, and the fork of the earlier disk
+    snapshot booted on the installed runtime and read the file written under
+    v0.4.21. The moved start and the moved restart failed: the guest powered
+    off with "native runtime bootstrap identity changed" with the installed
+    catalog, and "trusted runtime launcher changed" with the earlier one. The
+    guest's runtime cache on the state disk is bound to the earlier bootstrap
+    and init; the move's seed field in `docs/dev/CLI-ORCHESTRATION.md`
+    answers it. A failed move used
+    to leave staging no operation owned, which stopped the supervisor at the
+    next drain of that environment; a failed move now stays staged. Failure
+    observed for the moved start and restart; listing, restore and fork
+    refusals and the disk-snapshot fork observed working (#4980).
+  - macOS, released v0.4.18 to #5088 at e4c1a2c4d, 2026-11-16, by cw-mac: the
+    same network-step failure for a start from stopped and from `error` and
+    for a restart. A `cw setup --local --replace` while v0.4.18's supervisor
+    still ran a VM was refused with the next step (#2826's hand-off), as
+    designed (#4980).
+  - Linux, released v0.4.21 to #5088 at 292323d03 with its runtime,
+    2026-11-16. After the earlier supervisor's SIGTERM, `cw --local start
+    up-walk` moved the environment and booted it on the installed runtime in
+    1m 25s; it read the file written under v0.4.21, and `cw --version` in the
+    VM printed the installed runtime's `cw`. supervisor.log recorded
+    `cw_runtime_move` with both catalogs, and the environment's binding read
+    the installed catalog active and the earlier one as its rollback. The
+    restart of up-run, still running on v0.4.21's runner, moved it the same
+    way. `checkpoint ls` listed the earlier checkpoint as `unrestorable`; its
+    restore and its fork were refused naming `cw --local checkpoint rm
+    before`; the disk-snapshot fork booted on the installed runtime with the
+    file; `checkpoint rm`, `snapshot rm` and `rm` of all three worked. The
+    start printed no move line, though its result recorded the move: the CLI
+    read it from progress updates, which never carry the finished operation.
+    Observed working except the move line (#4980).
+  - macOS, released v0.4.18 to #5088 at 292323d03, 2026-11-16, by cw-mac:
+    with v0.4.18's supervisor still running VMs, `setup --replace` and a
+    restart were refused with the next step; after stopping them through
+    it, `setup --replace` was accepted. Starts of a stopped environment, one
+    in `error` and one stopped from running each moved and booted (52-60 s),
+    with the marker, the installed guest `cw` and the bindings as on Linux. A
+    move boot failed on purpose kept the move staged, and the next start
+    moved it and booted. A restart of a moved VM moved nothing. `rm` worked
+    on all three. No move line, for the same reason (#4980).
+  - Linux, released v0.4.21 to #5088 at be6a7e93c, 2026-11-16: one
+    environment with a VM checkpoint, moved by its start after the earlier
+    supervisor's SIGTERM. The start printed "! Moved up-walk to this cw's VM
+    runtime (guest seed 9 to 10, net none to 2); its 1 VM checkpoint from
+    before can't be restored (`cw --local checkpoint ls` lists it)", and the
+    file written under v0.4.21 read back. Observed working (#4980).
+  - macOS, released v0.4.18 to #5088 at be6a7e93c, 2026-11-16, by cw-mac:
+    under `TERM=dumb` the start printed "+ Moved up-line to this cw's VM
+    runtime (guest seed 9 to 10, net none to 2)", the form without
+    checkpoints, and the marker read back. Observed working (#4980).

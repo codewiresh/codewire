@@ -679,7 +679,7 @@ pub(super) async fn record_inputs(
     }
     let artifact_generation = manifest.root_generation.artifact_generation()?.to_owned();
     supervisor
-        .require_guest_seed_abi_for_generation(&artifact_generation)
+        .require_forkable_guest(&artifact_generation, manifest.checkpoint.is_some())
         .await?;
     if fs::symlink_metadata(supervisor.config.cw_runtime_lock()).is_ok() {
         let engine = PrivateRoot::open(&supervisor.config.engine_root())?;

@@ -188,6 +188,8 @@ async fn handle_local_checkpoint_command(
                 .get_checkpoint(&args.checkpoint)
                 .await
                 .map_err(status("checkpoint restore"))?;
+            // Refused before the source is stopped.
+            refuse_unrestorable(&checkpoint, "restored")?;
             let source = checkpoint.source_name.clone();
             let started = std::time::Instant::now();
             let environment = client
@@ -288,6 +290,22 @@ fn confirm_restore(source: &str, checkpoint: &str, yes: bool) -> anyhow::Result<
     let mut answer = String::new();
     std::io::stdin().lock().read_line(&mut answer)?;
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
+}
+
+/// Refuses a VM checkpoint this cw cannot restore, such as one taken under an
+/// earlier runtime (#4980), with the command that removes it.
+pub(super) fn refuse_unrestorable(checkpoint: &v1::Checkpoint, verb: &str) -> anyhow::Result<()> {
+    if checkpoint.unrestorable_reason.is_empty() {
+        return Ok(());
+    }
+    let name = terminal_text(&checkpoint.name);
+    Err(crate::error_report::with_next_step(
+        anyhow::anyhow!(
+            "VM checkpoint {name} cannot be {verb}: {}",
+            terminal_text(&checkpoint.unrestorable_reason)
+        ),
+        format!("cw --local checkpoint rm {name}"),
+    ))
 }
 
 fn print_warnings(checkpoint: &v1::Checkpoint) {
@@ -546,6 +564,25 @@ impl From<&v1::Checkpoint> for CheckpointView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unrestorable_checkpoint_is_refused_with_its_removal() {
+        let mut checkpoint = v1::Checkpoint {
+            name: "before".into(),
+            ..Default::default()
+        };
+        assert!(refuse_unrestorable(&checkpoint, "restored").is_ok());
+        checkpoint.unrestorable_reason = "it was taken under an earlier runtime".into();
+        let error = refuse_unrestorable(&checkpoint, "restored").unwrap_err();
+        assert_eq!(
+            error.root_cause().to_string(),
+            "VM checkpoint before cannot be restored: it was taken under an earlier runtime"
+        );
+        let step = error
+            .downcast_ref::<crate::error_report::NextStep>()
+            .unwrap();
+        assert_eq!(step.to_string(), "cw --local checkpoint rm before");
+    }
+
     use super::*;
 
     #[derive(Debug, clap::Parser)]

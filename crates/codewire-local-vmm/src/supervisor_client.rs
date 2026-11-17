@@ -317,7 +317,9 @@ impl NativeSupervisorClient {
     }
 
     pub async fn start(&mut self, name: &str) -> Result<v1::Environment, Status> {
-        self.start_observed(name, &mut |_| {}).await
+        self.start_observed(name, &mut |_| {})
+            .await
+            .map(|(environment, _)| environment)
     }
 
     /// Start, reporting the lifecycle operation's progress to `observe`.
@@ -325,14 +327,16 @@ impl NativeSupervisorClient {
         &mut self,
         name: &str,
         observe: &mut (dyn FnMut(&v1::Operation) + Send),
-    ) -> Result<v1::Environment, Status> {
+    ) -> Result<(v1::Environment, v1::Operation), Status> {
         let operation = self
             .inner
             .start_environment(mutation_selector(name))
             .await?
             .into_inner();
-        self.follow_environment_operation(operation, name, observe)
-            .await
+        // The completed operation carries the start's result, such as a
+        // runtime move (#4980), which `observe` never sees.
+        let completed = self.follow_operation(operation, observe).await?;
+        Ok((self.get(name).await?, completed))
     }
 
     pub async fn stop(&mut self, name: &str) -> Result<v1::Environment, Status> {

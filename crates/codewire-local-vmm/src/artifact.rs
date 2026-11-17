@@ -368,6 +368,14 @@ impl AdmittedArtifacts {
         Ok(())
     }
 
+    /// What the guest init declares in its one ABI marker, such as
+    /// `seed=11;cw_catalog=1;net=2`, for telling a person which runtime an
+    /// environment moved from and to. An init without exactly one marker, or
+    /// with one that is not printable ASCII, is unsupported.
+    pub(crate) fn guest_runtime_abi(&self) -> Result<String, ArtifactError> {
+        declared_guest_abi(&self.initramfs)
+    }
+
     /// The guest init binds `workspace.vm_only` paths (#vm_only); an older one
     /// would refuse such a plan only at boot.
     pub(crate) fn require_vm_only_guest(&self) -> Result<(), ArtifactError> {
@@ -896,6 +904,52 @@ pub(crate) fn validate_parameter_path(path: &Path) -> Result<(), ArtifactError> 
         return Err(ArtifactError::UnsafePath(path.to_owned()));
     }
     Ok(())
+}
+
+/// What an initramfs's guest init declares in its one ABI marker, such as
+/// `seed=11;cw_catalog=1;net=2`. An init without exactly one marker, or with
+/// one that is not printable ASCII, is unsupported.
+pub(crate) fn declared_guest_abi(initramfs: &AdmittedArtifact) -> Result<String, ArtifactError> {
+    let init = read_canonical_initramfs_entry(initramfs, b"init")?;
+    let unsupported = || ArtifactError::GuestSeedProtocolUnsupported(initramfs.path().to_owned());
+    let prefix = b"\0CWGUESTABI\0";
+    let mut markers = init
+        .windows(prefix.len())
+        .enumerate()
+        .filter(|(_, bytes)| *bytes == prefix)
+        .map(|(at, _)| at + prefix.len());
+    let (Some(start), None) = (markers.next(), markers.next()) else {
+        return Err(unsupported());
+    };
+    let declared = init[start..]
+        .split(|byte| *byte == 0)
+        .next()
+        .filter(|bytes| !bytes.is_empty() && bytes.len() <= 128)
+        .filter(|bytes| bytes.iter().all(|byte| byte.is_ascii_graphic()))
+        .ok_or_else(unsupported)?;
+    String::from_utf8(declared.to_vec()).map_err(|_| unsupported())
+}
+
+/// What the installed guest init declares: [`GUEST_RUNTIME_ABI_MARKER`]'s
+/// contents.
+///
+/// [`GUEST_RUNTIME_ABI_MARKER`]: codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER
+// For VM checkpoints, which need a Linux host.
+#[cfg(target_os = "linux")]
+pub(crate) fn current_guest_abi() -> &'static str {
+    let marker = codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER;
+    std::str::from_utf8(&marker[b"\0CWGUESTABI\0".len()..marker.len() - 1])
+        .expect("the guest ABI marker is ASCII")
+}
+
+/// One stored data file, admitted alone: no executable is probed.
+// For VM checkpoints, which need a Linux host.
+#[cfg(target_os = "linux")]
+pub(crate) fn admit_data_file(
+    root: &PrivateRoot,
+    spec: &ArtifactSpec,
+) -> Result<AdmittedArtifact, ArtifactError> {
+    admit_one(root, spec, false)
 }
 
 fn admit_one(
@@ -1734,6 +1788,19 @@ mod tests {
             assert_eq!(
                 artifacts.require_current_guest_seed_abi().is_ok(),
                 index == 1
+            );
+            // What the marker declares, for naming the runtime to a person;
+            // an init with no marker, or two, declares nothing.
+            let current = std::str::from_utf8(&marker[12..marker.len() - 1]).unwrap();
+            let declared = match index {
+                1 => Some(current),
+                3 => Some("seed=8;cw_catalog=0"),
+                _ => None,
+            };
+            assert_eq!(
+                artifacts.guest_runtime_abi().ok().as_deref(),
+                declared,
+                "{index}"
             );
             if index == 1 {
                 let mut changed = archive;

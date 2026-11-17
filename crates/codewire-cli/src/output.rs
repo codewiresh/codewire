@@ -52,7 +52,7 @@ pub(crate) use self::{
     style::{HELP, Role, Status, Style, styled_help},
     summary::{
         Allocation, LifecycleSummary, MeshPlacement, NetworkRef, Outcome, SourcePlacement,
-        SourceRef, VmLocation,
+        SourceRef, VmLocation, render_next,
     },
     text_input::run_text_input,
     upgrade_wire::play_upgrade_wire,

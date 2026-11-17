@@ -17,6 +17,7 @@ mod operation_log;
 mod retained_images;
 mod runner_report;
 mod runtime;
+mod runtime_move;
 mod snapshots;
 mod sources;
 mod ssh;
@@ -2850,9 +2851,9 @@ impl Supervisor {
                 }
                 LifecycleEffect::StageWorkspaceGeneration => {
                     let _writer = self.begin_staging(&request.name).await?;
-                    let generation = self.stage_workspace_generation(&request.name).await?;
+                    let staged = self.stage_start_generation(&request.name).await?;
                     operation = self.commit_operation(&operation, |next_state| {
-                        record_staged_workspace_generation(next_state, &request.name, generation)
+                        staged.record(next_state, &request.name)
                     })?;
                 }
                 LifecycleEffect::RecordStarting => {
@@ -2972,6 +2973,9 @@ impl Supervisor {
             return Ok(());
         }
         if operation.kind == OperationKind::Start {
+            // A move's report for the start's result; an error here meets the
+            // start itself, which fails with it.
+            let moves_from = self.start_moves_from(name).await.unwrap_or(None);
             let (_, operation) = match self.start(name, &operation).await {
                 Ok(result) => result,
                 Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
@@ -2997,13 +3001,16 @@ impl Supervisor {
                     return Ok(());
                 }
             };
-            let result = self
+            let mut result = self
                 .core()
                 .state
                 .environments
                 .get(name)
                 .map(environment_operation_result)
                 .ok_or(SupervisorError::InvalidState)?;
+            if let Some(from) = moves_from {
+                result["runtime_move"] = self.runtime_move_result(name, from).await?;
+            }
             self.core().complete_operation(&operation, &result)?;
             return Ok(());
         }
@@ -3047,8 +3054,7 @@ impl Supervisor {
                         &error,
                         "restart_preflight",
                     );
-                    self.core()
-                        .fail_pending_operation(&operation, "restart_preflight")?;
+                    self.core().fail_restart_preflight(&operation, name)?;
                     return Ok(());
                 }
                 Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
@@ -3270,6 +3276,7 @@ impl SupervisorCore {
             .is_some_and(|environment| {
                 environment.active_workspace_generation.is_some()
                     && environment.staging_workspace_generation.is_some()
+                    && !runtime_move::staged_runtime_move(environment)
             })
         {
             return Err(SupervisorError::InvalidState);
@@ -4352,17 +4359,6 @@ impl Supervisor {
         Ok(client)
     }
 
-    async fn require_environment_guest_seed_abi(
-        &self,
-        name: &str,
-        staging: bool,
-    ) -> Result<(), SupervisorError> {
-        let generation =
-            artifact_generation_for_boot(&self.environment(name)?, staging)?.to_owned();
-        self.require_guest_seed_abi_for_generation(&generation)
-            .await
-    }
-
     /// A plan that keeps paths on the VM's disk boots only a guest that binds
     /// them; checked before a create or start rather than failing at boot.
     async fn require_vm_only_guest_for_plan(
@@ -4392,57 +4388,6 @@ impl Supervisor {
         if root_share {
             artifacts.require_workspace_root_share_guest()?;
         }
-        Ok(())
-    }
-
-    async fn require_guest_seed_abi_for_generation(
-        &self,
-        generation: &str,
-    ) -> Result<(), SupervisorError> {
-        let engine = PrivateRoot::open(&self.config.engine_root())?;
-        RuntimeArtifactStore::create(&engine)
-            .map_err(artifact_store_error)?
-            .open_generation(generation)
-            .await
-            .map_err(artifact_store_error)?
-            .require_current_guest_seed_abi()?;
-        Ok(())
-    }
-
-    async fn admit_start_boot_inputs(&self, name: &str) -> Result<(), SupervisorError> {
-        let environment = self.environment(name)?;
-        let staging = environment.staging_workspace_generation.is_some();
-        let generation = if !staging
-            && environment.active_workspace_generation.is_none()
-            && environment.staging_workspace_generation.is_none()
-            && environment.staging_artifact_generation.is_none()
-        {
-            // A first Start has retained boot assets before its workspace is
-            // staged. Admit those exact assets, never a new installed default.
-            environment
-                .active_artifact_generation
-                .as_deref()
-                .filter(|generation| valid_sha256(generation))
-                .ok_or(SupervisorError::InvalidState)?
-        } else {
-            artifact_generation_for_boot(&environment, staging)?
-        }
-        .to_owned();
-        self.require_guest_seed_abi_for_generation(&generation)
-            .await?;
-        let workspace_plan = self.environment(name)?.workspace_plan.clone();
-        self.require_vm_only_guest_for_plan(&generation, &workspace_plan)
-            .await?;
-        if self.environment(name)?.cw_runtime.is_some() {
-            let engine = PrivateRoot::open(&self.config.engine_root())?;
-            RuntimeArtifactStore::create(&engine)
-                .map_err(artifact_store_error)?
-                .open_generation(&generation)
-                .await
-                .map_err(artifact_store_error)?
-                .require_live_cw_runtime_publisher()?;
-        }
-        self.admit_environment_cw_runtime(name).await?;
         Ok(())
     }
 
@@ -4578,6 +4523,7 @@ impl Supervisor {
             network_policy_document: egress.network_policy_document,
             intercept: egress.intercept,
             cw_runtime_catalog_generation: expected_cw_runtime_generation.clone(),
+            cw_runtime_moved_from_generation: self.cw_runtime_moved_from(&environment),
             environment_id: environment.id.to_string(),
             generation,
             vsock_cid: allocate_vsock_cid(environment.id),
@@ -4833,7 +4779,7 @@ impl Supervisor {
         if operation.checkpoint > 0 {
             // Recovery past authority admission must still validate retained
             // assets before recording state or touching an existing runner.
-            self.admit_start_boot_inputs(name).await?;
+            self.admit_start_or_move(name).await?;
         }
         let mut operation = operation.clone();
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
@@ -4842,7 +4788,7 @@ impl Supervisor {
             match effect {
                 LifecycleEffect::RequireEnvironmentAccess => {
                     self.require_environment_access(name).await?;
-                    self.admit_start_boot_inputs(name).await?;
+                    self.admit_start_or_move(name).await?;
                     operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::RecordStarting => {
@@ -4863,20 +4809,20 @@ impl Supervisor {
                         .map(checkpoints::start_payload_checkpoint)
                         .transpose()?
                         .flatten();
-                    let generation = match restore {
-                        Some(checkpoint) => {
+                    let staged = match restore {
+                        Some(checkpoint) => runtime_move::StagedStart::Generation(
                             checkpoints::place_in_place(
                                 self,
                                 name,
                                 checkpoint,
                                 operation.operation_id,
                             )
-                            .await?
-                        }
-                        None => self.stage_workspace_generation(name).await?,
+                            .await?,
+                        ),
+                        None => self.stage_start_generation(name).await?,
                     };
                     operation = self.commit_operation(&operation, |next_state| {
-                        record_staged_workspace_generation(next_state, name, generation)
+                        staged.record(next_state, name)
                     })?;
                 }
                 LifecycleEffect::EnsureRunner => {
@@ -5403,7 +5349,7 @@ impl Supervisor {
                 }
                 LifecycleEffect::StopVm => {
                     if was_running {
-                        self.require_environment_guest_seed_abi(name, false)
+                        self.require_boot_guest_seed_abi(name)
                             .await
                             .map_err(|error| {
                                 SupervisorError::ReplacementPreflight(Box::new(error))
@@ -6510,7 +6456,11 @@ impl LocalSupervisorService for SupervisorRpc {
             operation
         } else {
             self.supervisor
-                .require_environment_guest_seed_abi(&name, false)
+                .stage_restart_move(&name)
+                .await
+                .map_err(Status::from)?;
+            self.supervisor
+                .require_boot_guest_seed_abi(&name)
                 .await
                 .map_err(Status::from)?;
             self.supervisor
@@ -7920,7 +7870,11 @@ fn operation_result_proto(
             cleanup_pending,
         })
     } else {
-        if fields.len() != 4 {
+        let runtime_move = fields
+            .get("runtime_move")
+            .map(runtime_move::runtime_move_proto)
+            .transpose()?;
+        if fields.len() != 4 + usize::from(runtime_move.is_some()) {
             return Err(Status::internal(
                 "local lifecycle environment result is invalid",
             ));
@@ -7950,6 +7904,7 @@ fn operation_result_proto(
             name: name.to_owned(),
             state: state.proto() as i32,
             generation,
+            runtime_move,
         })
     };
     Ok(v1::OperationResult { value: Some(value) })

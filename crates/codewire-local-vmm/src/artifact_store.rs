@@ -88,6 +88,20 @@ impl RuntimeArtifactStore {
         self.admit_cached(&lock).await
     }
 
+    /// What `generation`'s guest init declares, read from its initramfs
+    /// alone: no executable is probed, so a listing can ask it of every
+    /// retained generation (#4980). For VM checkpoints, which need a Linux
+    /// host.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn guest_runtime_abi(
+        &self,
+        generation: &str,
+    ) -> Result<String, RuntimeArtifactStoreError> {
+        let lock = cached_lock(&self.read_generation(generation)?);
+        let initramfs = crate::artifact::admit_data_file(&self.blobs, &lock.initramfs)?;
+        Ok(crate::artifact::declared_guest_abi(&initramfs)?)
+    }
+
     /// Removes only generation manifests absent from the complete durable
     /// supervisor reachability set, then removes blobs no retained manifest
     /// references. The supervisor runs this only with no artifact writer in

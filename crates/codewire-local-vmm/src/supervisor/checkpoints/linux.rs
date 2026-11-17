@@ -10,6 +10,9 @@ use super::super::snapshots::{
 use super::*;
 use crate::state::{CHECKPOINT_OUT_PREFIX, CHECKPOINT_VMM_FILES, CHECKPOINTS_DIRECTORY};
 
+mod proto;
+pub(in crate::supervisor) use proto::{checkpoint_proto, earlier_runtime, unrestorable_after_move};
+
 /// The seed bindings a runner reports for the boot it captured; an empty
 /// field is unset.
 fn boot_bindings(boot: &v1::CheckpointBootBindings) -> BootBindings {
@@ -293,6 +296,12 @@ async fn admit_restorable(
                 "VM checkpoint {row_name} is damaged: its stored files no longer match its manifest; it cannot be restored"
             ))
         })?;
+    if let Some(reason) = earlier_runtime(&supervisor.config.engine_root(), manifest) {
+        return Err(Status::failed_precondition(format!(
+            "VM checkpoint {} cannot be restored: {reason}",
+            row.name
+        )));
+    }
     let fork = || {
         format!(
             "fork it instead: `cw create --local --checkpoint {}`",
@@ -1073,70 +1082,4 @@ pub(super) fn retire(
         }
     }
     Ok(())
-}
-
-pub(super) fn checkpoint_proto(
-    engine_root: &Path,
-    row: &crate::snapshot_store::SnapshotRow,
-    manifest: &Manifest,
-    measure_sharing: bool,
-) -> Result<v1::Checkpoint, SupervisorError> {
-    let checkpoint = manifest
-        .checkpoint
-        .as_ref()
-        .ok_or(SupervisorError::InvalidState)?;
-    let snapshot = snapshot_proto(engine_root, row, manifest, measure_sharing)?;
-    let described = snapshot.clone();
-    let memory = snapshots_root(engine_root)?
-        .path()
-        .join(row.id.to_string())
-        .join("vmm/memory-ranges");
-    let memory_allocated_bytes = fs::File::open(&memory)
-        .and_then(|file| crate::fs_clone::allocated_bytes(&file))
-        .unwrap_or(0);
-    let host = host_identity();
-    let unrestorable_reason = if host.cpu != checkpoint.host.cpu {
-        format!(
-            "it was taken on another CPU ({}; this host has {})",
-            checkpoint.host.cpu, host.cpu
-        )
-    } else {
-        String::new()
-    };
-    let mut warnings = vec![
-        "a VM checkpoint holds everything the VM's memory held, delivered sign-ins included, until they expire; it stays on this host and is never exported".to_owned(),
-    ];
-    if host.kernel_release != checkpoint.host.kernel_release {
-        warnings.push(format!(
-            "taken under host kernel {}; this host runs {}",
-            checkpoint.host.kernel_release, host.kernel_release
-        ));
-    }
-    Ok(v1::Checkpoint {
-        id: snapshot.id,
-        name: snapshot.name,
-        created_unix_ms: snapshot.created_unix_ms,
-        source_environment_id: snapshot.source_environment_id,
-        source_name: snapshot.source_name,
-        consistency: snapshot.consistency,
-        locations: snapshot.locations,
-        architecture: snapshot.architecture,
-        vcpus: snapshot.vcpus,
-        memory_mib: snapshot.memory_mib,
-        disk_bytes: snapshot.disk_bytes,
-        docker_disk_bytes: snapshot.docker_disk_bytes,
-        image: snapshot.image,
-        disks: snapshot.disks,
-        memory_bytes: checkpoint.memory_bytes,
-        memory_allocated_bytes,
-        vmm_version: checkpoint.vmm.version.clone(),
-        vmm_sha256: checkpoint.vmm.sha256.clone(),
-        guest_checkpoint_abi: checkpoint.guest_checkpoint_abi,
-        timings: Some(checkpoint.timings.proto()),
-        unrestorable_reason,
-        warnings,
-        account: snapshot.account,
-        source_generation: checkpoint.source_generation,
-        snapshot: Some(described),
-    })
 }
