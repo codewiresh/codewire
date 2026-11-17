@@ -155,10 +155,11 @@ fi
 if grep -q '^enable-openid-connect:' "$WORKFLOW"; then
   fail 'CI exposes Forgejo OIDC to every verification job'
 fi
-# Compile once (infra#1632): the compile job and Rust checks build in their
-# build runner's own warm folder and request no identity, so they are not
-# cache jobs.
+# Compile once (infra#1632): the compile job's legs build in their build
+# runner's own warm folder and, where the runner turns their cache on, read
+# the shared one through the same selector (#5146), so it is a cache job too.
 cache_jobs=(
+  rust-compile
   contracts
   standard
   rust-packages
@@ -201,6 +202,8 @@ readonly main_push="github.event_name == 'push' && github.ref == 'refs/heads/mai
 # Only the main-push branch of the expression matters here; pull requests read.
 readonly sized_runs_on="    runs-on: \${{ $main_push && (vars.CODEWIRE_CI_RUNNER_TRUSTED_HEAVY || "
 readonly medium_runs_on="    runs-on: \${{ $main_push && (vars.CODEWIRE_CI_RUNNER_TRUSTED_MEDIUM || "
+# The main build runner: main's own metal VM, which takes only main pushes.
+readonly build_runs_on="    runs-on: \${{ $main_push && (vars.CODEWIRE_CI_RUNNER_TRUSTED_BUILD || "
 check_main_cache_runners() {
   local workflow="$1" job block step checked=0
   while IFS= read -r job; do
@@ -213,6 +216,7 @@ check_main_cache_runners() {
     checked=$((checked + 1))
     grep -Fq -- "$sized_runs_on" <<<"$block" && continue
     grep -Fq -- "$medium_runs_on" <<<"$block" && continue
+    grep -Fq -- "$build_runs_on" <<<"$block" && continue
     # Unsized: every selector step must force local caches on a main push.
     while IFS= read -r -d '' step; do
       grep -Eq 'select-untrusted-(rust|workspace)-cache\.sh' <<<"$step" || continue

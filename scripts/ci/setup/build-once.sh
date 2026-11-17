@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Compile once per run (infra#1632): the build half, on a build runner, whose
 # guest mounts its persistent build disk at /ci-cache and keeps it between
-# guests and jobs. A push to main runs on the main build runner and builds in
-# /ci-cache/main; every other run, on the pull request build runner, in
-# /ci-cache/pr (build-once-tree.sh). A disk that already holds the other
-# folder is refused, so a job never builds on, or clears, the other kind's
-# runner. That check is advisory, since a pull request can change this
-# script; the runners' labels and the archive stores' admission keep the
-# kinds apart.
+# guests and jobs. A push to main runs on the main build runner and every
+# other run on a pull request build runner, both in /ci-cache/build
+# (build-once-tree.sh), so their compiler cache keys match (#5146). Each disk
+# records the kind that builds on it (/ci-cache/.build-once-kind), and a run
+# of the other kind is refused, so a job never builds on, or clears, the
+# other kind's runner. That check is advisory, since a pull request can
+# change this script; the runners' labels and the archive stores' admission
+# keep the kinds apart.
 #
 #   build-once.sh prepare CHECKOUT build|checks
 #                                   bring the warm build folder to this job's
@@ -33,7 +34,7 @@
 #                                   at once under one jobserver, each in its
 #                                   own target folder, within build
 #
-# The build folder, /ci-cache/main or /ci-cache/pr:
+# The build folder, /ci-cache/build:
 # - src: a persistent clone. The job's checkout is fetched into it, so git
 #   rewrites only changed files and Cargo's mtime fingerprints keep every
 #   unchanged workspace crate fresh (a new checkout rebuilds them all); every
@@ -103,8 +104,12 @@ readonly cache_root="${BUILD_ONCE_ROOT:-/ci-cache}"
 source "$ROOT/scripts/ci/setup/build-once-tree.sh"
 work="$(build_once_tree "$cache_root")"
 readonly work
-if [ "${work##*/}" = main ]; then other_work="$cache_root/pr"; else other_work="$cache_root/main"; fi
-readonly other_work
+kind="$(build_once_kind)"
+readonly kind
+if [ "$kind" = main ]; then other_kind='pr'; else other_kind='main'; fi
+readonly other_kind
+# The kind that builds on this disk, written by its first prepare.
+readonly kind_file="$cache_root/.build-once-kind"
 readonly src="$work/src"
 # A compiler cache on the build disk, shared by every leg, when the runner
 # sets CODEWIRE_BUILD_ONCE_SCCACHE=local: a canary on one pull request build
@@ -190,8 +195,13 @@ prepare() {
     [ "$(stat -f -c %T "$cache_root" 2>/dev/null)" = ext2/ext3 ] ||
       die "$cache_root is not the build runner's build disk"
   fi
-  [ ! -e "$other_work" ] ||
-    die "this build disk holds $other_work; a ${work##*/} run does not build here"
+  # Before #5146 each kind built in its own folder, ROOT/main or ROOT/pr; a
+  # disk holding the other kind's, or recording it, is refused.
+  [ ! -e "$cache_root/$other_kind" ] ||
+    die "this build disk holds $cache_root/$other_kind; a $kind run does not build here"
+  if [ -f "$kind_file" ] && [ "$(cat "$kind_file")" != "$kind" ]; then
+    die "this build disk is the $(cat "$kind_file") runner's ($kind_file); a $kind run does not build here"
+  fi
   # The workflow names the same folder for its later steps.
   [ -z "${BUILD_ONCE_TREE:-}" ] || [ "$BUILD_ONCE_TREE" = "$work" ] ||
     die "BUILD_ONCE_TREE=$BUILD_ONCE_TREE, but this run builds in $work"
@@ -202,11 +212,25 @@ prepare() {
   share="$(ci_cpu_share)"
   : "${GITHUB_PATH:?a Forgejo job path file is required}"
 
+  # The folder this kind built in before #5146 becomes the build folder: its
+  # clone, Cargo home and tools carry over, its targets do not. Cargo calls a
+  # moved target fresh, but what it compiled keeps the old path
+  # (env!("CARGO_MANIFEST_DIR"), CARGO_BIN_EXE_*), so the tests would look for
+  # their fixtures under a folder the test jobs never create. The first build
+  # after the move is cold, once per disk.
+  if [ -d "$cache_root/$kind" ] && [ ! -e "$work" ]; then
+    mv -- "$cache_root/$kind" "$work"
+    rm -rf -- "$work/targets"
+    echo "build-once: the build folder moved from $cache_root/$kind to $work; its targets, which name the old path, are dropped"
+  fi
   mkdir -p "$work"
+  printf '%s\n' "$kind" > "$kind_file.new"
+  mv -f -- "$kind_file.new" "$kind_file"
   remove_interrupted_writes
   shopt -s dotglob nullglob
   for entry in "$cache_root"/*; do
-    [ "$entry" = "$work" ] || [ "$entry" = "$cache_root/lost+found" ] || rm -rf -- "$entry"
+    [ "$entry" = "$work" ] || [ "$entry" = "$kind_file" ] || [ "$entry" = "$cache_root/lost+found" ] ||
+      rm -rf -- "$entry"
   done
   for entry in "$work"/*; do
     case "${entry##*/}" in
@@ -440,13 +464,15 @@ bound_targets() {
   local days="${BUILD_ONCE_SWEEP_DAYS:-3}" unit units=0
   local -a build_units=()
   local -A read_units=()
-  swept="$(find "$work/targets" -xdev -type f -atime +"$(( days - 1 ))" -not -path '*/build/*' \
+  # The build-script patterns start below targets: the build folder is itself
+  # named build (/ci-cache/build, #5146).
+  swept="$(find "$work/targets" -xdev -type f -atime +"$(( days - 1 ))" -not -path "$work/targets/*/build/*" \
     -print -delete 2>/dev/null | wc -l)"
   # Each build/<unit> directory, by the first build/ under a profile. A unit
   # was read when any file under it was: one find, started at every unit,
   # prints the start (%H) each read file is under, so no unit forks its own
   # and a nested build/ under out/ is never mistaken for a unit.
-  mapfile -d '' build_units < <(find "$work/targets" -xdev -mindepth 2 -type d -path '*/build/*' \
+  mapfile -d '' build_units < <(find "$work/targets" -xdev -mindepth 2 -type d -path "$work/targets/*/build/*" \
     -prune -print0 2>/dev/null)
   if [ "${#build_units[@]}" -gt 0 ]; then
     # shellcheck disable=SC2016 # the inner sh expands $0 and $@
@@ -462,7 +488,7 @@ bound_targets() {
       units=$(( units + 1 ))
     fi
   done
-  find "$work/targets" -xdev -mindepth 2 -type d -empty -not -path '*/build/*' -delete 2>/dev/null || true
+  find "$work/targets" -xdev -mindepth 2 -type d -empty -not -path "$work/targets/*/build/*" -delete 2>/dev/null || true
   [ "$swept" -eq 0 ] || echo "build-once: removed $swept target files no build read for $days days"
   [ "$units" -eq 0 ] ||
     echo "build-once: removed $units build-script units no build read for $days days or left without out/ or invoked.timestamp"
@@ -751,12 +777,12 @@ run_one_leg() {
   local name="$1" out="$2" logs="$3" started=$SECONDS status=0
   mark_used "$work/targets/$name"
   if sccache_on; then
-    sccache_local_only
+    sccache_selected_only
     # Each leg has its own server on the one cache folder, so its hit rate is
     # its own.
     export SCCACHE_SERVER_UDS="${RUNNER_TEMP:-/tmp}/build-once-sccache-$name.sock"
-    if ! "$sccache_bin" --start-server >/dev/null 2>&1 || ! sccache_is_local; then
-      echo "::warning::build-once: the $name leg's compiler cache is not this build folder's local one; it compiles without it"
+    if ! "$sccache_bin" --start-server >/dev/null 2>&1 || ! sccache_is_selected; then
+      echo "::warning::build-once: the $name leg's compiler cache is not this build folder's, or the shared one the job selected; it compiles without it"
       "$sccache_bin" --stop-server >/dev/null 2>&1 || true
       export BUILD_ONCE_NO_CACHE=1
     fi
@@ -774,33 +800,87 @@ run_one_leg() {
   fi
 }
 
-sccache_local_only() {
-  # Local must stay local (cw-security, #5231): sccache uses a remote backend
-  # whenever its environment or configuration file names one (a bucket, an
-  # endpoint, Redis, GCS, Azure, GHA or WebDAV settings, AWS credentials), so
-  # a leg drops every other SCCACHE_ and AWS_ variable and reads no
-  # configuration file.
-  local name
-  for name in $(compgen -e); do
-    case "$name" in
-      SCCACHE_DIR|SCCACHE_CACHE_SIZE) ;;
-      SCCACHE_*|AWS_*) unset "$name" ;;
-    esac
-  done
-  export SCCACHE_CONF=/dev/null
+# The settings select-untrusted-rust-cache.sh writes for its shared level,
+# which a leg keeps only when they name that level exactly (sccache_shared).
+readonly SCCACHE_SHARED_KEYS=" SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_USE_SSL \
+SCCACHE_S3_KEY_PREFIX SCCACHE_MULTILEVEL_CHAIN SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY SCCACHE_S3_RW_MODE \
+AWS_SHARED_CREDENTIALS_FILE AWS_PROFILE AWS_EC2_METADATA_DISABLED "
+
+sccache_shared() {
+  # Whether the job selected the shared R2 level (select-untrusted-rust-cache.sh,
+  # the same selector, roles and credential the test jobs use; owner,
+  # 2026-11-17, #5146) and its settings name exactly that level: the
+  # workflow's bucket and endpoint, the protected prefix behind this build
+  # folder's disk, and on anything but a main push the read-only token and
+  # mode (OpenBao gives a pull request only protected-read).
+  [ "${CODEWIRE_SCCACHE_MODE:-}" = r2 ] || return 1
+  local trust=protected-read
+  [ "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}" != 'push|refs/heads/main' ] || trust=main
+  [ -n "${CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED:-}" ] && [ -n "${CODEWIRE_R2_CACHE_ENDPOINT:-}" ] &&
+    [ "${SCCACHE_BUCKET:-}" = "$CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED" ] &&
+    [ "${SCCACHE_ENDPOINT:-}" = "$CODEWIRE_R2_CACHE_ENDPOINT" ] &&
+    [ "${SCCACHE_S3_KEY_PREFIX:-}" = protected/codewire/v1 ] &&
+    [ "${SCCACHE_MULTILEVEL_CHAIN:-}" = disk,s3 ] &&
+    [ "${CODEWIRE_R2_CACHE_TRUST:-}" = "$trust" ] || return 1
+  if [ "$trust" = protected-read ]; then
+    [ "${SCCACHE_S3_RW_MODE:-}" = READ_ONLY ] || return 1
+  fi
+  # The credential is the selector's file below RUNNER_TEMP, never a value in
+  # the environment.
+  case "${AWS_SHARED_CREDENTIALS_FILE:-}" in
+    "${RUNNER_TEMP:?}"/*) [ -f "$AWS_SHARED_CREDENTIALS_FILE" ] && [ ! -L "$AWS_SHARED_CREDENTIALS_FILE" ] ;;
+    *) return 1 ;;
+  esac
 }
 
-sccache_is_local() {
+sccache_selected_only() {
+  # Local must stay local (cw-security, #5231): sccache uses a remote backend
+  # whenever its environment or configuration file names one (a bucket, an
+  # endpoint, Redis, GCS, Azure, GHA or WebDAV settings, AWS credentials). So
+  # a leg drops every other SCCACHE_ and AWS_ variable, keeping the shared
+  # level's only when sccache_shared names the job's own, and reads no
+  # configuration but its own. Its disk level is always this build folder's.
+  local name keep=" "
+  if sccache_shared; then
+    keep="$SCCACHE_SHARED_KEYS"
+  elif [ "${CODEWIRE_SCCACHE_MODE:-}" = r2 ]; then
+    echo "::warning::build-once: the job's shared compiler cache does not name its own bucket, prefix and trust; the legs keep only the local one"
+  fi
+  for name in $(compgen -e); do
+    case "$name" in
+      SCCACHE_*|AWS_*) [[ "$keep" == *" $name "* ]] || unset "$name" ;;
+    esac
+  done
+  export SCCACHE_DIR="$sccache_dir" SCCACHE_CACHE_SIZE="${BUILD_ONCE_SCCACHE_SIZE:-40G}"
+  if [ "$keep" = " " ]; then
+    export SCCACHE_CONF=/dev/null
+  else
+    # The shared level checks its bucket at server start, which can take
+    # longer than the client's default 10 s wait.
+    printf 'server_startup_timeout_ms = 60000\n' > "${RUNNER_TEMP:-/tmp}/build-once-sccache.conf"
+    export SCCACHE_CONF="${RUNNER_TEMP:-/tmp}/build-once-sccache.conf"
+  fi
+}
+
+sccache_is_selected() {
   # Whether the leg's running server caches in this build folder, on the
-  # local disk, as it reports itself.
+  # local disk, and, when the shared level is kept, in the job's bucket and
+  # nowhere else, as the server reports itself.
+  local bucket=''
+  [ -z "${SCCACHE_BUCKET:-}" ] || bucket="$SCCACHE_BUCKET"
   "$sccache_bin" --show-stats --stats-format json 2>/dev/null | python3 -c '
-import json, sys
+import json, re, sys
+directory, bucket = sys.argv[1], sys.argv[2]
 try:
     location = json.load(sys.stdin).get("cache_location", "")
 except ValueError:
     sys.exit(1)
-sys.exit(0 if location == f"Local disk: \"{sys.argv[1]}\"" else 1)
-' "$sccache_dir"
+local = f"Local disk: \"{directory}\""
+if not bucket:
+    sys.exit(0 if location == local else 1)
+others = re.search(r"redis|memcached|gcs|azure|gha|webdav|oss|cos\b", location, re.I)
+sys.exit(0 if local in location and bucket in location and not others else 1)
+' "$sccache_dir" "$bucket"
 }
 
 sccache_leg_stats() {
@@ -823,8 +903,9 @@ misses = sum(stats.get("cache_misses", {}).get("counts", {}).values())
 rate = f"{100 * hits / (hits + misses):.1f}" if hits + misses else "n/a"
 uncacheable = stats.get("non_cacheable_compilations", 0)
 size = report.get("cache_size", 0)
+location = report.get("cache_location", "")
 print(f"[build-once] leg {name}: sccache hits={hits} misses={misses} hit_rate={rate} "
-      f"not_cacheable={uncacheable} cache_bytes={size}")
+      f"not_cacheable={uncacheable} cache_bytes={size} location={location}")
 ' "$name" <<<"$stats"
 }
 

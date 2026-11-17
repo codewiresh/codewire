@@ -138,9 +138,8 @@ cargo_ci() {
 # dropped, so the archives build in the dev profile and share their units
 # with the build runner's other archives; ARCHIVE_CARGO_PROFILE=keep builds
 # them in the lane's profile instead (--cargo-profile), keyed apart.
-# The build runner's build folder, /ci-cache/main on a push to main and
-# /ci-cache/pr otherwise (build-once-tree.sh); the archives' test binaries
-# carry its paths.
+# The build runner's build folder, /ci-cache/build for every run
+# (build-once-tree.sh); the archives' test binaries carry its paths.
 # shellcheck source=scripts/ci/setup/build-once-tree.sh
 source "$ROOT/scripts/ci/setup/build-once-tree.sh"
 DATABASE_ARCHIVE_BUILD_ROOT="$(build_once_tree)"

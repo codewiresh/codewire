@@ -162,8 +162,8 @@ run_rust_archive_tests() {
     echo "::error::the test archive $RUST_TEST_ARCHIVE is missing" >&2
     return 1
   }
-  # The build runner's build folder, /ci-cache/main on a push to main and
-  # /ci-cache/pr otherwise (build-once-tree.sh). Test binaries carry its paths
+  # The build runner's build folder, /ci-cache/build for every run
+  # (build-once-tree.sh). Test binaries carry its paths
   # (the compile-time CARGO_MANIFEST_DIR and CARGO_BIN_EXE_*), so the checkout
   # and the extracted target folder go there. A metal guest runs as many tests
   # at once as its share of the host (cpu-share.sh) times
@@ -395,8 +395,7 @@ run_daemon_stock_gh() {
 # each archive's build target folder links into its extraction.
 SHARD_ARCHIVE_SOURCE_READY=false
 
-# The build folder of this run's kind: /ci-cache/main on a push to main,
-# /ci-cache/pr otherwise (build-once-tree.sh).
+# The build runner's build folder, /ci-cache/build (build-once-tree.sh).
 shard_archive_root() {
   # shellcheck source=scripts/ci/setup/build-once-tree.sh
   source "$ROOT/scripts/ci/setup/build-once-tree.sh"

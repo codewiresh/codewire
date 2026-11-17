@@ -740,7 +740,7 @@ jobs:
         run: scripts/ci/verify/run-product-verification.sh tooling
 
   rust-compile:
-    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job requests no identity and reads no protected credential: it builds in its build runner's own warm folder, never the shared cache.
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential: on a pull request its only identity is the shared compiler cache's read-only one, as the test jobs'.
     # Compile once (infra#1632): every run builds its test archives on a build
     # runner, whose persistent build disk keeps a warm build folder. It runs
     # build-once.sh's legs, every test archive at once under one jobserver,
@@ -756,15 +756,19 @@ jobs:
     # so a separate job could only start after the build, and held the runner
     # from the next run. The test jobs start when this job ends, so they wait
     # for the checks too. A main push uses the main
-    # build runner, its build folder /ci-cache/main and the main archive
-    # store, which only main's guests reach; every other run uses the pull
-    # request build runner, /ci-cache/pr and the pull request archive store.
+    # build runner and the main archive store, which only main's guests
+    # reach; every other run uses a pull request build runner and the pull
+    # request archive store. Both build in /ci-cache/build, so their compiler
+    # cache keys match (#5146).
     name: Build test archives
     runs-on: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_RUNNER_TRUSTED_BUILD || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_BUILD') || (vars.CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_BUILD') }}
     # A cold build of every leg, after a lockfile or toolchain change, took
     # 27 min with its legs one after another (run 22438); they now all run at
     # once. Warm builds stay far below; the bound holds a cold one under the
     # 90-minute task budget.
+    # The shared compiler cache's identity, where the runner turns the build
+    # legs' cache on (the shared Rust cache step below).
+    enable-openid-connect: true
     timeout-minutes: 60
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.rust_compile_expected == 'true' }}
@@ -777,8 +781,8 @@ jobs:
       local_vmm_sha256: ${{ steps.publish.outputs.local_vmm_sha256 }}
     env:
       # The build runner's warm build folder (build-once.sh prepare).
-      BUILD_ONCE_TREE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '/ci-cache/main' || '/ci-cache/pr' }}
-      CARGO_HOME: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '/ci-cache/main/cargo-home' || '/ci-cache/pr/cargo-home' }}
+      BUILD_ONCE_TREE: /ci-cache/build
+      CARGO_HOME: /ci-cache/build/cargo-home
       ARCHIVE_STORE_URL: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (vars.CODEWIRE_CI_ARCHIVE_STORE_TRUSTED || 'http://ci-archive-main.forgejo-ci-archive.svc:8090') || 'http://ams3-1-untrusted-helper-small-0.forgejo-ci-archive.svc:8090' }}
       # The build legs of Rust / transport verification's local-vmm shard and
       # its artifact-selected desktop package (build-once.sh).
@@ -818,6 +822,23 @@ jobs:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
         run: scripts/ci/setup/build-once.sh prepare "$GITHUB_WORKSPACE" build
 
+      # The shared compiler cache the test jobs use (#5146; owner,
+      # 2026-11-17): a main push reads and writes the protected R2 prefix, and
+      # a pull request reads it with the read-only token. build-once puts it
+      # behind its build folder's own cache, which is all a pull request
+      # writes, and only where the runner turns that on
+      # (CODEWIRE_BUILD_ONCE_SCCACHE); elsewhere no credential is fetched.
+      - name: Select best-effort shared Rust cache
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        env:
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+        run: |
+          if [ "${CODEWIRE_BUILD_ONCE_SCCACHE:-off}" = local ]; then
+            scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+          else
+            echo 'This runner keeps no compiler cache for the build legs; no shared cache is selected.'
+          fi
+
       # The macOS cw and the local VMM link Apple frameworks, so only the
       # protected Mac runner links them (cli-release.yaml and
       # cw-release-dry-run.yaml). The Rust checks compile them for the Mac
@@ -850,6 +871,10 @@ jobs:
       - name: Put the build folder on disk
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         run: scripts/ci/setup/build-once.sh finish
+
+      - name: Report and clean Rust cache
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
+        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
       - name: Publish the test archives
         id: publish

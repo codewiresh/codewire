@@ -94,7 +94,10 @@ size_gb() {
   df -h "$cache_root" | tail -n 1
 } | tee "$out/guest.txt"
 
-# Only /ci-cache/pr and its known entries persist.
+# Only /ci-cache/pr and its known entries persist. A disk build-once now
+# builds on (/ci-cache/build, #5146) is refused: this would remove its folder.
+[ ! -e "$cache_root/build" ] ||
+  { echo "build-runner: $cache_root holds build-once's build folder; this measurement would remove it" >&2; exit 1; }
 started="$(now)"
 mkdir -p "$work"
 shopt -s dotglob nullglob

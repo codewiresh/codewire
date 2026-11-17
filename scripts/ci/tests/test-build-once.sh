@@ -39,14 +39,14 @@ git clone -q --depth 1 "file://$work/origin" "$work/checkout2"
 # The git half of prepare, as the script runs it.
 sync_clone() {
   # shellcheck disable=SC2034 # The fetch line read from the script uses it.
-  local checkout="$1" src="$work/root/pr/src"
+  local checkout="$1" src="$work/root/build/src"
   local git_src=(git -c core.hooksPath=/dev/null -C "$src")
   [ -d "$src/.git" ] || git init -q "$src"
   eval "$(sed -nE 's/^  "\$\{git_src\[@\]\}" (fetch .*)$/"${git_src[@]}" \1/p' "$SCRIPT")"
   "${git_src[@]}" checkout -q --force --detach FETCH_HEAD
   "${git_src[@]}" rev-parse HEAD
 }
-mkdir -p "$work/root/pr"
+mkdir -p "$work/root/build"
 [ "$(sync_clone "$work/checkout1")" = "$first" ] || fail 'the first fetch into an empty clone did not land on the commit'
 [ "$(sync_clone "$work/checkout2")" = "$second" ] || fail 'a later fetch did not land on the newer commit'
 grep -Fq -- '--update-shallow "$checkout" HEAD' "$SCRIPT" || fail 'the fetch must update the shallow boundary'
@@ -93,15 +93,18 @@ while read -r name; do
     fail "the $name leg does not build in targets/$name"
 done < <(VERIFICATION_SELECTION="${all}rust|transport|" BUILD_ONCE_LOCAL_VMM=true "$SCRIPT" legs)
 
-# The build folder follows the event: main only for a push to main.
+# Every run builds in one folder (#5146), so main's and a pull request's
+# compiler cache keys, which carry absolute paths, match; the kind follows the
+# event, main only for a push to main.
 tree() {
   # shellcheck source=scripts/ci/setup/build-once-tree.sh
-  ( source "$ROOT/scripts/ci/setup/build-once-tree.sh"; GITHUB_EVENT_NAME="$1" GITHUB_REF="$2" build_once_tree /d )
+  ( source "$ROOT/scripts/ci/setup/build-once-tree.sh"; GITHUB_EVENT_NAME="$1" GITHUB_REF="$2"
+    printf '%s %s\n' "$(build_once_tree /d)" "$(build_once_kind)" )
 }
-[ "$(tree push refs/heads/main)" = /d/main ] || fail 'a push to main must build in main'
-[ "$(tree pull_request refs/pull/1/head)" = /d/pr ] || fail 'a pull request must build in pr'
-[ "$(tree push refs/heads/other)" = /d/pr ] || fail 'a push to another branch must build in pr'
-[ "$(tree workflow_dispatch refs/heads/main)" = /d/pr ] || fail 'a dispatched run must build in pr'
+[ "$(tree push refs/heads/main)" = '/d/build main' ] || fail 'a push to main must build in build as main'
+[ "$(tree pull_request refs/pull/1/head)" = '/d/build pr' ] || fail 'a pull request must build in build as pr'
+[ "$(tree push refs/heads/other)" = '/d/build pr' ] || fail 'a push to another branch must build as pr'
+[ "$(tree workflow_dispatch refs/heads/main)" = '/d/build pr' ] || fail 'a dispatched run must build as pr'
 
 # prepare refuses a disk that holds the other kind's folder, and a workflow
 # that names another folder, before it touches anything.
@@ -113,6 +116,18 @@ if GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1/head BUILD_ONCE_ROOT="$
 fi
 grep -q 'holds .*/main; a pr run does not build here' "$work/refused.log" || fail 'no reason for the refusal'
 [ -d "$work/disk/main/src" ] || fail 'the refused prepare touched the main folder'
+# A disk that records the other kind is refused the same way.
+mkdir -p "$work/kind-disk/build/src"
+printf 'main\n' > "$work/kind-disk/.build-once-kind"
+if GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1/head BUILD_ONCE_ROOT="$work/kind-disk" \
+    GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" RUNNER_TEMP="$work/env" \
+    "$SCRIPT" prepare "$work/checkout1" build > "$work/refused.log" 2>&1; then
+  fail "a pull request prepared on main's disk"
+fi
+grep -q "this build disk is the main runner's .*; a pr run does not build here" "$work/refused.log" ||
+  fail "no reason for the kind refusal: $(cat "$work/refused.log")"
+[ -d "$work/kind-disk/build/src" ] && grep -qx main "$work/kind-disk/.build-once-kind" ||
+  fail "the refused prepare touched main's disk"
 if GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main BUILD_ONCE_ROOT="$work/disk" BUILD_ONCE_TREE=/ci-cache/pr \
     GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" RUNNER_TEMP="$work/env" \
     "$SCRIPT" prepare "$work/checkout1" build > "$work/refused.log" 2>&1; then
@@ -213,7 +228,7 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted\nfake %s %s %s %s
 DF
 chmod +x "$work/fake-df"
 targets_prepare() {
-  BUILD_ONCE_DF="$work/fake-df" FAKE_DF_TARGETS="$work/marker-root/pr/targets" \
+  BUILD_ONCE_DF="$work/fake-df" FAKE_DF_TARGETS="$work/marker-root/build/targets" \
   BUILD_ONCE_ROOT="$work/marker-root" BUILD_ONCE_TEST_STOP_AFTER_TARGETS=1 \
     GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" RUNNER_TEMP="$work/env" \
     "$SCRIPT" prepare "$work/lock-checkout" "${PREPARE_JOB:-build}" > "$work/prepare.log" 2>&1 ||
@@ -221,7 +236,7 @@ targets_prepare() {
   # These cases are about the folders; job-running has its own below.
   [ "${KEEP_JOB_RUNNING:-}" = 1 ] || rm -f "$marker_root/job-running"
 }
-marker_root="$work/marker-root/pr"
+marker_root="$work/marker-root/build"
 # The archive leg's epoch, as prepare records it; the cases below keep their
 # fixture's archive folder at the current epoch, and the epoch has its own.
 archive_epoch() { printf '1\n' > "$marker_root/targets/archive/.build-once-epoch"; }
@@ -274,6 +289,23 @@ for folder in $CHECK_FOLDERS; do
 done
 [ ! -e "$marker_root/targets/stray" ] || fail 'prepare kept an unknown target folder'
 grep -q 'removing the unused target folder stray' "$work/prepare.log" || fail 'the stray folder removal gave no reason'
+# The folder a kind built in before #5146 becomes the build folder: its clone
+# and Cargo home move, its targets, which name the old path, do not, and the
+# disk records its kind.
+mkdir -p "$work/move-disk/pr/targets/archive" "$work/move-disk/pr/cargo-home/registry"
+printf '1\n' > "$work/move-disk/pr/targets/archive/.build-once-epoch"
+printf 'warm' > "$work/move-disk/pr/targets/archive/lib.rlib"
+printf 'index' > "$work/move-disk/pr/cargo-home/registry/kept"
+GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1/head BUILD_ONCE_DF="$work/fake-df" \
+  FAKE_DF_TARGETS="$work/move-disk/build/targets" BUILD_ONCE_ROOT="$work/move-disk" BUILD_ONCE_TEST_STOP_AFTER_TARGETS=1 \
+  GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" RUNNER_TEMP="$work/env" \
+  "$SCRIPT" prepare "$work/lock-checkout" build > "$work/move.log" 2>&1 || fail "the move prepare failed: $(cat "$work/move.log")"
+[ -f "$work/move-disk/build/cargo-home/registry/kept" ] || fail "the pull request folder's Cargo home did not move to build"
+[ ! -e "$work/move-disk/build/targets/archive/lib.rlib" ] || fail 'a moved target, which names the old path, was kept'
+[ ! -e "$work/move-disk/pr" ] || fail 'the old pull request folder stayed'
+grep -qx pr "$work/move-disk/.build-once-kind" || fail 'the disk did not record its kind'
+grep -q "the build folder moved from $work/move-disk/pr to $work/move-disk/build; its targets, which name the old path, are dropped" \
+  "$work/move.log" || fail 'the move gave no reason'
 # The compiler cache canary (#5146): its folder stays only while the runner
 # turns it on, and an unknown setting is refused before anything is touched.
 mkdir -p "$marker_root/sccache"
@@ -587,8 +619,10 @@ objcopy --add-section .debug_info="$work/legs-archive/payload" "$work/legs-archi
 tar -c -C "$work/legs-archive" target | zstd -q -o "$work/legs-bin/archive.tar.zst"
 legs_build() {
   rm -rf "$work/legs-out" "$work/legs-state"; mkdir -p "$work/legs-out" "$work/legs-state"
-  mkdir -p "$work/legs-root/pr/targets/archive/debug/deps"
-  printf 'half' > "$work/legs-root/pr/targets/archive/debug/deps/libbroken.rlib"
+  # The shared cache's credential file, as the selector leaves it in RUNNER_TEMP.
+  [ -z "${LEGS_CREDENTIAL:-}" ] || install -m 0600 /dev/null "$work/legs-state/codewire-sccache-r2.aws"
+  mkdir -p "$work/legs-root/build/targets/archive/debug/deps"
+  printf 'half' > "$work/legs-root/build/targets/archive/debug/deps/libbroken.rlib"
   PATH="$work/legs-bin:$PATH" BUILD_ONCE_ROOT="$work/legs-root" BUILD_ONCE_SRC="$legs_src" \
     BUILD_ONCE_COLD=true LEGS_STATE="$work/legs-state" LEGS_CARGO_MODE="$1" RUNNER_TEMP="$work/legs-state" \
     VERIFICATION_SELECTION="${LEGS_SELECTION:-}" BUILD_ONCE_JOBSERVER_TOKENS=6 \
@@ -623,7 +657,7 @@ for signature in 'could not load dep-graph' 'required to be available in rlib fo
 done
 legs_build missing || fail "a missing crate was not rebuilt: $(cat "$work/legs.log")"
 [ "$(wc -l < "$work/legs-state/calls")" -eq 2 ] || fail 'the missing-crate leg did not build exactly twice'
-grep -q "read a corrupt output in $work/legs-root/pr/targets/archive; it is wiped" "$work/legs.log" ||
+grep -q "read a corrupt output in $work/legs-root/build/targets/archive; it is wiped" "$work/legs.log" ||
   fail 'a missing crate did not wipe the leg'"'"'s own folder'
 # A leg whose builds run in batches (the database leg) keeps each batch but
 # its first in batch-NAME inside its folder: a corrupt output there wipes
@@ -635,7 +669,7 @@ broken="$CARGO_TARGET_DIR/batch-orchestration/debug/deps/libbroken.rlib"
 if [ -e "$broken" ]; then echo "error: $broken: failed to mmap file"; exit 101; fi
 DATABASE
 chmod +x "$legs_src/scripts/ci/verify/run-integration-verification.sh"
-batch_root="$work/legs-root/pr/targets/database"
+batch_root="$work/legs-root/build/targets/database"
 mkdir -p "$batch_root/batch-orchestration/debug/deps" "$batch_root/batch-billing" "$batch_root/debug"
 printf 'half' > "$batch_root/batch-orchestration/debug/deps/libbroken.rlib"
 : > "$batch_root/batch-billing/kept"
@@ -648,7 +682,7 @@ grep -q "read a corrupt output in $batch_root/batch-orchestration; it is wiped" 
   fail "a corrupt batch output wiped the leg's or another batch's folder"
 if legs_build compile; then fail 'a compile error passed'; fi
 [ "$(wc -l < "$work/legs-state/calls")" -eq 1 ] || fail 'a compile error was rebuilt'
-[ -e "$work/legs-root/pr/targets/archive/debug/deps/libbroken.rlib" ] || fail 'a compile error wiped the target folder'
+[ -e "$work/legs-root/build/targets/archive/debug/deps/libbroken.rlib" ] || fail 'a compile error wiped the target folder'
 
 # checks runs the Rust checks from src, each in its own target folder, all
 # under one jobserver; marks the folders used; and reruns once after a
@@ -678,7 +712,7 @@ if [ -e "$broken" ]; then
 fi
 CHECKS
 chmod +x "$legs_src/scripts/ci/verify/run-rust-checks.sh"
-checks_root="$work/legs-root/pr/targets"
+checks_root="$work/legs-root/build/targets"
 checks_run() {
   rm -rf "$work/legs-state"; mkdir -p "$work/legs-state" "$checks_root/clippy" "$checks_root/darwin_cw" "$checks_root/darwin"
   : > "$checks_root/clippy/broken"
@@ -794,7 +828,7 @@ SCCACHE
 chmod +x "$work/legs-bin/fake-sccache"
 cache_legs_build() {
   CODEWIRE_BUILD_ONCE_SCCACHE=local BUILD_ONCE_SCCACHE_BIN="$work/legs-bin/fake-sccache" \
-    SCCACHE_DIR="$work/legs-root/pr/sccache" SCCACHE_BUCKET=stray-bucket SCCACHE_REDIS=redis://stray \
+    SCCACHE_DIR="$work/legs-root/build/sccache" SCCACHE_BUCKET=stray-bucket SCCACHE_REDIS=redis://stray \
     AWS_ACCESS_KEY_ID=stray-id LEGS_SELECTION='|valid:v3|complete|' legs_build ok
 }
 cache_legs_build || fail "a build with the compiler cache failed: $(cat "$work/legs.log")"
@@ -807,9 +841,104 @@ grep -qx "wrapper=$work/legs-bin/fake-sccache bucket=none redis=none aws=none" "
 grep -q '^\[build-once\] leg archive: sccache hits=3 misses=1 hit_rate=75.0 ' "$work/legs.log" ||
   fail "the leg logged no hit rate: $(cat "$work/legs.log")"
 FAKE_SCCACHE_LOCATION='S3, name: stray-bucket' cache_legs_build || fail "a build with a remote cache server failed: $(cat "$work/legs.log")"
-grep -q "the archive leg's compiler cache is not this build folder's local one; it compiles without it" "$work/legs.log" ||
+grep -q "the archive leg's compiler cache is not this build folder's, or the shared one the job selected; it compiles without it" "$work/legs.log" ||
   fail 'a remote cache server was not refused'
 grep -qx 'wrapper=none bucket=none redis=none aws=none' "$work/legs-state/cargo-env" ||
   fail "a leg compiled through a remote cache: $(cat "$work/legs-state/cargo-env")"
+# The shared level the job selected (#5146): exactly the selector's settings
+# reach a pull request leg's server, read-only, with its own configuration;
+# a stray setting still does not.
+# A level that names another bucket, or a pull request's without read-only,
+# is dropped and the leg keeps only the local cache.
+shared_legs_build() {
+  CODEWIRE_BUILD_ONCE_SCCACHE=local BUILD_ONCE_SCCACHE_BIN="$work/legs-bin/fake-sccache" \
+    SCCACHE_DIR="$work/legs-state/selector-cache" CODEWIRE_SCCACHE_MODE=r2 \
+    CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED=protected-bucket CODEWIRE_R2_CACHE_ENDPOINT=https://r2.example.invalid \
+    SCCACHE_BUCKET="${SHARED_BUCKET:-protected-bucket}" SCCACHE_ENDPOINT=https://r2.example.invalid \
+    SCCACHE_REGION=auto SCCACHE_S3_KEY_PREFIX=protected/codewire/v1 SCCACHE_MULTILEVEL_CHAIN=disk,s3 \
+    SCCACHE_S3_RW_MODE="${SHARED_MODE-READ_ONLY}" CODEWIRE_R2_CACHE_TRUST=protected-read \
+    AWS_SHARED_CREDENTIALS_FILE="$work/legs-state/codewire-sccache-r2.aws" AWS_PROFILE=default \
+    SCCACHE_REDIS=redis://stray AWS_ACCESS_KEY_ID=stray-id GITHUB_EVENT_NAME=pull_request \
+    GITHUB_REF=refs/pull/1/head LEGS_CREDENTIAL=1 LEGS_SELECTION='|valid:v3|complete|' legs_build ok
+}
+FAKE_SCCACHE_LOCATION="Multi-level: Local disk: \"$work/legs-root/build/sccache\", S3, name: protected-bucket" \
+  shared_legs_build || fail "a build with the shared cache failed: $(cat "$work/legs.log")"
+server_env="$work/legs-state/sccache-server-env"
+for kept in SCCACHE_BUCKET=protected-bucket SCCACHE_S3_RW_MODE=READ_ONLY SCCACHE_MULTILEVEL_CHAIN=disk,s3 \
+    "SCCACHE_DIR=$work/legs-root/build/sccache" \
+    "SCCACHE_CONF=$work/legs-state/build-once-sccache.conf" \
+    "AWS_SHARED_CREDENTIALS_FILE=$work/legs-state/codewire-sccache-r2.aws"; do
+  grep -qxF "$kept" "$server_env" || fail "the leg's cache server lacked $kept"
+done
+for stray in SCCACHE_REDIS AWS_ACCESS_KEY_ID; do
+  ! grep -q "^$stray=" "$server_env" || fail "the leg's shared cache server saw $stray"
+done
+grep -q '^\[build-once\] leg archive: sccache hits=3 misses=1 hit_rate=75.0 .* location=Multi-level: ' "$work/legs.log" ||
+  fail "the leg did not log its cache's location: $(cat "$work/legs.log")"
+SHARED_BUCKET=other-bucket shared_legs_build || fail "a build with another bucket failed: $(cat "$work/legs.log")"
+grep -q "the job's shared compiler cache does not name its own bucket, prefix and trust" "$work/legs.log" ||
+  fail 'a shared cache with another bucket was not refused'
+! grep -q '^SCCACHE_BUCKET=' "$server_env" || fail 'a shared cache with another bucket reached the leg'
+grep -qx 'SCCACHE_CONF=/dev/null' "$server_env" || fail 'a refused shared cache left a configuration file'
+SHARED_MODE='' shared_legs_build || fail "a read-write pull request build failed: $(cat "$work/legs.log")"
+grep -q "the job's shared compiler cache does not name its own bucket, prefix and trust" "$work/legs.log" ||
+  fail "a pull request's shared cache without read-only was not refused"
+! grep -q '^SCCACHE_BUCKET=' "$server_env" || fail "a pull request's read-write shared cache reached the leg"
 
-echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the per-kind build folder, the archive fetch and its build fallback, interrupted folders and lockfile changes kept warm, the disk bound (idle folders first, live ones kept, the folders a job uses never removed), the corrupt-output rebuild and publish hold, and the local compiler cache stays local; bad input refused'
+# Why one folder (#5146): sccache's Rust keys carry absolute paths, which
+# SCCACHE_BASEDIRS does not remove. A crate compiled in main's build folder
+# on one disk is a hit for a pull request's on another disk at the same path,
+# sharing one cache; at another path it never is.
+real_cache_build() {
+  # real_cache_build DISK_ROOT NAME: build the probe crate in build_once_tree
+  # DISK_ROOT through the shared cache; print the server's hits.
+  local tree crate
+  tree="$( source "$ROOT/scripts/ci/setup/build-once-tree.sh"; build_once_tree "$1" )"
+  crate="$tree/src/probe"
+  mkdir -p "$crate/src"
+  printf '[package]\nname = "build_once_probe"\nversion = "0.1.0"\nedition = "2021"\n' > "$crate/Cargo.toml"
+  printf 'pub fn probe() -> u32 { 42 }\n' > "$crate/src/lib.rs"
+  (
+    export SCCACHE_DIR="$work/real-cache" SCCACHE_SERVER_UDS="$work/real-$2.sock" SCCACHE_CONF=/dev/null
+    RUSTC_WRAPPER="$(command -v sccache)"
+    export RUSTC_WRAPPER CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
+    unset SCCACHE_BASEDIRS
+    sccache --start-server >/dev/null 2>&1 || exit 1
+    (cd "$crate" && CARGO_TARGET_DIR="$tree/targets/probe" cargo build -q --offline >/dev/null 2>&1) || exit 1
+    sccache --show-stats --stats-format json |
+      python3 -c 'import json, sys; print(sum(json.load(sys.stdin)["stats"]["cache_hits"]["counts"].values()))'
+    sccache --stop-server >/dev/null 2>&1 || true
+  )
+}
+command -v cargo >/dev/null && [ "$(sccache --version 2>/dev/null)" = 'sccache 0.17.0' ] ||
+  fail 'the CI image has no cargo or no pinned sccache 0.17.0 for the shared-path case'
+mkdir -p "$work/real-cache"
+[ "$(real_cache_build "$work/real-disk" main)" = 0 ] || fail 'the first build read a cache nothing had written'
+rm -rf -- "$work/real-disk"
+hits="$(real_cache_build "$work/real-disk" pr)"
+[[ "$hits" =~ ^[0-9]+$ ]] && [ "$hits" -gt 0 ] || fail "a pull request at main's path got no cache hit: ${hits:-none}"
+[ "$(real_cache_build "$work/real-other-disk" other)" = 0 ] || fail 'a build at another path hit the cache'
+
+# Why the move drops the targets: Cargo calls a moved target fresh, but a
+# compiled env!("CARGO_MANIFEST_DIR") keeps the old path. A crate built in
+# the old folder, moved by prepare, then built again names the new one.
+probe_dir() {
+  # probe_dir TREE: build and run the probe in TREE; print the path compiled in.
+  (cd "$1/tools/dir-probe" && CARGO_HOME="$1/cargo-home" CARGO_TARGET_DIR="$1/targets/archive" CARGO_INCREMENTAL=0 \
+    cargo run -q --offline 2>/dev/null)
+}
+# The probe lives in tools/, which prepare keeps; it syncs and cleans src/.
+mkdir -p "$work/dir-disk/pr/tools/dir-probe/src" "$work/dir-disk/pr/cargo-home"
+printf '[package]\nname = "dir_probe"\nversion = "0.1.0"\nedition = "2021"\n' > "$work/dir-disk/pr/tools/dir-probe/Cargo.toml"
+printf 'fn main() { println!("{}", env!("CARGO_MANIFEST_DIR")); }\n' > "$work/dir-disk/pr/tools/dir-probe/src/main.rs"
+[ "$(probe_dir "$work/dir-disk/pr")" = "$work/dir-disk/pr/tools/dir-probe" ] || fail 'the probe did not build in the old folder'
+# A warm folder at the archive leg's epoch, so only the move can drop it.
+printf '1\n' > "$work/dir-disk/pr/targets/archive/.build-once-epoch"
+GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1/head BUILD_ONCE_DF="$work/fake-df" \
+  FAKE_DF_TARGETS="$work/dir-disk/build/targets" BUILD_ONCE_ROOT="$work/dir-disk" BUILD_ONCE_TEST_STOP_AFTER_TARGETS=1 \
+  GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" RUNNER_TEMP="$work/env" \
+  "$SCRIPT" prepare "$work/lock-checkout" build > "$work/dir.log" 2>&1 || fail "the move prepare failed: $(cat "$work/dir.log")"
+[ "$(probe_dir "$work/dir-disk/build")" = "$work/dir-disk/build/tools/dir-probe" ] ||
+  fail "a target built before the move still names the old path: $(probe_dir "$work/dir-disk/build")"
+
+echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the one build folder and its kind, the archive fetch and its build fallback, interrupted folders and lockfile changes kept warm, the disk bound (idle folders first, live ones kept, the folders a job uses never removed), the corrupt-output rebuild and publish hold, the local compiler cache stays local and reads only the shared level its job selected, and main and pull request builds share one path; bad input refused'
