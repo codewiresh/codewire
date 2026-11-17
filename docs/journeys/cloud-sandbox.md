@@ -19,7 +19,7 @@ Updated 2026-11-17.
 | `sandbox-create-fails` | cw-cleanup | observed 2026-11-17 (#4483) | not yet observed; v0.4.21 lacks #4483's reasons |
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
-| `sandbox-cw-knows-its-server` | cw-identity | not yet observed | not yet observed |
+| `sandbox-cw-knows-its-server` | cw-identity | partly observed 2026-11-17 (#5202) | not yet observed |
 | `sandbox-attach-stays` | cw-direct-udp | not yet observed | not yet observed |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
@@ -285,10 +285,10 @@ server it belongs to and says what it can do, instead of asking for a URL.
 - **Driving it:** in `walk`:
 
   ```sh
-  cw exec walk -- sh -c 'echo "$CODEWIRE_SANDBOX_SERVER_URL"; cw whoami; echo "exit $?"'
-  printf 'cw login\n' | script -qec 'cw shell walk' /dev/null
-  cw exec walk -- sh -c 'CODEWIRE_SERVER_URL=https://other.invalid cw whoami'
-  cw exec walk -- sh -lc 'command -v cw; cw --version; /codewire/bin/cw --version; cw ls; echo "exit $?"'
+  cw --cloud exec --in walk -- sh -c 'echo "$CODEWIRE_SANDBOX_SERVER_URL"; cw whoami; echo "exit $?"'
+  cw --cloud exec --in walk -- sh -c 'timeout 8 cw login </dev/null'
+  cw --cloud exec --in walk -- sh -c 'CODEWIRE_SERVER_URL=https://other.invalid cw whoami'
+  cw --cloud exec --in walk -- sh -lc 'command -v cw; cw --version; /codewire/bin/cw --version; cw ls; echo "exit $?"'
   ```
 
   Then run an agent in `walk` and ask it to run `cw whoami` and `cw ls`, with
@@ -304,8 +304,8 @@ server it belongs to and says what it can do, instead of asking for a URL.
     a URL.
   - `cw login` names that server as this sandbox's before it waits. Stop it
     there; don't sign in.
-  - With `CODEWIRE_SERVER_URL` set, `cw` names `https://other.invalid`, not
-    the sandbox's server.
+  - With `CODEWIRE_SERVER_URL` set, that server wins: `cw` gives the plain
+    not-signed-in message, not the sandbox's.
   - `command -v cw` is `/usr/local/bin/cw`, yet `cw --version` prints the
     same version as `/codewire/bin/cw --version`: the release's, not the
     image's (#5202).
@@ -317,7 +317,19 @@ server it belongs to and says what it can do, instead of asking for a URL.
     variable; only daemon sessions (`cw exec`, `cw shell`, SSH) do.
   - On Kind there is no `https` server origin, so the variable is absent and
     `cw` says "no server configured" there, as on any machine without one.
-- **Observed:** not yet.
+  - Until #5202 ships, the `cw` on PATH can be the workspace image's own
+    build, older than the release; the `command -v cw` proof shows which.
+- **Observed:**
+  - Dev, 2026-11-17 (cw-identity), source 4b9752e7, promote-dev 57727, host
+    `cw` 0.4.21, as the Dev smoke identity. The session carries
+    `CODEWIRE_SANDBOX_SERVER_URL=https://codewire-dev.sh`. With
+    `/codewire/bin/cw`: `cw whoami` names the sandbox on that server, says it
+    holds no sign-in, names `cw network connect` and the cost of `cw login`,
+    and exits 1; `cw org list` says the same and exits 0; `cw login` prints
+    "Connecting to codewire-dev.sh (this sandbox's server)…" and the warning
+    before it waits; `CODEWIRE_SERVER_URL` wins; an `http` value is ignored.
+    Not observed with the `cw` on PATH: it is the image's 2026-11-13 build
+    and still says "no server configured" (#5202). Evidence: #5100.
 
 ## `sandbox-attach-stays`: an attached session stays connected
 
