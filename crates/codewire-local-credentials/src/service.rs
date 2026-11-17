@@ -1233,7 +1233,7 @@ async fn start_broker<S: ProtectedStore + 'static>(
     };
     let mut child = child;
     let pid = child.id();
-    let stderr = child.stderr.take().map(StderrTail::spawn);
+    let stderr = (child.stderr.take()).map(|err| log.tail(err, environment, generation, pid));
     log.record(
         "broker_spawned",
         &[

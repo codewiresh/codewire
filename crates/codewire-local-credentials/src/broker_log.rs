@@ -12,6 +12,14 @@
 //! characters in it is redacted besides; never request contents, error
 //! messages, credential values or other child output. Writing is best effort
 //! and never affects the broker.
+//!
+//! While a broker runs, its refusals to deliver an agent's login are kept too
+//! (`claude_login_refused` and `codex_login_refused`), so a VM whose agent is
+//! not logged in says why. The broker writes `CW_BROKER_LOGIN_REFUSED
+//! agent=<agent> reason=<reason>`; only a line whose agent and reason are
+//! both in the closed sets below is recorded, with the environment,
+//! generation and pid this authority already knows, at most once per reason
+//! and child in [`LOGIN_REFUSAL_INTERVAL`], counting the ones held back.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
@@ -112,6 +120,20 @@ pub(crate) struct StderrTail {
 }
 
 const TAIL_BYTES: usize = 4096;
+/// The line a local broker writes when it refuses to deliver an agent's login.
+pub const AGENT_LOGIN_REFUSED_MARKER: &str = "CW_BROKER_LOGIN_REFUSED";
+/// The agents whose login a broker may refuse.
+pub const AGENT_LOGIN_REFUSAL_AGENTS: &[&str] = &["claude", "codex"];
+/// Every reason a broker gives for refusing an agent's login. A broker that
+/// adds a reason adds it here: its own test refuses a reason missing from
+/// this list, and this log ignores one.
+pub const AGENT_LOGIN_REFUSAL_REASONS: &[&str] =
+    &["deadline_passed_before_seal", "scopes_outside_sign_in"];
+/// One line per reason and child at most this often: the guest asks for a
+/// login every two minutes, so a lasting refusal would otherwise repeat.
+pub(crate) const LOGIN_REFUSAL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+/// A longer stderr line is not a refusal line and is never looked at.
+const REFUSAL_LINE_BYTES: usize = 128;
 /// The one line of a broker's stderr the log keeps (see the broker's
 /// `BROKER_EXIT_MARKER`).
 const EXIT_MARKER: &str = "CW_BROKER_EXIT ";
@@ -120,8 +142,114 @@ const REDACT_RUN: usize = 20;
 /// How long an exited child's pipe may take to reach end of file.
 const EXITED_DRAIN: std::time::Duration = std::time::Duration::from_millis(250);
 
+impl BrokerLog {
+    /// The stderr tail of broker `pid` for one environment generation, which
+    /// also records the broker's login refusals as they arrive.
+    pub(crate) fn tail(
+        self: &std::sync::Arc<Self>,
+        stderr: tokio::process::ChildStderr,
+        environment: &impl std::fmt::Display,
+        generation: u64,
+        pid: Option<u32>,
+    ) -> StderrTail {
+        StderrTail::spawn_reporting(
+            stderr,
+            Some(LoginRefusals {
+                log: std::sync::Arc::clone(self),
+                environment: environment.to_string(),
+                generation,
+                pid: pid.map_or_else(|| "none".to_owned(), |pid| pid.to_string()),
+                line: Vec::new(),
+                last: std::collections::HashMap::new(),
+            }),
+        )
+    }
+}
+
+/// A running broker's login refusals, recorded as its stderr arrives.
+struct LoginRefusals {
+    log: std::sync::Arc<BrokerLog>,
+    environment: String,
+    generation: u64,
+    pid: String,
+    /// The current line, while it can still be a refusal line.
+    line: Vec<u8>,
+    /// Per agent and reason: when it was last recorded, and how many were
+    /// held back since.
+    last: std::collections::HashMap<(&'static str, &'static str), (std::time::Instant, u64)>,
+}
+
+impl LoginRefusals {
+    fn read(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if byte == b'\n' {
+                let line = std::mem::take(&mut self.line);
+                if let Some((agent, reason)) = refusal_line(&line) {
+                    self.refused(agent, reason, std::time::Instant::now());
+                }
+            } else if self.line.len() <= REFUSAL_LINE_BYTES {
+                self.line.push(byte);
+            }
+        }
+    }
+
+    fn refused(&mut self, agent: &'static str, reason: &'static str, now: std::time::Instant) {
+        if let Some((at, held)) = self.last.get_mut(&(agent, reason))
+            && now.duration_since(*at) < LOGIN_REFUSAL_INTERVAL
+        {
+            *held += 1;
+            return;
+        }
+        let held = self
+            .last
+            .insert((agent, reason), (now, 0))
+            .map_or(0, |(_, held)| held);
+        self.log.record(
+            &format!("{agent}_login_refused"),
+            &[
+                ("environment", &self.environment),
+                ("generation", &self.generation),
+                ("pid", &self.pid),
+                ("reason", &reason),
+                ("held_back", &held),
+            ],
+        );
+    }
+}
+
+/// The agent and reason of a broker's refusal line, both from the closed
+/// sets; anything else is not one.
+fn refusal_line(line: &[u8]) -> Option<(&'static str, &'static str)> {
+    let line = std::str::from_utf8(line).ok()?.trim_end_matches('\r');
+    let mut words = line.split(' ');
+    if words.next()? != AGENT_LOGIN_REFUSED_MARKER {
+        return None;
+    }
+    let agent = words.next()?.strip_prefix("agent=")?;
+    let reason = words.next()?.strip_prefix("reason=")?;
+    if words.next().is_some() {
+        return None;
+    }
+    let agent = AGENT_LOGIN_REFUSAL_AGENTS
+        .iter()
+        .find(|known| **known == agent)?;
+    let reason = AGENT_LOGIN_REFUSAL_REASONS
+        .iter()
+        .find(|known| **known == reason)?;
+    Some((agent, reason))
+}
+
 impl StderrTail {
-    pub(crate) fn spawn(mut stderr: tokio::process::ChildStderr) -> Self {
+    /// A tail that records nothing as it reads.
+    #[cfg(test)]
+    pub(crate) fn spawn(stderr: tokio::process::ChildStderr) -> Self {
+        Self::spawn_reporting(stderr, None)
+    }
+
+    fn spawn_reporting(
+        mut stderr: tokio::process::ChildStderr,
+        mut refusals: Option<LoginRefusals>,
+    ) -> Self {
         use tokio::io::AsyncReadExt as _;
         let tail = std::sync::Arc::new(Mutex::new(Vec::new()));
         let shared = std::sync::Arc::clone(&tail);
@@ -130,6 +258,9 @@ impl StderrTail {
             while let Ok(count) = stderr.read(&mut buffer).await {
                 if count == 0 {
                     break;
+                }
+                if let Some(refusals) = &mut refusals {
+                    refusals.read(&buffer[..count]);
                 }
                 let mut tail = shared
                     .lock()
@@ -284,6 +415,99 @@ mod tests {
         assert_eq!(
             redact_long_runs("stage=lease.refresh_in_progress kind=status.failed_precondition"),
             "stage=lease.refresh_in_progress kind=status.failed_precondition"
+        );
+    }
+
+    /// Only the marker with an agent and a reason from the closed sets, and
+    /// nothing after them, is a refusal line.
+    #[test]
+    fn a_refusal_line_is_the_marker_with_known_words_only() {
+        let line = |text: &str| refusal_line(text.as_bytes());
+        assert_eq!(
+            line("CW_BROKER_LOGIN_REFUSED agent=claude reason=scopes_outside_sign_in"),
+            Some(("claude", "scopes_outside_sign_in"))
+        );
+        assert_eq!(
+            line("CW_BROKER_LOGIN_REFUSED agent=codex reason=deadline_passed_before_seal\r"),
+            Some(("codex", "deadline_passed_before_seal"))
+        );
+        for other in [
+            "CW_BROKER_LOGIN_REFUSED agent=gemini reason=scopes_outside_sign_in",
+            "CW_BROKER_LOGIN_REFUSED agent=claude reason=sk-0123456789abcdefghij",
+            "CW_BROKER_LOGIN_REFUSED agent=claude reason=scopes_outside_sign_in extra=1",
+            "CW_BROKER_LOGIN_REFUSED agent=claude",
+            "CW_BROKER_EXIT agent=claude reason=scopes_outside_sign_in",
+            " CW_BROKER_LOGIN_REFUSED agent=claude reason=scopes_outside_sign_in",
+        ] {
+            assert_eq!(line(other), None, "{other}");
+        }
+    }
+
+    /// A running broker's refusal is recorded as it arrives, with what the
+    /// authority knows of the child; no other stderr reaches the log.
+    #[tokio::test]
+    async fn a_running_brokers_login_refusal_is_recorded_once_with_its_child() {
+        let root = tempfile::tempdir().unwrap();
+        let log = std::sync::Arc::new(BrokerLog::in_root(root.path()));
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "printf 'CW_BROKER_LOGIN_REFUSED agent=claude reason=scopes_outside_sign_in\\nError: ghu_0123456789abcdefghij\\nCW_BROKER_LOGIN_REFUSED agent=claude reason=scopes_outside_sign_in\\nCW_BROKER_LOGIN_REFUSED agent=claude reason=unheard_of\\n' >&2",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut tail = log.tail(child.stderr.take().unwrap(), &"env-1", 3, Some(42));
+        child.wait().await.unwrap();
+        assert_eq!(tail.exit_line(true).await, "");
+        let text = fs::read_to_string(root.path().join("logs/brokers.log")).unwrap();
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(
+            lines[0].ends_with(
+                " event=claude_login_refused environment=env-1 generation=3 pid=42 reason=scopes_outside_sign_in held_back=0"
+            ),
+            "{text}"
+        );
+    }
+
+    /// A lasting refusal is recorded once per interval, with how many were
+    /// held back in between.
+    #[test]
+    fn a_repeated_refusal_is_held_back_and_counted() {
+        let root = tempfile::tempdir().unwrap();
+        let mut refusals = LoginRefusals {
+            log: std::sync::Arc::new(BrokerLog::in_root(root.path())),
+            environment: "env-1".into(),
+            generation: 3,
+            pid: "42".into(),
+            line: Vec::new(),
+            last: std::collections::HashMap::new(),
+        };
+        let start = std::time::Instant::now();
+        let reason = "deadline_passed_before_seal";
+        refusals.refused("codex", reason, start);
+        refusals.refused("codex", reason, start + std::time::Duration::from_secs(120));
+        refusals.refused("codex", reason, start + std::time::Duration::from_secs(240));
+        refusals.refused(
+            "claude",
+            reason,
+            start + std::time::Duration::from_secs(240),
+        );
+        refusals.refused("codex", reason, start + LOGIN_REFUSAL_INTERVAL);
+        let text = fs::read_to_string(root.path().join("logs/brokers.log")).unwrap();
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert!(
+            lines[0].contains(" event=codex_login_refused ") && lines[0].ends_with(" held_back=0")
+        );
+        assert!(
+            lines[1].contains(" event=claude_login_refused ") && lines[1].ends_with(" held_back=0")
+        );
+        assert!(
+            lines[2].contains(" event=codex_login_refused ") && lines[2].ends_with(" held_back=2")
         );
     }
 }

@@ -45,6 +45,9 @@ pub use broker_channel::{
     LocalEnvironmentProjectionBinding, LocalSshSignError, LocalSshSignRequest, LocalSshSigner,
     StartedBrokerCredentialRefresh, serve_broker_lease_channel,
 };
+pub use broker_log::{
+    AGENT_LOGIN_REFUSAL_AGENTS, AGENT_LOGIN_REFUSAL_REASONS, AGENT_LOGIN_REFUSED_MARKER,
+};
 pub use broker_process::{
     EnvironmentBrokerRuntime, EnvironmentBrokerSelection, LocalBrokerProcessConfig,
     LocalBrokerProcessSpawner, LocalBrokerSpawnError,

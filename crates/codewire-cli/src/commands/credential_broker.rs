@@ -63,6 +63,14 @@ pub(crate) async fn run_local_credential_broker(
     args: LocalCredentialBrokerArgs,
 ) -> anyhow::Result<()> {
     let stage = BrokerStage(std::sync::Mutex::new("process.verify"));
+    // Each refused agent login, as one line the authority keeps in its
+    // broker log: two closed words, nothing from the request.
+    codewire_credential_broker::timing::set_login_refusal_sink(|agent, reason| {
+        eprintln!(
+            "{} agent={agent} reason={reason}",
+            codewire_local_credentials::AGENT_LOGIN_REFUSED_MARKER
+        );
+    });
     let result = run_broker(args, &stage).await;
     if let Err(error) = &result {
         eprintln!(

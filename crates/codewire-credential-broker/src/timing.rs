@@ -368,11 +368,30 @@ pub(crate) fn capacity_rejected(
     );
 }
 
+/// Where this process reports each refused agent login besides its timing
+/// line: set once by a local broker, whose authority keeps the refusals in
+/// `brokers.log`, and never by a hosted one.
+static LOGIN_REFUSAL_SINK: std::sync::OnceLock<fn(&'static str, &'static str)> =
+    std::sync::OnceLock::new();
+
+/// Report each refused agent login to `sink`, as `(agent, reason)`, from now
+/// on. Only the first call takes effect.
+pub fn set_login_refusal_sink(sink: fn(agent: &'static str, reason: &'static str)) {
+    let _ = LOGIN_REFUSAL_SINK.set(sink);
+}
+
+fn report_login_refusal(agent: &'static str, reason: &'static str) {
+    if let Some(sink) = LOGIN_REFUSAL_SINK.get() {
+        sink(agent, reason);
+    }
+}
+
 /// One line per Codex login answered UNAVAILABLE for a timing cause the daemon
 /// cannot see, such as clock skew between daemon and broker. `reason` is a
 /// closed label: `deadline_passed`, `deadline_too_far` or
 /// `deadline_passed_before_seal`.
 pub(crate) fn codex_login_refused(reason: &'static str) {
+    report_login_refusal("codex", reason);
     tracing::info!(
         target: TARGET,
         event = "codex_login_refused",
@@ -384,6 +403,7 @@ pub(crate) fn codex_login_refused(reason: &'static str) {
 /// [`codex_login_refused`] for the Claude login, with the same closed reasons
 /// and `scopes_outside_sign_in`.
 pub(crate) fn claude_login_refused(reason: &'static str) {
+    report_login_refusal("claude", reason);
     tracing::info!(
         target: TARGET,
         event = "claude_login_refused",
@@ -852,5 +872,69 @@ pub(crate) mod tests {
         assert_eq!(second["status"], 0);
         #[cfg(feature = "platform")]
         assert_eq!(lines[2]["fields"]["streams_in_use"], 9);
+    }
+
+    /// Every agent-login refusal this crate gives is one its authority keeps:
+    /// a reason missing from `AGENT_LOGIN_REFUSAL_REASONS` would never reach
+    /// `brokers.log`, so adding a refusal means adding its word there.
+    #[test]
+    fn every_login_refusal_reason_is_one_the_authority_keeps() {
+        fn sources(directory: &std::path::Path, found: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    sources(&path, found);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for agent in ["claude", "codex"] {
+                        let call = format!("{agent}_login_refused(\"");
+                        for (at, _) in text.match_indices(&call) {
+                            let rest = &text[at + call.len()..];
+                            let reason = &rest[..rest.find('"').unwrap()];
+                            found.push((agent.to_owned(), reason.to_owned()));
+                        }
+                    }
+                }
+            }
+        }
+        let mut found = Vec::new();
+        sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut found,
+        );
+        // This test's own `format!` builds the call text; every other match
+        // is a real call.
+        found.retain(|(_, reason)| !reason.is_empty() && !reason.contains('{'));
+        assert!(!found.is_empty());
+        for (agent, reason) in found {
+            assert!(
+                codewire_local_credentials::AGENT_LOGIN_REFUSAL_AGENTS.contains(&agent.as_str()),
+                "{agent}"
+            );
+            assert!(
+                codewire_local_credentials::AGENT_LOGIN_REFUSAL_REASONS.contains(&reason.as_str()),
+                "{agent}_login_refused(\"{reason}\") is not in AGENT_LOGIN_REFUSAL_REASONS"
+            );
+        }
+    }
+
+    /// A set sink hears each refused login as its agent and reason. The sink
+    /// is process-wide and set once, so this is the only test in this binary
+    /// that sets it; another setter would make the two depend on order.
+    #[test]
+    fn a_set_sink_hears_each_refused_login() {
+        static HEARD: std::sync::Mutex<Vec<(&str, &str)>> = std::sync::Mutex::new(Vec::new());
+        set_login_refusal_sink(|agent, reason| HEARD.lock().unwrap().push((agent, reason)));
+        claude_login_refused("scopes_outside_sign_in");
+        codex_login_refused("deadline_passed_before_seal");
+        let heard = HEARD.lock().unwrap();
+        assert!(
+            heard.contains(&("claude", "scopes_outside_sign_in")),
+            "{heard:?}"
+        );
+        assert!(
+            heard.contains(&("codex", "deadline_passed_before_seal")),
+            "{heard:?}"
+        );
     }
 }
