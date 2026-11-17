@@ -21,6 +21,7 @@ observed**.
 | `cred-claude-setup-token` | not yet observed | not yet observed | not yet observed |
 | `cred-claude-sign-in` | observed, #4798 at f5657302c, 2026-11-15 (steps 1–4; the plan and `/usage`, step 5, not yet observed) | login file observed, #4868 at b4541bf05, 2026-11-15 (steps 1–3 and the file; `claude -p`, `/status` and `/usage` not yet observed: the guest had no network, #4948) | link screen and paste prompt observed, v0.4.18, 2026-11-14; a completed sign-in not yet observed |
 | `cred-ssh-key` | not yet observed | not yet observed | not yet observed |
+| `cred-sign-in-screen` | partly observed, #4885 at aea6abdb8, 2026-11-16 (steps 1 and 2 for Claude and Codex at a pty; GitHub, `cw login`, piped, `TERM=dumb` and SSH not yet observed) | not yet observed | not yet observed |
 | `profile-default` | not yet observed | not yet observed | not yet observed |
 | `cred-delivery-diagnosis` | not yet observed | not yet observed | local VMs only |
 
@@ -285,6 +286,59 @@ Issues: #4714 (local), #2559 (cloud).
   broker's agent route. Expect no private key in the environment.
 - **Remove:** `rotate` is refused (enrol a new key instead). Delete removes
   it; the public key stays wherever it was added.
+
+## 8. `cred-sign-in-screen`: the sign-in link, the copy key and the wait
+
+Issues: #4850, #4717 (C2). The screens are the approved screens 3 and 4.
+
+- **Entry points:** every browser sign-in, in both placements: `connect
+  claude`, `connect codex` and `connect github`, and `cw login`.
+- **States to exercise:** at a terminal; piped (`| cat` on stdout and
+  stderr); `TERM=dumb`; `--output json`; over SSH; a code pasted at Claude's
+  prompt that starts with `c`; one Ctrl-C and then a second one while a
+  Codex or GitHub login waits; Esc at Claude's prompt.
+- **Driving it:**
+  1. At a terminal, `connect claude --name NAME`. Under "Open this link to
+     sign in:" the link is clickable, and `Press c to copy the link` is
+     under it. Press `c` before pasting: `✓ Copied`, and the link is on the
+     clipboard. Over SSH it lands on the clipboard of the computer you type
+     on. A pasted code that starts with `c` is taken as the code.
+  2. `connect codex --name NAME`, then `connect github`. The same link and
+     hint, "Enter this code:" with the code alone on the next line, then
+     `◐ Waiting for you to approve in the browser… 0:14 · Ctrl-C to cancel`,
+     counting. `c` copies the link. One Ctrl-C cancels and saves nothing; a
+     second one ends `cw` at once (exit 130) with the terminal as it was.
+  3. `cw login` at a terminal: its three stdout lines are unchanged, the
+     link is clickable, and the hint and the waiting line are on stderr.
+  4. Each again piped and with `TERM=dumb`: the plain URL, no hint, no
+     waiting line, no escape sequences, and keys aren't read.
+- **Proof:** pty output with escapes shown holds the OSC 8 hyperlink around
+  the URL, and, after `c`, the OSC 52 sequence whose base64 payload is the
+  URL, then `✓ Copied`. Piped output holds no ESC byte.
+- **Gotchas:** `c` copies only before anything is typed; a code typed by
+  hand that starts with `c` loses its first letter, but codes are pasted. A
+  terminal that ignores OSC 52 shows `✓ Copied` without copying; on the
+  desktop `pbcopy`, `wl-copy` or `xclip` copies as well. The link is no
+  longer copied when the screen appears.
+- **Observed:**
+  - Linux local VM, #4885 at aea6abdb8 (built `cw`), 2026-11-16, a
+    pseudo-terminal with `TERM=xterm-kitty` and a throwaway HOME and state;
+    no sign-in was completed and nothing was saved:
+    - step 1, `--local connect claude --name walk`: screen 4 as approved,
+      with the OSC 8 link alone on its line and the hint under it. `c` at
+      the empty prompt sent one OSC 52 and printed `✓ Copied`, then redrew
+      the prompt. Bracketed paste was on while the prompt read and off after
+      it. Esc cancelled with exit 1;
+    - step 2, `--local connect codex --name walk`: screen 3 as approved, with
+      the first-time note and its settings link under the title, the link
+      and hint, the code alone under "Enter this code:", and the waiting
+      line counting. `c` printed `✓ Copied` above the waiting line. One
+      Ctrl-C printed `✗ Login cancelled; no credential was changed` and
+      exited 1 at once, so a second Ctrl-C found `cw` already gone. The 130
+      exit applies only while a cancel is slow, and that is not yet observed;
+    - no OSC 52 was sent before `c`, in either walk.
+  - GitHub, `cw login`, piped, `TERM=dumb`, over SSH, the cloud placement and
+    the Mac: not yet observed.
 
 ## 9. `profile-default`: the default profile a create uses
 

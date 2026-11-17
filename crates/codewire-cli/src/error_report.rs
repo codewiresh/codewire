@@ -90,7 +90,7 @@ fn capitalised(text: &str) -> String {
 
 /// Whether the command line asks for JSON output, in any of its spellings.
 /// Arguments after `--` are a command's own, not cw's.
-fn json_requested(args: impl Iterator<Item = std::ffi::OsString>) -> bool {
+pub(crate) fn json_requested(args: impl Iterator<Item = std::ffi::OsString>) -> bool {
     let args: Vec<String> = args
         .map(|arg| arg.to_string_lossy().into_owned())
         .take_while(|arg| arg != "--")

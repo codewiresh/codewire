@@ -554,52 +554,50 @@ pub(crate) async fn login_with_device(
         .await
         .context("device auth failed")?;
 
-    println!("Opening browser to authorize...");
-    println!("If browser doesn't open, visit: {}", auth.verification_uri);
-    println!("Your code: {}", auth.user_code);
-    let _ = open_browser(&auth.verification_uri);
-
     let mut interval = Duration::from_secs(auth.interval.max(5));
     let deadline = Instant::now() + Duration::from_secs(auth.expires_in.max(1));
+    let polled = async {
+        loop {
+            if Instant::now() > deadline {
+                anyhow::bail!("timed out waiting for authorization");
+            }
+            tokio::time::sleep(interval).await;
 
-    eprintln!("Waiting for authorization...");
-    loop {
-        if Instant::now() > deadline {
-            anyhow::bail!("timed out waiting for authorization");
+            let poll = match client.exchange_device_code(&auth.device_code).await {
+                Ok(poll) => poll,
+                // Each HTTP poll has its own bounded request budget; this loop's
+                // device-code expiry remains the overall authorization deadline.
+                Err(error) if error.oauth_code() == Some("authorization_pending") => continue,
+                // The edge's rate limit answers 429 without an OAuth body; back
+                // off as the token endpoint asks with `slow_down`, to at most a
+                // minute between polls.
+                Err(error)
+                    if error.oauth_code() == Some("slow_down") || error.is_rate_limited() =>
+                {
+                    interval = interval
+                        .saturating_add(Duration::from_secs(5))
+                        .min(Duration::from_secs(60));
+                    continue;
+                }
+                Err(error) if error.oauth_code() == Some("access_denied") => {
+                    anyhow::bail!("authorization denied")
+                }
+                Err(error) if error.oauth_code() == Some("expired_token") => {
+                    anyhow::bail!("device code expired")
+                }
+                Err(error) => return Err(error).context("device authorization poll"),
+            };
+            let credentials = client
+                .credentials_from_device_token(poll)
+                .context("validate OAuth device token")?;
+            let user = client
+                .userinfo(&credentials.bearer_token()?)
+                .await
+                .context("read OAuth user info")?;
+            return anyhow::Ok((credentials, user));
         }
-        tokio::time::sleep(interval).await;
-
-        let poll = match client.exchange_device_code(&auth.device_code).await {
-            Ok(poll) => poll,
-            // Each HTTP poll has its own bounded request budget; this loop's
-            // device-code expiry remains the overall authorization deadline.
-            Err(error) if error.oauth_code() == Some("authorization_pending") => continue,
-            // The edge's rate limit answers 429 without an OAuth body; back
-            // off as the token endpoint asks with `slow_down`, to at most a
-            // minute between polls.
-            Err(error) if error.oauth_code() == Some("slow_down") || error.is_rate_limited() => {
-                interval = interval
-                    .saturating_add(Duration::from_secs(5))
-                    .min(Duration::from_secs(60));
-                continue;
-            }
-            Err(error) if error.oauth_code() == Some("access_denied") => {
-                anyhow::bail!("authorization denied")
-            }
-            Err(error) if error.oauth_code() == Some("expired_token") => {
-                anyhow::bail!("device code expired")
-            }
-            Err(error) => return Err(error).context("device authorization poll"),
-        };
-        let credentials = client
-            .credentials_from_device_token(poll)
-            .context("validate OAuth device token")?;
-        let user = client
-            .userinfo(&credentials.bearer_token()?)
-            .await
-            .context("read OAuth user info")?;
-        return Ok((credentials, user));
-    }
+    };
+    super::login_screen::device_login_wait(&auth.verification_uri, &auth.user_code, polled).await
 }
 
 /// Save a login and the account it verified. The previous account record

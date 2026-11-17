@@ -34,7 +34,6 @@ use codewire_credential_broker::{
 };
 use codewire_protected_store::ProtectedValue;
 
-use super::credential_input::CODEX_DEVICE_AUTHORIZATION_GUIDANCE;
 use super::credential_input::connect::Interrupt;
 use super::login_screen::SignInScreen;
 
@@ -106,11 +105,10 @@ pub(crate) async fn codex_device_login(
     sign_in: SignInScreen<'_>,
     interrupt: &mut Interrupt,
 ) -> anyhow::Result<CodexOAuthImport> {
-    eprintln!("{CODEX_DEVICE_AUTHORIZATION_GUIDANCE}");
     let upstream = resolve(HttpProvider::CodexDeviceEnrollment)
         .await
         .context("resolve the Codex login endpoint")?;
-    codex_device_login_with(sign_in, upstream, interrupt.pressed()).await
+    codex_device_login_with(sign_in, upstream, interrupt.pressed(), interrupt).await
 }
 
 /// Authorize the Codewire GitHub App for this GitHub account.
@@ -126,6 +124,7 @@ pub(crate) async fn github_device_login(
         codewire_github_app(),
         upstream,
         interrupt.pressed(),
+        interrupt,
     )
     .await
 }
@@ -172,6 +171,7 @@ async fn codex_device_login_with(
     sign_in: SignInScreen<'_>,
     upstream: Arc<dyn BrokerUpstreamTransport>,
     cancel: impl Future<Output = ()>,
+    keys: &Interrupt,
 ) -> anyhow::Result<CodexOAuthImport> {
     let login = CodexDeviceLogin::new(upstream);
     // Only the wait for approval is cancelled; nothing is issued before it.
@@ -179,15 +179,18 @@ async fn codex_device_login_with(
     // the connect through the sticky flag, which revokes what it returns.
     let approved = tokio::select! {
         biased;
-        () = cancel => anyhow::bail!(CANCELLED),
+        () = cancel => Err(anyhow::anyhow!(CANCELLED)),
         result = async {
             let pending = login.start().await.context("start the Codex device login")?;
-            show_challenge(sign_in, pending.challenge());
+            show_challenge(sign_in, pending.challenge(), keys);
             login.approve(pending).await.context("complete the Codex device login")
-        } => result?,
+        } => result,
     };
+    // The terminal is given back before the exchange, so a Ctrl-C during it
+    // arrives as the signal the connect reads afterwards.
+    keys.stop_keys();
     login
-        .finish(approved)
+        .finish(approved?)
         .await
         .context("complete the Codex device login")
 }
@@ -197,20 +200,24 @@ async fn github_device_login_with(
     app: codewire_credential_broker::provider_oauth::github::GitHubDeviceLoginConfig,
     upstream: Arc<dyn BrokerUpstreamTransport>,
     cancel: impl Future<Output = ()>,
+    keys: &Interrupt,
 ) -> anyhow::Result<GitHubAppAuthorizationImport> {
     let login = GitHubDeviceLogin::new(app, upstream);
     // GitHub issues the user token with the approval, so only the wait for it
     // is cancelled; the checks after it run to their end.
     let approved = tokio::select! {
         biased;
-        () = cancel => anyhow::bail!(CANCELLED),
+        () = cancel => Err(anyhow::anyhow!(CANCELLED)),
         result = async {
             let pending = login.start().await.context("start the GitHub device login")?;
-            show_challenge(sign_in, pending.challenge());
+            show_challenge(sign_in, pending.challenge(), keys);
             login.approve(pending).await.context("complete the GitHub device login")
-        } => result?,
+        } => result,
     };
-    login.finish(approved).await.map_err(|error| {
+    // The terminal is given back before the checks, so a Ctrl-C during them
+    // arrives as the signal the connect reads afterwards.
+    keys.stop_keys();
+    login.finish(approved?).await.map_err(|error| {
         let error = match error {
             DeviceLoginError::InstallationRequired => anyhow::anyhow!(
                 "the Codewire GitHub App is not installed on any account this GitHub login can use; \
@@ -238,7 +245,8 @@ async fn resolve(_: HttpProvider) -> anyhow::Result<Arc<dyn BrokerUpstreamTransp
 
 /// The link screen for the fixed provider page, then the one-time code: the
 /// same screen the cloud shows. Nothing else of the challenge is shown.
-fn show_challenge(sign_in: SignInScreen<'_>, challenge: &DeviceChallenge) {
+/// While the login waits, `c` copies the link and the waiting line shows.
+fn show_challenge(sign_in: SignInScreen<'_>, challenge: &DeviceChallenge, keys: &Interrupt) {
     super::login_screen::open_sign_in_link(sign_in, challenge.verification_url());
     let style =
         crate::output::Capabilities::from_process(crate::output::OutputMode::Text).stderr_style();
@@ -246,6 +254,7 @@ fn show_challenge(sign_in: SignInScreen<'_>, challenge: &DeviceChallenge) {
         "{}",
         super::login_screen::device_code_lines(challenge.user_code(), style)
     );
+    keys.watch_keys(challenge.verification_url());
 }
 
 #[cfg(test)]

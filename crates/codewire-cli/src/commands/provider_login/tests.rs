@@ -83,9 +83,14 @@ fn github_app() -> GitHubDeviceLoginConfig {
 #[tokio::test]
 async fn codex_login_imports_the_issued_tokens_without_a_provider_cli() {
     let provider = scripted(codex_answers());
-    let import = codex_device_login_with(SIGN_IN, provider.clone(), std::future::pending())
-        .await
-        .unwrap();
+    let import = codex_device_login_with(
+        SIGN_IN,
+        provider.clone(),
+        std::future::pending(),
+        &Interrupt::default(),
+    )
+    .await
+    .unwrap();
     assert_eq!(import.account_hint(), Some("person@example.test"));
     assert_eq!(
         provider.1.lock().unwrap().as_slice(),
@@ -104,19 +109,26 @@ async fn github_login_verifies_the_app_installation() {
             .into_iter()
             .chain([json!({"installations":[{"id":41,"app_slug":"codewire-synthetic"}]})]),
     );
-    let import = github_device_login_with(SIGN_IN, github_app(), provider, std::future::pending())
-        .await
-        .unwrap();
+    let import = github_device_login_with(
+        SIGN_IN,
+        github_app(),
+        provider,
+        std::future::pending(),
+        &Interrupt::default(),
+    )
+    .await
+    .unwrap();
     assert_eq!(import.account_hint(), "octo-user");
 }
 
 #[tokio::test]
 async fn cancelling_a_pending_login_changes_nothing() {
     let provider = scripted([]);
-    let error = match codex_device_login_with(SIGN_IN, provider, async {}).await {
-        Ok(_) => panic!("a cancelled login must not complete"),
-        Err(error) => error,
-    };
+    let error =
+        match codex_device_login_with(SIGN_IN, provider, async {}, &Interrupt::default()).await {
+            Ok(_) => panic!("a cancelled login must not complete"),
+            Err(error) => error,
+        };
     assert_eq!(error.to_string(), CANCELLED);
 }
 
@@ -168,7 +180,7 @@ fn press_at(
 #[tokio::test]
 async fn a_ctrl_c_during_the_codex_exchange_returns_the_issued_sign_in() {
     let (provider, cancel) = press_at(scripted(codex_answers()), 2);
-    let import = codex_device_login_with(SIGN_IN, provider, cancel)
+    let import = codex_device_login_with(SIGN_IN, provider, cancel, &Interrupt::default())
         .await
         .expect("the exchange runs to its end");
     assert_eq!(import.account_hint(), Some("person@example.test"));
@@ -186,9 +198,15 @@ async fn a_ctrl_c_during_the_github_checks_returns_the_issued_authorization() {
         ),
         2,
     );
-    let import = github_device_login_with(SIGN_IN, github_app(), provider, cancel)
-        .await
-        .expect("the checks run to their end");
+    let import = github_device_login_with(
+        SIGN_IN,
+        github_app(),
+        provider,
+        cancel,
+        &Interrupt::default(),
+    )
+    .await
+    .expect("the checks run to their end");
     assert_eq!(import.account_hint(), "octo-user");
 }
 
@@ -201,13 +219,18 @@ async fn a_github_failure_after_the_approval_is_marked_issued() {
             .into_iter()
             .chain([json!({"installations":[]})]),
     );
-    let error =
-        match github_device_login_with(SIGN_IN, github_app(), provider, std::future::pending())
-            .await
-        {
-            Ok(_) => panic!("no installation must not complete the login"),
-            Err(error) => error,
-        };
+    let error = match github_device_login_with(
+        SIGN_IN,
+        github_app(),
+        provider,
+        std::future::pending(),
+        &Interrupt::default(),
+    )
+    .await
+    {
+        Ok(_) => panic!("no installation must not complete the login"),
+        Err(error) => error,
+    };
     assert!(
         error.downcast_ref::<IssuedButNotSaved>().is_some(),
         "{error:#}"
@@ -219,7 +242,14 @@ async fn a_github_failure_after_the_approval_is_marked_issued() {
         "{error:#}"
     );
     // A cancel before the approval issued nothing.
-    let error = match github_device_login_with(SIGN_IN, github_app(), scripted([]), async {}).await
+    let error = match github_device_login_with(
+        SIGN_IN,
+        github_app(),
+        scripted([]),
+        async {},
+        &Interrupt::default(),
+    )
+    .await
     {
         Ok(_) => panic!("a cancelled login must not complete"),
         Err(error) => error,
@@ -255,11 +285,15 @@ impl BrokerUpstreamTransport for Recording {
 
 /// The bundle a Codex login produces, as the connect holds it.
 async fn codex_material() -> ProtectedValue {
-    let (bundle, _) =
-        codex_device_login_with(SIGN_IN, scripted(codex_answers()), std::future::pending())
-            .await
-            .unwrap()
-            .into_parts();
+    let (bundle, _) = codex_device_login_with(
+        SIGN_IN,
+        scripted(codex_answers()),
+        std::future::pending(),
+        &Interrupt::default(),
+    )
+    .await
+    .unwrap()
+    .into_parts();
     let mut bytes = bundle.into_bytes();
     ProtectedValue::new(std::mem::take(&mut *bytes)).unwrap()
 }

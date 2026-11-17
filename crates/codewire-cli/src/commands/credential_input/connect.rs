@@ -406,25 +406,27 @@ fn confirm_reconnect_with(
 /// seen.
 #[derive(Default)]
 pub(in crate::commands) struct Interrupt {
-    source: Option<Source>,
+    source: std::sync::OnceLock<KeyWatch>,
     #[cfg(test)]
     pressed_in_test: bool,
 }
 
-/// Where the press comes from. The sign-in screen's key watcher (#4885)
-/// replaces this with its `KeyWatch`, which has the same three calls.
-type Source = CtrlC;
+/// Where the press comes from: the sign-in screen's key watch (#4850), a
+/// sticky Ctrl-C flag heard as the signal, or as a key while it reads keys
+/// at a terminal. A second press ends the process with 130, after the
+/// terminal is given back.
+type KeyWatch = crate::commands::login_screen::KeyWatch;
 
 impl Interrupt {
     /// Start listening, once.
-    pub(in crate::commands) fn listen(&mut self) {
-        self.source.get_or_insert_with(Source::new);
+    pub(in crate::commands) fn listen(&self) {
+        self.source.get_or_init(KeyWatch::new);
     }
 
     /// The first press since listening started.
-    pub(in crate::commands) async fn pressed(&mut self) {
+    pub(in crate::commands) async fn pressed(&self) {
         self.listen();
-        if let Some(source) = &self.source {
+        if let Some(source) = self.source.get() {
             source.cancelled().await;
         }
     }
@@ -434,67 +436,24 @@ impl Interrupt {
         if self.pressed_in_test {
             return true;
         }
-        self.source.as_ref().is_some_and(Source::was_cancelled)
+        self.source.get().is_some_and(KeyWatch::was_cancelled)
     }
-}
 
-/// A sticky Ctrl-C flag. Without a usable signal handler Ctrl-C keeps its
-/// default behaviour and this never reads pressed. A second press ends the
-/// process as Ctrl-C would, so a person never waits on a step after the
-/// first one. Ctrl-C arrives as a signal only while the terminal is in its
-/// normal mode, so that exit has no terminal mode to restore.
-struct CtrlC {
-    pressed: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    woken: std::sync::Arc<tokio::sync::Notify>,
-    listener: tokio::task::AbortHandle,
-}
-
-impl CtrlC {
-    fn new() -> Self {
-        let pressed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let woken = std::sync::Arc::new(tokio::sync::Notify::new());
-        let listener = tokio::spawn({
-            let (pressed, woken) = (pressed.clone(), woken.clone());
-            async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    pressed.store(true, std::sync::atomic::Ordering::SeqCst);
-                    woken.notify_waiters();
-                    if tokio::signal::ctrl_c().await.is_ok() {
-                        std::process::exit(130);
-                    }
-                }
-            }
-        })
-        .abort_handle();
-        Self {
-            pressed,
-            woken,
-            listener,
+    /// While a device sign-in waits: `c` copies its link, and the waiting
+    /// line shows, at an interactive terminal.
+    pub(in crate::commands) fn watch_keys(&self, url: &str) {
+        self.listen();
+        if let Some(source) = self.source.get() {
+            source.watch(url);
         }
     }
 
-    async fn cancelled(&self) {
-        loop {
-            let woken = self.woken.notified();
-            tokio::pin!(woken);
-            // Registered before the flag is read, so a press between the two
-            // still wakes this wait.
-            woken.as_mut().enable();
-            if self.was_cancelled() {
-                return;
-            }
-            woken.await;
+    /// The wait is over: the terminal is given back before anything prints.
+    /// A Ctrl-C is still heard as the signal.
+    pub(in crate::commands) fn stop_keys(&self) {
+        if let Some(source) = self.source.get() {
+            source.stop_keys();
         }
-    }
-
-    fn was_cancelled(&self) -> bool {
-        self.pressed.load(std::sync::atomic::Ordering::SeqCst)
-    }
-}
-
-impl Drop for CtrlC {
-    fn drop(&mut self) {
-        self.listener.abort();
     }
 }
 

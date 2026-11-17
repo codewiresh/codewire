@@ -7,9 +7,8 @@ use super::credential_input::connect::{
     claude_token_rotate_refusal, provider_id, provider_label, read_claude_token,
 };
 use super::credential_input::{
-    CODEX_DEVICE_AUTHORIZATION_GUIDANCE, ParsedCredentialSelector, SSH_PUBLIC_KEY_GITHUB_HINT,
-    parse_credential_selector, prompt_credential_material, read_ssh_import,
-    validate_ssh_generation, validate_ssh_import,
+    ParsedCredentialSelector, SSH_PUBLIC_KEY_GITHUB_HINT, parse_credential_selector,
+    prompt_credential_material, read_ssh_import, validate_ssh_generation, validate_ssh_import,
 };
 use super::login_screen;
 use super::*;
@@ -424,6 +423,8 @@ impl ConnectStore for CloudConnectStore<'_> {
             target.existing.as_ref(),
         )?;
         let client = self.client;
+        // `c` copies a device login's link while it waits (#4850).
+        let keys: &Interrupt = interrupt;
         let enrollment = async {
             match approval {
                 CloudApproval::Claude { sign_in, pasted } => client
@@ -465,28 +466,25 @@ impl ConnectStore for CloudConnectStore<'_> {
                         })
                     })
                     .map(|credential| (credential, Vec::new())),
-                CloudApproval::Codex => {
-                    eprintln!("{}", CODEX_DEVICE_AUTHORIZATION_GUIDANCE);
-                    client
-                        .enroll_codex(
-                            rpc::EnrollCodexRequest {
-                                name: request.name,
-                                credential_id: request.credential_id,
-                                expected_revocation_generation: request
-                                    .expected_revocation_generation,
-                                ..Default::default()
-                            },
-                            |challenge| {
-                                display_challenge(
-                                    screen,
-                                    &challenge.verification_url,
-                                    &challenge.user_code,
-                                )
-                            },
-                        )
-                        .await
-                        .map(|credential| (credential, Vec::new()))
-                }
+                CloudApproval::Codex => client
+                    .enroll_codex(
+                        rpc::EnrollCodexRequest {
+                            name: request.name,
+                            credential_id: request.credential_id,
+                            expected_revocation_generation: request.expected_revocation_generation,
+                            ..Default::default()
+                        },
+                        |challenge| {
+                            display_challenge(
+                                screen,
+                                &challenge.verification_url,
+                                &challenge.user_code,
+                                keys,
+                            )
+                        },
+                    )
+                    .await
+                    .map(|credential| (credential, Vec::new())),
                 CloudApproval::Github => client
                     .enroll_github(
                         rpc::EnrollGithubRequest {
@@ -500,6 +498,7 @@ impl ConnectStore for CloudConnectStore<'_> {
                                 screen,
                                 &challenge.verification_url,
                                 &challenge.user_code,
+                                keys,
                             )
                         },
                     )
@@ -507,12 +506,15 @@ impl ConnectStore for CloudConnectStore<'_> {
                     .map(|enrolled| (enrolled.credential, enrolled.pending_permissions)),
             }
         };
-        let (credential, pending) = tokio::select! {
-            result = enrollment => result.context("enroll platform OAuth credential")?,
-            () = interrupt.pressed() => {
-                anyhow::bail!("enrollment cancelled; inspect the credential by name before retrying because storage acknowledgement may be unknown");
-            }
+        let enrolled = tokio::select! {
+            result = enrollment => result.context("enroll platform OAuth credential"),
+            () = keys.pressed() => Err(anyhow::anyhow!(
+                "enrollment cancelled; inspect the credential by name before retrying because storage acknowledgement may be unknown"
+            )),
         };
+        // The terminal is back before the result prints.
+        keys.stop_keys();
+        let (credential, pending) = enrolled?;
         let (who, expires) = match target.provider {
             CredentialConnectProviderArg::ClaudeToken => {
                 (credential.name.as_str(), credential.expires_at_unix)
@@ -560,12 +562,19 @@ async fn find_named(
 }
 
 /// A device flow's challenge (Codex, GitHub): the link screen, then the code
-/// to enter on the provider's page.
-fn display_challenge(screen: login_screen::SignInScreen<'_>, url: &str, code: &str) -> bool {
+/// to enter on the provider's page, with `c` copying the link and the
+/// waiting line while it waits.
+fn display_challenge(
+    screen: login_screen::SignInScreen<'_>,
+    url: &str,
+    code: &str,
+    keys: &Interrupt,
+) -> bool {
     login_screen::open_sign_in_link(screen, url);
     let style =
         crate::output::Capabilities::from_process(crate::output::OutputMode::Text).stderr_style();
     eprint!("{}", login_screen::device_code_lines(code, style));
+    keys.watch_keys(url);
     true
 }
 

@@ -561,9 +561,19 @@ pub(super) fn prompt_named_material(label: &str) -> anyhow::Result<ProtectedValu
 /// [`prompt_named_material`] with the prompt shown exactly as given, and its
 /// confirmation under `indent`.
 pub(super) fn prompt_hidden(prompt: &str, indent: &str) -> anyhow::Result<ProtectedValue> {
+    prompt_hidden_copying(prompt, indent, None)
+}
+
+/// [`prompt_hidden`], where `c` typed first copies `copy`, the sign-in link
+/// the prompt belongs to (#4850).
+fn prompt_hidden_copying(
+    prompt: &str,
+    indent: &str,
+    copy: Option<&str>,
+) -> anyhow::Result<ProtectedValue> {
     let interactive = std::io::stdin().is_terminal();
     let value = if interactive {
-        read_hidden_terminal_bytes(prompt, MAX_PROTECTED_VALUE_BYTES).and_then(|mut bytes| {
+        read_terminal_bytes(prompt, MAX_PROTECTED_VALUE_BYTES, copy).and_then(|mut bytes| {
             ProtectedValue::new(std::mem::take(&mut *bytes)).context("the pasted value isn't valid")
         })
     } else {
@@ -586,22 +596,52 @@ pub(super) fn read_hidden_terminal_bytes(
     prompt: &str,
     maximum: usize,
 ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    read_terminal_bytes(prompt, maximum, None)
+}
+
+fn read_terminal_bytes(
+    prompt: &str,
+    maximum: usize,
+    copy: Option<&str>,
+) -> anyhow::Result<Zeroizing<Vec<u8>>> {
     #[cfg(unix)]
     {
-        use std::os::fd::AsFd as _;
+        use std::os::fd::{AsFd as _, AsRawFd as _};
         let mut input = std::fs::File::from(std::io::stdin().as_fd().try_clone_to_owned()?);
         let _terminal = crate::terminal_attach::RawModeGuard::enable()?;
+        // Bracketed paste marks a paste, so a code that starts with `c` is
+        // never taken for the copy key; it is turned off again on return.
+        let _paste = copy.map(|_| BracketedPaste::enable());
         // Advertise the prompt only after echo is disabled, so immediate
         // paste cannot race the terminal transition.
         eprint!("{prompt}");
         std::io::stderr()
             .flush()
             .context("flush protected input prompt")?;
-        read_hidden_bytes(&mut input, maximum)
+        let fd = input.as_raw_fd();
+        let mut more = || super::login_screen::keys_readable(fd, PASTE_BURST_MS);
+        let copied = |url: &str| {
+            // Raw mode: a line ends with a carriage return too.
+            eprint!("\r\n{}\r\n{prompt}", super::login_screen::copy_link(url));
+            // Nothing can report a failed write to stderr; the screen just goes without it.
+            let _ = std::io::stderr().flush();
+        };
+        match copy {
+            Some(url) => read_hidden_bytes_with(
+                &mut input,
+                maximum,
+                Some(CopyKey {
+                    copy: &mut || copied(url),
+                    more: &mut more,
+                }),
+            ),
+            None => read_hidden_bytes(&mut input, maximum),
+        }
     }
     #[cfg(not(unix))]
     {
-        let _ = (prompt, maximum);
+        // No terminal to read from here, so these go unused.
+        let _ = (prompt, maximum, copy);
         anyhow::bail!(
             "protected terminal input is unavailable on this host; pipe the value to stdin"
         )
@@ -609,14 +649,72 @@ pub(super) fn read_hidden_terminal_bytes(
 }
 
 fn read_hidden_bytes(reader: &mut impl Read, maximum: usize) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    read_hidden_bytes_with(reader, maximum, None)
+}
+
+/// How long after a `c` more input means a paste rather than the copy key:
+/// a paste arrives as one burst, a key press alone.
+const PASTE_BURST_MS: i32 = 30;
+
+/// The copy key at a sign-in's hidden prompt (#4850): `c` typed before
+/// anything else, outside a bracketed paste and with no input right behind
+/// it, calls `copy`. `more` says whether input is waiting.
+struct CopyKey<'a> {
+    copy: &'a mut dyn FnMut(),
+    more: &'a mut dyn FnMut() -> bool,
+}
+
+/// Turns the terminal's bracketed paste on for its lifetime.
+struct BracketedPaste;
+
+impl BracketedPaste {
+    fn enable() -> Self {
+        eprint!("\x1b[?2004h");
+        Self
+    }
+}
+
+impl Drop for BracketedPaste {
+    fn drop(&mut self) {
+        eprint!("\x1b[?2004l");
+        // Nothing can report a failed write to stderr; the screen just goes without it.
+        let _ = std::io::stderr().flush();
+    }
+}
+
+fn read_hidden_bytes_with(
+    reader: &mut impl Read,
+    maximum: usize,
+    mut copy_key: Option<CopyKey<'_>>,
+) -> anyhow::Result<Zeroizing<Vec<u8>>> {
     let mut value = Zeroizing::new(Vec::with_capacity(maximum));
     let mut byte = Zeroizing::new([0u8; 1]);
+    let mut pasting = false;
     loop {
         match reader.read(&mut *byte) {
             Ok(0) => anyhow::bail!("canceled; no protected value was saved"),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error).context("read protected terminal input"),
             Ok(_) => {}
+        }
+        if let Some(key) = copy_key.as_mut() {
+            match byte[0] {
+                // A bracketed paste's start or end; a lone Escape still
+                // cancels, and any other sequence is ignored.
+                0x1b if (key.more)() => {
+                    match read_sequence(reader)?.as_slice() {
+                        b"[200~" => pasting = true,
+                        b"[201~" => pasting = false,
+                        _ => {}
+                    }
+                    continue;
+                }
+                b'c' | b'C' if value.is_empty() && !pasting && !(key.more)() => {
+                    (key.copy)();
+                    continue;
+                }
+                _ => {}
+            }
         }
         match byte[0] {
             b'\r' | b'\n' => return Ok(value),
@@ -641,6 +739,26 @@ fn read_hidden_bytes(reader: &mut impl Read, maximum: usize) -> anyhow::Result<Z
     }
 }
 
+/// The rest of an escape sequence after its ESC: `[` and parameters up to
+/// the final byte, at most eight bytes.
+fn read_sequence(reader: &mut impl Read) -> anyhow::Result<Vec<u8>> {
+    let mut sequence = Vec::with_capacity(8);
+    let mut byte = [0u8; 1];
+    while sequence.len() < 8 {
+        match reader.read(&mut byte) {
+            Ok(0) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error).context("read protected terminal input"),
+            Ok(_) => {}
+        }
+        sequence.push(byte[0]);
+        if sequence.len() > 1 && (0x40..=0x7e).contains(&byte[0]) {
+            break;
+        }
+    }
+    Ok(sequence)
+}
+
 /// What the hidden prompt says once it has read a value: its length only.
 fn received_confirmation(value: &[u8]) -> String {
     let characters = std::str::from_utf8(value).map_or(value.len(), |text| text.chars().count());
@@ -655,14 +773,15 @@ fn received_confirmation(value: &[u8]) -> String {
 /// the `code#state` itself with surrounding whitespace and a line ending, or
 /// the full callback URL Claude's page was opened at. At a terminal a value of
 /// another shape gets one retry; nothing is sent to Claude until it parses.
-pub(super) fn prompt_claude_code() -> anyhow::Result<ProtectedValue> {
+pub(super) fn prompt_claude_code(copy: Option<&str>) -> anyhow::Result<ProtectedValue> {
     let interactive = std::io::stdin().is_terminal();
     claude_code_with_retry(
         interactive,
         || {
-            prompt_hidden(
+            prompt_hidden_copying(
                 super::login_screen::PASTE_CODE_PROMPT,
                 super::login_screen::INDENT,
+                copy,
             )
         },
         &mut std::io::stderr(),
@@ -1039,6 +1158,63 @@ mod tests {
         let mut clear = std::io::Cursor::new(b"discard\x15kept\r");
         assert_eq!(&*read_hidden_bytes(&mut clear, 128).unwrap(), b"kept");
         assert!(read_hidden_bytes(&mut std::io::Cursor::new(b"too-long\r"), 3).is_err());
+    }
+
+    /// The sign-in prompt's copy key (#4850), with `more` scripted: what
+    /// `poll` would say each time the reader asks whether input is waiting.
+    fn read_with_copy_key(input: &[u8], more: &[bool]) -> (String, usize) {
+        let mut copies = 0;
+        let mut answers = more.iter().copied();
+        let value = read_hidden_bytes_with(
+            &mut std::io::Cursor::new(input.to_vec()),
+            128,
+            Some(CopyKey {
+                copy: &mut || copies += 1,
+                more: &mut || answers.next().unwrap_or(false),
+            }),
+        )
+        .unwrap();
+        (String::from_utf8(value.to_vec()).unwrap(), copies)
+    }
+
+    #[test]
+    fn c_alone_before_anything_is_typed_copies_the_link() {
+        assert_eq!(
+            read_with_copy_key(b"cab#cd\r", &[false]),
+            ("ab#cd".to_owned(), 1)
+        );
+        // Typed after other text, c is part of the code.
+        assert_eq!(read_with_copy_key(b"xc\r", &[]), ("xc".to_owned(), 0));
+    }
+
+    #[test]
+    fn a_pasted_code_that_starts_with_c_is_the_code() {
+        // Without bracketed paste: the rest of the paste is already waiting.
+        assert_eq!(
+            read_with_copy_key(b"cab#cd\r", &[true]),
+            ("cab#cd".to_owned(), 0)
+        );
+        // With it: the markers say so, and are not part of the code.
+        assert_eq!(
+            read_with_copy_key(b"\x1b[200~cab#cd\x1b[201~\r", &[true, true]),
+            ("cab#cd".to_owned(), 0)
+        );
+    }
+
+    #[test]
+    fn a_lone_escape_still_cancels_with_the_copy_key() {
+        let mut copies = 0;
+        let error = read_hidden_bytes_with(
+            &mut std::io::Cursor::new(b"\x1b".to_vec()),
+            128,
+            Some(CopyKey {
+                copy: &mut || copies += 1,
+                more: &mut || false,
+            }),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("canceled"), "{error}");
+        assert_eq!(copies, 0);
     }
 
     #[test]

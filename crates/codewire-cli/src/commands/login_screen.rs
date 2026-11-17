@@ -1,23 +1,65 @@
 //! The screens `credentials connect` shows, the same in both placements, as
 //! the owner approved them (private-docs
 //! `designs/2026-11-15-credentials-screens.html`): one title line naming the
-//! provider, the credential's name and its store, then the link to sign in
-//! (copied to the clipboard with OSC 52 at a terminal), a device code alone on
-//! its line or a hidden paste prompt, then one result line. Nothing here
-//! prints a token or a pasted code.
+//! provider, the credential's name and its store, then the link to sign in,
+//! clickable at a terminal with "Press c to copy the link" under it (#4850), a
+//! device code alone on its line or a hidden paste prompt, then one result
+//! line. `cw login`'s device sign-in uses the same link and copy key. Nothing
+//! here prints a token or a pasted code.
 
 use std::io::{IsTerminal as _, Write as _};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
-use crate::output::{Role, Status, Style};
+use crate::output::{Capabilities, OutputMode, Role, Status, Style};
+
+mod keys;
+
+pub(super) use keys::KeyWatch;
+#[cfg(unix)]
+pub(super) use keys::readable as keys_readable;
 
 /// The indent of every line under the screen's title.
 pub(super) const INDENT: &str = "  ";
 
 /// The hidden prompt for the code Claude shows after sign-in.
 pub(super) const PASTE_CODE_PROMPT: &str = "  Paste the code Claude shows after you sign in > ";
+
+/// The hint under the link while `c` copies it.
+pub(super) const COPY_HINT: &str = "Press c to copy the link";
+
+/// Where ChatGPT turns on the device-code sign-in Codex needs.
+const CODEX_DEVICE_SETTINGS: &str = "https://chatgpt.com/#settings/Security";
+
+/// What the sign-in screen may draw on stderr.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ScreenCaps {
+    /// The link as an OSC 8 hyperlink: stderr is a live terminal.
+    pub(super) link: bool,
+    /// The copy key, its hint and the waiting line: an interactive
+    /// terminal, and no JSON.
+    pub(super) keys: bool,
+}
+
+#[cfg(test)]
+impl ScreenCaps {
+    /// Piped, or under `--output json`: the plain URL, no hint, no keys.
+    pub(super) const PLAIN: Self = Self {
+        link: false,
+        keys: false,
+    };
+}
+
+pub(super) fn screen_caps() -> ScreenCaps {
+    let caps = Capabilities::from_process(OutputMode::Text);
+    ScreenCaps {
+        link: caps.live,
+        keys: caps.live
+            && caps.interactive
+            && !crate::error_report::json_requested(std::env::args_os().skip(1)),
+    }
+}
 
 /// What a sign-in screen is for: the provider, the name the credential is
 /// saved under, and where it is saved.
@@ -59,12 +101,50 @@ impl<'a> SignInScreen<'a> {
 }
 
 /// The link screen: the title, then where to sign in, true whether or not a
-/// browser opened.
-pub(super) fn link_screen(sign_in: SignInScreen<'_>, url: &str) -> String {
+/// browser opened. At a terminal the link is clickable and `c` copies it.
+pub(super) fn link_screen(sign_in: SignInScreen<'_>, url: &str, caps: ScreenCaps) -> String {
+    let link = if caps.link {
+        hyperlink(url)
+    } else {
+        url.to_owned()
+    };
+    let hint = if caps.keys {
+        format!("{INDENT}{COPY_HINT}\n")
+    } else {
+        String::new()
+    };
+    // Codex's device code works only once the account allows it (screen 3).
+    let first_time = if sign_in.provider == "Codex" {
+        let settings = if caps.link {
+            hyperlink(CODEX_DEVICE_SETTINGS)
+        } else {
+            CODEX_DEVICE_SETTINGS.to_owned()
+        };
+        format!(
+            "{INDENT}First time? Turn on \"Enable device code authorization for Codex\" here:\n{INDENT}{settings}\n\n"
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{}{INDENT}Open this link to sign in:\n{INDENT}{url}\n",
+        "{}{first_time}{INDENT}Open this link to sign in:\n{INDENT}{link}\n{hint}",
         sign_in.heading()
     )
+}
+
+/// `url` as an OSC 8 hyperlink whose text is the URL itself; anything but
+/// a [`safe_link`] stays plain text.
+pub(super) fn hyperlink(url: &str) -> String {
+    if !safe_link(url) {
+        return url.to_owned();
+    }
+    format!("\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\")
+}
+
+/// A link a terminal may be handed: `https://`, with no control character or
+/// space that could end the escape sequence or hide part of the link.
+pub(super) fn safe_link(url: &str) -> bool {
+    url.starts_with("https://") && !url.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 
 /// The device-code lines under the link screen of a device flow (Codex,
@@ -111,6 +191,64 @@ pub(super) fn osc52_copy(text: &str) -> String {
     format!("\x1b]52;c;{}\x07", BASE64.encode(text))
 }
 
+/// Copy `url` for the person who pressed `c`: OSC 52 to the terminal on
+/// stderr, which reaches their own clipboard over SSH too, and the platform
+/// clipboard when this is their own desktop. Returns the line that says so.
+pub(super) fn copy_link(url: &str) -> String {
+    let mut stderr = std::io::stderr();
+    // Best effort: a terminal that drops OSC 52 still has the platform copy.
+    let _ = stderr.write_all(osc52_copy(url).as_bytes());
+    let _ = stderr.flush();
+    platform_copy(url);
+    let style = Capabilities::from_process(OutputMode::Text).stderr_style();
+    format!("{INDENT}{} Copied", style.status(Status::Done))
+}
+
+/// The desktop's clipboard tool, if this session is on the desktop: over SSH
+/// that clipboard is the remote machine's, so OSC 52 alone serves.
+fn platform_copy(url: &str) {
+    use std::process::{Command, Stdio};
+    let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    if var("SSH_CONNECTION").is_some() || var("SSH_TTY").is_some() {
+        return;
+    }
+    let tool: &[&str] = if cfg!(target_os = "macos") {
+        &["pbcopy"]
+    } else if var("WAYLAND_DISPLAY").is_some() {
+        &["wl-copy"]
+    } else if var("DISPLAY").is_some() {
+        &["xclip", "-selection", "clipboard"]
+    } else {
+        return;
+    };
+    let Ok(mut child) = Command::new(tool[0])
+        .args(&tool[1..])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        // A tool that can't take the link copies nothing; OSC 52 already did.
+        let _ = stdin.write_all(url.as_bytes());
+    }
+    // wl-copy and xclip serve the selection from a child of their own and
+    // return at once; pbcopy returns when done.
+    // Bounded: a tool that hangs is stopped, and the copy is OSC 52's alone.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // A hung tool is stopped and reaped as far as it lets us; the copy stands.
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// The link screen, then the browser at a terminal. The link is on its own
 /// line first, so it works when no browser opens; the browser is started
 /// fully detached, so nothing it prints reaches a prompt.
@@ -131,21 +269,57 @@ pub(super) fn claude_sign_in_code(
 ) -> anyhow::Result<codewire_protected_store::ProtectedValue> {
     open_sign_in_link(sign_in, authorize_url);
     eprintln!();
-    super::credential_input::prompt_claude_code()
+    let copy = screen_caps().keys.then_some(authorize_url);
+    super::credential_input::prompt_claude_code(copy)
 }
 
-/// Show the link screen on stderr, after copying the link with OSC 52 when
-/// stdout is a terminal (the sequence goes to stdout only then, so a piped
-/// stdout never receives it).
-pub(super) fn show_link(sign_in: SignInScreen<'_>, url: &str) {
-    if std::io::stdout().is_terminal() {
-        let mut stdout = std::io::stdout();
-        // A terminal that ignores OSC 52 still shows the link to select.
-        let _ = stdout
-            .write_all(osc52_copy(url).as_bytes())
-            .and_then(|()| stdout.flush());
+/// `cw login`'s device sign-in: the page, the code and the wait for `polled`.
+/// Scripts read the three stdout lines from a pipe, so they stay as they
+/// are; at a terminal the link is clickable and `c` copies it while the
+/// login waits (#4850).
+pub(super) async fn device_login_wait<T>(
+    url: &str,
+    code: &str,
+    polled: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    // The server names the page; nothing else reaches the terminal or the
+    // browser.
+    anyhow::ensure!(
+        safe_link(url),
+        "the server sent a sign-in page that isn't a plain https link; nothing was opened"
+    );
+    let screen = screen_caps();
+    let link = if screen.link && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        hyperlink(url)
+    } else {
+        url.to_owned()
+    };
+    println!("Opening browser to authorize...");
+    println!("If browser doesn't open, visit: {link}");
+    println!("Your code: {code}");
+    // The link printed above is the way there when no browser starts.
+    let _ = super::platform_commands::open_browser(url);
+    if screen.keys {
+        // The key watch draws the waiting line under the hint.
+        eprintln!("{INDENT}{COPY_HINT}");
+    } else {
+        eprintln!("Waiting for authorization...");
     }
-    eprint!("{}", link_screen(sign_in, url));
+    let keys = KeyWatch::new();
+    keys.watch(url);
+    let polled = tokio::select! {
+        result = polled => result,
+        () = keys.cancelled() => anyhow::bail!("login cancelled; nothing was saved"),
+    };
+    // A Ctrl-C that came as the login finished still saves nothing.
+    anyhow::ensure!(!keys.was_cancelled(), "login cancelled; nothing was saved");
+    polled
+}
+
+/// Show the link screen on stderr. The link is copied only when `c` is
+/// pressed ([`copy_link`]), not when the screen appears.
+pub(super) fn show_link(sign_in: SignInScreen<'_>, url: &str) {
+    eprint!("{}", link_screen(sign_in, url, screen_caps()));
 }
 
 #[cfg(test)]
@@ -162,7 +336,8 @@ mod tests {
         assert_eq!(
             link_screen(
                 SignInScreen::local("Claude (sign-in)", "n@example.com"),
-                URL
+                URL,
+                ScreenCaps::PLAIN
             ),
             format!(
                 "Connect Claude (sign-in) as n@example.com, on this computer\n\n  Open this link to sign in:\n  {URL}\n"
@@ -175,10 +350,58 @@ mod tests {
         );
         // The link is alone on its line, so it can be selected whole.
         assert!(
-            link_screen(SignInScreen::local("Codex", "work"), URL)
+            link_screen(SignInScreen::local("Codex", "work"), URL, ScreenCaps::PLAIN)
                 .lines()
                 .any(|line| line.trim() == URL)
         );
+    }
+
+    /// At a terminal the link is an OSC 8 hyperlink with the copy hint under
+    /// it; piped, it is the plain URL with no hint and no escape sequence.
+    #[test]
+    fn the_link_is_clickable_with_the_copy_hint_only_at_a_terminal() {
+        let screen = SignInScreen::local("Codex", "n@example.com");
+        let terminal = ScreenCaps {
+            link: true,
+            keys: true,
+        };
+        assert_eq!(
+            link_screen(screen, URL, terminal),
+            format!(
+                "Connect Codex as n@example.com, on this computer\n\n  First time? Turn on \"Enable device code authorization for Codex\" here:\n  {}\n\n  Open this link to sign in:\n  \x1b]8;;{URL}\x1b\\{URL}\x1b]8;;\x1b\\\n  Press c to copy the link\n",
+                hyperlink(CODEX_DEVICE_SETTINGS)
+            )
+        );
+        let piped = link_screen(screen, URL, ScreenCaps::PLAIN);
+        assert!(!piped.contains('\x1b'), "{piped:?}");
+        assert!(!piped.contains(COPY_HINT));
+    }
+
+    #[test]
+    fn the_hyperlink_is_osc_8_around_the_url() {
+        assert_eq!(
+            hyperlink("https://example.test/a"),
+            "\x1b]8;;https://example.test/a\x1b\\https://example.test/a\x1b]8;;\x1b\\"
+        );
+    }
+
+    /// A link from a server is handed to the terminal only when it is a
+    /// plain https link.
+    #[test]
+    fn only_a_plain_https_link_becomes_a_hyperlink() {
+        for unsafe_link in [
+            "http://example.test/a",
+            "javascript:alert(1)",
+            "https://example.test/a\x1b]8;;https://evil.test\x1b\\",
+            "https://example.test/a b",
+            "https://example.test/\x07",
+        ] {
+            assert!(!safe_link(unsafe_link), "{unsafe_link:?}");
+            assert_eq!(hyperlink(unsafe_link), unsafe_link);
+        }
+        assert!(safe_link(
+            "https://codewire-dev.sh/device?user_code=ABCD-1234"
+        ));
     }
 
     #[test]

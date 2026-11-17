@@ -452,7 +452,7 @@ async fn a_ctrl_c_while_nothing_waits_for_it_is_still_seen() {
     // default handler, whatever the order of registration.
     let _listener =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
-    let mut interrupt = Interrupt::default();
+    let interrupt = Interrupt::default();
     assert!(!interrupt.was_pressed());
     interrupt.listen();
     assert!(!interrupt.was_pressed());
