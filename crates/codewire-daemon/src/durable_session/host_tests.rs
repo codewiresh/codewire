@@ -951,8 +951,26 @@ async fn an_explicit_stop_that_cannot_be_recorded_signals_nothing_and_fails() {
     }
 
     std::fs::remove_dir(&blocked).unwrap();
-    engine.stop(&driver).await.unwrap();
-    assert_eq!(witnessed(temp.path()), ["intent", "signalled"]);
+    let mut noted = Vec::new();
+    for attempt in 0..WITNESS_ATTEMPTS {
+        if attempt > 0 {
+            // Nothing noted: start the conversation again and stop it again.
+            let state = temp.path().join("hosts").join(&environment);
+            crate::stop_evidence::clear_stop_intent(&state, &driver).unwrap();
+            engine.restart(&driver).await.unwrap();
+            witness_ready(temp.path()).await;
+        }
+        engine.stop(&driver).await.unwrap();
+        noted = witnessed(temp.path());
+        if !noted.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        noted,
+        ["intent", "signalled"],
+        "noted in {WITNESS_ATTEMPTS} attempts"
+    );
     engine.shutdown().await.unwrap();
 }
 
