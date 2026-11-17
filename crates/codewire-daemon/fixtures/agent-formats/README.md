@@ -25,9 +25,15 @@ What fails, and what to do:
   (`scripts/ci/verify/claude-login-compat.py`, run by
   `scripts/ci/verify/workspace-agents.sh`): the pinned Claude Code is run with
   no network against a fake provider, starting from
-  `claude-code.credentials.json` with its access token run out. The failure
-  names what changed: the refresh request, where the placeholder is sent, or
-  what the agent wrote back. The broker swaps the placeholder on every path
+  `claude-code.credentials.json` with its access token run out, and then
+  with no file and the placeholder in each environment variable it reads an
+  Anthropic credential from (`CLAUDE_CODE_OAUTH_TOKEN`,
+  `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`). The failure names what
+  changed: the refresh request, where the placeholder is sent, what the
+  agent wrote back, or a variable whose placeholder it no longer sends. The
+  placeholders it makes up have the shape
+  `crates/codewire-access/tests/fixtures/claude-oauth-token/refresh-response.json`
+  states. The broker swaps the placeholder on every path
   of the API host, so the script's path lists are its alarm for a new pin,
   not a rule the broker enforces: look at what a new path is before adding
   it.

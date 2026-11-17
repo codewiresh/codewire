@@ -2606,6 +2606,7 @@ if [ "$event_selected" = false ]; then
     case "$path" in
       images/workspace/agents/package.json|images/workspace/agents/package-lock.json|\
       crates/codewire-daemon/fixtures/agent-formats/*|\
+      crates/codewire-access/tests/fixtures/claude-oauth-token/refresh-response.json|\
       scripts/ci/verify/workspace-agents.sh|scripts/ci/verify/claude-login-compat.py)
         select_token workspace_agents
         recognized=true

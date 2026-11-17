@@ -18,7 +18,11 @@ releases, so this runs the real agent and checks each:
 - a refused refresh leaves the login file as the daemon recognises a cleared
   one, and an unavailable one leaves it alone;
 - when the API rejects its token, each refresh carries the refresh token the
-  last answer returned.
+  last answer returned;
+- it takes the placeholder from each environment variable it reads an
+  Anthropic credential from, and sends its request with it: a release that
+  began to refuse a token for its shape would fail here, not in an
+  environment.
 
 The agent runs as it does in an environment: nothing here turns off any of
 its own traffic. It runs with no network but loopback, and this program
@@ -66,10 +70,11 @@ CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 # with no credential at all, each a method and a pattern its whole path
 # matches. A request in neither list is one nobody has looked at: the run
 # fails and names it. The feature-flag request names a client key in its path.
+EVALUATION = ("POST", "/api/eval/sdk-[A-Za-z0-9]+")
 PLACEHOLDER_REQUESTS = (
     ("POST", "/v1/messages"), ("GET", "/v1/mcp_servers"), ("GET", "/api/oauth/profile"),
     ("GET", "/api/claude_cli/bootstrap"), ("GET", "/api/claude_code_penguin_mode"),
-    ("POST", "/api/eval/sdk-[A-Za-z0-9]+"), ("POST", "/api/event_logging/v2/batch"),
+    EVALUATION, ("POST", "/api/event_logging/v2/batch"),
 )
 # The image's version asks for the server list at the first path, and newer
 # releases, which an environment updates itself to, at the second.
@@ -77,6 +82,42 @@ OPEN_REQUESTS = (
     ("GET", "/mcp-registry/v0/servers"), ("GET", "/api/directory/server-urls"),
     ("POST", "/api/event_logging/v2/batch"),
 )
+
+
+@dataclasses.dataclass(frozen=True)
+class Place:
+    """A place the agent reads its Anthropic credential from: what this
+    program calls it, the header the agent then sends the credential in, what
+    comes before it there, and the API requests seen to carry it."""
+    name: str
+    header: str
+    scheme: str
+    requests: tuple
+
+    def carries(self, access):
+        return self.scheme + access
+
+
+LOGIN_FILE = Place("the login file", "authorization", "Bearer ", PLACEHOLDER_REQUESTS)
+# The environment variables, each named as the agent reads it. The first is
+# a subscription sign-in's long-lived token, the second any bearer token, the
+# third an API key.
+VARIABLES = (
+    Place("CLAUDE_CODE_OAUTH_TOKEN", "authorization", "Bearer ", (
+        ("POST", "/v1/messages"), ("GET", "/api/claude_cli/bootstrap"),
+        ("GET", "/api/claude_code/policy_limits"), ("GET", "/api/claude_code/settings"),
+        EVALUATION,
+    )),
+    Place("ANTHROPIC_AUTH_TOKEN", "authorization", "Bearer ", (("POST", "/v1/messages"), EVALUATION)),
+    Place("ANTHROPIC_API_KEY", "x-api-key", "", (
+        ("POST", "/v1/messages"), ("GET", "/api/claude_cli/bootstrap"),
+        ("GET", "/api/claude_code/organizations/metrics_enabled"),
+        ("GET", "/api/claude_code/policy_limits"), ("GET", "/api/claude_code/settings"),
+        ("GET", "/api/claude_code_penguin_mode"), EVALUATION,
+        ("POST", "/api/event_logging/v2/batch"),
+    )),
+)
+CREDENTIAL_HEADERS = ("authorization", "x-api-key")
 MANAGED_REFRESH_PREFIX = "codewire-managed-no-refresh-token-"
 MANAGED_REFRESH = re.compile(re.escape(MANAGED_REFRESH_PREFIX) + "[0-9a-f]{32}")
 # What a managed refresh answers as the access token's life: ten years.
@@ -237,10 +278,28 @@ class Provider:
             "type": "not_found_error", "message": "not found"}}).encode()
 
 
-def placeholder():
-    """A made-up access token in the shape of an environment's placeholder:
-    its tag and 32 bytes in unpadded URL-safe base64."""
-    return "cwp1_" + secrets.token_urlsafe(32)
+class PlaceholderShape:
+    """The shape of an environment's placeholder, as the fixture of the
+    token answer states it for `access_token`: what it begins with, and how
+    many base64url characters follow. A test beside the code that mints
+    placeholders holds that fixture to the code, so a made-up placeholder
+    here has the shape that ships."""
+
+    def __init__(self, token_answer):
+        stated = token_answer.get("access_token") if isinstance(token_answer, dict) else None
+        shape = re.fullmatch(r"([^<>]+)<([0-9]+) base64url characters>", stated or "")
+        if shape is None:
+            raise Failure("the token answer's fixture does not state the placeholder's shape "
+                          "as a beginning and a number of base64url characters")
+        self.begins, self.characters = shape.group(1), int(shape.group(2))
+        # Unpadded base64url of whole bytes, as the real one is.
+        self.bytes = self.characters * 6 // 8
+        if len(secrets.token_urlsafe(self.bytes)) != self.characters:
+            raise Failure(f"{self.characters} base64url characters are not a whole number of bytes")
+
+    def make(self):
+        """A made-up placeholder of this shape."""
+        return self.begins + secrets.token_urlsafe(self.bytes)
 
 
 def reply_stream(model):
@@ -359,8 +418,9 @@ class Proxy(http.server.ThreadingHTTPServer):
             self.provider.stray(f"a request the fake provider failed on ({type(error).__name__})")
 
 
-def run_agent(agent, home, project, proxy_port, authority):
-    """Run `claude -p` once. Returns its exit status and what it printed."""
+def run_agent(agent, home, project, proxy_port, authority, variables):
+    """Run `claude -p` once, with `variables` added to its environment.
+    Returns its exit status and what it printed."""
     proxy = f"http://127.0.0.1:{proxy_port}"
     environment = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -369,6 +429,7 @@ def run_agent(agent, home, project, proxy_port, authority):
         "HTTPS_PROXY": proxy,
         "HTTP_PROXY": proxy,
         "NODE_EXTRA_CA_CERTS": str(authority),
+        **variables,
     }
     process = subprocess.Popen(
         [str(agent), "-p", "say ok"], cwd=project, env=environment, stdin=subprocess.DEVNULL,
@@ -388,15 +449,15 @@ def run_agent(agent, home, project, proxy_port, authority):
     return result
 
 
-def starting_login(recorded):
+def starting_login(recorded, access):
     """The recorded login file as an environment holds it once its access
-    token has run out: a placeholder access token, already expired, and a
+    token has run out: the placeholder `access`, already expired, and a
     placeholder refresh token."""
     login = json.loads(json.dumps(recorded))
     oauth = login["claudeAiOauth"]
     if oauth["refreshToken"] != MANAGED_REFRESH_PREFIX + "<nonce>":
         raise Failure("the recorded login file's refresh token is not the placeholder this test knows")
-    oauth["accessToken"] = placeholder()
+    oauth["accessToken"] = access
     oauth["refreshToken"] = MANAGED_REFRESH_PREFIX + secrets.token_hex(16)
     oauth["expiresAt"] = int((time.time() - 3600) * 1000)
     return login
@@ -420,11 +481,11 @@ def named(request, requests):
                for method, pattern in requests)
 
 
-def carried_elsewhere(request, access):
-    """Where `request` carries the placeholder other than as its bearer
-    token: the names of those places."""
+def carried_elsewhere(request, access, place):
+    """Where `request` carries the placeholder other than as `place` has
+    the agent send it: the names of those places."""
     places = [f"the {name} header" for name, value in request.headers.items()
-              if access in value and (name, value) != ("authorization", f"Bearer {access}")]
+              if access in value and (name, value) != (place.header, place.carries(access))]
     if access in request.target:
         places.append("the request line")
     if access.encode() in request.raw:
@@ -432,9 +493,9 @@ def carried_elsewhere(request, access):
     return places
 
 
-def requests_wrong(provider, held):
-    """What is wrong with the requests of one run of the agent, which began
-    holding the refresh token `held`."""
+def requests_wrong(provider, held, place=LOGIN_FILE):
+    """What is wrong with the requests of one run of the agent, which read
+    its credential from `place` and began holding the refresh token `held`."""
     wrong = [f"the agent made {what}" for what in provider.strays]
     # Each refresh is the request Codewire answers, and carries the refresh
     # token the agent was last given.
@@ -454,29 +515,32 @@ def requests_wrong(provider, held):
                 wrong.append(f"refresh {index + 1} has {name} {shape(got)}, not {shape(want)}")
         if not isinstance(body.get("scope"), str) or not body["scope"]:
             wrong.append(f"refresh {index + 1} names no scope")
-        for header in ("authorization", "x-api-key"):
+        for header in CREDENTIAL_HEADERS:
             if header in request.headers:
                 wrong.append(f"refresh {index + 1} carries a {header} header")
-    # An API request carries the placeholder as a bearer token, in a request
-    # recorded for it, or no credential, in a request recorded for that.
+    # An API request carries the placeholder in the place's header, in a
+    # request recorded for it, or no credential, in a request recorded for
+    # that.
     for request in (r for r in provider.requests if r.host == API_HOST):
         asked = f"{request.method} {request.path}"
-        carried = request.headers.get("authorization")
-        if "x-api-key" in request.headers:
-            wrong.append(f"{asked} carries an x-api-key header")
+        carried = request.headers.get(place.header)
+        for header in CREDENTIAL_HEADERS:
+            if header != place.header and header in request.headers:
+                wrong.append(f"{asked} carries an {header} header")
         if carried is None:
             if not named(request, OPEN_REQUESTS):
                 wrong.append(f"{asked} carries no credential, and is not recorded as a request that does not")
-        elif carried != f"Bearer {provider.access}":
-            wrong.append(f"{asked} carries authorization {shape(carried)}, not the placeholder")
-        elif not named(request, PLACEHOLDER_REQUESTS):
+        elif carried != place.carries(provider.access):
+            wrong.append(f"{asked} carries {place.header} {shape(carried)}, not the placeholder")
+        elif not named(request, place.requests):
             wrong.append(f"{asked} carries the placeholder, and is not recorded as a request that does")
     # Nowhere else: not in another header, the request line or a body, and
     # never at the token host.
     for request in provider.requests:
-        for place in carried_elsewhere(request, provider.access):
-            wrong.append(f"{request.method} {request.host}{request.path} carries the placeholder in {place}")
-        if request.host == TOKEN_HOST and request.headers.get("authorization") == f"Bearer {provider.access}":
+        for where in carried_elsewhere(request, provider.access, place):
+            wrong.append(f"{request.method} {request.host}{request.path} carries the placeholder in {where}")
+        if (request.host == TOKEN_HOST
+                and request.headers.get(place.header) == place.carries(provider.access)):
             wrong.append(f"{request.method} {request.host}{request.path} carries the placeholder")
     return wrong
 
@@ -568,17 +632,18 @@ CASES = (
 
 
 class Run:
-    """One run of the agent in `work`'s home against a new fake provider."""
+    """One run of the agent in `work`'s home against a new fake provider,
+    holding the placeholder `access` with `scopes`, and given `variables`."""
 
-    def __init__(self, case, login, agent, tls, authority, work):
-        oauth = login["claudeAiOauth"]
-        self.provider = Provider(case, oauth["accessToken"], list(oauth["scopes"]))
+    def __init__(self, case, access, scopes, agent, tls, authority, work, variables=None):
+        self.provider = Provider(case, access, list(scopes))
         proxy = Proxy(tls, self.provider)
         threading.Thread(target=proxy.serve_forever, daemon=True).start()
         self.started = int(time.time() * 1000)
         try:
             self.status, self.printed = run_agent(
-                agent, work / "home", work / "project", proxy.server_address[1], authority)
+                agent, work / "home", work / "project", proxy.server_address[1], authority,
+                variables or {})
         finally:
             self.finished = int(time.time() * 1000)
             proxy.shutdown()
@@ -595,7 +660,8 @@ class Run:
         if wrong:
             # What the agent asked, in order, to read the failure by.
             for request in provider.requests:
-                carried = request.headers.get("authorization")
+                carried = next((request.headers[header] for header in CREDENTIAL_HEADERS
+                                if header in request.headers), None)
                 if request.host == TOKEN_HOST and isinstance(request.body, dict):
                     carried = request.body.get("refresh_token")
                 print(f"claude-login-compat:   {request.at:6.1f} s  {request.method} "
@@ -610,15 +676,16 @@ def read_login(login_file):
         return None
 
 
-def run_case(case, agent, recorded, tls, authority, work):
-    before = starting_login(recorded)
+def run_case(case, agent, recorded, placeholders, tls, authority, work):
+    before = starting_login(recorded, placeholders.make())
+    oauth = before["claudeAiOauth"]
     login_file = work / "home" / ".claude" / ".credentials.json"
     login_file.parent.mkdir(parents=True)
     login_file.write_text(json.dumps(before))
     login_file.chmod(0o600)
     (work / "project").mkdir()
 
-    first = Run(case, before, agent, tls, authority, work)
+    first = Run(case, oauth["accessToken"], oauth["scopes"], agent, tls, authority, work)
     after = read_login(login_file)
     passed = first.report(case.name, check(
         case, first.provider, before, after, first.status, first.printed, first.started, first.finished))
@@ -626,7 +693,8 @@ def run_case(case, agent, recorded, tls, authority, work):
         return passed
     # The answer's ten years hold: the next run asks for no refresh, and
     # leaves the login file as it is.
-    again = Run(case, after, agent, tls, authority, work)
+    stored_login = after["claudeAiOauth"]
+    again = Run(case, stored_login["accessToken"], stored_login["scopes"], agent, tls, authority, work)
     wrong = requests_wrong(again.provider, after["claudeAiOauth"]["refreshToken"])
     wrong += answered(again.status, again.printed, again.provider)
     if any(r.host == TOKEN_HOST for r in again.provider.requests):
@@ -636,16 +704,42 @@ def run_case(case, agent, recorded, tls, authority, work):
     return again.report("the run after an answered refresh", wrong)
 
 
+def run_variable(place, agent, placeholders, tls, authority, work):
+    """The agent with no login file and the placeholder in the environment
+    variable `place` names: it sends its request with it, in the header the
+    place names, and asks the token host for nothing."""
+    access = placeholders.make()
+    login_file = work / "home" / ".claude" / ".credentials.json"
+    login_file.parent.mkdir(parents=True)
+    (work / "project").mkdir()
+    run = Run(Case(f"the placeholder in {place.name}", "issue", "answer"), access, (), agent,
+              tls, authority, work, {place.name: access})
+    provider = run.provider
+    wrong = requests_wrong(provider, None, place) + answered(run.status, run.printed, provider)
+    if not any(r.host == API_HOST and r.path == "/v1/messages"
+               and r.headers.get(place.header) == place.carries(access) for r in provider.requests):
+        wrong.append(f"no request to /v1/messages carries the placeholder in its {place.header} header")
+    if any(r.host == TOKEN_HOST for r in provider.requests):
+        wrong.append("a request to the token host, though a variable's token has no refresh")
+    if login_file.exists():
+        wrong.append("the agent wrote a login file")
+    return run.report(provider.case.name, wrong)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--agent", required=True, type=Path, help="the installed claude command")
     parser.add_argument("--login", required=True, type=Path,
                         help="the recorded login file, claude-code.credentials.json")
+    parser.add_argument("--token-answer", required=True, type=Path,
+                        help="the token answer's fixture, claude-oauth-token/refresh-response.json, "
+                             "which states the placeholder's shape")
     parser.add_argument("--work", required=True, type=Path, help="an existing directory to work in")
     arguments = parser.parse_args()
     try:
         isolate()
         recorded = json.loads(arguments.login.read_text())
+        placeholders = PlaceholderShape(json.loads(arguments.token_answer.read_text()))
         certificate_directory = arguments.work / "certificates"
         certificate_directory.mkdir()
         authority, tls = certificates(certificate_directory)
@@ -653,7 +747,11 @@ def main():
         for number, case in enumerate(CASES):
             case_work = arguments.work / f"case-{number}"
             case_work.mkdir()
-            passed &= run_case(case, arguments.agent, recorded, tls, authority, case_work)
+            passed &= run_case(case, arguments.agent, recorded, placeholders, tls, authority, case_work)
+        for place in VARIABLES:
+            variable_work = arguments.work / place.name
+            variable_work.mkdir()
+            passed &= run_variable(place, arguments.agent, placeholders, tls, authority, variable_work)
     except Failure as failure:
         print(f"claude-login-compat: {failure}", file=sys.stderr)
         return 2

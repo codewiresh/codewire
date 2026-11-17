@@ -131,12 +131,13 @@ PY
 # its placeholder as Codewire expects (#3999).
 readonly COMPAT="$ROOT/scripts/ci/verify/claude-login-compat.py"
 readonly LOGIN="$ROOT/crates/codewire-daemon/fixtures/agent-formats/claude-code.credentials.json"
+readonly TOKEN_ANSWER="$ROOT/crates/codewire-access/tests/fixtures/claude-oauth-token/refresh-response.json"
 readonly MOVED='the pinned Claude Code no longer does with its login file what Codewire expects: see crates/codewire-daemon/fixtures/agent-formats/README.md'
 mkdir "$work/claude-login"
 case "$LOOPBACK_ONLY" in
   namespace)
     unshare -rn python3 -I "$COMPAT" --agent "$work/node_modules/.bin/claude" \
-      --login "$LOGIN" --work "$work/claude-login" || die "$MOVED"
+      --login "$LOGIN" --token-answer "$TOKEN_ANSWER" --work "$work/claude-login" || die "$MOVED"
     ;;
   container)
     # Files are copied in: a bind mount would name a path on the daemon's
@@ -144,10 +145,12 @@ case "$LOOPBACK_ONLY" in
     # loopback is the container's only interface.
     cp "$COMPAT" "$work/claude-login/claude-login-compat.py"
     cp "$LOGIN" "$work/claude-login/login.json"
+    cp "$TOKEN_ANSWER" "$work/claude-login/token-answer.json"
     mkdir "$work/claude-login/work" "$work/claude-login/agents"
     login_container="$(docker create --network none --pids-limit 2048 --entrypoint python3 "$job_image" \
       -I /claude-login/claude-login-compat.py --agent /claude-login/agents/node_modules/.bin/claude \
-      --login /claude-login/login.json --work /claude-login/work)" ||
+      --login /claude-login/login.json --token-answer /claude-login/token-answer.json \
+      --work /claude-login/work)" ||
       die 'the container for the Claude Code login check could not be made'
     if ! docker cp -q "$work/claude-login" "$login_container":/claude-login ||
       ! docker cp -q "$work/node_modules" "$login_container":/claude-login/agents/; then

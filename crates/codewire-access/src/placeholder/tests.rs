@@ -358,3 +358,19 @@ fn derivation_matches_a_known_answer() {
         "cwp1_CrtskkVMKO8hWIv0dqtomFhFamB5zbu6Peo4NJ8QLZc"
     );
 }
+
+/// The Claude Code compatibility check makes its placeholders up in the shape
+/// this fixture states for `access_token`
+/// (`scripts/ci/verify/claude-login-compat.py`), so the fixture states the
+/// shape minted here.
+#[test]
+fn the_token_answer_fixture_states_the_shape_minted_here() {
+    let answer: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/claude-oauth-token/refresh-response.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        answer["access_token"],
+        format!("{CREDENTIAL_PLACEHOLDER_TAG}<{PLACEHOLDER_ENCODED_BYTES} base64url characters>")
+    );
+}

@@ -2028,6 +2028,11 @@ run_paths_case workspace_agents_check_script pull_request refs/pull/3274/head fa
 run_paths_case workspace_agents_claude_login_run pull_request refs/pull/3274/head false \
   'policy security security_js workspace_agents' \
   scripts/ci/verify/claude-login-compat.py
+# The fixture that states the placeholder's shape, which the run makes its
+# placeholders from.
+run_paths_case workspace_agents_placeholder_shape pull_request refs/pull/3274/head false \
+  'database policy rust rust_pkg_codewire_access rust_pkg_codewire_credential_broker rust_pkg_codewire_platform_credentials workspace_agents' \
+  crates/codewire-access/tests/fixtures/claude-oauth-token/refresh-response.json
 # Its neighbours do not: the agents' licence file, and the daemon code that
 # writes the login files, whose own tests hold them to the recorded formats.
 run_paths_case workspace_agents_not_for_the_license pull_request refs/pull/3274/head false \
